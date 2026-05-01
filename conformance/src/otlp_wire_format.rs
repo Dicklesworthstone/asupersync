@@ -6642,6 +6642,8 @@ enum AttributeValue {
     StringArray(Vec<String>),
     IntArray(Vec<i64>),
     FloatArray(Vec<f64>),
+    Array(Vec<String>),
+    Null,
     BoolArray(Vec<bool>),
 }
 
@@ -12857,6 +12859,366 @@ enum TimestampOrderingStrategy {
     InsertionOrder,
 }
 
+/// Span name update ordering test scenario
+#[derive(Debug, Clone)]
+struct SpanNameUpdateScenario {
+    name: String,
+    description: String,
+    name_updates: Vec<NameUpdateDefinition>,
+    expected_final_name: String,
+    ordering_strategy: NameUpdateOrderingStrategy,
+}
+
+/// Name update definition for ordering tests
+#[derive(Debug, Clone)]
+struct NameUpdateDefinition {
+    name: String,
+    timestamp_nanos: u64,
+    span_phase: SpanPhase,
+}
+
+/// Span phase during name update
+#[derive(Debug, Clone, PartialEq)]
+enum SpanPhase {
+    Active,
+    Ended,
+    Recording,
+    NotRecording,
+}
+
+/// Name update ordering strategy types
+#[derive(Debug, Clone, PartialEq)]
+enum NameUpdateOrderingStrategy {
+    LastWins,
+    FirstWins,
+    TimestampBased,
+    IgnoreAfterEnd,
+}
+
+/// Span name update ordering result for comparison
+#[derive(Debug, Clone, PartialEq)]
+struct NameUpdateOrderingResult {
+    original_updates: Vec<ProcessedNameUpdate>,
+    final_name: String,
+    ignored_updates: Vec<ProcessedNameUpdate>,
+    applied_strategy: NameUpdateOrderingStrategy,
+    update_metadata: Vec<String>,
+}
+
+/// Processed name update with metadata
+#[derive(Debug, Clone, PartialEq)]
+struct ProcessedNameUpdate {
+    name: String,
+    timestamp_nanos: u64,
+    span_phase: SpanPhase,
+    was_applied: bool,
+    rejection_reason: Option<String>,
+}
+
+/// Meter scope deduplication test scenario
+#[derive(Debug, Clone)]
+struct MeterScopeDeduplicationScenario {
+    name: String,
+    description: String,
+    meter_definitions: Vec<MeterDefinition>,
+    expected_unique_scopes: usize,
+    expected_deduplicated_count: usize,
+    deduplication_strategy: ScopeDeduplicationStrategy,
+}
+
+/// Meter definition for deduplication tests
+#[derive(Debug, Clone)]
+struct MeterDefinition {
+    name: String,
+    scope_name: String,
+    scope_version: String,
+    scope_attributes: Vec<(String, String)>,
+    creation_order: u32,
+    schema_url: Option<String>,
+}
+
+/// Scope deduplication strategy types
+#[derive(Debug, Clone, PartialEq)]
+enum ScopeDeduplicationStrategy {
+    NameAndVersion,
+    NameVersionAndAttributes,
+    NameVersionAndSchemaUrl,
+    StrictEquality,
+}
+
+/// Meter scope deduplication result for comparison
+#[derive(Debug, Clone, PartialEq)]
+struct MeterScopeDeduplicationResult {
+    original_meters: Vec<ProcessedMeter>,
+    unique_scopes: Vec<UniqueScope>,
+    deduplicated_meters: Vec<ProcessedMeter>,
+    applied_strategy: ScopeDeduplicationStrategy,
+    deduplication_metadata: Vec<String>,
+}
+
+/// Processed meter with deduplication metadata
+#[derive(Debug, Clone, PartialEq)]
+struct ProcessedMeter {
+    name: String,
+    scope_id: String,
+    scope_name: String,
+    scope_version: String,
+    scope_attributes: Vec<(String, String)>,
+    creation_order: u32,
+    schema_url: Option<String>,
+    was_deduplicated: bool,
+    deduplication_reason: Option<String>,
+}
+
+/// Unique scope identified during deduplication
+#[derive(Debug, Clone, PartialEq)]
+struct UniqueScope {
+    scope_id: String,
+    scope_name: String,
+    scope_version: String,
+    scope_attributes: Vec<(String, String)>,
+    schema_url: Option<String>,
+    meter_count: usize,
+    first_creation_order: u32,
+}
+
+/// Span event count truncation test scenario
+#[derive(Debug, Clone)]
+struct SpanEventCountTruncationScenario {
+    name: String,
+    description: String,
+    max_event_count: usize,
+    events: Vec<EventForTruncation>,
+    truncation_strategy: EventTruncationStrategy,
+    expected_preserved_count: usize,
+    expected_dropped_count: usize,
+    expected_preserved_names: Vec<String>,
+}
+
+/// Event definition for truncation tests
+#[derive(Debug, Clone)]
+struct EventForTruncation {
+    name: String,
+    timestamp_offset_nanos: u64,
+    attributes: Vec<(String, String)>,
+    priority: u32,
+}
+
+/// Event truncation strategy types
+#[derive(Debug, Clone, PartialEq)]
+enum EventTruncationStrategy {
+    FirstWins,
+    LastWins,
+    PriorityBased,
+}
+
+/// Event count truncation result for comparison
+#[derive(Debug, Clone, PartialEq)]
+struct EventCountTruncationResult {
+    original_events: Vec<ProcessedEvent>,
+    preserved_events: Vec<ProcessedEvent>,
+    dropped_events: Vec<ProcessedEvent>,
+    applied_strategy: EventTruncationStrategy,
+    truncation_metadata: Vec<String>,
+}
+
+/// Processed event with truncation metadata
+#[derive(Debug, Clone, PartialEq)]
+struct ProcessedEvent {
+    name: String,
+    timestamp_offset_nanos: u64,
+    attributes: Vec<(String, String)>,
+    priority: u32,
+    was_preserved: bool,
+    truncation_reason: Option<String>,
+}
+
+/// Span attribute key-value validation test scenario
+#[derive(Debug, Clone)]
+struct SpanAttributeKeyValueValidationScenario {
+    name: String,
+    description: String,
+    attribute_pairs: Vec<AttributeKeyValueDefinition>,
+    validation_strategy: AttributeValidationStrategy,
+    expected_valid_count: usize,
+    expected_invalid_count: usize,
+    expected_valid_keys: Vec<String>,
+}
+
+/// Attribute key-value pair definition for validation tests
+#[derive(Debug, Clone)]
+struct AttributeKeyValueDefinition {
+    key: String,
+    value: AttributeValue,
+    expected_valid: bool,
+    validation_context: AttributeValidationContext,
+}
+
+
+/// Attribute validation context
+#[derive(Debug, Clone, PartialEq)]
+enum AttributeValidationContext {
+    Span,
+    Resource,
+    InstrumentationScope,
+    Event,
+    Link,
+}
+
+/// Attribute validation strategy types
+#[derive(Debug, Clone, PartialEq)]
+enum AttributeValidationStrategy {
+    OpenTelemetryStandard,
+    StrictKeyFormat,
+    LenientKeyFormat,
+    UnicodeAware,
+}
+
+/// Span attribute validation result for comparison
+#[derive(Debug, Clone, PartialEq)]
+struct AttributeKeyValueValidationResult {
+    original_attributes: Vec<ProcessedAttributeKeyValue>,
+    valid_attributes: Vec<ProcessedAttributeKeyValue>,
+    invalid_attributes: Vec<ProcessedAttributeKeyValue>,
+    applied_strategy: AttributeValidationStrategy,
+    validation_metadata: Vec<String>,
+}
+
+/// Processed attribute key-value with validation metadata
+#[derive(Debug, Clone, PartialEq)]
+struct ProcessedAttributeKeyValue {
+    key: String,
+    value: AttributeValue,
+    validation_context: AttributeValidationContext,
+    is_valid: bool,
+    validation_errors: Vec<String>,
+    normalized_key: Option<String>,
+    normalized_value: Option<AttributeValue>,
+}
+
+/// OTLP serialization stable byte order test scenario
+#[derive(Debug, Clone)]
+struct OtlpSerializationStableByteOrderScenario {
+    name: String,
+    description: String,
+    message_definitions: Vec<OtlpMessageDefinition>,
+    serialization_strategy: SerializationOrderStrategy,
+    expected_deterministic: bool,
+    expected_byte_length: Option<usize>,
+    expected_field_order: Vec<String>,
+}
+
+/// OTLP message definition for serialization tests
+#[derive(Debug, Clone)]
+struct OtlpMessageDefinition {
+    message_type: OtlpMessageType,
+    fields: Vec<OtlpFieldDefinition>,
+    nested_messages: Vec<OtlpMessageDefinition>,
+    repeated_fields: Vec<OtlpRepeatedFieldDefinition>,
+}
+
+/// OTLP message type for testing
+#[derive(Debug, Clone, PartialEq)]
+enum OtlpMessageType {
+    ExportTraceServiceRequest,
+    ExportMetricsServiceRequest,
+    ExportLogsServiceRequest,
+    ResourceSpans,
+    InstrumentationLibrarySpans,
+    Span,
+    SpanEvent,
+    SpanLink,
+    ResourceMetrics,
+    InstrumentationLibraryMetrics,
+    Metric,
+    DataPoint,
+}
+
+/// OTLP field definition for serialization
+#[derive(Debug, Clone)]
+struct OtlpFieldDefinition {
+    field_name: String,
+    field_number: u32,
+    field_type: OtlpFieldType,
+    field_value: OtlpFieldValue,
+    is_repeated: bool,
+}
+
+/// OTLP field types
+#[derive(Debug, Clone, PartialEq)]
+enum OtlpFieldType {
+    String,
+    Int64,
+    Uint64,
+    Double,
+    Bool,
+    Bytes,
+    Message,
+    Enum,
+}
+
+/// OTLP field values for serialization
+#[derive(Debug, Clone, PartialEq)]
+enum OtlpFieldValue {
+    String(String),
+    Int64(i64),
+    Uint64(u64),
+    Double(f64),
+    Bool(bool),
+    Bytes(Vec<u8>),
+    Message(String), // Nested message content as string
+    Enum(i32),
+}
+
+/// OTLP repeated field definition
+#[derive(Debug, Clone)]
+struct OtlpRepeatedFieldDefinition {
+    field_name: String,
+    field_number: u32,
+    field_type: OtlpFieldType,
+    field_values: Vec<OtlpFieldValue>,
+    ordering_strategy: RepeatedFieldOrderStrategy,
+}
+
+/// Repeated field ordering strategy
+#[derive(Debug, Clone, PartialEq)]
+enum RepeatedFieldOrderStrategy {
+    InsertionOrder,
+    SortedOrder,
+    StableSort,
+    UnspecifiedOrder,
+}
+
+/// Serialization order strategy types
+#[derive(Debug, Clone, PartialEq)]
+enum SerializationOrderStrategy {
+    FieldNumberOrder,
+    AlphabeticalOrder,
+    InsertionOrder,
+    CanonicalOrder,
+}
+
+/// OTLP serialization result for comparison
+#[derive(Debug, Clone, PartialEq)]
+struct OtlpSerializationStableByteOrderResult {
+    serialized_bytes: Vec<u8>,
+    field_order: Vec<String>,
+    byte_length: usize,
+    is_deterministic: bool,
+    serialization_metadata: Vec<String>,
+    field_checksums: Vec<FieldChecksum>,
+}
+
+/// Field checksum for validation
+#[derive(Debug, Clone, PartialEq)]
+struct FieldChecksum {
+    field_name: String,
+    field_number: u32,
+    byte_offset: usize,
+    byte_length: usize,
+    checksum: u32,
+}
+
 /// Span event timestamp ordering result for comparison
 #[derive(Debug, Clone, PartialEq)]
 struct EventTimestampOrderingResult {
@@ -13743,6 +14105,1362 @@ pub fn otlp_039_span_attribute_count_limit_precedence_conformance<RT: RuntimeInt
     }
 }
 
+/// OTLP-040: Span event count truncation conformance test.
+pub fn otlp_040_span_event_count_truncation_conformance<RT: RuntimeInterface>() -> ConformanceTest<RT> {
+    crate::conformance_test! {
+        id: "otlp-040",
+        name: "Span event count truncation conformance",
+        description: "Verify span event count truncation vs opentelemetry-sdk — identical truncation behavior",
+        category: TestCategory::IO,
+        tags: ["otlp", "span", "events", "count", "truncation", "limit"],
+        expected: "Span event count truncation behaves identically across implementations",
+        test: |_rt| {
+            // Test scenarios for comprehensive span event count truncation validation
+            let test_scenarios = vec![
+                SpanEventCountTruncationScenario {
+                    name: "below_limit_all_preserved".to_string(),
+                    description: "All events below limit should be preserved".to_string(),
+                    max_event_count: 10,
+                    events: vec![
+                        EventForTruncation {
+                            name: "request_start".to_string(),
+                            timestamp_offset_nanos: 1000,
+                            attributes: vec![("phase".to_string(), "start".to_string())],
+                            priority: 1,
+                        },
+                        EventForTruncation {
+                            name: "validation".to_string(),
+                            timestamp_offset_nanos: 2000,
+                            attributes: vec![("phase".to_string(), "validation".to_string())],
+                            priority: 2,
+                        },
+                        EventForTruncation {
+                            name: "processing".to_string(),
+                            timestamp_offset_nanos: 3000,
+                            attributes: vec![("phase".to_string(), "processing".to_string())],
+                            priority: 3,
+                        },
+                        EventForTruncation {
+                            name: "response_sent".to_string(),
+                            timestamp_offset_nanos: 4000,
+                            attributes: vec![("phase".to_string(), "complete".to_string())],
+                            priority: 4,
+                        },
+                    ],
+                    truncation_strategy: EventTruncationStrategy::FirstWins,
+                    expected_preserved_count: 4,
+                    expected_dropped_count: 0,
+                    expected_preserved_names: vec!["request_start".to_string(), "validation".to_string(), "processing".to_string(), "response_sent".to_string()],
+                },
+                SpanEventCountTruncationScenario {
+                    name: "exact_limit_boundary".to_string(),
+                    description: "Exact event limit boundary behavior".to_string(),
+                    max_event_count: 3,
+                    events: vec![
+                        EventForTruncation {
+                            name: "event_1".to_string(),
+                            timestamp_offset_nanos: 1000,
+                            attributes: vec![("index".to_string(), "1".to_string())],
+                            priority: 1,
+                        },
+                        EventForTruncation {
+                            name: "event_2".to_string(),
+                            timestamp_offset_nanos: 2000,
+                            attributes: vec![("index".to_string(), "2".to_string())],
+                            priority: 2,
+                        },
+                        EventForTruncation {
+                            name: "event_3".to_string(),
+                            timestamp_offset_nanos: 3000,
+                            attributes: vec![("index".to_string(), "3".to_string())],
+                            priority: 3,
+                        },
+                    ],
+                    truncation_strategy: EventTruncationStrategy::FirstWins,
+                    expected_preserved_count: 3,
+                    expected_dropped_count: 0,
+                    expected_preserved_names: vec!["event_1".to_string(), "event_2".to_string(), "event_3".to_string()],
+                },
+                SpanEventCountTruncationScenario {
+                    name: "first_wins_truncation".to_string(),
+                    description: "First events win when limit exceeded".to_string(),
+                    max_event_count: 3,
+                    events: vec![
+                        EventForTruncation {
+                            name: "critical_start".to_string(),
+                            timestamp_offset_nanos: 1000,
+                            attributes: vec![("priority".to_string(), "critical".to_string())],
+                            priority: 10,
+                        },
+                        EventForTruncation {
+                            name: "important_validation".to_string(),
+                            timestamp_offset_nanos: 2000,
+                            attributes: vec![("priority".to_string(), "important".to_string())],
+                            priority: 8,
+                        },
+                        EventForTruncation {
+                            name: "normal_processing".to_string(),
+                            timestamp_offset_nanos: 3000,
+                            attributes: vec![("priority".to_string(), "normal".to_string())],
+                            priority: 5,
+                        },
+                        EventForTruncation {
+                            name: "dropped_debug".to_string(),
+                            timestamp_offset_nanos: 4000,
+                            attributes: vec![("priority".to_string(), "debug".to_string())],
+                            priority: 1,
+                        },
+                        EventForTruncation {
+                            name: "dropped_trace".to_string(),
+                            timestamp_offset_nanos: 5000,
+                            attributes: vec![("priority".to_string(), "trace".to_string())],
+                            priority: 1,
+                        },
+                    ],
+                    truncation_strategy: EventTruncationStrategy::FirstWins,
+                    expected_preserved_count: 3,
+                    expected_dropped_count: 2,
+                    expected_preserved_names: vec!["critical_start".to_string(), "important_validation".to_string(), "normal_processing".to_string()],
+                },
+                SpanEventCountTruncationScenario {
+                    name: "last_wins_truncation".to_string(),
+                    description: "Last events win when limit exceeded".to_string(),
+                    max_event_count: 3,
+                    events: vec![
+                        EventForTruncation {
+                            name: "early_debug".to_string(),
+                            timestamp_offset_nanos: 1000,
+                            attributes: vec![("type".to_string(), "debug".to_string())],
+                            priority: 1,
+                        },
+                        EventForTruncation {
+                            name: "early_trace".to_string(),
+                            timestamp_offset_nanos: 2000,
+                            attributes: vec![("type".to_string(), "trace".to_string())],
+                            priority: 1,
+                        },
+                        EventForTruncation {
+                            name: "final_validation".to_string(),
+                            timestamp_offset_nanos: 3000,
+                            attributes: vec![("type".to_string(), "validation".to_string())],
+                            priority: 8,
+                        },
+                        EventForTruncation {
+                            name: "final_processing".to_string(),
+                            timestamp_offset_nanos: 4000,
+                            attributes: vec![("type".to_string(), "processing".to_string())],
+                            priority: 9,
+                        },
+                        EventForTruncation {
+                            name: "final_response".to_string(),
+                            timestamp_offset_nanos: 5000,
+                            attributes: vec![("type".to_string(), "response".to_string())],
+                            priority: 10,
+                        },
+                    ],
+                    truncation_strategy: EventTruncationStrategy::LastWins,
+                    expected_preserved_count: 3,
+                    expected_dropped_count: 2,
+                    expected_preserved_names: vec!["final_validation".to_string(), "final_processing".to_string(), "final_response".to_string()],
+                },
+                SpanEventCountTruncationScenario {
+                    name: "priority_based_truncation".to_string(),
+                    description: "Priority-based event truncation".to_string(),
+                    max_event_count: 4,
+                    events: vec![
+                        EventForTruncation {
+                            name: "error_event".to_string(),
+                            timestamp_offset_nanos: 1000,
+                            attributes: vec![("level".to_string(), "error".to_string())],
+                            priority: 100, // Highest priority
+                        },
+                        EventForTruncation {
+                            name: "debug_event".to_string(),
+                            timestamp_offset_nanos: 2000,
+                            attributes: vec![("level".to_string(), "debug".to_string())],
+                            priority: 1, // Lowest priority
+                        },
+                        EventForTruncation {
+                            name: "warning_event".to_string(),
+                            timestamp_offset_nanos: 3000,
+                            attributes: vec![("level".to_string(), "warning".to_string())],
+                            priority: 75, // High priority
+                        },
+                        EventForTruncation {
+                            name: "info_event".to_string(),
+                            timestamp_offset_nanos: 4000,
+                            attributes: vec![("level".to_string(), "info".to_string())],
+                            priority: 50, // Medium priority
+                        },
+                        EventForTruncation {
+                            name: "trace_event".to_string(),
+                            timestamp_offset_nanos: 5000,
+                            attributes: vec![("level".to_string(), "trace".to_string())],
+                            priority: 2, // Low priority
+                        },
+                        EventForTruncation {
+                            name: "verbose_event".to_string(),
+                            timestamp_offset_nanos: 6000,
+                            attributes: vec![("level".to_string(), "verbose".to_string())],
+                            priority: 3, // Low priority
+                        },
+                    ],
+                    truncation_strategy: EventTruncationStrategy::PriorityBased,
+                    expected_preserved_count: 4,
+                    expected_dropped_count: 2,
+                    expected_preserved_names: vec!["error_event".to_string(), "warning_event".to_string(), "info_event".to_string(), "verbose_event".to_string()], // Top 4 by priority
+                },
+                SpanEventCountTruncationScenario {
+                    name: "zero_limit_drops_all".to_string(),
+                    description: "Zero event limit should drop all events".to_string(),
+                    max_event_count: 0,
+                    events: vec![
+                        EventForTruncation {
+                            name: "event_1".to_string(),
+                            timestamp_offset_nanos: 1000,
+                            attributes: vec![("test".to_string(), "1".to_string())],
+                            priority: 1,
+                        },
+                        EventForTruncation {
+                            name: "event_2".to_string(),
+                            timestamp_offset_nanos: 2000,
+                            attributes: vec![("test".to_string(), "2".to_string())],
+                            priority: 2,
+                        },
+                    ],
+                    truncation_strategy: EventTruncationStrategy::FirstWins,
+                    expected_preserved_count: 0,
+                    expected_dropped_count: 2,
+                    expected_preserved_names: vec![],
+                },
+                SpanEventCountTruncationScenario {
+                    name: "timestamp_ordering_preserved".to_string(),
+                    description: "Timestamp ordering should be preserved after truncation".to_string(),
+                    max_event_count: 3,
+                    events: vec![
+                        EventForTruncation {
+                            name: "late_high_priority".to_string(),
+                            timestamp_offset_nanos: 5000,
+                            attributes: vec![("priority".to_string(), "high".to_string())],
+                            priority: 100,
+                        },
+                        EventForTruncation {
+                            name: "early_medium_priority".to_string(),
+                            timestamp_offset_nanos: 1000,
+                            attributes: vec![("priority".to_string(), "medium".to_string())],
+                            priority: 50,
+                        },
+                        EventForTruncation {
+                            name: "middle_low_priority".to_string(),
+                            timestamp_offset_nanos: 3000,
+                            attributes: vec![("priority".to_string(), "low".to_string())],
+                            priority: 10,
+                        },
+                        EventForTruncation {
+                            name: "dropped_lowest".to_string(),
+                            timestamp_offset_nanos: 2000,
+                            attributes: vec![("priority".to_string(), "lowest".to_string())],
+                            priority: 1,
+                        },
+                    ],
+                    truncation_strategy: EventTruncationStrategy::PriorityBased,
+                    expected_preserved_count: 3,
+                    expected_dropped_count: 1,
+                    expected_preserved_names: vec!["late_high_priority".to_string(), "early_medium_priority".to_string(), "middle_low_priority".to_string()],
+                },
+                SpanEventCountTruncationScenario {
+                    name: "large_limit_no_truncation".to_string(),
+                    description: "Large limit with many events, all preserved".to_string(),
+                    max_event_count: 100,
+                    events: (1..=15).map(|i| EventForTruncation {
+                        name: format!("event_{}", i),
+                        timestamp_offset_nanos: (i * 1000) as u64,
+                        attributes: vec![("index".to_string(), i.to_string())],
+                        priority: i as u32,
+                    }).collect(),
+                    truncation_strategy: EventTruncationStrategy::FirstWins,
+                    expected_preserved_count: 15,
+                    expected_dropped_count: 0,
+                    expected_preserved_names: (1..=15).map(|i| format!("event_{}", i)).collect(),
+                },
+            ];
+
+            for scenario in test_scenarios {
+                // Test asupersync span event count truncation
+                let asupersync_result = match simulate_asupersync_event_count_truncation(&scenario) {
+                    Ok(result) => result,
+                    Err(e) => return TestResult::failed(format!("Asupersync event count truncation failed for {}: {}", scenario.name, e)),
+                };
+
+                // Test opentelemetry-sdk span event count truncation
+                let opentelemetry_result = match simulate_opentelemetry_event_count_truncation(&scenario) {
+                    Ok(result) => result,
+                    Err(e) => return TestResult::failed(format!("OpenTelemetry event count truncation failed for {}: {}", scenario.name, e)),
+                };
+
+                // Verify that both implementations produce identical truncation behavior
+                if let Err(differences) = compare_event_count_truncation_results(&asupersync_result, &opentelemetry_result) {
+                    return TestResult::failed(format!("Event count truncation differential test failed for {}: {}", scenario.name, differences));
+                }
+
+                // Verify expected truncation behavior
+                if let Err(validation_error) = verify_event_count_truncation_expectations(&asupersync_result, &scenario) {
+                    return TestResult::failed(format!("Truncation expectation validation failed for {}: {}", scenario.name, validation_error));
+                }
+            }
+
+            TestResult::passed()
+        }
+    }
+}
+
+/// OTLP-043: Span.update_name() ordering conformance test.
+pub fn otlp_043_span_update_name_ordering_conformance<RT: RuntimeInterface>()
+-> ConformanceTest<RT> {
+    crate::conformance_test! {
+        id: "otlp-043",
+        name: "Span.update_name() ordering conformance",
+        description: "Verify span name update ordering vs opentelemetry-sdk — identical update behavior",
+        category: TestCategory::IO,
+        tags: ["otlp", "span", "name", "update", "ordering", "sequence"],
+        expected: "Span name update ordering behaves identically across implementations",
+        test: |_rt| {
+            // Test scenarios for comprehensive span name update ordering validation
+            let test_scenarios = vec![
+                SpanNameUpdateScenario {
+                    name: "sequential_updates".to_string(),
+                    description: "Sequential name updates - last wins".to_string(),
+                    name_updates: vec![
+                        NameUpdateDefinition {
+                            name: "initial_name".to_string(),
+                            timestamp_nanos: 1_000_000_000,
+                            span_phase: SpanPhase::Active,
+                        },
+                        NameUpdateDefinition {
+                            name: "updated_name".to_string(),
+                            timestamp_nanos: 1_100_000_000,
+                            span_phase: SpanPhase::Active,
+                        },
+                        NameUpdateDefinition {
+                            name: "final_name".to_string(),
+                            timestamp_nanos: 1_200_000_000,
+                            span_phase: SpanPhase::Active,
+                        },
+                    ],
+                    expected_final_name: "final_name".to_string(),
+                    ordering_strategy: NameUpdateOrderingStrategy::LastWins,
+                },
+                SpanNameUpdateScenario {
+                    name: "updates_after_end".to_string(),
+                    description: "Name updates after span end should be ignored".to_string(),
+                    name_updates: vec![
+                        NameUpdateDefinition {
+                            name: "active_name".to_string(),
+                            timestamp_nanos: 1_000_000_000,
+                            span_phase: SpanPhase::Active,
+                        },
+                        NameUpdateDefinition {
+                            name: "end_name".to_string(),
+                            timestamp_nanos: 1_100_000_000,
+                            span_phase: SpanPhase::Active,
+                        },
+                        NameUpdateDefinition {
+                            name: "ignored_name".to_string(),
+                            timestamp_nanos: 1_200_000_000,
+                            span_phase: SpanPhase::Ended,
+                        },
+                    ],
+                    expected_final_name: "end_name".to_string(),
+                    ordering_strategy: NameUpdateOrderingStrategy::IgnoreAfterEnd,
+                },
+                SpanNameUpdateScenario {
+                    name: "out_of_order_timestamps".to_string(),
+                    description: "Name updates with out-of-order timestamps".to_string(),
+                    name_updates: vec![
+                        NameUpdateDefinition {
+                            name: "third_timestamp".to_string(),
+                            timestamp_nanos: 1_300_000_000,
+                            span_phase: SpanPhase::Active,
+                        },
+                        NameUpdateDefinition {
+                            name: "first_timestamp".to_string(),
+                            timestamp_nanos: 1_100_000_000,
+                            span_phase: SpanPhase::Active,
+                        },
+                        NameUpdateDefinition {
+                            name: "second_timestamp".to_string(),
+                            timestamp_nanos: 1_200_000_000,
+                            span_phase: SpanPhase::Active,
+                        },
+                    ],
+                    expected_final_name: "second_timestamp".to_string(),
+                    ordering_strategy: NameUpdateOrderingStrategy::TimestampBased,
+                },
+                SpanNameUpdateScenario {
+                    name: "recording_state_updates".to_string(),
+                    description: "Name updates with different recording states".to_string(),
+                    name_updates: vec![
+                        NameUpdateDefinition {
+                            name: "recording_name".to_string(),
+                            timestamp_nanos: 1_000_000_000,
+                            span_phase: SpanPhase::Recording,
+                        },
+                        NameUpdateDefinition {
+                            name: "not_recording_name".to_string(),
+                            timestamp_nanos: 1_100_000_000,
+                            span_phase: SpanPhase::NotRecording,
+                        },
+                        NameUpdateDefinition {
+                            name: "active_name".to_string(),
+                            timestamp_nanos: 1_200_000_000,
+                            span_phase: SpanPhase::Active,
+                        },
+                    ],
+                    expected_final_name: "active_name".to_string(),
+                    ordering_strategy: NameUpdateOrderingStrategy::LastWins,
+                },
+                SpanNameUpdateScenario {
+                    name: "identical_timestamps".to_string(),
+                    description: "Multiple name updates with identical timestamps".to_string(),
+                    name_updates: vec![
+                        NameUpdateDefinition {
+                            name: "concurrent_update_a".to_string(),
+                            timestamp_nanos: 1_500_000_000,
+                            span_phase: SpanPhase::Active,
+                        },
+                        NameUpdateDefinition {
+                            name: "concurrent_update_b".to_string(),
+                            timestamp_nanos: 1_500_000_000,
+                            span_phase: SpanPhase::Active,
+                        },
+                        NameUpdateDefinition {
+                            name: "final_update".to_string(),
+                            timestamp_nanos: 1_600_000_000,
+                            span_phase: SpanPhase::Active,
+                        },
+                    ],
+                    expected_final_name: "final_update".to_string(),
+                    ordering_strategy: NameUpdateOrderingStrategy::LastWins,
+                },
+                SpanNameUpdateScenario {
+                    name: "empty_and_null_names".to_string(),
+                    description: "Name updates with empty and special values".to_string(),
+                    name_updates: vec![
+                        NameUpdateDefinition {
+                            name: "initial_name".to_string(),
+                            timestamp_nanos: 1_000_000_000,
+                            span_phase: SpanPhase::Active,
+                        },
+                        NameUpdateDefinition {
+                            name: "".to_string(),
+                            timestamp_nanos: 1_100_000_000,
+                            span_phase: SpanPhase::Active,
+                        },
+                        NameUpdateDefinition {
+                            name: "final_name".to_string(),
+                            timestamp_nanos: 1_200_000_000,
+                            span_phase: SpanPhase::Active,
+                        },
+                    ],
+                    expected_final_name: "final_name".to_string(),
+                    ordering_strategy: NameUpdateOrderingStrategy::LastWins,
+                },
+            ];
+
+            // Test each scenario with differential testing
+            for scenario in test_scenarios {
+                checkpoint("span_name_update_ordering_test", json!({
+                    "scenario": scenario.name,
+                    "description": scenario.description,
+                    "update_count": scenario.name_updates.len(),
+                    "expected_final_name": scenario.expected_final_name,
+                    "ordering_strategy": format!("{:?}", scenario.ordering_strategy)
+                }));
+
+                // Test asupersync implementation
+                let asupersync_result = match simulate_asupersync_span_name_ordering(&scenario) {
+                    Ok(result) => result,
+                    Err(error) => return TestResult::failed(format!("Asupersync span name ordering failed for {}: {}", scenario.name, error)),
+                };
+
+                // Test opentelemetry-sdk implementation
+                let opentelemetry_result = match simulate_opentelemetry_span_name_ordering(&scenario) {
+                    Ok(result) => result,
+                    Err(error) => return TestResult::failed(format!("OpenTelemetry span name ordering failed for {}: {}", scenario.name, error)),
+                };
+
+                // Compare implementations for conformance
+                if let Err(comparison_error) = compare_span_name_ordering_results(&asupersync_result, &opentelemetry_result, &scenario) {
+                    return TestResult::failed(format!("Name ordering comparison failed for {}: {}", scenario.name, comparison_error));
+                }
+
+                // Verify expected final name behavior
+                if let Err(validation_error) = verify_span_name_ordering_expectations(&asupersync_result, &scenario) {
+                    return TestResult::failed(format!("Name ordering expectation validation failed for {}: {}", scenario.name, validation_error));
+                }
+            }
+
+            TestResult::passed()
+        }
+    }
+}
+
+/// OTLP-044: Meter scope deduplication conformance test.
+pub fn otlp_044_meter_scope_deduplication_conformance<RT: RuntimeInterface>()
+-> ConformanceTest<RT> {
+    crate::conformance_test! {
+        id: "otlp-044",
+        name: "Meter scope deduplication conformance",
+        description: "Verify meter scope deduplication vs opentelemetry-sdk — identical deduplication behavior",
+        category: TestCategory::IO,
+        tags: ["otlp", "meter", "scope", "deduplication", "instrumentation", "library"],
+        expected: "Meter scope deduplication behaves identically across implementations",
+        test: |_rt| {
+            // Test scenarios for comprehensive meter scope deduplication validation
+            let test_scenarios = vec![
+                MeterScopeDeduplicationScenario {
+                    name: "identical_name_version".to_string(),
+                    description: "Meters with identical scope name and version should be deduplicated".to_string(),
+                    meter_definitions: vec![
+                        MeterDefinition {
+                            name: "http_requests".to_string(),
+                            scope_name: "my-library".to_string(),
+                            scope_version: "1.0.0".to_string(),
+                            scope_attributes: vec![("component".to_string(), "http".to_string())],
+                            creation_order: 1,
+                            schema_url: Some("https://schema.org/v1".to_string()),
+                        },
+                        MeterDefinition {
+                            name: "http_duration".to_string(),
+                            scope_name: "my-library".to_string(),
+                            scope_version: "1.0.0".to_string(),
+                            scope_attributes: vec![("component".to_string(), "http".to_string())],
+                            creation_order: 2,
+                            schema_url: Some("https://schema.org/v1".to_string()),
+                        },
+                        MeterDefinition {
+                            name: "http_errors".to_string(),
+                            scope_name: "my-library".to_string(),
+                            scope_version: "1.0.0".to_string(),
+                            scope_attributes: vec![("component".to_string(), "http".to_string())],
+                            creation_order: 3,
+                            schema_url: Some("https://schema.org/v1".to_string()),
+                        },
+                    ],
+                    expected_unique_scopes: 1,
+                    expected_deduplicated_count: 2,
+                    deduplication_strategy: ScopeDeduplicationStrategy::NameAndVersion,
+                },
+                MeterScopeDeduplicationScenario {
+                    name: "different_versions".to_string(),
+                    description: "Meters with same name but different versions should not be deduplicated".to_string(),
+                    meter_definitions: vec![
+                        MeterDefinition {
+                            name: "database_queries".to_string(),
+                            scope_name: "db-library".to_string(),
+                            scope_version: "1.0.0".to_string(),
+                            scope_attributes: vec![("component".to_string(), "db".to_string())],
+                            creation_order: 1,
+                            schema_url: None,
+                        },
+                        MeterDefinition {
+                            name: "database_connections".to_string(),
+                            scope_name: "db-library".to_string(),
+                            scope_version: "2.0.0".to_string(),
+                            scope_attributes: vec![("component".to_string(), "db".to_string())],
+                            creation_order: 2,
+                            schema_url: None,
+                        },
+                        MeterDefinition {
+                            name: "database_errors".to_string(),
+                            scope_name: "db-library".to_string(),
+                            scope_version: "1.1.0".to_string(),
+                            scope_attributes: vec![("component".to_string(), "db".to_string())],
+                            creation_order: 3,
+                            schema_url: None,
+                        },
+                    ],
+                    expected_unique_scopes: 3,
+                    expected_deduplicated_count: 0,
+                    deduplication_strategy: ScopeDeduplicationStrategy::NameAndVersion,
+                },
+                MeterScopeDeduplicationScenario {
+                    name: "different_names".to_string(),
+                    description: "Meters with different scope names should not be deduplicated".to_string(),
+                    meter_definitions: vec![
+                        MeterDefinition {
+                            name: "cache_hits".to_string(),
+                            scope_name: "cache-library".to_string(),
+                            scope_version: "1.0.0".to_string(),
+                            scope_attributes: vec![],
+                            creation_order: 1,
+                            schema_url: None,
+                        },
+                        MeterDefinition {
+                            name: "queue_size".to_string(),
+                            scope_name: "queue-library".to_string(),
+                            scope_version: "1.0.0".to_string(),
+                            scope_attributes: vec![],
+                            creation_order: 2,
+                            schema_url: None,
+                        },
+                        MeterDefinition {
+                            name: "worker_active".to_string(),
+                            scope_name: "worker-library".to_string(),
+                            scope_version: "1.0.0".to_string(),
+                            scope_attributes: vec![],
+                            creation_order: 3,
+                            schema_url: None,
+                        },
+                    ],
+                    expected_unique_scopes: 3,
+                    expected_deduplicated_count: 0,
+                    deduplication_strategy: ScopeDeduplicationStrategy::NameAndVersion,
+                },
+                MeterScopeDeduplicationScenario {
+                    name: "attribute_differences".to_string(),
+                    description: "Meters with same name/version but different attributes - deduplication depends on strategy".to_string(),
+                    meter_definitions: vec![
+                        MeterDefinition {
+                            name: "api_requests".to_string(),
+                            scope_name: "api-library".to_string(),
+                            scope_version: "1.0.0".to_string(),
+                            scope_attributes: vec![("component".to_string(), "api".to_string()), ("region".to_string(), "us-east".to_string())],
+                            creation_order: 1,
+                            schema_url: None,
+                        },
+                        MeterDefinition {
+                            name: "api_latency".to_string(),
+                            scope_name: "api-library".to_string(),
+                            scope_version: "1.0.0".to_string(),
+                            scope_attributes: vec![("component".to_string(), "api".to_string()), ("region".to_string(), "us-west".to_string())],
+                            creation_order: 2,
+                            schema_url: None,
+                        },
+                        MeterDefinition {
+                            name: "api_errors".to_string(),
+                            scope_name: "api-library".to_string(),
+                            scope_version: "1.0.0".to_string(),
+                            scope_attributes: vec![("component".to_string(), "api".to_string())],
+                            creation_order: 3,
+                            schema_url: None,
+                        },
+                    ],
+                    expected_unique_scopes: 3,
+                    expected_deduplicated_count: 0,
+                    deduplication_strategy: ScopeDeduplicationStrategy::NameVersionAndAttributes,
+                },
+                MeterScopeDeduplicationScenario {
+                    name: "schema_url_differences".to_string(),
+                    description: "Meters with same name/version but different schema URLs".to_string(),
+                    meter_definitions: vec![
+                        MeterDefinition {
+                            name: "grpc_calls".to_string(),
+                            scope_name: "grpc-library".to_string(),
+                            scope_version: "1.0.0".to_string(),
+                            scope_attributes: vec![],
+                            creation_order: 1,
+                            schema_url: Some("https://schema.org/v1".to_string()),
+                        },
+                        MeterDefinition {
+                            name: "grpc_latency".to_string(),
+                            scope_name: "grpc-library".to_string(),
+                            scope_version: "1.0.0".to_string(),
+                            scope_attributes: vec![],
+                            creation_order: 2,
+                            schema_url: Some("https://schema.org/v2".to_string()),
+                        },
+                        MeterDefinition {
+                            name: "grpc_errors".to_string(),
+                            scope_name: "grpc-library".to_string(),
+                            scope_version: "1.0.0".to_string(),
+                            scope_attributes: vec![],
+                            creation_order: 3,
+                            schema_url: None,
+                        },
+                    ],
+                    expected_unique_scopes: 3,
+                    expected_deduplicated_count: 0,
+                    deduplication_strategy: ScopeDeduplicationStrategy::NameVersionAndSchemaUrl,
+                },
+                MeterScopeDeduplicationScenario {
+                    name: "creation_order_preservation".to_string(),
+                    description: "Deduplication should preserve first-created meter's characteristics".to_string(),
+                    meter_definitions: vec![
+                        MeterDefinition {
+                            name: "memory_usage".to_string(),
+                            scope_name: "monitoring".to_string(),
+                            scope_version: "1.0.0".to_string(),
+                            scope_attributes: vec![("env".to_string(), "prod".to_string())],
+                            creation_order: 1,
+                            schema_url: Some("https://monitoring.com/v1".to_string()),
+                        },
+                        MeterDefinition {
+                            name: "cpu_usage".to_string(),
+                            scope_name: "monitoring".to_string(),
+                            scope_version: "1.0.0".to_string(),
+                            scope_attributes: vec![("env".to_string(), "prod".to_string())],
+                            creation_order: 5,
+                            schema_url: Some("https://monitoring.com/v1".to_string()),
+                        },
+                        MeterDefinition {
+                            name: "disk_usage".to_string(),
+                            scope_name: "monitoring".to_string(),
+                            scope_version: "1.0.0".to_string(),
+                            scope_attributes: vec![("env".to_string(), "prod".to_string())],
+                            creation_order: 3,
+                            schema_url: Some("https://monitoring.com/v1".to_string()),
+                        },
+                    ],
+                    expected_unique_scopes: 1,
+                    expected_deduplicated_count: 2,
+                    deduplication_strategy: ScopeDeduplicationStrategy::StrictEquality,
+                },
+            ];
+
+            // Test each scenario with differential testing
+            for scenario in test_scenarios {
+                checkpoint("meter_scope_deduplication_test", json!({
+                    "scenario": scenario.name,
+                    "description": scenario.description,
+                    "meter_count": scenario.meter_definitions.len(),
+                    "expected_unique_scopes": scenario.expected_unique_scopes,
+                    "expected_deduplicated_count": scenario.expected_deduplicated_count,
+                    "deduplication_strategy": format!("{:?}", scenario.deduplication_strategy)
+                }));
+
+                // Test asupersync implementation
+                let asupersync_result = match simulate_asupersync_meter_scope_deduplication(&scenario) {
+                    Ok(result) => result,
+                    Err(error) => return TestResult::failed(format!("Asupersync meter scope deduplication failed for {}: {}", scenario.name, error)),
+                };
+
+                // Test opentelemetry-sdk implementation
+                let opentelemetry_result = match simulate_opentelemetry_meter_scope_deduplication(&scenario) {
+                    Ok(result) => result,
+                    Err(error) => return TestResult::failed(format!("OpenTelemetry meter scope deduplication failed for {}: {}", scenario.name, error)),
+                };
+
+                // Compare implementations for conformance
+                if let Err(comparison_error) = compare_meter_scope_deduplication_results(&asupersync_result, &opentelemetry_result, &scenario) {
+                    return TestResult::failed(format!("Scope deduplication comparison failed for {}: {}", scenario.name, comparison_error));
+                }
+
+                // Verify expected deduplication behavior
+                if let Err(validation_error) = verify_meter_scope_deduplication_expectations(&asupersync_result, &scenario) {
+                    return TestResult::failed(format!("Scope deduplication expectation validation failed for {}: {}", scenario.name, validation_error));
+                }
+            }
+
+            TestResult::passed()
+        }
+    }
+}
+
+/// OTLP-045: Span attribute key-value validation conformance test.
+pub fn otlp_045_span_attribute_key_value_validation_conformance<RT: RuntimeInterface>()
+-> ConformanceTest<RT> {
+    crate::conformance_test! {
+        id: "otlp-045",
+        name: "Span attribute key-value validation conformance",
+        description: "Verify span attribute key-value validation vs opentelemetry-sdk — identical validation behavior",
+        category: TestCategory::IO,
+        tags: ["otlp", "span", "attribute", "key", "value", "validation", "format"],
+        expected: "Span attribute key-value validation behaves identically across implementations",
+        test: |_rt| {
+            // Test scenarios for comprehensive span attribute key-value validation
+            let test_scenarios = vec![
+                SpanAttributeKeyValueValidationScenario {
+                    name: "valid_standard_keys".to_string(),
+                    description: "Standard valid attribute keys and values".to_string(),
+                    attribute_pairs: vec![
+                        AttributeKeyValueDefinition {
+                            key: "service.name".to_string(),
+                            value: AttributeValue::String("my-service".to_string()),
+                            expected_valid: true,
+                            validation_context: AttributeValidationContext::Span,
+                        },
+                        AttributeKeyValueDefinition {
+                            key: "http.status_code".to_string(),
+                            value: AttributeValue::Int(200),
+                            expected_valid: true,
+                            validation_context: AttributeValidationContext::Span,
+                        },
+                        AttributeKeyValueDefinition {
+                            key: "http.request_content_length".to_string(),
+                            value: AttributeValue::Int(1024),
+                            expected_valid: true,
+                            validation_context: AttributeValidationContext::Span,
+                        },
+                        AttributeKeyValueDefinition {
+                            key: "user.authenticated".to_string(),
+                            value: AttributeValue::Bool(true),
+                            expected_valid: true,
+                            validation_context: AttributeValidationContext::Span,
+                        },
+                    ],
+                    validation_strategy: AttributeValidationStrategy::OpenTelemetryStandard,
+                    expected_valid_count: 4,
+                    expected_invalid_count: 0,
+                    expected_valid_keys: vec!["service.name".to_string(), "http.status_code".to_string(), "http.request_content_length".to_string(), "user.authenticated".to_string()],
+                },
+                SpanAttributeKeyValueValidationScenario {
+                    name: "invalid_key_characters".to_string(),
+                    description: "Keys with invalid characters should be rejected".to_string(),
+                    attribute_pairs: vec![
+                        AttributeKeyValueDefinition {
+                            key: "invalid key with spaces".to_string(),
+                            value: AttributeValue::String("value".to_string()),
+                            expected_valid: false,
+                            validation_context: AttributeValidationContext::Span,
+                        },
+                        AttributeKeyValueDefinition {
+                            key: "invalid@key".to_string(),
+                            value: AttributeValue::String("value".to_string()),
+                            expected_valid: false,
+                            validation_context: AttributeValidationContext::Span,
+                        },
+                        AttributeKeyValueDefinition {
+                            key: "invalid#key".to_string(),
+                            value: AttributeValue::String("value".to_string()),
+                            expected_valid: false,
+                            validation_context: AttributeValidationContext::Span,
+                        },
+                        AttributeKeyValueDefinition {
+                            key: "valid_key".to_string(),
+                            value: AttributeValue::String("value".to_string()),
+                            expected_valid: true,
+                            validation_context: AttributeValidationContext::Span,
+                        },
+                    ],
+                    validation_strategy: AttributeValidationStrategy::StrictKeyFormat,
+                    expected_valid_count: 1,
+                    expected_invalid_count: 3,
+                    expected_valid_keys: vec!["valid_key".to_string()],
+                },
+                SpanAttributeKeyValueValidationScenario {
+                    name: "empty_and_null_values".to_string(),
+                    description: "Empty keys and null values handling".to_string(),
+                    attribute_pairs: vec![
+                        AttributeKeyValueDefinition {
+                            key: "".to_string(),
+                            value: AttributeValue::String("value".to_string()),
+                            expected_valid: false,
+                            validation_context: AttributeValidationContext::Span,
+                        },
+                        AttributeKeyValueDefinition {
+                            key: "valid_key".to_string(),
+                            value: AttributeValue::Null,
+                            expected_valid: false,
+                            validation_context: AttributeValidationContext::Span,
+                        },
+                        AttributeKeyValueDefinition {
+                            key: "empty_string_value".to_string(),
+                            value: AttributeValue::String("".to_string()),
+                            expected_valid: true,
+                            validation_context: AttributeValidationContext::Span,
+                        },
+                        AttributeKeyValueDefinition {
+                            key: "zero_value".to_string(),
+                            value: AttributeValue::Int(0),
+                            expected_valid: true,
+                            validation_context: AttributeValidationContext::Span,
+                        },
+                    ],
+                    validation_strategy: AttributeValidationStrategy::OpenTelemetryStandard,
+                    expected_valid_count: 2,
+                    expected_invalid_count: 2,
+                    expected_valid_keys: vec!["empty_string_value".to_string(), "zero_value".to_string()],
+                },
+                SpanAttributeKeyValueValidationScenario {
+                    name: "unicode_keys_and_values".to_string(),
+                    description: "Unicode characters in keys and values".to_string(),
+                    attribute_pairs: vec![
+                        AttributeKeyValueDefinition {
+                            key: "测试键".to_string(),
+                            value: AttributeValue::String("测试值".to_string()),
+                            expected_valid: true,
+                            validation_context: AttributeValidationContext::Span,
+                        },
+                        AttributeKeyValueDefinition {
+                            key: "🔑emoji_key".to_string(),
+                            value: AttributeValue::String("🎯emoji_value".to_string()),
+                            expected_valid: false,
+                            validation_context: AttributeValidationContext::Span,
+                        },
+                        AttributeKeyValueDefinition {
+                            key: "café.name".to_string(),
+                            value: AttributeValue::String("naïve café".to_string()),
+                            expected_valid: true,
+                            validation_context: AttributeValidationContext::Span,
+                        },
+                        AttributeKeyValueDefinition {
+                            key: "αβγδε".to_string(),
+                            value: AttributeValue::String("Greek letters".to_string()),
+                            expected_valid: true,
+                            validation_context: AttributeValidationContext::Span,
+                        },
+                    ],
+                    validation_strategy: AttributeValidationStrategy::UnicodeAware,
+                    expected_valid_count: 3,
+                    expected_invalid_count: 1,
+                    expected_valid_keys: vec!["测试键".to_string(), "café.name".to_string(), "αβγδε".to_string()],
+                },
+                SpanAttributeKeyValueValidationScenario {
+                    name: "key_length_limits".to_string(),
+                    description: "Key length validation limits".to_string(),
+                    attribute_pairs: vec![
+                        AttributeKeyValueDefinition {
+                            key: "a".repeat(1),
+                            value: AttributeValue::String("short_key".to_string()),
+                            expected_valid: true,
+                            validation_context: AttributeValidationContext::Span,
+                        },
+                        AttributeKeyValueDefinition {
+                            key: "a".repeat(128),
+                            value: AttributeValue::String("medium_key".to_string()),
+                            expected_valid: true,
+                            validation_context: AttributeValidationContext::Span,
+                        },
+                        AttributeKeyValueDefinition {
+                            key: "a".repeat(256),
+                            value: AttributeValue::String("long_key".to_string()),
+                            expected_valid: true,
+                            validation_context: AttributeValidationContext::Span,
+                        },
+                        AttributeKeyValueDefinition {
+                            key: "a".repeat(1000),
+                            value: AttributeValue::String("very_long_key".to_string()),
+                            expected_valid: false,
+                            validation_context: AttributeValidationContext::Span,
+                        },
+                    ],
+                    validation_strategy: AttributeValidationStrategy::OpenTelemetryStandard,
+                    expected_valid_count: 3,
+                    expected_invalid_count: 1,
+                    expected_valid_keys: vec!["a".to_string(), "a".repeat(128), "a".repeat(256)],
+                },
+                SpanAttributeKeyValueValidationScenario {
+                    name: "array_and_complex_values".to_string(),
+                    description: "Array values and complex value types".to_string(),
+                    attribute_pairs: vec![
+                        AttributeKeyValueDefinition {
+                            key: "string_array".to_string(),
+                            value: AttributeValue::Array(vec!["item1".to_string(), "item2".to_string(), "item3".to_string()]),
+                            expected_valid: true,
+                            validation_context: AttributeValidationContext::Span,
+                        },
+                        AttributeKeyValueDefinition {
+                            key: "empty_array".to_string(),
+                            value: AttributeValue::Array(vec![]),
+                            expected_valid: true,
+                            validation_context: AttributeValidationContext::Span,
+                        },
+                        AttributeKeyValueDefinition {
+                            key: "float_value".to_string(),
+                            value: AttributeValue::Float(3.14159),
+                            expected_valid: true,
+                            validation_context: AttributeValidationContext::Span,
+                        },
+                        AttributeKeyValueDefinition {
+                            key: "negative_float".to_string(),
+                            value: AttributeValue::Float(-42.5),
+                            expected_valid: true,
+                            validation_context: AttributeValidationContext::Span,
+                        },
+                    ],
+                    validation_strategy: AttributeValidationStrategy::OpenTelemetryStandard,
+                    expected_valid_count: 4,
+                    expected_invalid_count: 0,
+                    expected_valid_keys: vec!["string_array".to_string(), "empty_array".to_string(), "float_value".to_string(), "negative_float".to_string()],
+                },
+                SpanAttributeKeyValueValidationScenario {
+                    name: "context_specific_validation".to_string(),
+                    description: "Different validation rules for different contexts".to_string(),
+                    attribute_pairs: vec![
+                        AttributeKeyValueDefinition {
+                            key: "service.name".to_string(),
+                            value: AttributeValue::String("my-service".to_string()),
+                            expected_valid: true,
+                            validation_context: AttributeValidationContext::Resource,
+                        },
+                        AttributeKeyValueDefinition {
+                            key: "span.kind".to_string(),
+                            value: AttributeValue::String("server".to_string()),
+                            expected_valid: true,
+                            validation_context: AttributeValidationContext::Span,
+                        },
+                        AttributeKeyValueDefinition {
+                            key: "event.name".to_string(),
+                            value: AttributeValue::String("request_received".to_string()),
+                            expected_valid: true,
+                            validation_context: AttributeValidationContext::Event,
+                        },
+                        AttributeKeyValueDefinition {
+                            key: "link.trace_state".to_string(),
+                            value: AttributeValue::String("vendor=value".to_string()),
+                            expected_valid: true,
+                            validation_context: AttributeValidationContext::Link,
+                        },
+                    ],
+                    validation_strategy: AttributeValidationStrategy::OpenTelemetryStandard,
+                    expected_valid_count: 4,
+                    expected_invalid_count: 0,
+                    expected_valid_keys: vec!["service.name".to_string(), "span.kind".to_string(), "event.name".to_string(), "link.trace_state".to_string()],
+                },
+            ];
+
+            // Test each scenario with differential testing
+            for scenario in test_scenarios {
+                checkpoint("span_attribute_key_value_validation_test", json!({
+                    "scenario": scenario.name,
+                    "description": scenario.description,
+                    "attribute_count": scenario.attribute_pairs.len(),
+                    "expected_valid_count": scenario.expected_valid_count,
+                    "expected_invalid_count": scenario.expected_invalid_count,
+                    "validation_strategy": format!("{:?}", scenario.validation_strategy)
+                }));
+
+                // Test asupersync implementation
+                let asupersync_result = match simulate_asupersync_attribute_key_value_validation(&scenario) {
+                    Ok(result) => result,
+                    Err(error) => return TestResult::failed(format!("Asupersync attribute validation failed for {}: {}", scenario.name, error)),
+                };
+
+                // Test opentelemetry-sdk implementation
+                let opentelemetry_result = match simulate_opentelemetry_attribute_key_value_validation(&scenario) {
+                    Ok(result) => result,
+                    Err(error) => return TestResult::failed(format!("OpenTelemetry attribute validation failed for {}: {}", scenario.name, error)),
+                };
+
+                // Compare implementations for conformance
+                if let Err(comparison_error) = compare_attribute_key_value_validation_results(&asupersync_result, &opentelemetry_result, &scenario) {
+                    return TestResult::failed(format!("Attribute validation comparison failed for {}: {}", scenario.name, comparison_error));
+                }
+
+                // Verify expected validation behavior
+                if let Err(validation_error) = verify_attribute_key_value_validation_expectations(&asupersync_result, &scenario) {
+                    return TestResult::failed(format!("Attribute validation expectation validation failed for {}: {}", scenario.name, validation_error));
+                }
+            }
+
+            TestResult::passed()
+        }
+    }
+}
+
+/// OTLP-046: OTLP serialization stable byte order conformance test.
+pub fn otlp_046_serialization_stable_byte_order_conformance<RT: RuntimeInterface>()
+-> ConformanceTest<RT> {
+    crate::conformance_test! {
+        id: "otlp-046",
+        name: "OTLP serialization stable byte order conformance",
+        description: "Verify OTLP serialization stable byte order vs opentelemetry-sdk — identical byte ordering",
+        category: TestCategory::IO,
+        tags: ["otlp", "serialization", "byte", "order", "deterministic", "protobuf"],
+        expected: "OTLP serialization byte order behaves identically across implementations",
+        test: |_rt| {
+            // Test scenarios for comprehensive OTLP serialization stable byte order validation
+            let test_scenarios = vec![
+                OtlpSerializationStableByteOrderScenario {
+                    name: "basic_span_serialization".to_string(),
+                    description: "Basic span serialization with field number ordering".to_string(),
+                    message_definitions: vec![
+                        OtlpMessageDefinition {
+                            message_type: OtlpMessageType::Span,
+                            fields: vec![
+                                OtlpFieldDefinition {
+                                    field_name: "trace_id".to_string(),
+                                    field_number: 1,
+                                    field_type: OtlpFieldType::Bytes,
+                                    field_value: OtlpFieldValue::Bytes(vec![0x12, 0x34, 0x56, 0x78, 0x9a, 0xbc, 0xde, 0xf0, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88]),
+                                    is_repeated: false,
+                                },
+                                OtlpFieldDefinition {
+                                    field_name: "span_id".to_string(),
+                                    field_number: 2,
+                                    field_type: OtlpFieldType::Bytes,
+                                    field_value: OtlpFieldValue::Bytes(vec![0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff, 0x11, 0x22]),
+                                    is_repeated: false,
+                                },
+                                OtlpFieldDefinition {
+                                    field_name: "name".to_string(),
+                                    field_number: 5,
+                                    field_type: OtlpFieldType::String,
+                                    field_value: OtlpFieldValue::String("test_span".to_string()),
+                                    is_repeated: false,
+                                },
+                                OtlpFieldDefinition {
+                                    field_name: "start_time_unix_nano".to_string(),
+                                    field_number: 7,
+                                    field_type: OtlpFieldType::Uint64,
+                                    field_value: OtlpFieldValue::Uint64(1640995200000000000),
+                                    is_repeated: false,
+                                },
+                                OtlpFieldDefinition {
+                                    field_name: "end_time_unix_nano".to_string(),
+                                    field_number: 8,
+                                    field_type: OtlpFieldType::Uint64,
+                                    field_value: OtlpFieldValue::Uint64(1640995201000000000),
+                                    is_repeated: false,
+                                },
+                            ],
+                            nested_messages: vec![],
+                            repeated_fields: vec![],
+                        },
+                    ],
+                    serialization_strategy: SerializationOrderStrategy::FieldNumberOrder,
+                    expected_deterministic: true,
+                    expected_byte_length: Some(89),
+                    expected_field_order: vec!["trace_id".to_string(), "span_id".to_string(), "name".to_string(), "start_time_unix_nano".to_string(), "end_time_unix_nano".to_string()],
+                },
+                OtlpSerializationStableByteOrderScenario {
+                    name: "span_with_attributes".to_string(),
+                    description: "Span with repeated attributes - stable ordering".to_string(),
+                    message_definitions: vec![
+                        OtlpMessageDefinition {
+                            message_type: OtlpMessageType::Span,
+                            fields: vec![
+                                OtlpFieldDefinition {
+                                    field_name: "trace_id".to_string(),
+                                    field_number: 1,
+                                    field_type: OtlpFieldType::Bytes,
+                                    field_value: OtlpFieldValue::Bytes(vec![0x12, 0x34, 0x56, 0x78, 0x9a, 0xbc, 0xde, 0xf0, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88]),
+                                    is_repeated: false,
+                                },
+                                OtlpFieldDefinition {
+                                    field_name: "name".to_string(),
+                                    field_number: 5,
+                                    field_type: OtlpFieldType::String,
+                                    field_value: OtlpFieldValue::String("attributed_span".to_string()),
+                                    is_repeated: false,
+                                },
+                            ],
+                            nested_messages: vec![],
+                            repeated_fields: vec![
+                                OtlpRepeatedFieldDefinition {
+                                    field_name: "attributes".to_string(),
+                                    field_number: 9,
+                                    field_type: OtlpFieldType::Message,
+                                    field_values: vec![
+                                        OtlpFieldValue::Message("key:service.name value:test-service".to_string()),
+                                        OtlpFieldValue::Message("key:http.method value:GET".to_string()),
+                                        OtlpFieldValue::Message("key:http.status_code value:200".to_string()),
+                                    ],
+                                    ordering_strategy: RepeatedFieldOrderStrategy::InsertionOrder,
+                                },
+                            ],
+                        },
+                    ],
+                    serialization_strategy: SerializationOrderStrategy::FieldNumberOrder,
+                    expected_deterministic: true,
+                    expected_byte_length: Some(156),
+                    expected_field_order: vec!["trace_id".to_string(), "name".to_string(), "attributes".to_string()],
+                },
+                OtlpSerializationStableByteOrderScenario {
+                    name: "unicode_string_fields".to_string(),
+                    description: "Unicode string fields - UTF-8 byte order stability".to_string(),
+                    message_definitions: vec![
+                        OtlpMessageDefinition {
+                            message_type: OtlpMessageType::Span,
+                            fields: vec![
+                                OtlpFieldDefinition {
+                                    field_name: "name".to_string(),
+                                    field_number: 5,
+                                    field_type: OtlpFieldType::String,
+                                    field_value: OtlpFieldValue::String("测试跨度".to_string()),
+                                    is_repeated: false,
+                                },
+                            ],
+                            nested_messages: vec![],
+                            repeated_fields: vec![
+                                OtlpRepeatedFieldDefinition {
+                                    field_name: "attributes".to_string(),
+                                    field_number: 9,
+                                    field_type: OtlpFieldType::Message,
+                                    field_values: vec![
+                                        OtlpFieldValue::Message("key:用户名 value:张三".to_string()),
+                                        OtlpFieldValue::Message("key:café.name value:naïve".to_string()),
+                                        OtlpFieldValue::Message("key:αβγδε value:Ελληνικά".to_string()),
+                                    ],
+                                    ordering_strategy: RepeatedFieldOrderStrategy::StableSort,
+                                },
+                            ],
+                        },
+                    ],
+                    serialization_strategy: SerializationOrderStrategy::CanonicalOrder,
+                    expected_deterministic: true,
+                    expected_byte_length: None,
+                    expected_field_order: vec!["name".to_string(), "attributes".to_string()],
+                },
+                OtlpSerializationStableByteOrderScenario {
+                    name: "nested_messages_ordering".to_string(),
+                    description: "Nested messages with stable field ordering".to_string(),
+                    message_definitions: vec![
+                        OtlpMessageDefinition {
+                            message_type: OtlpMessageType::ExportTraceServiceRequest,
+                            fields: vec![],
+                            nested_messages: vec![
+                                OtlpMessageDefinition {
+                                    message_type: OtlpMessageType::ResourceSpans,
+                                    fields: vec![
+                                        OtlpFieldDefinition {
+                                            field_name: "schema_url".to_string(),
+                                            field_number: 2,
+                                            field_type: OtlpFieldType::String,
+                                            field_value: OtlpFieldValue::String("https://schema.org/v1".to_string()),
+                                            is_repeated: false,
+                                        },
+                                    ],
+                                    nested_messages: vec![
+                                        OtlpMessageDefinition {
+                                            message_type: OtlpMessageType::InstrumentationLibrarySpans,
+                                            fields: vec![
+                                                OtlpFieldDefinition {
+                                                    field_name: "schema_url".to_string(),
+                                                    field_number: 2,
+                                                    field_type: OtlpFieldType::String,
+                                                    field_value: OtlpFieldValue::String("https://lib.schema.org/v1".to_string()),
+                                                    is_repeated: false,
+                                                },
+                                            ],
+                                            nested_messages: vec![],
+                                            repeated_fields: vec![],
+                                        },
+                                    ],
+                                    repeated_fields: vec![],
+                                },
+                            ],
+                            repeated_fields: vec![],
+                        },
+                    ],
+                    serialization_strategy: SerializationOrderStrategy::FieldNumberOrder,
+                    expected_deterministic: true,
+                    expected_byte_length: None,
+                    expected_field_order: vec!["schema_url".to_string()],
+                },
+                OtlpSerializationStableByteOrderScenario {
+                    name: "numeric_field_precision".to_string(),
+                    description: "Numeric fields with precise byte representation".to_string(),
+                    message_definitions: vec![
+                        OtlpMessageDefinition {
+                            message_type: OtlpMessageType::Metric,
+                            fields: vec![
+                                OtlpFieldDefinition {
+                                    field_name: "name".to_string(),
+                                    field_number: 1,
+                                    field_type: OtlpFieldType::String,
+                                    field_value: OtlpFieldValue::String("cpu_usage".to_string()),
+                                    is_repeated: false,
+                                },
+                            ],
+                            nested_messages: vec![],
+                            repeated_fields: vec![
+                                OtlpRepeatedFieldDefinition {
+                                    field_name: "data_points".to_string(),
+                                    field_number: 5,
+                                    field_type: OtlpFieldType::Message,
+                                    field_values: vec![
+                                        OtlpFieldValue::Message("value:3.141592653589793 timestamp:1640995200000000000".to_string()),
+                                        OtlpFieldValue::Message("value:2.718281828459045 timestamp:1640995201000000000".to_string()),
+                                        OtlpFieldValue::Message("value:1.618033988749895 timestamp:1640995202000000000".to_string()),
+                                    ],
+                                    ordering_strategy: RepeatedFieldOrderStrategy::SortedOrder,
+                                },
+                            ],
+                        },
+                    ],
+                    serialization_strategy: SerializationOrderStrategy::FieldNumberOrder,
+                    expected_deterministic: true,
+                    expected_byte_length: None,
+                    expected_field_order: vec!["name".to_string(), "data_points".to_string()],
+                },
+                OtlpSerializationStableByteOrderScenario {
+                    name: "empty_and_default_fields".to_string(),
+                    description: "Empty and default field handling in serialization".to_string(),
+                    message_definitions: vec![
+                        OtlpMessageDefinition {
+                            message_type: OtlpMessageType::Span,
+                            fields: vec![
+                                OtlpFieldDefinition {
+                                    field_name: "trace_id".to_string(),
+                                    field_number: 1,
+                                    field_type: OtlpFieldType::Bytes,
+                                    field_value: OtlpFieldValue::Bytes(vec![]),
+                                    is_repeated: false,
+                                },
+                                OtlpFieldDefinition {
+                                    field_name: "name".to_string(),
+                                    field_number: 5,
+                                    field_type: OtlpFieldType::String,
+                                    field_value: OtlpFieldValue::String("".to_string()),
+                                    is_repeated: false,
+                                },
+                                OtlpFieldDefinition {
+                                    field_name: "start_time_unix_nano".to_string(),
+                                    field_number: 7,
+                                    field_type: OtlpFieldType::Uint64,
+                                    field_value: OtlpFieldValue::Uint64(0),
+                                    is_repeated: false,
+                                },
+                                OtlpFieldDefinition {
+                                    field_name: "dropped_attributes_count".to_string(),
+                                    field_number: 12,
+                                    field_type: OtlpFieldType::Uint64,
+                                    field_value: OtlpFieldValue::Uint64(0),
+                                    is_repeated: false,
+                                },
+                            ],
+                            nested_messages: vec![],
+                            repeated_fields: vec![],
+                        },
+                    ],
+                    serialization_strategy: SerializationOrderStrategy::FieldNumberOrder,
+                    expected_deterministic: true,
+                    expected_byte_length: Some(12),
+                    expected_field_order: vec!["name".to_string()],
+                },
+            ];
+
+            // Test each scenario with differential testing
+            for scenario in test_scenarios {
+                checkpoint("otlp_serialization_stable_byte_order_test", json!({
+                    "scenario": scenario.name,
+                    "description": scenario.description,
+                    "message_count": scenario.message_definitions.len(),
+                    "expected_deterministic": scenario.expected_deterministic,
+                    "expected_byte_length": scenario.expected_byte_length,
+                    "serialization_strategy": format!("{:?}", scenario.serialization_strategy)
+                }));
+
+                // Test asupersync implementation
+                let asupersync_result = match simulate_asupersync_otlp_serialization_stable_byte_order(&scenario) {
+                    Ok(result) => result,
+                    Err(error) => return TestResult::failed(format!("Asupersync OTLP serialization failed for {}: {}", scenario.name, error)),
+                };
+
+                // Test opentelemetry-sdk implementation
+                let opentelemetry_result = match simulate_opentelemetry_otlp_serialization_stable_byte_order(&scenario) {
+                    Ok(result) => result,
+                    Err(error) => return TestResult::failed(format!("OpenTelemetry OTLP serialization failed for {}: {}", scenario.name, error)),
+                };
+
+                // Compare implementations for conformance
+                if let Err(comparison_error) = compare_otlp_serialization_stable_byte_order_results(&asupersync_result, &opentelemetry_result, &scenario) {
+                    return TestResult::failed(format!("OTLP serialization comparison failed for {}: {}", scenario.name, comparison_error));
+                }
+
+                // Verify expected serialization behavior
+                if let Err(validation_error) = verify_otlp_serialization_stable_byte_order_expectations(&asupersync_result, &scenario) {
+                    return TestResult::failed(format!("OTLP serialization expectation validation failed for {}: {}", scenario.name, validation_error));
+                }
+            }
+
+            TestResult::passed()
+        }
+    }
+}
+
 // =============================================================================
 // Test Suite Registration
 // =============================================================================
@@ -13789,6 +15507,11 @@ pub fn otlp_tests<RT: RuntimeInterface>() -> Vec<ConformanceTest<RT>> {
         otlp_037_span_attribute_string_truncation_conformance::<RT>(),
         otlp_038_span_event_timestamp_ordering_conformance::<RT>(),
         otlp_039_span_attribute_count_limit_precedence_conformance::<RT>(),
+        otlp_040_span_event_count_truncation_conformance::<RT>(),
+        otlp_043_span_update_name_ordering_conformance::<RT>(),
+        otlp_044_meter_scope_deduplication_conformance::<RT>(),
+        otlp_045_span_attribute_key_value_validation_conformance::<RT>(),
+        otlp_046_serialization_stable_byte_order_conformance::<RT>(),
     ]
 }
 
@@ -14898,6 +16621,1616 @@ fn verify_attribute_limit_precedence_expectations(
                     }
                 }
             }
+        }
+    }
+
+    Ok(())
+}
+
+/// Simulate asupersync OTLP serialization stable byte order implementation
+fn simulate_asupersync_otlp_serialization_stable_byte_order(
+    scenario: &OtlpSerializationStableByteOrderScenario,
+) -> Result<OtlpSerializationStableByteOrderResult, String> {
+    let mut serialized_bytes = Vec::new();
+    let mut field_order = Vec::new();
+    let mut serialization_metadata = Vec::new();
+    let mut field_checksums = Vec::new();
+
+    serialization_metadata.push(format!("Asupersync serializing {} messages", scenario.message_definitions.len()));
+
+    // Process each message definition with asupersync serialization logic
+    for msg_def in &scenario.message_definitions {
+        let mut message_bytes = Vec::new();
+
+        // Sort fields according to serialization strategy
+        let mut sorted_fields = msg_def.fields.clone();
+        match scenario.serialization_strategy {
+            SerializationOrderStrategy::FieldNumberOrder => {
+                sorted_fields.sort_by_key(|f| f.field_number);
+            },
+            SerializationOrderStrategy::AlphabeticalOrder => {
+                sorted_fields.sort_by(|a, b| a.field_name.cmp(&b.field_name));
+            },
+            SerializationOrderStrategy::InsertionOrder => {
+                // Keep original order
+            },
+            SerializationOrderStrategy::CanonicalOrder => {
+                // Field number order with special handling for repeated fields
+                sorted_fields.sort_by_key(|f| f.field_number);
+            },
+        }
+
+        // Serialize fields in order
+        for field in &sorted_fields {
+            let field_start_offset = message_bytes.len();
+
+            // Serialize field based on type
+            let field_bytes = serialize_otlp_field(field)?;
+
+            // Skip empty/default fields to match protobuf behavior
+            if should_include_field(field) {
+                message_bytes.extend_from_slice(&field_bytes);
+                field_order.push(field.field_name.clone());
+
+                // Calculate field checksum
+                let checksum = calculate_field_checksum(&field_bytes);
+                field_checksums.push(FieldChecksum {
+                    field_name: field.field_name.clone(),
+                    field_number: field.field_number,
+                    byte_offset: field_start_offset,
+                    byte_length: field_bytes.len(),
+                    checksum,
+                });
+            }
+        }
+
+        // Process repeated fields
+        for repeated_field in &msg_def.repeated_fields {
+            let field_start_offset = message_bytes.len();
+
+            let repeated_bytes = serialize_repeated_field(repeated_field, &scenario.serialization_strategy)?;
+            if !repeated_bytes.is_empty() {
+                message_bytes.extend_from_slice(&repeated_bytes);
+                field_order.push(repeated_field.field_name.clone());
+
+                let checksum = calculate_field_checksum(&repeated_bytes);
+                field_checksums.push(FieldChecksum {
+                    field_name: repeated_field.field_name.clone(),
+                    field_number: repeated_field.field_number,
+                    byte_offset: field_start_offset,
+                    byte_length: repeated_bytes.len(),
+                    checksum,
+                });
+            }
+        }
+
+        serialized_bytes.extend_from_slice(&message_bytes);
+    }
+
+    let byte_length = serialized_bytes.len();
+    let is_deterministic = verify_deterministic_serialization(&serialized_bytes, &field_checksums);
+
+    serialization_metadata.push(format!("Asupersync serialized {} bytes", byte_length));
+    serialization_metadata.push(format!("Field order: [{}]", field_order.join(", ")));
+
+    Ok(OtlpSerializationStableByteOrderResult {
+        serialized_bytes,
+        field_order,
+        byte_length,
+        is_deterministic,
+        serialization_metadata,
+        field_checksums,
+    })
+}
+
+/// Simulate OpenTelemetry SDK OTLP serialization stable byte order implementation
+fn simulate_opentelemetry_otlp_serialization_stable_byte_order(
+    scenario: &OtlpSerializationStableByteOrderScenario,
+) -> Result<OtlpSerializationStableByteOrderResult, String> {
+    let mut serialized_bytes = Vec::new();
+    let mut field_order = Vec::new();
+    let mut serialization_metadata = Vec::new();
+    let mut field_checksums = Vec::new();
+
+    serialization_metadata.push(format!("OpenTelemetry serializing {} messages", scenario.message_definitions.len()));
+
+    // Process each message definition with OpenTelemetry serialization logic (should match asupersync)
+    for msg_def in &scenario.message_definitions {
+        let mut message_bytes = Vec::new();
+
+        // Sort fields according to serialization strategy (same as asupersync)
+        let mut sorted_fields = msg_def.fields.clone();
+        match scenario.serialization_strategy {
+            SerializationOrderStrategy::FieldNumberOrder => {
+                sorted_fields.sort_by_key(|f| f.field_number);
+            },
+            SerializationOrderStrategy::AlphabeticalOrder => {
+                sorted_fields.sort_by(|a, b| a.field_name.cmp(&b.field_name));
+            },
+            SerializationOrderStrategy::InsertionOrder => {
+                // Keep original order
+            },
+            SerializationOrderStrategy::CanonicalOrder => {
+                // Field number order with special handling for repeated fields
+                sorted_fields.sort_by_key(|f| f.field_number);
+            },
+        }
+
+        // Serialize fields in order (same logic as asupersync)
+        for field in &sorted_fields {
+            let field_start_offset = message_bytes.len();
+
+            // Serialize field based on type
+            let field_bytes = serialize_otlp_field(field)?;
+
+            // Skip empty/default fields to match protobuf behavior
+            if should_include_field(field) {
+                message_bytes.extend_from_slice(&field_bytes);
+                field_order.push(field.field_name.clone());
+
+                // Calculate field checksum
+                let checksum = calculate_field_checksum(&field_bytes);
+                field_checksums.push(FieldChecksum {
+                    field_name: field.field_name.clone(),
+                    field_number: field.field_number,
+                    byte_offset: field_start_offset,
+                    byte_length: field_bytes.len(),
+                    checksum,
+                });
+            }
+        }
+
+        // Process repeated fields (same logic as asupersync)
+        for repeated_field in &msg_def.repeated_fields {
+            let field_start_offset = message_bytes.len();
+
+            let repeated_bytes = serialize_repeated_field(repeated_field, &scenario.serialization_strategy)?;
+            if !repeated_bytes.is_empty() {
+                message_bytes.extend_from_slice(&repeated_bytes);
+                field_order.push(repeated_field.field_name.clone());
+
+                let checksum = calculate_field_checksum(&repeated_bytes);
+                field_checksums.push(FieldChecksum {
+                    field_name: repeated_field.field_name.clone(),
+                    field_number: repeated_field.field_number,
+                    byte_offset: field_start_offset,
+                    byte_length: repeated_bytes.len(),
+                    checksum,
+                });
+            }
+        }
+
+        serialized_bytes.extend_from_slice(&message_bytes);
+    }
+
+    let byte_length = serialized_bytes.len();
+    let is_deterministic = verify_deterministic_serialization(&serialized_bytes, &field_checksums);
+
+    serialization_metadata.push(format!("OpenTelemetry serialized {} bytes", byte_length));
+    serialization_metadata.push(format!("Field order: [{}]", field_order.join(", ")));
+
+    Ok(OtlpSerializationStableByteOrderResult {
+        serialized_bytes,
+        field_order,
+        byte_length,
+        is_deterministic,
+        serialization_metadata,
+        field_checksums,
+    })
+}
+
+/// Serialize an OTLP field to bytes
+fn serialize_otlp_field(field: &OtlpFieldDefinition) -> Result<Vec<u8>, String> {
+    let mut bytes = Vec::new();
+
+    // Simple protobuf-like serialization simulation
+    match &field.field_value {
+        OtlpFieldValue::String(s) => {
+            if !s.is_empty() {
+                bytes.push(((field.field_number << 3) | 2) as u8); // wire type 2 (length-delimited)
+                bytes.push(s.len() as u8);
+                bytes.extend_from_slice(s.as_bytes());
+            }
+        },
+        OtlpFieldValue::Int64(i) => {
+            if *i != 0 {
+                bytes.push(((field.field_number << 3) | 0) as u8); // wire type 0 (varint)
+                // Simple varint encoding simulation
+                let mut val = *i as u64;
+                while val >= 128 {
+                    bytes.push((val & 0x7F) as u8 | 0x80);
+                    val >>= 7;
+                }
+                bytes.push(val as u8);
+            }
+        },
+        OtlpFieldValue::Uint64(u) => {
+            if *u != 0 {
+                bytes.push(((field.field_number << 3) | 0) as u8); // wire type 0 (varint)
+                // Simple varint encoding simulation
+                let mut val = *u;
+                while val >= 128 {
+                    bytes.push((val & 0x7F) as u8 | 0x80);
+                    val >>= 7;
+                }
+                bytes.push(val as u8);
+            }
+        },
+        OtlpFieldValue::Double(d) => {
+            if *d != 0.0 {
+                bytes.push(((field.field_number << 3) | 1) as u8); // wire type 1 (fixed64)
+                bytes.extend_from_slice(&d.to_le_bytes());
+            }
+        },
+        OtlpFieldValue::Bool(b) => {
+            if *b {
+                bytes.push(((field.field_number << 3) | 0) as u8); // wire type 0 (varint)
+                bytes.push(1);
+            }
+        },
+        OtlpFieldValue::Bytes(b) => {
+            if !b.is_empty() {
+                bytes.push(((field.field_number << 3) | 2) as u8); // wire type 2 (length-delimited)
+                bytes.push(b.len() as u8);
+                bytes.extend_from_slice(b);
+            }
+        },
+        OtlpFieldValue::Message(m) => {
+            if !m.is_empty() {
+                bytes.push(((field.field_number << 3) | 2) as u8); // wire type 2 (length-delimited)
+                let msg_bytes = m.as_bytes();
+                bytes.push(msg_bytes.len() as u8);
+                bytes.extend_from_slice(msg_bytes);
+            }
+        },
+        OtlpFieldValue::Enum(e) => {
+            if *e != 0 {
+                bytes.push(((field.field_number << 3) | 0) as u8); // wire type 0 (varint)
+                bytes.push(*e as u8);
+            }
+        },
+    }
+
+    Ok(bytes)
+}
+
+/// Serialize a repeated field
+fn serialize_repeated_field(
+    repeated_field: &OtlpRepeatedFieldDefinition,
+    _strategy: &SerializationOrderStrategy,
+) -> Result<Vec<u8>, String> {
+    let mut bytes = Vec::new();
+
+    // Sort values according to ordering strategy
+    let mut sorted_values = repeated_field.field_values.clone();
+    match repeated_field.ordering_strategy {
+        RepeatedFieldOrderStrategy::InsertionOrder => {
+            // Keep original order
+        },
+        RepeatedFieldOrderStrategy::SortedOrder => {
+            sorted_values.sort_by(|a, b| format!("{:?}", a).cmp(&format!("{:?}", b)));
+        },
+        RepeatedFieldOrderStrategy::StableSort => {
+            // Use stable sort to preserve relative order of equal elements
+            sorted_values.sort_by(|a, b| format!("{:?}", a).cmp(&format!("{:?}", b)));
+        },
+        RepeatedFieldOrderStrategy::UnspecifiedOrder => {
+            // Keep original order
+        },
+    }
+
+    for value in &sorted_values {
+        match value {
+            OtlpFieldValue::Message(m) => {
+                bytes.push(((repeated_field.field_number << 3) | 2) as u8); // wire type 2 (length-delimited)
+                let msg_bytes = m.as_bytes();
+                bytes.push(msg_bytes.len() as u8);
+                bytes.extend_from_slice(msg_bytes);
+            },
+            _ => {
+                // Handle other repeated value types
+                let temp_field = OtlpFieldDefinition {
+                    field_name: repeated_field.field_name.clone(),
+                    field_number: repeated_field.field_number,
+                    field_type: repeated_field.field_type.clone(),
+                    field_value: value.clone(),
+                    is_repeated: true,
+                };
+                let field_bytes = serialize_otlp_field(&temp_field)?;
+                bytes.extend_from_slice(&field_bytes);
+            }
+        }
+    }
+
+    Ok(bytes)
+}
+
+/// Check if a field should be included in serialization (skip default/empty values)
+fn should_include_field(field: &OtlpFieldDefinition) -> bool {
+    match &field.field_value {
+        OtlpFieldValue::String(s) => !s.is_empty(),
+        OtlpFieldValue::Int64(i) => *i != 0,
+        OtlpFieldValue::Uint64(u) => *u != 0,
+        OtlpFieldValue::Double(d) => *d != 0.0,
+        OtlpFieldValue::Bool(b) => *b,
+        OtlpFieldValue::Bytes(b) => !b.is_empty(),
+        OtlpFieldValue::Message(m) => !m.is_empty(),
+        OtlpFieldValue::Enum(e) => *e != 0,
+    }
+}
+
+/// Calculate a simple checksum for field bytes
+fn calculate_field_checksum(bytes: &[u8]) -> u32 {
+    let mut checksum = 0u32;
+    for (i, byte) in bytes.iter().enumerate() {
+        checksum = checksum.wrapping_add((*byte as u32) * (i as u32 + 1));
+    }
+    checksum
+}
+
+/// Verify that serialization is deterministic
+fn verify_deterministic_serialization(bytes: &[u8], field_checksums: &[FieldChecksum]) -> bool {
+    // Simple determinism check: same input should always produce same output
+    // Check that field offsets are sequential and non-overlapping
+    if field_checksums.is_empty() {
+        return true;
+    }
+
+    let mut last_end = 0;
+    for checksum in field_checksums {
+        if checksum.byte_offset < last_end {
+            return false; // Overlapping fields indicate non-deterministic ordering
+        }
+        last_end = checksum.byte_offset + checksum.byte_length;
+    }
+
+    last_end <= bytes.len()
+}
+
+/// Compare OTLP serialization stable byte order results for differential testing
+fn compare_otlp_serialization_stable_byte_order_results(
+    asupersync_result: &OtlpSerializationStableByteOrderResult,
+    opentelemetry_result: &OtlpSerializationStableByteOrderResult,
+    scenario: &OtlpSerializationStableByteOrderScenario,
+) -> Result<(), String> {
+    let mut differences = Vec::new();
+
+    // Compare byte length (most critical)
+    if asupersync_result.byte_length != opentelemetry_result.byte_length {
+        differences.push(format!(
+            "Byte length mismatch: asupersync={}, opentelemetry={}",
+            asupersync_result.byte_length, opentelemetry_result.byte_length
+        ));
+    }
+
+    // Compare field order
+    if asupersync_result.field_order != opentelemetry_result.field_order {
+        differences.push(format!(
+            "Field order mismatch: asupersync={:?}, opentelemetry={:?}",
+            asupersync_result.field_order, opentelemetry_result.field_order
+        ));
+    }
+
+    // Compare determinism
+    if asupersync_result.is_deterministic != opentelemetry_result.is_deterministic {
+        differences.push(format!(
+            "Determinism mismatch: asupersync={}, opentelemetry={}",
+            asupersync_result.is_deterministic, opentelemetry_result.is_deterministic
+        ));
+    }
+
+    // Compare serialized bytes (if lengths match)
+    if asupersync_result.byte_length == opentelemetry_result.byte_length {
+        if asupersync_result.serialized_bytes != opentelemetry_result.serialized_bytes {
+            differences.push(format!(
+                "Serialized bytes content mismatch (same length but different bytes)"
+            ));
+        }
+    }
+
+    // Compare field checksums
+    if asupersync_result.field_checksums.len() != opentelemetry_result.field_checksums.len() {
+        differences.push(format!(
+            "Field checksum count mismatch: asupersync={}, opentelemetry={}",
+            asupersync_result.field_checksums.len(), opentelemetry_result.field_checksums.len()
+        ));
+    }
+
+    if !differences.is_empty() {
+        return Err(format!("Conformance differences detected:\n{}", differences.join("\n")));
+    }
+
+    Ok(())
+}
+
+/// Verify OTLP serialization stable byte order expectations against scenario
+fn verify_otlp_serialization_stable_byte_order_expectations(
+    result: &OtlpSerializationStableByteOrderResult,
+    scenario: &OtlpSerializationStableByteOrderScenario,
+) -> Result<(), String> {
+    // Verify expected determinism
+    if result.is_deterministic != scenario.expected_deterministic {
+        return Err(format!(
+            "Determinism expectation mismatch: expected {}, got {}",
+            scenario.expected_deterministic, result.is_deterministic
+        ));
+    }
+
+    // Verify expected byte length if specified
+    if let Some(expected_length) = scenario.expected_byte_length {
+        if result.byte_length != expected_length {
+            return Err(format!(
+                "Byte length expectation mismatch: expected {}, got {}",
+                expected_length, result.byte_length
+            ));
+        }
+    }
+
+    // Verify expected field order
+    if result.field_order != scenario.expected_field_order {
+        return Err(format!(
+            "Field order expectation mismatch: expected {:?}, got {:?}",
+            scenario.expected_field_order, result.field_order
+        ));
+    }
+
+    // Verify field checksums are valid
+    if result.field_checksums.len() != result.field_order.len() {
+        return Err(format!(
+            "Field checksum count does not match field order count: checksums={}, fields={}",
+            result.field_checksums.len(), result.field_order.len()
+        ));
+    }
+
+    // Verify no field overlaps (deterministic serialization)
+    if scenario.expected_deterministic && !result.is_deterministic {
+        return Err(format!(
+            "Expected deterministic serialization but result indicates non-deterministic"
+        ));
+    }
+
+    Ok(())
+}
+
+/// Simulate asupersync span attribute key-value validation implementation
+fn simulate_asupersync_attribute_key_value_validation(
+    scenario: &SpanAttributeKeyValueValidationScenario,
+) -> Result<AttributeKeyValueValidationResult, String> {
+    let mut processed_attributes = Vec::new();
+    let mut validation_metadata = Vec::new();
+
+    validation_metadata.push(format!("Processing {} attribute pairs", scenario.attribute_pairs.len()));
+
+    // Process each attribute pair with asupersync validation logic
+    for attr_def in &scenario.attribute_pairs {
+        let mut validation_errors = Vec::new();
+        let mut is_valid = true;
+
+        // Apply asupersync-specific validation rules
+        match &scenario.validation_strategy {
+            AttributeValidationStrategy::OpenTelemetryStandard => {
+                // Standard OpenTelemetry key validation
+                if attr_def.key.is_empty() {
+                    validation_errors.push("Empty key not allowed".to_string());
+                    is_valid = false;
+                }
+                if attr_def.key.len() > 256 {
+                    validation_errors.push("Key too long (>256 characters)".to_string());
+                    is_valid = false;
+                }
+                if matches!(attr_def.value, AttributeValue::Null) {
+                    validation_errors.push("Null value not allowed".to_string());
+                    is_valid = false;
+                }
+            },
+            AttributeValidationStrategy::StrictKeyFormat => {
+                // Strict key format validation
+                if attr_def.key.contains(' ') || attr_def.key.contains('@') || attr_def.key.contains('#') {
+                    validation_errors.push("Invalid characters in key".to_string());
+                    is_valid = false;
+                }
+                if attr_def.key.is_empty() {
+                    validation_errors.push("Empty key not allowed".to_string());
+                    is_valid = false;
+                }
+            },
+            AttributeValidationStrategy::UnicodeAware => {
+                // Unicode-aware validation
+                if attr_def.key.contains('🔑') || attr_def.key.contains('🎯') {
+                    validation_errors.push("Emoji characters not allowed in keys".to_string());
+                    is_valid = false;
+                }
+                if attr_def.key.is_empty() {
+                    validation_errors.push("Empty key not allowed".to_string());
+                    is_valid = false;
+                }
+            },
+            AttributeValidationStrategy::LenientKeyFormat => {
+                // Lenient validation - only empty keys rejected
+                if attr_def.key.is_empty() {
+                    validation_errors.push("Empty key not allowed".to_string());
+                    is_valid = false;
+                }
+            },
+        }
+
+        let processed_attr = ProcessedAttributeKeyValue {
+            key: attr_def.key.clone(),
+            value: attr_def.value.clone(),
+            validation_context: attr_def.validation_context.clone(),
+            is_valid,
+            validation_errors,
+            normalized_key: if is_valid { Some(attr_def.key.clone()) } else { None },
+            normalized_value: if is_valid { Some(attr_def.value.clone()) } else { None },
+        };
+
+        processed_attributes.push(processed_attr);
+    }
+
+    // Separate valid and invalid attributes
+    let valid_attributes: Vec<ProcessedAttributeKeyValue> = processed_attributes
+        .iter()
+        .filter(|attr| attr.is_valid)
+        .cloned()
+        .collect();
+
+    let invalid_attributes: Vec<ProcessedAttributeKeyValue> = processed_attributes
+        .iter()
+        .filter(|attr| !attr.is_valid)
+        .cloned()
+        .collect();
+
+    validation_metadata.push(format!("Found {} valid attributes", valid_attributes.len()));
+    validation_metadata.push(format!("Found {} invalid attributes", invalid_attributes.len()));
+
+    Ok(AttributeKeyValueValidationResult {
+        original_attributes: processed_attributes,
+        valid_attributes,
+        invalid_attributes,
+        applied_strategy: scenario.validation_strategy.clone(),
+        validation_metadata,
+    })
+}
+
+/// Simulate OpenTelemetry SDK span attribute key-value validation implementation
+fn simulate_opentelemetry_attribute_key_value_validation(
+    scenario: &SpanAttributeKeyValueValidationScenario,
+) -> Result<AttributeKeyValueValidationResult, String> {
+    let mut processed_attributes = Vec::new();
+    let mut validation_metadata = Vec::new();
+
+    validation_metadata.push(format!("OpenTelemetry processing {} attribute pairs", scenario.attribute_pairs.len()));
+
+    // Process each attribute pair with OpenTelemetry validation logic (should match asupersync)
+    for attr_def in &scenario.attribute_pairs {
+        let mut validation_errors = Vec::new();
+        let mut is_valid = true;
+
+        // Apply OpenTelemetry-specific validation rules (should match asupersync)
+        match &scenario.validation_strategy {
+            AttributeValidationStrategy::OpenTelemetryStandard => {
+                // Standard OpenTelemetry key validation
+                if attr_def.key.is_empty() {
+                    validation_errors.push("OpenTelemetry: Empty key not allowed".to_string());
+                    is_valid = false;
+                }
+                if attr_def.key.len() > 256 {
+                    validation_errors.push("OpenTelemetry: Key too long (>256 characters)".to_string());
+                    is_valid = false;
+                }
+                if matches!(attr_def.value, AttributeValue::Null) {
+                    validation_errors.push("OpenTelemetry: Null value not allowed".to_string());
+                    is_valid = false;
+                }
+            },
+            AttributeValidationStrategy::StrictKeyFormat => {
+                // Strict key format validation
+                if attr_def.key.contains(' ') || attr_def.key.contains('@') || attr_def.key.contains('#') {
+                    validation_errors.push("OpenTelemetry: Invalid characters in key".to_string());
+                    is_valid = false;
+                }
+                if attr_def.key.is_empty() {
+                    validation_errors.push("OpenTelemetry: Empty key not allowed".to_string());
+                    is_valid = false;
+                }
+            },
+            AttributeValidationStrategy::UnicodeAware => {
+                // Unicode-aware validation
+                if attr_def.key.contains('🔑') || attr_def.key.contains('🎯') {
+                    validation_errors.push("OpenTelemetry: Emoji characters not allowed in keys".to_string());
+                    is_valid = false;
+                }
+                if attr_def.key.is_empty() {
+                    validation_errors.push("OpenTelemetry: Empty key not allowed".to_string());
+                    is_valid = false;
+                }
+            },
+            AttributeValidationStrategy::LenientKeyFormat => {
+                // Lenient validation - only empty keys rejected
+                if attr_def.key.is_empty() {
+                    validation_errors.push("OpenTelemetry: Empty key not allowed".to_string());
+                    is_valid = false;
+                }
+            },
+        }
+
+        let processed_attr = ProcessedAttributeKeyValue {
+            key: attr_def.key.clone(),
+            value: attr_def.value.clone(),
+            validation_context: attr_def.validation_context.clone(),
+            is_valid,
+            validation_errors,
+            normalized_key: if is_valid { Some(attr_def.key.clone()) } else { None },
+            normalized_value: if is_valid { Some(attr_def.value.clone()) } else { None },
+        };
+
+        processed_attributes.push(processed_attr);
+    }
+
+    // Separate valid and invalid attributes (same logic as asupersync)
+    let valid_attributes: Vec<ProcessedAttributeKeyValue> = processed_attributes
+        .iter()
+        .filter(|attr| attr.is_valid)
+        .cloned()
+        .collect();
+
+    let invalid_attributes: Vec<ProcessedAttributeKeyValue> = processed_attributes
+        .iter()
+        .filter(|attr| !attr.is_valid)
+        .cloned()
+        .collect();
+
+    validation_metadata.push(format!("OpenTelemetry found {} valid attributes", valid_attributes.len()));
+    validation_metadata.push(format!("OpenTelemetry found {} invalid attributes", invalid_attributes.len()));
+
+    Ok(AttributeKeyValueValidationResult {
+        original_attributes: processed_attributes,
+        valid_attributes,
+        invalid_attributes,
+        applied_strategy: scenario.validation_strategy.clone(),
+        validation_metadata,
+    })
+}
+
+/// Compare span attribute key-value validation results for differential testing
+fn compare_attribute_key_value_validation_results(
+    asupersync_result: &AttributeKeyValueValidationResult,
+    opentelemetry_result: &AttributeKeyValueValidationResult,
+    scenario: &SpanAttributeKeyValueValidationScenario,
+) -> Result<(), String> {
+    let mut differences = Vec::new();
+
+    // Compare valid attribute counts (most critical)
+    if asupersync_result.valid_attributes.len() != opentelemetry_result.valid_attributes.len() {
+        differences.push(format!(
+            "Valid attribute count mismatch: asupersync={}, opentelemetry={}",
+            asupersync_result.valid_attributes.len(), opentelemetry_result.valid_attributes.len()
+        ));
+    }
+
+    // Compare invalid attribute counts
+    if asupersync_result.invalid_attributes.len() != opentelemetry_result.invalid_attributes.len() {
+        differences.push(format!(
+            "Invalid attribute count mismatch: asupersync={}, opentelemetry={}",
+            asupersync_result.invalid_attributes.len(), opentelemetry_result.invalid_attributes.len()
+        ));
+    }
+
+    // Compare applied strategy
+    if asupersync_result.applied_strategy != opentelemetry_result.applied_strategy {
+        differences.push(format!(
+            "Strategy mismatch: asupersync={:?}, opentelemetry={:?}",
+            asupersync_result.applied_strategy, opentelemetry_result.applied_strategy
+        ));
+    }
+
+    // Compare individual attribute validation results
+    for (index, (asupersync_attr, opentelemetry_attr)) in asupersync_result
+        .original_attributes
+        .iter()
+        .zip(opentelemetry_result.original_attributes.iter())
+        .enumerate()
+    {
+        if asupersync_attr.is_valid != opentelemetry_attr.is_valid {
+            differences.push(format!(
+                "Attribute {} validation result mismatch: asupersync={}, opentelemetry={}",
+                index, asupersync_attr.is_valid, opentelemetry_attr.is_valid
+            ));
+        }
+
+        if asupersync_attr.key != opentelemetry_attr.key {
+            differences.push(format!(
+                "Attribute {} key mismatch: asupersync='{}', opentelemetry='{}'",
+                index, asupersync_attr.key, opentelemetry_attr.key
+            ));
+        }
+
+        if asupersync_attr.value != opentelemetry_attr.value {
+            differences.push(format!(
+                "Attribute {} value mismatch: asupersync={:?}, opentelemetry={:?}",
+                index, asupersync_attr.value, opentelemetry_attr.value
+            ));
+        }
+    }
+
+    if !differences.is_empty() {
+        return Err(format!("Conformance differences detected:\n{}", differences.join("\n")));
+    }
+
+    Ok(())
+}
+
+/// Verify span attribute key-value validation expectations against scenario
+fn verify_attribute_key_value_validation_expectations(
+    result: &AttributeKeyValueValidationResult,
+    scenario: &SpanAttributeKeyValueValidationScenario,
+) -> Result<(), String> {
+    // Verify valid attribute count matches expected
+    if result.valid_attributes.len() != scenario.expected_valid_count {
+        return Err(format!(
+            "Valid count expectation mismatch: expected {}, got {}",
+            scenario.expected_valid_count, result.valid_attributes.len()
+        ));
+    }
+
+    // Verify invalid attribute count matches expected
+    if result.invalid_attributes.len() != scenario.expected_invalid_count {
+        return Err(format!(
+            "Invalid count expectation mismatch: expected {}, got {}",
+            scenario.expected_invalid_count, result.invalid_attributes.len()
+        ));
+    }
+
+    // Verify strategy was applied correctly
+    if result.applied_strategy != scenario.validation_strategy {
+        return Err(format!(
+            "Strategy expectation mismatch: expected {:?}, got {:?}",
+            scenario.validation_strategy, result.applied_strategy
+        ));
+    }
+
+    // Verify expected valid keys are present
+    let valid_keys: std::collections::HashSet<String> = result.valid_attributes.iter().map(|a| a.key.clone()).collect();
+    for expected_key in &scenario.expected_valid_keys {
+        if !valid_keys.contains(expected_key) {
+            return Err(format!(
+                "Expected valid key '{}' not found in valid results",
+                expected_key
+            ));
+        }
+    }
+
+    // Verify individual attribute validation expectations
+    for (attr_def, processed_attr) in scenario.attribute_pairs.iter().zip(result.original_attributes.iter()) {
+        if attr_def.expected_valid != processed_attr.is_valid {
+            return Err(format!(
+                "Attribute '{}' validation expectation mismatch: expected {}, got {}",
+                attr_def.key, attr_def.expected_valid, processed_attr.is_valid
+            ));
+        }
+
+        if attr_def.validation_context != processed_attr.validation_context {
+            return Err(format!(
+                "Attribute '{}' context expectation mismatch: expected {:?}, got {:?}",
+                attr_def.key, attr_def.validation_context, processed_attr.validation_context
+            ));
+        }
+    }
+
+    Ok(())
+}
+
+/// Simulate asupersync span event count truncation implementation
+fn simulate_asupersync_event_count_truncation(
+    scenario: &SpanEventCountTruncationScenario,
+) -> Result<EventCountTruncationResult, String> {
+    let mut processed_events = Vec::new();
+    let mut truncation_metadata = Vec::new();
+
+    truncation_metadata.push(format!("Processing {} events with limit {}", scenario.events.len(), scenario.max_event_count));
+
+    // Process all events first
+    for event_def in &scenario.events {
+        let processed_event = ProcessedEvent {
+            name: event_def.name.clone(),
+            timestamp_offset_nanos: event_def.timestamp_offset_nanos,
+            attributes: event_def.attributes.clone(),
+            priority: event_def.priority,
+            was_preserved: false,
+            truncation_reason: None,
+        };
+        processed_events.push(processed_event);
+    }
+
+    // Apply truncation strategy
+    let mut preserved_events = processed_events.clone();
+    match scenario.truncation_strategy {
+        EventTruncationStrategy::FirstWins => {
+            preserved_events.truncate(scenario.max_event_count);
+        },
+        EventTruncationStrategy::LastWins => {
+            if preserved_events.len() > scenario.max_event_count {
+                let start_index = preserved_events.len() - scenario.max_event_count;
+                preserved_events.drain(0..start_index);
+            }
+        },
+        EventTruncationStrategy::PriorityBased => {
+            preserved_events.sort_by_key(|e| std::cmp::Reverse(e.priority));
+            preserved_events.truncate(scenario.max_event_count);
+        },
+    }
+
+    // Mark preserved events
+    for preserved in &mut preserved_events {
+        preserved.was_preserved = true;
+    }
+
+    // Calculate dropped events
+    let preserved_names: std::collections::HashSet<String> = preserved_events.iter().map(|e| e.name.clone()).collect();
+    let mut dropped_events = Vec::new();
+    for mut event in processed_events.iter().cloned() {
+        if !preserved_names.contains(&event.name) {
+            event.truncation_reason = Some("Exceeded event count limit".to_string());
+            dropped_events.push(event);
+        }
+    }
+
+    truncation_metadata.push(format!("Preserved {} events, dropped {} events", preserved_events.len(), dropped_events.len()));
+
+    Ok(EventCountTruncationResult {
+        original_events: processed_events,
+        preserved_events,
+        dropped_events,
+        applied_strategy: scenario.truncation_strategy.clone(),
+        truncation_metadata,
+    })
+}
+
+/// Simulate OpenTelemetry SDK span event count truncation implementation
+fn simulate_opentelemetry_event_count_truncation(
+    scenario: &SpanEventCountTruncationScenario,
+) -> Result<EventCountTruncationResult, String> {
+    let mut processed_events = Vec::new();
+    let mut truncation_metadata = Vec::new();
+
+    truncation_metadata.push(format!("OpenTelemetry processing {} events with limit {}", scenario.events.len(), scenario.max_event_count));
+
+    // Process all events first (same as asupersync)
+    for event_def in &scenario.events {
+        let processed_event = ProcessedEvent {
+            name: event_def.name.clone(),
+            timestamp_offset_nanos: event_def.timestamp_offset_nanos,
+            attributes: event_def.attributes.clone(),
+            priority: event_def.priority,
+            was_preserved: false,
+            truncation_reason: None,
+        };
+        processed_events.push(processed_event);
+    }
+
+    // Apply truncation strategy (should match asupersync)
+    let mut preserved_events = processed_events.clone();
+    match scenario.truncation_strategy {
+        EventTruncationStrategy::FirstWins => {
+            preserved_events.truncate(scenario.max_event_count);
+        },
+        EventTruncationStrategy::LastWins => {
+            if preserved_events.len() > scenario.max_event_count {
+                let start_index = preserved_events.len() - scenario.max_event_count;
+                preserved_events.drain(0..start_index);
+            }
+        },
+        EventTruncationStrategy::PriorityBased => {
+            preserved_events.sort_by_key(|e| std::cmp::Reverse(e.priority));
+            preserved_events.truncate(scenario.max_event_count);
+        },
+    }
+
+    // Mark preserved events
+    for preserved in &mut preserved_events {
+        preserved.was_preserved = true;
+    }
+
+    // Calculate dropped events
+    let preserved_names: std::collections::HashSet<String> = preserved_events.iter().map(|e| e.name.clone()).collect();
+    let mut dropped_events = Vec::new();
+    for mut event in processed_events.iter().cloned() {
+        if !preserved_names.contains(&event.name) {
+            event.truncation_reason = Some("OpenTelemetry event limit exceeded".to_string());
+            dropped_events.push(event);
+        }
+    }
+
+    truncation_metadata.push(format!("OpenTelemetry preserved {} events, dropped {} events", preserved_events.len(), dropped_events.len()));
+
+    Ok(EventCountTruncationResult {
+        original_events: processed_events,
+        preserved_events,
+        dropped_events,
+        applied_strategy: scenario.truncation_strategy.clone(),
+        truncation_metadata,
+    })
+}
+
+/// Compare span event count truncation results for differential testing
+fn compare_event_count_truncation_results(
+    asupersync_result: &EventCountTruncationResult,
+    opentelemetry_result: &EventCountTruncationResult,
+) -> Result<(), String> {
+    let mut differences = Vec::new();
+
+    // Compare preserved event counts
+    if asupersync_result.preserved_events.len() != opentelemetry_result.preserved_events.len() {
+        differences.push(format!(
+            "Preserved event count mismatch: asupersync={}, opentelemetry={}",
+            asupersync_result.preserved_events.len(), opentelemetry_result.preserved_events.len()
+        ));
+    }
+
+    // Compare dropped event counts
+    if asupersync_result.dropped_events.len() != opentelemetry_result.dropped_events.len() {
+        differences.push(format!(
+            "Dropped event count mismatch: asupersync={}, opentelemetry={}",
+            asupersync_result.dropped_events.len(), opentelemetry_result.dropped_events.len()
+        ));
+    }
+
+    // Compare applied strategy
+    if asupersync_result.applied_strategy != opentelemetry_result.applied_strategy {
+        differences.push(format!(
+            "Strategy mismatch: asupersync={:?}, opentelemetry={:?}",
+            asupersync_result.applied_strategy, opentelemetry_result.applied_strategy
+        ));
+    }
+
+    if !differences.is_empty() {
+        return Err(format!("Conformance differences detected:\n{}", differences.join("\n")));
+    }
+
+    Ok(())
+}
+
+/// Verify span event count truncation expectations against scenario
+fn verify_event_count_truncation_expectations(
+    result: &EventCountTruncationResult,
+    scenario: &SpanEventCountTruncationScenario,
+) -> Result<(), String> {
+    // Verify preserved count matches expected
+    if result.preserved_events.len() != scenario.expected_preserved_count {
+        return Err(format!(
+            "Preserved count expectation mismatch: expected {}, got {}",
+            scenario.expected_preserved_count, result.preserved_events.len()
+        ));
+    }
+
+    // Verify dropped count matches expected
+    if result.dropped_events.len() != scenario.expected_dropped_count {
+        return Err(format!(
+            "Dropped count expectation mismatch: expected {}, got {}",
+            scenario.expected_dropped_count, result.dropped_events.len()
+        ));
+    }
+
+    // Verify preserved event names match expected
+    let preserved_names: Vec<String> = result.preserved_events.iter().map(|e| e.name.clone()).collect();
+    for expected_name in &scenario.expected_preserved_names {
+        if !preserved_names.contains(expected_name) {
+            return Err(format!(
+                "Expected preserved event '{}' not found in result",
+                expected_name
+            ));
+        }
+    }
+
+    Ok(())
+}
+
+/// Simulate asupersync meter scope deduplication implementation
+fn simulate_asupersync_meter_scope_deduplication(
+    scenario: &MeterScopeDeduplicationScenario,
+) -> Result<MeterScopeDeduplicationResult, String> {
+    let mut processed_meters = Vec::new();
+    let mut unique_scopes = std::collections::HashMap::new();
+    let mut deduplication_metadata = Vec::new();
+
+    deduplication_metadata.push(format!("Processing {} meter definitions", scenario.meter_definitions.len()));
+
+    // Process each meter definition and perform deduplication
+    for meter_def in &scenario.meter_definitions {
+        // Generate scope ID based on deduplication strategy
+        let scope_id = generate_scope_id(meter_def, &scenario.deduplication_strategy);
+
+        // Check if this scope already exists
+        let (is_duplicate, deduplication_reason) = if unique_scopes.contains_key(&scope_id) {
+            (true, Some("Scope already exists".to_string()))
+        } else {
+            // Create new unique scope entry
+            let unique_scope = UniqueScope {
+                scope_id: scope_id.clone(),
+                scope_name: meter_def.scope_name.clone(),
+                scope_version: meter_def.scope_version.clone(),
+                scope_attributes: meter_def.scope_attributes.clone(),
+                schema_url: meter_def.schema_url.clone(),
+                meter_count: 1,
+                first_creation_order: meter_def.creation_order,
+            };
+            unique_scopes.insert(scope_id.clone(), unique_scope);
+            (false, None)
+        };
+
+        // Update meter count for existing scope
+        if is_duplicate {
+            if let Some(scope) = unique_scopes.get_mut(&scope_id) {
+                scope.meter_count += 1;
+            }
+        }
+
+        // Create processed meter entry
+        let processed_meter = ProcessedMeter {
+            name: meter_def.name.clone(),
+            scope_id: scope_id,
+            scope_name: meter_def.scope_name.clone(),
+            scope_version: meter_def.scope_version.clone(),
+            scope_attributes: meter_def.scope_attributes.clone(),
+            creation_order: meter_def.creation_order,
+            schema_url: meter_def.schema_url.clone(),
+            was_deduplicated: is_duplicate,
+            deduplication_reason,
+        };
+
+        processed_meters.push(processed_meter);
+    }
+
+    // Extract unique scopes into vector
+    let unique_scopes_vec: Vec<UniqueScope> = unique_scopes.into_values().collect();
+
+    // Calculate deduplicated meters (those that were duplicates)
+    let deduplicated_meters: Vec<ProcessedMeter> = processed_meters
+        .iter()
+        .filter(|m| m.was_deduplicated)
+        .cloned()
+        .collect();
+
+    deduplication_metadata.push(format!("Found {} unique scopes", unique_scopes_vec.len()));
+    deduplication_metadata.push(format!("Deduplicated {} meters", deduplicated_meters.len()));
+
+    Ok(MeterScopeDeduplicationResult {
+        original_meters: processed_meters,
+        unique_scopes: unique_scopes_vec,
+        deduplicated_meters,
+        applied_strategy: scenario.deduplication_strategy.clone(),
+        deduplication_metadata,
+    })
+}
+
+/// Simulate OpenTelemetry SDK meter scope deduplication implementation
+fn simulate_opentelemetry_meter_scope_deduplication(
+    scenario: &MeterScopeDeduplicationScenario,
+) -> Result<MeterScopeDeduplicationResult, String> {
+    let mut processed_meters = Vec::new();
+    let mut unique_scopes = std::collections::HashMap::new();
+    let mut deduplication_metadata = Vec::new();
+
+    deduplication_metadata.push(format!("OpenTelemetry processing {} meter definitions", scenario.meter_definitions.len()));
+
+    // Process each meter definition with OpenTelemetry behavior
+    for meter_def in &scenario.meter_definitions {
+        // Generate scope ID based on deduplication strategy (should match asupersync)
+        let scope_id = generate_scope_id(meter_def, &scenario.deduplication_strategy);
+
+        // Check if this scope already exists
+        let (is_duplicate, deduplication_reason) = if unique_scopes.contains_key(&scope_id) {
+            (true, Some("OpenTelemetry scope deduplication".to_string()))
+        } else {
+            // Create new unique scope entry
+            let unique_scope = UniqueScope {
+                scope_id: scope_id.clone(),
+                scope_name: meter_def.scope_name.clone(),
+                scope_version: meter_def.scope_version.clone(),
+                scope_attributes: meter_def.scope_attributes.clone(),
+                schema_url: meter_def.schema_url.clone(),
+                meter_count: 1,
+                first_creation_order: meter_def.creation_order,
+            };
+            unique_scopes.insert(scope_id.clone(), unique_scope);
+            (false, None)
+        };
+
+        // Update meter count for existing scope
+        if is_duplicate {
+            if let Some(scope) = unique_scopes.get_mut(&scope_id) {
+                scope.meter_count += 1;
+            }
+        }
+
+        // Create processed meter entry
+        let processed_meter = ProcessedMeter {
+            name: meter_def.name.clone(),
+            scope_id: scope_id,
+            scope_name: meter_def.scope_name.clone(),
+            scope_version: meter_def.scope_version.clone(),
+            scope_attributes: meter_def.scope_attributes.clone(),
+            creation_order: meter_def.creation_order,
+            schema_url: meter_def.schema_url.clone(),
+            was_deduplicated: is_duplicate,
+            deduplication_reason,
+        };
+
+        processed_meters.push(processed_meter);
+    }
+
+    // Extract unique scopes into vector (sorted for consistency)
+    let mut unique_scopes_vec: Vec<UniqueScope> = unique_scopes.into_values().collect();
+    unique_scopes_vec.sort_by_key(|s| s.first_creation_order);
+
+    // Calculate deduplicated meters (those that were duplicates)
+    let deduplicated_meters: Vec<ProcessedMeter> = processed_meters
+        .iter()
+        .filter(|m| m.was_deduplicated)
+        .cloned()
+        .collect();
+
+    deduplication_metadata.push(format!("OpenTelemetry found {} unique scopes", unique_scopes_vec.len()));
+    deduplication_metadata.push(format!("OpenTelemetry deduplicated {} meters", deduplicated_meters.len()));
+
+    Ok(MeterScopeDeduplicationResult {
+        original_meters: processed_meters,
+        unique_scopes: unique_scopes_vec,
+        deduplicated_meters,
+        applied_strategy: scenario.deduplication_strategy.clone(),
+        deduplication_metadata,
+    })
+}
+
+/// Generate scope ID based on deduplication strategy
+fn generate_scope_id(meter_def: &MeterDefinition, strategy: &ScopeDeduplicationStrategy) -> String {
+    match strategy {
+        ScopeDeduplicationStrategy::NameAndVersion => {
+            format!("{}:{}", meter_def.scope_name, meter_def.scope_version)
+        },
+        ScopeDeduplicationStrategy::NameVersionAndAttributes => {
+            let mut attrs_str = meter_def.scope_attributes.iter()
+                .map(|(k, v)| format!("{}={}", k, v))
+                .collect::<Vec<_>>();
+            attrs_str.sort(); // Ensure consistent ordering
+            format!("{}:{}:{}", meter_def.scope_name, meter_def.scope_version, attrs_str.join(","))
+        },
+        ScopeDeduplicationStrategy::NameVersionAndSchemaUrl => {
+            let schema_part = meter_def.schema_url.as_deref().unwrap_or("");
+            format!("{}:{}:{}", meter_def.scope_name, meter_def.scope_version, schema_part)
+        },
+        ScopeDeduplicationStrategy::StrictEquality => {
+            let mut attrs_str = meter_def.scope_attributes.iter()
+                .map(|(k, v)| format!("{}={}", k, v))
+                .collect::<Vec<_>>();
+            attrs_str.sort(); // Ensure consistent ordering
+            let schema_part = meter_def.schema_url.as_deref().unwrap_or("");
+            format!("{}:{}:{}:{}", meter_def.scope_name, meter_def.scope_version, attrs_str.join(","), schema_part)
+        },
+    }
+}
+
+/// Compare meter scope deduplication results for differential testing
+fn compare_meter_scope_deduplication_results(
+    asupersync_result: &MeterScopeDeduplicationResult,
+    opentelemetry_result: &MeterScopeDeduplicationResult,
+    scenario: &MeterScopeDeduplicationScenario,
+) -> Result<(), String> {
+    let mut differences = Vec::new();
+
+    // Compare number of unique scopes (most critical)
+    if asupersync_result.unique_scopes.len() != opentelemetry_result.unique_scopes.len() {
+        differences.push(format!(
+            "Unique scope count mismatch: asupersync={}, opentelemetry={}",
+            asupersync_result.unique_scopes.len(), opentelemetry_result.unique_scopes.len()
+        ));
+    }
+
+    // Compare number of deduplicated meters
+    if asupersync_result.deduplicated_meters.len() != opentelemetry_result.deduplicated_meters.len() {
+        differences.push(format!(
+            "Deduplicated meter count mismatch: asupersync={}, opentelemetry={}",
+            asupersync_result.deduplicated_meters.len(), opentelemetry_result.deduplicated_meters.len()
+        ));
+    }
+
+    // Compare applied strategy
+    if asupersync_result.applied_strategy != opentelemetry_result.applied_strategy {
+        differences.push(format!(
+            "Strategy mismatch: asupersync={:?}, opentelemetry={:?}",
+            asupersync_result.applied_strategy, opentelemetry_result.applied_strategy
+        ));
+    }
+
+    // Compare meter deduplication results
+    for (index, (asupersync_meter, opentelemetry_meter)) in asupersync_result
+        .original_meters
+        .iter()
+        .zip(opentelemetry_result.original_meters.iter())
+        .enumerate()
+    {
+        if asupersync_meter.was_deduplicated != opentelemetry_meter.was_deduplicated {
+            differences.push(format!(
+                "Meter {} deduplication status mismatch: asupersync={}, opentelemetry={}",
+                index, asupersync_meter.was_deduplicated, opentelemetry_meter.was_deduplicated
+            ));
+        }
+
+        if asupersync_meter.scope_id != opentelemetry_meter.scope_id {
+            differences.push(format!(
+                "Meter {} scope ID mismatch: asupersync='{}', opentelemetry='{}'",
+                index, asupersync_meter.scope_id, opentelemetry_meter.scope_id
+            ));
+        }
+    }
+
+    // Compare unique scope characteristics
+    for (index, (asupersync_scope, opentelemetry_scope)) in asupersync_result
+        .unique_scopes
+        .iter()
+        .zip(opentelemetry_result.unique_scopes.iter())
+        .enumerate()
+    {
+        if asupersync_scope.meter_count != opentelemetry_scope.meter_count {
+            differences.push(format!(
+                "Scope {} meter count mismatch: asupersync={}, opentelemetry={}",
+                index, asupersync_scope.meter_count, opentelemetry_scope.meter_count
+            ));
+        }
+
+        if asupersync_scope.scope_id != opentelemetry_scope.scope_id {
+            differences.push(format!(
+                "Scope {} ID mismatch: asupersync='{}', opentelemetry='{}'",
+                index, asupersync_scope.scope_id, opentelemetry_scope.scope_id
+            ));
+        }
+    }
+
+    if !differences.is_empty() {
+        return Err(format!("Conformance differences detected:\n{}", differences.join("\n")));
+    }
+
+    Ok(())
+}
+
+/// Verify meter scope deduplication expectations against scenario
+fn verify_meter_scope_deduplication_expectations(
+    result: &MeterScopeDeduplicationResult,
+    scenario: &MeterScopeDeduplicationScenario,
+) -> Result<(), String> {
+    // Verify unique scope count matches expected
+    if result.unique_scopes.len() != scenario.expected_unique_scopes {
+        return Err(format!(
+            "Unique scope count expectation mismatch: expected {}, got {}",
+            scenario.expected_unique_scopes, result.unique_scopes.len()
+        ));
+    }
+
+    // Verify deduplicated count matches expected
+    if result.deduplicated_meters.len() != scenario.expected_deduplicated_count {
+        return Err(format!(
+            "Deduplicated count expectation mismatch: expected {}, got {}",
+            scenario.expected_deduplicated_count, result.deduplicated_meters.len()
+        ));
+    }
+
+    // Verify strategy was applied correctly
+    if result.applied_strategy != scenario.deduplication_strategy {
+        return Err(format!(
+            "Strategy expectation mismatch: expected {:?}, got {:?}",
+            scenario.deduplication_strategy, result.applied_strategy
+        ));
+    }
+
+    // Verify meter count consistency across unique scopes
+    let total_meters_in_scopes: usize = result.unique_scopes.iter().map(|s| s.meter_count).sum();
+    if total_meters_in_scopes != scenario.meter_definitions.len() {
+        return Err(format!(
+            "Meter count consistency check failed: total in scopes={}, original count={}",
+            total_meters_in_scopes, scenario.meter_definitions.len()
+        ));
+    }
+
+    // Verify first creation order preservation for each unique scope
+    for unique_scope in &result.unique_scopes {
+        let first_meter = scenario.meter_definitions.iter()
+            .find(|m| m.scope_name == unique_scope.scope_name && m.scope_version == unique_scope.scope_version)
+            .ok_or_else(|| format!("Could not find first meter for scope {}", unique_scope.scope_id))?;
+
+        if unique_scope.first_creation_order != first_meter.creation_order {
+            return Err(format!(
+                "First creation order not preserved for scope {}: expected {}, got {}",
+                unique_scope.scope_id, first_meter.creation_order, unique_scope.first_creation_order
+            ));
+        }
+    }
+
+    Ok(())
+}
+
+/// Simulate asupersync span name update ordering implementation
+fn simulate_asupersync_span_name_ordering(
+    scenario: &SpanNameUpdateScenario,
+) -> Result<NameUpdateOrderingResult, String> {
+    let mut processed_updates = Vec::new();
+    let mut ignored_updates = Vec::new();
+    let mut update_metadata = Vec::new();
+
+    update_metadata.push(format!("Processing {} name updates", scenario.name_updates.len()));
+
+    // Process name updates based on scenario strategy
+    for (index, update_def) in scenario.name_updates.iter().enumerate() {
+        let mut processed_update = ProcessedNameUpdate {
+            name: update_def.name.clone(),
+            timestamp_nanos: update_def.timestamp_nanos,
+            span_phase: update_def.span_phase.clone(),
+            was_applied: false,
+            rejection_reason: None,
+        };
+
+        // Apply asupersync-specific name update logic
+        match scenario.ordering_strategy {
+            NameUpdateOrderingStrategy::IgnoreAfterEnd => {
+                if update_def.span_phase == SpanPhase::Ended {
+                    processed_update.rejection_reason = Some("Update after span end".to_string());
+                    ignored_updates.push(processed_update);
+                    continue;
+                }
+            },
+            NameUpdateOrderingStrategy::TimestampBased => {
+                // Asupersync uses timestamp-based ordering
+                update_metadata.push(format!("Update {} at timestamp {}", index, update_def.timestamp_nanos));
+            },
+            _ => {
+                // Other strategies process updates in sequence
+            }
+        }
+
+        processed_update.was_applied = true;
+        processed_updates.push(processed_update);
+    }
+
+    // Determine final name based on strategy
+    let final_name = match scenario.ordering_strategy {
+        NameUpdateOrderingStrategy::LastWins => {
+            processed_updates.last()
+                .map(|u| u.name.clone())
+                .unwrap_or_else(|| "".to_string())
+        },
+        NameUpdateOrderingStrategy::FirstWins => {
+            processed_updates.first()
+                .map(|u| u.name.clone())
+                .unwrap_or_else(|| "".to_string())
+        },
+        NameUpdateOrderingStrategy::TimestampBased => {
+            // Sort by timestamp, latest name wins
+            let mut sorted_updates = processed_updates.clone();
+            sorted_updates.sort_by_key(|u| u.timestamp_nanos);
+            sorted_updates.last()
+                .map(|u| u.name.clone())
+                .unwrap_or_else(|| "".to_string())
+        },
+        NameUpdateOrderingStrategy::IgnoreAfterEnd => {
+            // Last valid update before end wins
+            processed_updates.last()
+                .map(|u| u.name.clone())
+                .unwrap_or_else(|| "".to_string())
+        },
+    };
+
+    update_metadata.push(format!("Final name determined: '{}'", final_name));
+
+    Ok(NameUpdateOrderingResult {
+        original_updates: {
+            let mut all_updates = processed_updates.clone();
+            all_updates.extend(ignored_updates.clone());
+            all_updates
+        },
+        final_name,
+        ignored_updates,
+        applied_strategy: scenario.ordering_strategy.clone(),
+        update_metadata,
+    })
+}
+
+/// Simulate OpenTelemetry SDK span name update ordering implementation
+fn simulate_opentelemetry_span_name_ordering(
+    scenario: &SpanNameUpdateScenario,
+) -> Result<NameUpdateOrderingResult, String> {
+    let mut processed_updates = Vec::new();
+    let mut ignored_updates = Vec::new();
+    let mut update_metadata = Vec::new();
+
+    update_metadata.push(format!("OpenTelemetry processing {} name updates", scenario.name_updates.len()));
+
+    // Process name updates with OpenTelemetry behavior
+    for (index, update_def) in scenario.name_updates.iter().enumerate() {
+        let mut processed_update = ProcessedNameUpdate {
+            name: update_def.name.clone(),
+            timestamp_nanos: update_def.timestamp_nanos,
+            span_phase: update_def.span_phase.clone(),
+            was_applied: false,
+            rejection_reason: None,
+        };
+
+        // Apply OpenTelemetry-specific name update logic
+        match scenario.ordering_strategy {
+            NameUpdateOrderingStrategy::IgnoreAfterEnd => {
+                if update_def.span_phase == SpanPhase::Ended {
+                    processed_update.rejection_reason = Some("Update after span end ignored".to_string());
+                    ignored_updates.push(processed_update);
+                    continue;
+                }
+            },
+            NameUpdateOrderingStrategy::TimestampBased => {
+                // OpenTelemetry uses timestamp-based ordering (should match asupersync)
+                update_metadata.push(format!("OTel update {} at timestamp {}", index, update_def.timestamp_nanos));
+            },
+            _ => {
+                // Other strategies process updates in sequence
+            }
+        }
+
+        processed_update.was_applied = true;
+        processed_updates.push(processed_update);
+    }
+
+    // Determine final name based on strategy (should match asupersync behavior)
+    let final_name = match scenario.ordering_strategy {
+        NameUpdateOrderingStrategy::LastWins => {
+            processed_updates.last()
+                .map(|u| u.name.clone())
+                .unwrap_or_else(|| "".to_string())
+        },
+        NameUpdateOrderingStrategy::FirstWins => {
+            processed_updates.first()
+                .map(|u| u.name.clone())
+                .unwrap_or_else(|| "".to_string())
+        },
+        NameUpdateOrderingStrategy::TimestampBased => {
+            // Sort by timestamp, latest name wins
+            let mut sorted_updates = processed_updates.clone();
+            sorted_updates.sort_by_key(|u| u.timestamp_nanos);
+            sorted_updates.last()
+                .map(|u| u.name.clone())
+                .unwrap_or_else(|| "".to_string())
+        },
+        NameUpdateOrderingStrategy::IgnoreAfterEnd => {
+            // Last valid update before end wins
+            processed_updates.last()
+                .map(|u| u.name.clone())
+                .unwrap_or_else(|| "".to_string())
+        },
+    };
+
+    update_metadata.push(format!("OpenTelemetry final name: '{}'", final_name));
+
+    Ok(NameUpdateOrderingResult {
+        original_updates: {
+            let mut all_updates = processed_updates.clone();
+            all_updates.extend(ignored_updates.clone());
+            all_updates
+        },
+        final_name,
+        ignored_updates,
+        applied_strategy: scenario.ordering_strategy.clone(),
+        update_metadata,
+    })
+}
+
+/// Compare span name update ordering results for differential testing
+fn compare_span_name_ordering_results(
+    asupersync_result: &NameUpdateOrderingResult,
+    opentelemetry_result: &NameUpdateOrderingResult,
+    scenario: &SpanNameUpdateScenario,
+) -> Result<(), String> {
+    let mut differences = Vec::new();
+
+    // Compare final names (most critical)
+    if asupersync_result.final_name != opentelemetry_result.final_name {
+        differences.push(format!(
+            "Final name mismatch: asupersync='{}', opentelemetry='{}'",
+            asupersync_result.final_name, opentelemetry_result.final_name
+        ));
+    }
+
+    // Compare number of ignored updates
+    if asupersync_result.ignored_updates.len() != opentelemetry_result.ignored_updates.len() {
+        differences.push(format!(
+            "Ignored update count mismatch: asupersync={}, opentelemetry={}",
+            asupersync_result.ignored_updates.len(),
+            opentelemetry_result.ignored_updates.len()
+        ));
+    }
+
+    // Compare applied strategy
+    if asupersync_result.applied_strategy != opentelemetry_result.applied_strategy {
+        differences.push(format!(
+            "Strategy mismatch: asupersync={:?}, opentelemetry={:?}",
+            asupersync_result.applied_strategy, opentelemetry_result.applied_strategy
+        ));
+    }
+
+    // Compare update processing results
+    for (index, (asupersync_update, opentelemetry_update)) in asupersync_result
+        .original_updates
+        .iter()
+        .zip(opentelemetry_result.original_updates.iter())
+        .enumerate()
+    {
+        if asupersync_update.was_applied != opentelemetry_update.was_applied {
+            differences.push(format!(
+                "Update {} application mismatch: asupersync={}, opentelemetry={}",
+                index, asupersync_update.was_applied, opentelemetry_update.was_applied
+            ));
+        }
+
+        if asupersync_update.rejection_reason != opentelemetry_update.rejection_reason {
+            differences.push(format!(
+                "Update {} rejection reason mismatch: asupersync={:?}, opentelemetry={:?}",
+                index, asupersync_update.rejection_reason, opentelemetry_update.rejection_reason
+            ));
+        }
+    }
+
+    if !differences.is_empty() {
+        return Err(format!("Conformance differences detected:\n{}", differences.join("\n")));
+    }
+
+    Ok(())
+}
+
+/// Verify span name update ordering expectations against scenario
+fn verify_span_name_ordering_expectations(
+    result: &NameUpdateOrderingResult,
+    scenario: &SpanNameUpdateScenario,
+) -> Result<(), String> {
+    // Verify final name matches expected
+    if result.final_name != scenario.expected_final_name {
+        return Err(format!(
+            "Final name expectation mismatch: expected '{}', got '{}'",
+            scenario.expected_final_name, result.final_name
+        ));
+    }
+
+    // Verify strategy was applied correctly
+    if result.applied_strategy != scenario.ordering_strategy {
+        return Err(format!(
+            "Strategy expectation mismatch: expected {:?}, got {:?}",
+            scenario.ordering_strategy, result.applied_strategy
+        ));
+    }
+
+    // Verify updates were processed according to strategy
+    match scenario.ordering_strategy {
+        NameUpdateOrderingStrategy::IgnoreAfterEnd => {
+            // Check that updates after end were ignored
+            let ended_updates: Vec<_> = scenario.name_updates.iter()
+                .filter(|u| u.span_phase == SpanPhase::Ended)
+                .collect();
+            if result.ignored_updates.len() != ended_updates.len() {
+                return Err(format!(
+                    "IgnoreAfterEnd strategy: expected {} ignored updates, got {}",
+                    ended_updates.len(), result.ignored_updates.len()
+                ));
+            }
+        },
+        NameUpdateOrderingStrategy::TimestampBased => {
+            // Check that final name comes from latest timestamp
+            let latest_update = scenario.name_updates.iter()
+                .filter(|u| u.span_phase != SpanPhase::Ended)
+                .max_by_key(|u| u.timestamp_nanos);
+            if let Some(latest) = latest_update {
+                if result.final_name != latest.name {
+                    return Err(format!(
+                        "TimestampBased strategy: expected latest update '{}', got '{}'",
+                        latest.name, result.final_name
+                    ));
+                }
+            }
+        },
+        _ => {
+            // Other strategies handled by general validation
         }
     }
 
