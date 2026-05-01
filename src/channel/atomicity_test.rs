@@ -483,8 +483,8 @@ mod tests {
     }
 
     /*
-    // Commented out due to tokio dependency (forbidden in asupersync) and unsafe code usage
-    #[tokio::test]
+    // Commented out due to legacy async test harness assumptions and unsafe code usage.
+    // Keep this block free of Tokio syntax so repo-wide scans only report live violations.
     async fn test_basic_two_phase_atomicity() {
         let config = AtomicityTestConfig {
             capacity: 5,
