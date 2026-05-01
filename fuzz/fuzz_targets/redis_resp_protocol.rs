@@ -25,8 +25,9 @@ use libfuzzer_sys::fuzz_target;
 // Import the Redis module to test
 use asupersync::messaging::redis::{
     PubSubEvent, PubSubMessage, PubSubSubscriptionKind, RedisProtocolLimits, RespValue,
-    decode_resp_value_for_fuzz, parse_client_kill_for_fuzz, parse_pubsub_event_for_fuzz,
-    parse_script_eval_for_fuzz, parse_zadd_for_fuzz,
+    decode_resp_value_for_fuzz, parse_client_kill_for_fuzz, parse_latency_for_fuzz,
+    parse_pubsub_event_for_fuzz, parse_script_eval_for_fuzz, parse_slowlog_for_fuzz,
+    parse_zadd_for_fuzz,
 };
 
 const MAX_STRUCTURED_FIELD_BYTES: usize = 96;
@@ -634,6 +635,82 @@ fn exercise_client_kill_parser(data: &[u8]) {
     );
 }
 
+fn exercise_slowlog_latency_parsers(data: &[u8]) {
+    let payload = &data[..data.len().min(MAX_STRUCTURED_FIELD_BYTES)];
+    let count = payload.len().to_string();
+    let slowlog_get = RespValue::Array(Some(vec![
+        bulk_arg(b"SLOWLOG"),
+        bulk_arg(b"GET"),
+        bulk_arg(count.as_bytes()),
+    ]));
+    let _ = parse_slowlog_for_fuzz(slowlog_get).expect("SLOWLOG GET count should parse");
+
+    let slowlog_len = RespValue::Array(Some(vec![bulk_arg(b"SLOWLOG"), bulk_arg(b"LEN")]));
+    let _ = parse_slowlog_for_fuzz(slowlog_len).expect("SLOWLOG LEN should parse");
+
+    let slowlog_arbitrary_count = RespValue::Array(Some(vec![
+        bulk_arg(b"SLOWLOG"),
+        bulk_arg(b"GET"),
+        bulk_arg(payload),
+    ]));
+    let _ = parse_slowlog_for_fuzz(slowlog_arbitrary_count);
+
+    let slowlog_extra_len = RespValue::Array(Some(vec![
+        bulk_arg(b"SLOWLOG"),
+        bulk_arg(b"LEN"),
+        bulk_arg(b"extra"),
+    ]));
+    assert!(
+        parse_slowlog_for_fuzz(slowlog_extra_len).is_err(),
+        "SLOWLOG LEN must fail closed on extra arguments"
+    );
+
+    let latency_event = if payload.is_empty() {
+        b"command".as_slice()
+    } else {
+        payload
+    };
+    let latency_history = RespValue::Array(Some(vec![
+        bulk_arg(b"LATENCY"),
+        bulk_arg(b"HISTORY"),
+        bulk_arg(latency_event),
+    ]));
+    let _ = parse_latency_for_fuzz(latency_history).expect("LATENCY HISTORY should parse");
+
+    let latency_reset = RespValue::Array(Some(vec![
+        bulk_arg(b"LATENCY"),
+        bulk_arg(b"RESET"),
+        bulk_arg(b"command"),
+        bulk_arg(latency_event),
+    ]));
+    let _ = parse_latency_for_fuzz(latency_reset).expect("LATENCY RESET should parse");
+
+    let latency_histogram = RespValue::Array(Some(vec![
+        bulk_arg(b"LATENCY"),
+        bulk_arg(b"HISTOGRAM"),
+        bulk_arg(b"GET"),
+        bulk_arg(payload),
+    ]));
+    let _ = parse_latency_for_fuzz(latency_histogram);
+
+    let latency_missing_history_event =
+        RespValue::Array(Some(vec![bulk_arg(b"LATENCY"), bulk_arg(b"HISTORY")]));
+    assert!(
+        parse_latency_for_fuzz(latency_missing_history_event).is_err(),
+        "LATENCY HISTORY requires an event"
+    );
+
+    let latency_extra_latest = RespValue::Array(Some(vec![
+        bulk_arg(b"LATENCY"),
+        bulk_arg(b"LATEST"),
+        bulk_arg(b"extra"),
+    ]));
+    assert!(
+        parse_latency_for_fuzz(latency_extra_latest).is_err(),
+        "LATENCY LATEST must fail closed on extra arguments"
+    );
+}
+
 fn exercise_zadd_option_parser(data: &[u8]) {
     let payload = &data[..data.len().min(MAX_STRUCTURED_FIELD_BYTES)];
     let finite_score = format!("{}.{}", payload.len(), data.first().copied().unwrap_or(0));
@@ -885,7 +962,10 @@ fuzz_target!(|data: &[u8]| {
     // Test 13: Redis CLIENT KILL filter parser seam
     exercise_client_kill_parser(data);
 
-    // Test 14: Fragmented parsing simulation (partial buffer scenarios)
+    // Test 14: Redis SLOWLOG/LATENCY observability parser seams
+    exercise_slowlog_latency_parsers(data);
+
+    // Test 15: Fragmented parsing simulation (partial buffer scenarios)
     if data.len() > 10 {
         for split_point in [1, data.len() / 4, data.len() / 2, data.len() - 1]
             .iter()

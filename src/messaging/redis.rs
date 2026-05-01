@@ -3977,6 +3977,265 @@ pub fn parse_client_kill_for_fuzz(value: RespValue) -> Result<RedisClientKillCom
 }
 
 #[cfg(any(test, feature = "test-internals"))]
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[doc(hidden)]
+pub enum RedisSlowlogCommand {
+    Get { count: Option<u64> },
+    Len,
+    Reset,
+    Help,
+}
+
+#[cfg(any(test, feature = "test-internals"))]
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[doc(hidden)]
+pub enum RedisLatencySubcommand {
+    Doctor,
+    Latest,
+    History { event: Vec<u8> },
+    Graph { event: Vec<u8> },
+    Reset { events: Vec<Vec<u8>> },
+    Histogram { commands: Vec<Vec<u8>> },
+    Help,
+}
+
+#[cfg(any(test, feature = "test-internals"))]
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[doc(hidden)]
+pub struct RedisLatencyCommand {
+    pub subcommand: RedisLatencySubcommand,
+}
+
+#[cfg(any(test, feature = "test-internals"))]
+fn decode_observability_arg(
+    value: RespValue,
+    command: &str,
+    label: &str,
+) -> Result<Vec<u8>, RedisError> {
+    decode_bulk_command_arg(value, command, label)
+}
+
+#[cfg(any(test, feature = "test-internals"))]
+fn reject_observability_extra_args(
+    command: &str,
+    subcommand: &str,
+    remaining: &[RespValue],
+) -> Result<(), RedisError> {
+    if remaining.is_empty() {
+        Ok(())
+    } else {
+        Err(RedisError::Protocol(format!(
+            "{command} {subcommand} takes no arguments, got {}",
+            remaining.len()
+        )))
+    }
+}
+
+#[cfg(any(test, feature = "test-internals"))]
+fn require_non_empty_observability_arg(
+    command: &str,
+    label: &str,
+    bytes: Vec<u8>,
+) -> Result<Vec<u8>, RedisError> {
+    if bytes.is_empty() {
+        Err(RedisError::Protocol(format!(
+            "{command} {label} must not be empty"
+        )))
+    } else {
+        Ok(bytes)
+    }
+}
+
+#[cfg(any(test, feature = "test-internals"))]
+#[allow(dead_code)]
+#[doc(hidden)]
+pub fn parse_slowlog_for_fuzz(value: RespValue) -> Result<RedisSlowlogCommand, RedisError> {
+    let args = match value {
+        RespValue::Array(Some(args)) => args,
+        other => {
+            return Err(RedisError::Protocol(format!(
+                "SLOWLOG command must be a RESP array, got {other:?}"
+            )));
+        }
+    };
+    if args.len() < 2 {
+        return Err(RedisError::Protocol(
+            "SLOWLOG requires command and subcommand".to_string(),
+        ));
+    }
+
+    let mut iter = args.into_iter();
+    let command = decode_observability_arg(
+        iter.next()
+            .ok_or_else(|| RedisError::Protocol("SLOWLOG missing command".to_string()))?,
+        "SLOWLOG",
+        "command",
+    )?;
+    if !bytes_eq_ignore_ascii_case(&command, b"SLOWLOG") {
+        return Err(RedisError::Protocol(format!(
+            "SLOWLOG command name expected, got {}",
+            String::from_utf8_lossy(&command)
+        )));
+    }
+
+    let subcommand = decode_observability_arg(
+        iter.next()
+            .ok_or_else(|| RedisError::Protocol("SLOWLOG missing subcommand".to_string()))?,
+        "SLOWLOG",
+        "subcommand",
+    )?;
+    let remaining: Vec<RespValue> = iter.collect();
+
+    if bytes_eq_ignore_ascii_case(&subcommand, b"GET") {
+        let count = match remaining.as_slice() {
+            [] => None,
+            [value] => {
+                let count = decode_observability_arg(value.clone(), "SLOWLOG", "GET count")?;
+                Some(parse_unsigned_decimal_arg("SLOWLOG", &count, "GET count")?)
+            }
+            _ => {
+                return Err(RedisError::Protocol(format!(
+                    "SLOWLOG GET accepts at most one count, got {}",
+                    remaining.len()
+                )));
+            }
+        };
+        Ok(RedisSlowlogCommand::Get { count })
+    } else if bytes_eq_ignore_ascii_case(&subcommand, b"LEN") {
+        reject_observability_extra_args("SLOWLOG", "LEN", &remaining)?;
+        Ok(RedisSlowlogCommand::Len)
+    } else if bytes_eq_ignore_ascii_case(&subcommand, b"RESET") {
+        reject_observability_extra_args("SLOWLOG", "RESET", &remaining)?;
+        Ok(RedisSlowlogCommand::Reset)
+    } else if bytes_eq_ignore_ascii_case(&subcommand, b"HELP") {
+        reject_observability_extra_args("SLOWLOG", "HELP", &remaining)?;
+        Ok(RedisSlowlogCommand::Help)
+    } else {
+        Err(RedisError::Protocol(format!(
+            "SLOWLOG unknown subcommand {}",
+            String::from_utf8_lossy(&subcommand)
+        )))
+    }
+}
+
+#[cfg(any(test, feature = "test-internals"))]
+#[allow(dead_code)]
+#[doc(hidden)]
+pub fn parse_latency_for_fuzz(value: RespValue) -> Result<RedisLatencyCommand, RedisError> {
+    let args = match value {
+        RespValue::Array(Some(args)) => args,
+        other => {
+            return Err(RedisError::Protocol(format!(
+                "LATENCY command must be a RESP array, got {other:?}"
+            )));
+        }
+    };
+    if args.len() < 2 {
+        return Err(RedisError::Protocol(
+            "LATENCY requires command and subcommand".to_string(),
+        ));
+    }
+
+    let mut iter = args.into_iter();
+    let command = decode_observability_arg(
+        iter.next()
+            .ok_or_else(|| RedisError::Protocol("LATENCY missing command".to_string()))?,
+        "LATENCY",
+        "command",
+    )?;
+    if !bytes_eq_ignore_ascii_case(&command, b"LATENCY") {
+        return Err(RedisError::Protocol(format!(
+            "LATENCY command name expected, got {}",
+            String::from_utf8_lossy(&command)
+        )));
+    }
+
+    let subcommand = decode_observability_arg(
+        iter.next()
+            .ok_or_else(|| RedisError::Protocol("LATENCY missing subcommand".to_string()))?,
+        "LATENCY",
+        "subcommand",
+    )?;
+    let remaining: Vec<RespValue> = iter.collect();
+
+    let subcommand = if bytes_eq_ignore_ascii_case(&subcommand, b"DOCTOR") {
+        reject_observability_extra_args("LATENCY", "DOCTOR", &remaining)?;
+        RedisLatencySubcommand::Doctor
+    } else if bytes_eq_ignore_ascii_case(&subcommand, b"LATEST") {
+        reject_observability_extra_args("LATENCY", "LATEST", &remaining)?;
+        RedisLatencySubcommand::Latest
+    } else if bytes_eq_ignore_ascii_case(&subcommand, b"HISTORY") {
+        let [event] = remaining.as_slice() else {
+            return Err(RedisError::Protocol(format!(
+                "LATENCY HISTORY requires exactly one event, got {}",
+                remaining.len()
+            )));
+        };
+        RedisLatencySubcommand::History {
+            event: require_non_empty_observability_arg(
+                "LATENCY",
+                "HISTORY event",
+                decode_observability_arg(event.clone(), "LATENCY", "HISTORY event")?,
+            )?,
+        }
+    } else if bytes_eq_ignore_ascii_case(&subcommand, b"GRAPH") {
+        let [event] = remaining.as_slice() else {
+            return Err(RedisError::Protocol(format!(
+                "LATENCY GRAPH requires exactly one event, got {}",
+                remaining.len()
+            )));
+        };
+        RedisLatencySubcommand::Graph {
+            event: require_non_empty_observability_arg(
+                "LATENCY",
+                "GRAPH event",
+                decode_observability_arg(event.clone(), "LATENCY", "GRAPH event")?,
+            )?,
+        }
+    } else if bytes_eq_ignore_ascii_case(&subcommand, b"RESET") {
+        let events = remaining
+            .into_iter()
+            .enumerate()
+            .map(|(index, value)| {
+                require_non_empty_observability_arg(
+                    "LATENCY",
+                    &format!("RESET event[{index}]"),
+                    decode_observability_arg(value, "LATENCY", &format!("RESET event[{index}]"))?,
+                )
+            })
+            .collect::<Result<_, _>>()?;
+        RedisLatencySubcommand::Reset { events }
+    } else if bytes_eq_ignore_ascii_case(&subcommand, b"HISTOGRAM") {
+        let commands = remaining
+            .into_iter()
+            .enumerate()
+            .map(|(index, value)| {
+                require_non_empty_observability_arg(
+                    "LATENCY",
+                    &format!("HISTOGRAM command[{index}]"),
+                    decode_observability_arg(
+                        value,
+                        "LATENCY",
+                        &format!("HISTOGRAM command[{index}]"),
+                    )?,
+                )
+            })
+            .collect::<Result<_, _>>()?;
+        RedisLatencySubcommand::Histogram { commands }
+    } else if bytes_eq_ignore_ascii_case(&subcommand, b"HELP") {
+        reject_observability_extra_args("LATENCY", "HELP", &remaining)?;
+        RedisLatencySubcommand::Help
+    } else {
+        return Err(RedisError::Protocol(format!(
+            "LATENCY unknown subcommand {}",
+            String::from_utf8_lossy(&subcommand)
+        )));
+    };
+
+    Ok(RedisLatencyCommand { subcommand })
+}
+
+#[cfg(any(test, feature = "test-internals"))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[doc(hidden)]
 pub enum RedisZaddInsertMode {
@@ -4720,6 +4979,179 @@ mod tests {
         assert!(matches!(
             parse_client_kill_for_fuzz(unknown_filter),
             Err(RedisError::Protocol(msg)) if msg.contains("unknown filter")
+        ));
+    }
+
+    #[test]
+    fn slowlog_parser_accepts_supported_subcommands() {
+        let get = RespValue::Array(Some(vec![
+            bulk_arg("SLOWLOG"),
+            bulk_arg("GET"),
+            bulk_arg("128"),
+        ]));
+        assert_eq!(
+            parse_slowlog_for_fuzz(get).expect("SLOWLOG GET count should parse"),
+            RedisSlowlogCommand::Get { count: Some(128) }
+        );
+
+        let len = RespValue::Array(Some(vec![bulk_arg("slowlog"), bulk_arg("len")]));
+        assert_eq!(
+            parse_slowlog_for_fuzz(len).expect("SLOWLOG LEN should parse"),
+            RedisSlowlogCommand::Len
+        );
+
+        let reset = RespValue::Array(Some(vec![bulk_arg("SLOWLOG"), bulk_arg("RESET")]));
+        assert_eq!(
+            parse_slowlog_for_fuzz(reset).expect("SLOWLOG RESET should parse"),
+            RedisSlowlogCommand::Reset
+        );
+
+        let help = RespValue::Array(Some(vec![bulk_arg("SLOWLOG"), bulk_arg("HELP")]));
+        assert_eq!(
+            parse_slowlog_for_fuzz(help).expect("SLOWLOG HELP should parse"),
+            RedisSlowlogCommand::Help
+        );
+    }
+
+    #[test]
+    fn slowlog_parser_rejects_malformed_command_shapes() {
+        let negative_count = RespValue::Array(Some(vec![
+            bulk_arg("SLOWLOG"),
+            bulk_arg("GET"),
+            bulk_arg("-1"),
+        ]));
+        assert!(matches!(
+            parse_slowlog_for_fuzz(negative_count),
+            Err(RedisError::Protocol(msg)) if msg.contains("non-digit")
+        ));
+
+        let extra_len_arg = RespValue::Array(Some(vec![
+            bulk_arg("SLOWLOG"),
+            bulk_arg("LEN"),
+            bulk_arg("extra"),
+        ]));
+        assert!(matches!(
+            parse_slowlog_for_fuzz(extra_len_arg),
+            Err(RedisError::Protocol(msg)) if msg.contains("takes no arguments")
+        ));
+
+        let unknown = RespValue::Array(Some(vec![bulk_arg("SLOWLOG"), bulk_arg("BOGUS")]));
+        assert!(matches!(
+            parse_slowlog_for_fuzz(unknown),
+            Err(RedisError::Protocol(msg)) if msg.contains("unknown subcommand")
+        ));
+    }
+
+    #[test]
+    fn latency_parser_accepts_supported_subcommands() {
+        let history = RespValue::Array(Some(vec![
+            bulk_arg("LATENCY"),
+            bulk_arg("HISTORY"),
+            bulk_arg("command"),
+        ]));
+        assert_eq!(
+            parse_latency_for_fuzz(history)
+                .expect("LATENCY HISTORY should parse")
+                .subcommand,
+            RedisLatencySubcommand::History {
+                event: b"command".to_vec()
+            }
+        );
+
+        let graph = RespValue::Array(Some(vec![
+            bulk_arg("latency"),
+            bulk_arg("graph"),
+            bulk_arg("fork"),
+        ]));
+        assert_eq!(
+            parse_latency_for_fuzz(graph)
+                .expect("LATENCY GRAPH should parse")
+                .subcommand,
+            RedisLatencySubcommand::Graph {
+                event: b"fork".to_vec()
+            }
+        );
+
+        let reset = RespValue::Array(Some(vec![
+            bulk_arg("LATENCY"),
+            bulk_arg("RESET"),
+            bulk_arg("command"),
+            bulk_arg("fork"),
+        ]));
+        assert_eq!(
+            parse_latency_for_fuzz(reset)
+                .expect("LATENCY RESET should parse")
+                .subcommand,
+            RedisLatencySubcommand::Reset {
+                events: vec![b"command".to_vec(), b"fork".to_vec()]
+            }
+        );
+
+        let histogram = RespValue::Array(Some(vec![
+            bulk_arg("LATENCY"),
+            bulk_arg("HISTOGRAM"),
+            bulk_arg("GET"),
+            bulk_arg("SET"),
+        ]));
+        assert_eq!(
+            parse_latency_for_fuzz(histogram)
+                .expect("LATENCY HISTOGRAM should parse")
+                .subcommand,
+            RedisLatencySubcommand::Histogram {
+                commands: vec![b"GET".to_vec(), b"SET".to_vec()]
+            }
+        );
+
+        let latest = RespValue::Array(Some(vec![bulk_arg("LATENCY"), bulk_arg("LATEST")]));
+        assert_eq!(
+            parse_latency_for_fuzz(latest)
+                .expect("LATENCY LATEST should parse")
+                .subcommand,
+            RedisLatencySubcommand::Latest
+        );
+
+        let doctor = RespValue::Array(Some(vec![bulk_arg("LATENCY"), bulk_arg("DOCTOR")]));
+        assert_eq!(
+            parse_latency_for_fuzz(doctor)
+                .expect("LATENCY DOCTOR should parse")
+                .subcommand,
+            RedisLatencySubcommand::Doctor
+        );
+    }
+
+    #[test]
+    fn latency_parser_rejects_malformed_command_shapes() {
+        let missing_history_event =
+            RespValue::Array(Some(vec![bulk_arg("LATENCY"), bulk_arg("HISTORY")]));
+        assert!(matches!(
+            parse_latency_for_fuzz(missing_history_event),
+            Err(RedisError::Protocol(msg)) if msg.contains("requires exactly one event")
+        ));
+
+        let empty_graph_event = RespValue::Array(Some(vec![
+            bulk_arg("LATENCY"),
+            bulk_arg("GRAPH"),
+            bulk_arg(""),
+        ]));
+        assert!(matches!(
+            parse_latency_for_fuzz(empty_graph_event),
+            Err(RedisError::Protocol(msg)) if msg.contains("must not be empty")
+        ));
+
+        let extra_latest_arg = RespValue::Array(Some(vec![
+            bulk_arg("LATENCY"),
+            bulk_arg("LATEST"),
+            bulk_arg("extra"),
+        ]));
+        assert!(matches!(
+            parse_latency_for_fuzz(extra_latest_arg),
+            Err(RedisError::Protocol(msg)) if msg.contains("takes no arguments")
+        ));
+
+        let unknown = RespValue::Array(Some(vec![bulk_arg("LATENCY"), bulk_arg("BOGUS")]));
+        assert!(matches!(
+            parse_latency_for_fuzz(unknown),
+            Err(RedisError::Protocol(msg)) if msg.contains("unknown subcommand")
         ));
     }
 
