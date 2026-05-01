@@ -345,27 +345,23 @@ impl DecodingPipeline {
                     ));
                 }
             }
-        } else {
+        } else if !self.verify_auth_disabled_warned {
             // br-asupersync-f4mdcr: auth is disabled by configuration.
             // The pre-fix shape silently accepted the symbol with NO
             // log, NO counter, NO observability hook — operators
             // alerting on `starvation_events: 0, priority_inversions: 0`
             // had no way to detect a deployment that quietly turned
             // off auth. Now we emit a one-time WARN per pipeline
-            // instance and increment a `skipped_verifications`
-            // counter that observers can poll via
+            // instance and expose accepted-symbol counts via
             // [`Self::skipped_verifications`].
-            self.skipped_verifications = self.skipped_verifications.saturating_add(1);
-            if !self.verify_auth_disabled_warned {
-                self.verify_auth_disabled_warned = true;
-                crate::tracing_compat::warn!(
-                    target: "asupersync::decoding",
-                    "br-asupersync-f4mdcr: DecodingPipeline configured \
-                     with verify_auth=false; subsequent symbols are accepted \
-                     without authentication. Skipped count is exposed via \
-                     DecodingPipeline::skipped_verifications()."
-                );
-            }
+            self.verify_auth_disabled_warned = true;
+            crate::tracing_compat::warn!(
+                target: "asupersync::decoding",
+                "br-asupersync-f4mdcr: DecodingPipeline configured \
+                 with verify_auth=false; subsequent symbols are accepted \
+                 without authentication. Skipped count is exposed via \
+                 DecodingPipeline::skipped_verifications()."
+            );
         }
 
         let symbol = auth_symbol.into_symbol();
@@ -411,6 +407,9 @@ impl DecodingPipeline {
                 threshold_reached,
             } => {
                 self.accepted_symbols_total = self.accepted_symbols_total.saturating_add(1);
+                if !self.config.verify_auth {
+                    self.skipped_verifications = self.skipped_verifications.saturating_add(1);
+                }
                 if block_progress.k.is_none() {
                     self.configure_block_k();
                 }
@@ -1800,6 +1799,64 @@ mod tests {
             crate::assert_with_log!(is_ok, &format!("result[{i}] is Ok"), true, is_ok);
         }
         crate::test_complete!("feed_batch_returns_results_per_symbol");
+    }
+
+    #[test]
+    fn skipped_verifications_count_only_inserted_symbols() {
+        init_test("skipped_verifications_count_only_inserted_symbols");
+        let config = encoding_config();
+        let object_id = ObjectId::new_for_test(103);
+        let mut decoder = DecodingPipeline::new(DecodingConfig {
+            symbol_size: config.symbol_size,
+            max_block_size: config.max_block_size,
+            verify_auth: false,
+            ..DecodingConfig::default()
+        });
+        decoder
+            .set_object_params(ObjectParams::new(object_id, 512, config.symbol_size, 1, 2))
+            .expect("set object params");
+
+        let wrong_object = Symbol::new(
+            SymbolId::new(ObjectId::new_for_test(104), 0, 0),
+            vec![0u8; usize::from(config.symbol_size)],
+            SymbolKind::Source,
+        );
+        let result = decoder
+            .feed(AuthenticatedSymbol::from_parts(
+                wrong_object,
+                crate::security::tag::AuthenticationTag::zero(),
+            ))
+            .expect("wrong-object feed should not error");
+        assert_eq!(
+            result,
+            SymbolAcceptResult::Rejected(RejectReason::WrongObjectId)
+        );
+        assert_eq!(decoder.skipped_verifications(), 0);
+
+        let valid = Symbol::new(
+            SymbolId::new(object_id, 0, 0),
+            vec![1u8; usize::from(config.symbol_size)],
+            SymbolKind::Source,
+        );
+        let result = decoder
+            .feed(AuthenticatedSymbol::from_parts(
+                valid.clone(),
+                crate::security::tag::AuthenticationTag::zero(),
+            ))
+            .expect("valid feed should not error");
+        assert!(matches!(result, SymbolAcceptResult::Accepted { .. }));
+        assert_eq!(decoder.skipped_verifications(), 1);
+
+        let result = decoder
+            .feed(AuthenticatedSymbol::from_parts(
+                valid,
+                crate::security::tag::AuthenticationTag::zero(),
+            ))
+            .expect("duplicate feed should not error");
+        assert_eq!(result, SymbolAcceptResult::Duplicate);
+        assert_eq!(decoder.skipped_verifications(), 1);
+
+        crate::test_complete!("skipped_verifications_count_only_inserted_symbols");
     }
 
     #[test]
