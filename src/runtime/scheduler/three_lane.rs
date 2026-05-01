@@ -317,6 +317,11 @@ impl AdaptiveCancelStreakPolicy {
         self.epoch_start = None;
     }
 
+    fn abort_epoch(&mut self) {
+        self.steps_in_epoch = 0;
+        self.epoch_start = None;
+    }
+
     fn current_limit(&self) -> usize {
         self.arms[self.selected_arm]
     }
@@ -3053,6 +3058,12 @@ impl ThreeLaneWorker {
         }
     }
 
+    fn abort_adaptive_epoch(&mut self) {
+        if let Some(policy) = self.adaptive_cancel_policy.as_mut() {
+            policy.abort_epoch();
+        }
+    }
+
     fn drive_io_phase(&self) -> IoPhaseOutcome {
         let Some(io) = &self.io_driver else {
             return IoPhaseOutcome::NoProgress;
@@ -4657,6 +4668,9 @@ impl ThreeLaneWorker {
         let mut credit_adaptive_epoch = true;
         match poll_result {
             Ok(Poll::Ready(outcome)) => {
+                if matches!(outcome, crate::types::Outcome::Panicked(_)) {
+                    credit_adaptive_epoch = false;
+                }
                 // Map Outcome<(), ()> to Outcome<(), Error> for record.complete()
                 let task_outcome = outcome
                     .map_err(|()| crate::error::Error::new(crate::error::ErrorKind::Internal));
@@ -4877,6 +4891,8 @@ impl ThreeLaneWorker {
         drop(guard);
         if credit_adaptive_epoch {
             self.adaptive_on_dispatch();
+        } else {
+            self.abort_adaptive_epoch();
         }
     }
 
@@ -12347,11 +12363,17 @@ mod tests {
         let mut scheduler = ThreeLaneScheduler::new_with_cancel_limit(1, &state, 4);
         scheduler.set_adaptive_cancel_streak(true, 1);
 
+        let root = {
+            let mut runtime_state = state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            runtime_state.create_root_region(Budget::INFINITE)
+        };
+
         let panicking_task = {
             let mut runtime_state = state
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
-            let root = runtime_state.create_root_region(Budget::INFINITE);
             let (task_id, _handle) = runtime_state
                 .create_task(root, Budget::INFINITE, async {
                     panic!("adaptive epoch should ignore panicking dispatches");
@@ -12392,7 +12414,6 @@ mod tests {
             let mut runtime_state = state
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
-            let root = runtime_state.create_root_region(Budget::INFINITE);
             let (task_id, _handle) = runtime_state
                 .create_task(root, Budget::INFINITE, async {})
                 .expect("task create");
