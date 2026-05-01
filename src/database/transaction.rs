@@ -193,7 +193,10 @@ mod pg {
         wait_retry_delay,
     };
     use crate::database::postgres::{PgConnection, PgError, PgTransaction};
-    use std::{cell::Cell, fmt};
+    use std::{
+        fmt,
+        sync::atomic::{AtomicBool, Ordering},
+    };
 
     fn rollback_required_error() -> PgError {
         PgError::Protocol("transaction must roll back before commit".to_string())
@@ -271,16 +274,17 @@ mod pg {
         mut f: F,
     ) -> Outcome<T, PgError>
     where
-        F: FnMut(&mut PgTransaction<'_>, &Cx) -> MkFut,
-        MkFut: Future<Output = Outcome<T, PgError>>,
+        T: Send,
+        F: FnMut(&mut PgTransaction<'_>, &Cx) -> MkFut + Send,
+        MkFut: Future<Output = Outcome<T, PgError>> + Send,
     {
-        let body_started = Cell::new(false);
+        let body_started = AtomicBool::new(false);
         let mut attempt = 0u32;
 
         loop {
-            body_started.set(false);
+            body_started.store(false, Ordering::Relaxed);
             let result = with_pg_transaction(conn, cx, |tx, tx_cx| {
-                body_started.set(true);
+                body_started.store(true, Ordering::Relaxed);
                 f(tx, tx_cx)
             })
             .await;
@@ -289,7 +293,7 @@ mod pg {
                 Outcome::Err(err)
                     if err.is_serialization_failure()
                         && (replay_safety == TransactionReplaySafety::ReplaySafe
-                            || !body_started.get())
+                            || !body_started.load(Ordering::Relaxed))
                         && attempt < policy.max_retries =>
                 {
                     let delay = policy.delay_for(attempt);
@@ -679,7 +683,10 @@ mod mysql {
         wait_retry_delay,
     };
     use crate::database::mysql::{MySqlConnection, MySqlError, MySqlTransaction};
-    use std::{cell::Cell, fmt};
+    use std::{
+        fmt,
+        sync::atomic::{AtomicBool, Ordering},
+    };
 
     fn rollback_required_error() -> MySqlError {
         MySqlError::Protocol("transaction must roll back before commit".to_string())
@@ -748,16 +755,17 @@ mod mysql {
         mut f: F,
     ) -> Outcome<T, MySqlError>
     where
-        F: FnMut(&mut MySqlTransaction<'_>, &Cx) -> MkFut,
-        MkFut: Future<Output = Outcome<T, MySqlError>>,
+        T: Send,
+        F: FnMut(&mut MySqlTransaction<'_>, &Cx) -> MkFut + Send,
+        MkFut: Future<Output = Outcome<T, MySqlError>> + Send,
     {
-        let body_started = Cell::new(false);
+        let body_started = AtomicBool::new(false);
         let mut attempt = 0u32;
 
         loop {
-            body_started.set(false);
+            body_started.store(false, Ordering::Relaxed);
             let result = with_mysql_transaction(conn, cx, |tx, tx_cx| {
-                body_started.set(true);
+                body_started.store(true, Ordering::Relaxed);
                 f(tx, tx_cx)
             })
             .await;
@@ -766,7 +774,7 @@ mod mysql {
                 Outcome::Err(err)
                     if err.is_deadlock()
                         && (replay_safety == TransactionReplaySafety::ReplaySafe
-                            || !body_started.get())
+                            || !body_started.load(Ordering::Relaxed))
                         && attempt < policy.max_retries =>
                 {
                     let delay = policy.delay_for(attempt);
