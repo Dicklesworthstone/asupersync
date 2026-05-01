@@ -8,3 +8,4 @@
 pub mod h2_continuation_ordering_conformance;
 pub mod h2_rst_stream_error_propagation_conformance;
 pub mod h2_ping_rtt_measurement_conformance;
+pub mod h2_initial_window_size_conformance;

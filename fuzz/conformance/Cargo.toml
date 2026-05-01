@@ -48,3 +48,9 @@ name = "h2_ping_rtt_measurement_conformance"
 path = "src/bin/h2_ping_rtt_measurement_conformance.rs"
 test = false
 doc = false
+
+[[bin]]
+name = "h2_initial_window_size_conformance"
+path = "src/bin/h2_initial_window_size_conformance.rs"
+test = false
+doc = false
