@@ -121,12 +121,8 @@ fn peer_omits_grpc_timeout_falls_back_to_default() {
     // grpc-timeout, the server's default_timeout is used. This is
     // the documented fallback path.
     let n = now();
-    let ctx = CallContext::from_metadata_at(
-        Metadata::new(),
-        Some(Duration::from_millis(500)),
-        None,
-        n,
-    );
+    let ctx =
+        CallContext::from_metadata_at(Metadata::new(), Some(Duration::from_millis(500)), None, n);
     let remaining = ctx
         .deadline()
         .and_then(|d| d.checked_duration_since(n))
@@ -172,12 +168,7 @@ fn invalid_grpc_timeout_yields_none_deadline_not_default() {
     // ask for) is caught.
     let metadata = meta_with_timeout("not-a-valid-timeout");
     let n = now();
-    let ctx = CallContext::from_metadata_at(
-        metadata,
-        Some(Duration::from_millis(250)),
-        None,
-        n,
-    );
+    let ctx = CallContext::from_metadata_at(metadata, Some(Duration::from_millis(250)), None, n);
     assert!(
         ctx.deadline().is_none(),
         "malformed peer grpc-timeout produces None deadline (NOT a fallback \

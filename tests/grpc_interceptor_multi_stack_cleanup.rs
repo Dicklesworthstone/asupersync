@@ -91,7 +91,8 @@ impl Interceptor for InspectableRateLimit {
         request: &Request<Bytes>,
         response: &mut Response<Bytes>,
     ) -> Result<(), Status> {
-        self.inner.intercept_response_with_request(request, response)
+        self.inner
+            .intercept_response_with_request(request, response)
     }
     fn intercept_error_with_request(
         &self,

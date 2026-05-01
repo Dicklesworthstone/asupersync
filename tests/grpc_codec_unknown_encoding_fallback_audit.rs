@@ -150,8 +150,7 @@ fn codec_poisoned_after_unknown_encoding_compressed_frame() {
         .expect_err("post-poison rejects");
     let err_str = format!("{err:?}");
     assert!(
-        err_str.to_lowercase().contains("poison")
-            || err_str.to_lowercase().contains("protocol"),
+        err_str.to_lowercase().contains("poison") || err_str.to_lowercase().contains("protocol"),
         "post-poison error must mention poisoned state; got {err_str}",
     );
 }
@@ -218,17 +217,7 @@ fn unknown_encoding_fallback_chain_at_known_attack_vectors() {
     // strings all yield the same fallback (None at parse, no
     // decompressor at codec, compressed-frame reject).
     let attacks = [
-        "zstd",
-        "br",
-        "deflate",
-        "lzma",
-        "xz",
-        "snappy",
-        "lz4",
-        "compress",
-        "BR",
-        "Brotli",
-        "ZsTd",
+        "zstd", "br", "deflate", "lzma", "xz", "snappy", "lz4", "compress", "BR", "Brotli", "ZsTd",
     ];
     for attack in attacks {
         // Layer 1: parse rejects.

@@ -74,21 +74,21 @@ fn accept_encoding_whitelist_rejects_exotic_encodings() {
     // Anything outside identity/gzip returns None — operators
     // cannot accidentally accept br/deflate/zstd/xz/exec/etc.
     let exotic = [
-        "deflate", // historically supported by HTTP, NOT by gRPC
-        "br",      // brotli — not a gRPC encoding
-        "zstd",    // not a gRPC encoding
-        "xz",      // not a gRPC encoding
-        "snappy",  // not a gRPC encoding
-        "lz4",     // not a gRPC encoding
+        "deflate",  // historically supported by HTTP, NOT by gRPC
+        "br",       // brotli — not a gRPC encoding
+        "zstd",     // not a gRPC encoding
+        "xz",       // not a gRPC encoding
+        "snappy",   // not a gRPC encoding
+        "lz4",      // not a gRPC encoding
         "compress", // legacy HTTP encoding — never a gRPC encoding
         "Identity", // case-sensitive — must be lowercase per spec
         "Gzip",     // case-sensitive
         "GZIP",
         "IDENTITY",
-        "gzip ",  // trailing space
-        " gzip",  // leading space
+        "gzip ",        // trailing space
+        " gzip",        // leading space
         "gzip,deflate", // comma list — single value only
-        "exec",   // attacker fuzz string
+        "exec",         // attacker fuzz string
         "",
         "../identity", // path-traversal-shaped string
     ];
@@ -125,7 +125,9 @@ fn server_config_default_accept_compression_includes_identity() {
     // interop with vanilla clients that send uncompressed payloads.
     let config = ServerConfig::default();
     assert!(
-        config.accept_compression.contains(&CompressionEncoding::Identity),
+        config
+            .accept_compression
+            .contains(&CompressionEncoding::Identity),
         "default ServerConfig must accept Identity — uncompressed \
          payloads are the gRPC interop baseline. accept_compression={:?}",
         config.accept_compression,
@@ -229,11 +231,7 @@ fn grpc_codec_encode_at_max_size_boundary_succeeds() {
     codec
         .encode(msg, &mut buf)
         .expect("payload at exactly max_encode_message_size must encode");
-    assert_eq!(
-        buf.len(),
-        5 + 64,
-        "5-byte LPM header + 64-byte payload",
-    );
+    assert_eq!(buf.len(), 5 + 64, "5-byte LPM header + 64-byte payload",);
 }
 
 #[cfg(feature = "compression")]

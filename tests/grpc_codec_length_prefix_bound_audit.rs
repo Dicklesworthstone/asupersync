@@ -45,7 +45,7 @@
 //!
 //! Regression tests below pin (a)-(e) at the public API surface.
 
-use asupersync::bytes::{Bytes, BytesMut, BufMut};
+use asupersync::bytes::{BufMut, Bytes, BytesMut};
 use asupersync::codec::{Decoder, Encoder};
 use asupersync::grpc::{GrpcCodec, GrpcMessage};
 
@@ -136,9 +136,7 @@ fn decode_size_cap_rejects_one_byte_over() {
     let frame = lpm_frame(0, (cap + 1) as u32, &body);
     let mut buf = BytesMut::from(&frame[..]);
 
-    let err = codec
-        .decode(&mut buf)
-        .expect_err("cap+1 must reject");
+    let err = codec.decode(&mut buf).expect_err("cap+1 must reject");
     let err_str = format!("{err:?}");
     assert!(err_str.contains("MessageTooLarge") || err_str.to_lowercase().contains("too large"));
 }
@@ -163,9 +161,9 @@ fn decode_with_partial_buffer_returns_need_more_bytes_only_under_cap() {
     let result = codec.decode(&mut buf);
     match result {
         Ok(None) => {} // need-more-bytes — correct under-cap path
-        other => panic!(
-            "under-cap partial frame must return Ok(None) (need more bytes); got {other:?}",
-        ),
+        other => {
+            panic!("under-cap partial frame must return Ok(None) (need more bytes); got {other:?}",)
+        }
     }
     // The buffer is unchanged — partial-frame state preserved
     // for the next decode call.

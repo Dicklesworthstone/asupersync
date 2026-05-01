@@ -57,10 +57,10 @@
 //! HTTP/2 server's own conformance tests.
 
 use asupersync::bytes::BytesMut;
+use asupersync::grpc::Status;
 use asupersync::grpc::status::Code;
 use asupersync::grpc::streaming::{Metadata, MetadataValue};
-use asupersync::grpc::web::{decode_trailers, encode_trailers, TrailerFrame};
-use asupersync::grpc::Status;
+use asupersync::grpc::web::{TrailerFrame, decode_trailers, encode_trailers};
 
 /// gRPC-Web trailer frame flag byte: high bit set, low 7 bits = 0.
 const TRAILER_FLAG: u8 = 0x80;
@@ -73,15 +73,10 @@ fn error_status_encodes_as_self_contained_trailer_frame() {
     // frame with no preceding body required. The frame's flag
     // byte is 0x80 (trailer marker per gRPC-Web spec).
     let mut buf = BytesMut::new();
-    encode_trailers(
-        &Status::not_found("missing"),
-        &Metadata::new(),
-        &mut buf,
-    );
+    encode_trailers(&Status::not_found("missing"), &Metadata::new(), &mut buf);
     assert!(buf.len() >= FRAME_HEADER_SIZE, "frame must include header");
     assert_eq!(
-        buf[0],
-        TRAILER_FLAG,
+        buf[0], TRAILER_FLAG,
         "trailer frame's first byte MUST be 0x80 — without this the \
          consumer cannot distinguish trailers from data and Trailers-Only \
          response cannot be parsed",
@@ -113,17 +108,13 @@ fn ok_status_with_no_body_encodes_as_trailers_only_shape() {
     encode_trailers(&Status::ok(), &metadata, &mut buf);
 
     assert_eq!(buf[0], TRAILER_FLAG);
-    let decoded = decode_trailers(&buf[FRAME_HEADER_SIZE..])
-        .expect("Trailers-Only OK decodes");
+    let decoded = decode_trailers(&buf[FRAME_HEADER_SIZE..]).expect("Trailers-Only OK decodes");
     assert_eq!(decoded.status.code().as_i32(), 0);
     assert_eq!(
-        decoded
-            .metadata
-            .get("x-cache")
-            .and_then(|v| match v {
-                MetadataValue::Ascii(s) => Some(s.as_str()),
-                _ => None,
-            }),
+        decoded.metadata.get("x-cache").and_then(|v| match v {
+            MetadataValue::Ascii(s) => Some(s.as_str()),
+            _ => None,
+        }),
         Some("MISS"),
         "trailer-block metadata round-trips",
     );
@@ -172,26 +163,21 @@ fn trailers_only_carries_status_metadata_in_single_frame() {
         status,
         metadata: decoded_metadata,
         ..
-    } = decode_trailers(&buf[FRAME_HEADER_SIZE..])
-        .expect("trailers-only frame decodes");
+    } = decode_trailers(&buf[FRAME_HEADER_SIZE..]).expect("trailers-only frame decodes");
     assert_eq!(status.code(), Code::ResourceExhausted);
     assert_eq!(status.message(), "rate limited");
     assert_eq!(
-        decoded_metadata
-            .get("retry-after")
-            .and_then(|v| match v {
-                MetadataValue::Ascii(s) => Some(s.as_str()),
-                _ => None,
-            }),
+        decoded_metadata.get("retry-after").and_then(|v| match v {
+            MetadataValue::Ascii(s) => Some(s.as_str()),
+            _ => None,
+        }),
         Some("3"),
     );
     assert_eq!(
-        decoded_metadata
-            .get("x-trace-id")
-            .and_then(|v| match v {
-                MetadataValue::Ascii(s) => Some(s.as_str()),
-                _ => None,
-            }),
+        decoded_metadata.get("x-trace-id").and_then(|v| match v {
+            MetadataValue::Ascii(s) => Some(s.as_str()),
+            _ => None,
+        }),
         Some("abc-123"),
     );
 }
@@ -234,7 +220,8 @@ fn error_trailers_message_is_percent_encoded() {
     // The decode side reverses the percent-encoding.
     let decoded = decode_trailers(&buf[FRAME_HEADER_SIZE..]).expect("decode");
     assert_eq!(
-        decoded.status.message(), "bad\nfield",
+        decoded.status.message(),
+        "bad\nfield",
         "percent-decoded message recovers the original bytes",
     );
 }
@@ -250,8 +237,8 @@ fn empty_status_ok_with_metadata_still_decodes_as_ok() {
     let mut buf = BytesMut::new();
     encode_trailers(&Status::ok(), &metadata, &mut buf);
 
-    let decoded = decode_trailers(&buf[FRAME_HEADER_SIZE..])
-        .expect("OK + metadata trailers-only decodes");
+    let decoded =
+        decode_trailers(&buf[FRAME_HEADER_SIZE..]).expect("OK + metadata trailers-only decodes");
     assert_eq!(decoded.status.code().as_i32(), 0);
     // status_message is "OK" or empty — both are valid for
     // Status::ok(). Pin that it does NOT carry the metadata

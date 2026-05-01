@@ -132,10 +132,7 @@ fn request_with_metadata_does_not_share_capacity_across_calls() {
     // test is a sanity check that the constructor doesn't dedupe
     // across calls (it doesn't — Bytes::from_static is
     // pass-through).
-    let req_1 = Request::with_metadata(
-        Bytes::from_static(b"alpha"),
-        Metadata::new(),
-    );
+    let req_1 = Request::with_metadata(Bytes::from_static(b"alpha"), Metadata::new());
     let req_2 = Request::with_metadata(
         Bytes::from_static(b"alpha"), // same content!
         Metadata::new(),

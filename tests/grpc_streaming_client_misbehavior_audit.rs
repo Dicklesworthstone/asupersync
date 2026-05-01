@@ -38,10 +38,10 @@
 //! requires the transport-adapter integration test path); they
 //! pin the structural cap and the typed error shape.
 
+use asupersync::grpc::ResponseStream;
 use asupersync::grpc::server::{ConnectionState, ServerConfig};
 use asupersync::grpc::status::Code;
 use asupersync::grpc::streaming::StreamingRequest;
-use asupersync::grpc::ResponseStream;
 use std::time::Duration;
 
 /// Documented cap as of 2026-04-29.
@@ -73,9 +73,7 @@ fn slow_loris_idle_cleanup_removes_streams_at_zero_threshold() {
     // target (grpc_server_idle_timeout_state_machine) also pins.
     let mut state = ConnectionState::new();
     for stream_id in 0..8u32 {
-        state
-            .add_stream(stream_id, 16)
-            .expect("under cap");
+        state.add_stream(stream_id, 16).expect("under cap");
     }
     let removed = state.cleanup_idle_streams(Duration::from_nanos(0));
     assert_eq!(

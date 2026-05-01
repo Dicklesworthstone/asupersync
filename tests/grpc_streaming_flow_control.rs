@@ -154,10 +154,8 @@ fn cap_applies_per_stream_not_globally() {
         b.push(i).expect("b fills independently");
     }
 
-    a.push(DOCUMENTED_CAP as u32)
-        .expect_err("a at cap rejects");
-    b.push(DOCUMENTED_CAP as u32)
-        .expect_err("b at cap rejects");
+    a.push(DOCUMENTED_CAP as u32).expect_err("a at cap rejects");
+    b.push(DOCUMENTED_CAP as u32).expect_err("b at cap rejects");
 }
 
 #[test]

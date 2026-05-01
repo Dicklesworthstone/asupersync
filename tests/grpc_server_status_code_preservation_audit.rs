@@ -51,8 +51,8 @@
 //! Regression tests below pin (a)-(e) at the public API surface.
 
 use asupersync::bytes::BytesMut;
-use asupersync::grpc::status::Code;
 use asupersync::grpc::Status;
+use asupersync::grpc::status::Code;
 
 /// Decode the integer value from a freshly-encoded trailer block.
 fn extract_grpc_status(buf: &[u8]) -> i32 {

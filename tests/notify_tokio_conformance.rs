@@ -64,7 +64,6 @@ impl NotificationTracker {
     }
 }
 
-
 /// Run notify test on asupersync Notify using thread-based async runtime
 fn test_async_notify_conformance(config: &NotifyTest) -> NotifyConformanceResult {
     // Create a simple single-threaded async runtime
@@ -207,7 +206,10 @@ fn test_tokio_notify_conformance(config: &NotifyTest) -> NotifyConformanceResult
 }
 
 /// Compare notify results between implementations
-fn compare_notify_results(async_result: &NotifyConformanceResult, tokio_result: &NotifyConformanceResult) -> Result<(), String> {
+fn compare_notify_results(
+    async_result: &NotifyConformanceResult,
+    tokio_result: &NotifyConformanceResult,
+) -> Result<(), String> {
     // Both should send same number of notifications
     if async_result.notifications_sent != tokio_result.notifications_sent {
         return Err(format!(
@@ -226,9 +228,26 @@ fn compare_notify_results(async_result: &NotifyConformanceResult, tokio_result: 
 
     // Check that the notification order patterns are consistent
     // We allow some timing variation but the relative order should be similar
-    println!("Async Notify order: {:?}", async_result.notification_order.iter().map(|(id, _)| id).collect::<Vec<_>>());
-    println!("Tokio Notify order: {:?}", tokio_result.notification_order.iter().map(|(id, _)| id).collect::<Vec<_>>());
-    println!("Async duration: {:?}, Tokio duration: {:?}", async_result.duration, tokio_result.duration);
+    println!(
+        "Async Notify order: {:?}",
+        async_result
+            .notification_order
+            .iter()
+            .map(|(id, _)| id)
+            .collect::<Vec<_>>()
+    );
+    println!(
+        "Tokio Notify order: {:?}",
+        tokio_result
+            .notification_order
+            .iter()
+            .map(|(id, _)| id)
+            .collect::<Vec<_>>()
+    );
+    println!(
+        "Async duration: {:?}, Tokio duration: {:?}",
+        async_result.duration, tokio_result.duration
+    );
 
     // Basic sanity checks
     if async_result.waiters_notified == 0 && async_result.notifications_sent > 0 {
@@ -271,10 +290,14 @@ fn notify_single_waiter_multiple_notifications() {
     let tokio_result = test_tokio_notify_conformance(&config);
 
     // Single waiter should only get one notification
-    assert_eq!(async_result.waiters_notified, 1,
-        "Async notify: single waiter should only receive one notification");
-    assert_eq!(tokio_result.waiters_notified, 1,
-        "Tokio notify: single waiter should only receive one notification");
+    assert_eq!(
+        async_result.waiters_notified, 1,
+        "Async notify: single waiter should only receive one notification"
+    );
+    assert_eq!(
+        tokio_result.waiters_notified, 1,
+        "Tokio notify: single waiter should only receive one notification"
+    );
 
     compare_notify_results(&async_result, &tokio_result)
         .expect("Single waiter multiple notifications conformance check failed");
@@ -293,10 +316,14 @@ fn notify_multiple_waiters_single_notification() {
     let tokio_result = test_tokio_notify_conformance(&config);
 
     // Single notification should wake exactly one waiter
-    assert_eq!(async_result.waiters_notified, 1,
-        "Async notify: single notification should wake exactly one waiter");
-    assert_eq!(tokio_result.waiters_notified, 1,
-        "Tokio notify: single notification should wake exactly one waiter");
+    assert_eq!(
+        async_result.waiters_notified, 1,
+        "Async notify: single notification should wake exactly one waiter"
+    );
+    assert_eq!(
+        tokio_result.waiters_notified, 1,
+        "Tokio notify: single notification should wake exactly one waiter"
+    );
 
     compare_notify_results(&async_result, &tokio_result)
         .expect("Multiple waiters single notification conformance check failed");
@@ -315,10 +342,14 @@ fn notify_fairness_conformance() {
     let tokio_result = test_tokio_notify_conformance(&config);
 
     // All waiters should eventually be notified
-    assert_eq!(async_result.waiters_notified, 4,
-        "Async notify: all waiters should be notified");
-    assert_eq!(tokio_result.waiters_notified, 4,
-        "Tokio notify: all waiters should be notified");
+    assert_eq!(
+        async_result.waiters_notified, 4,
+        "Async notify: all waiters should be notified"
+    );
+    assert_eq!(
+        tokio_result.waiters_notified, 4,
+        "Tokio notify: all waiters should be notified"
+    );
 
     compare_notify_results(&async_result, &tokio_result)
         .expect("Notify fairness conformance check failed");
@@ -337,10 +368,14 @@ fn notify_rapid_sequence_conformance() {
     let tokio_result = test_tokio_notify_conformance(&config);
 
     // Exactly 3 waiters should be notified
-    assert_eq!(async_result.waiters_notified, 3,
-        "Async notify: exactly 3 waiters should be notified");
-    assert_eq!(tokio_result.waiters_notified, 3,
-        "Tokio notify: exactly 3 waiters should be notified");
+    assert_eq!(
+        async_result.waiters_notified, 3,
+        "Async notify: exactly 3 waiters should be notified"
+    );
+    assert_eq!(
+        tokio_result.waiters_notified, 3,
+        "Tokio notify: exactly 3 waiters should be notified"
+    );
 
     compare_notify_results(&async_result, &tokio_result)
         .expect("Rapid sequence conformance check failed");

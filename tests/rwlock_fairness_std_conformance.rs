@@ -4,13 +4,13 @@
 //! when the same sequence of N readers + M writers arrive in the same order.
 //! Validates basic ordering semantics and absence of starvation.
 
-use asupersync::sync::RwLock as AsyncRwLock;
 use asupersync::cx::Cx;
-use asupersync::types::{RegionId, TaskId, Budget};
+use asupersync::sync::RwLock as AsyncRwLock;
+use asupersync::types::{Budget, RegionId, TaskId};
 use asupersync::util::ArenaIndex;
 use std::pin::Pin;
-use std::sync::{Arc, Barrier, Mutex as StdMutex};
 use std::sync::RwLock as StdRwLock;
+use std::sync::{Arc, Barrier, Mutex as StdMutex};
 use std::task::{Context, Poll, Waker};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -68,7 +68,10 @@ impl CompletionTracker {
     fn get_completion_order(&self) -> Vec<(usize, bool)> {
         let mut completions = self.completions.lock().unwrap().clone();
         completions.sort_by_key(|(_, _, timestamp)| *timestamp);
-        completions.into_iter().map(|(id, is_writer, _)| (id, is_writer)).collect()
+        completions
+            .into_iter()
+            .map(|(id, is_writer, _)| (id, is_writer))
+            .collect()
     }
 }
 
@@ -179,8 +182,14 @@ fn test_async_rwlock_fairness(config: &FairnessTest) -> RwLockConformanceResult 
     }
 
     let completion_order = tracker.get_completion_order();
-    let reader_acquisitions = completion_order.iter().filter(|(_, is_writer)| !is_writer).count();
-    let writer_acquisitions = completion_order.iter().filter(|(_, is_writer)| *is_writer).count();
+    let reader_acquisitions = completion_order
+        .iter()
+        .filter(|(_, is_writer)| !is_writer)
+        .count();
+    let writer_acquisitions = completion_order
+        .iter()
+        .filter(|(_, is_writer)| *is_writer)
+        .count();
 
     RwLockConformanceResult {
         scenario: "async_rwlock".to_string(),
@@ -259,8 +268,14 @@ fn test_std_rwlock_fairness(config: &FairnessTest) -> RwLockConformanceResult {
     }
 
     let completion_order = tracker.get_completion_order();
-    let reader_acquisitions = completion_order.iter().filter(|(_, is_writer)| !is_writer).count();
-    let writer_acquisitions = completion_order.iter().filter(|(_, is_writer)| *is_writer).count();
+    let reader_acquisitions = completion_order
+        .iter()
+        .filter(|(_, is_writer)| !is_writer)
+        .count();
+    let writer_acquisitions = completion_order
+        .iter()
+        .filter(|(_, is_writer)| *is_writer)
+        .count();
 
     RwLockConformanceResult {
         scenario: "std_rwlock".to_string(),
@@ -272,15 +287,21 @@ fn test_std_rwlock_fairness(config: &FairnessTest) -> RwLockConformanceResult {
     }
 }
 
-
 /// Compare fairness results between implementations
-fn compare_fairness_results(async_result: &RwLockConformanceResult, std_result: &RwLockConformanceResult) -> Result<(), String> {
+fn compare_fairness_results(
+    async_result: &RwLockConformanceResult,
+    std_result: &RwLockConformanceResult,
+) -> Result<(), String> {
     // Both should complete all operations
-    if async_result.total_operations != async_result.reader_acquisitions + async_result.writer_acquisitions {
+    if async_result.total_operations
+        != async_result.reader_acquisitions + async_result.writer_acquisitions
+    {
         return Err("Async RwLock: total operations != sum of acquisitions".to_string());
     }
 
-    if std_result.total_operations != std_result.reader_acquisitions + std_result.writer_acquisitions {
+    if std_result.total_operations
+        != std_result.reader_acquisitions + std_result.writer_acquisitions
+    {
         return Err("Std RwLock: total operations != sum of acquisitions".to_string());
     }
 
@@ -307,9 +328,18 @@ fn compare_fairness_results(async_result: &RwLockConformanceResult, std_result: 
         ));
     }
 
-    println!("Async RwLock completion order: {:?}", async_result.completion_order);
-    println!("Std RwLock completion order: {:?}", std_result.completion_order);
-    println!("Async duration: {:?}, Std duration: {:?}", async_result.duration, std_result.duration);
+    println!(
+        "Async RwLock completion order: {:?}",
+        async_result.completion_order
+    );
+    println!(
+        "Std RwLock completion order: {:?}",
+        std_result.completion_order
+    );
+    println!(
+        "Async duration: {:?}, Std duration: {:?}",
+        async_result.duration, std_result.duration
+    );
 
     Ok(())
 }
@@ -360,14 +390,22 @@ fn rwlock_fairness_no_starvation_conformance() {
     let std_result = test_std_rwlock_fairness(&config);
 
     // Verify no starvation occurred
-    assert_eq!(async_result.reader_acquisitions, config.reader_count,
-        "Async RwLock: reader starvation detected");
-    assert_eq!(async_result.writer_acquisitions, config.writer_count,
-        "Async RwLock: writer starvation detected");
-    assert_eq!(std_result.reader_acquisitions, config.reader_count,
-        "Std RwLock: reader starvation detected");
-    assert_eq!(std_result.writer_acquisitions, config.writer_count,
-        "Std RwLock: writer starvation detected");
+    assert_eq!(
+        async_result.reader_acquisitions, config.reader_count,
+        "Async RwLock: reader starvation detected"
+    );
+    assert_eq!(
+        async_result.writer_acquisitions, config.writer_count,
+        "Async RwLock: writer starvation detected"
+    );
+    assert_eq!(
+        std_result.reader_acquisitions, config.reader_count,
+        "Std RwLock: reader starvation detected"
+    );
+    assert_eq!(
+        std_result.writer_acquisitions, config.writer_count,
+        "Std RwLock: writer starvation detected"
+    );
 
     compare_fairness_results(&async_result, &std_result)
         .expect("No starvation fairness conformance check failed");

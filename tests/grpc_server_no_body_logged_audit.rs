@@ -190,10 +190,8 @@ fn known_eprintln_at_server_rs_156_does_not_log_body_content() {
     // violation (runtime must not write to stdio). Documented as
     // a separate audit follow-up; orthogonal to body-logging.
     let manifest_dir = env!("CARGO_MANIFEST_DIR");
-    let server_rs = std::fs::read_to_string(
-        Path::new(manifest_dir).join("src/grpc/server.rs"),
-    )
-    .expect("read src/grpc/server.rs");
+    let server_rs = std::fs::read_to_string(Path::new(manifest_dir).join("src/grpc/server.rs"))
+        .expect("read src/grpc/server.rs");
 
     // The known-clean format string. A regression that altered it
     // to log body content would surface here.

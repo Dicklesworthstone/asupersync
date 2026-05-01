@@ -6,18 +6,20 @@
 //! - Consistent poison detection and error handling
 //! - Proper panic propagation and poison state persistence
 
-use asupersync::sync::mutex::{Mutex as AsupersyncMutex, LockError, TryLockError as AsupersyncTryLockError};
 use asupersync::cx::Cx;
-use asupersync::types::{RegionId, TaskId, Budget};
+use asupersync::sync::mutex::{
+    LockError, Mutex as AsupersyncMutex, TryLockError as AsupersyncTryLockError,
+};
+use asupersync::types::{Budget, RegionId, TaskId};
 use asupersync::util::ArenaIndex;
-use std::sync::{Arc, Mutex as StdMutex, PoisonError, TryLockError as StdTryLockError};
-use std::thread;
-use std::time::Duration;
-use std::panic::{catch_unwind, AssertUnwindSafe};
 use futures::task::noop_waker;
 use std::future::Future;
+use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::pin::Pin;
+use std::sync::{Arc, Mutex as StdMutex, PoisonError, TryLockError as StdTryLockError};
 use std::task::{Context, Poll};
+use std::thread;
+use std::time::Duration;
 
 /// Result of a mutex poison conformance test comparing both implementations.
 #[derive(Debug, Clone, PartialEq)]
@@ -118,9 +120,7 @@ impl PoisonConformanceContext {
         });
 
         // Wait for thread and catch panic
-        let panic_result = catch_unwind(AssertUnwindSafe(|| {
-            handle.join()
-        }));
+        let panic_result = catch_unwind(AssertUnwindSafe(|| handle.join()));
 
         if should_panic {
             assert!(panic_result.is_err(), "Thread should have panicked");
@@ -150,7 +150,7 @@ impl PoisonConformanceContext {
                 Poll::Ready(Err(LockError::Poisoned)) => true,
                 Poll::Ready(Ok(_)) => false,
                 Poll::Ready(Err(_)) => false, // Other error types
-                Poll::Pending => false, // Would eventually succeed or fail
+                Poll::Pending => false,       // Would eventually succeed or fail
             }
         };
 
@@ -186,9 +186,7 @@ impl PoisonConformanceContext {
         });
 
         // Wait for thread and catch panic
-        let panic_result = catch_unwind(AssertUnwindSafe(|| {
-            handle.join()
-        }));
+        let panic_result = catch_unwind(AssertUnwindSafe(|| handle.join()));
 
         if should_panic {
             assert!(panic_result.is_err(), "Thread should have panicked");
@@ -223,32 +221,23 @@ impl PoisonConformanceContext {
 fn assert_poison_conformance(result: &PoisonConformanceResult, test_name: &str) {
     // Both should have identical poison state
     assert_eq!(
-        result.asupersync_poisoned,
-        result.std_poisoned,
+        result.asupersync_poisoned, result.std_poisoned,
         "{}: Poison state differs: asupersync={}, std={}",
-        test_name,
-        result.asupersync_poisoned,
-        result.std_poisoned
+        test_name, result.asupersync_poisoned, result.std_poisoned
     );
 
     // Both should have identical next lock behavior
     assert_eq!(
-        result.asupersync_next_lock_error,
-        result.std_next_lock_error,
+        result.asupersync_next_lock_error, result.std_next_lock_error,
         "{}: Next lock error behavior differs: asupersync={}, std={}",
-        test_name,
-        result.asupersync_next_lock_error,
-        result.std_next_lock_error
+        test_name, result.asupersync_next_lock_error, result.std_next_lock_error
     );
 
     // Both should have identical try_lock behavior
     assert_eq!(
-        result.asupersync_try_lock_error,
-        result.std_try_lock_error,
+        result.asupersync_try_lock_error, result.std_try_lock_error,
         "{}: Try lock error behavior differs: asupersync={}, std={}",
-        test_name,
-        result.asupersync_try_lock_error,
-        result.std_try_lock_error
+        test_name, result.asupersync_try_lock_error, result.std_try_lock_error
     );
 
     // If poison should have occurred, verify it did

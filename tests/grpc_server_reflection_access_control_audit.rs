@@ -184,8 +184,11 @@ fn with_auth_callback_can_reject() {
     // Pin (a) Required arm: an installed callback that returns
     // Err produces a PermissionDenied (or whatever Status the
     // callback returns) — the callback's verdict is propagated.
-    let reflection = ReflectionService::new()
-        .with_auth(|_cx, _method| Err(asupersync::grpc::Status::permission_denied("denied by callback")));
+    let reflection = ReflectionService::new().with_auth(|_cx, _method| {
+        Err(asupersync::grpc::Status::permission_denied(
+            "denied by callback",
+        ))
+    });
 
     // Note: Cx::current() is None in this test context. The
     // check_auth function fail-closes with Unauthenticated when

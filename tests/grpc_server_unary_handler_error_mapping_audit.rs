@@ -84,12 +84,18 @@ impl RecorderInterceptor {
 
 impl Interceptor for RecorderInterceptor {
     fn intercept_request(&self, _request: &mut Request<Bytes>) -> Result<(), Status> {
-        self.log.lock().unwrap().push(format!("{}-request", self.name));
+        self.log
+            .lock()
+            .unwrap()
+            .push(format!("{}-request", self.name));
         Ok(())
     }
 
     fn intercept_response(&self, _response: &mut Response<Bytes>) -> Result<(), Status> {
-        self.log.lock().unwrap().push(format!("{}-response", self.name));
+        self.log
+            .lock()
+            .unwrap()
+            .push(format!("{}-response", self.name));
         Ok(())
     }
 
@@ -98,7 +104,10 @@ impl Interceptor for RecorderInterceptor {
         _request: &Request<Bytes>,
         _response: &mut Response<Bytes>,
     ) -> Result<(), Status> {
-        self.log.lock().unwrap().push(format!("{}-response_with_request", self.name));
+        self.log
+            .lock()
+            .unwrap()
+            .push(format!("{}-response_with_request", self.name));
         Ok(())
     }
 
@@ -107,7 +116,10 @@ impl Interceptor for RecorderInterceptor {
         _request: &Request<Bytes>,
         status: &mut Status,
     ) -> Result<(), Status> {
-        self.log.lock().unwrap().push(format!("{}-error", self.name));
+        self.log
+            .lock()
+            .unwrap()
+            .push(format!("{}-error", self.name));
         if let Some(repl) = &self.error_replacement {
             return Err(repl.clone());
         }
@@ -149,14 +161,8 @@ fn handler_error_propagates_unchanged_when_no_replacing_interceptor() {
     let entries = log.lock().unwrap().clone();
     // Every prior layer must have seen its request-side hook
     // AND its error-side hook (in reverse order).
-    let request_hooks: Vec<&String> = entries
-        .iter()
-        .filter(|s| s.ends_with("-request"))
-        .collect();
-    let error_hooks: Vec<&String> = entries
-        .iter()
-        .filter(|s| s.ends_with("-error"))
-        .collect();
+    let request_hooks: Vec<&String> = entries.iter().filter(|s| s.ends_with("-request")).collect();
+    let error_hooks: Vec<&String> = entries.iter().filter(|s| s.ends_with("-error")).collect();
     assert_eq!(
         request_hooks.len(),
         2,

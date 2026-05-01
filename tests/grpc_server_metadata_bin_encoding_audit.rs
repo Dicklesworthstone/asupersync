@@ -64,16 +64,13 @@ fn binary_metadata_round_trips_through_trailer_codec() {
     // bytes that ASCII can't represent) round-trips exactly.
     let original_bytes: Vec<u8> = (0u8..=255u8).collect(); // every byte value
     let mut metadata = Metadata::new();
-    assert!(metadata.insert_bin(
-        "trace-bin",
-        Bytes::from(original_bytes.clone()),
-    ));
+    assert!(metadata.insert_bin("trace-bin", Bytes::from(original_bytes.clone()),));
 
     let mut buf = BytesMut::new();
     encode_trailers(&Status::ok(), &metadata, &mut buf);
 
-    let decoded = decode_trailers(&buf[FRAME_HEADER_SIZE..])
-        .expect("trailers with -bin metadata decode");
+    let decoded =
+        decode_trailers(&buf[FRAME_HEADER_SIZE..]).expect("trailers with -bin metadata decode");
     let recovered = decoded
         .metadata
         .get("trace-bin")
@@ -193,17 +190,14 @@ fn binary_value_with_padding_round_trips() {
     // tightened to no-padding mode would reject standard
     // encodings.
     let cases = [
-        vec![0x00],             // 1 byte → "AA==" (2 pad chars)
-        vec![0x00, 0x01],       // 2 bytes → "AAE=" (1 pad char)
-        vec![0x00, 0x01, 0x02], // 3 bytes → "AAEC" (no pad)
+        vec![0x00],                   // 1 byte → "AA==" (2 pad chars)
+        vec![0x00, 0x01],             // 2 bytes → "AAE=" (1 pad char)
+        vec![0x00, 0x01, 0x02],       // 3 bytes → "AAEC" (no pad)
         vec![0x00, 0x01, 0x02, 0x03], // 4 bytes → "AAECAw==" (2 pad)
     ];
     for original in cases {
         let mut metadata = Metadata::new();
-        assert!(metadata.insert_bin(
-            "round-trip-bin",
-            Bytes::from(original.clone()),
-        ));
+        assert!(metadata.insert_bin("round-trip-bin", Bytes::from(original.clone()),));
         let mut buf = BytesMut::new();
         encode_trailers(&Status::ok(), &metadata, &mut buf);
         let decoded = decode_trailers(&buf[FRAME_HEADER_SIZE..]).expect("decode");
@@ -234,7 +228,10 @@ fn bin_suffix_routes_value_through_binary_path() {
     let mut buf = BytesMut::new();
     encode_trailers(&Status::ok(), &metadata, &mut buf);
     let decoded = decode_trailers(&buf[FRAME_HEADER_SIZE..]).expect("decode");
-    let value = decoded.metadata.get("route-bin").expect("route-bin present");
+    let value = decoded
+        .metadata
+        .get("route-bin")
+        .expect("route-bin present");
     match value {
         MetadataValue::Binary(b) => {
             assert_eq!(b.as_ref(), &payload[..]);
@@ -252,9 +249,7 @@ fn ascii_value_with_high_bit_bytes_stripped_at_insert() {
     // insert. The bytes never travel on the wire as part
     // of an ASCII trailer.
     let mut metadata = Metadata::new();
-    let value_with_high_bit: String = (32u8..255u8)
-        .map(|b| char::from(b))
-        .collect();
+    let value_with_high_bit: String = (32u8..255u8).map(|b| char::from(b)).collect();
     assert!(metadata.insert("x-mixed", value_with_high_bit.as_str()));
 
     match metadata.get("x-mixed") {

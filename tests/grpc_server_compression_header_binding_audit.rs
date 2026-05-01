@@ -126,8 +126,7 @@ fn codec_poisoned_after_compression_tampering_rejects_subsequent_frames() {
         .expect_err("post-poison decode must reject");
     let err_str = format!("{err:?}");
     assert!(
-        err_str.to_lowercase().contains("poison")
-            || err_str.to_lowercase().contains("protocol"),
+        err_str.to_lowercase().contains("poison") || err_str.to_lowercase().contains("protocol"),
         "post-poison error must mention poisoned state; got {err_str}",
     );
 }
@@ -187,10 +186,9 @@ fn content_type_allowlist_pins_application_grpc_family() {
     // Public-API-level pin: the allowlist is documented in the
     // server.rs module. Pin via grep-equivalent string presence.
     let manifest_dir = env!("CARGO_MANIFEST_DIR");
-    let server_rs = std::fs::read_to_string(
-        std::path::Path::new(manifest_dir).join("src/grpc/server.rs"),
-    )
-    .expect("read server.rs");
+    let server_rs =
+        std::fs::read_to_string(std::path::Path::new(manifest_dir).join("src/grpc/server.rs"))
+            .expect("read server.rs");
     assert!(
         server_rs.contains("matches_media_type_prefix(value.trim(), \"application/grpc\")")
             || server_rs.contains("application/grpc"),
@@ -210,10 +208,9 @@ fn te_header_must_be_trailers_for_grpc() {
     // validator helper's documented behavior captured in
     // server.rs source.
     let manifest_dir = env!("CARGO_MANIFEST_DIR");
-    let server_rs = std::fs::read_to_string(
-        std::path::Path::new(manifest_dir).join("src/grpc/server.rs"),
-    )
-    .expect("read server.rs");
+    let server_rs =
+        std::fs::read_to_string(std::path::Path::new(manifest_dir).join("src/grpc/server.rs"))
+            .expect("read server.rs");
     assert!(
         server_rs.contains("te must be trailers for gRPC over HTTP/2"),
         "TE validator must enforce trailers-only and surface a \

@@ -68,8 +68,7 @@ fn compression_encoding_as_header_value_is_lowercase() {
     // API surfaces the canonical form.
     let canonical = ["identity", "gzip"];
     for c in canonical {
-        let parsed = CompressionEncoding::from_header_value(c)
-            .expect("canonical lowercase parses");
+        let parsed = CompressionEncoding::from_header_value(c).expect("canonical lowercase parses");
         // Round-trip pin: parse → variant → use it as a marker.
         match (c, parsed) {
             ("identity", CompressionEncoding::Identity) => {}
@@ -85,10 +84,7 @@ fn compression_encoding_variants_are_distinct() {
     // must distinguish them. A regression that conflated them
     // (e.g. via a single global encoding) would break the
     // per-message compressed_flag contract (tick #176).
-    assert_ne!(
-        CompressionEncoding::Identity,
-        CompressionEncoding::Gzip,
-    );
+    assert_ne!(CompressionEncoding::Identity, CompressionEncoding::Gzip,);
 }
 
 #[test]

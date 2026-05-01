@@ -69,8 +69,8 @@
 //! an intentional re-baseline AND a re-audit of the trust model.
 
 use asupersync::bytes::Bytes;
-use asupersync::grpc::{Interceptor, TracingInterceptor};
 use asupersync::grpc::streaming::{Metadata, MetadataValue, Request};
+use asupersync::grpc::{Interceptor, TracingInterceptor};
 
 #[test]
 fn metadata_insert_strips_crlf_in_x_request_id() {

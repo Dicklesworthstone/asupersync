@@ -67,9 +67,7 @@ fn rst_stream_cancel_code_maps_to_status_cancelled() {
     // production transport adapter calls cancel_with_error
     // with the mapped Status).
     let mut stream = StreamingRequest::<u32>::open();
-    stream.cancel_with_error(Status::cancelled(
-        "Received RST_STREAM with code CANCEL",
-    ));
+    stream.cancel_with_error(Status::cancelled("Received RST_STREAM with code CANCEL"));
 
     let waker = null_waker();
     let mut cx = Context::from_waker(&waker);
@@ -232,9 +230,7 @@ fn rst_stream_status_is_idempotent_on_repeated_poll() {
                     "poll round {poll_round} must surface Cancelled idempotently",
                 );
             }
-            other => panic!(
-                "round {poll_round}: expected Cancelled Err, got {other:?}",
-            ),
+            other => panic!("round {poll_round}: expected Cancelled Err, got {other:?}",),
         }
     }
 }

@@ -88,7 +88,7 @@ fn negotiation_rejects_non_grpc_web_content_types() {
     // Pin (c): the content-type whitelist is strict — anything
     // outside the application/grpc-web family returns false.
     let rejected = [
-        "application/grpc",       // standard gRPC over HTTP/2 — NOT gRPC-Web
+        "application/grpc", // standard gRPC over HTTP/2 — NOT gRPC-Web
         "application/json",
         "text/plain",
         "application/octet-stream",

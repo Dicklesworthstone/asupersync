@@ -69,9 +69,7 @@
 use asupersync::bytes::Bytes;
 use asupersync::grpc::status::Code;
 use asupersync::grpc::streaming::{Metadata, Request, Response};
-use asupersync::grpc::{
-    Interceptor, InterceptorLayer, RateLimitInterceptor, Status,
-};
+use asupersync::grpc::{Interceptor, InterceptorLayer, RateLimitInterceptor, Status};
 
 #[test]
 fn rate_limit_slot_releases_on_success_path() {
@@ -177,10 +175,7 @@ fn rate_limit_under_layer_cleanup_walks_back_through_acquired_interceptors() {
 
     let mut request = Request::with_metadata(Bytes::new(), Metadata::new());
     let result = layer.intercept_request(&mut request);
-    assert!(
-        result.is_err(),
-        "second layer rejects → overall layer Err",
-    );
+    assert!(result.is_err(), "second layer rejects → overall layer Err",);
     assert_eq!(
         limiter.current_count(),
         0,
@@ -277,8 +272,8 @@ fn handler_owned_resources_drop_when_dispatch_future_dropped() {
     // once.
     use std::future::Future;
     use std::pin::Pin;
-    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::task::{Context, Poll};
 
     struct DropCounter(Arc<AtomicUsize>);

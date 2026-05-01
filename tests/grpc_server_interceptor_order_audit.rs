@@ -60,11 +60,11 @@
 
 use asupersync::bytes::Bytes;
 use asupersync::grpc::interceptor::LoggingInterceptor;
+use asupersync::grpc::streaming::{Metadata, MetadataValue, Request};
 use asupersync::grpc::{
     BearerAuthInterceptor, Interceptor, InterceptorLayer, TracingInterceptor,
     auth_bearer_interceptor, logging_interceptor, trace_interceptor,
 };
-use asupersync::grpc::streaming::{Metadata, MetadataValue, Request};
 
 #[test]
 fn built_in_logging_interceptor_does_not_emit_log_lines() {
@@ -84,8 +84,7 @@ fn built_in_logging_interceptor_does_not_emit_log_lines() {
     assert!(metadata.insert("authorization", "Bearer secret-token-do-not-log"));
     let mut request = Request::with_metadata(Bytes::new(), metadata);
 
-    Interceptor::intercept_request(&logger, &mut request)
-        .expect("intercept_request must Ok");
+    Interceptor::intercept_request(&logger, &mut request).expect("intercept_request must Ok");
 
     // Authorization header is UNCHANGED — interceptor read nothing.
     match request.metadata().get("authorization") {

@@ -158,8 +158,7 @@ fn propagate_timeout_to_clamps_child_to_parent_remaining() {
         Some(MetadataValue::Ascii(s)) => s.clone(),
         other => panic!("expected Ascii, got {other:?}"),
     };
-    let parsed = parse_grpc_timeout(&actual)
-        .expect("propagated timeout must be parseable");
+    let parsed = parse_grpc_timeout(&actual).expect("propagated timeout must be parseable");
     assert!(
         parsed <= Duration::from_millis(100),
         "child timeout must be clamped to parent's 100 ms; got {parsed:?}",
@@ -202,13 +201,7 @@ fn max_request_deadline_clamps_peer_huge_timeout() {
     assert!(metadata.insert("grpc-timeout", "99999999H")); // ~11,400 years
 
     let cap = Duration::from_secs(30);
-    let cx = CallContext::from_metadata_at_with_max_deadline(
-        metadata,
-        None,
-        Some(cap),
-        None,
-        now,
-    );
+    let cx = CallContext::from_metadata_at_with_max_deadline(metadata, None, Some(cap), None, now);
 
     let deadline = cx.deadline().unwrap();
     let effective = deadline.saturating_duration_since(now);
@@ -258,8 +251,7 @@ fn format_then_parse_grpc_timeout_round_trips() {
         Duration::ZERO,
     ] {
         let formatted = format_grpc_timeout(original);
-        let parsed = parse_grpc_timeout(&formatted)
-            .expect("format/parse must round-trip");
+        let parsed = parse_grpc_timeout(&formatted).expect("format/parse must round-trip");
         // Allow lossy round-trip — format quantizes to gRPC
         // timeout units. The error must be small.
         let diff = if parsed >= original {

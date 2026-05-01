@@ -150,11 +150,17 @@ fn k2048_large_k_matches_raptorq_rs() {
     let decoder = InactivationDecoder::new(k, symbol_size, seed);
     let params = decoder.params();
     assert_eq!(params.k, 2048, "K=2048 decoder must preserve K");
-    assert_eq!(params.k_prime, 2070, "K=2048 decoder must pin the rounded RFC row");
+    assert_eq!(
+        params.k_prime, 2070,
+        "K=2048 decoder must pin the rounded RFC row"
+    );
     assert_eq!(params.j, 506, "K=2048 decoder must pin the RFC J(K') value");
     assert_eq!(params.s, 89, "K=2048 decoder must pin the RFC S(K') value");
     assert_eq!(params.h, 11, "K=2048 decoder must pin the RFC H(K') value");
-    assert_eq!(params.w, 2099, "K=2048 decoder must pin the RFC W(K') value");
+    assert_eq!(
+        params.w, 2099,
+        "K=2048 decoder must pin the RFC W(K') value"
+    );
     assert_eq!(params.l, 2170, "K=2048 decoder must pin the RFC L value");
     assert_eq!(params.b, 2010, "K=2048 decoder must pin the RFC B value");
 

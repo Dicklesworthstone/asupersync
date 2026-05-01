@@ -128,9 +128,7 @@ fn response_stream_cancel_is_abrupt_discards_buffered_items() {
             assert_eq!(s.code(), Code::Cancelled);
             assert!(s.message().contains("abrupt cancel"));
         }
-        other => panic!(
-            "abrupt cancel must surface BEFORE any buffered item — got {other:?}",
-        ),
+        other => panic!("abrupt cancel must surface BEFORE any buffered item — got {other:?}",),
     }
 }
 
@@ -243,8 +241,8 @@ fn cancel_idempotent_first_status_wins_on_streaming_request() {
 fn drop_after_cancel_releases_all_buffered_items_streaming_request() {
     // Pin (c) on StreamingRequest: dropping the stream after
     // cancel runs every buffered item's Drop impl exactly once.
-    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     struct DropCounter(Arc<AtomicUsize>);
     impl Drop for DropCounter {
@@ -277,8 +275,8 @@ fn drop_after_abrupt_cancel_releases_buffered_items_response_stream() {
     // explicitly clears `state.items` (client.rs:864 — `if
     // discard_buffered { state.items.clear(); }`). After that
     // call, every previously-buffered item has been dropped.
-    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     struct DropCounter(Arc<AtomicUsize>);
     impl Drop for DropCounter {

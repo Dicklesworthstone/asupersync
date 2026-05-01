@@ -115,10 +115,7 @@ fn metadata_insert_rejects_disallowed_chars_in_key() {
 fn metadata_insert_rejects_empty_key() {
     // Pin (b): empty key rejected.
     let mut metadata = Metadata::new();
-    assert!(
-        !metadata.insert("", "value"),
-        "empty key must be rejected",
-    );
+    assert!(!metadata.insert("", "value"), "empty key must be rejected",);
 }
 
 #[test]
@@ -154,10 +151,7 @@ fn metadata_insert_bin_keeps_existing_bin_suffix() {
     // Pin (d) extension: a binary key that already ends in
     // `-bin` is NOT double-suffixed.
     let mut metadata = Metadata::new();
-    assert!(metadata.insert_bin(
-        "trace-bin",
-        asupersync::bytes::Bytes::from_static(b"\x01"),
-    ));
+    assert!(metadata.insert_bin("trace-bin", asupersync::bytes::Bytes::from_static(b"\x01"),));
     assert!(metadata.get("trace-bin").is_some());
     assert!(metadata.get("trace-bin-bin").is_none()); // NOT double-suffixed
 }

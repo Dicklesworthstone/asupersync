@@ -73,11 +73,11 @@ fn from_header_value_rejects_known_attack_vectors() {
     let unknown_encodings = [
         // Spec-known but unsupported in asupersync
         "deflate",
-        "br",        // Brotli
-        "zstd",      // Zstandard
+        "br",   // Brotli
+        "zstd", // Zstandard
         "snappy",
         "lz4",
-        "compress",  // legacy HTTP encoding
+        "compress", // legacy HTTP encoding
         // Case variations — must be case-sensitive per gRPC spec
         "GZIP",
         "Gzip",
@@ -207,8 +207,8 @@ fn unknown_encoding_string_must_not_match_any_variant() {
     // returned — even partial-prefix or suffix matches reject.
     let cases = [
         ("identity", true, "Identity"),
-        ("identityx", false, ""),       // suffix
-        ("xidentity", false, ""),       // prefix
+        ("identityx", false, ""), // suffix
+        ("xidentity", false, ""), // prefix
         ("gzip", true, "Gzip"),
         ("gzipx", false, ""),
         ("gzip2", false, ""),

@@ -50,8 +50,8 @@
 //! Regression tests below pin (a)+(b)+(c)+(d).
 
 use asupersync::bytes::Bytes;
-use asupersync::grpc::status::{Code, MAX_STATUS_MESSAGE_LEN};
 use asupersync::grpc::Status;
+use asupersync::grpc::status::{Code, MAX_STATUS_MESSAGE_LEN};
 use std::path::Path;
 
 /// Tokens that, if found inside a `Status::internal(...)` call
@@ -246,11 +246,7 @@ fn status_with_details_caps_message_and_details() {
     // of the two would let a leak through the other channel.
     let oversize_msg = "M".repeat(16 * 1024);
     let oversize_details = vec![b'D'; 256 * 1024];
-    let status = Status::with_details(
-        Code::Internal,
-        oversize_msg,
-        Bytes::from(oversize_details),
-    );
+    let status = Status::with_details(Code::Internal, oversize_msg, Bytes::from(oversize_details));
     assert!(
         status.message().len() <= MAX_STATUS_MESSAGE_LEN,
         "with_details message cap not enforced",

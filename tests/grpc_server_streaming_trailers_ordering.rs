@@ -87,10 +87,7 @@ fn finish_with_metadata_drains_items_before_emitting_trailer_status() {
     for i in 0..5 {
         stream.push(Ok(i)).expect("push");
     }
-    stream.finish_with_metadata(
-        Status::new(Code::Internal, "boom"),
-        Metadata::new(),
-    );
+    stream.finish_with_metadata(Status::new(Code::Internal, "boom"), Metadata::new());
 
     let drained = drain(&mut stream);
     assert_eq!(drained.len(), 6, "5 items + 1 terminal status");
@@ -130,10 +127,7 @@ fn finish_with_metadata_with_ok_status_still_emits_trailer_after_items() {
     for i in 0..3 {
         stream.push(Ok(i)).expect("push");
     }
-    stream.finish_with_metadata(
-        Status::new(Code::Ok, ""),
-        Metadata::new(),
-    );
+    stream.finish_with_metadata(Status::new(Code::Ok, ""), Metadata::new());
 
     let drained = drain(&mut stream);
     assert_eq!(drained.len(), 4, "3 items + 1 terminal Ok-trailer");
@@ -164,10 +158,7 @@ fn cancel_with_metadata_discards_buffered_items_per_abrupt_semantic() {
     for i in 0..5 {
         stream.push(Ok(i)).expect("push");
     }
-    stream.cancel_with_metadata(
-        Status::new(Code::Cancelled, "abrupt"),
-        Metadata::new(),
-    );
+    stream.cancel_with_metadata(Status::new(Code::Cancelled, "abrupt"), Metadata::new());
 
     let drained = drain(&mut stream);
     // Per cancel_with_metadata's doc:
@@ -196,7 +187,11 @@ fn close_yields_graceful_none_terminator_after_buffered_items() {
     stream.close();
 
     let drained = drain(&mut stream);
-    assert_eq!(drained.len(), 2, "items only — no trailer on graceful close");
+    assert_eq!(
+        drained.len(),
+        2,
+        "items only — no trailer on graceful close"
+    );
     for (i, result) in drained.iter().enumerate() {
         assert_eq!(result.as_ref().ok().copied(), Some(i as u32));
     }
@@ -235,10 +230,7 @@ fn finish_after_partial_drain_still_appends_trailer_after_remaining_items() {
     assert_eq!(early, vec![0, 1, 2]);
 
     // Handler errors NOW with 3 items still in the buffer.
-    stream.finish_with_metadata(
-        Status::new(Code::Aborted, "mid-stream"),
-        Metadata::new(),
-    );
+    stream.finish_with_metadata(Status::new(Code::Aborted, "mid-stream"), Metadata::new());
 
     // Drain: remaining 3 items first, THEN the trailer status.
     let drained = drain(&mut stream);
@@ -269,10 +261,7 @@ fn finish_terminal_metadata_is_observable_after_drain() {
     let mut trailing = Metadata::new();
     let _ = trailing.insert("x-tenant", "acme");
     let _ = trailing.insert("x-trace-id", "trace-123");
-    stream.finish_with_metadata(
-        Status::new(Code::Ok, ""),
-        trailing.clone(),
-    );
+    stream.finish_with_metadata(Status::new(Code::Ok, ""), trailing.clone());
 
     let _drained = drain(&mut stream);
     let observed = stream.terminal_metadata();
@@ -294,15 +283,9 @@ fn first_terminal_wins_double_finish_does_not_overwrite() {
     // contract is that the terminal trailer is sent exactly once.
     let mut stream = ResponseStream::<u32>::open();
     stream.push(Ok(1)).expect("push");
-    stream.finish_with_metadata(
-        Status::new(Code::Ok, "first"),
-        Metadata::new(),
-    );
+    stream.finish_with_metadata(Status::new(Code::Ok, "first"), Metadata::new());
     // Second call: must be a no-op on the terminal.
-    stream.finish_with_metadata(
-        Status::new(Code::Internal, "second"),
-        Metadata::new(),
-    );
+    stream.finish_with_metadata(Status::new(Code::Internal, "second"), Metadata::new());
 
     let drained = drain(&mut stream);
     assert_eq!(drained.len(), 2);

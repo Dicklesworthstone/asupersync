@@ -64,8 +64,8 @@ fn collect_rs_files(root: &Path) -> Vec<PathBuf> {
     let mut out = Vec::new();
     let mut stack = vec![root.to_path_buf()];
     while let Some(dir) = stack.pop() {
-        let entries = std::fs::read_dir(&dir)
-            .unwrap_or_else(|e| panic!("read_dir({}): {e}", dir.display()));
+        let entries =
+            std::fs::read_dir(&dir).unwrap_or_else(|e| panic!("read_dir({}): {e}", dir.display()));
         for entry in entries.flatten() {
             let path = entry.path();
             let file_type = match entry.file_type() {
@@ -116,8 +116,7 @@ fn find_production_allow_anonymous_lines(src: &str) -> Vec<(usize, String)> {
                     p == "#[cfg(test)]" || p.starts_with("#[cfg(test)]")
                 })
                 .unwrap_or(false);
-        let entering_test_mod_via_prev_attr =
-            prev_line_has_test_attr && line.starts_with("mod ");
+        let entering_test_mod_via_prev_attr = prev_line_has_test_attr && line.starts_with("mod ");
 
         if entering_test_mod || entering_test_mod_via_prev_attr {
             // Wait for the `{` that opens the module body.
@@ -235,9 +234,10 @@ fn reflection_service_documents_anonymous_as_dev_only() {
     // would weaken the audit boundary's intent — the API is
     // safe-by-design only as long as the documented contract
     // sticks.
-    let reflection_rs =
-        std::fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("src/grpc/reflection.rs"))
-            .expect("read src/grpc/reflection.rs");
+    let reflection_rs = std::fs::read_to_string(
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("src/grpc/reflection.rs"),
+    )
+    .expect("read src/grpc/reflection.rs");
     assert!(
         reflection_rs.contains("Do not use in production"),
         "reflection.rs must keep the 'Do not use in production' caveat \

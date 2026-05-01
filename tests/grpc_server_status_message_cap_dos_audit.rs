@@ -39,8 +39,8 @@
 //! Regression tests below pin (a)-(e).
 
 use asupersync::bytes::Bytes;
-use asupersync::grpc::status::{Code, MAX_STATUS_MESSAGE_LEN};
 use asupersync::grpc::Status;
+use asupersync::grpc::status::{Code, MAX_STATUS_MESSAGE_LEN};
 
 const MAX_DETAILS_LEN: usize = 64 * 1024;
 
@@ -178,11 +178,7 @@ fn status_at_exact_cap_passes_through_unchanged() {
         MAX_STATUS_MESSAGE_LEN,
         "at-cap message preserved at full length",
     );
-    assert_eq!(
-        status.message(),
-        exact.as_str(),
-        "at-cap content unchanged",
-    );
+    assert_eq!(status.message(), exact.as_str(), "at-cap content unchanged",);
 }
 
 #[test]
@@ -201,11 +197,7 @@ fn details_at_exact_cap_passes_through_unchanged() {
     // Pin (c) boundary: details AT exactly MAX_DETAILS_LEN
     // pass through.
     let at_cap = vec![b'D'; MAX_DETAILS_LEN];
-    let status = Status::with_details(
-        Code::Internal,
-        "msg",
-        Bytes::from(at_cap),
-    );
+    let status = Status::with_details(Code::Internal, "msg", Bytes::from(at_cap));
     assert_eq!(
         status.details().map(|b| b.len()).unwrap_or(0),
         MAX_DETAILS_LEN,

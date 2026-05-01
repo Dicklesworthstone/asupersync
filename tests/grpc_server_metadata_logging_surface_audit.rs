@@ -127,8 +127,7 @@ fn no_production_log_macro_references_sensitive_metadata_tokens() {
                 brace_at_test_entry.get_or_insert(current_brace);
             }
 
-            current_brace += line.matches('{').count() as i32
-                - line.matches('}').count() as i32;
+            current_brace += line.matches('{').count() as i32 - line.matches('}').count() as i32;
 
             if let Some(entry_depth) = brace_at_test_entry {
                 if current_brace <= entry_depth {
@@ -219,10 +218,8 @@ fn health_rs_post_fix_does_not_log_token_prefix() {
     // direct grep — a regression that re-introduced
     // `token_prefix` in this exact file would trip.
     let manifest_dir = env!("CARGO_MANIFEST_DIR");
-    let health_rs = std::fs::read_to_string(
-        Path::new(manifest_dir).join("src/grpc/health.rs"),
-    )
-    .expect("read src/grpc/health.rs");
+    let health_rs = std::fs::read_to_string(Path::new(manifest_dir).join("src/grpc/health.rs"))
+        .expect("read src/grpc/health.rs");
 
     // Filter out cfg(test) blocks crudely — find the first
     // `#[cfg(test)]` and ignore everything after.
@@ -246,10 +243,8 @@ fn health_rs_keeps_auth_scheme_static_log() {
     // documented post-fix line is present so a future revert
     // would trip this test.
     let manifest_dir = env!("CARGO_MANIFEST_DIR");
-    let health_rs = std::fs::read_to_string(
-        Path::new(manifest_dir).join("src/grpc/health.rs"),
-    )
-    .expect("read src/grpc/health.rs");
+    let health_rs = std::fs::read_to_string(Path::new(manifest_dir).join("src/grpc/health.rs"))
+        .expect("read src/grpc/health.rs");
 
     assert!(
         health_rs.contains("auth_scheme = \"Bearer\""),
