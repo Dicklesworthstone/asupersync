@@ -27,8 +27,8 @@ use asupersync::messaging::redis::{
     PubSubEvent, PubSubMessage, PubSubSubscriptionKind, RedisProtocolLimits, RespValue,
     decode_resp_value_for_fuzz, parse_acl_for_fuzz, parse_client_kill_for_fuzz,
     parse_client_tracking_push_for_fuzz, parse_cluster_command_for_fuzz, parse_latency_for_fuzz,
-    parse_pubsub_event_for_fuzz, parse_script_eval_for_fuzz, parse_slowlog_for_fuzz,
-    parse_zadd_for_fuzz, parse_zrangebyscore_for_fuzz,
+    parse_pubsub_event_for_fuzz, parse_resp3_non_pubsub_push_for_fuzz, parse_script_eval_for_fuzz,
+    parse_slowlog_for_fuzz, parse_zadd_for_fuzz, parse_zrangebyscore_for_fuzz,
 };
 
 const MAX_STRUCTURED_FIELD_BYTES: usize = 96;
@@ -460,6 +460,46 @@ fn exercise_client_tracking_push_parser(data: &[u8]) {
     assert!(
         parse_client_tracking_push_for_fuzz(pubsub_shape).is_err(),
         "RESP2 redirect pubsub messages are not RESP3 tracking pushes"
+    );
+}
+
+fn exercise_resp3_non_pubsub_push_parser(data: &[u8]) {
+    let payload = &data[..data.len().min(MAX_STRUCTURED_FIELD_BYTES)];
+
+    let generic_push = RespValue::Push(vec![
+        RespValue::BulkString(Some(b"server-event".to_vec())),
+        RespValue::BulkString(Some(payload.to_vec())),
+        RespValue::Integer(i64::try_from(payload.len()).expect("bounded payload length fits i64")),
+    ]);
+    let encoded = generic_push.encode();
+    assert_eq!(encoded.first(), Some(&b'>'));
+    let decoded = RespValue::try_decode(&encoded)
+        .expect("generic RESP3 push should decode")
+        .expect("encoded generic RESP3 push should be complete");
+    assert_eq!(decoded.0, generic_push);
+    let _ = parse_resp3_non_pubsub_push_for_fuzz(decoded.0)
+        .expect("generic non-pubsub RESP3 push should parse");
+
+    let tracking_push = RespValue::Push(vec![
+        RespValue::BulkString(Some(b"invalidate".to_vec())),
+        RespValue::Array(Some(vec![RespValue::BulkString(Some(payload.to_vec()))])),
+    ]);
+    let _ = parse_resp3_non_pubsub_push_for_fuzz(tracking_push)
+        .expect("client tracking push should parse through non-pubsub seam");
+
+    let pubsub_push = RespValue::Push(vec![
+        RespValue::BulkString(Some(b"message".to_vec())),
+        RespValue::BulkString(Some(b"chan".to_vec())),
+        RespValue::BulkString(Some(payload.to_vec())),
+    ]);
+    assert!(
+        parse_resp3_non_pubsub_push_for_fuzz(pubsub_push).is_err(),
+        "pubsub RESP3 pushes must stay on the pubsub parser path"
+    );
+
+    assert!(
+        parse_resp3_non_pubsub_push_for_fuzz(RespValue::Push(vec![])).is_err(),
+        "empty RESP3 pushes must be rejected"
     );
 }
 
@@ -1283,7 +1323,10 @@ fuzz_target!(|data: &[u8]| {
     // Test 18: Redis CLIENT TRACKING RESP3 push parser seam
     exercise_client_tracking_push_parser(data);
 
-    // Test 19: Fragmented parsing simulation (partial buffer scenarios)
+    // Test 19: Redis RESP3 non-pubsub push parser seam
+    exercise_resp3_non_pubsub_push_parser(data);
+
+    // Test 20: Fragmented parsing simulation (partial buffer scenarios)
     if data.len() > 10 {
         for split_point in [1, data.len() / 4, data.len() / 2, data.len() - 1]
             .iter()
@@ -1304,7 +1347,7 @@ fuzz_target!(|data: &[u8]| {
         }
     }
 
-    // Test 20: Boundary value testing for limits
+    // Test 21: Boundary value testing for limits
     let boundary_limits = [
         RedisProtocolLimits {
             max_frame_size: data.len().saturating_sub(1).max(1),
