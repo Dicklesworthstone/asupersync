@@ -156,6 +156,7 @@ async fn wait_retry_delay(cx: &Cx, delay: Duration) -> Result<(), CancelReason> 
     .await
 }
 
+#[cfg(any(test, feature = "sqlite"))]
 async fn retry_with_policy<T, E, Op, OpFut, Pred>(
     cx: &Cx,
     policy: &RetryPolicy,
@@ -188,8 +189,8 @@ where
 #[cfg(feature = "postgres")]
 mod pg {
     use super::{
-        Cx, Future, Outcome, RetryPolicy, TransactionReplaySafety, retry_with_policy,
-        validate_savepoint_name,
+        Cx, Future, Outcome, RetryPolicy, TransactionReplaySafety, validate_savepoint_name,
+        wait_retry_delay,
     };
     use crate::database::postgres::{PgConnection, PgError, PgTransaction};
     use std::{cell::Cell, fmt};
@@ -274,22 +275,32 @@ mod pg {
         MkFut: Future<Output = Outcome<T, PgError>>,
     {
         let body_started = Cell::new(false);
-        retry_with_policy(
-            cx,
-            policy,
-            || {
-                body_started.set(false);
-                with_pg_transaction(conn, cx, |tx, tx_cx| {
-                    body_started.set(true);
-                    f(tx, tx_cx)
-                })
-            },
-            |err| {
-                err.is_serialization_failure()
-                    && (replay_safety == TransactionReplaySafety::ReplaySafe || !body_started.get())
-            },
-        )
-        .await
+        let mut attempt = 0u32;
+
+        loop {
+            body_started.set(false);
+            let result = with_pg_transaction(conn, cx, |tx, tx_cx| {
+                body_started.set(true);
+                f(tx, tx_cx)
+            })
+            .await;
+
+            match &result {
+                Outcome::Err(err)
+                    if err.is_serialization_failure()
+                        && (replay_safety == TransactionReplaySafety::ReplaySafe
+                            || !body_started.get())
+                        && attempt < policy.max_retries =>
+                {
+                    let delay = policy.delay_for(attempt);
+                    attempt += 1;
+                    if let Err(reason) = wait_retry_delay(cx, delay).await {
+                        return Outcome::Cancelled(reason);
+                    }
+                }
+                _ => return result,
+            }
+        }
     }
 
     /// A PostgreSQL savepoint within an active transaction.
@@ -664,8 +675,8 @@ pub use sqlite::{
 #[cfg(feature = "mysql")]
 mod mysql {
     use super::{
-        Cx, Future, Outcome, RetryPolicy, TransactionReplaySafety, retry_with_policy,
-        validate_savepoint_name,
+        Cx, Future, Outcome, RetryPolicy, TransactionReplaySafety, validate_savepoint_name,
+        wait_retry_delay,
     };
     use crate::database::mysql::{MySqlConnection, MySqlError, MySqlTransaction};
     use std::{cell::Cell, fmt};
@@ -741,22 +752,32 @@ mod mysql {
         MkFut: Future<Output = Outcome<T, MySqlError>>,
     {
         let body_started = Cell::new(false);
-        retry_with_policy(
-            cx,
-            policy,
-            || {
-                body_started.set(false);
-                with_mysql_transaction(conn, cx, |tx, tx_cx| {
-                    body_started.set(true);
-                    f(tx, tx_cx)
-                })
-            },
-            |err| {
-                err.is_deadlock()
-                    && (replay_safety == TransactionReplaySafety::ReplaySafe || !body_started.get())
-            },
-        )
-        .await
+        let mut attempt = 0u32;
+
+        loop {
+            body_started.set(false);
+            let result = with_mysql_transaction(conn, cx, |tx, tx_cx| {
+                body_started.set(true);
+                f(tx, tx_cx)
+            })
+            .await;
+
+            match &result {
+                Outcome::Err(err)
+                    if err.is_deadlock()
+                        && (replay_safety == TransactionReplaySafety::ReplaySafe
+                            || !body_started.get())
+                        && attempt < policy.max_retries =>
+                {
+                    let delay = policy.delay_for(attempt);
+                    attempt += 1;
+                    if let Err(reason) = wait_retry_delay(cx, delay).await {
+                        return Outcome::Cancelled(reason);
+                    }
+                }
+                _ => return result,
+            }
+        }
     }
 
     /// A MySQL savepoint within an active transaction.
