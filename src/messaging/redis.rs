@@ -3451,13 +3451,22 @@ fn bytes_eq_ignore_ascii_case(left: &[u8], right: &[u8]) -> bool {
 }
 
 #[cfg(any(test, feature = "test-internals"))]
-fn decode_command_arg(value: RespValue, label: &str) -> Result<Vec<u8>, RedisError> {
+fn decode_bulk_command_arg(
+    value: RespValue,
+    command: &str,
+    label: &str,
+) -> Result<Vec<u8>, RedisError> {
     match value {
         RespValue::BulkString(Some(bytes)) => Ok(bytes),
         other => Err(RedisError::Protocol(format!(
-            "SCRIPT EVAL {label} must be a non-null bulk string, got {other:?}"
+            "{command} {label} must be a non-null bulk string, got {other:?}"
         ))),
     }
+}
+
+#[cfg(any(test, feature = "test-internals"))]
+fn decode_command_arg(value: RespValue, label: &str) -> Result<Vec<u8>, RedisError> {
+    decode_bulk_command_arg(value, "SCRIPT EVAL", label)
 }
 
 #[cfg(any(test, feature = "test-internals"))]
@@ -3725,6 +3734,259 @@ pub fn parse_script_eval_for_fuzz(value: RespValue) -> Result<RedisScriptEvalCom
         keys,
         argv,
         lua,
+    })
+}
+
+#[cfg(any(test, feature = "test-internals"))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[doc(hidden)]
+pub enum RedisZaddInsertMode {
+    Upsert,
+    Nx,
+    Xx,
+}
+
+#[cfg(any(test, feature = "test-internals"))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[doc(hidden)]
+pub enum RedisZaddScoreMode {
+    Always,
+    GreaterThan,
+    LessThan,
+}
+
+#[cfg(any(test, feature = "test-internals"))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[doc(hidden)]
+pub struct RedisZaddOptions {
+    pub insert: RedisZaddInsertMode,
+    pub score: RedisZaddScoreMode,
+    pub changed: bool,
+    pub increment: bool,
+}
+
+#[cfg(any(test, feature = "test-internals"))]
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[doc(hidden)]
+pub struct RedisZaddEntry {
+    pub score: Vec<u8>,
+    pub member: Vec<u8>,
+}
+
+#[cfg(any(test, feature = "test-internals"))]
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[doc(hidden)]
+pub struct RedisZaddCommand {
+    pub key: Vec<u8>,
+    pub options: RedisZaddOptions,
+    pub entries: Vec<RedisZaddEntry>,
+}
+
+#[cfg(any(test, feature = "test-internals"))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RedisZaddOption {
+    Nx,
+    Xx,
+    Gt,
+    Lt,
+    Ch,
+    Incr,
+}
+
+#[cfg(any(test, feature = "test-internals"))]
+fn parse_zadd_option(bytes: &[u8]) -> Option<RedisZaddOption> {
+    if bytes_eq_ignore_ascii_case(bytes, b"NX") {
+        Some(RedisZaddOption::Nx)
+    } else if bytes_eq_ignore_ascii_case(bytes, b"XX") {
+        Some(RedisZaddOption::Xx)
+    } else if bytes_eq_ignore_ascii_case(bytes, b"GT") {
+        Some(RedisZaddOption::Gt)
+    } else if bytes_eq_ignore_ascii_case(bytes, b"LT") {
+        Some(RedisZaddOption::Lt)
+    } else if bytes_eq_ignore_ascii_case(bytes, b"CH") {
+        Some(RedisZaddOption::Ch)
+    } else if bytes_eq_ignore_ascii_case(bytes, b"INCR") {
+        Some(RedisZaddOption::Incr)
+    } else {
+        None
+    }
+}
+
+#[cfg(any(test, feature = "test-internals"))]
+fn parse_zadd_score_for_fuzz(score: &[u8]) -> Result<(), RedisError> {
+    if score.is_empty() {
+        return Err(RedisError::Protocol(
+            "ZADD score must not be empty".to_string(),
+        ));
+    }
+    let text = std::str::from_utf8(score)
+        .map_err(|_| RedisError::Protocol("ZADD score must be UTF-8 ASCII".to_string()))?;
+    if !text.is_ascii() {
+        return Err(RedisError::Protocol("ZADD score must be ASCII".to_string()));
+    }
+    let value = text
+        .parse::<f64>()
+        .map_err(|_| RedisError::Protocol(format!("ZADD invalid score: {text}")))?;
+    if value.is_nan() {
+        return Err(RedisError::Protocol(
+            "ZADD score must not be NaN".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(any(test, feature = "test-internals"))]
+fn apply_zadd_option(
+    options: &mut RedisZaddOptions,
+    option: RedisZaddOption,
+) -> Result<(), RedisError> {
+    match option {
+        RedisZaddOption::Nx => {
+            if options.insert != RedisZaddInsertMode::Upsert
+                || options.score != RedisZaddScoreMode::Always
+            {
+                return Err(RedisError::Protocol(
+                    "ZADD NX is mutually exclusive with XX, GT, and LT".to_string(),
+                ));
+            }
+            options.insert = RedisZaddInsertMode::Nx;
+        }
+        RedisZaddOption::Xx => {
+            if options.insert != RedisZaddInsertMode::Upsert {
+                return Err(RedisError::Protocol(
+                    "ZADD XX is mutually exclusive with NX".to_string(),
+                ));
+            }
+            options.insert = RedisZaddInsertMode::Xx;
+        }
+        RedisZaddOption::Gt => {
+            if options.insert == RedisZaddInsertMode::Nx
+                || options.score != RedisZaddScoreMode::Always
+            {
+                return Err(RedisError::Protocol(
+                    "ZADD GT is mutually exclusive with NX and LT".to_string(),
+                ));
+            }
+            options.score = RedisZaddScoreMode::GreaterThan;
+        }
+        RedisZaddOption::Lt => {
+            if options.insert == RedisZaddInsertMode::Nx
+                || options.score != RedisZaddScoreMode::Always
+            {
+                return Err(RedisError::Protocol(
+                    "ZADD LT is mutually exclusive with NX and GT".to_string(),
+                ));
+            }
+            options.score = RedisZaddScoreMode::LessThan;
+        }
+        RedisZaddOption::Ch => {
+            if options.changed {
+                return Err(RedisError::Protocol(
+                    "ZADD CH option appears more than once".to_string(),
+                ));
+            }
+            options.changed = true;
+        }
+        RedisZaddOption::Incr => {
+            if options.increment {
+                return Err(RedisError::Protocol(
+                    "ZADD INCR option appears more than once".to_string(),
+                ));
+            }
+            options.increment = true;
+        }
+    }
+    Ok(())
+}
+
+#[cfg(any(test, feature = "test-internals"))]
+#[allow(dead_code)]
+#[doc(hidden)]
+pub fn parse_zadd_for_fuzz(value: RespValue) -> Result<RedisZaddCommand, RedisError> {
+    let args = match value {
+        RespValue::Array(Some(args)) => args,
+        other => {
+            return Err(RedisError::Protocol(format!(
+                "ZADD command must be a RESP array, got {other:?}"
+            )));
+        }
+    };
+    if args.len() < 4 {
+        return Err(RedisError::Protocol(
+            "ZADD requires command, key, score, and member".to_string(),
+        ));
+    }
+
+    let mut iter = args.into_iter();
+    let command = decode_bulk_command_arg(
+        iter.next()
+            .ok_or_else(|| RedisError::Protocol("ZADD missing command name".to_string()))?,
+        "ZADD",
+        "command",
+    )?;
+    if !bytes_eq_ignore_ascii_case(&command, b"ZADD") {
+        return Err(RedisError::Protocol(format!(
+            "ZADD command name expected, got {}",
+            String::from_utf8_lossy(&command)
+        )));
+    }
+
+    let key = decode_bulk_command_arg(
+        iter.next()
+            .ok_or_else(|| RedisError::Protocol("ZADD missing key".to_string()))?,
+        "ZADD",
+        "key",
+    )?;
+    let remaining: Vec<Vec<u8>> = iter
+        .enumerate()
+        .map(|(index, value)| decode_bulk_command_arg(value, "ZADD", &format!("arg[{index}]")))
+        .collect::<Result<_, _>>()?;
+
+    let mut options = RedisZaddOptions {
+        insert: RedisZaddInsertMode::Upsert,
+        score: RedisZaddScoreMode::Always,
+        changed: false,
+        increment: false,
+    };
+    let mut first_score = 0usize;
+    while let Some(option) = remaining
+        .get(first_score)
+        .and_then(|arg| parse_zadd_option(arg))
+    {
+        apply_zadd_option(&mut options, option)?;
+        first_score += 1;
+    }
+
+    let pairs = &remaining[first_score..];
+    if pairs.is_empty() {
+        return Err(RedisError::Protocol(
+            "ZADD requires at least one score/member pair".to_string(),
+        ));
+    }
+    if pairs.len() % 2 != 0 {
+        return Err(RedisError::Protocol(
+            "ZADD score/member arguments must be paired".to_string(),
+        ));
+    }
+    if options.increment && pairs.len() != 2 {
+        return Err(RedisError::Protocol(
+            "ZADD INCR accepts exactly one score/member pair".to_string(),
+        ));
+    }
+
+    let mut entries = Vec::with_capacity(pairs.len() / 2);
+    for pair in pairs.chunks_exact(2) {
+        parse_zadd_score_for_fuzz(&pair[0])?;
+        entries.push(RedisZaddEntry {
+            score: pair[0].clone(),
+            member: pair[1].clone(),
+        });
+    }
+
+    Ok(RedisZaddCommand {
+        key,
+        options,
+        entries,
     })
 }
 
@@ -4119,6 +4381,127 @@ mod tests {
         assert!(matches!(
             parse_script_eval_for_fuzz(null_arg),
             Err(RedisError::Protocol(msg)) if msg.contains("non-null bulk string")
+        ));
+    }
+
+    #[test]
+    fn zadd_parser_splits_options_and_entries() {
+        let command = RespValue::Array(Some(vec![
+            bulk_arg("ZADD"),
+            bulk_arg("zset"),
+            bulk_arg("NX"),
+            bulk_arg("CH"),
+            bulk_arg("1.5"),
+            bulk_arg("member-a"),
+            bulk_arg("-2"),
+            bulk_arg("member-b"),
+        ]));
+
+        let parsed = parse_zadd_for_fuzz(command).expect("valid ZADD command should parse");
+
+        assert_eq!(parsed.key, b"zset".to_vec());
+        assert_eq!(parsed.options.insert, RedisZaddInsertMode::Nx);
+        assert_eq!(parsed.options.score, RedisZaddScoreMode::Always);
+        assert!(parsed.options.changed);
+        assert!(!parsed.options.increment);
+        assert_eq!(
+            parsed.entries,
+            vec![
+                RedisZaddEntry {
+                    score: b"1.5".to_vec(),
+                    member: b"member-a".to_vec(),
+                },
+                RedisZaddEntry {
+                    score: b"-2".to_vec(),
+                    member: b"member-b".to_vec(),
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn zadd_parser_accepts_xx_gt_incr_single_pair() {
+        let command = RespValue::Array(Some(vec![
+            bulk_arg("zadd"),
+            bulk_arg("zset"),
+            bulk_arg("gt"),
+            bulk_arg("xx"),
+            bulk_arg("INCR"),
+            bulk_arg("1.25"),
+            bulk_arg("member"),
+        ]));
+
+        let parsed = parse_zadd_for_fuzz(command).expect("valid ZADD INCR command should parse");
+
+        assert_eq!(parsed.options.insert, RedisZaddInsertMode::Xx);
+        assert_eq!(parsed.options.score, RedisZaddScoreMode::GreaterThan);
+        assert!(parsed.options.increment);
+        assert_eq!(parsed.entries.len(), 1);
+        assert_eq!(parsed.entries[0].score, b"1.25".to_vec());
+        assert_eq!(parsed.entries[0].member, b"member".to_vec());
+    }
+
+    #[test]
+    fn zadd_parser_rejects_malformed_command_shapes() {
+        let nx_gt_conflict = RespValue::Array(Some(vec![
+            bulk_arg("ZADD"),
+            bulk_arg("zset"),
+            bulk_arg("NX"),
+            bulk_arg("GT"),
+            bulk_arg("1"),
+            bulk_arg("member"),
+        ]));
+        assert!(matches!(
+            parse_zadd_for_fuzz(nx_gt_conflict),
+            Err(RedisError::Protocol(msg)) if msg.contains("mutually exclusive")
+        ));
+
+        let odd_pairing = RespValue::Array(Some(vec![
+            bulk_arg("ZADD"),
+            bulk_arg("zset"),
+            bulk_arg("1"),
+            bulk_arg("member"),
+            bulk_arg("2"),
+        ]));
+        assert!(matches!(
+            parse_zadd_for_fuzz(odd_pairing),
+            Err(RedisError::Protocol(msg)) if msg.contains("paired")
+        ));
+
+        let incr_multi_pair = RespValue::Array(Some(vec![
+            bulk_arg("ZADD"),
+            bulk_arg("zset"),
+            bulk_arg("INCR"),
+            bulk_arg("1"),
+            bulk_arg("a"),
+            bulk_arg("2"),
+            bulk_arg("b"),
+        ]));
+        assert!(matches!(
+            parse_zadd_for_fuzz(incr_multi_pair),
+            Err(RedisError::Protocol(msg)) if msg.contains("exactly one")
+        ));
+
+        let nan_score = RespValue::Array(Some(vec![
+            bulk_arg("ZADD"),
+            bulk_arg("zset"),
+            bulk_arg("NaN"),
+            bulk_arg("member"),
+        ]));
+        assert!(matches!(
+            parse_zadd_for_fuzz(nan_score),
+            Err(RedisError::Protocol(msg)) if msg.contains("NaN")
+        ));
+
+        let null_member = RespValue::Array(Some(vec![
+            bulk_arg("ZADD"),
+            bulk_arg("zset"),
+            bulk_arg("1"),
+            RespValue::BulkString(None),
+        ]));
+        assert!(matches!(
+            parse_zadd_for_fuzz(null_member),
+            Err(RedisError::Protocol(msg)) if msg.contains("ZADD arg[1]")
         ));
     }
 

@@ -26,6 +26,7 @@ use libfuzzer_sys::fuzz_target;
 use asupersync::messaging::redis::{
     PubSubEvent, PubSubMessage, PubSubSubscriptionKind, RedisProtocolLimits, RespValue,
     decode_resp_value_for_fuzz, parse_pubsub_event_for_fuzz, parse_script_eval_for_fuzz,
+    parse_zadd_for_fuzz,
 };
 
 const MAX_STRUCTURED_FIELD_BYTES: usize = 96;
@@ -549,6 +550,99 @@ fn exercise_script_eval_parser(data: &[u8]) {
     );
 }
 
+fn exercise_zadd_option_parser(data: &[u8]) {
+    let payload = &data[..data.len().min(MAX_STRUCTURED_FIELD_BYTES)];
+    let finite_score = format!("{}.{}", payload.len(), data.first().copied().unwrap_or(0));
+    let valid_command = RespValue::Array(Some(vec![
+        bulk_arg(b"ZADD"),
+        bulk_arg(b"zset"),
+        bulk_arg(b"NX"),
+        bulk_arg(b"CH"),
+        bulk_arg(finite_score.as_bytes()),
+        bulk_arg(payload),
+    ]));
+    let parsed =
+        parse_zadd_for_fuzz(valid_command).expect("sanitized ZADD NX CH command should parse");
+    assert_eq!(parsed.key, b"zset".to_vec());
+    assert!(parsed.options.changed);
+    assert!(!parsed.options.increment);
+    assert_eq!(parsed.entries.len(), 1);
+    assert_eq!(parsed.entries[0].score, finite_score.as_bytes());
+    assert_eq!(parsed.entries[0].member, payload);
+
+    let ordered_options = RespValue::Array(Some(vec![
+        bulk_arg(b"ZADD"),
+        bulk_arg(b"zset"),
+        bulk_arg(b"GT"),
+        bulk_arg(b"XX"),
+        bulk_arg(b"INCR"),
+        bulk_arg(b"1.25"),
+        bulk_arg(b"member"),
+    ]));
+    let parsed = parse_zadd_for_fuzz(ordered_options)
+        .expect("ZADD XX GT INCR single-pair command should parse");
+    assert!(parsed.options.increment);
+    assert_eq!(parsed.entries.len(), 1);
+
+    let arbitrary_score = RespValue::Array(Some(vec![
+        bulk_arg(b"ZADD"),
+        bulk_arg(b"zset"),
+        bulk_arg(payload),
+        bulk_arg(b"member"),
+    ]));
+    let _ = parse_zadd_for_fuzz(arbitrary_score);
+
+    let conflicting_options = RespValue::Array(Some(vec![
+        bulk_arg(b"ZADD"),
+        bulk_arg(b"zset"),
+        bulk_arg(b"NX"),
+        bulk_arg(b"LT"),
+        bulk_arg(b"1"),
+        bulk_arg(b"member"),
+    ]));
+    assert!(
+        parse_zadd_for_fuzz(conflicting_options).is_err(),
+        "ZADD NX and LT must fail closed"
+    );
+
+    let incr_multi_pair = RespValue::Array(Some(vec![
+        bulk_arg(b"ZADD"),
+        bulk_arg(b"zset"),
+        bulk_arg(b"INCR"),
+        bulk_arg(b"1"),
+        bulk_arg(b"a"),
+        bulk_arg(b"2"),
+        bulk_arg(b"b"),
+    ]));
+    assert!(
+        parse_zadd_for_fuzz(incr_multi_pair).is_err(),
+        "ZADD INCR with multiple score/member pairs must fail closed"
+    );
+
+    let odd_pairing = RespValue::Array(Some(vec![
+        bulk_arg(b"ZADD"),
+        bulk_arg(b"zset"),
+        bulk_arg(b"1"),
+        bulk_arg(b"member"),
+        bulk_arg(b"2"),
+    ]));
+    assert!(
+        parse_zadd_for_fuzz(odd_pairing).is_err(),
+        "ZADD score/member arguments must be paired"
+    );
+
+    let nan_score = RespValue::Array(Some(vec![
+        bulk_arg(b"ZADD"),
+        bulk_arg(b"zset"),
+        bulk_arg(b"NaN"),
+        bulk_arg(b"member"),
+    ]));
+    assert!(
+        parse_zadd_for_fuzz(nan_score).is_err(),
+        "ZADD NaN scores must fail closed"
+    );
+}
+
 /// Test helper functions in isolation
 fn test_helper_functions(data: &[u8]) {
     // Test find_crlf with various scenarios
@@ -701,7 +795,10 @@ fuzz_target!(|data: &[u8]| {
     // Test 11: Redis SCRIPT EVAL command and Lua parser seam
     exercise_script_eval_parser(data);
 
-    // Test 12: Fragmented parsing simulation (partial buffer scenarios)
+    // Test 12: Redis ZADD option parser seam
+    exercise_zadd_option_parser(data);
+
+    // Test 13: Fragmented parsing simulation (partial buffer scenarios)
     if data.len() > 10 {
         for split_point in [1, data.len() / 4, data.len() / 2, data.len() - 1]
             .iter()
@@ -722,7 +819,7 @@ fuzz_target!(|data: &[u8]| {
         }
     }
 
-    // Test 13: Boundary value testing for limits
+    // Test 14: Boundary value testing for limits
     let boundary_limits = [
         RedisProtocolLimits {
             max_frame_size: data.len().saturating_sub(1).max(1),
