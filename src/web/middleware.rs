@@ -61,7 +61,7 @@ use crate::http::compress::{
     ContentEncoding, DEFAULT_MAX_COMPRESSED_SIZE, make_compressor_with_output_limit,
     negotiate_encoding,
 };
-use crate::tracing_compat::{debug, warn};
+use crate::tracing_compat::{debug, error, warn};
 use crate::types::Time;
 
 use super::extract::Request;
@@ -1191,18 +1191,28 @@ impl<H: Handler> RequestTraceMiddleware<H> {
     }
 
     fn resolve_trace_id(req: &Request) -> Option<String> {
-        if let Some(id) = req.extensions.get("trace_id") {
-            return Some(id.to_string());
-        }
-        if let Some(id) = req.extensions.get("request_id") {
-            return Some(id.to_string());
-        }
-        // Sanitize and truncate raw x-request-id header to prevent DoS
-        // via giant headers that get amplified into logs and response headers.
-        // (br-asupersync-gwezkv)
-        header_value(req, "x-request-id")
-            .map(|id| sanitize_and_truncate_id(&id, DEFAULT_TRACE_ID_MAX_LENGTH))
+        resolve_trace_id(req)
     }
+}
+
+/// Free-function resolver shared by `RequestTraceMiddleware` and
+/// `CatchPanicMiddleware` so panic logs carry the same correlation
+/// id as the request-trace logs.
+///
+/// Resolution order: extensions `trace_id`, then extensions
+/// `request_id`, then the raw `x-request-id` header (sanitized +
+/// truncated to `DEFAULT_TRACE_ID_MAX_LENGTH` to prevent DoS via
+/// giant headers being amplified into logs / response headers,
+/// br-asupersync-gwezkv).
+fn resolve_trace_id(req: &Request) -> Option<String> {
+    if let Some(id) = req.extensions.get("trace_id") {
+        return Some(id.to_string());
+    }
+    if let Some(id) = req.extensions.get("request_id") {
+        return Some(id.to_string());
+    }
+    header_value(req, "x-request-id")
+        .map(|id| sanitize_and_truncate_id(&id, DEFAULT_TRACE_ID_MAX_LENGTH))
 }
 
 impl<H: Handler> Handler for RequestTraceMiddleware<H> {
@@ -1509,8 +1519,13 @@ impl<H: Handler> Handler for LoadShedMiddleware<H> {
 /// 500 Internal Server Error response instead of unwinding.
 ///
 /// This is a safety net for production servers: a panicking handler
-/// should not take down the entire server. The panic message is logged
-/// but not exposed to the client (to avoid information leakage).
+/// should not take down the entire server. On panic, a structured
+/// `tracing::error!` event is emitted carrying the request method,
+/// path, trace-id (resolved via the same lookup
+/// `RequestTraceMiddleware` uses, so panic logs correlate with the
+/// surrounding request-trace events), and the stringified panic
+/// payload. The panic message is NOT exposed to the client (to avoid
+/// information leakage).
 pub struct CatchPanicMiddleware<H> {
     inner: H,
 }
@@ -1523,12 +1538,53 @@ impl<H: Handler> CatchPanicMiddleware<H> {
     }
 }
 
+/// Best-effort string extraction from a `catch_unwind` payload.
+///
+/// `panic!` payloads are commonly `&'static str` or `String`; we
+/// downcast to both. Anything else surfaces as a placeholder so the
+/// log site never panics on the panic — the recovery path must be
+/// totally infallible.
+fn panic_payload_message(payload: &(dyn std::any::Any + Send)) -> String {
+    if let Some(s) = payload.downcast_ref::<&'static str>() {
+        return (*s).to_string();
+    }
+    if let Some(s) = payload.downcast_ref::<String>() {
+        return s.clone();
+    }
+    "<non-string panic payload>".to_string()
+}
+
 impl<H: Handler> Handler for CatchPanicMiddleware<H> {
     fn call(&self, req: Request) -> Response {
+        // Extract correlation context BEFORE the catch_unwind
+        // closure consumes `req`. After a panic the request is
+        // gone, so the only way to log with proper trace-id +
+        // method + path correlation is to capture them up front.
+        let method = req.method.clone();
+        let path = req.path.clone();
+        let trace_id = resolve_trace_id(&req);
+
         match panic::catch_unwind(AssertUnwindSafe(|| self.inner.call(req))) {
             Ok(resp) => resp,
-            Err(_payload) => {
-                // Do not expose panic details to the client.
+            Err(payload) => {
+                // br-asupersync-catch-panic-log: emit a structured
+                // error event so SREs see the panic — silently
+                // swallowing it would leave production blind to
+                // handler bugs while still returning a 500. Do
+                // NOT include the panic message in the response
+                // body (information leakage); it goes only to the
+                // server-side log.
+                let panic_message = panic_payload_message(&*payload);
+                error!(
+                    method = %method,
+                    path = %path,
+                    trace_id = ?trace_id,
+                    panic_message = %panic_message,
+                    "http handler panicked; returning 500 Internal Server Error",
+                );
+                #[cfg(not(feature = "tracing-integration"))]
+                let _ = (&method, &path, &trace_id, &panic_message);
+
                 Response::new(
                     StatusCode::INTERNAL_SERVER_ERROR,
                     b"Internal Server Error".to_vec(),
