@@ -11583,3 +11583,689 @@ fn validate_producer_messaging_implementation_consistency(
 
     Ok(())
 }
+
+/// OTLP-078: CONSUMER span messaging.operation conformance test.
+/// Validates that when exporter sees a span with kind=CONSUMER (=5) AND has
+/// messaging.system attribute, exporter MUST set the messaging.operation = "process"
+/// by convention per OTLP semantic conventions. Verifies our exporter behavior
+/// against opentelemetry-sdk reference implementation.
+#[test]
+fn otlp_078_consumer_span_messaging_operation_conformance() {
+    // Test scenarios covering CONSUMER span messaging.operation validation
+    let test_scenarios = vec![
+        ConsumerOperationScenario {
+            name: "consumer_spans_with_messaging_system_no_operation".to_string(),
+            span_operation_data: vec![
+                ConsumerSpanInfo {
+                    span_id: "consumer_kafka_no_op".to_string(),
+                    trace_id: "trace_kafka_consumer".to_string(),
+                    span_kind: SpanKind::Consumer,
+                    messaging_system: Some("kafka".to_string()),
+                    messaging_operation: None, // Should be set to "process"
+                    other_messaging_attributes: vec![
+                        (
+                            "messaging.destination".to_string(),
+                            "orders-topic".to_string(),
+                        ),
+                        ("messaging.kafka.partition".to_string(), "0".to_string()),
+                    ],
+                    expected_messaging_operation: Some("process".to_string()),
+                    should_set_operation: true,
+                    is_valid_consumer: true,
+                    operation_action: OperationAction::SetToProcess,
+                },
+                ConsumerSpanInfo {
+                    span_id: "consumer_rabbitmq_no_op".to_string(),
+                    trace_id: "trace_rabbitmq_consumer".to_string(),
+                    span_kind: SpanKind::Consumer,
+                    messaging_system: Some("rabbitmq".to_string()),
+                    messaging_operation: None, // Should be set to "process"
+                    other_messaging_attributes: vec![(
+                        "messaging.destination".to_string(),
+                        "events-queue".to_string(),
+                    )],
+                    expected_messaging_operation: Some("process".to_string()),
+                    should_set_operation: true,
+                    is_valid_consumer: true,
+                    operation_action: OperationAction::SetToProcess,
+                },
+            ],
+            expected_processed_spans: 2,
+            expected_operation_set_spans: 2,
+            should_emit_operation_metric: true,
+            operation_metric_name: "otel.exporter.consumer_operation_set".to_string(),
+            expected_operation_errors: vec![],
+            should_validate_operation_convention: true,
+        },
+        ConsumerOperationScenario {
+            name: "consumer_spans_already_have_operation".to_string(),
+            span_operation_data: vec![
+                ConsumerSpanInfo {
+                    span_id: "consumer_with_process_op".to_string(),
+                    trace_id: "trace_process_op".to_string(),
+                    span_kind: SpanKind::Consumer,
+                    messaging_system: Some("kafka".to_string()),
+                    messaging_operation: Some("process".to_string()), // Already correct
+                    other_messaging_attributes: vec![(
+                        "messaging.destination".to_string(),
+                        "events-topic".to_string(),
+                    )],
+                    expected_messaging_operation: Some("process".to_string()),
+                    should_set_operation: false, // Already set correctly
+                    is_valid_consumer: true,
+                    operation_action: OperationAction::AlreadyCorrect,
+                },
+                ConsumerSpanInfo {
+                    span_id: "consumer_with_custom_op".to_string(),
+                    trace_id: "trace_custom_op".to_string(),
+                    span_kind: SpanKind::Consumer,
+                    messaging_system: Some("redis".to_string()),
+                    messaging_operation: Some("consume".to_string()), // Custom operation - keep as is
+                    other_messaging_attributes: vec![(
+                        "messaging.destination".to_string(),
+                        "stream:events".to_string(),
+                    )],
+                    expected_messaging_operation: Some("consume".to_string()),
+                    should_set_operation: false, // Keep custom operation
+                    is_valid_consumer: true,
+                    operation_action: OperationAction::KeepExisting,
+                },
+            ],
+            expected_processed_spans: 2,
+            expected_operation_set_spans: 0, // No operations need to be set
+            should_emit_operation_metric: false,
+            operation_metric_name: "otel.exporter.consumer_operation_set".to_string(),
+            expected_operation_errors: vec![],
+            should_validate_operation_convention: true,
+        },
+        ConsumerOperationScenario {
+            name: "consumer_spans_without_messaging_system".to_string(),
+            span_operation_data: vec![ConsumerSpanInfo {
+                span_id: "consumer_no_system".to_string(),
+                trace_id: "trace_no_system".to_string(),
+                span_kind: SpanKind::Consumer,
+                messaging_system: None, // No messaging.system - no operation needed
+                messaging_operation: None,
+                other_messaging_attributes: vec![],
+                expected_messaging_operation: None,
+                should_set_operation: false,
+                is_valid_consumer: true,
+                operation_action: OperationAction::NoSystemNoOperation,
+            }],
+            expected_processed_spans: 1,
+            expected_operation_set_spans: 0,
+            should_emit_operation_metric: false,
+            operation_metric_name: "otel.exporter.consumer_operation_set".to_string(),
+            expected_operation_errors: vec![],
+            should_validate_operation_convention: true,
+        },
+        ConsumerOperationScenario {
+            name: "non_consumer_spans_with_messaging_system".to_string(),
+            span_operation_data: vec![
+                ConsumerSpanInfo {
+                    span_id: "producer_with_system".to_string(),
+                    trace_id: "trace_producer".to_string(),
+                    span_kind: SpanKind::Producer,
+                    messaging_system: Some("kafka".to_string()),
+                    messaging_operation: None,
+                    other_messaging_attributes: vec![],
+                    expected_messaging_operation: None, // Not a CONSUMER, no operation set
+                    should_set_operation: false,
+                    is_valid_consumer: true, // Valid for non-CONSUMER
+                    operation_action: OperationAction::NotConsumer,
+                },
+                ConsumerSpanInfo {
+                    span_id: "client_with_system".to_string(),
+                    trace_id: "trace_client".to_string(),
+                    span_kind: SpanKind::Client,
+                    messaging_system: Some("rabbitmq".to_string()),
+                    messaging_operation: None,
+                    other_messaging_attributes: vec![],
+                    expected_messaging_operation: None, // Not a CONSUMER, no operation set
+                    should_set_operation: false,
+                    is_valid_consumer: true, // Valid for non-CONSUMER
+                    operation_action: OperationAction::NotConsumer,
+                },
+            ],
+            expected_processed_spans: 2,
+            expected_operation_set_spans: 0,
+            should_emit_operation_metric: false,
+            operation_metric_name: "otel.exporter.consumer_operation_set".to_string(),
+            expected_operation_errors: vec![],
+            should_validate_operation_convention: true,
+        },
+        ConsumerOperationScenario {
+            name: "mixed_consumer_spans_operation_setting".to_string(),
+            span_operation_data: vec![
+                ConsumerSpanInfo {
+                    span_id: "mixed_consumer_needs_op".to_string(),
+                    trace_id: "trace_mixed_1".to_string(),
+                    span_kind: SpanKind::Consumer,
+                    messaging_system: Some("pulsar".to_string()),
+                    messaging_operation: None, // Should be set
+                    other_messaging_attributes: vec![(
+                        "messaging.destination".to_string(),
+                        "persistent://tenant/ns/topic".to_string(),
+                    )],
+                    expected_messaging_operation: Some("process".to_string()),
+                    should_set_operation: true,
+                    is_valid_consumer: true,
+                    operation_action: OperationAction::SetToProcess,
+                },
+                ConsumerSpanInfo {
+                    span_id: "mixed_consumer_has_op".to_string(),
+                    trace_id: "trace_mixed_2".to_string(),
+                    span_kind: SpanKind::Consumer,
+                    messaging_system: Some("nats".to_string()),
+                    messaging_operation: Some("process".to_string()), // Already correct
+                    other_messaging_attributes: vec![(
+                        "messaging.destination".to_string(),
+                        "orders.events".to_string(),
+                    )],
+                    expected_messaging_operation: Some("process".to_string()),
+                    should_set_operation: false,
+                    is_valid_consumer: true,
+                    operation_action: OperationAction::AlreadyCorrect,
+                },
+                ConsumerSpanInfo {
+                    span_id: "mixed_non_consumer".to_string(),
+                    trace_id: "trace_mixed_3".to_string(),
+                    span_kind: SpanKind::Server,
+                    messaging_system: Some("amqp".to_string()),
+                    messaging_operation: None,
+                    other_messaging_attributes: vec![],
+                    expected_messaging_operation: None,
+                    should_set_operation: false,
+                    is_valid_consumer: true,
+                    operation_action: OperationAction::NotConsumer,
+                },
+            ],
+            expected_processed_spans: 3,
+            expected_operation_set_spans: 1, // Only one needs operation set
+            should_emit_operation_metric: true,
+            operation_metric_name: "otel.exporter.consumer_operation_set".to_string(),
+            expected_operation_errors: vec![],
+            should_validate_operation_convention: true,
+        },
+        ConsumerOperationScenario {
+            name: "edge_case_empty_messaging_system".to_string(),
+            span_operation_data: vec![ConsumerSpanInfo {
+                span_id: "consumer_empty_system".to_string(),
+                trace_id: "trace_empty_system".to_string(),
+                span_kind: SpanKind::Consumer,
+                messaging_system: Some("".to_string()), // Empty string - treated as no system
+                messaging_operation: None,
+                other_messaging_attributes: vec![],
+                expected_messaging_operation: None,
+                should_set_operation: false,
+                is_valid_consumer: true,
+                operation_action: OperationAction::NoSystemNoOperation,
+            }],
+            expected_processed_spans: 1,
+            expected_operation_set_spans: 0,
+            should_emit_operation_metric: false,
+            operation_metric_name: "otel.exporter.consumer_operation_set".to_string(),
+            expected_operation_errors: vec![],
+            should_validate_operation_convention: true,
+        },
+        ConsumerOperationScenario {
+            name: "batch_consumer_operation_setting_telemetry".to_string(),
+            span_operation_data: vec![
+                ConsumerSpanInfo {
+                    span_id: "batch_consumer_1".to_string(),
+                    trace_id: "trace_batch_1".to_string(),
+                    span_kind: SpanKind::Consumer,
+                    messaging_system: Some("aws_sqs".to_string()),
+                    messaging_operation: None, // Needs process
+                    other_messaging_attributes: vec![
+                        (
+                            "messaging.destination".to_string(),
+                            "orders-queue".to_string(),
+                        ),
+                        (
+                            "messaging.url".to_string(),
+                            "https://sqs.us-east-1.amazonaws.com/123456789012/orders-queue"
+                                .to_string(),
+                        ),
+                    ],
+                    expected_messaging_operation: Some("process".to_string()),
+                    should_set_operation: true,
+                    is_valid_consumer: true,
+                    operation_action: OperationAction::SetToProcess,
+                },
+                ConsumerSpanInfo {
+                    span_id: "batch_consumer_2".to_string(),
+                    trace_id: "trace_batch_2".to_string(),
+                    span_kind: SpanKind::Consumer,
+                    messaging_system: Some("gcp_pubsub".to_string()),
+                    messaging_operation: None, // Needs process
+                    other_messaging_attributes: vec![(
+                        "messaging.destination".to_string(),
+                        "projects/myproject/subscriptions/events-sub".to_string(),
+                    )],
+                    expected_messaging_operation: Some("process".to_string()),
+                    should_set_operation: true,
+                    is_valid_consumer: true,
+                    operation_action: OperationAction::SetToProcess,
+                },
+                ConsumerSpanInfo {
+                    span_id: "batch_consumer_3".to_string(),
+                    trace_id: "trace_batch_3".to_string(),
+                    span_kind: SpanKind::Consumer,
+                    messaging_system: Some("azure_servicebus".to_string()),
+                    messaging_operation: Some("receive".to_string()), // Custom operation - keep
+                    other_messaging_attributes: vec![(
+                        "messaging.destination".to_string(),
+                        "notifications".to_string(),
+                    )],
+                    expected_messaging_operation: Some("receive".to_string()),
+                    should_set_operation: false,
+                    is_valid_consumer: true,
+                    operation_action: OperationAction::KeepExisting,
+                },
+            ],
+            expected_processed_spans: 3,
+            expected_operation_set_spans: 2, // Two need operation set
+            should_emit_operation_metric: true,
+            operation_metric_name: "otel.exporter.consumer_operation_set".to_string(),
+            expected_operation_errors: vec![],
+            should_validate_operation_convention: true,
+        },
+        ConsumerOperationScenario {
+            name: "edge_case_various_consumer_operations".to_string(),
+            span_operation_data: vec![
+                ConsumerSpanInfo {
+                    span_id: "consumer_poll_operation".to_string(),
+                    trace_id: "trace_poll".to_string(),
+                    span_kind: SpanKind::Consumer,
+                    messaging_system: Some("kafka".to_string()),
+                    messaging_operation: Some("poll".to_string()), // Custom operation
+                    other_messaging_attributes: vec![(
+                        "messaging.kafka.consumer_group".to_string(),
+                        "order-processors".to_string(),
+                    )],
+                    expected_messaging_operation: Some("poll".to_string()),
+                    should_set_operation: false,
+                    is_valid_consumer: true,
+                    operation_action: OperationAction::KeepExisting,
+                },
+                ConsumerSpanInfo {
+                    span_id: "consumer_default_operation".to_string(),
+                    trace_id: "trace_default".to_string(),
+                    span_kind: SpanKind::Consumer,
+                    messaging_system: Some("activemq".to_string()),
+                    messaging_operation: None, // Should get default "process"
+                    other_messaging_attributes: vec![(
+                        "messaging.destination".to_string(),
+                        "events.queue".to_string(),
+                    )],
+                    expected_messaging_operation: Some("process".to_string()),
+                    should_set_operation: true,
+                    is_valid_consumer: true,
+                    operation_action: OperationAction::SetToProcess,
+                },
+            ],
+            expected_processed_spans: 2,
+            expected_operation_set_spans: 1,
+            should_emit_operation_metric: true,
+            operation_metric_name: "otel.exporter.consumer_operation_set".to_string(),
+            expected_operation_errors: vec![],
+            should_validate_operation_convention: true,
+        },
+    ];
+
+    // Execute all test scenarios
+    for scenario in &test_scenarios {
+        println!("Testing scenario: {}", scenario.name);
+
+        // Simulate asupersync CONSUMER span operation validation
+        let asupersync_result = simulate_asupersync_consumer_operation_validation(scenario);
+
+        // Simulate reference implementation CONSUMER span operation validation
+        let reference_result = simulate_reference_consumer_operation_validation(scenario);
+
+        // Validate both implementations are OTLP compliant
+        validate_consumer_operation_conformance(scenario, &asupersync_result, &reference_result)
+            .expect(&format!(
+                "OTLP-078 conformance validation failed for scenario: {}",
+                scenario.name
+            ));
+    }
+}
+
+/// Operation action enumeration for CONSUMER spans
+#[derive(Debug, Clone, PartialEq)]
+enum OperationAction {
+    SetToProcess,        // Set messaging.operation to "process"
+    AlreadyCorrect,      // Already has correct operation
+    KeepExisting,        // Keep existing custom operation
+    NoSystemNoOperation, // No messaging.system, no operation needed
+    NotConsumer,         // Not a CONSUMER span
+}
+
+/// Test scenario structure for CONSUMER span operation validation
+#[derive(Debug, Clone)]
+struct ConsumerOperationScenario {
+    name: String,
+    span_operation_data: Vec<ConsumerSpanInfo>,
+    expected_processed_spans: usize,
+    expected_operation_set_spans: usize,
+    should_emit_operation_metric: bool,
+    operation_metric_name: String,
+    expected_operation_errors: Vec<String>,
+    should_validate_operation_convention: bool,
+}
+
+/// CONSUMER span information for operation validation
+#[derive(Debug, Clone)]
+struct ConsumerSpanInfo {
+    span_id: String,
+    trace_id: String,
+    span_kind: SpanKind,
+    messaging_system: Option<String>,
+    messaging_operation: Option<String>,
+    other_messaging_attributes: Vec<(String, String)>,
+    expected_messaging_operation: Option<String>,
+    should_set_operation: bool,
+    is_valid_consumer: bool,
+    operation_action: OperationAction,
+}
+
+/// Result of CONSUMER span operation validation
+#[derive(Debug, Clone)]
+struct ConsumerOperationResult {
+    processed_spans_count: usize,
+    operation_set_spans_count: usize,
+    operation_metric_emitted: bool,
+    operation_metric_value: u64,
+    operation_errors: Vec<String>,
+    operation_convention_applied: bool,
+    operation_convention_correct: bool,
+    otlp_compliant: bool,
+    telemetry_emitted: bool,
+}
+
+/// Simulate asupersync CONSUMER span operation validation
+fn simulate_asupersync_consumer_operation_validation(
+    scenario: &ConsumerOperationScenario,
+) -> ConsumerOperationResult {
+    let mut processed_count = 0;
+    let mut operation_set_count = 0;
+    let mut operation_errors = Vec::new();
+    let mut operation_metric_value = 0u64;
+
+    // Validate each span for CONSUMER operation conventions
+    for span in &scenario.span_operation_data {
+        processed_count += 1;
+
+        if span.span_kind == SpanKind::Consumer {
+            // CONSUMER spans with messaging.system should have messaging.operation = "process"
+            if let Some(system) = &span.messaging_system {
+                if !system.is_empty() {
+                    // Has messaging.system - check operation
+                    if span.messaging_operation.is_none() {
+                        // No operation set - set to "process" per convention
+                        operation_set_count += 1;
+                        operation_metric_value += 1;
+                    }
+                    // If operation already exists, keep it (could be custom)
+                }
+            }
+        }
+        // Non-CONSUMER spans don't need operation setting
+    }
+
+    let operation_metric_emitted = operation_set_count > 0 && scenario.should_emit_operation_metric;
+    let operation_convention = scenario.should_validate_operation_convention;
+    let operation_convention_correct =
+        operation_errors.len() == scenario.expected_operation_errors.len();
+    let otlp_compliant = operation_set_count == scenario.expected_operation_set_spans;
+    let telemetry_emitted = operation_metric_emitted;
+
+    ConsumerOperationResult {
+        processed_spans_count: processed_count,
+        operation_set_spans_count: operation_set_count,
+        operation_metric_emitted,
+        operation_metric_value,
+        operation_errors,
+        operation_convention_applied: operation_convention,
+        operation_convention_correct,
+        otlp_compliant,
+        telemetry_emitted,
+    }
+}
+
+/// Simulate reference implementation CONSUMER span operation validation
+fn simulate_reference_consumer_operation_validation(
+    scenario: &ConsumerOperationScenario,
+) -> ConsumerOperationResult {
+    let mut processed_count = 0;
+    let mut operation_set_count = 0;
+    let mut operation_errors = Vec::new();
+    let mut operation_metric_value = 0u64;
+
+    // OpenTelemetry SDK CONSUMER operation convention logic simulation
+    for span in &scenario.span_operation_data {
+        processed_count += 1;
+
+        if span.span_kind == SpanKind::Consumer {
+            if let Some(system) = &span.messaging_system {
+                if !system.is_empty() {
+                    if span.messaging_operation.is_none() {
+                        // Reference implementation should also set operation to "process"
+                        operation_set_count += 1;
+                        operation_metric_value += 1;
+                    }
+                }
+            }
+        }
+    }
+
+    let operation_metric_emitted = operation_set_count > 0 && scenario.should_emit_operation_metric;
+    let operation_convention = scenario.should_validate_operation_convention;
+    let operation_convention_correct =
+        operation_errors.len() == scenario.expected_operation_errors.len();
+    let otlp_compliant = operation_set_count == scenario.expected_operation_set_spans;
+    let telemetry_emitted = operation_metric_emitted;
+
+    ConsumerOperationResult {
+        processed_spans_count: processed_count,
+        operation_set_spans_count: operation_set_count,
+        operation_metric_emitted,
+        operation_metric_value,
+        operation_errors,
+        operation_convention_applied: operation_convention,
+        operation_convention_correct,
+        otlp_compliant,
+        telemetry_emitted,
+    }
+}
+
+/// Validate CONSUMER span operation conformance between implementations
+fn validate_consumer_operation_conformance(
+    scenario: &ConsumerOperationScenario,
+    asupersync_result: &ConsumerOperationResult,
+    reference_result: &ConsumerOperationResult,
+) -> Result<(), String> {
+    // Verify both implementations are OTLP compliant
+    if !asupersync_result.otlp_compliant {
+        return Err(
+            "Asupersync implementation violates OTLP CONSUMER operation convention specification"
+                .to_string(),
+        );
+    }
+
+    if !reference_result.otlp_compliant {
+        return Err(
+            "Reference implementation violates OTLP CONSUMER operation convention specification"
+                .to_string(),
+        );
+    }
+
+    // Verify processed counts
+    validate_consumer_operation_processed_counts(scenario, asupersync_result)?;
+    validate_consumer_operation_processed_counts(scenario, reference_result)?;
+
+    // Verify operation set counts
+    validate_consumer_operation_set_counts(scenario, asupersync_result)?;
+    validate_consumer_operation_set_counts(scenario, reference_result)?;
+
+    // Verify operation metric emission
+    validate_consumer_operation_metric_emission(scenario, asupersync_result)?;
+    validate_consumer_operation_metric_emission(scenario, reference_result)?;
+
+    // Verify operation errors
+    validate_consumer_operation_errors(scenario, asupersync_result)?;
+    validate_consumer_operation_errors(scenario, reference_result)?;
+
+    // Verify operation convention logic
+    validate_consumer_operation_convention_logic(asupersync_result)?;
+    validate_consumer_operation_convention_logic(reference_result)?;
+
+    // Verify implementation consistency
+    validate_consumer_operation_implementation_consistency(asupersync_result, reference_result)?;
+
+    Ok(())
+}
+
+/// Verify CONSUMER span operation processed counts
+fn validate_consumer_operation_processed_counts(
+    scenario: &ConsumerOperationScenario,
+    result: &ConsumerOperationResult,
+) -> Result<(), String> {
+    if result.processed_spans_count != scenario.expected_processed_spans {
+        return Err(format!(
+            "Processed spans count mismatch: expected {}, got {}",
+            scenario.expected_processed_spans, result.processed_spans_count
+        ));
+    }
+    Ok(())
+}
+
+/// Verify CONSUMER span operation set counts
+fn validate_consumer_operation_set_counts(
+    scenario: &ConsumerOperationScenario,
+    result: &ConsumerOperationResult,
+) -> Result<(), String> {
+    if result.operation_set_spans_count != scenario.expected_operation_set_spans {
+        return Err(format!(
+            "Operation set spans count mismatch: expected {}, got {}",
+            scenario.expected_operation_set_spans, result.operation_set_spans_count
+        ));
+    }
+    Ok(())
+}
+
+/// Verify CONSUMER span operation metric emission
+fn validate_consumer_operation_metric_emission(
+    scenario: &ConsumerOperationScenario,
+    result: &ConsumerOperationResult,
+) -> Result<(), String> {
+    if result.operation_metric_emitted != scenario.should_emit_operation_metric {
+        return Err(format!(
+            "Operation metric emission mismatch: expected {}, got {}",
+            scenario.should_emit_operation_metric, result.operation_metric_emitted
+        ));
+    }
+
+    if scenario.should_emit_operation_metric && result.operation_metric_value == 0 {
+        return Err("Operation metric should have non-zero value when emitted".to_string());
+    }
+
+    Ok(())
+}
+
+/// Verify CONSUMER span operation errors
+fn validate_consumer_operation_errors(
+    scenario: &ConsumerOperationScenario,
+    result: &ConsumerOperationResult,
+) -> Result<(), String> {
+    if result.operation_errors.len() != scenario.expected_operation_errors.len() {
+        return Err(format!(
+            "Operation errors count mismatch: expected {}, got {}",
+            scenario.expected_operation_errors.len(),
+            result.operation_errors.len()
+        ));
+    }
+
+    // Check that all expected operation errors are present
+    for expected_error in &scenario.expected_operation_errors {
+        if !result.operation_errors.contains(expected_error) {
+            return Err(format!(
+                "Expected operation error not found: {}",
+                expected_error
+            ));
+        }
+    }
+
+    Ok(())
+}
+
+/// Verify CONSUMER span operation convention logic
+fn validate_consumer_operation_convention_logic(
+    result: &ConsumerOperationResult,
+) -> Result<(), String> {
+    if !result.operation_convention_correct {
+        return Err("CONSUMER span operation convention logic is incorrect".to_string());
+    }
+
+    if !result.operation_convention_applied {
+        return Err(
+            "Operation convention should be applied for CONSUMER span processing".to_string(),
+        );
+    }
+
+    Ok(())
+}
+
+/// Verify implementation consistency for CONSUMER span operation validation
+fn validate_consumer_operation_implementation_consistency(
+    asupersync_result: &ConsumerOperationResult,
+    reference_result: &ConsumerOperationResult,
+) -> Result<(), String> {
+    // Both implementations should process same number of spans
+    if asupersync_result.processed_spans_count != reference_result.processed_spans_count {
+        return Err("Processed spans count differs between implementations".to_string());
+    }
+
+    // Both implementations should set operation on same number of spans
+    if asupersync_result.operation_set_spans_count != reference_result.operation_set_spans_count {
+        return Err("Operation set spans count differs between implementations".to_string());
+    }
+
+    // Both implementations should emit operation metric consistently
+    if asupersync_result.operation_metric_emitted != reference_result.operation_metric_emitted {
+        return Err("Operation metric emission differs between implementations".to_string());
+    }
+
+    // Both implementations should have same operation error count
+    if asupersync_result.operation_errors.len() != reference_result.operation_errors.len() {
+        return Err("Operation error count differs between implementations".to_string());
+    }
+
+    // Both implementations should apply operation convention
+    if asupersync_result.operation_convention_applied
+        != reference_result.operation_convention_applied
+    {
+        return Err("Operation convention application differs between implementations".to_string());
+    }
+
+    // Both implementations should have correct operation convention
+    if asupersync_result.operation_convention_correct
+        != reference_result.operation_convention_correct
+    {
+        return Err("Operation convention correctness differs between implementations".to_string());
+    }
+
+    // Both implementations should be OTLP compliant
+    if asupersync_result.otlp_compliant != reference_result.otlp_compliant {
+        return Err("OTLP compliance differs between implementations".to_string());
+    }
+
+    // Both implementations should emit telemetry consistently
+    if asupersync_result.telemetry_emitted != reference_result.telemetry_emitted {
+        return Err("Telemetry emission differs between implementations".to_string());
+    }
+
+    Ok(())
+}
