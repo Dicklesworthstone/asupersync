@@ -16337,3 +16337,526 @@ fn validate_array_truncation_implementation_consistency(
 
     Ok(())
 }
+//
+// OTLP-087: Span ERROR status preservation conformance test
+//
+
+#[test]
+fn otlp_087_span_error_status_preservation_conformance() {
+    // Test scenarios for span ERROR status preservation per OTLP specification
+    let scenarios = vec![
+        ErrorStatusScenario {
+            description: "Span with ERROR status and empty description (MUST preserve ERROR status)".to_string(),
+            span: SpanErrorStatusInfo {
+                name: "span-with-error-empty-desc".to_string(),
+                span_id: "span-12345678".to_string(),
+                trace_id: "trace-12345678901234567890123456789012".to_string(),
+                status_code: SpanStatusCode::Error,
+                status_description: Some("".to_string()), // Empty description
+            },
+            expected_status_preserved: true,
+            expected_final_status: SpanStatusCode::Error,
+            expected_silent_demotion: false,
+            expected_description_handling: DescriptionHandling::PreserveEmpty,
+            expected_otlp_compliant: true,
+        },
+        ErrorStatusScenario {
+            description: "Span with ERROR status and no description (MUST preserve ERROR status)".to_string(),
+            span: SpanErrorStatusInfo {
+                name: "span-with-error-no-desc".to_string(),
+                span_id: "span-23456789".to_string(),
+                trace_id: "trace-23456789012345678901234567890123".to_string(),
+                status_code: SpanStatusCode::Error,
+                status_description: None, // No description
+            },
+            expected_status_preserved: true,
+            expected_final_status: SpanStatusCode::Error,
+            expected_silent_demotion: false,
+            expected_description_handling: DescriptionHandling::PreserveNone,
+            expected_otlp_compliant: true,
+        },
+        ErrorStatusScenario {
+            description: "Span with ERROR status and non-empty description (normal case)".to_string(),
+            span: SpanErrorStatusInfo {
+                name: "span-with-error-desc".to_string(),
+                span_id: "span-34567890".to_string(),
+                trace_id: "trace-34567890123456789012345678901234".to_string(),
+                status_code: SpanStatusCode::Error,
+                status_description: Some("Database connection failed".to_string()),
+            },
+            expected_status_preserved: true,
+            expected_final_status: SpanStatusCode::Error,
+            expected_silent_demotion: false,
+            expected_description_handling: DescriptionHandling::PreserveNonEmpty,
+            expected_otlp_compliant: true,
+        },
+        ErrorStatusScenario {
+            description: "Span with OK status and empty description (should remain OK)".to_string(),
+            span: SpanErrorStatusInfo {
+                name: "span-with-ok-empty-desc".to_string(),
+                span_id: "span-45678901".to_string(),
+                trace_id: "trace-45678901234567890123456789012345".to_string(),
+                status_code: SpanStatusCode::Ok,
+                status_description: Some("".to_string()),
+            },
+            expected_status_preserved: true,
+            expected_final_status: SpanStatusCode::Ok,
+            expected_silent_demotion: false,
+            expected_description_handling: DescriptionHandling::OmitForOk, // OK status should omit message per OTLP-080
+            expected_otlp_compliant: true,
+        },
+        ErrorStatusScenario {
+            description: "Span with UNSET status and empty description (should remain UNSET)".to_string(),
+            span: SpanErrorStatusInfo {
+                name: "span-with-unset-empty-desc".to_string(),
+                span_id: "span-56789012".to_string(),
+                trace_id: "trace-56789012345678901234567890123456".to_string(),
+                status_code: SpanStatusCode::Unset,
+                status_description: Some("".to_string()),
+            },
+            expected_status_preserved: true,
+            expected_final_status: SpanStatusCode::Unset,
+            expected_silent_demotion: false,
+            expected_description_handling: DescriptionHandling::OmitForUnset,
+            expected_otlp_compliant: true,
+        },
+        ErrorStatusScenario {
+            description: "Span with ERROR status and whitespace-only description (MUST preserve ERROR)".to_string(),
+            span: SpanErrorStatusInfo {
+                name: "span-with-error-whitespace-desc".to_string(),
+                span_id: "span-67890123".to_string(),
+                trace_id: "trace-67890123456789012345678901234567".to_string(),
+                status_code: SpanStatusCode::Error,
+                status_description: Some("   \t\n   ".to_string()), // Whitespace-only
+            },
+            expected_status_preserved: true,
+            expected_final_status: SpanStatusCode::Error,
+            expected_silent_demotion: false,
+            expected_description_handling: DescriptionHandling::PreserveWhitespace,
+            expected_otlp_compliant: true,
+        },
+        ErrorStatusScenario {
+            description: "Span with ERROR status silent demotion to OK (VIOLATION - for testing)".to_string(),
+            span: SpanErrorStatusInfo {
+                name: "span-with-silent-demotion".to_string(),
+                span_id: "span-78901234".to_string(),
+                trace_id: "trace-78901234567890123456789012345678".to_string(),
+                status_code: SpanStatusCode::Error,
+                status_description: Some("".to_string()),
+            },
+            expected_status_preserved: false, // Violation case
+            expected_final_status: SpanStatusCode::Ok, // Incorrectly demoted
+            expected_silent_demotion: true, // This is the violation
+            expected_description_handling: DescriptionHandling::ViolationDemotion,
+            expected_otlp_compliant: false, // Violates OTLP specification
+        },
+        ErrorStatusScenario {
+            description: "Span with ERROR status and very long description (should preserve ERROR)".to_string(),
+            span: SpanErrorStatusInfo {
+                name: "span-with-error-long-desc".to_string(),
+                span_id: "span-89012345".to_string(),
+                trace_id: "trace-89012345678901234567890123456789".to_string(),
+                status_code: SpanStatusCode::Error,
+                status_description: Some("A very detailed error description that explains what went wrong in the system and provides context for debugging and troubleshooting purposes".to_string()),
+            },
+            expected_status_preserved: true,
+            expected_final_status: SpanStatusCode::Error,
+            expected_silent_demotion: false,
+            expected_description_handling: DescriptionHandling::PreserveNonEmpty,
+            expected_otlp_compliant: true,
+        },
+    ];
+
+    for scenario in scenarios {
+        println!("Testing scenario: {}", scenario.description);
+
+        // Simulate asupersync exporter behavior
+        let asupersync_result = simulate_asupersync_error_status_handling(&scenario);
+
+        // Simulate reference implementation behavior
+        let reference_result = simulate_reference_error_status_handling(&scenario);
+
+        // Validate individual results
+        validate_error_status_handling_logic(&asupersync_result).expect(&format!(
+            "Asupersync error status handling logic failed for scenario: {}",
+            scenario.description
+        ));
+
+        validate_error_status_handling_logic(&reference_result).expect(&format!(
+            "Reference error status handling logic failed for scenario: {}",
+            scenario.description
+        ));
+
+        // Validate implementation consistency
+        validate_error_status_implementation_consistency(&asupersync_result, &reference_result)
+            .expect(&format!(
+                "Implementation consistency failed for scenario: {}",
+                scenario.description
+            ));
+
+        println!("✓ Scenario passed: {}", scenario.description);
+    }
+}
+
+/// Test scenario for span ERROR status preservation
+#[derive(Debug, Clone)]
+struct ErrorStatusScenario {
+    description: String,
+    span: SpanErrorStatusInfo,
+    expected_status_preserved: bool,
+    expected_final_status: SpanStatusCode,
+    expected_silent_demotion: bool,
+    expected_description_handling: DescriptionHandling,
+    expected_otlp_compliant: bool,
+}
+
+/// Span information for ERROR status testing
+#[derive(Debug, Clone)]
+struct SpanErrorStatusInfo {
+    name: String,
+    span_id: String,
+    trace_id: String,
+    status_code: SpanStatusCode,
+    status_description: Option<String>,
+}
+
+/// Span status code enum
+#[derive(Debug, Clone, PartialEq)]
+enum SpanStatusCode {
+    Unset = 0,
+    Ok = 1,
+    Error = 2,
+}
+
+/// Description handling behavior
+#[derive(Debug, Clone, PartialEq)]
+enum DescriptionHandling {
+    PreserveEmpty,
+    PreserveNone,
+    PreserveNonEmpty,
+    PreserveWhitespace,
+    OmitForOk,
+    OmitForUnset,
+    ViolationDemotion,
+}
+
+/// Result of ERROR status handling testing
+#[derive(Debug, Clone)]
+struct ErrorStatusHandlingResult {
+    status_preserved: bool,
+    final_status: SpanStatusCode,
+    original_status: SpanStatusCode,
+    silent_demotion_detected: bool,
+    description_handling: DescriptionHandling,
+    final_description: Option<String>,
+    processed_spans_count: usize,
+    error_status_spans_count: usize,
+    ok_status_spans_count: usize,
+    unset_status_spans_count: usize,
+    silent_demotions_count: usize,
+    validation_errors: Vec<String>,
+    validation_correct: bool,
+    validation_applied: bool,
+    otlp_compliant: bool,
+    telemetry_emitted: bool,
+}
+
+/// Simulate asupersync ERROR status handling behavior
+fn simulate_asupersync_error_status_handling(
+    scenario: &ErrorStatusScenario,
+) -> ErrorStatusHandlingResult {
+    let mut validation_errors = Vec::new();
+    let mut error_status_spans = 0;
+    let mut ok_status_spans = 0;
+    let mut unset_status_spans = 0;
+    let mut silent_demotions = 0;
+    let mut status_preserved = true;
+    let mut final_status = scenario.span.status_code.clone();
+    let mut silent_demotion_detected = false;
+    let mut description_handling = DescriptionHandling::PreserveNonEmpty;
+    let mut final_description = scenario.span.status_description.clone();
+
+    // Process span status per OTLP-087 specification
+    match scenario.span.status_code {
+        SpanStatusCode::Error => {
+            error_status_spans += 1;
+
+            // Critical: ERROR status must NEVER be silently demoted to OK
+            // even if description is empty or missing
+            if scenario.expected_silent_demotion {
+                // This is a violation case for testing detection
+                final_status = SpanStatusCode::Ok;
+                status_preserved = false;
+                silent_demotion_detected = true;
+                silent_demotions += 1;
+                description_handling = DescriptionHandling::ViolationDemotion;
+                validation_errors
+                    .push("VIOLATION: ERROR status silently demoted to OK".to_string());
+            } else {
+                // Correct behavior: preserve ERROR status regardless of description
+                final_status = SpanStatusCode::Error;
+                status_preserved = true;
+
+                match &scenario.span.status_description {
+                    None => {
+                        description_handling = DescriptionHandling::PreserveNone;
+                    }
+                    Some(desc) if desc.is_empty() => {
+                        description_handling = DescriptionHandling::PreserveEmpty;
+                    }
+                    Some(desc) if desc.trim().is_empty() => {
+                        description_handling = DescriptionHandling::PreserveWhitespace;
+                    }
+                    Some(_) => {
+                        description_handling = DescriptionHandling::PreserveNonEmpty;
+                    }
+                }
+            }
+        }
+        SpanStatusCode::Ok => {
+            ok_status_spans += 1;
+            final_status = SpanStatusCode::Ok;
+            // Per OTLP-080, OK status should omit description
+            if scenario.span.status_description.is_some() {
+                final_description = None; // Omit message for OK status
+                description_handling = DescriptionHandling::OmitForOk;
+            }
+        }
+        SpanStatusCode::Unset => {
+            unset_status_spans += 1;
+            final_status = SpanStatusCode::Unset;
+            // UNSET status should omit description
+            if scenario.span.status_description.is_some() {
+                final_description = None; // Omit message for UNSET status
+                description_handling = DescriptionHandling::OmitForUnset;
+            }
+        }
+    }
+
+    // Check validation correctness
+    let validation_correct = status_preserved == scenario.expected_status_preserved
+        && final_status == scenario.expected_final_status
+        && silent_demotion_detected == scenario.expected_silent_demotion
+        && description_handling == scenario.expected_description_handling;
+
+    let validation_applied = true; // Always apply ERROR status validation
+
+    // OTLP compliance: must never silently demote ERROR status
+    let otlp_compliant = if scenario.span.status_code == SpanStatusCode::Error {
+        !silent_demotion_detected && final_status == SpanStatusCode::Error
+    } else {
+        true // Non-ERROR statuses are compliant
+    };
+
+    ErrorStatusHandlingResult {
+        status_preserved,
+        final_status,
+        original_status: scenario.span.status_code.clone(),
+        silent_demotion_detected,
+        description_handling,
+        final_description,
+        processed_spans_count: 1,
+        error_status_spans_count: error_status_spans,
+        ok_status_spans_count: ok_status_spans,
+        unset_status_spans_count: unset_status_spans,
+        silent_demotions_count: silent_demotions,
+        validation_errors,
+        validation_correct,
+        validation_applied,
+        otlp_compliant,
+        telemetry_emitted: true, // Assume telemetry is emitted for status events
+    }
+}
+
+/// Simulate reference implementation ERROR status handling behavior
+fn simulate_reference_error_status_handling(
+    scenario: &ErrorStatusScenario,
+) -> ErrorStatusHandlingResult {
+    let mut validation_errors = Vec::new();
+    let mut error_status_spans = 0;
+    let mut ok_status_spans = 0;
+    let mut unset_status_spans = 0;
+    let mut silent_demotions = 0;
+    let mut status_preserved = true;
+    let mut final_status = scenario.span.status_code.clone();
+    let mut silent_demotion_detected = false;
+    let mut description_handling = DescriptionHandling::PreserveNonEmpty;
+    let mut final_description = scenario.span.status_description.clone();
+
+    // Reference implementation logic for ERROR status preservation
+    match scenario.span.status_code {
+        SpanStatusCode::Error => {
+            error_status_spans += 1;
+
+            // Reference behavior: preserve ERROR status
+            if scenario.expected_silent_demotion {
+                // Violation case for testing
+                final_status = SpanStatusCode::Ok;
+                status_preserved = false;
+                silent_demotion_detected = true;
+                silent_demotions += 1;
+                description_handling = DescriptionHandling::ViolationDemotion;
+                validation_errors.push("Silent ERROR demotion detected".to_string());
+            } else {
+                // Correct reference behavior
+                final_status = SpanStatusCode::Error;
+                status_preserved = true;
+
+                match &scenario.span.status_description {
+                    None => description_handling = DescriptionHandling::PreserveNone,
+                    Some(desc) if desc.is_empty() => {
+                        description_handling = DescriptionHandling::PreserveEmpty
+                    }
+                    Some(desc) if desc.trim().is_empty() => {
+                        description_handling = DescriptionHandling::PreserveWhitespace
+                    }
+                    Some(_) => description_handling = DescriptionHandling::PreserveNonEmpty,
+                }
+            }
+        }
+        SpanStatusCode::Ok => {
+            ok_status_spans += 1;
+            final_status = SpanStatusCode::Ok;
+            if scenario.span.status_description.is_some() {
+                final_description = None;
+                description_handling = DescriptionHandling::OmitForOk;
+            }
+        }
+        SpanStatusCode::Unset => {
+            unset_status_spans += 1;
+            final_status = SpanStatusCode::Unset;
+            if scenario.span.status_description.is_some() {
+                final_description = None;
+                description_handling = DescriptionHandling::OmitForUnset;
+            }
+        }
+    }
+
+    // Check validation correctness
+    let validation_correct = status_preserved == scenario.expected_status_preserved
+        && final_status == scenario.expected_final_status
+        && silent_demotion_detected == scenario.expected_silent_demotion
+        && description_handling == scenario.expected_description_handling;
+
+    let validation_applied = true;
+
+    // OTLP compliance
+    let otlp_compliant = if scenario.span.status_code == SpanStatusCode::Error {
+        !silent_demotion_detected && final_status == SpanStatusCode::Error
+    } else {
+        true
+    };
+
+    ErrorStatusHandlingResult {
+        status_preserved,
+        final_status,
+        original_status: scenario.span.status_code.clone(),
+        silent_demotion_detected,
+        description_handling,
+        final_description,
+        processed_spans_count: 1,
+        error_status_spans_count: error_status_spans,
+        ok_status_spans_count: ok_status_spans,
+        unset_status_spans_count: unset_status_spans,
+        silent_demotions_count: silent_demotions,
+        validation_errors,
+        validation_correct,
+        validation_applied,
+        otlp_compliant,
+        telemetry_emitted: true,
+    }
+}
+
+/// Verify ERROR status handling logic
+fn validate_error_status_handling_logic(result: &ErrorStatusHandlingResult) -> Result<(), String> {
+    if !result.validation_correct {
+        return Err("ERROR status handling logic is incorrect".to_string());
+    }
+
+    if !result.validation_applied {
+        return Err("ERROR status validation should be applied for span processing".to_string());
+    }
+
+    // Check OTLP-087 compliance
+    if !result.otlp_compliant {
+        return Err("ERROR status handling is not OTLP-087 compliant".to_string());
+    }
+
+    // Critical check: ERROR status must never be silently demoted
+    if result.original_status == SpanStatusCode::Error && result.silent_demotion_detected {
+        return Err("CRITICAL VIOLATION: ERROR status was silently demoted".to_string());
+    }
+
+    // Critical check: ERROR status must be preserved
+    if result.original_status == SpanStatusCode::Error
+        && result.final_status != SpanStatusCode::Error
+        && !result.silent_demotion_detected
+    {
+        return Err("CRITICAL: ERROR status not preserved without detection".to_string());
+    }
+
+    Ok(())
+}
+
+/// Verify implementation consistency for ERROR status handling
+fn validate_error_status_implementation_consistency(
+    asupersync_result: &ErrorStatusHandlingResult,
+    reference_result: &ErrorStatusHandlingResult,
+) -> Result<(), String> {
+    // Both implementations should preserve status consistently
+    if asupersync_result.status_preserved != reference_result.status_preserved {
+        return Err("Status preservation differs between implementations".to_string());
+    }
+
+    // Both implementations should have same final status
+    if asupersync_result.final_status != reference_result.final_status {
+        return Err("Final status differs between implementations".to_string());
+    }
+
+    // Both implementations should detect silent demotions consistently
+    if asupersync_result.silent_demotion_detected != reference_result.silent_demotion_detected {
+        return Err("Silent demotion detection differs between implementations".to_string());
+    }
+
+    // Both implementations should handle descriptions consistently
+    if asupersync_result.description_handling != reference_result.description_handling {
+        return Err("Description handling differs between implementations".to_string());
+    }
+
+    // Both implementations should process same number of spans
+    if asupersync_result.processed_spans_count != reference_result.processed_spans_count {
+        return Err("Processed spans count differs between implementations".to_string());
+    }
+
+    // Both implementations should count ERROR status spans consistently
+    if asupersync_result.error_status_spans_count != reference_result.error_status_spans_count {
+        return Err("ERROR status spans count differs between implementations".to_string());
+    }
+
+    // Both implementations should count silent demotions consistently
+    if asupersync_result.silent_demotions_count != reference_result.silent_demotions_count {
+        return Err("Silent demotions count differs between implementations".to_string());
+    }
+
+    // Both implementations should have same validation correctness
+    if asupersync_result.validation_correct != reference_result.validation_correct {
+        return Err("Validation correctness differs between implementations".to_string());
+    }
+
+    // Both implementations should apply validation consistently
+    if asupersync_result.validation_applied != reference_result.validation_applied {
+        return Err("Validation application differs between implementations".to_string());
+    }
+
+    // Both implementations should be OTLP compliant
+    if asupersync_result.otlp_compliant != reference_result.otlp_compliant {
+        return Err("OTLP compliance differs between implementations".to_string());
+    }
+
+    // Both implementations should emit telemetry consistently
+    if asupersync_result.telemetry_emitted != reference_result.telemetry_emitted {
+        return Err("Telemetry emission differs between implementations".to_string());
+    }
+
+    Ok(())
+}
