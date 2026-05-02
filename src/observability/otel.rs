@@ -885,6 +885,7 @@ pub struct OtlpHttpExporter {
     max_retries: u32,
     initial_retry_delay: Duration,
     max_retry_delay: Duration,
+    compression: bool,
 }
 
 impl OtlpHttpExporter {
@@ -897,6 +898,7 @@ impl OtlpHttpExporter {
             max_retries: 3,
             initial_retry_delay: Duration::from_millis(100),
             max_retry_delay: Duration::from_secs(30),
+            compression: false, // Default to false for backward compatibility
         }
     }
 
@@ -918,6 +920,13 @@ impl OtlpHttpExporter {
         self.max_retries = max_retries;
         self.initial_retry_delay = initial_delay;
         self.max_retry_delay = max_delay;
+        self
+    }
+
+    /// Enable gzip compression for request bodies.
+    #[must_use]
+    pub fn with_compression(mut self, compression: bool) -> Self {
+        self.compression = compression;
         self
     }
 
@@ -987,19 +996,45 @@ impl OtlpHttpExporter {
         {
             let client = HttpClient::new();
 
+            // Apply compression if enabled
+            let (compressed_body, content_encoding) = if self.compression {
+                #[cfg(feature = "compression")]
+                {
+                    use flate2::{Compression, write::GzEncoder};
+                    use std::io::Write;
+
+                    let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
+                    encoder.write_all(body).map_err(|e| {
+                        OtlpError::non_retryable(format!("Compression failed: {}", e))
+                    })?;
+                    let compressed = encoder.finish().map_err(|e| {
+                        OtlpError::non_retryable(format!("Compression finish failed: {}", e))
+                    })?;
+                    (compressed, Some("gzip".to_string()))
+                }
+                #[cfg(not(feature = "compression"))]
+                {
+                    return Err(OtlpError::non_retryable(
+                        "Compression requested but 'compression' feature not enabled",
+                    ));
+                }
+            } else {
+                (body.to_vec(), None)
+            };
+
+            // Build headers with optional Content-Encoding
+            let mut headers = vec![(
+                "Content-Type".to_owned(),
+                "application/x-protobuf".to_owned(),
+            )];
+            if let Some(encoding) = content_encoding {
+                headers.push(("Content-Encoding".to_owned(), encoding));
+            }
+
             // Send request with timeout
             let response = crate::time::timeout(cx.now(), self.timeout, async {
                 client
-                    .request(
-                        cx,
-                        Method::Post,
-                        &self.endpoint,
-                        vec![(
-                            "Content-Type".to_owned(),
-                            "application/x-protobuf".to_owned(),
-                        )],
-                        body.to_vec(),
-                    )
+                    .request(cx, Method::Post, &self.endpoint, headers, compressed_body)
                     .await
             })
             .await

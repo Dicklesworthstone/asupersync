@@ -16,6 +16,30 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
+/// Default maximum length for OTLP span attribute values per OTLP §2.5.3.
+/// Values exceeding this length are truncated with ellipsis suffix.
+const DEFAULT_MAX_ATTRIBUTE_VALUE_LENGTH: usize = 255;
+
+/// Truncate span attribute value per OTLP §2.5.3 specification.
+///
+/// **OTLP COMPLIANCE**: Attribute string values SHOULD be capped at ~255 characters
+/// by default with ellipsis suffix when truncated. Respects UTF-8 character boundaries.
+fn truncate_attribute_value(value: &str) -> String {
+    if value.len() <= DEFAULT_MAX_ATTRIBUTE_VALUE_LENGTH {
+        value.to_string()
+    } else {
+        // Find last char boundary at or before limit
+        let mut end = DEFAULT_MAX_ATTRIBUTE_VALUE_LENGTH;
+        while end > 0 && !value.is_char_boundary(end) {
+            end -= 1;
+        }
+        let mut result = String::with_capacity(end + 3); // Reserve space for ellipsis
+        result.push_str(&value[..end]);
+        result.push('…'); // Unicode ellipsis character (3 bytes UTF-8)
+        result
+    }
+}
+
 /// Export error for OTLP trace exporter.
 #[derive(Debug, Clone)]
 pub enum ExportError {
@@ -131,6 +155,76 @@ pub struct OtlpSpan {
     pub end_time_unix_nano: u64,
     /// Span attributes (key-value pairs).
     pub attributes: Vec<(String, String)>,
+    /// Trace flags from W3C trace context (for head-based sampling).
+    /// If None, span is assumed to be sampled for backward compatibility.
+    pub trace_flags: Option<u8>,
+}
+
+impl OtlpSpan {
+    /// Returns true if this span should be sampled (exported).
+    ///
+    /// **HEAD-BASED SAMPLING**: Per OTLP specification, spans with
+    /// trace_flags=0 (not sampled) MUST be dropped before serialization.
+    pub fn is_sampled(&self) -> bool {
+        match self.trace_flags {
+            Some(flags) => (flags & 0x01) != 0, // Check sampled bit
+            None => true, // Backward compatibility: assume sampled if flags not set
+        }
+    }
+
+    /// Create a new OTLP span with sampling information.
+    ///
+    /// **OTLP COMPLIANCE**: Attribute values are automatically truncated per §2.5.3
+    /// to prevent payload bloat. Values exceeding 255 characters are truncated with
+    /// ellipsis suffix while respecting UTF-8 boundaries.
+    pub fn new_with_flags(
+        span_id: String,
+        name: String,
+        start_time_unix_nano: u64,
+        end_time_unix_nano: u64,
+        attributes: Vec<(String, String)>,
+        trace_flags: u8,
+    ) -> Self {
+        let truncated_attributes = attributes
+            .into_iter()
+            .map(|(key, value)| (key, truncate_attribute_value(&value)))
+            .collect();
+
+        Self {
+            span_id,
+            name,
+            start_time_unix_nano,
+            end_time_unix_nano,
+            attributes: truncated_attributes,
+            trace_flags: Some(trace_flags),
+        }
+    }
+
+    /// Create a new OTLP span with automatic attribute truncation.
+    ///
+    /// **OTLP COMPLIANCE**: Convenience constructor that applies OTLP §2.5.3
+    /// attribute value truncation automatically.
+    pub fn new(
+        span_id: String,
+        name: String,
+        start_time_unix_nano: u64,
+        end_time_unix_nano: u64,
+        attributes: Vec<(String, String)>,
+    ) -> Self {
+        let truncated_attributes = attributes
+            .into_iter()
+            .map(|(key, value)| (key, truncate_attribute_value(&value)))
+            .collect();
+
+        Self {
+            span_id,
+            name,
+            start_time_unix_nano,
+            end_time_unix_nano,
+            attributes: truncated_attributes,
+            trace_flags: None, // Backward compatibility: assume sampled if not set
+        }
+    }
 }
 
 /// Trait for OTLP trace exporters.
@@ -245,13 +339,49 @@ impl LoadSheddingTraceExporter {
 }
 
 impl TraceExporter for LoadSheddingTraceExporter {
-    /// Export span batch with load shedding.
+    /// Export span batch with head-based sampling and load shedding.
     ///
-    /// **OTLP BEST PRACTICE**: When queue is full, drops OLDEST batch to preserve
+    /// **HEAD-BASED SAMPLING**: Per OTLP specification, spans with trace_flags=0
+    /// (not sampled) are filtered out before export. This prevents unnecessary
+    /// network overhead and storage costs for unsampled traces.
+    ///
+    /// **LOAD SHEDDING**: When queue is full, drops OLDEST batch to preserve
     /// recent observability data. Updates `otel.exporter.dropped_spans` metric.
     fn export(&self, batch: &SpanBatch) -> Result<(), ExportError> {
-        let spans_in_batch = batch.spans.len() as u64;
-        let dropped = self.export_queue.enqueue(batch.clone());
+        // **HEAD-BASED SAMPLING**: Filter out unsampled spans before export
+        let sampled_spans: Vec<OtlpSpan> = batch
+            .spans
+            .iter()
+            .filter(|span| span.is_sampled())
+            .cloned()
+            .collect();
+
+        let unsampled_count = batch.spans.len() - sampled_spans.len();
+        if unsampled_count > 0 {
+            #[cfg(feature = "tracing-integration")]
+            crate::tracing_compat::debug!(
+                target: "asupersync::observability::otlp_trace",
+                "Head-based sampling: dropped {} unsampled spans (trace_flags=0), \
+                 exporting {} sampled spans",
+                unsampled_count,
+                sampled_spans.len()
+            );
+        }
+
+        // Skip export if no spans remain after sampling
+        if sampled_spans.is_empty() {
+            return Ok(());
+        }
+
+        // Create filtered batch with only sampled spans
+        let filtered_batch = SpanBatch {
+            batch_id: batch.batch_id,
+            spans: sampled_spans,
+            created_at: batch.created_at,
+        };
+
+        let spans_in_batch = filtered_batch.spans.len() as u64;
+        let dropped = self.export_queue.enqueue(filtered_batch);
 
         if dropped {
             // Update dropped spans metric (required by OTLP best practices)
@@ -351,6 +481,7 @@ mod tests {
             start_time_unix_nano: 1000000000,
             end_time_unix_nano: 1000001000,
             attributes: vec![("service".to_string(), "test".to_string())],
+            trace_flags: Some(0x01), // Default to sampled for backward compatibility
         }
     }
 

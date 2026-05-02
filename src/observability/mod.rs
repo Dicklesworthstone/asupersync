@@ -40,11 +40,15 @@ pub mod cancellation_analyzer;
 pub mod cancellation_debt_monitor;
 pub mod cancellation_tracer;
 pub mod cancellation_visualizer;
+#[cfg(all(test, feature = "metrics"))]
+pub mod cardinality_limits_audit_test;
 pub mod collector;
 pub mod context;
 pub mod debt_runtime_integration;
 pub mod diagnostics;
 pub mod entry;
+#[cfg(test)]
+pub mod head_based_sampling_audit_test;
 #[cfg(feature = "metrics")]
 pub mod histogram_conformance;
 pub mod level;
@@ -56,15 +60,35 @@ pub mod obligation_tracker;
 pub mod otel;
 pub mod otel_conformance_tests;
 pub mod otel_structured_concurrency;
+#[cfg(test)]
+pub mod otlp_compression_audit_test;
+#[cfg(test)]
+pub mod otlp_network_partition_audit_test;
+#[cfg(test)]
+pub mod otlp_attribute_size_cap_audit_test;
+#[cfg(test)]
+pub mod otlp_resource_attributes_inheritance_audit_test;
+#[cfg(test)]
+pub mod otlp_retry_after_audit_test;
 pub mod otlp_trace_exporter;
 pub mod performance_budget_monitor;
 pub mod resource_accounting;
+#[cfg(all(test, feature = "metrics"))]
+pub mod resource_attribute_merging_audit_test;
 pub mod runtime_integration;
+#[cfg(test)]
+pub mod runtime_metrics_endpoint_audit_test;
+#[cfg(test)]
+pub mod span_id_collision_audit_test;
+#[cfg(test)]
+pub mod span_lifecycle_obligation_leak_audit_test;
 #[cfg(test)]
 pub mod span_propagation_audit_test;
 pub mod spectral_health;
 pub mod structured_cancellation_analyzer;
 pub mod task_inspector;
+#[cfg(all(test, feature = "metrics"))]
+pub mod tls_configuration_audit_test;
 #[cfg(test)]
 pub mod trace_id_format_audit_test;
 pub mod w3c_trace_context;
