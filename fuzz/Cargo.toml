@@ -4600,6 +4600,12 @@ test = false
 doc = false
 
 [[bin]]
+name = "h2_settings_initial_window_size_change"
+path = "fuzz_targets/h2_settings_initial_window_size_change.rs"
+test = false
+doc = false
+
+[[bin]]
 name = "h2_headers_frame_size_cap_concurrent"
 path = "fuzz_targets/h2_headers_frame_size_cap_concurrent.rs"
 test = false
