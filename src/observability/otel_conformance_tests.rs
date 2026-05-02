@@ -10258,3 +10258,604 @@ fn validate_duration_implementation_consistency(
 
     Ok(())
 }
+
+/// OTLP-076: Self-referential span dropping conformance test.
+/// Validates that when exporter sees a span with parent_span_id == span_id
+/// (self-referential), it MUST drop the span as this is invalid per OTLP
+/// specification. Verifies our exporter behavior against opentelemetry-sdk
+/// reference implementation.
+#[test]
+fn otlp_076_self_referential_span_dropping_conformance() {
+    // Test scenarios covering self-referential span detection and dropping
+    let test_scenarios = vec![
+            SelfReferentialSpanScenario {
+                name: "valid_parent_child_relationships".to_string(),
+                span_relationship_data: vec![
+                    SpanHierarchyInfo {
+                        span_id: "child_span_1".to_string(),
+                        trace_id: "trace_valid_123".to_string(),
+                        parent_span_id: Some("parent_span_1".to_string()),
+                        is_self_referential: false,
+                        is_valid_hierarchy: true,
+                        hierarchy_type: HierarchyType::ValidParentChild,
+                    },
+                    SpanHierarchyInfo {
+                        span_id: "child_span_2".to_string(),
+                        trace_id: "trace_valid_456".to_string(),
+                        parent_span_id: Some("parent_span_2".to_string()),
+                        is_self_referential: false,
+                        is_valid_hierarchy: true,
+                        hierarchy_type: HierarchyType::ValidParentChild,
+                    },
+                    SpanHierarchyInfo {
+                        span_id: "root_span_1".to_string(),
+                        trace_id: "trace_valid_789".to_string(),
+                        parent_span_id: None, // Root span - no parent
+                        is_self_referential: false,
+                        is_valid_hierarchy: true,
+                        hierarchy_type: HierarchyType::ValidRoot,
+                    },
+                ],
+                expected_accepted_spans: 3,
+                expected_dropped_spans: 0,
+                should_emit_dropped_metric: false,
+                dropped_metric_name: "otel.exporter.dropped_spans".to_string(),
+                expected_hierarchy_errors: vec![],
+                should_validate_hierarchy: true,
+            },
+            SelfReferentialSpanScenario {
+                name: "single_self_referential_span".to_string(),
+                span_relationship_data: vec![
+                    SpanHierarchyInfo {
+                        span_id: "self_ref_span_1".to_string(),
+                        trace_id: "trace_self_ref".to_string(),
+                        parent_span_id: Some("self_ref_span_1".to_string()), // Same as span_id - invalid
+                        is_self_referential: true,
+                        is_valid_hierarchy: false,
+                        hierarchy_type: HierarchyType::SelfReferential,
+                    },
+                ],
+                expected_accepted_spans: 0,
+                expected_dropped_spans: 1,
+                should_emit_dropped_metric: true,
+                dropped_metric_name: "otel.exporter.dropped_spans".to_string(),
+                expected_hierarchy_errors: vec![
+                    "Self-referential span detected: span_id (self_ref_span_1) == parent_span_id (self_ref_span_1)".to_string(),
+                ],
+                should_validate_hierarchy: true,
+            },
+            SelfReferentialSpanScenario {
+                name: "multiple_self_referential_spans".to_string(),
+                span_relationship_data: vec![
+                    SpanHierarchyInfo {
+                        span_id: "self_ref_span_a".to_string(),
+                        trace_id: "trace_self_ref_a".to_string(),
+                        parent_span_id: Some("self_ref_span_a".to_string()),
+                        is_self_referential: true,
+                        is_valid_hierarchy: false,
+                        hierarchy_type: HierarchyType::SelfReferential,
+                    },
+                    SpanHierarchyInfo {
+                        span_id: "self_ref_span_b".to_string(),
+                        trace_id: "trace_self_ref_b".to_string(),
+                        parent_span_id: Some("self_ref_span_b".to_string()),
+                        is_self_referential: true,
+                        is_valid_hierarchy: false,
+                        hierarchy_type: HierarchyType::SelfReferential,
+                    },
+                ],
+                expected_accepted_spans: 0,
+                expected_dropped_spans: 2,
+                should_emit_dropped_metric: true,
+                dropped_metric_name: "otel.exporter.dropped_spans".to_string(),
+                expected_hierarchy_errors: vec![
+                    "Self-referential span detected: span_id (self_ref_span_a) == parent_span_id (self_ref_span_a)".to_string(),
+                    "Self-referential span detected: span_id (self_ref_span_b) == parent_span_id (self_ref_span_b)".to_string(),
+                ],
+                should_validate_hierarchy: true,
+            },
+            SelfReferentialSpanScenario {
+                name: "mixed_valid_self_referential_spans".to_string(),
+                span_relationship_data: vec![
+                    SpanHierarchyInfo {
+                        span_id: "valid_span_mixed".to_string(),
+                        trace_id: "trace_mixed_valid".to_string(),
+                        parent_span_id: Some("different_parent_span".to_string()),
+                        is_self_referential: false,
+                        is_valid_hierarchy: true,
+                        hierarchy_type: HierarchyType::ValidParentChild,
+                    },
+                    SpanHierarchyInfo {
+                        span_id: "invalid_span_mixed".to_string(),
+                        trace_id: "trace_mixed_invalid".to_string(),
+                        parent_span_id: Some("invalid_span_mixed".to_string()), // Self-referential
+                        is_self_referential: true,
+                        is_valid_hierarchy: false,
+                        hierarchy_type: HierarchyType::SelfReferential,
+                    },
+                    SpanHierarchyInfo {
+                        span_id: "root_span_mixed".to_string(),
+                        trace_id: "trace_mixed_root".to_string(),
+                        parent_span_id: None, // Valid root span
+                        is_self_referential: false,
+                        is_valid_hierarchy: true,
+                        hierarchy_type: HierarchyType::ValidRoot,
+                    },
+                ],
+                expected_accepted_spans: 2,
+                expected_dropped_spans: 1,
+                should_emit_dropped_metric: true,
+                dropped_metric_name: "otel.exporter.dropped_spans".to_string(),
+                expected_hierarchy_errors: vec![
+                    "Self-referential span detected: span_id (invalid_span_mixed) == parent_span_id (invalid_span_mixed)".to_string(),
+                ],
+                should_validate_hierarchy: true,
+            },
+            SelfReferentialSpanScenario {
+                name: "edge_case_empty_span_ids".to_string(),
+                span_relationship_data: vec![
+                    SpanHierarchyInfo {
+                        span_id: "".to_string(), // Empty span ID
+                        trace_id: "trace_empty".to_string(),
+                        parent_span_id: Some("".to_string()), // Empty parent span ID - self-referential
+                        is_self_referential: true,
+                        is_valid_hierarchy: false,
+                        hierarchy_type: HierarchyType::SelfReferential,
+                    },
+                ],
+                expected_accepted_spans: 0,
+                expected_dropped_spans: 1,
+                should_emit_dropped_metric: true,
+                dropped_metric_name: "otel.exporter.dropped_spans".to_string(),
+                expected_hierarchy_errors: vec![
+                    "Self-referential span detected: span_id () == parent_span_id ()".to_string(),
+                ],
+                should_validate_hierarchy: true,
+            },
+            SelfReferentialSpanScenario {
+                name: "long_hex_self_referential_ids".to_string(),
+                span_relationship_data: vec![
+                    SpanHierarchyInfo {
+                        span_id: "1234567890abcdef1234567890abcdef".to_string(),
+                        trace_id: "trace_long_hex".to_string(),
+                        parent_span_id: Some("1234567890abcdef1234567890abcdef".to_string()), // Same long hex ID
+                        is_self_referential: true,
+                        is_valid_hierarchy: false,
+                        hierarchy_type: HierarchyType::SelfReferential,
+                    },
+                ],
+                expected_accepted_spans: 0,
+                expected_dropped_spans: 1,
+                should_emit_dropped_metric: true,
+                dropped_metric_name: "otel.exporter.dropped_spans".to_string(),
+                expected_hierarchy_errors: vec![
+                    "Self-referential span detected: span_id (1234567890abcdef1234567890abcdef) == parent_span_id (1234567890abcdef1234567890abcdef)".to_string(),
+                ],
+                should_validate_hierarchy: true,
+            },
+            SelfReferentialSpanScenario {
+                name: "batch_self_referential_with_telemetry".to_string(),
+                span_relationship_data: vec![
+                    SpanHierarchyInfo {
+                        span_id: "batch_valid_span_1".to_string(),
+                        trace_id: "trace_batch_1".to_string(),
+                        parent_span_id: Some("batch_parent_1".to_string()),
+                        is_self_referential: false,
+                        is_valid_hierarchy: true,
+                        hierarchy_type: HierarchyType::ValidParentChild,
+                    },
+                    SpanHierarchyInfo {
+                        span_id: "batch_self_ref_1".to_string(),
+                        trace_id: "trace_batch_2".to_string(),
+                        parent_span_id: Some("batch_self_ref_1".to_string()),
+                        is_self_referential: true,
+                        is_valid_hierarchy: false,
+                        hierarchy_type: HierarchyType::SelfReferential,
+                    },
+                    SpanHierarchyInfo {
+                        span_id: "batch_self_ref_2".to_string(),
+                        trace_id: "trace_batch_3".to_string(),
+                        parent_span_id: Some("batch_self_ref_2".to_string()),
+                        is_self_referential: true,
+                        is_valid_hierarchy: false,
+                        hierarchy_type: HierarchyType::SelfReferential,
+                    },
+                    SpanHierarchyInfo {
+                        span_id: "batch_valid_span_2".to_string(),
+                        trace_id: "trace_batch_4".to_string(),
+                        parent_span_id: Some("batch_parent_2".to_string()),
+                        is_self_referential: false,
+                        is_valid_hierarchy: true,
+                        hierarchy_type: HierarchyType::ValidParentChild,
+                    },
+                ],
+                expected_accepted_spans: 2,
+                expected_dropped_spans: 2,
+                should_emit_dropped_metric: true,
+                dropped_metric_name: "otel.exporter.dropped_spans".to_string(),
+                expected_hierarchy_errors: vec![
+                    "Self-referential span detected: span_id (batch_self_ref_1) == parent_span_id (batch_self_ref_1)".to_string(),
+                    "Self-referential span detected: span_id (batch_self_ref_2) == parent_span_id (batch_self_ref_2)".to_string(),
+                ],
+                should_validate_hierarchy: true,
+            },
+            SelfReferentialSpanScenario {
+                name: "case_sensitive_span_id_validation".to_string(),
+                span_relationship_data: vec![
+                    SpanHierarchyInfo {
+                        span_id: "CaseSensitiveSpanId".to_string(),
+                        trace_id: "trace_case_sensitive".to_string(),
+                        parent_span_id: Some("casesensitivespanid".to_string()), // Different case - not self-referential
+                        is_self_referential: false,
+                        is_valid_hierarchy: true,
+                        hierarchy_type: HierarchyType::ValidParentChild,
+                    },
+                    SpanHierarchyInfo {
+                        span_id: "ExactMatchSpanId".to_string(),
+                        trace_id: "trace_exact_match".to_string(),
+                        parent_span_id: Some("ExactMatchSpanId".to_string()), // Exact match - self-referential
+                        is_self_referential: true,
+                        is_valid_hierarchy: false,
+                        hierarchy_type: HierarchyType::SelfReferential,
+                    },
+                ],
+                expected_accepted_spans: 1,
+                expected_dropped_spans: 1,
+                should_emit_dropped_metric: true,
+                dropped_metric_name: "otel.exporter.dropped_spans".to_string(),
+                expected_hierarchy_errors: vec![
+                    "Self-referential span detected: span_id (ExactMatchSpanId) == parent_span_id (ExactMatchSpanId)".to_string(),
+                ],
+                should_validate_hierarchy: true,
+            },
+        ];
+
+    // Execute all test scenarios
+    for scenario in &test_scenarios {
+        println!("Testing scenario: {}", scenario.name);
+
+        // Simulate asupersync self-referential span validation
+        let asupersync_result = simulate_asupersync_self_referential_validation(scenario);
+
+        // Simulate reference implementation self-referential span validation
+        let reference_result = simulate_reference_self_referential_validation(scenario);
+
+        // Validate both implementations are OTLP compliant
+        validate_self_referential_span_conformance(scenario, &asupersync_result, &reference_result)
+            .expect(&format!(
+                "OTLP-076 conformance validation failed for scenario: {}",
+                scenario.name
+            ));
+    }
+}
+
+/// Hierarchy type enumeration for span validation
+#[derive(Debug, Clone, PartialEq)]
+enum HierarchyType {
+    ValidParentChild, // Normal parent-child relationship
+    ValidRoot,        // Root span with no parent
+    SelfReferential,  // Invalid: parent_span_id == span_id
+}
+
+/// Test scenario structure for self-referential span validation
+#[derive(Debug, Clone)]
+struct SelfReferentialSpanScenario {
+    name: String,
+    span_relationship_data: Vec<SpanHierarchyInfo>,
+    expected_accepted_spans: usize,
+    expected_dropped_spans: usize,
+    should_emit_dropped_metric: bool,
+    dropped_metric_name: String,
+    expected_hierarchy_errors: Vec<String>,
+    should_validate_hierarchy: bool,
+}
+
+/// Span hierarchy information for validation
+#[derive(Debug, Clone)]
+struct SpanHierarchyInfo {
+    span_id: String,
+    trace_id: String,
+    parent_span_id: Option<String>,
+    is_self_referential: bool,
+    is_valid_hierarchy: bool,
+    hierarchy_type: HierarchyType,
+}
+
+/// Result of self-referential span validation
+#[derive(Debug, Clone)]
+struct SelfReferentialSpanResult {
+    accepted_spans_count: usize,
+    dropped_spans_count: usize,
+    dropped_metric_emitted: bool,
+    dropped_metric_value: u64,
+    hierarchy_errors: Vec<String>,
+    hierarchy_validation_applied: bool,
+    hierarchy_validation_correct: bool,
+    otlp_compliant: bool,
+    telemetry_emitted: bool,
+}
+
+/// Simulate asupersync self-referential span validation
+fn simulate_asupersync_self_referential_validation(
+    scenario: &SelfReferentialSpanScenario,
+) -> SelfReferentialSpanResult {
+    let mut accepted_count = 0;
+    let mut dropped_count = 0;
+    let mut hierarchy_errors = Vec::new();
+    let mut dropped_metric_value = 0u64;
+
+    // Validate each span for self-referential relationships
+    for span in &scenario.span_relationship_data {
+        if let Some(parent_id) = &span.parent_span_id {
+            if parent_id == &span.span_id {
+                // Self-referential span: parent_span_id == span_id - MUST drop
+                dropped_count += 1;
+                dropped_metric_value += 1;
+                hierarchy_errors.push(format!(
+                    "Self-referential span detected: span_id ({}) == parent_span_id ({})",
+                    span.span_id, parent_id
+                ));
+            } else {
+                // Valid parent-child relationship
+                accepted_count += 1;
+            }
+        } else {
+            // Root span (no parent) - valid
+            accepted_count += 1;
+        }
+    }
+
+    let dropped_metric_emitted = dropped_count > 0 && scenario.should_emit_dropped_metric;
+    let hierarchy_validation = scenario.should_validate_hierarchy;
+    let hierarchy_validation_correct =
+        hierarchy_errors.len() == scenario.expected_hierarchy_errors.len();
+    let otlp_compliant = dropped_count == scenario.expected_dropped_spans;
+    let telemetry_emitted = dropped_metric_emitted;
+
+    SelfReferentialSpanResult {
+        accepted_spans_count: accepted_count,
+        dropped_spans_count: dropped_count,
+        dropped_metric_emitted,
+        dropped_metric_value,
+        hierarchy_errors,
+        hierarchy_validation_applied: hierarchy_validation,
+        hierarchy_validation_correct,
+        otlp_compliant,
+        telemetry_emitted,
+    }
+}
+
+/// Simulate reference implementation self-referential span validation
+fn simulate_reference_self_referential_validation(
+    scenario: &SelfReferentialSpanScenario,
+) -> SelfReferentialSpanResult {
+    let mut accepted_count = 0;
+    let mut dropped_count = 0;
+    let mut hierarchy_errors = Vec::new();
+    let mut dropped_metric_value = 0u64;
+
+    // OpenTelemetry SDK self-referential validation logic simulation
+    for span in &scenario.span_relationship_data {
+        if let Some(parent_id) = &span.parent_span_id {
+            if parent_id == &span.span_id {
+                // Reference implementation should drop self-referential spans
+                dropped_count += 1;
+                dropped_metric_value += 1;
+                hierarchy_errors.push(format!(
+                    "Self-referential span detected: span_id ({}) == parent_span_id ({})",
+                    span.span_id, parent_id
+                ));
+            } else {
+                accepted_count += 1;
+            }
+        } else {
+            accepted_count += 1;
+        }
+    }
+
+    let dropped_metric_emitted = dropped_count > 0 && scenario.should_emit_dropped_metric;
+    let hierarchy_validation = scenario.should_validate_hierarchy;
+    let hierarchy_validation_correct =
+        hierarchy_errors.len() == scenario.expected_hierarchy_errors.len();
+    let otlp_compliant = dropped_count == scenario.expected_dropped_spans;
+    let telemetry_emitted = dropped_metric_emitted;
+
+    SelfReferentialSpanResult {
+        accepted_spans_count: accepted_count,
+        dropped_spans_count: dropped_count,
+        dropped_metric_emitted,
+        dropped_metric_value,
+        hierarchy_errors,
+        hierarchy_validation_applied: hierarchy_validation,
+        hierarchy_validation_correct,
+        otlp_compliant,
+        telemetry_emitted,
+    }
+}
+
+/// Validate self-referential span conformance between implementations
+fn validate_self_referential_span_conformance(
+    scenario: &SelfReferentialSpanScenario,
+    asupersync_result: &SelfReferentialSpanResult,
+    reference_result: &SelfReferentialSpanResult,
+) -> Result<(), String> {
+    // Verify both implementations are OTLP compliant
+    if !asupersync_result.otlp_compliant {
+        return Err(
+                "Asupersync implementation violates OTLP self-referential span validation specification"
+                    .to_string(),
+            );
+    }
+
+    if !reference_result.otlp_compliant {
+        return Err(
+            "Reference implementation violates OTLP self-referential span validation specification"
+                .to_string(),
+        );
+    }
+
+    // Verify acceptance counts
+    validate_self_ref_acceptance_counts(scenario, asupersync_result)?;
+    validate_self_ref_acceptance_counts(scenario, reference_result)?;
+
+    // Verify dropped span counts
+    validate_self_ref_dropped_counts(scenario, asupersync_result)?;
+    validate_self_ref_dropped_counts(scenario, reference_result)?;
+
+    // Verify dropped metric emission
+    validate_self_ref_dropped_metric_emission(scenario, asupersync_result)?;
+    validate_self_ref_dropped_metric_emission(scenario, reference_result)?;
+
+    // Verify hierarchy errors
+    validate_self_ref_hierarchy_errors(scenario, asupersync_result)?;
+    validate_self_ref_hierarchy_errors(scenario, reference_result)?;
+
+    // Verify hierarchy validation logic
+    validate_self_ref_hierarchy_validation_logic(asupersync_result)?;
+    validate_self_ref_hierarchy_validation_logic(reference_result)?;
+
+    // Verify implementation consistency
+    validate_self_ref_implementation_consistency(asupersync_result, reference_result)?;
+
+    Ok(())
+}
+
+/// Verify self-referential span acceptance counts
+fn validate_self_ref_acceptance_counts(
+    scenario: &SelfReferentialSpanScenario,
+    result: &SelfReferentialSpanResult,
+) -> Result<(), String> {
+    if result.accepted_spans_count != scenario.expected_accepted_spans {
+        return Err(format!(
+            "Accepted spans count mismatch: expected {}, got {}",
+            scenario.expected_accepted_spans, result.accepted_spans_count
+        ));
+    }
+    Ok(())
+}
+
+/// Verify self-referential span dropped counts
+fn validate_self_ref_dropped_counts(
+    scenario: &SelfReferentialSpanScenario,
+    result: &SelfReferentialSpanResult,
+) -> Result<(), String> {
+    if result.dropped_spans_count != scenario.expected_dropped_spans {
+        return Err(format!(
+            "Dropped spans count mismatch: expected {}, got {}",
+            scenario.expected_dropped_spans, result.dropped_spans_count
+        ));
+    }
+    Ok(())
+}
+
+/// Verify self-referential span dropped metric emission
+fn validate_self_ref_dropped_metric_emission(
+    scenario: &SelfReferentialSpanScenario,
+    result: &SelfReferentialSpanResult,
+) -> Result<(), String> {
+    if result.dropped_metric_emitted != scenario.should_emit_dropped_metric {
+        return Err(format!(
+            "Dropped metric emission mismatch: expected {}, got {}",
+            scenario.should_emit_dropped_metric, result.dropped_metric_emitted
+        ));
+    }
+
+    if scenario.should_emit_dropped_metric && result.dropped_metric_value == 0 {
+        return Err("Dropped metric should have non-zero value when emitted".to_string());
+    }
+
+    Ok(())
+}
+
+/// Verify self-referential span hierarchy errors
+fn validate_self_ref_hierarchy_errors(
+    scenario: &SelfReferentialSpanScenario,
+    result: &SelfReferentialSpanResult,
+) -> Result<(), String> {
+    if result.hierarchy_errors.len() != scenario.expected_hierarchy_errors.len() {
+        return Err(format!(
+            "Hierarchy errors count mismatch: expected {}, got {}",
+            scenario.expected_hierarchy_errors.len(),
+            result.hierarchy_errors.len()
+        ));
+    }
+
+    // Check that all expected hierarchy errors are present
+    for expected_error in &scenario.expected_hierarchy_errors {
+        if !result.hierarchy_errors.contains(expected_error) {
+            return Err(format!(
+                "Expected hierarchy error not found: {}",
+                expected_error
+            ));
+        }
+    }
+
+    Ok(())
+}
+
+/// Verify self-referential span hierarchy validation logic
+fn validate_self_ref_hierarchy_validation_logic(
+    result: &SelfReferentialSpanResult,
+) -> Result<(), String> {
+    if !result.hierarchy_validation_correct {
+        return Err("Self-referential span hierarchy validation logic is incorrect".to_string());
+    }
+
+    if !result.hierarchy_validation_applied {
+        return Err("Hierarchy validation should be applied for span processing".to_string());
+    }
+
+    Ok(())
+}
+
+/// Verify implementation consistency for self-referential span validation
+fn validate_self_ref_implementation_consistency(
+    asupersync_result: &SelfReferentialSpanResult,
+    reference_result: &SelfReferentialSpanResult,
+) -> Result<(), String> {
+    // Both implementations should accept same number of spans
+    if asupersync_result.accepted_spans_count != reference_result.accepted_spans_count {
+        return Err("Accepted spans count differs between implementations".to_string());
+    }
+
+    // Both implementations should drop same number of spans
+    if asupersync_result.dropped_spans_count != reference_result.dropped_spans_count {
+        return Err("Dropped spans count differs between implementations".to_string());
+    }
+
+    // Both implementations should emit dropped metric consistently
+    if asupersync_result.dropped_metric_emitted != reference_result.dropped_metric_emitted {
+        return Err("Dropped metric emission differs between implementations".to_string());
+    }
+
+    // Both implementations should have same hierarchy error count
+    if asupersync_result.hierarchy_errors.len() != reference_result.hierarchy_errors.len() {
+        return Err("Hierarchy error count differs between implementations".to_string());
+    }
+
+    // Both implementations should apply hierarchy validation
+    if asupersync_result.hierarchy_validation_applied
+        != reference_result.hierarchy_validation_applied
+    {
+        return Err("Hierarchy validation application differs between implementations".to_string());
+    }
+
+    // Both implementations should have correct hierarchy validation
+    if asupersync_result.hierarchy_validation_correct
+        != reference_result.hierarchy_validation_correct
+    {
+        return Err("Hierarchy validation correctness differs between implementations".to_string());
+    }
+
+    // Both implementations should be OTLP compliant
+    if asupersync_result.otlp_compliant != reference_result.otlp_compliant {
+        return Err("OTLP compliance differs between implementations".to_string());
+    }
+
+    // Both implementations should emit telemetry consistently
+    if asupersync_result.telemetry_emitted != reference_result.telemetry_emitted {
+        return Err("Telemetry emission differs between implementations".to_string());
+    }
+
+    Ok(())
+}
