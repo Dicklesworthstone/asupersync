@@ -3677,4 +3677,97 @@ mod tests {
 
         crate::test_complete!("metamorphic_acquire_release_identity_with_concurrent_waiters");
     }
+
+    /// Audit test: semaphore forget() semantics - when a permit is forgotten
+    /// (drop without release), the permit is leaked and the underlying counter
+    /// reflects this correctly such that future try_acquire() sees fewer permits.
+    #[test]
+    fn audit_semaphore_forget_permanently_leaks_permits() {
+        init_test("audit_semaphore_forget_permanently_leaks_permits");
+        let sem = Semaphore::new(3);
+
+        // Initial state: 3 permits available
+        let initial = sem.available_permits();
+        crate::assert_with_log!(initial == 3, "initial capacity", 3usize, initial);
+
+        // Acquire 2 permits
+        let permit1 = sem.try_acquire(1).expect("acquire first permit");
+        let permit2 = sem.try_acquire(1).expect("acquire second permit");
+
+        // After acquisition: 1 permit remains
+        let after_acquire = sem.available_permits();
+        crate::assert_with_log!(after_acquire == 1, "after acquire 2", 1usize, after_acquire);
+
+        // Normal release: drop permit1 normally (goes through Drop::drop)
+        drop(permit1);
+        let after_normal_drop = sem.available_permits();
+        crate::assert_with_log!(
+            after_normal_drop == 2,
+            "normal drop restores permit",
+            2usize,
+            after_normal_drop
+        );
+
+        // Forgotten release: call forget() on permit2
+        // This should permanently leak the permit - it won't be returned to the pool
+        permit2.forget();
+        let after_forget = sem.available_permits();
+        crate::assert_with_log!(
+            after_forget == 2,
+            "forget() does not restore permit",
+            2usize,
+            after_forget
+        );
+
+        // Verify the leak is permanent: future operations see the reduced capacity
+        let permit3 = sem.try_acquire(1).expect("acquire after forget");
+        let permit4 = sem.try_acquire(1).expect("acquire second after forget");
+
+        // Should have exactly 0 permits left (2 acquired from pool of 2 remaining)
+        let exhausted = sem.available_permits();
+        crate::assert_with_log!(exhausted == 0, "pool exhausted", 0usize, exhausted);
+
+        // Next try_acquire should fail - leaked permit is not available
+        let should_fail = sem.try_acquire(1);
+        crate::assert_with_log!(
+            should_fail.is_err(),
+            "acquire fails due to leak",
+            true,
+            should_fail.is_err()
+        );
+
+        // Release the remaining permits normally
+        drop(permit3);
+        drop(permit4);
+
+        // Final capacity should be 2, not 3 - the forgotten permit is permanently lost
+        let final_capacity = sem.available_permits();
+        crate::assert_with_log!(
+            final_capacity == 2,
+            "forgotten permit permanently leaked",
+            2usize,
+            final_capacity
+        );
+
+        // Verify max_permits reflects the initial size, not current available
+        let max_permits = sem.max_permits();
+        crate::assert_with_log!(
+            max_permits == 3,
+            "max_permits unchanged by forget",
+            3usize,
+            max_permits
+        );
+
+        // Metamorphic property: forget() + add_permits() should restore full capacity
+        sem.add_permits(1); // Manually restore the leaked permit
+        let restored = sem.available_permits();
+        crate::assert_with_log!(
+            restored == 3,
+            "add_permits can restore leaked capacity",
+            3usize,
+            restored
+        );
+
+        crate::test_complete!("audit_semaphore_forget_permanently_leaks_permits");
+    }
 }
