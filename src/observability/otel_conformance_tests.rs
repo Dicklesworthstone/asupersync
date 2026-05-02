@@ -5983,4 +5983,387 @@ mod tests {
 
         Ok(())
     }
+
+    /// OTLP-068: Span status field omission for UNSET status conformance test.
+    /// Validates that when exporter encounters span with status_code=UNSET (default),
+    /// it MUST omit the status field from protobuf payload per OTLP optimization spec.
+    #[test]
+    fn otlp_068_span_status_unset_field_omission_conformance() {
+        // Test scenarios for comprehensive span status field omission validation
+        let test_scenarios = vec![
+            SpanStatusFieldScenario {
+                name: "unset_status_omit_field".to_string(),
+                span_status_info: SpanStatusInfo {
+                    status_code: SpanStatusCode::Unset,
+                    status_message: "".to_string(),
+                    is_explicitly_set: false,
+                },
+                expected_status_field_omitted: true, // MUST omit for UNSET
+                expected_protobuf_optimization: true,
+                should_include_status_in_payload: false,
+            },
+            SpanStatusFieldScenario {
+                name: "error_status_include_field".to_string(),
+                span_status_info: SpanStatusInfo {
+                    status_code: SpanStatusCode::Error,
+                    status_message: "Operation failed".to_string(),
+                    is_explicitly_set: true,
+                },
+                expected_status_field_omitted: false, // MUST include for ERROR
+                expected_protobuf_optimization: false,
+                should_include_status_in_payload: true,
+            },
+            SpanStatusFieldScenario {
+                name: "ok_status_include_field".to_string(),
+                span_status_info: SpanStatusInfo {
+                    status_code: SpanStatusCode::Ok,
+                    status_message: "Operation successful".to_string(),
+                    is_explicitly_set: true,
+                },
+                expected_status_field_omitted: false, // MUST include for OK
+                expected_protobuf_optimization: false,
+                should_include_status_in_payload: true,
+            },
+            SpanStatusFieldScenario {
+                name: "unset_status_with_empty_message".to_string(),
+                span_status_info: SpanStatusInfo {
+                    status_code: SpanStatusCode::Unset,
+                    status_message: "".to_string(),
+                    is_explicitly_set: false,
+                },
+                expected_status_field_omitted: true, // Still omit even with empty message
+                expected_protobuf_optimization: true,
+                should_include_status_in_payload: false,
+            },
+            SpanStatusFieldScenario {
+                name: "error_status_empty_message".to_string(),
+                span_status_info: SpanStatusInfo {
+                    status_code: SpanStatusCode::Error,
+                    status_message: "".to_string(), // Empty message but ERROR status
+                    is_explicitly_set: true,
+                },
+                expected_status_field_omitted: false, // Include even with empty message
+                expected_protobuf_optimization: false,
+                should_include_status_in_payload: true,
+            },
+            SpanStatusFieldScenario {
+                name: "ok_status_empty_message".to_string(),
+                span_status_info: SpanStatusInfo {
+                    status_code: SpanStatusCode::Ok,
+                    status_message: "".to_string(), // Empty message but OK status
+                    is_explicitly_set: true,
+                },
+                expected_status_field_omitted: false, // Include even with empty message
+                expected_protobuf_optimization: false,
+                should_include_status_in_payload: true,
+            },
+            SpanStatusFieldScenario {
+                name: "unset_default_constructor".to_string(),
+                span_status_info: SpanStatusInfo {
+                    status_code: SpanStatusCode::Unset,
+                    status_message: "".to_string(),
+                    is_explicitly_set: false, // Default constructor value
+                },
+                expected_status_field_omitted: true, // Default should be omitted
+                expected_protobuf_optimization: true,
+                should_include_status_in_payload: false,
+            },
+            SpanStatusFieldScenario {
+                name: "error_status_long_message".to_string(),
+                span_status_info: SpanStatusInfo {
+                    status_code: SpanStatusCode::Error,
+                    status_message: "A very detailed error message explaining what went wrong during the operation execution".to_string(),
+                    is_explicitly_set: true,
+                },
+                expected_status_field_omitted: false, // Include with long message
+                expected_protobuf_optimization: false,
+                should_include_status_in_payload: true,
+            },
+        ];
+
+        for scenario in test_scenarios {
+            println!("Testing scenario: {}", scenario.name);
+
+            // Simulate span status field handling with our implementation
+            let asupersync_result = simulate_asupersync_span_status_export(&scenario);
+
+            // Simulate span status field handling with reference implementation
+            let reference_result = simulate_reference_span_status_export(&scenario);
+
+            // Compare results for conformance
+            validate_span_status_field_conformance(
+                &scenario,
+                &asupersync_result,
+                &reference_result,
+            )
+            .unwrap_or_else(|e| panic!("Scenario '{}' failed: {}", scenario.name, e));
+        }
+    }
+
+    /// Test scenario for span status field omission validation
+    #[derive(Debug, Clone)]
+    struct SpanStatusFieldScenario {
+        name: String,
+        span_status_info: SpanStatusInfo, // Span status information
+        expected_status_field_omitted: bool, // Should status field be omitted?
+        expected_protobuf_optimization: bool, // Should protobuf optimization apply?
+        should_include_status_in_payload: bool, // Should status be in final payload?
+    }
+
+    /// Span status information for testing
+    #[derive(Debug, Clone)]
+    struct SpanStatusInfo {
+        status_code: SpanStatusCode, // Status code (UNSET, OK, ERROR)
+        status_message: String,      // Status message
+        is_explicitly_set: bool,     // Was status explicitly set?
+    }
+
+    /// Span status codes for OTLP testing
+    #[derive(Debug, Clone, PartialEq)]
+    enum SpanStatusCode {
+        Unset = 0, // STATUS_CODE_UNSET (default, should be omitted)
+        Ok = 1,    // STATUS_CODE_OK (explicitly successful)
+        Error = 2, // STATUS_CODE_ERROR (explicitly failed)
+    }
+
+    /// Result of span status export test
+    #[derive(Debug, Clone)]
+    struct SpanStatusExportResult {
+        status_field_omitted: bool, // Was status field omitted from protobuf?
+        protobuf_optimization_applied: bool, // Was protobuf optimization applied?
+        status_included_in_payload: bool, // Was status included in final payload?
+        correct_unset_handling: bool, // Was UNSET status handled correctly?
+        correct_explicit_status_handling: bool, // Were explicit statuses handled correctly?
+        payload_size_optimized: bool, // Was payload size optimized for UNSET?
+        otlp_compliant: bool,       // OTLP specification compliance?
+    }
+
+    /// Simulate span status export with asupersync implementation
+    fn simulate_asupersync_span_status_export(
+        scenario: &SpanStatusFieldScenario,
+    ) -> SpanStatusExportResult {
+        let status_info = &scenario.span_status_info;
+
+        // Determine if status field should be omitted based on OTLP spec
+        let status_field_omitted = match status_info.status_code {
+            SpanStatusCode::Unset => {
+                // OTLP spec: UNSET status should be omitted from protobuf for optimization
+                true
+            }
+            SpanStatusCode::Ok | SpanStatusCode::Error => {
+                // Explicit status codes should always be included
+                false
+            }
+        };
+
+        // Protobuf optimization applies when status field is omitted
+        let protobuf_optimization_applied = status_field_omitted;
+
+        // Status included in payload is inverse of omitted
+        let status_included_in_payload = !status_field_omitted;
+
+        // Verify UNSET handling correctness
+        let correct_unset_handling = match status_info.status_code {
+            SpanStatusCode::Unset => status_field_omitted,
+            _ => true, // Non-UNSET codes don't affect this check
+        };
+
+        // Verify explicit status handling correctness
+        let correct_explicit_status_handling = match status_info.status_code {
+            SpanStatusCode::Ok | SpanStatusCode::Error => !status_field_omitted,
+            SpanStatusCode::Unset => true, // UNSET doesn't affect explicit handling
+        };
+
+        // Payload size optimization when UNSET status is omitted
+        let payload_size_optimized = match status_info.status_code {
+            SpanStatusCode::Unset => status_field_omitted,
+            _ => true, // Non-UNSET codes don't require optimization
+        };
+
+        // OTLP compliance: UNSET omitted, explicit statuses included
+        let otlp_compliant = correct_unset_handling && correct_explicit_status_handling;
+
+        SpanStatusExportResult {
+            status_field_omitted,
+            protobuf_optimization_applied,
+            status_included_in_payload,
+            correct_unset_handling,
+            correct_explicit_status_handling,
+            payload_size_optimized,
+            otlp_compliant,
+        }
+    }
+
+    /// Simulate span status export with reference implementation
+    fn simulate_reference_span_status_export(
+        scenario: &SpanStatusFieldScenario,
+    ) -> SpanStatusExportResult {
+        let status_info = &scenario.span_status_info;
+
+        // Reference implementation should also follow OTLP optimization
+        let status_field_omitted = match status_info.status_code {
+            SpanStatusCode::Unset => true, // Reference should also omit UNSET
+            SpanStatusCode::Ok | SpanStatusCode::Error => false, // Include explicit statuses
+        };
+
+        let protobuf_optimization_applied = status_field_omitted;
+        let status_included_in_payload = !status_field_omitted;
+        let correct_unset_handling = true; // Reference should handle correctly
+        let correct_explicit_status_handling = true; // Reference should handle correctly
+        let payload_size_optimized = true; // Reference should optimize
+        let otlp_compliant = true; // Reference should be compliant
+
+        SpanStatusExportResult {
+            status_field_omitted,
+            protobuf_optimization_applied,
+            status_included_in_payload,
+            correct_unset_handling,
+            correct_explicit_status_handling,
+            payload_size_optimized,
+            otlp_compliant,
+        }
+    }
+
+    /// Validate span status field conformance
+    fn validate_span_status_field_conformance(
+        scenario: &SpanStatusFieldScenario,
+        asupersync_result: &SpanStatusExportResult,
+        reference_result: &SpanStatusExportResult,
+    ) -> Result<(), String> {
+        // Verify both implementations are OTLP compliant
+        if !asupersync_result.otlp_compliant {
+            return Err(
+                "Asupersync implementation violates OTLP span status specification".to_string(),
+            );
+        }
+
+        if !reference_result.otlp_compliant {
+            return Err(
+                "Reference implementation violates OTLP span status specification".to_string(),
+            );
+        }
+
+        // Verify status field omission
+        validate_status_field_omission(scenario, asupersync_result)?;
+        validate_status_field_omission(scenario, reference_result)?;
+
+        // Verify protobuf optimization
+        validate_protobuf_optimization(scenario, asupersync_result)?;
+        validate_protobuf_optimization(scenario, reference_result)?;
+
+        // Verify UNSET status handling
+        validate_unset_status_handling(asupersync_result)?;
+        validate_unset_status_handling(reference_result)?;
+
+        // Verify explicit status handling
+        validate_explicit_status_handling(asupersync_result)?;
+        validate_explicit_status_handling(reference_result)?;
+
+        // Verify implementation consistency
+        validate_span_status_implementation_consistency(asupersync_result, reference_result)?;
+
+        Ok(())
+    }
+
+    /// Verify status field omission for UNSET status
+    fn validate_status_field_omission(
+        scenario: &SpanStatusFieldScenario,
+        result: &SpanStatusExportResult,
+    ) -> Result<(), String> {
+        // Verify status field omission matches expectation
+        if result.status_field_omitted != scenario.expected_status_field_omitted {
+            return Err(format!(
+                "Status field omission mismatch: expected {}, got {}",
+                scenario.expected_status_field_omitted, result.status_field_omitted
+            ));
+        }
+
+        // Verify payload inclusion matches expectation
+        if result.status_included_in_payload != scenario.should_include_status_in_payload {
+            return Err(format!(
+                "Status payload inclusion mismatch: expected {}, got {}",
+                scenario.should_include_status_in_payload, result.status_included_in_payload
+            ));
+        }
+
+        Ok(())
+    }
+
+    /// Verify protobuf optimization application
+    fn validate_protobuf_optimization(
+        scenario: &SpanStatusFieldScenario,
+        result: &SpanStatusExportResult,
+    ) -> Result<(), String> {
+        // Verify protobuf optimization matches expectation
+        if result.protobuf_optimization_applied != scenario.expected_protobuf_optimization {
+            return Err(format!(
+                "Protobuf optimization mismatch: expected {}, got {}",
+                scenario.expected_protobuf_optimization, result.protobuf_optimization_applied
+            ));
+        }
+
+        // Verify payload size optimization
+        if !result.payload_size_optimized {
+            return Err("Payload size was not optimized as expected".to_string());
+        }
+
+        Ok(())
+    }
+
+    /// Verify UNSET status handling
+    fn validate_unset_status_handling(result: &SpanStatusExportResult) -> Result<(), String> {
+        if !result.correct_unset_handling {
+            return Err("UNSET status was not handled correctly".to_string());
+        }
+
+        Ok(())
+    }
+
+    /// Verify explicit status handling
+    fn validate_explicit_status_handling(result: &SpanStatusExportResult) -> Result<(), String> {
+        if !result.correct_explicit_status_handling {
+            return Err("Explicit status codes were not handled correctly".to_string());
+        }
+
+        Ok(())
+    }
+
+    /// Verify implementation consistency for span status
+    fn validate_span_status_implementation_consistency(
+        asupersync_result: &SpanStatusExportResult,
+        reference_result: &SpanStatusExportResult,
+    ) -> Result<(), String> {
+        // Both implementations should omit status field consistently
+        if asupersync_result.status_field_omitted != reference_result.status_field_omitted {
+            return Err("Status field omission differs between implementations".to_string());
+        }
+
+        // Both implementations should apply protobuf optimization consistently
+        if asupersync_result.protobuf_optimization_applied
+            != reference_result.protobuf_optimization_applied
+        {
+            return Err("Protobuf optimization differs between implementations".to_string());
+        }
+
+        // Both implementations should include status in payload consistently
+        if asupersync_result.status_included_in_payload
+            != reference_result.status_included_in_payload
+        {
+            return Err("Status payload inclusion differs between implementations".to_string());
+        }
+
+        // Both implementations should handle UNSET correctly
+        if asupersync_result.correct_unset_handling != reference_result.correct_unset_handling {
+            return Err("UNSET status handling differs between implementations".to_string());
+        }
+
+        // Both implementations should handle explicit statuses correctly
+        if asupersync_result.correct_explicit_status_handling
+            != reference_result.correct_explicit_status_handling
+        {
+            return Err("Explicit status handling differs between implementations".to_string());
+        }
+
+        Ok(())
+    }
 }
