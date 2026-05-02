@@ -12,7 +12,7 @@ edition = "2024"
 cargo-fuzz = true
 
 [dependencies]
-asupersync = { path = "..", features = ["compression", "tls", "metrics", "tracing-integration", "test-internals", "trace-compression", "io-uring", "simd-intrinsics", "fuzz", "mysql"] }
+asupersync = { path = "..", features = ["compression", "tls", "metrics", "tracing-integration", "test-internals", "trace-compression", "io-uring", "simd-intrinsics", "fuzz", "mysql", "postgres"] }
 libfuzzer-sys = "0.4"
 arbitrary = { version = "1", features = ["derive"] }
 libc = "0.2"
@@ -210,6 +210,13 @@ bench = false
 [[bin]]
 name = "postgres_row_description_packet"
 path = "fuzz_targets/postgres_row_description_packet.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "postgres_row_description"
+path = "fuzz_targets/postgres_row_description.rs"
 test = false
 doc = false
 bench = false
@@ -2244,6 +2251,15 @@ bench = false
 [[bin]]
 name = "postgres_extended_query_bind"
 path = "fuzz_targets/postgres_extended_query_bind.rs"
+test = false
+doc = false
+bench = false
+
+# COPY IN frontend stream fuzzer for CopyData length prefixes, empty CopyFail,
+# and CopyDone-before-data handling.
+[[bin]]
+name = "postgres_copy_in"
+path = "fuzz_targets/postgres_copy_in.rs"
 test = false
 doc = false
 bench = false
@@ -4503,6 +4519,12 @@ doc = false
 [[bin]]
 name = "h2_settings_max_frame_size_overflow"
 path = "fuzz_targets/h2_settings_max_frame_size_overflow.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "h2_settings_unknown_id"
+path = "fuzz_targets/h2_settings_unknown_id.rs"
 test = false
 doc = false
 

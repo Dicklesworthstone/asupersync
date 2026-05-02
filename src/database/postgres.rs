@@ -6553,6 +6553,24 @@ pub struct FuzzBindMessage {
     pub result_format_codes: Vec<i16>,
 }
 
+/// Terminal message for a frontend COPY IN stream.
+#[cfg(feature = "test-internals")]
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[doc(hidden)]
+pub enum FuzzCopyInEnd {
+    Done,
+    Fail(String),
+}
+
+/// Fuzz-target summary for frontend COPY IN message decoding.
+#[cfg(feature = "test-internals")]
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[doc(hidden)]
+pub struct FuzzCopyInSequence {
+    pub copy_data_chunks: Vec<Vec<u8>>,
+    pub end: FuzzCopyInEnd,
+}
+
 #[cfg(feature = "test-internals")]
 fn fuzz_frontend_message_body(frame: &[u8], expected_type: u8) -> Result<&[u8], PgError> {
     if frame.len() < 5 {
@@ -6582,6 +6600,84 @@ fn fuzz_frontend_message_body(frame: &[u8], expected_type: u8) -> Result<&[u8], 
     }
 
     Ok(&frame[5..body_end])
+}
+
+/// Fuzz-target re-exporter for frontend COPY IN stream decoding.
+#[cfg(feature = "test-internals")]
+#[doc(hidden)]
+pub fn fuzz_parse_copy_in_sequence(stream: &[u8]) -> Result<FuzzCopyInSequence, PgError> {
+    let mut cursor = 0usize;
+    let mut copy_data_chunks = Vec::new();
+
+    loop {
+        if cursor == stream.len() {
+            return Err(PgError::Protocol(
+                "COPY IN stream ended before CopyDone or CopyFail".to_string(),
+            ));
+        }
+        if stream.len().saturating_sub(cursor) < 5 {
+            return Err(PgError::Protocol(
+                "unexpected end of COPY IN message".to_string(),
+            ));
+        }
+
+        let msg_type = stream[cursor];
+        let len_i32 = i32::from_be_bytes([
+            stream[cursor + 1],
+            stream[cursor + 2],
+            stream[cursor + 3],
+            stream[cursor + 4],
+        ]);
+        let body_len = backend_message_body_len(len_i32)?;
+        let body_start = cursor + 5;
+        let body_end = body_start
+            .checked_add(body_len)
+            .ok_or_else(|| PgError::Protocol("message length overflow".to_string()))?;
+
+        if stream.len() < body_end {
+            return Err(PgError::Protocol(
+                "unexpected end of COPY IN message".to_string(),
+            ));
+        }
+
+        let body = &stream[body_start..body_end];
+        cursor = body_end;
+
+        let end = match msg_type {
+            value if value == FrontendMessage::CopyData as u8 => {
+                copy_data_chunks.push(body.to_vec());
+                continue;
+            }
+            value if value == FrontendMessage::CopyDone as u8 => {
+                MessageReader::new(body).ensure_consumed("CopyDone")?;
+                FuzzCopyInEnd::Done
+            }
+            value if value == FrontendMessage::CopyFail as u8 => {
+                let mut reader = MessageReader::new(body);
+                let message = reader.read_cstring()?.to_string();
+                reader.ensure_consumed("CopyFail")?;
+                FuzzCopyInEnd::Fail(message)
+            }
+            other => {
+                return Err(PgError::Protocol(format!(
+                    "unexpected COPY IN frontend message: {}",
+                    other as char
+                )));
+            }
+        };
+
+        if cursor != stream.len() {
+            return Err(PgError::Protocol(format!(
+                "COPY IN stream has {} trailing byte(s) after terminal message",
+                stream.len() - cursor
+            )));
+        }
+
+        return Ok(FuzzCopyInSequence {
+            copy_data_chunks,
+            end,
+        });
+    }
 }
 
 /// Fuzz-target re-exporter for frontend Parse message decoding.
