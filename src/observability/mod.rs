@@ -88,6 +88,8 @@ pub mod span_lifecycle_obligation_leak_audit_test;
 pub mod span_propagation_audit_test;
 pub mod spectral_health;
 pub mod structured_cancellation_analyzer;
+#[cfg(test)]
+pub mod subscriber_installation_order_audit_test;
 pub mod task_inspector;
 #[cfg(all(test, feature = "metrics"))]
 pub mod tls_configuration_audit_test;
