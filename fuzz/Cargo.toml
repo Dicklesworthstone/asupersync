@@ -717,6 +717,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "sync_watch_concurrent_send"
+path = "fuzz_targets/sync_watch_concurrent_send.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "fuzz_h2_state_machine"
 path = "fuzz_targets/h2_state_machine.rs"
 test = false
