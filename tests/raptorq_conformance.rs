@@ -1741,6 +1741,7 @@ mod differential_harness {
         Decoder as RaptorqRsDecoder, EncodingPacket as RaptorqRsEncodingPacket,
         ObjectTransmissionInformation as RaptorqRsObjectTransmissionInformation,
         PayloadId as RaptorqRsPayloadId,
+        extended_source_block_symbols as raptorq_rs_extended_source_block_symbols,
     };
 
     const DIFF_REPLAY_REF: &str = "replay:rq-d2-diff-harness-v1";
@@ -2134,6 +2135,36 @@ mod differential_harness {
             expect_success: true,
             expected_error_kind: None,
         });
+    }
+
+    #[test]
+    fn differential_repair_esi_mapping_matches_raptorq_rs_k8192() {
+        let k = 8192usize;
+        let params = SystematicParams::for_source_block(k, 8);
+        let reference_k_prime = usize::try_from(raptorq_rs_extended_source_block_symbols(
+            u32::try_from(k).expect("K must fit u32"),
+        ))
+        .expect("raptorq-rs K' must fit usize");
+
+        assert_eq!(
+            params.k_prime, reference_k_prime,
+            "raptorq-rs and asupersync must agree on K' before mapping K8192 repair ESIs"
+        );
+
+        for offset in [0_u32, 1, 15, 127] {
+            let public_esi = u32::try_from(k).expect("K must fit u32") + offset;
+            let reference_esi = reference_k_prime
+                .checked_add(usize::try_from(offset).expect("offset fits usize"))
+                .expect("reference repair ESI must not overflow");
+            let padding_delta = params.k_prime - params.k;
+
+            assert_eq!(
+                usize::try_from(public_esi).expect("public ESI fits usize") + padding_delta,
+                reference_esi,
+                "public repair ESI {public_esi} must map to the same repair ESI that \
+                 raptorq-rs emits for offset {offset}"
+            );
+        }
     }
 
     #[test]
