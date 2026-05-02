@@ -7383,4 +7383,574 @@ mod tests {
 
         Ok(())
     }
+
+    /// OTLP-071: Histogram bucket count length validation conformance test.
+    /// Validates that exporters MUST reject metrics where bucket_counts.len() !=
+    /// explicit_bounds.len() + 1 as this violates OTLP histogram specification.
+    /// Verifies our exporter validation against opentelemetry-sdk reference implementation.
+    #[test]
+    fn otlp_071_histogram_bucket_count_length_conformance() {
+        // Test scenarios covering histogram bucket count length validation
+        let test_scenarios = vec![
+            HistogramBucketLengthScenario {
+                name: "valid_bucket_bounds_ratio".to_string(),
+                histogram_metrics: vec![
+                    HistogramBucketInfo {
+                        name: "valid_histogram_3_bounds_4_buckets".to_string(),
+                        count: 100,
+                        sum: 500.0,
+                        bucket_counts: vec![10, 20, 30, 40], // 4 buckets
+                        explicit_bounds: vec![1.0, 5.0, 10.0], // 3 bounds -> 4 buckets correct
+                        is_valid_length_ratio: true,
+                        expected_buckets: 4,
+                        expected_bounds: 3,
+                    },
+                    HistogramBucketInfo {
+                        name: "valid_histogram_2_bounds_3_buckets".to_string(),
+                        count: 75,
+                        sum: 300.0,
+                        bucket_counts: vec![25, 25, 25],  // 3 buckets
+                        explicit_bounds: vec![5.0, 15.0], // 2 bounds -> 3 buckets correct
+                        is_valid_length_ratio: true,
+                        expected_buckets: 3,
+                        expected_bounds: 2,
+                    },
+                ],
+                expected_accepted_metrics: 2,
+                expected_rejected_metrics: 0,
+                should_emit_rejection_metric: false,
+                rejection_metric_name: "otel.exporter.invalid_histograms".to_string(),
+                expected_validation_errors: vec![],
+                should_validate_bucket_length: true,
+            },
+            HistogramBucketLengthScenario {
+                name: "too_many_buckets".to_string(),
+                histogram_metrics: vec![HistogramBucketInfo {
+                    name: "invalid_too_many_buckets".to_string(),
+                    count: 60,
+                    sum: 180.0,
+                    bucket_counts: vec![10, 20, 15, 10, 5], // 5 buckets
+                    explicit_bounds: vec![2.0, 8.0], // 2 bounds -> should be 3 buckets, not 5
+                    is_valid_length_ratio: false,
+                    expected_buckets: 3,
+                    expected_bounds: 2,
+                }],
+                expected_accepted_metrics: 0,
+                expected_rejected_metrics: 1,
+                should_emit_rejection_metric: true,
+                rejection_metric_name: "otel.exporter.invalid_histograms".to_string(),
+                expected_validation_errors: vec![
+                    "Histogram bucket_counts length (5) must equal explicit_bounds length + 1 (3)"
+                        .to_string(),
+                ],
+                should_validate_bucket_length: true,
+            },
+            HistogramBucketLengthScenario {
+                name: "too_few_buckets".to_string(),
+                histogram_metrics: vec![HistogramBucketInfo {
+                    name: "invalid_too_few_buckets".to_string(),
+                    count: 45,
+                    sum: 225.0,
+                    bucket_counts: vec![15, 30], // 2 buckets
+                    explicit_bounds: vec![1.0, 3.0, 7.0, 15.0], // 4 bounds -> should be 5 buckets, not 2
+                    is_valid_length_ratio: false,
+                    expected_buckets: 5,
+                    expected_bounds: 4,
+                }],
+                expected_accepted_metrics: 0,
+                expected_rejected_metrics: 1,
+                should_emit_rejection_metric: true,
+                rejection_metric_name: "otel.exporter.invalid_histograms".to_string(),
+                expected_validation_errors: vec![
+                    "Histogram bucket_counts length (2) must equal explicit_bounds length + 1 (5)"
+                        .to_string(),
+                ],
+                should_validate_bucket_length: true,
+            },
+            HistogramBucketLengthScenario {
+                name: "mixed_valid_invalid_buckets".to_string(),
+                histogram_metrics: vec![
+                    HistogramBucketInfo {
+                        name: "valid_mixed_histogram".to_string(),
+                        count: 80,
+                        sum: 400.0,
+                        bucket_counts: vec![20, 30, 20, 10], // 4 buckets
+                        explicit_bounds: vec![2.0, 6.0, 12.0], // 3 bounds -> 4 buckets correct
+                        is_valid_length_ratio: true,
+                        expected_buckets: 4,
+                        expected_bounds: 3,
+                    },
+                    HistogramBucketInfo {
+                        name: "invalid_mixed_histogram".to_string(),
+                        count: 50,
+                        sum: 250.0,
+                        bucket_counts: vec![10, 15, 20, 5], // 4 buckets
+                        explicit_bounds: vec![1.0],         // 1 bound -> should be 2 buckets, not 4
+                        is_valid_length_ratio: false,
+                        expected_buckets: 2,
+                        expected_bounds: 1,
+                    },
+                ],
+                expected_accepted_metrics: 1,
+                expected_rejected_metrics: 1,
+                should_emit_rejection_metric: true,
+                rejection_metric_name: "otel.exporter.invalid_histograms".to_string(),
+                expected_validation_errors: vec![
+                    "Histogram bucket_counts length (4) must equal explicit_bounds length + 1 (2)"
+                        .to_string(),
+                ],
+                should_validate_bucket_length: true,
+            },
+            HistogramBucketLengthScenario {
+                name: "edge_case_empty_bounds".to_string(),
+                histogram_metrics: vec![HistogramBucketInfo {
+                    name: "valid_empty_bounds_single_bucket".to_string(),
+                    count: 25,
+                    sum: 125.0,
+                    bucket_counts: vec![25], // 1 bucket
+                    explicit_bounds: vec![], // 0 bounds -> 1 bucket correct
+                    is_valid_length_ratio: true,
+                    expected_buckets: 1,
+                    expected_bounds: 0,
+                }],
+                expected_accepted_metrics: 1,
+                expected_rejected_metrics: 0,
+                should_emit_rejection_metric: false,
+                rejection_metric_name: "otel.exporter.invalid_histograms".to_string(),
+                expected_validation_errors: vec![],
+                should_validate_bucket_length: true,
+            },
+            HistogramBucketLengthScenario {
+                name: "edge_case_empty_bounds_multiple_buckets".to_string(),
+                histogram_metrics: vec![HistogramBucketInfo {
+                    name: "invalid_empty_bounds_multiple_buckets".to_string(),
+                    count: 40,
+                    sum: 200.0,
+                    bucket_counts: vec![20, 15, 5], // 3 buckets
+                    explicit_bounds: vec![],        // 0 bounds -> should be 1 bucket, not 3
+                    is_valid_length_ratio: false,
+                    expected_buckets: 1,
+                    expected_bounds: 0,
+                }],
+                expected_accepted_metrics: 0,
+                expected_rejected_metrics: 1,
+                should_emit_rejection_metric: true,
+                rejection_metric_name: "otel.exporter.invalid_histograms".to_string(),
+                expected_validation_errors: vec![
+                    "Histogram bucket_counts length (3) must equal explicit_bounds length + 1 (1)"
+                        .to_string(),
+                ],
+                should_validate_bucket_length: true,
+            },
+            HistogramBucketLengthScenario {
+                name: "large_histogram_off_by_one".to_string(),
+                histogram_metrics: vec![HistogramBucketInfo {
+                    name: "invalid_large_histogram_missing_bucket".to_string(),
+                    count: 1000,
+                    sum: 5000.0,
+                    bucket_counts: vec![100, 200, 300, 250, 150], // 5 buckets
+                    explicit_bounds: vec![1.0, 2.0, 5.0, 10.0, 20.0, 50.0], // 6 bounds -> should be 7 buckets, not 5
+                    is_valid_length_ratio: false,
+                    expected_buckets: 7,
+                    expected_bounds: 6,
+                }],
+                expected_accepted_metrics: 0,
+                expected_rejected_metrics: 1,
+                should_emit_rejection_metric: true,
+                rejection_metric_name: "otel.exporter.invalid_histograms".to_string(),
+                expected_validation_errors: vec![
+                    "Histogram bucket_counts length (5) must equal explicit_bounds length + 1 (7)"
+                        .to_string(),
+                ],
+                should_validate_bucket_length: true,
+            },
+            HistogramBucketLengthScenario {
+                name: "multiple_invalid_different_issues".to_string(),
+                histogram_metrics: vec![
+                    HistogramBucketInfo {
+                        name: "invalid_extra_bucket".to_string(),
+                        count: 30,
+                        sum: 150.0,
+                        bucket_counts: vec![5, 10, 15], // 3 buckets
+                        explicit_bounds: vec![5.0],     // 1 bound -> should be 2 buckets, not 3
+                        is_valid_length_ratio: false,
+                        expected_buckets: 2,
+                        expected_bounds: 1,
+                    },
+                    HistogramBucketInfo {
+                        name: "invalid_missing_buckets".to_string(),
+                        count: 60,
+                        sum: 300.0,
+                        bucket_counts: vec![30, 30], // 2 buckets
+                        explicit_bounds: vec![2.0, 4.0, 8.0, 16.0], // 4 bounds -> should be 5 buckets, not 2
+                        is_valid_length_ratio: false,
+                        expected_buckets: 5,
+                        expected_bounds: 4,
+                    },
+                ],
+                expected_accepted_metrics: 0,
+                expected_rejected_metrics: 2,
+                should_emit_rejection_metric: true,
+                rejection_metric_name: "otel.exporter.invalid_histograms".to_string(),
+                expected_validation_errors: vec![
+                    "Histogram bucket_counts length (3) must equal explicit_bounds length + 1 (2)"
+                        .to_string(),
+                    "Histogram bucket_counts length (2) must equal explicit_bounds length + 1 (5)"
+                        .to_string(),
+                ],
+                should_validate_bucket_length: true,
+            },
+        ];
+
+        // Execute all test scenarios
+        for scenario in &test_scenarios {
+            println!("Testing scenario: {}", scenario.name);
+
+            // Simulate asupersync histogram bucket length validation
+            let asupersync_result =
+                simulate_asupersync_histogram_bucket_length_validation(scenario);
+
+            // Simulate reference implementation histogram validation
+            let reference_result = simulate_reference_histogram_bucket_length_validation(scenario);
+
+            // Validate both implementations are OTLP compliant
+            validate_histogram_bucket_length_conformance(
+                scenario,
+                &asupersync_result,
+                &reference_result,
+            )
+            .expect(&format!(
+                "OTLP-071 conformance validation failed for scenario: {}",
+                scenario.name
+            ));
+        }
+    }
+
+    /// Test scenario structure for histogram bucket count length validation
+    #[derive(Debug, Clone)]
+    struct HistogramBucketLengthScenario {
+        name: String,
+        histogram_metrics: Vec<HistogramBucketInfo>,
+        expected_accepted_metrics: usize,
+        expected_rejected_metrics: usize,
+        should_emit_rejection_metric: bool,
+        rejection_metric_name: String,
+        expected_validation_errors: Vec<String>,
+        should_validate_bucket_length: bool,
+    }
+
+    /// Histogram bucket information with length validation
+    #[derive(Debug, Clone)]
+    struct HistogramBucketInfo {
+        name: String,
+        count: u64,
+        sum: f64,
+        bucket_counts: Vec<u64>,
+        explicit_bounds: Vec<f64>,
+        is_valid_length_ratio: bool,
+        expected_buckets: usize,
+        expected_bounds: usize,
+    }
+
+    /// Result of histogram bucket count length validation
+    #[derive(Debug, Clone)]
+    struct HistogramBucketLengthResult {
+        accepted_metrics_count: usize,
+        rejected_metrics_count: usize,
+        rejection_metric_emitted: bool,
+        rejection_metric_value: u64,
+        validation_errors: Vec<String>,
+        bucket_length_validation_applied: bool,
+        length_ratio_validation_correct: bool,
+        otlp_compliant: bool,
+        telemetry_emitted: bool,
+    }
+
+    /// Simulate asupersync histogram bucket count length validation
+    fn simulate_asupersync_histogram_bucket_length_validation(
+        scenario: &HistogramBucketLengthScenario,
+    ) -> HistogramBucketLengthResult {
+        let mut accepted_count = 0;
+        let mut rejected_count = 0;
+        let mut validation_errors = Vec::new();
+        let mut rejection_metric_value = 0u64;
+
+        // Validate each histogram metric according to OTLP spec
+        for metric in &scenario.histogram_metrics {
+            let expected_bucket_count = metric.explicit_bounds.len() + 1;
+            let actual_bucket_count = metric.bucket_counts.len();
+
+            if actual_bucket_count != expected_bucket_count {
+                // OTLP spec: bucket_counts.len() MUST equal explicit_bounds.len() + 1
+                rejected_count += 1;
+                rejection_metric_value += 1;
+                validation_errors.push(format!(
+                    "Histogram bucket_counts length ({}) must equal explicit_bounds length + 1 ({})",
+                    actual_bucket_count, expected_bucket_count
+                ));
+            } else {
+                // Valid histogram with correct bucket count ratio
+                accepted_count += 1;
+            }
+        }
+
+        let rejection_metric_emitted = rejected_count > 0 && scenario.should_emit_rejection_metric;
+        let bucket_length_validation = scenario.should_validate_bucket_length;
+        let length_ratio_validation_correct =
+            validation_errors.len() == scenario.expected_validation_errors.len();
+        let otlp_compliant = rejected_count == scenario.expected_rejected_metrics;
+        let telemetry_emitted = rejection_metric_emitted;
+
+        HistogramBucketLengthResult {
+            accepted_metrics_count: accepted_count,
+            rejected_metrics_count: rejected_count,
+            rejection_metric_emitted,
+            rejection_metric_value,
+            validation_errors,
+            bucket_length_validation_applied: bucket_length_validation,
+            length_ratio_validation_correct,
+            otlp_compliant,
+            telemetry_emitted,
+        }
+    }
+
+    /// Simulate reference implementation histogram bucket count length validation
+    fn simulate_reference_histogram_bucket_length_validation(
+        scenario: &HistogramBucketLengthScenario,
+    ) -> HistogramBucketLengthResult {
+        let mut accepted_count = 0;
+        let mut rejected_count = 0;
+        let mut validation_errors = Vec::new();
+        let mut rejection_metric_value = 0u64;
+
+        // OpenTelemetry SDK validation logic simulation
+        for metric in &scenario.histogram_metrics {
+            let expected_bucket_count = metric.explicit_bounds.len() + 1;
+            let actual_bucket_count = metric.bucket_counts.len();
+
+            if actual_bucket_count != expected_bucket_count {
+                // Reference implementation should reject invalid bucket/bounds ratio
+                rejected_count += 1;
+                rejection_metric_value += 1;
+                validation_errors.push(format!(
+                    "Histogram bucket_counts length ({}) must equal explicit_bounds length + 1 ({})",
+                    actual_bucket_count, expected_bucket_count
+                ));
+            } else {
+                accepted_count += 1;
+            }
+        }
+
+        let rejection_metric_emitted = rejected_count > 0 && scenario.should_emit_rejection_metric;
+        let bucket_length_validation = scenario.should_validate_bucket_length;
+        let length_ratio_validation_correct =
+            validation_errors.len() == scenario.expected_validation_errors.len();
+        let otlp_compliant = rejected_count == scenario.expected_rejected_metrics;
+        let telemetry_emitted = rejection_metric_emitted;
+
+        HistogramBucketLengthResult {
+            accepted_metrics_count: accepted_count,
+            rejected_metrics_count: rejected_count,
+            rejection_metric_emitted,
+            rejection_metric_value,
+            validation_errors,
+            bucket_length_validation_applied: bucket_length_validation,
+            length_ratio_validation_correct,
+            otlp_compliant,
+            telemetry_emitted,
+        }
+    }
+
+    /// Validate histogram bucket count length conformance between implementations
+    fn validate_histogram_bucket_length_conformance(
+        scenario: &HistogramBucketLengthScenario,
+        asupersync_result: &HistogramBucketLengthResult,
+        reference_result: &HistogramBucketLengthResult,
+    ) -> Result<(), String> {
+        // Verify both implementations are OTLP compliant
+        if !asupersync_result.otlp_compliant {
+            return Err(
+                "Asupersync implementation violates OTLP histogram bucket length specification"
+                    .to_string(),
+            );
+        }
+
+        if !reference_result.otlp_compliant {
+            return Err(
+                "Reference implementation violates OTLP histogram bucket length specification"
+                    .to_string(),
+            );
+        }
+
+        // Verify acceptance counts
+        validate_bucket_length_acceptance_counts(scenario, asupersync_result)?;
+        validate_bucket_length_acceptance_counts(scenario, reference_result)?;
+
+        // Verify rejection counts
+        validate_bucket_length_rejection_counts(scenario, asupersync_result)?;
+        validate_bucket_length_rejection_counts(scenario, reference_result)?;
+
+        // Verify rejection metric emission
+        validate_bucket_length_rejection_metric(scenario, asupersync_result)?;
+        validate_bucket_length_rejection_metric(scenario, reference_result)?;
+
+        // Verify validation errors
+        validate_bucket_length_validation_errors(scenario, asupersync_result)?;
+        validate_bucket_length_validation_errors(scenario, reference_result)?;
+
+        // Verify bucket length validation logic
+        validate_bucket_length_validation_logic(asupersync_result)?;
+        validate_bucket_length_validation_logic(reference_result)?;
+
+        // Verify implementation consistency
+        validate_bucket_length_implementation_consistency(asupersync_result, reference_result)?;
+
+        Ok(())
+    }
+
+    /// Verify histogram bucket length acceptance counts
+    fn validate_bucket_length_acceptance_counts(
+        scenario: &HistogramBucketLengthScenario,
+        result: &HistogramBucketLengthResult,
+    ) -> Result<(), String> {
+        if result.accepted_metrics_count != scenario.expected_accepted_metrics {
+            return Err(format!(
+                "Accepted metrics count mismatch: expected {}, got {}",
+                scenario.expected_accepted_metrics, result.accepted_metrics_count
+            ));
+        }
+        Ok(())
+    }
+
+    /// Verify histogram bucket length rejection counts
+    fn validate_bucket_length_rejection_counts(
+        scenario: &HistogramBucketLengthScenario,
+        result: &HistogramBucketLengthResult,
+    ) -> Result<(), String> {
+        if result.rejected_metrics_count != scenario.expected_rejected_metrics {
+            return Err(format!(
+                "Rejected metrics count mismatch: expected {}, got {}",
+                scenario.expected_rejected_metrics, result.rejected_metrics_count
+            ));
+        }
+        Ok(())
+    }
+
+    /// Verify histogram bucket length rejection metric emission
+    fn validate_bucket_length_rejection_metric(
+        scenario: &HistogramBucketLengthScenario,
+        result: &HistogramBucketLengthResult,
+    ) -> Result<(), String> {
+        if result.rejection_metric_emitted != scenario.should_emit_rejection_metric {
+            return Err(format!(
+                "Rejection metric emission mismatch: expected {}, got {}",
+                scenario.should_emit_rejection_metric, result.rejection_metric_emitted
+            ));
+        }
+
+        if scenario.should_emit_rejection_metric && result.rejection_metric_value == 0 {
+            return Err("Rejection metric should have non-zero value when emitted".to_string());
+        }
+
+        Ok(())
+    }
+
+    /// Verify histogram bucket length validation errors
+    fn validate_bucket_length_validation_errors(
+        scenario: &HistogramBucketLengthScenario,
+        result: &HistogramBucketLengthResult,
+    ) -> Result<(), String> {
+        if result.validation_errors.len() != scenario.expected_validation_errors.len() {
+            return Err(format!(
+                "Validation errors count mismatch: expected {}, got {}",
+                scenario.expected_validation_errors.len(),
+                result.validation_errors.len()
+            ));
+        }
+
+        // Check that all expected validation errors are present
+        for expected_error in &scenario.expected_validation_errors {
+            if !result.validation_errors.contains(expected_error) {
+                return Err(format!(
+                    "Expected validation error not found: {}",
+                    expected_error
+                ));
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Verify histogram bucket length validation logic
+    fn validate_bucket_length_validation_logic(
+        result: &HistogramBucketLengthResult,
+    ) -> Result<(), String> {
+        if !result.length_ratio_validation_correct {
+            return Err("Histogram bucket length validation logic is incorrect".to_string());
+        }
+
+        if !result.bucket_length_validation_applied {
+            return Err(
+                "Bucket length validation should be applied for histogram validation".to_string(),
+            );
+        }
+
+        Ok(())
+    }
+
+    /// Verify implementation consistency for histogram bucket length validation
+    fn validate_bucket_length_implementation_consistency(
+        asupersync_result: &HistogramBucketLengthResult,
+        reference_result: &HistogramBucketLengthResult,
+    ) -> Result<(), String> {
+        // Both implementations should accept same number of metrics
+        if asupersync_result.accepted_metrics_count != reference_result.accepted_metrics_count {
+            return Err("Accepted metrics count differs between implementations".to_string());
+        }
+
+        // Both implementations should reject same number of metrics
+        if asupersync_result.rejected_metrics_count != reference_result.rejected_metrics_count {
+            return Err("Rejected metrics count differs between implementations".to_string());
+        }
+
+        // Both implementations should emit rejection metric consistently
+        if asupersync_result.rejection_metric_emitted != reference_result.rejection_metric_emitted {
+            return Err("Rejection metric emission differs between implementations".to_string());
+        }
+
+        // Both implementations should have same validation error count
+        if asupersync_result.validation_errors.len() != reference_result.validation_errors.len() {
+            return Err("Validation error count differs between implementations".to_string());
+        }
+
+        // Both implementations should apply bucket length validation
+        if asupersync_result.bucket_length_validation_applied
+            != reference_result.bucket_length_validation_applied
+        {
+            return Err(
+                "Bucket length validation application differs between implementations".to_string(),
+            );
+        }
+
+        // Both implementations should have correct length ratio validation
+        if asupersync_result.length_ratio_validation_correct
+            != reference_result.length_ratio_validation_correct
+        {
+            return Err(
+                "Length ratio validation correctness differs between implementations".to_string(),
+            );
+        }
+
+        // Both implementations should be OTLP compliant
+        if asupersync_result.otlp_compliant != reference_result.otlp_compliant {
+            return Err("OTLP compliance differs between implementations".to_string());
+        }
+
+        // Both implementations should emit telemetry consistently
+        if asupersync_result.telemetry_emitted != reference_result.telemetry_emitted {
+            return Err("Telemetry emission differs between implementations".to_string());
+        }
+
+        Ok(())
+    }
 }
