@@ -2487,6 +2487,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "grpc_streaming_recv_window"
+path = "fuzz_targets/grpc_streaming_recv_window.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "raptorq_gauss_solver"
 path = "fuzz_targets/raptorq_gauss_solver.rs"
 test = false
@@ -4535,6 +4542,12 @@ doc = false
 [[bin]]
 name = "h2_settings_unknown_id"
 path = "fuzz_targets/h2_settings_unknown_id.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "h2_continuation_no_headers"
+path = "fuzz_targets/h2_continuation_no_headers.rs"
 test = false
 doc = false
 
