@@ -200,6 +200,35 @@ impl Notify {
     ///
     /// The returned future is cancel-safe: if dropped before completion,
     /// the waiter is cleanly removed.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use asupersync::sync::Notify;
+    /// use std::sync::{
+    ///     Arc,
+    ///     atomic::{AtomicBool, Ordering},
+    /// };
+    ///
+    /// # futures_lite::future::block_on(async {
+    /// let notify = Arc::new(Notify::new());
+    /// let ready = Arc::new(AtomicBool::new(false));
+    ///
+    /// let signaler = {
+    ///     let notify = Arc::clone(&notify);
+    ///     let ready = Arc::clone(&ready);
+    ///
+    ///     std::thread::spawn(move || {
+    ///         ready.store(true, Ordering::Release);
+    ///         notify.notify_one();
+    ///     })
+    /// };
+    ///
+    /// notify.notified().await;
+    /// assert!(ready.load(Ordering::Acquire));
+    /// signaler.join().expect("signaler thread panicked");
+    /// # });
+    /// ```
     #[inline]
     pub fn notified(&self) -> Notified<'_> {
         Notified {
