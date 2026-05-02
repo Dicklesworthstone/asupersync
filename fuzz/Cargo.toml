@@ -4588,6 +4588,12 @@ test = false
 doc = false
 
 [[bin]]
+name = "h1_chunked_chunk_extension"
+path = "fuzz_targets/h1_chunked_chunk_extension.rs"
+test = false
+doc = false
+
+[[bin]]
 name = "h2_headers_frame_size_cap_concurrent"
 path = "fuzz_targets/h2_headers_frame_size_cap_concurrent.rs"
 test = false
