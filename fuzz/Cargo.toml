@@ -4780,3 +4780,9 @@ name = "h2_settings_table_size_zero"
 path = "fuzz_targets/h2_settings_table_size_zero.rs"
 test = false
 doc = false
+
+[[bin]]
+name = "h2_settings_duplicate_id"
+path = "fuzz_targets/h2_settings_duplicate_id.rs"
+test = false
+doc = false
