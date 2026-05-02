@@ -4754,3 +4754,9 @@ name = "h1_header_continuation"
 path = "fuzz_targets/h1_header_continuation.rs"
 test = false
 doc = false
+
+[[bin]]
+name = "h2_settings_max_header_list_size_zero"
+path = "fuzz_targets/h2_settings_max_header_list_size_zero.rs"
+test = false
+doc = false

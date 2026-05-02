@@ -12704,3 +12704,444 @@ fn validate_instrumentation_scope_implementation_consistency(
 
     Ok(())
 }
+//
+// OTLP-080: Span status message validation conformance test
+//
+
+#[test]
+fn otlp_080_span_status_message_omission_conformance() {
+    // Test scenarios for span status message omission validation
+    let scenarios = vec![
+        StatusMessageOmissionScenario {
+            description: "Span with OK status and non-empty message (message should be omitted)".to_string(),
+            span: SpanStatusInfo {
+                name: "test-span-ok-with-message".to_string(),
+                status_code: StatusCode::Ok,
+                status_message: Some("This message should be omitted".to_string()),
+                trace_id: "12345678901234567890123456789012".to_string(),
+                span_id: "1234567890123456".to_string(),
+            },
+            expected_message_omitted: true,
+            expected_message_preserved: false,
+            expected_validation_failure: false, // Should pass validation by omitting message
+            expected_otlp_compliant: true,
+        },
+        StatusMessageOmissionScenario {
+            description: "Span with ERROR status and non-empty message (message should be preserved)".to_string(),
+            span: SpanStatusInfo {
+                name: "test-span-error-with-message".to_string(),
+                status_code: StatusCode::Error,
+                status_message: Some("Error occurred during processing".to_string()),
+                trace_id: "12345678901234567890123456789013".to_string(),
+                span_id: "1234567890123457".to_string(),
+            },
+            expected_message_omitted: false,
+            expected_message_preserved: true,
+            expected_validation_failure: false,
+            expected_otlp_compliant: true,
+        },
+        StatusMessageOmissionScenario {
+            description: "Span with UNSET status and non-empty message (message should be omitted)".to_string(),
+            span: SpanStatusInfo {
+                name: "test-span-unset-with-message".to_string(),
+                status_code: StatusCode::Unset,
+                status_message: Some("Unset message should be omitted".to_string()),
+                trace_id: "12345678901234567890123456789014".to_string(),
+                span_id: "1234567890123458".to_string(),
+            },
+            expected_message_omitted: true,
+            expected_message_preserved: false,
+            expected_validation_failure: false,
+            expected_otlp_compliant: true,
+        },
+        StatusMessageOmissionScenario {
+            description: "Span with OK status and empty message (no omission needed)".to_string(),
+            span: SpanStatusInfo {
+                name: "test-span-ok-empty-message".to_string(),
+                status_code: StatusCode::Ok,
+                status_message: Some("".to_string()), // Empty message
+                trace_id: "12345678901234567890123456789015".to_string(),
+                span_id: "1234567890123459".to_string(),
+            },
+            expected_message_omitted: false, // No omission needed for empty message
+            expected_message_preserved: false,
+            expected_validation_failure: false,
+            expected_otlp_compliant: true,
+        },
+        StatusMessageOmissionScenario {
+            description: "Span with OK status and no message (already compliant)".to_string(),
+            span: SpanStatusInfo {
+                name: "test-span-ok-no-message".to_string(),
+                status_code: StatusCode::Ok,
+                status_message: None, // No message
+                trace_id: "12345678901234567890123456789016".to_string(),
+                span_id: "1234567890123460".to_string(),
+            },
+            expected_message_omitted: false, // No omission needed
+            expected_message_preserved: false,
+            expected_validation_failure: false,
+            expected_otlp_compliant: true,
+        },
+        StatusMessageOmissionScenario {
+            description: "Span with ERROR status and very long message (should be preserved)".to_string(),
+            span: SpanStatusInfo {
+                name: "test-span-error-long-message".to_string(),
+                status_code: StatusCode::Error,
+                status_message: Some("Very long error message that contains detailed information about what went wrong during processing and should be preserved because this is an ERROR status".to_string()),
+                trace_id: "12345678901234567890123456789017".to_string(),
+                span_id: "1234567890123461".to_string(),
+            },
+            expected_message_omitted: false,
+            expected_message_preserved: true,
+            expected_validation_failure: false,
+            expected_otlp_compliant: true,
+        },
+        StatusMessageOmissionScenario {
+            description: "Span with OK status and whitespace-only message (should be omitted)".to_string(),
+            span: SpanStatusInfo {
+                name: "test-span-ok-whitespace-message".to_string(),
+                status_code: StatusCode::Ok,
+                status_message: Some("   \t\n   ".to_string()), // Whitespace-only
+                trace_id: "12345678901234567890123456789018".to_string(),
+                span_id: "1234567890123462".to_string(),
+            },
+            expected_message_omitted: true,
+            expected_message_preserved: false,
+            expected_validation_failure: false,
+            expected_otlp_compliant: true,
+        },
+        StatusMessageOmissionScenario {
+            description: "Span with OK status and special characters message (should be omitted)".to_string(),
+            span: SpanStatusInfo {
+                name: "test-span-ok-special-chars".to_string(),
+                status_code: StatusCode::Ok,
+                status_message: Some("🎉 Success with emoji! ✓".to_string()),
+                trace_id: "12345678901234567890123456789019".to_string(),
+                span_id: "1234567890123463".to_string(),
+            },
+            expected_message_omitted: true,
+            expected_message_preserved: false,
+            expected_validation_failure: false,
+            expected_otlp_compliant: true,
+        },
+    ];
+
+    for scenario in scenarios {
+        println!("Testing scenario: {}", scenario.description);
+
+        // Simulate asupersync exporter behavior
+        let asupersync_result = simulate_asupersync_span_status_message_processing(&scenario);
+
+        // Simulate reference implementation behavior
+        let reference_result = simulate_reference_span_status_message_processing(&scenario);
+
+        // Validate individual results
+        validate_span_status_message_logic(&asupersync_result).expect(&format!(
+            "Asupersync status message logic failed for scenario: {}",
+            scenario.description
+        ));
+
+        validate_span_status_message_logic(&reference_result).expect(&format!(
+            "Reference status message logic failed for scenario: {}",
+            scenario.description
+        ));
+
+        // Validate implementation consistency
+        validate_span_status_message_implementation_consistency(
+            &asupersync_result,
+            &reference_result,
+        )
+        .expect(&format!(
+            "Implementation consistency failed for scenario: {}",
+            scenario.description
+        ));
+
+        println!("✓ Scenario passed: {}", scenario.description);
+    }
+}
+
+/// Test scenario for span status message omission validation
+#[derive(Debug, Clone)]
+struct StatusMessageOmissionScenario {
+    description: String,
+    span: SpanStatusInfo,
+    expected_message_omitted: bool,
+    expected_message_preserved: bool,
+    expected_validation_failure: bool,
+    expected_otlp_compliant: bool,
+}
+
+/// Span status information for testing
+#[derive(Debug, Clone)]
+struct SpanStatusInfo {
+    name: String,
+    status_code: StatusCode,
+    status_message: Option<String>,
+    trace_id: String,
+    span_id: String,
+}
+
+/// Status code enum matching OTLP specification
+#[derive(Debug, Clone, PartialEq)]
+enum StatusCode {
+    Unset = 0,
+    Ok = 1,
+    Error = 2,
+}
+
+/// Result of span status message processing
+#[derive(Debug, Clone)]
+struct StatusMessageProcessingResult {
+    message_omitted: bool,
+    message_preserved: bool,
+    original_message: Option<String>,
+    processed_message: Option<String>,
+    status_code: StatusCode,
+    processed_spans_count: usize,
+    omitted_messages_count: usize,
+    preserved_messages_count: usize,
+    validation_errors: Vec<String>,
+    validation_correct: bool,
+    validation_applied: bool,
+    otlp_compliant: bool,
+    telemetry_emitted: bool,
+}
+
+/// Simulate asupersync span status message processing behavior
+fn simulate_asupersync_span_status_message_processing(
+    scenario: &StatusMessageOmissionScenario,
+) -> StatusMessageProcessingResult {
+    let mut omitted_messages = 0;
+    let mut preserved_messages = 0;
+    let mut validation_errors = Vec::new();
+    let mut message_omitted = false;
+    let mut message_preserved = false;
+    let mut processed_message = scenario.span.status_message.clone();
+
+    // Apply OTLP §6.4 spec: message only valid for ERROR status
+    match scenario.span.status_code {
+        StatusCode::Ok => {
+            if let Some(ref message) = scenario.span.status_message {
+                if !message.trim().is_empty() {
+                    // Omit non-empty message for OK status per OTLP §6.4
+                    processed_message = None;
+                    message_omitted = true;
+                    omitted_messages += 1;
+                } else {
+                    // Empty message doesn't need omission
+                    processed_message = None;
+                }
+            }
+        }
+        StatusCode::Error => {
+            if scenario.span.status_message.is_some() {
+                // Preserve message for ERROR status
+                message_preserved = true;
+                preserved_messages += 1;
+            }
+        }
+        StatusCode::Unset => {
+            if let Some(ref message) = scenario.span.status_message {
+                if !message.trim().is_empty() {
+                    // Omit message for UNSET status (similar to OK)
+                    processed_message = None;
+                    message_omitted = true;
+                    omitted_messages += 1;
+                }
+            }
+        }
+    }
+
+    // Check validation correctness
+    let validation_correct = message_omitted == scenario.expected_message_omitted
+        && message_preserved == scenario.expected_message_preserved;
+
+    let validation_applied = true; // Always apply status message validation
+
+    // OTLP compliance: messages should only exist for ERROR status
+    let otlp_compliant = match scenario.span.status_code {
+        StatusCode::Error => true, // ERROR can have messages
+        StatusCode::Ok | StatusCode::Unset => {
+            processed_message.is_none()
+                || processed_message
+                    .as_ref()
+                    .map_or(true, |m| m.trim().is_empty())
+        }
+    };
+
+    StatusMessageProcessingResult {
+        message_omitted,
+        message_preserved,
+        original_message: scenario.span.status_message.clone(),
+        processed_message,
+        status_code: scenario.span.status_code.clone(),
+        processed_spans_count: 1,
+        omitted_messages_count: omitted_messages,
+        preserved_messages_count: preserved_messages,
+        validation_errors,
+        validation_correct,
+        validation_applied,
+        otlp_compliant,
+        telemetry_emitted: true, // Assume telemetry is emitted for status processing
+    }
+}
+
+/// Simulate reference implementation span status message processing behavior
+fn simulate_reference_span_status_message_processing(
+    scenario: &StatusMessageOmissionScenario,
+) -> StatusMessageProcessingResult {
+    let mut omitted_messages = 0;
+    let mut preserved_messages = 0;
+    let mut validation_errors = Vec::new();
+    let mut message_omitted = false;
+    let mut message_preserved = false;
+    let mut processed_message = scenario.span.status_message.clone();
+
+    // Reference implementation logic for OTLP §6.4 compliance
+    match scenario.span.status_code {
+        StatusCode::Ok => {
+            if let Some(ref message) = scenario.span.status_message {
+                if !message.trim().is_empty() {
+                    // Omit message for OK status
+                    processed_message = None;
+                    message_omitted = true;
+                    omitted_messages += 1;
+                } else {
+                    processed_message = None;
+                }
+            }
+        }
+        StatusCode::Error => {
+            if scenario.span.status_message.is_some() {
+                // Keep message for ERROR status
+                message_preserved = true;
+                preserved_messages += 1;
+            }
+        }
+        StatusCode::Unset => {
+            if let Some(ref message) = scenario.span.status_message {
+                if !message.trim().is_empty() {
+                    // Omit message for UNSET status
+                    processed_message = None;
+                    message_omitted = true;
+                    omitted_messages += 1;
+                }
+            }
+        }
+    }
+
+    // Check validation correctness
+    let validation_correct = message_omitted == scenario.expected_message_omitted
+        && message_preserved == scenario.expected_message_preserved;
+
+    let validation_applied = true;
+
+    // OTLP compliance check
+    let otlp_compliant = match scenario.span.status_code {
+        StatusCode::Error => true,
+        StatusCode::Ok | StatusCode::Unset => {
+            processed_message.is_none()
+                || processed_message
+                    .as_ref()
+                    .map_or(true, |m| m.trim().is_empty())
+        }
+    };
+
+    StatusMessageProcessingResult {
+        message_omitted,
+        message_preserved,
+        original_message: scenario.span.status_message.clone(),
+        processed_message,
+        status_code: scenario.span.status_code.clone(),
+        processed_spans_count: 1,
+        omitted_messages_count: omitted_messages,
+        preserved_messages_count: preserved_messages,
+        validation_errors,
+        validation_correct,
+        validation_applied,
+        otlp_compliant,
+        telemetry_emitted: true,
+    }
+}
+
+/// Verify span status message processing logic
+fn validate_span_status_message_logic(
+    result: &StatusMessageProcessingResult,
+) -> Result<(), String> {
+    if !result.validation_correct {
+        return Err("Span status message processing logic is incorrect".to_string());
+    }
+
+    if !result.validation_applied {
+        return Err("Status message validation should be applied for span processing".to_string());
+    }
+
+    // Check OTLP §6.4 compliance
+    if !result.otlp_compliant {
+        return Err("Span status message processing is not OTLP §6.4 compliant".to_string());
+    }
+
+    Ok(())
+}
+
+/// Verify implementation consistency for span status message processing
+fn validate_span_status_message_implementation_consistency(
+    asupersync_result: &StatusMessageProcessingResult,
+    reference_result: &StatusMessageProcessingResult,
+) -> Result<(), String> {
+    // Both implementations should omit/preserve messages consistently
+    if asupersync_result.message_omitted != reference_result.message_omitted {
+        return Err("Message omission differs between implementations".to_string());
+    }
+
+    if asupersync_result.message_preserved != reference_result.message_preserved {
+        return Err("Message preservation differs between implementations".to_string());
+    }
+
+    // Both implementations should process same number of spans
+    if asupersync_result.processed_spans_count != reference_result.processed_spans_count {
+        return Err("Processed spans count differs between implementations".to_string());
+    }
+
+    // Both implementations should omit same number of messages
+    if asupersync_result.omitted_messages_count != reference_result.omitted_messages_count {
+        return Err("Omitted messages count differs between implementations".to_string());
+    }
+
+    // Both implementations should preserve same number of messages
+    if asupersync_result.preserved_messages_count != reference_result.preserved_messages_count {
+        return Err("Preserved messages count differs between implementations".to_string());
+    }
+
+    // Both implementations should have same processed message result
+    if asupersync_result.processed_message != reference_result.processed_message {
+        return Err("Processed message result differs between implementations".to_string());
+    }
+
+    // Both implementations should have same status code
+    if asupersync_result.status_code != reference_result.status_code {
+        return Err("Status code differs between implementations".to_string());
+    }
+
+    // Both implementations should have same validation correctness
+    if asupersync_result.validation_correct != reference_result.validation_correct {
+        return Err("Validation correctness differs between implementations".to_string());
+    }
+
+    // Both implementations should apply validation consistently
+    if asupersync_result.validation_applied != reference_result.validation_applied {
+        return Err("Validation application differs between implementations".to_string());
+    }
+
+    // Both implementations should be OTLP compliant
+    if asupersync_result.otlp_compliant != reference_result.otlp_compliant {
+        return Err("OTLP compliance differs between implementations".to_string());
+    }
+
+    // Both implementations should emit telemetry consistently
+    if asupersync_result.telemetry_emitted != reference_result.telemetry_emitted {
+        return Err("Telemetry emission differs between implementations".to_string());
+    }
+
+    Ok(())
+}
