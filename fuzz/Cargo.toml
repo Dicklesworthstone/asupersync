@@ -4343,6 +4343,16 @@ test = false
 doc = false
 bench = false
 
+# HTTP/2 SETTINGS_INITIAL_WINDOW_SIZE boundary fuzzer.
+# Covers 2^31-2, 2^31-1, and 2^31 against Settings validation,
+# builder clamping, and StreamStore flow-control window arithmetic.
+[[bin]]
+name = "h2_settings_initial_window_clamp"
+path = "fuzz_targets/h2_settings_initial_window_clamp.rs"
+test = false
+doc = false
+bench = false
+
 # Tick #177 — HTTP/2 SETTINGS unsupported value range fuzzer
 # Tests arbitrary u32 setting values exceeding RFC 9113 bounds. Validates
 # PROTOCOL_ERROR for out-of-bounds SETTINGS_ENABLE_PUSH (must be 0-1),
