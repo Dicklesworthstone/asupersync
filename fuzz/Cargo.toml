@@ -308,6 +308,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "raptorq_repair_overhead"
+path = "fuzz_targets/raptorq_repair_overhead.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "fuzz_length_delimited_codec"
 path = "fuzz_targets/length_delimited_codec.rs"
 test = false
