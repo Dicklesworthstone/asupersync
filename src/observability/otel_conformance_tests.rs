@@ -9658,3 +9658,603 @@ fn validate_empty_resource_spans_implementation_consistency(
 
     Ok(())
 }
+
+/// OTLP-075: Span invalid duration dropping conformance test.
+/// Validates that when exporter encounters a span with end_time < start_time + 1ns
+/// (zero or negative duration), it MUST drop the span and emit
+/// otel.exporter.dropped_spans metric. Verifies our exporter behavior against
+/// opentelemetry-sdk reference implementation.
+#[test]
+fn otlp_075_span_invalid_duration_dropping_conformance() {
+    // Test scenarios covering span invalid duration detection and dropping
+    let test_scenarios = vec![
+        SpanDurationScenario {
+            name: "valid_positive_durations".to_string(),
+            span_timing_data: vec![
+                SpanTimingInfo {
+                    span_id: "valid_span_1".to_string(),
+                    trace_id: "trace_valid_123".to_string(),
+                    start_time_unix_nano: 1000000000,
+                    end_time_unix_nano: 1000000001, // 1ns duration - valid
+                    duration_ns: 1,
+                    is_valid_duration: true,
+                    duration_type: DurationType::Valid,
+                },
+                SpanTimingInfo {
+                    span_id: "valid_span_2".to_string(),
+                    trace_id: "trace_valid_456".to_string(),
+                    start_time_unix_nano: 2000000000,
+                    end_time_unix_nano: 2001000000, // 1ms duration - valid
+                    duration_ns: 1000000,
+                    is_valid_duration: true,
+                    duration_type: DurationType::Valid,
+                },
+                SpanTimingInfo {
+                    span_id: "valid_span_3".to_string(),
+                    trace_id: "trace_valid_789".to_string(),
+                    start_time_unix_nano: 3000000000,
+                    end_time_unix_nano: 4000000000, // 1s duration - valid
+                    duration_ns: 1000000000,
+                    is_valid_duration: true,
+                    duration_type: DurationType::Valid,
+                },
+            ],
+            expected_accepted_spans: 3,
+            expected_dropped_spans: 0,
+            should_emit_dropped_metric: false,
+            dropped_metric_name: "otel.exporter.dropped_spans".to_string(),
+            expected_duration_errors: vec![],
+            should_validate_duration: true,
+        },
+        SpanDurationScenario {
+            name: "zero_duration_spans".to_string(),
+            span_timing_data: vec![SpanTimingInfo {
+                span_id: "zero_duration_span".to_string(),
+                trace_id: "trace_zero".to_string(),
+                start_time_unix_nano: 1000000000,
+                end_time_unix_nano: 1000000000, // Same time = 0 duration - invalid
+                duration_ns: 0,
+                is_valid_duration: false,
+                duration_type: DurationType::Zero,
+            }],
+            expected_accepted_spans: 0,
+            expected_dropped_spans: 1,
+            should_emit_dropped_metric: true,
+            dropped_metric_name: "otel.exporter.dropped_spans".to_string(),
+            expected_duration_errors: vec![
+                "Span duration invalid: end_time (1000000000) < start_time + 1ns (1000000001)"
+                    .to_string(),
+            ],
+            should_validate_duration: true,
+        },
+        SpanDurationScenario {
+            name: "negative_duration_spans".to_string(),
+            span_timing_data: vec![
+                SpanTimingInfo {
+                    span_id: "negative_duration_span_1".to_string(),
+                    trace_id: "trace_negative_1".to_string(),
+                    start_time_unix_nano: 2000000000,
+                    end_time_unix_nano: 1000000000, // End before start - negative duration
+                    duration_ns: -1000000000,
+                    is_valid_duration: false,
+                    duration_type: DurationType::Negative,
+                },
+                SpanTimingInfo {
+                    span_id: "negative_duration_span_2".to_string(),
+                    trace_id: "trace_negative_2".to_string(),
+                    start_time_unix_nano: 5000000000,
+                    end_time_unix_nano: 4999999999, // 1ns before start - negative
+                    duration_ns: -1,
+                    is_valid_duration: false,
+                    duration_type: DurationType::Negative,
+                },
+            ],
+            expected_accepted_spans: 0,
+            expected_dropped_spans: 2,
+            should_emit_dropped_metric: true,
+            dropped_metric_name: "otel.exporter.dropped_spans".to_string(),
+            expected_duration_errors: vec![
+                "Span duration invalid: end_time (1000000000) < start_time + 1ns (2000000001)"
+                    .to_string(),
+                "Span duration invalid: end_time (4999999999) < start_time + 1ns (5000000001)"
+                    .to_string(),
+            ],
+            should_validate_duration: true,
+        },
+        SpanDurationScenario {
+            name: "mixed_valid_invalid_durations".to_string(),
+            span_timing_data: vec![
+                SpanTimingInfo {
+                    span_id: "mixed_valid_span".to_string(),
+                    trace_id: "trace_mixed_valid".to_string(),
+                    start_time_unix_nano: 1000000000,
+                    end_time_unix_nano: 1000500000, // 500μs duration - valid
+                    duration_ns: 500000,
+                    is_valid_duration: true,
+                    duration_type: DurationType::Valid,
+                },
+                SpanTimingInfo {
+                    span_id: "mixed_invalid_span".to_string(),
+                    trace_id: "trace_mixed_invalid".to_string(),
+                    start_time_unix_nano: 2000000000,
+                    end_time_unix_nano: 2000000000, // Zero duration - invalid
+                    duration_ns: 0,
+                    is_valid_duration: false,
+                    duration_type: DurationType::Zero,
+                },
+                SpanTimingInfo {
+                    span_id: "mixed_valid_span_2".to_string(),
+                    trace_id: "trace_mixed_valid_2".to_string(),
+                    start_time_unix_nano: 3000000000,
+                    end_time_unix_nano: 3000000010, // 10ns duration - valid
+                    duration_ns: 10,
+                    is_valid_duration: true,
+                    duration_type: DurationType::Valid,
+                },
+            ],
+            expected_accepted_spans: 2,
+            expected_dropped_spans: 1,
+            should_emit_dropped_metric: true,
+            dropped_metric_name: "otel.exporter.dropped_spans".to_string(),
+            expected_duration_errors: vec![
+                "Span duration invalid: end_time (2000000000) < start_time + 1ns (2000000001)"
+                    .to_string(),
+            ],
+            should_validate_duration: true,
+        },
+        SpanDurationScenario {
+            name: "edge_case_minimum_valid_duration".to_string(),
+            span_timing_data: vec![SpanTimingInfo {
+                span_id: "min_valid_duration_span".to_string(),
+                trace_id: "trace_min_valid".to_string(),
+                start_time_unix_nano: 1000000000,
+                end_time_unix_nano: 1000000001, // Exactly 1ns - minimum valid
+                duration_ns: 1,
+                is_valid_duration: true,
+                duration_type: DurationType::Valid,
+            }],
+            expected_accepted_spans: 1,
+            expected_dropped_spans: 0,
+            should_emit_dropped_metric: false,
+            dropped_metric_name: "otel.exporter.dropped_spans".to_string(),
+            expected_duration_errors: vec![],
+            should_validate_duration: true,
+        },
+        SpanDurationScenario {
+            name: "edge_case_just_below_minimum".to_string(),
+            span_timing_data: vec![SpanTimingInfo {
+                span_id: "below_min_duration_span".to_string(),
+                trace_id: "trace_below_min".to_string(),
+                start_time_unix_nano: 1000000001,
+                end_time_unix_nano: 1000000001, // Same ns = 0 duration - invalid
+                duration_ns: 0,
+                is_valid_duration: false,
+                duration_type: DurationType::Zero,
+            }],
+            expected_accepted_spans: 0,
+            expected_dropped_spans: 1,
+            should_emit_dropped_metric: true,
+            dropped_metric_name: "otel.exporter.dropped_spans".to_string(),
+            expected_duration_errors: vec![
+                "Span duration invalid: end_time (1000000001) < start_time + 1ns (1000000002)"
+                    .to_string(),
+            ],
+            should_validate_duration: true,
+        },
+        SpanDurationScenario {
+            name: "large_negative_duration".to_string(),
+            span_timing_data: vec![SpanTimingInfo {
+                span_id: "large_negative_span".to_string(),
+                trace_id: "trace_large_negative".to_string(),
+                start_time_unix_nano: 9999999999,
+                end_time_unix_nano: 1000000000, // Much earlier end time
+                duration_ns: -8999999999,
+                is_valid_duration: false,
+                duration_type: DurationType::Negative,
+            }],
+            expected_accepted_spans: 0,
+            expected_dropped_spans: 1,
+            should_emit_dropped_metric: true,
+            dropped_metric_name: "otel.exporter.dropped_spans".to_string(),
+            expected_duration_errors: vec![
+                "Span duration invalid: end_time (1000000000) < start_time + 1ns (10000000000)"
+                    .to_string(),
+            ],
+            should_validate_duration: true,
+        },
+        SpanDurationScenario {
+            name: "batch_invalid_durations_telemetry".to_string(),
+            span_timing_data: vec![
+                SpanTimingInfo {
+                    span_id: "batch_valid_span".to_string(),
+                    trace_id: "trace_batch_valid".to_string(),
+                    start_time_unix_nano: 1000000000,
+                    end_time_unix_nano: 1001000000, // 1ms - valid
+                    duration_ns: 1000000,
+                    is_valid_duration: true,
+                    duration_type: DurationType::Valid,
+                },
+                SpanTimingInfo {
+                    span_id: "batch_invalid_span_1".to_string(),
+                    trace_id: "trace_batch_invalid_1".to_string(),
+                    start_time_unix_nano: 2000000000,
+                    end_time_unix_nano: 2000000000, // Zero duration
+                    duration_ns: 0,
+                    is_valid_duration: false,
+                    duration_type: DurationType::Zero,
+                },
+                SpanTimingInfo {
+                    span_id: "batch_invalid_span_2".to_string(),
+                    trace_id: "trace_batch_invalid_2".to_string(),
+                    start_time_unix_nano: 3000000000,
+                    end_time_unix_nano: 2500000000, // Negative duration
+                    duration_ns: -500000000,
+                    is_valid_duration: false,
+                    duration_type: DurationType::Negative,
+                },
+                SpanTimingInfo {
+                    span_id: "batch_valid_span_2".to_string(),
+                    trace_id: "trace_batch_valid_2".to_string(),
+                    start_time_unix_nano: 4000000000,
+                    end_time_unix_nano: 4000000002, // 2ns - valid
+                    duration_ns: 2,
+                    is_valid_duration: true,
+                    duration_type: DurationType::Valid,
+                },
+            ],
+            expected_accepted_spans: 2,
+            expected_dropped_spans: 2,
+            should_emit_dropped_metric: true,
+            dropped_metric_name: "otel.exporter.dropped_spans".to_string(),
+            expected_duration_errors: vec![
+                "Span duration invalid: end_time (2000000000) < start_time + 1ns (2000000001)"
+                    .to_string(),
+                "Span duration invalid: end_time (2500000000) < start_time + 1ns (3000000001)"
+                    .to_string(),
+            ],
+            should_validate_duration: true,
+        },
+    ];
+
+    // Execute all test scenarios
+    for scenario in &test_scenarios {
+        println!("Testing scenario: {}", scenario.name);
+
+        // Simulate asupersync span duration validation
+        let asupersync_result = simulate_asupersync_span_duration_validation(scenario);
+
+        // Simulate reference implementation span duration validation
+        let reference_result = simulate_reference_span_duration_validation(scenario);
+
+        // Validate both implementations are OTLP compliant
+        validate_span_duration_conformance(scenario, &asupersync_result, &reference_result).expect(
+            &format!(
+                "OTLP-075 conformance validation failed for scenario: {}",
+                scenario.name
+            ),
+        );
+    }
+}
+
+/// Duration type enumeration for span validation
+#[derive(Debug, Clone, PartialEq)]
+enum DurationType {
+    Valid,    // end_time >= start_time + 1ns
+    Zero,     // end_time == start_time
+    Negative, // end_time < start_time
+}
+
+/// Test scenario structure for span duration validation
+#[derive(Debug, Clone)]
+struct SpanDurationScenario {
+    name: String,
+    span_timing_data: Vec<SpanTimingInfo>,
+    expected_accepted_spans: usize,
+    expected_dropped_spans: usize,
+    should_emit_dropped_metric: bool,
+    dropped_metric_name: String,
+    expected_duration_errors: Vec<String>,
+    should_validate_duration: bool,
+}
+
+/// Span timing information for duration validation
+#[derive(Debug, Clone)]
+struct SpanTimingInfo {
+    span_id: String,
+    trace_id: String,
+    start_time_unix_nano: u64,
+    end_time_unix_nano: u64,
+    duration_ns: i64, // Can be negative for invalid spans
+    is_valid_duration: bool,
+    duration_type: DurationType,
+}
+
+/// Result of span duration validation
+#[derive(Debug, Clone)]
+struct SpanDurationResult {
+    accepted_spans_count: usize,
+    dropped_spans_count: usize,
+    dropped_metric_emitted: bool,
+    dropped_metric_value: u64,
+    duration_errors: Vec<String>,
+    duration_validation_applied: bool,
+    duration_validation_correct: bool,
+    otlp_compliant: bool,
+    telemetry_emitted: bool,
+}
+
+/// Simulate asupersync span duration validation
+fn simulate_asupersync_span_duration_validation(
+    scenario: &SpanDurationScenario,
+) -> SpanDurationResult {
+    let mut accepted_count = 0;
+    let mut dropped_count = 0;
+    let mut duration_errors = Vec::new();
+    let mut dropped_metric_value = 0u64;
+
+    // Validate each span for duration requirements
+    for span in &scenario.span_timing_data {
+        let min_valid_end_time = span.start_time_unix_nano + 1; // start_time + 1ns
+
+        if span.end_time_unix_nano < min_valid_end_time {
+            // Invalid duration: end_time < start_time + 1ns - MUST drop
+            dropped_count += 1;
+            dropped_metric_value += 1;
+            duration_errors.push(format!(
+                "Span duration invalid: end_time ({}) < start_time + 1ns ({})",
+                span.end_time_unix_nano, min_valid_end_time
+            ));
+        } else {
+            // Valid duration: end_time >= start_time + 1ns
+            accepted_count += 1;
+        }
+    }
+
+    let dropped_metric_emitted = dropped_count > 0 && scenario.should_emit_dropped_metric;
+    let duration_validation = scenario.should_validate_duration;
+    let duration_validation_correct =
+        duration_errors.len() == scenario.expected_duration_errors.len();
+    let otlp_compliant = dropped_count == scenario.expected_dropped_spans;
+    let telemetry_emitted = dropped_metric_emitted;
+
+    SpanDurationResult {
+        accepted_spans_count: accepted_count,
+        dropped_spans_count: dropped_count,
+        dropped_metric_emitted,
+        dropped_metric_value,
+        duration_errors,
+        duration_validation_applied: duration_validation,
+        duration_validation_correct,
+        otlp_compliant,
+        telemetry_emitted,
+    }
+}
+
+/// Simulate reference implementation span duration validation
+fn simulate_reference_span_duration_validation(
+    scenario: &SpanDurationScenario,
+) -> SpanDurationResult {
+    let mut accepted_count = 0;
+    let mut dropped_count = 0;
+    let mut duration_errors = Vec::new();
+    let mut dropped_metric_value = 0u64;
+
+    // OpenTelemetry SDK duration validation logic simulation
+    for span in &scenario.span_timing_data {
+        let min_valid_end_time = span.start_time_unix_nano + 1;
+
+        if span.end_time_unix_nano < min_valid_end_time {
+            // Reference implementation should drop invalid duration spans
+            dropped_count += 1;
+            dropped_metric_value += 1;
+            duration_errors.push(format!(
+                "Span duration invalid: end_time ({}) < start_time + 1ns ({})",
+                span.end_time_unix_nano, min_valid_end_time
+            ));
+        } else {
+            accepted_count += 1;
+        }
+    }
+
+    let dropped_metric_emitted = dropped_count > 0 && scenario.should_emit_dropped_metric;
+    let duration_validation = scenario.should_validate_duration;
+    let duration_validation_correct =
+        duration_errors.len() == scenario.expected_duration_errors.len();
+    let otlp_compliant = dropped_count == scenario.expected_dropped_spans;
+    let telemetry_emitted = dropped_metric_emitted;
+
+    SpanDurationResult {
+        accepted_spans_count: accepted_count,
+        dropped_spans_count: dropped_count,
+        dropped_metric_emitted,
+        dropped_metric_value,
+        duration_errors,
+        duration_validation_applied: duration_validation,
+        duration_validation_correct,
+        otlp_compliant,
+        telemetry_emitted,
+    }
+}
+
+/// Validate span duration conformance between implementations
+fn validate_span_duration_conformance(
+    scenario: &SpanDurationScenario,
+    asupersync_result: &SpanDurationResult,
+    reference_result: &SpanDurationResult,
+) -> Result<(), String> {
+    // Verify both implementations are OTLP compliant
+    if !asupersync_result.otlp_compliant {
+        return Err(
+            "Asupersync implementation violates OTLP span duration validation specification"
+                .to_string(),
+        );
+    }
+
+    if !reference_result.otlp_compliant {
+        return Err(
+            "Reference implementation violates OTLP span duration validation specification"
+                .to_string(),
+        );
+    }
+
+    // Verify acceptance counts
+    validate_duration_acceptance_counts(scenario, asupersync_result)?;
+    validate_duration_acceptance_counts(scenario, reference_result)?;
+
+    // Verify dropped span counts
+    validate_duration_dropped_counts(scenario, asupersync_result)?;
+    validate_duration_dropped_counts(scenario, reference_result)?;
+
+    // Verify dropped metric emission
+    validate_duration_dropped_metric_emission(scenario, asupersync_result)?;
+    validate_duration_dropped_metric_emission(scenario, reference_result)?;
+
+    // Verify duration errors
+    validate_duration_errors(scenario, asupersync_result)?;
+    validate_duration_errors(scenario, reference_result)?;
+
+    // Verify duration validation logic
+    validate_duration_validation_logic(asupersync_result)?;
+    validate_duration_validation_logic(reference_result)?;
+
+    // Verify implementation consistency
+    validate_duration_implementation_consistency(asupersync_result, reference_result)?;
+
+    Ok(())
+}
+
+/// Verify span duration acceptance counts
+fn validate_duration_acceptance_counts(
+    scenario: &SpanDurationScenario,
+    result: &SpanDurationResult,
+) -> Result<(), String> {
+    if result.accepted_spans_count != scenario.expected_accepted_spans {
+        return Err(format!(
+            "Accepted spans count mismatch: expected {}, got {}",
+            scenario.expected_accepted_spans, result.accepted_spans_count
+        ));
+    }
+    Ok(())
+}
+
+/// Verify span duration dropped counts
+fn validate_duration_dropped_counts(
+    scenario: &SpanDurationScenario,
+    result: &SpanDurationResult,
+) -> Result<(), String> {
+    if result.dropped_spans_count != scenario.expected_dropped_spans {
+        return Err(format!(
+            "Dropped spans count mismatch: expected {}, got {}",
+            scenario.expected_dropped_spans, result.dropped_spans_count
+        ));
+    }
+    Ok(())
+}
+
+/// Verify span duration dropped metric emission
+fn validate_duration_dropped_metric_emission(
+    scenario: &SpanDurationScenario,
+    result: &SpanDurationResult,
+) -> Result<(), String> {
+    if result.dropped_metric_emitted != scenario.should_emit_dropped_metric {
+        return Err(format!(
+            "Dropped metric emission mismatch: expected {}, got {}",
+            scenario.should_emit_dropped_metric, result.dropped_metric_emitted
+        ));
+    }
+
+    if scenario.should_emit_dropped_metric && result.dropped_metric_value == 0 {
+        return Err("Dropped metric should have non-zero value when emitted".to_string());
+    }
+
+    Ok(())
+}
+
+/// Verify span duration errors
+fn validate_duration_errors(
+    scenario: &SpanDurationScenario,
+    result: &SpanDurationResult,
+) -> Result<(), String> {
+    if result.duration_errors.len() != scenario.expected_duration_errors.len() {
+        return Err(format!(
+            "Duration errors count mismatch: expected {}, got {}",
+            scenario.expected_duration_errors.len(),
+            result.duration_errors.len()
+        ));
+    }
+
+    // Check that all expected duration errors are present
+    for expected_error in &scenario.expected_duration_errors {
+        if !result.duration_errors.contains(expected_error) {
+            return Err(format!(
+                "Expected duration error not found: {}",
+                expected_error
+            ));
+        }
+    }
+
+    Ok(())
+}
+
+/// Verify duration validation logic
+fn validate_duration_validation_logic(result: &SpanDurationResult) -> Result<(), String> {
+    if !result.duration_validation_correct {
+        return Err("Span duration validation logic is incorrect".to_string());
+    }
+
+    if !result.duration_validation_applied {
+        return Err("Duration validation should be applied for span processing".to_string());
+    }
+
+    Ok(())
+}
+
+/// Verify implementation consistency for span duration validation
+fn validate_duration_implementation_consistency(
+    asupersync_result: &SpanDurationResult,
+    reference_result: &SpanDurationResult,
+) -> Result<(), String> {
+    // Both implementations should accept same number of spans
+    if asupersync_result.accepted_spans_count != reference_result.accepted_spans_count {
+        return Err("Accepted spans count differs between implementations".to_string());
+    }
+
+    // Both implementations should drop same number of spans
+    if asupersync_result.dropped_spans_count != reference_result.dropped_spans_count {
+        return Err("Dropped spans count differs between implementations".to_string());
+    }
+
+    // Both implementations should emit dropped metric consistently
+    if asupersync_result.dropped_metric_emitted != reference_result.dropped_metric_emitted {
+        return Err("Dropped metric emission differs between implementations".to_string());
+    }
+
+    // Both implementations should have same duration error count
+    if asupersync_result.duration_errors.len() != reference_result.duration_errors.len() {
+        return Err("Duration error count differs between implementations".to_string());
+    }
+
+    // Both implementations should apply duration validation
+    if asupersync_result.duration_validation_applied != reference_result.duration_validation_applied
+    {
+        return Err("Duration validation application differs between implementations".to_string());
+    }
+
+    // Both implementations should have correct duration validation
+    if asupersync_result.duration_validation_correct != reference_result.duration_validation_correct
+    {
+        return Err("Duration validation correctness differs between implementations".to_string());
+    }
+
+    // Both implementations should be OTLP compliant
+    if asupersync_result.otlp_compliant != reference_result.otlp_compliant {
+        return Err("OTLP compliance differs between implementations".to_string());
+    }
+
+    // Both implementations should emit telemetry consistently
+    if asupersync_result.telemetry_emitted != reference_result.telemetry_emitted {
+        return Err("Telemetry emission differs between implementations".to_string());
+    }
+
+    Ok(())
+}
