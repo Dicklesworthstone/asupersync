@@ -4748,3 +4748,9 @@ name = "sync_oneshot_cancel_recv"
 path = "fuzz_targets/sync_oneshot_cancel_recv.rs"
 test = false
 doc = false
+
+[[bin]]
+name = "h1_header_continuation"
+path = "fuzz_targets/h1_header_continuation.rs"
+test = false
+doc = false
