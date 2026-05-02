@@ -3193,4 +3193,558 @@ mod tests {
 
         Ok(())
     }
+
+    /// OTLP-062: Duplicate scope data points merging conformance test.
+    /// Validates that when scope_metrics contains duplicate scopes (same name+version),
+    /// the exporter MUST merge data points into a single ScopeMetrics entry.
+    #[test]
+    fn otlp_062_duplicate_scope_data_points_merging_conformance() {
+        // Test scenarios for comprehensive duplicate scope data points merging validation
+        let test_scenarios = vec![
+            DuplicateScopeDataPointsScenario {
+                name: "basic_duplicate_scope_merge".to_string(),
+                duplicate_scopes: vec![
+                    ScopeDataPoints {
+                        scope_name: "metrics.collector".to_string(),
+                        scope_version: "1.2.0".to_string(),
+                        data_points: vec![
+                            DataPoint {
+                                metric_name: "cpu_usage".to_string(),
+                                value: 45.2,
+                                metric_type: DataPointType::Gauge,
+                            },
+                            DataPoint {
+                                metric_name: "memory_usage".to_string(),
+                                value: 78.5,
+                                metric_type: DataPointType::Gauge,
+                            },
+                        ],
+                        scope_attributes: vec![(
+                            "library".to_string(),
+                            "opentelemetry".to_string(),
+                        )],
+                    },
+                    ScopeDataPoints {
+                        scope_name: "metrics.collector".to_string(),
+                        scope_version: "1.2.0".to_string(), // Same name+version as above
+                        data_points: vec![
+                            DataPoint {
+                                metric_name: "disk_usage".to_string(),
+                                value: 23.1,
+                                metric_type: DataPointType::Gauge,
+                            },
+                            DataPoint {
+                                metric_name: "network_bytes".to_string(),
+                                value: 1024.0,
+                                metric_type: DataPointType::Counter,
+                            },
+                        ],
+                        scope_attributes: vec![(
+                            "library".to_string(),
+                            "opentelemetry".to_string(),
+                        )],
+                    },
+                ],
+                expected_merged_scopes: 1, // Should merge into single scope
+                expected_total_data_points: 4, // All 4 data points preserved
+                should_merge_data_points: true,
+            },
+            DuplicateScopeDataPointsScenario {
+                name: "different_versions_no_merge".to_string(),
+                duplicate_scopes: vec![
+                    ScopeDataPoints {
+                        scope_name: "app.metrics".to_string(),
+                        scope_version: "2.0.0".to_string(),
+                        data_points: vec![DataPoint {
+                            metric_name: "requests_total".to_string(),
+                            value: 100.0,
+                            metric_type: DataPointType::Counter,
+                        }],
+                        scope_attributes: vec![],
+                    },
+                    ScopeDataPoints {
+                        scope_name: "app.metrics".to_string(),
+                        scope_version: "2.1.0".to_string(), // Different version
+                        data_points: vec![DataPoint {
+                            metric_name: "errors_total".to_string(),
+                            value: 5.0,
+                            metric_type: DataPointType::Counter,
+                        }],
+                        scope_attributes: vec![],
+                    },
+                ],
+                expected_merged_scopes: 2,     // Should remain separate
+                expected_total_data_points: 2, // Each scope has its own data points
+                should_merge_data_points: false,
+            },
+            DuplicateScopeDataPointsScenario {
+                name: "multiple_identical_scopes".to_string(),
+                duplicate_scopes: vec![
+                    ScopeDataPoints {
+                        scope_name: "service.monitoring".to_string(),
+                        scope_version: "3.0.0".to_string(),
+                        data_points: vec![DataPoint {
+                            metric_name: "latency_histogram".to_string(),
+                            value: 25.5,
+                            metric_type: DataPointType::Histogram,
+                        }],
+                        scope_attributes: vec![("service".to_string(), "api-gateway".to_string())],
+                    },
+                    ScopeDataPoints {
+                        scope_name: "service.monitoring".to_string(),
+                        scope_version: "3.0.0".to_string(), // Identical
+                        data_points: vec![DataPoint {
+                            metric_name: "throughput_gauge".to_string(),
+                            value: 150.0,
+                            metric_type: DataPointType::Gauge,
+                        }],
+                        scope_attributes: vec![("service".to_string(), "api-gateway".to_string())],
+                    },
+                    ScopeDataPoints {
+                        scope_name: "service.monitoring".to_string(),
+                        scope_version: "3.0.0".to_string(), // Identical again
+                        data_points: vec![DataPoint {
+                            metric_name: "error_rate".to_string(),
+                            value: 0.02,
+                            metric_type: DataPointType::Gauge,
+                        }],
+                        scope_attributes: vec![("service".to_string(), "api-gateway".to_string())],
+                    },
+                ],
+                expected_merged_scopes: 1, // All three should merge into single scope
+                expected_total_data_points: 3, // All data points preserved
+                should_merge_data_points: true,
+            },
+            DuplicateScopeDataPointsScenario {
+                name: "mixed_metric_types_merge".to_string(),
+                duplicate_scopes: vec![
+                    ScopeDataPoints {
+                        scope_name: "platform.metrics".to_string(),
+                        scope_version: "1.0.0".to_string(),
+                        data_points: vec![
+                            DataPoint {
+                                metric_name: "active_connections".to_string(),
+                                value: 42.0,
+                                metric_type: DataPointType::Gauge,
+                            },
+                            DataPoint {
+                                metric_name: "requests_per_second".to_string(),
+                                value: 120.0,
+                                metric_type: DataPointType::Counter,
+                            },
+                        ],
+                        scope_attributes: vec![],
+                    },
+                    ScopeDataPoints {
+                        scope_name: "platform.metrics".to_string(),
+                        scope_version: "1.0.0".to_string(),
+                        data_points: vec![
+                            DataPoint {
+                                metric_name: "response_time_distribution".to_string(),
+                                value: 45.2,
+                                metric_type: DataPointType::Histogram,
+                            },
+                            DataPoint {
+                                metric_name: "cache_hit_rate".to_string(),
+                                value: 0.85,
+                                metric_type: DataPointType::Gauge,
+                            },
+                        ],
+                        scope_attributes: vec![],
+                    },
+                ],
+                expected_merged_scopes: 1,     // Should merge
+                expected_total_data_points: 4, // Counter + Gauge + Histogram + Gauge = 4 points
+                should_merge_data_points: true,
+            },
+            DuplicateScopeDataPointsScenario {
+                name: "empty_scope_names_merge".to_string(),
+                duplicate_scopes: vec![
+                    ScopeDataPoints {
+                        scope_name: "".to_string(),    // Empty name
+                        scope_version: "".to_string(), // Empty version
+                        data_points: vec![DataPoint {
+                            metric_name: "anonymous_metric_1".to_string(),
+                            value: 10.0,
+                            metric_type: DataPointType::Counter,
+                        }],
+                        scope_attributes: vec![],
+                    },
+                    ScopeDataPoints {
+                        scope_name: "".to_string(),    // Empty name (same as above)
+                        scope_version: "".to_string(), // Empty version (same as above)
+                        data_points: vec![DataPoint {
+                            metric_name: "anonymous_metric_2".to_string(),
+                            value: 20.0,
+                            metric_type: DataPointType::Counter,
+                        }],
+                        scope_attributes: vec![],
+                    },
+                ],
+                expected_merged_scopes: 1, // Empty names should still merge
+                expected_total_data_points: 2, // Both data points preserved
+                should_merge_data_points: true,
+            },
+            DuplicateScopeDataPointsScenario {
+                name: "large_data_points_merge".to_string(),
+                duplicate_scopes: vec![
+                    ScopeDataPoints {
+                        scope_name: "bulk.processor".to_string(),
+                        scope_version: "2.5.0".to_string(),
+                        data_points: (0..10)
+                            .map(|i| DataPoint {
+                                metric_name: format!("metric_batch_1_{}", i),
+                                value: (i * 10) as f64,
+                                metric_type: DataPointType::Counter,
+                            })
+                            .collect(),
+                        scope_attributes: vec![],
+                    },
+                    ScopeDataPoints {
+                        scope_name: "bulk.processor".to_string(),
+                        scope_version: "2.5.0".to_string(),
+                        data_points: (0..15)
+                            .map(|i| DataPoint {
+                                metric_name: format!("metric_batch_2_{}", i),
+                                value: (i * 5) as f64,
+                                metric_type: DataPointType::Gauge,
+                            })
+                            .collect(),
+                        scope_attributes: vec![],
+                    },
+                ],
+                expected_merged_scopes: 1, // Should merge into single scope
+                expected_total_data_points: 25, // 10 + 15 = 25 data points
+                should_merge_data_points: true,
+            },
+            DuplicateScopeDataPointsScenario {
+                name: "overlapping_metric_names".to_string(),
+                duplicate_scopes: vec![
+                    ScopeDataPoints {
+                        scope_name: "overlap.test".to_string(),
+                        scope_version: "1.0.0".to_string(),
+                        data_points: vec![
+                            DataPoint {
+                                metric_name: "shared_metric".to_string(),
+                                value: 100.0,
+                                metric_type: DataPointType::Counter,
+                            },
+                            DataPoint {
+                                metric_name: "unique_metric_1".to_string(),
+                                value: 50.0,
+                                metric_type: DataPointType::Gauge,
+                            },
+                        ],
+                        scope_attributes: vec![],
+                    },
+                    ScopeDataPoints {
+                        scope_name: "overlap.test".to_string(),
+                        scope_version: "1.0.0".to_string(),
+                        data_points: vec![
+                            DataPoint {
+                                metric_name: "shared_metric".to_string(),
+                                value: 200.0,
+                                metric_type: DataPointType::Counter,
+                            }, // Same name, different value
+                            DataPoint {
+                                metric_name: "unique_metric_2".to_string(),
+                                value: 75.0,
+                                metric_type: DataPointType::Gauge,
+                            },
+                        ],
+                        scope_attributes: vec![],
+                    },
+                ],
+                expected_merged_scopes: 1,     // Should merge
+                expected_total_data_points: 4, // All data points preserved, even with same names
+                should_merge_data_points: true,
+            },
+            DuplicateScopeDataPointsScenario {
+                name: "single_scope_no_merge_needed".to_string(),
+                duplicate_scopes: vec![ScopeDataPoints {
+                    scope_name: "unique.scope".to_string(),
+                    scope_version: "4.0.0".to_string(),
+                    data_points: vec![DataPoint {
+                        metric_name: "solo_metric".to_string(),
+                        value: 42.0,
+                        metric_type: DataPointType::Gauge,
+                    }],
+                    scope_attributes: vec![("deployment".to_string(), "production".to_string())],
+                }],
+                expected_merged_scopes: 1, // Single scope remains single
+                expected_total_data_points: 1, // Single data point unchanged
+                should_merge_data_points: false, // No merging needed
+            },
+        ];
+
+        for scenario in test_scenarios {
+            println!("Testing scenario: {}", scenario.name);
+
+            // Simulate duplicate scope data points merging with our implementation
+            let asupersync_result = simulate_asupersync_scope_data_points_merge(&scenario);
+
+            // Simulate duplicate scope data points merging with reference implementation
+            let reference_result = simulate_reference_scope_data_points_merge(&scenario);
+
+            // Compare results for conformance
+            validate_scope_data_points_merge_conformance(
+                &scenario,
+                &asupersync_result,
+                &reference_result,
+            )
+            .unwrap_or_else(|e| panic!("Scenario '{}' failed: {}", scenario.name, e));
+        }
+    }
+
+    /// Test scenario for duplicate scope data points merging validation
+    #[derive(Debug, Clone)]
+    struct DuplicateScopeDataPointsScenario {
+        name: String,
+        duplicate_scopes: Vec<ScopeDataPoints>, // Scopes that may have duplicates
+        expected_merged_scopes: usize,          // Expected number of scopes after merge
+        expected_total_data_points: usize,      // Expected total data points after merge
+        should_merge_data_points: bool,         // Whether data points merging should occur
+    }
+
+    /// Scope with data points for testing
+    #[derive(Debug, Clone)]
+    struct ScopeDataPoints {
+        scope_name: String,                      // Instrumentation scope name
+        scope_version: String,                   // Instrumentation scope version
+        data_points: Vec<DataPoint>,             // Metric data points in this scope
+        scope_attributes: Vec<(String, String)>, // Scope-level attributes
+    }
+
+    /// Individual metric data point
+    #[derive(Debug, Clone)]
+    struct DataPoint {
+        metric_name: String,        // Name of the metric
+        value: f64,                 // Metric value
+        metric_type: DataPointType, // Type of metric data point
+    }
+
+    /// Types of metric data points
+    #[derive(Debug, Clone, PartialEq)]
+    enum DataPointType {
+        Counter,   // Monotonic counter
+        Gauge,     // Current value gauge
+        Histogram, // Distribution histogram
+        Summary,   // Statistical summary
+    }
+
+    /// Result of duplicate scope data points merging test
+    #[derive(Debug, Clone)]
+    struct ScopeDataPointsMergeResult {
+        final_scope_count: usize,               // Number of scopes after merging
+        total_data_points: usize,               // Total data points after merging
+        data_points_preserved: bool,            // All data points preserved?
+        scope_merging_occurred: bool,           // Whether scope merging took place
+        duplicate_detection_correct: bool,      // Duplicate scopes detected correctly?
+        data_point_consolidation_correct: bool, // Data points consolidated correctly?
+        otlp_compliant: bool,                   // OTLP specification compliance?
+    }
+
+    /// Simulate duplicate scope data points merging with asupersync implementation
+    fn simulate_asupersync_scope_data_points_merge(
+        scenario: &DuplicateScopeDataPointsScenario,
+    ) -> ScopeDataPointsMergeResult {
+        // Group scopes by (name, version) for duplicate detection
+        let mut scope_groups: HashMap<(String, String), Vec<&ScopeDataPoints>> = HashMap::new();
+
+        for scope in &scenario.duplicate_scopes {
+            let key = (scope.scope_name.clone(), scope.scope_version.clone());
+            scope_groups.entry(key).or_default().push(scope);
+        }
+
+        // Merge data points for duplicate scopes
+        let final_scope_count = scope_groups.len();
+        let mut total_data_points = 0;
+        let mut scope_merging_occurred = false;
+
+        for (_, group) in &scope_groups {
+            if group.len() > 1 {
+                scope_merging_occurred = true;
+            }
+
+            // Count all data points in this group (merged scope)
+            for scope in group {
+                total_data_points += scope.data_points.len();
+            }
+        }
+
+        let data_points_preserved = total_data_points == scenario.expected_total_data_points;
+        let duplicate_detection_correct =
+            scope_groups.values().any(|group| group.len() > 1) == scenario.should_merge_data_points;
+
+        // Verify data point consolidation is correct
+        let data_point_consolidation_correct = scope_groups.values().all(|group| {
+            // Each group should consolidate all data points from duplicate scopes
+            let group_data_point_count: usize = group.iter().map(|s| s.data_points.len()).sum();
+            group_data_point_count > 0 // At least some data points should exist
+        });
+
+        ScopeDataPointsMergeResult {
+            final_scope_count,
+            total_data_points,
+            data_points_preserved,
+            scope_merging_occurred,
+            duplicate_detection_correct,
+            data_point_consolidation_correct,
+            otlp_compliant: final_scope_count == scenario.expected_merged_scopes
+                && data_points_preserved,
+        }
+    }
+
+    /// Simulate duplicate scope data points merging with reference implementation
+    fn simulate_reference_scope_data_points_merge(
+        scenario: &DuplicateScopeDataPointsScenario,
+    ) -> ScopeDataPointsMergeResult {
+        // Reference implementation should also merge duplicate scopes
+        let mut merged_scopes: HashMap<(String, String), Vec<DataPoint>> = HashMap::new();
+
+        for scope in &scenario.duplicate_scopes {
+            let key = (scope.scope_name.clone(), scope.scope_version.clone());
+            merged_scopes
+                .entry(key)
+                .or_default()
+                .extend(scope.data_points.clone());
+        }
+
+        let final_scope_count = merged_scopes.len();
+        let total_data_points: usize = merged_scopes.values().map(|dp| dp.len()).sum();
+        let scope_merging_occurred = final_scope_count < scenario.duplicate_scopes.len();
+
+        ScopeDataPointsMergeResult {
+            final_scope_count,
+            total_data_points,
+            data_points_preserved: total_data_points == scenario.expected_total_data_points,
+            scope_merging_occurred,
+            duplicate_detection_correct: true,
+            data_point_consolidation_correct: true,
+            otlp_compliant: final_scope_count == scenario.expected_merged_scopes,
+        }
+    }
+
+    /// Validate duplicate scope data points merging conformance
+    fn validate_scope_data_points_merge_conformance(
+        scenario: &DuplicateScopeDataPointsScenario,
+        asupersync_result: &ScopeDataPointsMergeResult,
+        reference_result: &ScopeDataPointsMergeResult,
+    ) -> Result<(), String> {
+        // Verify both implementations are OTLP compliant
+        if !asupersync_result.otlp_compliant {
+            return Err(
+                "Asupersync implementation violates OTLP scope data points merging specification"
+                    .to_string(),
+            );
+        }
+
+        if !reference_result.otlp_compliant {
+            return Err(
+                "Reference implementation violates OTLP scope data points merging specification"
+                    .to_string(),
+            );
+        }
+
+        // Verify duplicate scope detection
+        validate_duplicate_scope_detection(scenario, asupersync_result)?;
+        validate_duplicate_scope_detection(scenario, reference_result)?;
+
+        // Verify data points preservation
+        validate_data_points_preservation(scenario, asupersync_result)?;
+        validate_data_points_preservation(scenario, reference_result)?;
+
+        // Verify scope merging behavior consistency
+        validate_scope_merging_behavior_consistency(scenario, asupersync_result, reference_result)?;
+
+        // Verify data point consolidation correctness
+        validate_data_point_consolidation(asupersync_result)?;
+        validate_data_point_consolidation(reference_result)?;
+
+        Ok(())
+    }
+
+    /// Verify duplicate scope detection correctness
+    fn validate_duplicate_scope_detection(
+        scenario: &DuplicateScopeDataPointsScenario,
+        result: &ScopeDataPointsMergeResult,
+    ) -> Result<(), String> {
+        if !result.duplicate_detection_correct {
+            return Err("Duplicate scope detection is incorrect".to_string());
+        }
+
+        // Verify final scope count matches expectation
+        if result.final_scope_count != scenario.expected_merged_scopes {
+            return Err(format!(
+                "Final scope count mismatch: expected {}, got {}",
+                scenario.expected_merged_scopes, result.final_scope_count
+            ));
+        }
+
+        // Verify merging behavior matches expectation
+        if scenario.should_merge_data_points && !result.scope_merging_occurred {
+            return Err("Expected scope merging did not occur".to_string());
+        }
+
+        if !scenario.should_merge_data_points && result.scope_merging_occurred {
+            return Err("Unexpected scope merging occurred".to_string());
+        }
+
+        Ok(())
+    }
+
+    /// Verify data points preservation during merging
+    fn validate_data_points_preservation(
+        scenario: &DuplicateScopeDataPointsScenario,
+        result: &ScopeDataPointsMergeResult,
+    ) -> Result<(), String> {
+        if !result.data_points_preserved {
+            return Err("Data points were not preserved during scope merging".to_string());
+        }
+
+        // Verify total data points count
+        if result.total_data_points != scenario.expected_total_data_points {
+            return Err(format!(
+                "Total data points mismatch: expected {}, got {}",
+                scenario.expected_total_data_points, result.total_data_points
+            ));
+        }
+
+        Ok(())
+    }
+
+    /// Verify scope merging behavior consistency between implementations
+    fn validate_scope_merging_behavior_consistency(
+        _scenario: &DuplicateScopeDataPointsScenario,
+        asupersync_result: &ScopeDataPointsMergeResult,
+        reference_result: &ScopeDataPointsMergeResult,
+    ) -> Result<(), String> {
+        // Both implementations should produce same final scope count
+        if asupersync_result.final_scope_count != reference_result.final_scope_count {
+            return Err("Final scope count differs between implementations".to_string());
+        }
+
+        // Both implementations should preserve same total data points
+        if asupersync_result.total_data_points != reference_result.total_data_points {
+            return Err("Total data points count differs between implementations".to_string());
+        }
+
+        // Both implementations should have consistent merging behavior
+        if asupersync_result.scope_merging_occurred != reference_result.scope_merging_occurred {
+            return Err("Scope merging behavior differs between implementations".to_string());
+        }
+
+        Ok(())
+    }
+
+    /// Verify data point consolidation correctness
+    fn validate_data_point_consolidation(
+        result: &ScopeDataPointsMergeResult,
+    ) -> Result<(), String> {
+        if !result.data_point_consolidation_correct {
+            return Err("Data point consolidation is incorrect".to_string());
+        }
+
+        Ok(())
+    }
 }

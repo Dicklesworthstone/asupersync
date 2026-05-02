@@ -3009,6 +3009,15 @@ test = false
 doc = false
 bench = false
 
+# Structure-aware JetStream `Nats-Msg-Id` duplicate-window fuzzer.
+# Covers just-before-window rejection plus exact-boundary and just-past expiry.
+[[bin]]
+name = "jetstream_msg_id_dedup"
+path = "fuzz_targets/jetstream_msg_id_dedup.rs"
+test = false
+doc = false
+bench = false
+
 # RFC 6330 RaptorQ encoder K_max + N_max boundary limits fuzzer.
 # Structure-aware fuzzing targeting SystematicParams validation and encoding
 # with K values around the RFC 6330 limit (~56,403) and various N combinations.
