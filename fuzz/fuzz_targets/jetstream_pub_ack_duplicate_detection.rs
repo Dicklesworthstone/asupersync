@@ -192,7 +192,9 @@ impl PubAckFuzzCase {
         }
 
         match &self.duplicate_variant {
-            DuplicateFieldVariant::StandardTrue => Some(true),
+            DuplicateFieldVariant::StandardTrue | DuplicateFieldVariant::SpacedBeforeColonTrue => {
+                Some(true)
+            }
             DuplicateFieldVariant::StandardFalse | DuplicateFieldVariant::Missing => Some(false),
             DuplicateFieldVariant::TitleCaseTrue
             | DuplicateFieldVariant::UpperCaseFalse
@@ -202,7 +204,6 @@ impl PubAckFuzzCase {
             | DuplicateFieldVariant::Null
             | DuplicateFieldVariant::String(_)
             | DuplicateFieldVariant::Multiple(_)
-            | DuplicateFieldVariant::SpacedBeforeColonTrue
             | DuplicateFieldVariant::EscapedTrueString => None,
         }
     }
@@ -268,6 +269,7 @@ fn exercise_structured_case(case: &PubAckFuzzCase) {
 fn exercise_curated_cases() {
     let cases: &[(&[u8], bool)] = &[
         (br#"{"stream":"ORDERS","seq":42,"duplicate":true}"#, true),
+        (br#"{"stream":"ORDERS","seq":42,"duplicate" : true}"#, true),
         (br#"{"stream":"ORDERS","seq":42,"duplicate":   true}"#, true),
         (br#"{"stream":"ORDERS","seq":42,"duplicate":false}"#, false),
         (br#"{"stream":"ORDERS","seq":42}"#, false),

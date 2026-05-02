@@ -914,7 +914,7 @@ impl JetStreamContext {
 
         // Check for error in response
         let response_str = String::from_utf8_lossy(&response.payload);
-        if response_str.contains("\"error\":{\"code\":") {
+        if has_json_api_error(&response_str) {
             return Err(Self::parse_api_error(&response_str));
         }
 
@@ -1002,7 +1002,7 @@ impl JetStreamContext {
             .await?;
 
         let response_str = String::from_utf8_lossy(&response.payload);
-        if response_str.contains("\"error\":{\"code\":") {
+        if has_json_api_error(&response_str) {
             return Err(Self::parse_api_error(&response_str));
         }
 
@@ -1030,7 +1030,7 @@ impl JetStreamContext {
         let response = self.client.request(cx, &subject, b"").await?;
 
         let response_str = String::from_utf8_lossy(&response.payload);
-        if response_str.contains("\"error\":{\"code\":") {
+        if has_json_api_error(&response_str) {
             return Err(Self::parse_api_error(&response_str));
         }
 
@@ -1054,7 +1054,7 @@ impl JetStreamContext {
         let response = self.client.request(cx, &subject, b"").await?;
 
         let response_str = String::from_utf8_lossy(&response.payload);
-        if response_str.contains("\"error\":{\"code\":") {
+        if has_json_api_error(&response_str) {
             return Err(Self::parse_api_error(&response_str));
         }
 
@@ -1069,7 +1069,7 @@ impl JetStreamContext {
     fn parse_stream_info(payload: &[u8]) -> Result<StreamInfo, JsError> {
         let json = String::from_utf8_lossy(payload);
 
-        if json.contains("\"error\":{\"code\":") {
+        if has_json_api_error(&json) {
             return Err(Self::parse_api_error(&json));
         }
 
@@ -1096,7 +1096,7 @@ impl JetStreamContext {
     fn parse_pub_ack(payload: &[u8]) -> Result<PubAck, JsError> {
         let json = String::from_utf8_lossy(payload);
 
-        if json.contains("\"error\":{\"code\":") {
+        if has_json_api_error(&json) {
             return Err(Self::parse_api_error(&json));
         }
 
@@ -2026,10 +2026,64 @@ fn json_escape(s: &str) -> String {
     out
 }
 
+fn has_json_api_error(json: &str) -> bool {
+    extract_json_object(json, "error")
+        .is_some_and(|error_json| extract_json_u64(error_json, "code").is_some())
+}
+
+fn json_value_after_key<'a>(json: &'a str, key: &str) -> Option<&'a str> {
+    let mut search_start = 0;
+
+    while search_start < json.len() {
+        let quote_start = search_start + json[search_start..].find('"')?;
+        let (matches_key, after_quote) = scan_json_string_literal(json, quote_start, key)?;
+        search_start = after_quote;
+
+        if !matches_key {
+            continue;
+        }
+
+        if let Some(after_colon) = json[after_quote..].trim_start().strip_prefix(':') {
+            return Some(after_colon.trim_start());
+        }
+    }
+
+    None
+}
+
+fn scan_json_string_literal(json: &str, quote_start: usize, key: &str) -> Option<(bool, usize)> {
+    let mut key_chars = key.chars();
+    let mut matches_key = true;
+    let mut escaped = false;
+
+    for (offset, ch) in json[quote_start + 1..].char_indices() {
+        let idx = quote_start + 1 + offset;
+
+        if escaped {
+            matches_key = false;
+            escaped = false;
+            continue;
+        }
+
+        match ch {
+            '\\' => {
+                matches_key = false;
+                escaped = true;
+            }
+            '"' => return Some((matches_key && key_chars.next().is_none(), idx + 1)),
+            _ => {
+                if key_chars.next() != Some(ch) {
+                    matches_key = false;
+                }
+            }
+        }
+    }
+
+    None
+}
+
 fn extract_json_object<'a>(json: &'a str, key: &str) -> Option<&'a str> {
-    let pattern = format!("\"{key}\":");
-    let start = json.find(&pattern)? + pattern.len();
-    let rest = json[start..].trim_start();
+    let rest = json_value_after_key(json, key)?;
     if !rest.starts_with('{') {
         return None;
     }
@@ -2068,10 +2122,9 @@ fn extract_json_object<'a>(json: &'a str, key: &str) -> Option<&'a str> {
 }
 
 fn extract_json_string_simple(json: &str, key: &str) -> Option<String> {
-    let pattern = format!("\"{key}\":\"");
-    let start = json.find(&pattern)? + pattern.len();
+    let rest = json_value_after_key(json, key)?;
+    let slice = rest.strip_prefix('"')?;
     // Walk forward, respecting backslash escapes and building unescaped string
-    let slice = &json[start..];
     let mut chars = slice.char_indices();
     let mut result = String::new();
     loop {
@@ -2110,9 +2163,7 @@ fn extract_json_string_simple(json: &str, key: &str) -> Option<String> {
 }
 
 fn extract_json_u64(json: &str, key: &str) -> Option<u64> {
-    let pattern = format!("\"{key}\":");
-    let start = json.find(&pattern)? + pattern.len();
-    let rest = json[start..].trim_start();
+    let rest = json_value_after_key(json, key)?;
     let end = rest
         .find(|c: char| !c.is_ascii_digit())
         .unwrap_or(rest.len());
@@ -2120,9 +2171,7 @@ fn extract_json_u64(json: &str, key: &str) -> Option<u64> {
 }
 
 fn extract_json_bool(json: &str, key: &str) -> Option<bool> {
-    let pattern = format!("\"{key}\":");
-    let start = json.find(&pattern)? + pattern.len();
-    let rest = json[start..].trim_start();
+    let rest = json_value_after_key(json, key)?;
     if rest.starts_with("true") {
         Some(true)
     } else if rest.starts_with("false") {
@@ -2511,7 +2560,7 @@ mod tests {
 
     #[test]
     fn test_extract_json_u64() {
-        let json = r#"{"seq":12345,"messages":100}"#;
+        let json = r#"{"seq":12345,"messages" : 100}"#;
         assert_eq!(extract_json_u64(json, "seq"), Some(12345));
         assert_eq!(extract_json_u64(json, "messages"), Some(100));
         assert_eq!(extract_json_u64(json, "missing"), None);
@@ -3068,9 +3117,9 @@ mod tests {
     #[test]
     fn parse_pub_ack_accepts_whitespace_around_duplicate_bool() {
         let payload = br#"{
-            "stream":"ORDERS",
-            "seq":42,
-            "duplicate": true
+            "stream" : "ORDERS",
+            "seq" : 42,
+            "duplicate" : true
         }"#;
 
         let ack = JetStreamContext::parse_pub_ack(payload).expect("valid PubAck");
@@ -3184,14 +3233,14 @@ mod tests {
         // should NOT be classified as an error.
         let response = r#"{"stream":"error-handler","seq":1}"#;
         assert!(
-            !response.contains("\"error\":{\"code\":"),
+            !has_json_api_error(response),
             "data containing 'error' in name should not match error envelope"
         );
 
         // Actual error envelope should match
-        let error_response = r#"{"error":{"code":404,"description":"not found"}}"#;
+        let error_response = r#"{"error" : {"code" : 404,"description":"not found"}}"#;
         assert!(
-            error_response.contains("\"error\":{\"code\":"),
+            has_json_api_error(error_response),
             "actual error envelope should match"
         );
     }
@@ -3200,7 +3249,8 @@ mod tests {
     fn parse_api_error_uses_err_code_for_stream_not_found() {
         // BUG-4 regression: StreamNotFound should be returned when err_code
         // is 10059, not when code is 10059.
-        let json = r#"{"error":{"code":404,"err_code":10059,"description":"stream not found"}}"#;
+        let json =
+            r#"{"error" : {"code" : 404,"err_code" : 10059,"description" : "stream not found"}}"#;
         let err = JetStreamContext::parse_api_error(json);
         assert!(
             matches!(err, JsError::StreamNotFound(ref d) if d.contains("stream not found")),
@@ -3213,6 +3263,17 @@ mod tests {
         assert!(
             matches!(err2, JsError::Api { code: 404, .. }),
             "should be generic Api error, got: {err2:?}"
+        );
+    }
+
+    #[test]
+    fn parse_stream_info_detects_spaced_error_object() {
+        let payload =
+            br#"{"error" : {"code" : 404,"err_code" : 10059,"description" : "stream not found"}}"#;
+        let err = JetStreamContext::parse_stream_info(payload).expect_err("error response");
+        assert!(
+            matches!(err, JsError::StreamNotFound(ref d) if d == "stream not found"),
+            "spaced error envelope should be classified, got: {err:?}"
         );
     }
 
@@ -3250,7 +3311,7 @@ mod tests {
     #[test]
     fn test_extract_json_string_handles_unicode_escape() {
         // BUG-7 regression: \uXXXX should not truncate the extracted string
-        let json = r#"{"name":"hello\u0020world","other":"val"}"#;
+        let json = r#"{"name" : "hello\u0020world","other":"val"}"#;
         let result = extract_json_string_simple(json, "name");
         assert_eq!(
             result,
