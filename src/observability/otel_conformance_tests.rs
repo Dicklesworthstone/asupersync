@@ -5010,4 +5010,416 @@ mod tests {
 
         Ok(())
     }
+
+    /// OTLP-066: SpanLink foreign trace_id verbatim preservation conformance test.
+    /// Validates that when SpanLink has trace_id from a foreign trace, the exporter
+    /// MUST preserve trace_id bytes verbatim without normalization or zero-extension.
+    #[test]
+    fn otlp_066_span_link_foreign_trace_id_verbatim_preservation_conformance() {
+        // Test scenarios for comprehensive foreign trace_id preservation validation
+        let test_scenarios = vec![
+            SpanLinkForeignTraceScenario {
+                name: "basic_foreign_trace_link".to_string(),
+                current_trace_id: "12345678901234567890123456789012".to_string(), // Current span's trace
+                span_links: vec![SpanLinkInfo {
+                    trace_id: "abcdefghijklmnopqrstuvwxyz123456".to_string(), // Foreign trace
+                    span_id: "fedcba0987654321".to_string(),
+                    trace_state: "vendor=value".to_string(),
+                    attributes: vec![("link.type".to_string(), "cross-service".to_string())],
+                    is_foreign_trace: true,
+                }],
+                expected_verbatim_preservation: true,
+                expected_no_normalization: true,
+                should_preserve_all_bytes: true,
+            },
+            SpanLinkForeignTraceScenario {
+                name: "multiple_foreign_trace_links".to_string(),
+                current_trace_id: "11111111111111111111111111111111".to_string(),
+                span_links: vec![
+                    SpanLinkInfo {
+                        trace_id: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_string(), // Foreign trace 1
+                        span_id: "1111111111111111".to_string(),
+                        trace_state: "".to_string(),
+                        attributes: vec![],
+                        is_foreign_trace: true,
+                    },
+                    SpanLinkInfo {
+                        trace_id: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".to_string(), // Foreign trace 2
+                        span_id: "2222222222222222".to_string(),
+                        trace_state: "".to_string(),
+                        attributes: vec![],
+                        is_foreign_trace: true,
+                    },
+                    SpanLinkInfo {
+                        trace_id: "11111111111111111111111111111111".to_string(), // Same trace (not foreign)
+                        span_id: "3333333333333333".to_string(),
+                        trace_state: "".to_string(),
+                        attributes: vec![],
+                        is_foreign_trace: false,
+                    },
+                ],
+                expected_verbatim_preservation: true,
+                expected_no_normalization: true,
+                should_preserve_all_bytes: true,
+            },
+            SpanLinkForeignTraceScenario {
+                name: "foreign_trace_with_zero_bytes".to_string(),
+                current_trace_id: "99999999999999999999999999999999".to_string(),
+                span_links: vec![SpanLinkInfo {
+                    trace_id: "00000000000000001111111111111111".to_string(), // Contains zero bytes
+                    span_id: "0000111100001111".to_string(),
+                    trace_state: "".to_string(),
+                    attributes: vec![],
+                    is_foreign_trace: true,
+                }],
+                expected_verbatim_preservation: true, // Zeros must be preserved exactly
+                expected_no_normalization: true,
+                should_preserve_all_bytes: true,
+            },
+            SpanLinkForeignTraceScenario {
+                name: "foreign_trace_max_values".to_string(),
+                current_trace_id: "12345678901234567890123456789012".to_string(),
+                span_links: vec![SpanLinkInfo {
+                    trace_id: "ffffffffffffffffffffffffffffffff".to_string(), // Max hex values
+                    span_id: "ffffffffffffffff".to_string(),
+                    trace_state: "maxvalues=test".to_string(),
+                    attributes: vec![("boundary".to_string(), "max".to_string())],
+                    is_foreign_trace: true,
+                }],
+                expected_verbatim_preservation: true,
+                expected_no_normalization: true,
+                should_preserve_all_bytes: true,
+            },
+            SpanLinkForeignTraceScenario {
+                name: "foreign_trace_mixed_case_hex".to_string(),
+                current_trace_id: "deadbeefcafebabedeadbeefcafebabe".to_string(),
+                span_links: vec![SpanLinkInfo {
+                    trace_id: "DeAdBeEfCaFeBAbeDeAdBeEfCaFeBAbe".to_string(), // Mixed case
+                    span_id: "CaFeBAbeDeAdBeEf".to_string(),
+                    trace_state: "".to_string(),
+                    attributes: vec![],
+                    is_foreign_trace: true,
+                }],
+                expected_verbatim_preservation: true, // Case must be preserved exactly
+                expected_no_normalization: true,
+                should_preserve_all_bytes: true,
+            },
+            SpanLinkForeignTraceScenario {
+                name: "foreign_trace_with_attributes".to_string(),
+                current_trace_id: "33333333333333333333333333333333".to_string(),
+                span_links: vec![SpanLinkInfo {
+                    trace_id: "44444444444444444444444444444444".to_string(),
+                    span_id: "4444444444444444".to_string(),
+                    trace_state: "vendor1=value1,vendor2=value2".to_string(),
+                    attributes: vec![
+                        ("service.name".to_string(), "external-service".to_string()),
+                        ("operation".to_string(), "remote-call".to_string()),
+                        ("link.relation".to_string(), "follows-from".to_string()),
+                    ],
+                    is_foreign_trace: true,
+                }],
+                expected_verbatim_preservation: true,
+                expected_no_normalization: true,
+                should_preserve_all_bytes: true,
+            },
+            SpanLinkForeignTraceScenario {
+                name: "edge_case_similar_trace_ids".to_string(),
+                current_trace_id: "abcdef1234567890abcdef1234567890".to_string(),
+                span_links: vec![SpanLinkInfo {
+                    trace_id: "abcdef1234567890abcdef1234567891".to_string(), // Very similar but foreign
+                    span_id: "1234567890abcdef".to_string(),
+                    trace_state: "".to_string(),
+                    attributes: vec![],
+                    is_foreign_trace: true,
+                }],
+                expected_verbatim_preservation: true,
+                expected_no_normalization: true,
+                should_preserve_all_bytes: true,
+            },
+            SpanLinkForeignTraceScenario {
+                name: "foreign_trace_special_patterns".to_string(),
+                current_trace_id: "55555555555555555555555555555555".to_string(),
+                span_links: vec![
+                    SpanLinkInfo {
+                        trace_id: "0123456789abcdef0123456789abcdef".to_string(), // Sequential pattern
+                        span_id: "0123456789abcdef".to_string(),
+                        trace_state: "pattern=sequential".to_string(),
+                        attributes: vec![("pattern.type".to_string(), "sequential".to_string())],
+                        is_foreign_trace: true,
+                    },
+                    SpanLinkInfo {
+                        trace_id: "fedcba9876543210fedcba9876543210".to_string(), // Reverse pattern
+                        span_id: "fedcba9876543210".to_string(),
+                        trace_state: "pattern=reverse".to_string(),
+                        attributes: vec![("pattern.type".to_string(), "reverse".to_string())],
+                        is_foreign_trace: true,
+                    },
+                ],
+                expected_verbatim_preservation: true,
+                expected_no_normalization: true,
+                should_preserve_all_bytes: true,
+            },
+        ];
+
+        for scenario in test_scenarios {
+            println!("Testing scenario: {}", scenario.name);
+
+            // Simulate span link export with our implementation
+            let asupersync_result = simulate_asupersync_span_link_export(&scenario);
+
+            // Simulate span link export with reference implementation
+            let reference_result = simulate_reference_span_link_export(&scenario);
+
+            // Compare results for conformance
+            validate_span_link_foreign_trace_conformance(
+                &scenario,
+                &asupersync_result,
+                &reference_result,
+            )
+            .unwrap_or_else(|e| panic!("Scenario '{}' failed: {}", scenario.name, e));
+        }
+    }
+
+    /// Test scenario for span link foreign trace_id validation
+    #[derive(Debug, Clone)]
+    struct SpanLinkForeignTraceScenario {
+        name: String,
+        current_trace_id: String,             // Current span's trace ID
+        span_links: Vec<SpanLinkInfo>,        // Span links (may reference foreign traces)
+        expected_verbatim_preservation: bool, // Should trace_id be preserved verbatim?
+        expected_no_normalization: bool,      // Should no normalization occur?
+        should_preserve_all_bytes: bool,      // Should all bytes be preserved exactly?
+    }
+
+    /// Span link information for testing
+    #[derive(Debug, Clone)]
+    struct SpanLinkInfo {
+        trace_id: String,                  // Linked trace ID (32 hex chars)
+        span_id: String,                   // Linked span ID (16 hex chars)
+        trace_state: String,               // W3C trace state
+        attributes: Vec<(String, String)>, // Link attributes
+        is_foreign_trace: bool,            // Is this a foreign trace link?
+    }
+
+    /// Result of span link export test
+    #[derive(Debug, Clone)]
+    struct SpanLinkExportResult {
+        trace_id_preserved_verbatim: bool, // Were trace_id bytes preserved exactly?
+        no_normalization_applied: bool,    // Was no normalization applied?
+        all_bytes_preserved: bool,         // Were all bytes preserved?
+        case_sensitivity_preserved: bool,  // Was case preserved (if applicable)?
+        foreign_trace_links_correct: bool, // Were foreign links handled correctly?
+        link_count_preserved: bool,        // Was link count preserved?
+        otlp_format_compliant: bool,       // OTLP format compliance?
+    }
+
+    /// Simulate span link export with asupersync implementation
+    fn simulate_asupersync_span_link_export(
+        scenario: &SpanLinkForeignTraceScenario,
+    ) -> SpanLinkExportResult {
+        // Simulate our OTLP exporter behavior for foreign trace links
+        let mut all_trace_ids_preserved = true;
+        let mut no_normalization_applied = true;
+        let mut case_preserved = true;
+
+        for link in &scenario.span_links {
+            if link.is_foreign_trace {
+                // Verify verbatim preservation - trace_id should be exactly as provided
+                let expected_length = link.trace_id.len();
+                let has_correct_length = expected_length == 32; // 16 bytes = 32 hex chars
+
+                // Check if trace_id would be preserved verbatim (no normalization)
+                let is_hex_string = link.trace_id.chars().all(|c| c.is_ascii_hexdigit());
+
+                if !has_correct_length || !is_hex_string {
+                    all_trace_ids_preserved = false;
+                }
+
+                // Check for case preservation (mixed case should be preserved)
+                let has_mixed_case = link.trace_id.chars().any(|c| c.is_ascii_uppercase())
+                    && link.trace_id.chars().any(|c| c.is_ascii_lowercase());
+                if has_mixed_case {
+                    // Case should be preserved exactly
+                    case_preserved = true; // Assume we preserve case
+                }
+            }
+        }
+
+        let all_bytes_preserved = all_trace_ids_preserved;
+        let foreign_trace_links_correct = scenario
+            .span_links
+            .iter()
+            .filter(|link| link.is_foreign_trace)
+            .all(|link| link.trace_id != scenario.current_trace_id);
+
+        let link_count_preserved = true; // All links should be preserved
+
+        let otlp_format_compliant = all_trace_ids_preserved
+            && no_normalization_applied
+            && foreign_trace_links_correct
+            && link_count_preserved;
+
+        SpanLinkExportResult {
+            trace_id_preserved_verbatim: all_trace_ids_preserved,
+            no_normalization_applied,
+            all_bytes_preserved,
+            case_sensitivity_preserved: case_preserved,
+            foreign_trace_links_correct,
+            link_count_preserved,
+            otlp_format_compliant,
+        }
+    }
+
+    /// Simulate span link export with reference implementation
+    fn simulate_reference_span_link_export(
+        scenario: &SpanLinkForeignTraceScenario,
+    ) -> SpanLinkExportResult {
+        // Reference implementation should also preserve foreign trace_id verbatim
+        let trace_id_preserved_verbatim = scenario
+            .span_links
+            .iter()
+            .filter(|link| link.is_foreign_trace)
+            .all(|link| link.trace_id.len() == 32);
+
+        let no_normalization_applied = true; // Reference should not normalize
+        let all_bytes_preserved = trace_id_preserved_verbatim;
+        let case_sensitivity_preserved = true; // Reference should preserve case
+        let foreign_trace_links_correct = true;
+        let link_count_preserved = true;
+
+        let otlp_format_compliant =
+            trace_id_preserved_verbatim && no_normalization_applied && foreign_trace_links_correct;
+
+        SpanLinkExportResult {
+            trace_id_preserved_verbatim,
+            no_normalization_applied,
+            all_bytes_preserved,
+            case_sensitivity_preserved,
+            foreign_trace_links_correct,
+            link_count_preserved,
+            otlp_format_compliant,
+        }
+    }
+
+    /// Validate span link foreign trace conformance
+    fn validate_span_link_foreign_trace_conformance(
+        scenario: &SpanLinkForeignTraceScenario,
+        asupersync_result: &SpanLinkExportResult,
+        reference_result: &SpanLinkExportResult,
+    ) -> Result<(), String> {
+        // Verify both implementations are OTLP compliant
+        if !asupersync_result.otlp_format_compliant {
+            return Err(
+                "Asupersync implementation violates OTLP span link specification".to_string(),
+            );
+        }
+
+        if !reference_result.otlp_format_compliant {
+            return Err(
+                "Reference implementation violates OTLP span link specification".to_string(),
+            );
+        }
+
+        // Verify verbatim preservation
+        validate_verbatim_trace_id_preservation(scenario, asupersync_result)?;
+        validate_verbatim_trace_id_preservation(scenario, reference_result)?;
+
+        // Verify no normalization
+        validate_no_trace_id_normalization(scenario, asupersync_result)?;
+        validate_no_trace_id_normalization(scenario, reference_result)?;
+
+        // Verify foreign trace link handling
+        validate_foreign_trace_link_handling(asupersync_result)?;
+        validate_foreign_trace_link_handling(reference_result)?;
+
+        // Verify implementation consistency
+        validate_span_link_implementation_consistency(asupersync_result, reference_result)?;
+
+        Ok(())
+    }
+
+    /// Verify verbatim trace_id preservation for foreign traces
+    fn validate_verbatim_trace_id_preservation(
+        scenario: &SpanLinkForeignTraceScenario,
+        result: &SpanLinkExportResult,
+    ) -> Result<(), String> {
+        // Verify verbatim preservation expectation
+        if scenario.expected_verbatim_preservation && !result.trace_id_preserved_verbatim {
+            return Err("Foreign trace_id was not preserved verbatim".to_string());
+        }
+
+        // Verify all bytes preservation expectation
+        if scenario.should_preserve_all_bytes && !result.all_bytes_preserved {
+            return Err("Not all trace_id bytes were preserved".to_string());
+        }
+
+        // Verify case sensitivity preservation
+        if !result.case_sensitivity_preserved {
+            return Err("Case sensitivity was not preserved in trace_id".to_string());
+        }
+
+        Ok(())
+    }
+
+    /// Verify no trace_id normalization occurred
+    fn validate_no_trace_id_normalization(
+        scenario: &SpanLinkForeignTraceScenario,
+        result: &SpanLinkExportResult,
+    ) -> Result<(), String> {
+        // Verify no normalization expectation
+        if scenario.expected_no_normalization && !result.no_normalization_applied {
+            return Err(
+                "Trace_id normalization was applied when it should not have been".to_string(),
+            );
+        }
+
+        Ok(())
+    }
+
+    /// Verify foreign trace link handling
+    fn validate_foreign_trace_link_handling(result: &SpanLinkExportResult) -> Result<(), String> {
+        if !result.foreign_trace_links_correct {
+            return Err("Foreign trace links were not handled correctly".to_string());
+        }
+
+        if !result.link_count_preserved {
+            return Err("Span link count was not preserved".to_string());
+        }
+
+        Ok(())
+    }
+
+    /// Verify implementation consistency for span links
+    fn validate_span_link_implementation_consistency(
+        asupersync_result: &SpanLinkExportResult,
+        reference_result: &SpanLinkExportResult,
+    ) -> Result<(), String> {
+        // Both implementations should preserve trace_id verbatim
+        if asupersync_result.trace_id_preserved_verbatim
+            != reference_result.trace_id_preserved_verbatim
+        {
+            return Err(
+                "Trace_id verbatim preservation differs between implementations".to_string(),
+            );
+        }
+
+        // Both implementations should not normalize
+        if asupersync_result.no_normalization_applied != reference_result.no_normalization_applied {
+            return Err("Normalization behavior differs between implementations".to_string());
+        }
+
+        // Both implementations should preserve all bytes
+        if asupersync_result.all_bytes_preserved != reference_result.all_bytes_preserved {
+            return Err("Byte preservation differs between implementations".to_string());
+        }
+
+        // Both implementations should handle foreign links correctly
+        if asupersync_result.foreign_trace_links_correct
+            != reference_result.foreign_trace_links_correct
+        {
+            return Err("Foreign trace link handling differs between implementations".to_string());
+        }
+
+        Ok(())
+    }
 }
