@@ -4343,6 +4343,15 @@ test = false
 doc = false
 bench = false
 
+# Structure-aware fuzzer for concurrent Pool acquire/release. Tracks checked-out
+# resource ids across worker threads and verifies final pool stats drain cleanly.
+[[bin]]
+name = "sync_pool_acquire_release"
+path = "fuzz_targets/sync_pool_acquire_release.rs"
+test = false
+doc = false
+bench = false
+
 # HTTP/2 SETTINGS_INITIAL_WINDOW_SIZE boundary fuzzer.
 # Covers 2^31-2, 2^31-1, and 2^31 against Settings validation,
 # builder clamping, and StreamStore flow-control window arithmetic.
@@ -4819,5 +4828,11 @@ doc = false
 [[bin]]
 name = "h2_request_header_too_large"
 path = "fuzz_targets/h2_request_header_too_large.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "h2_request_authority_with_userinfo"
+path = "fuzz_targets/h2_request_authority_with_userinfo.rs"
 test = false
 doc = false
