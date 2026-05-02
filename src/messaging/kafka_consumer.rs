@@ -123,6 +123,8 @@ pub struct ConsumerConfig {
     /// When true, always use rdkafka broker connection.
     /// When false (default), use StubBroker in test mode for deterministic testing.
     pub force_real_kafka: bool,
+    /// Maximum number of retries for retriable operations (offset commits, etc.).
+    pub retries: u32,
     /// Internal test/debug-only opt-in for PLAINTEXT / unauthenticated remote brokers.
     ///
     /// The secure default is fail-closed for non-loopback plaintext bootstrap
@@ -155,6 +157,7 @@ impl Default for ConsumerConfig {
             isolation_level: IsolationLevel::ReadUncommitted,
             security: KafkaSecurityConfig::default(),
             force_real_kafka: false,
+            retries: 3,
             allow_insecure_transport_for_testing: false,
         }
     }
@@ -252,6 +255,13 @@ impl ConsumerConfig {
     #[must_use]
     pub const fn force_real_kafka(mut self, force: bool) -> Self {
         self.force_real_kafka = force;
+        self
+    }
+
+    /// Set maximum number of retries for retriable operations.
+    #[must_use]
+    pub const fn retries(mut self, retries: u32) -> Self {
+        self.retries = retries;
         self
     }
 
@@ -560,6 +570,61 @@ fn map_consumer_error(err: RdKafkaError) -> KafkaError {
             KafkaError::Config(msg)
         }
         _ => KafkaError::Broker(err.to_string()),
+    }
+}
+
+#[cfg(any(feature = "kafka", test))]
+fn consumer_retry_backoff(config: &ConsumerConfig, attempt: u32) -> Duration {
+    let base_ms = config.heartbeat_interval.as_millis().max(1) as u64;
+    let exp = 1_u64 << attempt.min(6);
+    Duration::from_millis(base_ms.saturating_mul(exp).min(5000))
+}
+
+#[cfg(any(feature = "kafka", test))]
+async fn wait_consumer_retry_backoff(cx: &Cx, delay: Duration) -> Result<(), KafkaError> {
+    if delay.is_zero() {
+        cx.checkpoint().map_err(|_| KafkaError::Cancelled)?;
+        crate::runtime::yield_now().await;
+        return cx.checkpoint().map_err(|_| KafkaError::Cancelled);
+    }
+
+    let now = cx
+        .timer_driver()
+        .map_or_else(crate::time::wall_now, |driver| driver.now());
+    let mut sleeper = crate::time::sleep(now, delay);
+    std::future::poll_fn(|task_cx| {
+        if cx.checkpoint().is_err() {
+            return std::task::Poll::Ready(Err(KafkaError::Cancelled));
+        }
+        std::pin::Pin::new(&mut sleeper)
+            .poll(task_cx)
+            .map(|()| Ok(()))
+    })
+    .await
+}
+
+#[cfg(any(feature = "kafka", test))]
+async fn retry_consumer_operation<T, F>(
+    cx: &Cx,
+    config: &ConsumerConfig,
+    mut attempt_operation: F,
+) -> Result<T, KafkaError>
+where
+    F: FnMut() -> Result<T, KafkaError>,
+{
+    let mut attempt = 0;
+    loop {
+        cx.checkpoint().map_err(|_| KafkaError::Cancelled)?;
+
+        match attempt_operation() {
+            Ok(value) => return Ok(value),
+            Err(err) if err.is_retryable() && attempt < config.retries => {
+                let delay = consumer_retry_backoff(config, attempt);
+                attempt = attempt.saturating_add(1);
+                wait_consumer_retry_backoff(cx, delay).await?;
+            }
+            Err(err) => return Err(err),
+        }
     }
 }
 
@@ -1207,16 +1272,34 @@ impl KafkaConsumer {
         #[cfg(feature = "kafka")]
         if let Some((consumer, broker_ops)) = self.broker_backend() {
             let commit_batch = normalized.clone();
-            crate::runtime::spawn_blocking::spawn_blocking_on_thread(move || {
-                let _guard = broker_ops.lock();
-                let mut tpl = TopicPartitionList::new();
-                for ((topic, partition), offset) in &commit_batch {
-                    tpl.add_partition_offset(topic, *partition, Offset::Offset(*offset))
-                        .map_err(map_consumer_error)?;
-                }
-                consumer
-                    .commit(&tpl, CommitMode::Sync)
-                    .map_err(map_consumer_error)
+            let config = &self.config;
+
+            retry_consumer_operation(cx, config, || {
+                let commit_batch = &commit_batch;
+                let consumer = &consumer;
+                let broker_ops = &broker_ops;
+
+                // Use sync spawn_blocking to perform the commit with retry
+                std::thread::scope(|scope| {
+                    scope
+                        .spawn(|| {
+                            let _guard = broker_ops.lock();
+                            let mut tpl = TopicPartitionList::new();
+                            for ((topic, partition), offset) in commit_batch {
+                                tpl.add_partition_offset(
+                                    topic,
+                                    *partition,
+                                    Offset::Offset(*offset),
+                                )
+                                .map_err(map_consumer_error)?;
+                            }
+                            consumer
+                                .commit(&tpl, CommitMode::Sync)
+                                .map_err(map_consumer_error)
+                        })
+                        .join()
+                        .unwrap()
+                })
             })
             .await?;
         }

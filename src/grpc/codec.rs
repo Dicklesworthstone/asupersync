@@ -517,6 +517,21 @@ impl<C: Codec> FramedCodec<C> {
 
     /// Decode a message with framing.
     pub fn decode_message(&mut self, src: &mut BytesMut) -> Result<Option<C::Decode>, GrpcError> {
+        self.decode_message_with_encoding(src, None)
+    }
+
+    /// Decode a message with framing and validate compression flag consistency.
+    ///
+    /// Per gRPC specification, the compressed flag must be consistent with the
+    /// grpc-encoding header:
+    /// - If grpc_encoding is "identity", compressed flag must be 0
+    /// - If grpc_encoding is "gzip", compressed flag must be 1
+    /// - Mismatches are protocol errors
+    pub fn decode_message_with_encoding(
+        &mut self,
+        src: &mut BytesMut,
+        grpc_encoding: Option<&str>,
+    ) -> Result<Option<C::Decode>, GrpcError> {
         if self.poisoned {
             src.clear();
             return Err(GrpcError::protocol(
@@ -530,6 +545,35 @@ impl<C: Codec> FramedCodec<C> {
             Ok(None) => return Ok(None),
             Err(error) => return self.poison_decode_stream(src, error),
         };
+
+        // SECURITY FIX: Validate compression flag consistency with grpc-encoding header
+        if let Some(encoding) = grpc_encoding {
+            let expected_compressed = match encoding {
+                "identity" => false,
+                "gzip" | "deflate" | "snappy" => true,
+                unknown => {
+                    return self.poison_decode_stream(
+                        src,
+                        GrpcError::protocol(format!(
+                            "unsupported grpc-encoding: '{}'. Supported: identity, gzip",
+                            unknown
+                        )),
+                    );
+                }
+            };
+
+            if message.compressed != expected_compressed {
+                return self.poison_decode_stream(
+                    src,
+                    GrpcError::protocol(format!(
+                        "gRPC protocol violation: compressed-flag={} but grpc-encoding='{}'. \
+                         Per spec: identity requires flag=0, compression algorithms require flag=1",
+                        u8::from(message.compressed),
+                        encoding
+                    )),
+                );
+            }
+        }
 
         // Handle compression
         let data = if message.compressed {

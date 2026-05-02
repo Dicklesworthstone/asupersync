@@ -80,19 +80,14 @@
 use std::path::PathBuf;
 
 fn read_priority_source() -> String {
-    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("src/runtime/scheduler/priority.rs");
+    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/runtime/scheduler/priority.rs");
     std::fs::read_to_string(&path).expect("read priority.rs")
 }
 
 fn timed_entry_cmp_body(source: &str) -> &str {
     let impl_marker = "impl Ord for TimedEntry {";
-    let start = source
-        .find(impl_marker)
-        .expect("impl Ord for TimedEntry");
-    let end_rel = source[start..]
-        .find("\n}\n")
-        .expect("impl close");
+    let start = source.find(impl_marker).expect("impl Ord for TimedEntry");
+    let end_rel = source[start..].find("\n}\n").expect("impl close");
     &source[start..start + end_rel]
 }
 
@@ -106,9 +101,7 @@ fn timed_entry_struct_carries_deadline_and_generation() {
 
     let struct_marker = "struct TimedEntry {";
     let start = source.find(struct_marker).expect("TimedEntry struct");
-    let end_rel = source[start..]
-        .find("\n}\n")
-        .expect("struct close");
+    let end_rel = source[start..].find("\n}\n").expect("struct close");
     let body = &source[start..start + end_rel];
 
     assert!(
@@ -274,9 +267,7 @@ fn timed_entry_partial_ord_delegates_to_ord() {
     let start = source
         .find(impl_marker)
         .expect("impl PartialOrd for TimedEntry");
-    let end_rel = source[start..]
-        .find("\n}\n")
-        .expect("impl close");
+    let end_rel = source[start..].find("\n}\n").expect("impl close");
     let body = &source[start..start + end_rel];
 
     assert!(
@@ -385,8 +376,8 @@ mod behavioral {
         // that flipped the order would break EDF entirely.
         let mut sched = Scheduler::new();
 
-        sched.schedule_timed(task(1), Time::from_secs(20));  // later deadline, inserted first
-        sched.schedule_timed(task(2), Time::from_secs(10));  // earlier deadline, inserted second
+        sched.schedule_timed(task(1), Time::from_secs(20)); // later deadline, inserted first
+        sched.schedule_timed(task(2), Time::from_secs(10)); // earlier deadline, inserted second
 
         let first = sched.pop();
         let second = sched.pop();
@@ -453,16 +444,11 @@ mod behavioral {
 
         // Insert 100 tasks in a non-monotone TaskId order.
         let order: Vec<u64> = vec![
-            42, 7, 99, 1, 50, 33, 88, 12, 64, 25,
-            76, 19, 5, 80, 14, 67, 30, 95, 8, 56,
-            71, 3, 84, 22, 47, 91, 16, 60, 38, 73,
-            27, 6, 53, 11, 78, 4, 36, 89, 21, 65,
-            45, 13, 82, 29, 70, 2, 58, 41, 86, 17,
-            74, 28, 9, 62, 35, 90, 18, 51, 77, 24,
-            10, 83, 39, 66, 20, 54, 92, 15, 48, 87,
-            26, 79, 32, 61, 96, 23, 69, 40, 85, 31,
-            44, 75, 49, 93, 34, 81, 57, 98, 43, 68,
-            55, 37, 100, 46, 72, 94, 52, 63, 59, 97,
+            42, 7, 99, 1, 50, 33, 88, 12, 64, 25, 76, 19, 5, 80, 14, 67, 30, 95, 8, 56, 71, 3, 84,
+            22, 47, 91, 16, 60, 38, 73, 27, 6, 53, 11, 78, 4, 36, 89, 21, 65, 45, 13, 82, 29, 70,
+            2, 58, 41, 86, 17, 74, 28, 9, 62, 35, 90, 18, 51, 77, 24, 10, 83, 39, 66, 20, 54, 92,
+            15, 48, 87, 26, 79, 32, 61, 96, 23, 69, 40, 85, 31, 44, 75, 49, 93, 34, 81, 57, 98, 43,
+            68, 55, 37, 100, 46, 72, 94, 52, 63, 59, 97,
         ];
         for &n in &order {
             sched.schedule_timed(task(n), deadline);
@@ -475,8 +461,7 @@ mod behavioral {
 
         let expected: Vec<TaskId> = order.iter().map(|&n| task(n)).collect();
         assert_eq!(
-            popped,
-            expected,
+            popped, expected,
             "REGRESSION: 100-task FIFO insertion at the same \
              deadline did not produce strict insertion-order \
              pop. The generation tiebreaker is broken.\n\n\

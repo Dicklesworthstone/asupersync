@@ -209,7 +209,8 @@ fn audit_session_resumption_preserves_accumulated_spans() {
         "Should have 5 batches queued during partition"
     );
     assert_eq!(
-        partition_exporter.successful_exports(), 1,
+        partition_exporter.successful_exports(),
+        1,
         "Only normal batch should be exported (before partition)"
     );
 
@@ -247,11 +248,13 @@ fn audit_session_resumption_preserves_accumulated_spans() {
         "Queue should be empty after successful resumption"
     );
     assert_eq!(
-        partition_exporter.successful_exports(), 6,
+        partition_exporter.successful_exports(),
+        6,
         "Should have 1 normal + 5 resumed = 6 total successful exports"
     );
     assert_eq!(
-        final_exported.len(), 6,
+        final_exported.len(),
+        6,
         "Should have exported all 6 batches (1 normal + 5 resumed)"
     );
 
@@ -338,7 +341,8 @@ fn audit_automatic_resumption_via_flush() {
         "flush() should automatically drain queue"
     );
     assert_eq!(
-        partition_exporter.successful_exports(), 3,
+        partition_exporter.successful_exports(),
+        3,
         "flush() should export all queued batches"
     );
 
@@ -368,9 +372,21 @@ fn audit_resumption_data_integrity_and_ordering() {
 
     // Create batches with rich span data
     let expected_data = vec![
-        ("service_auth", "user_login", vec![("user_id", "12345"), ("method", "oauth2")]),
-        ("service_db", "user_query", vec![("table", "users"), ("query_time_ms", "42")]),
-        ("service_cache", "cache_miss", vec![("key", "user:12345"), ("ttl", "300")]),
+        (
+            "service_auth",
+            "user_login",
+            vec![("user_id", "12345"), ("method", "oauth2")],
+        ),
+        (
+            "service_db",
+            "user_query",
+            vec![("table", "users"), ("query_time_ms", "42")],
+        ),
+        (
+            "service_cache",
+            "cache_miss",
+            vec![("key", "user:12345"), ("ttl", "300")],
+        ),
     ];
 
     for (i, (service, operation, attrs)) in expected_data.iter().enumerate() {
@@ -399,9 +415,7 @@ fn audit_resumption_data_integrity_and_ordering() {
 
     // Recover and process
     partition_exporter.simulate_recovery();
-    exporter
-        .process_queue()
-        .expect("Resumption should succeed");
+    exporter.process_queue().expect("Resumption should succeed");
 
     let exported = partition_exporter.exported_batches();
     println!("📊 Data integrity verification:");

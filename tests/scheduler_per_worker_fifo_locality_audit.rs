@@ -99,9 +99,7 @@ fn each_worker_has_its_own_fast_queue_field() {
     let source = read("src/runtime/scheduler/three_lane.rs");
 
     let struct_marker = "pub struct ThreeLaneWorker {";
-    let start = source
-        .find(struct_marker)
-        .expect("ThreeLaneWorker struct");
+    let start = source.find(struct_marker).expect("ThreeLaneWorker struct");
     let end_rel = source[start..]
         .find("\n}\n")
         .expect("ThreeLaneWorker close");
@@ -216,9 +214,7 @@ fn try_phase3_checks_fast_queue_before_global() {
 
     let fn_marker = "fn try_phase3_ready_work(&mut self) -> Option<TaskId> {";
     let start = source.find(fn_marker).expect("try_phase3_ready_work");
-    let body_end = source[start..]
-        .find("\n    }\n")
-        .expect("phase3 close");
+    let body_end = source[start..].find("\n    }\n").expect("phase3 close");
     let body = &source[start..start + body_end];
 
     let fast_pos = body
@@ -253,20 +249,14 @@ fn try_phase3_checks_local_ready_before_anything_else() {
 
     let fn_marker = "fn try_phase3_ready_work(&mut self) -> Option<TaskId> {";
     let start = source.find(fn_marker).expect("try_phase3_ready_work");
-    let body_end = source[start..]
-        .find("\n    }\n")
-        .expect("phase3 close");
+    let body_end = source[start..].find("\n    }\n").expect("phase3 close");
     let body = &source[start..start + body_end];
 
     let local_ready_pos = body
         .find("self.local_ready.lock().pop_front()")
         .expect("local_ready pop_front call");
-    let fast_pos = body
-        .find("self.fast_queue.pop()")
-        .expect("fast_queue pop");
-    let global_pos = body
-        .find("self.global.pop_ready()")
-        .expect("global pop");
+    let fast_pos = body.find("self.fast_queue.pop()").expect("fast_queue pop");
+    let global_pos = body.find("self.global.pop_ready()").expect("global pop");
 
     assert!(
         local_ready_pos < fast_pos && local_ready_pos < global_pos,
@@ -290,9 +280,7 @@ fn fast_queue_fairness_limit_breaks_stolen_starvation() {
 
     let fn_marker = "fn try_phase3_ready_work(&mut self) -> Option<TaskId> {";
     let start = source.find(fn_marker).expect("try_phase3_ready_work");
-    let body_end = source[start..]
-        .find("\n    }\n")
-        .expect("phase3 close");
+    let body_end = source[start..].find("\n    }\n").expect("phase3 close");
     let body = &source[start..start + body_end];
 
     assert!(
@@ -345,7 +333,8 @@ fn local_queue_is_spmc_with_owning_worker_push_only() {
 
     // schedule_local_push is the canonical push method.
     assert!(
-        source.contains("fn schedule_local_push(") || source.contains("fn schedule_local_push_internal("),
+        source.contains("fn schedule_local_push(")
+            || source.contains("fn schedule_local_push_internal("),
         "REGRESSION: LocalQueue no longer has a \
          schedule_local_push method. The push side is the \
          load-bearing SPMC primitive — without it, the \
@@ -389,8 +378,7 @@ fn worker_pool_creates_independent_local_queues_per_worker() {
     // Look for either LocalQueue::new() or LocalQueue::with_capacity
     // calls inside the construction window.
     assert!(
-        window.contains("LocalQueue::new(")
-            || window.contains("LocalQueue::with_capacity("),
+        window.contains("LocalQueue::new(") || window.contains("LocalQueue::with_capacity("),
         "REGRESSION: scheduler construction does not appear to \
          create per-worker LocalQueue instances. If a single \
          LocalQueue is now shared, all workers' spawns serialize \

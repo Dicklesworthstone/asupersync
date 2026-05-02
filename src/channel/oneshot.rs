@@ -2338,4 +2338,169 @@ mod tests {
 
         crate::test_complete!("audit_sender_is_closed_eager_detection");
     }
+
+    /// Audit test for Sender::send() value recovery semantics.
+    ///
+    /// Per asupersync semantics, when send() fails (receiver dropped or cancelled),
+    /// it must return Err(value) to allow value recovery, NOT Err(()) (lossy).
+    /// This test verifies both failure paths preserve the original value.
+    #[test]
+    fn audit_send_value_recovery_semantics() {
+        init_test("audit_send_value_recovery_semantics");
+
+        // Test value recovery on receiver-dropped scenario
+        let cx = test_cx();
+        let (tx1, rx1) = channel::<i32>();
+        let test_value = 42;
+
+        // Drop receiver before send
+        drop(rx1);
+
+        // Send should fail but return the original value for recovery
+        let result1 = tx1.send(&cx, test_value);
+        crate::assert_with_log!(
+            matches!(result1, Err(SendError::Disconnected(42))),
+            "send to dropped receiver must return Err(Disconnected(value)) for value recovery",
+            "Err(Disconnected(42))",
+            format!("{:?}", result1)
+        );
+
+        // Verify value can be recovered from the error
+        if let Err(SendError::Disconnected(recovered_value)) = result1 {
+            crate::assert_with_log!(
+                recovered_value == test_value,
+                "recovered value must match original",
+                test_value,
+                recovered_value
+            );
+        } else {
+            panic!("Expected Disconnected error with value");
+        }
+
+        // Test value recovery on cancelled-cx scenario
+        let cancelled_cx = test_cx();
+        cancelled_cx.cancel_with(crate::types::CancelKind::User, Some("test cancel"));
+        let (tx2, _rx2) = channel::<i32>();
+        let test_value2 = 99;
+
+        // Send with cancelled cx should fail but return the original value
+        let result2 = tx2.send(&cancelled_cx, test_value2);
+        crate::assert_with_log!(
+            matches!(result2, Err(SendError::Cancelled(99))),
+            "send with cancelled cx must return Err(Cancelled(value)) for value recovery",
+            "Err(Cancelled(99))",
+            format!("{:?}", result2)
+        );
+
+        // Verify value can be recovered from cancellation error
+        if let Err(SendError::Cancelled(recovered_value)) = result2 {
+            crate::assert_with_log!(
+                recovered_value == test_value2,
+                "recovered value from cancellation must match original",
+                test_value2,
+                recovered_value
+            );
+        } else {
+            panic!("Expected Cancelled error with value");
+        }
+
+        // Test that SendPermit::send() also preserves value recovery semantics
+        let (tx3, rx3) = channel::<String>();
+        let test_string = "recoverable".to_string();
+        let test_string_clone = test_string.clone();
+
+        // Get permit and drop receiver
+        let permit = tx3.reserve(&cx).expect("cx not cancelled in test");
+        drop(rx3);
+
+        // SendPermit::send should also return the value on failure
+        let result3 = permit.send(test_string);
+        crate::assert_with_log!(
+            result3.is_err(),
+            "permit send to dropped receiver must fail",
+            true,
+            result3.is_err()
+        );
+
+        if let Err(SendError::Disconnected(recovered_string)) = result3 {
+            crate::assert_with_log!(
+                recovered_string == test_string_clone,
+                "permit send must also preserve value recovery semantics",
+                test_string_clone,
+                recovered_string
+            );
+        } else {
+            panic!("Expected Disconnected error with value from permit send");
+        }
+
+        crate::test_complete!("audit_send_value_recovery_semantics");
+    }
+
+    /// Audit test: Receiver::poll() behavior when Sender already sent value.
+    ///
+    /// When the sender has already sent a value, the next poll on the receiver
+    /// must synchronously return Ready(Ok(value)) without any spurious Pending.
+    /// Per spec, this must be immediate ready - no additional wakeup staging.
+    #[test]
+    fn audit_receiver_poll_after_send_immediate_ready() {
+        init_test("audit_receiver_poll_after_send_immediate_ready");
+
+        let (tx, rx) = channel::<u32>();
+        let cx = crate::cx::Cx::root(crate::cx::CxId::new());
+
+        // Phase 1: Send value first (sender completes transmission)
+        tx.send(&cx, 42).expect("send should succeed");
+
+        // Phase 2: Create receive future AFTER value is already sent
+        let mut recv_fut = rx.recv(&cx);
+
+        // Phase 3: Critical test - poll() must return Ready immediately
+        // No spurious Pending allowed since value is already available
+        let mut context = Context::from_waker(&noop_waker());
+        let poll_result = Pin::new(&mut recv_fut).poll(&mut context);
+
+        // AUDIT: Verify immediate ready behavior (no spurious pending)
+        crate::assert_with_log!(
+            matches!(poll_result, Poll::Ready(Ok(42))),
+            "poll() after send must return Ready(Ok(value)) synchronously",
+            "Ready(Ok(42))",
+            format!("{:?}", poll_result)
+        );
+
+        // Phase 4: Verify no additional wakeups needed
+        // The future should be exhausted - further polls return PolledAfterCompletion
+        let second_poll_result = Pin::new(&mut recv_fut).poll(&mut context);
+        crate::assert_with_log!(
+            matches!(
+                second_poll_result,
+                Poll::Ready(Err(RecvError::PolledAfterCompletion))
+            ),
+            "second poll must return PolledAfterCompletion (future exhausted)",
+            "Ready(Err(PolledAfterCompletion))",
+            format!("{:?}", second_poll_result)
+        );
+
+        crate::test_complete!("audit_receiver_poll_after_send_immediate_ready");
+    }
+
+    /// Helper function to create a no-op waker for testing.
+    fn noop_waker() -> Waker {
+        use std::task::{RawWaker, RawWakerVTable};
+
+        fn noop_clone(_: *const ()) -> RawWaker {
+            RawWaker::new(std::ptr::null(), &NOOP_VTABLE)
+        }
+
+        fn noop_wake(_: *const ()) {}
+
+        fn noop_wake_by_ref(_: *const ()) {}
+
+        fn noop_drop(_: *const ()) {}
+
+        const NOOP_VTABLE: RawWakerVTable =
+            RawWakerVTable::new(noop_clone, noop_wake, noop_wake_by_ref, noop_drop);
+
+        let raw_waker = RawWaker::new(std::ptr::null(), &NOOP_VTABLE);
+        unsafe { Waker::from_raw(raw_waker) }
+    }
 }

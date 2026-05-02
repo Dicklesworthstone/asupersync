@@ -122,7 +122,8 @@ fn budget_deadline_field_is_absolute_time_not_relative_duration() {
     let source = read("src/types/budget.rs");
 
     assert!(
-        source.contains("pub deadline: Option<Time>,") || source.contains("deadline: Option<Time>,"),
+        source.contains("pub deadline: Option<Time>,")
+            || source.contains("deadline: Option<Time>,"),
         "REGRESSION: Budget.deadline is no longer Option<Time>. \
          If it became Option<Duration> (relative), the deadline \
          would naturally reset at each re-poll — gaming the \
@@ -303,19 +304,15 @@ fn yield_now_struct_does_not_touch_budget() {
     // scheduler on every yield_now() call.
     let source = read("src/runtime/yield_now.rs");
 
-    let fn_marker = "fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {";
+    let fn_marker =
+        "fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {";
     let start = source.find(fn_marker).expect("YieldNow poll fn");
     let body_end = source[start..]
         .find("\n    }\n")
         .expect("YieldNow poll close");
     let body = &source[start..start + body_end];
 
-    let suspect_budget_patterns = [
-        "budget",
-        "polls_remaining",
-        "cancel",
-        "Cx::current",
-    ];
+    let suspect_budget_patterns = ["budget", "polls_remaining", "cancel", "Cx::current"];
     for pat in &suspect_budget_patterns {
         assert!(
             !body.contains(pat),

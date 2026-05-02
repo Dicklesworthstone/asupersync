@@ -1362,7 +1362,10 @@ impl SqliteConnection {
         }
 
         // Execute WAL checkpoint asynchronously for better error handling
-        match self.execute_batch_unchecked(cx, "PRAGMA wal_checkpoint(FULL)").await {
+        match self
+            .execute_batch_unchecked(cx, "PRAGMA wal_checkpoint(FULL)")
+            .await
+        {
             Outcome::Ok(()) => {}
             Outcome::Err(e) => {
                 tracing::warn!(

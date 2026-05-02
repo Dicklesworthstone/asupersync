@@ -237,6 +237,14 @@ pub struct NatsConfig {
     /// stream type), but until then we MUST refuse to send credentials
     /// in cleartext when TLS is required by either side.
     pub require_tls: bool,
+    /// Enable automatic reconnection on TCP failures.
+    pub auto_reconnect: bool,
+    /// Maximum number of reconnection attempts (0 = infinite).
+    pub max_reconnect_attempts: u32,
+    /// Initial reconnection delay.
+    pub reconnect_delay: Duration,
+    /// Maximum reconnection delay (with exponential backoff).
+    pub max_reconnect_delay: Duration,
 }
 
 /// br-asupersync-5in552: redact credentials in Debug output.
@@ -285,6 +293,10 @@ impl Default for NatsConfig {
             max_payload: 1_048_576, // 1MB
             max_read_buffer: DEFAULT_MAX_READ_BUFFER,
             require_tls: false,
+            auto_reconnect: true,
+            max_reconnect_attempts: 10,
+            reconnect_delay: Duration::from_millis(100),
+            max_reconnect_delay: Duration::from_secs(30),
         }
     }
 }
@@ -1059,6 +1071,111 @@ impl NatsClient {
         Ok(())
     }
 
+    /// Attempt to reconnect when the TCP connection is lost.
+    async fn try_reconnect(&mut self, cx: &Cx) -> Result<(), NatsError> {
+        if !self.config.auto_reconnect {
+            return Err(NatsError::NotConnected);
+        }
+
+        cx.trace("nats: connection lost, attempting to reconnect");
+
+        let mut attempt = 0;
+        let mut delay = self.config.reconnect_delay;
+
+        loop {
+            if self.config.max_reconnect_attempts > 0
+                && attempt >= self.config.max_reconnect_attempts
+            {
+                cx.trace(&format!(
+                    "nats: max reconnect attempts ({}) exceeded",
+                    self.config.max_reconnect_attempts
+                ));
+                return Err(NatsError::NotConnected);
+            }
+
+            if attempt > 0 {
+                cx.trace(&format!(
+                    "nats: reconnect attempt {} after {}ms delay",
+                    attempt + 1,
+                    delay.as_millis()
+                ));
+
+                // Wait before retry
+                crate::time::sleep(delay).await;
+
+                // Exponential backoff with max cap
+                delay = std::cmp::min(delay * 2, self.config.max_reconnect_delay);
+            }
+
+            attempt += 1;
+
+            // Check for cancellation
+            cx.checkpoint().map_err(|_| NatsError::Cancelled)?;
+
+            // Attempt TCP reconnection
+            let addr = format!("{}:{}", self.config.host, self.config.port);
+            match TcpStream::connect(&addr).await {
+                Ok(new_stream) => {
+                    cx.trace(&format!(
+                        "nats: TCP reconnected to {} (attempt {})",
+                        addr, attempt
+                    ));
+
+                    // Replace the stream and reset buffer
+                    self.stream = new_stream;
+                    self.read_buf = NatsReadBuffer::with_limit(self.config.max_read_buffer);
+                    self.connected = false;
+
+                    // Complete NATS handshake
+                    match self.complete_reconnect_handshake(cx).await {
+                        Ok(()) => {
+                            cx.trace("nats: reconnection successful");
+                            return Ok(());
+                        }
+                        Err(e) => {
+                            cx.trace(&format!("nats: handshake failed during reconnect: {}", e));
+                            continue;
+                        }
+                    }
+                }
+                Err(e) => {
+                    cx.trace(&format!("nats: TCP reconnect failed: {}", e));
+                    continue;
+                }
+            }
+        }
+    }
+
+    /// Complete the NATS protocol handshake after TCP reconnection.
+    async fn complete_reconnect_handshake(&mut self, cx: &Cx) -> Result<(), NatsError> {
+        // Read initial INFO from server
+        let info = self.read_info(cx).await?;
+
+        // Check TLS requirements
+        if info.tls_required || self.config.require_tls {
+            return Err(NatsError::TlsRequired {
+                server_required: info.tls_required,
+                client_required: self.config.require_tls,
+            });
+        }
+
+        // Update max_payload if server advertises a smaller limit
+        if info.max_payload > 0 && info.max_payload < self.config.max_payload {
+            self.config.max_payload = info.max_payload;
+        }
+
+        *self.state.server_info.lock() = Some(info);
+
+        // Send CONNECT command
+        self.send_connect(cx).await?;
+        self.connected = true;
+
+        // TODO: Re-establish subscriptions that existed before disconnect
+        // For now, subscriptions will need to be manually re-created by the application
+
+        Ok(())
+    }
+
     /// Wait for +OK response.
     async fn expect_ok(&mut self, cx: &Cx) -> Result<(), NatsError> {
         loop {
@@ -1485,7 +1602,8 @@ impl NatsClient {
         cx.checkpoint().map_err(|_| NatsError::Cancelled)?;
 
         if !self.connected {
-            return Err(NatsError::NotConnected);
+            // Try to reconnect if auto-reconnect is enabled
+            self.try_reconnect(cx).await?;
         }
         validate_nats_publish_subject(subject, "subject")?;
 

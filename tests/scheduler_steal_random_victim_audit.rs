@@ -75,14 +75,13 @@
 use std::path::PathBuf;
 
 fn read_three_lane_source() -> String {
-    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("src/runtime/scheduler/three_lane.rs");
+    let path =
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/runtime/scheduler/three_lane.rs");
     std::fs::read_to_string(&path).expect("read three_lane.rs")
 }
 
 fn read_stealing_source() -> String {
-    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("src/runtime/scheduler/stealing.rs");
+    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/runtime/scheduler/stealing.rs");
     std::fs::read_to_string(&path).expect("read stealing.rs")
 }
 
@@ -214,9 +213,7 @@ fn steal_task_helper_uses_power_of_two_choices() {
 
     let fn_marker = "pub fn steal_task(stealers: &[Stealer], rng: &mut DetRng) -> Option<TaskId> {";
     let start = source.find(fn_marker).expect("steal_task fn");
-    let body_end = source[start..]
-        .find("\n}\n")
-        .expect("steal_task close");
+    let body_end = source[start..].find("\n}\n").expect("steal_task close");
     let body = &source[start..start + body_end];
 
     // Must call rng.next_usize at LEAST twice: idx1 and idx2
@@ -273,10 +270,7 @@ fn steal_task_doc_documents_power_of_two_choices() {
     }
     let doc_window = &source[doc_start..fn_pos];
 
-    let required_phrases = [
-        "Power of Two Choices",
-        "load balancing",
-    ];
+    let required_phrases = ["Power of Two Choices", "load balancing"];
     for phrase in &required_phrases {
         assert!(
             doc_window.contains(phrase),
@@ -334,7 +328,8 @@ fn try_steal_does_not_call_steal_on_self() {
     // The fast_stealers field is constructed in the worker
     // builder. We pin via the field's construction site to
     // verify it's filtered.
-    let fast_stealers_init_marker = "let fast_stealers: SmallVec<[local_queue::Stealer; 16]> = fast_queues";
+    let fast_stealers_init_marker =
+        "let fast_stealers: SmallVec<[local_queue::Stealer; 16]> = fast_queues";
     let pos = source
         .find(fast_stealers_init_marker)
         .expect("fast_stealers initialization");
@@ -352,7 +347,10 @@ fn try_steal_does_not_call_steal_on_self() {
     // The construction must filter / skip / exclude the
     // worker's own index (commonly `enumerate().filter(|(i,
     // _)| *i != worker_id)` or similar).
-    let has_self_filter = window.contains(".filter(") || window.contains("!= worker") || window.contains("!= self.id") || window.contains("ne(");
+    let has_self_filter = window.contains(".filter(")
+        || window.contains("!= worker")
+        || window.contains("!= self.id")
+        || window.contains("ne(");
 
     assert!(
         has_self_filter,

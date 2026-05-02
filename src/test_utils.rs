@@ -155,7 +155,6 @@ pub fn init_runtime_logging_with_level(
     RuntimeSubscriberHandle::new_isolated(runtime_id, level)
 }
 
-
 /// Acquire the global environment lock for tests that mutate env vars.
 #[allow(dead_code)] // Used by other modules' #[cfg(test)] blocks
 pub(crate) fn env_lock() -> parking_lot::MutexGuard<'static, ()> {

@@ -977,6 +977,22 @@ impl<H: Handler> RequestBodyLimitMiddleware<H> {
 
 impl<H: Handler> Handler for RequestBodyLimitMiddleware<H> {
     fn call(&self, req: Request) -> Response {
+        // SECURITY: Check Content-Length header BEFORE reading body to prevent DoS
+        if let Some(cl_value) = super::extract::header_value_ci(&req, "content-length") {
+            if let Ok(declared_length) = super::extract::parse_content_length(cl_value) {
+                if declared_length > self.max_bytes {
+                    return Response::new(
+                        StatusCode::PAYLOAD_TOO_LARGE,
+                        format!(
+                            "Payload Too Large: Content-Length {} bytes exceeds limit {} bytes",
+                            declared_length, self.max_bytes
+                        )
+                        .into_bytes(),
+                    );
+                }
+            }
+        }
+
         if req.body.len() > self.max_bytes {
             return Response::new(
                 StatusCode::PAYLOAD_TOO_LARGE,
@@ -3570,6 +3586,34 @@ mod tests {
         req.body = vec![0u8; 20].into();
         let _ = mw.call(req);
         assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn body_limit_middleware_checks_content_length_early_dos_prevention() {
+        // AUDIT TEST: Verify RequestBodyLimitMiddleware checks Content-Length
+        // BEFORE body processing to prevent DoS attacks via memory exhaustion
+        use crate::bytes::Bytes;
+
+        let mw = RequestBodyLimitMiddleware::new(FnHandler::new(ok_handler), 1024);
+
+        // Test: Large Content-Length with small actual body - should be rejected early
+        let req = Request::new("POST", "/upload")
+            .with_header("content-length", "2097152") // 2MB declared
+            .with_body(Bytes::from_static(b"small")); // But tiny actual body
+
+        let resp = mw.call(req);
+        assert_eq!(resp.status, StatusCode::PAYLOAD_TOO_LARGE);
+
+        let body_str = String::from_utf8_lossy(&resp.body);
+        assert!(
+            body_str.contains("Content-Length"),
+            "Error should mention Content-Length check, got: {}",
+            body_str
+        );
+        assert!(
+            body_str.contains("2097152"),
+            "Error should mention declared Content-Length value"
+        );
     }
 
     // --- RequestIdMiddleware ---

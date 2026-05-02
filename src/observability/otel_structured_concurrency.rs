@@ -31,6 +31,7 @@
 
 use crate::types::{RegionId, TaskId, Time};
 use std::collections::{HashMap, HashSet};
+use std::time::{Duration, SystemTime};
 
 #[cfg(feature = "metrics")]
 use opentelemetry::{
@@ -42,8 +43,19 @@ use opentelemetry::{
 use parking_lot::RwLock;
 #[cfg(feature = "metrics")]
 use std::sync::atomic::{AtomicU64, Ordering};
-#[cfg(feature = "metrics")]
-use std::time::{Duration, SystemTime};
+
+/// Detected span obligation leak for debugging.
+#[derive(Debug, Clone)]
+pub struct SpanLeak {
+    /// The entity ID of the leaked span.
+    pub entity_id: EntityId,
+    /// How long the span has been unended.
+    pub age: Duration,
+    /// The span name for debugging.
+    pub span_name: String,
+    /// When the span was created.
+    pub created_at: SystemTime,
+}
 
 /// Entity identifier for span tracking.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -52,6 +64,13 @@ pub enum EntityId {
     Task(TaskId),
     Operation(u64),
     Cancel(u64),
+}
+
+impl EntityId {
+    /// Creates a region entity ID from a raw number for testing.
+    pub fn region_from_raw(id: u64) -> Self {
+        Self::Region(RegionId::new_for_test(id, 1))
+    }
 }
 
 /// Types of spans created for structured concurrency operations.
@@ -184,6 +203,8 @@ pub struct PendingSpan {
     start_time: Time,
     parent_span_context: Option<opentelemetry::Context>,
     operation_count: u64,
+    /// When this span was created for obligation leak detection.
+    created_at: SystemTime,
 }
 
 #[cfg(feature = "metrics")]
@@ -203,6 +224,7 @@ impl PendingSpan {
             start_time,
             parent_span_context,
             operation_count: 0,
+            created_at: SystemTime::now(),
         }
     }
 
@@ -486,6 +508,49 @@ impl SpanStorage {
         }
     }
 
+    /// Creates a span (wrapper for create_pending_span for compatibility).
+    pub fn create_span(
+        &self,
+        span_type: SpanType,
+        entity_id: EntityId,
+        name: String,
+        start_time: Time,
+        parent_context: Option<opentelemetry::Context>,
+    ) -> bool {
+        self.create_pending_span(span_type, entity_id, name, start_time, parent_context)
+    }
+
+    /// Detects obligation leaks: spans that have been created but not ended beyond a threshold.
+    ///
+    /// This implements the "no obligation leaks" rule from AGENTS.md by detecting spans
+    /// that have been unended for longer than the specified age threshold.
+    pub fn detect_obligation_leaks(&self, age_threshold: Duration) -> Vec<SpanLeak> {
+        let mut leaked_spans = Vec::new();
+        let now = SystemTime::now();
+
+        // Check pending spans for leaks
+        {
+            let pending_spans = self.pending_spans.read();
+            for (entity_id, pending_span) in pending_spans.iter() {
+                if let Ok(age) = now.duration_since(pending_span.created_at) {
+                    if age > age_threshold {
+                        leaked_spans.push(SpanLeak {
+                            entity_id: *entity_id,
+                            age,
+                            span_name: pending_span.name.clone(),
+                            created_at: pending_span.created_at,
+                        });
+                    }
+                }
+            }
+        }
+
+        // Note: active_spans are not leaked - they are materialized but not yet ended,
+        // which is normal. Only pending spans that never materialize or end are leaks.
+
+        leaked_spans
+    }
+
     /// Gets current statistics.
     pub fn stats(&self) -> (u64, u64, u64, u64, u64, u64) {
         (
@@ -521,6 +586,24 @@ impl SpanStorage {
         #[cfg(not(feature = "metrics"))] _parent_context: Option<()>,
     ) -> bool {
         false
+    }
+
+    #[must_use]
+    pub fn create_span(
+        &self,
+        _span_type: SpanType,
+        _entity_id: EntityId,
+        _name: String,
+        _start_time: Time,
+        #[cfg(feature = "metrics")] _parent_context: Option<opentelemetry::Context>,
+        #[cfg(not(feature = "metrics"))] _parent_context: Option<()>,
+    ) -> bool {
+        false
+    }
+
+    #[must_use]
+    pub fn detect_obligation_leaks(&self, _age_threshold: std::time::Duration) -> Vec<SpanLeak> {
+        Vec::new()
     }
 
     pub fn end_span<T>(&self, _entity_id: EntityId, _tracer: &T) {}

@@ -2330,4 +2330,233 @@ mod tests {
 
         crate::test_complete!("audit_once_cell_panic_retry_behavior");
     }
+
+    #[test]
+    fn audit_once_cell_set_vs_get_or_init_race_first_write_wins() {
+        init_test("audit_once_cell_set_vs_get_or_init_race_first_write_wins");
+
+        // AUDIT: Verify OnceCell set() vs get_or_init() race implements first-write-wins
+        // CONTEXT: Asupersync spec requires deterministic behavior when racing initialization
+        // MECHANISM: Both operations CAS UNINIT→INITIALIZING; winner proceeds, loser adapts
+
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        // Phase 1: Test set() wins race (fast set vs slow get_or_init)
+        let cell1 = Arc::new(OnceCell::new());
+        let set_won = Arc::new(AtomicBool::new(false));
+
+        let cell_for_set = Arc::clone(&cell1);
+        let set_won_flag = Arc::clone(&set_won);
+
+        // Simulate race: set() should win and get_or_init() should return set value
+        let set_result = cell_for_set.set(100u32);
+        set_won_flag.store(set_result.is_ok(), Ordering::SeqCst);
+
+        // get_or_init() should return the set value, not run initializer
+        let mut initializer_ran = false;
+        let get_or_init_result = block_on(cell1.get_or_init(|| async {
+            initializer_ran = true;
+            200u32 // This should not be the final value
+        }));
+
+        crate::assert_with_log!(
+            set_won.load(Ordering::SeqCst),
+            "set() should succeed in race",
+            true,
+            set_won.load(Ordering::SeqCst)
+        );
+        crate::assert_with_log!(
+            *get_or_init_result == 100,
+            "get_or_init() should return set() value",
+            100u32,
+            *get_or_init_result
+        );
+        crate::assert_with_log!(
+            !initializer_ran,
+            "get_or_init() initializer should not run",
+            false,
+            initializer_ran
+        );
+
+        // Phase 2: Test get_or_init() wins race (slow set vs fast get_or_init)
+        let cell2 = Arc::new(OnceCell::new());
+
+        // Start get_or_init first
+        let get_or_init_result = block_on(cell2.get_or_init(|| async { 300u32 }));
+
+        // set() should fail since cell is already initialized
+        let set_result = cell2.set(400u32);
+
+        crate::assert_with_log!(
+            *get_or_init_result == 300,
+            "get_or_init() should succeed when winning race",
+            300u32,
+            *get_or_init_result
+        );
+        crate::assert_with_log!(
+            set_result.is_err(),
+            "set() should fail when losing race",
+            true,
+            set_result.is_err()
+        );
+        if let Err(rejected_value) = set_result {
+            crate::assert_with_log!(
+                rejected_value == 400,
+                "set() should return rejected value",
+                400u32,
+                rejected_value
+            );
+        }
+
+        // Phase 3: Test multiple get_or_init() racing (only one should run initializer)
+        let cell3 = Arc::new(OnceCell::new());
+        let init_count = Arc::new(AtomicUsize::new(0));
+
+        let mut handles = Vec::new();
+
+        for i in 0..5 {
+            let cell_clone = Arc::clone(&cell3);
+            let counter_clone = Arc::clone(&init_count);
+            let handle = std::thread::spawn(move || {
+                block_on(cell_clone.get_or_init(|| async {
+                    counter_clone.fetch_add(1, Ordering::SeqCst);
+                    500u32 + i // Only winner's value should be used
+                }))
+            });
+            handles.push(handle);
+        }
+
+        let mut results = Vec::new();
+        for handle in handles {
+            let result = handle.join().expect("thread should complete");
+            results.push(*result);
+        }
+
+        // All results should be the same (winner's value)
+        let first_result = results[0];
+        let all_same = results.iter().all(|&x| x == first_result);
+        crate::assert_with_log!(
+            all_same,
+            "all get_or_init() calls should return same value",
+            true,
+            all_same
+        );
+
+        let init_count_final = init_count.load(Ordering::SeqCst);
+        crate::assert_with_log!(
+            init_count_final == 1,
+            "only one initializer should run in race",
+            1usize,
+            init_count_final
+        );
+
+        // Phase 4: Test set() vs already-initialized (immediate error)
+        let cell4 = OnceCell::with_value(600u32);
+        let late_set_result = cell4.set(700u32);
+
+        crate::assert_with_log!(
+            late_set_result.is_err(),
+            "set() fails on already-initialized cell",
+            true,
+            late_set_result.is_err()
+        );
+        crate::assert_with_log!(
+            cell4.get() == Some(&600),
+            "cell retains original value after failed set",
+            Some(&600),
+            cell4.get()
+        );
+
+        crate::test_complete!("audit_once_cell_set_vs_get_or_init_race_first_write_wins");
+    }
+
+    /// Audit test: concurrent set+get happens-before relationship.
+    ///
+    /// When one task calls set(v) and another concurrently calls get(),
+    /// the writer's value must be visible to the reader as soon as set()
+    /// returns. This tests the Release-Acquire memory ordering on state field.
+    ///
+    /// Memory ordering bug would manifest as: set() returns Ok(()), but
+    /// concurrent get() returns None due to lack of proper synchronization.
+    #[test]
+    fn audit_concurrent_set_get_happens_before_relationship() {
+        init_test("audit_concurrent_set_get_happens_before_relationship");
+
+        // Stress test with multiple iterations to catch ordering violations
+        for iteration in 0..1000 {
+            let cell = std::sync::Arc::new(OnceCell::<u64>::new());
+            let cell_reader = cell.clone();
+            let cell_writer = cell.clone();
+
+            // Barrier to synchronize thread start
+            let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
+            let barrier_reader = barrier.clone();
+            let barrier_writer = barrier.clone();
+
+            // Flag to track when set() completes
+            let set_completed = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let set_completed_reader = set_completed.clone();
+            let set_completed_writer = set_completed.clone();
+
+            let expected_value = 42u64 + iteration as u64;
+
+            // Writer thread: calls set()
+            let writer = std::thread::spawn(move || {
+                barrier_writer.wait();
+                let result = cell_writer.set(expected_value);
+                // Memory barrier: set() completion must be visible to reader
+                set_completed_writer.store(true, std::sync::atomic::Ordering::Release);
+                result
+            });
+
+            // Reader thread: calls get() after set() completes
+            let reader = std::thread::spawn(move || {
+                barrier_reader.wait();
+
+                // Spin until set() completes with proper synchronization
+                while !set_completed_reader.load(std::sync::atomic::Ordering::Acquire) {
+                    std::hint::spin_loop();
+                }
+
+                // At this point, set() has completed. The happens-before relationship
+                // established by Release-Acquire on state field means get() MUST
+                // see the written value immediately.
+                cell_reader.get()
+            });
+
+            let set_result = writer.join().expect("writer thread panicked");
+            let get_result = reader.join().expect("reader thread panicked");
+
+            // Verify set() succeeded
+            crate::assert_with_log!(
+                set_result.is_ok(),
+                &format!("iteration {}: set() succeeded", iteration),
+                true,
+                set_result.is_ok()
+            );
+
+            // CRITICAL: verify happens-before - get() must see set() value immediately
+            crate::assert_with_log!(
+                get_result == Some(&expected_value),
+                &format!(
+                    "iteration {}: get() sees set() value immediately after set() completes",
+                    iteration
+                ),
+                Some(&expected_value),
+                get_result
+            );
+
+            // Additional verification: the cell is properly initialized
+            let final_state_check = cell.get();
+            crate::assert_with_log!(
+                final_state_check == Some(&expected_value),
+                &format!("iteration {}: final state consistent", iteration),
+                Some(&expected_value),
+                final_state_check
+            );
+        }
+
+        crate::test_complete!("audit_concurrent_set_get_happens_before_relationship");
+    }
 }

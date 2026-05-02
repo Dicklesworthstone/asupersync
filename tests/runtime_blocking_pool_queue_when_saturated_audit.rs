@@ -98,8 +98,7 @@
 use std::path::PathBuf;
 
 fn read_blocking_pool_source() -> String {
-    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("src/runtime/blocking_pool.rs");
+    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/runtime/blocking_pool.rs");
     std::fs::read_to_string(&path).expect("read blocking_pool.rs")
 }
 
@@ -158,7 +157,8 @@ fn try_enqueue_task_pushes_unconditionally_unless_shutdown() {
     // false-return is the shutdown branch.
     let source = read_blocking_pool_source();
 
-    let fn_marker = "fn try_enqueue_task(inner: &Arc<BlockingPoolInner>, task: BlockingTask) -> bool {";
+    let fn_marker =
+        "fn try_enqueue_task(inner: &Arc<BlockingPoolInner>, task: BlockingTask) -> bool {";
     let start = source.find(fn_marker).expect("try_enqueue_task fn");
     let body_end = source[start..]
         .find("\n}\n")
@@ -213,10 +213,9 @@ fn spawn_with_priority_returns_cancelled_handle_on_shutdown() {
     // lets callers continue cleanly during teardown.
     let source = read_blocking_pool_source();
 
-    let fn_marker = "pub fn spawn_with_priority<F>(&self, f: F, priority: u8) -> BlockingTaskHandle";
-    let start = source
-        .find(fn_marker)
-        .expect("spawn_with_priority fn");
+    let fn_marker =
+        "pub fn spawn_with_priority<F>(&self, f: F, priority: u8) -> BlockingTaskHandle";
+    let start = source.find(fn_marker).expect("spawn_with_priority fn");
     // spawn_with_priority is short; take a generous window.
     let after = &source[start + fn_marker.len()..];
     let next_fn_offset = after
@@ -256,7 +255,8 @@ fn spawn_path_has_no_panicking_code() {
     // graceful (returns a cancelled handle).
     let source = read_blocking_pool_source();
 
-    let fn_marker = "pub fn spawn_with_priority<F>(&self, f: F, priority: u8) -> BlockingTaskHandle";
+    let fn_marker =
+        "pub fn spawn_with_priority<F>(&self, f: F, priority: u8) -> BlockingTaskHandle";
     let start = source.find(fn_marker).expect("spawn_with_priority");
     let after = &source[start + fn_marker.len()..];
     let next_fn_offset = after
@@ -299,7 +299,8 @@ fn try_enqueue_task_locks_mutex_only_for_shutdown_check() {
     // SegQueue push.
     let source = read_blocking_pool_source();
 
-    let fn_marker = "fn try_enqueue_task(inner: &Arc<BlockingPoolInner>, task: BlockingTask) -> bool {";
+    let fn_marker =
+        "fn try_enqueue_task(inner: &Arc<BlockingPoolInner>, task: BlockingTask) -> bool {";
     let start = source.find(fn_marker).expect("try_enqueue_task fn");
     let body_end = source[start..]
         .find("\n}\n")
@@ -353,7 +354,8 @@ fn maybe_spawn_thread_called_after_enqueue_to_grow_pool() {
     // size at min_threads regardless of load.
     let source = read_blocking_pool_source();
 
-    let fn_marker = "pub fn spawn_with_priority<F>(&self, f: F, priority: u8) -> BlockingTaskHandle";
+    let fn_marker =
+        "pub fn spawn_with_priority<F>(&self, f: F, priority: u8) -> BlockingTaskHandle";
     let start = source.find(fn_marker).expect("spawn_with_priority");
     let after = &source[start + fn_marker.len()..];
     let next_fn_offset = after
@@ -408,9 +410,9 @@ fn blocking_pool_struct_holds_max_threads_bound() {
 #[cfg(feature = "test-internals")]
 mod behavioral {
     use asupersync::runtime::BlockingPool;
-    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
     use std::sync::Barrier;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::time::Duration;
 
     #[test]

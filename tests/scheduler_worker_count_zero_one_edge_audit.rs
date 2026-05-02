@@ -65,8 +65,8 @@
 use std::path::PathBuf;
 
 fn read_three_lane_source() -> String {
-    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("src/runtime/scheduler/three_lane.rs");
+    let path =
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/runtime/scheduler/three_lane.rs");
     std::fs::read_to_string(&path).expect("read three_lane.rs")
 }
 
@@ -178,7 +178,8 @@ fn infallible_constructor_doc_documents_the_clamp_behavior() {
 
     // The doc above `pub fn new(` must mention the clamp
     // behavior and the historical bug.
-    let fn_marker = "pub fn new(worker_count: usize, state: &Arc<ContendedMutex<RuntimeState>>) -> Self {";
+    let fn_marker =
+        "pub fn new(worker_count: usize, state: &Arc<ContendedMutex<RuntimeState>>) -> Self {";
     let fn_pos = source.find(fn_marker).expect("new constructor");
     let mut doc_start = fn_pos;
     for _ in 0..30 {
@@ -240,8 +241,7 @@ fn fallible_constructor_doc_documents_the_error_path() {
          doc window:\n{doc_window}",
     );
     assert!(
-        doc_window.contains("ErrorKind::ConfigError")
-            && doc_window.contains("worker_count == 0"),
+        doc_window.contains("ErrorKind::ConfigError") && doc_window.contains("worker_count == 0"),
         "REGRESSION: try_new doc no longer documents the \
          specific error variant + condition. Operators rely \
          on this documentation to write their match arms.\n\n\

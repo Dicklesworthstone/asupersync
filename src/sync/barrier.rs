@@ -1385,4 +1385,125 @@ mod tests {
 
         crate::test_complete!("audit_barrier_cyclic_reuse_after_completion");
     }
+
+    /// Audit test for Barrier N=0 edge case rejection semantics.
+    ///
+    /// Per asupersync semantics, Barrier::new(0) must reject N=0 because a
+    /// zero-participant barrier is nonsensical - no task can ever call wait()
+    /// to trip it. This test verifies it panics (correct) rather than:
+    /// - Allowing construct + immediate-release (incorrect for empty barrier)
+    /// - Hanging on first wait (worst case behavior)
+    #[test]
+    #[should_panic(expected = "barrier requires at least 1 party")]
+    fn audit_barrier_zero_participants_panics() {
+        init_test("audit_barrier_zero_participants_panics");
+
+        // This must panic immediately during construction, not allow creation
+        // of an empty barrier that would behave incorrectly later
+        let _barrier = Barrier::new(0); // MUST panic here
+
+        // This line should never be reached due to panic above
+        panic!("Barrier::new(0) should have panicked but didn't");
+    }
+
+    /// Audit test documenting the specific panic message for N=0 barriers.
+    ///
+    /// The panic message must be informative for developers to understand
+    /// why zero-participant barriers are rejected at construction time.
+    #[test]
+    fn audit_barrier_zero_participants_panic_message() {
+        init_test("audit_barrier_zero_participants_panic_message");
+
+        let panic_result = std::panic::catch_unwind(|| Barrier::new(0));
+
+        crate::assert_with_log!(
+            panic_result.is_err(),
+            "Barrier::new(0) should panic",
+            true,
+            panic_result.is_err()
+        );
+
+        // Extract and verify panic message contains expected text
+        if let Err(panic_payload) = panic_result {
+            let panic_message = if let Some(s) = panic_payload.downcast_ref::<&str>() {
+                s.to_string()
+            } else if let Some(s) = panic_payload.downcast_ref::<String>() {
+                s.clone()
+            } else {
+                "Unknown panic type".to_string()
+            };
+
+            crate::assert_with_log!(
+                panic_message.contains("barrier requires at least 1 party"),
+                "panic message should be informative",
+                true,
+                panic_message.contains("barrier requires at least 1 party")
+            );
+        }
+
+        crate::test_complete!("audit_barrier_zero_participants_panic_message");
+    }
+
+    /// Audit test for minimal valid barrier (N=1) semantics.
+    ///
+    /// Verifies that the boundary case Barrier::new(1) works correctly:
+    /// - Constructs without panic (valid: single-participant rendezvous)
+    /// - First wait() immediately completes as leader (correct single-party behavior)
+    /// - Subsequent waits also complete immediately (cyclic behavior)
+    #[test]
+    fn audit_barrier_minimal_valid_n_equals_one() {
+        init_test("audit_barrier_minimal_valid_n_equals_one");
+
+        // N=1 should construct successfully (boundary case)
+        let barrier = Barrier::new(1);
+
+        crate::assert_with_log!(
+            barrier.parties() == 1,
+            "N=1 barrier reports correct party count",
+            1,
+            barrier.parties()
+        );
+
+        // First wait should complete immediately as leader
+        let cx = Cx::for_testing();
+        let result1 = block_on(barrier.wait(&cx)).expect("N=1 barrier first wait should succeed");
+
+        crate::assert_with_log!(
+            result1.is_leader(),
+            "single party must be leader",
+            true,
+            result1.is_leader()
+        );
+
+        // Verify barrier state after first completion
+        let (arrived, generation, waiters) = barrier.state_snapshot_for_test();
+        crate::assert_with_log!(
+            (arrived, generation, waiters) == (0, 1, 0),
+            "N=1 barrier reset after completion",
+            (0, 1, 0),
+            (arrived, generation, waiters)
+        );
+
+        // Subsequent wait should also complete immediately (cyclic reuse)
+        let cx2 = Cx::for_testing();
+        let result2 = block_on(barrier.wait(&cx2)).expect("N=1 barrier second wait should succeed");
+
+        crate::assert_with_log!(
+            result2.is_leader(),
+            "single party is leader again in cycle 2",
+            true,
+            result2.is_leader()
+        );
+
+        // Final state check
+        let (arrived, generation, waiters) = barrier.state_snapshot_for_test();
+        crate::assert_with_log!(
+            (arrived, generation, waiters) == (0, 2, 0),
+            "N=1 barrier reset after cycle 2",
+            (0, 2, 0),
+            (arrived, generation, waiters)
+        );
+
+        crate::test_complete!("audit_barrier_minimal_valid_n_equals_one");
+    }
 }
