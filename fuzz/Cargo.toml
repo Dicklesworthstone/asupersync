@@ -3454,6 +3454,13 @@ test = false
 doc = false
 bench = false
 
+[[bin]]
+name = "raptorq_decode_padding"
+path = "fuzz_targets/raptorq_decode_padding.rs"
+test = false
+doc = false
+bench = false
+
 # Tests adjusted_frame_len boundary conditions with saturating arithmetic and i64/usize conversion.
 # Exercises length adjustment overflow/underflow scenarios, frame length validation boundaries,
 # negative frame length handling, arithmetic saturation behavior, and integer conversion edge cases
