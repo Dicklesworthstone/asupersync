@@ -3,9 +3,6 @@
 //! Tests that both implementations exhibit identical send/recv ordering behavior
 //! with cancel injection producing identical observable outcomes.
 
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::task::{Context, Poll, Waker};
 use std::time::{Duration, Instant};
 
 use asupersync::channel::oneshot as AsupersyncOneshot;
@@ -33,8 +30,6 @@ enum RecvOutcome {
     Success(u32),
     /// Received a "closed" error (sender dropped)
     Closed,
-    /// Received a "cancelled" error
-    Cancelled,
     /// Operation timed out or was wedged
     TimedOut,
 }
@@ -89,7 +84,6 @@ impl ConformanceTestContext {
     /// Test asupersync oneshot behavior
     fn test_asupersync_oneshot(&self) -> OneshotResult {
         let start_time = Instant::now();
-        let cancelled = Arc::new(AtomicBool::new(false));
 
         let cx = Cx::new(
             RegionId::from_arena(ArenaIndex::new(0, 0)),
@@ -100,43 +94,24 @@ impl ConformanceTestContext {
         let (sender, mut receiver) = AsupersyncOneshot::channel::<u32>();
 
         // Handle cancellation timing
-        let mut send_success = false;
         let mut recv_result = RecvOutcome::TimedOut;
 
-        match self.config.cancellation_timing {
-            CancellationTiming::BeforeSend => {
-                cancelled.store(true, Ordering::SeqCst);
-                cx.set_cancel_requested(true);
-            }
-            _ => {}
+        if self.config.cancellation_timing == CancellationTiming::BeforeSend {
+            cx.set_cancel_requested(true);
         }
 
-        // Send operation
-        let send_result = if matches!(
-            self.config.cancellation_timing,
-            CancellationTiming::BeforeSend
-        ) {
-            sender.send(&cx, self.config.send_value)
-        } else {
-            sender.send(&cx, self.config.send_value)
-        };
-
-        send_success = send_result.is_ok();
+        let send_success = sender.send(&cx, self.config.send_value).is_ok();
 
         if self.config.operation_delay_us > 0 {
             std::thread::sleep(Duration::from_micros(self.config.operation_delay_us));
         }
 
-        match self.config.cancellation_timing {
-            CancellationTiming::BetweenSendRecv => {
-                cancelled.store(true, Ordering::SeqCst);
-                cx.set_cancel_requested(true);
-            }
-            _ => {}
+        if self.config.cancellation_timing == CancellationTiming::BetweenSendRecv {
+            cx.set_cancel_requested(true);
         }
 
         // Receive operation
-        let recv_cx = if matches!(
+        let _recv_cx = if matches!(
             self.config.cancellation_timing,
             CancellationTiming::DuringRecv
         ) {
@@ -163,7 +138,6 @@ impl ConformanceTestContext {
                 }
                 Err(AsupersyncOneshot::TryRecvError::Empty) => {
                     std::thread::sleep(Duration::from_millis(1));
-                    continue;
                 }
                 Err(AsupersyncOneshot::TryRecvError::Closed) => {
                     recv_result = RecvOutcome::Closed;
@@ -186,48 +160,30 @@ impl ConformanceTestContext {
 
         rt.block_on(async {
             let start_time = Instant::now();
-            let cancelled = Arc::new(AtomicBool::new(false));
 
             let (sender, receiver) = tokio::sync::oneshot::channel::<u32>();
 
             // Handle cancellation timing
-            let mut send_success = false;
-            let mut recv_result = RecvOutcome::TimedOut;
-
             // Create a cancellation token for tokio
             let cancel_token = tokio_util::sync::CancellationToken::new();
 
-            match self.config.cancellation_timing {
-                CancellationTiming::BeforeSend => {
-                    cancelled.store(true, Ordering::SeqCst);
-                    cancel_token.cancel();
-                }
-                _ => {}
+            if self.config.cancellation_timing == CancellationTiming::BeforeSend {
+                cancel_token.cancel();
             }
 
-            // Send operation
-            let send_result = if matches!(
-                self.config.cancellation_timing,
-                CancellationTiming::BeforeSend
-            ) {
-                // For tokio, sending can't be cancelled once started
-                sender.send(self.config.send_value)
+            let send_success = if cancel_token.is_cancelled() {
+                drop(sender);
+                false
             } else {
-                sender.send(self.config.send_value)
+                sender.send(self.config.send_value).is_ok()
             };
-
-            send_success = send_result.is_ok();
 
             if self.config.operation_delay_us > 0 {
                 tokio::time::sleep(Duration::from_micros(self.config.operation_delay_us)).await;
             }
 
-            match self.config.cancellation_timing {
-                CancellationTiming::BetweenSendRecv => {
-                    cancelled.store(true, Ordering::SeqCst);
-                    cancel_token.cancel();
-                }
-                _ => {}
+            if self.config.cancellation_timing == CancellationTiming::BetweenSendRecv {
+                cancel_token.cancel();
             }
 
             // Receive operation
@@ -246,7 +202,7 @@ impl ConformanceTestContext {
             };
 
             // Add timeout
-            recv_result = match tokio::time::timeout(self.timeout, recv_future).await {
+            let recv_result = match tokio::time::timeout(self.timeout, recv_future).await {
                 Ok(result) => result,
                 Err(_) => RecvOutcome::TimedOut,
             };
@@ -289,16 +245,8 @@ fn assert_oneshot_conformance(
         (RecvOutcome::Closed, RecvOutcome::Closed) => {
             // Both closed - good
         }
-        (RecvOutcome::Cancelled, RecvOutcome::Cancelled) => {
-            // Both cancelled - good
-        }
         (RecvOutcome::TimedOut, RecvOutcome::TimedOut) => {
             // Both timed out - acceptable for this test
-        }
-        // Allow some cross-mapping of error conditions since implementations may differ in details
-        (RecvOutcome::Closed, RecvOutcome::Cancelled)
-        | (RecvOutcome::Cancelled, RecvOutcome::Closed) => {
-            // These can be equivalent depending on timing
         }
         _ => {
             // Only fail if the core behavioral difference is significant
@@ -316,8 +264,8 @@ fn assert_oneshot_conformance(
 }
 
 /// Test basic send/receive without cancellation
-#[tokio::test]
-async fn conformance_basic_send_recv() {
+#[test]
+fn conformance_basic_send_recv() {
     let config = ConformanceTestConfig {
         send_value: 42,
         cancellation_timing: CancellationTiming::None,
@@ -338,8 +286,8 @@ async fn conformance_basic_send_recv() {
 }
 
 /// Test cancellation before send
-#[tokio::test]
-async fn conformance_cancel_before_send() {
+#[test]
+fn conformance_cancel_before_send() {
     let config = ConformanceTestConfig {
         send_value: 100,
         cancellation_timing: CancellationTiming::BeforeSend,
@@ -354,8 +302,8 @@ async fn conformance_cancel_before_send() {
 }
 
 /// Test cancellation between send and receive
-#[tokio::test]
-async fn conformance_cancel_between_send_recv() {
+#[test]
+fn conformance_cancel_between_send_recv() {
     let config = ConformanceTestConfig {
         send_value: 200,
         cancellation_timing: CancellationTiming::BetweenSendRecv,
@@ -374,8 +322,8 @@ async fn conformance_cancel_between_send_recv() {
 }
 
 /// Test cancellation during receive
-#[tokio::test]
-async fn conformance_cancel_during_recv() {
+#[test]
+fn conformance_cancel_during_recv() {
     let config = ConformanceTestConfig {
         send_value: 300,
         cancellation_timing: CancellationTiming::DuringRecv,
@@ -390,8 +338,8 @@ async fn conformance_cancel_during_recv() {
 }
 
 /// Test with operation delays
-#[tokio::test]
-async fn conformance_with_delays() {
+#[test]
+fn conformance_with_delays() {
     let config = ConformanceTestConfig {
         send_value: 400,
         cancellation_timing: CancellationTiming::None,
@@ -412,8 +360,8 @@ async fn conformance_with_delays() {
 }
 
 /// Comprehensive conformance test matrix
-#[tokio::test]
-async fn conformance_comprehensive_matrix() {
+#[test]
+fn conformance_comprehensive_matrix() {
     let test_cases = vec![
         // Basic scenarios
         (50, CancellationTiming::None, 0),
@@ -445,31 +393,102 @@ async fn conformance_comprehensive_matrix() {
     }
 }
 
-/// Generate conformance coverage report
-#[tokio::test]
-async fn generate_conformance_report() {
-    println!("\n=== Oneshot Conformance Coverage Report ===\n");
-
-    println!("| Test Case | Send Value | Cancel Timing | Delay | Status |");
-    println!("|-----------|------------|---------------|-------|--------|");
-
+/// Verify that the documented conformance coverage matrix is executable.
+#[test]
+fn oneshot_tokio_conformance_coverage_matrix_is_executable() {
     let test_cases = vec![
-        ("Basic Send/Recv", 42, "None", 0),
-        ("Cancel Before Send", 100, "BeforeSend", 0),
-        ("Cancel Between", 200, "BetweenSendRecv", 100),
-        ("Cancel During Recv", 300, "DuringRecv", 0),
-        ("With Delays", 400, "None", 1000),
+        (
+            "basic_send_recv",
+            42,
+            CancellationTiming::None,
+            0,
+            Some(RecvOutcome::Success(42)),
+        ),
+        (
+            "cancel_before_send",
+            100,
+            CancellationTiming::BeforeSend,
+            0,
+            None,
+        ),
+        (
+            "cancel_between_send_recv",
+            200,
+            CancellationTiming::BetweenSendRecv,
+            100,
+            None,
+        ),
+        (
+            "cancel_during_recv",
+            300,
+            CancellationTiming::DuringRecv,
+            0,
+            None,
+        ),
+        (
+            "with_delays",
+            400,
+            CancellationTiming::None,
+            1000,
+            Some(RecvOutcome::Success(400)),
+        ),
     ];
 
-    for (name, value, timing, delay) in test_cases {
-        println!(
-            "| {} | {} | {} | {}μs | ✅ PASS |",
-            name, value, timing, delay
-        );
+    let mut covered_no_cancel = false;
+    let mut covered_before_send = false;
+    let mut covered_between_send_recv = false;
+    let mut covered_during_recv = false;
+    let mut covered_delayed_operation = false;
+
+    for (name, send_value, cancellation_timing, operation_delay_us, expected_recv) in test_cases {
+        covered_no_cancel |= matches!(cancellation_timing, CancellationTiming::None);
+        covered_before_send |= matches!(cancellation_timing, CancellationTiming::BeforeSend);
+        covered_between_send_recv |=
+            matches!(cancellation_timing, CancellationTiming::BetweenSendRecv);
+        covered_during_recv |= matches!(cancellation_timing, CancellationTiming::DuringRecv);
+        covered_delayed_operation |= operation_delay_us > 0;
+
+        let config = ConformanceTestConfig {
+            send_value,
+            cancellation_timing,
+            operation_delay_us,
+            timeout_ms: 200,
+        };
+
+        let ctx = ConformanceTestContext::new(config);
+        let (asupersync_result, tokio_result) = ctx.run_differential_test();
+
+        assert_oneshot_conformance(&asupersync_result, &tokio_result, name);
+
+        if let Some(expected_recv) = expected_recv {
+            assert!(asupersync_result.send_success, "{name}: asupersync send");
+            assert!(tokio_result.send_success, "{name}: tokio send");
+            assert_eq!(
+                asupersync_result.recv_result, expected_recv,
+                "{name}: unexpected asupersync receive outcome"
+            );
+            assert_eq!(
+                tokio_result.recv_result, expected_recv,
+                "{name}: unexpected tokio receive outcome"
+            );
+        }
     }
 
-    println!("\n✅ All conformance tests passing");
-    println!("📊 Coverage: 5/5 test scenarios (100%)");
-    println!("🎯 Send/recv ordering conformance: VERIFIED");
-    println!("🚫 Cancellation injection behavior: CONSISTENT");
+    assert!(covered_no_cancel, "coverage matrix missing no-cancel case");
+    assert!(
+        covered_before_send,
+        "coverage matrix missing before-send cancellation case"
+    );
+    assert!(
+        covered_between_send_recv,
+        "coverage matrix missing between-send-recv cancellation case"
+    );
+    assert!(
+        covered_during_recv,
+        "coverage matrix missing during-recv cancellation case"
+    );
+    assert!(
+        covered_delayed_operation,
+        "coverage matrix missing delayed operation case"
+    );
 }
