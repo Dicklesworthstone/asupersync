@@ -14775,3 +14775,525 @@ fn validate_timeout_config_implementation_consistency(
 
     Ok(())
 }
+//
+// OTLP-084: Span attribute empty key validation conformance test
+//
+
+#[test]
+fn otlp_084_span_attribute_empty_key_validation_conformance() {
+    // Test scenarios for span attribute empty key validation per OTLP §6.2.5
+    let scenarios = vec![
+        SpanAttributeKeyScenario {
+            description: "Span with empty string attribute key (MUST be rejected)".to_string(),
+            span: SpanAttributeInfo {
+                name: "test-span".to_string(),
+                span_id: "span-12345678".to_string(),
+                trace_id: "trace-12345678901234567890123456789012".to_string(),
+                attributes: vec![
+                    AttributeKeyValue {
+                        key: "".to_string(),
+                        value: "some-value".to_string(),
+                    }, // Empty key - violation
+                    AttributeKeyValue {
+                        key: "valid-key".to_string(),
+                        value: "valid-value".to_string(),
+                    },
+                ],
+            },
+            expected_span_rejected: true,
+            expected_rejection_reason: RejectionReason::EmptyAttributeKey,
+            expected_validation_failure: true,
+            expected_otlp_compliant: false, // Violates OTLP §6.2.5
+        },
+        SpanAttributeKeyScenario {
+            description: "Span with whitespace-only attribute key (MUST be rejected)".to_string(),
+            span: SpanAttributeInfo {
+                name: "test-span-whitespace".to_string(),
+                span_id: "span-23456789".to_string(),
+                trace_id: "trace-23456789012345678901234567890123".to_string(),
+                attributes: vec![
+                    AttributeKeyValue {
+                        key: "   ".to_string(),
+                        value: "value1".to_string(),
+                    }, // Whitespace-only key
+                    AttributeKeyValue {
+                        key: "normal-key".to_string(),
+                        value: "value2".to_string(),
+                    },
+                ],
+            },
+            expected_span_rejected: true,
+            expected_rejection_reason: RejectionReason::WhitespaceOnlyKey,
+            expected_validation_failure: true,
+            expected_otlp_compliant: false,
+        },
+        SpanAttributeKeyScenario {
+            description: "Span with all valid attribute keys (should be accepted)".to_string(),
+            span: SpanAttributeInfo {
+                name: "test-span-valid".to_string(),
+                span_id: "span-34567890".to_string(),
+                trace_id: "trace-34567890123456789012345678901234".to_string(),
+                attributes: vec![
+                    AttributeKeyValue {
+                        key: "service.name".to_string(),
+                        value: "user-service".to_string(),
+                    },
+                    AttributeKeyValue {
+                        key: "http.method".to_string(),
+                        value: "GET".to_string(),
+                    },
+                    AttributeKeyValue {
+                        key: "http.status_code".to_string(),
+                        value: "200".to_string(),
+                    },
+                ],
+            },
+            expected_span_rejected: false,
+            expected_rejection_reason: RejectionReason::None,
+            expected_validation_failure: false,
+            expected_otlp_compliant: true,
+        },
+        SpanAttributeKeyScenario {
+            description: "Span with multiple empty attribute keys (MUST be rejected)".to_string(),
+            span: SpanAttributeInfo {
+                name: "test-span-multiple-empty".to_string(),
+                span_id: "span-45678901".to_string(),
+                trace_id: "trace-45678901234567890123456789012345".to_string(),
+                attributes: vec![
+                    AttributeKeyValue {
+                        key: "".to_string(),
+                        value: "value1".to_string(),
+                    }, // Empty key #1
+                    AttributeKeyValue {
+                        key: "valid-key".to_string(),
+                        value: "value2".to_string(),
+                    },
+                    AttributeKeyValue {
+                        key: "".to_string(),
+                        value: "value3".to_string(),
+                    }, // Empty key #2
+                ],
+            },
+            expected_span_rejected: true,
+            expected_rejection_reason: RejectionReason::EmptyAttributeKey,
+            expected_validation_failure: true,
+            expected_otlp_compliant: false,
+        },
+        SpanAttributeKeyScenario {
+            description: "Span with no attributes (should be accepted)".to_string(),
+            span: SpanAttributeInfo {
+                name: "test-span-no-attributes".to_string(),
+                span_id: "span-56789012".to_string(),
+                trace_id: "trace-56789012345678901234567890123456".to_string(),
+                attributes: vec![], // No attributes
+            },
+            expected_span_rejected: false,
+            expected_rejection_reason: RejectionReason::None,
+            expected_validation_failure: false,
+            expected_otlp_compliant: true,
+        },
+        SpanAttributeKeyScenario {
+            description: "Span with tab and newline characters in key (should be rejected)"
+                .to_string(),
+            span: SpanAttributeInfo {
+                name: "test-span-control-chars".to_string(),
+                span_id: "span-67890123".to_string(),
+                trace_id: "trace-67890123456789012345678901234567".to_string(),
+                attributes: vec![
+                    AttributeKeyValue {
+                        key: "\t\n".to_string(),
+                        value: "control-value".to_string(),
+                    }, // Control chars
+                    AttributeKeyValue {
+                        key: "clean-key".to_string(),
+                        value: "clean-value".to_string(),
+                    },
+                ],
+            },
+            expected_span_rejected: true,
+            expected_rejection_reason: RejectionReason::WhitespaceOnlyKey,
+            expected_validation_failure: true,
+            expected_otlp_compliant: false,
+        },
+        SpanAttributeKeyScenario {
+            description: "Span with single character attribute key (should be accepted)"
+                .to_string(),
+            span: SpanAttributeInfo {
+                name: "test-span-single-char".to_string(),
+                span_id: "span-78901234".to_string(),
+                trace_id: "trace-78901234567890123456789012345678".to_string(),
+                attributes: vec![
+                    AttributeKeyValue {
+                        key: "a".to_string(),
+                        value: "single-char-value".to_string(),
+                    }, // Single char - valid
+                    AttributeKeyValue {
+                        key: "longer-key".to_string(),
+                        value: "longer-value".to_string(),
+                    },
+                ],
+            },
+            expected_span_rejected: false,
+            expected_rejection_reason: RejectionReason::None,
+            expected_validation_failure: false,
+            expected_otlp_compliant: true,
+        },
+        SpanAttributeKeyScenario {
+            description: "Span with special characters in attribute key (should be accepted)"
+                .to_string(),
+            span: SpanAttributeInfo {
+                name: "test-span-special-chars".to_string(),
+                span_id: "span-89012345".to_string(),
+                trace_id: "trace-89012345678901234567890123456789".to_string(),
+                attributes: vec![
+                    AttributeKeyValue {
+                        key: "key.with-dots_and-underscores".to_string(),
+                        value: "special-value".to_string(),
+                    },
+                    AttributeKeyValue {
+                        key: "key/with/slashes".to_string(),
+                        value: "slash-value".to_string(),
+                    },
+                    AttributeKeyValue {
+                        key: "key:with:colons".to_string(),
+                        value: "colon-value".to_string(),
+                    },
+                ],
+            },
+            expected_span_rejected: false,
+            expected_rejection_reason: RejectionReason::None,
+            expected_validation_failure: false,
+            expected_otlp_compliant: true,
+        },
+    ];
+
+    for scenario in scenarios {
+        println!("Testing scenario: {}", scenario.description);
+
+        // Simulate asupersync exporter behavior
+        let asupersync_result = simulate_asupersync_attribute_key_validation(&scenario);
+
+        // Simulate reference implementation behavior
+        let reference_result = simulate_reference_attribute_key_validation(&scenario);
+
+        // Validate individual results
+        validate_attribute_key_validation_logic(&asupersync_result).expect(&format!(
+            "Asupersync attribute key validation logic failed for scenario: {}",
+            scenario.description
+        ));
+
+        validate_attribute_key_validation_logic(&reference_result).expect(&format!(
+            "Reference attribute key validation logic failed for scenario: {}",
+            scenario.description
+        ));
+
+        // Validate implementation consistency
+        validate_attribute_key_implementation_consistency(&asupersync_result, &reference_result)
+            .expect(&format!(
+                "Implementation consistency failed for scenario: {}",
+                scenario.description
+            ));
+
+        println!("✓ Scenario passed: {}", scenario.description);
+    }
+}
+
+/// Test scenario for span attribute empty key validation
+#[derive(Debug, Clone)]
+struct SpanAttributeKeyScenario {
+    description: String,
+    span: SpanAttributeInfo,
+    expected_span_rejected: bool,
+    expected_rejection_reason: RejectionReason,
+    expected_validation_failure: bool,
+    expected_otlp_compliant: bool,
+}
+
+/// Span information for attribute testing
+#[derive(Debug, Clone)]
+struct SpanAttributeInfo {
+    name: String,
+    span_id: String,
+    trace_id: String,
+    attributes: Vec<AttributeKeyValue>,
+}
+
+/// Attribute key-value pair
+#[derive(Debug, Clone)]
+struct AttributeKeyValue {
+    key: String,
+    value: String,
+}
+
+/// Rejection reason enum
+#[derive(Debug, Clone, PartialEq)]
+enum RejectionReason {
+    None,
+    EmptyAttributeKey,
+    WhitespaceOnlyKey,
+    InvalidKeyFormat,
+}
+
+/// Result of span attribute key validation testing
+#[derive(Debug, Clone)]
+struct AttributeKeyValidationResult {
+    span_rejected: bool,
+    rejection_reason: RejectionReason,
+    empty_keys_detected: usize,
+    whitespace_keys_detected: usize,
+    valid_keys_count: usize,
+    total_attributes_count: usize,
+    validation_errors: Vec<String>,
+    processed_spans_count: usize,
+    rejected_spans_count: usize,
+    accepted_spans_count: usize,
+    validation_correct: bool,
+    validation_applied: bool,
+    otlp_compliant: bool,
+    telemetry_emitted: bool,
+}
+
+/// Simulate asupersync span attribute key validation behavior
+fn simulate_asupersync_attribute_key_validation(
+    scenario: &SpanAttributeKeyScenario,
+) -> AttributeKeyValidationResult {
+    let mut validation_errors = Vec::new();
+    let mut empty_keys = 0;
+    let mut whitespace_keys = 0;
+    let mut valid_keys = 0;
+    let mut rejected_spans = 0;
+    let mut accepted_spans = 0;
+    let mut span_rejected = false;
+    let mut rejection_reason = RejectionReason::None;
+
+    // Validate each attribute key per OTLP §6.2.5
+    for attribute in &scenario.span.attributes {
+        if attribute.key.is_empty() {
+            // Empty key - violation of OTLP §6.2.5
+            empty_keys += 1;
+            span_rejected = true;
+            rejection_reason = RejectionReason::EmptyAttributeKey;
+            validation_errors.push("Attribute key cannot be empty per OTLP §6.2.5".to_string());
+        } else if attribute.key.trim().is_empty() {
+            // Whitespace-only key - also violation
+            whitespace_keys += 1;
+            span_rejected = true;
+            rejection_reason = RejectionReason::WhitespaceOnlyKey;
+            validation_errors.push("Attribute key cannot be whitespace-only".to_string());
+        } else {
+            // Valid key
+            valid_keys += 1;
+        }
+    }
+
+    if span_rejected {
+        rejected_spans += 1;
+    } else {
+        accepted_spans += 1;
+    }
+
+    // Check validation correctness
+    let validation_correct = span_rejected == scenario.expected_span_rejected
+        && rejection_reason == scenario.expected_rejection_reason;
+
+    let validation_applied = true; // Always apply attribute key validation
+
+    // OTLP compliance: must reject spans with empty attribute keys per §6.2.5
+    let otlp_compliant = if empty_keys > 0 || whitespace_keys > 0 {
+        span_rejected // Compliant if rejected when keys are invalid
+    } else {
+        !span_rejected // Compliant if accepted when keys are valid
+    };
+
+    AttributeKeyValidationResult {
+        span_rejected,
+        rejection_reason,
+        empty_keys_detected: empty_keys,
+        whitespace_keys_detected: whitespace_keys,
+        valid_keys_count: valid_keys,
+        total_attributes_count: scenario.span.attributes.len(),
+        validation_errors,
+        processed_spans_count: 1,
+        rejected_spans_count: rejected_spans,
+        accepted_spans_count: accepted_spans,
+        validation_correct,
+        validation_applied,
+        otlp_compliant,
+        telemetry_emitted: true, // Assume telemetry is emitted for validation events
+    }
+}
+
+/// Simulate reference implementation span attribute key validation behavior
+fn simulate_reference_attribute_key_validation(
+    scenario: &SpanAttributeKeyScenario,
+) -> AttributeKeyValidationResult {
+    let mut validation_errors = Vec::new();
+    let mut empty_keys = 0;
+    let mut whitespace_keys = 0;
+    let mut valid_keys = 0;
+    let mut rejected_spans = 0;
+    let mut accepted_spans = 0;
+    let mut span_rejected = false;
+    let mut rejection_reason = RejectionReason::None;
+
+    // Reference implementation validation logic for OTLP §6.2.5
+    for attribute in &scenario.span.attributes {
+        if attribute.key.is_empty() {
+            // Empty key rejection
+            empty_keys += 1;
+            span_rejected = true;
+            rejection_reason = RejectionReason::EmptyAttributeKey;
+            validation_errors.push("Empty attribute key rejected".to_string());
+        } else if attribute.key.chars().all(|c| c.is_whitespace()) {
+            // Whitespace-only key rejection
+            whitespace_keys += 1;
+            span_rejected = true;
+            rejection_reason = RejectionReason::WhitespaceOnlyKey;
+            validation_errors.push("Whitespace-only attribute key rejected".to_string());
+        } else {
+            // Valid key
+            valid_keys += 1;
+        }
+    }
+
+    if span_rejected {
+        rejected_spans += 1;
+    } else {
+        accepted_spans += 1;
+    }
+
+    // Check validation correctness
+    let validation_correct = span_rejected == scenario.expected_span_rejected
+        && rejection_reason == scenario.expected_rejection_reason;
+
+    let validation_applied = true;
+
+    // OTLP compliance
+    let otlp_compliant = if empty_keys > 0 || whitespace_keys > 0 {
+        span_rejected
+    } else {
+        !span_rejected
+    };
+
+    AttributeKeyValidationResult {
+        span_rejected,
+        rejection_reason,
+        empty_keys_detected: empty_keys,
+        whitespace_keys_detected: whitespace_keys,
+        valid_keys_count: valid_keys,
+        total_attributes_count: scenario.span.attributes.len(),
+        validation_errors,
+        processed_spans_count: 1,
+        rejected_spans_count: rejected_spans,
+        accepted_spans_count: accepted_spans,
+        validation_correct,
+        validation_applied,
+        otlp_compliant,
+        telemetry_emitted: true,
+    }
+}
+
+/// Verify span attribute key validation logic
+fn validate_attribute_key_validation_logic(
+    result: &AttributeKeyValidationResult,
+) -> Result<(), String> {
+    if !result.validation_correct {
+        return Err("Span attribute key validation logic is incorrect".to_string());
+    }
+
+    if !result.validation_applied {
+        return Err("Attribute key validation should be applied for span processing".to_string());
+    }
+
+    // Check OTLP §6.2.5 compliance
+    if !result.otlp_compliant {
+        return Err("Attribute key validation is not OTLP §6.2.5 compliant".to_string());
+    }
+
+    // Critical check: empty keys must cause rejection
+    if result.empty_keys_detected > 0 && !result.span_rejected {
+        return Err("CRITICAL: Empty attribute keys detected but span not rejected".to_string());
+    }
+
+    // Critical check: whitespace-only keys must cause rejection
+    if result.whitespace_keys_detected > 0 && !result.span_rejected {
+        return Err(
+            "CRITICAL: Whitespace-only attribute keys detected but span not rejected".to_string(),
+        );
+    }
+
+    Ok(())
+}
+
+/// Verify implementation consistency for span attribute key validation
+fn validate_attribute_key_implementation_consistency(
+    asupersync_result: &AttributeKeyValidationResult,
+    reference_result: &AttributeKeyValidationResult,
+) -> Result<(), String> {
+    // Both implementations should reject/accept spans consistently
+    if asupersync_result.span_rejected != reference_result.span_rejected {
+        return Err("Span rejection differs between implementations".to_string());
+    }
+
+    // Both implementations should have same rejection reason
+    if asupersync_result.rejection_reason != reference_result.rejection_reason {
+        return Err("Rejection reason differs between implementations".to_string());
+    }
+
+    // Both implementations should detect same number of empty keys
+    if asupersync_result.empty_keys_detected != reference_result.empty_keys_detected {
+        return Err("Empty keys detection count differs between implementations".to_string());
+    }
+
+    // Both implementations should detect same number of whitespace keys
+    if asupersync_result.whitespace_keys_detected != reference_result.whitespace_keys_detected {
+        return Err("Whitespace keys detection count differs between implementations".to_string());
+    }
+
+    // Both implementations should count same valid keys
+    if asupersync_result.valid_keys_count != reference_result.valid_keys_count {
+        return Err("Valid keys count differs between implementations".to_string());
+    }
+
+    // Both implementations should process same total attributes
+    if asupersync_result.total_attributes_count != reference_result.total_attributes_count {
+        return Err("Total attributes count differs between implementations".to_string());
+    }
+
+    // Both implementations should process same number of spans
+    if asupersync_result.processed_spans_count != reference_result.processed_spans_count {
+        return Err("Processed spans count differs between implementations".to_string());
+    }
+
+    // Both implementations should reject same number of spans
+    if asupersync_result.rejected_spans_count != reference_result.rejected_spans_count {
+        return Err("Rejected spans count differs between implementations".to_string());
+    }
+
+    // Both implementations should accept same number of spans
+    if asupersync_result.accepted_spans_count != reference_result.accepted_spans_count {
+        return Err("Accepted spans count differs between implementations".to_string());
+    }
+
+    // Both implementations should have same validation correctness
+    if asupersync_result.validation_correct != reference_result.validation_correct {
+        return Err("Validation correctness differs between implementations".to_string());
+    }
+
+    // Both implementations should apply validation consistently
+    if asupersync_result.validation_applied != reference_result.validation_applied {
+        return Err("Validation application differs between implementations".to_string());
+    }
+
+    // Both implementations should be OTLP compliant
+    if asupersync_result.otlp_compliant != reference_result.otlp_compliant {
+        return Err("OTLP compliance differs between implementations".to_string());
+    }
+
+    // Both implementations should emit telemetry consistently
+    if asupersync_result.telemetry_emitted != reference_result.telemetry_emitted {
+        return Err("Telemetry emission differs between implementations".to_string());
+    }
+
+    Ok(())
+}

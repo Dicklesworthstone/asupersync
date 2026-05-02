@@ -4799,3 +4799,9 @@ name = "h2_settings_max_frame_size_change"
 path = "fuzz_targets/h2_settings_max_frame_size_change.rs"
 test = false
 doc = false
+
+[[bin]]
+name = "h1_te_chunked_extension_dos"
+path = "fuzz_targets/h1_te_chunked_extension_dos.rs"
+test = false
+doc = false
