@@ -4570,6 +4570,18 @@ test = false
 doc = false
 
 [[bin]]
+name = "h2_pseudo_header_order"
+path = "fuzz_targets/h2_pseudo_header_order.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "h2_pseudo_header_uppercase"
+path = "fuzz_targets/h2_pseudo_header_uppercase.rs"
+test = false
+doc = false
+
+[[bin]]
 name = "h2_headers_frame_size_cap_concurrent"
 path = "fuzz_targets/h2_headers_frame_size_cap_concurrent.rs"
 test = false
