@@ -260,6 +260,43 @@ impl<T> Sender<T> {
     /// New subscribers created after a zero-receiver gap observe the most
     /// recent value.
     ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// use asupersync::Cx;
+    /// use asupersync::channel::watch;
+    ///
+    /// #[derive(Clone, Debug, PartialEq, Eq)]
+    /// struct Config {
+    ///     generation: u64,
+    ///     enabled: bool,
+    /// }
+    ///
+    /// # async fn apply_update(cx: &Cx) -> Result<(), Box<dyn std::error::Error>> {
+    /// let (tx, mut rx) = watch::channel(Config {
+    ///     generation: 0,
+    ///     enabled: false,
+    /// });
+    ///
+    /// tx.send(Config {
+    ///     generation: 1,
+    ///     enabled: true,
+    /// })?;
+    ///
+    /// rx.changed(cx).await?;
+    /// let updated = rx.borrow_and_update_clone();
+    ///
+    /// assert_eq!(
+    ///     updated,
+    ///     Config {
+    ///         generation: 1,
+    ///         enabled: true,
+    ///     }
+    /// );
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
     /// # Errors
     ///
     /// Returns `SendError::Closed(value)` only if the sender has already been
