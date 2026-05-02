@@ -60,7 +60,9 @@
 //!   - dropped the empty-string "" propagation
 //! would all be caught here.
 
-use asupersync::grpc::health::{HealthCheckResponse, HealthService, HealthWatchStream, ServingStatus};
+use asupersync::grpc::health::{
+    HealthCheckResponse, HealthService, HealthWatchStream, ServingStatus,
+};
 use asupersync::grpc::status::{Code, Status};
 use asupersync::grpc::streaming::{Request, Response, Streaming};
 use std::pin::Pin;
@@ -315,7 +317,10 @@ fn watch_empty_string_observes_named_service_changes() {
     // tracks a notion of overall status separate from named
     // services).
     let _ = poll_once(&mut stream_empty, &waker);
-    assert!(matches!(poll_once(&mut stream_empty, &waker), Poll::Pending));
+    assert!(matches!(
+        poll_once(&mut stream_empty, &waker),
+        Poll::Pending
+    ));
 
     // Flip a NAMED service. Empty-string watcher must wake.
     service.set_status("test.svc", ServingStatus::NotServing);
@@ -424,7 +429,9 @@ fn watch_status_returns_unauthenticated_without_auth_metadata() {
     // the watch surface — if the auth check ever drifted, an
     // unauthenticated peer could observe internal health state.
     let service = HealthService::new();
-    let req = Request::new(asupersync::grpc::health::HealthCheckRequest::new("test.svc"));
+    let req = Request::new(asupersync::grpc::health::HealthCheckRequest::new(
+        "test.svc",
+    ));
 
     let mut fut = service.watch_async(&req);
     let waker = std::task::Waker::noop().clone();

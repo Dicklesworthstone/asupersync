@@ -57,9 +57,9 @@
 
 use asupersync::bytes::{BufMut, BytesMut};
 use asupersync::codec::Decoder;
+use asupersync::grpc::GrpcCodec;
 use asupersync::grpc::codec::MESSAGE_HEADER_SIZE;
 use asupersync::grpc::status::Code;
-use asupersync::grpc::GrpcCodec;
 
 /// Build an LPM frame with the given declared length but only
 /// `actual_payload_bytes` bytes appended after the header.
@@ -282,7 +282,9 @@ fn unexpected_eof_error_is_classified_as_transport() {
     // as a peer-misbehavior INTERNAL.
     let mut buf = lpm_partial(10, 1);
     let mut codec = GrpcCodec::new();
-    let err = codec.decode_eof(&mut buf).expect_err("partial frame at EOF errors");
+    let err = codec
+        .decode_eof(&mut buf)
+        .expect_err("partial frame at EOF errors");
 
     // Verify the error is the Transport variant, NOT the protocol
     // variant. We assert via the Code mapping which is the most
@@ -355,6 +357,8 @@ fn massive_declared_length_with_tiny_payload_at_eof_does_not_oom() {
     assert_eq!(buf.len(), MESSAGE_HEADER_SIZE + 4);
 
     // decode_eof errors — does not magically allocate the missing 1 MiB.
-    let err = codec.decode_eof(&mut buf).expect_err("partial frame at EOF");
+    let err = codec
+        .decode_eof(&mut buf)
+        .expect_err("partial frame at EOF");
     assert_eq!(err.into_status().code(), Code::Unavailable);
 }

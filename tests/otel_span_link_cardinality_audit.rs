@@ -208,8 +208,7 @@ fn test_otlp_request_builder_default_init_for_links() {
     // The conformance test pins both paths. Verify the `links:
     // vec![]` line still exists in the our-impl branch.
     assert!(
-        source.contains("links: vec![],")
-            || source.contains("links: vec ! [ ],"),
+        source.contains("links: vec![],") || source.contains("links: vec ! [ ],"),
         "REGRESSION: build_our_otlp_export no longer emits \
          `links: vec![]` explicitly. If a real link-construction \
          path was added, ensure it is bounded by the OTel SDK \

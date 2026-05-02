@@ -12,18 +12,36 @@ fn test_authentication_error_classification() {
 
     // Authentication failures should NOT be retryable
     let auth_error = KafkaError::Authentication("SASL authentication failed".to_string());
-    assert!(!auth_error.is_retryable(), "Authentication errors should not be retryable");
-    assert!(!auth_error.is_transient(), "Authentication errors should not be transient");
+    assert!(
+        !auth_error.is_retryable(),
+        "Authentication errors should not be retryable"
+    );
+    assert!(
+        !auth_error.is_transient(),
+        "Authentication errors should not be transient"
+    );
 
     // Broker errors (non-auth) should be retryable (existing behavior)
     let broker_error = KafkaError::Broker("Temporary broker unavailable".to_string());
-    assert!(broker_error.is_retryable(), "Broker errors should be retryable");
-    assert!(broker_error.is_transient(), "Broker errors should be transient");
+    assert!(
+        broker_error.is_retryable(),
+        "Broker errors should be retryable"
+    );
+    assert!(
+        broker_error.is_transient(),
+        "Broker errors should be transient"
+    );
 
     // Protocol errors should not be retryable (malformed responses)
     let protocol_error = KafkaError::Protocol("Truncated frame".to_string());
-    assert!(!protocol_error.is_retryable(), "Protocol errors should not be retryable");
-    assert!(!protocol_error.is_transient(), "Protocol errors should not be transient");
+    assert!(
+        !protocol_error.is_retryable(),
+        "Protocol errors should not be retryable"
+    );
+    assert!(
+        !protocol_error.is_transient(),
+        "Protocol errors should not be transient"
+    );
 }
 
 #[test]
@@ -42,10 +60,14 @@ fn test_authentication_error_detection_patterns() {
 
     for case in test_cases {
         let error = KafkaError::Authentication(case.to_string());
-        assert!(!error.is_retryable(),
-            "Authentication error '{case}' should not be retryable");
-        assert!(!error.is_transient(),
-            "Authentication error '{case}' should not be transient");
+        assert!(
+            !error.is_retryable(),
+            "Authentication error '{case}' should not be retryable"
+        );
+        assert!(
+            !error.is_transient(),
+            "Authentication error '{case}' should not be transient"
+        );
     }
 }
 
@@ -56,10 +78,16 @@ fn test_error_message_formatting() {
     let auth_error = KafkaError::Authentication("SASL handshake failed: invalid token".to_string());
     let formatted = format!("{}", auth_error);
 
-    assert!(formatted.contains("authentication failed"),
-        "Auth error message should be clear: {}", formatted);
-    assert!(formatted.contains("SASL handshake failed"),
-        "Auth error should preserve original context: {}", formatted);
+    assert!(
+        formatted.contains("authentication failed"),
+        "Auth error message should be clear: {}",
+        formatted
+    );
+    assert!(
+        formatted.contains("SASL handshake failed"),
+        "Auth error should preserve original context: {}",
+        formatted
+    );
 }
 
 #[test]
@@ -88,14 +116,18 @@ fn audit_malformed_response_scenario() {
 
     // Simulate the fix behavior
     let malformed_auth_error = KafkaError::Authentication(
-        "SASL authentication failed: truncated response frame".to_string()
+        "SASL authentication failed: truncated response frame".to_string(),
     );
 
     // Verify the fix prevents retries
-    assert!(!malformed_auth_error.is_retryable(),
-        "Malformed auth responses should not trigger credential retries");
-    assert!(!malformed_auth_error.is_transient(),
-        "Malformed auth responses should not be treated as transient failures");
+    assert!(
+        !malformed_auth_error.is_retryable(),
+        "Malformed auth responses should not trigger credential retries"
+    );
+    assert!(
+        !malformed_auth_error.is_transient(),
+        "Malformed auth responses should not be treated as transient failures"
+    );
 
     println!("AUDIT: Fix verified - authentication errors are non-retryable");
 }
@@ -106,20 +138,29 @@ fn test_transport_vs_auth_error_distinction() {
 
     // Transport/protocol errors (should remain as Protocol errors)
     let transport_error = KafkaError::Protocol("Truncated Kafka frame header".to_string());
-    assert!(!transport_error.is_retryable(), "Protocol errors should not be retryable");
+    assert!(
+        !transport_error.is_retryable(),
+        "Protocol errors should not be retryable"
+    );
 
     // I/O errors (should remain retryable for network issues)
     let io_error = KafkaError::Io(std::io::Error::new(
         std::io::ErrorKind::TimedOut,
-        "Connection timeout"
+        "Connection timeout",
     ));
     assert!(io_error.is_retryable(), "I/O timeouts should be retryable");
     assert!(io_error.is_transient(), "I/O timeouts should be transient");
 
     // Authentication errors (should not be retryable)
     let auth_error = KafkaError::Authentication("Invalid SASL credentials".to_string());
-    assert!(!auth_error.is_retryable(), "Auth failures should not be retryable");
-    assert!(!auth_error.is_transient(), "Auth failures should not be transient");
+    assert!(
+        !auth_error.is_retryable(),
+        "Auth failures should not be retryable"
+    );
+    assert!(
+        !auth_error.is_transient(),
+        "Auth failures should not be transient"
+    );
 
     println!("AUDIT: Error classification correctly distinguishes:");
     println!("  - Transport errors: Protocol (non-retryable)");
@@ -132,14 +173,20 @@ fn test_error_source_preservation() {
     // Test that error source information is preserved for debugging
 
     let auth_error = KafkaError::Authentication(
-        "SASL_SSL authentication failed: malformed server response at offset 42".to_string()
+        "SASL_SSL authentication failed: malformed server response at offset 42".to_string(),
     );
 
     let formatted = format!("{}", auth_error);
-    assert!(formatted.contains("malformed server response"),
-        "Error should preserve diagnostic details: {}", formatted);
-    assert!(formatted.contains("offset 42"),
-        "Error should preserve offset information: {}", formatted);
+    assert!(
+        formatted.contains("malformed server response"),
+        "Error should preserve diagnostic details: {}",
+        formatted
+    );
+    assert!(
+        formatted.contains("offset 42"),
+        "Error should preserve offset information: {}",
+        formatted
+    );
 
     println!("AUDIT: Authentication errors preserve diagnostic context for debugging");
 }
@@ -173,8 +220,11 @@ fn test_rdkafka_error_mapping_simulation() {
 
     for pattern in auth_patterns {
         let error = classify_error_message(pattern);
-        assert!(matches!(error, KafkaError::Authentication(_)),
-            "Pattern '{}' should be classified as Authentication error", pattern);
+        assert!(
+            matches!(error, KafkaError::Authentication(_)),
+            "Pattern '{}' should be classified as Authentication error",
+            pattern
+        );
     }
 
     // Test non-authentication patterns
@@ -187,8 +237,11 @@ fn test_rdkafka_error_mapping_simulation() {
 
     for pattern in non_auth_patterns {
         let error = classify_error_message(pattern);
-        assert!(matches!(error, KafkaError::Broker(_)),
-            "Pattern '{}' should remain as Broker error", pattern);
+        assert!(
+            matches!(error, KafkaError::Broker(_)),
+            "Pattern '{}' should remain as Broker error",
+            pattern
+        );
     }
 
     println!("AUDIT: Error mapping correctly classifies auth vs non-auth errors");

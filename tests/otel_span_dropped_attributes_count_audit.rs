@@ -96,8 +96,7 @@ fn test_set_attribute_value_bumps_dropped_count_on_cap() {
     let body = &source[start..start + body_end];
 
     assert!(
-        body.contains("self.dropped_attributes_count")
-            && body.contains("saturating_add(1)"),
+        body.contains("self.dropped_attributes_count") && body.contains("saturating_add(1)"),
         "REGRESSION: set_attribute_value no longer increments \
          dropped_attributes_count via saturating_add(1) in the \
          drop branch. The OTLP spec requires the SDK to count \
@@ -181,9 +180,7 @@ fn test_from_parts_initializes_dropped_count_to_zero() {
 
 #[cfg(feature = "tracing-integration")]
 mod behavioral {
-    use asupersync::observability::otel::span_semantics::{
-        SpanConformanceConfig, TestSpan,
-    };
+    use asupersync::observability::otel::span_semantics::{SpanConformanceConfig, TestSpan};
     use opentelemetry::trace::SpanKind;
 
     fn small_cap_config(max: usize) -> SpanConformanceConfig {

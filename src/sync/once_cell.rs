@@ -2103,19 +2103,33 @@ mod tests {
             .collect();
 
         // Verify all tasks got the same value (cell was properly initialized)
-        assert!(results.iter().all(|&v| v == 42), "all tasks should see same value: {:?}", results);
+        assert!(
+            results.iter().all(|&v| v == 42),
+            "all tasks should see same value: {:?}",
+            results
+        );
 
         // Verify the cell is properly initialized
-        assert!(cell.is_initialized(), "cell should be initialized after panic recovery");
-        assert_eq!(*cell.get().unwrap(), 42, "cell should contain correct value");
+        assert!(
+            cell.is_initialized(),
+            "cell should be initialized after panic recovery"
+        );
+        assert_eq!(
+            *cell.get().unwrap(),
+            42,
+            "cell should contain correct value"
+        );
 
         // Verify state is INITIALIZED, not poisoned
-        assert_eq!(cell.state.load(Ordering::Acquire), INITIALIZED, "cell should be in INITIALIZED state");
+        assert_eq!(
+            cell.state.load(Ordering::Acquire),
+            INITIALIZED,
+            "cell should be in INITIALIZED state"
+        );
 
         // Verify subsequent access works normally
-        let final_value = cell.get_or_init_blocking(|| {
-            panic!("should not be called on already-initialized cell")
-        });
+        let final_value = cell
+            .get_or_init_blocking(|| panic!("should not be called on already-initialized cell"));
         assert_eq!(*final_value, 42, "subsequent access should work normally");
 
         crate::test_complete!("audit_concurrent_get_or_init_panic_recovery");

@@ -356,7 +356,9 @@ fn no_silent_delta_temporality_path_on_counter() {
 
     // Find the metrics_request_from_snapshot function.
     let fn_marker = "pub fn metrics_request_from_snapshot(";
-    let start = source.find(fn_marker).expect("metrics_request_from_snapshot");
+    let start = source
+        .find(fn_marker)
+        .expect("metrics_request_from_snapshot");
     // The function ends at `\n    }\n` after balanced braces.
     // Use a simple heuristic: take a generous window.
     let window_end = (start + 4000).min(source.len());

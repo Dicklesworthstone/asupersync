@@ -191,9 +191,7 @@ fn resolve_trace_id_is_a_shared_free_function() {
     // the x-request-id header (DoS guard, br-gwezkv).
     let fn_marker = "\nfn resolve_trace_id(req: &Request) -> Option<String> {";
     let start = source.find(fn_marker).expect("free fn");
-    let body_end = source[start..]
-        .find("\n}\n")
-        .expect("free fn close");
+    let body_end = source[start..].find("\n}\n").expect("free fn close");
     let fn_body = &source[start..start + body_end];
 
     assert!(
