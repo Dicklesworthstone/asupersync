@@ -197,6 +197,24 @@ impl RoutePattern {
 
     /// Try to match a path against this pattern, extracting parameters.
     fn matches(&self, path: &str) -> Option<RouteMatch> {
+        // br-asupersync-router-empty-seg: reject paths containing
+        // empty segments ("//"). Per RFC 3986, an empty segment is
+        // semantically distinct from no segment, and silently
+        // collapsing it would let "/users//foo" match a "/users/:id"
+        // route as :id="foo" (or :id="" under a different
+        // implementation, which is even worse). Both options leak
+        // path-confusion attacks: an attacker could craft a URL
+        // that bypasses path-prefix-based access controls (e.g.,
+        // "/api//admin" might evade a filter that expects
+        // "/api/admin" while still routing to the admin handler).
+        // strip_prefix() in this same module already rejects empty
+        // segments at mount boundaries (see
+        // strip_prefix_rejects_empty_segment_at_mount_boundary
+        // test); the matcher must agree to keep the routing
+        // surface consistent.
+        if path.contains("//") {
+            return None;
+        }
         let path_segments: SmallVec<[&str; 8]> =
             path.split('/').filter(|s| !s.is_empty()).collect();
 
