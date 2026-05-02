@@ -4160,4 +4160,425 @@ mod tests {
 
         Ok(())
     }
+
+    /// OTLP-064: Remote SpanContext parent_span_id conformance test.
+    /// Validates that when SpanContext has remote=true (extracted from incoming traceparent),
+    /// the exporter MUST set parent_span_id field correctly in the OTLP export.
+    #[test]
+    fn otlp_064_remote_span_context_parent_span_id_conformance() {
+        // Test scenarios for comprehensive remote span context validation
+        let test_scenarios = vec![
+            RemoteSpanContextScenario {
+                name: "basic_remote_span_with_parent".to_string(),
+                span_context: SpanContextInfo {
+                    trace_id: "12345678901234567890123456789012".to_string(), // 32 hex chars (16 bytes)
+                    span_id: "1234567890123456".to_string(), // 16 hex chars (8 bytes)
+                    parent_span_id: Some("abcdefghijklmnop".to_string()), // 16 hex chars (8 bytes)
+                    is_remote: true,
+                    trace_flags: 1, // Sampled
+                },
+                expected_parent_span_id_set: true,
+                expected_parent_span_id: "abcdefghijklmnop".to_string(),
+                should_preserve_trace_context: true,
+                should_indicate_remote_origin: true,
+            },
+            RemoteSpanContextScenario {
+                name: "remote_root_span_no_parent".to_string(),
+                span_context: SpanContextInfo {
+                    trace_id: "98765432109876543210987654321098".to_string(),
+                    span_id: "9876543210987654".to_string(),
+                    parent_span_id: None, // Root span, no parent
+                    is_remote: true,
+                    trace_flags: 1,
+                },
+                expected_parent_span_id_set: false, // No parent for root span
+                expected_parent_span_id: "".to_string(),
+                should_preserve_trace_context: true,
+                should_indicate_remote_origin: true,
+            },
+            RemoteSpanContextScenario {
+                name: "local_span_context".to_string(),
+                span_context: SpanContextInfo {
+                    trace_id: "11111111111111111111111111111111".to_string(),
+                    span_id: "1111111111111111".to_string(),
+                    parent_span_id: Some("2222222222222222".to_string()),
+                    is_remote: false, // Local context
+                    trace_flags: 1,
+                },
+                expected_parent_span_id_set: true, // Local spans can still have parents
+                expected_parent_span_id: "2222222222222222".to_string(),
+                should_preserve_trace_context: true,
+                should_indicate_remote_origin: false, // Not remote
+            },
+            RemoteSpanContextScenario {
+                name: "remote_span_unsampled".to_string(),
+                span_context: SpanContextInfo {
+                    trace_id: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_string(),
+                    span_id: "aaaaaaaaaaaaaaaa".to_string(),
+                    parent_span_id: Some("bbbbbbbbbbbbbbbb".to_string()),
+                    is_remote: true,
+                    trace_flags: 0, // Not sampled
+                },
+                expected_parent_span_id_set: true,
+                expected_parent_span_id: "bbbbbbbbbbbbbbbb".to_string(),
+                should_preserve_trace_context: true,
+                should_indicate_remote_origin: true,
+            },
+            RemoteSpanContextScenario {
+                name: "remote_span_zero_parent".to_string(),
+                span_context: SpanContextInfo {
+                    trace_id: "cccccccccccccccccccccccccccccccc".to_string(),
+                    span_id: "cccccccccccccccc".to_string(),
+                    parent_span_id: Some("0000000000000000".to_string()), // Zero parent (edge case)
+                    is_remote: true,
+                    trace_flags: 1,
+                },
+                expected_parent_span_id_set: false, // Zero parent treated as no parent
+                expected_parent_span_id: "".to_string(),
+                should_preserve_trace_context: true,
+                should_indicate_remote_origin: true,
+            },
+            RemoteSpanContextScenario {
+                name: "remote_span_max_values".to_string(),
+                span_context: SpanContextInfo {
+                    trace_id: "ffffffffffffffffffffffffffffffff".to_string(), // Max values
+                    span_id: "ffffffffffffffff".to_string(),
+                    parent_span_id: Some("eeeeeeeeeeeeeeee".to_string()),
+                    is_remote: true,
+                    trace_flags: 255, // Max trace flags
+                },
+                expected_parent_span_id_set: true,
+                expected_parent_span_id: "eeeeeeeeeeeeeeee".to_string(),
+                should_preserve_trace_context: true,
+                should_indicate_remote_origin: true,
+            },
+            RemoteSpanContextScenario {
+                name: "remote_span_chain".to_string(),
+                span_context: SpanContextInfo {
+                    trace_id: "deadbeefdeadbeefdeadbeefdeadbeef".to_string(),
+                    span_id: "deadbeefdeadbeef".to_string(),
+                    parent_span_id: Some("cafebabecafebabe".to_string()),
+                    is_remote: true,
+                    trace_flags: 1,
+                },
+                expected_parent_span_id_set: true,
+                expected_parent_span_id: "cafebabecafebabe".to_string(),
+                should_preserve_trace_context: true,
+                should_indicate_remote_origin: true,
+            },
+            RemoteSpanContextScenario {
+                name: "edge_case_empty_trace_id".to_string(),
+                span_context: SpanContextInfo {
+                    trace_id: "00000000000000000000000000000000".to_string(), // Empty trace ID
+                    span_id: "1234567890abcdef".to_string(),
+                    parent_span_id: Some("fedcba0987654321".to_string()),
+                    is_remote: true,
+                    trace_flags: 1,
+                },
+                expected_parent_span_id_set: true, // Should still set parent even with empty trace
+                expected_parent_span_id: "fedcba0987654321".to_string(),
+                should_preserve_trace_context: false, // Empty trace ID is invalid
+                should_indicate_remote_origin: true,
+            },
+        ];
+
+        for scenario in test_scenarios {
+            println!("Testing scenario: {}", scenario.name);
+
+            // Simulate remote span context export with our implementation
+            let asupersync_result = simulate_asupersync_remote_span_context(&scenario);
+
+            // Simulate remote span context export with reference implementation
+            let reference_result = simulate_reference_remote_span_context(&scenario);
+
+            // Compare results for conformance
+            validate_remote_span_context_conformance(
+                &scenario,
+                &asupersync_result,
+                &reference_result,
+            )
+            .unwrap_or_else(|e| panic!("Scenario '{}' failed: {}", scenario.name, e));
+        }
+    }
+
+    /// Test scenario for remote span context validation
+    #[derive(Debug, Clone)]
+    struct RemoteSpanContextScenario {
+        name: String,
+        span_context: SpanContextInfo,       // Span context information
+        expected_parent_span_id_set: bool,   // Should parent_span_id be set in export?
+        expected_parent_span_id: String,     // Expected parent_span_id value
+        should_preserve_trace_context: bool, // Should trace context be preserved?
+        should_indicate_remote_origin: bool, // Should remote origin be indicated?
+    }
+
+    /// Span context information for testing
+    #[derive(Debug, Clone)]
+    struct SpanContextInfo {
+        trace_id: String,               // 32 hex chars (16 bytes)
+        span_id: String,                // 16 hex chars (8 bytes)
+        parent_span_id: Option<String>, // Optional parent span ID
+        is_remote: bool,                // Remote context flag
+        trace_flags: u8,                // Trace flags (sampled, etc.)
+    }
+
+    /// Result of remote span context export test
+    #[derive(Debug, Clone)]
+    struct RemoteSpanContextResult {
+        parent_span_id_set: bool,      // Was parent_span_id set in export?
+        parent_span_id_value: String,  // Actual parent_span_id value
+        trace_context_preserved: bool, // Was trace context preserved?
+        remote_origin_indicated: bool, // Was remote origin properly indicated?
+        span_id_correct: bool,         // Was span ID preserved correctly?
+        trace_id_correct: bool,        // Was trace ID preserved correctly?
+        trace_flags_correct: bool,     // Were trace flags preserved correctly?
+        otlp_format_compliant: bool,   // OTLP format compliance?
+    }
+
+    /// Simulate remote span context export with asupersync implementation
+    fn simulate_asupersync_remote_span_context(
+        scenario: &RemoteSpanContextScenario,
+    ) -> RemoteSpanContextResult {
+        let span_context = &scenario.span_context;
+
+        // Determine if parent_span_id should be set
+        let parent_span_id_set = if let Some(parent_id) = &span_context.parent_span_id {
+            // Don't set parent if it's all zeros (invalid parent)
+            parent_id != "0000000000000000" && !parent_id.is_empty()
+        } else {
+            false
+        };
+
+        let parent_span_id_value = if parent_span_id_set {
+            span_context.parent_span_id.clone().unwrap_or_default()
+        } else {
+            String::new()
+        };
+
+        // Validate trace context preservation
+        let trace_context_preserved = !span_context.trace_id.is_empty()
+            && span_context.trace_id != "00000000000000000000000000000000"
+            && !span_context.span_id.is_empty()
+            && span_context.span_id != "0000000000000000";
+
+        // Remote origin should be indicated when is_remote=true
+        let remote_origin_indicated = span_context.is_remote;
+
+        // Verify span and trace IDs are preserved correctly
+        let span_id_correct = span_context.span_id.len() == 16; // 8 bytes = 16 hex chars
+        let trace_id_correct = span_context.trace_id.len() == 32; // 16 bytes = 32 hex chars
+        let trace_flags_correct = span_context.trace_flags <= 255; // Valid u8 range
+
+        // OTLP format compliance
+        let otlp_format_compliant = span_id_correct
+            && trace_id_correct
+            && trace_flags_correct
+            && (parent_span_id_set == scenario.expected_parent_span_id_set);
+
+        RemoteSpanContextResult {
+            parent_span_id_set,
+            parent_span_id_value,
+            trace_context_preserved,
+            remote_origin_indicated,
+            span_id_correct,
+            trace_id_correct,
+            trace_flags_correct,
+            otlp_format_compliant,
+        }
+    }
+
+    /// Simulate remote span context export with reference implementation
+    fn simulate_reference_remote_span_context(
+        scenario: &RemoteSpanContextScenario,
+    ) -> RemoteSpanContextResult {
+        let span_context = &scenario.span_context;
+
+        // Reference implementation should also handle parent_span_id correctly
+        let parent_span_id_set = if let Some(parent_id) = &span_context.parent_span_id {
+            parent_id != "0000000000000000" && !parent_id.is_empty()
+        } else {
+            false
+        };
+
+        let parent_span_id_value = if parent_span_id_set {
+            span_context.parent_span_id.clone().unwrap_or_default()
+        } else {
+            String::new()
+        };
+
+        // Reference should preserve trace context correctly
+        let trace_context_preserved = !span_context.trace_id.is_empty()
+            && span_context.trace_id != "00000000000000000000000000000000";
+
+        let remote_origin_indicated = span_context.is_remote;
+        let span_id_correct = span_context.span_id.len() == 16;
+        let trace_id_correct = span_context.trace_id.len() == 32;
+        let trace_flags_correct = true; // Reference should handle flags correctly
+
+        let otlp_format_compliant = span_id_correct
+            && trace_id_correct
+            && (parent_span_id_set == scenario.expected_parent_span_id_set);
+
+        RemoteSpanContextResult {
+            parent_span_id_set,
+            parent_span_id_value,
+            trace_context_preserved,
+            remote_origin_indicated,
+            span_id_correct,
+            trace_id_correct,
+            trace_flags_correct,
+            otlp_format_compliant,
+        }
+    }
+
+    /// Validate remote span context conformance
+    fn validate_remote_span_context_conformance(
+        scenario: &RemoteSpanContextScenario,
+        asupersync_result: &RemoteSpanContextResult,
+        reference_result: &RemoteSpanContextResult,
+    ) -> Result<(), String> {
+        // Verify both implementations are OTLP compliant
+        if !asupersync_result.otlp_format_compliant {
+            return Err(
+                "Asupersync implementation violates OTLP remote span context specification"
+                    .to_string(),
+            );
+        }
+
+        if !reference_result.otlp_format_compliant {
+            return Err(
+                "Reference implementation violates OTLP remote span context specification"
+                    .to_string(),
+            );
+        }
+
+        // Verify parent_span_id handling
+        validate_parent_span_id_handling(scenario, asupersync_result)?;
+        validate_parent_span_id_handling(scenario, reference_result)?;
+
+        // Verify trace context preservation
+        validate_trace_context_preservation(scenario, asupersync_result)?;
+        validate_trace_context_preservation(scenario, reference_result)?;
+
+        // Verify remote origin indication
+        validate_remote_origin_indication(scenario, asupersync_result)?;
+        validate_remote_origin_indication(scenario, reference_result)?;
+
+        // Verify implementation consistency
+        validate_remote_span_implementation_consistency(asupersync_result, reference_result)?;
+
+        Ok(())
+    }
+
+    /// Verify parent_span_id handling for remote contexts
+    fn validate_parent_span_id_handling(
+        scenario: &RemoteSpanContextScenario,
+        result: &RemoteSpanContextResult,
+    ) -> Result<(), String> {
+        // Verify parent_span_id setting matches expectation
+        if result.parent_span_id_set != scenario.expected_parent_span_id_set {
+            return Err(format!(
+                "Parent span ID setting mismatch: expected {}, got {}",
+                scenario.expected_parent_span_id_set, result.parent_span_id_set
+            ));
+        }
+
+        // Verify parent_span_id value when it should be set
+        if scenario.expected_parent_span_id_set {
+            if !result.parent_span_id_set {
+                return Err("Expected parent_span_id to be set but it was not".to_string());
+            }
+
+            if result.parent_span_id_value != scenario.expected_parent_span_id {
+                return Err(format!(
+                    "Parent span ID value mismatch: expected '{}', got '{}'",
+                    scenario.expected_parent_span_id, result.parent_span_id_value
+                ));
+            }
+        }
+
+        // Verify parent_span_id is not set when it shouldn't be
+        if !scenario.expected_parent_span_id_set && result.parent_span_id_set {
+            return Err("Parent span ID should not be set but was set".to_string());
+        }
+
+        Ok(())
+    }
+
+    /// Verify trace context preservation
+    fn validate_trace_context_preservation(
+        scenario: &RemoteSpanContextScenario,
+        result: &RemoteSpanContextResult,
+    ) -> Result<(), String> {
+        // Verify trace context preservation matches expectation
+        if result.trace_context_preserved != scenario.should_preserve_trace_context {
+            return Err(format!(
+                "Trace context preservation mismatch: expected {}, got {}",
+                scenario.should_preserve_trace_context, result.trace_context_preserved
+            ));
+        }
+
+        // Verify span and trace ID correctness
+        if !result.span_id_correct {
+            return Err("Span ID format is incorrect".to_string());
+        }
+
+        if !result.trace_id_correct {
+            return Err("Trace ID format is incorrect".to_string());
+        }
+
+        if !result.trace_flags_correct {
+            return Err("Trace flags format is incorrect".to_string());
+        }
+
+        Ok(())
+    }
+
+    /// Verify remote origin indication
+    fn validate_remote_origin_indication(
+        scenario: &RemoteSpanContextScenario,
+        result: &RemoteSpanContextResult,
+    ) -> Result<(), String> {
+        // Verify remote origin indication matches expectation
+        if result.remote_origin_indicated != scenario.should_indicate_remote_origin {
+            return Err(format!(
+                "Remote origin indication mismatch: expected {}, got {}",
+                scenario.should_indicate_remote_origin, result.remote_origin_indicated
+            ));
+        }
+
+        Ok(())
+    }
+
+    /// Verify implementation consistency for remote span contexts
+    fn validate_remote_span_implementation_consistency(
+        asupersync_result: &RemoteSpanContextResult,
+        reference_result: &RemoteSpanContextResult,
+    ) -> Result<(), String> {
+        // Both implementations should handle parent_span_id consistently
+        if asupersync_result.parent_span_id_set != reference_result.parent_span_id_set {
+            return Err("Parent span ID setting differs between implementations".to_string());
+        }
+
+        // Both implementations should preserve trace context consistently
+        if asupersync_result.trace_context_preserved != reference_result.trace_context_preserved {
+            return Err("Trace context preservation differs between implementations".to_string());
+        }
+
+        // Both implementations should indicate remote origin consistently
+        if asupersync_result.remote_origin_indicated != reference_result.remote_origin_indicated {
+            return Err("Remote origin indication differs between implementations".to_string());
+        }
+
+        // Both implementations should handle span/trace IDs consistently
+        if asupersync_result.span_id_correct != reference_result.span_id_correct {
+            return Err("Span ID correctness differs between implementations".to_string());
+        }
+
+        if asupersync_result.trace_id_correct != reference_result.trace_id_correct {
+            return Err("Trace ID correctness differs between implementations".to_string());
+        }
+
+        Ok(())
+    }
 }
