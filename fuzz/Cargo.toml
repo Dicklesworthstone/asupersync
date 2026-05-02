@@ -4466,6 +4466,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "h2_settings_max_concurrent_streams_increase"
+path = "fuzz_targets/h2_settings_max_concurrent_streams_increase.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "h2_settings_header_table_size_update"
 path = "fuzz_targets/h2_settings_header_table_size_update.rs"
 test = false
