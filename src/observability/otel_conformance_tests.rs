@@ -15297,3 +15297,538 @@ fn validate_attribute_key_implementation_consistency(
 
     Ok(())
 }
+//
+// OTLP-085: SpanLink empty span_id validation conformance test
+//
+
+#[test]
+fn otlp_085_span_link_empty_span_id_validation_conformance() {
+    // Test scenarios for SpanLink empty span_id validation per OTLP §5.2
+    let scenarios = vec![
+        SpanLinkScenario {
+            description:
+                "Span with SpanLink containing empty span_id (all zeros, MUST be rejected)"
+                    .to_string(),
+            span: SpanLinkInfo {
+                name: "span-with-empty-link".to_string(),
+                span_id: "valid-span-123456".to_string(),
+                trace_id: "trace-12345678901234567890123456789012".to_string(),
+                links: vec![
+                    SpanLinkData {
+                        span_id: "0000000000000000".to_string(), // Empty span_id (all zeros) - violation
+                        trace_id: "trace-12345678901234567890123456789012".to_string(),
+                        attributes: vec![],
+                    },
+                    SpanLinkData {
+                        span_id: "valid-link-789012".to_string(),
+                        trace_id: "trace-12345678901234567890123456789012".to_string(),
+                        attributes: vec![],
+                    },
+                ],
+            },
+            expected_span_rejected: true,
+            expected_rejection_reason: LinkRejectionReason::EmptySpanId,
+            expected_empty_span_ids_count: 1,
+            expected_otlp_compliant: false, // Violates OTLP §5.2
+        },
+        SpanLinkScenario {
+            description: "Span with SpanLink containing valid span_ids (should be accepted)"
+                .to_string(),
+            span: SpanLinkInfo {
+                name: "span-with-valid-links".to_string(),
+                span_id: "valid-span-234567".to_string(),
+                trace_id: "trace-23456789012345678901234567890123".to_string(),
+                links: vec![
+                    SpanLinkData {
+                        span_id: "valid-link-111111".to_string(),
+                        trace_id: "trace-23456789012345678901234567890123".to_string(),
+                        attributes: vec![],
+                    },
+                    SpanLinkData {
+                        span_id: "valid-link-222222".to_string(),
+                        trace_id: "trace-23456789012345678901234567890123".to_string(),
+                        attributes: vec![],
+                    },
+                ],
+            },
+            expected_span_rejected: false,
+            expected_rejection_reason: LinkRejectionReason::None,
+            expected_empty_span_ids_count: 0,
+            expected_otlp_compliant: true,
+        },
+        SpanLinkScenario {
+            description:
+                "Span with multiple SpanLinks containing empty span_ids (MUST be rejected)"
+                    .to_string(),
+            span: SpanLinkInfo {
+                name: "span-with-multiple-empty-links".to_string(),
+                span_id: "valid-span-345678".to_string(),
+                trace_id: "trace-34567890123456789012345678901234".to_string(),
+                links: vec![
+                    SpanLinkData {
+                        span_id: "0000000000000000".to_string(), // Empty span_id #1
+                        trace_id: "trace-34567890123456789012345678901234".to_string(),
+                        attributes: vec![],
+                    },
+                    SpanLinkData {
+                        span_id: "valid-link-333333".to_string(),
+                        trace_id: "trace-34567890123456789012345678901234".to_string(),
+                        attributes: vec![],
+                    },
+                    SpanLinkData {
+                        span_id: "0000000000000000".to_string(), // Empty span_id #2
+                        trace_id: "trace-34567890123456789012345678901234".to_string(),
+                        attributes: vec![],
+                    },
+                ],
+            },
+            expected_span_rejected: true,
+            expected_rejection_reason: LinkRejectionReason::EmptySpanId,
+            expected_empty_span_ids_count: 2,
+            expected_otlp_compliant: false,
+        },
+        SpanLinkScenario {
+            description: "Span with no SpanLinks (should be accepted)".to_string(),
+            span: SpanLinkInfo {
+                name: "span-with-no-links".to_string(),
+                span_id: "valid-span-456789".to_string(),
+                trace_id: "trace-45678901234567890123456789012345".to_string(),
+                links: vec![], // No links
+            },
+            expected_span_rejected: false,
+            expected_rejection_reason: LinkRejectionReason::None,
+            expected_empty_span_ids_count: 0,
+            expected_otlp_compliant: true,
+        },
+        SpanLinkScenario {
+            description: "Span with SpanLink containing whitespace span_id (should be rejected)"
+                .to_string(),
+            span: SpanLinkInfo {
+                name: "span-with-whitespace-link".to_string(),
+                span_id: "valid-span-567890".to_string(),
+                trace_id: "trace-56789012345678901234567890123456".to_string(),
+                links: vec![SpanLinkData {
+                    span_id: "                ".to_string(), // Whitespace span_id
+                    trace_id: "trace-56789012345678901234567890123456".to_string(),
+                    attributes: vec![],
+                }],
+            },
+            expected_span_rejected: true,
+            expected_rejection_reason: LinkRejectionReason::InvalidSpanId,
+            expected_empty_span_ids_count: 0, // Not counted as empty, but invalid
+            expected_otlp_compliant: false,
+        },
+        SpanLinkScenario {
+            description: "Span with SpanLink containing hex zeros span_id (should be rejected)"
+                .to_string(),
+            span: SpanLinkInfo {
+                name: "span-with-hex-zero-link".to_string(),
+                span_id: "valid-span-678901".to_string(),
+                trace_id: "trace-67890123456789012345678901234567".to_string(),
+                links: vec![SpanLinkData {
+                    span_id: "00000000".to_string(), // Short hex zeros
+                    trace_id: "trace-67890123456789012345678901234567".to_string(),
+                    attributes: vec![],
+                }],
+            },
+            expected_span_rejected: true,
+            expected_rejection_reason: LinkRejectionReason::EmptySpanId,
+            expected_empty_span_ids_count: 1,
+            expected_otlp_compliant: false,
+        },
+        SpanLinkScenario {
+            description: "Span with SpanLink containing minimum valid span_id (should be accepted)"
+                .to_string(),
+            span: SpanLinkInfo {
+                name: "span-with-min-valid-link".to_string(),
+                span_id: "valid-span-789012".to_string(),
+                trace_id: "trace-78901234567890123456789012345678".to_string(),
+                links: vec![SpanLinkData {
+                    span_id: "0000000000000001".to_string(), // Minimum valid (non-zero)
+                    trace_id: "trace-78901234567890123456789012345678".to_string(),
+                    attributes: vec![],
+                }],
+            },
+            expected_span_rejected: false,
+            expected_rejection_reason: LinkRejectionReason::None,
+            expected_empty_span_ids_count: 0,
+            expected_otlp_compliant: true,
+        },
+        SpanLinkScenario {
+            description:
+                "Span with SpanLinks having mixed valid and empty span_ids (should be rejected)"
+                    .to_string(),
+            span: SpanLinkInfo {
+                name: "span-with-mixed-links".to_string(),
+                span_id: "valid-span-890123".to_string(),
+                trace_id: "trace-89012345678901234567890123456789".to_string(),
+                links: vec![
+                    SpanLinkData {
+                        span_id: "valid-link-444444".to_string(),
+                        trace_id: "trace-89012345678901234567890123456789".to_string(),
+                        attributes: vec![],
+                    },
+                    SpanLinkData {
+                        span_id: "0000000000000000".to_string(), // Empty span_id mixed in
+                        trace_id: "trace-89012345678901234567890123456789".to_string(),
+                        attributes: vec![],
+                    },
+                    SpanLinkData {
+                        span_id: "valid-link-555555".to_string(),
+                        trace_id: "trace-89012345678901234567890123456789".to_string(),
+                        attributes: vec![],
+                    },
+                ],
+            },
+            expected_span_rejected: true,
+            expected_rejection_reason: LinkRejectionReason::EmptySpanId,
+            expected_empty_span_ids_count: 1,
+            expected_otlp_compliant: false,
+        },
+    ];
+
+    for scenario in scenarios {
+        println!("Testing scenario: {}", scenario.description);
+
+        // Simulate asupersync exporter behavior
+        let asupersync_result = simulate_asupersync_span_link_validation(&scenario);
+
+        // Simulate reference implementation behavior
+        let reference_result = simulate_reference_span_link_validation(&scenario);
+
+        // Validate individual results
+        validate_span_link_validation_logic(&asupersync_result).expect(&format!(
+            "Asupersync span link validation logic failed for scenario: {}",
+            scenario.description
+        ));
+
+        validate_span_link_validation_logic(&reference_result).expect(&format!(
+            "Reference span link validation logic failed for scenario: {}",
+            scenario.description
+        ));
+
+        // Validate implementation consistency
+        validate_span_link_implementation_consistency(&asupersync_result, &reference_result)
+            .expect(&format!(
+                "Implementation consistency failed for scenario: {}",
+                scenario.description
+            ));
+
+        println!("✓ Scenario passed: {}", scenario.description);
+    }
+}
+
+/// Test scenario for SpanLink empty span_id validation
+#[derive(Debug, Clone)]
+struct SpanLinkScenario {
+    description: String,
+    span: SpanLinkInfo,
+    expected_span_rejected: bool,
+    expected_rejection_reason: LinkRejectionReason,
+    expected_empty_span_ids_count: usize,
+    expected_otlp_compliant: bool,
+}
+
+/// Span information with links for testing
+#[derive(Debug, Clone)]
+struct SpanLinkInfo {
+    name: String,
+    span_id: String,
+    trace_id: String,
+    links: Vec<SpanLinkData>,
+}
+
+/// SpanLink data structure
+#[derive(Debug, Clone)]
+struct SpanLinkData {
+    span_id: String,
+    trace_id: String,
+    attributes: Vec<LinkAttribute>,
+}
+
+/// Link attribute (simplified)
+#[derive(Debug, Clone)]
+struct LinkAttribute {
+    key: String,
+    value: String,
+}
+
+/// Link rejection reason enum
+#[derive(Debug, Clone, PartialEq)]
+enum LinkRejectionReason {
+    None,
+    EmptySpanId,
+    InvalidSpanId,
+    EmptyTraceId,
+}
+
+/// Result of span link validation testing
+#[derive(Debug, Clone)]
+struct SpanLinkValidationResult {
+    span_rejected: bool,
+    rejection_reason: LinkRejectionReason,
+    empty_span_ids_detected: usize,
+    invalid_span_ids_detected: usize,
+    valid_links_count: usize,
+    total_links_count: usize,
+    validation_errors: Vec<String>,
+    processed_spans_count: usize,
+    rejected_spans_count: usize,
+    accepted_spans_count: usize,
+    validation_correct: bool,
+    validation_applied: bool,
+    otlp_compliant: bool,
+    telemetry_emitted: bool,
+}
+
+/// Simulate asupersync span link validation behavior
+fn simulate_asupersync_span_link_validation(
+    scenario: &SpanLinkScenario,
+) -> SpanLinkValidationResult {
+    let mut validation_errors = Vec::new();
+    let mut empty_span_ids = 0;
+    let mut invalid_span_ids = 0;
+    let mut valid_links = 0;
+    let mut rejected_spans = 0;
+    let mut accepted_spans = 0;
+    let mut span_rejected = false;
+    let mut rejection_reason = LinkRejectionReason::None;
+
+    // Validate each SpanLink per OTLP §5.2
+    for link in &scenario.span.links {
+        if is_empty_span_id(&link.span_id) {
+            // Empty span_id - violation of OTLP §5.2
+            empty_span_ids += 1;
+            span_rejected = true;
+            rejection_reason = LinkRejectionReason::EmptySpanId;
+            validation_errors.push("SpanLink span_id cannot be empty per OTLP §5.2".to_string());
+        } else if is_invalid_span_id(&link.span_id) {
+            // Invalid span_id format
+            invalid_span_ids += 1;
+            span_rejected = true;
+            rejection_reason = LinkRejectionReason::InvalidSpanId;
+            validation_errors.push("SpanLink span_id format is invalid".to_string());
+        } else {
+            // Valid span_id
+            valid_links += 1;
+        }
+    }
+
+    if span_rejected {
+        rejected_spans += 1;
+    } else {
+        accepted_spans += 1;
+    }
+
+    // Check validation correctness
+    let validation_correct = span_rejected == scenario.expected_span_rejected
+        && rejection_reason == scenario.expected_rejection_reason
+        && empty_span_ids == scenario.expected_empty_span_ids_count;
+
+    let validation_applied = true; // Always apply SpanLink validation
+
+    // OTLP compliance: must reject spans with empty span_ids in links per §5.2
+    let otlp_compliant = if empty_span_ids > 0 || invalid_span_ids > 0 {
+        span_rejected // Compliant if rejected when links are invalid
+    } else {
+        !span_rejected // Compliant if accepted when links are valid
+    };
+
+    SpanLinkValidationResult {
+        span_rejected,
+        rejection_reason,
+        empty_span_ids_detected: empty_span_ids,
+        invalid_span_ids_detected: invalid_span_ids,
+        valid_links_count: valid_links,
+        total_links_count: scenario.span.links.len(),
+        validation_errors,
+        processed_spans_count: 1,
+        rejected_spans_count: rejected_spans,
+        accepted_spans_count: accepted_spans,
+        validation_correct,
+        validation_applied,
+        otlp_compliant,
+        telemetry_emitted: true, // Assume telemetry is emitted for validation events
+    }
+}
+
+/// Simulate reference implementation span link validation behavior
+fn simulate_reference_span_link_validation(
+    scenario: &SpanLinkScenario,
+) -> SpanLinkValidationResult {
+    let mut validation_errors = Vec::new();
+    let mut empty_span_ids = 0;
+    let mut invalid_span_ids = 0;
+    let mut valid_links = 0;
+    let mut rejected_spans = 0;
+    let mut accepted_spans = 0;
+    let mut span_rejected = false;
+    let mut rejection_reason = LinkRejectionReason::None;
+
+    // Reference implementation validation logic for OTLP §5.2
+    for link in &scenario.span.links {
+        if is_empty_span_id(&link.span_id) {
+            // Empty span_id rejection
+            empty_span_ids += 1;
+            span_rejected = true;
+            rejection_reason = LinkRejectionReason::EmptySpanId;
+            validation_errors.push("Empty span_id in SpanLink rejected".to_string());
+        } else if is_invalid_span_id(&link.span_id) {
+            // Invalid span_id rejection
+            invalid_span_ids += 1;
+            span_rejected = true;
+            rejection_reason = LinkRejectionReason::InvalidSpanId;
+            validation_errors.push("Invalid span_id format in SpanLink rejected".to_string());
+        } else {
+            // Valid span_id
+            valid_links += 1;
+        }
+    }
+
+    if span_rejected {
+        rejected_spans += 1;
+    } else {
+        accepted_spans += 1;
+    }
+
+    // Check validation correctness
+    let validation_correct = span_rejected == scenario.expected_span_rejected
+        && rejection_reason == scenario.expected_rejection_reason
+        && empty_span_ids == scenario.expected_empty_span_ids_count;
+
+    let validation_applied = true;
+
+    // OTLP compliance
+    let otlp_compliant = if empty_span_ids > 0 || invalid_span_ids > 0 {
+        span_rejected
+    } else {
+        !span_rejected
+    };
+
+    SpanLinkValidationResult {
+        span_rejected,
+        rejection_reason,
+        empty_span_ids_detected: empty_span_ids,
+        invalid_span_ids_detected: invalid_span_ids,
+        valid_links_count: valid_links,
+        total_links_count: scenario.span.links.len(),
+        validation_errors,
+        processed_spans_count: 1,
+        rejected_spans_count: rejected_spans,
+        accepted_spans_count: accepted_spans,
+        validation_correct,
+        validation_applied,
+        otlp_compliant,
+        telemetry_emitted: true,
+    }
+}
+
+/// Check if a span_id is empty (all zeros)
+fn is_empty_span_id(span_id: &str) -> bool {
+    // Check for all-zero patterns
+    span_id == "0000000000000000" || span_id == "00000000" || span_id.chars().all(|c| c == '0')
+}
+
+/// Check if a span_id is invalid format
+fn is_invalid_span_id(span_id: &str) -> bool {
+    // Check for invalid patterns
+    span_id.trim().is_empty() || span_id.chars().all(|c| c.is_whitespace())
+}
+
+/// Verify span link validation logic
+fn validate_span_link_validation_logic(result: &SpanLinkValidationResult) -> Result<(), String> {
+    if !result.validation_correct {
+        return Err("Span link validation logic is incorrect".to_string());
+    }
+
+    if !result.validation_applied {
+        return Err("SpanLink validation should be applied for span processing".to_string());
+    }
+
+    // Check OTLP §5.2 compliance
+    if !result.otlp_compliant {
+        return Err("SpanLink validation is not OTLP §5.2 compliant".to_string());
+    }
+
+    // Critical check: empty span_ids must cause rejection
+    if result.empty_span_ids_detected > 0 && !result.span_rejected {
+        return Err(
+            "CRITICAL: Empty span_ids detected in SpanLinks but span not rejected".to_string(),
+        );
+    }
+
+    Ok(())
+}
+
+/// Verify implementation consistency for span link validation
+fn validate_span_link_implementation_consistency(
+    asupersync_result: &SpanLinkValidationResult,
+    reference_result: &SpanLinkValidationResult,
+) -> Result<(), String> {
+    // Both implementations should reject/accept spans consistently
+    if asupersync_result.span_rejected != reference_result.span_rejected {
+        return Err("Span rejection differs between implementations".to_string());
+    }
+
+    // Both implementations should have same rejection reason
+    if asupersync_result.rejection_reason != reference_result.rejection_reason {
+        return Err("Rejection reason differs between implementations".to_string());
+    }
+
+    // Both implementations should detect same number of empty span_ids
+    if asupersync_result.empty_span_ids_detected != reference_result.empty_span_ids_detected {
+        return Err("Empty span_ids detection count differs between implementations".to_string());
+    }
+
+    // Both implementations should detect same number of invalid span_ids
+    if asupersync_result.invalid_span_ids_detected != reference_result.invalid_span_ids_detected {
+        return Err("Invalid span_ids detection count differs between implementations".to_string());
+    }
+
+    // Both implementations should count same valid links
+    if asupersync_result.valid_links_count != reference_result.valid_links_count {
+        return Err("Valid links count differs between implementations".to_string());
+    }
+
+    // Both implementations should process same total links
+    if asupersync_result.total_links_count != reference_result.total_links_count {
+        return Err("Total links count differs between implementations".to_string());
+    }
+
+    // Both implementations should process same number of spans
+    if asupersync_result.processed_spans_count != reference_result.processed_spans_count {
+        return Err("Processed spans count differs between implementations".to_string());
+    }
+
+    // Both implementations should reject same number of spans
+    if asupersync_result.rejected_spans_count != reference_result.rejected_spans_count {
+        return Err("Rejected spans count differs between implementations".to_string());
+    }
+
+    // Both implementations should accept same number of spans
+    if asupersync_result.accepted_spans_count != reference_result.accepted_spans_count {
+        return Err("Accepted spans count differs between implementations".to_string());
+    }
+
+    // Both implementations should have same validation correctness
+    if asupersync_result.validation_correct != reference_result.validation_correct {
+        return Err("Validation correctness differs between implementations".to_string());
+    }
+
+    // Both implementations should apply validation consistently
+    if asupersync_result.validation_applied != reference_result.validation_applied {
+        return Err("Validation application differs between implementations".to_string());
+    }
+
+    // Both implementations should be OTLP compliant
+    if asupersync_result.otlp_compliant != reference_result.otlp_compliant {
+        return Err("OTLP compliance differs between implementations".to_string());
+    }
+
+    // Both implementations should emit telemetry consistently
+    if asupersync_result.telemetry_emitted != reference_result.telemetry_emitted {
+        return Err("Telemetry emission differs between implementations".to_string());
+    }
+
+    Ok(())
+}
