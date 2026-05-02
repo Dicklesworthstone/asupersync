@@ -44,7 +44,8 @@ use crate::types::Time;
 use std::borrow::Cow;
 use std::fmt;
 use std::fmt::Write as _;
-use std::sync::atomic::{AtomicU8, Ordering};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU8, AtomicUsize, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 /// br-asupersync-w7n2qx: client-side cap on stream and consumer name
@@ -808,6 +809,8 @@ pub struct JsMessage {
     reply_subject: String,
     /// Terminal ack state for ack/nack/term transitions.
     ack_state: AtomicU8,
+    /// Shared pending ack counter for flow control.
+    pending_acks: Option<Arc<AtomicUsize>>,
 }
 
 impl fmt::Debug for JsMessage {
@@ -838,6 +841,10 @@ impl Drop for JsMessage {
                 sequence = self.sequence,
                 "JetStream message dropped without ack/nack - will be redelivered"
             );
+            // Decrement pending ack count for flow control
+            if let Some(ref pending) = self.pending_acks {
+                pending.fetch_sub(1, Ordering::Relaxed);
+            }
         }
     }
 }
@@ -1014,6 +1021,8 @@ impl JetStreamContext {
             stream: stream.to_string(),
             name,
             prefix: self.prefix.clone(),
+            pending_acks: Arc::new(AtomicUsize::new(0)),
+            max_ack_pending: config.max_ack_pending.max(1) as usize,
         })
     }
 
@@ -1034,10 +1043,17 @@ impl JetStreamContext {
             return Err(Self::parse_api_error(&response_str));
         }
 
+        // Extract max_ack_pending from consumer info response, fallback to default
+        let max_ack_pending = extract_json_i64_simple(&response_str, "max_ack_pending")
+            .unwrap_or(1000)
+            .max(1) as usize;
+
         Ok(Consumer {
             stream: stream.to_string(),
             name: consumer.to_string(),
             prefix: self.prefix.clone(),
+            pending_acks: Arc::new(AtomicUsize::new(0)),
+            max_ack_pending,
         })
     }
 
@@ -1137,6 +1153,10 @@ pub struct Consumer {
     stream: String,
     name: String,
     prefix: String,
+    /// Client-side pending ack counter for flow control (shared with messages).
+    pending_acks: Arc<AtomicUsize>,
+    /// Maximum pending acks allowed (from ConsumerConfig).
+    max_ack_pending: usize,
 }
 
 impl fmt::Debug for Consumer {
@@ -1145,6 +1165,8 @@ impl fmt::Debug for Consumer {
             .field("stream", &self.stream)
             .field("name", &self.name)
             .field("prefix", &self.prefix)
+            .field("pending_acks", &self.pending_acks.load(Ordering::Relaxed))
+            .field("max_ack_pending", &self.max_ack_pending)
             .finish()
     }
 }
@@ -1165,6 +1187,84 @@ impl Consumer {
     #[must_use]
     pub fn stream(&self) -> &str {
         &self.stream
+    }
+
+    /// Get current pending acks count.
+    #[must_use]
+    pub fn pending_acks(&self) -> usize {
+        self.pending_acks.load(Ordering::Relaxed)
+    }
+
+    /// Check if we can accept more messages based on max_ack_pending limit.
+    #[must_use]
+    pub fn can_accept_message(&self) -> bool {
+        self.pending_acks.load(Ordering::Relaxed) < self.max_ack_pending
+    }
+
+    /// Increment pending ack count (called when receiving a message).
+    fn increment_pending(&self) -> bool {
+        let current = self.pending_acks.fetch_add(1, Ordering::Relaxed);
+        if current >= self.max_ack_pending {
+            // Rollback the increment if we exceeded the limit
+            self.pending_acks.fetch_sub(1, Ordering::Relaxed);
+            false
+        } else {
+            true
+        }
+    }
+
+    /// Decrement pending ack count (called when ack/nack).
+    fn decrement_pending(&self) {
+        self.pending_acks.fetch_sub(1, Ordering::Relaxed);
+    }
+
+    /// Acknowledge a message and update pending ack count.
+    ///
+    /// This is the flow-control-aware version of `JsMessage::ack()`.
+    pub async fn ack_message(
+        &self,
+        client: &mut NatsClient,
+        cx: &Cx,
+        msg: &JsMessage,
+    ) -> Result<(), JsError> {
+        let result = msg.ack(client, cx).await;
+        if result.is_ok() {
+            self.decrement_pending();
+        }
+        result
+    }
+
+    /// Negative acknowledge a message and update pending ack count.
+    ///
+    /// This is the flow-control-aware version of `JsMessage::nack()`.
+    pub async fn nack_message(
+        &self,
+        client: &mut NatsClient,
+        cx: &Cx,
+        msg: &JsMessage,
+    ) -> Result<(), JsError> {
+        let result = msg.nack(client, cx).await;
+        if result.is_ok() {
+            self.decrement_pending();
+        }
+        result
+    }
+
+    /// Negative acknowledge a message with delay and update pending ack count.
+    ///
+    /// This is the flow-control-aware version of `JsMessage::nack_with_delay()`.
+    pub async fn nack_message_with_delay(
+        &self,
+        client: &mut NatsClient,
+        cx: &Cx,
+        msg: &JsMessage,
+        delay: Duration,
+    ) -> Result<(), JsError> {
+        let result = msg.nack_with_delay(client, cx, delay).await;
+        if result.is_ok() {
+            self.decrement_pending();
+        }
+        result
     }
 
     /// Pull a batch of messages.
@@ -1260,9 +1360,23 @@ impl Consumer {
                 let Some(msg) = sub.try_next() else {
                     break;
                 };
-                if let Some(js_msg) = Self::parse_js_message(msg) {
-                    messages.push(js_msg);
-                    pull_state.observe_parsed_message();
+                if let Some(js_msg) = Self::parse_js_message(msg, Some(self.pending_acks.clone())) {
+                    // Flow control: check if we can accept this message
+                    if self.increment_pending() {
+                        messages.push(js_msg);
+                        pull_state.observe_parsed_message();
+                    } else {
+                        // Exceeded max_ack_pending - drop the message and log warning
+                        warn!(
+                            stream = %self.stream,
+                            consumer = %self.name,
+                            pending = self.pending_acks(),
+                            max_ack_pending = self.max_ack_pending,
+                            sequence = js_msg.sequence,
+                            "JetStream flow control: dropping message - max_ack_pending exceeded"
+                        );
+                        pull_state.observe_ignored_message();
+                    }
                 } else {
                     pull_state.observe_ignored_message();
                 }
@@ -1302,7 +1416,7 @@ impl Consumer {
         finish_pull(messages, pull_state)
     }
 
-    fn parse_js_message(msg: Message) -> Option<JsMessage> {
+    fn parse_js_message(msg: Message, pending_acks: Option<Arc<AtomicUsize>>) -> Option<JsMessage> {
         // JetStream messages have metadata in headers (reply subject format)
         // Format: $JS.ACK.<stream>.<consumer>.<delivered>.<stream_seq>.<consumer_seq>.<timestamp>.<pending>
         // Note: stream and consumer names may contain dots, so we parse
@@ -1335,6 +1449,7 @@ impl Consumer {
             delivered,
             reply_subject: reply,
             ack_state: AtomicU8::new(ACK_STATE_PENDING),
+            pending_acks,
         })
     }
 }
@@ -1508,7 +1623,7 @@ pub fn fuzz_parse_api_error(json: &str) -> JsError {
 #[cfg(feature = "test-internals")]
 #[doc(hidden)]
 pub fn fuzz_parse_js_message(msg: Message) -> Option<FuzzJsAckMetadata> {
-    Consumer::parse_js_message(msg).map(|parsed| FuzzJsAckMetadata {
+    Consumer::parse_js_message(msg, None).map(|parsed| FuzzJsAckMetadata {
         subject: parsed.subject.clone(),
         sequence: parsed.sequence,
         delivered: parsed.delivered,
@@ -1985,6 +2100,10 @@ impl JsMessage {
         {
             Ok(()) => {
                 self.ack_state.store(committed, Ordering::Release);
+                // Decrement pending ack count for flow control
+                if let Some(ref pending) = self.pending_acks {
+                    pending.fetch_sub(1, Ordering::Relaxed);
+                }
                 Ok(())
             }
             Err(err) => {
@@ -2166,6 +2285,14 @@ fn extract_json_u64(json: &str, key: &str) -> Option<u64> {
     let rest = json_value_after_key(json, key)?;
     let end = rest
         .find(|c: char| !c.is_ascii_digit())
+        .unwrap_or(rest.len());
+    rest[..end].parse().ok()
+}
+
+fn extract_json_i64_simple(json: &str, key: &str) -> Option<i64> {
+    let rest = json_value_after_key(json, key)?;
+    let end = rest
+        .find(|c: char| !c.is_ascii_digit() && c != '-')
         .unwrap_or(rest.len());
     rest[..end].parse().ok()
 }
@@ -2352,7 +2479,7 @@ mod tests {
             payload: payload.to_vec(),
             reply_to: Some(reply_subject.to_string()),
         };
-        let js_msg = Consumer::parse_js_message(msg).expect("valid JetStream reply subject");
+        let js_msg = Consumer::parse_js_message(msg, None).expect("valid JetStream reply subject");
 
         json!({
             "subject": js_msg.subject,
@@ -3205,7 +3332,7 @@ mod tests {
             payload: b"hello".to_vec(),
             reply_to: Some(reply.to_string()),
         };
-        let js_msg = Consumer::parse_js_message(msg).expect("should parse dotted names");
+        let js_msg = Consumer::parse_js_message(msg, None).expect("should parse dotted names");
         // delivered=1 (5th from right), stream_seq=42 (4th from right)
         assert_eq!(js_msg.delivered, 1);
         assert_eq!(js_msg.sequence, 42);
@@ -3222,7 +3349,7 @@ mod tests {
             payload: vec![],
             reply_to: Some(reply.to_string()),
         };
-        let js_msg = Consumer::parse_js_message(msg).expect("should parse simple names");
+        let js_msg = Consumer::parse_js_message(msg, None).expect("should parse simple names");
         assert_eq!(js_msg.delivered, 2);
         assert_eq!(js_msg.sequence, 100);
     }

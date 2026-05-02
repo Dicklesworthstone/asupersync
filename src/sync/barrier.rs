@@ -1288,4 +1288,101 @@ mod tests {
 
         crate::test_complete!("audit_barrier_cancellation_threshold_behavior");
     }
+
+    /// Audit test for Barrier cyclic semantics after wait completion.
+    ///
+    /// Verifies that after N tasks reach a barrier and are released, a NEW set
+    /// of N tasks can reuse the same Barrier (correct: cyclic behavior). Per
+    /// asupersync barrier docs, barriers must be cyclic, not one-shot. Each
+    /// completion increments the generation counter and resets arrived count.
+    #[test]
+    fn audit_barrier_cyclic_reuse_after_completion() {
+        init_test("audit_barrier_cyclic_reuse_after_completion");
+        let barrier = Arc::new(Barrier::new(2));
+
+        // Initial state: generation 0, no arrivals
+        let (arrived, generation, waiters) = barrier.state_snapshot_for_test();
+        crate::assert_with_log!(
+            (arrived, generation, waiters) == (0, 0, 0),
+            "initial barrier state",
+            (0, 0, 0),
+            (arrived, generation, waiters)
+        );
+
+        // CYCLE 1: Two tasks complete the barrier
+        let barrier1 = Arc::clone(&barrier);
+        let handle1 = std::thread::spawn(move || {
+            let cx = Cx::for_testing();
+            block_on(barrier1.wait(&cx)).expect("cycle 1 wait failed")
+        });
+
+        let barrier2 = Arc::clone(&barrier);
+        let handle2 = std::thread::spawn(move || {
+            let cx = Cx::for_testing();
+            block_on(barrier2.wait(&cx)).expect("cycle 1 wait failed")
+        });
+
+        let result1 = handle1.join().expect("thread 1 failed");
+        let result2 = handle2.join().expect("thread 2 failed");
+
+        // Exactly one leader in cycle 1
+        let cycle1_leaders = [result1.is_leader(), result2.is_leader()]
+            .iter()
+            .filter(|&&is_leader| is_leader)
+            .count();
+        crate::assert_with_log!(
+            cycle1_leaders == 1,
+            "exactly one leader in cycle 1",
+            1,
+            cycle1_leaders
+        );
+
+        // After cycle 1: generation advanced, arrived reset, no waiters
+        let (arrived, generation, waiters) = barrier.state_snapshot_for_test();
+        crate::assert_with_log!(
+            (arrived, generation, waiters) == (0, 1, 0),
+            "barrier reset after cycle 1 completion",
+            (0, 1, 0),
+            (arrived, generation, waiters)
+        );
+
+        // CYCLE 2: NEW set of tasks can reuse the SAME barrier (cyclic behavior)
+        let barrier3 = Arc::clone(&barrier);
+        let handle3 = std::thread::spawn(move || {
+            let cx = Cx::for_testing();
+            block_on(barrier3.wait(&cx)).expect("cycle 2 wait failed")
+        });
+
+        let barrier4 = Arc::clone(&barrier);
+        let handle4 = std::thread::spawn(move || {
+            let cx = Cx::for_testing();
+            block_on(barrier4.wait(&cx)).expect("cycle 2 wait failed")
+        });
+
+        let result3 = handle3.join().expect("thread 3 failed");
+        let result4 = handle4.join().expect("thread 4 failed");
+
+        // Exactly one leader in cycle 2 (independent of cycle 1)
+        let cycle2_leaders = [result3.is_leader(), result4.is_leader()]
+            .iter()
+            .filter(|&&is_leader| is_leader)
+            .count();
+        crate::assert_with_log!(
+            cycle2_leaders == 1,
+            "exactly one leader in cycle 2",
+            1,
+            cycle2_leaders
+        );
+
+        // After cycle 2: generation advanced again, arrived reset again
+        let (arrived, generation, waiters) = barrier.state_snapshot_for_test();
+        crate::assert_with_log!(
+            (arrived, generation, waiters) == (0, 2, 0),
+            "barrier reset after cycle 2 completion",
+            (0, 2, 0),
+            (arrived, generation, waiters)
+        );
+
+        crate::test_complete!("audit_barrier_cyclic_reuse_after_completion");
+    }
 }

@@ -78,8 +78,8 @@
 use std::path::PathBuf;
 
 fn read_three_lane_source() -> String {
-    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("src/runtime/scheduler/three_lane.rs");
+    let path =
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/runtime/scheduler/three_lane.rs");
     std::fs::read_to_string(&path).expect("read three_lane.rs")
 }
 
@@ -94,8 +94,7 @@ fn read_lyapunov_source() -> String {
 }
 
 fn read_progress_cert_source() -> String {
-    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("src/cancel/progress_certificate.rs");
+    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/cancel/progress_certificate.rs");
     std::fs::read_to_string(&path).expect("read progress_certificate.rs")
 }
 
@@ -109,9 +108,7 @@ fn scheduling_suggestion_has_four_canonical_variants() {
 
     let enum_marker = "pub enum SchedulingSuggestion {";
     let start = source.find(enum_marker).expect("SchedulingSuggestion enum");
-    let end_rel = source[start..]
-        .find("\n}\n")
-        .expect("enum close");
+    let end_rel = source[start..].find("\n}\n").expect("enum close");
     let body = &source[start..start + end_rel];
 
     for variant in &[
@@ -171,28 +168,30 @@ fn emit_scheduler_evidence_maps_each_suggestion_to_canonical_label() {
     // mapping would break dashboards and alert queries.
     let source = read_three_lane_source();
 
-    let fn_marker = "fn emit_scheduler_evidence_for_suggestion(&self, suggestion: SchedulingSuggestion) {";
+    let fn_marker =
+        "fn emit_scheduler_evidence_for_suggestion(&self, suggestion: SchedulingSuggestion) {";
     let start = source.find(fn_marker).expect("emit_... fn");
-    let body_end = source[start..]
-        .find("\n    }\n")
-        .expect("fn close");
+    let body_end = source[start..].find("\n    }\n").expect("fn close");
     let body = &source[start..start + body_end];
 
     for (variant, label) in &[
         ("SchedulingSuggestion::MeetDeadlines", "\"meet_deadlines\""),
-        ("SchedulingSuggestion::DrainObligations", "\"drain_obligations\""),
+        (
+            "SchedulingSuggestion::DrainObligations",
+            "\"drain_obligations\"",
+        ),
         ("SchedulingSuggestion::DrainRegions", "\"drain_regions\""),
         ("SchedulingSuggestion::NoPreference", "\"no_preference\""),
     ] {
         // Each variant must appear → its canonical label.
-        let variant_pos = body
-            .find(variant)
-            .unwrap_or_else(|| panic!(
+        let variant_pos = body.find(variant).unwrap_or_else(|| {
+            panic!(
                 "REGRESSION: variant `{variant}` no longer appears \
                  in the suggestion → label string match. A \
                  regression that defaulted via `_ =>` would \
                  silently lose this transition. Body:\n{body}"
-            ));
+            )
+        });
         // The label must follow the variant within ~100 chars
         // (the match arm).
         let arm_window = &body[variant_pos..(variant_pos + 200).min(body.len())];
@@ -217,9 +216,7 @@ fn drain_phase_stalled_variant_exists_and_means_no_progress() {
 
     let enum_marker = "pub enum DrainPhase {";
     let start = source.find(enum_marker).expect("DrainPhase enum");
-    let end_rel = source[start..]
-        .find("\n}\n")
-        .expect("DrainPhase close");
+    let end_rel = source[start..].find("\n}\n").expect("DrainPhase close");
     let body = &source[start..start + end_rel];
 
     assert!(
@@ -300,9 +297,7 @@ fn evidence_sink_emit_scheduler_evidence_uses_action_label() {
 
     let fn_marker = "pub fn emit_scheduler_evidence(";
     let start = source.find(fn_marker).expect("emit_scheduler_evidence");
-    let body_end = source[start..]
-        .find("\n}\n")
-        .expect("fn close");
+    let body_end = source[start..].find("\n}\n").expect("fn close");
     let body = &source[start..start + body_end];
 
     assert!(
@@ -345,9 +340,7 @@ fn evidence_sink_emit_scheduler_evidence_carries_lane_depths() {
 
     let fn_marker = "pub fn emit_scheduler_evidence(";
     let start = source.find(fn_marker).expect("emit_scheduler_evidence");
-    let body_end = source[start..]
-        .find("\n}\n")
-        .expect("fn close");
+    let body_end = source[start..].find("\n}\n").expect("fn close");
     let body = &source[start..start + body_end];
 
     for feature in &["cancel_depth", "timed_depth", "ready_depth"] {
@@ -383,9 +376,7 @@ fn governor_compute_emits_per_invocation_not_only_on_change() {
 
     // Take the 200 chars preceding the emit call.
     let pre_start = emit_pos.saturating_sub(200);
-    let pre_start = source[..pre_start]
-        .rfind('\n')
-        .map_or(0, |p| p + 1);
+    let pre_start = source[..pre_start].rfind('\n').map_or(0, |p| p + 1);
     let pre_window = &source[pre_start..emit_pos];
 
     assert!(
@@ -410,11 +401,10 @@ fn observability_gap_drain_phase_stalled_known_limitation() {
     // NOT a correctness bug.
     let source = read_three_lane_source();
 
-    let fn_marker = "fn emit_scheduler_evidence_for_suggestion(&self, suggestion: SchedulingSuggestion) {";
+    let fn_marker =
+        "fn emit_scheduler_evidence_for_suggestion(&self, suggestion: SchedulingSuggestion) {";
     let start = source.find(fn_marker).expect("emit_... fn");
-    let body_end = source[start..]
-        .find("\n    }\n")
-        .expect("fn close");
+    let body_end = source[start..].find("\n    }\n").expect("fn close");
     let body = &source[start..start + body_end];
 
     // Today, NO "drain_obligations_stalled" / "panic" /

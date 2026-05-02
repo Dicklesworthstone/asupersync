@@ -743,6 +743,18 @@ mod tests {
         }
     }
 
+    fn block_on<F: Future>(f: F) -> F::Output {
+        let waker = Waker::noop().clone();
+        let mut cx = Context::from_waker(&waker);
+        let mut pinned = Box::pin(f);
+        loop {
+            match pinned.as_mut().poll(&mut cx) {
+                Poll::Ready(v) => return v,
+                Poll::Pending => std::thread::yield_now(),
+            }
+        }
+    }
+
     #[test]
     fn basic_send_recv() {
         init_test("basic_send_recv");
@@ -3089,5 +3101,176 @@ mod tests {
         );
 
         crate::test_complete!("audit_concurrent_send_during_borrow_and_update");
+    }
+
+    /// Audit test for concurrent receiver count tracking.
+    ///
+    /// Verifies that when N receivers exist and one is dropped concurrently,
+    /// receiver_count() decrements immediately (correct) rather than lazily (incorrect).
+    /// Per asupersync cancel-aware semantics, resource counts must reflect reality immediately.
+    #[test]
+    fn audit_receiver_count_immediate_decrement() {
+        init_test("audit_receiver_count_immediate_decrement");
+
+        let (tx, rx1) = channel::<u32>(0);
+
+        // Create multiple receivers concurrently
+        let rx2 = rx1.clone();
+        let rx3 = tx.subscribe();
+        let rx4 = tx.subscribe();
+
+        // Verify initial count
+        assert_eq!(tx.receiver_count(), 4, "initial receiver count");
+
+        // Test concurrent drops with immediate count checks
+        std::thread::scope(|s| {
+            let tx_ref = &tx;
+
+            // Spawn threads that drop receivers and immediately check counts
+            let handle1 = s.spawn(|| {
+                drop(rx2);
+                // Count should be decremented immediately due to Drop impl
+                // using fetch_sub with Release ordering
+                tx_ref.receiver_count()
+            });
+
+            let handle2 = s.spawn(|| {
+                drop(rx3);
+                tx_ref.receiver_count()
+            });
+
+            // Drop one receiver in main thread
+            drop(rx4);
+            let main_count = tx.receiver_count();
+
+            // Collect results from other threads
+            let count1 = handle1.join().unwrap();
+            let count2 = handle2.join().unwrap();
+
+            // At least one thread should see the decrement
+            // All observed counts should be <= 3 (less than initial 4)
+            assert!(count1 <= 3, "thread1 saw decremented count: {}", count1);
+            assert!(count2 <= 3, "thread2 saw decremented count: {}", count2);
+            assert!(
+                main_count <= 3,
+                "main thread saw decremented count: {}",
+                main_count
+            );
+
+            // Final count check - only rx1 should remain
+            let final_count = tx.receiver_count();
+            assert_eq!(final_count, 1, "final count after concurrent drops");
+        });
+
+        // Verify rx1 is still functional
+        tx.send(42).unwrap();
+        let value = *rx1.borrow();
+        assert_eq!(value, 42, "remaining receiver still functional");
+
+        // Drop last receiver
+        drop(rx1);
+        assert_eq!(
+            tx.receiver_count(),
+            0,
+            "count zero after dropping all receivers"
+        );
+
+        crate::test_complete!("audit_receiver_count_immediate_decrement");
+    }
+
+    /// Audit test for watch channel lagging-receiver behavior.
+    ///
+    /// Verifies that slow receivers do NOT cause memory leaks via unbounded buffering.
+    /// Per asupersync semantics, watch channels keep only the LATEST value - intermediate
+    /// values are lost forever when a receiver lags behind the sender. This is by design
+    /// and prevents memory exhaustion from slow consumers.
+    #[test]
+    fn audit_watch_no_buffering_latest_only() {
+        init_test("audit_watch_no_buffering_latest_only");
+        let cx = test_cx();
+        let (tx, mut rx) = channel(0u32);
+
+        // Receiver starts at version 0, value 0
+        let initial_version = rx.seen_version;
+        crate::assert_with_log!(
+            initial_version == 0,
+            "receiver starts at initial version",
+            0,
+            initial_version
+        );
+        crate::assert_with_log!(
+            *rx.borrow() == 0,
+            "receiver sees initial value",
+            0,
+            *rx.borrow()
+        );
+
+        // Send multiple rapid updates: 1, 2, 3, 4, 5
+        // Receiver does NOT call changed() between these sends
+        for i in 1..=5 {
+            tx.send(i).expect("send should succeed");
+        }
+
+        // Receiver can only see the LATEST value (5), not intermediate values (1,2,3,4)
+        let current_value = *rx.borrow();
+        crate::assert_with_log!(
+            current_value == 5,
+            "receiver sees only latest value, intermediate values lost",
+            5,
+            current_value
+        );
+
+        // Calling changed() once should see the jump from version 0 to 5
+        let changed_result = block_on(rx.changed(&cx));
+        crate::assert_with_log!(
+            changed_result.is_ok(),
+            "changed() succeeds for version jump",
+            true,
+            changed_result.is_ok()
+        );
+        crate::assert_with_log!(
+            rx.seen_version == 5,
+            "receiver version jumps directly to latest",
+            5,
+            rx.seen_version
+        );
+        crate::assert_with_log!(
+            *rx.borrow() == 5,
+            "receiver sees latest value after changed",
+            5,
+            *rx.borrow()
+        );
+
+        // Verify memory efficiency: no matter how many values sent,
+        // watch channel uses O(1) memory (just the latest value + version)
+        for i in 6..=1000 {
+            tx.send(i).expect("send should succeed");
+        }
+
+        // After 1000 sends, receiver can still only see the latest value
+        let final_value = *rx.borrow();
+        crate::assert_with_log!(
+            final_value == 1000,
+            "receiver sees latest of many rapid updates",
+            1000,
+            final_value
+        );
+
+        // One changed() call jumps directly from version 5 to 1000
+        let changed_result = block_on(rx.changed(&cx));
+        crate::assert_with_log!(
+            changed_result.is_ok(),
+            "changed() succeeds for large version jump",
+            true,
+            changed_result.is_ok()
+        );
+        crate::assert_with_log!(
+            rx.seen_version == 1000,
+            "receiver version jumps directly to 1000",
+            1000,
+            rx.seen_version
+        );
+
+        crate::test_complete!("audit_watch_no_buffering_latest_only");
     }
 }

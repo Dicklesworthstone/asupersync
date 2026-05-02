@@ -1330,11 +1330,56 @@ impl SqliteConnection {
         let mut guard = self.inner.lock();
         if let Some(conn) = guard.conn.as_ref() {
             let _ = rollback_orphaned_transaction(conn, self.needs_rollback.as_ref());
+
+            // SECURITY FIX: Explicit WAL checkpoint to ensure durability
+            // Without this, WAL frames after the last auto-checkpoint may be lost on crash
+            if let Err(e) = conn.execute_batch("PRAGMA wal_checkpoint(FULL)") {
+                // Log checkpoint failure but don't fail close operation
+                tracing::warn!(
+                    error = %e,
+                    "WAL checkpoint failed during connection close - potential data loss risk"
+                );
+            }
+
             conn.flush_prepared_statement_cache();
         }
         self.needs_rollback.store(false, Ordering::Release);
         guard.close();
         Ok(())
+    }
+
+    /// Closes the connection asynchronously with proper WAL checkpoint.
+    ///
+    /// This method ensures WAL frames are safely checkpointed before closing
+    /// the connection, providing better crash recovery guarantees than the
+    /// synchronous `close()` method.
+    pub async fn close_async(&self, cx: &Cx) -> Outcome<(), SqliteError> {
+        if cx.checkpoint().is_err() {
+            return Outcome::Cancelled(
+                cx.cancel_reason()
+                    .unwrap_or_else(|| CancelReason::user("cancelled")),
+            );
+        }
+
+        // Execute WAL checkpoint asynchronously for better error handling
+        match self.execute_batch_unchecked(cx, "PRAGMA wal_checkpoint(FULL)").await {
+            Outcome::Ok(()) => {}
+            Outcome::Err(e) => {
+                tracing::warn!(
+                    error = %e,
+                    "Async WAL checkpoint failed during connection close"
+                );
+                // Continue with close despite checkpoint failure
+            }
+            Outcome::Cancelled(r) => return Outcome::Cancelled(r),
+            Outcome::Panicked(p) => return Outcome::Panicked(p),
+        }
+
+        // Delegate to synchronous close (which won't re-checkpoint)
+        match self.close() {
+            Ok(()) => Outcome::Ok(()),
+            Err(e) => Outcome::Err(e),
+        }
     }
 
     /// Returns true if the connection is open.

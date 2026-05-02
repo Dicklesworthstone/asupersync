@@ -153,8 +153,7 @@ fn result_impl_requires_e_into_response_bound() {
     let source = read("src/web/response.rs");
 
     assert!(
-        source
-            .contains("impl<T: IntoResponse, E: IntoResponse> IntoResponse for Result<T, E> {"),
+        source.contains("impl<T: IntoResponse, E: IntoResponse> IntoResponse for Result<T, E> {"),
         "REGRESSION: the IntoResponse for Result<T, E> bound is \
          no longer `E: IntoResponse`. If a more permissive bound \
          (E: Display, E: Error) was added, the framework now \
@@ -313,12 +312,11 @@ fn fn_handler_call_dispatches_via_into_response() {
     // in .into_response() so the async path also delegates.
     let helper_marker = "fn run_async_handler_with_runtime_cx";
     let start = source.find(helper_marker).expect("async helper");
-    let body_end = source[start..]
-        .find("\n}\n")
-        .expect("async helper close");
+    let body_end = source[start..].find("\n}\n").expect("async helper close");
     let helper_body = &source[start..start + body_end];
     assert!(
-        helper_body.contains(".into_response()") || helper_body.contains("IntoResponse::into_response"),
+        helper_body.contains(".into_response()")
+            || helper_body.contains("IntoResponse::into_response"),
         "REGRESSION: run_async_handler_with_runtime_cx no \
          longer calls .into_response() on the handler's result. \
          The async dispatch path now bypasses the user's \

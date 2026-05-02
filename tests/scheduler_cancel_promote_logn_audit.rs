@@ -76,8 +76,7 @@
 use std::path::PathBuf;
 
 fn read_priority_source() -> String {
-    let path =
-        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/runtime/scheduler/priority.rs");
+    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/runtime/scheduler/priority.rs");
     std::fs::read_to_string(&path).expect("read priority.rs")
 }
 
@@ -198,7 +197,9 @@ fn move_to_cancel_lane_doc_documents_log_n_complexity() {
     );
 
     assert!(
-        doc_window.contains("lazy promotion") || doc_window.contains("lazy-promote") || doc_window.contains("TOMBSTONE"),
+        doc_window.contains("lazy promotion")
+            || doc_window.contains("lazy-promote")
+            || doc_window.contains("TOMBSTONE"),
         "REGRESSION: doc no longer explains the lazy-promotion / \
          tombstone mechanism. The mechanism is non-obvious and \
          load-bearing; without the doc, a future maintainer \

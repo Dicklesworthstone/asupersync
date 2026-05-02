@@ -2524,7 +2524,7 @@ fn cancelled_error(cx: &Cx) -> PgError {
 
 const MAX_BACKEND_MESSAGE_LEN: i32 = 64 * 1024 * 1024;
 const MAX_NOTIFICATION_CHANNEL_NAME_BYTES: usize = 63;
-const MAX_NOTIFICATION_PAYLOAD_BYTES: usize = 7_999;
+const MAX_NOTIFICATION_PAYLOAD_BYTES: usize = 8_000;
 
 fn backend_message_body_len(len_i32: i32) -> Result<usize, PgError> {
     // Practical PostgreSQL message limit. The protocol allows up to 2 GiB
@@ -7494,7 +7494,7 @@ mod tests {
 
         match run(conn.notify(&cx, "jobs", &payload)) {
             Outcome::Err(PgError::Protocol(msg)) => {
-                assert!(msg.contains("7999-byte limit"), "got: {msg}");
+                assert!(msg.contains("8000-byte limit"), "got: {msg}");
             }
             other => panic!("expected Protocol error, got {other:?}"),
         }

@@ -49,17 +49,25 @@ pub mod entry;
 pub mod histogram_conformance;
 pub mod level;
 pub mod metrics;
+#[cfg(test)]
+pub mod multi_runtime_subscriber_audit_test;
 pub mod obligation_tracker;
 #[cfg(feature = "metrics")]
 pub mod otel;
 pub mod otel_conformance_tests;
 pub mod otel_structured_concurrency;
+pub mod otlp_trace_exporter;
 pub mod performance_budget_monitor;
 pub mod resource_accounting;
 pub mod runtime_integration;
+#[cfg(test)]
+pub mod span_propagation_audit_test;
 pub mod spectral_health;
 pub mod structured_cancellation_analyzer;
 pub mod task_inspector;
+#[cfg(test)]
+pub mod trace_id_format_audit_test;
+pub mod w3c_trace_context;
 
 pub use analyzer_plugin::{
     ANALYZER_PLUGIN_CONTRACT_VERSION, AggregatedAnalyzerFinding, AnalyzerCapability,
@@ -116,6 +124,7 @@ pub use otel::{
 pub use otel_structured_concurrency::{
     EntityId, OtelStructuredConcurrencyConfig, SpanStorage, SpanType,
 };
+pub use otlp_trace_exporter::{LoadSheddingTraceExporter, OtlpSpan, SpanBatch, TraceExporter};
 pub use performance_budget_monitor::{
     BudgetAlert, BudgetDirection, BudgetEvaluation, BudgetSample, BudgetSeverity,
     PerformanceBudget, PerformanceBudgetMonitor, PerformanceBudgetSnapshot,
@@ -131,6 +140,10 @@ pub use task_inspector::{
     TASK_CONSOLE_WIRE_SCHEMA_V1, TaskConsoleWireSnapshot, TaskDetails, TaskDetailsWire,
     TaskInspector, TaskInspectorConfig, TaskRegionCountWire, TaskStateInfo, TaskSummary,
     TaskSummaryWire,
+};
+pub use w3c_trace_context::{
+    SpanId as W3CSpanId, TraceContextError, TraceFlags, TraceId, W3CTraceContext,
+    extract_from_http, inject_to_grpc,
 };
 
 /// br-asupersync-z5ge0x: globally-installable observability clock for

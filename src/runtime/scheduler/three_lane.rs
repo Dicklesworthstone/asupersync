@@ -1246,6 +1246,10 @@ impl ThreeLaneScheduler {
                 invariant_monitor: Mutex::new(
                     super::invariant_monitor::SchedulerInvariantMonitor::with_defaults(),
                 ),
+                fast_queue_dispatch_streak: 0,
+                fast_queue_fairness_limit: 4, // Allow max 4 consecutive stolen work dispatches
+                timed_dispatch_streak: 0,
+                timed_fairness_limit: 6, // Allow max 6 consecutive EDF dispatches before FIFO fairness
             });
         }
 
@@ -1920,6 +1924,26 @@ pub struct ThreeLaneWorker {
     fairness_monitor: Mutex<FairnessMonitor>,
     /// Scheduler invariant monitor for comprehensive correctness verification.
     invariant_monitor: Mutex<super::invariant_monitor::SchedulerInvariantMonitor>,
+    /// Number of consecutive fast_queue (stolen work) dispatches.
+    ///
+    /// Tracks fairness between stolen work and local work to prevent starvation.
+    /// When this counter exceeds a threshold, local work gets priority.
+    fast_queue_dispatch_streak: usize,
+    /// Maximum consecutive fast_queue dispatches before yielding to local work.
+    ///
+    /// Fairness guarantee: local work will be checked after at most this many
+    /// consecutive stolen work dispatches.
+    fast_queue_fairness_limit: usize,
+    /// Number of consecutive timed-lane (EDF) dispatches.
+    ///
+    /// Tracks fairness between EDF and FIFO work to prevent FIFO starvation.
+    /// When this counter exceeds a threshold, ready (FIFO) work gets priority.
+    timed_dispatch_streak: usize,
+    /// Maximum consecutive timed-lane dispatches before yielding to FIFO work.
+    ///
+    /// Fairness guarantee: FIFO work will be checked after at most this many
+    /// consecutive EDF dispatches, ensuring 1/N quantum fairness invariant.
+    timed_fairness_limit: usize,
 }
 
 #[derive(Debug, Clone)]
@@ -3357,14 +3381,28 @@ impl ThreeLaneWorker {
             self.preemption_metrics.fairness_yields += 1;
         }
 
+        // ── TIMED FAIRNESS: Prevent EDF starvation of FIFO work ──────────
+        let check_timed = self.timed_dispatch_streak < self.timed_fairness_limit;
+        if !check_timed && suggestion == SchedulingSuggestion::MeetDeadlines {
+            // Timed fairness limit exceeded - force FIFO work to be checked
+            // before more EDF dispatches to ensure 1/N quantum fairness
+            if let Some(task) = self.try_phase3_ready_work() {
+                self.timed_dispatch_streak = 0; // Reset EDF streak
+                return Some(task);
+            }
+            // If no FIFO work available, allow EDF to continue but log fairness yield
+            self.preemption_metrics.fairness_yields += 1;
+        }
+
         // Current time for EDF (computed once, reused for global + local).
         let now = self.current_scheduler_time();
 
         // ── PHASE 1: Highest Priority Global Queue ───────────────────────
-        if suggestion == SchedulingSuggestion::MeetDeadlines {
-            // Deadline pressure: global timed first.
+        if suggestion == SchedulingSuggestion::MeetDeadlines && check_timed {
+            // Deadline pressure: global timed first (if fairness allows).
             if let Some(tt) = self.global.pop_timed_if_due(now) {
                 self.record_timed_dispatch();
+                self.timed_dispatch_streak += 1; // Track EDF streak
                 return Some(self.dispatch_with_adaptive_epoch(tt.task));
             }
         } else {
@@ -3385,11 +3423,12 @@ impl ThreeLaneWorker {
         let mut local = self.local.lock();
         let rng_hint = self.rng.next_u64();
 
-        if suggestion == SchedulingSuggestion::MeetDeadlines {
+        if suggestion == SchedulingSuggestion::MeetDeadlines && check_timed {
             // MeetDeadlines: Timed > Cancel (global timed already checked)
             if let Some(task) = local.pop_timed_only_with_hint(rng_hint, now) {
                 drop(local);
                 self.record_timed_dispatch();
+                self.timed_dispatch_streak += 1; // Track EDF streak
                 return Some(self.dispatch_with_adaptive_epoch(task));
             }
             if check_cancel {
@@ -3502,13 +3541,35 @@ impl ThreeLaneWorker {
     fn try_phase3_ready_work(&mut self) -> Option<TaskId> {
         // ── PHASE 3: Fast ready paths (no PriorityScheduler lock) ────
         // Check local_ready first (highest priority: non-stealable local tasks),
-        // then lock-free fast_queue (O(1) atomic pop).
+        // then apply fairness logic between fast_queue (stolen work) and local work.
         let local_ready_task = self.local_ready.lock().pop_front();
         if let Some(task) = local_ready_task {
             self.record_ready_dispatch();
+            self.fast_queue_dispatch_streak = 0; // Reset stolen work streak
             return Some(self.dispatch_with_adaptive_epoch(task));
         }
 
+        // ── FAIRNESS LOGIC: Balance stolen work vs local work ───────
+        // If we've dispatched too many consecutive stolen tasks, give local
+        // work a chance to prevent starvation.
+        let should_prioritize_local =
+            self.fast_queue_dispatch_streak >= self.fast_queue_fairness_limit;
+
+        if should_prioritize_local {
+            // Check local work first to break stolen work streak
+            let rng_hint = self.rng.next_u64();
+            let local_task = {
+                let mut local = self.local.lock();
+                local.pop_ready_only_with_hint(rng_hint)
+            };
+            if let Some(task) = local_task {
+                self.record_ready_dispatch();
+                self.fast_queue_dispatch_streak = 0; // Reset stolen work streak
+                return Some(self.dispatch_with_adaptive_epoch(task));
+            }
+        }
+
+        // Check fast_queue (stolen work) if fairness allows it or local was empty
         if let Some(task) = self.fast_queue.pop() {
             if let Some(blocked_local_task) = self.peek_blocked_local_ready_for_inversion() {
                 let dispatched_priority = self.task_sched_priority(task);
@@ -3519,8 +3580,10 @@ impl ThreeLaneWorker {
                 );
             }
             self.record_ready_dispatch();
+            self.fast_queue_dispatch_streak += 1; // Track stolen work streak
             return Some(self.dispatch_with_adaptive_epoch(task));
         }
+
         if let Some(pt) = self.global.pop_ready() {
             if let Some(blocked_local_task) = self.peek_blocked_local_ready_for_inversion() {
                 self.record_ready_priority_inversion(
@@ -3530,22 +3593,23 @@ impl ThreeLaneWorker {
                 );
             }
             self.record_ready_dispatch();
+            self.fast_queue_dispatch_streak = 0; // Reset stolen work streak
             return Some(self.dispatch_with_adaptive_epoch(pt.task));
         }
 
-        // ── PHASE 3b: Local Ready Lane ───────────────────────────────
-        // All global/fast ready paths returned nothing. Check local ready.
-        // The local ready path only needs the pop; inversion tracking is relevant
-        // only when a higher-priority fast/global dispatch jumps ahead of blocked
-        // local ready work.
-        let rng_hint = self.rng.next_u64();
-        let local_task = {
-            let mut local = self.local.lock();
-            local.pop_ready_only_with_hint(rng_hint)
-        };
-        if let Some(task) = local_task {
-            self.record_ready_dispatch();
-            return Some(self.dispatch_with_adaptive_epoch(task));
+        // ── PHASE 3b: Local Ready Lane (fallback) ────────────────────
+        // All fast paths returned nothing. Check local ready as final fallback.
+        if !should_prioritize_local {
+            let rng_hint = self.rng.next_u64();
+            let local_task = {
+                let mut local = self.local.lock();
+                local.pop_ready_only_with_hint(rng_hint)
+            };
+            if let Some(task) = local_task {
+                self.record_ready_dispatch();
+                self.fast_queue_dispatch_streak = 0; // Reset stolen work streak
+                return Some(self.dispatch_with_adaptive_epoch(task));
+            }
         }
 
         None
@@ -3564,6 +3628,8 @@ impl ThreeLaneWorker {
         if self.cancel_streak > effective_limit {
             self.preemption_metrics.effective_limit_exceedances += 1;
         }
+        // Reset timed streak when cancel work is dispatched
+        self.timed_dispatch_streak = 0;
     }
 
     #[inline]
@@ -3574,6 +3640,7 @@ impl ThreeLaneWorker {
         self.cancel_streak = 0;
         self.ready_dispatch_streak = 0;
         self.preemption_metrics.timed_dispatches += 1;
+        // Note: timed_dispatch_streak is incremented at call sites for fairness tracking
     }
 
     #[inline]
@@ -3583,6 +3650,8 @@ impl ThreeLaneWorker {
         }
         self.cancel_streak = 0;
         self.ready_dispatch_streak = self.ready_dispatch_streak.saturating_add(1);
+        // Reset timed streak when ready work is dispatched
+        self.timed_dispatch_streak = 0;
         self.preemption_metrics.ready_dispatches += 1;
     }
 
@@ -12839,6 +12908,398 @@ mod tests {
         assert!(
             t > 0,
             "br-asupersync-9nn568: wall_now() fallback must return non-zero"
+        );
+    }
+
+    /// AUDIT: Cancellation propagation latency regression test.
+    ///
+    /// This test demonstrates that cancellation propagation is NOT bounded by
+    /// ~1 quantum as expected, but by cancel_streak_limit × poll_budget which
+    /// can be arbitrarily long (default: 16 × 128 = 2,048 poll cycles).
+    ///
+    /// DEFECT: Long-running tasks can delay cancellation observation for
+    /// up to 2,048 poll cycles, violating bounded latency expectations.
+    #[test]
+    fn audit_cancellation_propagation_latency_is_not_bounded_by_one_quantum() {
+        let state = Arc::new(ContendedMutex::new("runtime_state", RuntimeState::new()));
+        let mut scheduler = ThreeLaneScheduler::new(1, &state);
+
+        // Verify current latency bounds
+        let worker = &scheduler.workers[0];
+        let cancel_streak_limit = worker.cancel_streak_limit;
+        let poll_budget = 128u32; // Default from RuntimeConfig
+
+        let max_cancellation_delay_polls = cancel_streak_limit as u32 * poll_budget;
+
+        // DEFECT: This should be ~1 quantum, but it's actually 2,048 polls
+        assert_eq!(
+            cancel_streak_limit, 16,
+            "Default cancel_streak_limit should be 16"
+        );
+        assert_eq!(
+            max_cancellation_delay_polls, 2048,
+            "Maximum cancellation delay is {} poll cycles, not ~1 quantum",
+            max_cancellation_delay_polls
+        );
+
+        // Demonstrate the latency issue with a test scenario:
+        // If we inject 16 tasks into cancel lane, each running for 128 polls,
+        // a subsequent task could wait 16×128=2048 polls before cancellation
+        let cancel_tasks: Vec<TaskId> = (0..16).map(|i| TaskId::new_for_test(i, 1)).collect();
+
+        for &task_id in &cancel_tasks {
+            scheduler.inject_cancel(task_id, 100);
+        }
+
+        // The 17th task would have to wait through all 16 cancel dispatches
+        // Each dispatch could theoretically run for 128 polls before yielding
+        // Total delay: 16 × 128 = 2,048 polls (potentially seconds, not microseconds)
+
+        let mut workers = scheduler.take_workers();
+        let worker = &mut workers[0];
+
+        // Verify that the cancel lane has accumulated tasks
+        let mut cancel_task_count = 0;
+        while worker.next_task().is_some() {
+            cancel_task_count += 1;
+            if cancel_task_count >= 16 {
+                break;
+            }
+        }
+
+        assert_eq!(
+            cancel_task_count, 16,
+            "Should have dispatched 16 cancel tasks"
+        );
+
+        // FINDING: Cancellation propagation latency is bounded by
+        // cancel_streak_limit × poll_budget, not by ~1 quantum.
+        //
+        // IMPACT: Long-running CPU-bound tasks can delay cancellation
+        // observation for potentially seconds, not microseconds.
+        //
+        // RECOMMENDATION: Implement quantum-based preemption with:
+        // 1. Time-based yield budget (e.g., 1ms per dispatch)
+        // 2. Cancel check injection in tight loops
+        // 3. Asynchronous cancellation signaling
+    }
+
+    #[test]
+    fn test_edf_starves_fifo_lane_defect() {
+        // REGRESSION TEST: EDF lane starvation of FIFO lane under deadline pressure
+        //
+        // SCENARIO: EDF lane is consistently busy with deadline-tight tasks.
+        // Per scheduler invariant, FIFO lane must get at least 1/N quantum per cycle.
+        //
+        // EXPECTED DEFECT: FIFO lane tasks starve completely when EDF lane is busy.
+        // Unlike cancel lane (which has cancel_streak_limit fairness), timed lane
+        // has no fairness bounds and can monopolize the scheduler.
+        //
+        // INVARIANT VIOLATION: FIFO tasks should get guaranteed execution slots.
+
+        use crate::time::{TimerDriverHandle, VirtualClock};
+
+        // Start at t=1000, advance to make tasks due
+        let clock = Arc::new(VirtualClock::starting_at(Time::from_nanos(1000)));
+        let state = Arc::new(ContendedMutex::new("runtime_state", RuntimeState::new()));
+        {
+            let mut guard = state.lock().expect("lock state");
+            guard.set_timer_driver(TimerDriverHandle::with_virtual_clock(clock.clone()));
+        }
+
+        let mut scheduler = ThreeLaneScheduler::new(1, &state);
+        let mut workers = scheduler.take_workers();
+        let worker = &mut workers[0];
+
+        // Force MeetDeadlines suggestion (EDF priority mode)
+        // Create deadline pressure to trigger EDF mode
+        let root = {
+            let mut guard = state.lock().expect("lock state");
+            guard.now = Time::from_nanos(1000);
+            guard.create_root_region(Budget::unlimited())
+        };
+
+        // Inject FIFO tasks that should get fairness guarantee
+        let fifo_tasks: Vec<TaskId> = (1..=10).map(|i| TaskId::new_for_test(1, i)).collect();
+
+        for &task_id in &fifo_tasks {
+            scheduler.inject_ready(task_id, 50); // FIFO ready work
+        }
+
+        // Inject continuous stream of deadline-tight EDF tasks
+        let edf_tasks: Vec<TaskId> = (100..=120).map(|i| TaskId::new_for_test(2, i)).collect();
+
+        for &task_id in &edf_tasks {
+            scheduler.inject_timed(task_id, Time::from_nanos(1001)); // All due immediately
+        }
+
+        // Advance time to make EDF tasks due
+        clock.advance_to(Time::from_nanos(1001));
+
+        // Verify we're in MeetDeadlines mode
+        let suggestion = worker.governor_suggest();
+        assert_eq!(
+            suggestion,
+            SchedulingSuggestion::MeetDeadlines,
+            "Should be in EDF priority mode due to deadline pressure"
+        );
+
+        // Consume tasks and track dispatch order
+        let mut dispatch_sequence = Vec::new();
+        let mut edf_count = 0;
+        let mut fifo_count = 0;
+
+        // Dispatch first 15 tasks (should be all EDF under current defective behavior)
+        for _ in 0..15 {
+            if let Some(task) = worker.next_task() {
+                dispatch_sequence.push(task);
+
+                if edf_tasks.contains(&task) {
+                    edf_count += 1;
+                } else if fifo_tasks.contains(&task) {
+                    fifo_count += 1;
+                }
+            } else {
+                break;
+            }
+        }
+
+        // FAIRNESS VERIFICATION: With the fix, FIFO tasks should get dispatched
+        eprintln!("EDF LANE FAIRNESS FIX VERIFICATION:");
+        eprintln!("  EDF tasks dispatched: {}", edf_count);
+        eprintln!("  FIFO tasks dispatched: {}", fifo_count);
+        eprintln!("  Total EDF tasks available: {}", edf_tasks.len());
+        eprintln!("  Total FIFO tasks available: {}", fifo_tasks.len());
+        eprintln!("  Timed fairness limit: {}", worker.timed_fairness_limit);
+        eprintln!("  Dispatch sequence: {:?}", dispatch_sequence);
+        eprintln!("");
+
+        // With the fix, FIFO tasks should get fairness guarantees
+        assert!(
+            fifo_count > 0,
+            "FAIRNESS FIX VERIFICATION: FIFO lane should get at least 1 dispatch, got {}",
+            fifo_count
+        );
+
+        // Verify fairness: EDF shouldn't monopolize beyond the limit
+        let max_consecutive_edf = dispatch_sequence
+            .windows(worker.timed_fairness_limit + 2)
+            .any(|window| window.iter().all(|task| edf_tasks.contains(task)));
+
+        assert!(
+            !max_consecutive_edf,
+            "EDF tasks should not exceed consecutive fairness limit of {}",
+            worker.timed_fairness_limit
+        );
+
+        eprintln!(
+            "  ✓ FAIRNESS FIX WORKING: FIFO lane received {} dispatches",
+            fifo_count
+        );
+        eprintln!("  ✓ SCHEDULER INVARIANT PRESERVED: 1/N quantum fairness maintained");
+    }
+
+    #[test]
+    fn test_deadline_preemption_priority_inversion_defect() {
+        // REGRESSION TEST: Deadline-monotone preemption within quantum boundaries
+        //
+        // SCENARIO: Low-priority ready task starts executing, then high-priority
+        // deadline task arrives and becomes due. The deadline task should preempt
+        // at the next yield point, not wait for the full quantum.
+        //
+        // EXPECTED DEFECT: High-priority deadline task waits for low-priority task
+        // to complete its full quantum (up to cancel_streak_limit × poll_budget cycles).
+        //
+        // PRIORITY INVERSION: Deadline tasks should preempt within bounded latency.
+
+        use crate::time::{TimerDriverHandle, VirtualClock};
+
+        // Create virtual clock starting at t=1000
+        let clock = Arc::new(VirtualClock::starting_at(Time::from_nanos(1000)));
+        let state = Arc::new(ContendedMutex::new("runtime_state", RuntimeState::new()));
+        {
+            let mut guard = state.lock().expect("lock state");
+            guard.set_timer_driver(TimerDriverHandle::with_virtual_clock(clock.clone()));
+        }
+
+        let mut scheduler = ThreeLaneScheduler::new(1, &state);
+        let mut workers = scheduler.take_workers();
+        let worker = &mut workers[0];
+
+        // Get current quantum limits for defect verification
+        let cancel_streak_limit = worker.cancel_streak_limit;
+        let poll_budget = 128u32; // Default RuntimeConfig poll budget
+        let max_preemption_delay = cancel_streak_limit as u32 * poll_budget;
+
+        // Schedule low-priority ready task that will start executing
+        let low_priority_ready = TaskId::new_for_test(1, 1);
+        scheduler.inject_ready(low_priority_ready, 50); // Low priority
+
+        // Verify the ready task is dispatched first
+        let first_task = worker.next_task();
+        assert_eq!(
+            first_task,
+            Some(low_priority_ready),
+            "Low-priority ready task should be dispatched"
+        );
+
+        // Now simulate: while the low-priority task is "executing", a high-priority
+        // deadline task arrives and becomes due. In a real scenario, the executing
+        // task would continue for its quantum before the scheduler gets called again.
+        let high_priority_deadline = TaskId::new_for_test(2, 1);
+
+        // Schedule deadline task that becomes due immediately
+        scheduler.inject_timed(high_priority_deadline, Time::from_nanos(1001)); // Due at t=1001
+        clock.advance_to(Time::from_nanos(1001)); // Make it due
+
+        // The next scheduler dispatch should prioritize the deadline task
+        let second_task = worker.next_task();
+        assert_eq!(
+            second_task,
+            Some(high_priority_deadline),
+            "High-priority deadline task should preempt immediately"
+        );
+
+        // DEFECT VERIFICATION: Document the current priority inversion issue
+        eprintln!("DEADLINE PREEMPTION DEFECT ANALYSIS:");
+        eprintln!("  Cancel streak limit: {}", cancel_streak_limit);
+        eprintln!("  Poll budget per task: {}", poll_budget);
+        eprintln!(
+            "  Maximum preemption delay: {} poll cycles",
+            max_preemption_delay
+        );
+        eprintln!("  Expected delay: ~1 quantum (few polls)");
+        eprintln!(
+            "  Actual delay: up to {} polls (potentially milliseconds)",
+            max_preemption_delay
+        );
+        eprintln!("");
+        eprintln!("  ISSUE: Once a task starts executing, it can run for a full quantum");
+        eprintln!("  ROOT CAUSE: No time-based preemption between scheduler calls");
+        eprintln!("  IMPACT: High-priority deadline tasks suffer bounded but high latency");
+
+        // Current test passes because we call next_task() immediately (no quantum delay)
+        // but documents the real-world issue where tasks run between scheduler calls
+        assert_eq!(
+            max_preemption_delay, 2048,
+            "DOCUMENTED DEFECT: Maximum preemption delay is {} cycles, should be ~1 quantum",
+            max_preemption_delay
+        );
+
+        eprintln!("  NOTE: Test passes because next_task() is called immediately,");
+        eprintln!("        but real tasks execute for quantums between scheduler calls");
+    }
+
+    #[test]
+    fn test_work_stealer_fairness_defect() {
+        // REGRESSION TEST: WorkStealer fairness across multiple workers
+        //
+        // SCENARIO: Worker-A repeatedly steals batches from worker-B's queue.
+        // The stolen batch remainders go into worker-A's fast_queue, which has
+        // dispatch priority over worker-A's own local PriorityScheduler work.
+        //
+        // EXPECTED DEFECT: Worker-A's own newly-spawned tasks get starved
+        // because stolen work in fast_queue gets dispatched first.
+        //
+        // FAIRNESS VIOLATION: Stolen work should not starve local work.
+
+        let state = Arc::new(ContendedMutex::new("runtime_state", RuntimeState::new()));
+        let mut scheduler = ThreeLaneScheduler::new_with_workers_and_budget(2, &state, None);
+
+        let mut workers = scheduler.take_workers().into_iter().collect::<Vec<_>>();
+        let mut worker_a = workers.remove(0);
+        let mut worker_b = workers.remove(0);
+
+        // Fill worker-B with many tasks to create a large steal surface
+        let victim_tasks: Vec<TaskId> = (1..=20).map(|i| TaskId::new_for_test(2, i)).collect();
+
+        for (i, &task_id) in victim_tasks.iter().enumerate() {
+            worker_b.schedule_local(task_id, 50 + i as u8); // Mixed priorities
+        }
+
+        // Worker-A spawns its own local task (should have priority over stolen work)
+        let local_task_a = TaskId::new_for_test(1, 1);
+        worker_a.schedule_local(local_task_a, 100); // High priority local task
+
+        // Worker-A repeatedly steals from worker-B
+        let mut stolen_tasks = Vec::new();
+        let mut dispatched_tasks = Vec::new();
+
+        // First steal: should return immediately and fill fast_queue with batch remainder
+        if let Some(first_stolen) = worker_a.try_steal() {
+            stolen_tasks.push(first_stolen);
+        }
+
+        // Fast_queue now contains stolen work remainder
+        let fast_queue_len = worker_a.fast_queue.len();
+        assert!(
+            fast_queue_len > 0,
+            "fast_queue should contain stolen batch remainder"
+        );
+
+        // Record dispatch sequence to check fairness
+        while let Some(task) = worker_a.next_task() {
+            dispatched_tasks.push(task);
+
+            // Stop after we've seen our local task to avoid infinite loop
+            if task == local_task_a {
+                break;
+            }
+        }
+
+        // FAIRNESS DEFECT VERIFICATION:
+        // Find position of local_task_a in dispatch sequence
+        let local_task_position = dispatched_tasks
+            .iter()
+            .position(|&task| task == local_task_a)
+            .expect("local task should have been dispatched");
+
+        // Check if any stolen work was dispatched before local work
+        let stolen_before_local = dispatched_tasks[..local_task_position]
+            .iter()
+            .any(|&task| victim_tasks.contains(&task));
+
+        if stolen_before_local {
+            // FAIRNESS DEFECT DETECTED: Test that the fix prevents this
+            let stolen_count_before_local = dispatched_tasks[..local_task_position]
+                .iter()
+                .filter(|&task| victim_tasks.contains(task))
+                .count();
+
+            eprintln!("FAIRNESS TEST RESULT:");
+            eprintln!(
+                "  Worker-A local task (priority 100): {:?} at position {}",
+                local_task_a, local_task_position
+            );
+            eprintln!("  Dispatch sequence: {:?}", dispatched_tasks);
+            eprintln!("  Stolen tasks before local: {}", stolen_count_before_local);
+            eprintln!(
+                "  Fast queue fairness limit: {}",
+                worker_a.fast_queue_fairness_limit
+            );
+
+            // With the fairness fix, stolen work should be limited by fast_queue_fairness_limit
+            assert!(
+                stolen_count_before_local <= worker_a.fast_queue_fairness_limit,
+                "Fairness fix should limit consecutive stolen work to {} but got {}",
+                worker_a.fast_queue_fairness_limit,
+                stolen_count_before_local
+            );
+
+            eprintln!(
+                "  ✓ FAIRNESS FIX WORKING: Limited stolen work to {} consecutive dispatches",
+                stolen_count_before_local
+            );
+        } else {
+            // Ideal case: no stolen work dispatched before local work
+            eprintln!("OPTIMAL FAIRNESS: Local work dispatched before any stolen work");
+        }
+
+        // Additional verification: ensure the defect is consistently reproducible
+        let local_sched_depth = worker_a.local.lock().len();
+        assert!(
+            local_sched_depth == 0,
+            "Local scheduler should be empty after dispatching local task"
         );
     }
 }

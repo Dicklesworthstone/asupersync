@@ -83,8 +83,7 @@ fn read_otel_source() -> String {
 }
 
 fn read_timeout_future_source() -> String {
-    let path =
-        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/time/timeout_future.rs");
+    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/time/timeout_future.rs");
     std::fs::read_to_string(&path).expect("read timeout_future.rs")
 }
 
@@ -171,9 +170,7 @@ fn timeout_error_maps_to_non_retryable() {
     // The timeout map_err must produce non_retryable, NOT
     // retryable. Look for the canonical pattern.
     assert!(
-        body.contains(
-            ".map_err(|_| OtlpError::non_retryable(\"OTLP request timeout\"))"
-        ),
+        body.contains(".map_err(|_| OtlpError::non_retryable(\"OTLP request timeout\"))"),
         "REGRESSION: timeout error mapping is no longer \
          `.map_err(|_| OtlpError::non_retryable(\"OTLP request \
          timeout\"))`. If the timeout now maps to a Retryable \
@@ -223,11 +220,7 @@ fn timeout_future_holds_inner_future_as_pinned_field() {
 
     // Forbid Arc / Box wrapping that would defeat drop
     // propagation.
-    let suspect_field_wraps = [
-        "future: Arc<",
-        "future: Rc<",
-        "future: Box<dyn Future",
-    ];
+    let suspect_field_wraps = ["future: Arc<", "future: Rc<", "future: Box<dyn Future"];
     for pat in &suspect_field_wraps {
         assert!(
             !body.contains(pat),
@@ -252,9 +245,7 @@ fn timeout_future_returns_elapsed_and_marks_completed() {
 
     let fn_marker = "fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {";
     let start = source.find(fn_marker).expect("TimeoutFuture::poll");
-    let body_end = source[start..]
-        .find("\n    }\n")
-        .expect("poll body close");
+    let body_end = source[start..].find("\n    }\n").expect("poll body close");
     let body = &source[start..start + body_end];
 
     assert!(
@@ -297,8 +288,7 @@ fn retry_loop_returns_immediately_on_non_retryable_timeout() {
     // The retry loop must have an explicit non-retryable arm
     // that returns Err.
     assert!(
-        body.contains("Err(e) => {")
-            && body.contains("// Non-retryable error"),
+        body.contains("Err(e) => {") && body.contains("// Non-retryable error"),
         "REGRESSION: the retry loop no longer has a clear \
          non-retryable Err arm. Without it, a timeout (mapped \
          to OtlpError::non_retryable) might fall through to \
@@ -404,9 +394,7 @@ fn body_passed_by_reference_to_send_request_once() {
 
     let fn_marker = "async fn send_request_once(";
     let start = source.find(fn_marker).expect("send_request_once");
-    let body_start = source[start..]
-        .find('{')
-        .expect("body open") + start;
+    let body_start = source[start..].find('{').expect("body open") + start;
     let signature = &source[start..body_start];
 
     assert!(

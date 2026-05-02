@@ -5897,4 +5897,84 @@ worker_threads = 16
         drop(rt_a);
         drop(rt_b);
     }
+
+    /// AUDIT: Configuration validation approach - normalization vs rejection.
+    ///
+    /// This test pins the current behavior where invalid configurations are
+    /// normalized to safe defaults rather than rejected with clear errors.
+    /// The philosophy is defensive programming - fix invalid inputs rather
+    /// than crashing. However, this may mask misconfigurations.
+    #[test]
+    fn audit_configuration_validation_normalizes_invalid_inputs() {
+        init_test_logging();
+
+        // Test zero worker threads - should be normalized to 1
+        let runtime = RuntimeBuilder::new()
+            .worker_threads(0)
+            .build()
+            .expect("zero worker_threads should be normalized, not rejected");
+
+        // Verify the runtime was built successfully despite invalid input
+        assert!(
+            runtime.inner.config.worker_threads > 0,
+            "worker_threads should be normalized from 0 to positive value"
+        );
+        drop(runtime);
+
+        // Test other zero values that should be normalized
+        let mut config = crate::runtime::config::RuntimeConfig::default();
+        config.worker_threads = 0;
+        config.poll_budget = 0;
+        config.steal_batch_size = 0;
+        config.cancel_lane_max_streak = 0;
+        config.governor_interval = 0;
+        config.thread_stack_size = 0;
+
+        config.normalize();
+
+        assert_eq!(
+            config.worker_threads, 1,
+            "zero worker_threads normalized to 1"
+        );
+        assert_eq!(config.poll_budget, 1, "zero poll_budget normalized to 1");
+        assert_eq!(
+            config.steal_batch_size, 1,
+            "zero steal_batch_size normalized to 1"
+        );
+        assert_eq!(
+            config.cancel_lane_max_streak, 1,
+            "zero cancel_lane_max_streak normalized to 1"
+        );
+        assert_eq!(
+            config.governor_interval, 1,
+            "zero governor_interval normalized to 1"
+        );
+        assert_eq!(
+            config.thread_stack_size,
+            2 * 1024 * 1024,
+            "zero thread_stack_size normalized to 2MB"
+        );
+
+        // Verify no validation errors are returned for extreme values
+        let runtime_extreme = RuntimeBuilder::new()
+            .worker_threads(usize::MAX) // Extreme value
+            .build()
+            .expect("extreme worker_threads should be accepted, not rejected");
+
+        assert_eq!(
+            runtime_extreme.inner.config.worker_threads,
+            usize::MAX,
+            "extreme worker_threads value should be accepted as-is"
+        );
+        drop(runtime_extreme);
+
+        // FINDING: RuntimeBuilder follows normalization approach, not validation.
+        // - Zero values are silently corrected to safe defaults
+        // - Extreme values are accepted without bounds checking
+        // - No ConfigurationError is returned for invalid combinations
+        //
+        // This is SOUND behavior for defensive programming, but may mask
+        // genuine misconfigurations. Alternative would be strict validation
+        // with clear error messages for invalid inputs.
+    }
 }

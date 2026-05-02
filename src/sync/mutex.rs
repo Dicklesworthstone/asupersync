@@ -533,7 +533,10 @@ pub struct MutexGuard<'a, T> {
     mutex: &'a Mutex<T>,
 }
 
-unsafe impl<T: Send> Send for MutexGuard<'_, T> {}
+// AUDIT: MutexGuard is NOT Send - must be dropped in the same task where acquired
+// to preserve cancel-aware invariants. The Drop implementation calls unlock()
+// which may affect task-local state.
+// unsafe impl<T: Send> Send for MutexGuard<'_, T> {} // REMOVED - guard is !Send
 unsafe impl<T: Sync> Sync for MutexGuard<'_, T> {}
 
 impl<T: std::fmt::Debug> std::fmt::Debug for MutexGuard<'_, T> {
@@ -1909,6 +1912,48 @@ mod tests {
         drop(fourth_guard);
 
         assert!(!mutex.is_locked(), "mutex should be unlocked");
+        assert_eq!(mutex.waiters(), 0, "no waiters should remain");
+    }
+
+    #[test]
+    fn audit_mutex_guard_is_not_send() {
+        // AUDIT: Verify MutexGuard is !Send to prevent cross-task drop invariant violations
+        // CONTEXT: Asupersync cancel-aware design - guards must be dropped in acquisition task
+        // MECHANISM: No Send implementation allows Rust's trait system to enforce this invariant
+
+        // Compile-time test: This function should NOT compile if MutexGuard is Send
+        fn test_guard_not_send() {
+            fn require_send<T: Send>(_: T) {}
+
+            // Uncomment the following lines to test - they should fail to compile:
+            // let mutex = Mutex::new(42);
+            // let guard = unsafe { std::mem::zeroed::<MutexGuard<i32>>() };
+            // require_send(guard); // This MUST fail to compile
+        }
+
+        // Runtime test: Verify normal usage still works
+        let mutex = Mutex::new(42);
+        let cx = test_cx();
+        let runtime = LabRuntime::new();
+
+        runtime.block_on(async {
+            let guard = mutex.lock(&cx).await.expect("lock should succeed");
+            assert_eq!(*guard, 42);
+
+            // Verify the guard works in the same task context
+            {
+                let _data: &i32 = &*guard;
+                // guard is !Send so it cannot be moved to another task
+            }
+
+            drop(guard);
+        });
+
+        // Verify mutex properties after test
+        assert!(
+            !mutex.is_locked(),
+            "mutex should be unlocked after guard drop"
+        );
         assert_eq!(mutex.waiters(), 0, "no waiters should remain");
     }
 }

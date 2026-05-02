@@ -131,7 +131,8 @@ fn check_cardinality_filters_drop_labels_first() {
     // denied label keys into the cardinality tracker (which
     // surfaces in lock-metrics / debug dumps).
     let source = read_otel_source();
-    let fn_marker = "fn check_cardinality(&self, metric: &str, labels: &[KeyValue]) -> Option<Vec<KeyValue>> {";
+    let fn_marker =
+        "fn check_cardinality(&self, metric: &str, labels: &[KeyValue]) -> Option<Vec<KeyValue>> {";
     let start = source.find(fn_marker).expect("check_cardinality fn");
     let body_end = source[start..]
         .find("\n    }\n")
@@ -140,8 +141,7 @@ fn check_cardinality_filters_drop_labels_first() {
 
     // The filter must be present.
     assert!(
-        body.contains("self.config.drop_labels.contains")
-            && body.contains(".filter("),
+        body.contains("self.config.drop_labels.contains") && body.contains(".filter("),
         "REGRESSION: check_cardinality no longer filters labels \
          via `self.config.drop_labels.contains(...)` inside a \
          `.filter(...)` chain. The denylist is the load-bearing \
@@ -186,7 +186,8 @@ fn check_cardinality_returns_filtered_labels_to_caller() {
     // the unfiltered labels would pass the denied keys through
     // to the SDK.
     let source = read_otel_source();
-    let fn_marker = "fn check_cardinality(&self, metric: &str, labels: &[KeyValue]) -> Option<Vec<KeyValue>> {";
+    let fn_marker =
+        "fn check_cardinality(&self, metric: &str, labels: &[KeyValue]) -> Option<Vec<KeyValue>> {";
     let start = source.find(fn_marker).expect("check_cardinality fn");
     let body_end = source[start..]
         .find("\n    }\n")
@@ -244,9 +245,7 @@ fn metrics_provider_callers_use_check_cardinality_when_labels_present() {
         // verify check_cardinality precedes the &labels use.
         let ctx_start = abs.saturating_sub(600);
         // Char-boundary safe.
-        let ctx_start = block[..ctx_start]
-            .rfind('\n')
-            .map_or(0, |p| p + 1);
+        let ctx_start = block[..ctx_start].rfind('\n').map_or(0, |p| p + 1);
         let ctx = &block[ctx_start..abs];
         let routed_through_filter = ctx.contains("check_cardinality");
 
@@ -280,7 +279,8 @@ fn check_cardinality_filter_is_exact_key_match() {
     // configuring "id" as denied would also drop "request_id"
     // under prefix-matching).
     let source = read_otel_source();
-    let fn_marker = "fn check_cardinality(&self, metric: &str, labels: &[KeyValue]) -> Option<Vec<KeyValue>> {";
+    let fn_marker =
+        "fn check_cardinality(&self, metric: &str, labels: &[KeyValue]) -> Option<Vec<KeyValue>> {";
     let start = source.find(fn_marker).expect("check_cardinality fn");
     let body_end = source[start..]
         .find("\n    }\n")
@@ -307,9 +307,7 @@ fn check_cardinality_filter_is_exact_key_match() {
     for pat in &suspect_fuzzy {
         // Look only inside the filter expression — the rest of
         // check_cardinality may have legitimate uses.
-        let filter_start = body
-            .find(".filter(|kv|")
-            .expect("filter expression");
+        let filter_start = body.find(".filter(|kv|").expect("filter expression");
         let filter_end = body[filter_start..]
             .find(".cloned()")
             .expect("filter chain end");
@@ -370,7 +368,10 @@ mod behavioral {
             !filtered.iter().any(|kv| kv.key.as_str() == "user_id"),
             "REGRESSION: 'user_id' attribute survived the \
              denylist filter. value: {:?}",
-            filtered.iter().map(|kv| kv.key.as_str()).collect::<Vec<_>>(),
+            filtered
+                .iter()
+                .map(|kv| kv.key.as_str())
+                .collect::<Vec<_>>(),
         );
         // outcome and region MUST be preserved.
         assert!(filtered.iter().any(|kv| kv.key.as_str() == "outcome"));
@@ -392,7 +393,11 @@ mod behavioral {
             .expect("under cap, returns Some");
 
         let kept: Vec<&str> = filtered.iter().map(|kv| kv.key.as_str()).collect();
-        assert_eq!(kept, vec!["outcome"], "only outcome should remain; got {kept:?}");
+        assert_eq!(
+            kept,
+            vec!["outcome"],
+            "only outcome should remain; got {kept:?}"
+        );
     }
 
     #[test]
@@ -420,8 +425,8 @@ mod behavioral {
         // would need to update this test.)
         let metrics = make_metrics(&["user_id"]);
         let labels = [
-            KeyValue::new("user_id", "alice"),    // denied
-            KeyValue::new("User_Id", "ALICE"),    // NOT denied
+            KeyValue::new("user_id", "alice"), // denied
+            KeyValue::new("User_Id", "ALICE"), // NOT denied
         ];
         let filtered = metrics
             .check_cardinality("test", &labels)

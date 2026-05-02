@@ -30,6 +30,7 @@ pub use crate::test_logging::{
     TempDirFixture, TestContext, TestEnvironment, derive_component_seed, derive_entropy_seed,
     derive_scenario_seed, wait_until_healthy,
 };
+
 pub use crate::test_ndjson::{
     NDJSON_SCHEMA_VERSION, NdjsonEvent, NdjsonLogger, artifact_base_dir, artifact_bundle_dir,
     ndjson_file_name, trace_file_name, write_artifact_bundle,
@@ -37,29 +38,86 @@ pub use crate::test_ndjson::{
 use crate::time::timeout;
 use parking_lot::Mutex;
 use std::future::Future;
-use std::sync::Once;
+use std::sync::{Arc, Once};
 use std::time::Duration;
+use tracing::Dispatch;
 use tracing_subscriber::fmt::format::FmtSpan;
 
-static INIT_LOGGING: Once = Once::new();
+static GLOBAL_INIT_LOGGING: Once = Once::new();
 #[allow(dead_code)] // Used by other modules' #[cfg(test)] blocks via test-internals feature
 static ENV_LOCK: Mutex<()> = Mutex::new(());
 
 /// Default seed used by test lab helpers.
 pub const DEFAULT_TEST_SEED: u64 = 0xDEAD_BEEF;
 
+/// Runtime-isolated subscriber handle for per-runtime tracing.
+///
+/// **CRITICAL**: This fixes the global subscriber conflict where multiple
+/// runtimes in the same process would interfere with each other's tracing.
+/// Each runtime gets its own isolated subscriber instead of sharing global state.
+#[derive(Debug, Clone)]
+pub struct RuntimeSubscriberHandle {
+    _dispatch: Arc<Dispatch>,
+    runtime_id: String,
+}
+
+impl RuntimeSubscriberHandle {
+    /// Create a per-runtime subscriber with isolation from other runtimes.
+    ///
+    /// **SECURITY FIX**: This prevents global subscriber state conflicts
+    /// where the second runtime would lose tracing output due to the
+    /// Once guard in the old implementation.
+    pub fn new_isolated(runtime_id: String, level: tracing::Level) -> Self {
+        let subscriber = tracing_subscriber::fmt()
+            .with_max_level(level)
+            .with_test_writer()
+            .with_file(true)
+            .with_line_number(true)
+            .with_target(true)
+            .with_thread_ids(true)
+            .with_span_events(FmtSpan::CLOSE)
+            .with_ansi(false)
+            .finish();
+
+        let dispatch = Arc::new(Dispatch::new(subscriber));
+
+        Self {
+            _dispatch: dispatch,
+            runtime_id,
+        }
+    }
+
+    /// Execute a closure with this runtime's subscriber as the default.
+    ///
+    /// **ISOLATION**: Tracing events within the closure use this runtime's
+    /// subscriber, regardless of global subscriber state.
+    pub fn with_subscriber<F, R>(&self, f: F) -> R
+    where
+        F: FnOnce() -> R,
+    {
+        tracing::dispatcher::with_default(&*self._dispatch, f)
+    }
+}
+
 /// Initialize test logging with trace-level output.
 ///
-/// Safe to call multiple times; only initializes once.
+/// **DEPRECATED**: Use `init_runtime_logging()` for new code to get proper
+/// per-runtime isolation. This function maintains global semantics for
+/// backwards compatibility with existing tests.
+///
+/// Safe to call multiple times; only initializes once per process.
 pub fn init_test_logging() {
     init_test_logging_with_level(tracing::Level::TRACE);
 }
 
 /// Initialize test logging with a custom level.
 ///
-/// The first call wins; later calls are no-ops.
+/// **DEPRECATED**: Use `init_runtime_logging_with_level()` for new code.
+///
+/// The first call wins; later calls are no-ops. This maintains the old
+/// behavior for compatibility but is vulnerable to multi-runtime conflicts.
 pub fn init_test_logging_with_level(level: tracing::Level) {
-    INIT_LOGGING.call_once(|| {
+    GLOBAL_INIT_LOGGING.call_once(|| {
         let _ = tracing_subscriber::fmt()
             .with_max_level(level)
             .with_test_writer()
@@ -72,6 +130,31 @@ pub fn init_test_logging_with_level(level: tracing::Level) {
             .try_init();
     });
 }
+
+/// Initialize per-runtime logging with trace-level output.
+///
+/// **RECOMMENDED**: Use this for new test code that needs runtime isolation.
+/// Returns a handle that can be used to execute code with this runtime's
+/// subscriber active.
+///
+/// **SAFETY**: Each runtime gets its own isolated subscriber, preventing
+/// global subscriber conflicts that break tracing for subsequent runtimes.
+pub fn init_runtime_logging(runtime_id: String) -> RuntimeSubscriberHandle {
+    init_runtime_logging_with_level(runtime_id, tracing::Level::TRACE)
+}
+
+/// Initialize per-runtime logging with a custom level.
+///
+/// **ISOLATION**: Creates a completely isolated subscriber for this runtime.
+/// Multiple runtimes can coexist without interfering with each other's
+/// tracing output.
+pub fn init_runtime_logging_with_level(
+    runtime_id: String,
+    level: tracing::Level,
+) -> RuntimeSubscriberHandle {
+    RuntimeSubscriberHandle::new_isolated(runtime_id, level)
+}
+
 
 /// Acquire the global environment lock for tests that mutate env vars.
 #[allow(dead_code)] // Used by other modules' #[cfg(test)] blocks

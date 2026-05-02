@@ -59,8 +59,8 @@
 //! should add an `// audit-ok-await-lock:` annotation on the
 //! same line and update this test's allowlist.
 
-use std::path::PathBuf;
 use std::ffi::OsStr;
+use std::path::PathBuf;
 
 /// Recursively walk a directory and return all `.rs` file paths.
 fn collect_rs_files(dir: &PathBuf) -> Vec<PathBuf> {
@@ -113,7 +113,9 @@ fn scan_file_for_bad_pattern(content: &str) -> Vec<(usize, String)> {
         // followed by `.clone();` or `.value.clone();` (which
         // are typical "extract-then-drop" patterns).
         let is_guard_bind = (trimmed.starts_with("let mut ") || trimmed.starts_with("let "))
-            && (line.contains(".lock();") || line.contains(".read();") || line.contains(".write();"))
+            && (line.contains(".lock();")
+                || line.contains(".read();")
+                || line.contains(".write();"))
             && !line.contains("// audit-ok")
             && !line.contains(AUDIT_OK_MARKER);
 
@@ -126,11 +128,7 @@ fn scan_file_for_bad_pattern(content: &str) -> Vec<(usize, String)> {
             .strip_prefix("let mut ")
             .or_else(|| trimmed.strip_prefix("let "))
             .unwrap_or("");
-        let var_name = after_let
-            .split('=')
-            .next()
-            .map(str::trim)
-            .unwrap_or("");
+        let var_name = after_let.split('=').next().map(str::trim).unwrap_or("");
         if var_name.is_empty() || var_name.starts_with('_') {
             // _-prefixed bindings are typically RAII-only and
             // dropped at end of scope; tolerate (the pattern
@@ -165,8 +163,12 @@ fn scan_file_for_bad_pattern(content: &str) -> Vec<(usize, String)> {
             }
 
             // Re-bind shadowing the guard? Treat as drop.
-            if follow_line.trim_start().starts_with(&format!("let {var_name}"))
-                || follow_line.trim_start().starts_with(&format!("let mut {var_name}"))
+            if follow_line
+                .trim_start()
+                .starts_with(&format!("let {var_name}"))
+                || follow_line
+                    .trim_start()
+                    .starts_with(&format!("let mut {var_name}"))
             {
                 break;
             }
@@ -204,12 +206,7 @@ fn project_dir(rel: &str) -> PathBuf {
 
 #[test]
 fn no_await_while_holding_lock_in_runtime_sync_cx_channel() {
-    let scopes = [
-        "src/runtime",
-        "src/sync",
-        "src/cx",
-        "src/channel",
-    ];
+    let scopes = ["src/runtime", "src/sync", "src/cx", "src/channel"];
 
     let mut all_findings: Vec<(String, usize, String)> = Vec::new();
 

@@ -2297,4 +2297,45 @@ mod tests {
 
         crate::test_complete!("audit_sender_drop_during_receiver_poll");
     }
+
+    /// Audit test for Sender::is_closed() eager detection of receiver drop.
+    ///
+    /// Per Tokio-compat semantics, is_closed() must return true IMMEDIATELY after
+    /// receiver drop, not lazily after try_send. This test verifies the eager
+    /// behavior by checking is_closed() directly after receiver drop without
+    /// any intervening send attempts.
+    #[test]
+    fn audit_sender_is_closed_eager_detection() {
+        init_test("audit_sender_is_closed_eager_detection");
+        let (tx, rx) = channel::<i32>();
+
+        // Before receiver drop: should not be closed
+        crate::assert_with_log!(
+            !tx.is_closed(),
+            "sender should not report closed before receiver drop",
+            false,
+            tx.is_closed()
+        );
+
+        // Drop receiver
+        drop(rx);
+
+        // Immediately after receiver drop: should be closed WITHOUT needing try_send
+        crate::assert_with_log!(
+            tx.is_closed(),
+            "sender should report closed IMMEDIATELY after receiver drop (eager detection)",
+            true,
+            tx.is_closed()
+        );
+
+        // Multiple calls should remain consistent
+        crate::assert_with_log!(
+            tx.is_closed(),
+            "sender should remain closed on subsequent calls",
+            true,
+            tx.is_closed()
+        );
+
+        crate::test_complete!("audit_sender_is_closed_eager_detection");
+    }
 }

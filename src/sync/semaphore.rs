@@ -3770,4 +3770,154 @@ mod tests {
 
         crate::test_complete!("audit_semaphore_forget_permanently_leaks_permits");
     }
+
+    /// Property test auditing semaphore permit counter integrity.
+    ///
+    /// Verifies that through any sequence of acquire/release/forget/add_permits operations,
+    /// the permit counter never goes negative (which would wrap around in usize).
+    /// Tests the core invariant: permits >= 0 at all times under all interleavings.
+    #[test]
+    fn audit_semaphore_permit_counter_never_negative() {
+        init_test("audit_semaphore_permit_counter_never_negative");
+
+        let cx = test_cx();
+        let sem = Arc::new(Semaphore::new(3)); // Start with 3 permits
+
+        // Test 1: Rapid acquire/release cycles cannot cause underflow
+        {
+            // Acquire all permits
+            let permit1 = sem.try_acquire(1).expect("should get permit 1");
+            let permit2 = sem.try_acquire(1).expect("should get permit 2");
+            let permit3 = sem.try_acquire(1).expect("should get permit 3");
+
+            // Should have 0 permits now
+            assert_eq!(sem.available_permits(), 0, "all permits acquired");
+            assert!(sem.try_acquire(1).is_err(), "no more permits available");
+
+            // Release permits one by one, verifying counter integrity
+            drop(permit1);
+            assert_eq!(sem.available_permits(), 1, "permit 1 restored");
+
+            drop(permit2);
+            assert_eq!(sem.available_permits(), 2, "permit 2 restored");
+
+            drop(permit3);
+            assert_eq!(sem.available_permits(), 3, "all permits restored");
+        }
+
+        // Test 2: Forget operations cannot cause negative permits
+        {
+            let permit1 = sem.try_acquire(2).expect("should get 2 permits");
+            let permit2 = sem.try_acquire(1).expect("should get 1 permit");
+
+            assert_eq!(sem.available_permits(), 0, "all permits taken");
+
+            // Forget permit1 - this should NOT return permits to pool
+            permit1.forget();
+            assert_eq!(sem.available_permits(), 0, "forget does not return permits");
+
+            // Drop permit2 normally - should restore only 1 permit
+            drop(permit2);
+            assert_eq!(sem.available_permits(), 1, "normal drop restores permit");
+
+            // The 2 permits from permit1 are permanently leaked (not returned)
+            // This is correct behavior for forget()
+        }
+
+        // Test 3: Add permits cannot overflow and cause wraparound
+        {
+            // Current state: 1 permit available (from previous test)
+            sem.add_permits(usize::MAX - 5); // Try to cause overflow
+
+            // Should saturate at usize::MAX, not wrap around
+            let permits = sem.available_permits();
+            assert!(
+                permits > 0,
+                "permits should remain positive after overflow attempt"
+            );
+
+            // Should still be able to acquire permits normally
+            let _permit = sem
+                .try_acquire(1)
+                .expect("should still work after overflow attempt");
+        }
+
+        // Test 4: Direct verification that permit counter cannot underflow
+        {
+            let sem_empty = Semaphore::new(0); // Start with 0 permits
+
+            // Should not be able to acquire when permits = 0
+            assert!(
+                sem_empty.try_acquire(1).is_err(),
+                "cannot acquire from empty semaphore"
+            );
+            assert_eq!(sem_empty.available_permits(), 0, "still 0 permits");
+
+            // Add one permit
+            sem_empty.add_permits(1);
+            assert_eq!(sem_empty.available_permits(), 1, "now 1 permit");
+
+            // Acquire and forget it
+            let permit = sem_empty.try_acquire(1).expect("should get the permit");
+            permit.forget(); // This zeroes permit.count but doesn't affect semaphore counter
+            assert_eq!(
+                sem_empty.available_permits(),
+                0,
+                "back to 0 permits after forget"
+            );
+
+            // Should still not be able to acquire (proves forget didn't underflow)
+            assert!(
+                sem_empty.try_acquire(1).is_err(),
+                "still cannot acquire after forget"
+            );
+        }
+
+        // Test 5: Multiple threads cannot cause race condition underflows
+        std::thread::scope(|s| {
+            let sem_ref = &sem; // sem currently has usize::MAX - 4 permits (from test 3)
+            let permit_counters = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+
+            // Spawn multiple threads doing rapid acquire/release cycles
+            let handles: Vec<_> = (0..4)
+                .map(|_| {
+                    let counter = Arc::clone(&permit_counters);
+                    s.spawn(move || {
+                        for i in 0..100 {
+                            if let Ok(permit) = sem_ref.try_acquire(1) {
+                                counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                                if i % 5 == 0 {
+                                    permit.forget(); // Some permits are leaked
+                                } else {
+                                    drop(permit); // Others are returned normally
+                                }
+                            }
+                        }
+                    })
+                })
+                .collect();
+
+            // Wait for all threads
+            for handle in handles {
+                handle.join().unwrap();
+            }
+
+            // After all operations, permit count should still be non-negative
+            let final_permits = sem.available_permits();
+            // We can't predict exact count due to forgotten permits and the usize::MAX from test 3,
+            // but it should be a large positive number
+            assert!(
+                final_permits > 0,
+                "permits should remain positive after concurrent operations"
+            );
+
+            let total_acquired = permit_counters.load(std::sync::atomic::Ordering::Relaxed);
+            assert!(
+                total_acquired > 0,
+                "threads should have acquired some permits"
+            );
+        });
+
+        crate::test_complete!("audit_semaphore_permit_counter_never_negative");
+    }
 }

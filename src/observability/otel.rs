@@ -666,6 +666,172 @@ pub struct InMemoryExporter {
     snapshots: Mutex<Vec<MetricsSnapshot>>,
 }
 
+/// Bounded export queue with OTLP-compliant load shedding.
+///
+/// When the export queue reaches capacity, drops OLDEST batches to preserve
+/// recent data (per OTLP exporter best practices). This prevents memory
+/// exhaustion under sustained high export load while maintaining observability
+/// of the most recent system state.
+#[derive(Debug)]
+pub struct BoundedExportQueue<T> {
+    queue: Mutex<std::collections::VecDeque<T>>,
+    capacity: usize,
+    dropped_batches: std::sync::atomic::AtomicU64,
+}
+
+impl<T> BoundedExportQueue<T> {
+    /// Create a new bounded export queue with the specified capacity.
+    #[must_use]
+    pub fn new(capacity: usize) -> Self {
+        Self {
+            queue: Mutex::new(std::collections::VecDeque::with_capacity(capacity)),
+            capacity,
+            dropped_batches: std::sync::atomic::AtomicU64::new(0),
+        }
+    }
+
+    /// Enqueue a batch for export. If queue is full, drops OLDEST batch first.
+    ///
+    /// Returns `true` if a batch was dropped to make room (load shedding occurred).
+    pub fn enqueue(&self, batch: T) -> bool {
+        let mut queue = self.queue.lock();
+
+        // Apply load shedding: drop oldest batch if at capacity
+        let dropped = if queue.len() >= self.capacity {
+            queue.pop_front(); // Remove OLDEST batch (correct OTLP behavior)
+            self.dropped_batches
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            true
+        } else {
+            false
+        };
+
+        queue.push_back(batch); // Add new batch to end
+        dropped
+    }
+
+    /// Dequeue the next batch for export (FIFO order).
+    pub fn dequeue(&self) -> Option<T> {
+        self.queue.lock().pop_front()
+    }
+
+    /// Get the current queue depth.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.queue.lock().len()
+    }
+
+    /// Check if the queue is empty.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.queue.lock().is_empty()
+    }
+
+    /// Get the number of batches dropped due to load shedding.
+    #[must_use]
+    pub fn dropped_count(&self) -> u64 {
+        self.dropped_batches
+            .load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// Get the configured capacity.
+    #[must_use]
+    pub fn capacity(&self) -> usize {
+        self.capacity
+    }
+}
+
+/// OTLP-compliant exporter with bounded export queue and oldest-drop load shedding.
+///
+/// Implements OTLP exporter best practices:
+/// - Bounded export queue prevents memory exhaustion
+/// - Drop OLDEST batches when queue is full (preserves recent data)
+/// - Maintains export order (FIFO)
+/// - Tracks load shedding metrics
+#[derive(Debug)]
+pub struct LoadSheddingExporter {
+    inner: Box<dyn MetricsExporter>,
+    export_queue: BoundedExportQueue<MetricsSnapshot>,
+}
+
+impl LoadSheddingExporter {
+    /// Create a new load shedding exporter.
+    ///
+    /// # Arguments
+    /// * `inner` - The underlying exporter to send batches to
+    /// * `queue_capacity` - Maximum number of batches to queue (recommended: 100-1000)
+    #[must_use]
+    pub fn new(inner: Box<dyn MetricsExporter>, queue_capacity: usize) -> Self {
+        Self {
+            inner,
+            export_queue: BoundedExportQueue::new(queue_capacity),
+        }
+    }
+
+    /// Get load shedding statistics.
+    #[must_use]
+    pub fn load_shedding_stats(&self) -> LoadSheddingStats {
+        LoadSheddingStats {
+            queue_depth: self.export_queue.len(),
+            queue_capacity: self.export_queue.capacity(),
+            dropped_batches: self.export_queue.dropped_count(),
+        }
+    }
+
+    /// Process all queued batches (typically called by export background task).
+    pub fn process_queue(&self) -> Result<usize, ExportError> {
+        let mut processed = 0;
+
+        while let Some(batch) = self.export_queue.dequeue() {
+            self.inner.export(&batch)?;
+            processed += 1;
+        }
+
+        Ok(processed)
+    }
+}
+
+impl MetricsExporter for LoadSheddingExporter {
+    /// Queue metrics for export with load shedding.
+    ///
+    /// When queue is full, drops OLDEST batch to make room for new data.
+    /// This preserves recent observability data per OTLP best practices.
+    fn export(&self, metrics: &MetricsSnapshot) -> Result<(), ExportError> {
+        let dropped = self.export_queue.enqueue(metrics.clone());
+
+        if dropped {
+            // Log load shedding event (but don't fail the export)
+            #[cfg(feature = "tracing-integration")]
+            crate::tracing_compat::warn!(
+                target: "asupersync::observability::otel",
+                "OTLP export queue full: dropped oldest batch to preserve recent data. \
+                 Queue capacity: {}, dropped total: {}",
+                self.export_queue.capacity(),
+                self.export_queue.dropped_count()
+            );
+        }
+
+        Ok(())
+    }
+
+    fn flush(&self) -> Result<(), ExportError> {
+        // Process all queued batches then flush underlying exporter
+        self.process_queue()?;
+        self.inner.flush()
+    }
+}
+
+/// Load shedding statistics for monitoring export queue health.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LoadSheddingStats {
+    /// Current number of batches in the export queue.
+    pub queue_depth: usize,
+    /// Maximum queue capacity.
+    pub queue_capacity: usize,
+    /// Total number of batches dropped due to load shedding.
+    pub dropped_batches: u64,
+}
+
 impl InMemoryExporter {
     /// Create a new in-memory exporter.
     #[must_use]
@@ -2245,6 +2411,140 @@ mod exporter_tests {
     fn export_error_display() {
         let err = ExportError::new("test error");
         assert!(err.to_string().contains("test error"));
+    }
+
+    #[test]
+    fn otlp_export_queue_load_shedding_drops_oldest_batches() {
+        // AUDIT TEST: OTLP exporter load shedding behavior
+        //
+        // REQUIREMENT: When export channel is full, drop OLDEST batches (correct)
+        // NOT drop NEWEST batches (incorrect) per OTLP exporter best practices.
+        //
+        // GOAL: Preserve recent data over stale data for better observability.
+
+        // Create a mock exporter that tracks what it receives
+        let received_batches = Arc::new(Mutex::new(Vec::<MetricsSnapshot>::new()));
+
+        struct MockTrackingExporter {
+            received: Arc<Mutex<Vec<MetricsSnapshot>>>,
+        }
+
+        impl MetricsExporter for MockTrackingExporter {
+            fn export(&self, metrics: &MetricsSnapshot) -> Result<(), ExportError> {
+                self.received.lock().push(metrics.clone());
+                Ok(())
+            }
+
+            fn flush(&self) -> Result<(), ExportError> {
+                Ok(())
+            }
+        }
+
+        let mock_exporter = MockTrackingExporter {
+            received: Arc::clone(&received_batches),
+        };
+
+        // Create load shedding exporter with small capacity for testing
+        let queue_capacity = 3;
+        let exporter = LoadSheddingExporter::new(Box::new(mock_exporter), queue_capacity);
+
+        // Create identifiable test batches
+        let mut batches = Vec::new();
+        for i in 0..6 {
+            let mut batch = MetricsSnapshot::new();
+            batch.add_counter(
+                "test_metric",
+                vec![("batch_id".to_string(), i.to_string())],
+                i as u64 + 1,
+            );
+            batches.push(batch);
+        }
+
+        // Fill queue beyond capacity to trigger load shedding
+        for batch in &batches {
+            let result = exporter.export(batch);
+            assert!(
+                result.is_ok(),
+                "export should succeed even when dropping oldest"
+            );
+        }
+
+        // Verify load shedding stats
+        let stats = exporter.load_shedding_stats();
+        assert_eq!(stats.queue_capacity, 3, "queue capacity should be 3");
+        assert_eq!(stats.queue_depth, 3, "queue should be full");
+        assert_eq!(
+            stats.dropped_batches, 3,
+            "should have dropped 3 oldest batches"
+        );
+
+        // Process queue and verify OLDEST batches were dropped
+        let processed = exporter
+            .process_queue()
+            .expect("process queue should succeed");
+        assert_eq!(processed, 3, "should have processed 3 batches");
+
+        let received = received_batches.lock();
+        assert_eq!(received.len(), 3, "should have received 3 batches");
+
+        // Verify we kept the NEWEST 3 batches (3, 4, 5) and dropped oldest (0, 1, 2)
+        let received_batch_ids: Vec<String> = received
+            .iter()
+            .map(|batch| {
+                // Extract batch_id from the counter labels
+                batch.counters[0].1[0].1.clone()
+            })
+            .collect();
+
+        assert_eq!(
+            received_batch_ids,
+            vec!["3", "4", "5"],
+            "should preserve NEWEST batches (3,4,5) and drop oldest (0,1,2)"
+        );
+
+        eprintln!("OTLP LOAD SHEDDING AUDIT RESULTS:");
+        eprintln!("  ✓ CORRECT: Drops OLDEST batches when queue is full");
+        eprintln!("  ✓ CORRECT: Preserves NEWEST batches for recent observability");
+        eprintln!("  ✓ CORRECT: Maintains FIFO export order");
+        eprintln!("  Queue capacity: {}", stats.queue_capacity);
+        eprintln!("  Dropped batches: {}", stats.dropped_batches);
+        eprintln!("  Preserved batches: {}", received_batch_ids.join(", "));
+    }
+
+    #[test]
+    fn bounded_export_queue_fifo_order_preserved() {
+        // Test that the bounded queue maintains FIFO order even with load shedding
+        let queue = BoundedExportQueue::new(2);
+
+        // Add items that fit in queue
+        assert!(!queue.enqueue("first"));
+        assert!(!queue.enqueue("second"));
+        assert_eq!(queue.len(), 2);
+        assert_eq!(queue.dropped_count(), 0);
+
+        // Add item that triggers load shedding (drops oldest = "first")
+        assert!(queue.enqueue("third"));
+        assert_eq!(queue.len(), 2);
+        assert_eq!(queue.dropped_count(), 1);
+
+        // Verify FIFO order: should get "second" then "third"
+        assert_eq!(queue.dequeue(), Some("second"));
+        assert_eq!(queue.dequeue(), Some("third"));
+        assert_eq!(queue.dequeue(), None);
+    }
+
+    #[test]
+    fn bounded_export_queue_capacity_limits() {
+        let queue = BoundedExportQueue::new(0); // Zero capacity edge case
+        assert!(queue.enqueue("item"));
+        assert_eq!(queue.len(), 1);
+        assert_eq!(queue.dropped_count(), 0); // No previous item to drop
+
+        let queue = BoundedExportQueue::new(1);
+        assert!(!queue.enqueue("first"));
+        assert!(queue.enqueue("second")); // Drops "first"
+        assert_eq!(queue.dequeue(), Some("second"));
+        assert_eq!(queue.dropped_count(), 1);
     }
 
     // Pure data-type tests (wave 38 – CyanBarn)

@@ -94,11 +94,10 @@ fn read_redis_source() -> String {
 }
 
 fn cmd_bytes_body(source: &str) -> &str {
-    let marker = "pub async fn cmd_bytes(&self, cx: &Cx, args: &[&[u8]]) -> Result<RespValue, RedisError> {";
+    let marker =
+        "pub async fn cmd_bytes(&self, cx: &Cx, args: &[&[u8]]) -> Result<RespValue, RedisError> {";
     let start = source.find(marker).expect("cmd_bytes fn");
-    let body_end = source[start..]
-        .find("\n    }\n")
-        .expect("cmd_bytes close");
+    let body_end = source[start..].find("\n    }\n").expect("cmd_bytes close");
     &source[start..start + body_end]
 }
 
@@ -152,8 +151,7 @@ fn cmd_bytes_caps_redirect_chain() {
     // The exhaustion path must return Err(Protocol(...)) — NOT
     // panic, NOT loop forever, NOT silently succeed.
     assert!(
-        body.contains("RedisError::Protocol(format!(")
-            && body.contains("exceeded maximum of"),
+        body.contains("RedisError::Protocol(format!(") && body.contains("exceeded maximum of"),
         "REGRESSION: cmd_bytes no longer returns a protocol \
          error on redirect-chain exhaustion. The error class \
          and message text are part of the operator's \
@@ -214,9 +212,7 @@ fn ask_branch_does_not_update_slot_map() {
 
     // Find the ASK branch arm.
     let ask_marker = "Redirect::Ask { .. } => {";
-    let ask_start = body
-        .find(ask_marker)
-        .expect("ASK branch must exist");
+    let ask_start = body.find(ask_marker).expect("ASK branch must exist");
     // The ASK branch ends at the next `},\n` at the same
     // indentation level. We scan for it conservatively.
     let ask_end = body[ask_start..]
@@ -286,9 +282,7 @@ fn parse_redirect_distinguishes_moved_from_ask() {
 
     let fn_marker = "fn parse_redirect(msg: &str) -> Option<Redirect> {";
     let start = source.find(fn_marker).expect("parse_redirect fn");
-    let body_end = source[start..]
-        .find("\n}\n")
-        .expect("parse_redirect close");
+    let body_end = source[start..].find("\n}\n").expect("parse_redirect close");
     let body = &source[start..start + body_end];
 
     assert!(
@@ -353,7 +347,8 @@ fn cmd_bytes_doc_describes_caching_and_bound() {
     // The doc lives ABOVE the `pub async fn cmd_bytes` line.
     // Take a window of the 30 lines preceding the fn to scope
     // the doc-text grep.
-    let fn_marker = "pub async fn cmd_bytes(&self, cx: &Cx, args: &[&[u8]]) -> Result<RespValue, RedisError> {";
+    let fn_marker =
+        "pub async fn cmd_bytes(&self, cx: &Cx, args: &[&[u8]]) -> Result<RespValue, RedisError> {";
     let fn_pos = source.find(fn_marker).expect("cmd_bytes fn");
     // Walk backward 30 lines to get the doc block.
     let mut doc_start = fn_pos;
@@ -392,9 +387,7 @@ fn parse_redirect_rejects_empty_or_malformed() {
 
     let fn_marker = "fn parse_redirect(msg: &str) -> Option<Redirect> {";
     let start = source.find(fn_marker).expect("parse_redirect");
-    let body_end = source[start..]
-        .find("\n}\n")
-        .expect("parse_redirect close");
+    let body_end = source[start..].find("\n}\n").expect("parse_redirect close");
     let body = &source[start..start + body_end];
 
     assert!(

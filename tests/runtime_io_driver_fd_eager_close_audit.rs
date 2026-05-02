@@ -113,9 +113,7 @@ fn io_registration_drop_eagerly_deregisters() {
     let start = source
         .find(impl_marker)
         .expect("impl Drop for IoRegistration");
-    let end_rel = source[start..]
-        .find("\n}\n")
-        .expect("Drop impl close");
+    let end_rel = source[start..].find("\n}\n").expect("Drop impl close");
     let body = &source[start..start + end_rel];
 
     assert!(
@@ -159,9 +157,7 @@ fn io_registration_drop_wakes_reactor_for_immediate_visibility() {
 
     let impl_marker = "impl Drop for IoRegistration {";
     let start = source.find(impl_marker).expect("impl Drop");
-    let end_rel = source[start..]
-        .find("\n}\n")
-        .expect("Drop impl close");
+    let end_rel = source[start..].find("\n}\n").expect("Drop impl close");
     let body = &source[start..start + end_rel];
 
     assert!(
@@ -176,9 +172,7 @@ fn io_registration_drop_wakes_reactor_for_immediate_visibility() {
 
     // Defense-in-depth: wake must come BEFORE deregister so
     // the reactor wakes BEFORE its registration view changes.
-    let wake_pos = body
-        .find("self.wake_polling_reactor()")
-        .expect("wake call");
+    let wake_pos = body.find("self.wake_polling_reactor()").expect("wake call");
     let deregister_pos = body
         .find("guard.deregister(self.token)")
         .expect("deregister call");
@@ -203,9 +197,7 @@ fn io_registration_struct_does_not_hold_arc_to_inner_stream() {
 
     let struct_marker = "pub struct IoRegistration {";
     let start = source.find(struct_marker).expect("IoRegistration struct");
-    let end_rel = source[start..]
-        .find("\n}\n")
-        .expect("struct close");
+    let end_rel = source[start..].find("\n}\n").expect("struct close");
     let body = &source[start..start + end_rel];
 
     let suspect_field_patterns = [
@@ -237,9 +229,7 @@ fn tcp_stream_drop_calls_shutdown_on_drop_when_enabled() {
 
     let impl_marker = "impl Drop for TcpStream {";
     let start = source.find(impl_marker).expect("TcpStream Drop impl");
-    let end_rel = source[start..]
-        .find("\n}\n")
-        .expect("Drop impl close");
+    let end_rel = source[start..].find("\n}\n").expect("Drop impl close");
     let body = &source[start..start + end_rel];
 
     assert!(
@@ -284,8 +274,7 @@ fn tcp_stream_inner_is_arc_for_split_support() {
 
     // No Weak<net::TcpStream> field — that would be a smell.
     assert!(
-        !source.contains("Weak<net::TcpStream>")
-            && !source.contains("Weak<std::net::TcpStream>"),
+        !source.contains("Weak<net::TcpStream>") && !source.contains("Weak<std::net::TcpStream>"),
         "REGRESSION: TcpStream now holds a Weak<net::TcpStream>. \
          Weak references would let the FD close while the \
          TcpStream is still in use — use-after-close on the \

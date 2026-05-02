@@ -66,9 +66,7 @@ fn matches_fn_rejects_paths_containing_double_slash() {
     let source = read_router_source();
     let fn_marker = "fn matches(&self, path: &str) -> Option<RouteMatch> {";
     let start = source.find(fn_marker).expect("matches fn");
-    let body_end = source[start..]
-        .find("\n    }\n")
-        .expect("matches fn close");
+    let body_end = source[start..].find("\n    }\n").expect("matches fn close");
     let body = &source[start..start + body_end];
 
     assert!(
@@ -89,9 +87,7 @@ fn matches_fn_rejects_paths_containing_double_slash() {
     let guard_pos = body
         .find("path.contains(\"//\")")
         .expect("guard expression");
-    let split_pos = body
-        .find("path.split('/')")
-        .expect("split call");
+    let split_pos = body.find("path.split('/')").expect("split call");
     assert!(
         guard_pos < split_pos,
         "REGRESSION: the '//' guard now runs AFTER \
@@ -113,9 +109,7 @@ fn strip_prefix_already_rejects_empty_segments_at_boundary() {
     let start = source
         .find(test_marker)
         .expect("strip_prefix_rejects_empty_segment_at_mount_boundary test");
-    let body_end = source[start..]
-        .find("\n    }\n")
-        .expect("test close");
+    let body_end = source[start..].find("\n    }\n").expect("test close");
     let body = &source[start..start + body_end];
 
     assert!(

@@ -87,8 +87,8 @@
 use std::path::PathBuf;
 
 fn read_three_lane_source() -> String {
-    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("src/runtime/scheduler/three_lane.rs");
+    let path =
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/runtime/scheduler/three_lane.rs");
     std::fs::read_to_string(&path).expect("read three_lane.rs")
 }
 
@@ -113,9 +113,7 @@ fn three_lane_scheduler_shutdown_is_minimal_signal_plus_wake() {
     // `self.shutdown.store(true,` — that's the scheduler.
     while let Some(rel) = source[search..].find(fn_marker) {
         let abs = search + rel;
-        let body_end = source[abs..]
-            .find("\n    }\n")
-            .expect("shutdown fn close");
+        let body_end = source[abs..].find("\n    }\n").expect("shutdown fn close");
         let body = &source[abs..abs + body_end];
         if body.contains("self.shutdown.store(true,") {
             shutdown_body = Some(body.to_string());
@@ -123,8 +121,7 @@ fn three_lane_scheduler_shutdown_is_minimal_signal_plus_wake() {
         }
         search = abs + 1;
     }
-    let body =
-        shutdown_body.expect("ThreeLaneScheduler::shutdown body");
+    let body = shutdown_body.expect("ThreeLaneScheduler::shutdown body");
 
     // Body must contain the flag-set AND wake.
     assert!(
@@ -177,9 +174,7 @@ fn run_loop_exits_on_shutdown_flag() {
 
     let fn_marker = "pub fn run_loop(&mut self) {";
     let start = source.find(fn_marker).expect("run_loop fn");
-    let body_end = source[start..]
-        .find("\n    }\n")
-        .expect("run_loop close");
+    let body_end = source[start..].find("\n    }\n").expect("run_loop close");
     let body = &source[start..start + body_end];
 
     assert!(
@@ -348,7 +343,9 @@ fn drain_phases_double_the_cancel_budget() {
     let body = &source[start..safe_end];
 
     assert!(
-        body.contains("SchedulingSuggestion::DrainObligations | SchedulingSuggestion::DrainRegions"),
+        body.contains(
+            "SchedulingSuggestion::DrainObligations | SchedulingSuggestion::DrainRegions"
+        ),
         "REGRESSION: the DrainObligations/DrainRegions branch is \
          gone from next_task's effective_limit calculation. The \
          drain phase needs 2× the base cancel budget; without \

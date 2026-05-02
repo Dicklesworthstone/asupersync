@@ -2134,4 +2134,200 @@ mod tests {
 
         crate::test_complete!("audit_concurrent_get_or_init_panic_recovery");
     }
+
+    /// Audit test: OnceCell cancellation semantics - when a task is cancelled while
+    /// running the initializer, the next task sees the cell as uninitialized (correct)
+    /// and can re-run init, rather than hanging (incorrect deadlock).
+    ///
+    /// This test verifies asupersync's cancel-aware semantics: cancellation must not
+    /// leave the OnceCell in a permanently broken state.
+    #[test]
+    fn audit_once_cell_cancellation_allows_reinitialization() {
+        init_test("audit_once_cell_cancellation_allows_reinitialization");
+        let cell: OnceCell<u32> = OnceCell::new();
+
+        // Step 1: Start initialization with a future that never completes
+        let mut cancelled_init = Box::pin(cell.get_or_init(|| async {
+            // This future will be cancelled - it never resolves
+            pending::<u32>().await
+        }));
+
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+
+        // Poll once to start the initialization process
+        let initial_poll = Future::poll(cancelled_init.as_mut(), &mut cx);
+        crate::assert_with_log!(
+            initial_poll.is_pending(),
+            "initial init should be pending",
+            true,
+            initial_poll.is_pending()
+        );
+
+        // Verify cell is in INITIALIZING state
+        crate::assert_with_log!(
+            !cell.is_initialized(),
+            "cell should not be initialized yet",
+            false,
+            cell.is_initialized()
+        );
+        crate::assert_with_log!(
+            cell.state.load(Ordering::Acquire) == INITIALIZING,
+            "cell should be in INITIALIZING state",
+            INITIALIZING,
+            cell.state.load(Ordering::Acquire)
+        );
+
+        // Step 2: Start a second task that will wait for the first
+        let mut waiter_init = Box::pin(cell.get_or_init(|| async { 42u32 }));
+        let waiter_poll = Future::poll(waiter_init.as_mut(), &mut cx);
+        crate::assert_with_log!(
+            waiter_poll.is_pending(),
+            "waiter should be pending while first init runs",
+            true,
+            waiter_poll.is_pending()
+        );
+
+        // Step 3: Cancel the first initializer (simulates task cancellation)
+        drop(cancelled_init);
+
+        // Step 4: Verify cancel-aware semantics - cell should be back to UNINIT
+        let state_after_cancel = cell.state.load(Ordering::Acquire);
+        crate::assert_with_log!(
+            state_after_cancel == UNINIT,
+            "cell should be UNINIT after cancellation",
+            UNINIT,
+            state_after_cancel
+        );
+
+        crate::assert_with_log!(
+            !cell.is_initialized(),
+            "cell should not be initialized after cancellation",
+            false,
+            cell.is_initialized()
+        );
+
+        // Step 5: Critical test - waiter should NOT deadlock, should complete
+        let waiter_retry = Future::poll(waiter_init.as_mut(), &mut cx);
+        crate::assert_with_log!(
+            waiter_retry.is_ready(),
+            "waiter should complete after cancelled init (no deadlock)",
+            true,
+            waiter_retry.is_ready()
+        );
+
+        // Step 6: Verify successful re-initialization
+        crate::assert_with_log!(
+            cell.is_initialized(),
+            "cell should be initialized by waiter",
+            true,
+            cell.is_initialized()
+        );
+
+        let final_value = cell.get().expect("cell should have value");
+        crate::assert_with_log!(
+            *final_value == 42,
+            "cell should contain waiter's value",
+            42u32,
+            *final_value
+        );
+
+        // Step 7: Verify subsequent access works normally
+        let subsequent_value =
+            block_on(cell.get_or_init(|| async {
+                panic!("should not be called on already-initialized cell")
+            }));
+        crate::assert_with_log!(
+            *subsequent_value == 42,
+            "subsequent access should return existing value",
+            42u32,
+            *subsequent_value
+        );
+
+        // Step 8: Test multiple cancellation + recovery cycles
+        let cell2: OnceCell<String> = OnceCell::new();
+
+        // Cancel 3 initializers in a row
+        for cycle in 0..3 {
+            let mut temp_init = Box::pin(cell2.get_or_init(|| async { pending::<String>().await }));
+
+            let poll_result = Future::poll(temp_init.as_mut(), &mut cx);
+            crate::assert_with_log!(
+                poll_result.is_pending(),
+                &format!("cycle {} init should be pending", cycle),
+                true,
+                poll_result.is_pending()
+            );
+
+            drop(temp_init); // Cancel
+
+            crate::assert_with_log!(
+                !cell2.is_initialized(),
+                &format!("cycle {} cell should remain uninit after cancel", cycle),
+                false,
+                cell2.is_initialized()
+            );
+        }
+
+        // Final successful initialization
+        let final_init_value = block_on(cell2.get_or_init(|| async { "success".to_string() }));
+        crate::assert_with_log!(
+            final_init_value == "success",
+            "final init should succeed after multiple cancellations",
+            "success",
+            final_init_value.as_str()
+        );
+
+        crate::test_complete!("audit_once_cell_cancellation_allows_reinitialization");
+    }
+
+    #[test]
+    fn audit_once_cell_panic_retry_behavior() {
+        init_test("audit_once_cell_panic_retry_behavior");
+
+        // AUDIT: Verify OnceCell remains retryable rather than poisoned after initializer panic
+        // CONTEXT: Asupersync design principle - structured concurrency with graceful error recovery
+        // MECHANISM: InitGuard::Drop resets cell to UNINIT on panic via transition_out_of_initializing(UNINIT)
+
+        let cell = OnceCell::new();
+
+        // First attempt: initializer panics
+        let panic_result = std::panic::catch_unwind(|| {
+            block_on(cell.get_or_init(|| async { panic!("first attempt fails") }))
+        });
+        crate::assert_with_log!(
+            panic_result.is_err(),
+            "First init should have panicked",
+            true,
+            panic_result.is_err()
+        );
+
+        // Cell should be retryable - NOT permanently poisoned
+        let success_value = block_on(cell.get_or_init(|| async { 42 }));
+        crate::assert_with_log!(
+            success_value == &42,
+            "Second init should succeed after panic",
+            &42,
+            success_value
+        );
+
+        // Third attempt should return the successfully initialized value
+        let cached_value = block_on(cell.get_or_init(|| async { panic!("should not be called") }));
+        crate::assert_with_log!(
+            cached_value == &42,
+            "Third access should return cached value",
+            &42,
+            cached_value
+        );
+
+        // Verify the value is properly stored
+        crate::assert_with_log!(
+            cell.get() == Some(&42),
+            "get() should return the initialized value",
+            Some(&42),
+            cell.get()
+        );
+
+        crate::test_complete!("audit_once_cell_panic_retry_behavior");
+    }
 }

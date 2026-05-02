@@ -153,13 +153,7 @@ fn sse_into_response_materializes_body_synchronously() {
 
     // Forbid async / await / poll inside the IntoResponse impl
     // body.
-    let suspect_async_patterns = [
-        "async ",
-        ".await",
-        "poll_next",
-        "Pin::new(",
-        "Box::pin(",
-    ];
+    let suspect_async_patterns = ["async ", ".await", "poll_next", "Pin::new(", "Box::pin("];
     for pat in &suspect_async_patterns {
         assert!(
             !body.contains(pat),

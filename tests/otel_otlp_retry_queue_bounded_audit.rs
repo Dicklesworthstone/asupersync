@@ -222,10 +222,10 @@ fn send_otlp_protobuf_takes_request_body_by_value() {
     let source = read_otel_source();
 
     let sig_marker = "async fn send_otlp_protobuf(";
-    let sig_start = source.find(sig_marker).expect("send_otlp_protobuf signature");
-    let body_start = source[sig_start..]
-        .find('{')
-        .expect("body start") + sig_start;
+    let sig_start = source
+        .find(sig_marker)
+        .expect("send_otlp_protobuf signature");
+    let body_start = source[sig_start..].find('{').expect("body start") + sig_start;
     let signature = &source[sig_start..body_start];
 
     assert!(
@@ -254,9 +254,7 @@ fn otlp_sync_export_returns_error_no_queue() {
     let start = source
         .find(impl_marker)
         .expect("MetricsExporter for OtlpHttpExporter");
-    let end_rel = source[start..]
-        .find("\n}\n")
-        .expect("impl close");
+    let end_rel = source[start..].find("\n}\n").expect("impl close");
     let body = &source[start..start + end_rel];
 
     assert!(
@@ -307,9 +305,7 @@ fn otlp_flush_is_a_noop() {
         .find(flush_marker)
         .expect("flush method inside OtlpHttpExporter impl");
     let flush_abs = impl_abs + flush_rel;
-    let flush_end = source[flush_abs..]
-        .find("\n    }\n")
-        .expect("flush close");
+    let flush_end = source[flush_abs..].find("\n    }\n").expect("flush close");
     let flush_body = &source[flush_abs..flush_abs + flush_end];
 
     assert!(
@@ -335,9 +331,7 @@ fn no_background_dispatcher_or_retry_task() {
     // impl, not the trait impl).
     let impl_marker = "impl OtlpHttpExporter {";
     let start = source.find(impl_marker).expect("inherent impl");
-    let end_rel = source[start..]
-        .find("\n}\n")
-        .expect("inherent impl close");
+    let end_rel = source[start..].find("\n}\n").expect("inherent impl close");
     let body = &source[start..start + end_rel];
 
     let suspect_dispatcher_patterns = [

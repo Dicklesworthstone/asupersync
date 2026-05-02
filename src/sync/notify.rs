@@ -2199,4 +2199,373 @@ mod tests {
 
         crate::test_complete!("audit_notify_one_fifo_ordering_exactly_k_waiters");
     }
+
+    /// Audit test: notify_one() FIFO ordering under tight loop conditions.
+    ///
+    /// Verifies that rapid consecutive notify_one() calls in a tight loop
+    /// maintain strict FIFO ordering and never allow "leapfrogging" where
+    /// a later-queued waiter wakes before an earlier-queued waiter.
+    /// This tests for race conditions in the scan_start optimization.
+    #[test]
+    fn audit_notify_one_tight_loop_no_leapfrog() {
+        init_test("audit_notify_one_tight_loop_no_leapfrog");
+        let notify = Notify::new();
+
+        const N: usize = 10;
+
+        // Step 1: Create N waiters and register them in strict order
+        let mut waiters = Vec::with_capacity(N);
+        for i in 0..N {
+            let mut waiter = notify.notified();
+            assert!(
+                poll_once(&mut waiter).is_pending(),
+                "waiter {} should be pending",
+                i
+            );
+            waiters.push(waiter);
+        }
+
+        // Verify all waiters are registered
+        assert_eq!(notify.waiter_count(), N, "all waiters should be registered");
+
+        // Step 2: Call notify_one() in tight loop - no delays between calls
+        let notify_count = N - 2; // Leave some waiters pending for verification
+        for _ in 0..notify_count {
+            notify.notify_one();
+            // No delay here - this is the "tight loop" condition
+        }
+
+        // Step 3: Poll all waiters and record which ones are ready
+        let mut wake_order = Vec::new();
+        let mut still_pending = Vec::new();
+
+        for (i, waiter) in waiters.iter_mut().enumerate() {
+            if poll_once(waiter).is_ready() {
+                wake_order.push(i);
+            } else {
+                still_pending.push(i);
+            }
+        }
+
+        // Step 4: Verify exactly the expected number woke up
+        assert_eq!(
+            wake_order.len(),
+            notify_count,
+            "exactly {} waiters should be ready, got {}",
+            notify_count,
+            wake_order.len()
+        );
+
+        assert_eq!(
+            still_pending.len(),
+            N - notify_count,
+            "exactly {} waiters should still be pending",
+            N - notify_count
+        );
+
+        // Step 5: Critical FIFO ordering check - no leapfrogging allowed
+        let expected_wake_order: Vec<usize> = (0..notify_count).collect();
+        assert_eq!(
+            wake_order, expected_wake_order,
+            "FIFO violation detected! Expected wake order {:?}, got {:?}. This indicates leapfrogging occurred.",
+            expected_wake_order, wake_order
+        );
+
+        // Step 6: Verify remaining waiters are the tail of the queue
+        let expected_pending: Vec<usize> = (notify_count..N).collect();
+        assert_eq!(
+            still_pending, expected_pending,
+            "Pending waiters should be the tail of the queue, got {:?}",
+            still_pending
+        );
+
+        // Step 7: Verify next notify_one() wakes the next waiter in line
+        let next_waiter_index = notify_count;
+        notify.notify_one();
+
+        let next_ready = poll_once(&mut waiters[next_waiter_index]).is_ready();
+        assert!(
+            next_ready,
+            "Next waiter {} should wake after additional notify_one()",
+            next_waiter_index
+        );
+
+        // Verify no other waiters woke up
+        for i in (notify_count + 1)..N {
+            let should_be_pending = poll_once(&mut waiters[i]).is_pending();
+            assert!(
+                should_be_pending,
+                "Waiter {} should still be pending after single notify_one()",
+                i
+            );
+        }
+
+        // Step 8: Test slot reuse doesn't break FIFO by canceling middle waiter
+        let middle_index = (notify_count + 1 + N) / 2;
+        if middle_index < N {
+            drop(waiters.remove(middle_index - notify_count - 1)); // Adjust index for already-consumed waiters
+
+            // Add a new waiter - it should go to the back of the queue
+            let mut new_waiter = notify.notified();
+            assert!(
+                poll_once(&mut new_waiter).is_pending(),
+                "new waiter should be pending"
+            );
+
+            // Notify remaining waiters - new waiter should wake LAST
+            let remaining = waiters.len();
+            for _ in 0..remaining {
+                notify.notify_one();
+            }
+
+            for waiter in &mut waiters {
+                let ready = poll_once(waiter).is_ready();
+                assert!(ready, "existing waiters should all be ready");
+            }
+
+            let new_still_pending = poll_once(&mut new_waiter).is_pending();
+            assert!(
+                new_still_pending,
+                "new waiter should still be pending - it goes to back of queue despite slot reuse"
+            );
+
+            // Final notify should wake the new waiter
+            notify.notify_one();
+            let new_ready = poll_once(&mut new_waiter).is_ready();
+            assert!(new_ready, "new waiter should be ready after final notify");
+        }
+
+        crate::test_complete!("audit_notify_one_tight_loop_no_leapfrog");
+    }
+
+    /// Audit test for notify_one signal storage with no waiters.
+    ///
+    /// Verifies that when notify_one() is called with NO waiters present,
+    /// the signal is STORED (not dropped) and consumed by the next waiter.
+    /// Per asupersync notify-vs-notify-waiters spec: notify_one stores ONE signal.
+    #[test]
+    fn audit_notify_one_stores_signal_with_no_waiters() {
+        init_test("audit_notify_one_stores_signal_with_no_waiters");
+        let notify = Notify::new();
+
+        // Test 1: Core behavior - notify_one with absolutely no waiters should store signal
+        {
+            // Verify no waiters exist
+            assert_eq!(notify.waiter_count(), 0, "should start with no waiters");
+
+            // Verify no stored notifications initially
+            let initial_stored = notify.stored_notifications.load(Ordering::Acquire);
+            assert_eq!(
+                initial_stored, 0,
+                "should start with no stored notifications"
+            );
+
+            // Call notify_one() with no waiters present
+            notify.notify_one();
+
+            // Signal should be stored, not dropped
+            let stored_after_notify = notify.stored_notifications.load(Ordering::Acquire);
+            assert_eq!(
+                stored_after_notify, 1,
+                "notify_one() with no waiters should store exactly 1 signal"
+            );
+
+            // First waiter should consume stored signal immediately
+            let mut waiter = notify.notified();
+            let ready_immediately = poll_once(&mut waiter).is_ready();
+            assert!(
+                ready_immediately,
+                "first waiter should consume stored signal on first poll"
+            );
+
+            // Stored signal should be consumed
+            let stored_after_consume = notify.stored_notifications.load(Ordering::Acquire);
+            assert_eq!(
+                stored_after_consume, 0,
+                "stored signal should be consumed by waiter"
+            );
+        }
+
+        // Test 2: Multiple notify_one calls accumulate stored signals
+        {
+            // Call notify_one multiple times with no waiters
+            notify.notify_one();
+            notify.notify_one();
+            notify.notify_one();
+
+            let stored_multiple = notify.stored_notifications.load(Ordering::Acquire);
+            assert_eq!(
+                stored_multiple, 3,
+                "multiple notify_one calls should accumulate stored signals"
+            );
+
+            // Three waiters should consume three signals
+            let mut waiter1 = notify.notified();
+            let mut waiter2 = notify.notified();
+            let mut waiter3 = notify.notified();
+            let mut waiter4 = notify.notified();
+
+            assert!(
+                poll_once(&mut waiter1).is_ready(),
+                "waiter 1 consumes signal 1"
+            );
+            assert!(
+                poll_once(&mut waiter2).is_ready(),
+                "waiter 2 consumes signal 2"
+            );
+            assert!(
+                poll_once(&mut waiter3).is_ready(),
+                "waiter 3 consumes signal 3"
+            );
+            assert!(
+                poll_once(&mut waiter4).is_pending(),
+                "waiter 4 has no signal to consume"
+            );
+
+            let stored_after_three = notify.stored_notifications.load(Ordering::Acquire);
+            assert_eq!(
+                stored_after_three, 0,
+                "all stored signals should be consumed"
+            );
+        }
+
+        // Test 3: Contrast with notify_waiters - should not store signals
+        {
+            // Verify clean slate
+            assert_eq!(notify.waiter_count(), 1, "waiter4 still pending");
+            assert_eq!(notify.stored_notifications.load(Ordering::Acquire), 0);
+
+            // notify_waiters with no NEW waiters should not store signals
+            notify.notify_waiters();
+
+            let stored_after_broadcast = notify.stored_notifications.load(Ordering::Acquire);
+            assert_eq!(
+                stored_after_broadcast, 0,
+                "notify_waiters should not store signals for future waiters"
+            );
+
+            // New waiter after broadcast should remain pending
+            let mut waiter5 = notify.notified();
+            assert!(
+                poll_once(&mut waiter5).is_pending(),
+                "waiter after notify_waiters should not get a stored signal"
+            );
+        }
+
+        // Test 4: Mixed sequence - stored signals + live waiters
+        {
+            // Store a signal first
+            notify.notify_one();
+            assert_eq!(notify.stored_notifications.load(Ordering::Acquire), 1);
+
+            // Register waiters
+            let mut waiter6 = notify.notified();
+            let mut waiter7 = notify.notified();
+
+            // First poll on waiter6 should consume stored signal
+            assert!(
+                poll_once(&mut waiter6).is_ready(),
+                "waiter6 consumes stored signal"
+            );
+            assert!(
+                poll_once(&mut waiter7).is_pending(),
+                "waiter7 has no signal"
+            );
+
+            // Now notify_one should directly wake waiter7 (no storage needed)
+            notify.notify_one();
+            assert!(poll_once(&mut waiter7).is_ready(), "waiter7 woken directly");
+
+            assert_eq!(
+                notify.stored_notifications.load(Ordering::Acquire),
+                0,
+                "no storage when waiters are present"
+            );
+        }
+
+        // Test 5: Verify signal persistence across time
+        {
+            // Store signal and wait
+            notify.notify_one();
+            std::thread::sleep(std::time::Duration::from_millis(10));
+
+            // Signal should persist
+            assert_eq!(notify.stored_notifications.load(Ordering::Acquire), 1);
+
+            // Should still be consumable
+            let mut delayed_waiter = notify.notified();
+            assert!(
+                poll_once(&mut delayed_waiter).is_ready(),
+                "stored signal persists over time"
+            );
+        }
+
+        crate::test_complete!("audit_notify_one_stores_signal_with_no_waiters");
+    }
+
+    /// Audit test for notify_one concurrent with sole waiter cancellation.
+    ///
+    /// Verifies that when notify_one() is called concurrently with the sole waiter
+    /// being cancelled, the signal is NOT lost. Per asupersync semantics, signals
+    /// must persist until consumed. The implementation should either:
+    /// (a) wake another waiter (correct: signal not lost), or
+    /// (b) re-store the signal for the next waiter (correct: signal not lost).
+    /// This test verifies option (b) since there's only one waiter.
+    #[test]
+    fn audit_notify_one_cancel_during_notify_race_preserves_signal() {
+        init_test("audit_notify_one_cancel_during_notify_race_preserves_signal");
+        let notify = Arc::new(Notify::new());
+
+        // Initial state: no stored notifications
+        let initial_stored = notify.stored_notifications.load(Ordering::Acquire);
+        crate::assert_with_log!(
+            initial_stored == 0,
+            "no stored notifications initially",
+            0,
+            initial_stored
+        );
+
+        // Register sole waiter
+        let mut fut = notify.notified();
+        let pending = poll_once(&mut fut).is_pending();
+        crate::assert_with_log!(pending, "waiter registered and pending", true, pending);
+
+        // Simulate race: notify_one() concurrent with waiter cancellation
+        // The notify_one should find the waiter and mark it notified
+        notify.notify_one();
+
+        // Now cancel (drop) the sole waiter AFTER it was notified but BEFORE poll
+        // This should trigger the baton-pass mechanism
+        drop(fut);
+
+        // The signal should be re-stored since there are no other waiters
+        let stored_after_cancel = notify.stored_notifications.load(Ordering::Acquire);
+        crate::assert_with_log!(
+            stored_after_cancel == 1,
+            "signal re-stored after sole waiter cancelled",
+            1,
+            stored_after_cancel
+        );
+
+        // A new waiter should consume the re-stored signal immediately
+        let mut fut2 = notify.notified();
+        let ready = poll_once(&mut fut2).is_ready();
+        crate::assert_with_log!(
+            ready,
+            "new waiter immediately consumes re-stored signal",
+            true,
+            ready
+        );
+
+        // Stored notifications should be back to zero
+        let final_stored = notify.stored_notifications.load(Ordering::Acquire);
+        crate::assert_with_log!(
+            final_stored == 0,
+            "stored notifications consumed",
+            0,
+            final_stored
+        );
+
+        crate::test_complete!("audit_notify_one_cancel_during_notify_race_preserves_signal");
+    }
 }
