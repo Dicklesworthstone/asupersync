@@ -61,15 +61,17 @@ pub mod otel;
 pub mod otel_conformance_tests;
 pub mod otel_structured_concurrency;
 #[cfg(test)]
+pub mod otlp_attribute_size_cap_audit_test;
+#[cfg(test)]
 pub mod otlp_compression_audit_test;
 #[cfg(test)]
 pub mod otlp_network_partition_audit_test;
 #[cfg(test)]
-pub mod otlp_attribute_size_cap_audit_test;
-#[cfg(test)]
 pub mod otlp_resource_attributes_inheritance_audit_test;
 #[cfg(test)]
 pub mod otlp_retry_after_audit_test;
+#[cfg(test)]
+pub mod otlp_session_resumption_audit_test;
 pub mod otlp_trace_exporter;
 pub mod performance_budget_monitor;
 pub mod resource_accounting;
