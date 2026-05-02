@@ -81,6 +81,8 @@ pub mod runtime_integration;
 #[cfg(test)]
 pub mod runtime_metrics_endpoint_audit_test;
 #[cfg(test)]
+pub mod sampling_decision_propagation_audit_test;
+#[cfg(test)]
 pub mod span_id_collision_audit_test;
 #[cfg(test)]
 pub mod span_lifecycle_obligation_leak_audit_test;

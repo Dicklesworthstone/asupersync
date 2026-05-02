@@ -93,8 +93,8 @@
 use std::path::PathBuf;
 
 fn read_three_lane_source() -> String {
-    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("src/runtime/scheduler/three_lane.rs");
+    let path =
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/runtime/scheduler/three_lane.rs");
     std::fs::read_to_string(&path).expect("read three_lane.rs")
 }
 
@@ -113,9 +113,7 @@ fn wait_graph_task_snapshot_carries_id_and_waiters_only() {
     let start = source
         .find(struct_marker)
         .expect("WaitGraphTaskSnapshot struct");
-    let end_rel = source[start..]
-        .find("\n}\n")
-        .expect("struct close");
+    let end_rel = source[start..].find("\n}\n").expect("struct close");
     let body = &source[start..start + end_rel];
 
     assert!(
@@ -171,9 +169,7 @@ fn deadlock_detection_returns_boolean_only_today() {
     let start = source
         .find(fn_marker)
         .expect("wait_graph_signals_from_snapshot fn");
-    let body_end = source[start..]
-        .find("\n}\n")
-        .expect("fn close");
+    let body_end = source[start..].find("\n}\n").expect("fn close");
     let body = &source[start..start + body_end];
 
     // The return signature must be `(usize, Vec<(usize, usize)>, bool)`.
@@ -264,8 +260,7 @@ fn tarjan_implementation_remains_present() {
     );
 
     assert!(
-        source.contains("fn strongconnect(")
-            || source.contains("strongconnect(v)"),
+        source.contains("fn strongconnect(") || source.contains("strongconnect(v)"),
         "REGRESSION: the strongconnect method (Tarjan's \
          recursive SCC builder) is gone. Without it, the \
          wait-graph cycle detection collapses to a heuristic.",

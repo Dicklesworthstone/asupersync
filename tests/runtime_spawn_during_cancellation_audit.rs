@@ -102,9 +102,7 @@ fn region_can_spawn_only_when_open() {
 
     let fn_marker = "pub const fn can_spawn(self) -> bool {";
     let start = source.find(fn_marker).expect("can_spawn fn");
-    let body_end = source[start..]
-        .find("\n    }\n")
-        .expect("can_spawn close");
+    let body_end = source[start..].find("\n    }\n").expect("can_spawn close");
     let body = &source[start..start + body_end];
 
     assert!(
@@ -279,9 +277,7 @@ fn cancel_request_should_prevent_new_spawns_test_exists_in_crate() {
     // create_task returns Err(SpawnError::RegionClosed(_)).
     let test_marker = "fn cancel_request_should_prevent_new_spawns()";
     let start = source.find(test_marker).expect("test fn");
-    let body_end = source[start..]
-        .find("\n    }\n")
-        .expect("test close");
+    let body_end = source[start..].find("\n    }\n").expect("test close");
     let body = &source[start..start + body_end];
 
     assert!(
@@ -304,18 +300,10 @@ fn region_state_enum_has_five_canonical_variants() {
 
     let enum_marker = "pub enum RegionState {";
     let start = source.find(enum_marker).expect("RegionState enum");
-    let end_rel = source[start..]
-        .find("\n}\n")
-        .expect("enum close");
+    let end_rel = source[start..].find("\n}\n").expect("enum close");
     let body = &source[start..start + end_rel];
 
-    for variant in &[
-        "Open,",
-        "Closing,",
-        "Draining,",
-        "Finalizing,",
-        "Closed,",
-    ] {
+    for variant in &["Open,", "Closing,", "Draining,", "Finalizing,", "Closed,"] {
         assert!(
             body.contains(variant),
             "REGRESSION: RegionState no longer has variant \

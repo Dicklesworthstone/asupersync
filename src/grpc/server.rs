@@ -8,11 +8,11 @@ use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use crate::bytes::Bytes;
+use crate::bytes::{BufMut, Bytes, BytesMut};
 use crate::cx::{Cx, cap};
 
 use super::client::CompressionEncoding;
-use super::codec::{Codec, FramedCodec};
+use super::codec::{Codec, FramedCodec, IdentityCodec};
 use super::reflection::ReflectionService;
 use super::service::{NamedService, ServiceHandler};
 use super::status::{GrpcError, Status, TransportErrorKind};
@@ -3585,5 +3585,114 @@ mod tests {
         }
 
         crate::test_complete!("test_connection_hoarding_attack_simulation");
+    }
+
+    /// **AUDIT TEST: gRPC Message Size Limit Enforcement Compliance**
+    ///
+    /// Verifies that when a gRPC client sends a message exceeding the configured
+    /// `max_recv_message_size`, the server:
+    ///
+    /// **(a) Rejects early with RESOURCE_EXHAUSTED before reading body** ✅ CORRECT
+    ///     - Prevents DoS by checking declared length in 5-byte header
+    ///     - Returns proper gRPC status code per spec
+    ///     - Does not consume memory for oversized payloads
+    ///
+    /// NOT:
+    /// (b) Read all then reject (memory waste) ❌
+    /// (c) Silently truncate (data corruption) ❌
+    ///
+    /// **gRPC Spec Compliance:** RFC 7540 + gRPC spec require RESOURCE_EXHAUSTED
+    /// for resource limit violations. Early rejection prevents remote DoS.
+    ///
+    /// **Implementation:** `GrpcCodec::decode()` checks declared length against
+    /// `max_decode_message_size` before allocating/reading message body.
+    /// Maps to `Status::resource_exhausted("message too large")`.
+    #[test]
+    fn grpc_message_size_limit_enforcement_audit() {
+        init_test("grpc_message_size_limit_enforcement_audit");
+
+        // Set very small message size limit to easily test boundary
+        let max_message_size = 64; // 64 bytes
+        let server = Server::builder()
+            .max_recv_message_size(max_message_size)
+            .build();
+
+        // Create oversized payload (exceeds limit)
+        let oversized_payload = vec![0x42u8; max_message_size + 1]; // 65 bytes
+
+        // Manually construct gRPC frame with oversized length declaration
+        // Format: [compressed_flag:1][length:4][payload:N]
+        let mut frame_buf = BytesMut::new();
+        frame_buf.put_u8(0); // uncompressed
+        frame_buf.put_u32(oversized_payload.len() as u32); // declare oversized length
+        frame_buf.extend_from_slice(&oversized_payload[..max_message_size.min(16)]); // only partial payload needed
+
+        // Test the codec directly (this is where size checking happens)
+        let mut codec = server.framed_codec(crate::grpc::IdentityCodec);
+        let result = codec.decode_message(&mut frame_buf);
+
+        // AUDIT VERIFICATION: Must reject with MessageTooLarge
+        let error = result.expect_err("Oversized message must be rejected");
+        crate::assert_with_log!(
+            matches!(error, crate::grpc::GrpcError::MessageTooLarge),
+            "Must reject with MessageTooLarge error",
+            true,
+            matches!(error, crate::grpc::GrpcError::MessageTooLarge)
+        );
+
+        // AUDIT VERIFICATION: Must map to RESOURCE_EXHAUSTED status
+        let status = error.into_status();
+        crate::assert_with_log!(
+            status.code() == crate::grpc::Code::ResourceExhausted,
+            "Must use RESOURCE_EXHAUSTED status code per gRPC spec",
+            crate::grpc::Code::ResourceExhausted,
+            status.code()
+        );
+
+        // AUDIT VERIFICATION: Error message must be informative
+        let message = status.message();
+        crate::assert_with_log!(
+            message.contains("message too large"),
+            "Error message must indicate size violation",
+            true,
+            message.contains("message too large")
+        );
+
+        // BOUNDARY TEST: Message exactly at limit should succeed
+        let exact_limit_payload = vec![0x43u8; max_message_size]; // exactly 64 bytes
+        let mut exact_frame_buf = BytesMut::new();
+        exact_frame_buf.put_u8(0); // uncompressed
+        exact_frame_buf.put_u32(exact_limit_payload.len() as u32);
+        exact_frame_buf.extend_from_slice(&exact_limit_payload);
+
+        let mut exact_codec = server.framed_codec(crate::grpc::IdentityCodec);
+        let exact_result = exact_codec.decode_message(&mut exact_frame_buf);
+        crate::assert_with_log!(
+            exact_result.is_ok(),
+            "Message exactly at size limit must succeed",
+            true,
+            exact_result.is_ok()
+        );
+
+        // EARLY REJECTION VERIFICATION: Codec rejects before reading full payload
+        // This verifies we're in case (a) not (b) - rejection happens after reading
+        // only the 5-byte header, not the full declared payload length
+        let huge_declared_size = 1024 * 1024 * 1024; // 1GB declared
+        let mut dos_frame_buf = BytesMut::new();
+        dos_frame_buf.put_u8(0); // uncompressed
+        dos_frame_buf.put_u32(huge_declared_size as u32); // declare huge size
+        dos_frame_buf.extend_from_slice(&[0x44u8; 32]); // but only provide 32 bytes
+
+        let mut dos_codec = server.framed_codec(crate::grpc::IdentityCodec);
+        let dos_result = dos_codec.decode_message(&mut dos_frame_buf);
+        let dos_error = dos_result.expect_err("Huge declared size must be rejected");
+        crate::assert_with_log!(
+            matches!(dos_error, crate::grpc::GrpcError::MessageTooLarge),
+            "Must reject huge declared size even with partial buffer",
+            true,
+            matches!(dos_error, crate::grpc::GrpcError::MessageTooLarge)
+        );
+
+        crate::test_complete!("grpc_message_size_limit_enforcement_audit");
     }
 }

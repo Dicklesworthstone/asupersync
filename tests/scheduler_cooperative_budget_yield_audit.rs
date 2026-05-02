@@ -147,13 +147,15 @@ fn budget_struct_has_three_exhaustion_dimensions() {
          counts.",
     );
     assert!(
-        source.contains("pub deadline: Option<Time>,") || source.contains("deadline: Option<Time>,"),
+        source.contains("pub deadline: Option<Time>,")
+            || source.contains("deadline: Option<Time>,"),
         "REGRESSION: Budget no longer carries a deadline field. \
          Deadline is the most common budget dimension; dropping \
          it would silently disable deadline-based yielding.",
     );
     assert!(
-        source.contains("pub cost_quota: Option<u64>,") || source.contains("cost_quota: Option<u64>,"),
+        source.contains("pub cost_quota: Option<u64>,")
+            || source.contains("cost_quota: Option<u64>,"),
         "REGRESSION: Budget no longer carries cost_quota. \
          Cost-based budgets are a documented dimension.",
     );
@@ -317,10 +319,10 @@ fn checkpoint_budget_exhaustion_checks_all_three_dimensions() {
     let source = read_cx_source();
 
     let fn_marker = "fn checkpoint_budget_exhaustion(";
-    let start = source.find(fn_marker).expect("checkpoint_budget_exhaustion fn");
-    let body_end = source[start..]
-        .find("\n    }\n")
-        .expect("fn close");
+    let start = source
+        .find(fn_marker)
+        .expect("checkpoint_budget_exhaustion fn");
+    let body_end = source[start..].find("\n    }\n").expect("fn close");
     let body = &source[start..start + body_end];
 
     assert!(
@@ -345,7 +347,11 @@ fn checkpoint_budget_exhaustion_checks_all_three_dimensions() {
 
     // Each dimension must produce a CancelReason with the
     // matching CancelKind.
-    for kind in &["CancelKind::Deadline", "CancelKind::PollQuota", "CancelKind::CostBudget"] {
+    for kind in &[
+        "CancelKind::Deadline",
+        "CancelKind::PollQuota",
+        "CancelKind::CostBudget",
+    ] {
         assert!(
             body.contains(kind),
             "REGRESSION: checkpoint_budget_exhaustion no longer \
@@ -427,10 +433,7 @@ fn checkpoint_doc_explicitly_describes_cooperative_yield() {
     }
     let doc_window = &source[doc_start..fn_pos];
 
-    let required_phrases = [
-        "checkpoint",
-        "cancel",
-    ];
+    let required_phrases = ["checkpoint", "cancel"];
     for phrase in &required_phrases {
         assert!(
             doc_window.contains(phrase),

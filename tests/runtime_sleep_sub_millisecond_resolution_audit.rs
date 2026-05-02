@@ -117,9 +117,7 @@ fn sleep_struct_stores_deadline_at_nanosecond_precision() {
     let fn_marker = "pub fn after(now: Time, duration: Duration) -> Self {";
     let pos = source.find(fn_marker);
     if let Some(start) = pos {
-        let body_end = source[start..]
-            .find("\n    }\n")
-            .expect("after() close");
+        let body_end = source[start..].find("\n    }\n").expect("after() close");
         let body = &source[start..start + body_end];
 
         assert!(
@@ -264,8 +262,7 @@ fn sleep_supports_user_supplied_time_getter() {
     let source = read("src/time/sleep.rs");
 
     assert!(
-        source.contains("pub fn with_time_getter(")
-            || source.contains("with_time_getter(deadline"),
+        source.contains("pub fn with_time_getter(") || source.contains("with_time_getter(deadline"),
         "REGRESSION: Sleep::with_time_getter is gone. This \
          was the documented escape hatch for sub-ms precision \
          — without it, every Sleep is bound to the runtime's \
@@ -298,10 +295,7 @@ fn sleep_doc_describes_cancel_safety_and_time_source() {
     // re-auditing.
     let source = read("src/time/sleep.rs");
 
-    let required_phrases = [
-        "core primitive for time-based delays",
-        "cancel-safe",
-    ];
+    let required_phrases = ["core primitive for time-based delays", "cancel-safe"];
     for phrase in &required_phrases {
         assert!(
             source.contains(phrase),

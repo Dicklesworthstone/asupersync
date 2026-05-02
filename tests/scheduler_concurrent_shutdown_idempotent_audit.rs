@@ -78,8 +78,8 @@
 use std::path::PathBuf;
 
 fn read_three_lane_source() -> String {
-    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("src/runtime/scheduler/three_lane.rs");
+    let path =
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/runtime/scheduler/three_lane.rs");
     std::fs::read_to_string(&path).expect("read three_lane.rs")
 }
 
@@ -212,14 +212,11 @@ fn wake_all_iterates_all_parkers_idempotently() {
 
     let fn_marker = "pub(crate) fn wake_all(&self) {";
     let start = source.find(fn_marker).expect("wake_all fn");
-    let body_end = source[start..]
-        .find("\n    }\n")
-        .expect("wake_all close");
+    let body_end = source[start..].find("\n    }\n").expect("wake_all close");
     let body = &source[start..start + body_end];
 
     assert!(
-        body.contains("for parker in &self.parkers {")
-            && body.contains("parker.unpark();"),
+        body.contains("for parker in &self.parkers {") && body.contains("parker.unpark();"),
         "REGRESSION: wake_all no longer iterates parkers and \
          calls parker.unpark(). Without the iterate-and-\
          unpark loop, parked workers don't wake on \
@@ -304,13 +301,10 @@ fn shutdown_signal_is_atomic_bool_arc() {
         .find(struct_marker)
         .or_else(|| source.find("struct ThreeLaneScheduler {"))
         .expect("ThreeLaneScheduler struct");
-    let end_rel = source[start..]
-        .find("\n}\n")
-        .expect("struct close");
+    let end_rel = source[start..].find("\n}\n").expect("struct close");
     let body = &source[start..start + end_rel];
 
-    let has_atomic_bool = body.contains("AtomicBool")
-        || body.contains("Arc<AtomicBool>");
+    let has_atomic_bool = body.contains("AtomicBool") || body.contains("Arc<AtomicBool>");
     assert!(
         has_atomic_bool,
         "REGRESSION: ThreeLaneScheduler shutdown field is no \

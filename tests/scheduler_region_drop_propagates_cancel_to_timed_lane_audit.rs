@@ -185,9 +185,7 @@ fn move_to_cancel_lane_is_log_n_lazy_promote() {
     let priority = read("src/runtime/scheduler/priority.rs");
 
     let fn_marker = "pub fn move_to_cancel_lane(&mut self, task: TaskId, priority: u8) {";
-    let start = priority
-        .find(fn_marker)
-        .expect("move_to_cancel_lane fn");
+    let start = priority.find(fn_marker).expect("move_to_cancel_lane fn");
     let body_end = priority[start..]
         .find("\n    }\n")
         .expect("move_to_cancel_lane close");
@@ -404,7 +402,9 @@ fn agents_md_documents_no_orphan_tasks_invariant() {
     let agents = read("AGENTS.md");
 
     assert!(
-        agents.contains("No obligation leaks") || agents.contains("no orphan tasks") || agents.contains("Structured concurrency"),
+        agents.contains("No obligation leaks")
+            || agents.contains("no orphan tasks")
+            || agents.contains("Structured concurrency"),
         "REGRESSION: AGENTS.md no longer documents the 'no \
          orphan tasks' / 'structured concurrency' / 'no \
          obligation leaks' invariants. These are the public \

@@ -855,6 +855,56 @@ impl<T> Drop for RwLockWriteGuard<'_, T> {
     }
 }
 
+impl<'a, T> RwLockWriteGuard<'a, T> {
+    /// Atomically downgrades the write lock to a read lock.
+    ///
+    /// This operation is atomic - there is no race window where the lock
+    /// is unlocked between releasing the write lock and acquiring the read lock.
+    /// Any waiting readers will be woken up since the exclusive access is relaxed.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// let mut write_guard = lock.write(&cx).await?;
+    /// *write_guard = 42;
+    ///
+    /// let read_guard = write_guard.downgrade();
+    /// assert_eq!(*read_guard, 42);
+    /// ```
+    pub fn downgrade(self) -> RwLockReadGuard<'a, T> {
+        let read_guard = RwLockReadGuard { lock: self.lock };
+
+        // Atomically transition from writer to reader
+        let reader_wakers = {
+            let mut state = self.lock.state.lock();
+
+            // Atomic transition: writer_active -> reader
+            debug_assert!(state.writer_active, "downgrade called but no active writer");
+            state.writer_active = false;
+            state.readers = 1; // This downgraded reader
+
+            // Wake up any waiting readers since we're no longer exclusive
+            let mut wakers = Vec::new();
+            while let Some(waiter) = state.reader_waiters.pop_front() {
+                wakers.push(waiter.waker);
+                state.readers += 1;
+            }
+
+            wakers
+        };
+
+        // Wake readers outside the lock
+        for waker in reader_wakers {
+            waker.wake();
+        }
+
+        // Prevent the Drop impl from running since we've manually handled the transition
+        std::mem::forget(self);
+
+        read_guard
+    }
+}
+
 /// Owned read guard that can be moved between tasks.
 #[must_use = "guard will be immediately released if not held"]
 pub struct OwnedRwLockReadGuard<T> {
@@ -973,6 +1023,58 @@ impl<T> Drop for OwnedRwLockWriteGuard<T> {
             self.lock.poisoned.store(true, Ordering::Release);
         }
         self.lock.release_writer();
+    }
+}
+
+impl<T> OwnedRwLockWriteGuard<T> {
+    /// Atomically downgrades the owned write lock to an owned read lock.
+    ///
+    /// This operation is atomic - there is no race window where the lock
+    /// is unlocked between releasing the write lock and acquiring the read lock.
+    /// Any waiting readers will be woken up since the exclusive access is relaxed.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// let mut write_guard = OwnedRwLockWriteGuard::write(lock, &cx).await?;
+    /// write_guard.with_write(|data| *data = 42);
+    ///
+    /// let read_guard = write_guard.downgrade();
+    /// read_guard.with_read(|data| assert_eq!(*data, 42));
+    /// ```
+    pub fn downgrade(self) -> OwnedRwLockReadGuard<T> {
+        let read_guard = OwnedRwLockReadGuard {
+            lock: Arc::clone(&self.lock),
+        };
+
+        // Atomically transition from writer to reader
+        let reader_wakers = {
+            let mut state = self.lock.state.lock();
+
+            // Atomic transition: writer_active -> reader
+            debug_assert!(state.writer_active, "downgrade called but no active writer");
+            state.writer_active = false;
+            state.readers = 1; // This downgraded reader
+
+            // Wake up any waiting readers since we're no longer exclusive
+            let mut wakers = Vec::new();
+            while let Some(waiter) = state.reader_waiters.pop_front() {
+                wakers.push(waiter.waker);
+                state.readers += 1;
+            }
+
+            wakers
+        };
+
+        // Wake readers outside the lock
+        for waker in reader_wakers {
+            waker.wake();
+        }
+
+        // Prevent the Drop impl from running since we've manually handled the transition
+        std::mem::forget(self);
+
+        read_guard
     }
 }
 

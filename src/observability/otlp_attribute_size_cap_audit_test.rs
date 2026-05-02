@@ -67,19 +67,37 @@ fn audit_otlp_span_attribute_size_cap_enforcement() {
 
         if key == "long_attr" {
             assert!(value.len() <= 255 + 3, "Long attribute should be truncated");
-            assert!(value.ends_with('…'), "Long attribute should have ellipsis suffix");
-            assert!(value.starts_with('A'), "Truncated value should preserve prefix");
+            assert!(
+                value.ends_with('…'),
+                "Long attribute should have ellipsis suffix"
+            );
+            assert!(
+                value.starts_with('A'),
+                "Truncated value should preserve prefix"
+            );
         }
 
         if key == "very_long_attr" {
-            assert!(value.len() <= 255 + 3, "Very long attribute should be truncated");
-            assert!(value.ends_with('…'), "Very long attribute should have ellipsis suffix");
-            assert!(value.starts_with('B'), "Truncated value should preserve prefix");
+            assert!(
+                value.len() <= 255 + 3,
+                "Very long attribute should be truncated"
+            );
+            assert!(
+                value.ends_with('…'),
+                "Very long attribute should have ellipsis suffix"
+            );
+            assert!(
+                value.starts_with('B'),
+                "Truncated value should preserve prefix"
+            );
         }
 
         if key == "normal_attr" {
             assert_eq!(value, "normal", "Normal attribute should be unchanged");
-            assert!(!value.ends_with('…'), "Normal attribute should not have ellipsis");
+            assert!(
+                !value.ends_with('…'),
+                "Normal attribute should not have ellipsis"
+            );
         }
     }
 
@@ -109,8 +127,16 @@ fn audit_attribute_truncation_utf8_boundary_handling() {
     let emoji_value = "Test".to_string() + &"🔒".repeat(100) + "End"; // 🔒 is 4 bytes each
 
     println!("📊 Multibyte test scenarios:");
-    println!("   Multibyte value: {} bytes, {} chars", multibyte_value.len(), multibyte_value.chars().count());
-    println!("   Emoji value: {} bytes, {} chars", emoji_value.len(), emoji_value.chars().count());
+    println!(
+        "   Multibyte value: {} bytes, {} chars",
+        multibyte_value.len(),
+        multibyte_value.chars().count()
+    );
+    println!(
+        "   Emoji value: {} bytes, {} chars",
+        emoji_value.len(),
+        emoji_value.chars().count()
+    );
 
     let span = OtlpSpan::new(
         "utf8-test-span".to_string(),
@@ -125,27 +151,56 @@ fn audit_attribute_truncation_utf8_boundary_handling() {
 
     // Verify truncation with UTF-8 boundary handling
     for (key, value) in &span.attributes {
-        println!("   Attribute '{}': {} bytes, {} chars", key, value.len(), value.chars().count());
+        println!(
+            "   Attribute '{}': {} bytes, {} chars",
+            key,
+            value.len(),
+            value.chars().count()
+        );
 
         // Verify UTF-8 validity (must always be true after truncation)
-        assert!(std::str::from_utf8(value.as_bytes()).is_ok(), "Attribute value must be valid UTF-8");
+        assert!(
+            std::str::from_utf8(value.as_bytes()).is_ok(),
+            "Attribute value must be valid UTF-8"
+        );
 
         // Verify truncation applied correctly
         if key == "multibyte_attr" {
-            assert!(value.len() <= 255 + 3, "Multibyte attribute should be truncated");
-            assert!(value.ends_with('…'), "Truncated multibyte attribute should have ellipsis");
-            assert!(value.starts_with("ABC"), "Truncated value should preserve ASCII prefix");
+            assert!(
+                value.len() <= 255 + 3,
+                "Multibyte attribute should be truncated"
+            );
+            assert!(
+                value.ends_with('…'),
+                "Truncated multibyte attribute should have ellipsis"
+            );
+            assert!(
+                value.starts_with("ABC"),
+                "Truncated value should preserve ASCII prefix"
+            );
         }
 
         if key == "emoji_attr" {
-            assert!(value.len() <= 255 + 3, "Emoji attribute should be truncated");
-            assert!(value.ends_with('…'), "Truncated emoji attribute should have ellipsis");
-            assert!(value.starts_with("Test"), "Truncated value should preserve ASCII prefix");
+            assert!(
+                value.len() <= 255 + 3,
+                "Emoji attribute should be truncated"
+            );
+            assert!(
+                value.ends_with('…'),
+                "Truncated emoji attribute should have ellipsis"
+            );
+            assert!(
+                value.starts_with("Test"),
+                "Truncated value should preserve ASCII prefix"
+            );
         }
 
         // Verify no mid-character splits (UTF-8 validity confirms this)
         let char_boundary_valid = value.char_indices().all(|(i, _)| value.is_char_boundary(i));
-        assert!(char_boundary_valid, "Truncation must respect UTF-8 character boundaries");
+        assert!(
+            char_boundary_valid,
+            "Truncation must respect UTF-8 character boundaries"
+        );
     }
 
     println!("✅ UTF-8 BOUNDARY HANDLING: SOUND");
@@ -196,12 +251,18 @@ fn audit_attribute_truncation_implementation_strategy() {
     let expected_truncated_length = 255 + 3; // 255 chars + '…' (3 bytes)
 
     println!("   Input: {} character string", long_value.len());
-    println!("   Expected output: {} bytes (255 + ellipsis)", expected_truncated_length);
+    println!(
+        "   Expected output: {} bytes (255 + ellipsis)",
+        expected_truncated_length
+    );
     println!("   Should end with: '…'");
     println!("   Should respect: UTF-8 character boundaries");
 
     // This test documents the strategy - always passes
-    assert!(true, "Attribute truncation implementation strategy documented");
+    assert!(
+        true,
+        "Attribute truncation implementation strategy documented"
+    );
 
     println!("✅ IMPLEMENTATION STRATEGY DOCUMENTED");
 }
@@ -226,29 +287,37 @@ fn audit_attribute_truncation_performance_impact() {
     let long_values: Vec<String> = (0..10).map(|_| "L".repeat(500)).collect();
 
     println!("📊 Performance test scenario:");
-    println!("   Short values (≤255 chars): {} values", short_values.len());
+    println!(
+        "   Short values (≤255 chars): {} values",
+        short_values.len()
+    );
     println!("   Long values (>255 chars): {} values", long_values.len());
 
     // Current implementation (no truncation) - all values pass through
     let start = Instant::now();
-    let _spans: Vec<OtlpSpan> = (0..100).map(|i| {
-        let attrs = if i % 10 == 0 {
-            // Some spans with long attributes
-            vec![("long_attr".to_string(), long_values[i / 10].clone())]
-        } else {
-            // Most spans with short attributes
-            vec![("short_attr".to_string(), short_values[i % short_values.len()].clone())]
-        };
+    let _spans: Vec<OtlpSpan> = (0..100)
+        .map(|i| {
+            let attrs = if i % 10 == 0 {
+                // Some spans with long attributes
+                vec![("long_attr".to_string(), long_values[i / 10].clone())]
+            } else {
+                // Most spans with short attributes
+                vec![(
+                    "short_attr".to_string(),
+                    short_values[i % short_values.len()].clone(),
+                )]
+            };
 
-        OtlpSpan {
-            span_id: format!("span-{}", i),
-            name: "test-operation".to_string(),
-            start_time_unix_nano: 1000000,
-            end_time_unix_nano: 2000000,
-            attributes: attrs,
-            trace_flags: Some(0x01),
-        }
-    }).collect();
+            OtlpSpan {
+                span_id: format!("span-{}", i),
+                name: "test-operation".to_string(),
+                start_time_unix_nano: 1000000,
+                end_time_unix_nano: 2000000,
+                attributes: attrs,
+                trace_flags: Some(0x01),
+            }
+        })
+        .collect();
     let baseline_duration = start.elapsed();
 
     println!("📊 Current baseline performance:");

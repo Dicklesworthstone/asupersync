@@ -86,8 +86,8 @@
 use std::path::PathBuf;
 
 fn read_three_lane_source() -> String {
-    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("src/runtime/scheduler/three_lane.rs");
+    let path =
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/runtime/scheduler/three_lane.rs");
     std::fs::read_to_string(&path).expect("read three_lane.rs")
 }
 
