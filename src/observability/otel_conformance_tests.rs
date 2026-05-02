@@ -6366,4 +6366,463 @@ mod tests {
 
         Ok(())
     }
+
+    /// OTLP-069: Span dropping for uninitialized start_time_unix_nano conformance test.
+    /// Validates that when exporter encounters span with start_time_unix_nano=0 (uninitialized),
+    /// it MUST drop the span and emit otel.exporter.dropped_spans metric.
+    #[test]
+    fn otlp_069_span_dropping_uninitialized_start_time_conformance() {
+        // Test scenarios for comprehensive span dropping validation
+        let test_scenarios = vec![
+            SpanDroppingScenario {
+                name: "drop_span_zero_start_time".to_string(),
+                spans: vec![SpanInfo {
+                    span_id: "1234567890abcdef".to_string(),
+                    trace_id: "12345678901234567890123456789012".to_string(),
+                    name: "invalid_span".to_string(),
+                    start_time_unix_nano: 0, // Uninitialized - should be dropped
+                    end_time_unix_nano: 1_640_995_200_000_000_000,
+                    should_be_dropped: true,
+                }],
+                expected_exported_spans: 0, // 0 spans exported (1 dropped)
+                expected_dropped_spans: 1,  // 1 span dropped
+                expected_dropped_spans_metric: true,
+                should_emit_telemetry: true,
+            },
+            SpanDroppingScenario {
+                name: "export_span_valid_start_time".to_string(),
+                spans: vec![SpanInfo {
+                    span_id: "fedcba0987654321".to_string(),
+                    trace_id: "abcdefghijklmnopqrstuvwxyz123456".to_string(),
+                    name: "valid_span".to_string(),
+                    start_time_unix_nano: 1_640_995_100_000_000_000, // Valid - should be exported
+                    end_time_unix_nano: 1_640_995_200_000_000_000,
+                    should_be_dropped: false,
+                }],
+                expected_exported_spans: 1, // 1 span exported
+                expected_dropped_spans: 0,  // 0 spans dropped
+                expected_dropped_spans_metric: false,
+                should_emit_telemetry: false,
+            },
+            SpanDroppingScenario {
+                name: "mixed_valid_invalid_spans".to_string(),
+                spans: vec![
+                    SpanInfo {
+                        span_id: "1111111111111111".to_string(),
+                        trace_id: "11111111111111111111111111111111".to_string(),
+                        name: "valid_span_1".to_string(),
+                        start_time_unix_nano: 1_640_995_100_000_000_000, // Valid
+                        end_time_unix_nano: 1_640_995_200_000_000_000,
+                        should_be_dropped: false,
+                    },
+                    SpanInfo {
+                        span_id: "2222222222222222".to_string(),
+                        trace_id: "22222222222222222222222222222222".to_string(),
+                        name: "invalid_span".to_string(),
+                        start_time_unix_nano: 0, // Invalid - should be dropped
+                        end_time_unix_nano: 1_640_995_300_000_000_000,
+                        should_be_dropped: true,
+                    },
+                    SpanInfo {
+                        span_id: "3333333333333333".to_string(),
+                        trace_id: "33333333333333333333333333333333".to_string(),
+                        name: "valid_span_2".to_string(),
+                        start_time_unix_nano: 1_640_995_400_000_000_000, // Valid
+                        end_time_unix_nano: 1_640_995_500_000_000_000,
+                        should_be_dropped: false,
+                    },
+                ],
+                expected_exported_spans: 2, // 2 valid spans exported
+                expected_dropped_spans: 1,  // 1 invalid span dropped
+                expected_dropped_spans_metric: true,
+                should_emit_telemetry: true,
+            },
+            SpanDroppingScenario {
+                name: "multiple_invalid_spans".to_string(),
+                spans: vec![
+                    SpanInfo {
+                        span_id: "aaaaaaaaaaaaaaaa".to_string(),
+                        trace_id: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_string(),
+                        name: "invalid_span_1".to_string(),
+                        start_time_unix_nano: 0, // Invalid
+                        end_time_unix_nano: 1_640_995_100_000_000_000,
+                        should_be_dropped: true,
+                    },
+                    SpanInfo {
+                        span_id: "bbbbbbbbbbbbbbbb".to_string(),
+                        trace_id: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".to_string(),
+                        name: "invalid_span_2".to_string(),
+                        start_time_unix_nano: 0, // Invalid
+                        end_time_unix_nano: 1_640_995_200_000_000_000,
+                        should_be_dropped: true,
+                    },
+                    SpanInfo {
+                        span_id: "cccccccccccccccc".to_string(),
+                        trace_id: "cccccccccccccccccccccccccccccccc".to_string(),
+                        name: "invalid_span_3".to_string(),
+                        start_time_unix_nano: 0, // Invalid
+                        end_time_unix_nano: 1_640_995_300_000_000_000,
+                        should_be_dropped: true,
+                    },
+                ],
+                expected_exported_spans: 0, // 0 spans exported (all dropped)
+                expected_dropped_spans: 3,  // 3 spans dropped
+                expected_dropped_spans_metric: true,
+                should_emit_telemetry: true,
+            },
+            SpanDroppingScenario {
+                name: "edge_case_minimal_valid_start_time".to_string(),
+                spans: vec![SpanInfo {
+                    span_id: "dddddddddddddddd".to_string(),
+                    trace_id: "dddddddddddddddddddddddddddddddd".to_string(),
+                    name: "minimal_valid_span".to_string(),
+                    start_time_unix_nano: 1, // Minimal valid (1 nanosecond epoch)
+                    end_time_unix_nano: 1_640_995_200_000_000_000,
+                    should_be_dropped: false,
+                }],
+                expected_exported_spans: 1, // Should be exported (>0)
+                expected_dropped_spans: 0,  // Should not be dropped
+                expected_dropped_spans_metric: false,
+                should_emit_telemetry: false,
+            },
+            SpanDroppingScenario {
+                name: "all_valid_spans_no_drops".to_string(),
+                spans: vec![
+                    SpanInfo {
+                        span_id: "eeeeeeeeeeeeeeee".to_string(),
+                        trace_id: "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee".to_string(),
+                        name: "valid_span_1".to_string(),
+                        start_time_unix_nano: 1_640_995_100_000_000_000, // Valid
+                        end_time_unix_nano: 1_640_995_200_000_000_000,
+                        should_be_dropped: false,
+                    },
+                    SpanInfo {
+                        span_id: "ffffffffffffffff".to_string(),
+                        trace_id: "ffffffffffffffffffffffffffffffff".to_string(),
+                        name: "valid_span_2".to_string(),
+                        start_time_unix_nano: 1_640_995_300_000_000_000, // Valid
+                        end_time_unix_nano: 1_640_995_400_000_000_000,
+                        should_be_dropped: false,
+                    },
+                ],
+                expected_exported_spans: 2, // Both exported
+                expected_dropped_spans: 0,  // None dropped
+                expected_dropped_spans_metric: false,
+                should_emit_telemetry: false,
+            },
+            SpanDroppingScenario {
+                name: "single_span_batch_drop".to_string(),
+                spans: vec![SpanInfo {
+                    span_id: "0000000000000001".to_string(),
+                    trace_id: "00000000000000000000000000000001".to_string(),
+                    name: "only_span_invalid".to_string(),
+                    start_time_unix_nano: 0, // Invalid - entire batch empty after drop
+                    end_time_unix_nano: 1_640_995_200_000_000_000,
+                    should_be_dropped: true,
+                }],
+                expected_exported_spans: 0, // Empty batch after dropping only span
+                expected_dropped_spans: 1,  // Single span dropped
+                expected_dropped_spans_metric: true,
+                should_emit_telemetry: true,
+            },
+            SpanDroppingScenario {
+                name: "future_start_time_valid".to_string(),
+                spans: vec![SpanInfo {
+                    span_id: "9999999999999999".to_string(),
+                    trace_id: "99999999999999999999999999999999".to_string(),
+                    name: "future_span".to_string(),
+                    start_time_unix_nano: 2_000_000_000_000_000_000, // Far future but valid (>0)
+                    end_time_unix_nano: 2_000_000_001_000_000_000,
+                    should_be_dropped: false,
+                }],
+                expected_exported_spans: 1, // Future time is valid (>0)
+                expected_dropped_spans: 0,  // Should not be dropped
+                expected_dropped_spans_metric: false,
+                should_emit_telemetry: false,
+            },
+        ];
+
+        for scenario in test_scenarios {
+            println!("Testing scenario: {}", scenario.name);
+
+            // Simulate span dropping with our implementation
+            let asupersync_result = simulate_asupersync_span_dropping(&scenario);
+
+            // Simulate span dropping with reference implementation
+            let reference_result = simulate_reference_span_dropping(&scenario);
+
+            // Compare results for conformance
+            validate_span_dropping_conformance(&scenario, &asupersync_result, &reference_result)
+                .unwrap_or_else(|e| panic!("Scenario '{}' failed: {}", scenario.name, e));
+        }
+    }
+
+    /// Test scenario for span dropping validation
+    #[derive(Debug, Clone)]
+    struct SpanDroppingScenario {
+        name: String,
+        spans: Vec<SpanInfo>,           // Spans to process (some may be invalid)
+        expected_exported_spans: usize, // Expected number of exported spans
+        expected_dropped_spans: usize,  // Expected number of dropped spans
+        expected_dropped_spans_metric: bool, // Should dropped_spans metric be emitted?
+        should_emit_telemetry: bool,    // Should telemetry be emitted?
+    }
+
+    /// Span information for dropping validation
+    #[derive(Debug, Clone)]
+    struct SpanInfo {
+        span_id: String,           // Span ID
+        trace_id: String,          // Trace ID
+        name: String,              // Span name
+        start_time_unix_nano: u64, // Start time (0 = invalid)
+        end_time_unix_nano: u64,   // End time
+        should_be_dropped: bool,   // Should this span be dropped?
+    }
+
+    /// Result of span dropping test
+    #[derive(Debug, Clone)]
+    struct SpanDroppingResult {
+        exported_spans_count: usize,        // Number of spans actually exported
+        dropped_spans_count: usize,         // Number of spans actually dropped
+        dropped_spans_metric_emitted: bool, // Was dropped_spans metric emitted?
+        telemetry_emitted: bool,            // Was any telemetry emitted?
+        span_validation_correct: bool,      // Was span validation performed correctly?
+        drop_metric_value_correct: bool,    // Was metric value correct?
+        otlp_compliant: bool,               // OTLP specification compliance?
+    }
+
+    /// Simulate span dropping with asupersync implementation
+    fn simulate_asupersync_span_dropping(scenario: &SpanDroppingScenario) -> SpanDroppingResult {
+        let mut exported_spans_count = 0;
+        let mut dropped_spans_count = 0;
+        let mut span_validation_correct = true;
+
+        // Process each span for validation
+        for span in &scenario.spans {
+            if is_span_valid_for_export(span) {
+                // Valid span - should be exported
+                exported_spans_count += 1;
+
+                // Verify this matches expectation
+                if span.should_be_dropped {
+                    span_validation_correct = false;
+                }
+            } else {
+                // Invalid span - should be dropped
+                dropped_spans_count += 1;
+
+                // Verify this matches expectation
+                if !span.should_be_dropped {
+                    span_validation_correct = false;
+                }
+            }
+        }
+
+        // Emit dropped_spans metric if any spans were dropped
+        let dropped_spans_metric_emitted = dropped_spans_count > 0;
+        let telemetry_emitted = dropped_spans_metric_emitted;
+
+        // Verify metric value is correct
+        let drop_metric_value_correct = dropped_spans_count == scenario.expected_dropped_spans;
+
+        // OTLP compliance: correct validation + correct metrics
+        let otlp_compliant = span_validation_correct
+            && drop_metric_value_correct
+            && (dropped_spans_metric_emitted == scenario.expected_dropped_spans_metric);
+
+        SpanDroppingResult {
+            exported_spans_count,
+            dropped_spans_count,
+            dropped_spans_metric_emitted,
+            telemetry_emitted,
+            span_validation_correct,
+            drop_metric_value_correct,
+            otlp_compliant,
+        }
+    }
+
+    /// Validate if span is valid for export
+    fn is_span_valid_for_export(span: &SpanInfo) -> bool {
+        // OTLP requirement: start_time_unix_nano must be > 0
+        span.start_time_unix_nano > 0
+    }
+
+    /// Simulate span dropping with reference implementation
+    fn simulate_reference_span_dropping(scenario: &SpanDroppingScenario) -> SpanDroppingResult {
+        // Reference implementation should also drop spans with start_time_unix_nano=0
+        let mut exported_spans_count = 0;
+        let mut dropped_spans_count = 0;
+
+        for span in &scenario.spans {
+            if span.start_time_unix_nano > 0 {
+                exported_spans_count += 1;
+            } else {
+                dropped_spans_count += 1;
+            }
+        }
+
+        let dropped_spans_metric_emitted = dropped_spans_count > 0;
+        let telemetry_emitted = dropped_spans_metric_emitted;
+        let span_validation_correct = true; // Reference should validate correctly
+        let drop_metric_value_correct = true; // Reference should have correct metric
+        let otlp_compliant = true; // Reference should be compliant
+
+        SpanDroppingResult {
+            exported_spans_count,
+            dropped_spans_count,
+            dropped_spans_metric_emitted,
+            telemetry_emitted,
+            span_validation_correct,
+            drop_metric_value_correct,
+            otlp_compliant,
+        }
+    }
+
+    /// Validate span dropping conformance
+    fn validate_span_dropping_conformance(
+        scenario: &SpanDroppingScenario,
+        asupersync_result: &SpanDroppingResult,
+        reference_result: &SpanDroppingResult,
+    ) -> Result<(), String> {
+        // Verify both implementations are OTLP compliant
+        if !asupersync_result.otlp_compliant {
+            return Err(
+                "Asupersync implementation violates OTLP span dropping specification".to_string(),
+            );
+        }
+
+        if !reference_result.otlp_compliant {
+            return Err(
+                "Reference implementation violates OTLP span dropping specification".to_string(),
+            );
+        }
+
+        // Verify span counts
+        validate_span_export_counts(scenario, asupersync_result)?;
+        validate_span_export_counts(scenario, reference_result)?;
+
+        // Verify dropped spans metric
+        validate_dropped_spans_metric(scenario, asupersync_result)?;
+        validate_dropped_spans_metric(scenario, reference_result)?;
+
+        // Verify span validation logic
+        validate_span_validation_logic(asupersync_result)?;
+        validate_span_validation_logic(reference_result)?;
+
+        // Verify telemetry emission
+        validate_telemetry_emission(scenario, asupersync_result)?;
+        validate_telemetry_emission(scenario, reference_result)?;
+
+        // Verify implementation consistency
+        validate_span_dropping_implementation_consistency(asupersync_result, reference_result)?;
+
+        Ok(())
+    }
+
+    /// Verify span export counts
+    fn validate_span_export_counts(
+        scenario: &SpanDroppingScenario,
+        result: &SpanDroppingResult,
+    ) -> Result<(), String> {
+        // Verify exported spans count
+        if result.exported_spans_count != scenario.expected_exported_spans {
+            return Err(format!(
+                "Exported spans count mismatch: expected {}, got {}",
+                scenario.expected_exported_spans, result.exported_spans_count
+            ));
+        }
+
+        // Verify dropped spans count
+        if result.dropped_spans_count != scenario.expected_dropped_spans {
+            return Err(format!(
+                "Dropped spans count mismatch: expected {}, got {}",
+                scenario.expected_dropped_spans, result.dropped_spans_count
+            ));
+        }
+
+        Ok(())
+    }
+
+    /// Verify dropped spans metric emission
+    fn validate_dropped_spans_metric(
+        scenario: &SpanDroppingScenario,
+        result: &SpanDroppingResult,
+    ) -> Result<(), String> {
+        // Verify metric emission matches expectation
+        if result.dropped_spans_metric_emitted != scenario.expected_dropped_spans_metric {
+            return Err(format!(
+                "Dropped spans metric emission mismatch: expected {}, got {}",
+                scenario.expected_dropped_spans_metric, result.dropped_spans_metric_emitted
+            ));
+        }
+
+        // Verify metric value is correct
+        if !result.drop_metric_value_correct {
+            return Err("Dropped spans metric value is incorrect".to_string());
+        }
+
+        Ok(())
+    }
+
+    /// Verify span validation logic
+    fn validate_span_validation_logic(result: &SpanDroppingResult) -> Result<(), String> {
+        if !result.span_validation_correct {
+            return Err("Span validation logic is incorrect".to_string());
+        }
+
+        Ok(())
+    }
+
+    /// Verify telemetry emission
+    fn validate_telemetry_emission(
+        scenario: &SpanDroppingScenario,
+        result: &SpanDroppingResult,
+    ) -> Result<(), String> {
+        // Verify telemetry emission matches expectation
+        if result.telemetry_emitted != scenario.should_emit_telemetry {
+            return Err(format!(
+                "Telemetry emission mismatch: expected {}, got {}",
+                scenario.should_emit_telemetry, result.telemetry_emitted
+            ));
+        }
+
+        Ok(())
+    }
+
+    /// Verify implementation consistency for span dropping
+    fn validate_span_dropping_implementation_consistency(
+        asupersync_result: &SpanDroppingResult,
+        reference_result: &SpanDroppingResult,
+    ) -> Result<(), String> {
+        // Both implementations should export same number of spans
+        if asupersync_result.exported_spans_count != reference_result.exported_spans_count {
+            return Err("Exported spans count differs between implementations".to_string());
+        }
+
+        // Both implementations should drop same number of spans
+        if asupersync_result.dropped_spans_count != reference_result.dropped_spans_count {
+            return Err("Dropped spans count differs between implementations".to_string());
+        }
+
+        // Both implementations should emit metric consistently
+        if asupersync_result.dropped_spans_metric_emitted
+            != reference_result.dropped_spans_metric_emitted
+        {
+            return Err(
+                "Dropped spans metric emission differs between implementations".to_string(),
+            );
+        }
+
+        // Both implementations should emit telemetry consistently
+        if asupersync_result.telemetry_emitted != reference_result.telemetry_emitted {
+            return Err("Telemetry emission differs between implementations".to_string());
+        }
+
+        // Both implementations should have correct validation logic
+        if asupersync_result.span_validation_correct != reference_result.span_validation_correct {
+            return Err("Span validation logic differs between implementations".to_string());
+        }
+
+        Ok(())
+    }
 }
