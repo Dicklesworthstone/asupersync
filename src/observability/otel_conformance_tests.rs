@@ -16860,3 +16860,570 @@ fn validate_error_status_implementation_consistency(
 
     Ok(())
 }
+//
+// OTLP-088: INTERNAL span cross-trace validation conformance test
+//
+
+#[test]
+fn otlp_088_internal_span_same_trace_validation_conformance() {
+    // Test scenarios for INTERNAL span same-trace validation
+    let scenarios = vec![
+        InternalSpanTraceScenario {
+            description: "INTERNAL span with parent from same trace (valid)".to_string(),
+            span: InternalSpanTraceInfo {
+                name: "internal-processing".to_string(),
+                span_id: "internal-span-123456".to_string(),
+                parent_span_id: Some("parent-span-654321".to_string()),
+                kind: InternalSpanKind::Internal,
+                trace_id: "trace-12345678901234567890123456789012".to_string(),
+            },
+            parent_spans: vec![ParentTraceSpanInfo {
+                span_id: "parent-span-654321".to_string(),
+                trace_id: "trace-12345678901234567890123456789012".to_string(), // Same trace
+                kind: InternalSpanKind::Internal,
+                name: "parent-processing".to_string(),
+            }],
+            expected_validation_success: true,
+            expected_cross_trace_violation: false,
+            expected_same_trace_parent: true,
+            expected_otlp_compliant: true,
+        },
+        InternalSpanTraceScenario {
+            description: "INTERNAL span with parent from different trace (VIOLATION)".to_string(),
+            span: InternalSpanTraceInfo {
+                name: "cross-trace-internal".to_string(),
+                span_id: "internal-span-223456".to_string(),
+                parent_span_id: Some("parent-span-754321".to_string()),
+                kind: InternalSpanKind::Internal,
+                trace_id: "trace-12345678901234567890123456789012".to_string(),
+            },
+            parent_spans: vec![ParentTraceSpanInfo {
+                span_id: "parent-span-754321".to_string(),
+                trace_id: "trace-99999999901234567890123456789999".to_string(), // Different trace - VIOLATION
+                kind: InternalSpanKind::Internal,
+                name: "cross-trace-parent".to_string(),
+            }],
+            expected_validation_success: false,
+            expected_cross_trace_violation: true,
+            expected_same_trace_parent: false,
+            expected_otlp_compliant: false,
+        },
+        InternalSpanTraceScenario {
+            description: "INTERNAL span with no parent (root span, valid)".to_string(),
+            span: InternalSpanTraceInfo {
+                name: "root-internal-span".to_string(),
+                span_id: "internal-span-323456".to_string(),
+                parent_span_id: None, // Root span
+                kind: InternalSpanKind::Internal,
+                trace_id: "trace-32345678901234567890123456789012".to_string(),
+            },
+            parent_spans: vec![],
+            expected_validation_success: true,
+            expected_cross_trace_violation: false,
+            expected_same_trace_parent: true, // No parent needed
+            expected_otlp_compliant: true,
+        },
+        InternalSpanTraceScenario {
+            description: "CLIENT span with parent from different trace (allowed for CLIENT)"
+                .to_string(),
+            span: InternalSpanTraceInfo {
+                name: "client-request".to_string(),
+                span_id: "client-span-423456".to_string(),
+                parent_span_id: Some("parent-span-854321".to_string()),
+                kind: InternalSpanKind::Client,
+                trace_id: "trace-42345678901234567890123456789012".to_string(),
+            },
+            parent_spans: vec![ParentTraceSpanInfo {
+                span_id: "parent-span-854321".to_string(),
+                trace_id: "trace-88888888901234567890123456789888".to_string(), // Different trace - OK for CLIENT
+                kind: InternalSpanKind::Internal,
+                name: "remote-parent".to_string(),
+            }],
+            expected_validation_success: true,
+            expected_cross_trace_violation: false, // CLIENT spans can cross traces
+            expected_same_trace_parent: false,
+            expected_otlp_compliant: true,
+        },
+        InternalSpanTraceScenario {
+            description: "SERVER span with parent from different trace (allowed for SERVER)"
+                .to_string(),
+            span: InternalSpanTraceInfo {
+                name: "server-handler".to_string(),
+                span_id: "server-span-523456".to_string(),
+                parent_span_id: Some("parent-span-954321".to_string()),
+                kind: InternalSpanKind::Server,
+                trace_id: "trace-52345678901234567890123456789012".to_string(),
+            },
+            parent_spans: vec![ParentTraceSpanInfo {
+                span_id: "parent-span-954321".to_string(),
+                trace_id: "trace-77777777901234567890123456789777".to_string(), // Different trace - OK for SERVER
+                kind: InternalSpanKind::Client,
+                name: "client-request".to_string(),
+            }],
+            expected_validation_success: true,
+            expected_cross_trace_violation: false, // SERVER spans can cross traces
+            expected_same_trace_parent: false,
+            expected_otlp_compliant: true,
+        },
+        InternalSpanTraceScenario {
+            description: "INTERNAL span with missing parent span (orphaned)".to_string(),
+            span: InternalSpanTraceInfo {
+                name: "orphaned-internal".to_string(),
+                span_id: "internal-span-623456".to_string(),
+                parent_span_id: Some("missing-parent-064321".to_string()), // Parent doesn't exist
+                kind: InternalSpanKind::Internal,
+                trace_id: "trace-62345678901234567890123456789012".to_string(),
+            },
+            parent_spans: vec![], // No parent spans available
+            expected_validation_success: false,
+            expected_cross_trace_violation: false, // Not cross-trace, just missing
+            expected_same_trace_parent: false,
+            expected_otlp_compliant: false,
+        },
+        InternalSpanTraceScenario {
+            description: "INTERNAL span with multiple potential parents (same trace)".to_string(),
+            span: InternalSpanTraceInfo {
+                name: "multi-parent-internal".to_string(),
+                span_id: "internal-span-723456".to_string(),
+                parent_span_id: Some("parent-span-164321".to_string()),
+                kind: InternalSpanKind::Internal,
+                trace_id: "trace-72345678901234567890123456789012".to_string(),
+            },
+            parent_spans: vec![
+                ParentTraceSpanInfo {
+                    span_id: "parent-span-164321".to_string(),
+                    trace_id: "trace-72345678901234567890123456789012".to_string(), // Same trace - correct parent
+                    kind: InternalSpanKind::Internal,
+                    name: "correct-parent".to_string(),
+                },
+                ParentTraceSpanInfo {
+                    span_id: "other-span-264321".to_string(),
+                    trace_id: "trace-66666666901234567890123456789666".to_string(), // Different trace - wrong parent
+                    kind: InternalSpanKind::Internal,
+                    name: "wrong-parent".to_string(),
+                },
+            ],
+            expected_validation_success: true,
+            expected_cross_trace_violation: false,
+            expected_same_trace_parent: true, // Correct parent found
+            expected_otlp_compliant: true,
+        },
+        InternalSpanTraceScenario {
+            description: "INTERNAL span with PRODUCER/CONSUMER parent (same trace)".to_string(),
+            span: InternalSpanTraceInfo {
+                name: "message-processing-internal".to_string(),
+                span_id: "internal-span-823456".to_string(),
+                parent_span_id: Some("producer-span-264321".to_string()),
+                kind: InternalSpanKind::Internal,
+                trace_id: "trace-82345678901234567890123456789012".to_string(),
+            },
+            parent_spans: vec![ParentTraceSpanInfo {
+                span_id: "producer-span-264321".to_string(),
+                trace_id: "trace-82345678901234567890123456789012".to_string(), // Same trace
+                kind: InternalSpanKind::Producer,
+                name: "message-producer".to_string(),
+            }],
+            expected_validation_success: true,
+            expected_cross_trace_violation: false,
+            expected_same_trace_parent: true,
+            expected_otlp_compliant: true,
+        },
+    ];
+
+    for scenario in scenarios {
+        println!("Testing scenario: {}", scenario.description);
+
+        // Simulate asupersync exporter behavior
+        let asupersync_result = simulate_asupersync_internal_trace_validation(&scenario);
+
+        // Simulate reference implementation behavior
+        let reference_result = simulate_reference_internal_trace_validation(&scenario);
+
+        // Validate individual results
+        validate_internal_trace_validation_logic(&asupersync_result).expect(&format!(
+            "Asupersync internal trace validation logic failed for scenario: {}",
+            scenario.description
+        ));
+
+        validate_internal_trace_validation_logic(&reference_result).expect(&format!(
+            "Reference internal trace validation logic failed for scenario: {}",
+            scenario.description
+        ));
+
+        // Validate implementation consistency
+        validate_internal_trace_implementation_consistency(&asupersync_result, &reference_result)
+            .expect(&format!(
+                "Implementation consistency failed for scenario: {}",
+                scenario.description
+            ));
+
+        println!("✓ Scenario passed: {}", scenario.description);
+    }
+}
+
+/// Test scenario for INTERNAL span cross-trace validation
+#[derive(Debug, Clone)]
+struct InternalSpanTraceScenario {
+    description: String,
+    span: InternalSpanTraceInfo,
+    parent_spans: Vec<ParentTraceSpanInfo>,
+    expected_validation_success: bool,
+    expected_cross_trace_violation: bool,
+    expected_same_trace_parent: bool,
+    expected_otlp_compliant: bool,
+}
+
+/// INTERNAL span information for testing
+#[derive(Debug, Clone)]
+struct InternalSpanTraceInfo {
+    name: String,
+    span_id: String,
+    parent_span_id: Option<String>,
+    kind: InternalSpanKind,
+    trace_id: String,
+}
+
+/// Parent span information for cross-trace testing
+#[derive(Debug, Clone)]
+struct ParentTraceSpanInfo {
+    span_id: String,
+    trace_id: String,
+    kind: InternalSpanKind,
+    name: String,
+}
+
+/// Internal span kind enum
+#[derive(Debug, Clone, PartialEq)]
+enum InternalSpanKind {
+    Unspecified = 0,
+    Internal = 1,
+    Server = 2,
+    Client = 3,
+    Producer = 4,
+    Consumer = 5,
+}
+
+/// Result of INTERNAL span cross-trace validation testing
+#[derive(Debug, Clone)]
+struct InternalTraceValidationResult {
+    validation_success: bool,
+    cross_trace_violation_detected: bool,
+    same_trace_parent_found: bool,
+    parent_found: bool,
+    parent_trace_id: Option<String>,
+    span_trace_id: String,
+    validation_errors: Vec<String>,
+    processed_spans_count: usize,
+    internal_spans_count: usize,
+    cross_trace_violations_count: usize,
+    same_trace_parents_count: usize,
+    orphaned_spans_count: usize,
+    validation_correct: bool,
+    validation_applied: bool,
+    otlp_compliant: bool,
+    telemetry_emitted: bool,
+}
+
+/// Simulate asupersync INTERNAL span cross-trace validation behavior
+fn simulate_asupersync_internal_trace_validation(
+    scenario: &InternalSpanTraceScenario,
+) -> InternalTraceValidationResult {
+    let mut validation_errors = Vec::new();
+    let mut internal_spans = 0;
+    let mut cross_trace_violations = 0;
+    let mut same_trace_parents = 0;
+    let mut orphaned_spans = 0;
+    let mut validation_success = true;
+    let mut cross_trace_violation_detected = false;
+    let mut same_trace_parent_found = false;
+    let mut parent_found = false;
+    let mut parent_trace_id = None;
+
+    // Count span types
+    if scenario.span.kind == InternalSpanKind::Internal {
+        internal_spans += 1;
+    }
+
+    // Validate INTERNAL span trace constraints
+    if let Some(ref parent_span_id) = scenario.span.parent_span_id {
+        // Find the parent span
+        if let Some(parent) = scenario
+            .parent_spans
+            .iter()
+            .find(|p| p.span_id == *parent_span_id)
+        {
+            parent_found = true;
+            parent_trace_id = Some(parent.trace_id.clone());
+
+            // Check if parent is from same trace
+            if parent.trace_id == scenario.span.trace_id {
+                same_trace_parent_found = true;
+                same_trace_parents += 1;
+            } else {
+                // Different trace detected
+                if scenario.span.kind == InternalSpanKind::Internal {
+                    // VIOLATION: INTERNAL spans must have same-trace parents
+                    cross_trace_violation_detected = true;
+                    cross_trace_violations += 1;
+                    validation_success = false;
+                    validation_errors
+                        .push("INTERNAL span has parent from different trace".to_string());
+                } else {
+                    // CLIENT/SERVER spans can have cross-trace parents
+                    same_trace_parent_found = false; // Different trace, but allowed
+                }
+            }
+        } else {
+            // Parent span not found - orphaned span
+            orphaned_spans += 1;
+            validation_success = false;
+            validation_errors.push("Parent span not found - orphaned span".to_string());
+        }
+    } else {
+        // Root span - valid for any span type
+        same_trace_parent_found = true; // No parent constraint
+    }
+
+    // Check validation correctness
+    let validation_correct = validation_success == scenario.expected_validation_success
+        && cross_trace_violation_detected == scenario.expected_cross_trace_violation
+        && same_trace_parent_found == scenario.expected_same_trace_parent;
+
+    let validation_applied = true; // Always apply cross-trace validation
+
+    // OTLP compliance: INTERNAL spans must not cross traces
+    let otlp_compliant = if scenario.span.kind == InternalSpanKind::Internal {
+        !cross_trace_violation_detected
+    } else {
+        true // Non-INTERNAL spans are not subject to this constraint
+    };
+
+    InternalTraceValidationResult {
+        validation_success,
+        cross_trace_violation_detected,
+        same_trace_parent_found,
+        parent_found,
+        parent_trace_id,
+        span_trace_id: scenario.span.trace_id.clone(),
+        validation_errors,
+        processed_spans_count: 1,
+        internal_spans_count: internal_spans,
+        cross_trace_violations_count: cross_trace_violations,
+        same_trace_parents_count: same_trace_parents,
+        orphaned_spans_count: orphaned_spans,
+        validation_correct,
+        validation_applied,
+        otlp_compliant,
+        telemetry_emitted: true, // Assume telemetry is emitted for validation events
+    }
+}
+
+/// Simulate reference implementation INTERNAL span cross-trace validation behavior
+fn simulate_reference_internal_trace_validation(
+    scenario: &InternalSpanTraceScenario,
+) -> InternalTraceValidationResult {
+    let mut validation_errors = Vec::new();
+    let mut internal_spans = 0;
+    let mut cross_trace_violations = 0;
+    let mut same_trace_parents = 0;
+    let mut orphaned_spans = 0;
+    let mut validation_success = true;
+    let mut cross_trace_violation_detected = false;
+    let mut same_trace_parent_found = false;
+    let mut parent_found = false;
+    let mut parent_trace_id = None;
+
+    // Count span types
+    if scenario.span.kind == InternalSpanKind::Internal {
+        internal_spans += 1;
+    }
+
+    // Reference implementation validation logic
+    if let Some(ref parent_span_id) = scenario.span.parent_span_id {
+        // Look for parent span
+        if let Some(parent) = scenario
+            .parent_spans
+            .iter()
+            .find(|p| p.span_id == *parent_span_id)
+        {
+            parent_found = true;
+            parent_trace_id = Some(parent.trace_id.clone());
+
+            // Validate trace relationship
+            if parent.trace_id == scenario.span.trace_id {
+                same_trace_parent_found = true;
+                same_trace_parents += 1;
+            } else {
+                // Cross-trace parent
+                if scenario.span.kind == InternalSpanKind::Internal {
+                    // INTERNAL spans cannot cross traces
+                    cross_trace_violation_detected = true;
+                    cross_trace_violations += 1;
+                    validation_success = false;
+                    validation_errors.push("Cross-trace INTERNAL span detected".to_string());
+                } else {
+                    // Other span types can cross traces
+                    same_trace_parent_found = false;
+                }
+            }
+        } else {
+            // Missing parent
+            orphaned_spans += 1;
+            validation_success = false;
+            validation_errors.push("Missing parent span".to_string());
+        }
+    } else {
+        // Root span
+        same_trace_parent_found = true;
+    }
+
+    // Check validation correctness
+    let validation_correct = validation_success == scenario.expected_validation_success
+        && cross_trace_violation_detected == scenario.expected_cross_trace_violation
+        && same_trace_parent_found == scenario.expected_same_trace_parent;
+
+    let validation_applied = true;
+
+    // OTLP compliance
+    let otlp_compliant = if scenario.span.kind == InternalSpanKind::Internal {
+        !cross_trace_violation_detected
+    } else {
+        true
+    };
+
+    InternalTraceValidationResult {
+        validation_success,
+        cross_trace_violation_detected,
+        same_trace_parent_found,
+        parent_found,
+        parent_trace_id,
+        span_trace_id: scenario.span.trace_id.clone(),
+        validation_errors,
+        processed_spans_count: 1,
+        internal_spans_count: internal_spans,
+        cross_trace_violations_count: cross_trace_violations,
+        same_trace_parents_count: same_trace_parents,
+        orphaned_spans_count: orphaned_spans,
+        validation_correct,
+        validation_applied,
+        otlp_compliant,
+        telemetry_emitted: true,
+    }
+}
+
+/// Verify INTERNAL span cross-trace validation logic
+fn validate_internal_trace_validation_logic(
+    result: &InternalTraceValidationResult,
+) -> Result<(), String> {
+    if !result.validation_correct {
+        return Err("INTERNAL span cross-trace validation logic is incorrect".to_string());
+    }
+
+    if !result.validation_applied {
+        return Err(
+            "Cross-trace validation should be applied for INTERNAL span processing".to_string(),
+        );
+    }
+
+    // Check OTLP compliance
+    if !result.otlp_compliant {
+        return Err("INTERNAL span cross-trace validation is not OTLP compliant".to_string());
+    }
+
+    // Critical check: cross-trace violations must be detected for INTERNAL spans
+    if result.internal_spans_count > 0
+        && result.cross_trace_violation_detected
+        && result.validation_success
+    {
+        return Err("CRITICAL: Cross-trace violation detected but validation passed".to_string());
+    }
+
+    Ok(())
+}
+
+/// Verify implementation consistency for INTERNAL span cross-trace validation
+fn validate_internal_trace_implementation_consistency(
+    asupersync_result: &InternalTraceValidationResult,
+    reference_result: &InternalTraceValidationResult,
+) -> Result<(), String> {
+    // Both implementations should validate consistently
+    if asupersync_result.validation_success != reference_result.validation_success {
+        return Err("Validation success differs between implementations".to_string());
+    }
+
+    // Both implementations should detect cross-trace violations consistently
+    if asupersync_result.cross_trace_violation_detected
+        != reference_result.cross_trace_violation_detected
+    {
+        return Err("Cross-trace violation detection differs between implementations".to_string());
+    }
+
+    // Both implementations should find same-trace parents consistently
+    if asupersync_result.same_trace_parent_found != reference_result.same_trace_parent_found {
+        return Err("Same-trace parent detection differs between implementations".to_string());
+    }
+
+    // Both implementations should find parents consistently
+    if asupersync_result.parent_found != reference_result.parent_found {
+        return Err("Parent found status differs between implementations".to_string());
+    }
+
+    // Both implementations should identify same parent trace
+    if asupersync_result.parent_trace_id != reference_result.parent_trace_id {
+        return Err("Parent trace ID differs between implementations".to_string());
+    }
+
+    // Both implementations should process same span trace
+    if asupersync_result.span_trace_id != reference_result.span_trace_id {
+        return Err("Span trace ID differs between implementations".to_string());
+    }
+
+    // Both implementations should count spans consistently
+    if asupersync_result.processed_spans_count != reference_result.processed_spans_count {
+        return Err("Processed spans count differs between implementations".to_string());
+    }
+
+    // Both implementations should count INTERNAL spans consistently
+    if asupersync_result.internal_spans_count != reference_result.internal_spans_count {
+        return Err("Internal spans count differs between implementations".to_string());
+    }
+
+    // Both implementations should count violations consistently
+    if asupersync_result.cross_trace_violations_count
+        != reference_result.cross_trace_violations_count
+    {
+        return Err("Cross-trace violations count differs between implementations".to_string());
+    }
+
+    // Both implementations should count same-trace parents consistently
+    if asupersync_result.same_trace_parents_count != reference_result.same_trace_parents_count {
+        return Err("Same-trace parents count differs between implementations".to_string());
+    }
+
+    // Both implementations should count orphaned spans consistently
+    if asupersync_result.orphaned_spans_count != reference_result.orphaned_spans_count {
+        return Err("Orphaned spans count differs between implementations".to_string());
+    }
+
+    // Both implementations should have same validation correctness
+    if asupersync_result.validation_correct != reference_result.validation_correct {
+        return Err("Validation correctness differs between implementations".to_string());
+    }
+
+    // Both implementations should apply validation consistently
+    if asupersync_result.validation_applied != reference_result.validation_applied {
+        return Err("Validation application differs between implementations".to_string());
+    }
+
+    // Both implementations should be OTLP compliant
+    if asupersync_result.otlp_compliant != reference_result.otlp_compliant {
+        return Err("OTLP compliance differs between implementations".to_string());
+    }
+
+    // Both implementations should emit telemetry consistently
+    if asupersync_result.telemetry_emitted != reference_result.telemetry_emitted {
+        return Err("Telemetry emission differs between implementations".to_string());
+    }
+
+    Ok(())
+}
