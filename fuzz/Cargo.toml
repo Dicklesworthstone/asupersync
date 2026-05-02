@@ -4594,6 +4594,12 @@ test = false
 doc = false
 
 [[bin]]
+name = "h1_request_line_invalid"
+path = "fuzz_targets/h1_request_line_invalid.rs"
+test = false
+doc = false
+
+[[bin]]
 name = "h2_headers_frame_size_cap_concurrent"
 path = "fuzz_targets/h2_headers_frame_size_cap_concurrent.rs"
 test = false
