@@ -1206,6 +1206,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "h2_window_increment_max"
+path = "fuzz_targets/h2_window_increment_max.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "postgres_listen_notify"
 path = "fuzz_targets/postgres_listen_notify.rs"
 test = false
@@ -1993,6 +2000,13 @@ bench = false
 [[bin]]
 name = "raptorq_encoder_transition_cases"
 path = "fuzz_targets/raptorq_encoder_transition_cases.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "raptorq_intermediate_symbols"
+path = "fuzz_targets/raptorq_intermediate_symbols.rs"
 test = false
 doc = false
 bench = false
@@ -4291,6 +4305,16 @@ test = false
 doc = false
 bench = false
 
+# Structure-aware lab-runtime fuzzer for concurrent Mutex acquire/release.
+# Drives multiple tasks through queued ownership transfer while injecting
+# cancellation before lock, while queued, and after acquire.
+[[bin]]
+name = "sync_mutex_concurrent_acquire"
+path = "fuzz_targets/sync_mutex_concurrent_acquire.rs"
+test = false
+doc = false
+bench = false
+
 # Tick #177 — HTTP/2 SETTINGS unsupported value range fuzzer
 # Tests arbitrary u32 setting values exceeding RFC 9113 bounds. Validates
 # PROTOCOL_ERROR for out-of-bounds SETTINGS_ENABLE_PUSH (must be 0-1),
@@ -4696,5 +4720,11 @@ doc = false
 [[bin]]
 name = "h2_data_padding_overflow"
 path = "fuzz_targets/h2_data_padding_overflow.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "h2_request_authority_invalid"
+path = "fuzz_targets/h2_request_authority_invalid.rs"
 test = false
 doc = false
