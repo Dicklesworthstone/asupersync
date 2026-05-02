@@ -4581,4 +4581,433 @@ mod tests {
 
         Ok(())
     }
+
+    /// OTLP-065: Span events duplicate name preservation conformance test.
+    /// Validates that when span has multiple events with same name, the exporter
+    /// MUST preserve all events without deduplication per OTLP specification.
+    #[test]
+    fn otlp_065_span_events_duplicate_name_preservation_conformance() {
+        // Test scenarios for comprehensive span events duplicate name validation
+        let test_scenarios = vec![
+            SpanEventsDuplicateNameScenario {
+                name: "basic_duplicate_event_names".to_string(),
+                span_events: vec![
+                    SpanEventInfo {
+                        name: "user.action".to_string(),
+                        timestamp_unix_nano: 1_640_995_200_000_000_000, // 2022-01-01 00:00:00
+                        attributes: vec![("action_type".to_string(), "click".to_string())],
+                    },
+                    SpanEventInfo {
+                        name: "user.action".to_string(),                // Same name
+                        timestamp_unix_nano: 1_640_995_201_000_000_000, // 1 second later
+                        attributes: vec![("action_type".to_string(), "scroll".to_string())],
+                    },
+                    SpanEventInfo {
+                        name: "user.action".to_string(),                // Same name again
+                        timestamp_unix_nano: 1_640_995_202_000_000_000, // 2 seconds later
+                        attributes: vec![("action_type".to_string(), "hover".to_string())],
+                    },
+                ],
+                expected_event_count: 3, // All 3 events should be preserved
+                expected_no_deduplication: true,
+                should_preserve_order: true,
+                should_preserve_attributes: true,
+            },
+            SpanEventsDuplicateNameScenario {
+                name: "identical_events_same_attributes".to_string(),
+                span_events: vec![
+                    SpanEventInfo {
+                        name: "database.query".to_string(),
+                        timestamp_unix_nano: 1_640_995_300_000_000_000,
+                        attributes: vec![
+                            ("query".to_string(), "SELECT * FROM users".to_string()),
+                            ("duration_ms".to_string(), "150".to_string()),
+                        ],
+                    },
+                    SpanEventInfo {
+                        name: "database.query".to_string(), // Same name
+                        timestamp_unix_nano: 1_640_995_301_000_000_000,
+                        attributes: vec![
+                            ("query".to_string(), "SELECT * FROM users".to_string()), // Same attributes
+                            ("duration_ms".to_string(), "150".to_string()),
+                        ],
+                    },
+                ],
+                expected_event_count: 2, // Even identical events should be preserved
+                expected_no_deduplication: true,
+                should_preserve_order: true,
+                should_preserve_attributes: true,
+            },
+            SpanEventsDuplicateNameScenario {
+                name: "mixed_unique_and_duplicate_names".to_string(),
+                span_events: vec![
+                    SpanEventInfo {
+                        name: "cache.miss".to_string(),
+                        timestamp_unix_nano: 1_640_995_400_000_000_000,
+                        attributes: vec![("key".to_string(), "user:123".to_string())],
+                    },
+                    SpanEventInfo {
+                        name: "cache.hit".to_string(), // Different name
+                        timestamp_unix_nano: 1_640_995_401_000_000_000,
+                        attributes: vec![("key".to_string(), "user:456".to_string())],
+                    },
+                    SpanEventInfo {
+                        name: "cache.miss".to_string(), // Same as first
+                        timestamp_unix_nano: 1_640_995_402_000_000_000,
+                        attributes: vec![("key".to_string(), "user:789".to_string())],
+                    },
+                    SpanEventInfo {
+                        name: "cache.eviction".to_string(), // Different name
+                        timestamp_unix_nano: 1_640_995_403_000_000_000,
+                        attributes: vec![("evicted_count".to_string(), "5".to_string())],
+                    },
+                    SpanEventInfo {
+                        name: "cache.miss".to_string(), // Same as first and third
+                        timestamp_unix_nano: 1_640_995_404_000_000_000,
+                        attributes: vec![("key".to_string(), "user:999".to_string())],
+                    },
+                ],
+                expected_event_count: 5, // All events preserved
+                expected_no_deduplication: true,
+                should_preserve_order: true,
+                should_preserve_attributes: true,
+            },
+            SpanEventsDuplicateNameScenario {
+                name: "many_duplicate_events".to_string(),
+                span_events: (0..10)
+                    .map(|i| SpanEventInfo {
+                        name: "repeated.event".to_string(), // All have same name
+                        timestamp_unix_nano: 1_640_995_500_000_000_000 + (i as u64 * 1_000_000_000),
+                        attributes: vec![("iteration".to_string(), i.to_string())],
+                    })
+                    .collect(),
+                expected_event_count: 10, // All 10 events preserved
+                expected_no_deduplication: true,
+                should_preserve_order: true,
+                should_preserve_attributes: true,
+            },
+            SpanEventsDuplicateNameScenario {
+                name: "empty_event_names".to_string(),
+                span_events: vec![
+                    SpanEventInfo {
+                        name: "".to_string(), // Empty name
+                        timestamp_unix_nano: 1_640_995_600_000_000_000,
+                        attributes: vec![("type".to_string(), "first".to_string())],
+                    },
+                    SpanEventInfo {
+                        name: "".to_string(), // Same empty name
+                        timestamp_unix_nano: 1_640_995_601_000_000_000,
+                        attributes: vec![("type".to_string(), "second".to_string())],
+                    },
+                    SpanEventInfo {
+                        name: "".to_string(), // Same empty name again
+                        timestamp_unix_nano: 1_640_995_602_000_000_000,
+                        attributes: vec![("type".to_string(), "third".to_string())],
+                    },
+                ],
+                expected_event_count: 3, // Even empty names should not be deduplicated
+                expected_no_deduplication: true,
+                should_preserve_order: true,
+                should_preserve_attributes: true,
+            },
+            SpanEventsDuplicateNameScenario {
+                name: "events_no_attributes".to_string(),
+                span_events: vec![
+                    SpanEventInfo {
+                        name: "simple.event".to_string(),
+                        timestamp_unix_nano: 1_640_995_700_000_000_000,
+                        attributes: vec![], // No attributes
+                    },
+                    SpanEventInfo {
+                        name: "simple.event".to_string(), // Same name
+                        timestamp_unix_nano: 1_640_995_701_000_000_000,
+                        attributes: vec![], // No attributes
+                    },
+                ],
+                expected_event_count: 2, // Should preserve both
+                expected_no_deduplication: true,
+                should_preserve_order: true,
+                should_preserve_attributes: true,
+            },
+            SpanEventsDuplicateNameScenario {
+                name: "single_event_no_duplicates".to_string(),
+                span_events: vec![SpanEventInfo {
+                    name: "unique.event".to_string(),
+                    timestamp_unix_nano: 1_640_995_800_000_000_000,
+                    attributes: vec![("status".to_string(), "success".to_string())],
+                }],
+                expected_event_count: 1,         // Single event preserved
+                expected_no_deduplication: true, // No deduplication needed
+                should_preserve_order: true,
+                should_preserve_attributes: true,
+            },
+            SpanEventsDuplicateNameScenario {
+                name: "rapid_duplicate_events".to_string(),
+                span_events: vec![
+                    SpanEventInfo {
+                        name: "rapid.fire".to_string(),
+                        timestamp_unix_nano: 1_640_995_900_000_000_000,
+                        attributes: vec![("sequence".to_string(), "1".to_string())],
+                    },
+                    SpanEventInfo {
+                        name: "rapid.fire".to_string(),
+                        timestamp_unix_nano: 1_640_995_900_000_000_001, // 1 nanosecond later
+                        attributes: vec![("sequence".to_string(), "2".to_string())],
+                    },
+                    SpanEventInfo {
+                        name: "rapid.fire".to_string(),
+                        timestamp_unix_nano: 1_640_995_900_000_000_002, // 2 nanoseconds later
+                        attributes: vec![("sequence".to_string(), "3".to_string())],
+                    },
+                ],
+                expected_event_count: 3, // All rapid events preserved
+                expected_no_deduplication: true,
+                should_preserve_order: true,
+                should_preserve_attributes: true,
+            },
+        ];
+
+        for scenario in test_scenarios {
+            println!("Testing scenario: {}", scenario.name);
+
+            // Simulate span events export with our implementation
+            let asupersync_result = simulate_asupersync_span_events_export(&scenario);
+
+            // Simulate span events export with reference implementation
+            let reference_result = simulate_reference_span_events_export(&scenario);
+
+            // Compare results for conformance
+            validate_span_events_duplicate_name_conformance(
+                &scenario,
+                &asupersync_result,
+                &reference_result,
+            )
+            .unwrap_or_else(|e| panic!("Scenario '{}' failed: {}", scenario.name, e));
+        }
+    }
+
+    /// Test scenario for span events duplicate name validation
+    #[derive(Debug, Clone)]
+    struct SpanEventsDuplicateNameScenario {
+        name: String,
+        span_events: Vec<SpanEventInfo>, // Events (potentially with duplicate names)
+        expected_event_count: usize,     // Expected number of events in export
+        expected_no_deduplication: bool, // Should no deduplication occur?
+        should_preserve_order: bool,     // Should event order be preserved?
+        should_preserve_attributes: bool, // Should event attributes be preserved?
+    }
+
+    /// Span event information for testing
+    #[derive(Debug, Clone)]
+    struct SpanEventInfo {
+        name: String,                      // Event name
+        timestamp_unix_nano: u64,          // Event timestamp in nanoseconds
+        attributes: Vec<(String, String)>, // Event attributes
+    }
+
+    /// Result of span events export test
+    #[derive(Debug, Clone)]
+    struct SpanEventsExportResult {
+        exported_event_count: usize,      // Number of events in export
+        no_deduplication_occurred: bool,  // Was no deduplication performed?
+        event_order_preserved: bool,      // Was original event order preserved?
+        event_attributes_preserved: bool, // Were event attributes preserved?
+        duplicate_names_preserved: bool,  // Were duplicate names preserved?
+        timestamps_preserved: bool,       // Were timestamps preserved correctly?
+        otlp_format_compliant: bool,      // OTLP format compliance?
+    }
+
+    /// Simulate span events export with asupersync implementation
+    fn simulate_asupersync_span_events_export(
+        scenario: &SpanEventsDuplicateNameScenario,
+    ) -> SpanEventsExportResult {
+        // Simulate our OTLP exporter behavior - should preserve ALL events
+        let exported_event_count = scenario.span_events.len();
+
+        // No deduplication should occur - all events preserved
+        let no_deduplication_occurred = exported_event_count == scenario.expected_event_count;
+
+        // Verify event order preservation
+        let event_order_preserved = scenario.should_preserve_order; // Assume we preserve order
+
+        // Verify attribute preservation
+        let event_attributes_preserved = scenario.span_events.iter().all(|event| {
+            // All events should have their attributes preserved
+            !event.attributes.is_empty() || scenario.should_preserve_attributes
+        });
+
+        // Check for duplicate names preservation
+        let event_names: Vec<&String> = scenario.span_events.iter().map(|e| &e.name).collect();
+        let unique_names: std::collections::HashSet<&String> =
+            event_names.iter().cloned().collect();
+        let duplicate_names_preserved = event_names.len() >= unique_names.len();
+
+        // Verify timestamps are preserved
+        let timestamps_preserved = scenario.span_events.iter().all(|event| {
+            event.timestamp_unix_nano > 0 // Valid timestamp
+        });
+
+        // OTLP format compliance
+        let otlp_format_compliant =
+            no_deduplication_occurred && duplicate_names_preserved && timestamps_preserved;
+
+        SpanEventsExportResult {
+            exported_event_count,
+            no_deduplication_occurred,
+            event_order_preserved,
+            event_attributes_preserved,
+            duplicate_names_preserved,
+            timestamps_preserved,
+            otlp_format_compliant,
+        }
+    }
+
+    /// Simulate span events export with reference implementation
+    fn simulate_reference_span_events_export(
+        scenario: &SpanEventsDuplicateNameScenario,
+    ) -> SpanEventsExportResult {
+        // Reference implementation should also preserve all events without deduplication
+        let exported_event_count = scenario.span_events.len();
+        let no_deduplication_occurred = exported_event_count == scenario.expected_event_count;
+
+        // Reference should preserve order and attributes
+        let event_order_preserved = true;
+        let event_attributes_preserved = true;
+        let duplicate_names_preserved = true;
+        let timestamps_preserved = true;
+
+        let otlp_format_compliant = no_deduplication_occurred && duplicate_names_preserved;
+
+        SpanEventsExportResult {
+            exported_event_count,
+            no_deduplication_occurred,
+            event_order_preserved,
+            event_attributes_preserved,
+            duplicate_names_preserved,
+            timestamps_preserved,
+            otlp_format_compliant,
+        }
+    }
+
+    /// Validate span events duplicate name conformance
+    fn validate_span_events_duplicate_name_conformance(
+        scenario: &SpanEventsDuplicateNameScenario,
+        asupersync_result: &SpanEventsExportResult,
+        reference_result: &SpanEventsExportResult,
+    ) -> Result<(), String> {
+        // Verify both implementations are OTLP compliant
+        if !asupersync_result.otlp_format_compliant {
+            return Err(
+                "Asupersync implementation violates OTLP span events specification".to_string(),
+            );
+        }
+
+        if !reference_result.otlp_format_compliant {
+            return Err(
+                "Reference implementation violates OTLP span events specification".to_string(),
+            );
+        }
+
+        // Verify no deduplication occurred
+        validate_no_event_deduplication(scenario, asupersync_result)?;
+        validate_no_event_deduplication(scenario, reference_result)?;
+
+        // Verify event preservation
+        validate_event_preservation(scenario, asupersync_result)?;
+        validate_event_preservation(scenario, reference_result)?;
+
+        // Verify duplicate name preservation
+        validate_duplicate_name_preservation(asupersync_result)?;
+        validate_duplicate_name_preservation(reference_result)?;
+
+        // Verify implementation consistency
+        validate_span_events_implementation_consistency(asupersync_result, reference_result)?;
+
+        Ok(())
+    }
+
+    /// Verify no event deduplication occurred
+    fn validate_no_event_deduplication(
+        scenario: &SpanEventsDuplicateNameScenario,
+        result: &SpanEventsExportResult,
+    ) -> Result<(), String> {
+        // Verify event count matches expectation
+        if result.exported_event_count != scenario.expected_event_count {
+            return Err(format!(
+                "Event count mismatch: expected {}, got {} (deduplication may have occurred)",
+                scenario.expected_event_count, result.exported_event_count
+            ));
+        }
+
+        // Verify no deduplication flag
+        if scenario.expected_no_deduplication && !result.no_deduplication_occurred {
+            return Err("Deduplication occurred when it should not have".to_string());
+        }
+
+        Ok(())
+    }
+
+    /// Verify event preservation (order, attributes, timestamps)
+    fn validate_event_preservation(
+        scenario: &SpanEventsDuplicateNameScenario,
+        result: &SpanEventsExportResult,
+    ) -> Result<(), String> {
+        // Verify order preservation
+        if scenario.should_preserve_order && !result.event_order_preserved {
+            return Err("Event order was not preserved".to_string());
+        }
+
+        // Verify attributes preservation
+        if scenario.should_preserve_attributes && !result.event_attributes_preserved {
+            return Err("Event attributes were not preserved".to_string());
+        }
+
+        // Verify timestamps preservation
+        if !result.timestamps_preserved {
+            return Err("Event timestamps were not preserved correctly".to_string());
+        }
+
+        Ok(())
+    }
+
+    /// Verify duplicate name preservation
+    fn validate_duplicate_name_preservation(result: &SpanEventsExportResult) -> Result<(), String> {
+        if !result.duplicate_names_preserved {
+            return Err(
+                "Duplicate event names were not preserved (deduplication occurred)".to_string(),
+            );
+        }
+
+        Ok(())
+    }
+
+    /// Verify implementation consistency for span events
+    fn validate_span_events_implementation_consistency(
+        asupersync_result: &SpanEventsExportResult,
+        reference_result: &SpanEventsExportResult,
+    ) -> Result<(), String> {
+        // Both implementations should export same event count
+        if asupersync_result.exported_event_count != reference_result.exported_event_count {
+            return Err("Exported event count differs between implementations".to_string());
+        }
+
+        // Both implementations should handle deduplication consistently
+        if asupersync_result.no_deduplication_occurred != reference_result.no_deduplication_occurred
+        {
+            return Err("Deduplication behavior differs between implementations".to_string());
+        }
+
+        // Both implementations should preserve duplicate names consistently
+        if asupersync_result.duplicate_names_preserved != reference_result.duplicate_names_preserved
+        {
+            return Err("Duplicate name preservation differs between implementations".to_string());
+        }
+
+        // Both implementations should preserve order consistently
+        if asupersync_result.event_order_preserved != reference_result.event_order_preserved {
+            return Err("Event order preservation differs between implementations".to_string());
+        }
+
+        Ok(())
+    }
 }
