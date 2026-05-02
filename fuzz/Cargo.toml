@@ -1984,6 +1984,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "raptorq_repair_count"
+path = "fuzz_targets/raptorq_repair_count.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "raptorq_encoder_transition_cases"
 path = "fuzz_targets/raptorq_encoder_transition_cases.rs"
 test = false
@@ -3039,6 +3046,16 @@ test = false
 doc = false
 bench = false
 
+# Structure-aware JetStream publish timeout fuzzer.
+# Uses a no-ack NATS mock to assert publish returns a configured timeout
+# instead of hanging when the PubAck response never arrives.
+[[bin]]
+name = "jetstream_pub_ack_timeout"
+path = "fuzz_targets/jetstream_pub_ack_timeout.rs"
+test = false
+doc = false
+bench = false
+
 # Structure-aware JetStream `Nats-Msg-Id` duplicate-window fuzzer.
 # Covers just-before-window rejection plus exact-boundary and just-past expiry.
 [[bin]]
@@ -3258,6 +3275,16 @@ bench = false
 [[bin]]
 name = "redis_resp3_map_parse"
 path = "fuzz_targets/redis_resp3_map_parse.rs"
+test = false
+doc = false
+bench = false
+
+# Structure-aware fuzzer for RESP3 attribute (`|`) parsing.
+# Covers empty attribute maps, nested attributes, and attributes adjacent to
+# nested aggregate values.
+[[bin]]
+name = "redis_resp3_attributes"
+path = "fuzz_targets/redis_resp3_attributes.rs"
 test = false
 doc = false
 bench = false
@@ -4663,5 +4690,11 @@ doc = false
 [[bin]]
 name = "h2_rst_stream_flood"
 path = "fuzz_targets/h2_rst_stream_flood.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "h2_data_padding_overflow"
+path = "fuzz_targets/h2_data_padding_overflow.rs"
 test = false
 doc = false
