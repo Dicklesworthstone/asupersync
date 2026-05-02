@@ -2005,6 +2005,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "raptorq_decode_truncated"
+path = "fuzz_targets/raptorq_decode_truncated.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "raptorq_encoder_transition_cases"
 path = "fuzz_targets/raptorq_encoder_transition_cases.rs"
 test = false
@@ -4765,5 +4772,11 @@ doc = false
 [[bin]]
 name = "h2_settings_max_header_list_size_zero"
 path = "fuzz_targets/h2_settings_max_header_list_size_zero.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "h2_settings_table_size_zero"
+path = "fuzz_targets/h2_settings_table_size_zero.rs"
 test = false
 doc = false
