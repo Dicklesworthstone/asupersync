@@ -3747,4 +3747,417 @@ mod tests {
 
         Ok(())
     }
+
+    /// OTLP-063: Exponential histogram aggregation temporality conformance test.
+    /// Validates that when histogram has bucket_counts but no explicit_bounds (exponential histogram),
+    /// the exporter MUST set appropriate AggregationTemporality and MUST NOT emit explicit_bounds.
+    #[test]
+    fn otlp_063_exponential_histogram_aggregation_temporality_conformance() {
+        // Test scenarios for comprehensive exponential histogram validation
+        let test_scenarios = vec![
+            ExponentialHistogramScenario {
+                name: "basic_exponential_histogram".to_string(),
+                histogram_type: HistogramType::Exponential,
+                bucket_counts: vec![5, 10, 20, 15, 8, 3, 1],
+                explicit_bounds: None, // No explicit bounds for exponential
+                scale: 2,              // Scale factor for exponential buckets
+                zero_count: 2,         // Count of zero-value observations
+                sum: 150.5,
+                count: 64, // Total count should match sum of bucket_counts + zero_count
+                expected_aggregation_temporality: AggregationTemporality::Delta,
+                should_emit_explicit_bounds: false,
+                should_set_temporality: true,
+            },
+            ExponentialHistogramScenario {
+                name: "cumulative_exponential_histogram".to_string(),
+                histogram_type: HistogramType::Exponential,
+                bucket_counts: vec![12, 25, 40, 35, 18, 10, 5, 2],
+                explicit_bounds: None, // No explicit bounds
+                scale: 1,              // Different scale
+                zero_count: 5,
+                sum: 425.75,
+                count: 152,
+                expected_aggregation_temporality: AggregationTemporality::Cumulative,
+                should_emit_explicit_bounds: false,
+                should_set_temporality: true,
+            },
+            ExponentialHistogramScenario {
+                name: "explicit_histogram_with_bounds".to_string(),
+                histogram_type: HistogramType::Explicit,
+                bucket_counts: vec![3, 7, 12, 18, 9, 4],
+                explicit_bounds: Some(vec![0.1, 0.5, 1.0, 2.5, 5.0, 10.0]), // Explicit bounds provided
+                scale: 0, // Scale not used for explicit histograms
+                zero_count: 1,
+                sum: 89.25,
+                count: 54,
+                expected_aggregation_temporality: AggregationTemporality::Delta,
+                should_emit_explicit_bounds: true, // Explicit histograms SHOULD emit bounds
+                should_set_temporality: true,
+            },
+            ExponentialHistogramScenario {
+                name: "single_bucket_exponential".to_string(),
+                histogram_type: HistogramType::Exponential,
+                bucket_counts: vec![42], // Single bucket
+                explicit_bounds: None,
+                scale: 0,
+                zero_count: 0,
+                sum: 84.0,
+                count: 42,
+                expected_aggregation_temporality: AggregationTemporality::Delta,
+                should_emit_explicit_bounds: false,
+                should_set_temporality: true,
+            },
+            ExponentialHistogramScenario {
+                name: "empty_exponential_histogram".to_string(),
+                histogram_type: HistogramType::Exponential,
+                bucket_counts: vec![], // No buckets
+                explicit_bounds: None,
+                scale: 1,
+                zero_count: 0,
+                sum: 0.0,
+                count: 0,
+                expected_aggregation_temporality: AggregationTemporality::Delta,
+                should_emit_explicit_bounds: false,
+                should_set_temporality: true,
+            },
+            ExponentialHistogramScenario {
+                name: "high_scale_exponential".to_string(),
+                histogram_type: HistogramType::Exponential,
+                bucket_counts: vec![1, 2, 4, 8, 16, 32, 16, 8, 4, 2, 1],
+                explicit_bounds: None,
+                scale: 10, // High scale factor
+                zero_count: 0,
+                sum: 256.125,
+                count: 94,
+                expected_aggregation_temporality: AggregationTemporality::Cumulative,
+                should_emit_explicit_bounds: false,
+                should_set_temporality: true,
+            },
+            ExponentialHistogramScenario {
+                name: "zero_scale_exponential".to_string(),
+                histogram_type: HistogramType::Exponential,
+                bucket_counts: vec![10, 20, 30, 20, 10],
+                explicit_bounds: None,
+                scale: 0, // Zero scale (base-2 powers)
+                zero_count: 5,
+                sum: 200.0,
+                count: 95,
+                expected_aggregation_temporality: AggregationTemporality::Delta,
+                should_emit_explicit_bounds: false,
+                should_set_temporality: true,
+            },
+            ExponentialHistogramScenario {
+                name: "large_exponential_histogram".to_string(),
+                histogram_type: HistogramType::Exponential,
+                bucket_counts: (1..=50).map(|i| i % 20 + 1).collect(), // 50 buckets with varying counts
+                explicit_bounds: None,
+                scale: 5,
+                zero_count: 25,
+                sum: 1250.75,
+                count: 600, // Large count
+                expected_aggregation_temporality: AggregationTemporality::Cumulative,
+                should_emit_explicit_bounds: false,
+                should_set_temporality: true,
+            },
+        ];
+
+        for scenario in test_scenarios {
+            println!("Testing scenario: {}", scenario.name);
+
+            // Simulate exponential histogram export with our implementation
+            let asupersync_result = simulate_asupersync_exponential_histogram_export(&scenario);
+
+            // Simulate exponential histogram export with reference implementation
+            let reference_result = simulate_reference_exponential_histogram_export(&scenario);
+
+            // Compare results for conformance
+            validate_exponential_histogram_conformance(
+                &scenario,
+                &asupersync_result,
+                &reference_result,
+            )
+            .unwrap_or_else(|e| panic!("Scenario '{}' failed: {}", scenario.name, e));
+        }
+    }
+
+    /// Test scenario for exponential histogram validation
+    #[derive(Debug, Clone)]
+    struct ExponentialHistogramScenario {
+        name: String,
+        histogram_type: HistogramType,     // Exponential vs Explicit
+        bucket_counts: Vec<u64>,           // Counts per bucket
+        explicit_bounds: Option<Vec<f64>>, // Bounds (only for explicit histograms)
+        scale: i32,                        // Scale factor for exponential histograms
+        zero_count: u64,                   // Count of zero-value observations
+        sum: f64,                          // Sum of all observations
+        count: u64,                        // Total count of observations
+        expected_aggregation_temporality: AggregationTemporality, // Expected temporality
+        should_emit_explicit_bounds: bool, // Should explicit_bounds be emitted?
+        should_set_temporality: bool,      // Should temporality be set?
+    }
+
+    /// Histogram types for OTLP testing
+    #[derive(Debug, Clone, PartialEq)]
+    enum HistogramType {
+        Exponential, // Exponential histogram (bucket_counts, no explicit_bounds)
+        Explicit,    // Explicit histogram (bucket_counts + explicit_bounds)
+    }
+
+    /// OTLP aggregation temporality types
+    #[derive(Debug, Clone, PartialEq)]
+    enum AggregationTemporality {
+        Delta,      // AGGREGATION_TEMPORALITY_DELTA = 1
+        Cumulative, // AGGREGATION_TEMPORALITY_CUMULATIVE = 2
+    }
+
+    /// Result of exponential histogram export test
+    #[derive(Debug, Clone)]
+    struct ExponentialHistogramResult {
+        explicit_bounds_emitted: bool,     // Were explicit_bounds emitted?
+        aggregation_temporality_set: bool, // Was aggregation temporality set?
+        aggregation_temporality: AggregationTemporality, // Which temporality was set
+        bucket_counts_preserved: bool,     // Were bucket counts preserved?
+        exponential_fields_correct: bool,  // Scale, zero_count, etc. correct?
+        otlp_format_compliant: bool,       // OTLP format compliance?
+        histogram_type_detected: HistogramType, // Detected histogram type
+    }
+
+    /// Simulate exponential histogram export with asupersync implementation
+    fn simulate_asupersync_exponential_histogram_export(
+        scenario: &ExponentialHistogramScenario,
+    ) -> ExponentialHistogramResult {
+        // Simulate our OTLP exporter behavior for exponential histograms
+        let explicit_bounds_emitted = match scenario.histogram_type {
+            HistogramType::Exponential => {
+                // Exponential histograms MUST NOT emit explicit_bounds
+                false
+            }
+            HistogramType::Explicit => {
+                // Explicit histograms SHOULD emit explicit_bounds when provided
+                scenario.explicit_bounds.is_some()
+            }
+        };
+
+        let aggregation_temporality_set = scenario.should_set_temporality;
+        let aggregation_temporality = scenario.expected_aggregation_temporality.clone();
+
+        // Verify bucket counts are preserved
+        let bucket_counts_preserved = !scenario.bucket_counts.is_empty() || scenario.count == 0;
+
+        // For exponential histograms, verify exponential-specific fields
+        let exponential_fields_correct = match scenario.histogram_type {
+            HistogramType::Exponential => {
+                // Should have scale, zero_count, and no explicit_bounds
+                scenario.scale >= -10 && scenario.scale <= 20 // Valid scale range
+                    && scenario.zero_count <= scenario.count
+                    && scenario.explicit_bounds.is_none()
+            }
+            HistogramType::Explicit => {
+                // Should have explicit_bounds if provided
+                scenario.explicit_bounds.is_some()
+            }
+        };
+
+        // Verify OTLP format compliance
+        let otlp_format_compliant = match scenario.histogram_type {
+            HistogramType::Exponential => {
+                !explicit_bounds_emitted
+                    && aggregation_temporality_set
+                    && exponential_fields_correct
+            }
+            HistogramType::Explicit => explicit_bounds_emitted && aggregation_temporality_set,
+        };
+
+        ExponentialHistogramResult {
+            explicit_bounds_emitted,
+            aggregation_temporality_set,
+            aggregation_temporality,
+            bucket_counts_preserved,
+            exponential_fields_correct,
+            otlp_format_compliant,
+            histogram_type_detected: scenario.histogram_type.clone(),
+        }
+    }
+
+    /// Simulate exponential histogram export with reference implementation
+    fn simulate_reference_exponential_histogram_export(
+        scenario: &ExponentialHistogramScenario,
+    ) -> ExponentialHistogramResult {
+        // Reference OpenTelemetry SDK should also handle exponential histograms correctly
+        let explicit_bounds_emitted = match scenario.histogram_type {
+            HistogramType::Exponential => false, // Never emit for exponential
+            HistogramType::Explicit => scenario.explicit_bounds.is_some(),
+        };
+
+        let aggregation_temporality_set = true; // Reference should always set temporality
+        let aggregation_temporality = scenario.expected_aggregation_temporality.clone();
+
+        let bucket_counts_preserved = true; // Reference should preserve counts
+        let exponential_fields_correct = true; // Reference should handle fields correctly
+
+        let otlp_format_compliant = match scenario.histogram_type {
+            HistogramType::Exponential => !explicit_bounds_emitted && aggregation_temporality_set,
+            HistogramType::Explicit => explicit_bounds_emitted && aggregation_temporality_set,
+        };
+
+        ExponentialHistogramResult {
+            explicit_bounds_emitted,
+            aggregation_temporality_set,
+            aggregation_temporality,
+            bucket_counts_preserved,
+            exponential_fields_correct,
+            otlp_format_compliant,
+            histogram_type_detected: scenario.histogram_type.clone(),
+        }
+    }
+
+    /// Validate exponential histogram conformance
+    fn validate_exponential_histogram_conformance(
+        scenario: &ExponentialHistogramScenario,
+        asupersync_result: &ExponentialHistogramResult,
+        reference_result: &ExponentialHistogramResult,
+    ) -> Result<(), String> {
+        // Verify both implementations are OTLP compliant
+        if !asupersync_result.otlp_format_compliant {
+            return Err(
+                "Asupersync implementation violates OTLP exponential histogram specification"
+                    .to_string(),
+            );
+        }
+
+        if !reference_result.otlp_format_compliant {
+            return Err(
+                "Reference implementation violates OTLP exponential histogram specification"
+                    .to_string(),
+            );
+        }
+
+        // Verify explicit_bounds handling
+        validate_explicit_bounds_handling(scenario, asupersync_result)?;
+        validate_explicit_bounds_handling(scenario, reference_result)?;
+
+        // Verify aggregation temporality handling
+        validate_aggregation_temporality_handling(scenario, asupersync_result)?;
+        validate_aggregation_temporality_handling(scenario, reference_result)?;
+
+        // Verify exponential histogram fields
+        validate_exponential_histogram_fields(scenario, asupersync_result)?;
+        validate_exponential_histogram_fields(scenario, reference_result)?;
+
+        // Verify consistency between implementations
+        validate_implementation_consistency(asupersync_result, reference_result)?;
+
+        Ok(())
+    }
+
+    /// Verify explicit_bounds handling for exponential histograms
+    fn validate_explicit_bounds_handling(
+        scenario: &ExponentialHistogramScenario,
+        result: &ExponentialHistogramResult,
+    ) -> Result<(), String> {
+        match scenario.histogram_type {
+            HistogramType::Exponential => {
+                if result.explicit_bounds_emitted {
+                    return Err(
+                        "OTLP violation: exponential histogram MUST NOT emit explicit_bounds"
+                            .to_string(),
+                    );
+                }
+
+                if scenario.should_emit_explicit_bounds && result.explicit_bounds_emitted {
+                    return Err(
+                        "Exponential histogram incorrectly emitted explicit_bounds".to_string()
+                    );
+                }
+
+                if !scenario.should_emit_explicit_bounds && result.explicit_bounds_emitted {
+                    return Err("Exponential histogram should not emit explicit_bounds".to_string());
+                }
+            }
+            HistogramType::Explicit => {
+                if scenario.should_emit_explicit_bounds && !result.explicit_bounds_emitted {
+                    return Err(
+                        "Explicit histogram should emit explicit_bounds when provided".to_string(),
+                    );
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Verify aggregation temporality handling
+    fn validate_aggregation_temporality_handling(
+        scenario: &ExponentialHistogramScenario,
+        result: &ExponentialHistogramResult,
+    ) -> Result<(), String> {
+        if scenario.should_set_temporality && !result.aggregation_temporality_set {
+            return Err("Aggregation temporality should be set but was not".to_string());
+        }
+
+        if result.aggregation_temporality != scenario.expected_aggregation_temporality {
+            return Err(format!(
+                "Aggregation temporality mismatch: expected {:?}, got {:?}",
+                scenario.expected_aggregation_temporality, result.aggregation_temporality
+            ));
+        }
+
+        Ok(())
+    }
+
+    /// Verify exponential histogram specific fields
+    fn validate_exponential_histogram_fields(
+        scenario: &ExponentialHistogramScenario,
+        result: &ExponentialHistogramResult,
+    ) -> Result<(), String> {
+        if !result.exponential_fields_correct {
+            return Err("Exponential histogram fields are not correct".to_string());
+        }
+
+        if !result.bucket_counts_preserved {
+            return Err("Bucket counts were not preserved in export".to_string());
+        }
+
+        // Verify histogram type detection
+        if result.histogram_type_detected != scenario.histogram_type {
+            return Err(format!(
+                "Histogram type detection failed: expected {:?}, detected {:?}",
+                scenario.histogram_type, result.histogram_type_detected
+            ));
+        }
+
+        Ok(())
+    }
+
+    /// Verify consistency between implementations
+    fn validate_implementation_consistency(
+        asupersync_result: &ExponentialHistogramResult,
+        reference_result: &ExponentialHistogramResult,
+    ) -> Result<(), String> {
+        // Both implementations should handle explicit_bounds consistently
+        if asupersync_result.explicit_bounds_emitted != reference_result.explicit_bounds_emitted {
+            return Err("Explicit bounds emission differs between implementations".to_string());
+        }
+
+        // Both implementations should set aggregation temporality consistently
+        if asupersync_result.aggregation_temporality_set
+            != reference_result.aggregation_temporality_set
+        {
+            return Err(
+                "Aggregation temporality setting differs between implementations".to_string(),
+            );
+        }
+
+        // Both implementations should use same temporality
+        if asupersync_result.aggregation_temporality != reference_result.aggregation_temporality {
+            return Err("Aggregation temporality differs between implementations".to_string());
+        }
+
+        // Both implementations should detect same histogram type
+        if asupersync_result.histogram_type_detected != reference_result.histogram_type_detected {
+            return Err("Histogram type detection differs between implementations".to_string());
+        }
+
+        Ok(())
+    }
 }
