@@ -4513,6 +4513,20 @@ doc = false
 bench = false
 
 [[bin]]
+name = "h2_settings_initial_window_size_max"
+path = "fuzz_targets/h2_settings_initial_window_size_max.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "h2_data_frame_size_max"
+path = "fuzz_targets/h2_data_frame_size_max.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "h2_settings_max_concurrent_streams_zero"
 path = "fuzz_targets/h2_settings_max_concurrent_streams_zero.rs"
 test = false
@@ -4522,6 +4536,13 @@ bench = false
 [[bin]]
 name = "h2_settings_max_concurrent_streams_increase"
 path = "fuzz_targets/h2_settings_max_concurrent_streams_increase.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "h2_settings_max_concurrent_streams_decrease"
+path = "fuzz_targets/h2_settings_max_concurrent_streams_decrease.rs"
 test = false
 doc = false
 bench = false

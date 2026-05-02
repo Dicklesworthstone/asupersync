@@ -490,6 +490,7 @@ impl<'a> Future for AcquireFuture<'a, '_> {
 ///
 /// Fields are ordered so that `obligation` drops first (firing the panic if leaked)
 /// and then semaphore drops (releasing permits back to the semaphore).
+#[derive(Debug)]
 #[must_use = "permit will be immediately released if not held"]
 pub struct SemaphorePermit<'a> {
     obligation: Option<ObligationToken<SemaphorePermitKind>>,
@@ -3919,5 +3920,169 @@ mod tests {
         });
 
         crate::test_complete!("audit_semaphore_permit_counter_never_negative");
+    }
+
+    #[test]
+    fn audit_semaphore_atomic_bulk_acquisition() {
+        init_test("audit_semaphore_atomic_bulk_acquisition");
+
+        // AUDIT: Verify acquire(N) blocks until ALL N permits available (atomic bulk semantics)
+        // CONTEXT: Prevent deadlock risk - if acquire(N) partially acquired M < N permits,
+        // caller couldn't make progress without all N permits
+        // MECHANISM: `state.permits >= self.count` ensures all-or-nothing acquisition
+
+        let cx = test_cx();
+        let sem = Semaphore::new(3); // Start with 3 permits
+
+        // Phase 1: Verify partial acquisition does NOT happen
+        let held_permit = sem.try_acquire(1).expect("initial acquire 1 permit");
+        // Now have 2 permits available, need 3
+
+        let mut bulk_future = sem.acquire(&cx, 3); // Request 3, only 2 available
+        let initially_pending = poll_once(&mut bulk_future).is_none();
+        crate::assert_with_log!(
+            initially_pending,
+            "bulk acquire blocks when insufficient permits (2 available, 3 needed)",
+            true,
+            initially_pending
+        );
+
+        // Verify semaphore state unchanged - no partial acquisition
+        let permits_after_block = sem.available_permits();
+        crate::assert_with_log!(
+            permits_after_block == 2,
+            "no partial acquisition occurred - all permits preserved",
+            2usize,
+            permits_after_block
+        );
+
+        // Phase 2: Verify atomic acquisition when enough permits become available
+        drop(held_permit); // Release 1 permit, now have 3 total
+
+        let bulk_permit = poll_once(&mut bulk_future)
+            .expect("bulk acquire should complete")
+            .expect("bulk acquire should succeed");
+
+        // Verify ALL 3 permits were atomically acquired
+        let count = bulk_permit.count();
+        crate::assert_with_log!(count == 3, "bulk permit has correct count", 3usize, count);
+
+        let permits_after_bulk = sem.available_permits();
+        crate::assert_with_log!(
+            permits_after_bulk == 0,
+            "all 3 permits atomically acquired",
+            0usize,
+            permits_after_bulk
+        );
+
+        // Phase 3: Verify permits are atomically released
+        drop(bulk_permit);
+        let permits_after_release = sem.available_permits();
+        crate::assert_with_log!(
+            permits_after_release == 3,
+            "all 3 permits atomically released",
+            3usize,
+            permits_after_release
+        );
+
+        crate::test_complete!("audit_semaphore_atomic_bulk_acquisition");
+    }
+
+    /// Audit test for Semaphore::close() cancel-aware semantics.
+    ///
+    /// Per asupersync cancel-aware semantics, when close() is called, ALL pending
+    /// acquire() futures must resolve immediately with AcquireError::Closed (correct)
+    /// rather than hanging forever (deadlock). This test verifies the critical
+    /// wakeup-and-error-return behavior that prevents deadlocks.
+    #[test]
+    fn audit_semaphore_close_cancel_aware_semantics() {
+        init_test("audit_semaphore_close_cancel_aware_semantics");
+
+        let cx1 = test_cx();
+        let cx2 = test_cx();
+        let cx3 = test_cx();
+        let sem = Semaphore::new(1);
+
+        // Consume the single permit to force subsequent acquires to wait
+        let _blocking_permit = sem.try_acquire(1).expect("should acquire the only permit");
+
+        // Create multiple pending acquire() futures
+        let mut acquire1 = sem.acquire(&cx1, 1);
+        let mut acquire2 = sem.acquire(&cx2, 1);
+        let mut acquire3 = sem.acquire(&cx3, 1);
+
+        // Verify all futures are pending (waiting for permits)
+        let pending1 = poll_once(&mut acquire1).is_none();
+        let pending2 = poll_once(&mut acquire2).is_none();
+        let pending3 = poll_once(&mut acquire3).is_none();
+
+        crate::assert_with_log!(
+            pending1 && pending2 && pending3,
+            "all acquire futures should be pending before close",
+            true,
+            pending1 && pending2 && pending3
+        );
+
+        // CRITICAL: Call close() - this must wake ALL waiters immediately
+        sem.close();
+
+        // Verify semaphore is now closed
+        crate::assert_with_log!(
+            sem.is_closed(),
+            "semaphore should report closed after close()",
+            true,
+            sem.is_closed()
+        );
+
+        // AUDIT CHECK: All pending acquire() futures must resolve immediately
+        // with AcquireError::Closed (NOT hang forever)
+        let result1 = poll_once(&mut acquire1);
+        let result2 = poll_once(&mut acquire2);
+        let result3 = poll_once(&mut acquire3);
+
+        // Verify immediate resolution with Closed error
+        crate::assert_with_log!(
+            matches!(result1, Some(Err(AcquireError::Closed))),
+            "acquire1 must resolve immediately with Closed error",
+            "Some(Err(Closed))",
+            format!("{:?}", result1)
+        );
+
+        crate::assert_with_log!(
+            matches!(result2, Some(Err(AcquireError::Closed))),
+            "acquire2 must resolve immediately with Closed error",
+            "Some(Err(Closed))",
+            format!("{:?}", result2)
+        );
+
+        crate::assert_with_log!(
+            matches!(result3, Some(Err(AcquireError::Closed))),
+            "acquire3 must resolve immediately with Closed error",
+            "Some(Err(Closed))",
+            format!("{:?}", result3)
+        );
+
+        // Verify new acquire attempts also fail immediately (no hanging)
+        let cx4 = test_cx();
+        let mut new_acquire = sem.acquire(&cx4, 1);
+        let immediate_result = poll_once(&mut new_acquire);
+
+        crate::assert_with_log!(
+            matches!(immediate_result, Some(Err(AcquireError::Closed))),
+            "new acquire after close must fail immediately",
+            "Some(Err(Closed))",
+            format!("{:?}", immediate_result)
+        );
+
+        // Verify try_acquire also fails immediately
+        let try_result = sem.try_acquire(1);
+        crate::assert_with_log!(
+            try_result.is_err(),
+            "try_acquire after close must fail",
+            true,
+            try_result.is_err()
+        );
+
+        crate::test_complete!("audit_semaphore_close_cancel_aware_semantics");
     }
 }
