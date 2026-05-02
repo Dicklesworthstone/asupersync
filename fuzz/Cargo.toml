@@ -4742,3 +4742,9 @@ name = "h2_request_authority_invalid"
 path = "fuzz_targets/h2_request_authority_invalid.rs"
 test = false
 doc = false
+
+[[bin]]
+name = "sync_oneshot_cancel_recv"
+path = "fuzz_targets/sync_oneshot_cancel_recv.rs"
+test = false
+doc = false
