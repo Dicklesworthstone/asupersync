@@ -3238,6 +3238,16 @@ test = false
 doc = false
 bench = false
 
+# Structure-aware fuzzer for RESP3 map parsing.
+# Covers empty maps, odd-length bulk keys, deeply nested values, malformed
+# length prefixes, and streamed maps ending after a key without a value.
+[[bin]]
+name = "redis_resp3_map_parse"
+path = "fuzz_targets/redis_resp3_map_parse.rs"
+test = false
+doc = false
+bench = false
+
 # Structure-aware fuzzer for RESP3 verbatim strings with exact label preservation.
 # Targets src/messaging/redis.rs verbatim parsing for arbitrary payload bytes while
 # asserting that valid `txt`/`mkd` frames preserve the 3-byte label across
