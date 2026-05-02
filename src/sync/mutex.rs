@@ -307,6 +307,25 @@ impl<T> Mutex<T> {
     }
 
     /// Tries to acquire the mutex without waiting.
+    ///
+    /// The guard releases the mutex when it is dropped.
+    ///
+    /// ```
+    /// use asupersync::sync::Mutex;
+    ///
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// let mutex = Mutex::new(String::from("ready"));
+    ///
+    /// {
+    ///     let mut guard = mutex.try_lock()?;
+    ///     guard.push_str("!");
+    /// }
+    ///
+    /// let guard = mutex.try_lock()?;
+    /// assert_eq!(guard.as_str(), "ready!");
+    /// # Ok(())
+    /// # }
+    /// ```
     #[inline]
     pub fn try_lock(&self) -> Result<MutexGuard<'_, T>, TryLockError> {
         let mut state = self.state.lock();
