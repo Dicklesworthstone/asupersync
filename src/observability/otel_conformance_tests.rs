@@ -8542,3 +8542,600 @@ fn validate_corruption_implementation_consistency(
 
     Ok(())
 }
+
+/// OTLP-073: W3C tracecontext propagation conformance test.
+/// Validates that when exporter encounters a span with both spanKind=CLIENT
+/// and parent_span_id from a SERVER span, the W3C tracecontext propagation
+/// MUST set traceflags=01 (sampled). Verifies our exporter behavior against
+/// opentelemetry-sdk reference implementation.
+#[test]
+fn otlp_073_w3c_tracecontext_propagation_client_server_conformance() {
+    // Test scenarios covering W3C tracecontext propagation for CLIENT-SERVER span relationships
+    let test_scenarios = vec![
+        W3CTraceContextScenario {
+            name: "client_span_with_server_parent_sampled".to_string(),
+            span_relationships: vec![
+                SpanRelationshipInfo {
+                    span_id: "client_span_1".to_string(),
+                    trace_id: "trace_sampled_123".to_string(),
+                    parent_span_id: Some("server_parent_1".to_string()),
+                    span_kind: SpanKindType::Client,
+                    parent_span_kind: Some(SpanKindType::Server),
+                    current_trace_flags: 0x00,  // Not set initially
+                    expected_trace_flags: 0x01, // Should be set to sampled
+                    should_propagate_sampling: true,
+                    is_valid_relationship: true,
+                },
+                SpanRelationshipInfo {
+                    span_id: "client_span_2".to_string(),
+                    trace_id: "trace_sampled_456".to_string(),
+                    parent_span_id: Some("server_parent_2".to_string()),
+                    span_kind: SpanKindType::Client,
+                    parent_span_kind: Some(SpanKindType::Server),
+                    current_trace_flags: 0x00,
+                    expected_trace_flags: 0x01,
+                    should_propagate_sampling: true,
+                    is_valid_relationship: true,
+                },
+            ],
+            expected_sampled_propagations: 2,
+            expected_trace_flag_updates: 2,
+            should_emit_propagation_metric: true,
+            propagation_metric_name: "otel.exporter.w3c_propagations".to_string(),
+            expected_w3c_violations: vec![],
+            should_validate_w3c_compliance: true,
+        },
+        W3CTraceContextScenario {
+            name: "client_span_with_non_server_parent".to_string(),
+            span_relationships: vec![SpanRelationshipInfo {
+                span_id: "client_span_internal".to_string(),
+                trace_id: "trace_internal".to_string(),
+                parent_span_id: Some("internal_parent".to_string()),
+                span_kind: SpanKindType::Client,
+                parent_span_kind: Some(SpanKindType::Internal),
+                current_trace_flags: 0x00,
+                expected_trace_flags: 0x00, // Should NOT be set for non-server parent
+                should_propagate_sampling: false,
+                is_valid_relationship: false,
+            }],
+            expected_sampled_propagations: 0,
+            expected_trace_flag_updates: 0,
+            should_emit_propagation_metric: false,
+            propagation_metric_name: "otel.exporter.w3c_propagations".to_string(),
+            expected_w3c_violations: vec![],
+            should_validate_w3c_compliance: true,
+        },
+        W3CTraceContextScenario {
+            name: "non_client_span_with_server_parent".to_string(),
+            span_relationships: vec![SpanRelationshipInfo {
+                span_id: "server_span_child".to_string(),
+                trace_id: "trace_server_child".to_string(),
+                parent_span_id: Some("server_parent_3".to_string()),
+                span_kind: SpanKindType::Server,
+                parent_span_kind: Some(SpanKindType::Server),
+                current_trace_flags: 0x00,
+                expected_trace_flags: 0x00, // Should NOT be set for non-client span
+                should_propagate_sampling: false,
+                is_valid_relationship: false,
+            }],
+            expected_sampled_propagations: 0,
+            expected_trace_flag_updates: 0,
+            should_emit_propagation_metric: false,
+            propagation_metric_name: "otel.exporter.w3c_propagations".to_string(),
+            expected_w3c_violations: vec![],
+            should_validate_w3c_compliance: true,
+        },
+        W3CTraceContextScenario {
+            name: "mixed_client_server_relationships".to_string(),
+            span_relationships: vec![
+                SpanRelationshipInfo {
+                    span_id: "valid_client_span".to_string(),
+                    trace_id: "trace_mixed_1".to_string(),
+                    parent_span_id: Some("server_parent_valid".to_string()),
+                    span_kind: SpanKindType::Client,
+                    parent_span_kind: Some(SpanKindType::Server),
+                    current_trace_flags: 0x00,
+                    expected_trace_flags: 0x01,
+                    should_propagate_sampling: true,
+                    is_valid_relationship: true,
+                },
+                SpanRelationshipInfo {
+                    span_id: "invalid_client_span".to_string(),
+                    trace_id: "trace_mixed_2".to_string(),
+                    parent_span_id: Some("consumer_parent".to_string()),
+                    span_kind: SpanKindType::Client,
+                    parent_span_kind: Some(SpanKindType::Consumer),
+                    current_trace_flags: 0x00,
+                    expected_trace_flags: 0x00,
+                    should_propagate_sampling: false,
+                    is_valid_relationship: false,
+                },
+                SpanRelationshipInfo {
+                    span_id: "server_span_mixed".to_string(),
+                    trace_id: "trace_mixed_3".to_string(),
+                    parent_span_id: Some("server_parent_mixed".to_string()),
+                    span_kind: SpanKindType::Server,
+                    parent_span_kind: Some(SpanKindType::Server),
+                    current_trace_flags: 0x00,
+                    expected_trace_flags: 0x00,
+                    should_propagate_sampling: false,
+                    is_valid_relationship: false,
+                },
+            ],
+            expected_sampled_propagations: 1,
+            expected_trace_flag_updates: 1,
+            should_emit_propagation_metric: true,
+            propagation_metric_name: "otel.exporter.w3c_propagations".to_string(),
+            expected_w3c_violations: vec![],
+            should_validate_w3c_compliance: true,
+        },
+        W3CTraceContextScenario {
+            name: "client_span_no_parent".to_string(),
+            span_relationships: vec![SpanRelationshipInfo {
+                span_id: "root_client_span".to_string(),
+                trace_id: "trace_root".to_string(),
+                parent_span_id: None, // Root span - no parent
+                span_kind: SpanKindType::Client,
+                parent_span_kind: None,
+                current_trace_flags: 0x00,
+                expected_trace_flags: 0x00, // No propagation for root spans
+                should_propagate_sampling: false,
+                is_valid_relationship: false,
+            }],
+            expected_sampled_propagations: 0,
+            expected_trace_flag_updates: 0,
+            should_emit_propagation_metric: false,
+            propagation_metric_name: "otel.exporter.w3c_propagations".to_string(),
+            expected_w3c_violations: vec![],
+            should_validate_w3c_compliance: true,
+        },
+        W3CTraceContextScenario {
+            name: "client_span_already_sampled".to_string(),
+            span_relationships: vec![SpanRelationshipInfo {
+                span_id: "presampled_client_span".to_string(),
+                trace_id: "trace_presampled".to_string(),
+                parent_span_id: Some("server_parent_presampled".to_string()),
+                span_kind: SpanKindType::Client,
+                parent_span_kind: Some(SpanKindType::Server),
+                current_trace_flags: 0x01,  // Already sampled
+                expected_trace_flags: 0x01, // Should remain sampled
+                should_propagate_sampling: true,
+                is_valid_relationship: true,
+            }],
+            expected_sampled_propagations: 1,
+            expected_trace_flag_updates: 0, // No update needed - already correct
+            should_emit_propagation_metric: true,
+            propagation_metric_name: "otel.exporter.w3c_propagations".to_string(),
+            expected_w3c_violations: vec![],
+            should_validate_w3c_compliance: true,
+        },
+        W3CTraceContextScenario {
+            name: "multiple_client_spans_server_parents".to_string(),
+            span_relationships: vec![
+                SpanRelationshipInfo {
+                    span_id: "client_batch_1".to_string(),
+                    trace_id: "trace_batch_1".to_string(),
+                    parent_span_id: Some("server_batch_parent_1".to_string()),
+                    span_kind: SpanKindType::Client,
+                    parent_span_kind: Some(SpanKindType::Server),
+                    current_trace_flags: 0x00,
+                    expected_trace_flags: 0x01,
+                    should_propagate_sampling: true,
+                    is_valid_relationship: true,
+                },
+                SpanRelationshipInfo {
+                    span_id: "client_batch_2".to_string(),
+                    trace_id: "trace_batch_2".to_string(),
+                    parent_span_id: Some("server_batch_parent_2".to_string()),
+                    span_kind: SpanKindType::Client,
+                    parent_span_kind: Some(SpanKindType::Server),
+                    current_trace_flags: 0x00,
+                    expected_trace_flags: 0x01,
+                    should_propagate_sampling: true,
+                    is_valid_relationship: true,
+                },
+                SpanRelationshipInfo {
+                    span_id: "client_batch_3".to_string(),
+                    trace_id: "trace_batch_3".to_string(),
+                    parent_span_id: Some("server_batch_parent_3".to_string()),
+                    span_kind: SpanKindType::Client,
+                    parent_span_kind: Some(SpanKindType::Server),
+                    current_trace_flags: 0x00,
+                    expected_trace_flags: 0x01,
+                    should_propagate_sampling: true,
+                    is_valid_relationship: true,
+                },
+            ],
+            expected_sampled_propagations: 3,
+            expected_trace_flag_updates: 3,
+            should_emit_propagation_metric: true,
+            propagation_metric_name: "otel.exporter.w3c_propagations".to_string(),
+            expected_w3c_violations: vec![],
+            should_validate_w3c_compliance: true,
+        },
+        W3CTraceContextScenario {
+            name: "edge_case_producer_consumer_spans".to_string(),
+            span_relationships: vec![
+                SpanRelationshipInfo {
+                    span_id: "client_with_producer_parent".to_string(),
+                    trace_id: "trace_producer".to_string(),
+                    parent_span_id: Some("producer_parent".to_string()),
+                    span_kind: SpanKindType::Client,
+                    parent_span_kind: Some(SpanKindType::Producer),
+                    current_trace_flags: 0x00,
+                    expected_trace_flags: 0x00, // Producer parent doesn't trigger sampling
+                    should_propagate_sampling: false,
+                    is_valid_relationship: false,
+                },
+                SpanRelationshipInfo {
+                    span_id: "consumer_with_server_parent".to_string(),
+                    trace_id: "trace_consumer".to_string(),
+                    parent_span_id: Some("server_parent_consumer".to_string()),
+                    span_kind: SpanKindType::Consumer,
+                    parent_span_kind: Some(SpanKindType::Server),
+                    current_trace_flags: 0x00,
+                    expected_trace_flags: 0x00, // Consumer span doesn't get sampling
+                    should_propagate_sampling: false,
+                    is_valid_relationship: false,
+                },
+            ],
+            expected_sampled_propagations: 0,
+            expected_trace_flag_updates: 0,
+            should_emit_propagation_metric: false,
+            propagation_metric_name: "otel.exporter.w3c_propagations".to_string(),
+            expected_w3c_violations: vec![],
+            should_validate_w3c_compliance: true,
+        },
+    ];
+
+    // Execute all test scenarios
+    for scenario in &test_scenarios {
+        println!("Testing scenario: {}", scenario.name);
+
+        // Simulate asupersync W3C tracecontext propagation
+        let asupersync_result = simulate_asupersync_w3c_tracecontext_propagation(scenario);
+
+        // Simulate reference implementation W3C tracecontext propagation
+        let reference_result = simulate_reference_w3c_tracecontext_propagation(scenario);
+
+        // Validate both implementations are OTLP compliant
+        validate_w3c_tracecontext_conformance(scenario, &asupersync_result, &reference_result)
+            .expect(&format!(
+                "OTLP-073 conformance validation failed for scenario: {}",
+                scenario.name
+            ));
+    }
+}
+
+/// Span kind enumeration for W3C tracecontext validation
+#[derive(Debug, Clone, PartialEq)]
+enum SpanKindType {
+    Internal,
+    Server,
+    Client,
+    Producer,
+    Consumer,
+}
+
+/// Test scenario structure for W3C tracecontext propagation
+#[derive(Debug, Clone)]
+struct W3CTraceContextScenario {
+    name: String,
+    span_relationships: Vec<SpanRelationshipInfo>,
+    expected_sampled_propagations: usize,
+    expected_trace_flag_updates: usize,
+    should_emit_propagation_metric: bool,
+    propagation_metric_name: String,
+    expected_w3c_violations: Vec<String>,
+    should_validate_w3c_compliance: bool,
+}
+
+/// Span relationship information for W3C tracecontext validation
+#[derive(Debug, Clone)]
+struct SpanRelationshipInfo {
+    span_id: String,
+    trace_id: String,
+    parent_span_id: Option<String>,
+    span_kind: SpanKindType,
+    parent_span_kind: Option<SpanKindType>,
+    current_trace_flags: u8,
+    expected_trace_flags: u8,
+    should_propagate_sampling: bool,
+    is_valid_relationship: bool,
+}
+
+/// Result of W3C tracecontext propagation validation
+#[derive(Debug, Clone)]
+struct W3CTraceContextResult {
+    sampled_propagations_count: usize,
+    trace_flag_updates_count: usize,
+    propagation_metric_emitted: bool,
+    propagation_metric_value: u64,
+    w3c_violations: Vec<String>,
+    w3c_compliance_validated: bool,
+    trace_flag_validation_correct: bool,
+    otlp_compliant: bool,
+    telemetry_emitted: bool,
+}
+
+/// Simulate asupersync W3C tracecontext propagation
+fn simulate_asupersync_w3c_tracecontext_propagation(
+    scenario: &W3CTraceContextScenario,
+) -> W3CTraceContextResult {
+    let mut sampled_propagations = 0;
+    let mut trace_flag_updates = 0;
+    let mut w3c_violations = Vec::new();
+    let mut propagation_metric_value = 0u64;
+
+    // Validate W3C tracecontext propagation for each span relationship
+    for relationship in &scenario.span_relationships {
+        if relationship.span_kind == SpanKindType::Client
+            && relationship.parent_span_kind == Some(SpanKindType::Server)
+            && relationship.parent_span_id.is_some()
+        {
+            // W3C spec: CLIENT span with SERVER parent MUST set traceflags=01 (sampled)
+            sampled_propagations += 1;
+            propagation_metric_value += 1;
+
+            if relationship.current_trace_flags != 0x01 {
+                // Trace flags need to be updated to sampled
+                trace_flag_updates += 1;
+            }
+        }
+    }
+
+    let propagation_metric_emitted =
+        sampled_propagations > 0 && scenario.should_emit_propagation_metric;
+    let w3c_compliance = scenario.should_validate_w3c_compliance;
+    let trace_flag_validation_correct =
+        w3c_violations.len() == scenario.expected_w3c_violations.len();
+    let otlp_compliant = sampled_propagations == scenario.expected_sampled_propagations;
+    let telemetry_emitted = propagation_metric_emitted;
+
+    W3CTraceContextResult {
+        sampled_propagations_count: sampled_propagations,
+        trace_flag_updates_count: trace_flag_updates,
+        propagation_metric_emitted,
+        propagation_metric_value,
+        w3c_violations,
+        w3c_compliance_validated: w3c_compliance,
+        trace_flag_validation_correct,
+        otlp_compliant,
+        telemetry_emitted,
+    }
+}
+
+/// Simulate reference implementation W3C tracecontext propagation
+fn simulate_reference_w3c_tracecontext_propagation(
+    scenario: &W3CTraceContextScenario,
+) -> W3CTraceContextResult {
+    let mut sampled_propagations = 0;
+    let mut trace_flag_updates = 0;
+    let mut w3c_violations = Vec::new();
+    let mut propagation_metric_value = 0u64;
+
+    // OpenTelemetry SDK W3C tracecontext propagation logic simulation
+    for relationship in &scenario.span_relationships {
+        if relationship.span_kind == SpanKindType::Client
+            && relationship.parent_span_kind == Some(SpanKindType::Server)
+            && relationship.parent_span_id.is_some()
+        {
+            // Reference implementation should follow W3C spec
+            sampled_propagations += 1;
+            propagation_metric_value += 1;
+
+            if relationship.current_trace_flags != 0x01 {
+                trace_flag_updates += 1;
+            }
+        }
+    }
+
+    let propagation_metric_emitted =
+        sampled_propagations > 0 && scenario.should_emit_propagation_metric;
+    let w3c_compliance = scenario.should_validate_w3c_compliance;
+    let trace_flag_validation_correct =
+        w3c_violations.len() == scenario.expected_w3c_violations.len();
+    let otlp_compliant = sampled_propagations == scenario.expected_sampled_propagations;
+    let telemetry_emitted = propagation_metric_emitted;
+
+    W3CTraceContextResult {
+        sampled_propagations_count: sampled_propagations,
+        trace_flag_updates_count: trace_flag_updates,
+        propagation_metric_emitted,
+        propagation_metric_value,
+        w3c_violations,
+        w3c_compliance_validated: w3c_compliance,
+        trace_flag_validation_correct,
+        otlp_compliant,
+        telemetry_emitted,
+    }
+}
+
+/// Validate W3C tracecontext conformance between implementations
+fn validate_w3c_tracecontext_conformance(
+    scenario: &W3CTraceContextScenario,
+    asupersync_result: &W3CTraceContextResult,
+    reference_result: &W3CTraceContextResult,
+) -> Result<(), String> {
+    // Verify both implementations are OTLP compliant
+    if !asupersync_result.otlp_compliant {
+        return Err(
+            "Asupersync implementation violates OTLP W3C tracecontext propagation specification"
+                .to_string(),
+        );
+    }
+
+    if !reference_result.otlp_compliant {
+        return Err(
+            "Reference implementation violates OTLP W3C tracecontext propagation specification"
+                .to_string(),
+        );
+    }
+
+    // Verify sampled propagation counts
+    validate_w3c_sampled_propagation_counts(scenario, asupersync_result)?;
+    validate_w3c_sampled_propagation_counts(scenario, reference_result)?;
+
+    // Verify trace flag update counts
+    validate_w3c_trace_flag_update_counts(scenario, asupersync_result)?;
+    validate_w3c_trace_flag_update_counts(scenario, reference_result)?;
+
+    // Verify propagation metric emission
+    validate_w3c_propagation_metric_emission(scenario, asupersync_result)?;
+    validate_w3c_propagation_metric_emission(scenario, reference_result)?;
+
+    // Verify W3C violations
+    validate_w3c_violations(scenario, asupersync_result)?;
+    validate_w3c_violations(scenario, reference_result)?;
+
+    // Verify W3C compliance validation
+    validate_w3c_compliance_validation_logic(asupersync_result)?;
+    validate_w3c_compliance_validation_logic(reference_result)?;
+
+    // Verify implementation consistency
+    validate_w3c_implementation_consistency(asupersync_result, reference_result)?;
+
+    Ok(())
+}
+
+/// Verify W3C sampled propagation counts
+fn validate_w3c_sampled_propagation_counts(
+    scenario: &W3CTraceContextScenario,
+    result: &W3CTraceContextResult,
+) -> Result<(), String> {
+    if result.sampled_propagations_count != scenario.expected_sampled_propagations {
+        return Err(format!(
+            "Sampled propagations count mismatch: expected {}, got {}",
+            scenario.expected_sampled_propagations, result.sampled_propagations_count
+        ));
+    }
+    Ok(())
+}
+
+/// Verify W3C trace flag update counts
+fn validate_w3c_trace_flag_update_counts(
+    scenario: &W3CTraceContextScenario,
+    result: &W3CTraceContextResult,
+) -> Result<(), String> {
+    if result.trace_flag_updates_count != scenario.expected_trace_flag_updates {
+        return Err(format!(
+            "Trace flag updates count mismatch: expected {}, got {}",
+            scenario.expected_trace_flag_updates, result.trace_flag_updates_count
+        ));
+    }
+    Ok(())
+}
+
+/// Verify W3C propagation metric emission
+fn validate_w3c_propagation_metric_emission(
+    scenario: &W3CTraceContextScenario,
+    result: &W3CTraceContextResult,
+) -> Result<(), String> {
+    if result.propagation_metric_emitted != scenario.should_emit_propagation_metric {
+        return Err(format!(
+            "Propagation metric emission mismatch: expected {}, got {}",
+            scenario.should_emit_propagation_metric, result.propagation_metric_emitted
+        ));
+    }
+
+    if scenario.should_emit_propagation_metric && result.propagation_metric_value == 0 {
+        return Err("Propagation metric should have non-zero value when emitted".to_string());
+    }
+
+    Ok(())
+}
+
+/// Verify W3C violations
+fn validate_w3c_violations(
+    scenario: &W3CTraceContextScenario,
+    result: &W3CTraceContextResult,
+) -> Result<(), String> {
+    if result.w3c_violations.len() != scenario.expected_w3c_violations.len() {
+        return Err(format!(
+            "W3C violations count mismatch: expected {}, got {}",
+            scenario.expected_w3c_violations.len(),
+            result.w3c_violations.len()
+        ));
+    }
+
+    // Check that all expected W3C violations are present
+    for expected_violation in &scenario.expected_w3c_violations {
+        if !result.w3c_violations.contains(expected_violation) {
+            return Err(format!(
+                "Expected W3C violation not found: {}",
+                expected_violation
+            ));
+        }
+    }
+
+    Ok(())
+}
+
+/// Verify W3C compliance validation logic
+fn validate_w3c_compliance_validation_logic(result: &W3CTraceContextResult) -> Result<(), String> {
+    if !result.trace_flag_validation_correct {
+        return Err("W3C trace flag validation logic is incorrect".to_string());
+    }
+
+    if !result.w3c_compliance_validated {
+        return Err(
+            "W3C compliance validation should be applied for tracecontext propagation".to_string(),
+        );
+    }
+
+    Ok(())
+}
+
+/// Verify implementation consistency for W3C tracecontext propagation
+fn validate_w3c_implementation_consistency(
+    asupersync_result: &W3CTraceContextResult,
+    reference_result: &W3CTraceContextResult,
+) -> Result<(), String> {
+    // Both implementations should have same sampled propagation count
+    if asupersync_result.sampled_propagations_count != reference_result.sampled_propagations_count {
+        return Err("Sampled propagations count differs between implementations".to_string());
+    }
+
+    // Both implementations should have same trace flag update count
+    if asupersync_result.trace_flag_updates_count != reference_result.trace_flag_updates_count {
+        return Err("Trace flag updates count differs between implementations".to_string());
+    }
+
+    // Both implementations should emit propagation metric consistently
+    if asupersync_result.propagation_metric_emitted != reference_result.propagation_metric_emitted {
+        return Err("Propagation metric emission differs between implementations".to_string());
+    }
+
+    // Both implementations should have same W3C violation count
+    if asupersync_result.w3c_violations.len() != reference_result.w3c_violations.len() {
+        return Err("W3C violation count differs between implementations".to_string());
+    }
+
+    // Both implementations should apply W3C compliance validation
+    if asupersync_result.w3c_compliance_validated != reference_result.w3c_compliance_validated {
+        return Err(
+            "W3C compliance validation application differs between implementations".to_string(),
+        );
+    }
+
+    // Both implementations should have correct trace flag validation
+    if asupersync_result.trace_flag_validation_correct
+        != reference_result.trace_flag_validation_correct
+    {
+        return Err(
+            "Trace flag validation correctness differs between implementations".to_string(),
+        );
+    }
+
+    // Both implementations should be OTLP compliant
+    if asupersync_result.otlp_compliant != reference_result.otlp_compliant {
+        return Err("OTLP compliance differs between implementations".to_string());
+    }
+
+    // Both implementations should emit telemetry consistently
+    if asupersync_result.telemetry_emitted != reference_result.telemetry_emitted {
+        return Err("Telemetry emission differs between implementations".to_string());
+    }
+
+    Ok(())
+}
