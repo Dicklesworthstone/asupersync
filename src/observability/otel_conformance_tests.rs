@@ -43295,4 +43295,571 @@ mod otlp_122_tests {
         println!("  - Additional recommended Kafka consumer attributes detected and validated");
         println!("  - Consumer-specific operation validation (receive/process vs publish/send)");
     }
+
+    /// OTLP-146 conformance test: AMQP producer delivery mode requirement.
+    ///
+    /// When an exporter encounters a span with kind=PRODUCER and messaging.system="amqp",
+    /// the messaging.amqp.delivery_mode attribute MUST be one of {1, 2} where:
+    /// - 1 = transient (non-persistent) delivery
+    /// - 2 = persistent delivery
+    /// This ensures proper traceability and correlation for AMQP message production
+    /// operations with correct delivery semantics per AMQP specification.
+    #[test]
+    fn otlp_146_amqp_producer_delivery_mode_conformance() {
+        println!("Testing OTLP-146: AMQP producer delivery mode requirement...");
+
+        let test_scenarios = vec![
+            AmqpProducerDeliveryModeScenario {
+                description: "valid_amqp_producer_transient_delivery".to_string(),
+                span_kind: SpanKind::Producer,
+                messaging_system: "amqp".to_string(),
+                span_attributes: vec![
+                    ("messaging.amqp.delivery_mode".to_string(), AnyValue::IntValue(1)), // Transient
+                    ("messaging.system".to_string(), AnyValue::StringValue("amqp".to_string())),
+                    ("messaging.destination.name".to_string(), AnyValue::StringValue("user.notifications".to_string())),
+                    ("messaging.amqp.routing_key".to_string(), AnyValue::StringValue("user.123.email".to_string())),
+                    ("net.peer.name".to_string(), AnyValue::StringValue("rabbitmq.example.com".to_string())),
+                ],
+                should_be_valid: true,
+                expected_delivery_mode: Some(1),
+            },
+            AmqpProducerDeliveryModeScenario {
+                description: "valid_amqp_producer_persistent_delivery".to_string(),
+                span_kind: SpanKind::Producer,
+                messaging_system: "amqp".to_string(),
+                span_attributes: vec![
+                    ("messaging.amqp.delivery_mode".to_string(), AnyValue::IntValue(2)), // Persistent
+                    ("messaging.system".to_string(), AnyValue::StringValue("amqp".to_string())),
+                    ("messaging.destination.name".to_string(), AnyValue::StringValue("order.events".to_string())),
+                    ("messaging.amqp.exchange".to_string(), AnyValue::StringValue("orders".to_string())),
+                    ("messaging.amqp.routing_key".to_string(), AnyValue::StringValue("order.created".to_string())),
+                ],
+                should_be_valid: true,
+                expected_delivery_mode: Some(2),
+            },
+            AmqpProducerDeliveryModeScenario {
+                description: "amqp_producer_missing_delivery_mode".to_string(),
+                span_kind: SpanKind::Producer,
+                messaging_system: "amqp".to_string(),
+                span_attributes: vec![
+                    ("messaging.system".to_string(), AnyValue::StringValue("amqp".to_string())),
+                    ("messaging.destination.name".to_string(), AnyValue::StringValue("events".to_string())),
+                    ("messaging.amqp.routing_key".to_string(), AnyValue::StringValue("event.created".to_string())),
+                    // Missing messaging.amqp.delivery_mode - should be invalid
+                ],
+                should_be_valid: false,
+                expected_delivery_mode: None,
+            },
+            AmqpProducerDeliveryModeScenario {
+                description: "amqp_producer_invalid_delivery_mode_zero".to_string(),
+                span_kind: SpanKind::Producer,
+                messaging_system: "amqp".to_string(),
+                span_attributes: vec![
+                    ("messaging.amqp.delivery_mode".to_string(), AnyValue::IntValue(0)), // Invalid
+                    ("messaging.system".to_string(), AnyValue::StringValue("amqp".to_string())),
+                    ("messaging.destination.name".to_string(), AnyValue::StringValue("events".to_string())),
+                ],
+                should_be_valid: false,
+                expected_delivery_mode: None,
+            },
+            AmqpProducerDeliveryModeScenario {
+                description: "amqp_producer_invalid_delivery_mode_three".to_string(),
+                span_kind: SpanKind::Producer,
+                messaging_system: "amqp".to_string(),
+                span_attributes: vec![
+                    ("messaging.amqp.delivery_mode".to_string(), AnyValue::IntValue(3)), // Invalid
+                    ("messaging.system".to_string(), AnyValue::StringValue("amqp".to_string())),
+                    ("messaging.destination.name".to_string(), AnyValue::StringValue("events".to_string())),
+                ],
+                should_be_valid: false,
+                expected_delivery_mode: None,
+            },
+            AmqpProducerDeliveryModeScenario {
+                description: "amqp_producer_negative_delivery_mode".to_string(),
+                span_kind: SpanKind::Producer,
+                messaging_system: "amqp".to_string(),
+                span_attributes: vec![
+                    ("messaging.amqp.delivery_mode".to_string(), AnyValue::IntValue(-1)), // Invalid
+                    ("messaging.system".to_string(), AnyValue::StringValue("amqp".to_string())),
+                    ("messaging.destination.name".to_string(), AnyValue::StringValue("events".to_string())),
+                ],
+                should_be_valid: false,
+                expected_delivery_mode: None,
+            },
+            AmqpProducerDeliveryModeScenario {
+                description: "amqp_producer_non_integer_delivery_mode".to_string(),
+                span_kind: SpanKind::Producer,
+                messaging_system: "amqp".to_string(),
+                span_attributes: vec![
+                    ("messaging.amqp.delivery_mode".to_string(), AnyValue::StringValue("persistent".to_string())), // Wrong type
+                    ("messaging.system".to_string(), AnyValue::StringValue("amqp".to_string())),
+                    ("messaging.destination.name".to_string(), AnyValue::StringValue("events".to_string())),
+                ],
+                should_be_valid: false,
+                expected_delivery_mode: None,
+            },
+            AmqpProducerDeliveryModeScenario {
+                description: "non_amqp_producer_no_requirement".to_string(),
+                span_kind: SpanKind::Producer,
+                messaging_system: "kafka".to_string(), // Not AMQP
+                span_attributes: vec![
+                    ("messaging.system".to_string(), AnyValue::StringValue("kafka".to_string())),
+                    ("messaging.destination.name".to_string(), AnyValue::StringValue("events".to_string())),
+                    ("messaging.kafka.message.partition".to_string(), AnyValue::IntValue(3)),
+                ],
+                should_be_valid: true, // No delivery mode requirement for non-AMQP
+                expected_delivery_mode: None,
+            },
+            AmqpProducerDeliveryModeScenario {
+                description: "amqp_consumer_no_requirement".to_string(),
+                span_kind: SpanKind::Consumer, // Not producer
+                messaging_system: "amqp".to_string(),
+                span_attributes: vec![
+                    ("messaging.system".to_string(), AnyValue::StringValue("amqp".to_string())),
+                    ("messaging.destination.name".to_string(), AnyValue::StringValue("events".to_string())),
+                    ("messaging.operation".to_string(), AnyValue::StringValue("receive".to_string())),
+                ],
+                should_be_valid: true, // No delivery mode requirement for consumer spans
+                expected_delivery_mode: None,
+            },
+            AmqpProducerDeliveryModeScenario {
+                description: "valid_amqp_producer_with_full_amqp_attributes".to_string(),
+                span_kind: SpanKind::Producer,
+                messaging_system: "amqp".to_string(),
+                span_attributes: vec![
+                    ("messaging.amqp.delivery_mode".to_string(), AnyValue::IntValue(2)), // Persistent
+                    ("messaging.system".to_string(), AnyValue::StringValue("amqp".to_string())),
+                    ("messaging.destination.name".to_string(), AnyValue::StringValue("critical.events".to_string())),
+                    ("messaging.amqp.exchange".to_string(), AnyValue::StringValue("application.events".to_string())),
+                    ("messaging.amqp.routing_key".to_string(), AnyValue::StringValue("app.error.critical".to_string())),
+                    ("messaging.operation".to_string(), AnyValue::StringValue("publish".to_string())),
+                    ("messaging.message_id".to_string(), AnyValue::StringValue("msg-12345-abcdef".to_string())),
+                    ("net.peer.name".to_string(), AnyValue::StringValue("rabbitmq-cluster.prod.com".to_string())),
+                    ("net.peer.port".to_string(), AnyValue::IntValue(5672)),
+                ],
+                should_be_valid: true,
+                expected_delivery_mode: Some(2),
+            },
+            AmqpProducerDeliveryModeScenario {
+                description: "amqp_case_sensitivity_check".to_string(),
+                span_kind: SpanKind::Producer,
+                messaging_system: "AMQP".to_string(), // Different case
+                span_attributes: vec![
+                    ("messaging.system".to_string(), AnyValue::StringValue("AMQP".to_string())),
+                    ("messaging.destination.name".to_string(), AnyValue::StringValue("events".to_string())),
+                ],
+                should_be_valid: true, // Not exact "amqp" so no requirement
+                expected_delivery_mode: None,
+            },
+            AmqpProducerDeliveryModeScenario {
+                description: "amqp_producer_transient_with_exchange_routing".to_string(),
+                span_kind: SpanKind::Producer,
+                messaging_system: "amqp".to_string(),
+                span_attributes: vec![
+                    ("messaging.amqp.delivery_mode".to_string(), AnyValue::IntValue(1)), // Transient
+                    ("messaging.system".to_string(), AnyValue::StringValue("amqp".to_string())),
+                    ("messaging.destination.name".to_string(), AnyValue::StringValue("temp.notifications".to_string())),
+                    ("messaging.amqp.exchange".to_string(), AnyValue::StringValue("notifications.direct".to_string())),
+                    ("messaging.amqp.routing_key".to_string(), AnyValue::StringValue("notification.ephemeral".to_string())),
+                    ("messaging.operation".to_string(), AnyValue::StringValue("publish".to_string())),
+                    ("messaging.message_payload_size_bytes".to_string(), AnyValue::IntValue(1024)),
+                ],
+                should_be_valid: true,
+                expected_delivery_mode: Some(1),
+            },
+            AmqpProducerDeliveryModeScenario {
+                description: "amqp_producer_persistent_priority_message".to_string(),
+                span_kind: SpanKind::Producer,
+                messaging_system: "amqp".to_string(),
+                span_attributes: vec![
+                    ("messaging.amqp.delivery_mode".to_string(), AnyValue::IntValue(2)), // Persistent
+                    ("messaging.system".to_string(), AnyValue::StringValue("amqp".to_string())),
+                    ("messaging.destination.name".to_string(), AnyValue::StringValue("high-priority.orders".to_string())),
+                    ("messaging.amqp.exchange".to_string(), AnyValue::StringValue("orders.topic".to_string())),
+                    ("messaging.amqp.routing_key".to_string(), AnyValue::StringValue("order.urgent.payment".to_string())),
+                    ("messaging.message_payload_size_bytes".to_string(), AnyValue::IntValue(2048)),
+                    ("messaging.batch.message_count".to_string(), AnyValue::IntValue(1)),
+                ],
+                should_be_valid: true,
+                expected_delivery_mode: Some(2),
+            },
+        ];
+
+        /// Test scenario for AMQP producer delivery mode validation
+        #[derive(Debug, Clone)]
+        struct AmqpProducerDeliveryModeScenario {
+            description: String,
+            span_kind: SpanKind,
+            messaging_system: String,
+            span_attributes: Vec<(String, AnyValue)>,
+            should_be_valid: bool,
+            expected_delivery_mode: Option<i64>,
+        }
+
+        /// Span data for AMQP producer testing
+        #[derive(Debug, Clone)]
+        struct AmqpProducerSpanData {
+            name: String,
+            kind: SpanKind,
+            messaging_system: String,
+            attributes: HashMap<String, AnyValue>,
+        }
+
+        impl AmqpProducerSpanData {
+            fn from_scenario(scenario: &AmqpProducerDeliveryModeScenario) -> Self {
+                let mut attributes = HashMap::new();
+                for (key, value) in &scenario.span_attributes {
+                    attributes.insert(key.clone(), value.clone());
+                }
+
+                Self {
+                    name: format!("amqp_producer_span_{}", scenario.description),
+                    kind: scenario.span_kind.clone(),
+                    messaging_system: scenario.messaging_system.clone(),
+                    attributes,
+                }
+            }
+        }
+
+        /// Result of AMQP producer delivery mode validation
+        #[derive(Debug)]
+        enum AmqpProducerValidationResult {
+            Valid {
+                delivery_mode: Option<i64>,
+                additional_amqp_attributes: usize,
+            },
+            Invalid {
+                violations: Vec<String>,
+                missing_attributes: Vec<String>,
+            },
+            NotApplicable {
+                reason: String,
+            },
+        }
+
+        /// Validates AMQP producer delivery mode requirement conformance
+        fn validate_amqp_producer_delivery_mode_conformance(
+            scenario: &AmqpProducerDeliveryModeScenario,
+        ) -> Result<(), String> {
+            let span_data = AmqpProducerSpanData::from_scenario(scenario);
+            let validation_result = validate_amqp_producer_delivery_mode(&span_data);
+
+            match (&validation_result, scenario.should_be_valid) {
+                (AmqpProducerValidationResult::Valid { delivery_mode, .. }, true) => {
+                    // Verify expected delivery mode matches
+                    if let Some(expected_mode) = scenario.expected_delivery_mode {
+                        match delivery_mode {
+                            Some(actual_mode) if *actual_mode == expected_mode => {
+                                let mode_description = match expected_mode {
+                                    1 => "transient",
+                                    2 => "persistent",
+                                    _ => "unknown",
+                                };
+                                println!("✓ AMQP producer span has correct delivery mode: {} ({})", actual_mode, mode_description);
+                            }
+                            Some(actual_mode) => {
+                                return Err(format!(
+                                    "Delivery mode mismatch: expected {}, got {}",
+                                    expected_mode, actual_mode
+                                ));
+                            }
+                            None => {
+                                return Err(format!(
+                                    "Expected delivery mode {} but none found",
+                                    expected_mode
+                                ));
+                            }
+                        }
+                    } else {
+                        // No expected delivery mode - ensure none present when not required
+                        if delivery_mode.is_some() && requires_amqp_delivery_mode(&span_data) {
+                            return Err("Unexpected delivery mode found when none expected".to_string());
+                        }
+                    }
+                }
+                (AmqpProducerValidationResult::Invalid { .. }, false) => {
+                    println!("✓ Invalid AMQP producer span correctly rejected");
+                }
+                (AmqpProducerValidationResult::NotApplicable { reason }, true) => {
+                    println!("✓ Delivery mode requirement not applicable: {}", reason);
+                }
+                (AmqpProducerValidationResult::Valid { .. }, false) => {
+                    return Err("Invalid span was incorrectly accepted".to_string());
+                }
+                (AmqpProducerValidationResult::Invalid { violations, .. }, true) => {
+                    return Err(format!("Valid span was incorrectly rejected: {:?}", violations));
+                }
+                (AmqpProducerValidationResult::NotApplicable { .. }, false) => {
+                    return Err("Expected validation failure but got not applicable".to_string());
+                }
+            }
+
+            Ok(())
+        }
+
+        /// Validates that AMQP producer spans have required delivery mode attribute
+        fn validate_amqp_producer_delivery_mode(span_data: &AmqpProducerSpanData) -> AmqpProducerValidationResult {
+            // Check if this span requires delivery mode attribute
+            if !requires_amqp_delivery_mode(span_data) {
+                return AmqpProducerValidationResult::NotApplicable {
+                    reason: format!(
+                        "Span kind {:?} with messaging.system '{}' doesn't require messaging.amqp.delivery_mode",
+                        span_data.kind, span_data.messaging_system
+                    ),
+                };
+            }
+
+            let mut violations = Vec::new();
+            let mut missing_attributes = Vec::new();
+
+            // Extract and validate messaging.amqp.delivery_mode attribute
+            let delivery_mode = match span_data.attributes.get("messaging.amqp.delivery_mode") {
+                Some(AnyValue::IntValue(mode_val)) if *mode_val == 1 => {
+                    println!("✓ AMQP delivery mode: {} (transient)", mode_val);
+                    Some(*mode_val)
+                }
+                Some(AnyValue::IntValue(mode_val)) if *mode_val == 2 => {
+                    println!("✓ AMQP delivery mode: {} (persistent)", mode_val);
+                    Some(*mode_val)
+                }
+                Some(AnyValue::IntValue(mode_val)) => {
+                    violations.push(format!(
+                        "messaging.amqp.delivery_mode must be 1 (transient) or 2 (persistent), got: {}",
+                        mode_val
+                    ));
+                    None
+                }
+                Some(_) => {
+                    violations.push("messaging.amqp.delivery_mode attribute must be an integer value".to_string());
+                    missing_attributes.push("messaging.amqp.delivery_mode".to_string());
+                    None
+                }
+                None => {
+                    violations.push("OTLP-146: AMQP producer span missing required messaging.amqp.delivery_mode attribute".to_string());
+                    missing_attributes.push("messaging.amqp.delivery_mode".to_string());
+                    None
+                }
+            };
+
+            // Check for recommended AMQP producer attributes
+            let recommended_amqp_attrs = [
+                "messaging.system",
+                "messaging.destination.name",
+                "messaging.operation",
+                "messaging.amqp.exchange",
+                "messaging.amqp.routing_key"
+            ];
+
+            let mut amqp_attrs_present = 0;
+            for attr in &recommended_amqp_attrs {
+                if span_data.attributes.contains_key(*attr) {
+                    amqp_attrs_present += 1;
+                } else if attr != &"messaging.amqp.exchange" && attr != &"messaging.amqp.routing_key" {
+                    println!("⚠ Recommended AMQP attribute '{}' not present", attr);
+                }
+            }
+
+            // Verify messaging.system is set to "amqp" (case sensitive)
+            if let Some(AnyValue::StringValue(system)) = span_data.attributes.get("messaging.system") {
+                if system != "amqp" {
+                    if system.to_lowercase() == "amqp" {
+                        violations.push(format!("messaging.system should be exactly 'amqp' (case-sensitive), got: '{}'", system));
+                    } else {
+                        violations.push(format!("messaging.system should be 'amqp' for AMQP producer spans, got: '{}'", system));
+                    }
+                }
+            }
+
+            // Verify messaging.operation is appropriate for producer if present
+            if let Some(AnyValue::StringValue(operation)) = span_data.attributes.get("messaging.operation") {
+                match operation.as_str() {
+                    "publish" | "send" => {
+                        // Valid producer operations
+                    }
+                    "receive" | "process" => {
+                        violations.push(format!("messaging.operation '{}' is inappropriate for producer spans (use 'publish' or 'send')", operation));
+                    }
+                    _ => {
+                        println!("⚠ Unusual messaging.operation '{}' for producer span", operation);
+                    }
+                }
+            }
+
+            // Additional AMQP-specific validations
+            if let Some(AnyValue::StringValue(dest_name)) = span_data.attributes.get("messaging.destination.name") {
+                if dest_name.is_empty() {
+                    violations.push("messaging.destination.name should not be empty for AMQP spans".to_string());
+                }
+            }
+
+            // Validate AMQP exchange and routing key if present
+            if let Some(AnyValue::StringValue(exchange)) = span_data.attributes.get("messaging.amqp.exchange") {
+                if exchange.is_empty() {
+                    violations.push("messaging.amqp.exchange should not be empty when present".to_string());
+                }
+            }
+
+            if let Some(AnyValue::StringValue(routing_key)) = span_data.attributes.get("messaging.amqp.routing_key") {
+                if routing_key.len() > 255 {
+                    println!("⚠ Unusually long AMQP routing key: {} characters (max recommended: 255)", routing_key.len());
+                }
+            }
+
+            // Check for delivery mode consistency with message durability expectations
+            if let Some(mode) = delivery_mode {
+                if let Some(AnyValue::StringValue(dest_name)) = span_data.attributes.get("messaging.destination.name") {
+                    if mode == 1 && dest_name.contains("critical") {
+                        println!("⚠ Transient delivery mode for destination containing 'critical': consider persistent mode");
+                    }
+                    if mode == 2 && dest_name.contains("temp") {
+                        println!("⚠ Persistent delivery mode for destination containing 'temp': consider transient mode");
+                    }
+                }
+            }
+
+            if !violations.is_empty() {
+                AmqpProducerValidationResult::Invalid {
+                    violations,
+                    missing_attributes,
+                }
+            } else {
+                AmqpProducerValidationResult::Valid {
+                    delivery_mode,
+                    additional_amqp_attributes: amqp_attrs_present,
+                }
+            }
+        }
+
+        /// Determines if a span requires AMQP delivery mode attribute
+        fn requires_amqp_delivery_mode(span_data: &AmqpProducerSpanData) -> bool {
+            // OTLP-146: Only PRODUCER spans with messaging.system="amqp" require delivery mode
+            span_data.kind == SpanKind::Producer
+                && span_data.messaging_system == "amqp"
+        }
+
+        // Execute OTLP-146 conformance validation for all scenarios
+        let mut passed_scenarios = 0;
+        let total_scenarios = test_scenarios.len();
+
+        for scenario in &test_scenarios {
+            match validate_amqp_producer_delivery_mode_conformance(scenario) {
+                Ok(()) => {
+                    passed_scenarios += 1;
+                    println!("✓ OTLP-146 conformance verified for {}", scenario.description);
+                }
+                Err(error_msg) => {
+                    panic!(
+                        "OTLP-146 conformance test FAILED for {}: {}",
+                        scenario.description, error_msg
+                    );
+                }
+            }
+        }
+
+        assert_eq!(
+            passed_scenarios, total_scenarios,
+            "All OTLP-146 AMQP producer delivery mode scenarios must pass"
+        );
+
+        // Additional edge case testing
+        println!("Testing AMQP producer delivery mode edge cases...");
+
+        // Test messaging.system case sensitivity
+        let system_cases = vec![
+            ("amqp", true),       // Exact match - requires delivery mode
+            ("AMQP", false),      // Wrong case - no requirement
+            ("Amqp", false),      // Wrong case - no requirement
+            ("rabbitmq", false),  // Different system - no requirement
+        ];
+
+        for (system_name, should_require) in system_cases {
+            let mut test_attributes = HashMap::new();
+            test_attributes.insert("messaging.system".to_string(), AnyValue::StringValue(system_name.to_string()));
+            test_attributes.insert("messaging.destination.name".to_string(), AnyValue::StringValue("test.queue".to_string()));
+
+            if should_require {
+                test_attributes.insert("messaging.amqp.delivery_mode".to_string(), AnyValue::IntValue(1));
+            }
+
+            let edge_span = AmqpProducerSpanData {
+                name: format!("system_case_test_{}", system_name.to_lowercase()),
+                kind: SpanKind::Producer,
+                messaging_system: system_name.to_string(),
+                attributes: test_attributes,
+            };
+
+            let requires_mode = requires_amqp_delivery_mode(&edge_span);
+            assert_eq!(
+                requires_mode, should_require,
+                "Delivery mode requirement check failed for system '{}'",
+                system_name
+            );
+
+            if should_require {
+                match validate_amqp_producer_delivery_mode(&edge_span) {
+                    AmqpProducerValidationResult::Valid { delivery_mode, .. } => {
+                        assert!(delivery_mode.is_some(), "Should have delivery mode for system '{}'", system_name);
+                        println!("✓ System case '{}' correctly requires and validates delivery mode", system_name);
+                    }
+                    _ => panic!("System case '{}' should be valid with delivery mode", system_name),
+                }
+            } else {
+                match validate_amqp_producer_delivery_mode(&edge_span) {
+                    AmqpProducerValidationResult::NotApplicable { .. } => {
+                        println!("✓ System case '{}' correctly identified as not applicable", system_name);
+                    }
+                    _ => panic!("System case '{}' should not require delivery mode", system_name),
+                }
+            }
+        }
+
+        // Test delivery mode value validation
+        println!("Testing delivery mode value validation...");
+        let mode_tests = vec![
+            ("valid_transient", 1, true),
+            ("valid_persistent", 2, true),
+            ("invalid_zero", 0, false),
+            ("invalid_three", 3, false),
+            ("invalid_negative", -1, false),
+            ("invalid_large", 999, false),
+        ];
+
+        for (test_name, mode_value, should_be_valid) in mode_tests {
+            let mut test_attributes = HashMap::new();
+            test_attributes.insert("messaging.system".to_string(), AnyValue::StringValue("amqp".to_string()));
+            test_attributes.insert("messaging.destination.name".to_string(), AnyValue::StringValue("test.events".to_string()));
+            test_attributes.insert("messaging.amqp.delivery_mode".to_string(), AnyValue::IntValue(mode_value));
+
+            let test_span = AmqpProducerSpanData {
+                name: format!("mode_test_{}", test_name),
+                kind: SpanKind::Producer,
+                messaging_system: "amqp".to_string(),
+                attributes: test_attributes,
+            };
+
+            let result = validate_amqp_producer_delivery_mode(&test_span);
+            let is_valid = matches!(result, AmqpProducerValidationResult::Valid { .. });
+
+            assert_eq!(
+                is_valid, should_be_valid,
+                "Mode test '{}' validation mismatch: expected {}, got {}",
+                test_name, should_be_valid, is_valid
+            );
+
+            println!("✓ Mode test '{}' (value: {}) correctly evaluated as {}",
+                    test_name, mode_value, if is_valid { "valid" } else { "invalid" });
+        }
+
+        println!("✓ OTLP-146: AMQP producer delivery mode requirement conformance verified");
+        println!("  - PRODUCER spans with messaging.system='amqp' require messaging.amqp.delivery_mode");
+        println!("  - Delivery mode must be exactly 1 (transient) or 2 (persistent)");
+        println!("  - Non-AMQP producer systems exempt from requirement");
+        println!("  - Consumer spans exempt from requirement");
+        println!("  - Case-sensitive messaging.system matching enforced");
+        println!("  - Invalid delivery mode values (0, 3, negative) rejected");
+        println!("  - Non-integer delivery mode values rejected");
+        println!("  - Additional AMQP-specific attribute validation");
+        println!("  - Producer operation validation (publish/send vs receive/process)");
+        println!("  - Delivery mode consistency warnings for destination patterns");
+    }
 }
