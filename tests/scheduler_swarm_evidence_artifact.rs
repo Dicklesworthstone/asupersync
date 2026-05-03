@@ -1,11 +1,16 @@
 //! Integration tests for scheduler evidence artifacts and recommendations.
 
+use asupersync::runtime::RuntimeState;
 use asupersync::runtime::scheduler::{
     SCHEDULER_EVIDENCE_SCHEMA_VERSION, SchedulerEvidenceArtifact, SchedulerEvidenceError,
     SchedulerEvidenceMetrics, SchedulerKnobProfile, SchedulerRecommendationReason,
-    SchedulerTopologyDescriptor, SchedulerWorkloadClass,
+    SchedulerTopologyDescriptor, SchedulerWorkloadClass, ThreeLaneScheduler,
 };
+use asupersync::sync::ContendedMutex;
+use asupersync::types::{TaskId, Time};
 use serde_json::Value;
+use std::collections::BTreeSet;
+use std::sync::Arc;
 
 fn sample_artifact() -> SchedulerEvidenceArtifact {
     SchedulerEvidenceArtifact {
@@ -92,6 +97,100 @@ fn scheduler_evidence_artifact_rejects_invalid_inputs() {
     assert_eq!(
         artifact.validate(),
         Err(SchedulerEvidenceError::RemoteStealRatioOutOfRange(101))
+    );
+}
+
+#[test]
+fn runtime_scheduler_evidence_artifact_captures_live_dispatch_samples() {
+    let state = Arc::new(ContendedMutex::new("runtime_state", RuntimeState::new()));
+    let mut scheduler = ThreeLaneScheduler::new_with_cancel_limit(2, &state, 16);
+    scheduler.set_scheduler_evidence_window(32);
+    scheduler
+        .set_worker_cohort_map(&[0, 1])
+        .expect("cohort map should apply");
+
+    let local_ready = TaskId::new_for_test(10, 0);
+    let ready_a = TaskId::new_for_test(11, 0);
+    let ready_b = TaskId::new_for_test(12, 0);
+    let cancel = TaskId::new_for_test(13, 0);
+    let timed = TaskId::new_for_test(14, 0);
+
+    scheduler.inject_ready(ready_a, 30);
+    scheduler.inject_ready(ready_b, 40);
+    scheduler.inject_cancel(cancel, 90);
+    scheduler.inject_timed(timed, Time::ZERO);
+
+    let mut dispatched_ready = BTreeSet::new();
+    {
+        let worker = scheduler.worker_mut_for_test(0);
+        worker.schedule_local(local_ready, 60);
+
+        assert_eq!(worker.next_task(), Some(cancel));
+        assert_eq!(worker.next_task(), Some(timed));
+        dispatched_ready.insert(worker.next_task().expect("first ready task"));
+        dispatched_ready.insert(worker.next_task().expect("second ready task"));
+        dispatched_ready.insert(worker.next_task().expect("third ready task"));
+        assert_eq!(
+            dispatched_ready,
+            BTreeSet::from([local_ready, ready_a, ready_b])
+        );
+        assert_eq!(worker.next_task(), None);
+    }
+
+    let artifact = scheduler
+        .scheduler_evidence_artifact("runtime-capture", SchedulerWorkloadClass::MixedBurst, 256)
+        .expect("runtime evidence should be available");
+
+    assert_eq!(artifact.validate(), Ok(()));
+    assert_eq!(
+        artifact.schema_version,
+        SCHEDULER_EVIDENCE_SCHEMA_VERSION.to_string()
+    );
+    assert_eq!(artifact.run_label, "runtime-capture");
+    assert_eq!(artifact.topology.worker_threads, 2);
+    assert_eq!(artifact.topology.cohort_count, 2);
+    assert_eq!(artifact.topology.memory_budget_gib, 256);
+    assert_eq!(artifact.current_knobs.worker_threads, 2);
+    assert!(artifact.current_knobs.steal_batch_size > 0);
+    assert!(artifact.current_knobs.cancel_streak_limit > 0);
+    assert!(
+        artifact.metrics.wake_to_run_p95_ns >= artifact.metrics.wake_to_run_p50_ns,
+        "wake-to-run percentiles should be monotone"
+    );
+    assert!(
+        artifact.metrics.wake_to_run_p99_ns >= artifact.metrics.wake_to_run_p95_ns,
+        "wake-to-run percentiles should be monotone"
+    );
+    assert!(
+        artifact.metrics.queue_residency_p95_ns >= artifact.metrics.queue_residency_p50_ns,
+        "queue residency percentiles should be monotone"
+    );
+    assert!(
+        artifact.metrics.queue_residency_p99_ns >= artifact.metrics.queue_residency_p95_ns,
+        "queue residency percentiles should be monotone"
+    );
+    assert!(
+        artifact.metrics.ready_backlog_p99 >= artifact.metrics.ready_backlog_p95,
+        "ready backlog percentiles should be monotone"
+    );
+    assert!(
+        artifact.metrics.cancel_debt_p99 >= artifact.metrics.cancel_debt_p95,
+        "cancel debt percentiles should be monotone"
+    );
+    assert!(
+        artifact.notes.iter().any(|note| note == "runtime_capture"),
+        "artifact should mark live runtime capture"
+    );
+    assert!(
+        artifact.notes.iter().any(|note| note == "sample_window=32"),
+        "artifact should surface the configured sample window"
+    );
+    assert!(
+        artifact
+            .notes
+            .iter()
+            .any(|note| note.starts_with("sample_counts=")),
+        "artifact should surface collected sample counts"
     );
 }
 

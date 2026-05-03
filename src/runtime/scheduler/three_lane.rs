@@ -57,6 +57,10 @@ use crate::runtime::io_driver::IoDriverHandle;
 use crate::runtime::scheduler::global_injector::{GlobalInjector, PriorityTask};
 use crate::runtime::scheduler::local_queue::{self, LocalQueue};
 use crate::runtime::scheduler::priority::Scheduler as PriorityScheduler;
+use crate::runtime::scheduler::swarm_evidence::{
+    SCHEDULER_EVIDENCE_SCHEMA_VERSION, SchedulerEvidenceArtifact, SchedulerEvidenceMetrics,
+    SchedulerKnobProfile, SchedulerTopologyDescriptor, SchedulerWorkloadClass,
+};
 use crate::runtime::scheduler::worker::Parker;
 use crate::runtime::stored_task::AnyStoredTask;
 use crate::runtime::{RuntimeState, TaskTable};
@@ -64,7 +68,7 @@ use crate::sync::ContendedMutex;
 use crate::time::TimerDriverHandle;
 use crate::tracing_compat::{error, trace};
 use crate::types::{CxInner, TaskId, Time};
-use crate::util::{CachePadded, DetHasher, DetRng};
+use crate::util::{CachePadded, DetHashMap, DetHasher, DetRng};
 use parking_lot::Mutex;
 use parking_lot::RwLock;
 use smallvec::SmallVec;
@@ -95,6 +99,7 @@ const ADAPTIVE_EPROCESS_LAMBDA: f64 = 0.5;
 const SPIN_LIMIT: u32 = 8;
 const YIELD_LIMIT: u32 = 2;
 const SHORT_WAIT_LE_5MS_NANOS: u64 = 5_000_000;
+const DEFAULT_SCHEDULER_EVIDENCE_MAX_INFLIGHT_MULTIPLIER: usize = 4;
 
 type LocalReadyQueue = Mutex<VecDeque<TaskId>>;
 
@@ -962,6 +967,10 @@ pub struct ThreeLaneScheduler {
     governor_throttled_spawns: CachePadded<AtomicU64>,
     /// Scheduler-owned count of critical ready injections that bypassed drain mode.
     governor_bypass_spawns: CachePadded<AtomicU64>,
+    /// Optional shared collector for runtime scheduler evidence snapshots.
+    scheduler_evidence: Option<Arc<Mutex<SchedulerEvidenceCollector>>>,
+    /// Number of configured worker cohorts used for locality-aware stealing.
+    cohort_count: usize,
 }
 
 /// Discriminator for [`ThreeLaneScheduler::schedule_internal`]
@@ -1113,6 +1122,7 @@ impl ThreeLaneScheduler {
         let steal_batch_size = DEFAULT_STEAL_BATCH_SIZE;
         let enable_parking = DEFAULT_ENABLE_PARKING;
         let global = Arc::new(GlobalInjector::new());
+        let scheduler_evidence = None;
         let shutdown = Arc::new(AtomicBool::new(false));
         let mut workers = SmallVec::<[ThreeLaneWorker; 16]>::with_capacity(worker_count);
         let mut parkers = SmallVec::<[Parker; 16]>::with_capacity(worker_count);
@@ -1255,6 +1265,7 @@ impl ThreeLaneScheduler {
                 timed_dispatch_streak: 0,
                 timed_fairness_limit: 6, // Allow max 6 consecutive EDF dispatches before FIFO fairness
                 steal_locality_counters: StealLocalityCounters::default(),
+                scheduler_evidence: scheduler_evidence.clone(),
             });
         }
 
@@ -1275,6 +1286,8 @@ impl ThreeLaneScheduler {
             global_queue_limit: 0,
             governor_throttled_spawns: CachePadded::new(AtomicU64::new(0)),
             governor_bypass_spawns: CachePadded::new(AtomicU64::new(0)),
+            scheduler_evidence,
+            cohort_count: 1,
         }
     }
 
@@ -1411,6 +1424,11 @@ impl ThreeLaneScheduler {
             worker.preferred_heap_stealer_count = preferred_heap_count;
             worker.steal_locality_counters = StealLocalityCounters::default();
         }
+        self.cohort_count = worker_to_cohort
+            .iter()
+            .copied()
+            .max()
+            .map_or(1, |max_cohort| max_cohort.saturating_add(1));
 
         Ok(())
     }
@@ -1498,6 +1516,113 @@ impl ThreeLaneScheduler {
         self.global_queue_limit = limit;
     }
 
+    #[inline]
+    fn record_scheduler_evidence_enqueue(&self, task: TaskId) {
+        let Some(collector) = &self.scheduler_evidence else {
+            return;
+        };
+        collector
+            .lock()
+            .record_task_enqueue(task, crate::time::wall_now().as_nanos());
+    }
+
+    fn scheduler_evidence_remote_steal_ratio_pct(&self) -> Option<u8> {
+        let (preferred, remote) =
+            self.workers
+                .iter()
+                .fold((0_u64, 0_u64), |(preferred, remote), worker| {
+                    let counters = worker.steal_locality_counters;
+                    (
+                        preferred
+                            .saturating_add(counters.preferred_fast_steals)
+                            .saturating_add(counters.preferred_heap_steals),
+                        remote
+                            .saturating_add(counters.remote_fast_steals)
+                            .saturating_add(counters.remote_heap_steals),
+                    )
+                });
+        let total = preferred.saturating_add(remote);
+        if total == 0 {
+            return None;
+        }
+        let pct = remote.saturating_mul(100).saturating_add(total / 2) / total;
+        Some(u8::try_from(pct.min(100)).expect("remote steal ratio should fit in u8"))
+    }
+
+    /// Enables or disables runtime scheduler evidence capture.
+    ///
+    /// A `sample_window` of `0` disables the collector. Any positive value
+    /// installs a shared bounded collector and propagates it to all workers.
+    #[cfg(any(test, feature = "test-internals"))]
+    pub fn set_scheduler_evidence_window(&mut self, sample_window: usize) {
+        let collector = (sample_window > 0)
+            .then(|| Arc::new(Mutex::new(SchedulerEvidenceCollector::new(sample_window))));
+        self.scheduler_evidence = collector.clone();
+        for worker in &mut self.workers {
+            worker.scheduler_evidence = collector.clone();
+        }
+    }
+
+    /// Builds a live scheduler evidence artifact from the current collector snapshot.
+    #[must_use]
+    pub fn scheduler_evidence_artifact(
+        &self,
+        run_label: &str,
+        workload_class: SchedulerWorkloadClass,
+        memory_budget_gib: usize,
+    ) -> Option<SchedulerEvidenceArtifact> {
+        if self.workers.is_empty() {
+            return None;
+        }
+        let collector = self.scheduler_evidence.as_ref()?;
+        let remote_steal_ratio_pct = self.scheduler_evidence_remote_steal_ratio_pct();
+        let collector = collector.lock();
+        let sample_window = collector.sample_window();
+        let (wake_to_run_samples, queue_residency_samples, ready_backlog_samples, cancel_samples) =
+            collector.sample_counts();
+        let metrics = collector.snapshot_metrics(remote_steal_ratio_pct);
+        drop(collector);
+
+        let cancel_streak_limit = self
+            .workers
+            .first()
+            .map_or(DEFAULT_CANCEL_STREAK_LIMIT, |worker| {
+                worker.cancel_streak_limit
+            });
+
+        Some(SchedulerEvidenceArtifact {
+            schema_version: SCHEDULER_EVIDENCE_SCHEMA_VERSION.to_string(),
+            run_label: run_label.to_string(),
+            workload_class,
+            topology: SchedulerTopologyDescriptor {
+                worker_threads: self.workers.len(),
+                cohort_count: self.cohort_count.max(1),
+                memory_budget_gib,
+            },
+            current_knobs: SchedulerKnobProfile {
+                worker_threads: self.workers.len(),
+                steal_batch_size: self.steal_batch_size,
+                cancel_streak_limit,
+                global_queue_limit: self.global_queue_limit,
+                parking_enabled: self.enable_parking,
+            },
+            metrics,
+            notes: vec![
+                "runtime_capture".to_string(),
+                format!("sample_window={sample_window}"),
+                format!(
+                    "sample_counts=wake_to_run:{wake_to_run_samples},queue_residency:{queue_residency_samples},ready_backlog:{ready_backlog_samples},cancel_debt:{cancel_samples}"
+                ),
+            ],
+        })
+    }
+
+    #[doc(hidden)]
+    #[cfg(any(test, feature = "test-internals"))]
+    pub fn worker_mut_for_test(&mut self, worker_id: usize) -> &mut ThreeLaneWorker {
+        &mut self.workers[worker_id]
+    }
+
     /// Returns a reference to the global injector.
     #[must_use]
     pub fn global_injector(&self) -> Arc<GlobalInjector> {
@@ -1569,6 +1694,7 @@ impl ThreeLaneScheduler {
                     } else {
                         local.lock().move_to_cancel_lane(task, priority);
                     }
+                    self.record_scheduler_evidence_enqueue(task);
                     if let Some(parker) = self.parkers.get(worker_id) {
                         parker.unpark();
                     }
@@ -1576,6 +1702,7 @@ impl ThreeLaneScheduler {
                 }
             }
             if schedule_cancel_on_current_local(task, priority) {
+                self.record_scheduler_evidence_enqueue(task);
                 return;
             }
             // SAFETY: Local (!Send) tasks must only be polled on their owner
@@ -1600,6 +1727,7 @@ impl ThreeLaneScheduler {
         });
         if should_schedule {
             self.global.inject_cancel(task, priority);
+            self.record_scheduler_evidence_enqueue(task);
             self.wake_one();
         }
     }
@@ -1616,6 +1744,7 @@ impl ThreeLaneScheduler {
         });
         if should_schedule {
             self.global.inject_timed(task, deadline);
+            self.record_scheduler_evidence_enqueue(task);
             self.wake_one();
         }
     }
@@ -1654,6 +1783,7 @@ impl ThreeLaneScheduler {
         }
 
         self.global.inject_ready(task, priority);
+        self.record_scheduler_evidence_enqueue(task);
         self.wake_one();
     }
 
@@ -1747,6 +1877,7 @@ impl ThreeLaneScheduler {
                 );
             }
             self.global.inject_ready(task, priority);
+            self.record_scheduler_evidence_enqueue(task);
             self.wake_one();
         } else {
             trace!(
@@ -1825,6 +1956,7 @@ impl ThreeLaneScheduler {
             // 1. Try scheduling on current thread (fastest, no locks if TLS setup)
             // ONLY if this thread is the owner.
             if is_pinned_here && schedule_local_task(task) {
+                self.record_scheduler_evidence_enqueue(task);
                 return;
             }
 
@@ -1832,6 +1964,7 @@ impl ThreeLaneScheduler {
             if let Some(worker_id) = pinned_worker {
                 if let Some(queue) = self.local_ready.get(worker_id) {
                     queue.lock().push_back(task);
+                    self.record_scheduler_evidence_enqueue(task);
                     self.coordinator.wake_worker(worker_id);
                     return;
                 }
@@ -1849,6 +1982,7 @@ impl ThreeLaneScheduler {
 
         // Fast path 1 & 2: Try local queue (O(1)) then local scheduler (O(log n)) via TLS.
         if schedule_on_current_local(task, priority) {
+            self.record_scheduler_evidence_enqueue(task);
             return;
         }
 
@@ -2032,6 +2166,8 @@ pub struct ThreeLaneWorker {
     timed_fairness_limit: usize,
     /// Counters tracking preferred-vs-remote steal outcomes.
     steal_locality_counters: StealLocalityCounters,
+    /// Optional shared collector for runtime scheduler evidence snapshots.
+    scheduler_evidence: Option<Arc<Mutex<SchedulerEvidenceCollector>>>,
 }
 
 /// Worker-local counters for preferred-vs-remote steal outcomes.
@@ -2045,6 +2181,182 @@ pub struct StealLocalityCounters {
     pub preferred_heap_steals: u64,
     /// Successful cross-cohort heap-batch steals.
     pub remote_heap_steals: u64,
+}
+
+#[derive(Debug)]
+struct SchedulerEvidenceCollector {
+    sample_window: usize,
+    max_inflight: usize,
+    next_sequence: u64,
+    pending_enqueue: DetHashMap<TaskId, (u64, u64)>,
+    pending_wake: DetHashMap<TaskId, (u64, u64)>,
+    wake_order: VecDeque<(TaskId, u64)>,
+    enqueue_order: VecDeque<(TaskId, u64)>,
+    wake_to_run_samples_ns: VecDeque<u64>,
+    queue_residency_samples_ns: VecDeque<u64>,
+    ready_backlog_samples: VecDeque<usize>,
+    cancel_debt_samples: VecDeque<usize>,
+}
+
+impl SchedulerEvidenceCollector {
+    fn new(sample_window: usize) -> Self {
+        let sample_window = sample_window.max(1);
+        Self {
+            sample_window,
+            max_inflight: sample_window
+                .saturating_mul(DEFAULT_SCHEDULER_EVIDENCE_MAX_INFLIGHT_MULTIPLIER)
+                .max(sample_window),
+            next_sequence: 0,
+            pending_enqueue: DetHashMap::default(),
+            pending_wake: DetHashMap::default(),
+            wake_order: VecDeque::with_capacity(sample_window),
+            enqueue_order: VecDeque::with_capacity(sample_window),
+            wake_to_run_samples_ns: VecDeque::with_capacity(sample_window),
+            queue_residency_samples_ns: VecDeque::with_capacity(sample_window),
+            ready_backlog_samples: VecDeque::with_capacity(sample_window),
+            cancel_debt_samples: VecDeque::with_capacity(sample_window),
+        }
+    }
+
+    fn record_task_enqueue(&mut self, task_id: TaskId, timestamp_ns: u64) {
+        self.next_sequence = self.next_sequence.saturating_add(1);
+        let sequence = self.next_sequence;
+        self.pending_enqueue
+            .insert(task_id, (timestamp_ns, sequence));
+        self.enqueue_order.push_back((task_id, sequence));
+        self.pending_wake.insert(task_id, (timestamp_ns, sequence));
+        self.wake_order.push_back((task_id, sequence));
+        self.trim_pending();
+    }
+
+    fn record_task_dispatch(
+        &mut self,
+        task_id: TaskId,
+        dispatch_time_ns: u64,
+        ready_backlog: usize,
+        cancel_debt: usize,
+    ) {
+        let sample_window = self.sample_window;
+        if let Some((enqueue_time_ns, _)) = self.pending_enqueue.remove(&task_id) {
+            Self::push_u64_sample(
+                &mut self.queue_residency_samples_ns,
+                dispatch_time_ns.saturating_sub(enqueue_time_ns),
+                sample_window,
+            );
+        }
+        if let Some((wake_time_ns, _)) = self.pending_wake.remove(&task_id) {
+            Self::push_u64_sample(
+                &mut self.wake_to_run_samples_ns,
+                dispatch_time_ns.saturating_sub(wake_time_ns),
+                sample_window,
+            );
+        }
+        Self::push_usize_sample(
+            &mut self.ready_backlog_samples,
+            ready_backlog,
+            sample_window,
+        );
+        Self::push_usize_sample(&mut self.cancel_debt_samples, cancel_debt, sample_window);
+    }
+
+    fn sample_window(&self) -> usize {
+        self.sample_window
+    }
+
+    fn sample_counts(&self) -> (usize, usize, usize, usize) {
+        (
+            self.wake_to_run_samples_ns.len(),
+            self.queue_residency_samples_ns.len(),
+            self.ready_backlog_samples.len(),
+            self.cancel_debt_samples.len(),
+        )
+    }
+
+    fn snapshot_metrics(&self, remote_steal_ratio_pct: Option<u8>) -> SchedulerEvidenceMetrics {
+        SchedulerEvidenceMetrics {
+            wake_to_run_p50_ns: percentile_u64(&self.wake_to_run_samples_ns, 50),
+            wake_to_run_p95_ns: percentile_u64(&self.wake_to_run_samples_ns, 95),
+            wake_to_run_p99_ns: percentile_u64(&self.wake_to_run_samples_ns, 99),
+            queue_residency_p50_ns: percentile_u64(&self.queue_residency_samples_ns, 50),
+            queue_residency_p95_ns: percentile_u64(&self.queue_residency_samples_ns, 95),
+            queue_residency_p99_ns: percentile_u64(&self.queue_residency_samples_ns, 99),
+            ready_backlog_p95: percentile_usize(&self.ready_backlog_samples, 95),
+            ready_backlog_p99: percentile_usize(&self.ready_backlog_samples, 99),
+            cancel_debt_p95: percentile_usize(&self.cancel_debt_samples, 95),
+            cancel_debt_p99: percentile_usize(&self.cancel_debt_samples, 99),
+            remote_steal_ratio_pct,
+            cross_cohort_wake_p99_ns: None,
+        }
+    }
+
+    fn trim_pending(&mut self) {
+        while self.pending_enqueue.len() > self.max_inflight {
+            let Some((task_id, sequence)) = self.enqueue_order.pop_front() else {
+                break;
+            };
+            if self
+                .pending_enqueue
+                .get(&task_id)
+                .is_some_and(|(_, current_sequence)| *current_sequence == sequence)
+            {
+                self.pending_enqueue.remove(&task_id);
+            }
+        }
+        while self.pending_wake.len() > self.max_inflight {
+            let Some((task_id, sequence)) = self.wake_order.pop_front() else {
+                break;
+            };
+            if self
+                .pending_wake
+                .get(&task_id)
+                .is_some_and(|(_, current_sequence)| *current_sequence == sequence)
+            {
+                self.pending_wake.remove(&task_id);
+            }
+        }
+    }
+
+    fn push_u64_sample(samples: &mut VecDeque<u64>, value: u64, sample_window: usize) {
+        if samples.len() == sample_window {
+            samples.pop_front();
+        }
+        samples.push_back(value);
+    }
+
+    fn push_usize_sample(samples: &mut VecDeque<usize>, value: usize, sample_window: usize) {
+        if samples.len() == sample_window {
+            samples.pop_front();
+        }
+        samples.push_back(value);
+    }
+}
+
+fn percentile_index(len: usize, percentile: usize) -> usize {
+    debug_assert!(len > 0);
+    let percentile = percentile.clamp(1, 100);
+    percentile
+        .saturating_mul(len)
+        .div_ceil(100)
+        .saturating_sub(1)
+        .min(len.saturating_sub(1))
+}
+
+fn percentile_u64(samples: &VecDeque<u64>, percentile: usize) -> u64 {
+    if samples.is_empty() {
+        return 0;
+    }
+    let mut values = samples.iter().copied().collect::<Vec<_>>();
+    values.sort_unstable();
+    values[percentile_index(values.len(), percentile)]
+}
+
+fn percentile_usize(samples: &VecDeque<usize>, percentile: usize) -> usize {
+    if samples.is_empty() {
+        return 0;
+    }
+    let mut values = samples.iter().copied().collect::<Vec<_>>();
+    values.sort_unstable();
+    values[percentile_index(values.len(), percentile)]
 }
 
 #[derive(Debug, Clone)]
@@ -2859,6 +3171,19 @@ impl ThreeLaneWorker {
             );
         }
         crate::time::wall_now().as_nanos()
+    }
+
+    #[inline]
+    fn record_scheduler_evidence_enqueue_at(&self, task: TaskId, timestamp_ns: u64) {
+        let Some(collector) = &self.scheduler_evidence else {
+            return;
+        };
+        collector.lock().record_task_enqueue(task, timestamp_ns);
+    }
+
+    #[inline]
+    fn record_scheduler_evidence_enqueue(&self, task: TaskId) {
+        self.record_scheduler_evidence_enqueue_at(task, self.current_time_ns());
     }
 
     /// Executes a closure with access to the fairness monitor for this worker.
@@ -3866,6 +4191,14 @@ impl ThreeLaneWorker {
             .lock()
             .record_task_dispatch(task, Time::from_nanos(current_time));
 
+        if let Some(collector) = &self.scheduler_evidence {
+            let ready_backlog = self.ready_queue_depth_signal();
+            let cancel_debt = self.cancel_debt_signal();
+            collector
+                .lock()
+                .record_task_dispatch(task, current_time, ready_backlog, cancel_debt);
+        }
+
         task
     }
 
@@ -3882,6 +4215,13 @@ impl ThreeLaneWorker {
             .saturating_add(fast_ready)
             .saturating_add(pinned_local_ready)
             .saturating_add(local_priority_ready)
+    }
+
+    #[inline]
+    fn cancel_debt_signal(&self) -> usize {
+        let global_cancel = self.global.cancel_count();
+        let local_cancel = self.local.lock().approx_cancel_len();
+        global_cancel.saturating_add(local_cancel)
     }
 
     /// Consult the governor for a scheduling suggestion, taking a fresh
@@ -4482,6 +4822,7 @@ impl ThreeLaneWorker {
                 Time::from_nanos(current_time),
             );
 
+            self.record_scheduler_evidence_enqueue_at(task, current_time);
             self.parker.unpark();
         }
     }
@@ -4526,6 +4867,8 @@ impl ThreeLaneWorker {
                 priority,
                 Time::from_nanos(current_time),
             );
+
+            self.record_scheduler_evidence_enqueue_at(task, current_time);
         }
         self.parker.unpark();
     }
@@ -4569,6 +4912,7 @@ impl ThreeLaneWorker {
                 Time::from_nanos(current_time),
             );
 
+            self.record_scheduler_evidence_enqueue_at(task, current_time);
             self.parker.unpark();
         }
     }
@@ -4623,6 +4967,7 @@ impl ThreeLaneWorker {
                     if let Some(worker_id) = metadata.pinned_worker {
                         if let Some(queue) = self.all_local_ready.get(worker_id) {
                             queue.lock().push_back(waiter);
+                            self.record_scheduler_evidence_enqueue(waiter);
                             self.coordinator.wake_worker(worker_id);
                         } else {
                             // SAFETY: Invalid worker id for a local waiter means
@@ -4644,6 +4989,7 @@ impl ThreeLaneWorker {
                         // Local task without a pinned worker yet.
                         // Schedule on the current worker's local queue.
                         self.local_ready.lock().push_back(waiter);
+                        self.record_scheduler_evidence_enqueue(waiter);
                         self.parker.unpark();
                     }
                 } else {
@@ -4659,6 +5005,7 @@ impl ThreeLaneWorker {
             let mut reservation = self.global.reserve_ready_count(global_wakes);
             for (task, priority) in global_tasks {
                 self.global.inject_ready_uncounted(task, priority);
+                self.record_scheduler_evidence_enqueue(task);
                 reservation.publish_one();
             }
             self.coordinator.wake_many(global_wakes);
@@ -4712,6 +5059,8 @@ impl ThreeLaneWorker {
                             self.worker
                                 .global
                                 .inject_ready_uncounted(finalizer_task, priority);
+                            self.worker
+                                .record_scheduler_evidence_enqueue(finalizer_task);
                             reservation.publish_one();
                         }
                         self.worker.coordinator.wake_many(finalizer_wakes);
@@ -4845,6 +5194,7 @@ impl ThreeLaneWorker {
                     parker: self.parker.clone(),
                     fast_cancel,
                     cx_inner: weak_inner,
+                    scheduler_evidence: self.scheduler_evidence.clone(),
                 }))
             } else {
                 Waker::from(Arc::new(ThreeLaneWaker {
@@ -4855,6 +5205,7 @@ impl ThreeLaneWorker {
                     priority,
                     fast_cancel,
                     cx_inner: weak_inner,
+                    scheduler_evidence: self.scheduler_evidence.clone(),
                 }))
             }
         };
@@ -4879,6 +5230,7 @@ impl ThreeLaneWorker {
                         local_ready: Arc::clone(&self.local_ready),
                         parker: self.parker.clone(),
                         cx_inner: Arc::downgrade(inner),
+                        scheduler_evidence: self.scheduler_evidence.clone(),
                     }))
                 } else {
                     Waker::from(Arc::new(CancelLaneWaker {
@@ -4888,6 +5240,7 @@ impl ThreeLaneWorker {
                         global: Arc::clone(&self.global),
                         coordinator: Arc::clone(&self.coordinator),
                         cx_inner: Arc::downgrade(inner),
+                        scheduler_evidence: self.scheduler_evidence.clone(),
                     }))
                 };
                 // New waker: register in CxInner (single write lock).
@@ -4991,6 +5344,7 @@ impl ThreeLaneWorker {
                     let mut reservation = self.global.reserve_ready_count(finalizer_wakes);
                     for (finalizer_task, priority) in finalizers {
                         self.global.inject_ready_uncounted(finalizer_task, priority);
+                        self.record_scheduler_evidence_enqueue(finalizer_task);
                         reservation.publish_one();
                     }
                     self.coordinator.wake_many(finalizer_wakes);
@@ -5085,10 +5439,12 @@ impl ThreeLaneWorker {
                             drop(local_ready_guard);
                             let mut local = self.local.lock();
                             local.schedule_cancel(task_id, cancel_priority);
+                            self.record_scheduler_evidence_enqueue(task_id);
                         } else {
                             // Push to non-stealable local_ready queue.
                             // Local (!Send) tasks must never enter stealable structures.
                             self.local_ready.lock().push_back(task_id);
+                            self.record_scheduler_evidence_enqueue(task_id);
                         }
                         self.parker.unpark();
                     } else {
@@ -5098,6 +5454,7 @@ impl ThreeLaneWorker {
                         } else {
                             self.global.inject_ready(task_id, priority);
                         }
+                        self.record_scheduler_evidence_enqueue(task_id);
                         self.coordinator.wake_one();
                     }
                 }
@@ -5168,6 +5525,7 @@ impl ThreeLaneWorker {
             let mut reservation = self.global.reserve_ready_count(finalizer_wakes);
             for (task_id, priority) in tasks {
                 self.global.inject_ready_uncounted(task_id, priority);
+                self.record_scheduler_evidence_enqueue(task_id);
                 reservation.publish_one();
             }
             self.coordinator.wake_many(finalizer_wakes);
@@ -5227,6 +5585,7 @@ struct ThreeLaneWaker {
     priority: u8,
     fast_cancel: std::sync::Arc<std::sync::atomic::AtomicBool>,
     cx_inner: Weak<RwLock<CxInner>>,
+    scheduler_evidence: Option<Arc<Mutex<SchedulerEvidenceCollector>>>,
 }
 
 impl ThreeLaneWaker {
@@ -5253,6 +5612,11 @@ impl ThreeLaneWaker {
                 self.global.inject_cancel(self.task_id, priority);
             } else {
                 self.global.inject_ready(self.task_id, priority);
+            }
+            if let Some(collector) = &self.scheduler_evidence {
+                collector
+                    .lock()
+                    .record_task_enqueue(self.task_id, crate::time::wall_now().as_nanos());
             }
             self.coordinator.wake_one();
         }
@@ -5283,6 +5647,7 @@ struct ThreeLaneLocalWaker {
     parker: Parker,
     fast_cancel: std::sync::Arc<std::sync::atomic::AtomicBool>,
     cx_inner: Weak<RwLock<CxInner>>,
+    scheduler_evidence: Option<Arc<Mutex<SchedulerEvidenceCollector>>>,
 }
 
 impl ThreeLaneLocalWaker {
@@ -5315,6 +5680,11 @@ impl ThreeLaneLocalWaker {
                 // Push to non-stealable local_ready queue.
                 self.local_ready.lock().push_back(self.task_id);
             }
+            if let Some(collector) = &self.scheduler_evidence {
+                collector
+                    .lock()
+                    .record_task_enqueue(self.task_id, crate::time::wall_now().as_nanos());
+            }
             self.parker.unpark();
         }
     }
@@ -5339,6 +5709,7 @@ struct CancelLaneWaker {
     global: Arc<GlobalInjector>,
     coordinator: Arc<WorkerCoordinator>,
     cx_inner: Weak<RwLock<CxInner>>,
+    scheduler_evidence: Option<Arc<Mutex<SchedulerEvidenceCollector>>>,
 }
 
 impl CancelLaneWaker {
@@ -5368,6 +5739,11 @@ impl CancelLaneWaker {
         // Always inject to ensure priority promotion, even if already scheduled.
         // See `inject_cancel` for details.
         self.global.inject_cancel(self.task_id, priority);
+        if let Some(collector) = &self.scheduler_evidence {
+            collector
+                .lock()
+                .record_task_enqueue(self.task_id, crate::time::wall_now().as_nanos());
+        }
         self.coordinator.wake_one();
     }
 }
@@ -5392,6 +5768,7 @@ struct ThreeLaneLocalCancelWaker {
     local_ready: Arc<LocalReadyQueue>,
     parker: Parker,
     cx_inner: Weak<RwLock<CxInner>>,
+    scheduler_evidence: Option<Arc<Mutex<SchedulerEvidenceCollector>>>,
 }
 
 impl ThreeLaneLocalCancelWaker {
@@ -5428,6 +5805,11 @@ impl ThreeLaneLocalCancelWaker {
             drop(local_ready_guard);
             let mut local = self.local.lock();
             local.move_to_cancel_lane(self.task_id, priority);
+        }
+        if let Some(collector) = &self.scheduler_evidence {
+            collector
+                .lock()
+                .record_task_enqueue(self.task_id, crate::time::wall_now().as_nanos());
         }
         self.parker.unpark();
     }
