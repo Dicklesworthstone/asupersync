@@ -384,6 +384,392 @@
         "tamper_field": "config_diff_digest",
         "verification_refusal_count": 1
       }
+    },
+    {
+      "scenario_id": "AA-SIGNED-PROFILE-BUNDLE-SHADOW-RUN-WIN-64C-256G",
+      "description": "Shadow-run the locality-first profile bundle against the conservative baseline and promote only if the counterfactual loss beats the hold policy by a sufficient margin.",
+      "objective": "locality_first",
+      "requested_profile": "locality_first_64c_256g",
+      "host_resources": {
+        "cpu_cores": 64,
+        "memory_gib": 256
+      },
+      "host_fingerprint": {
+        "hostname": "lab-64c-256g-a",
+        "arch": "x86_64",
+        "cpu_cores": 64,
+        "memory_gib": 256
+      },
+      "controller_evidence": {
+        "brownout": {
+          "artifact_id": "artifacts/overload_brownout_smoke_contract_v1.json",
+          "contract_version": "overload-brownout-smoke-contract-v1",
+          "validation_passed": true
+        },
+        "otlp_brownout": {
+          "artifact_id": "artifacts/otlp_brownout_shedding_smoke_contract_v1.json",
+          "contract_version": "otlp-brownout-shedding-smoke-contract-v1",
+          "validation_passed": true
+        },
+        "admission_steering": {
+          "artifact_id": "artifacts/cohort_admission_steering_smoke_contract_v1.json",
+          "contract_version": "cohort-admission-steering-smoke-contract-v1",
+          "validation_passed": true
+        },
+        "adaptive_batch_sizing": {
+          "artifact_id": "artifacts/adaptive_batch_sizing_smoke_contract_v1.json",
+          "contract_version": "adaptive-batch-sizing-smoke-contract-v1",
+          "validation_passed": true
+        },
+        "blocking_pool_affinity": {
+          "artifact_id": "artifacts/blocking_pool_affinity_smoke_contract_v1.json",
+          "contract_version": "blocking-pool-affinity-smoke-contract-v1",
+          "validation_passed": true
+        },
+        "trace_storage_profile": {
+          "artifact_id": "artifacts/trace_storage_profile_smoke_contract_v1.json",
+          "contract_version": "trace-storage-profile-smoke-contract-v1",
+          "validation_passed": true
+        }
+      },
+      "manual_overrides": {
+        "global_queue_limit": 49152
+      },
+      "evidence_snapshot": {
+        "scenario_artifact_id": "artifacts/swarm_scenario_locality_64c_256g_shadow_win.json",
+        "scenario_artifact_hash": "b650c0e93b424af3d7782e332298672debf999efa6d5b393b7ae0566fa3f67d4",
+        "scenario_contract_version": "swarm-scenario-evidence-v1",
+        "host_fingerprint": {
+          "hostname": "lab-64c-256g-a",
+          "arch": "x86_64",
+          "cpu_cores": 64,
+          "memory_gib": 256
+        },
+        "artifact_age_hours": 8,
+        "measured_worker_count": 64,
+        "measured_agent_count": 512,
+        "measured_queue_depth": 36000,
+        "throughput_ops_per_sec": 236000,
+        "wake_to_run_p50_ns": 260000,
+        "wake_to_run_p95_ns": 880000,
+        "wake_to_run_p99_ns": 1220000,
+        "cancellation_debt_units": 118,
+        "memory_pressure_basis_points": 4200,
+        "brownout_stage": "optional_first",
+        "brownout_risk_basis_points": 620,
+        "retention_budget_gib": 2
+      },
+      "capacity_budget": {
+        "target_p99_ns": 1300000,
+        "target_cancel_debt_units": 140,
+        "max_memory_pressure_basis_points": 7600,
+        "max_brownout_risk_basis_points": 1800,
+        "max_queue_depth": 50000,
+        "max_artifact_age_hours": 48
+      },
+      "worker_count_sweep": [
+        48,
+        56,
+        64
+      ],
+      "agent_count_sweep": [
+        384,
+        512,
+        640
+      ],
+      "bundle_id": "swarm-profile-locality-first-shadow-run-win-64c-256g-v1",
+      "integrity_mode": "digest_only_sha256",
+      "proof_command_classes": [
+        "rch_cargo_test",
+        "smoke_runner",
+        "shadow_run"
+      ],
+      "controller_versions": [
+        {
+          "controller": "brownout",
+          "contract_version": "overload-brownout-smoke-contract-v1"
+        },
+        {
+          "controller": "otlp_brownout",
+          "contract_version": "otlp-brownout-shedding-smoke-contract-v1"
+        },
+        {
+          "controller": "admission_steering",
+          "contract_version": "cohort-admission-steering-smoke-contract-v1"
+        },
+        {
+          "controller": "adaptive_batch_sizing",
+          "contract_version": "adaptive-batch-sizing-smoke-contract-v1"
+        },
+        {
+          "controller": "blocking_pool_affinity",
+          "contract_version": "blocking-pool-affinity-smoke-contract-v1"
+        },
+        {
+          "controller": "trace_storage_profile",
+          "contract_version": "trace-storage-profile-smoke-contract-v1"
+        }
+      ],
+      "supported_controller_versions": [
+        {
+          "controller": "brownout",
+          "contract_version": "overload-brownout-smoke-contract-v1"
+        },
+        {
+          "controller": "otlp_brownout",
+          "contract_version": "otlp-brownout-shedding-smoke-contract-v1"
+        },
+        {
+          "controller": "admission_steering",
+          "contract_version": "cohort-admission-steering-smoke-contract-v1"
+        },
+        {
+          "controller": "adaptive_batch_sizing",
+          "contract_version": "adaptive-batch-sizing-smoke-contract-v1"
+        },
+        {
+          "controller": "blocking_pool_affinity",
+          "contract_version": "blocking-pool-affinity-smoke-contract-v1"
+        },
+        {
+          "controller": "trace_storage_profile",
+          "contract_version": "trace-storage-profile-smoke-contract-v1"
+        }
+      ],
+      "capacity_certificate_reference": {
+        "artifact_id": "artifacts/capacity_envelope_planner_smoke_contract_v1.json",
+        "contract_version": "capacity-envelope-planner-smoke-contract-v1",
+        "scenario_id": "AA-CAPACITY-ENVELOPE-LOCALITY-CERT-64C-256G"
+      },
+      "previous_config_digest": "64a911f5b81c3320cceeb7f85ad6d7164bc17c42ddf5c8a5d44236b00453498a",
+      "rollback_command_template": "offline_tuner apply-profile --profile conservative_baseline --host-fingerprint lab-64c-256g-a --verify-only",
+      "operator_note": "ticket=OPS-SHADOW api_token=super-secret",
+      "validation_command": "run_id=BUNDLE-SHADOW-WIN token=secret",
+      "require_operator_confirmation": true,
+      "execute_mode": "shadow_run",
+      "tamper_field": null,
+      "output_root": "target/signed-profile-bundle-smoke",
+      "expected_report_projection": {
+        "selected_profile": "locality_first_64c_256g",
+        "fallback_profile": "conservative_baseline",
+        "integrity_mode": "digest_only_sha256",
+        "execute_mode": "shadow_run",
+        "accepted": true,
+        "tamper_field": null,
+        "child_evidence_count": 6,
+        "controller_version_count": 6,
+        "supported_controller_version_count": 6,
+        "planning_refusal_count": 0,
+        "verification_refusal_count": 0,
+        "artifact_path_count": 10,
+        "integrity_limitation_count": 1,
+        "require_operator_confirmation": true,
+        "manual_override_count": 1,
+        "proof_command_class_count": 3,
+        "feature_gate_count": 6,
+        "sanitized_operator_note": "ticket=OPS-SHADOW api_token=[REDACTED]",
+        "sanitized_validation_command": "run_id=BUNDLE-SHADOW-WIN token=[REDACTED]",
+        "shadow_run_decision": "promote",
+        "candidate_loss_basis_points": 79434,
+        "baseline_loss_basis_points": 109592,
+        "regret_margin_basis_points": 30158,
+        "shadow_hold_reason_count": 0,
+        "shadow_dominant_reason_count": 4,
+        "projection_hash": 13231458667148203366
+      }
+    },
+    {
+      "scenario_id": "AA-SIGNED-PROFILE-BUNDLE-SHADOW-RUN-HOLD-64C-256G",
+      "description": "Shadow-run the locality-first profile bundle but hold the conservative baseline when the counterfactual loss fails to justify promotion.",
+      "objective": "locality_first",
+      "requested_profile": "locality_first_64c_256g",
+      "host_resources": {
+        "cpu_cores": 64,
+        "memory_gib": 256
+      },
+      "host_fingerprint": {
+        "hostname": "lab-64c-256g-a",
+        "arch": "x86_64",
+        "cpu_cores": 64,
+        "memory_gib": 256
+      },
+      "controller_evidence": {
+        "brownout": {
+          "artifact_id": "artifacts/overload_brownout_smoke_contract_v1.json",
+          "contract_version": "overload-brownout-smoke-contract-v1",
+          "validation_passed": true
+        },
+        "otlp_brownout": {
+          "artifact_id": "artifacts/otlp_brownout_shedding_smoke_contract_v1.json",
+          "contract_version": "otlp-brownout-shedding-smoke-contract-v1",
+          "validation_passed": true
+        },
+        "admission_steering": {
+          "artifact_id": "artifacts/cohort_admission_steering_smoke_contract_v1.json",
+          "contract_version": "cohort-admission-steering-smoke-contract-v1",
+          "validation_passed": true
+        },
+        "adaptive_batch_sizing": {
+          "artifact_id": "artifacts/adaptive_batch_sizing_smoke_contract_v1.json",
+          "contract_version": "adaptive-batch-sizing-smoke-contract-v1",
+          "validation_passed": true
+        },
+        "blocking_pool_affinity": {
+          "artifact_id": "artifacts/blocking_pool_affinity_smoke_contract_v1.json",
+          "contract_version": "blocking-pool-affinity-smoke-contract-v1",
+          "validation_passed": true
+        },
+        "trace_storage_profile": {
+          "artifact_id": "artifacts/trace_storage_profile_smoke_contract_v1.json",
+          "contract_version": "trace-storage-profile-smoke-contract-v1",
+          "validation_passed": true
+        }
+      },
+      "manual_overrides": {
+        "global_queue_limit": 49152
+      },
+      "evidence_snapshot": {
+        "scenario_artifact_id": "artifacts/swarm_scenario_locality_64c_256g_shadow_hold.json",
+        "scenario_artifact_hash": "d86a65d6e4e016a4d9ac438c3d69465c5b8786f62f363da7e92238c4226d63f1",
+        "scenario_contract_version": "swarm-scenario-evidence-v1",
+        "host_fingerprint": {
+          "hostname": "lab-64c-256g-a",
+          "arch": "x86_64",
+          "cpu_cores": 64,
+          "memory_gib": 256
+        },
+        "artifact_age_hours": 8,
+        "measured_worker_count": 64,
+        "measured_agent_count": 512,
+        "measured_queue_depth": 14000,
+        "throughput_ops_per_sec": 228000,
+        "wake_to_run_p50_ns": 140000,
+        "wake_to_run_p95_ns": 360000,
+        "wake_to_run_p99_ns": 500000,
+        "cancellation_debt_units": 50,
+        "memory_pressure_basis_points": 2000,
+        "brownout_stage": "optional_first",
+        "brownout_risk_basis_points": 420,
+        "retention_budget_gib": 8
+      },
+      "capacity_budget": {
+        "target_p99_ns": 1300000,
+        "target_cancel_debt_units": 130,
+        "max_memory_pressure_basis_points": 7600,
+        "max_brownout_risk_basis_points": 1800,
+        "max_queue_depth": 45000,
+        "max_artifact_age_hours": 48
+      },
+      "worker_count_sweep": [
+        48,
+        56,
+        64
+      ],
+      "agent_count_sweep": [
+        384,
+        512,
+        640
+      ],
+      "bundle_id": "swarm-profile-locality-first-shadow-run-hold-64c-256g-v1",
+      "integrity_mode": "digest_only_sha256",
+      "proof_command_classes": [
+        "rch_cargo_test",
+        "smoke_runner",
+        "shadow_run"
+      ],
+      "controller_versions": [
+        {
+          "controller": "brownout",
+          "contract_version": "overload-brownout-smoke-contract-v1"
+        },
+        {
+          "controller": "otlp_brownout",
+          "contract_version": "otlp-brownout-shedding-smoke-contract-v1"
+        },
+        {
+          "controller": "admission_steering",
+          "contract_version": "cohort-admission-steering-smoke-contract-v1"
+        },
+        {
+          "controller": "adaptive_batch_sizing",
+          "contract_version": "adaptive-batch-sizing-smoke-contract-v1"
+        },
+        {
+          "controller": "blocking_pool_affinity",
+          "contract_version": "blocking-pool-affinity-smoke-contract-v1"
+        },
+        {
+          "controller": "trace_storage_profile",
+          "contract_version": "trace-storage-profile-smoke-contract-v1"
+        }
+      ],
+      "supported_controller_versions": [
+        {
+          "controller": "brownout",
+          "contract_version": "overload-brownout-smoke-contract-v1"
+        },
+        {
+          "controller": "otlp_brownout",
+          "contract_version": "otlp-brownout-shedding-smoke-contract-v1"
+        },
+        {
+          "controller": "admission_steering",
+          "contract_version": "cohort-admission-steering-smoke-contract-v1"
+        },
+        {
+          "controller": "adaptive_batch_sizing",
+          "contract_version": "adaptive-batch-sizing-smoke-contract-v1"
+        },
+        {
+          "controller": "blocking_pool_affinity",
+          "contract_version": "blocking-pool-affinity-smoke-contract-v1"
+        },
+        {
+          "controller": "trace_storage_profile",
+          "contract_version": "trace-storage-profile-smoke-contract-v1"
+        }
+      ],
+      "capacity_certificate_reference": {
+        "artifact_id": "artifacts/capacity_envelope_planner_smoke_contract_v1.json",
+        "contract_version": "capacity-envelope-planner-smoke-contract-v1",
+        "scenario_id": "AA-CAPACITY-ENVELOPE-LOCALITY-CERT-64C-256G"
+      },
+      "previous_config_digest": "64a911f5b81c3320cceeb7f85ad6d7164bc17c42ddf5c8a5d44236b00453498a",
+      "rollback_command_template": "offline_tuner apply-profile --profile conservative_baseline --host-fingerprint lab-64c-256g-a --verify-only",
+      "operator_note": "ticket=OPS-SHADOW api_token=super-secret",
+      "validation_command": "run_id=BUNDLE-SHADOW-HOLD token=secret",
+      "require_operator_confirmation": true,
+      "execute_mode": "shadow_run",
+      "tamper_field": null,
+      "output_root": "target/signed-profile-bundle-smoke",
+      "expected_report_projection": {
+        "selected_profile": "locality_first_64c_256g",
+        "fallback_profile": "conservative_baseline",
+        "integrity_mode": "digest_only_sha256",
+        "execute_mode": "shadow_run",
+        "accepted": true,
+        "tamper_field": null,
+        "child_evidence_count": 6,
+        "controller_version_count": 6,
+        "supported_controller_version_count": 6,
+        "planning_refusal_count": 0,
+        "verification_refusal_count": 0,
+        "artifact_path_count": 10,
+        "integrity_limitation_count": 1,
+        "require_operator_confirmation": true,
+        "manual_override_count": 1,
+        "proof_command_class_count": 3,
+        "feature_gate_count": 6,
+        "sanitized_operator_note": "ticket=OPS-SHADOW api_token=[REDACTED]",
+        "sanitized_validation_command": "run_id=BUNDLE-SHADOW-HOLD token=[REDACTED]",
+        "shadow_run_decision": "hold",
+        "candidate_loss_basis_points": 44434,
+        "baseline_loss_basis_points": 53816,
+        "regret_margin_basis_points": 9382,
+        "shadow_hold_reason_count": 1,
+        "shadow_dominant_reason_count": 4,
+        "projection_hash": 10309708049515761990
+      }
     }
   ]
 }

@@ -2380,6 +2380,8 @@ pub enum SignedProfileBundleExecutionMode {
     DryRun,
     /// Verify the emitted bundle for tamper or structural drift.
     Verify,
+    /// Compare the emitted bundle against the conservative baseline before promotion.
+    ShadowRun,
 }
 
 impl SignedProfileBundleExecutionMode {
@@ -2388,6 +2390,7 @@ impl SignedProfileBundleExecutionMode {
         match self {
             Self::DryRun => "dry_run",
             Self::Verify => "verify",
+            Self::ShadowRun => "shadow_run",
         }
     }
 }
@@ -2608,10 +2611,22 @@ impl SignedProfileBundleManifestRequest {
             tamper_signed_profile_bundle_manifest(&mut manifest, field);
         }
         let verification = manifest.verify(self.execute_mode, self.tamper_field.clone());
+        let shadow_run_evaluation =
+            if self.execute_mode == SignedProfileBundleExecutionMode::ShadowRun {
+                Some(build_signed_profile_bundle_shadow_run_evaluation(
+                    self,
+                    &capacity_certificate,
+                    &manifest,
+                    &verification,
+                ))
+            } else {
+                None
+            };
         let rollback_receipt = SignedProfileBundleRollbackReceipt::from_manifest(&manifest);
         SignedProfileBundleBundle {
             manifest,
             verification,
+            shadow_run_evaluation,
             rollback_receipt,
         }
     }
@@ -2960,6 +2975,60 @@ pub struct SignedProfileBundleVerificationResult {
     pub observed_manifest_digest_sha256: String,
 }
 
+/// Promote-or-hold verdict from a deterministic shadow-run comparison.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SignedProfileBundleShadowRunDecision {
+    /// Candidate bundle beat the conservative baseline by a sufficient margin.
+    Promote,
+    /// Candidate bundle should remain in conservative hold mode.
+    Hold,
+}
+
+impl SignedProfileBundleShadowRunDecision {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Promote => "promote",
+            Self::Hold => "hold",
+        }
+    }
+}
+
+impl fmt::Display for SignedProfileBundleShadowRunDecision {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// Counterfactual comparison between the candidate bundle and conservative baseline.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SignedProfileBundleShadowRunEvaluation {
+    /// Decision emitted by the shadow-run gate.
+    pub decision: SignedProfileBundleShadowRunDecision,
+    /// Candidate profile evaluated by the shadow run.
+    pub candidate_profile: HostProfileId,
+    /// Conservative baseline profile.
+    pub baseline_profile: HostProfileId,
+    /// Candidate worker count at the best safe point.
+    pub candidate_worker_count: usize,
+    /// Candidate agent count at the best safe point.
+    pub candidate_agent_count: usize,
+    /// Baseline worker count at the best safe point.
+    pub baseline_worker_count: usize,
+    /// Baseline agent count at the best safe point.
+    pub baseline_agent_count: usize,
+    /// Weighted candidate loss score in basis points.
+    pub candidate_loss_basis_points: u64,
+    /// Weighted baseline loss score in basis points.
+    pub baseline_loss_basis_points: u64,
+    /// Baseline loss minus candidate loss. Positive means candidate improvement.
+    pub regret_margin_basis_points: i64,
+    /// Human-readable reasons the candidate was held.
+    pub hold_reasons: Vec<String>,
+    /// Human-readable dominant comparison reasons.
+    pub dominant_reasons: Vec<String>,
+}
+
 /// Rollback receipt for a bundle application or verification.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SignedProfileBundleRollbackReceipt {
@@ -3030,9 +3099,19 @@ pub struct SignedProfileBundleBundle {
     pub manifest: SignedProfileBundleManifest,
     /// Structural verification result.
     pub verification: SignedProfileBundleVerificationResult,
+    /// Optional shadow-run comparison against the conservative baseline.
+    pub shadow_run_evaluation: Option<SignedProfileBundleShadowRunEvaluation>,
     /// Rollback receipt for the bundle.
     pub rollback_receipt: SignedProfileBundleRollbackReceipt,
 }
+
+const SIGNED_PROFILE_SHADOW_RUN_P99_WEIGHT: u64 = 4;
+const SIGNED_PROFILE_SHADOW_RUN_CANCEL_WEIGHT: u64 = 2;
+const SIGNED_PROFILE_SHADOW_RUN_QUEUE_WEIGHT: u64 = 1;
+const SIGNED_PROFILE_SHADOW_RUN_MEMORY_WEIGHT: u64 = 3;
+const SIGNED_PROFILE_SHADOW_RUN_BROWNOUT_WEIGHT: u64 = 3;
+const SIGNED_PROFILE_SHADOW_RUN_AGENT_CREDIT_WEIGHT: u64 = 2;
+const SIGNED_PROFILE_SHADOW_RUN_PROMOTE_MARGIN_BPS: i64 = 250;
 
 fn build_signed_profile_bundle_child_evidence_hashes(
     evidence: &HostProfileEvidenceSet,
@@ -3061,6 +3140,255 @@ fn build_signed_profile_bundle_child_evidence_hashes(
         }
     }
     hashes
+}
+
+fn build_signed_profile_bundle_shadow_run_evaluation(
+    request: &SignedProfileBundleManifestRequest,
+    candidate_certificate: &CapacityEnvelopeCertificate,
+    manifest: &SignedProfileBundleManifest,
+    verification: &SignedProfileBundleVerificationResult,
+) -> SignedProfileBundleShadowRunEvaluation {
+    let mut baseline_manual_overrides = request.manual_overrides.clone();
+    if baseline_manual_overrides.worker_threads.is_none() {
+        let baseline_worker_ceiling = request
+            .candidate_worker_counts
+            .iter()
+            .copied()
+            .max()
+            .unwrap_or(candidate_certificate.final_bundle.worker_threads)
+            .min(request.host_resources.cpu_cores)
+            .max(1);
+        baseline_manual_overrides.worker_threads = Some(baseline_worker_ceiling);
+    }
+    let baseline_certificate = CapacityEnvelopePlannerRequest {
+        objective: request.objective,
+        requested_profile: Some(HostProfileId::ConservativeBaseline),
+        host_resources: request.host_resources,
+        controller_evidence: request.controller_evidence.clone(),
+        manual_overrides: baseline_manual_overrides,
+        host_fingerprint: request.host_fingerprint.clone(),
+        evidence_snapshot: request.evidence_snapshot.clone(),
+        candidate_worker_counts: request.candidate_worker_counts.clone(),
+        candidate_agent_counts: request.candidate_agent_counts.clone(),
+        budget: request.capacity_budget,
+        budget_overrides: CapacityEnvelopeBudgetOverrides::default(),
+        environment_note: None,
+        validation_command: None,
+    }
+    .plan();
+    let candidate_point = best_safe_capacity_point(candidate_certificate)
+        .unwrap_or_else(|| synthetic_hold_capacity_point(candidate_certificate));
+    let baseline_point = best_safe_capacity_point(&baseline_certificate)
+        .unwrap_or_else(|| synthetic_hold_capacity_point(&baseline_certificate));
+    let max_agent_count = request
+        .candidate_agent_counts
+        .iter()
+        .copied()
+        .max()
+        .unwrap_or(request.evidence_snapshot.measured_agent_count.max(1));
+    let candidate_loss_basis_points = signed_profile_bundle_shadow_run_loss_basis_points(
+        &candidate_point,
+        candidate_certificate.effective_budget,
+        max_agent_count,
+    );
+    let baseline_loss_basis_points = signed_profile_bundle_shadow_run_loss_basis_points(
+        &baseline_point,
+        baseline_certificate.effective_budget,
+        max_agent_count,
+    );
+    let regret_margin_basis_points =
+        baseline_loss_basis_points as i64 - candidate_loss_basis_points as i64;
+    let dominant_reasons = signed_profile_bundle_shadow_run_dominant_reasons(
+        &candidate_point,
+        &baseline_point,
+        regret_margin_basis_points,
+    );
+    let mut hold_reasons = Vec::new();
+    if !verification.accepted {
+        hold_reasons.extend(verification.refusal_reasons.clone());
+    }
+    if manifest.used_safe_fallback {
+        hold_reasons.extend(manifest.planning_refusal_reasons.clone());
+    }
+    if candidate_point.agent_count < baseline_point.agent_count {
+        hold_reasons.push(format!(
+            "candidate safe agent ceiling {} was below conservative baseline {}",
+            candidate_point.agent_count, baseline_point.agent_count
+        ));
+    }
+    if candidate_point.predicted_p99_ns > baseline_point.predicted_p99_ns {
+        hold_reasons.push(format!(
+            "candidate predicted p99 {}ns exceeded conservative baseline {}ns",
+            candidate_point.predicted_p99_ns, baseline_point.predicted_p99_ns
+        ));
+    }
+    if regret_margin_basis_points < SIGNED_PROFILE_SHADOW_RUN_PROMOTE_MARGIN_BPS {
+        hold_reasons.push(format!(
+            "candidate regret margin {}bps was below promote threshold {}bps",
+            regret_margin_basis_points, SIGNED_PROFILE_SHADOW_RUN_PROMOTE_MARGIN_BPS
+        ));
+    }
+    let decision = if hold_reasons.is_empty() {
+        SignedProfileBundleShadowRunDecision::Promote
+    } else {
+        SignedProfileBundleShadowRunDecision::Hold
+    };
+    dedup_preserving_order(&mut hold_reasons);
+    SignedProfileBundleShadowRunEvaluation {
+        decision,
+        candidate_profile: manifest.selected_profile,
+        baseline_profile: HostProfileId::ConservativeBaseline,
+        candidate_worker_count: candidate_point.worker_count,
+        candidate_agent_count: candidate_point.agent_count,
+        baseline_worker_count: baseline_point.worker_count,
+        baseline_agent_count: baseline_point.agent_count,
+        candidate_loss_basis_points,
+        baseline_loss_basis_points,
+        regret_margin_basis_points,
+        hold_reasons,
+        dominant_reasons,
+    }
+}
+
+fn best_safe_capacity_point(
+    certificate: &CapacityEnvelopeCertificate,
+) -> Option<CapacityEnvelopePointEvaluation> {
+    certificate
+        .evaluations
+        .iter()
+        .filter(|point| point.status == CapacityEnvelopePointStatus::Safe)
+        .max_by_key(|point| (point.agent_count, point.worker_count))
+        .cloned()
+}
+
+fn synthetic_hold_capacity_point(
+    certificate: &CapacityEnvelopeCertificate,
+) -> CapacityEnvelopePointEvaluation {
+    CapacityEnvelopePointEvaluation {
+        worker_count: certificate
+            .candidate_worker_counts
+            .first()
+            .copied()
+            .unwrap_or(certificate.host_fingerprint.cpu_cores.max(1)),
+        agent_count: certificate
+            .candidate_agent_counts
+            .first()
+            .copied()
+            .unwrap_or(certificate.evidence_snapshot.measured_agent_count.max(1)),
+        predicted_p50_ns: certificate.evidence_snapshot.wake_to_run_p50_ns,
+        predicted_p95_ns: certificate.evidence_snapshot.wake_to_run_p95_ns,
+        predicted_p99_ns: certificate.evidence_snapshot.wake_to_run_p99_ns,
+        predicted_cancellation_debt_units: certificate.evidence_snapshot.cancellation_debt_units,
+        predicted_queue_depth: certificate.evidence_snapshot.measured_queue_depth,
+        predicted_memory_gib: certificate.host_fingerprint.memory_gib,
+        predicted_memory_pressure_basis_points: certificate
+            .effective_budget
+            .max_memory_pressure_basis_points,
+        predicted_brownout_risk_basis_points: certificate
+            .effective_budget
+            .max_brownout_risk_basis_points,
+        status: CapacityEnvelopePointStatus::Refused,
+        refusal_reasons: certificate.refusal_reasons.clone(),
+    }
+}
+
+fn signed_profile_bundle_shadow_run_loss_basis_points(
+    point: &CapacityEnvelopePointEvaluation,
+    budget: CapacityEnvelopeBudget,
+    max_agent_count: usize,
+) -> u64 {
+    let p99 = normalize_capacity_metric_basis_points(
+        u128::from(point.predicted_p99_ns),
+        u128::from(budget.target_p99_ns.max(1)),
+    );
+    let cancellation = normalize_capacity_metric_basis_points(
+        u128::from(point.predicted_cancellation_debt_units),
+        u128::from(budget.target_cancel_debt_units.max(1)),
+    );
+    let queue = normalize_capacity_metric_basis_points(
+        point.predicted_queue_depth as u128,
+        budget.max_queue_depth.max(1) as u128,
+    );
+    let memory = normalize_capacity_metric_basis_points(
+        u128::from(point.predicted_memory_pressure_basis_points),
+        u128::from(budget.max_memory_pressure_basis_points.max(1)),
+    );
+    let brownout = normalize_capacity_metric_basis_points(
+        u128::from(point.predicted_brownout_risk_basis_points),
+        u128::from(budget.max_brownout_risk_basis_points.max(1)),
+    );
+    let agent_credit = normalize_capacity_metric_basis_points(
+        point.agent_count as u128,
+        max_agent_count.max(1) as u128,
+    );
+    p99.saturating_mul(SIGNED_PROFILE_SHADOW_RUN_P99_WEIGHT)
+        .saturating_add(cancellation.saturating_mul(SIGNED_PROFILE_SHADOW_RUN_CANCEL_WEIGHT))
+        .saturating_add(queue.saturating_mul(SIGNED_PROFILE_SHADOW_RUN_QUEUE_WEIGHT))
+        .saturating_add(memory.saturating_mul(SIGNED_PROFILE_SHADOW_RUN_MEMORY_WEIGHT))
+        .saturating_add(brownout.saturating_mul(SIGNED_PROFILE_SHADOW_RUN_BROWNOUT_WEIGHT))
+        .saturating_sub(agent_credit.saturating_mul(SIGNED_PROFILE_SHADOW_RUN_AGENT_CREDIT_WEIGHT))
+}
+
+fn normalize_capacity_metric_basis_points(numerator: u128, denominator: u128) -> u64 {
+    saturating_mul_div(numerator, 10_000, denominator.max(1)) as u64
+}
+
+fn signed_profile_bundle_shadow_run_dominant_reasons(
+    candidate: &CapacityEnvelopePointEvaluation,
+    baseline: &CapacityEnvelopePointEvaluation,
+    regret_margin_basis_points: i64,
+) -> Vec<String> {
+    let mut reasons = Vec::new();
+    if candidate.predicted_p99_ns < baseline.predicted_p99_ns {
+        reasons.push(format!(
+            "candidate p99 improved by {}ns",
+            baseline
+                .predicted_p99_ns
+                .saturating_sub(candidate.predicted_p99_ns)
+        ));
+    } else if candidate.predicted_p99_ns > baseline.predicted_p99_ns {
+        reasons.push(format!(
+            "candidate p99 regressed by {}ns",
+            candidate
+                .predicted_p99_ns
+                .saturating_sub(baseline.predicted_p99_ns)
+        ));
+    }
+    if candidate.agent_count > baseline.agent_count {
+        reasons.push(format!(
+            "candidate safe agent ceiling increased by {}",
+            candidate.agent_count.saturating_sub(baseline.agent_count)
+        ));
+    } else if candidate.agent_count < baseline.agent_count {
+        reasons.push(format!(
+            "candidate safe agent ceiling dropped by {}",
+            baseline.agent_count.saturating_sub(candidate.agent_count)
+        ));
+    }
+    if candidate.predicted_memory_pressure_basis_points
+        > baseline.predicted_memory_pressure_basis_points
+    {
+        reasons.push(format!(
+            "candidate memory pressure increased by {}bps",
+            candidate
+                .predicted_memory_pressure_basis_points
+                .saturating_sub(baseline.predicted_memory_pressure_basis_points)
+        ));
+    } else if candidate.predicted_memory_pressure_basis_points
+        < baseline.predicted_memory_pressure_basis_points
+    {
+        reasons.push(format!(
+            "candidate memory pressure decreased by {}bps",
+            baseline
+                .predicted_memory_pressure_basis_points
+                .saturating_sub(candidate.predicted_memory_pressure_basis_points)
+        ));
+    }
+    reasons.push(format!(
+        "counterfactual regret margin {}bps",
+        regret_margin_basis_points
+    ));
+    reasons
 }
 
 fn build_signed_profile_bundle_feature_gates(config: &RuntimeConfig) -> Vec<String> {

@@ -342,6 +342,7 @@ fn parse_execute_mode(value: &str) -> SignedProfileBundleExecutionMode {
     match value {
         "dry_run" => SignedProfileBundleExecutionMode::DryRun,
         "verify" => SignedProfileBundleExecutionMode::Verify,
+        "shadow_run" => SignedProfileBundleExecutionMode::ShadowRun,
         other => panic!("unsupported signed profile bundle execution mode {other}"),
     }
 }
@@ -475,6 +476,44 @@ fn report_projection(report: &Value) -> Value {
         "sanitized_operator_note": report["signed_profile_bundle_manifest"]["sanitized_operator_note"],
         "sanitized_validation_command": report["signed_profile_bundle_manifest"]["sanitized_validation_command"],
     });
+    if report["shadow_run_evaluation"].is_object() {
+        object.as_object_mut().expect("projection object").extend([
+            (
+                "shadow_run_decision".to_string(),
+                report["shadow_run_evaluation"]["decision"].clone(),
+            ),
+            (
+                "candidate_loss_basis_points".to_string(),
+                report["shadow_run_evaluation"]["candidate_loss_basis_points"].clone(),
+            ),
+            (
+                "baseline_loss_basis_points".to_string(),
+                report["shadow_run_evaluation"]["baseline_loss_basis_points"].clone(),
+            ),
+            (
+                "regret_margin_basis_points".to_string(),
+                report["shadow_run_evaluation"]["regret_margin_basis_points"].clone(),
+            ),
+            (
+                "shadow_hold_reason_count".to_string(),
+                json!(
+                    report["shadow_run_evaluation"]["hold_reasons"]
+                        .as_array()
+                        .expect("shadow hold reasons array")
+                        .len()
+                ),
+            ),
+            (
+                "shadow_dominant_reason_count".to_string(),
+                json!(
+                    report["shadow_run_evaluation"]["dominant_reasons"]
+                        .as_array()
+                        .expect("shadow dominant reasons array")
+                        .len()
+                ),
+            ),
+        ]);
+    }
     let hash = projection_hash(&object);
     object
         .as_object_mut()
@@ -492,6 +531,7 @@ fn build_report(
     let manifest = &bundle.manifest;
     let verification = &bundle.verification;
     let rollback_receipt = &bundle.rollback_receipt;
+    let shadow_run_evaluation = bundle.shadow_run_evaluation.as_ref();
     let mut report = json!({
         "schema_version": "asupersync.signed-profile-bundle-report.v1",
         "contract_version": contract_version,
@@ -581,6 +621,25 @@ fn build_report(
             ]
         }
     });
+    if let Some(shadow) = shadow_run_evaluation {
+        report.as_object_mut().expect("report object").insert(
+            "shadow_run_evaluation".to_string(),
+            json!({
+                "decision": shadow.decision.as_str(),
+                "candidate_profile": shadow.candidate_profile.as_str(),
+                "baseline_profile": shadow.baseline_profile.as_str(),
+                "candidate_worker_count": shadow.candidate_worker_count,
+                "candidate_agent_count": shadow.candidate_agent_count,
+                "baseline_worker_count": shadow.baseline_worker_count,
+                "baseline_agent_count": shadow.baseline_agent_count,
+                "candidate_loss_basis_points": shadow.candidate_loss_basis_points,
+                "baseline_loss_basis_points": shadow.baseline_loss_basis_points,
+                "regret_margin_basis_points": shadow.regret_margin_basis_points,
+                "hold_reasons": shadow.hold_reasons.clone(),
+                "dominant_reasons": shadow.dominant_reasons.clone(),
+            }),
+        );
+    }
     let projection = report_projection(&report);
     report
         .as_object_mut()
@@ -603,12 +662,16 @@ fn maybe_write_report(report: &Value) {
 }
 
 fn sample_request() -> SignedProfileBundleManifestRequest {
+    request_for_scenario(DEFAULT_SCENARIO_ID)
+}
+
+fn request_for_scenario(scenario_id: &str) -> SignedProfileBundleManifestRequest {
     let contract = default_contract();
     let scenario = contract
         .smoke_scenarios
         .iter()
-        .find(|scenario| scenario.scenario_id == DEFAULT_SCENARIO_ID)
-        .expect("default signed profile bundle scenario must exist");
+        .find(|scenario| scenario.scenario_id == scenario_id)
+        .unwrap_or_else(|| panic!("scenario {scenario_id} must exist"));
     build_request(scenario)
 }
 
@@ -732,6 +795,31 @@ fn signed_profile_bundle_rejects_missing_child_proof_hash() {
     assert!(bundle.verification.refusal_reasons.iter().any(|reason| {
         reason.contains("child evidence") || reason.contains("trace_storage_profile")
     }));
+}
+
+#[test]
+fn signed_profile_bundle_shadow_run_promotes_when_candidate_beats_baseline() {
+    let request = request_for_scenario("AA-SIGNED-PROFILE-BUNDLE-SHADOW-RUN-WIN-64C-256G");
+    let bundle = request.plan();
+    let shadow = bundle
+        .shadow_run_evaluation
+        .as_ref()
+        .expect("shadow-run evaluation must exist");
+    assert_eq!(shadow.decision.as_str(), "promote");
+    assert!(shadow.regret_margin_basis_points > 0);
+    assert!(shadow.hold_reasons.is_empty());
+}
+
+#[test]
+fn signed_profile_bundle_shadow_run_holds_when_candidate_is_no_win() {
+    let request = request_for_scenario("AA-SIGNED-PROFILE-BUNDLE-SHADOW-RUN-HOLD-64C-256G");
+    let bundle = request.plan();
+    let shadow = bundle
+        .shadow_run_evaluation
+        .as_ref()
+        .expect("shadow-run evaluation must exist");
+    assert_eq!(shadow.decision.as_str(), "hold");
+    assert!(!shadow.hold_reasons.is_empty());
 }
 
 #[test]
