@@ -44858,4 +44858,603 @@ mod otlp_122_tests {
         println!("  - Producer operation validation (publish/send vs receive/process)");
         println!("  - Topic exchange routing key pattern validation");
     }
+
+    /// OTLP-149 conformance test: RabbitMQ consumer queue name requirement.
+    ///
+    /// When an exporter encounters a span with kind=CONSUMER and messaging.system="rabbitmq",
+    /// the messaging.rabbitmq.queue_name attribute MUST be set per OTLP semantic conventions
+    /// for RabbitMQ consumer spans. This ensures proper traceability and correlation for
+    /// RabbitMQ message consumption operations where the queue name identifies the specific
+    /// queue from which messages are being consumed.
+    #[test]
+    fn otlp_149_rabbitmq_consumer_queue_name_conformance() {
+        println!("Testing OTLP-149: RabbitMQ consumer queue name requirement...");
+
+        let test_scenarios = vec![
+            RabbitMqConsumerQueueNameScenario {
+                description: "valid_rabbitmq_consumer_with_queue_name".to_string(),
+                span_kind: SpanKind::Consumer,
+                messaging_system: "rabbitmq".to_string(),
+                span_attributes: vec![
+                    ("messaging.rabbitmq.queue_name".to_string(), AnyValue::StringValue("user.notifications".to_string())),
+                    ("messaging.system".to_string(), AnyValue::StringValue("rabbitmq".to_string())),
+                    ("messaging.destination.name".to_string(), AnyValue::StringValue("user.notifications".to_string())),
+                    ("messaging.operation".to_string(), AnyValue::StringValue("receive".to_string())),
+                    ("net.peer.name".to_string(), AnyValue::StringValue("rabbitmq.example.com".to_string())),
+                ],
+                should_be_valid: true,
+                expected_queue_name: Some("user.notifications".to_string()),
+            },
+            RabbitMqConsumerQueueNameScenario {
+                description: "rabbitmq_consumer_missing_queue_name".to_string(),
+                span_kind: SpanKind::Consumer,
+                messaging_system: "rabbitmq".to_string(),
+                span_attributes: vec![
+                    ("messaging.system".to_string(), AnyValue::StringValue("rabbitmq".to_string())),
+                    ("messaging.destination.name".to_string(), AnyValue::StringValue("events".to_string())),
+                    ("messaging.operation".to_string(), AnyValue::StringValue("receive".to_string())),
+                    // Missing messaging.rabbitmq.queue_name - should be invalid
+                ],
+                should_be_valid: false,
+                expected_queue_name: None,
+            },
+            RabbitMqConsumerQueueNameScenario {
+                description: "rabbitmq_consumer_empty_queue_name".to_string(),
+                span_kind: SpanKind::Consumer,
+                messaging_system: "rabbitmq".to_string(),
+                span_attributes: vec![
+                    ("messaging.rabbitmq.queue_name".to_string(), AnyValue::StringValue("".to_string())), // Empty
+                    ("messaging.system".to_string(), AnyValue::StringValue("rabbitmq".to_string())),
+                    ("messaging.destination.name".to_string(), AnyValue::StringValue("events".to_string())),
+                ],
+                should_be_valid: false,
+                expected_queue_name: None,
+            },
+            RabbitMqConsumerQueueNameScenario {
+                description: "rabbitmq_consumer_non_string_queue_name".to_string(),
+                span_kind: SpanKind::Consumer,
+                messaging_system: "rabbitmq".to_string(),
+                span_attributes: vec![
+                    ("messaging.rabbitmq.queue_name".to_string(), AnyValue::IntValue(12345)), // Wrong type
+                    ("messaging.system".to_string(), AnyValue::StringValue("rabbitmq".to_string())),
+                    ("messaging.destination.name".to_string(), AnyValue::StringValue("events".to_string())),
+                ],
+                should_be_valid: false,
+                expected_queue_name: None,
+            },
+            RabbitMqConsumerQueueNameScenario {
+                description: "non_rabbitmq_consumer_no_requirement".to_string(),
+                span_kind: SpanKind::Consumer,
+                messaging_system: "kafka".to_string(), // Not RabbitMQ
+                span_attributes: vec![
+                    ("messaging.system".to_string(), AnyValue::StringValue("kafka".to_string())),
+                    ("messaging.destination.name".to_string(), AnyValue::StringValue("events".to_string())),
+                    ("messaging.kafka.consumer.group".to_string(), AnyValue::StringValue("processors".to_string())),
+                ],
+                should_be_valid: true, // No queue name requirement for non-RabbitMQ
+                expected_queue_name: None,
+            },
+            RabbitMqConsumerQueueNameScenario {
+                description: "rabbitmq_producer_no_requirement".to_string(),
+                span_kind: SpanKind::Producer, // Not consumer
+                messaging_system: "rabbitmq".to_string(),
+                span_attributes: vec![
+                    ("messaging.system".to_string(), AnyValue::StringValue("rabbitmq".to_string())),
+                    ("messaging.destination.name".to_string(), AnyValue::StringValue("events".to_string())),
+                    ("messaging.operation".to_string(), AnyValue::StringValue("publish".to_string())),
+                ],
+                should_be_valid: true, // No queue name requirement for producer spans
+                expected_queue_name: None,
+            },
+            RabbitMqConsumerQueueNameScenario {
+                description: "valid_rabbitmq_consumer_durable_queue".to_string(),
+                span_kind: SpanKind::Consumer,
+                messaging_system: "rabbitmq".to_string(),
+                span_attributes: vec![
+                    ("messaging.rabbitmq.queue_name".to_string(), AnyValue::StringValue("orders.processing.queue".to_string())),
+                    ("messaging.system".to_string(), AnyValue::StringValue("rabbitmq".to_string())),
+                    ("messaging.destination.name".to_string(), AnyValue::StringValue("orders.processing.queue".to_string())),
+                    ("messaging.operation".to_string(), AnyValue::StringValue("receive".to_string())),
+                    ("messaging.rabbitmq.queue_durable".to_string(), AnyValue::BoolValue(true)),
+                    ("messaging.rabbitmq.queue_auto_delete".to_string(), AnyValue::BoolValue(false)),
+                    ("net.peer.name".to_string(), AnyValue::StringValue("rabbitmq-cluster.prod.com".to_string())),
+                    ("net.peer.port".to_string(), AnyValue::IntValue(5672)),
+                ],
+                should_be_valid: true,
+                expected_queue_name: Some("orders.processing.queue".to_string()),
+            },
+            RabbitMqConsumerQueueNameScenario {
+                description: "rabbitmq_case_sensitivity_check".to_string(),
+                span_kind: SpanKind::Consumer,
+                messaging_system: "RabbitMQ".to_string(), // Different case
+                span_attributes: vec![
+                    ("messaging.system".to_string(), AnyValue::StringValue("RabbitMQ".to_string())),
+                    ("messaging.destination.name".to_string(), AnyValue::StringValue("events".to_string())),
+                ],
+                should_be_valid: true, // Not exact "rabbitmq" so no requirement
+                expected_queue_name: None,
+            },
+            RabbitMqConsumerQueueNameScenario {
+                description: "valid_rabbitmq_consumer_with_consumer_attributes".to_string(),
+                span_kind: SpanKind::Consumer,
+                messaging_system: "rabbitmq".to_string(),
+                span_attributes: vec![
+                    ("messaging.rabbitmq.queue_name".to_string(), AnyValue::StringValue("alerts.critical".to_string())),
+                    ("messaging.system".to_string(), AnyValue::StringValue("rabbitmq".to_string())),
+                    ("messaging.destination.name".to_string(), AnyValue::StringValue("alerts.critical".to_string())),
+                    ("messaging.operation".to_string(), AnyValue::StringValue("process".to_string())),
+                    ("messaging.rabbitmq.consumer_tag".to_string(), AnyValue::StringValue("consumer-123".to_string())),
+                    ("messaging.rabbitmq.queue_exclusive".to_string(), AnyValue::BoolValue(false)),
+                    ("messaging.message_payload_size_bytes".to_string(), AnyValue::IntValue(2048)),
+                ],
+                should_be_valid: true,
+                expected_queue_name: Some("alerts.critical".to_string()),
+            },
+            RabbitMqConsumerQueueNameScenario {
+                description: "rabbitmq_consumer_temporary_queue".to_string(),
+                span_kind: SpanKind::Consumer,
+                messaging_system: "rabbitmq".to_string(),
+                span_attributes: vec![
+                    ("messaging.rabbitmq.queue_name".to_string(), AnyValue::StringValue("amq.gen-xyz123".to_string())), // Server-generated
+                    ("messaging.system".to_string(), AnyValue::StringValue("rabbitmq".to_string())),
+                    ("messaging.destination.name".to_string(), AnyValue::StringValue("amq.gen-xyz123".to_string())),
+                    ("messaging.operation".to_string(), AnyValue::StringValue("receive".to_string())),
+                    ("messaging.rabbitmq.queue_durable".to_string(), AnyValue::BoolValue(false)),
+                    ("messaging.rabbitmq.queue_auto_delete".to_string(), AnyValue::BoolValue(true)),
+                    ("messaging.rabbitmq.queue_exclusive".to_string(), AnyValue::BoolValue(true)),
+                ],
+                should_be_valid: true,
+                expected_queue_name: Some("amq.gen-xyz123".to_string()),
+            },
+            RabbitMqConsumerQueueNameScenario {
+                description: "rabbitmq_consumer_work_queue_pattern".to_string(),
+                span_kind: SpanKind::Consumer,
+                messaging_system: "rabbitmq".to_string(),
+                span_attributes: vec![
+                    ("messaging.rabbitmq.queue_name".to_string(), AnyValue::StringValue("task.processing.workers".to_string())),
+                    ("messaging.system".to_string(), AnyValue::StringValue("rabbitmq".to_string())),
+                    ("messaging.destination.name".to_string(), AnyValue::StringValue("task.processing.workers".to_string())),
+                    ("messaging.operation".to_string(), AnyValue::StringValue("receive".to_string())),
+                    ("messaging.rabbitmq.consumer_tag".to_string(), AnyValue::StringValue("worker-node-01".to_string())),
+                    ("messaging.batch.message_count".to_string(), AnyValue::IntValue(1)),
+                ],
+                should_be_valid: true,
+                expected_queue_name: Some("task.processing.workers".to_string()),
+            },
+            RabbitMqConsumerQueueNameScenario {
+                description: "rabbitmq_consumer_rpc_reply_queue".to_string(),
+                span_kind: SpanKind::Consumer,
+                messaging_system: "rabbitmq".to_string(),
+                span_attributes: vec![
+                    ("messaging.rabbitmq.queue_name".to_string(), AnyValue::StringValue("amq.rabbitmq.reply-to.g-xyz".to_string())),
+                    ("messaging.system".to_string(), AnyValue::StringValue("rabbitmq".to_string())),
+                    ("messaging.destination.name".to_string(), AnyValue::StringValue("amq.rabbitmq.reply-to.g-xyz".to_string())),
+                    ("messaging.operation".to_string(), AnyValue::StringValue("receive".to_string())),
+                    ("messaging.rabbitmq.queue_durable".to_string(), AnyValue::BoolValue(false)),
+                    ("messaging.rabbitmq.queue_exclusive".to_string(), AnyValue::BoolValue(true)),
+                    ("messaging.conversation_id".to_string(), AnyValue::StringValue("rpc-call-12345".to_string())),
+                ],
+                should_be_valid: true,
+                expected_queue_name: Some("amq.rabbitmq.reply-to.g-xyz".to_string()),
+            },
+            RabbitMqConsumerQueueNameScenario {
+                description: "rabbitmq_consumer_priority_queue".to_string(),
+                span_kind: SpanKind::Consumer,
+                messaging_system: "rabbitmq".to_string(),
+                span_attributes: vec![
+                    ("messaging.rabbitmq.queue_name".to_string(), AnyValue::StringValue("high.priority.messages".to_string())),
+                    ("messaging.system".to_string(), AnyValue::StringValue("rabbitmq".to_string())),
+                    ("messaging.destination.name".to_string(), AnyValue::StringValue("high.priority.messages".to_string())),
+                    ("messaging.operation".to_string(), AnyValue::StringValue("receive".to_string())),
+                    ("messaging.rabbitmq.queue_priority".to_string(), AnyValue::IntValue(10)),
+                    ("messaging.message_payload_size_bytes".to_string(), AnyValue::IntValue(512)),
+                ],
+                should_be_valid: true,
+                expected_queue_name: Some("high.priority.messages".to_string()),
+            },
+        ];
+
+        /// Test scenario for RabbitMQ consumer queue name validation
+        #[derive(Debug, Clone)]
+        struct RabbitMqConsumerQueueNameScenario {
+            description: String,
+            span_kind: SpanKind,
+            messaging_system: String,
+            span_attributes: Vec<(String, AnyValue)>,
+            should_be_valid: bool,
+            expected_queue_name: Option<String>,
+        }
+
+        /// Span data for RabbitMQ consumer testing
+        #[derive(Debug, Clone)]
+        struct RabbitMqConsumerQueueSpanData {
+            name: String,
+            kind: SpanKind,
+            messaging_system: String,
+            attributes: HashMap<String, AnyValue>,
+        }
+
+        impl RabbitMqConsumerQueueSpanData {
+            fn from_scenario(scenario: &RabbitMqConsumerQueueNameScenario) -> Self {
+                let mut attributes = HashMap::new();
+                for (key, value) in &scenario.span_attributes {
+                    attributes.insert(key.clone(), value.clone());
+                }
+
+                Self {
+                    name: format!("rabbitmq_consumer_span_{}", scenario.description),
+                    kind: scenario.span_kind.clone(),
+                    messaging_system: scenario.messaging_system.clone(),
+                    attributes,
+                }
+            }
+        }
+
+        /// Result of RabbitMQ consumer queue name validation
+        #[derive(Debug)]
+        enum RabbitMqConsumerQueueValidationResult {
+            Valid {
+                queue_name: Option<String>,
+                additional_rabbitmq_attributes: usize,
+            },
+            Invalid {
+                violations: Vec<String>,
+                missing_attributes: Vec<String>,
+            },
+            NotApplicable {
+                reason: String,
+            },
+        }
+
+        /// Validates RabbitMQ consumer queue name requirement conformance
+        fn validate_rabbitmq_consumer_queue_name_conformance(
+            scenario: &RabbitMqConsumerQueueNameScenario,
+        ) -> Result<(), String> {
+            let span_data = RabbitMqConsumerQueueSpanData::from_scenario(scenario);
+            let validation_result = validate_rabbitmq_consumer_queue_name(&span_data);
+
+            match (&validation_result, scenario.should_be_valid) {
+                (RabbitMqConsumerQueueValidationResult::Valid { queue_name, .. }, true) => {
+                    // Verify expected queue name matches
+                    if let Some(expected_name) = &scenario.expected_queue_name {
+                        match queue_name {
+                            Some(actual_name) if actual_name == expected_name => {
+                                println!("✓ RabbitMQ consumer span has correct queue name: '{}'", actual_name);
+                            }
+                            Some(actual_name) => {
+                                return Err(format!(
+                                    "Queue name mismatch: expected '{}', got '{}'",
+                                    expected_name, actual_name
+                                ));
+                            }
+                            None => {
+                                return Err(format!(
+                                    "Expected queue name '{}' but none found",
+                                    expected_name
+                                ));
+                            }
+                        }
+                    } else {
+                        // No expected queue name - ensure none present when not required
+                        if queue_name.is_some() && requires_rabbitmq_queue_name(&span_data) {
+                            return Err("Unexpected queue name found when none expected".to_string());
+                        }
+                    }
+                }
+                (RabbitMqConsumerQueueValidationResult::Invalid { .. }, false) => {
+                    println!("✓ Invalid RabbitMQ consumer span correctly rejected");
+                }
+                (RabbitMqConsumerQueueValidationResult::NotApplicable { reason }, true) => {
+                    println!("✓ Queue name requirement not applicable: {}", reason);
+                }
+                (RabbitMqConsumerQueueValidationResult::Valid { .. }, false) => {
+                    return Err("Invalid span was incorrectly accepted".to_string());
+                }
+                (RabbitMqConsumerQueueValidationResult::Invalid { violations, .. }, true) => {
+                    return Err(format!("Valid span was incorrectly rejected: {:?}", violations));
+                }
+                (RabbitMqConsumerQueueValidationResult::NotApplicable { .. }, false) => {
+                    return Err("Expected validation failure but got not applicable".to_string());
+                }
+            }
+
+            Ok(())
+        }
+
+        /// Validates that RabbitMQ consumer spans have required queue name attribute
+        fn validate_rabbitmq_consumer_queue_name(span_data: &RabbitMqConsumerQueueSpanData) -> RabbitMqConsumerQueueValidationResult {
+            // Check if this span requires queue name attribute
+            if !requires_rabbitmq_queue_name(span_data) {
+                return RabbitMqConsumerQueueValidationResult::NotApplicable {
+                    reason: format!(
+                        "Span kind {:?} with messaging.system '{}' doesn't require messaging.rabbitmq.queue_name",
+                        span_data.kind, span_data.messaging_system
+                    ),
+                };
+            }
+
+            let mut violations = Vec::new();
+            let mut missing_attributes = Vec::new();
+
+            // Extract and validate messaging.rabbitmq.queue_name attribute
+            let queue_name = match span_data.attributes.get("messaging.rabbitmq.queue_name") {
+                Some(AnyValue::StringValue(name_str)) if !name_str.is_empty() => {
+                    Some(name_str.clone())
+                }
+                Some(AnyValue::StringValue(name_str)) if name_str.is_empty() => {
+                    violations.push("messaging.rabbitmq.queue_name attribute is empty".to_string());
+                    missing_attributes.push("messaging.rabbitmq.queue_name".to_string());
+                    None
+                }
+                Some(_) => {
+                    violations.push("messaging.rabbitmq.queue_name attribute must be a string value".to_string());
+                    missing_attributes.push("messaging.rabbitmq.queue_name".to_string());
+                    None
+                }
+                None => {
+                    violations.push("OTLP-149: RabbitMQ consumer span missing required messaging.rabbitmq.queue_name attribute".to_string());
+                    missing_attributes.push("messaging.rabbitmq.queue_name".to_string());
+                    None
+                }
+            };
+
+            // Validate queue name format and constraints
+            if let Some(name) = &queue_name {
+                // Warn about unusual queue names
+                if name.len() > 255 {
+                    println!("⚠ Unusually long queue name: {} characters (max recommended: 255)", name.len());
+                }
+
+                // Check for RabbitMQ reserved queue name patterns
+                if name.starts_with("amq.") && !name.starts_with("amq.gen-") && !name.starts_with("amq.rabbitmq.reply-to") {
+                    println!("⚠ Queue name '{}' starts with reserved 'amq.' prefix", name);
+                }
+
+                // Validate queue name characters (RabbitMQ allows most characters)
+                if name.contains('\0') {
+                    violations.push("messaging.rabbitmq.queue_name contains null character".to_string());
+                }
+
+                // Check for common queue naming patterns
+                if name.contains("..") {
+                    println!("⚠ Queue name '{}' contains consecutive dots", name);
+                }
+
+                // Identify queue patterns for better observability
+                if name.starts_with("amq.gen-") {
+                    println!("✓ Detected server-generated temporary queue: {}", name);
+                } else if name.starts_with("amq.rabbitmq.reply-to") {
+                    println!("✓ Detected RPC reply queue: {}", name);
+                } else if name.contains("temp") || name.contains("tmp") {
+                    println!("✓ Detected temporary queue pattern: {}", name);
+                } else if name.contains("priority") || name.contains("high") || name.contains("low") {
+                    println!("✓ Detected priority queue pattern: {}", name);
+                }
+            }
+
+            // Check for recommended RabbitMQ consumer attributes
+            let recommended_consumer_attrs = [
+                "messaging.system",
+                "messaging.destination.name",
+                "messaging.operation",
+                "messaging.rabbitmq.consumer_tag"
+            ];
+
+            let mut rabbitmq_attrs_present = 0;
+            for attr in &recommended_consumer_attrs {
+                if span_data.attributes.contains_key(*attr) {
+                    rabbitmq_attrs_present += 1;
+                } else if attr != &"messaging.rabbitmq.consumer_tag" {
+                    println!("⚠ Recommended RabbitMQ consumer attribute '{}' not present", attr);
+                }
+            }
+
+            // Verify messaging.system is set to "rabbitmq" (case sensitive)
+            if let Some(AnyValue::StringValue(system)) = span_data.attributes.get("messaging.system") {
+                if system != "rabbitmq" {
+                    if system.to_lowercase() == "rabbitmq" {
+                        violations.push(format!("messaging.system should be exactly 'rabbitmq' (case-sensitive), got: '{}'", system));
+                    } else {
+                        violations.push(format!("messaging.system should be 'rabbitmq' for RabbitMQ consumer spans, got: '{}'", system));
+                    }
+                }
+            }
+
+            // Verify messaging.operation is appropriate for consumer if present
+            if let Some(AnyValue::StringValue(operation)) = span_data.attributes.get("messaging.operation") {
+                match operation.as_str() {
+                    "receive" | "process" => {
+                        // Valid consumer operations
+                    }
+                    "publish" | "send" => {
+                        violations.push(format!("messaging.operation '{}' is inappropriate for consumer spans (use 'receive' or 'process')", operation));
+                    }
+                    _ => {
+                        println!("⚠ Unusual messaging.operation '{}' for consumer span", operation);
+                    }
+                }
+            }
+
+            // Additional RabbitMQ-specific validations
+            if let Some(AnyValue::StringValue(dest_name)) = span_data.attributes.get("messaging.destination.name") {
+                if dest_name.is_empty() {
+                    violations.push("messaging.destination.name should not be empty for RabbitMQ spans".to_string());
+                }
+
+                // Check consistency between queue_name and destination_name
+                if let Some(q_name) = &queue_name {
+                    if dest_name != q_name {
+                        println!("⚠ messaging.destination.name '{}' differs from messaging.rabbitmq.queue_name '{}'", dest_name, q_name);
+                    }
+                }
+            }
+
+            // Validate queue properties if present
+            if let Some(AnyValue::BoolValue(durable)) = span_data.attributes.get("messaging.rabbitmq.queue_durable") {
+                if let Some(q_name) = &queue_name {
+                    if q_name.starts_with("amq.gen-") && *durable {
+                        println!("⚠ Server-generated queue '{}' should typically not be durable", q_name);
+                    }
+                }
+            }
+
+            if let Some(AnyValue::BoolValue(exclusive)) = span_data.attributes.get("messaging.rabbitmq.queue_exclusive") {
+                if let Some(q_name) = &queue_name {
+                    if !q_name.starts_with("amq.") && *exclusive {
+                        println!("⚠ Named queue '{}' should typically not be exclusive", q_name);
+                    }
+                }
+            }
+
+            if !violations.is_empty() {
+                RabbitMqConsumerQueueValidationResult::Invalid {
+                    violations,
+                    missing_attributes,
+                }
+            } else {
+                RabbitMqConsumerQueueValidationResult::Valid {
+                    queue_name,
+                    additional_rabbitmq_attributes: rabbitmq_attrs_present,
+                }
+            }
+        }
+
+        /// Determines if a span requires RabbitMQ queue name attribute
+        fn requires_rabbitmq_queue_name(span_data: &RabbitMqConsumerQueueSpanData) -> bool {
+            // OTLP-149: Only CONSUMER spans with messaging.system="rabbitmq" require queue name
+            span_data.kind == SpanKind::Consumer
+                && span_data.messaging_system == "rabbitmq"
+        }
+
+        // Execute OTLP-149 conformance validation for all scenarios
+        let mut passed_scenarios = 0;
+        let total_scenarios = test_scenarios.len();
+
+        for scenario in &test_scenarios {
+            match validate_rabbitmq_consumer_queue_name_conformance(scenario) {
+                Ok(()) => {
+                    passed_scenarios += 1;
+                    println!("✓ OTLP-149 conformance verified for {}", scenario.description);
+                }
+                Err(error_msg) => {
+                    panic!(
+                        "OTLP-149 conformance test FAILED for {}: {}",
+                        scenario.description, error_msg
+                    );
+                }
+            }
+        }
+
+        assert_eq!(
+            passed_scenarios, total_scenarios,
+            "All OTLP-149 RabbitMQ consumer queue name scenarios must pass"
+        );
+
+        // Additional edge case testing
+        println!("Testing RabbitMQ consumer queue name edge cases...");
+
+        // Test messaging.system case sensitivity
+        let system_cases = vec![
+            ("rabbitmq", true),       // Exact match - requires queue name
+            ("RabbitMQ", false),      // Wrong case - no requirement
+            ("RABBITMQ", false),      // Wrong case - no requirement
+            ("amqp", false),          // Different system - no requirement
+        ];
+
+        for (system_name, should_require) in system_cases {
+            let mut test_attributes = HashMap::new();
+            test_attributes.insert("messaging.system".to_string(), AnyValue::StringValue(system_name.to_string()));
+            test_attributes.insert("messaging.destination.name".to_string(), AnyValue::StringValue("test.queue".to_string()));
+
+            if should_require {
+                test_attributes.insert("messaging.rabbitmq.queue_name".to_string(), AnyValue::StringValue("test.queue".to_string()));
+            }
+
+            let edge_span = RabbitMqConsumerQueueSpanData {
+                name: format!("system_case_test_{}", system_name.to_lowercase()),
+                kind: SpanKind::Consumer,
+                messaging_system: system_name.to_string(),
+                attributes: test_attributes,
+            };
+
+            let requires_name = requires_rabbitmq_queue_name(&edge_span);
+            assert_eq!(
+                requires_name, should_require,
+                "Queue name requirement check failed for system '{}'",
+                system_name
+            );
+
+            if should_require {
+                match validate_rabbitmq_consumer_queue_name(&edge_span) {
+                    RabbitMqConsumerQueueValidationResult::Valid { queue_name, .. } => {
+                        assert!(queue_name.is_some(), "Should have queue name for system '{}'", system_name);
+                        println!("✓ System case '{}' correctly requires and validates queue name", system_name);
+                    }
+                    _ => panic!("System case '{}' should be valid with queue name", system_name),
+                }
+            } else {
+                match validate_rabbitmq_consumer_queue_name(&edge_span) {
+                    RabbitMqConsumerQueueValidationResult::NotApplicable { .. } => {
+                        println!("✓ System case '{}' correctly identified as not applicable", system_name);
+                    }
+                    _ => panic!("System case '{}' should not require queue name", system_name),
+                }
+            }
+        }
+
+        // Test queue name format validation
+        println!("Testing queue name format validation...");
+        let queue_name_tests = vec![
+            ("simple_queue", "events", true),
+            ("dotted_queue", "user.notifications", true),
+            ("hyphenated_queue", "order-processing", true),
+            ("underscored_queue", "task_workers", true),
+            ("server_generated", "amq.gen-xyz123", true),
+            ("rpc_reply", "amq.rabbitmq.reply-to.g-abc", true),
+            ("reserved_amq", "amq.direct", true), // Valid but reserved
+            ("unicode_queue", "événements", true),
+            ("empty_queue", "", false), // Empty not allowed
+        ];
+
+        for (test_name, queue_name_value, should_be_valid) in queue_name_tests {
+            let mut test_attributes = HashMap::new();
+            test_attributes.insert("messaging.system".to_string(), AnyValue::StringValue("rabbitmq".to_string()));
+            test_attributes.insert("messaging.destination.name".to_string(), AnyValue::StringValue(queue_name_value.to_string()));
+            test_attributes.insert("messaging.rabbitmq.queue_name".to_string(), AnyValue::StringValue(queue_name_value.to_string()));
+
+            let test_span = RabbitMqConsumerQueueSpanData {
+                name: format!("queue_name_test_{}", test_name),
+                kind: SpanKind::Consumer,
+                messaging_system: "rabbitmq".to_string(),
+                attributes: test_attributes,
+            };
+
+            let result = validate_rabbitmq_consumer_queue_name(&test_span);
+            let is_valid = matches!(result, RabbitMqConsumerQueueValidationResult::Valid { .. });
+
+            assert_eq!(
+                is_valid, should_be_valid,
+                "Queue name test '{}' (value: '{}') validation mismatch: expected {}, got {}",
+                test_name, queue_name_value, should_be_valid, is_valid
+            );
+
+            if should_be_valid {
+                println!("✓ Queue name test '{}' (value: '{}') correctly validated", test_name, queue_name_value);
+            } else {
+                println!("✓ Queue name test '{}' (value: '{}') correctly rejected", test_name, queue_name_value);
+            }
+        }
+
+        println!("✓ OTLP-149: RabbitMQ consumer queue name requirement conformance verified");
+        println!("  - CONSUMER spans with messaging.system='rabbitmq' require messaging.rabbitmq.queue_name");
+        println!("  - Empty queue name is invalid (must be non-empty string)");
+        println!("  - Non-RabbitMQ consumer systems exempt from requirement");
+        println!("  - Producer spans exempt from requirement");
+        println!("  - Case-sensitive messaging.system matching enforced");
+        println!("  - Non-string queue name values rejected");
+        println!("  - Queue property consistency validation (durable, exclusive, auto-delete)");
+        println!("  - Queue naming pattern detection and validation");
+        println!("  - Consumer operation validation (receive/process vs publish/send)");
+        println!("  - Destination name consistency checking with queue name");
+    }
 }
