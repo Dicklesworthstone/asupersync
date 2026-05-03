@@ -1,0 +1,321 @@
+{
+  "contract_version": "tail-risk-admission-smoke-contract-v1",
+  "bead_id": "asupersync-g0aumf",
+  "description": "Contract-backed overload replay for the tail-risk-aware admission controller versus a conservative fixed-threshold baseline.",
+  "runner_script": "scripts/run_tail_risk_admission_smoke.sh",
+  "runner_bundle_schema_version": "tail-risk-admission-smoke-bundle-v1",
+  "runner_report_schema_version": "tail-risk-admission-smoke-run-report-v1",
+  "required_bundle_fields": [
+    "schema_version",
+    "contract_version",
+    "scenario_id",
+    "description",
+    "run_id",
+    "mode",
+    "artifact_path",
+    "report_path",
+    "run_log_path",
+    "command",
+    "fixture",
+    "tail_risk_profile",
+    "fixed_threshold_profile",
+    "host_fingerprint",
+    "expected_report_projection",
+    "actual_report_projection",
+    "command_exit_code",
+    "script_exit_code",
+    "validation_passed",
+    "status",
+    "started_ts",
+    "ended_ts"
+  ],
+  "required_run_report_fields": [
+    "schema_version",
+    "contract_version",
+    "artifact_path",
+    "bundle_manifest_path",
+    "run_id",
+    "scenario_id",
+    "mode",
+    "command_exit_code",
+    "script_exit_code",
+    "validation_passed",
+    "status",
+    "message",
+    "fixture",
+    "tail_risk_profile",
+    "fixed_threshold_profile",
+    "host_fingerprint",
+    "report_path",
+    "expected_report_projection",
+    "actual_report_projection"
+  ],
+  "required_execute_output_files": [
+    "bundle_manifest.json",
+    "run_report.json",
+    "tail_risk_admission_report.json",
+    "run.log"
+  ],
+  "required_dry_run_output_files": [
+    "bundle_manifest.json",
+    "run_report.json",
+    "run.log"
+  ],
+  "smoke_scenarios": [
+    {
+      "scenario_id": "AA-TAIL-RISK-ADMISSION-MIXED-OVERLOAD",
+      "description": "Drive a deterministic mixed overload replay covering balanced traffic, retry storms, backlog spikes, and memory pressure while comparing the tail-risk controller against a fixed-threshold baseline.",
+      "workload_class": "mixed-overload",
+      "output_root": "target/tail-risk-admission-smoke",
+      "execution_policy": "execute_or_dry_run",
+      "tail_risk_profile": {
+        "wake_to_run_p99_ns_limit": 150000,
+        "queue_residency_p99_ns_limit": 400000,
+        "ready_backlog_p99_limit": 256,
+        "cancel_debt_p99_limit": 96,
+        "retry_pressure_p99_limit": 32,
+        "memory_pressure_soft_bps": 8000,
+        "memory_pressure_hard_bps": 9200,
+        "defer_expected_loss_score": 35,
+        "shed_expected_loss_score": 65
+      },
+      "fixed_threshold_profile": {
+        "ready_backlog_soft_limit": 256,
+        "ready_backlog_hard_limit": 320,
+        "memory_pressure_soft_bps": 8200,
+        "memory_pressure_hard_bps": 9200,
+        "moderate_degradation_sheds": false
+      },
+      "fixture": {
+        "base_service_ns": 48000,
+        "replay_count": 2,
+        "windows": [
+          {
+            "window_id": "steady",
+            "wake_to_run_p99_ns": 92000,
+            "queue_residency_p99_ns": 180000,
+            "ready_backlog_p99": 144,
+            "cancel_debt_p99": 38,
+            "retry_pressure_p99": 8,
+            "memory_pressure_bps": 6700,
+            "degradation_level": "None",
+            "offered_work_units": 64
+          },
+          {
+            "window_id": "retry_storm",
+            "wake_to_run_p99_ns": 176000,
+            "queue_residency_p99_ns": 430000,
+            "ready_backlog_p99": 224,
+            "cancel_debt_p99": 72,
+            "retry_pressure_p99": 41,
+            "memory_pressure_bps": 7800,
+            "degradation_level": "Light",
+            "offered_work_units": 64
+          },
+          {
+            "window_id": "backlog_and_cancel",
+            "wake_to_run_p99_ns": 164000,
+            "queue_residency_p99_ns": 360000,
+            "ready_backlog_p99": 248,
+            "cancel_debt_p99": 118,
+            "retry_pressure_p99": 22,
+            "memory_pressure_bps": 7950,
+            "degradation_level": "Moderate",
+            "offered_work_units": 64
+          },
+          {
+            "window_id": "memory_surge",
+            "wake_to_run_p99_ns": 236000,
+            "queue_residency_p99_ns": 540000,
+            "ready_backlog_p99": 308,
+            "cancel_debt_p99": 132,
+            "retry_pressure_p99": 55,
+            "memory_pressure_bps": 9450,
+            "degradation_level": "Heavy",
+            "offered_work_units": 64
+          }
+        ]
+      },
+      "template_env": {
+        "TAIL_RISK_ADMISSION_SMOKE_OUTPUT_DIR": "Override the bundle and run-report output root.",
+        "TAIL_RISK_ADMISSION_SMOKE_ARTIFACT_ROOT": "Override the extracted tail-risk report root."
+      },
+      "expected_report_projection": {
+        "schema_version": "tail-risk-admission-projection-v1",
+        "scenario_id": "AA-TAIL-RISK-ADMISSION-MIXED-OVERLOAD",
+        "workload_class": "mixed-overload",
+        "replay_count": 2,
+        "window_count": 4,
+        "tail_risk_decision_sequence": [
+          "admit",
+          "defer",
+          "defer",
+          "shed"
+        ],
+        "fixed_threshold_decision_sequence": [
+          "admit",
+          "admit",
+          "defer",
+          "shed"
+        ],
+        "tail_risk": {
+          "admitted_units": 372,
+          "deferred_units": 60,
+          "shed_units": 80,
+          "fallback_used_count": 0,
+          "p95_latency_ns": 1187761,
+          "p99_latency_ns": 1193884,
+          "throughput_ratio": 0.7266
+        },
+        "fixed_threshold": {
+          "admitted_units": 402,
+          "deferred_units": 30,
+          "shed_units": 80,
+          "p95_latency_ns": 1622277,
+          "p99_latency_ns": 1626359,
+          "throughput_ratio": 0.7852
+        },
+        "comparison": {
+          "p95_latency_improvement_ns": 434516,
+          "p99_latency_improvement_ns": 432475,
+          "max_latency_improvement_ns": 430434,
+          "throughput_delta_units": -30,
+          "tail_risk_better_than_fixed": true
+        },
+        "fallback_windows": [],
+        "evidence_vector_fields": [
+          "wake_to_run_p99_ns",
+          "queue_residency_p99_ns",
+          "ready_backlog_p99",
+          "cancel_debt_p99",
+          "retry_pressure_p99",
+          "memory_pressure_bps",
+          "degradation_level"
+        ]
+      }
+    },
+    {
+      "scenario_id": "AA-TAIL-RISK-ADMISSION-CONSERVATIVE-FALLBACK",
+      "description": "Remove key evidence fields and prove the controller falls back deterministically to the conservative degradation-band comparator with explicit missing-field explanations.",
+      "workload_class": "low-confidence-fallback",
+      "output_root": "target/tail-risk-admission-smoke",
+      "execution_policy": "execute_or_dry_run",
+      "tail_risk_profile": {
+        "wake_to_run_p99_ns_limit": 150000,
+        "queue_residency_p99_ns_limit": 400000,
+        "ready_backlog_p99_limit": 256,
+        "cancel_debt_p99_limit": 96,
+        "retry_pressure_p99_limit": 32,
+        "memory_pressure_soft_bps": 8000,
+        "memory_pressure_hard_bps": 9200,
+        "defer_expected_loss_score": 35,
+        "shed_expected_loss_score": 65
+      },
+      "fixed_threshold_profile": {
+        "ready_backlog_soft_limit": 256,
+        "ready_backlog_hard_limit": 320,
+        "memory_pressure_soft_bps": 8200,
+        "memory_pressure_hard_bps": 9200,
+        "moderate_degradation_sheds": false
+      },
+      "fixture": {
+        "base_service_ns": 48000,
+        "replay_count": 1,
+        "windows": [
+          {
+            "window_id": "missing_scheduler",
+            "wake_to_run_p99_ns": null,
+            "queue_residency_p99_ns": null,
+            "ready_backlog_p99": null,
+            "cancel_debt_p99": null,
+            "retry_pressure_p99": 18,
+            "memory_pressure_bps": 7500,
+            "degradation_level": "Moderate",
+            "offered_work_units": 48
+          },
+          {
+            "window_id": "missing_retry",
+            "wake_to_run_p99_ns": 128000,
+            "queue_residency_p99_ns": 240000,
+            "ready_backlog_p99": 180,
+            "cancel_debt_p99": 52,
+            "retry_pressure_p99": null,
+            "memory_pressure_bps": 7200,
+            "degradation_level": "Light",
+            "offered_work_units": 48
+          },
+          {
+            "window_id": "invalid_memory",
+            "wake_to_run_p99_ns": 156000,
+            "queue_residency_p99_ns": 280000,
+            "ready_backlog_p99": 196,
+            "cancel_debt_p99": 66,
+            "retry_pressure_p99": 20,
+            "memory_pressure_bps": null,
+            "degradation_level": "Heavy",
+            "offered_work_units": 48
+          }
+        ]
+      },
+      "template_env": {
+        "TAIL_RISK_ADMISSION_SMOKE_OUTPUT_DIR": "Override the bundle and run-report output root.",
+        "TAIL_RISK_ADMISSION_SMOKE_ARTIFACT_ROOT": "Override the extracted tail-risk report root."
+      },
+      "expected_report_projection": {
+        "schema_version": "tail-risk-admission-projection-v1",
+        "scenario_id": "AA-TAIL-RISK-ADMISSION-CONSERVATIVE-FALLBACK",
+        "workload_class": "low-confidence-fallback",
+        "replay_count": 1,
+        "window_count": 3,
+        "tail_risk_decision_sequence": [
+          "defer",
+          "admit",
+          "shed"
+        ],
+        "fixed_threshold_decision_sequence": [
+          "shed",
+          "admit",
+          "shed"
+        ],
+        "tail_risk": {
+          "admitted_units": 103,
+          "deferred_units": 11,
+          "shed_units": 30,
+          "fallback_used_count": 3,
+          "p95_latency_ns": 1008818,
+          "p99_latency_ns": 1010859,
+          "throughput_ratio": 0.7153
+        },
+        "fixed_threshold": {
+          "admitted_units": 84,
+          "deferred_units": 0,
+          "shed_units": 60,
+          "p95_latency_ns": 1008818,
+          "p99_latency_ns": 1010859,
+          "throughput_ratio": 0.5833
+        },
+        "comparison": {
+          "p95_latency_improvement_ns": 0,
+          "p99_latency_improvement_ns": 0,
+          "max_latency_improvement_ns": 0,
+          "throughput_delta_units": 19,
+          "tail_risk_better_than_fixed": false
+        },
+        "fallback_windows": [
+          "missing_scheduler",
+          "missing_retry",
+          "invalid_memory"
+        ],
+        "evidence_vector_fields": [
+          "wake_to_run_p99_ns",
+          "queue_residency_p99_ns",
+          "ready_backlog_p99",
+          "cancel_debt_p99",
+          "retry_pressure_p99",
+          "memory_pressure_bps",
+          "degradation_level"
+        ]
+      }
+    }
+  ]
+}

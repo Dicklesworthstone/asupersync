@@ -1716,6 +1716,11 @@ mod tests {
         clippy::future_not_send
     )]
     use super::*;
+    use serde_json::{Value, json};
+    use std::collections::hash_map::DefaultHasher;
+    use std::fs;
+    use std::hash::{Hash, Hasher};
+    use std::path::Path;
 
     #[test]
     fn test_resource_measurement_ratios() {
@@ -2024,6 +2029,67 @@ mod tests {
     }
 
     #[test]
+    fn tail_risk_admission_transitions_across_overload_bands() {
+        let profile = TailRiskAdmissionProfile::default();
+        let mild = TailRiskAdmissionLedger::evaluate(
+            &TailRiskAdmissionEvidence {
+                scheduler: Some(SchedulerEvidenceMetrics {
+                    wake_to_run_p50_ns: 6_000,
+                    wake_to_run_p95_ns: 50_000,
+                    wake_to_run_p99_ns: 80_000,
+                    queue_residency_p50_ns: 10_000,
+                    queue_residency_p95_ns: 90_000,
+                    queue_residency_p99_ns: 140_000,
+                    ready_backlog_p95: 96,
+                    ready_backlog_p99: 120,
+                    cancel_debt_p95: 24,
+                    cancel_debt_p99: 40,
+                    remote_steal_ratio_pct: Some(18),
+                    cross_cohort_wake_p99_ns: Some(80_000),
+                }),
+                retry_pressure_p99: Some(6),
+                memory_pressure_bps: Some(6_800),
+                degradation_level: DegradationLevel::None,
+            },
+            &profile,
+        );
+        let medium = TailRiskAdmissionLedger::evaluate(
+            &TailRiskAdmissionEvidence {
+                scheduler: Some(SchedulerEvidenceMetrics {
+                    wake_to_run_p50_ns: 8_000,
+                    wake_to_run_p95_ns: 90_000,
+                    wake_to_run_p99_ns: 170_000,
+                    queue_residency_p50_ns: 16_000,
+                    queue_residency_p95_ns: 220_000,
+                    queue_residency_p99_ns: 420_000,
+                    ready_backlog_p95: 188,
+                    ready_backlog_p99: 220,
+                    cancel_debt_p95: 42,
+                    cancel_debt_p99: 78,
+                    remote_steal_ratio_pct: Some(34),
+                    cross_cohort_wake_p99_ns: Some(140_000),
+                }),
+                retry_pressure_p99: Some(36),
+                memory_pressure_bps: Some(7_900),
+                degradation_level: DegradationLevel::Light,
+            },
+            &profile,
+        );
+        let severe = TailRiskAdmissionLedger::evaluate(
+            &TailRiskAdmissionEvidence {
+                scheduler: Some(sample_scheduler_metrics()),
+                retry_pressure_p99: Some(52),
+                memory_pressure_bps: Some(9_450),
+                degradation_level: DegradationLevel::Heavy,
+            },
+            &profile,
+        );
+        assert_eq!(mild.decision, TailRiskAdmissionDecision::Admit);
+        assert_eq!(medium.decision, TailRiskAdmissionDecision::Defer);
+        assert_eq!(severe.decision, TailRiskAdmissionDecision::Shed);
+    }
+
+    #[test]
     fn tail_risk_admission_ledger_round_trips_through_json() {
         let ledger = TailRiskAdmissionLedger::evaluate(
             &TailRiskAdmissionEvidence {
@@ -2083,5 +2149,692 @@ mod tests {
                 .reason_codes
                 .contains(&TailRiskAdmissionReason::ExistingDegradation)
         );
+    }
+
+    const TAIL_RISK_ADMISSION_CONTRACT_PATH_ENV: &str =
+        "ASUPERSYNC_TAIL_RISK_ADMISSION_CONTRACT_PATH";
+    const TAIL_RISK_ADMISSION_SCENARIO_ENV: &str = "ASUPERSYNC_TAIL_RISK_ADMISSION_SCENARIO";
+    const TAIL_RISK_ADMISSION_REPORT_PATH_ENV: &str = "ASUPERSYNC_TAIL_RISK_ADMISSION_REPORT_PATH";
+    const TAIL_RISK_ADMISSION_REPORT_SCHEMA_VERSION: &str = "tail-risk-admission-report-v1";
+    const TAIL_RISK_ADMISSION_PROJECTION_SCHEMA_VERSION: &str = "tail-risk-admission-projection-v1";
+    const TAIL_RISK_ADMISSION_MIXED_SCENARIO_ID: &str = "AA-TAIL-RISK-ADMISSION-MIXED-OVERLOAD";
+    const TAIL_RISK_ADMISSION_FALLBACK_SCENARIO_ID: &str =
+        "AA-TAIL-RISK-ADMISSION-CONSERVATIVE-FALLBACK";
+
+    #[derive(Debug, Clone, Deserialize)]
+    struct TailRiskAdmissionSmokeContract {
+        smoke_scenarios: Vec<TailRiskAdmissionScenario>,
+    }
+
+    #[derive(Debug, Clone, Deserialize)]
+    struct TailRiskAdmissionScenario {
+        scenario_id: String,
+        description: String,
+        workload_class: String,
+        tail_risk_profile: TailRiskAdmissionProfile,
+        fixed_threshold_profile: FixedThresholdAdmissionProfile,
+        fixture: TailRiskAdmissionFixture,
+        expected_report_projection: Value,
+    }
+
+    #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+    struct FixedThresholdAdmissionProfile {
+        ready_backlog_soft_limit: usize,
+        ready_backlog_hard_limit: usize,
+        memory_pressure_soft_bps: u16,
+        memory_pressure_hard_bps: u16,
+        moderate_degradation_sheds: bool,
+    }
+
+    #[derive(Debug, Clone, Deserialize)]
+    struct TailRiskAdmissionFixture {
+        base_service_ns: u64,
+        replay_count: usize,
+        windows: Vec<TailRiskAdmissionWindow>,
+    }
+
+    #[derive(Debug, Clone, Deserialize)]
+    struct TailRiskAdmissionWindow {
+        window_id: String,
+        wake_to_run_p99_ns: Option<u64>,
+        queue_residency_p99_ns: Option<u64>,
+        ready_backlog_p99: Option<usize>,
+        cancel_debt_p99: Option<usize>,
+        retry_pressure_p99: Option<u64>,
+        memory_pressure_bps: Option<u16>,
+        degradation_level: DegradationLevel,
+        offered_work_units: u64,
+    }
+
+    #[derive(Debug, Clone, Serialize)]
+    struct PolicySummary {
+        decision_counts: Value,
+        admitted_units: u64,
+        deferred_units: u64,
+        shed_units: u64,
+        fallback_used_count: u64,
+        mean_expected_loss_score: f64,
+        p50_latency_ns: u64,
+        p95_latency_ns: u64,
+        p99_latency_ns: u64,
+        max_latency_ns: u64,
+        throughput_ratio: f64,
+    }
+
+    #[derive(Debug, Clone)]
+    struct PolicyAccumulator {
+        admit_count: u64,
+        defer_count: u64,
+        shed_count: u64,
+        admitted_units: u64,
+        deferred_units: u64,
+        shed_units: u64,
+        fallback_used_count: u64,
+        loss_score_sum: u64,
+        loss_score_count: u64,
+        latencies: Vec<u64>,
+    }
+
+    impl PolicyAccumulator {
+        fn record(
+            &mut self,
+            decision: TailRiskAdmissionDecision,
+            fallback_used: bool,
+            expected_loss_score: u8,
+            outcome: &WindowOutcome,
+        ) {
+            match decision {
+                TailRiskAdmissionDecision::Admit => self.admit_count += 1,
+                TailRiskAdmissionDecision::Defer => self.defer_count += 1,
+                TailRiskAdmissionDecision::Shed => self.shed_count += 1,
+            }
+            self.admitted_units = self.admitted_units.saturating_add(outcome.admitted_units);
+            self.deferred_units = self.deferred_units.saturating_add(outcome.deferred_units);
+            self.shed_units = self.shed_units.saturating_add(outcome.shed_units);
+            if fallback_used {
+                self.fallback_used_count += 1;
+            }
+            self.loss_score_sum = self
+                .loss_score_sum
+                .saturating_add(u64::from(expected_loss_score));
+            self.loss_score_count += 1;
+            self.latencies.extend_from_slice(&outcome.latency_samples);
+        }
+
+        fn summary(&self, total_offered_units: u64) -> PolicySummary {
+            PolicySummary {
+                decision_counts: json!({
+                    "admit": self.admit_count,
+                    "defer": self.defer_count,
+                    "shed": self.shed_count,
+                }),
+                admitted_units: self.admitted_units,
+                deferred_units: self.deferred_units,
+                shed_units: self.shed_units,
+                fallback_used_count: self.fallback_used_count,
+                mean_expected_loss_score: ratio_u64(self.loss_score_sum, self.loss_score_count),
+                p50_latency_ns: percentile_slice_u64(&self.latencies, 50, 100),
+                p95_latency_ns: percentile_slice_u64(&self.latencies, 95, 100),
+                p99_latency_ns: percentile_slice_u64(&self.latencies, 99, 100),
+                max_latency_ns: self.latencies.iter().copied().max().unwrap_or(0),
+                throughput_ratio: ratio_u64(self.admitted_units, total_offered_units),
+            }
+        }
+    }
+
+    #[derive(Debug, Clone)]
+    struct WindowOutcome {
+        admitted_units: u64,
+        deferred_units: u64,
+        shed_units: u64,
+        latency_samples: Vec<u64>,
+    }
+
+    fn default_tail_risk_admission_scenarios() -> Vec<TailRiskAdmissionScenario> {
+        vec![
+            TailRiskAdmissionScenario {
+                scenario_id: TAIL_RISK_ADMISSION_MIXED_SCENARIO_ID.to_string(),
+                description: "Drive a deterministic mixed overload replay covering balanced traffic, retry storms, backlog spikes, and memory pressure while comparing the tail-risk controller against a fixed-threshold baseline.".to_string(),
+                workload_class: "mixed-overload".to_string(),
+                tail_risk_profile: TailRiskAdmissionProfile::default(),
+                fixed_threshold_profile: FixedThresholdAdmissionProfile {
+                    ready_backlog_soft_limit: 256,
+                    ready_backlog_hard_limit: 320,
+                    memory_pressure_soft_bps: 8_200,
+                    memory_pressure_hard_bps: 9_200,
+                    moderate_degradation_sheds: false,
+                },
+                fixture: TailRiskAdmissionFixture {
+                    base_service_ns: 48_000,
+                    replay_count: 2,
+                    windows: vec![
+                        TailRiskAdmissionWindow {
+                            window_id: "steady".to_string(),
+                            wake_to_run_p99_ns: Some(92_000),
+                            queue_residency_p99_ns: Some(180_000),
+                            ready_backlog_p99: Some(144),
+                            cancel_debt_p99: Some(38),
+                            retry_pressure_p99: Some(8),
+                            memory_pressure_bps: Some(6_700),
+                            degradation_level: DegradationLevel::None,
+                            offered_work_units: 64,
+                        },
+                        TailRiskAdmissionWindow {
+                            window_id: "retry_storm".to_string(),
+                            wake_to_run_p99_ns: Some(176_000),
+                            queue_residency_p99_ns: Some(430_000),
+                            ready_backlog_p99: Some(224),
+                            cancel_debt_p99: Some(72),
+                            retry_pressure_p99: Some(41),
+                            memory_pressure_bps: Some(7_800),
+                            degradation_level: DegradationLevel::Light,
+                            offered_work_units: 64,
+                        },
+                        TailRiskAdmissionWindow {
+                            window_id: "backlog_and_cancel".to_string(),
+                            wake_to_run_p99_ns: Some(164_000),
+                            queue_residency_p99_ns: Some(360_000),
+                            ready_backlog_p99: Some(248),
+                            cancel_debt_p99: Some(118),
+                            retry_pressure_p99: Some(22),
+                            memory_pressure_bps: Some(7_950),
+                            degradation_level: DegradationLevel::Moderate,
+                            offered_work_units: 64,
+                        },
+                        TailRiskAdmissionWindow {
+                            window_id: "memory_surge".to_string(),
+                            wake_to_run_p99_ns: Some(236_000),
+                            queue_residency_p99_ns: Some(540_000),
+                            ready_backlog_p99: Some(308),
+                            cancel_debt_p99: Some(132),
+                            retry_pressure_p99: Some(55),
+                            memory_pressure_bps: Some(9_450),
+                            degradation_level: DegradationLevel::Heavy,
+                            offered_work_units: 64,
+                        },
+                    ],
+                },
+                expected_report_projection: Value::Null,
+            },
+            TailRiskAdmissionScenario {
+                scenario_id: TAIL_RISK_ADMISSION_FALLBACK_SCENARIO_ID.to_string(),
+                description: "Remove key evidence fields and prove the controller falls back deterministically to the conservative degradation-band comparator with explicit missing-field explanations.".to_string(),
+                workload_class: "low-confidence-fallback".to_string(),
+                tail_risk_profile: TailRiskAdmissionProfile::default(),
+                fixed_threshold_profile: FixedThresholdAdmissionProfile {
+                    ready_backlog_soft_limit: 256,
+                    ready_backlog_hard_limit: 320,
+                    memory_pressure_soft_bps: 8_200,
+                    memory_pressure_hard_bps: 9_200,
+                    moderate_degradation_sheds: false,
+                },
+                fixture: TailRiskAdmissionFixture {
+                    base_service_ns: 48_000,
+                    replay_count: 1,
+                    windows: vec![
+                        TailRiskAdmissionWindow {
+                            window_id: "missing_scheduler".to_string(),
+                            wake_to_run_p99_ns: None,
+                            queue_residency_p99_ns: None,
+                            ready_backlog_p99: None,
+                            cancel_debt_p99: None,
+                            retry_pressure_p99: Some(18),
+                            memory_pressure_bps: Some(7_500),
+                            degradation_level: DegradationLevel::Moderate,
+                            offered_work_units: 48,
+                        },
+                        TailRiskAdmissionWindow {
+                            window_id: "missing_retry".to_string(),
+                            wake_to_run_p99_ns: Some(128_000),
+                            queue_residency_p99_ns: Some(240_000),
+                            ready_backlog_p99: Some(180),
+                            cancel_debt_p99: Some(52),
+                            retry_pressure_p99: None,
+                            memory_pressure_bps: Some(7_200),
+                            degradation_level: DegradationLevel::Light,
+                            offered_work_units: 48,
+                        },
+                        TailRiskAdmissionWindow {
+                            window_id: "invalid_memory".to_string(),
+                            wake_to_run_p99_ns: Some(156_000),
+                            queue_residency_p99_ns: Some(280_000),
+                            ready_backlog_p99: Some(196),
+                            cancel_debt_p99: Some(66),
+                            retry_pressure_p99: Some(20),
+                            memory_pressure_bps: None,
+                            degradation_level: DegradationLevel::Heavy,
+                            offered_work_units: 48,
+                        },
+                    ],
+                },
+                expected_report_projection: Value::Null,
+            },
+        ]
+    }
+
+    fn load_tail_risk_admission_scenarios() -> Vec<TailRiskAdmissionScenario> {
+        let Some(contract_path) = std::env::var(TAIL_RISK_ADMISSION_CONTRACT_PATH_ENV).ok() else {
+            return default_tail_risk_admission_scenarios();
+        };
+        let contract: TailRiskAdmissionSmokeContract = serde_json::from_str(
+            &fs::read_to_string(&contract_path).expect("read tail-risk admission contract"),
+        )
+        .expect("parse tail-risk admission contract");
+        contract.smoke_scenarios
+    }
+
+    fn selected_tail_risk_admission_scenario() -> String {
+        std::env::var(TAIL_RISK_ADMISSION_SCENARIO_ENV)
+            .unwrap_or_else(|_| TAIL_RISK_ADMISSION_MIXED_SCENARIO_ID.to_string())
+    }
+
+    fn maybe_write_tail_risk_admission_report(path: &str, report: &Value) {
+        let report_path = Path::new(path);
+        if let Some(parent) = report_path.parent() {
+            fs::create_dir_all(parent).expect("create tail-risk admission report directory");
+        }
+        fs::write(
+            report_path,
+            serde_json::to_string_pretty(report).expect("serialize tail-risk admission report"),
+        )
+        .expect("write tail-risk admission report");
+    }
+
+    fn ratio_u64(numerator: u64, denominator: u64) -> f64 {
+        if denominator == 0 {
+            return 0.0;
+        }
+        round4(numerator as f64 / denominator as f64)
+    }
+
+    fn round4(value: f64) -> f64 {
+        (value * 10_000.0).round() / 10_000.0
+    }
+
+    fn percentile_slice_u64(samples: &[u64], numerator: usize, denominator: usize) -> u64 {
+        if samples.is_empty() {
+            return 0;
+        }
+        let mut sorted = samples.to_vec();
+        sorted.sort_unstable();
+        let index = ((sorted.len() - 1) * numerator) / denominator;
+        sorted[index]
+    }
+
+    fn sample_scheduler_metrics_from_window(
+        window: &TailRiskAdmissionWindow,
+        window_index: usize,
+    ) -> Option<SchedulerEvidenceMetrics> {
+        Some(SchedulerEvidenceMetrics {
+            wake_to_run_p50_ns: window.wake_to_run_p99_ns?.saturating_div(10).max(1),
+            wake_to_run_p95_ns: window
+                .wake_to_run_p99_ns?
+                .saturating_mul(8)
+                .saturating_div(10),
+            wake_to_run_p99_ns: window.wake_to_run_p99_ns?,
+            queue_residency_p50_ns: window.queue_residency_p99_ns?.saturating_div(8).max(1),
+            queue_residency_p95_ns: window
+                .queue_residency_p99_ns?
+                .saturating_mul(8)
+                .saturating_div(10),
+            queue_residency_p99_ns: window.queue_residency_p99_ns?,
+            ready_backlog_p95: window
+                .ready_backlog_p99?
+                .saturating_sub(window.ready_backlog_p99?.saturating_div(6)),
+            ready_backlog_p99: window.ready_backlog_p99?,
+            cancel_debt_p95: window
+                .cancel_debt_p99?
+                .saturating_sub(window.cancel_debt_p99?.saturating_div(5)),
+            cancel_debt_p99: window.cancel_debt_p99?,
+            remote_steal_ratio_pct: Some((25 + window_index * 7) as u8),
+            cross_cohort_wake_p99_ns: window
+                .wake_to_run_p99_ns
+                .map(|value| value.saturating_sub(12_000)),
+        })
+    }
+
+    fn fixed_threshold_decision(
+        window: &TailRiskAdmissionWindow,
+        profile: &FixedThresholdAdmissionProfile,
+    ) -> (TailRiskAdmissionDecision, Vec<&'static str>) {
+        let mut reasons = Vec::new();
+        if window.memory_pressure_bps.unwrap_or(10_001) >= profile.memory_pressure_hard_bps {
+            reasons.push("memory_hard_limit");
+        }
+        if window.ready_backlog_p99.unwrap_or(usize::MAX) >= profile.ready_backlog_hard_limit {
+            reasons.push("backlog_hard_limit");
+        }
+        if window.degradation_level >= DegradationLevel::Heavy
+            || (profile.moderate_degradation_sheds
+                && window.degradation_level >= DegradationLevel::Moderate)
+        {
+            reasons.push("degradation_band");
+        }
+        if !reasons.is_empty() {
+            return (TailRiskAdmissionDecision::Shed, reasons);
+        }
+
+        if window
+            .memory_pressure_bps
+            .unwrap_or(profile.memory_pressure_soft_bps)
+            >= profile.memory_pressure_soft_bps
+        {
+            reasons.push("memory_soft_limit");
+        }
+        if window
+            .ready_backlog_p99
+            .unwrap_or(profile.ready_backlog_soft_limit)
+            >= profile.ready_backlog_soft_limit
+        {
+            reasons.push("backlog_soft_limit");
+        }
+        if window.degradation_level >= DegradationLevel::Moderate {
+            reasons.push("moderate_degradation");
+        }
+        if !reasons.is_empty() {
+            return (TailRiskAdmissionDecision::Defer, reasons);
+        }
+
+        (TailRiskAdmissionDecision::Admit, vec!["steady_state"])
+    }
+
+    fn simulate_window_outcome(
+        decision: TailRiskAdmissionDecision,
+        fixture: &TailRiskAdmissionFixture,
+        window: &TailRiskAdmissionWindow,
+        window_index: usize,
+    ) -> WindowOutcome {
+        let offered = window.offered_work_units;
+        let (admitted_units, deferred_units, shed_units, overload_multiplier, decision_penalty) =
+            match decision {
+                TailRiskAdmissionDecision::Admit => (offered, 0, 0, 9_200, 18_000),
+                TailRiskAdmissionDecision::Defer => (
+                    offered.saturating_mul(78).saturating_div(100),
+                    offered.saturating_sub(offered.saturating_mul(78).saturating_div(100)),
+                    0,
+                    6_200,
+                    11_000,
+                ),
+                TailRiskAdmissionDecision::Shed => (
+                    offered.saturating_mul(38).saturating_div(100),
+                    0,
+                    offered.saturating_sub(offered.saturating_mul(38).saturating_div(100)),
+                    4_100,
+                    7_000,
+                ),
+            };
+        let wake = window.wake_to_run_p99_ns.unwrap_or(120_000);
+        let queue = window.queue_residency_p99_ns.unwrap_or(260_000);
+        let backlog = window.ready_backlog_p99.unwrap_or(180) as u64;
+        let cancel_debt = window.cancel_debt_p99.unwrap_or(64) as u64;
+        let retry = window.retry_pressure_p99.unwrap_or(18);
+        let memory = u64::from(window.memory_pressure_bps.unwrap_or(7_500));
+        let degradation = match window.degradation_level {
+            DegradationLevel::None => 0,
+            DegradationLevel::Light => 8,
+            DegradationLevel::Moderate => 18,
+            DegradationLevel::Heavy => 28,
+            DegradationLevel::Emergency => 42,
+        };
+        let overload_score = wake.saturating_div(20_000)
+            + queue.saturating_div(40_000)
+            + backlog.saturating_div(14)
+            + cancel_debt.saturating_div(9)
+            + retry.saturating_mul(2)
+            + memory.saturating_div(450)
+            + degradation;
+        let base_latency = fixture
+            .base_service_ns
+            .saturating_add(wake.saturating_div(3))
+            .saturating_add(queue.saturating_div(4));
+
+        let mut latency_samples = Vec::with_capacity(admitted_units as usize);
+        for sample_idx in 0..admitted_units {
+            let jitter = ((window_index as u64 * 19) + (sample_idx % 11) * 13).saturating_mul(157);
+            let latency = base_latency
+                .saturating_add(overload_score.saturating_mul(overload_multiplier))
+                .saturating_add(decision_penalty)
+                .saturating_add(jitter);
+            latency_samples.push(latency);
+        }
+
+        WindowOutcome {
+            admitted_units,
+            deferred_units,
+            shed_units,
+            latency_samples,
+        }
+    }
+
+    fn tail_risk_reason_label(reason: TailRiskAdmissionReason) -> &'static str {
+        match reason {
+            TailRiskAdmissionReason::WakeToRunTail => "wake_to_run_tail",
+            TailRiskAdmissionReason::QueueResidencyTail => "queue_residency_tail",
+            TailRiskAdmissionReason::BacklogPressure => "backlog_pressure",
+            TailRiskAdmissionReason::CancelDebtPressure => "cancel_debt_pressure",
+            TailRiskAdmissionReason::RetryPressure => "retry_pressure",
+            TailRiskAdmissionReason::MemoryPressure => "memory_pressure",
+            TailRiskAdmissionReason::ExistingDegradation => "existing_degradation",
+            TailRiskAdmissionReason::ConservativeFallback => "conservative_fallback",
+            TailRiskAdmissionReason::BalancedBaseline => "balanced_baseline",
+        }
+    }
+
+    fn hash_json_value(value: &Value) -> u64 {
+        let mut hasher = DefaultHasher::new();
+        serde_json::to_string(value)
+            .expect("serialize projection for hashing")
+            .hash(&mut hasher);
+        hasher.finish()
+    }
+
+    fn build_tail_risk_admission_report(
+        scenario: &TailRiskAdmissionScenario,
+        include_hash_probe: bool,
+    ) -> Value {
+        let total_offered_units = scenario
+            .fixture
+            .windows
+            .iter()
+            .map(|window| window.offered_work_units)
+            .sum::<u64>()
+            .saturating_mul(scenario.fixture.replay_count as u64);
+        let evidence_vector_fields = json!([
+            "wake_to_run_p99_ns",
+            "queue_residency_p99_ns",
+            "ready_backlog_p99",
+            "cancel_debt_p99",
+            "retry_pressure_p99",
+            "memory_pressure_bps",
+            "degradation_level"
+        ]);
+
+        let mut tail_risk = PolicyAccumulator {
+            admit_count: 0,
+            defer_count: 0,
+            shed_count: 0,
+            admitted_units: 0,
+            deferred_units: 0,
+            shed_units: 0,
+            fallback_used_count: 0,
+            loss_score_sum: 0,
+            loss_score_count: 0,
+            latencies: Vec::new(),
+        };
+        let mut fixed_threshold = tail_risk.clone();
+        let mut window_reports = Vec::new();
+        let mut fallback_windows = Vec::new();
+        let mut tail_risk_decisions = Vec::new();
+        let mut fixed_threshold_decisions = Vec::new();
+
+        for replay_index in 0..scenario.fixture.replay_count {
+            for (window_index, window) in scenario.fixture.windows.iter().enumerate() {
+                let evidence = TailRiskAdmissionEvidence {
+                    scheduler: sample_scheduler_metrics_from_window(window, window_index),
+                    retry_pressure_p99: window.retry_pressure_p99,
+                    memory_pressure_bps: window.memory_pressure_bps,
+                    degradation_level: window.degradation_level,
+                };
+                let ledger =
+                    TailRiskAdmissionLedger::evaluate(&evidence, &scenario.tail_risk_profile);
+                let (baseline_decision, baseline_reasons) =
+                    fixed_threshold_decision(window, &scenario.fixed_threshold_profile);
+
+                let tail_outcome = simulate_window_outcome(
+                    ledger.decision,
+                    &scenario.fixture,
+                    window,
+                    window_index,
+                );
+                let baseline_outcome = simulate_window_outcome(
+                    baseline_decision,
+                    &scenario.fixture,
+                    window,
+                    window_index,
+                );
+
+                tail_risk.record(
+                    ledger.decision,
+                    ledger.fallback_used,
+                    ledger.expected_loss_score,
+                    &tail_outcome,
+                );
+                fixed_threshold.record(baseline_decision, false, 0, &baseline_outcome);
+
+                if replay_index == 0 {
+                    tail_risk_decisions.push(format!("{:?}", ledger.decision).to_lowercase());
+                    fixed_threshold_decisions
+                        .push(format!("{:?}", baseline_decision).to_lowercase());
+                    if ledger.fallback_used {
+                        fallback_windows.push(window.window_id.clone());
+                    }
+                    window_reports.push(json!({
+                        "window_id": window.window_id,
+                        "evidence_vector": {
+                            "wake_to_run_p99_ns": window.wake_to_run_p99_ns,
+                            "queue_residency_p99_ns": window.queue_residency_p99_ns,
+                            "ready_backlog_p99": window.ready_backlog_p99,
+                            "cancel_debt_p99": window.cancel_debt_p99,
+                            "retry_pressure_p99": window.retry_pressure_p99,
+                            "memory_pressure_bps": window.memory_pressure_bps,
+                            "degradation_level": format!("{:?}", window.degradation_level).to_lowercase(),
+                        },
+                        "tail_risk": {
+                            "decision": format!("{:?}", ledger.decision).to_lowercase(),
+                            "fallback_used": ledger.fallback_used,
+                            "expected_loss_score": ledger.expected_loss_score,
+                            "confidence_percent": ledger.confidence_percent,
+                            "reason_codes": ledger.reason_codes.iter().map(|reason| tail_risk_reason_label(*reason)).collect::<Vec<_>>(),
+                            "missing_evidence_fields": ledger.missing_evidence_fields,
+                            "admitted_units": tail_outcome.admitted_units,
+                            "deferred_units": tail_outcome.deferred_units,
+                            "shed_units": tail_outcome.shed_units,
+                            "window_p99_ns": percentile_slice_u64(&tail_outcome.latency_samples, 99, 100),
+                        },
+                        "fixed_threshold": {
+                            "decision": format!("{:?}", baseline_decision).to_lowercase(),
+                            "reason_codes": baseline_reasons,
+                            "admitted_units": baseline_outcome.admitted_units,
+                            "deferred_units": baseline_outcome.deferred_units,
+                            "shed_units": baseline_outcome.shed_units,
+                            "window_p99_ns": percentile_slice_u64(&baseline_outcome.latency_samples, 99, 100),
+                        }
+                    }));
+                }
+            }
+        }
+
+        let tail_summary = tail_risk.summary(total_offered_units);
+        let fixed_summary = fixed_threshold.summary(total_offered_units);
+        let report_projection = json!({
+            "schema_version": TAIL_RISK_ADMISSION_PROJECTION_SCHEMA_VERSION,
+            "scenario_id": scenario.scenario_id,
+            "workload_class": scenario.workload_class,
+            "replay_count": scenario.fixture.replay_count,
+            "window_count": scenario.fixture.windows.len(),
+            "tail_risk_decision_sequence": tail_risk_decisions,
+            "fixed_threshold_decision_sequence": fixed_threshold_decisions,
+            "tail_risk": {
+                "admitted_units": tail_summary.admitted_units,
+                "deferred_units": tail_summary.deferred_units,
+                "shed_units": tail_summary.shed_units,
+                "fallback_used_count": tail_summary.fallback_used_count,
+                "p95_latency_ns": tail_summary.p95_latency_ns,
+                "p99_latency_ns": tail_summary.p99_latency_ns,
+                "throughput_ratio": tail_summary.throughput_ratio
+            },
+            "fixed_threshold": {
+                "admitted_units": fixed_summary.admitted_units,
+                "deferred_units": fixed_summary.deferred_units,
+                "shed_units": fixed_summary.shed_units,
+                "p95_latency_ns": fixed_summary.p95_latency_ns,
+                "p99_latency_ns": fixed_summary.p99_latency_ns,
+                "throughput_ratio": fixed_summary.throughput_ratio
+            },
+            "comparison": {
+                "p95_latency_improvement_ns": fixed_summary.p95_latency_ns.saturating_sub(tail_summary.p95_latency_ns),
+                "p99_latency_improvement_ns": fixed_summary.p99_latency_ns.saturating_sub(tail_summary.p99_latency_ns),
+                "max_latency_improvement_ns": fixed_summary.max_latency_ns.saturating_sub(tail_summary.max_latency_ns),
+                "throughput_delta_units": tail_summary.admitted_units as i64 - fixed_summary.admitted_units as i64,
+                "tail_risk_better_than_fixed": tail_summary.p99_latency_ns < fixed_summary.p99_latency_ns,
+            },
+            "fallback_windows": fallback_windows,
+            "evidence_vector_fields": evidence_vector_fields
+        });
+        let repeated_run_hash_match = if include_hash_probe {
+            let probe = build_tail_risk_admission_report(scenario, false);
+            hash_json_value(&probe["report_projection"]) == hash_json_value(&report_projection)
+        } else {
+            true
+        };
+
+        json!({
+            "schema_version": TAIL_RISK_ADMISSION_REPORT_SCHEMA_VERSION,
+            "scenario_id": scenario.scenario_id,
+            "description": scenario.description,
+            "workload_class": scenario.workload_class,
+            "tail_risk_profile": scenario.tail_risk_profile,
+            "fixed_threshold_profile": scenario.fixed_threshold_profile,
+            "report_projection": report_projection,
+            "repeated_run_hash_match": repeated_run_hash_match,
+            "tail_risk_summary": tail_summary,
+            "fixed_threshold_summary": fixed_summary,
+            "window_reports": window_reports,
+            "expected_report_projection": scenario.expected_report_projection
+        })
+    }
+
+    #[test]
+    fn tail_risk_admission_smoke_contract_emits_report() {
+        let scenarios = load_tail_risk_admission_scenarios();
+        let scenario_id = selected_tail_risk_admission_scenario();
+        let scenario = scenarios
+            .iter()
+            .find(|candidate| candidate.scenario_id == scenario_id)
+            .expect("selected tail-risk admission scenario must exist");
+        let report = build_tail_risk_admission_report(scenario, true);
+        if !scenario.expected_report_projection.is_null() {
+            assert_eq!(
+                report["report_projection"], scenario.expected_report_projection,
+                "smoke contract projection must stay stable"
+            );
+        }
+        assert_eq!(
+            report["repeated_run_hash_match"].as_bool(),
+            Some(true),
+            "repeated report generation must be deterministic"
+        );
+
+        if let Ok(path) = std::env::var(TAIL_RISK_ADMISSION_REPORT_PATH_ENV) {
+            maybe_write_tail_risk_admission_report(&path, &report);
+        }
+
+        println!("TAIL_RISK_ADMISSION_REPORT_JSON_BEGIN");
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&report).expect("serialize tail-risk report")
+        );
+        println!("TAIL_RISK_ADMISSION_REPORT_JSON_END");
+        crate::test_complete!("tail_risk_admission_smoke_contract_emits_report");
     }
 }
