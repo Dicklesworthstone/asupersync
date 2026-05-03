@@ -4772,6 +4772,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "h2_request_pseudo_scheme_invalid"
+path = "fuzz_targets/h2_request_pseudo_scheme_invalid.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "h2_pseudo_header_order"
 path = "fuzz_targets/h2_pseudo_header_order.rs"
 test = false
