@@ -42724,4 +42724,575 @@ mod otlp_122_tests {
         println!("  - Partition bounds validation and relationship checks");
         println!("  - Additional recommended Kafka attributes detected and validated");
     }
+
+    /// OTLP-145 conformance test: Kafka consumer instrumentation scope consumer group requirement.
+    ///
+    /// When an exporter encounters a span with kind=CONSUMER and instrumentation.scope.name="messaging.kafka",
+    /// the messaging.kafka.consumer.group attribute MUST be set per OTLP semantic conventions for Kafka
+    /// consumer spans. This ensures proper traceability and correlation for Kafka message consumption
+    /// operations in distributed messaging scenarios.
+    #[test]
+    fn otlp_145_kafka_consumer_group_conformance() {
+        println!("Testing OTLP-145: Kafka consumer instrumentation scope consumer group requirement...");
+
+        let test_scenarios = vec![
+            KafkaConsumerGroupScenario {
+                description: "valid_kafka_consumer_with_group".to_string(),
+                span_kind: SpanKind::Consumer,
+                instrumentation_scope_name: "messaging.kafka".to_string(),
+                instrumentation_scope_version: Some("1.0.0".to_string()),
+                span_attributes: vec![
+                    ("messaging.kafka.consumer.group".to_string(), AnyValue::StringValue("user-events-processors".to_string())),
+                    ("messaging.system".to_string(), AnyValue::StringValue("kafka".to_string())),
+                    ("messaging.destination.name".to_string(), AnyValue::StringValue("user.events".to_string())),
+                    ("messaging.kafka.message.partition".to_string(), AnyValue::IntValue(3)),
+                    ("messaging.kafka.message.offset".to_string(), AnyValue::IntValue(98765)),
+                ],
+                should_be_valid: true,
+                expected_consumer_group: Some("user-events-processors".to_string()),
+            },
+            KafkaConsumerGroupScenario {
+                description: "kafka_consumer_missing_group".to_string(),
+                span_kind: SpanKind::Consumer,
+                instrumentation_scope_name: "messaging.kafka".to_string(),
+                instrumentation_scope_version: Some("1.0.0".to_string()),
+                span_attributes: vec![
+                    ("messaging.system".to_string(), AnyValue::StringValue("kafka".to_string())),
+                    ("messaging.destination.name".to_string(), AnyValue::StringValue("user.events".to_string())),
+                    ("messaging.kafka.message.partition".to_string(), AnyValue::IntValue(3)),
+                    // Missing messaging.kafka.consumer.group - should be invalid
+                ],
+                should_be_valid: false,
+                expected_consumer_group: None,
+            },
+            KafkaConsumerGroupScenario {
+                description: "kafka_consumer_empty_group".to_string(),
+                span_kind: SpanKind::Consumer,
+                instrumentation_scope_name: "messaging.kafka".to_string(),
+                instrumentation_scope_version: Some("1.0.0".to_string()),
+                span_attributes: vec![
+                    ("messaging.kafka.consumer.group".to_string(), AnyValue::StringValue("".to_string())), // Empty group
+                    ("messaging.system".to_string(), AnyValue::StringValue("kafka".to_string())),
+                    ("messaging.destination.name".to_string(), AnyValue::StringValue("user.events".to_string())),
+                ],
+                should_be_valid: false,
+                expected_consumer_group: None,
+            },
+            KafkaConsumerGroupScenario {
+                description: "kafka_consumer_non_string_group".to_string(),
+                span_kind: SpanKind::Consumer,
+                instrumentation_scope_name: "messaging.kafka".to_string(),
+                instrumentation_scope_version: Some("1.0.0".to_string()),
+                span_attributes: vec![
+                    ("messaging.kafka.consumer.group".to_string(), AnyValue::IntValue(12345)), // Wrong type
+                    ("messaging.system".to_string(), AnyValue::StringValue("kafka".to_string())),
+                    ("messaging.destination.name".to_string(), AnyValue::StringValue("user.events".to_string())),
+                ],
+                should_be_valid: false,
+                expected_consumer_group: None,
+            },
+            KafkaConsumerGroupScenario {
+                description: "non_kafka_consumer_scope_no_requirement".to_string(),
+                span_kind: SpanKind::Consumer,
+                instrumentation_scope_name: "messaging.rabbitmq".to_string(), // Not Kafka
+                instrumentation_scope_version: Some("1.0.0".to_string()),
+                span_attributes: vec![
+                    ("messaging.system".to_string(), AnyValue::StringValue("rabbitmq".to_string())),
+                    ("messaging.destination.name".to_string(), AnyValue::StringValue("user.events".to_string())),
+                ],
+                should_be_valid: true, // No consumer group requirement for non-Kafka
+                expected_consumer_group: None,
+            },
+            KafkaConsumerGroupScenario {
+                description: "kafka_producer_scope_no_requirement".to_string(),
+                span_kind: SpanKind::Producer, // Not consumer
+                instrumentation_scope_name: "messaging.kafka".to_string(),
+                instrumentation_scope_version: Some("1.0.0".to_string()),
+                span_attributes: vec![
+                    ("messaging.system".to_string(), AnyValue::StringValue("kafka".to_string())),
+                    ("messaging.destination.name".to_string(), AnyValue::StringValue("user.events".to_string())),
+                    // No consumer group requirement for producer spans
+                ],
+                should_be_valid: true, // No requirement for producer spans
+                expected_consumer_group: None,
+            },
+            KafkaConsumerGroupScenario {
+                description: "valid_kafka_consumer_special_group_names".to_string(),
+                span_kind: SpanKind::Consumer,
+                instrumentation_scope_name: "messaging.kafka".to_string(),
+                instrumentation_scope_version: Some("1.0.0".to_string()),
+                span_attributes: vec![
+                    ("messaging.kafka.consumer.group".to_string(), AnyValue::StringValue("analytics-service-v2.1".to_string())),
+                    ("messaging.system".to_string(), AnyValue::StringValue("kafka".to_string())),
+                    ("messaging.destination.name".to_string(), AnyValue::StringValue("page.views".to_string())),
+                    ("messaging.kafka.message.key".to_string(), AnyValue::StringValue("page-view-123".to_string())),
+                ],
+                should_be_valid: true,
+                expected_consumer_group: Some("analytics-service-v2.1".to_string()),
+            },
+            KafkaConsumerGroupScenario {
+                description: "kafka_consumer_case_sensitive_scope_check".to_string(),
+                span_kind: SpanKind::Consumer,
+                instrumentation_scope_name: "MESSAGING.KAFKA".to_string(), // Wrong case
+                instrumentation_scope_version: Some("1.0.0".to_string()),
+                span_attributes: vec![
+                    ("messaging.system".to_string(), AnyValue::StringValue("kafka".to_string())),
+                    ("messaging.destination.name".to_string(), AnyValue::StringValue("events".to_string())),
+                ],
+                should_be_valid: true, // Not exact "messaging.kafka" so no requirement
+                expected_consumer_group: None,
+            },
+            KafkaConsumerGroupScenario {
+                description: "valid_kafka_consumer_with_full_kafka_attributes".to_string(),
+                span_kind: SpanKind::Consumer,
+                instrumentation_scope_name: "messaging.kafka".to_string(),
+                instrumentation_scope_version: Some("2.0.0".to_string()),
+                span_attributes: vec![
+                    ("messaging.kafka.consumer.group".to_string(), AnyValue::StringValue("transaction-processors".to_string())),
+                    ("messaging.system".to_string(), AnyValue::StringValue("kafka".to_string())),
+                    ("messaging.destination.name".to_string(), AnyValue::StringValue("transaction.events".to_string())),
+                    ("messaging.kafka.message.partition".to_string(), AnyValue::IntValue(7)),
+                    ("messaging.kafka.message.offset".to_string(), AnyValue::IntValue(123456789)),
+                    ("messaging.kafka.message.key".to_string(), AnyValue::StringValue("txn-abc123".to_string())),
+                    ("messaging.kafka.client_id".to_string(), AnyValue::StringValue("consumer-01".to_string())),
+                    ("messaging.operation".to_string(), AnyValue::StringValue("receive".to_string())),
+                    ("net.peer.name".to_string(), AnyValue::StringValue("kafka.example.com".to_string())),
+                    ("net.peer.port".to_string(), AnyValue::IntValue(9092)),
+                ],
+                should_be_valid: true,
+                expected_consumer_group: Some("transaction-processors".to_string()),
+            },
+            KafkaConsumerGroupScenario {
+                description: "kafka_consumer_scope_variation_no_requirement".to_string(),
+                span_kind: SpanKind::Consumer,
+                instrumentation_scope_name: "messaging.kafka.consumer".to_string(), // Has suffix
+                instrumentation_scope_version: Some("1.0.0".to_string()),
+                span_attributes: vec![
+                    ("messaging.system".to_string(), AnyValue::StringValue("kafka".to_string())),
+                    ("consumer.type".to_string(), AnyValue::StringValue("high-level".to_string())),
+                ],
+                should_be_valid: true, // Not exact "messaging.kafka" so no requirement
+                expected_consumer_group: None,
+            },
+            KafkaConsumerGroupScenario {
+                description: "kafka_consumer_with_long_group_name".to_string(),
+                span_kind: SpanKind::Consumer,
+                instrumentation_scope_name: "messaging.kafka".to_string(),
+                instrumentation_scope_version: None, // No version
+                span_attributes: vec![
+                    ("messaging.kafka.consumer.group".to_string(), AnyValue::StringValue("very-long-consumer-group-name-for-microservice-analytics-pipeline-v3".to_string())),
+                    ("messaging.system".to_string(), AnyValue::StringValue("kafka".to_string())),
+                    ("messaging.destination.name".to_string(), AnyValue::StringValue("events".to_string())),
+                ],
+                should_be_valid: true,
+                expected_consumer_group: Some("very-long-consumer-group-name-for-microservice-analytics-pipeline-v3".to_string()),
+            },
+            KafkaConsumerGroupScenario {
+                description: "kafka_consumer_with_numeric_group_name".to_string(),
+                span_kind: SpanKind::Consumer,
+                instrumentation_scope_name: "messaging.kafka".to_string(),
+                instrumentation_scope_version: Some("1.5.0".to_string()),
+                span_attributes: vec![
+                    ("messaging.kafka.consumer.group".to_string(), AnyValue::StringValue("group-123".to_string())),
+                    ("messaging.system".to_string(), AnyValue::StringValue("kafka".to_string())),
+                    ("messaging.destination.name".to_string(), AnyValue::StringValue("metrics".to_string())),
+                    ("messaging.kafka.message.timestamp".to_string(), AnyValue::IntValue(1642685400000)),
+                ],
+                should_be_valid: true,
+                expected_consumer_group: Some("group-123".to_string()),
+            },
+            KafkaConsumerGroupScenario {
+                description: "kafka_consumer_with_special_characters_group".to_string(),
+                span_kind: SpanKind::Consumer,
+                instrumentation_scope_name: "messaging.kafka".to_string(),
+                instrumentation_scope_version: Some("1.0.0".to_string()),
+                span_attributes: vec![
+                    ("messaging.kafka.consumer.group".to_string(), AnyValue::StringValue("analytics_service.v2-beta".to_string())),
+                    ("messaging.system".to_string(), AnyValue::StringValue("kafka".to_string())),
+                    ("messaging.destination.name".to_string(), AnyValue::StringValue("user.activity".to_string())),
+                    ("messaging.kafka.message.headers".to_string(), AnyValue::StringValue("content-type:application/json".to_string())),
+                ],
+                should_be_valid: true,
+                expected_consumer_group: Some("analytics_service.v2-beta".to_string()),
+            },
+        ];
+
+        /// Test scenario for Kafka consumer group validation
+        #[derive(Debug, Clone)]
+        struct KafkaConsumerGroupScenario {
+            description: String,
+            span_kind: SpanKind,
+            instrumentation_scope_name: String,
+            instrumentation_scope_version: Option<String>,
+            span_attributes: Vec<(String, AnyValue)>,
+            should_be_valid: bool,
+            expected_consumer_group: Option<String>,
+        }
+
+        /// Span data with instrumentation scope for Kafka consumer testing
+        #[derive(Debug, Clone)]
+        struct KafkaConsumerSpanData {
+            name: String,
+            kind: SpanKind,
+            instrumentation_scope: InstrumentationScope,
+            attributes: HashMap<String, AnyValue>,
+        }
+
+        impl KafkaConsumerSpanData {
+            fn from_scenario(scenario: &KafkaConsumerGroupScenario) -> Self {
+                let mut attributes = HashMap::new();
+                for (key, value) in &scenario.span_attributes {
+                    attributes.insert(key.clone(), value.clone());
+                }
+
+                Self {
+                    name: format!("kafka_consumer_span_{}", scenario.description),
+                    kind: scenario.span_kind.clone(),
+                    instrumentation_scope: InstrumentationScope {
+                        name: scenario.instrumentation_scope_name.clone(),
+                        version: scenario.instrumentation_scope_version.clone(),
+                        attributes: vec![],
+                    },
+                    attributes,
+                }
+            }
+        }
+
+        /// Result of Kafka consumer group validation
+        #[derive(Debug)]
+        enum KafkaConsumerValidationResult {
+            Valid {
+                consumer_group: Option<String>,
+                additional_kafka_attributes: usize,
+            },
+            Invalid {
+                violations: Vec<String>,
+                missing_attributes: Vec<String>,
+            },
+            NotApplicable {
+                reason: String,
+            },
+        }
+
+        /// Validates Kafka consumer group requirement conformance
+        fn validate_kafka_consumer_group_conformance(
+            scenario: &KafkaConsumerGroupScenario,
+        ) -> Result<(), String> {
+            let span_data = KafkaConsumerSpanData::from_scenario(scenario);
+            let validation_result = validate_kafka_consumer_group(&span_data);
+
+            match (&validation_result, scenario.should_be_valid) {
+                (KafkaConsumerValidationResult::Valid { consumer_group, .. }, true) => {
+                    // Verify expected consumer group matches
+                    if let Some(expected_group) = &scenario.expected_consumer_group {
+                        match consumer_group {
+                            Some(actual_group) if actual_group == expected_group => {
+                                println!("✓ Kafka consumer span has correct consumer group: '{}'", actual_group);
+                            }
+                            Some(actual_group) => {
+                                return Err(format!(
+                                    "Consumer group mismatch: expected '{}', got '{}'",
+                                    expected_group, actual_group
+                                ));
+                            }
+                            None => {
+                                return Err(format!(
+                                    "Expected consumer group '{}' but none found",
+                                    expected_group
+                                ));
+                            }
+                        }
+                    } else {
+                        // No expected consumer group - ensure none present when not required
+                        if consumer_group.is_some() && requires_consumer_group(&span_data) {
+                            return Err("Unexpected consumer group found when none expected".to_string());
+                        }
+                    }
+                }
+                (KafkaConsumerValidationResult::Invalid { .. }, false) => {
+                    println!("✓ Invalid Kafka consumer span correctly rejected");
+                }
+                (KafkaConsumerValidationResult::NotApplicable { reason }, true) => {
+                    println!("✓ Consumer group requirement not applicable: {}", reason);
+                }
+                (KafkaConsumerValidationResult::Valid { .. }, false) => {
+                    return Err("Invalid span was incorrectly accepted".to_string());
+                }
+                (KafkaConsumerValidationResult::Invalid { violations, .. }, true) => {
+                    return Err(format!("Valid span was incorrectly rejected: {:?}", violations));
+                }
+                (KafkaConsumerValidationResult::NotApplicable { .. }, false) => {
+                    return Err("Expected validation failure but got not applicable".to_string());
+                }
+            }
+
+            Ok(())
+        }
+
+        /// Validates that Kafka consumer spans have required consumer group attribute
+        fn validate_kafka_consumer_group(span_data: &KafkaConsumerSpanData) -> KafkaConsumerValidationResult {
+            // Check if this span requires consumer group attribute
+            if !requires_consumer_group(span_data) {
+                return KafkaConsumerValidationResult::NotApplicable {
+                    reason: format!(
+                        "Span kind {:?} with scope '{}' doesn't require messaging.kafka.consumer.group",
+                        span_data.kind, span_data.instrumentation_scope.name
+                    ),
+                };
+            }
+
+            let mut violations = Vec::new();
+            let mut missing_attributes = Vec::new();
+
+            // Extract and validate messaging.kafka.consumer.group attribute
+            let consumer_group = match span_data.attributes.get("messaging.kafka.consumer.group") {
+                Some(AnyValue::StringValue(group_str)) if !group_str.is_empty() => {
+                    Some(group_str.clone())
+                }
+                Some(AnyValue::StringValue(group_str)) if group_str.is_empty() => {
+                    violations.push("messaging.kafka.consumer.group attribute is empty".to_string());
+                    missing_attributes.push("messaging.kafka.consumer.group".to_string());
+                    None
+                }
+                Some(_) => {
+                    violations.push("messaging.kafka.consumer.group attribute must be a string value".to_string());
+                    missing_attributes.push("messaging.kafka.consumer.group".to_string());
+                    None
+                }
+                None => {
+                    violations.push("OTLP-145: Kafka consumer span missing required messaging.kafka.consumer.group attribute".to_string());
+                    missing_attributes.push("messaging.kafka.consumer.group".to_string());
+                    None
+                }
+            };
+
+            // Validate consumer group format and constraints
+            if let Some(group) = &consumer_group {
+                // Warn about unusual group names
+                if group.len() > 255 {
+                    println!("⚠ Unusually long consumer group name: {} characters (max recommended: 255)", group.len());
+                }
+
+                // Check for reserved group name patterns that may cause issues
+                if group.starts_with("__") {
+                    println!("⚠ Consumer group '{}' starts with '__' (reserved pattern in some Kafka configurations)", group);
+                }
+
+                // Validate typical Kafka group name constraints
+                if group.contains('\0') {
+                    violations.push("messaging.kafka.consumer.group contains null character".to_string());
+                }
+
+                // Additional format checks for common patterns
+                if group.contains(' ') && !group.contains('-') && !group.contains('_') {
+                    println!("⚠ Consumer group '{}' contains spaces but no separators (consider using hyphens or underscores)", group);
+                }
+            }
+
+            // Check for recommended Kafka consumer attributes
+            let recommended_consumer_attrs = [
+                "messaging.system",
+                "messaging.destination.name",
+                "messaging.operation",
+                "messaging.kafka.message.partition"
+            ];
+
+            let mut kafka_attrs_present = 0;
+            for attr in &recommended_consumer_attrs {
+                if span_data.attributes.contains_key(*attr) {
+                    kafka_attrs_present += 1;
+                } else {
+                    println!("⚠ Recommended Kafka consumer attribute '{}' not present", attr);
+                }
+            }
+
+            // Verify messaging.system is set to "kafka" if present
+            if let Some(AnyValue::StringValue(system)) = span_data.attributes.get("messaging.system") {
+                if system != "kafka" {
+                    violations.push(format!("messaging.system should be 'kafka' for Kafka consumer spans, got: '{}'", system));
+                }
+            }
+
+            // Verify messaging.operation is appropriate for consumer if present
+            if let Some(AnyValue::StringValue(operation)) = span_data.attributes.get("messaging.operation") {
+                match operation.as_str() {
+                    "receive" | "process" => {
+                        // Valid consumer operations
+                    }
+                    "publish" | "send" => {
+                        violations.push(format!("messaging.operation '{}' is inappropriate for consumer spans (use 'receive' or 'process')", operation));
+                    }
+                    _ => {
+                        println!("⚠ Unusual messaging.operation '{}' for consumer span", operation);
+                    }
+                }
+            }
+
+            // Additional Kafka-specific validations
+            if let Some(AnyValue::StringValue(dest_name)) = span_data.attributes.get("messaging.destination.name") {
+                if dest_name.is_empty() {
+                    violations.push("messaging.destination.name should not be empty for Kafka spans".to_string());
+                }
+            }
+
+            // Check for consumer-specific attributes that should be present
+            let consumer_specific_attrs = ["messaging.kafka.message.offset"];
+            for attr in &consumer_specific_attrs {
+                if span_data.attributes.contains_key(*attr) {
+                    kafka_attrs_present += 1;
+                }
+            }
+
+            if !violations.is_empty() {
+                KafkaConsumerValidationResult::Invalid {
+                    violations,
+                    missing_attributes,
+                }
+            } else {
+                KafkaConsumerValidationResult::Valid {
+                    consumer_group,
+                    additional_kafka_attributes: kafka_attrs_present,
+                }
+            }
+        }
+
+        /// Determines if a span requires consumer group attribute
+        fn requires_consumer_group(span_data: &KafkaConsumerSpanData) -> bool {
+            // OTLP-145: Only CONSUMER spans with instrumentation scope "messaging.kafka" require consumer group
+            span_data.kind == SpanKind::Consumer
+                && span_data.instrumentation_scope.name == "messaging.kafka"
+        }
+
+        // Execute OTLP-145 conformance validation for all scenarios
+        let mut passed_scenarios = 0;
+        let total_scenarios = test_scenarios.len();
+
+        for scenario in &test_scenarios {
+            match validate_kafka_consumer_group_conformance(scenario) {
+                Ok(()) => {
+                    passed_scenarios += 1;
+                    println!("✓ OTLP-145 conformance verified for {}", scenario.description);
+                }
+                Err(error_msg) => {
+                    panic!(
+                        "OTLP-145 conformance test FAILED for {}: {}",
+                        scenario.description, error_msg
+                    );
+                }
+            }
+        }
+
+        assert_eq!(
+            passed_scenarios, total_scenarios,
+            "All OTLP-145 Kafka consumer group scenarios must pass"
+        );
+
+        // Additional edge case testing
+        println!("Testing Kafka consumer group edge cases...");
+
+        // Test with exactly "messaging.kafka" scope (case sensitive)
+        let edge_cases = vec![
+            ("messaging.kafka", true),       // Exact match - requires consumer group
+            ("messaging.Kafka", false),      // Wrong case - no requirement
+            ("messaging.kafka.consumer", false), // Suffix - no requirement
+            ("my.messaging.kafka", false),   // Prefix - no requirement
+            ("kafka", false),                // Partial match - no requirement
+        ];
+
+        for (scope_name, should_require) in edge_cases {
+            let mut test_attributes = HashMap::new();
+            test_attributes.insert("messaging.system".to_string(), AnyValue::StringValue("kafka".to_string()));
+            test_attributes.insert("messaging.destination.name".to_string(), AnyValue::StringValue("test.topic".to_string()));
+
+            if should_require {
+                test_attributes.insert("messaging.kafka.consumer.group".to_string(), AnyValue::StringValue("test-group".to_string()));
+            }
+
+            let edge_span = KafkaConsumerSpanData {
+                name: format!("edge_case_test_{}", scope_name.replace('.', "_")),
+                kind: SpanKind::Consumer,
+                instrumentation_scope: InstrumentationScope {
+                    name: scope_name.to_string(),
+                    version: Some("1.0.0".to_string()),
+                    attributes: vec![],
+                },
+                attributes: test_attributes,
+            };
+
+            let requires_group = requires_consumer_group(&edge_span);
+            assert_eq!(
+                requires_group, should_require,
+                "Consumer group requirement check failed for scope '{}'",
+                scope_name
+            );
+
+            if should_require {
+                match validate_kafka_consumer_group(&edge_span) {
+                    KafkaConsumerValidationResult::Valid { consumer_group, .. } => {
+                        assert!(consumer_group.is_some(), "Should have consumer group for scope '{}'", scope_name);
+                        println!("✓ Edge case '{}' correctly requires and validates consumer group", scope_name);
+                    }
+                    _ => panic!("Edge case '{}' should be valid with consumer group", scope_name),
+                }
+            } else {
+                match validate_kafka_consumer_group(&edge_span) {
+                    KafkaConsumerValidationResult::NotApplicable { .. } => {
+                        println!("✓ Edge case '{}' correctly identified as not applicable", scope_name);
+                    }
+                    _ => panic!("Edge case '{}' should not require consumer group", scope_name),
+                }
+            }
+        }
+
+        // Test consumer group validation edge cases
+        println!("Testing consumer group validation edge cases...");
+        let group_tests = vec![
+            ("valid_standard_group", "my-consumer-group", true),
+            ("valid_underscore_group", "analytics_service", true),
+            ("valid_numeric_group", "group-123", true),
+            ("valid_mixed_group", "service_v2.1-beta", true),
+            ("empty_group", "", false),
+            ("null_char_group", "group\0name", false),
+        ];
+
+        for (test_name, group_name, should_be_valid) in group_tests {
+            let mut test_attributes = HashMap::new();
+            test_attributes.insert("messaging.system".to_string(), AnyValue::StringValue("kafka".to_string()));
+            test_attributes.insert("messaging.destination.name".to_string(), AnyValue::StringValue("test.events".to_string()));
+            test_attributes.insert("messaging.kafka.consumer.group".to_string(), AnyValue::StringValue(group_name.to_string()));
+
+            let test_span = KafkaConsumerSpanData {
+                name: format!("group_test_{}", test_name),
+                kind: SpanKind::Consumer,
+                instrumentation_scope: InstrumentationScope {
+                    name: "messaging.kafka".to_string(),
+                    version: Some("1.0.0".to_string()),
+                    attributes: vec![],
+                },
+                attributes: test_attributes,
+            };
+
+            let result = validate_kafka_consumer_group(&test_span);
+            let is_valid = matches!(result, KafkaConsumerValidationResult::Valid { .. });
+
+            assert_eq!(
+                is_valid, should_be_valid,
+                "Group test '{}' validation mismatch: expected {}, got {}",
+                test_name, should_be_valid, is_valid
+            );
+
+            println!("✓ Group test '{}' correctly evaluated as {}",
+                    test_name, if is_valid { "valid" } else { "invalid" });
+        }
+
+        println!("✓ OTLP-145: Kafka consumer group requirement conformance verified");
+        println!("  - CONSUMER spans with 'messaging.kafka' scope require messaging.kafka.consumer.group");
+        println!("  - Non-Kafka consumer scopes exempt from requirement");
+        println!("  - Producer spans exempt from requirement");
+        println!("  - Case-sensitive scope name matching enforced");
+        println!("  - Empty or non-string consumer group values rejected");
+        println!("  - Consumer group format validation (null characters, length warnings)");
+        println!("  - Additional recommended Kafka consumer attributes detected and validated");
+        println!("  - Consumer-specific operation validation (receive/process vs publish/send)");
+    }
 }
