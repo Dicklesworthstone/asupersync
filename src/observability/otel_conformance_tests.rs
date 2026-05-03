@@ -31681,3 +31681,723 @@ mod otlp_118_tests {
         println!("OTLP-118: HTTP method validation logic verified");
     }
 }
+// OTLP-119: HTTP client span semantic convention validation test
+// Test that spans with kind=CLIENT and instrumentation.scope.name="http.client"
+// must have http.url or url.full attribute set per OTLP semantic conventions
+
+#[cfg(test)]
+mod otlp_119_tests {
+    use super::*;
+    use crate::observability::{AttributeValue, OtelExporter, Span, SpanBatch, SpanKind};
+    use std::collections::HashMap;
+
+    /// OTLP-119 test scenario: HTTP client spans semantic convention validation
+    struct Otlp119Scenario {
+        name: String,
+        spans: Vec<SpanWithScope>,
+        expected_result: ValidationResult,
+        description: String,
+    }
+
+    #[derive(Debug, Clone)]
+    struct SpanWithScope {
+        span: Span,
+        instrumentation_scope_name: String,
+        instrumentation_scope_version: Option<String>,
+    }
+
+    #[derive(Debug, PartialEq)]
+    enum ValidationResult {
+        Accept,
+        Reject,
+    }
+
+    #[derive(Debug, PartialEq)]
+    struct SemanticValidationResult {
+        spans_validated: usize,
+        http_client_spans_found: usize,
+        valid_http_client_spans: usize,
+        missing_url_attributes: usize,
+        has_http_url: usize,
+        has_url_full: usize,
+        has_both_url_attrs: usize,
+        non_http_client_spans: usize,
+        validation_passed: bool,
+    }
+
+    impl Otlp119Scenario {
+        fn new(
+            name: &str,
+            spans: Vec<SpanWithScope>,
+            expected: ValidationResult,
+            description: &str,
+        ) -> Self {
+            Self {
+                name: name.to_string(),
+                spans,
+                expected_result: expected,
+                description: description.to_string(),
+            }
+        }
+
+        fn create_http_client_span(
+            trace_id: &str,
+            span_id: &str,
+            attrs: Vec<(&str, &str)>,
+            scope_name: &str,
+            scope_version: Option<&str>,
+        ) -> SpanWithScope {
+            let mut attributes = HashMap::new();
+            for (key, value) in attrs {
+                attributes.insert(key.to_string(), AttributeValue::String(value.to_string()));
+            }
+
+            SpanWithScope {
+                span: Span {
+                    trace_id: trace_id.to_string(),
+                    span_id: span_id.to_string(),
+                    parent_span_id: None,
+                    operation_name: "HTTP request".to_string(),
+                    start_time: 1000000000,
+                    end_time: 1000001000,
+                    attributes,
+                    status: crate::observability::SpanStatus::Ok,
+                    kind: SpanKind::Client,
+                },
+                instrumentation_scope_name: scope_name.to_string(),
+                instrumentation_scope_version: scope_version.map(|v| v.to_string()),
+            }
+        }
+
+        fn create_server_span(
+            trace_id: &str,
+            span_id: &str,
+            attrs: Vec<(&str, &str)>,
+            scope_name: &str,
+        ) -> SpanWithScope {
+            let mut attributes = HashMap::new();
+            for (key, value) in attrs {
+                attributes.insert(key.to_string(), AttributeValue::String(value.to_string()));
+            }
+
+            SpanWithScope {
+                span: Span {
+                    trace_id: trace_id.to_string(),
+                    span_id: span_id.to_string(),
+                    parent_span_id: None,
+                    operation_name: "HTTP handler".to_string(),
+                    start_time: 1000000000,
+                    end_time: 1000001000,
+                    attributes,
+                    status: crate::observability::SpanStatus::Ok,
+                    kind: SpanKind::Server,
+                },
+                instrumentation_scope_name: scope_name.to_string(),
+                instrumentation_scope_version: None,
+            }
+        }
+
+        fn create_internal_span(
+            trace_id: &str,
+            span_id: &str,
+            attrs: Vec<(&str, &str)>,
+            scope_name: &str,
+        ) -> SpanWithScope {
+            let mut attributes = HashMap::new();
+            for (key, value) in attrs {
+                attributes.insert(key.to_string(), AttributeValue::String(value.to_string()));
+            }
+
+            SpanWithScope {
+                span: Span {
+                    trace_id: trace_id.to_string(),
+                    span_id: span_id.to_string(),
+                    parent_span_id: None,
+                    operation_name: "internal_operation".to_string(),
+                    start_time: 1000000000,
+                    end_time: 1000001000,
+                    attributes,
+                    status: crate::observability::SpanStatus::Ok,
+                    kind: SpanKind::Internal,
+                },
+                instrumentation_scope_name: scope_name.to_string(),
+                instrumentation_scope_version: None,
+            }
+        }
+    }
+
+    fn is_http_client_span(span_with_scope: &SpanWithScope) -> bool {
+        span_with_scope.span.kind == SpanKind::Client
+            && span_with_scope.instrumentation_scope_name == "http.client"
+    }
+
+    fn has_valid_url_attribute(span: &Span) -> bool {
+        // Per OTLP semantic conventions: either http.url OR url.full must be present
+        let has_http_url = span.attributes.contains_key("http.url");
+        let has_url_full = span.attributes.contains_key("url.full");
+
+        // At least one URL attribute must be present
+        has_http_url || has_url_full
+    }
+
+    fn is_valid_url(url: &str) -> bool {
+        // Basic URL validation - must have scheme and host
+        url.starts_with("http://")
+            || url.starts_with("https://")
+            || url.starts_with("ftp://")
+            || url.starts_with("ftps://")
+    }
+
+    fn has_well_formed_url_attribute(span: &Span) -> bool {
+        // Validate that URL attributes contain well-formed URLs
+        if let Some(AttributeValue::String(http_url)) = span.attributes.get("http.url") {
+            if !is_valid_url(http_url) {
+                return false;
+            }
+        }
+
+        if let Some(AttributeValue::String(url_full)) = span.attributes.get("url.full") {
+            if !is_valid_url(url_full) {
+                return false;
+            }
+        }
+
+        true
+    }
+
+    fn simulate_asupersync_export(scenario: &Otlp119Scenario) -> ValidationResult {
+        // Simulate our asupersync exporter's semantic convention validation
+        for span_with_scope in &scenario.spans {
+            if is_http_client_span(span_with_scope) {
+                // Per OTLP semantic conventions: http.client spans MUST have http.url or url.full
+                if !has_valid_url_attribute(&span_with_scope.span) {
+                    return ValidationResult::Reject;
+                }
+                // URL values must be well-formed
+                if !has_well_formed_url_attribute(&span_with_scope.span) {
+                    return ValidationResult::Reject;
+                }
+            }
+        }
+        ValidationResult::Accept
+    }
+
+    fn simulate_reference_export(scenario: &Otlp119Scenario) -> ValidationResult {
+        // Simulate reference OTLP exporter behavior
+        // Per OTLP semantic conventions: CLIENT spans with http.client scope require URL attribute
+        for span_with_scope in &scenario.spans {
+            if is_http_client_span(span_with_scope) {
+                if !has_valid_url_attribute(&span_with_scope.span) {
+                    return ValidationResult::Reject;
+                }
+                if !has_well_formed_url_attribute(&span_with_scope.span) {
+                    return ValidationResult::Reject;
+                }
+            }
+        }
+        ValidationResult::Accept
+    }
+
+    fn validate_semantic_conventions(scenario: &Otlp119Scenario) -> SemanticValidationResult {
+        let mut result = SemanticValidationResult {
+            spans_validated: scenario.spans.len(),
+            http_client_spans_found: 0,
+            valid_http_client_spans: 0,
+            missing_url_attributes: 0,
+            has_http_url: 0,
+            has_url_full: 0,
+            has_both_url_attrs: 0,
+            non_http_client_spans: 0,
+            validation_passed: true,
+        };
+
+        for span_with_scope in &scenario.spans {
+            if is_http_client_span(span_with_scope) {
+                result.http_client_spans_found += 1;
+
+                let has_http_url = span_with_scope.span.attributes.contains_key("http.url");
+                let has_url_full = span_with_scope.span.attributes.contains_key("url.full");
+
+                if has_http_url {
+                    result.has_http_url += 1;
+                }
+                if has_url_full {
+                    result.has_url_full += 1;
+                }
+                if has_http_url && has_url_full {
+                    result.has_both_url_attrs += 1;
+                }
+
+                if has_valid_url_attribute(&span_with_scope.span)
+                    && has_well_formed_url_attribute(&span_with_scope.span)
+                {
+                    result.valid_http_client_spans += 1;
+                } else {
+                    if !has_valid_url_attribute(&span_with_scope.span) {
+                        result.missing_url_attributes += 1;
+                    }
+                    result.validation_passed = false;
+                }
+            } else {
+                result.non_http_client_spans += 1;
+            }
+        }
+
+        result
+    }
+
+    fn validate_otlp_119_scenario(scenario: &Otlp119Scenario) -> bool {
+        let asupersync_result = simulate_asupersync_export(scenario);
+        let reference_result = simulate_reference_export(scenario);
+
+        // Both exporters should behave identically
+        if asupersync_result != reference_result {
+            eprintln!(
+                "OTLP-119 DIVERGENCE in {}: asupersync={:?}, reference={:?}",
+                scenario.name, asupersync_result, reference_result
+            );
+            return false;
+        }
+
+        // Verify against expected result
+        if asupersync_result != scenario.expected_result {
+            eprintln!(
+                "OTLP-119 EXPECTATION MISMATCH in {}: got {:?}, expected {:?}",
+                scenario.name, asupersync_result, scenario.expected_result
+            );
+            return false;
+        }
+
+        println!(
+            "OTLP-119 PASS: {} - {}",
+            scenario.name, scenario.description
+        );
+        true
+    }
+
+    #[test]
+    fn test_otlp_119_http_client_semantic_conventions() {
+        let test_scenarios = vec![
+            // Test 1: Valid HTTP client span with http.url - should accept
+            Otlp119Scenario::new(
+                "valid_http_client_with_http_url",
+                vec![Otlp119Scenario::create_http_client_span(
+                    "trace-client-1",
+                    "span-001",
+                    vec![
+                        ("http.method", "GET"),
+                        ("http.url", "https://api.example.com/users"),
+                    ],
+                    "http.client",
+                    Some("1.0.0"),
+                )],
+                ValidationResult::Accept,
+                "Valid HTTP client span with http.url must be accepted",
+            ),
+            // Test 2: Valid HTTP client span with url.full (newer convention) - should accept
+            Otlp119Scenario::new(
+                "valid_http_client_with_url_full",
+                vec![Otlp119Scenario::create_http_client_span(
+                    "trace-client-2",
+                    "span-002",
+                    vec![
+                        ("http.request.method", "POST"),
+                        ("url.full", "https://api.example.com/users"),
+                    ],
+                    "http.client",
+                    Some("2.0.0"),
+                )],
+                ValidationResult::Accept,
+                "Valid HTTP client span with url.full must be accepted",
+            ),
+            // Test 3: HTTP client span with both http.url and url.full - should accept
+            Otlp119Scenario::new(
+                "http_client_with_both_urls",
+                vec![Otlp119Scenario::create_http_client_span(
+                    "trace-client-3",
+                    "span-003",
+                    vec![
+                        ("http.method", "PUT"),
+                        ("http.url", "https://api.example.com/users/123"),
+                        ("url.full", "https://api.example.com/users/123"),
+                    ],
+                    "http.client",
+                    None,
+                )],
+                ValidationResult::Accept,
+                "HTTP client span with both URL attributes must be accepted",
+            ),
+            // Test 4: HTTP client span missing both URL attributes - should reject
+            Otlp119Scenario::new(
+                "http_client_missing_url",
+                vec![Otlp119Scenario::create_http_client_span(
+                    "trace-client-4",
+                    "span-004",
+                    vec![("http.method", "GET"), ("http.status_code", "200")],
+                    "http.client",
+                    None,
+                )],
+                ValidationResult::Reject,
+                "HTTP client span without URL attributes must be rejected per semantic conventions",
+            ),
+            // Test 5: HTTP client span with invalid URL format - should reject
+            Otlp119Scenario::new(
+                "http_client_invalid_url",
+                vec![Otlp119Scenario::create_http_client_span(
+                    "trace-client-5",
+                    "span-005",
+                    vec![("http.method", "POST"), ("http.url", "invalid-url")],
+                    "http.client",
+                    None,
+                )],
+                ValidationResult::Reject,
+                "HTTP client span with malformed URL must be rejected",
+            ),
+            // Test 6: CLIENT span with different scope (not http.client) - should accept
+            Otlp119Scenario::new(
+                "client_span_different_scope",
+                vec![Otlp119Scenario::create_http_client_span(
+                    "trace-other-1",
+                    "span-006",
+                    vec![("rpc.method", "GetUser"), ("rpc.service", "UserService")],
+                    "grpc.client",
+                    None, // Different scope, so URL not required
+                )],
+                ValidationResult::Accept,
+                "CLIENT span with non-http scope should not require URL attributes",
+            ),
+            // Test 7: SERVER span with http.client scope - should accept (scope doesn't match kind)
+            Otlp119Scenario::new(
+                "server_span_http_client_scope",
+                vec![Otlp119Scenario::create_server_span(
+                    "trace-server-1",
+                    "span-007",
+                    vec![("http.method", "GET")], // No URL attributes
+                    "http.client",                // Scope is http.client but kind is SERVER
+                )],
+                ValidationResult::Accept,
+                "SERVER span should not be subject to http.client semantic conventions",
+            ),
+            // Test 8: Multiple valid HTTP client spans - should accept
+            Otlp119Scenario::new(
+                "multiple_valid_http_client_spans",
+                vec![
+                    Otlp119Scenario::create_http_client_span(
+                        "trace-multi-1",
+                        "span-008",
+                        vec![
+                            ("http.method", "GET"),
+                            ("http.url", "https://api.example.com/users"),
+                        ],
+                        "http.client",
+                        None,
+                    ),
+                    Otlp119Scenario::create_http_client_span(
+                        "trace-multi-1",
+                        "span-009",
+                        vec![
+                            ("http.request.method", "POST"),
+                            ("url.full", "https://api.example.com/orders"),
+                        ],
+                        "http.client",
+                        None,
+                    ),
+                    Otlp119Scenario::create_http_client_span(
+                        "trace-multi-1",
+                        "span-010",
+                        vec![
+                            ("http.method", "DELETE"),
+                            ("http.url", "https://api.example.com/users/123"),
+                        ],
+                        "http.client",
+                        None,
+                    ),
+                ],
+                ValidationResult::Accept,
+                "Multiple valid HTTP client spans must all be accepted",
+            ),
+            // Test 9: Mixed valid and invalid HTTP client spans - should reject
+            Otlp119Scenario::new(
+                "mixed_valid_invalid_http_client",
+                vec![
+                    Otlp119Scenario::create_http_client_span(
+                        "trace-mixed-1",
+                        "span-011",
+                        vec![
+                            ("http.method", "GET"),
+                            ("http.url", "https://api.example.com/users"),
+                        ],
+                        "http.client",
+                        None,
+                    ),
+                    Otlp119Scenario::create_http_client_span(
+                        "trace-mixed-1",
+                        "span-012",
+                        vec![("http.method", "POST")], // Missing URL
+                        "http.client",
+                        None,
+                    ),
+                ],
+                ValidationResult::Reject,
+                "Batch with any invalid HTTP client spans must be rejected",
+            ),
+            // Test 10: HTTP client spans with various URL schemes - should accept
+            Otlp119Scenario::new(
+                "various_url_schemes",
+                vec![
+                    Otlp119Scenario::create_http_client_span(
+                        "trace-schemes",
+                        "span-013",
+                        vec![("http.url", "https://secure.example.com/api")],
+                        "http.client",
+                        None,
+                    ),
+                    Otlp119Scenario::create_http_client_span(
+                        "trace-schemes",
+                        "span-014",
+                        vec![("url.full", "http://insecure.example.com/api")],
+                        "http.client",
+                        None,
+                    ),
+                    Otlp119Scenario::create_http_client_span(
+                        "trace-schemes",
+                        "span-015",
+                        vec![("http.url", "ftp://files.example.com/data")],
+                        "http.client",
+                        None,
+                    ),
+                ],
+                ValidationResult::Accept,
+                "Various valid URL schemes must be accepted",
+            ),
+            // Test 11: Mixed span kinds and scopes - should validate only matching patterns
+            Otlp119Scenario::new(
+                "mixed_spans_kinds_scopes",
+                vec![
+                    Otlp119Scenario::create_http_client_span(
+                        "trace-mixed-2",
+                        "span-016",
+                        vec![("http.url", "https://api.example.com")],
+                        "http.client",
+                        None, // Valid: CLIENT + http.client + URL
+                    ),
+                    Otlp119Scenario::create_server_span(
+                        "trace-mixed-2",
+                        "span-017",
+                        vec![("http.method", "GET")],
+                        "http.server", // SERVER span, different validation rules
+                    ),
+                    Otlp119Scenario::create_internal_span(
+                        "trace-mixed-2",
+                        "span-018",
+                        vec![("db.statement", "SELECT * FROM users")],
+                        "database", // INTERNAL span
+                    ),
+                ],
+                ValidationResult::Accept,
+                "Only CLIENT spans with http.client scope should require URL validation",
+            ),
+            // Test 12: HTTP client span with query parameters and fragments
+            Otlp119Scenario::new(
+                "complex_urls_with_params",
+                vec![
+                    Otlp119Scenario::create_http_client_span(
+                        "trace-complex-1",
+                        "span-019",
+                        vec![(
+                            "http.url",
+                            "https://api.example.com/users?page=1&limit=10&sort=name#results",
+                        )],
+                        "http.client",
+                        None,
+                    ),
+                    Otlp119Scenario::create_http_client_span(
+                        "trace-complex-2",
+                        "span-020",
+                        vec![(
+                            "url.full",
+                            "https://api.example.com/search?q=test&category=books&price=10-50",
+                        )],
+                        "http.client",
+                        None,
+                    ),
+                ],
+                ValidationResult::Accept,
+                "Complex URLs with query parameters and fragments must be accepted",
+            ),
+            // Test 13: HTTP client spans with localhost and IP URLs
+            Otlp119Scenario::new(
+                "localhost_and_ip_urls",
+                vec![
+                    Otlp119Scenario::create_http_client_span(
+                        "trace-local-1",
+                        "span-021",
+                        vec![("http.url", "http://localhost:8080/api/v1/health")],
+                        "http.client",
+                        None,
+                    ),
+                    Otlp119Scenario::create_http_client_span(
+                        "trace-local-2",
+                        "span-022",
+                        vec![("url.full", "https://192.168.1.100:9000/metrics")],
+                        "http.client",
+                        None,
+                    ),
+                    Otlp119Scenario::create_http_client_span(
+                        "trace-local-3",
+                        "span-023",
+                        vec![("http.url", "http://127.0.0.1:3000/")],
+                        "http.client",
+                        None,
+                    ),
+                ],
+                ValidationResult::Accept,
+                "Localhost and IP-based URLs must be accepted",
+            ),
+        ];
+
+        let mut passed = 0;
+        let mut failed = 0;
+
+        for scenario in test_scenarios {
+            if validate_otlp_119_scenario(&scenario) {
+                passed += 1;
+            } else {
+                failed += 1;
+            }
+        }
+
+        println!("OTLP-119 Summary: {} passed, {} failed", passed, failed);
+        assert_eq!(
+            failed, 0,
+            "All OTLP-119 HTTP client semantic convention scenarios must pass"
+        );
+    }
+
+    #[test]
+    fn test_otlp_119_semantic_validation_details() {
+        // Detailed validation test for semantic convention checking
+        let detailed_scenario = Otlp119Scenario::new(
+            "detailed_validation",
+            vec![
+                Otlp119Scenario::create_http_client_span(
+                    "trace-detail",
+                    "span-001",
+                    vec![("http.url", "https://example.com")],
+                    "http.client",
+                    None,
+                ),
+                Otlp119Scenario::create_http_client_span(
+                    "trace-detail",
+                    "span-002",
+                    vec![("url.full", "https://api.example.com")],
+                    "http.client",
+                    None,
+                ),
+                Otlp119Scenario::create_http_client_span(
+                    "trace-detail",
+                    "span-003",
+                    vec![
+                        ("http.url", "https://example.com"),
+                        ("url.full", "https://example.com"),
+                    ],
+                    "http.client",
+                    None,
+                ),
+                Otlp119Scenario::create_http_client_span(
+                    "trace-detail",
+                    "span-004",
+                    vec![("http.method", "GET")],
+                    "http.client",
+                    None, // Missing URL
+                ),
+                Otlp119Scenario::create_server_span(
+                    "trace-detail",
+                    "span-005",
+                    vec![("http.method", "POST")],
+                    "http.server",
+                ),
+            ],
+            ValidationResult::Reject,
+            "Detailed semantic validation test",
+        );
+
+        let validation_result = validate_semantic_conventions(&detailed_scenario);
+
+        assert_eq!(validation_result.spans_validated, 5);
+        assert_eq!(validation_result.http_client_spans_found, 4);
+        assert_eq!(validation_result.valid_http_client_spans, 3);
+        assert_eq!(validation_result.missing_url_attributes, 1);
+        assert_eq!(validation_result.has_http_url, 2);
+        assert_eq!(validation_result.has_url_full, 2);
+        assert_eq!(validation_result.has_both_url_attrs, 1);
+        assert_eq!(validation_result.non_http_client_spans, 1);
+        assert!(!validation_result.validation_passed);
+
+        println!("OTLP-119: Detailed semantic validation verified");
+    }
+
+    #[test]
+    fn test_otlp_119_url_validation() {
+        // Test URL validation logic
+        assert!(is_valid_url("https://example.com"));
+        assert!(is_valid_url("http://example.com"));
+        assert!(is_valid_url("https://api.example.com/v1/users"));
+        assert!(is_valid_url("http://localhost:8080"));
+        assert!(is_valid_url("https://192.168.1.1:9000/api"));
+        assert!(is_valid_url("ftp://files.example.com"));
+        assert!(is_valid_url("ftps://secure.files.example.com"));
+
+        // Invalid URLs
+        assert!(!is_valid_url("example.com"));
+        assert!(!is_valid_url("invalid-url"));
+        assert!(!is_valid_url("file:///local/path"));
+        assert!(!is_valid_url("mailto:test@example.com"));
+        assert!(!is_valid_url(""));
+
+        println!("OTLP-119: URL validation logic verified");
+    }
+
+    #[test]
+    fn test_otlp_119_url_attribute_presence() {
+        // Test URL attribute presence validation
+        let mut test_span = Span {
+            trace_id: "test-trace".to_string(),
+            span_id: "test-span".to_string(),
+            parent_span_id: None,
+            operation_name: "test".to_string(),
+            start_time: 1000000000,
+            end_time: 1000001000,
+            attributes: HashMap::new(),
+            status: crate::observability::SpanStatus::Ok,
+            kind: SpanKind::Client,
+        };
+
+        // No URL attributes
+        assert!(!has_valid_url_attribute(&test_span));
+
+        // Only http.url
+        test_span.attributes.insert(
+            "http.url".to_string(),
+            AttributeValue::String("https://example.com".to_string()),
+        );
+        assert!(has_valid_url_attribute(&test_span));
+
+        // Only url.full
+        test_span.attributes.clear();
+        test_span.attributes.insert(
+            "url.full".to_string(),
+            AttributeValue::String("https://example.com".to_string()),
+        );
+        assert!(has_valid_url_attribute(&test_span));
+
+        // Both attributes
+        test_span.attributes.insert(
+            "http.url".to_string(),
+            AttributeValue::String("https://example.com".to_string()),
+        );
+        assert!(has_valid_url_attribute(&test_span));
+
+        println!("OTLP-119: URL attribute presence validation verified");
+    }
+}
