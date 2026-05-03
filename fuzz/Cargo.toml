@@ -5045,3 +5045,9 @@ name = "h2_request_method_too_long"
 path = "fuzz_targets/h2_request_method_too_long.rs"
 test = false
 doc = false
+
+[[bin]]
+name = "h2_request_authority_empty"
+path = "fuzz_targets/h2_request_authority_empty.rs"
+test = false
+doc = false
