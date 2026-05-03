@@ -1485,27 +1485,14 @@ impl<P: Policy> Scope<'_, P> {
         &self,
         state: &mut RuntimeState,
     ) -> Result<TaskId, SpawnError> {
-        use crate::util::ArenaIndex;
-
         let now = state
             .timer_driver()
             .map_or(state.now, crate::time::TimerDriverHandle::now);
 
-        // Create placeholder task record
-        let idx = state.insert_task(TaskRecord::new_with_time(
-            TaskId::from_arena(ArenaIndex::new(0, 0)), // placeholder ID
-            self.region,
-            self.budget,
-            now,
-        ));
-
-        // Get the real task ID from the arena index
+        let idx = state.insert_task_with(|idx| {
+            TaskRecord::new_with_time(TaskId::from_arena(idx), self.region, self.budget, now)
+        });
         let task_id = TaskId::from_arena(idx);
-
-        // Update the task record with the correct ID
-        if let Some(record) = state.task_mut(task_id) {
-            record.id = task_id;
-        }
 
         // Add task to the owning region
         if let Some(region) = state.region(self.region) {
@@ -1749,6 +1736,7 @@ mod tests {
 
         let task = state.task(task_id).expect("task record");
         assert_eq!(task.created_at, Time::from_millis(18));
+        assert_eq!(task.id, task_id);
     }
 
     #[test]
