@@ -2768,7 +2768,8 @@ mod tests {
                     // Keep the future alive until main thread is done
                     barrier_clone.wait();
 
-                    (waiter_id, notified_fut)
+                    drop(notified_fut);
+                    waiter_id
                 });
 
                 waiter_handles.push(handle);
@@ -2852,7 +2853,7 @@ mod tests {
         let notify = Arc::new(Notify::new());
 
         // Capture initial memory baseline - check internal waiter count
-        let initial_waiter_count = notify.waiters.lock().count();
+        let initial_waiter_count = notify.waiters.lock().active_count();
 
         // Phase 1: Create and immediately drop many notified() futures
         for i in 0..NUM_FUTURES {
@@ -2864,7 +2865,7 @@ mod tests {
 
             // Periodically check that waiters are being cleaned up, not accumulating
             if i % 1000 == 999 {
-                let current_waiter_count = notify.waiters.lock().count();
+                let current_waiter_count = notify.waiters.lock().active_count();
                 crate::assert_with_log!(
                     current_waiter_count < 100, // Should stay very low if cleanup works
                     &format!(
@@ -2879,7 +2880,7 @@ mod tests {
         }
 
         // Phase 2: Verify final state - no significant memory accumulation
-        let final_waiter_count = notify.waiters.lock().count();
+        let final_waiter_count = notify.waiters.lock().active_count();
 
         crate::assert_with_log!(
             final_waiter_count <= initial_waiter_count + 10, // Allow small variance
@@ -2899,14 +2900,14 @@ mod tests {
             futures.push(notify.notified());
         }
 
-        let mid_create_count = notify.waiters.lock().count();
+        let mid_create_count = notify.waiters.lock().active_count();
 
         // Drop half without awaiting
         for _ in 0..50 {
             futures.pop();
         }
 
-        let mid_drop_count = notify.waiters.lock().count();
+        let mid_drop_count = notify.waiters.lock().active_count();
 
         crate::assert_with_log!(
             mid_drop_count < mid_create_count,
@@ -2923,7 +2924,7 @@ mod tests {
         // Drop remaining futures
         futures.clear();
 
-        let final_mixed_count = notify.waiters.lock().count();
+        let final_mixed_count = notify.waiters.lock().active_count();
 
         crate::assert_with_log!(
             final_mixed_count <= initial_waiter_count + 5,
@@ -2971,6 +2972,8 @@ mod tests {
             // Testing Sync would be: assert_sync::<Notified<'_>>();
             // But this is not required by asupersync semantics.
         }
+        assert_notify_send_sync();
+        assert_notified_future_send();
 
         // Verify the bounds work in practice
         let notify = std::sync::Arc::new(Notify::new());
@@ -3046,39 +3049,33 @@ mod tests {
 
         use std::sync::mpsc;
 
-        let notify = std::sync::Arc::new(Notify::new());
+        let notify = Notify::new();
 
-        // Channel to send the future from one thread to another
-        let (future_tx, future_rx) = mpsc::channel::<Notified<'_>>();
-        let notify_creator = notify.clone();
+        std::thread::scope(|scope| {
+            // Channel to send the future from one scoped thread to another.
+            let (future_tx, future_rx) = mpsc::channel::<Notified<'_>>();
+            let notify_for_sender = &notify;
+            let notify_for_receiver = &notify;
 
-        // Thread 1: Creates the Notified future
-        let creator_handle = std::thread::spawn(move || {
-            let future = notify_creator.notified();
+            // Thread 1: Creates the Notified future.
+            scope.spawn(move || {
+                let future = notify_for_sender.notified();
 
-            // Send the future to another thread (tests Send bound)
-            future_tx.send(future).expect("should send future");
+                // Send the future to another thread (tests Send bound).
+                future_tx.send(future).expect("should send future");
+            });
+
+            // Thread 2: Receives and owns the Notified future.
+            scope.spawn(move || {
+                let received_future = future_rx.recv().expect("should receive future");
+
+                // Future was successfully transferred (Send worked).
+                drop(received_future);
+
+                // Notify to unblock any potential waiters.
+                notify_for_receiver.notify_one();
+            });
         });
-
-        // Thread 2: Receives and owns the Notified future
-        let notify_consumer = notify.clone();
-        let consumer_handle = std::thread::spawn(move || {
-            let received_future = future_rx.recv().expect("should receive future");
-
-            // Future was successfully transferred (Send worked)
-            // Drop it to complete the test
-            drop(received_future);
-
-            // Notify to unblock any potential waiters
-            notify_consumer.notify_one();
-        });
-
-        creator_handle
-            .join()
-            .expect("creator thread should not panic");
-        consumer_handle
-            .join()
-            .expect("consumer thread should not panic");
 
         // Verify the basic functionality still works after Send transfer
         let final_future = notify.notified();
@@ -3508,8 +3505,6 @@ mod tests {
 
             let mutex_waiter = Arc::clone(&mutex);
             let notify_waiter = Arc::clone(&notify);
-            let counter_waiter = Arc::clone(&shared_counter);
-            let completed_waiter = Arc::clone(&unlock_notify_completed);
             let failed_count = Arc::clone(&failed_acquisitions);
 
             // Waiter thread: Wait for notification, then try to acquire mutex immediately
@@ -3550,6 +3545,12 @@ mod tests {
                                 .expect("Async lock should eventually succeed");
                             let acquire_latency = acquire_start.elapsed();
                             let counter_value = *guard;
+                            let expected_value = (iteration + 1) * 1000;
+                            assert_eq!(
+                                counter_value, expected_value,
+                                "iteration {}: fallback acquisition should observe modified shared state",
+                                iteration
+                            );
 
                             (false, acquire_latency)
                         }
@@ -3603,7 +3604,7 @@ mod tests {
             let modifier_duration = modifier_handle
                 .join()
                 .expect("Modifier thread should complete");
-            let (immediate_acquisition, waiter_latency) =
+            let (immediate_acquisition, _waiter_latency) =
                 waiter_handle.join().expect("Waiter thread should complete");
 
             if immediate_acquisition {
@@ -3641,7 +3642,7 @@ mod tests {
             );
         }
 
-        if failed_count > test_iterations / 20 {
+        if failed_count > (test_iterations / 20) as usize {
             panic!(
                 "❌ ORDERING DEFECT: {} failed immediate acquisitions (>{} threshold). \
                  Mutex unlock should complete before notify_one() is called.",
@@ -3848,7 +3849,7 @@ mod tests {
                         let poll_result = {
                             use std::future::Future;
                             use std::pin::Pin;
-                            use std::task::{Context, Poll, Waker};
+                            use std::task::{Context, Waker};
 
                             let noop_waker = Waker::noop();
                             let mut ctx = Context::from_waker(&noop_waker);
@@ -3920,7 +3921,7 @@ mod tests {
                         let poll_result = {
                             use std::future::Future;
                             use std::pin::Pin;
-                            use std::task::{Context, Poll, Waker};
+                            use std::task::{Context, Waker};
 
                             let noop_waker = Waker::noop();
                             let mut ctx = Context::from_waker(&noop_waker);
@@ -3982,7 +3983,7 @@ mod tests {
                 let second_poll_result = {
                     use std::future::Future;
                     use std::pin::Pin;
-                    use std::task::{Context, Poll, Waker};
+                    use std::task::{Context, Waker};
 
                     let noop_waker = Waker::noop();
                     let mut ctx = Context::from_waker(&noop_waker);
@@ -4020,7 +4021,6 @@ mod tests {
 
     #[test]
     fn audit_notify_one_multiple_unconsumed_queuing() {
-        use crate::cx::Cx;
         use std::sync::Arc;
         use std::sync::atomic::{AtomicU32, Ordering};
         use std::thread;
@@ -4035,8 +4035,6 @@ mod tests {
         // - Multiple notify_one() calls should create multiple permits
         //
         // Incorrect coalescing behavior would lose notifications
-
-        let notify = Arc::new(Notify::new());
 
         // Test 1: Basic sequential multiple notify_one() calls
         {
@@ -4141,7 +4139,7 @@ mod tests {
 
             // Verify stored_notifications count matches sent count
             let stored_after_sending = notify_stress.stored_notifications.load(Ordering::Acquire);
-            if stored_after_sending != num_notifications {
+            if stored_after_sending != num_notifications as usize {
                 panic!(
                     "❌ DEFECT: After {} concurrent notify_one() calls, stored_notifications = {}, expected {}. \
                      This indicates race condition in stored notification accounting.",
@@ -4315,7 +4313,7 @@ mod tests {
 
         // Poll all to register them
         for waiter in &mut waiters {
-            poll_once(waiter);
+            let _ = poll_once(waiter);
         }
 
         // Send one notification

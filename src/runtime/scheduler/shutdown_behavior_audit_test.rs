@@ -14,7 +14,13 @@
 #![cfg(test)]
 
 use crate::runtime::scheduler::three_lane::ThreeLaneScheduler;
-use std::time::Duration;
+use crate::runtime::state::RuntimeState;
+use crate::sync::ContendedMutex;
+use std::sync::Arc;
+
+fn test_state() -> Arc<ContendedMutex<RuntimeState>> {
+    Arc::new(ContendedMutex::new("runtime_state", RuntimeState::new()))
+}
 
 /// **AUDIT TEST**: Current implementation lacks shutdown_now() method.
 ///
@@ -24,7 +30,8 @@ use std::time::Duration;
 fn audit_shutdown_now_missing() {
     println!("🚨 AUDIT: shutdown_now() method missing");
 
-    let scheduler = ThreeLaneScheduler::new(1);
+    let state = test_state();
+    let scheduler = ThreeLaneScheduler::new(1, &state);
 
     // This should compile if shutdown_now() exists
     // scheduler.shutdown_now();
@@ -45,7 +52,8 @@ fn audit_shutdown_now_missing() {
 fn audit_shutdown_timeout_missing() {
     println!("🚨 AUDIT: shutdown_timeout() method missing");
 
-    let scheduler = ThreeLaneScheduler::new(1);
+    let state = test_state();
+    let scheduler = ThreeLaneScheduler::new(1, &state);
 
     // This should compile if shutdown_timeout() exists
     // let completed = scheduler.shutdown_timeout(Duration::from_secs(5));
@@ -67,7 +75,8 @@ fn audit_shutdown_timeout_missing() {
 fn audit_current_shutdown_behavior() {
     println!("🔍 AUDIT: Current shutdown() method behavior");
 
-    let scheduler = ThreeLaneScheduler::new(1);
+    let state = test_state();
+    let scheduler = ThreeLaneScheduler::new(1, &state);
 
     // Verify initial state
     assert!(
@@ -103,7 +112,9 @@ fn audit_current_shutdown_behavior() {
 fn audit_shutdown_timeout_observability() {
     println!("🔍 AUDIT: Shutdown timeout behavior observability");
 
-    let scheduler = ThreeLaneScheduler::new(1);
+    let state = test_state();
+    let scheduler = ThreeLaneScheduler::new(1, &state);
+    scheduler.shutdown();
 
     // MISSING: shutdown_timeout() should return whether tasks completed within timeout
     // Example expected API:

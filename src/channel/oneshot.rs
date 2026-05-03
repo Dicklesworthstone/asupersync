@@ -3355,9 +3355,14 @@ mod tests {
 
         let (tx, mut rx) = channel::<i32>();
 
+        // Verify receiver correctly reports not closed yet before a recv() future
+        // holds the mutable receiver borrow.
+        if rx.is_closed() {
+            panic!("❌ DEFECT: Receiver reports closed before sender is dropped");
+        }
+
         // Create a receiver future and poll it once to register waker
         let cx = test_cx();
-        let mut recv_fut = Box::pin(rx.recv(&cx));
 
         let noop_waker = Waker::noop();
         let mut task_ctx = Context::from_waker(&noop_waker);
@@ -3367,6 +3372,7 @@ mod tests {
             use std::future::Future;
             use std::pin::Pin;
 
+            let mut recv_fut = Box::pin(rx.recv(&cx));
             Pin::as_mut(&mut recv_fut).poll(&mut task_ctx)
         };
 
@@ -3375,11 +3381,6 @@ mod tests {
                 "❌ DEFECT: First poll returned {:?}, expected Pending when no value sent",
                 first_poll
             );
-        }
-
-        // Verify receiver correctly reports not closed yet
-        if rx.is_closed() {
-            panic!("❌ DEFECT: Receiver reports closed before sender is dropped");
         }
 
         // NOW drop the sender without sending
@@ -3395,6 +3396,7 @@ mod tests {
             use std::future::Future;
             use std::pin::Pin;
 
+            let mut recv_fut = Box::pin(rx.recv(&cx));
             Pin::as_mut(&mut recv_fut).poll(&mut task_ctx)
         };
 

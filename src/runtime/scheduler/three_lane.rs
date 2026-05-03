@@ -6905,6 +6905,7 @@ mod tests {
             global: Arc::clone(&global),
             coordinator,
             cx_inner: Arc::downgrade(&cx_inner),
+            scheduler_evidence: None,
         }));
 
         waker.wake_by_ref();
@@ -6942,6 +6943,7 @@ mod tests {
             priority: Budget::INFINITE.priority,
             fast_cancel: Arc::clone(&cx_inner.read().fast_cancel),
             cx_inner: Arc::downgrade(&cx_inner),
+            scheduler_evidence: None,
         }));
 
         waker.wake_by_ref();
@@ -7242,6 +7244,7 @@ mod tests {
             local_ready: Arc::clone(&local_ready),
             parker: Parker::new(),
             cx_inner: Arc::downgrade(&cx_inner),
+            scheduler_evidence: None,
         };
 
         waker.schedule();
@@ -7288,6 +7291,7 @@ mod tests {
             parker: Parker::new(),
             fast_cancel: Arc::clone(&cx_inner.read().fast_cancel),
             cx_inner: Arc::downgrade(&cx_inner),
+            scheduler_evidence: None,
         };
 
         waker.schedule();
@@ -7496,6 +7500,7 @@ mod tests {
                     priority: 0,
                     fast_cancel: Arc::new(std::sync::atomic::AtomicBool::new(false)),
                     cx_inner: Weak::new(),
+                    scheduler_evidence: None,
                 }))
             })
             .collect();
@@ -10549,6 +10554,7 @@ mod tests {
             parker,
             fast_cancel: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             cx_inner: Weak::new(),
+            scheduler_evidence: None,
         }));
 
         // Set local_ready TLS (waker uses schedule_local_task, not LocalQueue).
@@ -10590,6 +10596,7 @@ mod tests {
             parker,
             fast_cancel: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             cx_inner: Weak::new(),
+            scheduler_evidence: None,
         }));
 
         waker.wake_by_ref();
@@ -13713,7 +13720,7 @@ mod tests {
 
         // Force MeetDeadlines suggestion (EDF priority mode)
         // Create deadline pressure to trigger EDF mode
-        let root = {
+        let _root = {
             let mut guard = state.lock().expect("lock state");
             guard.now = Time::from_nanos(1000);
             guard.create_root_region(Budget::unlimited())
@@ -13904,11 +13911,11 @@ mod tests {
         // FAIRNESS VIOLATION: Stolen work should not starve local work.
 
         let state = Arc::new(ContendedMutex::new("runtime_state", RuntimeState::new()));
-        let mut scheduler = ThreeLaneScheduler::new_with_workers_and_budget(2, &state, None);
+        let mut scheduler = ThreeLaneScheduler::new(2, &state);
 
         let mut workers = scheduler.take_workers().into_iter().collect::<Vec<_>>();
         let mut worker_a = workers.remove(0);
-        let mut worker_b = workers.remove(0);
+        let worker_b = workers.remove(0);
 
         // Fill worker-B with many tasks to create a large steal surface
         let victim_tasks: Vec<TaskId> = (1..=20).map(|i| TaskId::new_for_test(2, i)).collect();
