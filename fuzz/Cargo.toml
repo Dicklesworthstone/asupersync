@@ -4723,6 +4723,12 @@ test = false
 doc = false
 
 [[bin]]
+name = "h2_settings_max_frame_size_below_default"
+path = "fuzz_targets/h2_settings_max_frame_size_below_default.rs"
+test = false
+doc = false
+
+[[bin]]
 name = "h2_settings_max_frame_size_overflow"
 path = "fuzz_targets/h2_settings_max_frame_size_overflow.rs"
 test = false
@@ -4801,6 +4807,12 @@ test = false
 doc = false
 
 [[bin]]
+name = "h2_priority_dependency_chain"
+path = "fuzz_targets/h2_priority_dependency_chain.rs"
+test = false
+doc = false
+
+[[bin]]
 name = "h2_continuation_overflow"
 path = "fuzz_targets/h2_continuation_overflow.rs"
 test = false
@@ -4857,6 +4869,12 @@ doc = false
 [[bin]]
 name = "h2_request_authority_invalid"
 path = "fuzz_targets/h2_request_authority_invalid.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "h2_request_with_huge_authority"
+path = "fuzz_targets/h2_request_with_huge_authority.rs"
 test = false
 doc = false
 
@@ -5127,5 +5145,11 @@ doc = false
 [[bin]]
 name = "h2_request_pseudo_path_with_query"
 path = "fuzz_targets/h2_request_pseudo_path_with_query.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "h2_request_pseudo_authority_with_userinfo"
+path = "fuzz_targets/h2_request_pseudo_authority_with_userinfo.rs"
 test = false
 doc = false
