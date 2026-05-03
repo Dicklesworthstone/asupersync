@@ -5,6 +5,7 @@ use asupersync::runtime::scheduler::{
     SchedulerEvidenceMetrics, SchedulerKnobProfile, SchedulerRecommendationReason,
     SchedulerTopologyDescriptor, SchedulerWorkloadClass,
 };
+use serde_json::Value;
 
 fn sample_artifact() -> SchedulerEvidenceArtifact {
     SchedulerEvidenceArtifact {
@@ -94,15 +95,42 @@ fn scheduler_evidence_artifact_rejects_invalid_inputs() {
     );
 }
 
-#[test]
-fn scheduler_recommend_smoke_contract_matches_tuning_projection() {
-    let contract: serde_json::Value = serde_json::from_str(include_str!(
+fn load_scheduler_recommend_contract() -> Value {
+    serde_json::from_str(include_str!(
         "../artifacts/scheduler_recommend_smoke_contract_v1.json"
     ))
-    .expect("parse scheduler recommend smoke contract");
+    .expect("parse scheduler recommend smoke contract")
+}
+
+fn scenario_by_id<'a>(contract: &'a Value, scenario_id: &str) -> &'a Value {
+    contract["smoke_scenarios"]
+        .as_array()
+        .expect("smoke_scenarios should be an array")
+        .iter()
+        .find(|scenario| scenario["scenario_id"].as_str() == Some(scenario_id))
+        .unwrap_or_else(|| panic!("missing scenario: {scenario_id}"))
+}
+
+#[test]
+fn scheduler_recommend_smoke_contract_matches_tuning_projection() {
+    let contract = load_scheduler_recommend_contract();
     assert_eq!(
         contract["runner_script"].as_str(),
         Some("scripts/run_scheduler_recommend_smoke.sh")
+    );
+    assert!(
+        contract["required_bundle_fields"]
+            .as_array()
+            .expect("required_bundle_fields")
+            .iter()
+            .any(|field| field.as_str() == Some("scenario_class"))
+    );
+    assert!(
+        contract["required_run_report_fields"]
+            .as_array()
+            .expect("required_run_report_fields")
+            .iter()
+            .any(|field| field.as_str() == Some("execution_policy"))
     );
 
     let scenarios = contract["smoke_scenarios"]
@@ -110,14 +138,22 @@ fn scheduler_recommend_smoke_contract_matches_tuning_projection() {
         .expect("smoke_scenarios should be an array");
     assert_eq!(
         scenarios.len(),
-        1,
-        "expected exactly one bounded smoke scenario"
+        2,
+        "expected deterministic + real-host scenarios"
     );
 
-    let scenario = &scenarios[0];
+    let scenario = scenario_by_id(&contract, "AA-SCHED-RECOMMEND-MIXED-BURST-64C");
     assert_eq!(
         scenario["scenario_id"].as_str(),
         Some("AA-SCHED-RECOMMEND-MIXED-BURST-64C")
+    );
+    assert_eq!(
+        scenario["scenario_class"].as_str(),
+        Some("deterministic_lab_safe")
+    );
+    assert_eq!(
+        scenario["execution_policy"].as_str(),
+        Some("execute_or_dry_run")
     );
 
     let evidence: SchedulerEvidenceArtifact =
@@ -140,4 +176,49 @@ fn scheduler_recommend_smoke_contract_matches_tuning_projection() {
     });
 
     assert_eq!(actual_projection, scenario["expected_report"]);
+}
+
+#[test]
+fn scheduler_recommend_smoke_contract_declares_real_host_template() {
+    let contract = load_scheduler_recommend_contract();
+    let scenario = scenario_by_id(&contract, "AA-SCHED-RECOMMEND-REAL-HOST-64C-256G");
+
+    assert_eq!(
+        scenario["scenario_class"].as_str(),
+        Some("real_host_template")
+    );
+    assert_eq!(scenario["execution_policy"].as_str(), Some("dry_run_only"));
+    assert_eq!(
+        scenario["host_requirements"]["min_worker_threads"].as_u64(),
+        Some(64)
+    );
+    assert_eq!(
+        scenario["host_requirements"]["min_memory_gib"].as_u64(),
+        Some(256)
+    );
+    assert_eq!(
+        scenario["expected_profile_name_hint"].as_str(),
+        Some("operator_captured")
+    );
+    assert_eq!(
+        scenario["expected_report"],
+        serde_json::Value::Null,
+        "template scenario should not pin a fake report projection"
+    );
+    assert!(
+        scenario["template_env"]["ASUPERSYNC_SCHEDULER_EVIDENCE_CAPTURE"]
+            .as_str()
+            .is_some()
+    );
+
+    let evidence: SchedulerEvidenceArtifact =
+        serde_json::from_value(scenario["evidence_artifact"].clone())
+            .expect("real host template evidence should deserialize");
+    assert!(
+        evidence
+            .notes
+            .iter()
+            .any(|note| note == "real_host_template"),
+        "template evidence should self-identify as real-host-only"
+    );
 }

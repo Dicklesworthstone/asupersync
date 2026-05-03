@@ -10,6 +10,8 @@
     "contract_version",
     "scenario_id",
     "description",
+    "scenario_class",
+    "execution_policy",
     "run_id",
     "mode",
     "artifact_path",
@@ -17,6 +19,9 @@
     "evidence_file",
     "report_file",
     "command",
+    "host_requirements",
+    "template_env",
+    "capture_plan",
     "expected_profile_name",
     "expected_reason_codes",
     "command_exit_code",
@@ -33,20 +38,31 @@
     "bundle_manifest_path",
     "run_id",
     "scenario_id",
+    "scenario_class",
+    "execution_policy",
     "mode",
     "command_exit_code",
     "script_exit_code",
     "validation_passed",
     "status",
     "message",
+    "host_requirements",
+    "template_env",
+    "capture_plan",
     "expected_report_projection",
     "actual_report_projection"
   ],
-  "required_output_files": [
+  "required_execute_output_files": [
     "bundle_manifest.json",
     "run_report.json",
     "scheduler_evidence.json",
     "scheduler_report.json",
+    "run.log"
+  ],
+  "required_dry_run_output_files": [
+    "bundle_manifest.json",
+    "run_report.json",
+    "scheduler_evidence.json",
     "run.log"
   ],
   "validation_projection_fields": [
@@ -66,6 +82,23 @@
       "description": "Verify mixed-burst 64-core scheduler evidence recommends the scale_workers profile with stable reason codes.",
       "output_root": "target/scheduler-recommend-smoke",
       "command_prefix": "cargo run -p asupersync --bin offline_tuner --features cli,simd-intrinsics -- scheduler-recommend",
+      "scenario_class": "deterministic_lab_safe",
+      "execution_policy": "execute_or_dry_run",
+      "host_requirements": {
+        "min_worker_threads": 64,
+        "min_memory_gib": 256,
+        "notes": [
+          "Execute mode is safe because the evidence artifact is committed and deterministic.",
+          "This scenario is the lab-safe anchor for later real-host scheduler evidence bundles."
+        ]
+      },
+      "template_env": {
+        "SCHEDULER_RECOMMEND_SMOKE_OUTPUT_DIR": "Override the output root when bundling artifacts elsewhere."
+      },
+      "capture_plan": [
+        "Use the committed evidence artifact embedded in this contract.",
+        "Execute the runner directly or replay the emitted scheduler_evidence.json through offline_tuner."
+      ],
       "evidence_artifact": {
         "schema_version": "asupersync.scheduler-evidence.v1",
         "run_label": "mixed-burst-64c",
@@ -129,6 +162,76 @@
           "remote_steal_pressure"
         ]
       }
+    },
+    {
+      "scenario_id": "AA-SCHED-RECOMMEND-REAL-HOST-64C-256G",
+      "description": "Emit a dry-run-only real-host template bundle for collecting scheduler evidence on a 64-core / 256GiB swarm node before invoking offline_tuner.",
+      "output_root": "target/scheduler-recommend-smoke",
+      "command_prefix": "cargo run -p asupersync --bin offline_tuner --features cli,simd-intrinsics -- scheduler-recommend",
+      "scenario_class": "real_host_template",
+      "execution_policy": "dry_run_only",
+      "host_requirements": {
+        "min_worker_threads": 64,
+        "min_memory_gib": 256,
+        "recommended_cpu_governor": "performance",
+        "required_tools": [
+          "rch",
+          "jq"
+        ],
+        "notes": [
+          "Replace the placeholder metrics in the emitted scheduler_evidence.json with live host telemetry before invoking offline_tuner.",
+          "Use this template for operator-grade evidence capture on large swarm hosts, not as a deterministic correctness oracle."
+        ]
+      },
+      "template_env": {
+        "ASUPERSYNC_HOST_WORKER_THREADS": "64",
+        "ASUPERSYNC_HOST_MEMORY_GIB": "256",
+        "ASUPERSYNC_SCHEDULER_EVIDENCE_CAPTURE": "target/scheduler-evidence/live_host_capture.json",
+        "ASUPERSYNC_SCHEDULER_COMMAND_TEMPLATE": "cargo run -p asupersync --bin offline_tuner --features cli,simd-intrinsics -- scheduler-recommend --evidence-file <captured-evidence.json> --output-file <output.json>"
+      },
+      "capture_plan": [
+        "Populate wake-to-run, queue residency, ready backlog, cancel debt, and remote steal metrics from a real 64-core / 256GiB host.",
+        "Replace the placeholder notes and metrics in scheduler_evidence.json before direct offline_tuner execution.",
+        "Keep this runner invocation in dry-run mode; use the emitted bundle as a reproducible operator template."
+      ],
+      "evidence_artifact": {
+        "schema_version": "asupersync.scheduler-evidence.v1",
+        "run_label": "real-host-template-64c-256g",
+        "workload_class": "mixed_burst",
+        "topology": {
+          "worker_threads": 64,
+          "cohort_count": 2,
+          "memory_budget_gib": 256
+        },
+        "current_knobs": {
+          "worker_threads": 64,
+          "steal_batch_size": 8,
+          "cancel_streak_limit": 16,
+          "global_queue_limit": 0,
+          "parking_enabled": true
+        },
+        "metrics": {
+          "wake_to_run_p50_ns": 0,
+          "wake_to_run_p95_ns": 0,
+          "wake_to_run_p99_ns": 0,
+          "queue_residency_p50_ns": 0,
+          "queue_residency_p95_ns": 0,
+          "queue_residency_p99_ns": 0,
+          "ready_backlog_p95": 0,
+          "ready_backlog_p99": 0,
+          "cancel_debt_p95": 0,
+          "cancel_debt_p99": 0,
+          "remote_steal_ratio_pct": 0,
+          "cross_cohort_wake_p99_ns": 0
+        },
+        "notes": [
+          "real_host_template",
+          "replace_metrics_before_execute"
+        ]
+      },
+      "expected_profile_name_hint": "operator_captured",
+      "expected_reason_codes_hint": [],
+      "expected_report": null
     }
   ]
 }
