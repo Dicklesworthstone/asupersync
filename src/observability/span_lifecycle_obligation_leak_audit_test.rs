@@ -96,7 +96,10 @@ fn audit_unended_spans_create_obligation_leaks() {
     );
 
     for leak in &leaked_spans {
-        println!("   - Leaked span: {} (age: {:?})", leak.entity_id, leak.age);
+        println!(
+            "   - Leaked span: {:?} (age: {:?})",
+            leak.entity_id, leak.age
+        );
     }
 }
 

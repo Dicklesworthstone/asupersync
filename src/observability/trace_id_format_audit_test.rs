@@ -78,8 +78,8 @@ fn audit_trace_id_generator_never_all_zeros() {
 fn audit_parser_rejects_all_zero_trace_id() {
     // Test cases: various representations of all-zero trace_id
     let all_zero_cases = vec![
-        "00000000000000000000000000000000", // explicit all-zeros
-        "0".repeat(32),                     // generated all-zeros
+        "00000000000000000000000000000000".to_string(), // explicit all-zeros
+        "0".repeat(32),                                 // generated all-zeros
     ];
 
     for zero_trace_id in all_zero_cases {
