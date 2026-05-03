@@ -10,6 +10,7 @@ use asupersync::sync::ContendedMutex;
 use asupersync::types::{TaskId, Time};
 use serde_json::Value;
 use std::collections::BTreeSet;
+use std::path::Path;
 use std::sync::Arc;
 
 fn sample_artifact() -> SchedulerEvidenceArtifact {
@@ -192,6 +193,16 @@ fn runtime_scheduler_evidence_artifact_captures_live_dispatch_samples() {
             .any(|note| note.starts_with("sample_counts=")),
         "artifact should surface collected sample counts"
     );
+
+    if let Ok(capture_path) = std::env::var("ASUPERSYNC_SCHEDULER_EVIDENCE_CAPTURE_PATH") {
+        let capture_path = Path::new(&capture_path);
+        if let Some(parent) = capture_path.parent() {
+            std::fs::create_dir_all(parent).expect("create capture directory");
+        }
+        let payload =
+            serde_json::to_vec_pretty(&artifact).expect("serialize runtime capture artifact");
+        std::fs::write(capture_path, payload).expect("write runtime capture artifact");
+    }
 }
 
 fn load_scheduler_recommend_contract() -> Value {
@@ -231,14 +242,28 @@ fn scheduler_recommend_smoke_contract_matches_tuning_projection() {
             .iter()
             .any(|field| field.as_str() == Some("execution_policy"))
     );
+    assert!(
+        contract["required_bundle_fields"]
+            .as_array()
+            .expect("required_bundle_fields")
+            .iter()
+            .any(|field| field.as_str() == Some("capture_mode"))
+    );
+    assert!(
+        contract["required_run_report_fields"]
+            .as_array()
+            .expect("required_run_report_fields")
+            .iter()
+            .any(|field| field.as_str() == Some("capture_command_exit_code"))
+    );
 
     let scenarios = contract["smoke_scenarios"]
         .as_array()
         .expect("smoke_scenarios should be an array");
     assert_eq!(
         scenarios.len(),
-        2,
-        "expected deterministic + real-host scenarios"
+        3,
+        "expected fixture, runtime-capture, and real-host scenarios"
     );
 
     let scenario = scenario_by_id(&contract, "AA-SCHED-RECOMMEND-MIXED-BURST-64C");
@@ -275,6 +300,40 @@ fn scheduler_recommend_smoke_contract_matches_tuning_projection() {
     });
 
     assert_eq!(actual_projection, scenario["expected_report"]);
+}
+
+#[test]
+fn scheduler_recommend_smoke_contract_declares_runtime_capture_scenario() {
+    let contract = load_scheduler_recommend_contract();
+    let scenario = scenario_by_id(&contract, "AA-SCHED-RECOMMEND-RUNTIME-CAPTURE-2W");
+
+    assert_eq!(
+        scenario["scenario_class"].as_str(),
+        Some("deterministic_lab_safe")
+    );
+    assert_eq!(
+        scenario["execution_policy"].as_str(),
+        Some("execute_or_dry_run")
+    );
+    assert_eq!(
+        scenario["capture_mode"].as_str(),
+        Some("runtime_test_capture")
+    );
+    let capture_command = scenario["capture_command"]
+        .as_str()
+        .expect("runtime capture scenario should declare a capture command");
+    assert!(
+        capture_command
+            .contains("runtime_scheduler_evidence_artifact_captures_live_dispatch_samples"),
+        "capture command should target the live runtime evidence test"
+    );
+    assert_eq!(scenario["expected_report"], serde_json::Value::Null);
+    assert!(
+        scenario["template_env"]["ASUPERSYNC_SCHEDULER_EVIDENCE_CAPTURE_PATH"]
+            .as_str()
+            .is_some(),
+        "runner-managed capture path should be documented"
+    );
 }
 
 #[test]

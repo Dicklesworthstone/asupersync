@@ -76,6 +76,9 @@ write_bundle_manifest() {
     local status="${20}"
     local started_ts="${21}"
     local ended_ts="${22}"
+    local capture_mode="${23}"
+    local capture_command="${24}"
+    local capture_command_exit_code="${25}"
 
     jq -n \
         --arg schema_version "$(artifact_value '.runner_bundle_schema_version')" \
@@ -102,6 +105,9 @@ write_bundle_manifest() {
         --arg status "$status" \
         --arg started_ts "$started_ts" \
         --arg ended_ts "$ended_ts" \
+        --arg capture_mode "$capture_mode" \
+        --arg capture_command "$capture_command" \
+        --argjson capture_command_exit_code "$capture_command_exit_code" \
         '{
             schema_version: $schema_version,
             contract_version: $contract_version,
@@ -126,7 +132,10 @@ write_bundle_manifest() {
             validation_passed: $validation_passed,
             status: $status,
             started_ts: $started_ts,
-            ended_ts: $ended_ts
+            ended_ts: $ended_ts,
+            capture_mode: $capture_mode,
+            capture_command: $capture_command,
+            capture_command_exit_code: $capture_command_exit_code
         }' >"$bundle_path"
 }
 
@@ -148,6 +157,9 @@ write_run_report() {
     local capture_plan_json="${15}"
     local expected_report_json="${16}"
     local actual_report_json="${17}"
+    local capture_mode="${18}"
+    local capture_command="${19}"
+    local capture_command_exit_code="${20}"
 
     jq -n \
         --arg schema_version "$(artifact_value '.runner_report_schema_version')" \
@@ -169,6 +181,9 @@ write_run_report() {
         --argjson capture_plan "$capture_plan_json" \
         --argjson expected_report_projection "$expected_report_json" \
         --argjson actual_report_projection "$actual_report_json" \
+        --arg capture_mode "$capture_mode" \
+        --arg capture_command "$capture_command" \
+        --argjson capture_command_exit_code "$capture_command_exit_code" \
         '{
             schema_version: $schema_version,
             contract_version: $contract_version,
@@ -188,7 +203,10 @@ write_run_report() {
             template_env: $template_env,
             capture_plan: $capture_plan,
             expected_report_projection: $expected_report_projection,
-            actual_report_projection: $actual_report_projection
+            actual_report_projection: $actual_report_projection,
+            capture_mode: $capture_mode,
+            capture_command: $capture_command,
+            capture_command_exit_code: $capture_command_exit_code
         }' >"$run_report_path"
 }
 
@@ -255,6 +273,8 @@ EXPECTED_REPORT_JSON="$(jq -c '.expected_report // {}' <<<"$SCENARIO_JSON")"
 HAS_EXPECTED_REPORT="$(jq -r 'if .expected_report == null then "false" else "true" end' <<<"$SCENARIO_JSON")"
 EXPECTED_PROFILE_NAME="$(jq -r 'if .expected_report != null then (.expected_report.profile_name // "") else (.expected_profile_name_hint // "") end' <<<"$SCENARIO_JSON")"
 EXPECTED_REASON_CODES_JSON="$(jq -c 'if .expected_report != null then (.expected_report.reason_codes // []) else (.expected_reason_codes_hint // []) end' <<<"$SCENARIO_JSON")"
+CAPTURE_MODE="$(jq -r '.capture_mode // "embedded_contract_artifact"' <<<"$SCENARIO_JSON")"
+CAPTURE_COMMAND="$(jq -r '.capture_command // empty' <<<"$SCENARIO_JSON")"
 OUTPUT_ROOT="${OUTPUT_ROOT_OVERRIDE:-${PROJECT_ROOT}/${SCENARIO_OUTPUT_ROOT}}"
 TIMESTAMP="$(date +%Y%m%d_%H%M%S)"
 RUN_ID="run_${TIMESTAMP}"
@@ -267,26 +287,84 @@ RUN_REPORT="${RUN_DIR}/run_report.json"
 COMMAND="${COMMAND_PREFIX} --evidence-file ${EVIDENCE_FILE} --output-file ${REPORT_FILE}"
 
 mkdir -p "$RUN_DIR"
-jq '.evidence_artifact // .evidence_template' <<<"$SCENARIO_JSON" >"$EVIDENCE_FILE"
+
+capture_evidence() {
+    local mode="$1"
+    local command="$2"
+    local exit_code=0
+
+    case "$mode" in
+        embedded_contract_artifact)
+            jq '.evidence_artifact // .evidence_template' <<<"$SCENARIO_JSON" >"$EVIDENCE_FILE"
+            printf 'CAPTURE_EMBEDDED %s\n' "$EVIDENCE_FILE" >>"$LOG_FILE"
+            ;;
+        runtime_test_capture)
+            if [[ -z "$command" ]]; then
+                echo "FATAL: runtime_test_capture requires capture_command" >&2
+                return 1
+            fi
+            printf 'CAPTURE_COMMAND %s\n' "$command" >>"$LOG_FILE"
+            set +e
+            pushd "$PROJECT_ROOT" >/dev/null
+            ASUPERSYNC_SCHEDULER_EVIDENCE_CAPTURE_PATH="$EVIDENCE_FILE" \
+                bash -lc "$command" 2>&1 | tee -a "$LOG_FILE"
+            exit_code=${PIPESTATUS[0]}
+            popd >/dev/null
+            set -e
+            if [[ "$exit_code" -ne 0 ]]; then
+                return "$exit_code"
+            fi
+            if [[ ! -f "$EVIDENCE_FILE" ]]; then
+                echo "FATAL: capture command succeeded but did not emit ${EVIDENCE_FILE}" >&2
+                return 1
+            fi
+            ;;
+        *)
+            echo "FATAL: unsupported capture_mode=${mode}" >&2
+            return 1
+            ;;
+    esac
+
+    return 0
+}
+
+printf '' >"$LOG_FILE"
 
 echo "==================================================================="
 echo "           SCHEDULER RECOMMEND SMOKE: INPUT EVIDENCE               "
 echo "==================================================================="
-cat "$EVIDENCE_FILE"
-echo ""
 
 STARTED_TS="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 COMMAND_EXIT_CODE=0
+CAPTURE_COMMAND_EXIT_CODE=0
 SCRIPT_EXIT_CODE=0
 VALIDATION_PASSED=true
 STATUS="dry_run"
 MESSAGE="dry-run mode: command not executed"
 ACTUAL_REPORT_JSON='{}'
 
-if [[ "$MODE" == "dry-run" ]]; then
-    printf 'DRY_RUN %s\n' "$COMMAND" >"$LOG_FILE"
+set +e
+capture_evidence "$CAPTURE_MODE" "$CAPTURE_COMMAND"
+CAPTURE_COMMAND_EXIT_CODE=$?
+set -e
+
+if [[ "$CAPTURE_COMMAND_EXIT_CODE" -ne 0 ]]; then
+    STATUS="failed"
+    VALIDATION_PASSED=false
+    MESSAGE="evidence capture failed with exit ${CAPTURE_COMMAND_EXIT_CODE}"
+    SCRIPT_EXIT_CODE="$CAPTURE_COMMAND_EXIT_CODE"
+else
+    cat "$EVIDENCE_FILE"
+    echo ""
+fi
+
+if [[ "$CAPTURE_COMMAND_EXIT_CODE" -ne 0 ]]; then
+    :
+elif [[ "$MODE" == "dry-run" ]]; then
+    printf 'DRY_RUN %s\n' "$COMMAND" >>"$LOG_FILE"
+    MESSAGE="dry-run mode: evidence captured; offline_tuner not executed"
 elif [[ "$EXECUTION_POLICY" == "dry_run_only" ]]; then
-    printf 'REFUSED_EXECUTE %s\n' "$COMMAND" >"$LOG_FILE"
+    printf 'REFUSED_EXECUTE %s\n' "$COMMAND" >>"$LOG_FILE"
     STATUS="blocked"
     VALIDATION_PASSED=false
     MESSAGE="scenario execution_policy=dry_run_only; use --dry-run to emit the real-host template bundle"
@@ -379,7 +457,10 @@ write_bundle_manifest \
     "$VALIDATION_PASSED" \
     "$STATUS" \
     "$STARTED_TS" \
-    "$ENDED_TS"
+    "$ENDED_TS" \
+    "$CAPTURE_MODE" \
+    "$CAPTURE_COMMAND" \
+    "$CAPTURE_COMMAND_EXIT_CODE"
 
 write_run_report \
     "$RUN_REPORT" \
@@ -398,7 +479,10 @@ write_run_report \
     "$TEMPLATE_ENV_JSON" \
     "$CAPTURE_PLAN_JSON" \
     "$EXPECTED_REPORT_JSON" \
-    "$ACTUAL_REPORT_JSON"
+    "$ACTUAL_REPORT_JSON" \
+    "$CAPTURE_MODE" \
+    "$CAPTURE_COMMAND" \
+    "$CAPTURE_COMMAND_EXIT_CODE"
 
 if [[ -f "$REPORT_FILE" ]]; then
     echo ""

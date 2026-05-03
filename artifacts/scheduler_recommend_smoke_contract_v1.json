@@ -25,6 +25,9 @@
     "expected_profile_name",
     "expected_reason_codes",
     "command_exit_code",
+    "capture_mode",
+    "capture_command",
+    "capture_command_exit_code",
     "script_exit_code",
     "validation_passed",
     "status",
@@ -49,6 +52,9 @@
     "host_requirements",
     "template_env",
     "capture_plan",
+    "capture_mode",
+    "capture_command",
+    "capture_command_exit_code",
     "expected_report_projection",
     "actual_report_projection"
   ],
@@ -162,6 +168,35 @@
           "remote_steal_pressure"
         ]
       }
+    },
+    {
+      "scenario_id": "AA-SCHED-RECOMMEND-RUNTIME-CAPTURE-2W",
+      "description": "Capture a live runtime-emitted scheduler evidence artifact from the deterministic integration test, then replay it through offline_tuner.",
+      "output_root": "target/scheduler-recommend-smoke",
+      "command_prefix": "cargo run -p asupersync --bin offline_tuner --features cli,simd-intrinsics -- scheduler-recommend",
+      "scenario_class": "deterministic_lab_safe",
+      "execution_policy": "execute_or_dry_run",
+      "capture_mode": "runtime_test_capture",
+      "capture_command": "cargo test -p asupersync --features test-internals --test scheduler_swarm_evidence_artifact runtime_scheduler_evidence_artifact_captures_live_dispatch_samples -- --nocapture",
+      "host_requirements": {
+        "min_worker_threads": 2,
+        "min_memory_gib": 1,
+        "notes": [
+          "This scenario proves the reusable runner can consume a runtime-emitted scheduler evidence artifact instead of only the contract fixture.",
+          "The emitted metrics are deterministic enough for schema and pipeline validation, but not pinned to a fixed tuning projection."
+        ]
+      },
+      "template_env": {
+        "ASUPERSYNC_SCHEDULER_EVIDENCE_CAPTURE_PATH": "Runner-managed path for the integration test to write scheduler_evidence.json."
+      },
+      "capture_plan": [
+        "Execute the deterministic integration test with ASUPERSYNC_SCHEDULER_EVIDENCE_CAPTURE_PATH pointing at the bundle-local scheduler_evidence.json.",
+        "Replay the captured evidence through offline_tuner to prove the runner path works with live runtime artifacts.",
+        "Treat report completion and bundle integrity as the deterministic contract; the exact recommendation projection is intentionally not pinned here."
+      ],
+      "expected_profile_name_hint": "runtime_capture_observed",
+      "expected_reason_codes_hint": [],
+      "expected_report": null
     },
     {
       "scenario_id": "AA-SCHED-RECOMMEND-REAL-HOST-64C-256G",
