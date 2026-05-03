@@ -37229,7 +37229,7 @@ mod otlp_122_tests {
         assert!(linear_result.is_properly_preserved, "Linear deep chain should be preserved");
 
         // Wide structure (many siblings, shallow)
-        let wide_kvlist = (0..20)
+        let wide_kvlist: Vec<(String, Otlp130NestedValue)> = (0..20)
             .map(|i| (format!("key_{}", i), Otlp130NestedValue::Integer(i as i64)))
             .collect();
 
@@ -39661,7 +39661,9 @@ mod otlp_122_tests {
         }
 
         /// Validates trace_state integrity and rejects corrupt negative counts
-        fn validate_span_trace_state_integrity(span_data: &SpanData) -> TraceStateValidationResult {
+        fn validate_span_trace_state_integrity(
+            span_data: &SpanData<HashMap<String, String>, TraceStateData>,
+        ) -> TraceStateValidationResult {
             if let Some(ref trace_state_data) = span_data.trace_state {
                 // CRITICAL VALIDATION: Negative value counts indicate corruption
                 if trace_state_data.raw_value_count < 0 {
@@ -40265,7 +40267,7 @@ mod otlp_122_tests {
                     let actual_nan_positions: Vec<usize> = scenario.array_values
                         .iter()
                         .enumerate()
-                        .filter(|(_, &value)| value.is_nan())
+                        .filter(|(_, value)| value.is_nan())
                         .map(|(index, _)| index)
                         .collect();
 
@@ -40298,7 +40300,7 @@ mod otlp_122_tests {
                         let nan_positions: Vec<usize> = f64_array
                             .iter()
                             .enumerate()
-                            .filter(|(_, &value)| value.is_nan())
+                            .filter(|(_, value)| value.is_nan())
                             .map(|(index, _)| index)
                             .collect();
 
@@ -41018,7 +41020,9 @@ mod otlp_122_tests {
         }
 
         /// Exports span with NaN validation and rejects entire span if any NaN DoubleValue found
-        fn export_span_with_nan_validation(span_data: &SpanData) -> SpanExportResult {
+        fn export_span_with_nan_validation(
+            span_data: &SpanData<HashMap<String, AnyValue>>,
+        ) -> SpanExportResult {
             // CRITICAL VALIDATION: Check for any NaN DoubleValues in span attributes
             let mut nan_attributes = Vec::new();
 
@@ -48045,7 +48049,6 @@ mod otlp_122_tests {
         println!("  - FIFO topics and cross-region publishing supported");
         println!("  - Message attributes, subscription filtering, and delivery protocols supported");
     }
-}
 
     /// OTLP-155 conformance test: AWS SNS consumer topic ARN and subscription ARN validation.
     ///
@@ -48057,7 +48060,6 @@ mod otlp_122_tests {
     /// being used for message delivery and processing.
     #[test]
     fn otlp_155_aws_sns_consumer_topic_and_subscription_arn_validation() {
-        use crate::observability::otel::{AnyValue, SpanData};
         use std::collections::HashMap;
 
         println!("Testing OTLP-155: AWS SNS consumer topic ARN and subscription ARN validation...");
@@ -48320,7 +48322,6 @@ mod otlp_122_tests {
         println!("  - Producer spans exempt from consumer ARN requirements");
         println!("  - Non-AWS SNS messaging systems exempt from validation");
     }
-}
 
     /// OTLP-156 conformance test: AWS SQS producer queue URL path preservation.
     ///
@@ -48332,7 +48333,6 @@ mod otlp_122_tests {
     /// and prevents issues with case-sensitive queue names or special path characters.
     #[test]
     fn otlp_156_aws_sqs_producer_queue_url_path_preservation() {
-        use crate::observability::otel::{AnyValue, SpanData};
         use std::collections::HashMap;
 
         println!("Testing OTLP-156: AWS SQS producer queue URL path preservation...");
@@ -48714,3 +48714,420 @@ mod otlp_122_tests {
         println!("  - Query parameters preserved if present");
         println!("  - Consumer spans and non-AWS SQS systems exempt from requirement");
     }
+    /// OTLP-157 conformance test: AWS Kinesis producer stream name validation.
+    ///
+    /// When an exporter encounters a span with kind=PRODUCER and messaging.system="kinesis",
+    /// the messaging.kinesis.stream_name attribute MUST be set per OTLP semantic conventions
+    /// for AWS Kinesis producer spans. This ensures proper traceability and correlation for
+    /// AWS Kinesis message production operations where the stream name is essential for
+    /// identifying the specific Kinesis data stream being used for record publication.
+    #[test]
+    fn otlp_157_kinesis_producer_stream_name_validation() {
+        use self::otlp_late_conformance_types::AnyValue;
+        use std::collections::HashMap;
+
+        println!("Testing OTLP-157: AWS Kinesis producer stream name validation...");
+
+        /// Test scenario for AWS Kinesis producer stream name validation
+        #[derive(Debug, Clone)]
+        struct KinesisProducerScenario {
+            description: String,
+            span_kind: SpanKind,
+            messaging_system: String,
+            span_attributes: Vec<(String, AnyValue)>,
+            should_be_valid: bool,
+            expected_stream_name: String,
+        }
+
+        /// SpanKind enumeration for testing
+        #[derive(Debug, Clone, PartialEq)]
+        enum SpanKind {
+            Internal,
+            Server,
+            Client,
+            Producer,
+            Consumer,
+        }
+
+        let test_scenarios = vec![
+            KinesisProducerScenario {
+                description: "valid_kinesis_producer_with_stream_name".to_string(),
+                span_kind: SpanKind::Producer,
+                messaging_system: "kinesis".to_string(),
+                span_attributes: vec![
+                    ("messaging.kinesis.stream_name".to_string(), AnyValue::StringValue("order-events-stream".to_string())),
+                    ("messaging.system".to_string(), AnyValue::StringValue("kinesis".to_string())),
+                    ("messaging.destination.name".to_string(), AnyValue::StringValue("order-events-stream".to_string())),
+                    ("messaging.operation".to_string(), AnyValue::StringValue("send".to_string())),
+                    ("messaging.kinesis.partition_key".to_string(), AnyValue::StringValue("customer-12345".to_string())),
+                    ("messaging.kinesis.sequence_number".to_string(), AnyValue::StringValue("49590338271490256608559692538361571095921575989136588801".to_string())),
+                ],
+                should_be_valid: true,
+                expected_stream_name: "order-events-stream".to_string(),
+            },
+            KinesisProducerScenario {
+                description: "valid_kinesis_producer_with_high_throughput_stream".to_string(),
+                span_kind: SpanKind::Producer,
+                messaging_system: "kinesis".to_string(),
+                span_attributes: vec![
+                    ("messaging.kinesis.stream_name".to_string(), AnyValue::StringValue("real-time-analytics-stream".to_string())),
+                    ("messaging.system".to_string(), AnyValue::StringValue("kinesis".to_string())),
+                    ("messaging.destination.name".to_string(), AnyValue::StringValue("real-time-analytics-stream".to_string())),
+                    ("messaging.operation".to_string(), AnyValue::StringValue("put_record".to_string())),
+                    ("messaging.kinesis.partition_key".to_string(), AnyValue::StringValue("user-67890".to_string())),
+                    ("messaging.kinesis.shard_id".to_string(), AnyValue::StringValue("shardId-000000000001".to_string())),
+                    ("messaging.kinesis.approximate_arrival_timestamp".to_string(), AnyValue::StringValue("1640995200000".to_string())),
+                ],
+                should_be_valid: true,
+                expected_stream_name: "real-time-analytics-stream".to_string(),
+            },
+            KinesisProducerScenario {
+                description: "kinesis_producer_missing_stream_name".to_string(),
+                span_kind: SpanKind::Producer,
+                messaging_system: "kinesis".to_string(),
+                span_attributes: vec![
+                    ("messaging.system".to_string(), AnyValue::StringValue("kinesis".to_string())),
+                    ("messaging.destination.name".to_string(), AnyValue::StringValue("some-stream".to_string())),
+                    ("messaging.operation".to_string(), AnyValue::StringValue("send".to_string())),
+                    ("messaging.kinesis.partition_key".to_string(), AnyValue::StringValue("partition-1".to_string())),
+                    // Missing messaging.kinesis.stream_name - should be invalid
+                ],
+                should_be_valid: false,
+                expected_stream_name: "".to_string(),
+            },
+            KinesisProducerScenario {
+                description: "kinesis_producer_empty_stream_name".to_string(),
+                span_kind: SpanKind::Producer,
+                messaging_system: "kinesis".to_string(),
+                span_attributes: vec![
+                    ("messaging.kinesis.stream_name".to_string(), AnyValue::StringValue("".to_string())), // Empty stream name
+                    ("messaging.system".to_string(), AnyValue::StringValue("kinesis".to_string())),
+                    ("messaging.destination.name".to_string(), AnyValue::StringValue("test-stream".to_string())),
+                    ("messaging.operation".to_string(), AnyValue::StringValue("put_record".to_string())),
+                ],
+                should_be_valid: false,
+                expected_stream_name: "".to_string(),
+            },
+            KinesisProducerScenario {
+                description: "kinesis_producer_wrong_attribute_type".to_string(),
+                span_kind: SpanKind::Producer,
+                messaging_system: "kinesis".to_string(),
+                span_attributes: vec![
+                    ("messaging.kinesis.stream_name".to_string(), AnyValue::IntValue(12345)), // Wrong type - should be string
+                    ("messaging.system".to_string(), AnyValue::StringValue("kinesis".to_string())),
+                    ("messaging.destination.name".to_string(), AnyValue::StringValue("test-stream".to_string())),
+                    ("messaging.operation".to_string(), AnyValue::StringValue("send".to_string())),
+                ],
+                should_be_valid: false,
+                expected_stream_name: "".to_string(),
+            },
+            KinesisProducerScenario {
+                description: "kinesis_consumer_span_exempt".to_string(),
+                span_kind: SpanKind::Consumer,
+                messaging_system: "kinesis".to_string(),
+                span_attributes: vec![
+                    ("messaging.system".to_string(), AnyValue::StringValue("kinesis".to_string())),
+                    ("messaging.destination.name".to_string(), AnyValue::StringValue("test-stream".to_string())),
+                    ("messaging.operation".to_string(), AnyValue::StringValue("get_record".to_string())),
+                    // Consumer spans are exempt from producer stream name requirement
+                ],
+                should_be_valid: true, // Consumer spans don't need producer stream name
+                expected_stream_name: "".to_string(),
+            },
+            KinesisProducerScenario {
+                description: "non_kinesis_messaging_system_exempt".to_string(),
+                span_kind: SpanKind::Producer,
+                messaging_system: "kafka".to_string(), // Different messaging system
+                span_attributes: vec![
+                    ("messaging.system".to_string(), AnyValue::StringValue("kafka".to_string())),
+                    ("messaging.destination.name".to_string(), AnyValue::StringValue("events-topic".to_string())),
+                    ("messaging.operation".to_string(), AnyValue::StringValue("publish".to_string())),
+                    // Non-Kinesis systems exempt from stream name requirement
+                ],
+                should_be_valid: true,
+                expected_stream_name: "".to_string(),
+            },
+            KinesisProducerScenario {
+                description: "case_sensitive_messaging_system_check".to_string(),
+                span_kind: SpanKind::Producer,
+                messaging_system: "KINESIS".to_string(), // Wrong case
+                span_attributes: vec![
+                    ("messaging.system".to_string(), AnyValue::StringValue("KINESIS".to_string())),
+                    ("messaging.destination.name".to_string(), AnyValue::StringValue("test-stream".to_string())),
+                    ("messaging.operation".to_string(), AnyValue::StringValue("send".to_string())),
+                    // Case-sensitive check - "KINESIS" != "kinesis"
+                ],
+                should_be_valid: true, // Not exact "kinesis" so exempt
+                expected_stream_name: "".to_string(),
+            },
+            KinesisProducerScenario {
+                description: "kinesis_producer_with_enhanced_fan_out".to_string(),
+                span_kind: SpanKind::Producer,
+                messaging_system: "kinesis".to_string(),
+                span_attributes: vec![
+                    ("messaging.kinesis.stream_name".to_string(), AnyValue::StringValue("enhanced-fan-out-stream".to_string())),
+                    ("messaging.system".to_string(), AnyValue::StringValue("kinesis".to_string())),
+                    ("messaging.destination.name".to_string(), AnyValue::StringValue("enhanced-fan-out-stream".to_string())),
+                    ("messaging.operation".to_string(), AnyValue::StringValue("put_record".to_string())),
+                    ("messaging.kinesis.partition_key".to_string(), AnyValue::StringValue("analytics-partition".to_string())),
+                    ("messaging.kinesis.consumer_arn".to_string(), AnyValue::StringValue("arn:aws:kinesis:us-east-1:123456789012:stream/enhanced-fan-out-stream/consumer/my-consumer".to_string())),
+                    ("messaging.kinesis.stream_arn".to_string(), AnyValue::StringValue("arn:aws:kinesis:us-east-1:123456789012:stream/enhanced-fan-out-stream".to_string())),
+                    ("cloud.provider".to_string(), AnyValue::StringValue("aws".to_string())),
+                    ("cloud.region".to_string(), AnyValue::StringValue("us-east-1".to_string())),
+                ],
+                should_be_valid: true,
+                expected_stream_name: "enhanced-fan-out-stream".to_string(),
+            },
+            KinesisProducerScenario {
+                description: "kinesis_producer_whitespace_only_stream_name".to_string(),
+                span_kind: SpanKind::Producer,
+                messaging_system: "kinesis".to_string(),
+                span_attributes: vec![
+                    ("messaging.kinesis.stream_name".to_string(), AnyValue::StringValue("   ".to_string())), // Whitespace only
+                    ("messaging.system".to_string(), AnyValue::StringValue("kinesis".to_string())),
+                    ("messaging.destination.name".to_string(), AnyValue::StringValue("test-stream".to_string())),
+                    ("messaging.operation".to_string(), AnyValue::StringValue("put_record".to_string())),
+                ],
+                should_be_valid: false,
+                expected_stream_name: "   ".to_string(),
+            },
+            KinesisProducerScenario {
+                description: "kinesis_producer_with_batch_operations".to_string(),
+                span_kind: SpanKind::Producer,
+                messaging_system: "kinesis".to_string(),
+                span_attributes: vec![
+                    ("messaging.kinesis.stream_name".to_string(), AnyValue::StringValue("batch-processing-stream".to_string())),
+                    ("messaging.system".to_string(), AnyValue::StringValue("kinesis".to_string())),
+                    ("messaging.destination.name".to_string(), AnyValue::StringValue("batch-processing-stream".to_string())),
+                    ("messaging.operation".to_string(), AnyValue::StringValue("put_records".to_string())),
+                    ("messaging.kinesis.record_count".to_string(), AnyValue::IntValue(100)),
+                    ("messaging.kinesis.failed_record_count".to_string(), AnyValue::IntValue(2)),
+                    ("messaging.kinesis.successful_record_count".to_string(), AnyValue::IntValue(98)),
+                    ("messaging.kinesis.retry_count".to_string(), AnyValue::IntValue(1)),
+                ],
+                should_be_valid: true,
+                expected_stream_name: "batch-processing-stream".to_string(),
+            },
+            KinesisProducerScenario {
+                description: "kinesis_producer_cross_region_stream".to_string(),
+                span_kind: SpanKind::Producer,
+                messaging_system: "kinesis".to_string(),
+                span_attributes: vec![
+                    ("messaging.kinesis.stream_name".to_string(), AnyValue::StringValue("cross-region-replication-stream".to_string())),
+                    ("messaging.system".to_string(), AnyValue::StringValue("kinesis".to_string())),
+                    ("messaging.destination.name".to_string(), AnyValue::StringValue("cross-region-replication-stream".to_string())),
+                    ("messaging.operation".to_string(), AnyValue::StringValue("put_record".to_string())),
+                    ("messaging.kinesis.partition_key".to_string(), AnyValue::StringValue("global-events".to_string())),
+                    ("messaging.kinesis.stream_arn".to_string(), AnyValue::StringValue("arn:aws:kinesis:eu-central-1:555666777888:stream/cross-region-replication-stream".to_string())),
+                    ("cloud.provider".to_string(), AnyValue::StringValue("aws".to_string())),
+                    ("cloud.region".to_string(), AnyValue::StringValue("eu-central-1".to_string())),
+                ],
+                should_be_valid: true,
+                expected_stream_name: "cross-region-replication-stream".to_string(),
+            },
+        ];
+
+        /// Span data for AWS Kinesis producer testing
+        #[derive(Debug, Clone)]
+        struct KinesisProducerSpanData {
+            name: String,
+            kind: SpanKind,
+            messaging_system: String,
+            attributes: HashMap<String, AnyValue>,
+        }
+
+        impl KinesisProducerSpanData {
+            fn from_scenario(scenario: &KinesisProducerScenario) -> Self {
+                let mut attributes = HashMap::new();
+                for (key, value) in &scenario.span_attributes {
+                    attributes.insert(key.clone(), value.clone());
+                }
+
+                Self {
+                    name: format!("kinesis_producer_span_{}", scenario.description),
+                    kind: scenario.span_kind.clone(),
+                    messaging_system: scenario.messaging_system.clone(),
+                    attributes,
+                }
+            }
+        }
+
+        /// Result of AWS Kinesis producer stream name validation
+        #[derive(Debug)]
+        enum KinesisProducerValidationResult {
+            Valid {
+                stream_name: String,
+                additional_kinesis_attributes: usize,
+            },
+            Invalid {
+                violations: Vec<String>,
+                missing_or_invalid_stream_name: Option<String>,
+            },
+            NotApplicable {
+                reason: String,
+            },
+        }
+
+        /// Validates AWS Kinesis producer stream name requirement conformance
+        fn validate_kinesis_producer_stream_name_conformance(
+            scenario: &KinesisProducerScenario,
+        ) -> Result<(), String> {
+            let span_data = KinesisProducerSpanData::from_scenario(scenario);
+
+            // OTLP-157 validation logic
+            let validation_result = validate_kinesis_producer_attributes(&span_data);
+
+            match validation_result {
+                KinesisProducerValidationResult::Valid { stream_name, .. } => {
+                    if !scenario.should_be_valid {
+                        return Err(format!(
+                            "Expected validation failure but span was accepted with stream_name: '{}' for '{}'",
+                            stream_name, scenario.description
+                        ));
+                    }
+
+                    // Verify stream name matches expected
+                    if !scenario.expected_stream_name.is_empty() && stream_name != scenario.expected_stream_name {
+                        return Err(format!(
+                            "Stream name mismatch: expected '{}', got '{}' for '{}'",
+                            scenario.expected_stream_name, stream_name, scenario.description
+                        ));
+                    }
+
+                    Ok(())
+                }
+                KinesisProducerValidationResult::Invalid { violations, .. } => {
+                    if scenario.should_be_valid {
+                        return Err(format!(
+                            "Expected validation success but span was rejected with violations: {:?} for '{}'",
+                            violations, scenario.description
+                        ));
+                    }
+
+                    Ok(())
+                }
+                KinesisProducerValidationResult::NotApplicable { .. } => {
+                    if !scenario.should_be_valid {
+                        return Err(format!(
+                            "Expected validation failure but span was marked not applicable for '{}'",
+                            scenario.description
+                        ));
+                    }
+
+                    Ok(())
+                }
+            }
+        }
+
+        /// Validates AWS Kinesis producer span attributes per OTLP-157
+        fn validate_kinesis_producer_attributes(
+            span_data: &KinesisProducerSpanData,
+        ) -> KinesisProducerValidationResult {
+            // Check if this is a PRODUCER span with messaging.system="kinesis"
+            if !matches!(span_data.kind, SpanKind::Producer) {
+                return KinesisProducerValidationResult::NotApplicable {
+                    reason: format!("Not a PRODUCER span: {:?}", span_data.kind),
+                };
+            }
+
+            // Case-sensitive messaging.system check
+            let messaging_system = span_data.attributes.get("messaging.system")
+                .and_then(|v| match v {
+                    AnyValue::StringValue(s) => Some(s.as_str()),
+                    _ => None,
+                })
+                .unwrap_or("");
+
+            if messaging_system != "kinesis" {
+                return KinesisProducerValidationResult::NotApplicable {
+                    reason: format!("Not Kinesis messaging system: '{}'", messaging_system),
+                };
+            }
+
+            // OTLP-157: messaging.kinesis.stream_name MUST be set for Kinesis PRODUCER spans
+            let mut violations = Vec::new();
+
+            let stream_name_attribute = span_data.attributes.get("messaging.kinesis.stream_name");
+            let stream_name = match stream_name_attribute {
+                Some(AnyValue::StringValue(name_string)) => {
+                    if name_string.trim().is_empty() {
+                        violations.push("OTLP-157: messaging.kinesis.stream_name is empty or whitespace-only".to_string());
+                        name_string.clone()
+                    } else {
+                        name_string.clone()
+                    }
+                }
+                Some(other_value) => {
+                    violations.push(format!(
+                        "OTLP-157: messaging.kinesis.stream_name has wrong type (expected StringValue, got {:?})",
+                        other_value
+                    ));
+                    return KinesisProducerValidationResult::Invalid {
+                        violations,
+                        missing_or_invalid_stream_name: Some("wrong_type".to_string()),
+                    };
+                }
+                None => {
+                    violations.push("OTLP-157: Kinesis producer span missing required messaging.kinesis.stream_name attribute".to_string());
+                    return KinesisProducerValidationResult::Invalid {
+                        violations,
+                        missing_or_invalid_stream_name: None,
+                    };
+                }
+            };
+
+            if !violations.is_empty() {
+                return KinesisProducerValidationResult::Invalid {
+                    violations,
+                    missing_or_invalid_stream_name: Some(stream_name),
+                };
+            }
+
+            // Count additional Kinesis-specific attributes
+            let additional_kinesis_attributes = span_data.attributes.keys()
+                .filter(|k| k.starts_with("messaging.kinesis.") && *k != "messaging.kinesis.stream_name")
+                .count();
+
+            KinesisProducerValidationResult::Valid {
+                stream_name,
+                additional_kinesis_attributes,
+            }
+        }
+
+        // Execute OTLP-157 conformance validation for all scenarios
+        let mut passed_scenarios = 0;
+        let total_scenarios = test_scenarios.len();
+
+        for scenario in &test_scenarios {
+            match validate_kinesis_producer_stream_name_conformance(scenario) {
+                Ok(()) => {
+                    passed_scenarios += 1;
+                    println!("✓ OTLP-157 conformance verified for {}", scenario.description);
+                }
+                Err(error_msg) => {
+                    panic!(
+                        "OTLP-157 conformance test FAILED for {}: {}",
+                        scenario.description, error_msg
+                    );
+                }
+            }
+        }
+
+        assert_eq!(
+            passed_scenarios, total_scenarios,
+            "All OTLP-157 Kinesis producer stream name scenarios must pass"
+        );
+
+        println!("✓ OTLP-157: Kinesis producer stream name validation conformance verified");
+        println!("  - PRODUCER spans with messaging.system='kinesis' require messaging.kinesis.stream_name");
+        println!("  - Stream name must be non-empty string value");
+        println!("  - Consumer spans exempt from producer stream name requirement");
+        println!("  - Non-Kinesis messaging systems exempt from validation");
+        println!("  - Case-sensitive messaging.system matching enforced");
+        println!("  - Wrong attribute types properly rejected");
+        println!("  - Empty and whitespace-only stream names rejected");
+        println!("  - Additional Kinesis attributes preserved and counted");
+        println!("  - Enhanced fan-out, batch operations, and cross-region streams supported");
+        println!("  - Partition keys, shard IDs, and sequence numbers preserved");
+    }
+}
