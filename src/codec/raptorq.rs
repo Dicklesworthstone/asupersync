@@ -257,6 +257,45 @@ mod golden_tests {
         );
     }
 
+    #[test]
+    fn systematic_encoder_creation_option_seam_is_explicit() {
+        use crate::raptorq::systematic::SystematicEncoder;
+
+        let source = vec![vec![0x11; 8], vec![0x22; 8]];
+        let encoder = SystematicEncoder::new(&source, 8, 0xF6C0_DE00)
+            .ok_or_else(|| "systematic encoder creation returned None".to_string());
+
+        assert!(
+            encoder.is_ok(),
+            "supported small-K source block should construct via the current Option-returning seam"
+        );
+
+        let missing = Option::<SystematicEncoder>::None
+            .ok_or_else(|| "systematic encoder creation returned None".to_string())
+            .expect_err("None must map to the stable diagnostic used by codec tests");
+        assert_eq!(
+            missing, "systematic encoder creation returned None",
+            "Option-to-Result adapter message drift"
+        );
+    }
+
+    #[test]
+    fn decode_error_debug_diagnostic_is_used_for_roundtrip_failures() {
+        let diagnostic = format!(
+            "Decoding failed in round-trip: {:?}",
+            crate::raptorq::decoder::DecodeError::SymbolSizeMismatch {
+                expected: 8,
+                actual: 7,
+            }
+        );
+
+        assert_eq!(
+            diagnostic,
+            "Decoding failed in round-trip: SymbolSizeMismatch { expected: 8, actual: 7 }",
+            "DecodeError intentionally exposes Debug, not Display, at this codec test seam"
+        );
+    }
+
     /// Differential conformance test: RaptorQ encode-decode round-trip vs RFC 6330 §6 reference.
     ///
     /// Verifies that our RaptorQ implementation produces encode-decode round-trips
@@ -965,7 +1004,7 @@ mod golden_tests {
 
             // STEP 1: Original encoding - encode(x)
             let encoder1 = SystematicEncoder::new(&source_data, symbol_size, seed)
-                .map_err(|e| format!("Original encoder creation failed: {}", e))?;
+                .ok_or_else(|| "Original encoder creation failed".to_string())?;
 
             // Collect original encoded symbols (source + some repair symbols for testing)
             let repair_count = k / 2 + 1; // Ensure sufficient repair symbols
@@ -1001,7 +1040,10 @@ mod golden_tests {
                 if (*esi as usize) >= k {
                     if let Ok((columns, coefficients)) = decoder.repair_equation(*esi) {
                         received_symbols.push(ReceivedSymbol::repair(
-                            *esi, columns, coefficients, data.clone(),
+                            *esi,
+                            columns,
+                            coefficients,
+                            data.clone(),
                         ));
                     }
                 }
@@ -1010,7 +1052,7 @@ mod golden_tests {
             // Perform decoding to recover original source data
             let decode_result = decoder
                 .decode(&received_symbols)
-                .map_err(|e| format!("Decoding failed in round-trip: {}", e))?;
+                .map_err(|e| format!("Decoding failed in round-trip: {e:?}"))?;
 
             // Verify decoding recovered original data exactly
             if decode_result.source.len() != k {
@@ -1036,7 +1078,7 @@ mod golden_tests {
 
             // STEP 3: Re-encode phase - encode(decode(encode(x)))
             let encoder2 = SystematicEncoder::new(&decode_result.source, symbol_size, seed)
-                .map_err(|e| format!("Second encoder creation failed: {}", e))?;
+                .ok_or_else(|| "Second encoder creation failed".to_string())?;
 
             // METAMORPHIC PROPERTY VERIFICATION: encode(decode(encode(x))) == encode(x)
             // Compare source symbols (systematic property)
@@ -1099,7 +1141,7 @@ mod golden_tests {
 
         // Final verification: test the metamorphic relation for edge cases
         let edge_cases = vec![
-            (1, 1), // Minimal case
+            (1, 1),  // Minimal case
             (2, 64), // Small K with large symbols
             (64, 2), // Large K with small symbols
         ];
