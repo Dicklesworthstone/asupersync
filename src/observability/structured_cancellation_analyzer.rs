@@ -9,6 +9,7 @@ use crate::observability::{
     cancellation_tracer::{CancellationTrace, CancellationTracer, CancellationTracerConfig},
     cancellation_visualizer::{CancellationDashboard, CancellationVisualizer, VisualizerConfig},
 };
+use crate::runtime::TraceStorageProfile;
 use crate::types::{CancelKind, CancelReason, Time};
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
@@ -52,6 +53,26 @@ impl Default for StructuredCancellationConfig {
             max_memory_usage_mb: 100,
             trace_retention_duration: Duration::from_secs(3600), // 1 hour
             enable_structured_logging: true,
+        }
+    }
+}
+
+impl StructuredCancellationConfig {
+    /// Builds a structured-cancellation profile aligned with runtime trace storage.
+    #[must_use]
+    pub fn for_trace_storage_profile(profile: TraceStorageProfile) -> Self {
+        const MIB: usize = 1024 * 1024;
+
+        let budget = profile.budget();
+        let cold_trace_budget_bytes = budget.estimated_cold_bytes();
+        let max_memory_usage_mb =
+            cold_trace_budget_bytes.saturating_add(MIB.saturating_sub(1)) / MIB;
+
+        Self {
+            tracer_config: CancellationTracerConfig::for_trace_storage_profile(profile),
+            trace_retention_duration: profile.distributed_trace_max_age(),
+            max_memory_usage_mb: max_memory_usage_mb.max(1),
+            ..Self::default()
         }
     }
 }

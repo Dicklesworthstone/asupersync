@@ -1,6 +1,6 @@
 //! Integration proofs for trace storage profile budgeting and runtime plumbing.
 
-use asupersync::observability::CancellationTracerConfig;
+use asupersync::observability::{CancellationTracerConfig, StructuredCancellationConfig};
 use asupersync::runtime::{RuntimeBuilder, TraceStorageProfile};
 use asupersync::trace::distributed::collector::SymbolTraceCollector;
 use asupersync::trace::distributed::context::RegionTag;
@@ -76,5 +76,27 @@ fn large_memory_trace_profile_widens_cold_trace_retention_limits() {
     assert!(
         large_collector.max_age() > default_collector.max_age(),
         "large-memory profile should extend distributed trace retention age"
+    );
+}
+
+#[test]
+fn large_memory_trace_profile_scales_structured_cancellation_budget() {
+    let default_config =
+        StructuredCancellationConfig::for_trace_storage_profile(TraceStorageProfile::Default);
+    let large_config = StructuredCancellationConfig::for_trace_storage_profile(
+        TraceStorageProfile::LargeMemory256G,
+    );
+
+    assert!(
+        large_config.tracer_config.max_traces > default_config.tracer_config.max_traces,
+        "large-memory profile should retain more cancellation traces in the analyzer"
+    );
+    assert!(
+        large_config.max_memory_usage_mb > default_config.max_memory_usage_mb,
+        "large-memory profile should publish a larger cold-trace memory budget"
+    );
+    assert!(
+        large_config.trace_retention_duration > default_config.trace_retention_duration,
+        "large-memory profile should retain structured cancellation traces longer"
     );
 }
