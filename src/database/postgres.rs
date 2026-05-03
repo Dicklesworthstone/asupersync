@@ -1179,7 +1179,7 @@ impl<'a> PgRowStream<'a> {
         if cx.checkpoint().is_err() {
             return Outcome::Cancelled(
                 cx.cancel_reason()
-                    .unwrap_or_else(|| CancelReason::user("cancelled"))
+                    .unwrap_or_else(|| CancelReason::user("cancelled")),
             );
         }
 
@@ -1204,7 +1204,7 @@ impl<'a> PgRowStream<'a> {
                     // DataRow - parse and return single row
                     let (Some(cols), Some(indices)) = (&self.columns, &self.column_indices) else {
                         return Outcome::Err(PgError::Protocol(
-                            "received DataRow before RowDescription in streaming query".to_string()
+                            "received DataRow before RowDescription in streaming query".to_string(),
                         ));
                     };
 
@@ -1227,6 +1227,7 @@ impl<'a> PgRowStream<'a> {
                 b'Z' => {
                     // ReadyForQuery - stream complete
                     self.finished = true;
+                    self.connection.inner.closed = false;
                     if let Err(e) = self.connection.handle_ready_for_query(&data) {
                         return Outcome::Err(e);
                     }
@@ -1291,9 +1292,20 @@ impl PgConnection {
             Ok(m) => m,
             Err(e) => return Outcome::Err(e),
         };
-        match self.write_message(cx, &query_msg).await {
-            Ok(()) => {}
-            Err(err) => return self.fail_in_flight(err),
+
+        match self.ensure_no_orphaned_transaction(cx).await {
+            Outcome::Ok(()) => {}
+            Outcome::Err(err) => return Outcome::Err(err),
+            Outcome::Cancelled(reason) => return Outcome::Cancelled(reason),
+            Outcome::Panicked(payload) => return Outcome::Panicked(payload),
+        }
+
+        // Mark closed until ReadyForQuery so cancellation or drop cannot leave
+        // a half-consumed stream available for a new protocol exchange.
+        self.inner.closed = true;
+
+        if let Err(err) = self.write_all(cx, &query_msg).await {
+            return self.fail_in_flight(err);
         }
 
         // Return streaming iterator
@@ -1326,15 +1338,23 @@ impl PgConnection {
             return Outcome::Err(PgError::ConnectionClosed);
         }
 
+        match self.flush_pending_deallocates_before_request(cx).await {
+            Outcome::Ok(()) => {}
+            Outcome::Err(err) => return Outcome::Err(err),
+            Outcome::Cancelled(reason) => return Outcome::Cancelled(reason),
+            Outcome::Panicked(payload) => return Outcome::Panicked(payload),
+        }
+
         // Use extended query protocol for parameterized queries
-        let stmt_name = "";  // Unnamed statement
+        let stmt_name = ""; // Unnamed statement
         let portal_name = ""; // Unnamed portal
 
-        let parse_msg = match build_parse_msg(stmt_name, sql, &[]) {
+        let param_oids: Vec<u32> = params.iter().map(ToSql::type_oid).collect();
+        let parse_msg = match build_parse_msg(stmt_name, sql, &param_oids) {
             Ok(msg) => msg,
             Err(e) => return Outcome::Err(e),
         };
-        let bind_msg = match build_bind_msg(portal_name, stmt_name, &[], params) {
+        let bind_msg = match build_bind_msg(portal_name, stmt_name, params, Format::Text) {
             Ok(msg) => msg,
             Err(e) => return Outcome::Err(e),
         };
@@ -1347,22 +1367,24 @@ impl PgConnection {
             Err(e) => return Outcome::Err(e),
         };
 
-        // Send all messages
-        match self.write_message(cx, &parse_msg).await {
-            Ok(()) => {}
-            Err(err) => return self.fail_in_flight(err),
+        let total = parse_msg.len() + bind_msg.len() + execute_msg.len() + sync_msg.len();
+        let mut combined = Vec::with_capacity(total);
+        combined.extend_from_slice(&parse_msg);
+        combined.extend_from_slice(&bind_msg);
+        combined.extend_from_slice(&execute_msg);
+        combined.extend_from_slice(&sync_msg);
+
+        match self.ensure_no_orphaned_transaction(cx).await {
+            Outcome::Ok(()) => {}
+            Outcome::Err(err) => return Outcome::Err(err),
+            Outcome::Cancelled(reason) => return Outcome::Cancelled(reason),
+            Outcome::Panicked(payload) => return Outcome::Panicked(payload),
         }
-        match self.write_message(cx, &bind_msg).await {
-            Ok(()) => {}
-            Err(err) => return self.fail_in_flight(err),
-        }
-        match self.write_message(cx, &execute_msg).await {
-            Ok(()) => {}
-            Err(err) => return self.fail_in_flight(err),
-        }
-        match self.write_message(cx, &sync_msg).await {
-            Ok(()) => {}
-            Err(err) => return self.fail_in_flight(err),
+
+        self.inner.closed = true;
+
+        if let Err(err) = self.write_all(cx, &combined).await {
+            return self.fail_in_flight(err);
         }
 
         // Return streaming iterator
@@ -3448,6 +3470,7 @@ impl PgConnection {
         tls_active: bool,
         tls_leaf_cert: Option<Vec<u8>>,
     ) -> Result<ScramChannelBinding, PgError> {
+        #[cfg(feature = "tls")]
         let server_offers_plus = mechanisms.iter().any(|m| m == "SCRAM-SHA-256-PLUS");
 
         #[cfg(feature = "tls")]
@@ -13691,9 +13714,6 @@ mod tests {
     /// This test ensures the fix for the critical memory accumulation defect works correctly.
     #[test]
     fn regression_postgres_streaming_query_bounded_memory() {
-        use std::sync::Arc;
-        use std::collections::BTreeMap;
-
         let (mut conn, mut peer) = make_test_connection_with_peer();
         let cx = Cx::for_testing();
 
@@ -13784,11 +13804,14 @@ mod tests {
                     let data_value = row.get("data").expect("data column should exist");
 
                     // Verify data consistency
-                    if let (PgValue::Text(id_str), PgValue::Text(data_str)) = (id_value, data_value) {
+                    if let (PgValue::Text(id_str), PgValue::Text(data_str)) = (id_value, data_value)
+                    {
                         let expected_id = processed_count.to_string();
                         assert_eq!(*id_str, expected_id, "ID should match row index");
-                        assert!(data_str.contains(&format!("row_data_{}", processed_count)),
-                               "Data should contain row index");
+                        assert!(
+                            data_str.contains(&format!("row_data_{}", processed_count)),
+                            "Data should contain row index"
+                        );
                     } else {
                         panic!("Expected text values for both columns");
                     }
@@ -13798,19 +13821,27 @@ mod tests {
                     // CRITICAL: At this point, only ONE row should be in memory
                     // Not 1000 rows accumulated in a Vec<PgRow>
                     if processed_count == 1 {
-                        eprintln!("{{\"regression_test\":\"streaming_memory\",\"status\":\"FIRST_ROW_RECEIVED\",\"memory_usage\":\"O(1)\",\"accumulated_rows_in_memory\":1}}");
+                        eprintln!(
+                            "{{\"regression_test\":\"streaming_memory\",\"status\":\"FIRST_ROW_RECEIVED\",\"memory_usage\":\"O(1)\",\"accumulated_rows_in_memory\":1}}"
+                        );
                     }
                     if processed_count == 100 {
-                        eprintln!("{{\"regression_test\":\"streaming_memory\",\"status\":\"100_ROWS_PROCESSED\",\"memory_usage\":\"still_O(1)\",\"accumulated_rows_in_memory\":1}}");
+                        eprintln!(
+                            "{{\"regression_test\":\"streaming_memory\",\"status\":\"100_ROWS_PROCESSED\",\"memory_usage\":\"still_O(1)\",\"accumulated_rows_in_memory\":1}}"
+                        );
                     }
 
                     // Verify we haven't accumulated all rows in memory
-                    assert!(total_memory_should_be_bounded,
-                           "Memory usage should remain bounded throughout streaming");
+                    assert!(
+                        total_memory_should_be_bounded,
+                        "Memory usage should remain bounded throughout streaming"
+                    );
 
                     // Break early to avoid processing all rows in test (time constraint)
                     if processed_count >= 50 {
-                        eprintln!("{{\"regression_test\":\"streaming_memory\",\"status\":\"EARLY_TERMINATION\",\"processed\":50,\"verified\":\"bounded_memory\"}}");
+                        eprintln!(
+                            "{{\"regression_test\":\"streaming_memory\",\"status\":\"EARLY_TERMINATION\",\"processed\":50,\"verified\":\"bounded_memory\"}}"
+                        );
                         break;
                     }
                 }
@@ -13824,15 +13855,72 @@ mod tests {
         }
 
         // Verify streaming worked
-        assert!(processed_count > 0, "Should have processed at least some rows");
+        assert!(
+            processed_count > 0,
+            "Should have processed at least some rows"
+        );
         assert!(processed_count <= row_count, "Should not exceed total rows");
 
         // REGRESSION VERIFICATION: Memory usage was bounded to single row
         // vs the old implementation that would accumulate all rows
-        eprintln!("{{\"regression_test\":\"PASS\",\"memory_model\":\"O(1)_per_row\",\"processed\":{},\"expected\":\"{}\"}}",
-                 processed_count, expected_memory_usage);
+        eprintln!(
+            "{{\"regression_test\":\"PASS\",\"memory_model\":\"O(1)_per_row\",\"processed\":{},\"expected\":\"{}\"}}",
+            processed_count, expected_memory_usage
+        );
 
         responder.join().expect("responder thread should complete");
+    }
+
+    #[test]
+    fn regression_postgres_streaming_params_writes_extended_protocol_frames() {
+        let (mut conn, mut peer) = make_test_connection_with_peer();
+        let cx = Cx::for_testing();
+        let value: i32 = 42;
+        let params: [&dyn ToSql; 1] = [&value];
+
+        let stream = match run(conn.query_stream_params(&cx, "SELECT $1::int4", &params)) {
+            Outcome::Ok(stream) => stream,
+            other => panic!("expected streaming params setup to succeed, got {other:?}"),
+        };
+
+        assert!(
+            stream.connection.inner.closed,
+            "streaming extended query must stay fail-closed until ReadyForQuery"
+        );
+
+        let written = read_until_contains(&mut peer, &[b'S', 0, 0, 0, 4]);
+        assert_eq!(written[0], b'P', "first extended frame should be Parse");
+        assert!(
+            written
+                .windows(b"SELECT $1::int4\0".len())
+                .any(|window| window == b"SELECT $1::int4\0"),
+            "Parse frame should include the SQL string"
+        );
+        assert!(
+            written
+                .windows(4)
+                .any(|window| window == oid::INT4.to_be_bytes()),
+            "Parse frame should carry the inferred INT4 parameter OID"
+        );
+        assert!(
+            written.iter().any(|byte| *byte == b'B'),
+            "Bind frame should be present"
+        );
+        assert!(
+            written.windows(2).any(|window| window == b"42"),
+            "Bind frame should serialize the parameter value"
+        );
+        assert!(
+            written
+                .windows(10)
+                .any(|window| window == [b'E', 0, 0, 0, 9, 0, 0, 0, 0, 0]),
+            "Execute frame should request all rows from the unnamed portal"
+        );
+
+        eprintln!(
+            "{{\"regression_test\":\"streaming_params_extended_protocol\",\"frames\":\"Parse,Bind,Execute,Sync\",\"param_oid\":{},\"param_value\":\"42\",\"fail_closed_until_ready_for_query\":true}}",
+            oid::INT4
+        );
     }
 
     /// Audit test for PostgreSQL ErrorResponse SQLSTATE preservation.
