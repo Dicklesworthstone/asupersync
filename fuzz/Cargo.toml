@@ -4562,6 +4562,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "h2_request_authority_special_chars"
+path = "fuzz_targets/h2_request_authority_special_chars.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "h2_settings_max_concurrent_streams_zero"
 path = "fuzz_targets/h2_settings_max_concurrent_streams_zero.rs"
 test = false
