@@ -22,19 +22,21 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use asupersync::record::task::TaskRecord;
 use asupersync::runtime::RuntimeState;
+use asupersync::runtime::config::BlockingPoolAffinityProfile;
 use asupersync::runtime::scheduler::local_queue::Stealer;
 use asupersync::runtime::scheduler::stealing::steal_task;
 use asupersync::runtime::scheduler::{
     GlobalQueue, IntrusiveRing, IntrusiveStack, LocalQueue, Parker, QUEUE_TAG_READY, Scheduler,
     ThreeLaneScheduler,
 };
+use asupersync::runtime::{BlockingPool, BlockingPoolOptions};
 use asupersync::sync::ContendedMutex;
 use asupersync::types::{Budget, RegionId, TaskId, Time};
 use asupersync::util::{Arena, DetRng};
 use std::collections::{BinaryHeap, VecDeque};
-use std::sync::Arc;
+use std::sync::{Arc, Barrier};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 const BURST_TASKS: usize = 10_000;
 
@@ -150,6 +152,72 @@ fn run_global_ready_contention_case(
         total_dispatched,
         metrics.global_ready_batch_drains,
         metrics.global_ready_batch_tasks,
+    )
+}
+
+fn blocking_affinity_bench_pool(
+    affinity_profile: BlockingPoolAffinityProfile,
+    cohort_count: Option<usize>,
+) -> BlockingPool {
+    let options = BlockingPoolOptions {
+        idle_timeout: Duration::from_millis(100),
+        time_getter: Instant::now,
+        sleep_fn: thread::sleep,
+        thread_name_prefix: "bench-blocking-affinity".to_string(),
+        on_thread_start: None,
+        on_thread_stop: None,
+        affinity_profile,
+        cohort_count,
+    };
+    BlockingPool::with_config(2, 2, options)
+}
+
+fn run_blocking_affinity_saturation_case(
+    affinity_profile: BlockingPoolAffinityProfile,
+    cohort_count: usize,
+    queued_task_count: usize,
+) -> (usize, usize, usize) {
+    let pool = blocking_affinity_bench_pool(affinity_profile, Some(cohort_count));
+    let start_barrier = Arc::new(Barrier::new(3));
+    let release_barrier = Arc::new(Barrier::new(3));
+
+    let blocker0_start = Arc::clone(&start_barrier);
+    let blocker0_release = Arc::clone(&release_barrier);
+    let blocker0 = pool.spawn_on_cohort(0, move || {
+        blocker0_start.wait();
+        blocker0_release.wait();
+    });
+
+    let blocker1_start = Arc::clone(&start_barrier);
+    let blocker1_release = Arc::clone(&release_barrier);
+    let blocker1 = pool.spawn_on_cohort(1 % cohort_count.max(1), move || {
+        blocker1_start.wait();
+        blocker1_release.wait();
+    });
+
+    start_barrier.wait();
+
+    let queued_handles: Vec<_> = (0..queued_task_count)
+        .map(|_| pool.spawn_on_cohort(0, thread::yield_now))
+        .collect();
+
+    release_barrier.wait();
+
+    blocker0.wait();
+    blocker1.wait();
+    for handle in queued_handles {
+        handle.wait();
+    }
+
+    let metrics = pool.affinity_metrics();
+    assert!(
+        pool.shutdown_and_wait(Duration::from_secs(1)),
+        "blocking affinity bench pool should shutdown cleanly"
+    );
+    (
+        metrics.local_queue_dispatches,
+        metrics.spill_dispatches,
+        metrics.fallback_dispatches,
     )
 }
 
@@ -1860,6 +1928,44 @@ fn bench_adaptive_cancel_streak_policy(c: &mut Criterion) {
     group.finish();
 }
 
+fn bench_blocking_pool_affinity(c: &mut Criterion) {
+    let mut group = c.benchmark_group("runtime/blocking_pool_affinity");
+    group.throughput(Throughput::Elements(4));
+
+    group.bench_function("disabled_saturation", |b: &mut criterion::Bencher| {
+        b.iter_batched(
+            || (),
+            |_| {
+                black_box(run_blocking_affinity_saturation_case(
+                    BlockingPoolAffinityProfile::Disabled,
+                    2,
+                    4,
+                ))
+            },
+            BatchSize::PerIteration,
+        )
+    });
+
+    group.bench_function("cohort_biased_saturation", |b: &mut criterion::Bencher| {
+        b.iter_batched(
+            || (),
+            |_| {
+                black_box(run_blocking_affinity_saturation_case(
+                    BlockingPoolAffinityProfile::CohortBiased {
+                        local_queue_soft_limit: 1,
+                        spill_check_interval: 1,
+                    },
+                    2,
+                    4,
+                ))
+            },
+            BatchSize::PerIteration,
+        )
+    });
+
+    group.finish();
+}
+
 // =============================================================================
 // MAIN
 // =============================================================================
@@ -1886,6 +1992,7 @@ criterion_group!(
     bench_cancel_preemption,
     bench_three_lane_decision,
     bench_adaptive_cancel_streak_policy,
+    bench_blocking_pool_affinity,
 );
 
 criterion_main!(benches);
