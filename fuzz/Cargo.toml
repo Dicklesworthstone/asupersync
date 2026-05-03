@@ -5300,3 +5300,10 @@ path = "fuzz_targets/h2_request_pseudo_authority_with_unicode.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "h2_request_pseudo_path_with_percent_encoding"
+path = "fuzz_targets/h2_request_pseudo_path_with_percent_encoding.rs"
+test = false
+doc = false
+bench = false
