@@ -3413,7 +3413,8 @@ mod tests {
             .expect("final modify should work");
 
         // Verify change notification works
-        poll_ready(&mut Box::pin(changed_future));
+        poll_ready(&mut Box::pin(changed_future))
+            .expect("changed future should observe the final send_modify");
         crate::assert_with_log!(
             *rx.borrow() == 100,
             "receiver notifications work after panic recovery",

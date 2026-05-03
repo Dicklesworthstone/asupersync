@@ -573,14 +573,14 @@ fn map_consumer_error(err: RdKafkaError) -> KafkaError {
     }
 }
 
-#[cfg(any(feature = "kafka", test))]
+#[cfg(feature = "kafka")]
 fn consumer_retry_backoff(config: &ConsumerConfig, attempt: u32) -> Duration {
     let base_ms = config.heartbeat_interval.as_millis().max(1) as u64;
     let exp = 1_u64 << attempt.min(6);
     Duration::from_millis(base_ms.saturating_mul(exp).min(5000))
 }
 
-#[cfg(any(feature = "kafka", test))]
+#[cfg(feature = "kafka")]
 async fn wait_consumer_retry_backoff(cx: &Cx, delay: Duration) -> Result<(), KafkaError> {
     if delay.is_zero() {
         cx.checkpoint().map_err(|_| KafkaError::Cancelled)?;
@@ -603,7 +603,7 @@ async fn wait_consumer_retry_backoff(cx: &Cx, delay: Duration) -> Result<(), Kaf
     .await
 }
 
-#[cfg(any(feature = "kafka", test))]
+#[cfg(feature = "kafka")]
 async fn retry_consumer_operation<T, F>(
     cx: &Cx,
     config: &ConsumerConfig,
