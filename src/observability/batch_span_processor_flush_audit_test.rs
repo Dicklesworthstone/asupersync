@@ -25,7 +25,7 @@ use std::sync::{
 use std::time::{Duration, Instant};
 
 /// Mock collector that simulates network delay and ACK behavior.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct MockCollectorExporter {
     export_delay: Duration,
     flush_delay: Duration,
@@ -413,7 +413,7 @@ fn audit_send_and_forget_antipattern() {
     println!("   • Result: data loss");
 
     /// Defective exporter that demonstrates send-and-forget
-    #[derive(Debug)]
+    #[derive(Debug, Clone)]
     struct SendAndForgetExporter {
         export_count: Arc<AtomicU64>,
         pending_exports: Arc<AtomicUsize>,

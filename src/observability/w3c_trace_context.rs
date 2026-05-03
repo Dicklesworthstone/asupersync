@@ -72,6 +72,12 @@ impl TraceFlags {
     pub const fn is_sampled(self) -> bool {
         self.0 & 0x01 != 0
     }
+
+    /// Returns the raw trace-flags byte.
+    #[must_use]
+    pub const fn bits(self) -> u8 {
+        self.0
+    }
 }
 
 #[derive(Debug, Clone)]

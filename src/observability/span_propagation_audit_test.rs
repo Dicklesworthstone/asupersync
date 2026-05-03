@@ -16,6 +16,7 @@
 
 use crate::observability::w3c_trace_context::*;
 use std::collections::HashMap;
+use std::str::FromStr;
 
 /// Simulates HTTP request with W3C trace context.
 struct MockHttpRequest {

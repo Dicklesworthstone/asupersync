@@ -25,7 +25,7 @@ use std::sync::{
 use std::time::{Duration, Instant};
 
 /// Mock exporter that can simulate network partitions and recovery.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct PartitionSimulatorExporter {
     is_partitioned: Arc<AtomicBool>,
     export_attempts: Arc<AtomicU64>,

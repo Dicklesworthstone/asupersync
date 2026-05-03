@@ -560,6 +560,7 @@ impl Drop for LoadSheddingTraceExporter {
 }
 
 /// Mock OTLP HTTP exporter for testing.
+#[derive(Clone)]
 pub struct MockOtlpHttpExporter {
     exported_batches: Arc<Mutex<Vec<SpanBatch>>>,
     export_delay: Duration,
