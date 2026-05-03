@@ -4915,6 +4915,13 @@ test = false
 doc = false
 
 [[bin]]
+name = "h2_settings_max_frame_size_change_mid"
+path = "fuzz_targets/h2_settings_max_frame_size_change_mid.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "h1_te_chunked_extension_dos"
 path = "fuzz_targets/h1_te_chunked_extension_dos.rs"
 test = false
