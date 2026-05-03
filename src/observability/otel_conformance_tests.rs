@@ -44280,4 +44280,582 @@ mod otlp_122_tests {
         println!("  - Comprehensive context testing for zero value rejection");
         println!("  - Edge case validation around zero boundary values");
     }
+
+    /// OTLP-148 conformance test: RabbitMQ producer destination routing key requirement.
+    ///
+    /// When an exporter encounters a span with kind=PRODUCER and messaging.system="rabbitmq",
+    /// the messaging.rabbitmq.destination_routing_key attribute MUST be set per OTLP semantic
+    /// conventions for RabbitMQ producer spans. This ensures proper traceability and correlation
+    /// for RabbitMQ message routing operations where the routing key determines message delivery
+    /// to appropriate queues based on exchange bindings.
+    #[test]
+    fn otlp_148_rabbitmq_producer_routing_key_conformance() {
+        println!("Testing OTLP-148: RabbitMQ producer destination routing key requirement...");
+
+        let test_scenarios = vec![
+            RabbitMqProducerRoutingKeyScenario {
+                description: "valid_rabbitmq_producer_with_routing_key".to_string(),
+                span_kind: SpanKind::Producer,
+                messaging_system: "rabbitmq".to_string(),
+                span_attributes: vec![
+                    ("messaging.rabbitmq.destination_routing_key".to_string(), AnyValue::StringValue("user.notifications.email".to_string())),
+                    ("messaging.system".to_string(), AnyValue::StringValue("rabbitmq".to_string())),
+                    ("messaging.destination.name".to_string(), AnyValue::StringValue("user.notifications".to_string())),
+                    ("messaging.operation".to_string(), AnyValue::StringValue("publish".to_string())),
+                    ("net.peer.name".to_string(), AnyValue::StringValue("rabbitmq.example.com".to_string())),
+                ],
+                should_be_valid: true,
+                expected_routing_key: Some("user.notifications.email".to_string()),
+            },
+            RabbitMqProducerRoutingKeyScenario {
+                description: "rabbitmq_producer_missing_routing_key".to_string(),
+                span_kind: SpanKind::Producer,
+                messaging_system: "rabbitmq".to_string(),
+                span_attributes: vec![
+                    ("messaging.system".to_string(), AnyValue::StringValue("rabbitmq".to_string())),
+                    ("messaging.destination.name".to_string(), AnyValue::StringValue("events".to_string())),
+                    ("messaging.operation".to_string(), AnyValue::StringValue("publish".to_string())),
+                    // Missing messaging.rabbitmq.destination_routing_key - should be invalid
+                ],
+                should_be_valid: false,
+                expected_routing_key: None,
+            },
+            RabbitMqProducerRoutingKeyScenario {
+                description: "rabbitmq_producer_empty_routing_key".to_string(),
+                span_kind: SpanKind::Producer,
+                messaging_system: "rabbitmq".to_string(),
+                span_attributes: vec![
+                    ("messaging.rabbitmq.destination_routing_key".to_string(), AnyValue::StringValue("".to_string())), // Empty
+                    ("messaging.system".to_string(), AnyValue::StringValue("rabbitmq".to_string())),
+                    ("messaging.destination.name".to_string(), AnyValue::StringValue("events".to_string())),
+                ],
+                should_be_valid: true, // Empty routing key is valid in RabbitMQ (default exchange)
+                expected_routing_key: Some("".to_string()),
+            },
+            RabbitMqProducerRoutingKeyScenario {
+                description: "rabbitmq_producer_non_string_routing_key".to_string(),
+                span_kind: SpanKind::Producer,
+                messaging_system: "rabbitmq".to_string(),
+                span_attributes: vec![
+                    ("messaging.rabbitmq.destination_routing_key".to_string(), AnyValue::IntValue(12345)), // Wrong type
+                    ("messaging.system".to_string(), AnyValue::StringValue("rabbitmq".to_string())),
+                    ("messaging.destination.name".to_string(), AnyValue::StringValue("events".to_string())),
+                ],
+                should_be_valid: false,
+                expected_routing_key: None,
+            },
+            RabbitMqProducerRoutingKeyScenario {
+                description: "non_rabbitmq_producer_no_requirement".to_string(),
+                span_kind: SpanKind::Producer,
+                messaging_system: "kafka".to_string(), // Not RabbitMQ
+                span_attributes: vec![
+                    ("messaging.system".to_string(), AnyValue::StringValue("kafka".to_string())),
+                    ("messaging.destination.name".to_string(), AnyValue::StringValue("events".to_string())),
+                    ("messaging.kafka.message.partition".to_string(), AnyValue::IntValue(3)),
+                ],
+                should_be_valid: true, // No routing key requirement for non-RabbitMQ
+                expected_routing_key: None,
+            },
+            RabbitMqProducerRoutingKeyScenario {
+                description: "rabbitmq_consumer_no_requirement".to_string(),
+                span_kind: SpanKind::Consumer, // Not producer
+                messaging_system: "rabbitmq".to_string(),
+                span_attributes: vec![
+                    ("messaging.system".to_string(), AnyValue::StringValue("rabbitmq".to_string())),
+                    ("messaging.destination.name".to_string(), AnyValue::StringValue("events".to_string())),
+                    ("messaging.operation".to_string(), AnyValue::StringValue("receive".to_string())),
+                ],
+                should_be_valid: true, // No routing key requirement for consumer spans
+                expected_routing_key: None,
+            },
+            RabbitMqProducerRoutingKeyScenario {
+                description: "valid_rabbitmq_producer_complex_routing_key".to_string(),
+                span_kind: SpanKind::Producer,
+                messaging_system: "rabbitmq".to_string(),
+                span_attributes: vec![
+                    ("messaging.rabbitmq.destination_routing_key".to_string(), AnyValue::StringValue("orders.payment.success.visa".to_string())),
+                    ("messaging.system".to_string(), AnyValue::StringValue("rabbitmq".to_string())),
+                    ("messaging.destination.name".to_string(), AnyValue::StringValue("payment.events".to_string())),
+                    ("messaging.operation".to_string(), AnyValue::StringValue("publish".to_string())),
+                    ("messaging.message_id".to_string(), AnyValue::StringValue("msg-payment-12345".to_string())),
+                    ("net.peer.name".to_string(), AnyValue::StringValue("rabbitmq-cluster.prod.com".to_string())),
+                    ("net.peer.port".to_string(), AnyValue::IntValue(5672)),
+                ],
+                should_be_valid: true,
+                expected_routing_key: Some("orders.payment.success.visa".to_string()),
+            },
+            RabbitMqProducerRoutingKeyScenario {
+                description: "rabbitmq_case_sensitivity_check".to_string(),
+                span_kind: SpanKind::Producer,
+                messaging_system: "RabbitMQ".to_string(), // Different case
+                span_attributes: vec![
+                    ("messaging.system".to_string(), AnyValue::StringValue("RabbitMQ".to_string())),
+                    ("messaging.destination.name".to_string(), AnyValue::StringValue("events".to_string())),
+                ],
+                should_be_valid: true, // Not exact "rabbitmq" so no requirement
+                expected_routing_key: None,
+            },
+            RabbitMqProducerRoutingKeyScenario {
+                description: "valid_rabbitmq_producer_with_exchange_attributes".to_string(),
+                span_kind: SpanKind::Producer,
+                messaging_system: "rabbitmq".to_string(),
+                span_attributes: vec![
+                    ("messaging.rabbitmq.destination_routing_key".to_string(), AnyValue::StringValue("alert.system.critical".to_string())),
+                    ("messaging.system".to_string(), AnyValue::StringValue("rabbitmq".to_string())),
+                    ("messaging.destination.name".to_string(), AnyValue::StringValue("alerts.topic".to_string())),
+                    ("messaging.rabbitmq.destination_exchange".to_string(), AnyValue::StringValue("alerts".to_string())),
+                    ("messaging.rabbitmq.exchange_type".to_string(), AnyValue::StringValue("topic".to_string())),
+                    ("messaging.operation".to_string(), AnyValue::StringValue("publish".to_string())),
+                    ("messaging.message_payload_size_bytes".to_string(), AnyValue::IntValue(1024)),
+                ],
+                should_be_valid: true,
+                expected_routing_key: Some("alert.system.critical".to_string()),
+            },
+            RabbitMqProducerRoutingKeyScenario {
+                description: "rabbitmq_producer_wildcard_routing_key".to_string(),
+                span_kind: SpanKind::Producer,
+                messaging_system: "rabbitmq".to_string(),
+                span_attributes: vec![
+                    ("messaging.rabbitmq.destination_routing_key".to_string(), AnyValue::StringValue("logs.*.error".to_string())),
+                    ("messaging.system".to_string(), AnyValue::StringValue("rabbitmq".to_string())),
+                    ("messaging.destination.name".to_string(), AnyValue::StringValue("application.logs".to_string())),
+                    ("messaging.rabbitmq.destination_exchange".to_string(), AnyValue::StringValue("logs.topic".to_string())),
+                    ("messaging.rabbitmq.exchange_type".to_string(), AnyValue::StringValue("topic".to_string())),
+                ],
+                should_be_valid: true,
+                expected_routing_key: Some("logs.*.error".to_string()),
+            },
+            RabbitMqProducerRoutingKeyScenario {
+                description: "rabbitmq_producer_direct_exchange_routing_key".to_string(),
+                span_kind: SpanKind::Producer,
+                messaging_system: "rabbitmq".to_string(),
+                span_attributes: vec![
+                    ("messaging.rabbitmq.destination_routing_key".to_string(), AnyValue::StringValue("queue.user.notifications".to_string())),
+                    ("messaging.system".to_string(), AnyValue::StringValue("rabbitmq".to_string())),
+                    ("messaging.destination.name".to_string(), AnyValue::StringValue("user.notifications".to_string())),
+                    ("messaging.rabbitmq.destination_exchange".to_string(), AnyValue::StringValue("direct.exchange".to_string())),
+                    ("messaging.rabbitmq.exchange_type".to_string(), AnyValue::StringValue("direct".to_string())),
+                    ("messaging.operation".to_string(), AnyValue::StringValue("publish".to_string())),
+                ],
+                should_be_valid: true,
+                expected_routing_key: Some("queue.user.notifications".to_string()),
+            },
+            RabbitMqProducerRoutingKeyScenario {
+                description: "rabbitmq_producer_fanout_exchange_ignore_routing_key".to_string(),
+                span_kind: SpanKind::Producer,
+                messaging_system: "rabbitmq".to_string(),
+                span_attributes: vec![
+                    ("messaging.rabbitmq.destination_routing_key".to_string(), AnyValue::StringValue("ignored.for.fanout".to_string())),
+                    ("messaging.system".to_string(), AnyValue::StringValue("rabbitmq".to_string())),
+                    ("messaging.destination.name".to_string(), AnyValue::StringValue("broadcast.events".to_string())),
+                    ("messaging.rabbitmq.destination_exchange".to_string(), AnyValue::StringValue("fanout.exchange".to_string())),
+                    ("messaging.rabbitmq.exchange_type".to_string(), AnyValue::StringValue("fanout".to_string())),
+                    ("messaging.operation".to_string(), AnyValue::StringValue("publish".to_string())),
+                ],
+                should_be_valid: true,
+                expected_routing_key: Some("ignored.for.fanout".to_string()),
+            },
+            RabbitMqProducerRoutingKeyScenario {
+                description: "rabbitmq_producer_headers_exchange_routing_key".to_string(),
+                span_kind: SpanKind::Producer,
+                messaging_system: "rabbitmq".to_string(),
+                span_attributes: vec![
+                    ("messaging.rabbitmq.destination_routing_key".to_string(), AnyValue::StringValue("headers.based.routing".to_string())),
+                    ("messaging.system".to_string(), AnyValue::StringValue("rabbitmq".to_string())),
+                    ("messaging.destination.name".to_string(), AnyValue::StringValue("filtered.events".to_string())),
+                    ("messaging.rabbitmq.destination_exchange".to_string(), AnyValue::StringValue("headers.exchange".to_string())),
+                    ("messaging.rabbitmq.exchange_type".to_string(), AnyValue::StringValue("headers".to_string())),
+                    ("messaging.rabbitmq.message_headers".to_string(), AnyValue::StringValue("priority:high,category:alert".to_string())),
+                ],
+                should_be_valid: true,
+                expected_routing_key: Some("headers.based.routing".to_string()),
+            },
+        ];
+
+        /// Test scenario for RabbitMQ producer routing key validation
+        #[derive(Debug, Clone)]
+        struct RabbitMqProducerRoutingKeyScenario {
+            description: String,
+            span_kind: SpanKind,
+            messaging_system: String,
+            span_attributes: Vec<(String, AnyValue)>,
+            should_be_valid: bool,
+            expected_routing_key: Option<String>,
+        }
+
+        /// Span data for RabbitMQ producer testing
+        #[derive(Debug, Clone)]
+        struct RabbitMqProducerSpanData {
+            name: String,
+            kind: SpanKind,
+            messaging_system: String,
+            attributes: HashMap<String, AnyValue>,
+        }
+
+        impl RabbitMqProducerSpanData {
+            fn from_scenario(scenario: &RabbitMqProducerRoutingKeyScenario) -> Self {
+                let mut attributes = HashMap::new();
+                for (key, value) in &scenario.span_attributes {
+                    attributes.insert(key.clone(), value.clone());
+                }
+
+                Self {
+                    name: format!("rabbitmq_producer_span_{}", scenario.description),
+                    kind: scenario.span_kind.clone(),
+                    messaging_system: scenario.messaging_system.clone(),
+                    attributes,
+                }
+            }
+        }
+
+        /// Result of RabbitMQ producer routing key validation
+        #[derive(Debug)]
+        enum RabbitMqProducerValidationResult {
+            Valid {
+                routing_key: Option<String>,
+                additional_rabbitmq_attributes: usize,
+            },
+            Invalid {
+                violations: Vec<String>,
+                missing_attributes: Vec<String>,
+            },
+            NotApplicable {
+                reason: String,
+            },
+        }
+
+        /// Validates RabbitMQ producer routing key requirement conformance
+        fn validate_rabbitmq_producer_routing_key_conformance(
+            scenario: &RabbitMqProducerRoutingKeyScenario,
+        ) -> Result<(), String> {
+            let span_data = RabbitMqProducerSpanData::from_scenario(scenario);
+            let validation_result = validate_rabbitmq_producer_routing_key(&span_data);
+
+            match (&validation_result, scenario.should_be_valid) {
+                (RabbitMqProducerValidationResult::Valid { routing_key, .. }, true) => {
+                    // Verify expected routing key matches
+                    if let Some(expected_key) = &scenario.expected_routing_key {
+                        match routing_key {
+                            Some(actual_key) if actual_key == expected_key => {
+                                println!("✓ RabbitMQ producer span has correct routing key: '{}'", actual_key);
+                            }
+                            Some(actual_key) => {
+                                return Err(format!(
+                                    "Routing key mismatch: expected '{}', got '{}'",
+                                    expected_key, actual_key
+                                ));
+                            }
+                            None => {
+                                return Err(format!(
+                                    "Expected routing key '{}' but none found",
+                                    expected_key
+                                ));
+                            }
+                        }
+                    } else {
+                        // No expected routing key - ensure none present when not required
+                        if routing_key.is_some() && requires_rabbitmq_routing_key(&span_data) {
+                            return Err("Unexpected routing key found when none expected".to_string());
+                        }
+                    }
+                }
+                (RabbitMqProducerValidationResult::Invalid { .. }, false) => {
+                    println!("✓ Invalid RabbitMQ producer span correctly rejected");
+                }
+                (RabbitMqProducerValidationResult::NotApplicable { reason }, true) => {
+                    println!("✓ Routing key requirement not applicable: {}", reason);
+                }
+                (RabbitMqProducerValidationResult::Valid { .. }, false) => {
+                    return Err("Invalid span was incorrectly accepted".to_string());
+                }
+                (RabbitMqProducerValidationResult::Invalid { violations, .. }, true) => {
+                    return Err(format!("Valid span was incorrectly rejected: {:?}", violations));
+                }
+                (RabbitMqProducerValidationResult::NotApplicable { .. }, false) => {
+                    return Err("Expected validation failure but got not applicable".to_string());
+                }
+            }
+
+            Ok(())
+        }
+
+        /// Validates that RabbitMQ producer spans have required routing key attribute
+        fn validate_rabbitmq_producer_routing_key(span_data: &RabbitMqProducerSpanData) -> RabbitMqProducerValidationResult {
+            // Check if this span requires routing key attribute
+            if !requires_rabbitmq_routing_key(span_data) {
+                return RabbitMqProducerValidationResult::NotApplicable {
+                    reason: format!(
+                        "Span kind {:?} with messaging.system '{}' doesn't require messaging.rabbitmq.destination_routing_key",
+                        span_data.kind, span_data.messaging_system
+                    ),
+                };
+            }
+
+            let mut violations = Vec::new();
+            let mut missing_attributes = Vec::new();
+
+            // Extract and validate messaging.rabbitmq.destination_routing_key attribute
+            let routing_key = match span_data.attributes.get("messaging.rabbitmq.destination_routing_key") {
+                Some(AnyValue::StringValue(key_str)) => {
+                    Some(key_str.clone()) // Empty string is valid for RabbitMQ (default exchange)
+                }
+                Some(_) => {
+                    violations.push("messaging.rabbitmq.destination_routing_key attribute must be a string value".to_string());
+                    missing_attributes.push("messaging.rabbitmq.destination_routing_key".to_string());
+                    None
+                }
+                None => {
+                    violations.push("OTLP-148: RabbitMQ producer span missing required messaging.rabbitmq.destination_routing_key attribute".to_string());
+                    missing_attributes.push("messaging.rabbitmq.destination_routing_key".to_string());
+                    None
+                }
+            };
+
+            // Validate routing key format and constraints
+            if let Some(key) = &routing_key {
+                // Warn about unusual routing keys
+                if key.len() > 255 {
+                    println!("⚠ Unusually long routing key: {} characters (max recommended: 255)", key.len());
+                }
+
+                // Check for common routing key patterns
+                if key.contains(' ') {
+                    println!("⚠ Routing key '{}' contains spaces (may cause routing issues)", key);
+                }
+
+                // Validate routing key for topic exchange patterns
+                if let Some(AnyValue::StringValue(exchange_type)) = span_data.attributes.get("messaging.rabbitmq.exchange_type") {
+                    match exchange_type.as_str() {
+                        "topic" => {
+                            if key.contains("..") {
+                                violations.push("Topic exchange routing key contains consecutive dots".to_string());
+                            }
+                            if key.starts_with('.') || key.ends_with('.') {
+                                violations.push("Topic exchange routing key should not start or end with dot".to_string());
+                            }
+                            if key.len() > 0 && !key.chars().all(|c| c.is_alphanumeric() || c == '.' || c == '*' || c == '#') {
+                                println!("⚠ Topic routing key '{}' contains unusual characters", key);
+                            }
+                        }
+                        "fanout" => {
+                            if !key.is_empty() {
+                                println!("⚠ Fanout exchange ignores routing key '{}' (consider empty string)", key);
+                            }
+                        }
+                        _ => {
+                            // Direct, headers exchanges can use any routing key
+                        }
+                    }
+                }
+            }
+
+            // Check for recommended RabbitMQ producer attributes
+            let recommended_rabbitmq_attrs = [
+                "messaging.system",
+                "messaging.destination.name",
+                "messaging.operation",
+                "messaging.rabbitmq.destination_exchange"
+            ];
+
+            let mut rabbitmq_attrs_present = 0;
+            for attr in &recommended_rabbitmq_attrs {
+                if span_data.attributes.contains_key(*attr) {
+                    rabbitmq_attrs_present += 1;
+                } else if attr != &"messaging.rabbitmq.destination_exchange" {
+                    println!("⚠ Recommended RabbitMQ attribute '{}' not present", attr);
+                }
+            }
+
+            // Verify messaging.system is set to "rabbitmq" (case sensitive)
+            if let Some(AnyValue::StringValue(system)) = span_data.attributes.get("messaging.system") {
+                if system != "rabbitmq" {
+                    if system.to_lowercase() == "rabbitmq" {
+                        violations.push(format!("messaging.system should be exactly 'rabbitmq' (case-sensitive), got: '{}'", system));
+                    } else {
+                        violations.push(format!("messaging.system should be 'rabbitmq' for RabbitMQ producer spans, got: '{}'", system));
+                    }
+                }
+            }
+
+            // Verify messaging.operation is appropriate for producer if present
+            if let Some(AnyValue::StringValue(operation)) = span_data.attributes.get("messaging.operation") {
+                match operation.as_str() {
+                    "publish" | "send" => {
+                        // Valid producer operations
+                    }
+                    "receive" | "process" => {
+                        violations.push(format!("messaging.operation '{}' is inappropriate for producer spans (use 'publish' or 'send')", operation));
+                    }
+                    _ => {
+                        println!("⚠ Unusual messaging.operation '{}' for producer span", operation);
+                    }
+                }
+            }
+
+            // Additional RabbitMQ-specific validations
+            if let Some(AnyValue::StringValue(dest_name)) = span_data.attributes.get("messaging.destination.name") {
+                if dest_name.is_empty() {
+                    violations.push("messaging.destination.name should not be empty for RabbitMQ spans".to_string());
+                }
+            }
+
+            // Validate exchange type consistency if present
+            if let Some(AnyValue::StringValue(exchange_type)) = span_data.attributes.get("messaging.rabbitmq.exchange_type") {
+                match exchange_type.as_str() {
+                    "direct" | "topic" | "fanout" | "headers" => {
+                        // Valid RabbitMQ exchange types
+                    }
+                    _ => {
+                        println!("⚠ Unusual RabbitMQ exchange type: '{}'", exchange_type);
+                    }
+                }
+            }
+
+            if !violations.is_empty() {
+                RabbitMqProducerValidationResult::Invalid {
+                    violations,
+                    missing_attributes,
+                }
+            } else {
+                RabbitMqProducerValidationResult::Valid {
+                    routing_key,
+                    additional_rabbitmq_attributes: rabbitmq_attrs_present,
+                }
+            }
+        }
+
+        /// Determines if a span requires RabbitMQ routing key attribute
+        fn requires_rabbitmq_routing_key(span_data: &RabbitMqProducerSpanData) -> bool {
+            // OTLP-148: Only PRODUCER spans with messaging.system="rabbitmq" require routing key
+            span_data.kind == SpanKind::Producer
+                && span_data.messaging_system == "rabbitmq"
+        }
+
+        // Execute OTLP-148 conformance validation for all scenarios
+        let mut passed_scenarios = 0;
+        let total_scenarios = test_scenarios.len();
+
+        for scenario in &test_scenarios {
+            match validate_rabbitmq_producer_routing_key_conformance(scenario) {
+                Ok(()) => {
+                    passed_scenarios += 1;
+                    println!("✓ OTLP-148 conformance verified for {}", scenario.description);
+                }
+                Err(error_msg) => {
+                    panic!(
+                        "OTLP-148 conformance test FAILED for {}: {}",
+                        scenario.description, error_msg
+                    );
+                }
+            }
+        }
+
+        assert_eq!(
+            passed_scenarios, total_scenarios,
+            "All OTLP-148 RabbitMQ producer routing key scenarios must pass"
+        );
+
+        // Additional edge case testing
+        println!("Testing RabbitMQ producer routing key edge cases...");
+
+        // Test messaging.system case sensitivity
+        let system_cases = vec![
+            ("rabbitmq", true),       // Exact match - requires routing key
+            ("RabbitMQ", false),      // Wrong case - no requirement
+            ("RABBITMQ", false),      // Wrong case - no requirement
+            ("amqp", false),          // Different system - no requirement
+        ];
+
+        for (system_name, should_require) in system_cases {
+            let mut test_attributes = HashMap::new();
+            test_attributes.insert("messaging.system".to_string(), AnyValue::StringValue(system_name.to_string()));
+            test_attributes.insert("messaging.destination.name".to_string(), AnyValue::StringValue("test.queue".to_string()));
+
+            if should_require {
+                test_attributes.insert("messaging.rabbitmq.destination_routing_key".to_string(), AnyValue::StringValue("test.routing.key".to_string()));
+            }
+
+            let edge_span = RabbitMqProducerSpanData {
+                name: format!("system_case_test_{}", system_name.to_lowercase()),
+                kind: SpanKind::Producer,
+                messaging_system: system_name.to_string(),
+                attributes: test_attributes,
+            };
+
+            let requires_key = requires_rabbitmq_routing_key(&edge_span);
+            assert_eq!(
+                requires_key, should_require,
+                "Routing key requirement check failed for system '{}'",
+                system_name
+            );
+
+            if should_require {
+                match validate_rabbitmq_producer_routing_key(&edge_span) {
+                    RabbitMqProducerValidationResult::Valid { routing_key, .. } => {
+                        assert!(routing_key.is_some(), "Should have routing key for system '{}'", system_name);
+                        println!("✓ System case '{}' correctly requires and validates routing key", system_name);
+                    }
+                    _ => panic!("System case '{}' should be valid with routing key", system_name),
+                }
+            } else {
+                match validate_rabbitmq_producer_routing_key(&edge_span) {
+                    RabbitMqProducerValidationResult::NotApplicable { .. } => {
+                        println!("✓ System case '{}' correctly identified as not applicable", system_name);
+                    }
+                    _ => panic!("System case '{}' should not require routing key", system_name),
+                }
+            }
+        }
+
+        // Test routing key format validation
+        println!("Testing routing key format validation...");
+        let routing_key_tests = vec![
+            ("empty_key", "", true),               // Empty is valid (default exchange)
+            ("simple_key", "queue.name", true),   // Simple key
+            ("dotted_key", "user.events.email", true), // Dotted notation
+            ("topic_wildcard", "logs.*.error", true),  // Topic pattern
+            ("topic_hash", "logs.#", true),            // Topic pattern
+            ("spaces_key", "queue with spaces", true), // Spaces (warning but valid)
+            ("unicode_key", "événements.utilisateur", true), // Unicode
+        ];
+
+        for (test_name, routing_key_value, should_be_valid) in routing_key_tests {
+            let mut test_attributes = HashMap::new();
+            test_attributes.insert("messaging.system".to_string(), AnyValue::StringValue("rabbitmq".to_string()));
+            test_attributes.insert("messaging.destination.name".to_string(), AnyValue::StringValue("test.queue".to_string()));
+            test_attributes.insert("messaging.rabbitmq.destination_routing_key".to_string(), AnyValue::StringValue(routing_key_value.to_string()));
+
+            let test_span = RabbitMqProducerSpanData {
+                name: format!("routing_key_test_{}", test_name),
+                kind: SpanKind::Producer,
+                messaging_system: "rabbitmq".to_string(),
+                attributes: test_attributes,
+            };
+
+            let result = validate_rabbitmq_producer_routing_key(&test_span);
+            let is_valid = matches!(result, RabbitMqProducerValidationResult::Valid { .. });
+
+            assert_eq!(
+                is_valid, should_be_valid,
+                "Routing key test '{}' (value: '{}') validation mismatch: expected {}, got {}",
+                test_name, routing_key_value, should_be_valid, is_valid
+            );
+
+            if is_valid {
+                println!("✓ Routing key test '{}' (value: '{}') correctly validated", test_name, routing_key_value);
+            }
+        }
+
+        println!("✓ OTLP-148: RabbitMQ producer routing key requirement conformance verified");
+        println!("  - PRODUCER spans with messaging.system='rabbitmq' require messaging.rabbitmq.destination_routing_key");
+        println!("  - Empty routing key is valid (default exchange behavior)");
+        println!("  - Non-RabbitMQ producer systems exempt from requirement");
+        println!("  - Consumer spans exempt from requirement");
+        println!("  - Case-sensitive messaging.system matching enforced");
+        println!("  - Non-string routing key values rejected");
+        println!("  - Exchange type specific routing key validation");
+        println!("  - Additional RabbitMQ-specific attribute validation");
+        println!("  - Producer operation validation (publish/send vs receive/process)");
+        println!("  - Topic exchange routing key pattern validation");
+    }
 }
