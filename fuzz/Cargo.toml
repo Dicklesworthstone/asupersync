@@ -5202,3 +5202,10 @@ path = "fuzz_targets/h2_settings_max_concurrent_streams_max.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "h2_request_pseudo_path_with_double_slash"
+path = "fuzz_targets/h2_request_pseudo_path_with_double_slash.rs"
+test = false
+doc = false
+bench = false
