@@ -114,6 +114,7 @@ impl WaiterSlab {
     #[inline]
     fn insert(&mut self, mut entry: WaiterEntry) -> (usize, u64) {
         let is_active = entry.waker.is_some();
+        let had_active = self.active > 0;
         let (index, slot_epoch) = loop {
             if let Some(free) = self.free_slots.pop() {
                 if free.index < self.entries.len() {
@@ -142,8 +143,10 @@ impl WaiterSlab {
         };
         if is_active {
             self.active += 1;
-            // New active entry before the scan cursor → lower the hint.
-            if index < self.scan_start {
+            // Reused low slots must not leapfrog older active waiters.
+            // Lower the cursor only when this waiter is the sole active entry;
+            // otherwise notify_one's wrap scan will find it after older waiters drain.
+            if !had_active && index < self.scan_start {
                 self.scan_start = index;
             }
         }
@@ -181,6 +184,42 @@ impl WaiterSlab {
     #[inline]
     fn active_count(&self) -> usize {
         self.active
+    }
+
+    #[inline]
+    fn take_next_active_waker(&mut self) -> Option<Waker> {
+        let len = self.entries.len();
+        let start = self.scan_start.min(len);
+
+        for i in start..len {
+            if let Some(waker) = self.take_active_waker_at(i) {
+                return Some(waker);
+            }
+        }
+
+        for i in 0..start {
+            if let Some(waker) = self.take_active_waker_at(i) {
+                return Some(waker);
+            }
+        }
+
+        self.scan_start = len;
+        None
+    }
+
+    #[inline]
+    fn take_active_waker_at(&mut self, index: usize) -> Option<Waker> {
+        let entry = &mut self.entries[index];
+        if !entry.notified && entry.waker.is_some() {
+            entry.notified = true;
+            let waker = entry.waker.take();
+            if waker.is_some() {
+                self.active -= 1;
+                self.scan_start = index + 1;
+            }
+            return waker;
+        }
+        None
     }
 }
 
@@ -245,34 +284,18 @@ impl Notify {
     /// will be delivered to the next task that calls `notified().await`.
     ///
     /// If multiple tasks are waiting, exactly one will be woken.
+    ///
+    /// Returns `true` when an active waiter was selected and woken, or
+    /// `false` when no waiter was available and the notification was stored.
     #[inline]
-    pub fn notify_one(&self) {
+    pub fn notify_one(&self) -> bool {
         let waker_to_wake = {
             let mut waiters = self.waiters.lock();
 
-            // Find a waiter to notify, starting from the scan cursor.
-            let mut found_waker = None;
-            let start = waiters.scan_start;
-            for i in start..waiters.entries.len() {
-                let entry = &mut waiters.entries[i];
-                if !entry.notified && entry.waker.is_some() {
-                    entry.notified = true;
-                    found_waker = entry.waker.take();
-                    waiters.scan_start = i + 1;
-                    break;
-                }
-            }
-
-            if found_waker.is_some() {
-                waiters.active -= 1;
+            if let Some(found_waker) = waiters.take_next_active_waker() {
                 drop(waiters);
-                found_waker
+                Some(found_waker)
             } else {
-                // If we found nothing, it means there are no active, unnotified waiters
-                // from `start` to the end. We can safely advance `scan_start` to the end
-                // to avoid O(N^2) scans in pathological broadcast then sequential notify workloads.
-                waiters.scan_start = waiters.entries.len();
-
                 // No waiters found, store the notification.
                 //
                 // Important: keep the waiter lock held while incrementing
@@ -289,6 +312,9 @@ impl Notify {
         // waiter state.
         if let Some(waker) = waker_to_wake {
             waker.wake();
+            true
+        } else {
+            false
         }
     }
 
@@ -347,21 +373,11 @@ impl Notify {
     /// Passes a `notify_one` baton to the next active waiter, or stores it if none exist.
     /// This must be called with the waiters lock held.
     fn pass_baton(&self, mut waiters: parking_lot::MutexGuard<'_, WaiterSlab>) {
-        let start = waiters.scan_start;
-        for i in start..waiters.entries.len() {
-            let entry = &mut waiters.entries[i];
-            if !entry.notified && entry.waker.is_some() {
-                entry.notified = true;
-                if let Some(waker) = entry.waker.take() {
-                    waiters.active -= 1;
-                    waiters.scan_start = i + 1;
-                    drop(waiters);
-                    waker.wake();
-                    return;
-                }
-            }
+        if let Some(waker) = waiters.take_next_active_waker() {
+            drop(waiters);
+            waker.wake();
+            return;
         }
-        waiters.scan_start = waiters.entries.len();
         self.stored_notifications.fetch_add(1, Ordering::Release);
     }
 
@@ -381,21 +397,11 @@ impl Notify {
         mut waiters: parking_lot::MutexGuard<'_, WaiterSlab>,
         store_if_absent: bool,
     ) {
-        let start = waiters.scan_start;
-        for i in start..waiters.entries.len() {
-            let entry = &mut waiters.entries[i];
-            if !entry.notified && entry.waker.is_some() {
-                entry.notified = true;
-                if let Some(waker) = entry.waker.take() {
-                    waiters.active -= 1;
-                    waiters.scan_start = i + 1;
-                    drop(waiters);
-                    waker.wake();
-                    return;
-                }
-            }
+        if let Some(waker) = waiters.take_next_active_waker() {
+            drop(waiters);
+            waker.wake();
+            return;
         }
-        waiters.scan_start = waiters.entries.len();
         if store_if_absent {
             self.stored_notifications.fetch_add(1, Ordering::Release);
         }
@@ -1009,6 +1015,177 @@ mod tests {
         let ready = poll_once(&mut fut).is_ready();
         crate::assert_with_log!(ready, "ready after notify", true, ready);
         crate::test_complete!("notify_one_wakes_waiter");
+    }
+
+    #[test]
+    fn notify_one_returns_false_when_notification_is_stored() {
+        init_test("notify_one_returns_false_when_notification_is_stored");
+        let notify = Notify::new();
+
+        let notified_waiter = notify.notify_one();
+        crate::assert_with_log!(
+            !notified_waiter,
+            "notify_one reports stored notification",
+            false,
+            notified_waiter
+        );
+
+        let stored = notify.stored_notifications.load(Ordering::Acquire);
+        crate::assert_with_log!(stored == 1, "stored notification count", 1usize, stored);
+
+        let mut fut = notify.notified();
+        let ready = poll_once(&mut fut).is_ready();
+        crate::assert_with_log!(ready, "stored notification consumed", true, ready);
+        crate::test_complete!("notify_one_returns_false_when_notification_is_stored");
+    }
+
+    #[test]
+    fn notify_one_returns_true_for_single_waiter() {
+        init_test("notify_one_returns_true_for_single_waiter");
+        let notify = Notify::new();
+        let mut fut = notify.notified();
+
+        assert!(poll_once(&mut fut).is_pending());
+
+        let notified_waiter = notify.notify_one();
+        crate::assert_with_log!(
+            notified_waiter,
+            "notify_one reports active waiter wake",
+            true,
+            notified_waiter
+        );
+
+        let ready = poll_once(&mut fut).is_ready();
+        crate::assert_with_log!(ready, "single waiter ready", true, ready);
+        crate::test_complete!("notify_one_returns_true_for_single_waiter");
+    }
+
+    #[test]
+    fn notify_one_returns_true_with_multiple_waiters_and_wakes_exactly_one() {
+        init_test("notify_one_returns_true_with_multiple_waiters_and_wakes_exactly_one");
+        let notify = Notify::new();
+        let mut fut1 = notify.notified();
+        let mut fut2 = notify.notified();
+        let mut fut3 = notify.notified();
+
+        assert!(poll_once(&mut fut1).is_pending());
+        assert!(poll_once(&mut fut2).is_pending());
+        assert!(poll_once(&mut fut3).is_pending());
+
+        let notified_waiter = notify.notify_one();
+        crate::assert_with_log!(
+            notified_waiter,
+            "notify_one reports one selected waiter",
+            true,
+            notified_waiter
+        );
+
+        let ready = [
+            poll_once(&mut fut1).is_ready(),
+            poll_once(&mut fut2).is_ready(),
+            poll_once(&mut fut3).is_ready(),
+        ];
+        let ready_count = ready.iter().filter(|ready| **ready).count();
+        crate::assert_with_log!(
+            ready_count == 1,
+            "exactly one waiter wakes",
+            1usize,
+            ready_count
+        );
+        crate::test_complete!(
+            "notify_one_returns_true_with_multiple_waiters_and_wakes_exactly_one"
+        );
+    }
+
+    #[test]
+    fn notify_one_returns_false_after_cancelled_waiter_is_removed() {
+        init_test("notify_one_returns_false_after_cancelled_waiter_is_removed");
+        let notify = Notify::new();
+        let mut fut = notify.notified();
+
+        assert!(poll_once(&mut fut).is_pending());
+        drop(fut);
+
+        let notified_waiter = notify.notify_one();
+        crate::assert_with_log!(
+            !notified_waiter,
+            "cancelled waiter is not reported as woken",
+            false,
+            notified_waiter
+        );
+
+        let stored = notify.stored_notifications.load(Ordering::Acquire);
+        crate::assert_with_log!(
+            stored == 1,
+            "notification stored after cancelled waiter",
+            1usize,
+            stored
+        );
+        crate::test_complete!("notify_one_returns_false_after_cancelled_waiter_is_removed");
+    }
+
+    #[test]
+    fn notify_one_return_stays_true_when_selected_waiter_cancels() {
+        init_test("notify_one_return_stays_true_when_selected_waiter_cancels");
+        let notify = Notify::new();
+        let mut fut1 = notify.notified();
+        let mut fut2 = notify.notified();
+
+        assert!(poll_once(&mut fut1).is_pending());
+        assert!(poll_once(&mut fut2).is_pending());
+
+        let notified_waiter = notify.notify_one();
+        crate::assert_with_log!(
+            notified_waiter,
+            "notify_one reports the selected waiter before cancellation",
+            true,
+            notified_waiter
+        );
+
+        drop(fut1);
+
+        let baton_ready = poll_once(&mut fut2).is_ready();
+        crate::assert_with_log!(
+            baton_ready,
+            "selected waiter's cancelled baton wakes next waiter",
+            true,
+            baton_ready
+        );
+        crate::test_complete!("notify_one_return_stays_true_when_selected_waiter_cancels");
+    }
+
+    #[test]
+    fn notify_one_return_value_does_not_change_notify_waiters_semantics() {
+        init_test("notify_one_return_value_does_not_change_notify_waiters_semantics");
+        let notify = Notify::new();
+        let mut fut1 = notify.notified();
+        let mut fut2 = notify.notified();
+
+        assert!(poll_once(&mut fut1).is_pending());
+        assert!(poll_once(&mut fut2).is_pending());
+
+        notify.notify_waiters();
+
+        let ready_pair = [
+            poll_once(&mut fut1).is_ready(),
+            poll_once(&mut fut2).is_ready(),
+        ];
+        let ready_count = ready_pair.iter().filter(|ready| **ready).count();
+        crate::assert_with_log!(
+            ready_count == 2,
+            "notify_waiters still wakes all active waiters",
+            2usize,
+            ready_count
+        );
+
+        let stored = notify.stored_notifications.load(Ordering::Acquire);
+        crate::assert_with_log!(
+            stored == 0,
+            "notify_waiters does not store notify_one tokens",
+            0usize,
+            stored
+        );
+        crate::test_complete!("notify_one_return_value_does_not_change_notify_waiters_semantics");
     }
 
     #[test]
@@ -2375,9 +2552,14 @@ mod tests {
                 "new waiter should be pending"
             );
 
-            // Notify remaining waiters - new waiter should wake LAST
-            let remaining = waiters.len();
-            for _ in 0..remaining {
+            // Notify remaining old waiters - new waiter should wake LAST.
+            let mut old_pending_count = 0;
+            for waiter in &mut waiters {
+                if poll_once(waiter).is_pending() {
+                    old_pending_count += 1;
+                }
+            }
+            for _ in 0..old_pending_count {
                 notify.notify_one();
             }
 
@@ -2490,11 +2672,8 @@ mod tests {
                 stored_after_three, 0,
                 "all stored signals should be consumed"
             );
-        }
 
-        // Test 3: Contrast with notify_waiters - should not store signals
-        {
-            // Verify clean slate
+            // Test 3: Contrast with notify_waiters while waiter4 is still pending.
             assert_eq!(notify.waiter_count(), 1, "waiter4 still pending");
             assert_eq!(notify.stored_notifications.load(Ordering::Acquire), 0);
 
