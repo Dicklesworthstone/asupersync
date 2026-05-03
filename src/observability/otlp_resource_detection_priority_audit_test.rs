@@ -17,6 +17,70 @@
 
 use std::collections::HashMap;
 use std::env;
+use std::sync::{Mutex, MutexGuard, OnceLock, PoisonError};
+
+const OTEL_RESOURCE_ATTRIBUTES: &str = "OTEL_RESOURCE_ATTRIBUTES";
+
+fn resource_env_lock() -> &'static Mutex<()> {
+    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| Mutex::new(()))
+}
+
+struct ResourceEnvGuard {
+    _guard: MutexGuard<'static, ()>,
+    previous_value: Option<String>,
+}
+
+impl ResourceEnvGuard {
+    #[allow(unsafe_code)]
+    fn set(value: &str) -> Self {
+        let guard = resource_env_lock()
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        let previous_value = env::var(OTEL_RESOURCE_ATTRIBUTES).ok();
+        // Process environment mutation is unsafe in Rust 2024 because other
+        // threads may concurrently read it. This audit file serializes its
+        // env mutation with a static mutex and restores the prior value on drop.
+        unsafe {
+            env::set_var(OTEL_RESOURCE_ATTRIBUTES, value);
+        }
+        Self {
+            _guard: guard,
+            previous_value,
+        }
+    }
+
+    #[allow(unsafe_code)]
+    fn unset() -> Self {
+        let guard = resource_env_lock()
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        let previous_value = env::var(OTEL_RESOURCE_ATTRIBUTES).ok();
+        // See `set`: this test-only mutation is serialized and restored.
+        unsafe {
+            env::remove_var(OTEL_RESOURCE_ATTRIBUTES);
+        }
+        Self {
+            _guard: guard,
+            previous_value,
+        }
+    }
+}
+
+impl Drop for ResourceEnvGuard {
+    #[allow(unsafe_code)]
+    fn drop(&mut self) {
+        // Restore while the guard is still held so these audit tests do not
+        // leak OTEL_RESOURCE_ATTRIBUTES across concurrently scheduled tests.
+        unsafe {
+            if let Some(previous_value) = &self.previous_value {
+                env::set_var(OTEL_RESOURCE_ATTRIBUTES, previous_value);
+            } else {
+                env::remove_var(OTEL_RESOURCE_ATTRIBUTES);
+            }
+        }
+    }
+}
 
 /// Mock OTLP resource for testing priority behavior.
 #[derive(Debug, Clone, PartialEq)]
@@ -63,7 +127,7 @@ impl MockResourceBuilder {
 
     /// Load attributes from OTEL_RESOURCE_ATTRIBUTES environment variable.
     pub fn with_env_resource_attributes(mut self) -> Self {
-        if let Ok(env_attrs_str) = env::var("OTEL_RESOURCE_ATTRIBUTES") {
+        if let Ok(env_attrs_str) = env::var(OTEL_RESOURCE_ATTRIBUTES) {
             self.env_attrs = parse_resource_attributes(&env_attrs_str);
         }
         self
@@ -111,10 +175,8 @@ fn audit_programmatic_over_environment_priority() {
     println!("🔍 AUDIT: OTLP resource detection priority - programmatic > environment");
 
     // Set environment variable
-    env::set_var(
-        "OTEL_RESOURCE_ATTRIBUTES",
-        "service.name=env-service,environment=staging,version=env-1.0",
-    );
+    let _resource_env =
+        ResourceEnvGuard::set("service.name=env-service,environment=staging,version=env-1.0");
 
     // Create resource with programmatic attributes that overlap with environment
     let programmatic_attrs = {
@@ -171,9 +233,6 @@ fn audit_programmatic_over_environment_priority() {
         "Environment-only attributes must be preserved when no programmatic override"
     );
 
-    // Clean up environment
-    env::remove_var("OTEL_RESOURCE_ATTRIBUTES");
-
     println!("✅ PROGRAMMATIC PRIORITY: Correctly overrides environment variables");
 }
 
@@ -187,10 +246,8 @@ fn audit_environment_over_defaults_priority() {
     println!("🔍 AUDIT: OTLP resource detection priority - environment > defaults");
 
     // Set environment variable that overrides defaults
-    env::set_var(
-        "OTEL_RESOURCE_ATTRIBUTES",
-        "service.name=env-override,telemetry.sdk.name=custom-sdk",
-    );
+    let _resource_env =
+        ResourceEnvGuard::set("service.name=env-override,telemetry.sdk.name=custom-sdk");
 
     println!("📋 Default attributes:");
     println!("   telemetry.sdk.name=asupersync");
@@ -222,9 +279,6 @@ fn audit_environment_over_defaults_priority() {
         "OTLP VIOLATION: Environment 'telemetry.sdk.name' must override default"
     );
 
-    // Clean up environment
-    env::remove_var("OTEL_RESOURCE_ATTRIBUTES");
-
     println!("✅ ENVIRONMENT PRIORITY: Correctly overrides default attributes");
 }
 
@@ -238,7 +292,7 @@ fn audit_defaults_fallback_behavior() {
     println!("🔍 AUDIT: OTLP resource detection priority - defaults fallback");
 
     // Ensure no environment variable is set
-    env::remove_var("OTEL_RESOURCE_ATTRIBUTES");
+    let _resource_env = ResourceEnvGuard::unset();
 
     println!("📋 Expected default attributes:");
     println!("   telemetry.sdk.name=asupersync");
@@ -283,7 +337,7 @@ fn audit_current_asupersync_resource_detection() {
     println!("   • Relies on external SDK resource configuration");
 
     // Set environment variable to test if asupersync reads it
-    env::set_var("OTEL_RESOURCE_ATTRIBUTES", "service.name=test-detection");
+    let _resource_env = ResourceEnvGuard::set("service.name=test-detection");
 
     println!("📊 Expected behavior with OTLP-compliant implementation:");
     println!("   ✓ Parse OTEL_RESOURCE_ATTRIBUTES environment variable");
@@ -294,9 +348,6 @@ fn audit_current_asupersync_resource_detection() {
     println!("   ❌ Does not parse OTEL_RESOURCE_ATTRIBUTES");
     println!("   ❌ Does not implement resource detection priority");
     println!("   ❌ Missing OTLP specification compliance feature");
-
-    // Clean up
-    env::remove_var("OTEL_RESOURCE_ATTRIBUTES");
 
     println!("🚨 DEFECT IDENTIFIED: Missing OTLP resource detection compliance");
     println!("🔧 REQUIRED: Implement resource detection with proper priority order");
@@ -363,10 +414,7 @@ fn audit_attribute_collision_resolution() {
     println!("🔍 AUDIT: OTLP resource attribute collision resolution");
 
     // All sources have "service.name" attribute
-    env::set_var(
-        "OTEL_RESOURCE_ATTRIBUTES",
-        "service.name=env-service,region=us-west",
-    );
+    let _resource_env = ResourceEnvGuard::set("service.name=env-service,region=us-west");
 
     let programmatic_attrs = {
         let mut attrs = HashMap::new();
@@ -411,8 +459,6 @@ fn audit_attribute_collision_resolution() {
         "asupersync",
         "Default-only attributes must be preserved"
     );
-
-    env::remove_var("OTEL_RESOURCE_ATTRIBUTES");
 
     println!("✅ COLLISION RESOLUTION: Highest priority source wins correctly");
 }

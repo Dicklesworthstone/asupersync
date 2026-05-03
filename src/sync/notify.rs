@@ -4271,4 +4271,100 @@ mod tests {
 
         crate::test_complete!("audit_notify_one_multiple_unconsumed_queuing");
     }
+
+    #[test]
+    fn audit_notified_cancel_then_poll_permit_transfer() {
+        // Audit: Notify::notified() future cancel-then-poll: when notified() future
+        // is cancelled (dropped), then a NEW notified() is awaited, does the cancelled
+        // one's "permission" get transferred to the new (correct: no permit lost)
+        // or get dropped (incorrect)? Per asupersync semantics.
+
+        init_test("audit_notified_cancel_then_poll_permit_transfer");
+
+        let notify = Notify::new();
+
+        // Phase 1: Register first waiter and notify it
+        let mut first_waiter = notify.notified();
+        crate::assert_with_log!(
+            poll_once(&mut first_waiter).is_pending(),
+            "First waiter initially pending",
+            false,
+            poll_once(&mut first_waiter).is_ready()
+        );
+
+        // Send notification - this targets the first waiter
+        notify.notify_one();
+
+        // Phase 2: Cancel first waiter WITHOUT polling (simulate select arm drop)
+        drop(first_waiter);
+
+        // Phase 3: Create NEW waiter - should get the transferred permit
+        let mut second_waiter = notify.notified();
+        let ready_immediately = poll_once(&mut second_waiter).is_ready();
+
+        crate::assert_with_log!(
+            ready_immediately,
+            "Second waiter ready immediately due to permit transfer",
+            true,
+            ready_immediately
+        );
+
+        // Phase 4: Verify no stored notifications remain (permit was consumed)
+        let stored_after = notify
+            .stored_notifications
+            .load(std::sync::atomic::Ordering::Acquire);
+        crate::assert_with_log!(
+            stored_after == 0,
+            "No stored notifications remain after transfer",
+            0,
+            stored_after
+        );
+
+        // Phase 5: Verify third waiter is pending (no extra permits created)
+        let mut third_waiter = notify.notified();
+        let third_pending = poll_once(&mut third_waiter).is_pending();
+        crate::assert_with_log!(
+            third_pending,
+            "Third waiter pending (no permit inflation)",
+            true,
+            third_pending
+        );
+
+        // Phase 6: Test multiple cancel chain - permits should pass through
+        let mut waiters = vec![];
+        for _ in 0..5 {
+            waiters.push(notify.notified());
+        }
+
+        // Poll all to register them
+        for waiter in &mut waiters {
+            poll_once(waiter);
+        }
+
+        // Send one notification
+        notify.notify_one();
+
+        // Drop first 4 waiters (cancel chain) - permit should pass through
+        for _ in 0..4 {
+            waiters.remove(0);
+        }
+
+        // Last waiter should get the permit
+        let last_ready = poll_once(&mut waiters[0]).is_ready();
+        crate::assert_with_log!(
+            last_ready,
+            "Permit passes through cancel chain to final waiter",
+            true,
+            last_ready
+        );
+
+        println!("✅ SOUND: Notified cancel-then-poll permit transfer verified:");
+        println!("  - Cancelled notified() future transfers permit to next waiter ✓");
+        println!("  - No permits lost during cancellation ✓");
+        println!("  - No permit inflation (extra permits created) ✓");
+        println!("  - Permit passes through multiple-waiter cancel chains ✓");
+        println!("  - Baton-passing mechanism preserves exactly-once semantics ✓");
+
+        crate::test_complete!("audit_notified_cancel_then_poll_permit_transfer");
+    }
 }
