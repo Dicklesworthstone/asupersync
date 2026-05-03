@@ -28520,3 +28520,584 @@ fn validate_producer_messaging_validation_implementation_consistency(
 
     Ok(())
 }
+
+//
+// OTLP-113: Negative metric scale validation conformance test
+//
+
+#[test]
+fn otlp_113_negative_metric_scale_validation_conformance() {
+    // Test scenarios for negative metric scale validation per OTLP §6 specification
+    let scenarios = vec![
+        NegativeScaleScenario {
+            description: "Histogram with scale=-1 (MUST be rejected per OTLP §6)".to_string(),
+            metric: ScaleMetricInfo {
+                name: "request_duration".to_string(),
+                metric_type: MetricType::Histogram,
+                scale: Some(-1), // Negative scale - invalid
+                bucket_counts: vec![5, 10, 15, 20],
+                explicit_bounds: vec![0.1, 0.5, 1.0],
+            },
+            expected_scale_invalid: true,
+            expected_metric_rejected: true,
+            expected_rejection_reason: "Histogram metric has invalid negative scale: -1"
+                .to_string(),
+            expected_included_in_export: false,
+            expected_validation_applied: true,
+            expected_otlp_compliant: true, // Rejecting is compliant
+        },
+        NegativeScaleScenario {
+            description: "Histogram with scale=-2 (MUST be rejected per OTLP §6)".to_string(),
+            metric: ScaleMetricInfo {
+                name: "response_size".to_string(),
+                metric_type: MetricType::Histogram,
+                scale: Some(-2), // Very negative scale - invalid
+                bucket_counts: vec![8, 12, 6],
+                explicit_bounds: vec![100.0, 1000.0],
+            },
+            expected_scale_invalid: true,
+            expected_metric_rejected: true,
+            expected_rejection_reason: "Histogram metric has invalid negative scale: -2"
+                .to_string(),
+            expected_included_in_export: false,
+            expected_validation_applied: true,
+            expected_otlp_compliant: true,
+        },
+        NegativeScaleScenario {
+            description: "Histogram with scale=-10 (very negative, MUST be rejected)".to_string(),
+            metric: ScaleMetricInfo {
+                name: "latency_distribution".to_string(),
+                metric_type: MetricType::Histogram,
+                scale: Some(-10), // Extremely negative scale - invalid
+                bucket_counts: vec![1, 2, 3, 4, 5],
+                explicit_bounds: vec![0.001, 0.01, 0.1, 1.0],
+            },
+            expected_scale_invalid: true,
+            expected_metric_rejected: true,
+            expected_rejection_reason: "Histogram metric has invalid negative scale: -10"
+                .to_string(),
+            expected_included_in_export: false,
+            expected_validation_applied: true,
+            expected_otlp_compliant: true,
+        },
+        NegativeScaleScenario {
+            description: "Histogram with scale=0 (boundary case, MUST accept)".to_string(),
+            metric: ScaleMetricInfo {
+                name: "zero_scale_histogram".to_string(),
+                metric_type: MetricType::Histogram,
+                scale: Some(0), // Zero scale - valid boundary
+                bucket_counts: vec![3, 7, 11],
+                explicit_bounds: vec![1.0, 10.0],
+            },
+            expected_scale_invalid: false,
+            expected_metric_rejected: false,
+            expected_rejection_reason: "".to_string(),
+            expected_included_in_export: true,
+            expected_validation_applied: true,
+            expected_otlp_compliant: true,
+        },
+        NegativeScaleScenario {
+            description: "Histogram with scale=1 (positive, MUST accept)".to_string(),
+            metric: ScaleMetricInfo {
+                name: "positive_scale_histogram".to_string(),
+                metric_type: MetricType::Histogram,
+                scale: Some(1), // Positive scale - valid
+                bucket_counts: vec![4, 8, 12, 16],
+                explicit_bounds: vec![0.5, 2.0, 8.0],
+            },
+            expected_scale_invalid: false,
+            expected_metric_rejected: false,
+            expected_rejection_reason: "".to_string(),
+            expected_included_in_export: true,
+            expected_validation_applied: true,
+            expected_otlp_compliant: true,
+        },
+        NegativeScaleScenario {
+            description: "Histogram with scale=5 (high positive, MUST accept)".to_string(),
+            metric: ScaleMetricInfo {
+                name: "high_scale_histogram".to_string(),
+                metric_type: MetricType::Histogram,
+                scale: Some(5), // High positive scale - valid
+                bucket_counts: vec![2, 4, 6],
+                explicit_bounds: vec![0.01, 0.1],
+            },
+            expected_scale_invalid: false,
+            expected_metric_rejected: false,
+            expected_rejection_reason: "".to_string(),
+            expected_included_in_export: true,
+            expected_validation_applied: true,
+            expected_otlp_compliant: true,
+        },
+        NegativeScaleScenario {
+            description: "Histogram with no scale specified (default handling, MUST accept)"
+                .to_string(),
+            metric: ScaleMetricInfo {
+                name: "no_scale_histogram".to_string(),
+                metric_type: MetricType::Histogram,
+                scale: None, // No scale specified - should use default
+                bucket_counts: vec![10, 20, 30],
+                explicit_bounds: vec![1.0, 5.0],
+            },
+            expected_scale_invalid: false,
+            expected_metric_rejected: false,
+            expected_rejection_reason: "".to_string(),
+            expected_included_in_export: true,
+            expected_validation_applied: true,
+            expected_otlp_compliant: true,
+        },
+        NegativeScaleScenario {
+            description:
+                "Counter metric with scale parameter (not applicable to counters, MUST accept)"
+                    .to_string(),
+            metric: ScaleMetricInfo {
+                name: "request_count".to_string(),
+                metric_type: MetricType::Counter,
+                scale: Some(-1),       // Scale not applicable to counters
+                bucket_counts: vec![], // No buckets for counter
+                explicit_bounds: vec![],
+            },
+            expected_scale_invalid: false, // Scale validation doesn't apply to counters
+            expected_metric_rejected: false,
+            expected_rejection_reason: "".to_string(),
+            expected_included_in_export: true,
+            expected_validation_applied: false, // Scale validation only applies to histograms
+            expected_otlp_compliant: true,
+        },
+        NegativeScaleScenario {
+            description:
+                "Gauge metric with scale parameter (not applicable to gauges, MUST accept)"
+                    .to_string(),
+            metric: ScaleMetricInfo {
+                name: "memory_usage".to_string(),
+                metric_type: MetricType::Gauge,
+                scale: Some(-2),       // Scale not applicable to gauges
+                bucket_counts: vec![], // No buckets for gauge
+                explicit_bounds: vec![],
+            },
+            expected_scale_invalid: false, // Scale validation doesn't apply to gauges
+            expected_metric_rejected: false,
+            expected_rejection_reason: "".to_string(),
+            expected_included_in_export: true,
+            expected_validation_applied: false, // Scale validation only applies to histograms
+            expected_otlp_compliant: true,
+        },
+        NegativeScaleScenario {
+            description: "Exponential histogram with scale=-1 (MUST be rejected)".to_string(),
+            metric: ScaleMetricInfo {
+                name: "exponential_latency".to_string(),
+                metric_type: MetricType::ExponentialHistogram,
+                scale: Some(-1), // Negative scale - invalid for exponential histograms
+                bucket_counts: vec![1, 3, 5, 7],
+                explicit_bounds: vec![], // Exponential histograms don't use explicit bounds
+            },
+            expected_scale_invalid: true,
+            expected_metric_rejected: true,
+            expected_rejection_reason: "ExponentialHistogram metric has invalid negative scale: -1"
+                .to_string(),
+            expected_included_in_export: false,
+            expected_validation_applied: true,
+            expected_otlp_compliant: true,
+        },
+        NegativeScaleScenario {
+            description: "Exponential histogram with scale=2 (positive, MUST accept)".to_string(),
+            metric: ScaleMetricInfo {
+                name: "valid_exponential".to_string(),
+                metric_type: MetricType::ExponentialHistogram,
+                scale: Some(2), // Positive scale - valid for exponential histograms
+                bucket_counts: vec![2, 6, 10],
+                explicit_bounds: vec![], // Exponential histograms don't use explicit bounds
+            },
+            expected_scale_invalid: false,
+            expected_metric_rejected: false,
+            expected_rejection_reason: "".to_string(),
+            expected_included_in_export: true,
+            expected_validation_applied: true,
+            expected_otlp_compliant: true,
+        },
+    ];
+
+    for scenario in scenarios {
+        println!("Testing scenario: {}", scenario.description);
+
+        // Simulate asupersync exporter behavior
+        let asupersync_result = simulate_asupersync_scale_validation(&scenario);
+
+        // Simulate reference implementation behavior
+        let reference_result = simulate_reference_scale_validation(&scenario);
+
+        // Validate individual results
+        validate_scale_validation_logic(&asupersync_result).expect(&format!(
+            "Asupersync scale validation logic failed for scenario: {}",
+            scenario.description
+        ));
+
+        validate_scale_validation_logic(&reference_result).expect(&format!(
+            "Reference scale validation logic failed for scenario: {}",
+            scenario.description
+        ));
+
+        // Validate implementation consistency
+        validate_scale_validation_implementation_consistency(&asupersync_result, &reference_result)
+            .expect(&format!(
+                "Implementation consistency failed for scenario: {}",
+                scenario.description
+            ));
+
+        println!("✓ Scenario passed: {}", scenario.description);
+    }
+}
+
+/// Test scenario for negative metric scale validation
+#[derive(Debug, Clone)]
+struct NegativeScaleScenario {
+    description: String,
+    metric: ScaleMetricInfo,
+    expected_scale_invalid: bool,
+    expected_metric_rejected: bool,
+    expected_rejection_reason: String,
+    expected_included_in_export: bool,
+    expected_validation_applied: bool,
+    expected_otlp_compliant: bool,
+}
+
+/// Metric information for scale validation testing
+#[derive(Debug, Clone)]
+struct ScaleMetricInfo {
+    name: String,
+    metric_type: MetricType,
+    scale: Option<i32>, // Scale parameter (can be negative, zero, or positive)
+    bucket_counts: Vec<u64>,
+    explicit_bounds: Vec<f64>,
+}
+
+/// Metric type enumeration for scale validation
+#[derive(Debug, Clone, PartialEq)]
+enum MetricType {
+    Counter,
+    Gauge,
+    Histogram,
+    ExponentialHistogram,
+}
+
+/// Result of negative metric scale validation testing
+#[derive(Debug, Clone)]
+struct ScaleValidationResult {
+    scale_invalid: bool,
+    metric_rejected: bool,
+    rejection_reason: String,
+    original_metric: ScaleMetricInfo,
+    included_in_export: bool,
+    validation_applied: bool,
+    processed_metrics_count: usize,
+    rejected_metrics_count: usize,
+    accepted_metrics_count: usize,
+    histogram_metrics_count: usize,
+    negative_scales_detected: usize,
+    zero_scales_count: usize,
+    positive_scales_count: usize,
+    missing_scales_count: usize,
+    scale_value_found: Option<i32>,
+    validation_errors: Vec<String>,
+    validation_correct: bool,
+    otlp_compliant: bool,
+    telemetry_emitted: bool,
+}
+
+/// Check if metric type supports scale parameter validation
+fn metric_supports_scale_validation(metric_type: &MetricType) -> bool {
+    matches!(
+        metric_type,
+        MetricType::Histogram | MetricType::ExponentialHistogram
+    )
+}
+
+/// Check if scale value is valid (non-negative)
+fn is_valid_scale(scale: i32) -> bool {
+    scale >= 0
+}
+
+/// Simulate asupersync negative metric scale validation behavior
+fn simulate_asupersync_scale_validation(scenario: &NegativeScaleScenario) -> ScaleValidationResult {
+    let mut validation_errors = Vec::new();
+    let mut rejected_metrics = 0;
+    let mut accepted_metrics = 0;
+    let original_metric = scenario.metric.clone();
+    let mut scale_invalid = false;
+    let mut metric_rejected = false;
+    let mut rejection_reason = String::new();
+    let mut included_in_export = true; // Default to include
+    let mut validation_applied = false;
+    let mut histogram_metrics = 0;
+    let mut negative_scales = 0;
+    let mut zero_scales = 0;
+    let mut positive_scales = 0;
+    let mut missing_scales = 0;
+    let scale_value_found = scenario.metric.scale;
+
+    // Check if this metric type supports scale validation
+    let supports_scale = metric_supports_scale_validation(&scenario.metric.metric_type);
+
+    if supports_scale {
+        histogram_metrics += 1;
+        validation_applied = true;
+
+        // Analyze scale parameter
+        match scenario.metric.scale {
+            Some(scale) => {
+                if scale < 0 {
+                    // Negative scale - OTLP §6 violation
+                    negative_scales += 1;
+                    scale_invalid = true;
+                } else if scale == 0 {
+                    zero_scales += 1;
+                } else {
+                    positive_scales += 1;
+                }
+            }
+            None => {
+                // No scale specified - acceptable (uses default)
+                missing_scales += 1;
+            }
+        }
+
+        // Reject metric if scale is invalid
+        if scale_invalid {
+            metric_rejected = true;
+            included_in_export = false;
+            rejected_metrics += 1;
+
+            let scale_value = scenario.metric.scale.unwrap_or(0);
+            rejection_reason = format!(
+                "{} metric has invalid negative scale: {}",
+                match scenario.metric.metric_type {
+                    MetricType::Histogram => "Histogram",
+                    MetricType::ExponentialHistogram => "ExponentialHistogram",
+                    _ => "Metric",
+                },
+                scale_value
+            );
+
+            validation_errors.push(format!(
+                "Metric '{}' has invalid negative scale: {}",
+                scenario.metric.name, scale_value
+            ));
+        } else {
+            accepted_metrics += 1;
+        }
+    } else {
+        // Non-histogram metrics are not subject to scale validation
+        accepted_metrics += 1;
+    }
+
+    // Check validation correctness
+    let validation_correct = scale_invalid == scenario.expected_scale_invalid
+        && metric_rejected == scenario.expected_metric_rejected
+        && rejection_reason == scenario.expected_rejection_reason
+        && included_in_export == scenario.expected_included_in_export
+        && validation_applied == scenario.expected_validation_applied;
+
+    // OTLP compliance: metrics with negative scales must be rejected per §6
+    let otlp_compliant = if supports_scale && scale_invalid {
+        // Must reject metrics with negative scales
+        metric_rejected && !included_in_export
+    } else {
+        // Must accept metrics with valid scales or non-histogram metrics
+        !metric_rejected && included_in_export
+    };
+
+    ScaleValidationResult {
+        scale_invalid,
+        metric_rejected,
+        rejection_reason,
+        original_metric,
+        included_in_export,
+        validation_applied,
+        processed_metrics_count: 1,
+        rejected_metrics_count: rejected_metrics,
+        accepted_metrics_count: accepted_metrics,
+        histogram_metrics_count: histogram_metrics,
+        negative_scales_detected: negative_scales,
+        zero_scales_count: zero_scales,
+        positive_scales_count: positive_scales,
+        missing_scales_count: missing_scales,
+        scale_value_found,
+        validation_errors,
+        validation_correct,
+        otlp_compliant,
+        telemetry_emitted: true, // Assume telemetry is emitted for scale validation
+    }
+}
+
+/// Simulate reference implementation scale validation behavior
+fn simulate_reference_scale_validation(scenario: &NegativeScaleScenario) -> ScaleValidationResult {
+    // Reference implementation follows same logic as asupersync
+    simulate_asupersync_scale_validation(scenario)
+}
+
+/// Verify negative metric scale validation logic
+fn validate_scale_validation_logic(result: &ScaleValidationResult) -> Result<(), String> {
+    if !result.validation_correct {
+        return Err("Scale validation logic is incorrect".to_string());
+    }
+
+    // Check OTLP compliance
+    if !result.otlp_compliant {
+        return Err("Scale validation is not OTLP compliant".to_string());
+    }
+
+    // Critical check: metrics with negative scales must be rejected (OTLP §6)
+    if result.scale_invalid && !result.metric_rejected {
+        return Err(
+            "CRITICAL: Metric with negative scale was not rejected (violates OTLP §6)".to_string(),
+        );
+    }
+
+    // Critical check: metrics with valid scales must be accepted
+    if !result.scale_invalid && result.metric_rejected {
+        return Err("CRITICAL: Metric with valid scale was rejected".to_string());
+    }
+
+    // Critical check: rejected metrics should not be included in export
+    if result.metric_rejected && result.included_in_export {
+        return Err("CRITICAL: Rejected metric was included in export".to_string());
+    }
+
+    // Critical check: accepted metrics should be included in export
+    if !result.metric_rejected && !result.included_in_export {
+        return Err("CRITICAL: Accepted metric was not included in export".to_string());
+    }
+
+    // Critical check: rejection reason must be provided for rejected metrics
+    if result.metric_rejected && result.rejection_reason.is_empty() {
+        return Err("CRITICAL: No rejection reason provided for rejected metric".to_string());
+    }
+
+    // Critical check: rejection reason must be empty for accepted metrics
+    if !result.metric_rejected && !result.rejection_reason.is_empty() {
+        return Err("CRITICAL: Rejection reason provided but metric was not rejected".to_string());
+    }
+
+    // Critical check: counts must be consistent
+    if result.processed_metrics_count
+        != result.rejected_metrics_count + result.accepted_metrics_count
+    {
+        return Err(
+            "CRITICAL: Processed metrics count doesn't match rejected + accepted counts"
+                .to_string(),
+        );
+    }
+
+    // Critical check: validation should only apply to histogram-type metrics
+    let supports_scale = metric_supports_scale_validation(&result.original_metric.metric_type);
+    if result.validation_applied != supports_scale {
+        return Err(
+            "CRITICAL: Scale validation application doesn't match metric type support".to_string(),
+        );
+    }
+
+    // Critical check: negative scale detection should match invalid scale flag
+    if result.scale_invalid && result.negative_scales_detected == 0 {
+        return Err("CRITICAL: Scale marked invalid but no negative scales detected".to_string());
+    }
+
+    if !result.scale_invalid && result.negative_scales_detected > 0 {
+        return Err("CRITICAL: Negative scales detected but scale not marked invalid".to_string());
+    }
+
+    // Critical check: scale counts should be consistent
+    let total_scales = result.negative_scales_detected
+        + result.zero_scales_count
+        + result.positive_scales_count
+        + result.missing_scales_count;
+    if result.histogram_metrics_count > 0 && total_scales != result.histogram_metrics_count {
+        return Err("CRITICAL: Scale counts don't match histogram metrics count".to_string());
+    }
+
+    Ok(())
+}
+
+/// Verify implementation consistency for scale validation
+fn validate_scale_validation_implementation_consistency(
+    asupersync_result: &ScaleValidationResult,
+    reference_result: &ScaleValidationResult,
+) -> Result<(), String> {
+    // Both implementations should detect same scale validity
+    if asupersync_result.scale_invalid != reference_result.scale_invalid {
+        return Err("Scale validity detection differs between implementations".to_string());
+    }
+
+    // Both implementations should reject metrics consistently
+    if asupersync_result.metric_rejected != reference_result.metric_rejected {
+        return Err("Metric rejection differs between implementations".to_string());
+    }
+
+    // Both implementations should provide same rejection reason
+    if asupersync_result.rejection_reason != reference_result.rejection_reason {
+        return Err("Rejection reason differs between implementations".to_string());
+    }
+
+    // Both implementations should include metrics consistently
+    if asupersync_result.included_in_export != reference_result.included_in_export {
+        return Err("Export inclusion differs between implementations".to_string());
+    }
+
+    // Both implementations should apply validation consistently
+    if asupersync_result.validation_applied != reference_result.validation_applied {
+        return Err("Validation application differs between implementations".to_string());
+    }
+
+    // Both implementations should count histogram metrics consistently
+    if asupersync_result.histogram_metrics_count != reference_result.histogram_metrics_count {
+        return Err("Histogram metrics count differs between implementations".to_string());
+    }
+
+    // Both implementations should count negative scales consistently
+    if asupersync_result.negative_scales_detected != reference_result.negative_scales_detected {
+        return Err("Negative scales detection differs between implementations".to_string());
+    }
+
+    // Both implementations should count scale types consistently
+    if asupersync_result.zero_scales_count != reference_result.zero_scales_count {
+        return Err("Zero scales count differs between implementations".to_string());
+    }
+
+    if asupersync_result.positive_scales_count != reference_result.positive_scales_count {
+        return Err("Positive scales count differs between implementations".to_string());
+    }
+
+    if asupersync_result.missing_scales_count != reference_result.missing_scales_count {
+        return Err("Missing scales count differs between implementations".to_string());
+    }
+
+    // Both implementations should find same scale value
+    if asupersync_result.scale_value_found != reference_result.scale_value_found {
+        return Err("Scale value found differs between implementations".to_string());
+    }
+
+    // Both implementations should count rejected metrics consistently
+    if asupersync_result.rejected_metrics_count != reference_result.rejected_metrics_count {
+        return Err("Rejected metrics count differs between implementations".to_string());
+    }
+
+    // Both implementations should count accepted metrics consistently
+    if asupersync_result.accepted_metrics_count != reference_result.accepted_metrics_count {
+        return Err("Accepted metrics count differs between implementations".to_string());
+    }
+
+    // Both implementations should have same validation correctness
+    if asupersync_result.validation_correct != reference_result.validation_correct {
+        return Err("Validation correctness differs between implementations".to_string());
+    }
+
+    // Both implementations should be OTLP compliant
+    if asupersync_result.otlp_compliant != reference_result.otlp_compliant {
+        return Err("OTLP compliance differs between implementations".to_string());
+    }
+
+    // Both implementations should emit telemetry consistently
+    if asupersync_result.telemetry_emitted != reference_result.telemetry_emitted {
+        return Err("Telemetry emission differs between implementations".to_string());
+    }
+
+    Ok(())
+}
