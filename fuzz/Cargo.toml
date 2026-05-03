@@ -5021,3 +5021,15 @@ name = "h2_data_payload_at_max"
 path = "fuzz_targets/h2_data_payload_at_max.rs"
 test = false
 doc = false
+
+[[bin]]
+name = "h2_priority_huge_dependency"
+path = "fuzz_targets/h2_priority_huge_dependency.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "h2_request_path_relative"
+path = "fuzz_targets/h2_request_path_relative.rs"
+test = false
+doc = false
