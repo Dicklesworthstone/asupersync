@@ -5069,3 +5069,9 @@ name = "h2_settings_at_default_then_change"
 path = "fuzz_targets/h2_settings_at_default_then_change.rs"
 test = false
 doc = false
+
+[[bin]]
+name = "h2_request_path_with_fragment"
+path = "fuzz_targets/h2_request_path_with_fragment.rs"
+test = false
+doc = false
