@@ -8,6 +8,7 @@
 //! on the existing observability infrastructure to provide comprehensive insights into
 //! cancellation behavior across complex structured concurrency applications.
 
+use crate::runtime::TraceStorageProfile;
 use crate::types::{CancelKind, CancelReason};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap, VecDeque};
@@ -45,6 +46,16 @@ impl Default for CancellationTracerConfig {
             enable_timing_analysis: cfg!(debug_assertions),
             sample_rate: 1.0,
         }
+    }
+}
+
+impl CancellationTracerConfig {
+    /// Builds a tracer config derived from a runtime trace-storage profile.
+    #[must_use]
+    pub fn for_trace_storage_profile(profile: TraceStorageProfile) -> Self {
+        let mut config = Self::default();
+        config.max_traces = profile.cancellation_trace_slots();
+        config
     }
 }
 

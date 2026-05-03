@@ -1,6 +1,9 @@
 //! Integration proofs for trace storage profile budgeting and runtime plumbing.
 
+use asupersync::observability::CancellationTracerConfig;
 use asupersync::runtime::{RuntimeBuilder, TraceStorageProfile};
+use asupersync::trace::distributed::collector::SymbolTraceCollector;
+use asupersync::trace::distributed::context::RegionTag;
 
 #[test]
 fn large_memory_trace_profile_budget_is_strictly_larger_than_default() {
@@ -47,5 +50,31 @@ fn runtime_builder_applies_trace_storage_profile_to_live_trace_buffer() {
         runtime.config().trace_storage_budget(),
         TraceStorageProfile::LargeMemory256G.budget(),
         "runtime config should surface the operator-visible storage budget"
+    );
+}
+
+#[test]
+fn large_memory_trace_profile_widens_cold_trace_retention_limits() {
+    let default_tracer =
+        CancellationTracerConfig::for_trace_storage_profile(TraceStorageProfile::Default);
+    let large_tracer =
+        CancellationTracerConfig::for_trace_storage_profile(TraceStorageProfile::LargeMemory256G);
+    assert!(
+        large_tracer.max_traces > default_tracer.max_traces,
+        "large-memory profile should retain more cancellation traces"
+    );
+
+    let default_collector = SymbolTraceCollector::new(RegionTag::new("default"))
+        .with_trace_storage_profile(TraceStorageProfile::Default);
+    let large_collector = SymbolTraceCollector::new(RegionTag::new("large-memory"))
+        .with_trace_storage_profile(TraceStorageProfile::LargeMemory256G);
+
+    assert!(
+        large_collector.max_traces() > default_collector.max_traces(),
+        "large-memory profile should retain more distributed traces"
+    );
+    assert!(
+        large_collector.max_age() > default_collector.max_age(),
+        "large-memory profile should extend distributed trace retention age"
     );
 }
