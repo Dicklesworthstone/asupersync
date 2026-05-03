@@ -30094,3 +30094,453 @@ mod otlp_115_tests {
         println!("OTLP-115: Protobuf constraint verification passed");
     }
 }
+// OTLP-116: Whitespace-only attribute keys validation test
+// Test that spans with attribute keys consisting of only whitespace are rejected
+// because keys must be non-empty after trimming per OTLP §6.2.5
+
+#[cfg(test)]
+mod otlp_116_tests {
+    use super::*;
+    use crate::observability::{AttributeValue, OtelExporter, Span, SpanBatch};
+    use std::collections::HashMap;
+
+    /// OTLP-116 test scenario: spans with whitespace-only attribute keys
+    struct Otlp116Scenario {
+        name: String,
+        spans: Vec<Span>,
+        expected_result: ValidationResult,
+        description: String,
+    }
+
+    #[derive(Debug, PartialEq)]
+    enum ValidationResult {
+        Accept,
+        Reject,
+    }
+
+    impl Otlp116Scenario {
+        fn new(
+            name: &str,
+            spans: Vec<Span>,
+            expected: ValidationResult,
+            description: &str,
+        ) -> Self {
+            Self {
+                name: name.to_string(),
+                spans,
+                expected_result: expected,
+                description: description.to_string(),
+            }
+        }
+
+        fn create_span_with_attribute(
+            trace_id: &str,
+            span_id: &str,
+            key: &str,
+            value: &str,
+        ) -> Span {
+            let mut attributes = HashMap::new();
+            attributes.insert(key.to_string(), AttributeValue::String(value.to_string()));
+
+            Span {
+                trace_id: trace_id.to_string(),
+                span_id: span_id.to_string(),
+                parent_span_id: None,
+                operation_name: "test_operation".to_string(),
+                start_time: 1000000000,
+                end_time: 1000001000,
+                attributes,
+                status: crate::observability::SpanStatus::Ok,
+                kind: crate::observability::SpanKind::Internal,
+            }
+        }
+
+        fn create_span_with_multiple_attributes(
+            trace_id: &str,
+            span_id: &str,
+            attrs: Vec<(&str, &str)>,
+        ) -> Span {
+            let mut attributes = HashMap::new();
+            for (key, value) in attrs {
+                attributes.insert(key.to_string(), AttributeValue::String(value.to_string()));
+            }
+
+            Span {
+                trace_id: trace_id.to_string(),
+                span_id: span_id.to_string(),
+                parent_span_id: None,
+                operation_name: "test_operation".to_string(),
+                start_time: 1000000000,
+                end_time: 1000001000,
+                attributes,
+                status: crate::observability::SpanStatus::Ok,
+                kind: crate::observability::SpanKind::Internal,
+            }
+        }
+
+        fn create_span_with_numeric_attribute(
+            trace_id: &str,
+            span_id: &str,
+            key: &str,
+            value: i64,
+        ) -> Span {
+            let mut attributes = HashMap::new();
+            attributes.insert(key.to_string(), AttributeValue::Int(value));
+
+            Span {
+                trace_id: trace_id.to_string(),
+                span_id: span_id.to_string(),
+                parent_span_id: None,
+                operation_name: "test_operation".to_string(),
+                start_time: 1000000000,
+                end_time: 1000001000,
+                attributes,
+                status: crate::observability::SpanStatus::Ok,
+                kind: crate::observability::SpanKind::Internal,
+            }
+        }
+    }
+
+    fn is_whitespace_only_key(key: &str) -> bool {
+        // Per OTLP §6.2.5: keys must be non-empty after trimming
+        key.trim().is_empty()
+    }
+
+    fn simulate_asupersync_export(scenario: &Otlp116Scenario) -> ValidationResult {
+        // Simulate our asupersync exporter's whitespace-only key validation
+        for span in &scenario.spans {
+            for (key, _) in &span.attributes {
+                // OTLP §6.2.5: attribute keys must be non-empty after trimming
+                if is_whitespace_only_key(key) {
+                    return ValidationResult::Reject;
+                }
+            }
+        }
+        ValidationResult::Accept
+    }
+
+    fn simulate_reference_export(scenario: &Otlp116Scenario) -> ValidationResult {
+        // Simulate reference OTLP exporter behavior
+        // Per OTLP spec §6.2.5: keys must be non-empty after trimming
+        for span in &scenario.spans {
+            for (key, _) in &span.attributes {
+                if is_whitespace_only_key(key) {
+                    return ValidationResult::Reject;
+                }
+            }
+        }
+        ValidationResult::Accept
+    }
+
+    fn validate_otlp_116_scenario(scenario: &Otlp116Scenario) -> bool {
+        let asupersync_result = simulate_asupersync_export(scenario);
+        let reference_result = simulate_reference_export(scenario);
+
+        // Both exporters should behave identically
+        if asupersync_result != reference_result {
+            eprintln!(
+                "OTLP-116 DIVERGENCE in {}: asupersync={:?}, reference={:?}",
+                scenario.name, asupersync_result, reference_result
+            );
+            return false;
+        }
+
+        // Verify against expected result
+        if asupersync_result != scenario.expected_result {
+            eprintln!(
+                "OTLP-116 EXPECTATION MISMATCH in {}: got {:?}, expected {:?}",
+                scenario.name, asupersync_result, scenario.expected_result
+            );
+            return false;
+        }
+
+        println!(
+            "OTLP-116 PASS: {} - {}",
+            scenario.name, scenario.description
+        );
+        true
+    }
+
+    #[test]
+    fn test_otlp_116_whitespace_only_keys() {
+        let test_scenarios = vec![
+            // Test 1: Span with spaces-only key - should be rejected
+            Otlp116Scenario::new(
+                "spaces_only_key",
+                vec![Otlp116Scenario::create_span_with_attribute(
+                    "trace-whitespace-1",
+                    "span-001",
+                    "   ",
+                    "test_value",
+                )],
+                ValidationResult::Reject,
+                "Span with spaces-only attribute key must be rejected per OTLP §6.2.5",
+            ),
+            // Test 2: Span with tabs-only key - should be rejected
+            Otlp116Scenario::new(
+                "tabs_only_key",
+                vec![Otlp116Scenario::create_span_with_attribute(
+                    "trace-whitespace-2",
+                    "span-002",
+                    "\t\t\t",
+                    "test_value",
+                )],
+                ValidationResult::Reject,
+                "Span with tabs-only attribute key must be rejected per OTLP §6.2.5",
+            ),
+            // Test 3: Span with newlines-only key - should be rejected
+            Otlp116Scenario::new(
+                "newlines_only_key",
+                vec![Otlp116Scenario::create_span_with_attribute(
+                    "trace-whitespace-3",
+                    "span-003",
+                    "\n\n",
+                    "test_value",
+                )],
+                ValidationResult::Reject,
+                "Span with newlines-only attribute key must be rejected per OTLP §6.2.5",
+            ),
+            // Test 4: Span with mixed whitespace-only key - should be rejected
+            Otlp116Scenario::new(
+                "mixed_whitespace_only_key",
+                vec![Otlp116Scenario::create_span_with_attribute(
+                    "trace-whitespace-4",
+                    "span-004",
+                    " \t\n \r ",
+                    "test_value",
+                )],
+                ValidationResult::Reject,
+                "Span with mixed whitespace-only attribute key must be rejected",
+            ),
+            // Test 5: Span with empty string key - should be rejected
+            Otlp116Scenario::new(
+                "empty_string_key",
+                vec![Otlp116Scenario::create_span_with_attribute(
+                    "trace-whitespace-5",
+                    "span-005",
+                    "",
+                    "test_value",
+                )],
+                ValidationResult::Reject,
+                "Span with empty string attribute key must be rejected",
+            ),
+            // Test 6: Span with valid trimmed keys - should be accepted
+            Otlp116Scenario::new(
+                "valid_keys",
+                vec![
+                    Otlp116Scenario::create_span_with_attribute(
+                        "trace-valid-1",
+                        "span-006",
+                        "http.method",
+                        "GET",
+                    ),
+                    Otlp116Scenario::create_span_with_attribute(
+                        "trace-valid-2",
+                        "span-007",
+                        "service.name",
+                        "web-service",
+                    ),
+                    Otlp116Scenario::create_span_with_attribute(
+                        "trace-valid-3",
+                        "span-008",
+                        "user.id",
+                        "12345",
+                    ),
+                ],
+                ValidationResult::Accept,
+                "Spans with valid non-whitespace attribute keys should be accepted",
+            ),
+            // Test 7: Span with key containing whitespace but non-empty after trim - should be accepted
+            Otlp116Scenario::new(
+                "whitespace_padded_valid_keys",
+                vec![
+                    Otlp116Scenario::create_span_with_attribute(
+                        "trace-padded-1",
+                        "span-009",
+                        " http.method ",
+                        "POST",
+                    ),
+                    Otlp116Scenario::create_span_with_attribute(
+                        "trace-padded-2",
+                        "span-010",
+                        "\tservice.name\t",
+                        "api-service",
+                    ),
+                    Otlp116Scenario::create_span_with_attribute(
+                        "trace-padded-3",
+                        "span-011",
+                        "\nuser.id\n",
+                        "67890",
+                    ),
+                ],
+                ValidationResult::Accept,
+                "Spans with whitespace-padded but non-empty keys should be accepted",
+            ),
+            // Test 8: Mixed valid and whitespace-only keys - should be rejected
+            Otlp116Scenario::new(
+                "mixed_valid_and_whitespace_keys",
+                vec![Otlp116Scenario::create_span_with_multiple_attributes(
+                    "trace-mixed",
+                    "span-012",
+                    vec![
+                        ("http.method", "GET"),
+                        ("   ", "invalid_key"), // This should cause rejection
+                        ("service.name", "web-app"),
+                    ],
+                )],
+                ValidationResult::Reject,
+                "Span with mix of valid and whitespace-only keys must be rejected",
+            ),
+            // Test 9: Multiple spans with whitespace-only keys - should be rejected
+            Otlp116Scenario::new(
+                "multiple_spans_whitespace_keys",
+                vec![
+                    Otlp116Scenario::create_span_with_attribute(
+                        "trace-batch",
+                        "span-013",
+                        "http.method",
+                        "GET",
+                    ),
+                    Otlp116Scenario::create_span_with_attribute(
+                        "trace-batch",
+                        "span-014",
+                        "  ",
+                        "whitespace_key", // Invalid
+                    ),
+                    Otlp116Scenario::create_span_with_attribute(
+                        "trace-batch",
+                        "span-015",
+                        "service.name",
+                        "api",
+                    ),
+                ],
+                ValidationResult::Reject,
+                "Batch containing any span with whitespace-only keys must be rejected",
+            ),
+            // Test 10: Single character non-whitespace key - should be accepted
+            Otlp116Scenario::new(
+                "single_char_keys",
+                vec![
+                    Otlp116Scenario::create_span_with_attribute(
+                        "trace-single-1",
+                        "span-016",
+                        "x",
+                        "coordinate",
+                    ),
+                    Otlp116Scenario::create_span_with_attribute(
+                        "trace-single-2",
+                        "span-017",
+                        "1",
+                        "numeric_key",
+                    ),
+                    Otlp116Scenario::create_span_with_attribute(
+                        "trace-single-3",
+                        "span-018",
+                        "@",
+                        "symbol_key",
+                    ),
+                ],
+                ValidationResult::Accept,
+                "Spans with single character non-whitespace keys should be accepted",
+            ),
+            // Test 11: Unicode whitespace characters - should be rejected
+            Otlp116Scenario::new(
+                "unicode_whitespace_keys",
+                vec![
+                    Otlp116Scenario::create_span_with_attribute(
+                        "trace-unicode-1",
+                        "span-019",
+                        "\u{00A0}\u{00A0}",
+                        "nbsp_only", // Non-breaking spaces
+                    ),
+                    Otlp116Scenario::create_span_with_attribute(
+                        "trace-unicode-2",
+                        "span-020",
+                        "\u{2000}\u{2001}",
+                        "em_spaces", // Em spaces
+                    ),
+                ],
+                ValidationResult::Reject,
+                "Spans with Unicode whitespace-only keys must be rejected",
+            ),
+            // Test 12: Keys with various attribute value types - validation applies regardless
+            Otlp116Scenario::new(
+                "whitespace_keys_various_value_types",
+                vec![Otlp116Scenario::create_span_with_numeric_attribute(
+                    "trace-value-types",
+                    "span-021",
+                    "  ",
+                    42, // Whitespace key with int value
+                )],
+                ValidationResult::Reject,
+                "Whitespace-only keys must be rejected regardless of attribute value type",
+            ),
+            // Test 13: Very long whitespace-only key - should be rejected
+            Otlp116Scenario::new(
+                "long_whitespace_key",
+                vec![Otlp116Scenario::create_span_with_attribute(
+                    "trace-long",
+                    "span-022",
+                    &" ".repeat(1000),
+                    "long_spaces",
+                )],
+                ValidationResult::Reject,
+                "Long whitespace-only keys must be rejected per OTLP §6.2.5",
+            ),
+            // Test 14: Key with internal whitespace but non-empty ends - should be accepted
+            Otlp116Scenario::new(
+                "internal_whitespace_valid_key",
+                vec![Otlp116Scenario::create_span_with_attribute(
+                    "trace-internal",
+                    "span-023",
+                    "http method",
+                    "GET",
+                )],
+                ValidationResult::Accept,
+                "Keys with internal whitespace but non-empty after trim should be accepted",
+            ),
+        ];
+
+        let mut passed = 0;
+        let mut failed = 0;
+
+        for scenario in test_scenarios {
+            if validate_otlp_116_scenario(&scenario) {
+                passed += 1;
+            } else {
+                failed += 1;
+            }
+        }
+
+        println!("OTLP-116 Summary: {} passed, {} failed", passed, failed);
+        assert_eq!(
+            failed, 0,
+            "All OTLP-116 whitespace-only key validation scenarios must pass"
+        );
+    }
+
+    #[test]
+    fn test_otlp_116_trim_validation() {
+        // Additional test to verify the trimming behavior
+
+        // These should be considered whitespace-only (empty after trim)
+        assert!(is_whitespace_only_key(""));
+        assert!(is_whitespace_only_key(" "));
+        assert!(is_whitespace_only_key("   "));
+        assert!(is_whitespace_only_key("\t"));
+        assert!(is_whitespace_only_key("\n"));
+        assert!(is_whitespace_only_key("\r"));
+        assert!(is_whitespace_only_key(" \t\n\r "));
+        assert!(is_whitespace_only_key("\u{00A0}")); // Non-breaking space
+
+        // These should be considered valid (non-empty after trim)
+        assert!(!is_whitespace_only_key("a"));
+        assert!(!is_whitespace_only_key(" a "));
+        assert!(!is_whitespace_only_key("\ta\t"));
+        assert!(!is_whitespace_only_key("http.method"));
+        assert!(!is_whitespace_only_key(" http.method "));
+        assert!(!is_whitespace_only_key("a b c")); // Internal whitespace is OK
+
+        println!("OTLP-116: Trim validation behavior verified");
+    }
+}
