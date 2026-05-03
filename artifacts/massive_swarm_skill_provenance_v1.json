@@ -1,0 +1,677 @@
+{
+  "contract_version": "massive-swarm-skill-provenance-v1",
+  "bead_id": "asupersync-ndr3ev",
+  "description": "Skill-phase provenance and recommendation-card evidence pack for the massive-swarm responsiveness program.",
+  "runner_script": "scripts/run_massive_swarm_skill_provenance_smoke.sh",
+  "runner_bundle_schema_version": "massive-swarm-skill-provenance-smoke-bundle-v1",
+  "runner_report_schema_version": "massive-swarm-skill-provenance-smoke-run-report-v1",
+  "source_skills": [
+    "extreme-software-optimization",
+    "alien-artifact-coding",
+    "alien-graveyard",
+    "idea-wizard"
+  ],
+  "objective": {
+    "statement": "Dramatically improve Asupersync for massive agent swarms on 64+ CPU core and 256GB+ RAM hosts while preserving cancel-correctness, deterministic testing, and operator trust.",
+    "constraints": [
+      "Preserve structured concurrency, region close to quiescence, cancellation protocol, and no obligation leaks.",
+      "Every runtime control must have a conservative fallback or disabled-mode equivalence proof.",
+      "Every optimization must be profile-driven, one lever at a time, and backed by deterministic artifacts.",
+      "Ordinary validation must remain lab-safe; real-host 64-core validation is optional and template-driven."
+    ],
+    "failure_cost_asymmetry": {
+      "false_positive_enable": "A bad default-on optimization can increase p99 latency, corrupt scheduling fairness, hide dropped evidence, or break cancellation invariants.",
+      "false_negative_disable": "A conservative fallback may leave performance on the table but preserves correctness and operator confidence.",
+      "policy": "Fail closed to the conservative profile whenever evidence, provenance, calibration, or smoke artifacts are missing."
+    },
+    "observables": [
+      "wake_to_run_p50_ns",
+      "wake_to_run_p95_ns",
+      "wake_to_run_p99_ns",
+      "queue_residency_p99_ns",
+      "cancel_debt_p99",
+      "remote_steal_ratio_pct",
+      "cross_cohort_wake_p99_ns",
+      "cas_retry_count",
+      "contention_counter",
+      "fallback_activations",
+      "memory_profile",
+      "artifact_paths"
+    ]
+  },
+  "objective_requirements": [
+    {
+      "id": "REQ-MASSIVE-SWARM-RESPONSIVENESS",
+      "statement": "Improve responsiveness for users operating massive agent swarms.",
+      "linked_bead_ids": [
+        "asupersync-2ijesw",
+        "asupersync-99if94",
+        "asupersync-3ld2ri",
+        "asupersync-j1980r",
+        "asupersync-crtx9h",
+        "asupersync-wqsael"
+      ]
+    },
+    {
+      "id": "REQ-RESOURCE-UTILIZATION-64C-256G",
+      "statement": "Take practical advantage of 64+ cores and 256GB+ RAM without making such hosts mandatory for CI.",
+      "linked_bead_ids": [
+        "asupersync-2b5y3w",
+        "asupersync-180d5m",
+        "asupersync-nxd9xm",
+        "asupersync-hhlhjv",
+        "asupersync-yaj7g6",
+        "asupersync-lpffta"
+      ]
+    },
+    {
+      "id": "REQ-ADVANCED-MATH-CONTROL",
+      "statement": "Use rigorous expected-loss, tail-risk, queueing, control, and contention models instead of ad hoc thresholds.",
+      "linked_bead_ids": [
+        "asupersync-b4guhs",
+        "asupersync-ccgxc3",
+        "asupersync-g0aumf",
+        "asupersync-m1k0pz",
+        "asupersync-xnqgmd",
+        "asupersync-ndr3ev"
+      ]
+    },
+    {
+      "id": "REQ-OPERATOR-EVIDENCE",
+      "statement": "Make every control explainable, testable, reproducible, and safe to decline.",
+      "linked_bead_ids": [
+        "asupersync-1l8m9y",
+        "asupersync-2ijesw",
+        "asupersync-c1qfr9",
+        "asupersync-nkbj54",
+        "asupersync-beih6k",
+        "asupersync-wqsael",
+        "asupersync-ndr3ev"
+      ]
+    }
+  ],
+  "idea_wizard_phase_ledger": {
+    "phase_1_grounding": [
+      "AGENTS.md project constraints",
+      "README.md runtime positioning",
+      "current br swarm-perf graph",
+      "bv robot diagnostics",
+      "canonical alien-graveyard source docs",
+      "dirty-tree artifact state"
+    ],
+    "generated_ideas": [
+      { "rank": 1, "idea": "topology-aware worker cohorts" },
+      { "rank": 2, "idea": "contention-adaptive combiner path" },
+      { "rank": 3, "idea": "expected-loss tail-risk admission" },
+      { "rank": 4, "idea": "wake-to-run telemetry and offline tuner" },
+      { "rank": 5, "idea": "reusable 64-core and 256GB scenario runner" },
+      { "rank": 6, "idea": "controller interference matrix" },
+      { "rank": 7, "idea": "controller snapshot ledger" },
+      { "rank": 8, "idea": "cohort-aware admission steering" },
+      { "rank": 9, "idea": "adaptive ready/cancel/inject batch sizing" },
+      { "rank": 10, "idea": "overload brownout ladder" },
+      { "rank": 11, "idea": "OTLP-aware observability shedding" },
+      { "rank": 12, "idea": "read-biased snapshot substrate" },
+      { "rank": 13, "idea": "incremental governor state snapshot" },
+      { "rank": 14, "idea": "blocking-pool affinity" },
+      { "rank": 15, "idea": "bounded-load distributed hot-node routing" },
+      { "rank": 16, "idea": "arena capacity hints and pre-sizing" },
+      { "rank": 17, "idea": "TaskRecord pooling" },
+      { "rank": 18, "idea": "NUMA-local arena placement" },
+      { "rank": 19, "idea": "hot/cold arena tiers" },
+      { "rank": 20, "idea": "large-memory trace profiles" },
+      { "rank": 21, "idea": "explainable host profile planner" },
+      { "rank": 22, "idea": "final signoff matrix" },
+      { "rank": 23, "idea": "smoke-runner invocation consistency" },
+      { "rank": 24, "idea": "generated smoke artifact ownership" },
+      { "rank": 25, "idea": "skill-provenance evidence pack" },
+      { "rank": 26, "idea": "policy-as-data signed controller bundles" },
+      { "rank": 27, "idea": "compositional latency-budget certificates" },
+      { "rank": 28, "idea": "mean-field swarm capacity planner" },
+      { "rank": 29, "idea": "enriched deadlock and wait-cause diagnostics" },
+      { "rank": 30, "idea": "static obligation/session-type strengthening for hot paths" }
+    ],
+    "top_5": [
+      {
+        "rank": 1,
+        "idea": "topology-aware worker cohorts",
+        "rationale": "Directly attacks cross-cohort cache and wake traffic on high-core hosts.",
+        "bead_id": "asupersync-3ld2ri"
+      },
+      {
+        "rank": 2,
+        "idea": "contention-adaptive combiner path",
+        "rationale": "Turns high-CAS injection hot spots into bounded batching under pressure.",
+        "bead_id": "asupersync-g0kwgh"
+      },
+      {
+        "rank": 3,
+        "idea": "expected-loss tail-risk admission",
+        "rationale": "Protects p99 behavior with explicit loss accounting instead of thresholds.",
+        "bead_id": "asupersync-g0aumf"
+      },
+      {
+        "rank": 4,
+        "idea": "wake-to-run telemetry and offline tuner",
+        "rationale": "Makes the dominant queueing/tail symptoms observable and tunable.",
+        "bead_id": "asupersync-99if94"
+      },
+      {
+        "rank": 5,
+        "idea": "reusable 64-core and 256GB scenario runner",
+        "rationale": "Converts performance intent into reproducible deterministic evidence.",
+        "bead_id": "asupersync-2ijesw"
+      }
+    ],
+    "next_10": [
+      { "rank": 6, "idea": "controller interference matrix", "bead_id": "asupersync-b4guhs" },
+      { "rank": 7, "idea": "controller snapshot ledger", "bead_id": "asupersync-ccgxc3" },
+      { "rank": 8, "idea": "cohort-aware admission steering", "bead_id": "asupersync-j1980r" },
+      { "rank": 9, "idea": "adaptive ready/cancel/inject batch sizing", "bead_id": "asupersync-crtx9h" },
+      { "rank": 10, "idea": "overload brownout ladder", "bead_id": "asupersync-m1k0pz" },
+      { "rank": 11, "idea": "OTLP-aware observability shedding", "bead_id": "asupersync-xnqgmd" },
+      { "rank": 12, "idea": "read-biased snapshot substrate", "bead_id": "asupersync-l0q0rs" },
+      { "rank": 13, "idea": "incremental governor state snapshot", "bead_id": "asupersync-k7nx5t" },
+      { "rank": 14, "idea": "blocking-pool affinity", "bead_id": "asupersync-lpffta" },
+      { "rank": 15, "idea": "large-memory evidence/storage profile", "bead_id": "asupersync-yaj7g6" }
+    ],
+    "parked_ideas": [
+      {
+        "rank": 26,
+        "idea": "policy-as-data signed controller bundles",
+        "reason": "Parked for a later controller artifact integration pass after the current evidence/signoff graph closes."
+      },
+      {
+        "rank": 27,
+        "idea": "compositional latency-budget certificates",
+        "reason": "Parked until each child control emits stable latency component ledgers."
+      },
+      {
+        "rank": 28,
+        "idea": "mean-field swarm capacity planner",
+        "reason": "Parked as a v2 planner after host-profile recommendations have real production evidence."
+      },
+      {
+        "rank": 29,
+        "idea": "enriched deadlock and wait-cause diagnostics",
+        "reason": "Already has a separate non-swarm-perf bead and should not be hidden inside the performance epic."
+      },
+      {
+        "rank": 30,
+        "idea": "static obligation/session-type strengthening for hot paths",
+        "reason": "Important proof work but broader than the current massive-swarm performance program."
+      }
+    ],
+    "overlap_policy": "Merge with existing beads when a strong bead already owns the surface; create a new bead only when provenance or functionality was missing."
+  },
+  "alien_artifact_compilation": {
+    "selected_math_families": [
+      "queueing theory",
+      "tail-risk CVaR and expected-loss decision theory",
+      "control theory with timescale separation",
+      "concurrency logic and automata",
+      "graph and topology-aware locality",
+      "robust sequential monitoring"
+    ],
+    "assumptions_ledger": [
+      "Wake-to-run and queue-residency artifacts are representative enough for deterministic small-mode proof.",
+      "Real 64-core host validation is useful but not mandatory for ordinary validation.",
+      "Conservative fallback behavior is preferable to uncalibrated adaptive behavior.",
+      "Controller interactions can be audited through shared ledgers and timescale separation."
+    ],
+    "proof_obligations": [
+      "Disabled mode preserves baseline dispatch and cancellation semantics.",
+      "No controller writes another controller's authority surface at the same timescale.",
+      "No optimization may leak tasks, obligations, regions, wakers, or cancellation state.",
+      "Every e2e runner emits artifact paths, detailed logs, repeated-run determinism, and pass/fail verdicts."
+    ],
+    "failure_modes": [
+      "Controller oscillation",
+      "False performance win from insufficient tail samples",
+      "NUMA/topology evidence mismatch",
+      "Dirty generated artifacts being mistaken for proof",
+      "Adaptive policy hiding a conservative fallback"
+    ],
+    "fallback_policy": {
+      "fallback_profile": "builtin://runtime/conservative-massive-swarm",
+      "activation_conditions": [
+        "missing provenance field",
+        "missing unit or e2e proof",
+        "missing fallback explanation",
+        "determinism hash mismatch",
+        "bv or br graph-health blocker",
+        "no-win verdict"
+      ]
+    },
+    "verification_plan": [
+      "Validate this artifact schema and deterministic report projection.",
+      "Validate every child bead's unit tests and deterministic smoke/e2e runner.",
+      "Run final signoff only after all children have proof and no unexplained artifacts remain."
+    ],
+    "galaxy_brain_cards": [
+      {
+        "level": 0,
+        "title": "Operator summary",
+        "message": "The runtime stays conservative unless measured swarm evidence justifies a specific control."
+      },
+      {
+        "level": 1,
+        "title": "Decision lens",
+        "message": "Controls optimize expected tail-loss while treating correctness violations as hard fail-closed events."
+      },
+      {
+        "level": 2,
+        "title": "Math lens",
+        "message": "Queueing, CVaR, and timescale-separated control models determine which knobs may adapt and when."
+      },
+      {
+        "level": 3,
+        "title": "Proof lens",
+        "message": "Every adaptive claim is compiled into schema fields, proof obligations, artifacts, and rollback-safe fallbacks."
+      }
+    ]
+  },
+  "extreme_optimization_discipline": {
+    "baseline_profile_required": true,
+    "opportunity_matrix_fields": [
+      "hotspot",
+      "impact",
+      "confidence",
+      "effort",
+      "score"
+    ],
+    "minimum_score_to_implement": 2.0,
+    "one_lever_per_commit": true,
+    "isomorphism_template_fields": [
+      "ordering_preserved",
+      "tie_breaking_unchanged",
+      "floating_point",
+      "rng_seeds",
+      "golden_outputs"
+    ],
+    "no_win_report_fields": [
+      "baseline_metric",
+      "candidate_metric",
+      "why_lost",
+      "safe_fallback_profile",
+      "artifact_path"
+    ],
+    "validation_command_policy": "Rust validation goes through rch with scoped cargo commands."
+  },
+  "alien_graveyard_provenance": [
+    {
+      "primitive": "Flat Combining",
+      "canonical_source_ref": "/data/projects/alien_cs_graveyard/alien_cs_graveyard.md#14.2",
+      "runtime_surface": "contention-adaptive injection hot path",
+      "linked_bead_ids": [
+        "asupersync-g0kwgh",
+        "asupersync-crtx9h"
+      ]
+    },
+    {
+      "primitive": "NUMA-Aware / Cohort Locks",
+      "canonical_source_ref": "/data/projects/alien_cs_graveyard/alien_cs_graveyard.md#14.5",
+      "runtime_surface": "worker cohorts, cohort admission, and arena locality",
+      "linked_bead_ids": [
+        "asupersync-3ld2ri",
+        "asupersync-j1980r",
+        "asupersync-nxd9xm"
+      ]
+    },
+    {
+      "primitive": "BRAVO read-biased access",
+      "canonical_source_ref": "/data/projects/alien_cs_graveyard/alien_cs_graveyard.md#14.7",
+      "runtime_surface": "read-biased snapshot substrate",
+      "linked_bead_ids": [
+        "asupersync-l0q0rs",
+        "asupersync-k7nx5t"
+      ]
+    },
+    {
+      "primitive": "Expected-loss runtime control",
+      "canonical_source_ref": "/data/projects/alien_cs_graveyard/alien_cs_graveyard.md#0.14",
+      "runtime_surface": "tail-risk admission, brownout, and batching",
+      "linked_bead_ids": [
+        "asupersync-g0aumf",
+        "asupersync-m1k0pz",
+        "asupersync-xnqgmd",
+        "asupersync-crtx9h"
+      ]
+    },
+    {
+      "primitive": "Tail-latency decomposition and evidence ledger",
+      "canonical_source_ref": "/data/projects/alien_cs_graveyard/high_level_summary_of_frankensuite_planned_and_implemented_features_and_concepts.md#tail-latency-decomposition-contract",
+      "runtime_surface": "shared scheduler evidence and signoff artifacts",
+      "linked_bead_ids": [
+        "asupersync-1l8m9y",
+        "asupersync-99if94",
+        "asupersync-2ijesw",
+        "asupersync-wqsael"
+      ]
+    },
+    {
+      "primitive": "Controller interference and timescale separation",
+      "canonical_source_ref": "/data/projects/alien_cs_graveyard/alien_cs_graveyard.md#controller-composition",
+      "runtime_surface": "adaptive policy safety gate",
+      "linked_bead_ids": [
+        "asupersync-b4guhs",
+        "asupersync-ccgxc3",
+        "asupersync-ndr3ev"
+      ]
+    }
+  ],
+  "required_mapping_fields": [
+    "bead_id",
+    "objective_requirement_id",
+    "source_skill_phase",
+    "canonical_source_ref",
+    "math_family",
+    "measured_symptom",
+    "ev_score",
+    "relevance_score",
+    "unit_tests",
+    "e2e_script",
+    "logging_fields",
+    "fallback_trigger",
+    "verification_command_class",
+    "proof_refs"
+  ],
+  "selected_bead_mappings": [
+    {
+      "bead_id": "asupersync-1l8m9y",
+      "objective_requirement_id": "REQ-OPERATOR-EVIDENCE",
+      "source_skill_phase": "idea-wizard.phase-5",
+      "canonical_source_ref": "tail-latency decomposition and evidence ledger",
+      "math_family": "observability schema",
+      "measured_symptom": "missing scheduler evidence vocabulary",
+      "ev_score": 8.0,
+      "relevance_score": 4.8,
+      "unit_tests": ["schema parse", "offline tuner ingest"],
+      "e2e_script": "scripts/run_scheduler_recommend_smoke.sh",
+      "logging_fields": ["scenario_id", "latency_summary", "artifact_path", "verdict"],
+      "fallback_trigger": "missing evidence artifact",
+      "verification_command_class": "rch cargo test plus smoke runner",
+      "proof_refs": ["artifacts/scheduler_recommend_smoke_contract_v1.json"]
+    },
+    {
+      "bead_id": "asupersync-2ijesw",
+      "objective_requirement_id": "REQ-MASSIVE-SWARM-RESPONSIVENESS",
+      "source_skill_phase": "idea-wizard.top-5",
+      "canonical_source_ref": "tail-latency decomposition and evidence ledger",
+      "math_family": "deterministic scenario replay",
+      "measured_symptom": "unreproducible 64-core validation",
+      "ev_score": 8.0,
+      "relevance_score": 5.0,
+      "unit_tests": ["manifest parsing", "artifact pack validation"],
+      "e2e_script": "scripts/run_scheduler_recommend_smoke.sh",
+      "logging_fields": ["host_fingerprint", "topology_profile", "memory_profile", "workload_seed"],
+      "fallback_trigger": "host capability missing",
+      "verification_command_class": "rch cargo test plus smoke runner",
+      "proof_refs": ["artifacts/scheduler_recommend_smoke_contract_v1.json"]
+    },
+    {
+      "bead_id": "asupersync-g0kwgh",
+      "objective_requirement_id": "REQ-MASSIVE-SWARM-RESPONSIVENESS",
+      "source_skill_phase": "idea-wizard.top-5",
+      "canonical_source_ref": "/data/projects/alien_cs_graveyard/alien_cs_graveyard.md#14.2",
+      "math_family": "contention batching",
+      "measured_symptom": "CAS retry pressure",
+      "ev_score": 8.0,
+      "relevance_score": 4.7,
+      "unit_tests": ["no task loss", "handoff correctness", "fallback"],
+      "e2e_script": "scripts/run_scheduler_combiner_smoke.sh",
+      "logging_fields": ["cas_retries", "mode_switches", "batch_size", "enqueue_tail_latency"],
+      "fallback_trigger": "combiner loses or calibration drifts",
+      "verification_command_class": "rch cargo test plus smoke runner",
+      "proof_refs": ["artifacts/scheduler_global_ready_contention_smoke_contract_v1.json"]
+    },
+    {
+      "bead_id": "asupersync-3ld2ri",
+      "objective_requirement_id": "REQ-MASSIVE-SWARM-RESPONSIVENESS",
+      "source_skill_phase": "idea-wizard.top-5",
+      "canonical_source_ref": "/data/projects/alien_cs_graveyard/alien_cs_graveyard.md#14.5",
+      "math_family": "topology-aware locality",
+      "measured_symptom": "remote steal pressure",
+      "ev_score": 7.5,
+      "relevance_score": 4.8,
+      "unit_tests": ["worker cohort map", "local-first stealing", "fallback"],
+      "e2e_script": "scripts/run_scheduler_topology_replay_smoke.sh",
+      "logging_fields": ["worker_cohort_map", "local_steals", "remote_steals", "replay_hash"],
+      "fallback_trigger": "missing or low-confidence topology",
+      "verification_command_class": "rch cargo test plus smoke runner",
+      "proof_refs": ["artifacts/scheduler_topology_replay_smoke_contract_v1.json"]
+    },
+    {
+      "bead_id": "asupersync-g0aumf",
+      "objective_requirement_id": "REQ-ADVANCED-MATH-CONTROL",
+      "source_skill_phase": "idea-wizard.top-5",
+      "canonical_source_ref": "expected-loss runtime control",
+      "math_family": "tail-risk CVaR",
+      "measured_symptom": "p99 overload collapse",
+      "ev_score": 8.3,
+      "relevance_score": 4.9,
+      "unit_tests": ["expected-loss decision", "disabled equivalence", "fallback"],
+      "e2e_script": "scripts/run_tail_risk_admission_smoke.sh",
+      "logging_fields": ["tail_loss", "admission_decision", "fallback_reason", "p99_latency"],
+      "fallback_trigger": "coverage drift or missing evidence",
+      "verification_command_class": "rch cargo test plus smoke runner",
+      "proof_refs": ["artifacts/tail_risk_admission_smoke_contract_v1.json"]
+    },
+    {
+      "bead_id": "asupersync-j1980r",
+      "objective_requirement_id": "REQ-MASSIVE-SWARM-RESPONSIVENESS",
+      "source_skill_phase": "idea-wizard.next-10",
+      "canonical_source_ref": "/data/projects/alien_cs_graveyard/alien_cs_graveyard.md#14.5",
+      "math_family": "queueing and cohort-local admission",
+      "measured_symptom": "remote spill before local saturation evidence",
+      "ev_score": 6.7,
+      "relevance_score": 4.5,
+      "unit_tests": ["remote-spill budget", "fairness escape hatch", "tail-risk composition"],
+      "e2e_script": "scripts/run_cohort_admission_steering_smoke.sh",
+      "logging_fields": ["per_cohort_backlog", "remote_spill_budget", "fairness_counters"],
+      "fallback_trigger": "missing topology or tail-risk conflict",
+      "verification_command_class": "rch cargo test plus smoke runner",
+      "proof_refs": ["artifacts/cohort_admission_steering_smoke_contract_v1.json"]
+    },
+    {
+      "bead_id": "asupersync-crtx9h",
+      "objective_requirement_id": "REQ-ADVANCED-MATH-CONTROL",
+      "source_skill_phase": "idea-wizard.next-10",
+      "canonical_source_ref": "expected-loss runtime control",
+      "math_family": "bounded lane-local control",
+      "measured_symptom": "fixed batch sizes under mixed burst pressure",
+      "ev_score": 5.3,
+      "relevance_score": 4.2,
+      "unit_tests": ["min/max bounds", "hysteresis", "cancel-debt floor"],
+      "e2e_script": "scripts/run_adaptive_batch_sizing_smoke.sh",
+      "logging_fields": ["selected_batch_size", "queue_depth", "cancel_debt", "no_win_trigger"],
+      "fallback_trigger": "adaptive profile loses to fixed profile",
+      "verification_command_class": "rch cargo test plus smoke runner",
+      "proof_refs": ["artifacts/adaptive_batch_sizing_smoke_contract_v1.json"]
+    },
+    {
+      "bead_id": "asupersync-m1k0pz",
+      "objective_requirement_id": "REQ-ADVANCED-MATH-CONTROL",
+      "source_skill_phase": "idea-wizard.next-10",
+      "canonical_source_ref": "expected-loss runtime control",
+      "math_family": "reversible overload control",
+      "measured_symptom": "optional work competing with core progress",
+      "ev_score": 6.0,
+      "relevance_score": 4.3,
+      "unit_tests": ["brownout state transitions", "critical surface preservation", "restoration"],
+      "e2e_script": "scripts/run_overload_brownout_smoke.sh",
+      "logging_fields": ["brownout_phase", "reason_code", "restored_surfaces", "core_throughput"],
+      "fallback_trigger": "missing overload evidence",
+      "verification_command_class": "rch cargo test plus smoke runner",
+      "proof_refs": ["artifacts/overload_brownout_smoke_contract_v1.json"]
+    },
+    {
+      "bead_id": "asupersync-xnqgmd",
+      "objective_requirement_id": "REQ-ADVANCED-MATH-CONTROL",
+      "source_skill_phase": "idea-wizard.next-10",
+      "canonical_source_ref": "policy-as-data and observability shedding",
+      "math_family": "observability brownout composition",
+      "measured_symptom": "OTLP export pressure during overload",
+      "ev_score": 5.6,
+      "relevance_score": 4.1,
+      "unit_tests": ["exporter shedding", "brownout composition", "drop accounting"],
+      "e2e_script": "scripts/run_otlp_brownout_shedding_smoke.sh",
+      "logging_fields": ["dropped_records", "retry_attempts", "collector_error", "brownout_phase"],
+      "fallback_trigger": "collector misbehavior or overload brownout",
+      "verification_command_class": "rch cargo test plus smoke runner",
+      "proof_refs": ["artifacts/otlp_brownout_shedding_smoke_contract_v1.json"]
+    },
+    {
+      "bead_id": "asupersync-2b5y3w",
+      "objective_requirement_id": "REQ-RESOURCE-UTILIZATION-64C-256G",
+      "source_skill_phase": "extreme-software-optimization",
+      "canonical_source_ref": "arena allocation hot spot",
+      "math_family": "capacity planning",
+      "measured_symptom": "arena reallocation bursts",
+      "ev_score": 7.0,
+      "relevance_score": 4.4,
+      "unit_tests": ["capacity hints", "explicit vs derived", "disabled equivalence"],
+      "e2e_script": "scripts/run_runtime_capacity_hints_smoke.sh",
+      "logging_fields": ["initial_capacity", "growth_events", "residual_reallocs"],
+      "fallback_trigger": "incorrect or missing capacity hints",
+      "verification_command_class": "rch cargo test plus smoke runner",
+      "proof_refs": ["artifacts/runtime_capacity_hints_smoke_contract_v1.json"]
+    },
+    {
+      "bead_id": "asupersync-180d5m",
+      "objective_requirement_id": "REQ-RESOURCE-UTILIZATION-64C-256G",
+      "source_skill_phase": "extreme-software-optimization",
+      "canonical_source_ref": "TaskRecord allocation hot spot",
+      "math_family": "object pooling with lifecycle invariants",
+      "measured_symptom": "TaskRecord allocation churn",
+      "ev_score": 6.5,
+      "relevance_score": 4.2,
+      "unit_tests": ["generation reset", "stale metadata rejection", "no task resurrection"],
+      "e2e_script": "scripts/run_task_record_pool_smoke.sh",
+      "logging_fields": ["pool_hits", "pool_misses", "generation_id", "reset_verdict"],
+      "fallback_trigger": "pool lifecycle risk or no-win benchmark",
+      "verification_command_class": "rch cargo test plus smoke runner",
+      "proof_refs": ["artifacts/task_record_pool_smoke_contract_v1.json"]
+    },
+    {
+      "bead_id": "asupersync-nxd9xm",
+      "objective_requirement_id": "REQ-RESOURCE-UTILIZATION-64C-256G",
+      "source_skill_phase": "idea-wizard.phase-5",
+      "canonical_source_ref": "/data/projects/alien_cs_graveyard/alien_cs_graveyard.md#14.5",
+      "math_family": "NUMA-local allocation",
+      "measured_symptom": "remote memory touch amplification",
+      "ev_score": 5.8,
+      "relevance_score": 4.0,
+      "unit_tests": ["placement policy", "remote-touch accounting", "fallback"],
+      "e2e_script": "scripts/run_numa_arena_locality_smoke.sh",
+      "logging_fields": ["numa_node", "remote_touches", "placement_policy", "fallback_reason"],
+      "fallback_trigger": "unknown NUMA topology",
+      "verification_command_class": "rch cargo test plus smoke runner",
+      "proof_refs": ["artifacts/numa_arena_locality_smoke_contract_v1.json"]
+    },
+    {
+      "bead_id": "asupersync-hhlhjv",
+      "objective_requirement_id": "REQ-RESOURCE-UTILIZATION-64C-256G",
+      "source_skill_phase": "idea-wizard.phase-5",
+      "canonical_source_ref": "hot/cold evidence tiering",
+      "math_family": "storage-temperature policy",
+      "measured_symptom": "hot-path interference from cold evidence",
+      "ev_score": 5.5,
+      "relevance_score": 4.0,
+      "unit_tests": ["hot/cold classification", "tier accounting", "fallback"],
+      "e2e_script": "scripts/run_hot_cold_arena_tiers_smoke.sh",
+      "logging_fields": ["hot_bytes", "cold_bytes", "large_page_status", "write_amplification"],
+      "fallback_trigger": "tier loses or platform support missing",
+      "verification_command_class": "rch cargo test plus smoke runner",
+      "proof_refs": ["artifacts/hot_cold_arena_tiers_smoke_contract_v1.json"]
+    },
+    {
+      "bead_id": "asupersync-yaj7g6",
+      "objective_requirement_id": "REQ-RESOURCE-UTILIZATION-64C-256G",
+      "source_skill_phase": "idea-wizard.next-10",
+      "canonical_source_ref": "large-memory evidence retention",
+      "math_family": "memory-budgeted retention",
+      "measured_symptom": "insufficient postmortem evidence retention",
+      "ev_score": 5.2,
+      "relevance_score": 4.0,
+      "unit_tests": ["profile parsing", "memory budget caps", "low-memory fallback"],
+      "e2e_script": "scripts/run_large_memory_trace_profile_smoke.sh",
+      "logging_fields": ["retention_window", "retained_artifacts", "dropped_artifacts", "memory_pressure"],
+      "fallback_trigger": "host below memory threshold or no-win verdict",
+      "verification_command_class": "rch cargo test plus smoke runner",
+      "proof_refs": ["artifacts/large_memory_trace_profile_smoke_contract_v1.json"]
+    },
+    {
+      "bead_id": "asupersync-c1qfr9",
+      "objective_requirement_id": "REQ-OPERATOR-EVIDENCE",
+      "source_skill_phase": "idea-wizard.phase-5",
+      "canonical_source_ref": "operator profile planner",
+      "math_family": "explainable composition",
+      "measured_symptom": "unsafe hidden profile heuristics",
+      "ev_score": 5.0,
+      "relevance_score": 4.2,
+      "unit_tests": ["manual override precedence", "missing proof rejection", "dry-run diff"],
+      "e2e_script": "scripts/run_host_profile_planner_smoke.sh",
+      "logging_fields": ["selected_profile", "config_diff", "manual_overrides", "proof_refs"],
+      "fallback_trigger": "missing child proof",
+      "verification_command_class": "rch cargo test plus smoke runner",
+      "proof_refs": ["artifacts/host_profile_planner_smoke_contract_v1.json"]
+    },
+    {
+      "bead_id": "asupersync-wqsael",
+      "objective_requirement_id": "REQ-OPERATOR-EVIDENCE",
+      "source_skill_phase": "idea-wizard.phase-6",
+      "canonical_source_ref": "program signoff evidence gate",
+      "math_family": "compositional verification",
+      "measured_symptom": "per-bead proof without composed operator verdict",
+      "ev_score": 7.0,
+      "relevance_score": 5.0,
+      "unit_tests": ["manifest parsing", "missing child failure", "report rendering"],
+      "e2e_script": "scripts/run_massive_swarm_signoff_smoke.sh",
+      "logging_fields": ["child_verdicts", "artifact_paths", "fallback_activations", "no_unexplained_artifacts"],
+      "fallback_trigger": "any child lacks proof",
+      "verification_command_class": "rch cargo test plus final smoke runner",
+      "proof_refs": ["artifacts/massive_swarm_skill_provenance_v1.json"]
+    },
+    {
+      "bead_id": "asupersync-ndr3ev",
+      "objective_requirement_id": "REQ-OPERATOR-EVIDENCE",
+      "source_skill_phase": "idea-wizard.phase-6",
+      "canonical_source_ref": "skill provenance evidence gate",
+      "math_family": "provenance and proof obligation indexing",
+      "measured_symptom": "skill process not preserved as an artifact",
+      "ev_score": 6.0,
+      "relevance_score": 4.7,
+      "unit_tests": ["schema parse", "required field rejection", "report projection"],
+      "e2e_script": "scripts/run_massive_swarm_skill_provenance_smoke.sh",
+      "logging_fields": ["input_bead_count", "selected_idea_count", "missing_field_count", "projection_hash"],
+      "fallback_trigger": "missing provenance or proof obligation",
+      "verification_command_class": "rch cargo test plus smoke runner",
+      "proof_refs": ["artifacts/massive_swarm_skill_provenance_v1.json"]
+    }
+  ],
+  "smoke_scenarios": [
+    {
+      "scenario_id": "AA-MASSIVE-SWARM-SKILL-PROVENANCE",
+      "description": "Validate that the skill-phase ledger and recommendation-card evidence pack is complete enough for final signoff ingestion.",
+      "scenario_class": "deterministic_plan_space",
+      "execution_policy": "execute_or_dry_run",
+      "expected_counts": {
+        "source_skill_count": 4,
+        "objective_requirement_count": 4,
+        "generated_idea_count": 30,
+        "top_5_count": 5,
+        "next_10_count": 10,
+        "parked_idea_count": 5,
+        "minimum_bead_mapping_count": 16,
+        "minimum_graveyard_primitive_count": 6,
+        "minimum_galaxy_brain_card_count": 4
+      },
+      "required_output_files": [
+        "bundle_manifest.json",
+        "run_report.json",
+        "run.log"
+      ]
+    }
+  ]
+}
