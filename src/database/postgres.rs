@@ -9091,6 +9091,94 @@ mod tests {
         assert_eq!(values[0], PgValue::Int4(42));
     }
 
+    /// **AUDIT TEST: PostgreSQL Per-Column Format Code Compliance**
+    ///
+    /// Verifies that when client requests mixed format codes in Bind message
+    /// (some columns binary format=1, others text format=0), each column
+    /// is parsed with the correct format as specified in RowDescription.
+    ///
+    /// **PG Protocol §49.7 Compliance**: Format codes are per-column, not per-row.
+    /// Mixed format rows must parse each column using its designated format.
+    ///
+    /// **Implementation**: `parse_data_row()` checks `col.format_code` per column
+    /// and routes to either `parse_text_value()` or `parse_binary_value()`.
+    #[test]
+    fn postgresql_mixed_format_per_column_audit() {
+        let conn = make_test_connection();
+
+        // Test mixed format row: col1=text, col2=binary, col3=text
+        let columns = vec![
+            PgColumn {
+                name: "text_col".to_string(),
+                table_oid: 0,
+                column_id: 0,
+                type_oid: oid::INT4,
+                type_size: 4,
+                type_modifier: -1,
+                format_code: 0, // TEXT format
+            },
+            PgColumn {
+                name: "binary_col".to_string(),
+                table_oid: 0,
+                column_id: 1,
+                type_oid: oid::INT4,
+                type_size: 4,
+                type_modifier: -1,
+                format_code: 1, // BINARY format
+            },
+            PgColumn {
+                name: "text_col2".to_string(),
+                table_oid: 0,
+                column_id: 2,
+                type_oid: oid::BOOL,
+                type_size: 1,
+                type_modifier: -1,
+                format_code: 0, // TEXT format
+            },
+        ];
+
+        // Construct DataRow with mixed formats
+        let mut data = Vec::new();
+        data.extend_from_slice(&3i16.to_be_bytes()); // num_columns = 3
+
+        // Column 1: INT4 in text format ("123")
+        let text_val = b"123";
+        data.extend_from_slice(&(text_val.len() as i32).to_be_bytes());
+        data.extend_from_slice(text_val);
+
+        // Column 2: INT4 in binary format (456 as 4-byte big-endian)
+        data.extend_from_slice(&4i32.to_be_bytes()); // 4 bytes for INT4
+        data.extend_from_slice(&456i32.to_be_bytes());
+
+        // Column 3: BOOL in text format ("t")
+        let bool_val = b"t";
+        data.extend_from_slice(&(bool_val.len() as i32).to_be_bytes());
+        data.extend_from_slice(bool_val);
+
+        // Parse and verify each column uses correct format
+        let values = conn.parse_data_row(&data, &columns)
+            .expect("mixed format DataRow should parse successfully");
+
+        assert_eq!(values.len(), 3);
+
+        // Verify text format INT4 parsed correctly
+        assert_eq!(values[0], PgValue::Int4(123),
+                   "text format column should parse '123' as INT4");
+
+        // Verify binary format INT4 parsed correctly
+        assert_eq!(values[1], PgValue::Int4(456),
+                   "binary format column should parse 4-byte big-endian as INT4");
+
+        // Verify text format BOOL parsed correctly
+        assert_eq!(values[2], PgValue::Bool(true),
+                   "text format column should parse 't' as BOOL");
+
+        // AUDIT VERIFICATION: Per-column format codes correctly applied
+        // - Column 0: format_code=0 → parse_text_value() → "123" → Int4(123)
+        // - Column 1: format_code=1 → parse_binary_value() → bytes → Int4(456)
+        // - Column 2: format_code=0 → parse_text_value() → "t" → Bool(true)
+    }
+
     // ================================================================
     // parse_text_value for each type OID
     // ================================================================
