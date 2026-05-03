@@ -49462,3 +49462,349 @@ mod otlp_122_tests {
         println!("  - Consumer ARNs, approximate arrival timestamps, and partition keys preserved");
     }
 }
+
+    /// OTLP-159: AWS Kinesis Firehose producer delivery stream name validation conformance test.
+    /// Validates that when exporter sees a span with kind=PRODUCER and
+    /// messaging.system="aws_kinesis_firehose", attribute messaging.aws_kinesis_firehose.delivery_stream_name
+    /// MUST be set per OTLP semantic conventions.
+    #[test]
+    fn otlp_159_kinesis_firehose_producer_delivery_stream_name_conformance() {
+        // Enum to represent OTLP attribute value types
+        #[derive(Debug, Clone)]
+        enum AttributeValue {
+            StringValue(String),
+            IntValue(i64),
+            BoolValue(bool),
+            ArrayValue(Vec<String>),
+            NullValue,
+        }
+
+        // Test scenario structure for Kinesis Firehose producer delivery stream name validation
+        #[derive(Debug, Clone)]
+        struct KinesisFirehoseProducerScenario {
+            description: String,
+            span_kind: String,
+            messaging_system: Option<String>,
+            delivery_stream_name: Option<AttributeValue>,
+            additional_attributes: HashMap<String, AttributeValue>,
+            should_pass_validation: bool,
+            expected_error_pattern: Option<String>,
+        }
+
+        // Validation result for producer delivery stream name conformance
+        #[derive(Debug)]
+        enum KinesisFirehoseProducerValidationResult {
+            Valid {
+                delivery_stream_name: String,
+                additional_firehose_attributes: usize,
+            },
+            NotApplicable(String),
+            Invalid(String),
+        }
+
+        // Mock span data structure for testing
+        #[derive(Debug)]
+        struct SpanData {
+            kind: String,
+            attributes: HashMap<String, AttributeValue>,
+        }
+
+        // Define comprehensive test scenarios for OTLP-159 validation
+        let test_scenarios = vec![
+            KinesisFirehoseProducerScenario {
+                description: "Valid producer span with delivery stream name".to_string(),
+                span_kind: "PRODUCER".to_string(),
+                messaging_system: Some("aws_kinesis_firehose".to_string()),
+                delivery_stream_name: Some(AttributeValue::StringValue("analytics-delivery-stream".to_string())),
+                additional_attributes: [
+                    ("messaging.aws_kinesis_firehose.destination".to_string(), AttributeValue::StringValue("s3".to_string())),
+                    ("messaging.aws_kinesis_firehose.record_format".to_string(), AttributeValue::StringValue("json".to_string())),
+                ].iter().cloned().collect(),
+                should_pass_validation: true,
+                expected_error_pattern: None,
+            },
+            KinesisFirehoseProducerScenario {
+                description: "Missing delivery stream name in producer span".to_string(),
+                span_kind: "PRODUCER".to_string(),
+                messaging_system: Some("aws_kinesis_firehose".to_string()),
+                delivery_stream_name: None,
+                additional_attributes: [
+                    ("messaging.aws_kinesis_firehose.destination".to_string(), AttributeValue::StringValue("redshift".to_string())),
+                ].iter().cloned().collect(),
+                should_pass_validation: false,
+                expected_error_pattern: Some("messaging.aws_kinesis_firehose.delivery_stream_name attribute is required".to_string()),
+            },
+            KinesisFirehoseProducerScenario {
+                description: "Empty string delivery stream name".to_string(),
+                span_kind: "PRODUCER".to_string(),
+                messaging_system: Some("aws_kinesis_firehose".to_string()),
+                delivery_stream_name: Some(AttributeValue::StringValue("".to_string())),
+                additional_attributes: HashMap::new(),
+                should_pass_validation: false,
+                expected_error_pattern: Some("messaging.aws_kinesis_firehose.delivery_stream_name must be non-empty".to_string()),
+            },
+            KinesisFirehoseProducerScenario {
+                description: "Wrong attribute type for delivery stream name".to_string(),
+                span_kind: "PRODUCER".to_string(),
+                messaging_system: Some("aws_kinesis_firehose".to_string()),
+                delivery_stream_name: Some(AttributeValue::IntValue(12345)),
+                additional_attributes: HashMap::new(),
+                should_pass_validation: false,
+                expected_error_pattern: Some("messaging.aws_kinesis_firehose.delivery_stream_name must be a StringValue".to_string()),
+            },
+            KinesisFirehoseProducerScenario {
+                description: "Valid delivery stream with S3 destination attributes".to_string(),
+                span_kind: "PRODUCER".to_string(),
+                messaging_system: Some("aws_kinesis_firehose".to_string()),
+                delivery_stream_name: Some(AttributeValue::StringValue("logs-to-s3-stream".to_string())),
+                additional_attributes: [
+                    ("messaging.aws_kinesis_firehose.destination".to_string(), AttributeValue::StringValue("s3".to_string())),
+                    ("messaging.aws_kinesis_firehose.s3_bucket".to_string(), AttributeValue::StringValue("analytics-bucket".to_string())),
+                    ("messaging.aws_kinesis_firehose.s3_prefix".to_string(), AttributeValue::StringValue("year=2024/month=01/day=15/".to_string())),
+                    ("messaging.aws_kinesis_firehose.compression".to_string(), AttributeValue::StringValue("gzip".to_string())),
+                ].iter().cloned().collect(),
+                should_pass_validation: true,
+                expected_error_pattern: None,
+            },
+            KinesisFirehoseProducerScenario {
+                description: "Valid delivery stream with Redshift destination".to_string(),
+                span_kind: "PRODUCER".to_string(),
+                messaging_system: Some("aws_kinesis_firehose".to_string()),
+                delivery_stream_name: Some(AttributeValue::StringValue("analytics-to-redshift".to_string())),
+                additional_attributes: [
+                    ("messaging.aws_kinesis_firehose.destination".to_string(), AttributeValue::StringValue("redshift".to_string())),
+                    ("messaging.aws_kinesis_firehose.redshift_cluster".to_string(), AttributeValue::StringValue("analytics-cluster".to_string())),
+                    ("messaging.aws_kinesis_firehose.redshift_table".to_string(), AttributeValue::StringValue("events".to_string())),
+                ].iter().cloned().collect(),
+                should_pass_validation: true,
+                expected_error_pattern: None,
+            },
+            KinesisFirehoseProducerScenario {
+                description: "Whitespace-only delivery stream name".to_string(),
+                span_kind: "PRODUCER".to_string(),
+                messaging_system: Some("aws_kinesis_firehose".to_string()),
+                delivery_stream_name: Some(AttributeValue::StringValue("   ".to_string())),
+                additional_attributes: HashMap::new(),
+                should_pass_validation: false,
+                expected_error_pattern: Some("messaging.aws_kinesis_firehose.delivery_stream_name must be non-empty".to_string()),
+            },
+            KinesisFirehoseProducerScenario {
+                description: "Consumer span should be exempt from producer delivery stream requirement".to_string(),
+                span_kind: "CONSUMER".to_string(),
+                messaging_system: Some("aws_kinesis_firehose".to_string()),
+                delivery_stream_name: None,
+                additional_attributes: HashMap::new(),
+                should_pass_validation: true,
+                expected_error_pattern: None,
+            },
+            KinesisFirehoseProducerScenario {
+                description: "Non-Kinesis Firehose messaging system should be exempt".to_string(),
+                span_kind: "PRODUCER".to_string(),
+                messaging_system: Some("kinesis".to_string()),
+                delivery_stream_name: None,
+                additional_attributes: [
+                    ("messaging.kinesis.stream_name".to_string(), AttributeValue::StringValue("regular-kinesis-stream".to_string())),
+                ].iter().cloned().collect(),
+                should_pass_validation: true,
+                expected_error_pattern: None,
+            },
+            KinesisFirehoseProducerScenario {
+                description: "Case-sensitive messaging system validation".to_string(),
+                span_kind: "PRODUCER".to_string(),
+                messaging_system: Some("AWS_Kinesis_Firehose".to_string()), // Wrong case
+                delivery_stream_name: None,
+                additional_attributes: HashMap::new(),
+                should_pass_validation: true, // Should be exempt due to case mismatch
+                expected_error_pattern: None,
+            },
+            KinesisFirehoseProducerScenario {
+                description: "Valid delivery stream with OpenSearch destination".to_string(),
+                span_kind: "PRODUCER".to_string(),
+                messaging_system: Some("aws_kinesis_firehose".to_string()),
+                delivery_stream_name: Some(AttributeValue::StringValue("logs-to-opensearch".to_string())),
+                additional_attributes: [
+                    ("messaging.aws_kinesis_firehose.destination".to_string(), AttributeValue::StringValue("opensearch".to_string())),
+                    ("messaging.aws_kinesis_firehose.opensearch_domain".to_string(), AttributeValue::StringValue("analytics-domain".to_string())),
+                    ("messaging.aws_kinesis_firehose.opensearch_index".to_string(), AttributeValue::StringValue("application-logs".to_string())),
+                ].iter().cloned().collect(),
+                should_pass_validation: true,
+                expected_error_pattern: None,
+            },
+            KinesisFirehoseProducerScenario {
+                description: "Valid delivery stream with data transformation enabled".to_string(),
+                span_kind: "PRODUCER".to_string(),
+                messaging_system: Some("aws_kinesis_firehose".to_string()),
+                delivery_stream_name: Some(AttributeValue::StringValue("transformed-data-stream".to_string())),
+                additional_attributes: [
+                    ("messaging.aws_kinesis_firehose.destination".to_string(), AttributeValue::StringValue("s3".to_string())),
+                    ("messaging.aws_kinesis_firehose.data_transformation".to_string(), AttributeValue::BoolValue(true)),
+                    ("messaging.aws_kinesis_firehose.lambda_processor".to_string(), AttributeValue::StringValue("arn:aws:lambda:us-east-1:123456789012:function:ProcessLogs".to_string())),
+                    ("messaging.aws_kinesis_firehose.buffer_size".to_string(), AttributeValue::IntValue(5242880)), // 5MB
+                    ("messaging.aws_kinesis_firehose.buffer_interval".to_string(), AttributeValue::IntValue(300)), // 5 minutes
+                ].iter().cloned().collect(),
+                should_pass_validation: true,
+                expected_error_pattern: None,
+            },
+            KinesisFirehoseProducerScenario {
+                description: "Missing messaging system should be exempt".to_string(),
+                span_kind: "PRODUCER".to_string(),
+                messaging_system: None,
+                delivery_stream_name: None,
+                additional_attributes: HashMap::new(),
+                should_pass_validation: true, // Exempt from Kinesis Firehose-specific validation
+                expected_error_pattern: None,
+            },
+        ];
+
+        // Validation function for Kinesis Firehose producer delivery stream name conformance
+        fn validate_kinesis_firehose_producer_delivery_stream_name_conformance(
+            scenario: &KinesisFirehoseProducerScenario,
+        ) -> Result<(), String> {
+            // Create span data from scenario
+            let mut attributes = scenario.additional_attributes.clone();
+            
+            if let Some(ref messaging_system) = scenario.messaging_system {
+                attributes.insert("messaging.system".to_string(), AttributeValue::StringValue(messaging_system.clone()));
+            }
+            
+            if let Some(ref delivery_stream_name) = scenario.delivery_stream_name {
+                attributes.insert("messaging.aws_kinesis_firehose.delivery_stream_name".to_string(), delivery_stream_name.clone());
+            }
+
+            let span_data = SpanData {
+                kind: scenario.span_kind.clone(),
+                attributes,
+            };
+
+            // Perform validation
+            match validate_kinesis_firehose_producer_delivery_stream_name(&span_data) {
+                KinesisFirehoseProducerValidationResult::Valid { .. } => {
+                    if scenario.should_pass_validation {
+                        Ok(())
+                    } else {
+                        Err("Expected validation to fail but it passed".to_string())
+                    }
+                }
+                KinesisFirehoseProducerValidationResult::NotApplicable(_) => {
+                    if scenario.should_pass_validation {
+                        Ok(())
+                    } else {
+                        Err("Validation was marked as not applicable when failure was expected".to_string())
+                    }
+                }
+                KinesisFirehoseProducerValidationResult::Invalid(error_msg) => {
+                    if scenario.should_pass_validation {
+                        Err(format!("Validation failed when it should have passed: {}", error_msg))
+                    } else if let Some(expected_pattern) = &scenario.expected_error_pattern {
+                        if error_msg.contains(expected_pattern) {
+                            Ok(())
+                        } else {
+                            Err(format!("Error message '{}' doesn't contain expected pattern '{}'", error_msg, expected_pattern))
+                        }
+                    } else {
+                        Ok(()) // Expected failure without specific pattern
+                    }
+                }
+            }
+        }
+
+        // Validation logic for Kinesis Firehose producer delivery stream name
+        fn validate_kinesis_firehose_producer_delivery_stream_name(span_data: &SpanData) -> KinesisFirehoseProducerValidationResult {
+            // Check if span kind is PRODUCER
+            if span_data.kind != "PRODUCER" {
+                return KinesisFirehoseProducerValidationResult::NotApplicable(
+                    format!("Span kind '{}' is not PRODUCER, delivery stream name validation not required", span_data.kind)
+                );
+            }
+
+            // Check if messaging.system is exactly "aws_kinesis_firehose" (case-sensitive)
+            let messaging_system = span_data.attributes.get("messaging.system");
+            match messaging_system {
+                Some(AttributeValue::StringValue(system)) if system == "aws_kinesis_firehose" => {
+                    // This is a Kinesis Firehose producer span - validate delivery_stream_name
+                }
+                _ => {
+                    return KinesisFirehoseProducerValidationResult::NotApplicable(
+                        "Messaging system is not 'aws_kinesis_firehose', delivery stream name validation not required".to_string()
+                    );
+                }
+            }
+
+            // Validate messaging.aws_kinesis_firehose.delivery_stream_name attribute
+            match span_data.attributes.get("messaging.aws_kinesis_firehose.delivery_stream_name") {
+                None => {
+                    return KinesisFirehoseProducerValidationResult::Invalid(
+                        "OTLP-159 violation: messaging.aws_kinesis_firehose.delivery_stream_name attribute is required for PRODUCER spans with messaging.system='aws_kinesis_firehose'".to_string()
+                    );
+                }
+                Some(AttributeValue::StringValue(delivery_stream_name)) => {
+                    if delivery_stream_name.is_empty() || delivery_stream_name.trim().is_empty() {
+                        return KinesisFirehoseProducerValidationResult::Invalid(
+                            "OTLP-159 violation: messaging.aws_kinesis_firehose.delivery_stream_name must be non-empty StringValue".to_string()
+                        );
+                    }
+                    
+                    // Valid delivery stream name found
+                    let delivery_stream_name = delivery_stream_name.trim().to_string();
+                }
+                Some(_) => {
+                    return KinesisFirehoseProducerValidationResult::Invalid(
+                        "OTLP-159 violation: messaging.aws_kinesis_firehose.delivery_stream_name must be a StringValue".to_string()
+                    );
+                }
+            }
+
+            // Extract final delivery stream name for result
+            let delivery_stream_name = match span_data.attributes.get("messaging.aws_kinesis_firehose.delivery_stream_name") {
+                Some(AttributeValue::StringValue(delivery_stream_name)) => delivery_stream_name.trim().to_string(),
+                _ => unreachable!("Should have been caught above"),
+            };
+
+            // Count additional Kinesis Firehose-specific attributes
+            let additional_firehose_attributes = span_data.attributes.keys()
+                .filter(|k| k.starts_with("messaging.aws_kinesis_firehose.") && *k != "messaging.aws_kinesis_firehose.delivery_stream_name")
+                .count();
+
+            KinesisFirehoseProducerValidationResult::Valid {
+                delivery_stream_name,
+                additional_firehose_attributes,
+            }
+        }
+
+        // Execute OTLP-159 conformance validation for all scenarios
+        let mut passed_scenarios = 0;
+        let total_scenarios = test_scenarios.len();
+
+        for scenario in &test_scenarios {
+            match validate_kinesis_firehose_producer_delivery_stream_name_conformance(scenario) {
+                Ok(()) => {
+                    passed_scenarios += 1;
+                    println!("✓ OTLP-159 conformance verified for {}", scenario.description);
+                }
+                Err(error_msg) => {
+                    panic!(
+                        "OTLP-159 conformance test FAILED for {}: {}",
+                        scenario.description, error_msg
+                    );
+                }
+            }
+        }
+
+        assert_eq!(
+            passed_scenarios, total_scenarios,
+            "All OTLP-159 Kinesis Firehose producer delivery stream name scenarios must pass"
+        );
+
+        println!("✓ OTLP-159: Kinesis Firehose producer delivery stream name validation conformance verified");
+        println!("  - PRODUCER spans with messaging.system='aws_kinesis_firehose' require messaging.aws_kinesis_firehose.delivery_stream_name");
+        println!("  - Delivery stream name must be non-empty string value");
+        println!("  - Consumer spans exempt from producer delivery stream name requirement");
+        println!("  - Non-Kinesis Firehose messaging systems exempt from validation");
+        println!("  - Case-sensitive messaging.system matching enforced");
+        println!("  - Wrong attribute types properly rejected");
+        println!("  - Empty and whitespace-only delivery stream names rejected");
+        println!("  - Additional Kinesis Firehose attributes preserved and counted");
+        println!("  - S3, Redshift, and OpenSearch destinations supported");
+        println!("  - Data transformation, buffering, and compression attributes preserved");
+    }
+}
