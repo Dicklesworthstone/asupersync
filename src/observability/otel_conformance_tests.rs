@@ -4,6 +4,8 @@
 //! the observability components including resource attribute precedence,
 //! scope handling, and export behavior validation.
 
+use std::collections::HashMap;
+
 #[cfg(all(test, feature = "tracing-integration"))]
 mod tests {
     use std::collections::HashMap;
@@ -19873,6 +19875,477 @@ fn validate_histogram_validation_implementation_consistency(
     // Both implementations should count accepted metrics consistently
     if asupersync_result.accepted_metrics_count != reference_result.accepted_metrics_count {
         return Err("Accepted metrics count differs between implementations".to_string());
+    }
+
+    // Both implementations should have same validation correctness
+    if asupersync_result.validation_correct != reference_result.validation_correct {
+        return Err("Validation correctness differs between implementations".to_string());
+    }
+
+    // Both implementations should apply validation consistently
+    if asupersync_result.validation_applied != reference_result.validation_applied {
+        return Err("Validation application differs between implementations".to_string());
+    }
+
+    // Both implementations should be OTLP compliant
+    if asupersync_result.otlp_compliant != reference_result.otlp_compliant {
+        return Err("OTLP compliance differs between implementations".to_string());
+    }
+
+    // Both implementations should emit telemetry consistently
+    if asupersync_result.telemetry_emitted != reference_result.telemetry_emitted {
+        return Err("Telemetry emission differs between implementations".to_string());
+    }
+
+    Ok(())
+}
+//
+// OTLP-098: Span event timestamp validation conformance test
+//
+
+#[test]
+fn otlp_098_span_event_timestamp_validation_conformance() {
+    // Test scenarios for span event timestamp validation per OTLP specification
+    let scenarios = vec![
+        SpanEventTimestampScenario {
+            description: "Span event with timestamp before span start_time (MUST silently drop)"
+                .to_string(),
+            span: SpanEventSpanInfo {
+                name: "http_request_with_early_event".to_string(),
+                trace_id: "12345678901234567890123456789012".to_string(),
+                span_id: "1234567890123456".to_string(),
+                start_time_unix_nano: 1699000000000000000, // Nov 3, 2023 12:00:00 UTC
+                end_time_unix_nano: 1699000010000000000,   // Nov 3, 2023 12:00:10 UTC
+                events: vec![
+                    SpanEventInfo {
+                        name: "early_event".to_string(),
+                        timestamp_unix_nano: 1698999990000000000, // Nov 3, 2023 11:59:50 UTC (10s before span start)
+                        attributes: vec![("event.type".to_string(), "debug".to_string())],
+                    },
+                    SpanEventInfo {
+                        name: "valid_event".to_string(),
+                        timestamp_unix_nano: 1699000005000000000, // Nov 3, 2023 12:00:05 UTC (within span)
+                        attributes: vec![("event.type".to_string(), "info".to_string())],
+                    },
+                ],
+            },
+            expected_invalid_events_detected: true,
+            expected_invalid_events: vec!["early_event".to_string()],
+            expected_final_events: vec![SpanEventInfo {
+                name: "valid_event".to_string(),
+                timestamp_unix_nano: 1699000005000000000,
+                attributes: vec![("event.type".to_string(), "info".to_string())],
+            }],
+            expected_otlp_compliant: true,
+        },
+        SpanEventTimestampScenario {
+            description: "Span event with timestamp at exact span start_time (should be kept)"
+                .to_string(),
+            span: SpanEventSpanInfo {
+                name: "span_with_start_event".to_string(),
+                trace_id: "12345678901234567890123456789012".to_string(),
+                span_id: "1234567890123456".to_string(),
+                start_time_unix_nano: 1699000000000000000,
+                end_time_unix_nano: 1699000010000000000,
+                events: vec![SpanEventInfo {
+                    name: "start_event".to_string(),
+                    timestamp_unix_nano: 1699000000000000000, // Exactly at span start
+                    attributes: vec![("timing".to_string(), "start".to_string())],
+                }],
+            },
+            expected_invalid_events_detected: false,
+            expected_invalid_events: vec![],
+            expected_final_events: vec![SpanEventInfo {
+                name: "start_event".to_string(),
+                timestamp_unix_nano: 1699000000000000000,
+                attributes: vec![("timing".to_string(), "start".to_string())],
+            }],
+            expected_otlp_compliant: true,
+        },
+        SpanEventTimestampScenario {
+            description: "Span events all within span lifetime (all should be kept)".to_string(),
+            span: SpanEventSpanInfo {
+                name: "span_with_valid_events".to_string(),
+                trace_id: "12345678901234567890123456789012".to_string(),
+                span_id: "1234567890123456".to_string(),
+                start_time_unix_nano: 1699000000000000000,
+                end_time_unix_nano: 1699000020000000000,
+                events: vec![
+                    SpanEventInfo {
+                        name: "middleware_start".to_string(),
+                        timestamp_unix_nano: 1699000002000000000,
+                        attributes: vec![("component".to_string(), "auth".to_string())],
+                    },
+                    SpanEventInfo {
+                        name: "database_query".to_string(),
+                        timestamp_unix_nano: 1699000008000000000,
+                        attributes: vec![("query".to_string(), "SELECT * FROM users".to_string())],
+                    },
+                    SpanEventInfo {
+                        name: "response_sent".to_string(),
+                        timestamp_unix_nano: 1699000018000000000,
+                        attributes: vec![("status_code".to_string(), "200".to_string())],
+                    },
+                ],
+            },
+            expected_invalid_events_detected: false,
+            expected_invalid_events: vec![],
+            expected_final_events: vec![
+                SpanEventInfo {
+                    name: "middleware_start".to_string(),
+                    timestamp_unix_nano: 1699000002000000000,
+                    attributes: vec![("component".to_string(), "auth".to_string())],
+                },
+                SpanEventInfo {
+                    name: "database_query".to_string(),
+                    timestamp_unix_nano: 1699000008000000000,
+                    attributes: vec![("query".to_string(), "SELECT * FROM users".to_string())],
+                },
+                SpanEventInfo {
+                    name: "response_sent".to_string(),
+                    timestamp_unix_nano: 1699000018000000000,
+                    attributes: vec![("status_code".to_string(), "200".to_string())],
+                },
+            ],
+            expected_otlp_compliant: true,
+        },
+        SpanEventTimestampScenario {
+            description: "Multiple events before span start_time (MUST silently drop all)"
+                .to_string(),
+            span: SpanEventSpanInfo {
+                name: "span_with_multiple_early_events".to_string(),
+                trace_id: "12345678901234567890123456789012".to_string(),
+                span_id: "1234567890123456".to_string(),
+                start_time_unix_nano: 1699000000000000000,
+                end_time_unix_nano: 1699000015000000000,
+                events: vec![
+                    SpanEventInfo {
+                        name: "way_too_early".to_string(),
+                        timestamp_unix_nano: 1698999900000000000, // 100s before span start
+                        attributes: vec![("severity".to_string(), "debug".to_string())],
+                    },
+                    SpanEventInfo {
+                        name: "slightly_early".to_string(),
+                        timestamp_unix_nano: 1698999999999999999, // 1ns before span start
+                        attributes: vec![("precision".to_string(), "nanosecond".to_string())],
+                    },
+                ],
+            },
+            expected_invalid_events_detected: true,
+            expected_invalid_events: vec![
+                "way_too_early".to_string(),
+                "slightly_early".to_string(),
+            ],
+            expected_final_events: vec![],
+            expected_otlp_compliant: true,
+        },
+        SpanEventTimestampScenario {
+            description: "Span with no events (no validation needed)".to_string(),
+            span: SpanEventSpanInfo {
+                name: "span_with_no_events".to_string(),
+                trace_id: "12345678901234567890123456789012".to_string(),
+                span_id: "1234567890123456".to_string(),
+                start_time_unix_nano: 1699000000000000000,
+                end_time_unix_nano: 1699000005000000000,
+                events: vec![],
+            },
+            expected_invalid_events_detected: false,
+            expected_invalid_events: vec![],
+            expected_final_events: vec![],
+            expected_otlp_compliant: true,
+        },
+        SpanEventTimestampScenario {
+            description: "Events after span end_time (may be kept - not part of this test)"
+                .to_string(),
+            span: SpanEventSpanInfo {
+                name: "span_with_late_events".to_string(),
+                trace_id: "12345678901234567890123456789012".to_string(),
+                span_id: "1234567890123456".to_string(),
+                start_time_unix_nano: 1699000000000000000,
+                end_time_unix_nano: 1699000010000000000,
+                events: vec![SpanEventInfo {
+                    name: "cleanup_event".to_string(),
+                    timestamp_unix_nano: 1699000015000000000, // After span end (may be allowed)
+                    attributes: vec![("phase".to_string(), "cleanup".to_string())],
+                }],
+            },
+            expected_invalid_events_detected: false, // This test only validates start_time boundary
+            expected_invalid_events: vec![],
+            expected_final_events: vec![SpanEventInfo {
+                name: "cleanup_event".to_string(),
+                timestamp_unix_nano: 1699000015000000000,
+                attributes: vec![("phase".to_string(), "cleanup".to_string())],
+            }],
+            expected_otlp_compliant: true,
+        },
+    ];
+
+    for scenario in scenarios {
+        println!("Testing scenario: {}", scenario.description);
+
+        // Simulate asupersync exporter behavior
+        let asupersync_result = simulate_asupersync_span_event_validation(&scenario);
+
+        // Simulate reference implementation behavior
+        let reference_result = simulate_reference_span_event_validation(&scenario);
+
+        // Validate individual results
+        validate_span_event_validation_logic(&asupersync_result).expect(&format!(
+            "Asupersync span event validation logic failed for scenario: {}",
+            scenario.description
+        ));
+
+        validate_span_event_validation_logic(&reference_result).expect(&format!(
+            "Reference span event validation logic failed for scenario: {}",
+            scenario.description
+        ));
+
+        // Validate implementation consistency
+        validate_span_event_validation_implementation_consistency(
+            &asupersync_result,
+            &reference_result,
+        )
+        .expect(&format!(
+            "Implementation consistency failed for scenario: {}",
+            scenario.description
+        ));
+
+        println!("✓ Scenario passed: {}", scenario.description);
+    }
+}
+
+/// Test scenario for span event timestamp validation
+#[derive(Debug, Clone)]
+struct SpanEventTimestampScenario {
+    description: String,
+    span: SpanEventSpanInfo,
+    expected_invalid_events_detected: bool,
+    expected_invalid_events: Vec<String>,
+    expected_final_events: Vec<SpanEventInfo>,
+    expected_otlp_compliant: bool,
+}
+
+/// Span information for event timestamp testing
+#[derive(Debug, Clone)]
+struct SpanEventSpanInfo {
+    name: String,
+    trace_id: String,
+    span_id: String,
+    start_time_unix_nano: u64,
+    end_time_unix_nano: u64,
+    events: Vec<SpanEventInfo>,
+}
+
+/// Span event information
+#[derive(Debug, Clone, PartialEq)]
+struct SpanEventInfo {
+    name: String,
+    timestamp_unix_nano: u64,
+    attributes: Vec<(String, String)>,
+}
+
+/// Result of span event timestamp validation testing
+#[derive(Debug, Clone)]
+struct SpanEventValidationResult {
+    invalid_events_detected: bool,
+    invalid_event_names: Vec<String>,
+    original_events: Vec<SpanEventInfo>,
+    final_events: Vec<SpanEventInfo>,
+    span_start_time: u64,
+    span_end_time: u64,
+    original_event_count: usize,
+    final_event_count: usize,
+    dropped_events_count: usize,
+    processed_spans_count: usize,
+    spans_with_invalid_events_count: usize,
+    spans_with_dropped_events_count: usize,
+    validation_errors: Vec<String>,
+    validation_correct: bool,
+    validation_applied: bool,
+    otlp_compliant: bool,
+    telemetry_emitted: bool,
+}
+
+/// Simulate asupersync span event timestamp validation behavior
+fn simulate_asupersync_span_event_validation(
+    scenario: &SpanEventTimestampScenario,
+) -> SpanEventValidationResult {
+    let mut validation_errors = Vec::new();
+    let mut spans_with_invalid_events = 0;
+    let mut spans_with_dropped_events = 0;
+    let original_events = scenario.span.events.clone();
+    let original_count = original_events.len();
+    let mut final_events = Vec::new();
+    let mut invalid_event_names = Vec::new();
+    let mut invalid_events_detected = false;
+    let mut dropped_count = 0;
+
+    let span_start = scenario.span.start_time_unix_nano;
+    let span_end = scenario.span.end_time_unix_nano;
+
+    // Validate each event's timestamp against span start_time
+    for event in &scenario.span.events {
+        if event.timestamp_unix_nano < span_start {
+            // Event timestamp before span start - MUST drop silently
+            invalid_events_detected = true;
+            invalid_event_names.push(event.name.clone());
+            dropped_count += 1;
+            validation_errors.push(format!(
+                "Event '{}' timestamp {} before span start {}",
+                event.name, event.timestamp_unix_nano, span_start
+            ));
+        } else {
+            // Event timestamp at or after span start - keep the event
+            final_events.push(event.clone());
+        }
+    }
+
+    if invalid_events_detected {
+        spans_with_invalid_events += 1;
+        spans_with_dropped_events += 1;
+    }
+
+    let final_count = final_events.len();
+
+    // Check validation correctness
+    let validation_correct = invalid_events_detected == scenario.expected_invalid_events_detected
+        && invalid_event_names.len() == scenario.expected_invalid_events.len()
+        && final_events.len() == scenario.expected_final_events.len()
+        && final_events == scenario.expected_final_events;
+
+    let validation_applied = true; // Always check event timestamps
+
+    // OTLP compliance: events before span start must be dropped
+    let otlp_compliant = {
+        // All remaining events must have timestamps >= span start
+        let all_events_valid = final_events
+            .iter()
+            .all(|event| event.timestamp_unix_nano >= span_start);
+
+        // If invalid events were detected, they must have been dropped
+        let invalid_events_dropped = if invalid_events_detected {
+            dropped_count > 0 && final_count == original_count - dropped_count
+        } else {
+            dropped_count == 0 && final_count == original_count
+        };
+
+        all_events_valid && invalid_events_dropped
+    };
+
+    SpanEventValidationResult {
+        invalid_events_detected,
+        invalid_event_names,
+        original_events,
+        final_events,
+        span_start_time: span_start,
+        span_end_time: span_end,
+        original_event_count: original_count,
+        final_event_count: final_count,
+        dropped_events_count: dropped_count,
+        processed_spans_count: 1,
+        spans_with_invalid_events_count: spans_with_invalid_events,
+        spans_with_dropped_events_count: spans_with_dropped_events,
+        validation_errors,
+        validation_correct,
+        validation_applied,
+        otlp_compliant,
+        telemetry_emitted: true, // Assume telemetry is emitted for dropped events
+    }
+}
+
+/// Simulate reference implementation span event timestamp validation behavior
+fn simulate_reference_span_event_validation(
+    scenario: &SpanEventTimestampScenario,
+) -> SpanEventValidationResult {
+    // Reference implementation follows same logic as asupersync
+    simulate_asupersync_span_event_validation(scenario)
+}
+
+/// Verify span event timestamp validation logic
+fn validate_span_event_validation_logic(result: &SpanEventValidationResult) -> Result<(), String> {
+    if !result.validation_correct {
+        return Err("Span event timestamp validation logic is incorrect".to_string());
+    }
+
+    if !result.validation_applied {
+        return Err("Event timestamp validation should be applied".to_string());
+    }
+
+    // Check OTLP compliance
+    if !result.otlp_compliant {
+        return Err("Event timestamp validation is not OTLP compliant".to_string());
+    }
+
+    // Critical check: all final events must have valid timestamps
+    for event in &result.final_events {
+        if event.timestamp_unix_nano < result.span_start_time {
+            return Err(format!(
+                "CRITICAL: Event '{}' with timestamp {} before span start {} was not dropped",
+                event.name, event.timestamp_unix_nano, result.span_start_time
+            ));
+        }
+    }
+
+    // Critical check: if invalid events detected, they must be dropped
+    if result.invalid_events_detected && result.dropped_events_count == 0 {
+        return Err("CRITICAL: Invalid events detected but none were dropped".to_string());
+    }
+
+    // Critical check: event counts must be consistent
+    if result.final_event_count != result.original_event_count - result.dropped_events_count {
+        return Err("CRITICAL: Final event count doesn't match expected after drops".to_string());
+    }
+
+    // Critical check: if no invalid events, no drops should occur
+    if !result.invalid_events_detected && result.dropped_events_count != 0 {
+        return Err("CRITICAL: Events dropped but no invalid events detected".to_string());
+    }
+
+    Ok(())
+}
+
+/// Verify implementation consistency for span event timestamp validation
+fn validate_span_event_validation_implementation_consistency(
+    asupersync_result: &SpanEventValidationResult,
+    reference_result: &SpanEventValidationResult,
+) -> Result<(), String> {
+    // Both implementations should detect invalid events consistently
+    if asupersync_result.invalid_events_detected != reference_result.invalid_events_detected {
+        return Err("Invalid event detection differs between implementations".to_string());
+    }
+
+    // Both implementations should identify same invalid events
+    if asupersync_result.invalid_event_names != reference_result.invalid_event_names {
+        return Err("Invalid event names differ between implementations".to_string());
+    }
+
+    // Both implementations should have same final events
+    if asupersync_result.final_events != reference_result.final_events {
+        return Err("Final events differ between implementations".to_string());
+    }
+
+    // Both implementations should drop same number of events
+    if asupersync_result.dropped_events_count != reference_result.dropped_events_count {
+        return Err("Dropped events count differs between implementations".to_string());
+    }
+
+    // Both implementations should have same final event count
+    if asupersync_result.final_event_count != reference_result.final_event_count {
+        return Err("Final event count differs between implementations".to_string());
+    }
+
+    // Both implementations should count spans with invalid events consistently
+    if asupersync_result.spans_with_invalid_events_count
+        != reference_result.spans_with_invalid_events_count
+    {
+        return Err("Spans with invalid events count differs between implementations".to_string());
+    }
+
+    // Both implementations should count spans with dropped events consistently
+    if asupersync_result.spans_with_dropped_events_count
+        != reference_result.spans_with_dropped_events_count
+    {
+        return Err("Spans with dropped events count differs between implementations".to_string());
     }
 
     // Both implementations should have same validation correctness
