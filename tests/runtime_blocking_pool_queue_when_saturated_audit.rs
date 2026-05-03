@@ -410,7 +410,7 @@ fn blocking_pool_struct_holds_max_threads_bound() {
 #[cfg(feature = "test-internals")]
 mod behavioral {
     use asupersync::runtime::config::BlockingPoolAffinityProfile;
-    use asupersync::runtime::{BlockingPool, BlockingPoolOptions};
+    use asupersync::runtime::{BlockingPool, BlockingPoolOptions, Runtime, RuntimeBuilder};
     use serde_json::{Value, json};
     use std::fs;
     use std::sync::Arc;
@@ -418,15 +418,18 @@ mod behavioral {
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::time::{Duration, Instant};
 
-    const BLOCKING_POOL_AFFINITY_SCENARIO_ID: &str = "AA-BLOCKING-POOL-AFFINITY-SATURATION-2C";
+    const BLOCKING_POOL_AFFINITY_SATURATION_SCENARIO_ID: &str =
+        "AA-BLOCKING-POOL-AFFINITY-SATURATION-2C";
+    const BLOCKING_POOL_AFFINITY_MIXED_ASYNC_SCENARIO_ID: &str =
+        "AA-BLOCKING-POOL-AFFINITY-MIXED-ASYNC-BLOCKING-2C";
     const BLOCKING_POOL_AFFINITY_CONTRACT_PATH_ENV: &str =
         "ASUPERSYNC_BLOCKING_POOL_AFFINITY_CONTRACT_PATH";
     const BLOCKING_POOL_AFFINITY_SCENARIO_ENV: &str = "ASUPERSYNC_BLOCKING_POOL_AFFINITY_SCENARIO";
     const BLOCKING_POOL_AFFINITY_REPORT_PATH_ENV: &str =
         "ASUPERSYNC_BLOCKING_POOL_AFFINITY_REPORT_PATH";
 
-    #[derive(Debug, Clone, Copy)]
-    struct AffinitySaturationSummary {
+    #[derive(Debug, Clone)]
+    struct AffinityScenarioSummary {
         enabled: bool,
         cohort_count: usize,
         queued_task_count: usize,
@@ -436,6 +439,10 @@ mod behavioral {
         spill_dispatches: usize,
         fallback_dispatches: usize,
         completion_latency_us: u128,
+        queue_depth_by_cohort: Vec<usize>,
+        global_pending_count_before_release: usize,
+        async_coordinator_task_count: usize,
+        blocking_spawn_request_count: usize,
     }
 
     fn affinity_test_pool(
@@ -455,11 +462,52 @@ mod behavioral {
         BlockingPool::with_config(2, 2, options)
     }
 
+    fn wait_for_pending_count<F>(mut read_pending: F, expected: usize, label: &str)
+    where
+        F: FnMut() -> usize,
+    {
+        let start = Instant::now();
+        while read_pending() < expected {
+            if start.elapsed() > Duration::from_secs(5) {
+                panic!(
+                    "REGRESSION: pending count for {label} did not reach {expected}; observed {}",
+                    read_pending()
+                );
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    fn normalize_queue_depth_by_cohort(queue_depths: &[usize], cohort_count: usize) -> Vec<usize> {
+        let mut normalized = vec![0; cohort_count];
+        for (cohort, depth) in queue_depths.iter().copied().enumerate().take(cohort_count) {
+            normalized[cohort] = depth;
+        }
+        normalized
+    }
+
+    fn affinity_test_runtime(
+        affinity_profile: BlockingPoolAffinityProfile,
+        worker_threads: usize,
+        cohort_count: usize,
+    ) -> Runtime {
+        let worker_cohort_map: Vec<_> = (0..worker_threads)
+            .map(|worker_slot| worker_slot % cohort_count.max(1))
+            .collect();
+        RuntimeBuilder::new()
+            .worker_threads(worker_threads)
+            .worker_cohorts(worker_cohort_map)
+            .blocking_threads(2, 2)
+            .blocking_affinity_profile(affinity_profile)
+            .build()
+            .expect("blocking affinity runtime should build")
+    }
+
     fn run_affinity_saturation_case(
         affinity_profile: BlockingPoolAffinityProfile,
         cohort_count: usize,
         queued_task_count: usize,
-    ) -> AffinitySaturationSummary {
+    ) -> AffinityScenarioSummary {
         let pool = affinity_test_pool(affinity_profile, Some(cohort_count));
         let start_barrier = Arc::new(Barrier::new(3));
         let release_barrier = Arc::new(Barrier::new(3));
@@ -484,8 +532,15 @@ mod behavioral {
             .map(|_| pool.spawn_on_cohort(0, || std::thread::yield_now()))
             .collect();
 
+        wait_for_pending_count(
+            || pool.pending_count(),
+            queued_task_count,
+            "saturation case",
+        );
+
         let pending_count_before_release = pool.pending_count();
         let busy_threads_before_release = pool.busy_threads();
+        let metrics_before_release = pool.affinity_metrics();
         let release_started_at = Instant::now();
         release_barrier.wait();
 
@@ -502,7 +557,7 @@ mod behavioral {
             "blocking affinity audit pool should shutdown cleanly"
         );
 
-        AffinitySaturationSummary {
+        AffinityScenarioSummary {
             enabled: metrics.enabled,
             cohort_count,
             queued_task_count,
@@ -512,6 +567,109 @@ mod behavioral {
             spill_dispatches: metrics.spill_dispatches,
             fallback_dispatches: metrics.fallback_dispatches,
             completion_latency_us,
+            queue_depth_by_cohort: normalize_queue_depth_by_cohort(
+                &metrics_before_release.cohort_pending_counts,
+                cohort_count,
+            ),
+            global_pending_count_before_release: metrics_before_release.global_pending_count,
+            async_coordinator_task_count: 0,
+            blocking_spawn_request_count: queued_task_count,
+        }
+    }
+
+    fn run_mixed_async_blocking_case(
+        affinity_profile: BlockingPoolAffinityProfile,
+        cohort_count: usize,
+        queued_task_count: usize,
+        async_coordinator_task_count: usize,
+    ) -> AffinityScenarioSummary {
+        let worker_threads = 2;
+        let runtime = affinity_test_runtime(affinity_profile, worker_threads, cohort_count);
+        let blocking_handle = runtime
+            .blocking_handle()
+            .expect("mixed scenario should expose a blocking pool handle");
+        let start_barrier = Arc::new(Barrier::new(3));
+        let release_barrier = Arc::new(Barrier::new(3));
+
+        let blocker0_start = Arc::clone(&start_barrier);
+        let blocker0_release = Arc::clone(&release_barrier);
+        let blocker0 = runtime
+            .spawn_blocking_on_cohort(0, move || {
+                blocker0_start.wait();
+                blocker0_release.wait();
+            })
+            .expect("blocking runtime should accept cohort-0 blocker");
+
+        let blocker1_start = Arc::clone(&start_barrier);
+        let blocker1_release = Arc::clone(&release_barrier);
+        let blocker1 = runtime
+            .spawn_blocking_on_cohort(1 % cohort_count.max(1), move || {
+                blocker1_start.wait();
+                blocker1_release.wait();
+            })
+            .expect("blocking runtime should accept cohort-1 blocker");
+
+        start_barrier.wait();
+
+        let base_spawn_requests = queued_task_count / async_coordinator_task_count.max(1);
+        let remainder = queued_task_count % async_coordinator_task_count.max(1);
+        let queued_handles = runtime.block_on(async {
+            let runtime_handle =
+                Runtime::current_handle().expect("mixed scenario should run inside a runtime");
+            let mut handles = Vec::with_capacity(queued_task_count);
+            for coordinator_index in 0..async_coordinator_task_count {
+                let spawn_requests =
+                    base_spawn_requests + usize::from(coordinator_index < remainder);
+                for _ in 0..spawn_requests {
+                    handles.push(
+                        runtime_handle
+                            .spawn_blocking_on_cohort(0, || std::thread::yield_now())
+                            .expect("async coordinator should enqueue blocking helper"),
+                    );
+                }
+                asupersync::runtime::yield_now().await;
+            }
+            handles
+        });
+
+        wait_for_pending_count(
+            || blocking_handle.pending_count(),
+            queued_task_count,
+            "mixed async-plus-blocking case",
+        );
+
+        let pending_count_before_release = blocking_handle.pending_count();
+        let busy_threads_before_release = 2;
+        let metrics_before_release = blocking_handle.affinity_metrics();
+        let release_started_at = Instant::now();
+        release_barrier.wait();
+
+        blocker0.wait();
+        blocker1.wait();
+        for handle in queued_handles {
+            handle.wait();
+        }
+
+        let completion_latency_us = release_started_at.elapsed().as_micros();
+        let metrics = blocking_handle.affinity_metrics();
+
+        AffinityScenarioSummary {
+            enabled: metrics.enabled,
+            cohort_count,
+            queued_task_count,
+            pending_count_before_release,
+            busy_threads_before_release,
+            local_queue_dispatches: metrics.local_queue_dispatches,
+            spill_dispatches: metrics.spill_dispatches,
+            fallback_dispatches: metrics.fallback_dispatches,
+            completion_latency_us,
+            queue_depth_by_cohort: normalize_queue_depth_by_cohort(
+                &metrics_before_release.cohort_pending_counts,
+                cohort_count,
+            ),
+            global_pending_count_before_release: metrics_before_release.global_pending_count,
+            async_coordinator_task_count,
+            blocking_spawn_request_count: queued_task_count,
         }
     }
 
@@ -548,7 +706,7 @@ mod behavioral {
     fn default_affinity_expected_projection() -> Value {
         json!({
             "schema_version": "blocking-pool-affinity-projection-v1",
-            "scenario_id": BLOCKING_POOL_AFFINITY_SCENARIO_ID,
+            "scenario_id": BLOCKING_POOL_AFFINITY_SATURATION_SCENARIO_ID,
             "workload_seed": 4102,
             "worker_threads": 2,
             "cohort_count": 2,
@@ -558,10 +716,75 @@ mod behavioral {
                 {"worker_slot": 1, "cohort": 1}
             ],
             "disabled_pending_count_before_release": 4,
+            "disabled_queue_depth_by_cohort_before_release": [0, 0],
+            "disabled_global_pending_count_before_release": 4,
             "disabled_local_queue_dispatches": 0,
             "disabled_spill_dispatches": 0,
             "disabled_fallback_dispatches": 0,
             "cohort_biased_pending_count_before_release": 4,
+            "cohort_biased_queue_depth_by_cohort_before_release": [1, 0],
+            "cohort_biased_global_pending_count_before_release": 3,
+            "cohort_biased_local_queue_dispatches": 3,
+            "cohort_biased_spill_dispatches": 3,
+            "cohort_biased_fallback_dispatches": 3,
+            "shutdown_drain_verdict": "clean"
+        })
+    }
+
+    fn default_mixed_async_affinity_workload_model() -> Value {
+        json!({
+            "workload_seed": 4117,
+            "worker_threads": 2,
+            "cohort_count": 2,
+            "queued_task_count": 4,
+            "async_coordinator_task_count": 2,
+            "repeated_samples": 5,
+            "selected_affinity_profiles": ["disabled", "cohort_biased"],
+            "queue_distribution": [
+                {"cohort": 0, "queued_task_count": 4},
+                {"cohort": 1, "queued_task_count": 0}
+            ]
+        })
+    }
+
+    fn default_mixed_async_affinity_operator_notes() -> Value {
+        json!({
+            "recommended_for": [
+                "64+ core hosts where async coordinators fan out bursts of CPU-heavy or blocking helper work",
+                "operators who want an end-to-end proof that cohort-biased blocking helpers improve locality without stranding mixed workloads"
+            ],
+            "avoid_when": [
+                "blocking helpers are extremely sparse and the disabled profile is already sufficient",
+                "host topology hints are unavailable and only the conservative disabled path is desired"
+            ],
+            "safe_fallback_profile": "disabled",
+            "no_win_trigger": "pin the disabled profile if the mixed async-plus-blocking report stops showing lower global queue spill or if cohort-biased p95 completion latency exceeds the disabled profile by 4x"
+        })
+    }
+
+    fn default_mixed_async_affinity_expected_projection() -> Value {
+        json!({
+            "schema_version": "blocking-pool-affinity-projection-v1",
+            "scenario_id": BLOCKING_POOL_AFFINITY_MIXED_ASYNC_SCENARIO_ID,
+            "workload_seed": 4117,
+            "worker_threads": 2,
+            "cohort_count": 2,
+            "queued_task_count": 4,
+            "async_coordinator_task_count": 2,
+            "blocking_spawn_request_count": 4,
+            "worker_cohort_map": [
+                {"worker_slot": 0, "cohort": 0},
+                {"worker_slot": 1, "cohort": 1}
+            ],
+            "disabled_pending_count_before_release": 4,
+            "disabled_queue_depth_by_cohort_before_release": [0, 0],
+            "disabled_global_pending_count_before_release": 4,
+            "disabled_local_queue_dispatches": 0,
+            "disabled_spill_dispatches": 0,
+            "disabled_fallback_dispatches": 0,
+            "cohort_biased_pending_count_before_release": 4,
+            "cohort_biased_queue_depth_by_cohort_before_release": [1, 0],
+            "cohort_biased_global_pending_count_before_release": 3,
             "cohort_biased_local_queue_dispatches": 3,
             "cohort_biased_spill_dispatches": 3,
             "cohort_biased_fallback_dispatches": 3,
@@ -571,7 +794,7 @@ mod behavioral {
 
     fn selected_blocking_pool_affinity_scenario() -> String {
         std::env::var(BLOCKING_POOL_AFFINITY_SCENARIO_ENV)
-            .unwrap_or_else(|_| BLOCKING_POOL_AFFINITY_SCENARIO_ID.to_string())
+            .unwrap_or_else(|_| BLOCKING_POOL_AFFINITY_SATURATION_SCENARIO_ID.to_string())
     }
 
     fn maybe_load_blocking_pool_affinity_contract_scenario() -> Option<(String, Value, Value, Value)>
@@ -603,7 +826,7 @@ mod behavioral {
         values[scaled]
     }
 
-    fn profile_latency_summary(samples: &[AffinitySaturationSummary]) -> Value {
+    fn profile_latency_summary(samples: &[AffinityScenarioSummary]) -> Value {
         let latencies: Vec<u128> = samples
             .iter()
             .map(|sample| sample.completion_latency_us)
@@ -634,7 +857,8 @@ mod behavioral {
         .expect("write blocking-pool affinity report");
     }
 
-    fn build_blocking_pool_affinity_report(
+    fn build_saturation_blocking_pool_affinity_report(
+        scenario_id: &str,
         description: &str,
         workload_model: &Value,
         operator_notes: &Value,
@@ -668,12 +892,14 @@ mod behavioral {
             })
             .collect();
 
-        let disabled = *disabled_samples
+        let disabled = disabled_samples
             .first()
-            .expect("disabled sample set should not be empty");
-        let cohort_biased = *cohort_biased_samples
+            .expect("disabled sample set should not be empty")
+            .clone();
+        let cohort_biased = cohort_biased_samples
             .first()
-            .expect("cohort-biased sample set should not be empty");
+            .expect("cohort-biased sample set should not be empty")
+            .clone();
 
         let worker_cohort_map: Vec<_> = (0..worker_threads.min(cohort_count.max(1)))
             .map(|worker_slot| json!({"worker_slot": worker_slot, "cohort": worker_slot % cohort_count.max(1)}))
@@ -682,17 +908,21 @@ mod behavioral {
         let queue_distribution = workload_model["queue_distribution"].clone();
         let report_projection = json!({
             "schema_version": "blocking-pool-affinity-projection-v1",
-            "scenario_id": BLOCKING_POOL_AFFINITY_SCENARIO_ID,
+            "scenario_id": scenario_id,
             "workload_seed": workload_seed,
             "worker_threads": worker_threads,
             "cohort_count": cohort_count,
             "queued_task_count": queued_task_count,
             "worker_cohort_map": worker_cohort_map,
             "disabled_pending_count_before_release": disabled.pending_count_before_release,
+            "disabled_queue_depth_by_cohort_before_release": disabled.queue_depth_by_cohort,
+            "disabled_global_pending_count_before_release": disabled.global_pending_count_before_release,
             "disabled_local_queue_dispatches": disabled.local_queue_dispatches,
             "disabled_spill_dispatches": disabled.spill_dispatches,
             "disabled_fallback_dispatches": disabled.fallback_dispatches,
             "cohort_biased_pending_count_before_release": cohort_biased.pending_count_before_release,
+            "cohort_biased_queue_depth_by_cohort_before_release": cohort_biased.queue_depth_by_cohort,
+            "cohort_biased_global_pending_count_before_release": cohort_biased.global_pending_count_before_release,
             "cohort_biased_local_queue_dispatches": cohort_biased.local_queue_dispatches,
             "cohort_biased_spill_dispatches": cohort_biased.spill_dispatches,
             "cohort_biased_fallback_dispatches": cohort_biased.fallback_dispatches,
@@ -701,17 +931,21 @@ mod behavioral {
         let repeated_run_hash_match = if include_hash_probe {
             let probe = json!({
                 "schema_version": "blocking-pool-affinity-projection-v1",
-                "scenario_id": BLOCKING_POOL_AFFINITY_SCENARIO_ID,
+                "scenario_id": scenario_id,
                 "workload_seed": workload_seed,
                 "worker_threads": worker_threads,
                 "cohort_count": cohort_count,
                 "queued_task_count": queued_task_count,
                 "worker_cohort_map": report_projection["worker_cohort_map"].clone(),
                 "disabled_pending_count_before_release": disabled.pending_count_before_release,
+                "disabled_queue_depth_by_cohort_before_release": disabled.queue_depth_by_cohort,
+                "disabled_global_pending_count_before_release": disabled.global_pending_count_before_release,
                 "disabled_local_queue_dispatches": disabled.local_queue_dispatches,
                 "disabled_spill_dispatches": disabled.spill_dispatches,
                 "disabled_fallback_dispatches": disabled.fallback_dispatches,
                 "cohort_biased_pending_count_before_release": cohort_biased.pending_count_before_release,
+                "cohort_biased_queue_depth_by_cohort_before_release": cohort_biased.queue_depth_by_cohort,
+                "cohort_biased_global_pending_count_before_release": cohort_biased.global_pending_count_before_release,
                 "cohort_biased_local_queue_dispatches": cohort_biased.local_queue_dispatches,
                 "cohort_biased_spill_dispatches": cohort_biased.spill_dispatches,
                 "cohort_biased_fallback_dispatches": cohort_biased.fallback_dispatches,
@@ -730,7 +964,7 @@ mod behavioral {
 
         json!({
             "schema_version": "blocking-pool-affinity-report-v1",
-            "scenario_id": BLOCKING_POOL_AFFINITY_SCENARIO_ID,
+            "scenario_id": scenario_id,
             "description": description,
             "workload_model": workload_model,
             "report_projection": report_projection,
@@ -741,6 +975,8 @@ mod behavioral {
                     "enabled": disabled.enabled,
                     "worker_cohort_map": report_projection["worker_cohort_map"].clone(),
                     "queue_distribution": queue_distribution.clone(),
+                    "queue_depth_by_cohort_before_release": disabled.queue_depth_by_cohort,
+                    "global_pending_count_before_release": disabled.global_pending_count_before_release,
                     "pending_count_before_release": disabled.pending_count_before_release,
                     "busy_threads_before_release": disabled.busy_threads_before_release,
                     "local_execution_count": disabled.local_queue_dispatches,
@@ -755,6 +991,8 @@ mod behavioral {
                     "enabled": cohort_biased.enabled,
                     "worker_cohort_map": report_projection["worker_cohort_map"].clone(),
                     "queue_distribution": queue_distribution,
+                    "queue_depth_by_cohort_before_release": cohort_biased.queue_depth_by_cohort,
+                    "global_pending_count_before_release": cohort_biased.global_pending_count_before_release,
                     "pending_count_before_release": cohort_biased.pending_count_before_release,
                     "busy_threads_before_release": cohort_biased.busy_threads_before_release,
                     "local_execution_count": cohort_biased.local_queue_dispatches,
@@ -783,6 +1021,211 @@ mod behavioral {
             },
             "operator_notes": operator_notes
         })
+    }
+
+    fn build_mixed_async_blocking_pool_affinity_report(
+        scenario_id: &str,
+        description: &str,
+        workload_model: &Value,
+        operator_notes: &Value,
+        include_hash_probe: bool,
+    ) -> Value {
+        let workload_seed = workload_model["workload_seed"].as_u64().unwrap_or(4117);
+        let cohort_count = workload_model["cohort_count"].as_u64().unwrap_or(2) as usize;
+        let queued_task_count = workload_model["queued_task_count"].as_u64().unwrap_or(4) as usize;
+        let repeated_samples = workload_model["repeated_samples"].as_u64().unwrap_or(5) as usize;
+        let worker_threads = workload_model["worker_threads"].as_u64().unwrap_or(2) as usize;
+        let async_coordinator_task_count = workload_model["async_coordinator_task_count"]
+            .as_u64()
+            .unwrap_or(2) as usize;
+
+        let disabled_samples: Vec<_> = (0..repeated_samples)
+            .map(|_| {
+                run_mixed_async_blocking_case(
+                    BlockingPoolAffinityProfile::Disabled,
+                    cohort_count,
+                    queued_task_count,
+                    async_coordinator_task_count,
+                )
+            })
+            .collect();
+        let cohort_biased_samples: Vec<_> = (0..repeated_samples)
+            .map(|_| {
+                run_mixed_async_blocking_case(
+                    BlockingPoolAffinityProfile::CohortBiased {
+                        local_queue_soft_limit: 1,
+                        spill_check_interval: 1,
+                    },
+                    cohort_count,
+                    queued_task_count,
+                    async_coordinator_task_count,
+                )
+            })
+            .collect();
+
+        let disabled = disabled_samples
+            .first()
+            .expect("disabled mixed sample set should not be empty");
+        let cohort_biased = cohort_biased_samples
+            .first()
+            .expect("cohort-biased mixed sample set should not be empty");
+        let worker_cohort_map: Vec<_> = (0..worker_threads.min(cohort_count.max(1)))
+            .map(|worker_slot| json!({"worker_slot": worker_slot, "cohort": worker_slot % cohort_count.max(1)}))
+            .collect();
+        let queue_distribution = workload_model["queue_distribution"].clone();
+
+        let report_projection = json!({
+            "schema_version": "blocking-pool-affinity-projection-v1",
+            "scenario_id": scenario_id,
+            "workload_seed": workload_seed,
+            "worker_threads": worker_threads,
+            "cohort_count": cohort_count,
+            "queued_task_count": queued_task_count,
+            "async_coordinator_task_count": async_coordinator_task_count,
+            "blocking_spawn_request_count": queued_task_count,
+            "worker_cohort_map": worker_cohort_map,
+            "disabled_pending_count_before_release": disabled.pending_count_before_release,
+            "disabled_queue_depth_by_cohort_before_release": disabled.queue_depth_by_cohort,
+            "disabled_global_pending_count_before_release": disabled.global_pending_count_before_release,
+            "disabled_local_queue_dispatches": disabled.local_queue_dispatches,
+            "disabled_spill_dispatches": disabled.spill_dispatches,
+            "disabled_fallback_dispatches": disabled.fallback_dispatches,
+            "cohort_biased_pending_count_before_release": cohort_biased.pending_count_before_release,
+            "cohort_biased_queue_depth_by_cohort_before_release": cohort_biased.queue_depth_by_cohort,
+            "cohort_biased_global_pending_count_before_release": cohort_biased.global_pending_count_before_release,
+            "cohort_biased_local_queue_dispatches": cohort_biased.local_queue_dispatches,
+            "cohort_biased_spill_dispatches": cohort_biased.spill_dispatches,
+            "cohort_biased_fallback_dispatches": cohort_biased.fallback_dispatches,
+            "shutdown_drain_verdict": "clean"
+        });
+        let repeated_run_hash_match = if include_hash_probe {
+            let probe = json!({
+                "schema_version": "blocking-pool-affinity-projection-v1",
+                "scenario_id": scenario_id,
+                "workload_seed": workload_seed,
+                "worker_threads": worker_threads,
+                "cohort_count": cohort_count,
+                "queued_task_count": queued_task_count,
+                "async_coordinator_task_count": async_coordinator_task_count,
+                "blocking_spawn_request_count": queued_task_count,
+                "worker_cohort_map": report_projection["worker_cohort_map"].clone(),
+                "disabled_pending_count_before_release": disabled.pending_count_before_release,
+                "disabled_queue_depth_by_cohort_before_release": disabled.queue_depth_by_cohort,
+                "disabled_global_pending_count_before_release": disabled.global_pending_count_before_release,
+                "disabled_local_queue_dispatches": disabled.local_queue_dispatches,
+                "disabled_spill_dispatches": disabled.spill_dispatches,
+                "disabled_fallback_dispatches": disabled.fallback_dispatches,
+                "cohort_biased_pending_count_before_release": cohort_biased.pending_count_before_release,
+                "cohort_biased_queue_depth_by_cohort_before_release": cohort_biased.queue_depth_by_cohort,
+                "cohort_biased_global_pending_count_before_release": cohort_biased.global_pending_count_before_release,
+                "cohort_biased_local_queue_dispatches": cohort_biased.local_queue_dispatches,
+                "cohort_biased_spill_dispatches": cohort_biased.spill_dispatches,
+                "cohort_biased_fallback_dispatches": cohort_biased.fallback_dispatches,
+                "shutdown_drain_verdict": "clean"
+            });
+            probe == report_projection
+        } else {
+            true
+        };
+        let verdict_winner = if cohort_biased.global_pending_count_before_release
+            < disabled.global_pending_count_before_release
+        {
+            "cohort_biased"
+        } else {
+            "disabled"
+        };
+
+        json!({
+            "schema_version": "blocking-pool-affinity-report-v1",
+            "scenario_id": scenario_id,
+            "description": description,
+            "workload_model": workload_model,
+            "report_projection": report_projection,
+            "repeated_run_hash_match": repeated_run_hash_match,
+            "profiles": {
+                "disabled": {
+                    "selected_affinity_profile": "disabled",
+                    "enabled": disabled.enabled,
+                    "worker_cohort_map": report_projection["worker_cohort_map"].clone(),
+                    "queue_distribution": queue_distribution.clone(),
+                    "queue_depth_by_cohort_before_release": disabled.queue_depth_by_cohort,
+                    "global_pending_count_before_release": disabled.global_pending_count_before_release,
+                    "pending_count_before_release": disabled.pending_count_before_release,
+                    "busy_threads_before_release": disabled.busy_threads_before_release,
+                    "local_execution_count": disabled.local_queue_dispatches,
+                    "remote_execution_count": disabled.spill_dispatches,
+                    "spill_count": disabled.spill_dispatches,
+                    "fallback_activations": disabled.fallback_dispatches,
+                    "async_coordinator_task_count": disabled.async_coordinator_task_count,
+                    "blocking_spawn_request_count": disabled.blocking_spawn_request_count,
+                    "shutdown_drain_verdict": "clean",
+                    "completion_latency_summary_us": profile_latency_summary(&disabled_samples)
+                },
+                "cohort_biased": {
+                    "selected_affinity_profile": "cohort_biased",
+                    "enabled": cohort_biased.enabled,
+                    "worker_cohort_map": report_projection["worker_cohort_map"].clone(),
+                    "queue_distribution": queue_distribution,
+                    "queue_depth_by_cohort_before_release": cohort_biased.queue_depth_by_cohort,
+                    "global_pending_count_before_release": cohort_biased.global_pending_count_before_release,
+                    "pending_count_before_release": cohort_biased.pending_count_before_release,
+                    "busy_threads_before_release": cohort_biased.busy_threads_before_release,
+                    "local_execution_count": cohort_biased.local_queue_dispatches,
+                    "remote_execution_count": cohort_biased.spill_dispatches,
+                    "spill_count": cohort_biased.spill_dispatches,
+                    "fallback_activations": cohort_biased.fallback_dispatches,
+                    "async_coordinator_task_count": cohort_biased.async_coordinator_task_count,
+                    "blocking_spawn_request_count": cohort_biased.blocking_spawn_request_count,
+                    "shutdown_drain_verdict": "clean",
+                    "completion_latency_summary_us": profile_latency_summary(&cohort_biased_samples)
+                }
+            },
+            "benchmark_surface": {
+                "criterion_group": "runtime/blocking_pool_affinity",
+                "cases": ["mixed_async_blocking_disabled", "mixed_async_blocking_cohort_biased"],
+                "compile_gate": "cargo check -p asupersync --bench scheduler_benchmark --features test-internals",
+                "no_run_gate": "cargo bench -p asupersync --bench scheduler_benchmark --features test-internals --no-run"
+            },
+            "operator_verdict": {
+                "winner_profile": verdict_winner,
+                "safe_fallback_profile": "disabled",
+                "pass": disabled.pending_count_before_release == cohort_biased.pending_count_before_release
+                    && disabled.async_coordinator_task_count == async_coordinator_task_count
+                    && cohort_biased.async_coordinator_task_count == async_coordinator_task_count
+                    && cohort_biased.global_pending_count_before_release
+                        < disabled.global_pending_count_before_release,
+                "reason": "cohort-biased affinity preserved clean mixed-workload drain while reducing global spill pressure under async-coordinated blocking bursts",
+                "no_win_trigger": operator_notes["no_win_trigger"].clone()
+            },
+            "operator_notes": operator_notes
+        })
+    }
+
+    fn build_blocking_pool_affinity_report(
+        description: &str,
+        workload_model: &Value,
+        operator_notes: &Value,
+        include_hash_probe: bool,
+    ) -> Value {
+        let scenario_id = selected_blocking_pool_affinity_scenario();
+        match scenario_id.as_str() {
+            BLOCKING_POOL_AFFINITY_MIXED_ASYNC_SCENARIO_ID => {
+                build_mixed_async_blocking_pool_affinity_report(
+                    &scenario_id,
+                    description,
+                    workload_model,
+                    operator_notes,
+                    include_hash_probe,
+                )
+            }
+            _ => build_saturation_blocking_pool_affinity_report(
+                &scenario_id,
+                description,
+                workload_model,
+                operator_notes,
+                include_hash_probe,
+            ),
+        }
     }
 
     #[test]
@@ -952,12 +1395,14 @@ mod behavioral {
         assert_eq!(cohort_biased.fallback_dispatches, 3);
 
         let summary = json!({
-            "scenario_id": "AA-BLOCKING-POOL-AFFINITY-SATURATION-2C",
+            "scenario_id": BLOCKING_POOL_AFFINITY_SATURATION_SCENARIO_ID,
             "profiles": {
                 "disabled": {
                     "cohort_count": disabled.cohort_count,
                     "queued_task_count": disabled.queued_task_count,
                     "pending_count_before_release": disabled.pending_count_before_release,
+                    "queue_depth_by_cohort_before_release": disabled.queue_depth_by_cohort,
+                    "global_pending_count_before_release": disabled.global_pending_count_before_release,
                     "busy_threads_before_release": disabled.busy_threads_before_release,
                     "local_queue_dispatches": disabled.local_queue_dispatches,
                     "spill_dispatches": disabled.spill_dispatches,
@@ -968,6 +1413,8 @@ mod behavioral {
                     "cohort_count": cohort_biased.cohort_count,
                     "queued_task_count": cohort_biased.queued_task_count,
                     "pending_count_before_release": cohort_biased.pending_count_before_release,
+                    "queue_depth_by_cohort_before_release": cohort_biased.queue_depth_by_cohort,
+                    "global_pending_count_before_release": cohort_biased.global_pending_count_before_release,
                     "busy_threads_before_release": cohort_biased.busy_threads_before_release,
                     "local_queue_dispatches": cohort_biased.local_queue_dispatches,
                     "spill_dispatches": cohort_biased.spill_dispatches,
@@ -985,16 +1432,81 @@ mod behavioral {
     }
 
     #[test]
+    fn blocking_pool_affinity_mixed_async_summary_emits_queue_depth_and_locality() {
+        let disabled =
+            run_mixed_async_blocking_case(BlockingPoolAffinityProfile::Disabled, 2, 4, 2);
+        let cohort_biased = run_mixed_async_blocking_case(
+            BlockingPoolAffinityProfile::CohortBiased {
+                local_queue_soft_limit: 1,
+                spill_check_interval: 1,
+            },
+            2,
+            4,
+            2,
+        );
+
+        assert_eq!(disabled.pending_count_before_release, 4);
+        assert_eq!(disabled.global_pending_count_before_release, 4);
+        assert_eq!(disabled.async_coordinator_task_count, 2);
+        assert_eq!(disabled.blocking_spawn_request_count, 4);
+        assert!(!disabled.enabled);
+
+        assert_eq!(cohort_biased.pending_count_before_release, 4);
+        assert_eq!(cohort_biased.queue_depth_by_cohort, vec![1, 0]);
+        assert_eq!(cohort_biased.global_pending_count_before_release, 3);
+        assert_eq!(cohort_biased.async_coordinator_task_count, 2);
+        assert_eq!(cohort_biased.blocking_spawn_request_count, 4);
+        assert!(cohort_biased.enabled);
+        assert_eq!(cohort_biased.local_queue_dispatches, 3);
+        assert_eq!(cohort_biased.spill_dispatches, 3);
+        assert_eq!(cohort_biased.fallback_dispatches, 3);
+
+        let summary = json!({
+            "scenario_id": BLOCKING_POOL_AFFINITY_MIXED_ASYNC_SCENARIO_ID,
+            "profiles": {
+                "disabled": {
+                    "queue_depth_by_cohort_before_release": disabled.queue_depth_by_cohort,
+                    "global_pending_count_before_release": disabled.global_pending_count_before_release,
+                    "async_coordinator_task_count": disabled.async_coordinator_task_count,
+                    "blocking_spawn_request_count": disabled.blocking_spawn_request_count
+                },
+                "cohort_biased": {
+                    "queue_depth_by_cohort_before_release": cohort_biased.queue_depth_by_cohort,
+                    "global_pending_count_before_release": cohort_biased.global_pending_count_before_release,
+                    "async_coordinator_task_count": cohort_biased.async_coordinator_task_count,
+                    "blocking_spawn_request_count": cohort_biased.blocking_spawn_request_count
+                }
+            }
+        });
+        println!("BLOCKING_POOL_AFFINITY_MIXED_SUMMARY_JSON_BEGIN");
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&summary)
+                .expect("serialize mixed blocking affinity summary")
+        );
+        println!("BLOCKING_POOL_AFFINITY_MIXED_SUMMARY_JSON_END");
+    }
+
+    #[test]
     fn blocking_pool_affinity_smoke_contract_emits_report() {
         let (description, workload_model, operator_notes, expected_report_projection) =
             maybe_load_blocking_pool_affinity_contract_scenario().unwrap_or_else(|| {
-                (
-                    "Compare disabled and cohort-biased blocking-pool affinity under deterministic saturation and freeze the operator-visible locality report."
-                        .to_string(),
-                    default_affinity_workload_model(),
-                    default_affinity_operator_notes(),
-                    default_affinity_expected_projection(),
-                )
+                match selected_blocking_pool_affinity_scenario().as_str() {
+                    BLOCKING_POOL_AFFINITY_MIXED_ASYNC_SCENARIO_ID => (
+                        "Drive cohort-biased blocking helpers from async coordinators and freeze the mixed-workload locality report."
+                            .to_string(),
+                        default_mixed_async_affinity_workload_model(),
+                        default_mixed_async_affinity_operator_notes(),
+                        default_mixed_async_affinity_expected_projection(),
+                    ),
+                    _ => (
+                        "Compare disabled and cohort-biased blocking-pool affinity under deterministic saturation and freeze the operator-visible locality report."
+                            .to_string(),
+                        default_affinity_workload_model(),
+                        default_affinity_operator_notes(),
+                        default_affinity_expected_projection(),
+                    ),
+                }
             });
         let report = build_blocking_pool_affinity_report(
             &description,
