@@ -5,6 +5,7 @@
 //! scope handling, and export behavior validation.
 
 #![cfg(test)]
+#![allow(dead_code)]
 
 use std::collections::HashMap;
 
