@@ -711,6 +711,7 @@ mod tests {
     )]
     use super::*;
     use crate::test_utils::init_test_logging;
+    use futures_lite::future::block_on;
     use std::sync::Arc;
     use std::sync::mpsc;
     use std::thread;
@@ -3656,12 +3657,10 @@ mod tests {
 
     #[test]
     fn audit_notify_memory_ordering_correctness() {
-        use crate::cx::Cx;
-        use crate::time::Sleep;
         use std::sync::Arc;
         use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
         use std::thread;
-        use std::time::{Duration, Instant};
+        use std::time::Duration;
 
         let notify = Arc::new(Notify::new());
         let shared_flag = Arc::new(AtomicBool::new(false));
@@ -3688,9 +3687,7 @@ mod tests {
 
             // Spawn waiter thread
             let waiter_handle = thread::spawn(move || {
-                let rt = crate::lab::LabRuntime::new();
-                rt.block_on(async {
-                    let cx = Cx::new();
+                block_on(async {
                     waiter_ready_clone.store(true, Ordering::Release);
 
                     // Wait for notification
@@ -3702,7 +3699,7 @@ mod tests {
                     let counter_visible = counter_clone.load(Ordering::Acquire);
 
                     (flag_visible, counter_visible)
-                });
+                })
             });
 
             // Wait for waiter to register
@@ -3758,10 +3755,7 @@ mod tests {
             let barrier_clone = barrier.clone();
 
             let handle = thread::spawn(move || {
-                let rt = crate::lab::LabRuntime::new();
-                rt.block_on(async {
-                    let cx = Cx::new();
-
+                block_on(async {
                     // All waiters synchronize before starting
                     barrier_clone.wait();
 
@@ -3772,7 +3766,7 @@ mod tests {
                     let data_seen = shared_data_clone.load(Ordering::Acquire);
 
                     (waiter_id, data_seen)
-                });
+                })
             });
             handles.push(handle);
         }
@@ -3814,7 +3808,6 @@ mod tests {
 
     #[test]
     fn audit_notify_spurious_wakeup_prevention() {
-        use crate::cx::Cx;
         use std::sync::Arc;
         use std::sync::atomic::{AtomicU32, Ordering};
         use std::thread;
@@ -3844,9 +3837,7 @@ mod tests {
 
             // Spawn waiter that polls many times
             let waiter_handle = thread::spawn(move || {
-                let rt = crate::lab::LabRuntime::new();
-                rt.block_on(async {
-                    let cx = Cx::new();
+                block_on(async {
                     let mut notified_fut = Box::pin(notify_clone.notified());
 
                     // Poll many times in rapid succession WITHOUT any notify_one() calls
@@ -3877,7 +3868,7 @@ mod tests {
 
                         // Small yield to allow for potential race conditions
                         if poll_iteration % 10 == 0 {
-                            crate::time::yield_now(&cx).await;
+                            crate::runtime::yield_now().await;
                         }
                     }
 
@@ -3885,7 +3876,7 @@ mod tests {
                     // Now wait for actual notification
                     notified_fut.await;
                     (0, false) // false = no spurious ready
-                });
+                })
             });
 
             // Give waiter time to poll many times without notification
@@ -3920,10 +3911,7 @@ mod tests {
             let ready_without_notify_clone = ready_without_notify_count.clone();
 
             let handle = thread::spawn(move || {
-                let rt = crate::lab::LabRuntime::new();
-                rt.block_on(async {
-                    let cx = Cx::new();
-
+                block_on(async {
                     // Create fresh notified() future
                     let mut notified_fut = Box::pin(notify2_clone.notified());
 
@@ -3945,7 +3933,7 @@ mod tests {
                         }
 
                         // Small delay between polls
-                        crate::time::yield_now(&cx).await;
+                        crate::runtime::yield_now().await;
                     }
 
                     // All 50 polls returned Pending, now wait for real notification
@@ -3983,12 +3971,9 @@ mod tests {
         notify3.notify_one();
 
         let consume_test_handle = thread::spawn(move || {
-            let rt = crate::lab::LabRuntime::new();
-            rt.block_on(async {
-                let cx = Cx::new();
-
+            block_on(async {
                 // First poll should return Ready (consumes stored notification)
-                let first_ready = notify3.notified().await;
+                notify3.notified().await;
 
                 // Create new notified() future - should NOT be Ready without new notification
                 let mut second_notified = Box::pin(notify3.notified());
@@ -4081,10 +4066,7 @@ mod tests {
                 let consumed_clone = consumed_notifications.clone();
 
                 let handle = thread::spawn(move || {
-                    let rt = crate::lab::LabRuntime::new();
-                    rt.block_on(async {
-                        let cx = Cx::new();
-
+                    block_on(async {
                         // Each notified() should consume exactly one stored notification
                         notify_clone.notified().await;
                         consumed_clone.fetch_add(1, Ordering::AcqRel);
@@ -4176,10 +4158,7 @@ mod tests {
                 let consumed_clone = notifications_consumed.clone();
 
                 let handle = thread::spawn(move || {
-                    let rt = crate::lab::LabRuntime::new();
-                    rt.block_on(async {
-                        let cx = Cx::new();
-
+                    block_on(async {
                         notify_clone.notified().await;
                         consumed_clone.fetch_add(1, Ordering::AcqRel);
 
@@ -4237,9 +4216,7 @@ mod tests {
                 let notify_clone = notify_mixed.clone();
 
                 let handle = thread::spawn(move || {
-                    let rt = crate::lab::LabRuntime::new();
-                    rt.block_on(async {
-                        let cx = Cx::new();
+                    block_on(async {
                         notify_clone.notified().await;
                         i
                     })
