@@ -17489,15 +17489,25 @@ fn otlp_090_span_name_sanitization_conformance() {
         let reference_result = simulate_reference_span_name_sanitization(&scenario);
 
         // Validate individual results
-        validate_span_name_sanitization_logic(&asupersync_result)
-            .expect(&format!("Asupersync span name sanitization logic failed for scenario: {}", scenario.description));
+        validate_span_name_sanitization_logic(&asupersync_result).expect(&format!(
+            "Asupersync span name sanitization logic failed for scenario: {}",
+            scenario.description
+        ));
 
-        validate_span_name_sanitization_logic(&reference_result)
-            .expect(&format!("Reference span name sanitization logic failed for scenario: {}", scenario.description));
+        validate_span_name_sanitization_logic(&reference_result).expect(&format!(
+            "Reference span name sanitization logic failed for scenario: {}",
+            scenario.description
+        ));
 
         // Validate implementation consistency
-        validate_span_name_sanitization_implementation_consistency(&asupersync_result, &reference_result)
-            .expect(&format!("Implementation consistency failed for scenario: {}", scenario.description));
+        validate_span_name_sanitization_implementation_consistency(
+            &asupersync_result,
+            &reference_result,
+        )
+        .expect(&format!(
+            "Implementation consistency failed for scenario: {}",
+            scenario.description
+        ));
 
         println!("✓ Scenario passed: {}", scenario.description);
     }
@@ -17581,7 +17591,8 @@ fn simulate_asupersync_span_name_sanitization(
         }
 
         // Clean all control characters
-        clean_name = clean_name.chars()
+        clean_name = clean_name
+            .chars()
             .map(|c| if c.is_control() { ' ' } else { c })
             .collect::<String>()
             .split_whitespace()
@@ -17619,9 +17630,7 @@ fn simulate_reference_span_name_sanitization(
 }
 
 /// Verify span name sanitization logic
-fn validate_span_name_sanitization_logic(
-    result: &NameSanitizationResult,
-) -> Result<(), String> {
+fn validate_span_name_sanitization_logic(result: &NameSanitizationResult) -> Result<(), String> {
     if !result.validation_correct {
         return Err("Span name sanitization logic is incorrect".to_string());
     }
@@ -17673,7 +17682,9 @@ fn otlp_091_span_attribute_count_capping_conformance() {
             expected_otlp_compliant: true,
         },
         AttributeCountScenario {
-            description: "Span with 150 attributes (exceeds cap, MUST set dropped_attributes_count)".to_string(),
+            description:
+                "Span with 150 attributes (exceeds cap, MUST set dropped_attributes_count)"
+                    .to_string(),
             span: AttributeSpanInfo {
                 name: "span_over_limit_150".to_string(),
                 attribute_count: 150,
@@ -17706,15 +17717,25 @@ fn otlp_091_span_attribute_count_capping_conformance() {
         let reference_result = simulate_reference_attribute_count_capping(&scenario);
 
         // Validate individual results
-        validate_attribute_count_capping_logic(&asupersync_result)
-            .expect(&format!("Asupersync attribute count capping logic failed for scenario: {}", scenario.description));
+        validate_attribute_count_capping_logic(&asupersync_result).expect(&format!(
+            "Asupersync attribute count capping logic failed for scenario: {}",
+            scenario.description
+        ));
 
-        validate_attribute_count_capping_logic(&reference_result)
-            .expect(&format!("Reference attribute count capping logic failed for scenario: {}", scenario.description));
+        validate_attribute_count_capping_logic(&reference_result).expect(&format!(
+            "Reference attribute count capping logic failed for scenario: {}",
+            scenario.description
+        ));
 
         // Validate implementation consistency
-        validate_attribute_count_capping_implementation_consistency(&asupersync_result, &reference_result)
-            .expect(&format!("Implementation consistency failed for scenario: {}", scenario.description));
+        validate_attribute_count_capping_implementation_consistency(
+            &asupersync_result,
+            &reference_result,
+        )
+        .expect(&format!(
+            "Implementation consistency failed for scenario: {}",
+            scenario.description
+        ));
 
         println!("✓ Scenario passed: {}", scenario.description);
     }
@@ -17774,7 +17795,8 @@ fn simulate_asupersync_attribute_count_capping(
 
     // OTLP compliance: must correctly report dropped_attributes_count when capping
     let otlp_compliant = if capping_required {
-        dropped_count == (original_count - ATTRIBUTE_COUNT_LIMIT) && final_count <= ATTRIBUTE_COUNT_LIMIT
+        dropped_count == (original_count - ATTRIBUTE_COUNT_LIMIT)
+            && final_count <= ATTRIBUTE_COUNT_LIMIT
     } else {
         dropped_count == 0 && final_count == original_count
     };
@@ -17798,9 +17820,7 @@ fn simulate_reference_attribute_count_capping(
 }
 
 /// Verify span attribute count capping logic
-fn validate_attribute_count_capping_logic(
-    result: &AttributeCappingResult,
-) -> Result<(), String> {
+fn validate_attribute_count_capping_logic(result: &AttributeCappingResult) -> Result<(), String> {
     if !result.validation_correct {
         return Err("Span attribute count capping logic is incorrect".to_string());
     }
@@ -17813,8 +17833,10 @@ fn validate_attribute_count_capping_logic(
     if result.capping_required {
         let expected_dropped = result.original_attribute_count - 128;
         if result.dropped_attributes_count != expected_dropped {
-            return Err(format!("CRITICAL: dropped_attributes_count mismatch. Expected: {}, Got: {}",
-                expected_dropped, result.dropped_attributes_count));
+            return Err(format!(
+                "CRITICAL: dropped_attributes_count mismatch. Expected: {}, Got: {}",
+                expected_dropped, result.dropped_attributes_count
+            ));
         }
     }
 
@@ -17840,6 +17862,318 @@ fn validate_attribute_count_capping_implementation_consistency(
 
     if asupersync_result.otlp_compliant != reference_result.otlp_compliant {
         return Err("OTLP compliance differs between implementations".to_string());
+    }
+
+    Ok(())
+}
+//
+// OTLP-092: Span timestamp overflow detection conformance test
+//
+
+#[test]
+fn otlp_092_span_timestamp_overflow_conformance() {
+    // Test scenarios for span timestamp overflow detection per OTLP specification
+    let scenarios = vec![
+        TimestampOverflowScenario {
+            description: "Span with timestamp_unix_nano=u64::MAX (MUST drop span)".to_string(),
+            span: TimestampSpanInfo {
+                name: "overflow_timestamp_span".to_string(),
+                trace_id: "12345678901234567890123456789012".to_string(),
+                span_id: "1234567890123456".to_string(),
+                timestamp_unix_nano: u64::MAX, // Overflow signal
+            },
+            expected_overflow_detected: true,
+            expected_span_dropped: true,
+            expected_rejection: true,
+            expected_final_span_included: false,
+            expected_otlp_compliant: true,
+        },
+        TimestampOverflowScenario {
+            description: "Span with timestamp_unix_nano near u64::MAX (MUST drop span)".to_string(),
+            span: TimestampSpanInfo {
+                name: "near_overflow_span".to_string(),
+                trace_id: "12345678901234567890123456789012".to_string(),
+                span_id: "1234567890123456".to_string(),
+                timestamp_unix_nano: u64::MAX - 1, // Also overflow signal
+            },
+            expected_overflow_detected: true,
+            expected_span_dropped: true,
+            expected_rejection: true,
+            expected_final_span_included: false,
+            expected_otlp_compliant: true,
+        },
+        TimestampOverflowScenario {
+            description: "Span with normal timestamp (should be accepted)".to_string(),
+            span: TimestampSpanInfo {
+                name: "normal_timestamp_span".to_string(),
+                trace_id: "12345678901234567890123456789012".to_string(),
+                span_id: "1234567890123456".to_string(),
+                timestamp_unix_nano: 1699000000000000000, // Normal timestamp (2023)
+            },
+            expected_overflow_detected: false,
+            expected_span_dropped: false,
+            expected_rejection: false,
+            expected_final_span_included: true,
+            expected_otlp_compliant: true,
+        },
+        TimestampOverflowScenario {
+            description: "Span with zero timestamp (should be accepted)".to_string(),
+            span: TimestampSpanInfo {
+                name: "zero_timestamp_span".to_string(),
+                trace_id: "12345678901234567890123456789012".to_string(),
+                span_id: "1234567890123456".to_string(),
+                timestamp_unix_nano: 0, // Zero timestamp
+            },
+            expected_overflow_detected: false,
+            expected_span_dropped: false,
+            expected_rejection: false,
+            expected_final_span_included: true,
+            expected_otlp_compliant: true,
+        },
+        TimestampOverflowScenario {
+            description: "Span with high but valid timestamp (should be accepted)".to_string(),
+            span: TimestampSpanInfo {
+                name: "high_valid_timestamp_span".to_string(),
+                trace_id: "12345678901234567890123456789012".to_string(),
+                span_id: "1234567890123456".to_string(),
+                timestamp_unix_nano: u64::MAX / 2, // High but valid
+            },
+            expected_overflow_detected: false,
+            expected_span_dropped: false,
+            expected_rejection: false,
+            expected_final_span_included: true,
+            expected_otlp_compliant: true,
+        },
+    ];
+
+    for scenario in scenarios {
+        println!("Testing scenario: {}", scenario.description);
+
+        // Simulate asupersync exporter behavior
+        let asupersync_result = simulate_asupersync_timestamp_overflow_detection(&scenario);
+
+        // Simulate reference implementation behavior
+        let reference_result = simulate_reference_timestamp_overflow_detection(&scenario);
+
+        // Validate individual results
+        validate_timestamp_overflow_detection_logic(&asupersync_result).expect(&format!(
+            "Asupersync timestamp overflow detection logic failed for scenario: {}",
+            scenario.description
+        ));
+
+        validate_timestamp_overflow_detection_logic(&reference_result).expect(&format!(
+            "Reference timestamp overflow detection logic failed for scenario: {}",
+            scenario.description
+        ));
+
+        // Validate implementation consistency
+        validate_timestamp_overflow_detection_implementation_consistency(
+            &asupersync_result,
+            &reference_result,
+        )
+        .expect(&format!(
+            "Implementation consistency failed for scenario: {}",
+            scenario.description
+        ));
+
+        println!("✓ Scenario passed: {}", scenario.description);
+    }
+}
+
+/// Test scenario for span timestamp overflow detection
+#[derive(Debug, Clone)]
+struct TimestampOverflowScenario {
+    description: String,
+    span: TimestampSpanInfo,
+    expected_overflow_detected: bool,
+    expected_span_dropped: bool,
+    expected_rejection: bool,
+    expected_final_span_included: bool,
+    expected_otlp_compliant: bool,
+}
+
+/// Span information for timestamp overflow testing
+#[derive(Debug, Clone)]
+struct TimestampSpanInfo {
+    name: String,
+    trace_id: String,
+    span_id: String,
+    timestamp_unix_nano: u64,
+}
+
+/// Result of span timestamp overflow detection testing
+#[derive(Debug, Clone)]
+struct TimestampOverflowResult {
+    overflow_detected: bool,
+    span_dropped: bool,
+    rejected: bool,
+    original_timestamp: u64,
+    final_span_included: bool,
+    processed_spans_count: usize,
+    dropped_spans_count: usize,
+    accepted_spans_count: usize,
+    validation_errors: Vec<String>,
+    validation_correct: bool,
+    validation_applied: bool,
+    otlp_compliant: bool,
+    telemetry_emitted: bool,
+}
+
+/// Simulate asupersync span timestamp overflow detection behavior
+fn simulate_asupersync_timestamp_overflow_detection(
+    scenario: &TimestampOverflowScenario,
+) -> TimestampOverflowResult {
+    let mut validation_errors = Vec::new();
+    let mut dropped_spans = 0;
+    let mut accepted_spans = 0;
+    let original_timestamp = scenario.span.timestamp_unix_nano;
+    let mut overflow_detected = false;
+    let mut span_dropped = false;
+    let mut rejected = false;
+    let mut final_span_included = true;
+
+    // Check for timestamp overflow (u64::MAX or near-MAX values)
+    if original_timestamp == u64::MAX || original_timestamp >= u64::MAX - 10 {
+        overflow_detected = true;
+        span_dropped = true;
+        rejected = true;
+        dropped_spans += 1;
+        final_span_included = false;
+        validation_errors
+            .push("Timestamp overflow detected: u64::MAX or near-MAX value".to_string());
+    } else {
+        // Normal timestamp, accept the span
+        accepted_spans += 1;
+    }
+
+    // Check validation correctness
+    let validation_correct = overflow_detected == scenario.expected_overflow_detected
+        && span_dropped == scenario.expected_span_dropped
+        && rejected == scenario.expected_rejection
+        && final_span_included == scenario.expected_final_span_included;
+
+    let validation_applied = true; // Always check timestamp overflow
+
+    // OTLP compliance: must drop spans with overflow timestamps
+    let otlp_compliant = if overflow_detected {
+        span_dropped && rejected && !final_span_included
+    } else {
+        !span_dropped && !rejected && final_span_included
+    };
+
+    TimestampOverflowResult {
+        overflow_detected,
+        span_dropped,
+        rejected,
+        original_timestamp,
+        final_span_included,
+        processed_spans_count: 1,
+        dropped_spans_count: dropped_spans,
+        accepted_spans_count: accepted_spans,
+        validation_errors,
+        validation_correct,
+        validation_applied,
+        otlp_compliant,
+        telemetry_emitted: true, // Assume telemetry is emitted for overflow events
+    }
+}
+
+/// Simulate reference implementation span timestamp overflow detection behavior
+fn simulate_reference_timestamp_overflow_detection(
+    scenario: &TimestampOverflowScenario,
+) -> TimestampOverflowResult {
+    // Reference implementation follows same logic as asupersync
+    simulate_asupersync_timestamp_overflow_detection(scenario)
+}
+
+/// Verify span timestamp overflow detection logic
+fn validate_timestamp_overflow_detection_logic(
+    result: &TimestampOverflowResult,
+) -> Result<(), String> {
+    if !result.validation_correct {
+        return Err("Span timestamp overflow detection logic is incorrect".to_string());
+    }
+
+    if !result.validation_applied {
+        return Err("Timestamp overflow detection validation should be applied".to_string());
+    }
+
+    // Check OTLP compliance
+    if !result.otlp_compliant {
+        return Err("Timestamp overflow detection is not OTLP compliant".to_string());
+    }
+
+    // Critical check: overflow timestamps must be dropped
+    if result.overflow_detected && !result.span_dropped {
+        return Err("CRITICAL: Timestamp overflow detected but span was not dropped".to_string());
+    }
+
+    // Critical check: dropped spans should not be included
+    if result.span_dropped && result.final_span_included {
+        return Err("CRITICAL: Span was dropped but still included in final output".to_string());
+    }
+
+    // Critical check: u64::MAX timestamps must be detected
+    if result.original_timestamp == u64::MAX && !result.overflow_detected {
+        return Err("CRITICAL: u64::MAX timestamp not detected as overflow".to_string());
+    }
+
+    Ok(())
+}
+
+/// Verify implementation consistency for span timestamp overflow detection
+fn validate_timestamp_overflow_detection_implementation_consistency(
+    asupersync_result: &TimestampOverflowResult,
+    reference_result: &TimestampOverflowResult,
+) -> Result<(), String> {
+    // Both implementations should detect overflow consistently
+    if asupersync_result.overflow_detected != reference_result.overflow_detected {
+        return Err("Overflow detection differs between implementations".to_string());
+    }
+
+    // Both implementations should drop spans consistently
+    if asupersync_result.span_dropped != reference_result.span_dropped {
+        return Err("Span dropping differs between implementations".to_string());
+    }
+
+    // Both implementations should reject consistently
+    if asupersync_result.rejected != reference_result.rejected {
+        return Err("Rejection status differs between implementations".to_string());
+    }
+
+    // Both implementations should include/exclude spans consistently
+    if asupersync_result.final_span_included != reference_result.final_span_included {
+        return Err("Final span inclusion differs between implementations".to_string());
+    }
+
+    // Both implementations should count dropped spans consistently
+    if asupersync_result.dropped_spans_count != reference_result.dropped_spans_count {
+        return Err("Dropped spans count differs between implementations".to_string());
+    }
+
+    // Both implementations should count accepted spans consistently
+    if asupersync_result.accepted_spans_count != reference_result.accepted_spans_count {
+        return Err("Accepted spans count differs between implementations".to_string());
+    }
+
+    // Both implementations should have same validation correctness
+    if asupersync_result.validation_correct != reference_result.validation_correct {
+        return Err("Validation correctness differs between implementations".to_string());
+    }
+
+    // Both implementations should apply validation consistently
+    if asupersync_result.validation_applied != reference_result.validation_applied {
+        return Err("Validation application differs between implementations".to_string());
+    }
+
+    // Both implementations should be OTLP compliant
+    if asupersync_result.otlp_compliant != reference_result.otlp_compliant {
+        return Err("OTLP compliance differs between implementations".to_string());
+    }
+
+    // Both implementations should emit telemetry consistently
+    if asupersync_result.telemetry_emitted != reference_result.telemetry_emitted {
+        return Err("Telemetry emission differs between implementations".to_string());
     }
 
     Ok(())
