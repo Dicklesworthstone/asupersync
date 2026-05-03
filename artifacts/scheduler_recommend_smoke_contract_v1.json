@@ -1,0 +1,134 @@
+{
+  "contract_version": "scheduler-recommend-smoke-contract-v1",
+  "bead_id": "asupersync-2ijesw",
+  "description": "Contract-backed smoke proof for offline_tuner scheduler recommendations derived from deterministic scheduler evidence artifacts.",
+  "runner_script": "scripts/run_scheduler_recommend_smoke.sh",
+  "runner_bundle_schema_version": "scheduler-recommend-smoke-bundle-v1",
+  "runner_report_schema_version": "scheduler-recommend-smoke-run-report-v1",
+  "required_bundle_fields": [
+    "schema_version",
+    "contract_version",
+    "scenario_id",
+    "description",
+    "run_id",
+    "mode",
+    "artifact_path",
+    "run_log_path",
+    "evidence_file",
+    "report_file",
+    "command",
+    "expected_profile_name",
+    "expected_reason_codes",
+    "command_exit_code",
+    "script_exit_code",
+    "validation_passed",
+    "status",
+    "started_ts",
+    "ended_ts"
+  ],
+  "required_run_report_fields": [
+    "schema_version",
+    "contract_version",
+    "artifact_path",
+    "bundle_manifest_path",
+    "run_id",
+    "scenario_id",
+    "mode",
+    "command_exit_code",
+    "script_exit_code",
+    "validation_passed",
+    "status",
+    "message",
+    "expected_report_projection",
+    "actual_report_projection"
+  ],
+  "required_output_files": [
+    "bundle_manifest.json",
+    "run_report.json",
+    "scheduler_evidence.json",
+    "scheduler_report.json",
+    "run.log"
+  ],
+  "validation_projection_fields": [
+    "schema_version",
+    "source_run_label",
+    "workload_class",
+    "profile_name",
+    "recommended_knobs",
+    "global_queue_limit_hint",
+    "fallback_profile",
+    "confidence_percent",
+    "reason_codes"
+  ],
+  "smoke_scenarios": [
+    {
+      "scenario_id": "AA-SCHED-RECOMMEND-MIXED-BURST-64C",
+      "description": "Verify mixed-burst 64-core scheduler evidence recommends the scale_workers profile with stable reason codes.",
+      "output_root": "target/scheduler-recommend-smoke",
+      "command_prefix": "cargo run -p asupersync --bin offline_tuner --features cli,simd-intrinsics -- scheduler-recommend",
+      "evidence_artifact": {
+        "schema_version": "asupersync.scheduler-evidence.v1",
+        "run_label": "mixed-burst-64c",
+        "workload_class": "mixed_burst",
+        "topology": {
+          "worker_threads": 64,
+          "cohort_count": 2,
+          "memory_budget_gib": 256
+        },
+        "current_knobs": {
+          "worker_threads": 64,
+          "steal_batch_size": 8,
+          "cancel_streak_limit": 16,
+          "global_queue_limit": 0,
+          "parking_enabled": true
+        },
+        "metrics": {
+          "wake_to_run_p50_ns": 8000,
+          "wake_to_run_p95_ns": 90000,
+          "wake_to_run_p99_ns": 220000,
+          "queue_residency_p50_ns": 16000,
+          "queue_residency_p95_ns": 200000,
+          "queue_residency_p99_ns": 520000,
+          "ready_backlog_p95": 192,
+          "ready_backlog_p99": 320,
+          "cancel_debt_p95": 48,
+          "cancel_debt_p99": 128,
+          "remote_steal_ratio_pct": 42,
+          "cross_cohort_wake_p99_ns": 180000
+        },
+        "notes": [
+          "deterministic_lab",
+          "smoke_e2e"
+        ]
+      },
+      "expected_report": {
+        "schema_version": "asupersync.scheduler-evidence.v1",
+        "source_run_label": "mixed-burst-64c",
+        "workload_class": "mixed_burst",
+        "profile_name": "scale_workers",
+        "recommended_knobs": {
+          "worker_threads": 66,
+          "steal_batch_size": 16,
+          "cancel_streak_limit": 32,
+          "global_queue_limit": 0,
+          "parking_enabled": true
+        },
+        "global_queue_limit_hint": 640,
+        "fallback_profile": {
+          "worker_threads": 64,
+          "steal_batch_size": 8,
+          "cancel_streak_limit": 16,
+          "global_queue_limit": 0,
+          "parking_enabled": true
+        },
+        "confidence_percent": 90,
+        "reason_codes": [
+          "workers_saturated",
+          "queue_residency_dominant",
+          "cancel_debt_dominant",
+          "remote_steal_pressure"
+        ]
+      }
+    }
+  ]
+}
