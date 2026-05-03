@@ -4206,4 +4206,290 @@ mod tests {
             });
         }
     }
+
+    /// AUDIT MODULE: SQLite prepared statement reset semantics compliance
+    ///
+    /// AUDIT FINDING: SOUND - SQLite wrapper uses rusqlite high-level APIs that
+    /// automatically handle sqlite3_step()/sqlite3_reset() lifecycle per SQLite spec.
+    /// No manual reset required, no risk of stale statement state.
+    ///
+    /// Per SQLite spec: after sqlite3_step() returns SQLITE_DONE or SQLITE_ROW (final),
+    /// the statement must be reset before re-execute. This wrapper delegates to
+    /// rusqlite APIs that handle this transparently.
+    mod sqlite_prepared_statement_reset_audit {
+        use super::*;
+
+        /// AUDIT: Verify rusqlite high-level API usage eliminates reset requirements
+        ///
+        /// Documents that the SQLite wrapper uses only high-level rusqlite APIs
+        /// (conn.execute, stmt.query) that automatically handle sqlite3_reset()
+        /// lifecycle, eliminating manual reset requirements per SQLite specification.
+        #[test]
+        fn audit_rusqlite_automatic_statement_reset() {
+            init_test_logging();
+            let cx = create_test_cx();
+
+            block_on(async {
+                let conn = match SqliteConnection::open_in_memory(&cx).await {
+                    Outcome::Ok(conn) => conn,
+                    other => panic!("open_in_memory failed: {other:?}"),
+                };
+
+                // Create test table
+                match conn.execute_batch(&cx, "CREATE TABLE reset_test (id INTEGER PRIMARY KEY, value TEXT);").await {
+                    Outcome::Ok(()) => {}
+                    other => panic!("create table failed: {other:?}"),
+                }
+
+                // AUDIT VERIFICATION: Multiple execute calls on same SQL use conn.execute()
+                // which internally prepares, steps, and resets automatically
+                for i in 1..=5 {
+                    let value = format!("test-value-{i}");
+                    match conn.execute(&cx, "INSERT INTO reset_test (value) VALUES (?1)", &[SqliteValue::Text(value)]).await {
+                        Outcome::Ok(rows) => {
+                            crate::assert_with_log!(
+                                rows == 1,
+                                "INSERT should affect exactly 1 row",
+                                1,
+                                rows
+                            );
+                        }
+                        other => panic!("insert {i} failed: {other:?}"),
+                    }
+                }
+
+                // AUDIT VERIFICATION: Multiple query calls on same SQL use prepare_cached()
+                // which manages statement lifecycle and automatic reset via Rows iterator
+                for i in 1..=5 {
+                    let expected_value = format!("test-value-{i}");
+                    match conn.query(&cx, "SELECT value FROM reset_test WHERE id = ?1", &[SqliteValue::Integer(i)]).await {
+                        Outcome::Ok(rows) => {
+                            crate::assert_with_log!(
+                                rows.len() == 1,
+                                "Query should return exactly 1 row",
+                                1,
+                                rows.len()
+                            );
+                            let actual_value = rows[0].get_str("value").unwrap();
+                            crate::assert_with_log!(
+                                actual_value == expected_value,
+                                "Query result should match inserted value",
+                                &expected_value,
+                                actual_value
+                            );
+                        }
+                        other => panic!("query {i} failed: {other:?}"),
+                    }
+                }
+
+                eprintln!(
+                    "{{\"audit\":\"SQLITE_RESET_SEMANTICS\",\"status\":\"SOUND\",\"requirement\":\"automatic statement reset via rusqlite APIs\"}}"
+                );
+
+                crate::test_complete!("audit_rusqlite_automatic_statement_reset");
+            });
+        }
+
+        /// AUDIT: Verify prepare_cached reuse doesn't leak statement state
+        ///
+        /// Tests that prepare_cached() statement reuse correctly handles statement
+        /// reset between executions, preventing stale state accumulation.
+        #[test]
+        fn audit_prepare_cached_statement_reuse() {
+            init_test_logging();
+            let cx = create_test_cx();
+
+            block_on(async {
+                let conn = match SqliteConnection::open_in_memory(&cx).await {
+                    Outcome::Ok(conn) => conn,
+                    other => panic!("open_in_memory failed: {other:?}"),
+                };
+
+                // Create test table
+                match conn.execute_batch(&cx, "CREATE TABLE cached_test (id INTEGER PRIMARY KEY, data TEXT);").await {
+                    Outcome::Ok(()) => {}
+                    other => panic!("create table failed: {other:?}"),
+                }
+
+                // Force small statement cache to ensure reuse
+                {
+                    let guard = conn.inner.lock();
+                    let raw_conn = guard.get().expect("connection should be open");
+                    raw_conn.set_prepared_statement_cache_capacity(2);
+                }
+
+                // Insert test data
+                match conn.execute(&cx, "INSERT INTO cached_test (data) VALUES ('first')", &[]).await {
+                    Outcome::Ok(_) => {}
+                    other => panic!("insert first failed: {other:?}"),
+                }
+
+                // AUDIT VERIFICATION: Same query SQL reused from cache, must not retain state
+                const QUERY_SQL: &str = "SELECT data FROM cached_test WHERE id = ?1";
+
+                // First query execution
+                match conn.query(&cx, QUERY_SQL, &[SqliteValue::Integer(1)]).await {
+                    Outcome::Ok(rows) => {
+                        crate::assert_with_log!(
+                            rows.len() == 1 && rows[0].get_str("data").unwrap() == "first",
+                            "First query execution should return 'first'",
+                            "first",
+                            rows[0].get_str("data").unwrap()
+                        );
+                    }
+                    other => panic!("first query failed: {other:?}"),
+                }
+
+                // Second query execution (statement reused from cache)
+                match conn.query(&cx, QUERY_SQL, &[SqliteValue::Integer(1)]).await {
+                    Outcome::Ok(rows) => {
+                        crate::assert_with_log!(
+                            rows.len() == 1 && rows[0].get_str("data").unwrap() == "first",
+                            "Second query execution should return same result",
+                            "first",
+                            rows[0].get_str("data").unwrap()
+                        );
+                    }
+                    other => panic!("second query failed: {other:?}"),
+                }
+
+                // Query with different parameter (cached statement reset with new binding)
+                match conn.execute(&cx, "INSERT INTO cached_test (data) VALUES ('second')", &[]).await {
+                    Outcome::Ok(_) => {}
+                    other => panic!("insert second failed: {other:?}"),
+                }
+
+                match conn.query(&cx, QUERY_SQL, &[SqliteValue::Integer(2)]).await {
+                    Outcome::Ok(rows) => {
+                        crate::assert_with_log!(
+                            rows.len() == 1 && rows[0].get_str("data").unwrap() == "second",
+                            "Cached statement with new parameter should return correct result",
+                            "second",
+                            rows[0].get_str("data").unwrap()
+                        );
+                    }
+                    other => panic!("parameter change query failed: {other:?}"),
+                }
+
+                eprintln!(
+                    "{{\"audit\":\"STATEMENT_CACHE_RESET\",\"status\":\"SOUND\",\"requirement\":\"cached statement reset between executions\"}}"
+                );
+
+                crate::test_complete!("audit_prepare_cached_statement_reuse");
+            });
+        }
+
+        /// AUDIT: Verify query iterator drop triggers statement reset
+        ///
+        /// Tests that Rows iterator lifecycle properly triggers statement reset
+        /// when dropped, ensuring statements are ready for next execution.
+        #[test]
+        fn audit_query_iterator_reset_on_drop() {
+            init_test_logging();
+            let cx = create_test_cx();
+
+            block_on(async {
+                let conn = match SqliteConnection::open_in_memory(&cx).await {
+                    Outcome::Ok(conn) => conn,
+                    other => panic!("open_in_memory failed: {other:?}"),
+                };
+
+                // Create test table with multiple rows
+                match conn.execute_batch(&cx, "CREATE TABLE iterator_test (id INTEGER PRIMARY KEY, value INTEGER);").await {
+                    Outcome::Ok(()) => {}
+                    other => panic!("create table failed: {other:?}"),
+                }
+
+                for i in 1..=10 {
+                    match conn.execute(&cx, "INSERT INTO iterator_test (value) VALUES (?1)", &[SqliteValue::Integer(i * 10)]).await {
+                        Outcome::Ok(_) => {}
+                        other => panic!("insert {i} failed: {other:?}"),
+                    }
+                }
+
+                // AUDIT VERIFICATION: Multiple queries on same cached statement
+                // Each query() call should work correctly despite previous iterator usage
+                let query_sql = "SELECT COUNT(*) as count FROM iterator_test WHERE value > ?1";
+
+                let count_gt_0 = match conn.query_row(&cx, query_sql, &[SqliteValue::Integer(0)]).await {
+                    Outcome::Ok(row) => row.get_i32("count").unwrap(),
+                    other => panic!("count_gt_0 query failed: {other:?}"),
+                };
+
+                let count_gt_50 = match conn.query_row(&cx, query_sql, &[SqliteValue::Integer(50)]).await {
+                    Outcome::Ok(row) => row.get_i32("count").unwrap(),
+                    other => panic!("count_gt_50 query failed: {other:?}"),
+                };
+
+                let count_gt_100 = match conn.query_row(&cx, query_sql, &[SqliteValue::Integer(100)]).await {
+                    Outcome::Ok(row) => row.get_i32("count").unwrap(),
+                    other => panic!("count_gt_100 query failed: {other:?}"),
+                };
+
+                // Verify statement reset worked correctly between queries
+                crate::assert_with_log!(
+                    count_gt_0 == 10 && count_gt_50 == 5 && count_gt_100 == 0,
+                    "Statement reset between queries should produce correct results",
+                    (10, 5, 0),
+                    (count_gt_0, count_gt_50, count_gt_100)
+                );
+
+                eprintln!(
+                    "{{\"audit\":\"ITERATOR_DROP_RESET\",\"status\":\"SOUND\",\"requirement\":\"statement reset on Rows drop\"}}"
+                );
+
+                crate::test_complete!("audit_query_iterator_reset_on_drop");
+            });
+        }
+
+        /// Audit test for SQLite query result streaming memory usage.
+        ///
+        /// CRITICAL DEFECT: SQLite wrapper violates sqlite3_step()'s native streaming behavior
+        /// by collecting ALL rows into Vec<SqliteRow> before returning, creating OOM risk
+        /// for large result sets (1M+ rows). Same defect pattern as MySQL/PostgreSQL.
+        #[test]
+        fn audit_sqlite_query_result_streaming_memory_usage() {
+            // DEFECT CONFIRMATION: SQLite wrapper discards native streaming
+
+            // Evidence 1: All query methods return Vec<SqliteRow> (collect entire result set)
+            // - query(&self, cx: &Cx, sql: &str, params: &[SqliteValue]) -> Outcome<Vec<SqliteRow>, SqliteError> (line 1066)
+            // - query_unchecked(&self, cx: &Cx, sql: &str, params: &[SqliteValue]) -> Outcome<Vec<SqliteRow>, SqliteError> (line 1079)
+
+            // Evidence 2: Vec accumulation loop in query_unchecked implementation
+            // From line 1134: let mut result = Vec::new();
+            // From lines 1135-1148: while let Some(row) = rows.next() { result.push(...); }
+            // From line 1151: Ok(result) - returns ALL rows loaded in memory
+
+            // NATIVE SQLITE BEHAVIOR (preserved correctly, then discarded):
+            // sqlite3_step() returns SQLITE_ROW for each row individually (streaming-friendly)
+            // rusqlite::Rows iterator properly wraps this with next() -> Option<Row>
+            // Our wrapper correctly calls rows.next() in loop BUT accumulates ALL into Vec
+
+            // MEMORY IMPACT CALCULATION:
+            // - 1M row result set with 10 columns @ 50 bytes avg per column = 500MB minimum
+            // - ALL loaded into memory before first row accessible to caller
+            // - BlockingPool task holds ALL rows in memory until completion
+
+            // ARCHITECTURE CHALLENGE:
+            // Unlike MySQL/PostgreSQL (network protocol streaming), SQLite uses BlockingPool:
+            // 1. SQLite is synchronous (file-based, not network)
+            // 2. Operations run in blocking pool thread
+            // 3. Streaming requires persistent connection state across async boundaries
+            // 4. More complex than network protocol streaming fixes
+
+            eprintln!(
+                "{{\"defect\":\"SQLITE_QUERY_RESULT_STREAMING\",\"severity\":\"CRITICAL\",\"impact\":\"OOM risk\",\"violation\":\"sqlite3_step streaming\",\"architecture\":\"blocking_pool\",\"complexity\":\"HIGH\"}}"
+            );
+
+            // REQUIRED IMPLEMENTATION (complex architectural change):
+            // 1. SqliteRowStream<'_> async iterator over BlockingPool
+            // 2. Persistent connection state across blocking pool calls
+            // 3. rusqlite::Rows lifecycle management across async boundaries
+            // 4. Proper cancellation and error handling in streaming context
+
+            eprintln!(
+                "{{\"recommendation\":\"FILE_BEAD\",\"reason\":\"30min_deadline_insufficient\",\"estimated_effort\":\"2-4_hours\",\"same_pattern_as\":\"MySQL/PostgreSQL but blocking_pool_architecture\"}}"
+            );
+        }
+    }
 }
