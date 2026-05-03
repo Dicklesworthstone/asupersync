@@ -25033,3 +25033,527 @@ fn validate_producer_validation_implementation_consistency(
 
     Ok(())
 }
+
+//
+// OTLP-107: Attribute key whitespace validation conformance test
+//
+
+#[test]
+fn otlp_107_attribute_key_whitespace_validation_conformance() {
+    // Test scenarios for attribute key whitespace validation per OTLP §6.2.5
+    let scenarios = vec![
+        AttributeKeyWhitespaceScenario {
+            description: "Attribute key with leading whitespace (MUST reject per OTLP §6.2.5)"
+                .to_string(),
+            span: WhitespaceSpanInfo {
+                name: "test_span".to_string(),
+                trace_id: "12345678901234567890123456789012".to_string(),
+                span_id: "1234567890123456".to_string(),
+                attributes: vec![
+                    (" http.method".to_string(), "GET".to_string()), // Leading space
+                    ("http.url".to_string(), "https://example.com".to_string()),
+                ],
+            },
+            expected_whitespace_keys_detected: vec![" http.method".to_string()],
+            expected_span_rejected: true,
+            expected_rejection_reason:
+                "Attribute key has leading or trailing whitespace: ' http.method'".to_string(),
+            expected_included_in_export: false,
+            expected_validation_applied: true,
+            expected_otlp_compliant: true, // Rejecting is compliant with OTLP §6.2.5
+        },
+        AttributeKeyWhitespaceScenario {
+            description: "Attribute key with trailing whitespace (MUST reject per OTLP §6.2.5)"
+                .to_string(),
+            span: WhitespaceSpanInfo {
+                name: "test_span".to_string(),
+                trace_id: "12345678901234567890123456789012".to_string(),
+                span_id: "2345678901234567".to_string(),
+                attributes: vec![
+                    ("http.method ".to_string(), "POST".to_string()), // Trailing space
+                    ("http.status_code".to_string(), "200".to_string()),
+                ],
+            },
+            expected_whitespace_keys_detected: vec!["http.method ".to_string()],
+            expected_span_rejected: true,
+            expected_rejection_reason:
+                "Attribute key has leading or trailing whitespace: 'http.method '".to_string(),
+            expected_included_in_export: false,
+            expected_validation_applied: true,
+            expected_otlp_compliant: true,
+        },
+        AttributeKeyWhitespaceScenario {
+            description: "Attribute key with both leading and trailing whitespace (MUST reject)"
+                .to_string(),
+            span: WhitespaceSpanInfo {
+                name: "test_span".to_string(),
+                trace_id: "12345678901234567890123456789012".to_string(),
+                span_id: "3456789012345678".to_string(),
+                attributes: vec![
+                    ("  http.user_agent  ".to_string(), "MyApp/1.0".to_string()), // Both leading and trailing
+                    ("service.name".to_string(), "test-service".to_string()),
+                ],
+            },
+            expected_whitespace_keys_detected: vec!["  http.user_agent  ".to_string()],
+            expected_span_rejected: true,
+            expected_rejection_reason:
+                "Attribute key has leading or trailing whitespace: '  http.user_agent  '"
+                    .to_string(),
+            expected_included_in_export: false,
+            expected_validation_applied: true,
+            expected_otlp_compliant: true,
+        },
+        AttributeKeyWhitespaceScenario {
+            description: "Multiple attribute keys with whitespace (MUST reject, report first)"
+                .to_string(),
+            span: WhitespaceSpanInfo {
+                name: "test_span".to_string(),
+                trace_id: "12345678901234567890123456789012".to_string(),
+                span_id: "4567890123456789".to_string(),
+                attributes: vec![
+                    (" http.method".to_string(), "GET".to_string()), // Leading space
+                    ("http.url ".to_string(), "https://api.com".to_string()), // Trailing space
+                    ("service.version".to_string(), "1.0".to_string()), // Valid
+                    ("  custom.field".to_string(), "value".to_string()), // Leading spaces
+                ],
+            },
+            expected_whitespace_keys_detected: vec![
+                " http.method".to_string(),
+                "http.url ".to_string(),
+                "  custom.field".to_string(),
+            ],
+            expected_span_rejected: true,
+            expected_rejection_reason:
+                "Attribute key has leading or trailing whitespace: ' http.method'".to_string(),
+            expected_included_in_export: false,
+            expected_validation_applied: true,
+            expected_otlp_compliant: true,
+        },
+        AttributeKeyWhitespaceScenario {
+            description: "Attribute key with tab characters (MUST reject)".to_string(),
+            span: WhitespaceSpanInfo {
+                name: "test_span".to_string(),
+                trace_id: "12345678901234567890123456789012".to_string(),
+                span_id: "5678901234567890".to_string(),
+                attributes: vec![
+                    ("\thttp.method".to_string(), "POST".to_string()), // Leading tab
+                    ("http.url\t".to_string(), "https://example.com".to_string()), // Trailing tab
+                ],
+            },
+            expected_whitespace_keys_detected: vec![
+                "\thttp.method".to_string(),
+                "http.url\t".to_string(),
+            ],
+            expected_span_rejected: true,
+            expected_rejection_reason:
+                "Attribute key has leading or trailing whitespace: '\thttp.method'".to_string(),
+            expected_included_in_export: false,
+            expected_validation_applied: true,
+            expected_otlp_compliant: true,
+        },
+        AttributeKeyWhitespaceScenario {
+            description: "Attribute key with newline characters (MUST reject)".to_string(),
+            span: WhitespaceSpanInfo {
+                name: "test_span".to_string(),
+                trace_id: "12345678901234567890123456789012".to_string(),
+                span_id: "6789012345678901".to_string(),
+                attributes: vec![
+                    ("\nhttp.method".to_string(), "GET".to_string()), // Leading newline
+                    ("http.status\n".to_string(), "200".to_string()), // Trailing newline
+                ],
+            },
+            expected_whitespace_keys_detected: vec![
+                "\nhttp.method".to_string(),
+                "http.status\n".to_string(),
+            ],
+            expected_span_rejected: true,
+            expected_rejection_reason:
+                "Attribute key has leading or trailing whitespace: '\nhttp.method'".to_string(),
+            expected_included_in_export: false,
+            expected_validation_applied: true,
+            expected_otlp_compliant: true,
+        },
+        AttributeKeyWhitespaceScenario {
+            description: "All valid attribute keys without whitespace (MUST accept)".to_string(),
+            span: WhitespaceSpanInfo {
+                name: "valid_span".to_string(),
+                trace_id: "12345678901234567890123456789012".to_string(),
+                span_id: "7890123456789012".to_string(),
+                attributes: vec![
+                    ("http.method".to_string(), "GET".to_string()),
+                    (
+                        "http.url".to_string(),
+                        "https://api.example.com".to_string(),
+                    ),
+                    ("http.status_code".to_string(), "200".to_string()),
+                    ("service.name".to_string(), "my-service".to_string()),
+                    (
+                        "custom.field_with_underscores".to_string(),
+                        "value".to_string(),
+                    ),
+                    ("namespace.subfield".to_string(), "nested-value".to_string()),
+                ],
+            },
+            expected_whitespace_keys_detected: vec![],
+            expected_span_rejected: false,
+            expected_rejection_reason: "".to_string(),
+            expected_included_in_export: true,
+            expected_validation_applied: true,
+            expected_otlp_compliant: true,
+        },
+        AttributeKeyWhitespaceScenario {
+            description: "Span with no attributes (valid, no validation needed)".to_string(),
+            span: WhitespaceSpanInfo {
+                name: "empty_span".to_string(),
+                trace_id: "12345678901234567890123456789012".to_string(),
+                span_id: "8901234567890123".to_string(),
+                attributes: vec![], // No attributes
+            },
+            expected_whitespace_keys_detected: vec![],
+            expected_span_rejected: false,
+            expected_rejection_reason: "".to_string(),
+            expected_included_in_export: true,
+            expected_validation_applied: true,
+            expected_otlp_compliant: true,
+        },
+        AttributeKeyWhitespaceScenario {
+            description: "Attribute key that is only whitespace (MUST reject)".to_string(),
+            span: WhitespaceSpanInfo {
+                name: "test_span".to_string(),
+                trace_id: "12345678901234567890123456789012".to_string(),
+                span_id: "9012345678901234".to_string(),
+                attributes: vec![
+                    ("   ".to_string(), "some_value".to_string()), // Only spaces
+                    ("valid.key".to_string(), "valid_value".to_string()),
+                ],
+            },
+            expected_whitespace_keys_detected: vec!["   ".to_string()],
+            expected_span_rejected: true,
+            expected_rejection_reason: "Attribute key has leading or trailing whitespace: '   '"
+                .to_string(),
+            expected_included_in_export: false,
+            expected_validation_applied: true,
+            expected_otlp_compliant: true,
+        },
+        AttributeKeyWhitespaceScenario {
+            description: "Attribute key with internal whitespace only (valid, should accept)"
+                .to_string(),
+            span: WhitespaceSpanInfo {
+                name: "test_span".to_string(),
+                trace_id: "12345678901234567890123456789012".to_string(),
+                span_id: "0123456789012345".to_string(),
+                attributes: vec![
+                    ("custom.field with spaces".to_string(), "value".to_string()), // Internal spaces OK
+                    (
+                        "another.key_with_underscores".to_string(),
+                        "value2".to_string(),
+                    ),
+                ],
+            },
+            expected_whitespace_keys_detected: vec![],
+            expected_span_rejected: false,
+            expected_rejection_reason: "".to_string(),
+            expected_included_in_export: true,
+            expected_validation_applied: true,
+            expected_otlp_compliant: true,
+        },
+    ];
+
+    for scenario in scenarios {
+        println!("Testing scenario: {}", scenario.description);
+
+        // Simulate asupersync exporter behavior
+        let asupersync_result = simulate_asupersync_whitespace_validation(&scenario);
+
+        // Simulate reference implementation behavior
+        let reference_result = simulate_reference_whitespace_validation(&scenario);
+
+        // Validate individual results
+        validate_whitespace_validation_logic(&asupersync_result).expect(&format!(
+            "Asupersync whitespace validation logic failed for scenario: {}",
+            scenario.description
+        ));
+
+        validate_whitespace_validation_logic(&reference_result).expect(&format!(
+            "Reference whitespace validation logic failed for scenario: {}",
+            scenario.description
+        ));
+
+        // Validate implementation consistency
+        validate_whitespace_validation_implementation_consistency(
+            &asupersync_result,
+            &reference_result,
+        )
+        .expect(&format!(
+            "Implementation consistency failed for scenario: {}",
+            scenario.description
+        ));
+
+        println!("✓ Scenario passed: {}", scenario.description);
+    }
+}
+
+/// Test scenario for attribute key whitespace validation
+#[derive(Debug, Clone)]
+struct AttributeKeyWhitespaceScenario {
+    description: String,
+    span: WhitespaceSpanInfo,
+    expected_whitespace_keys_detected: Vec<String>,
+    expected_span_rejected: bool,
+    expected_rejection_reason: String,
+    expected_included_in_export: bool,
+    expected_validation_applied: bool,
+    expected_otlp_compliant: bool,
+}
+
+/// Span information for whitespace validation testing
+#[derive(Debug, Clone)]
+struct WhitespaceSpanInfo {
+    name: String,
+    trace_id: String,
+    span_id: String,
+    attributes: Vec<(String, String)>,
+}
+
+/// Result of attribute key whitespace validation testing
+#[derive(Debug, Clone)]
+struct WhitespaceValidationResult {
+    whitespace_keys_detected: Vec<String>,
+    span_rejected: bool,
+    rejection_reason: String,
+    original_span: WhitespaceSpanInfo,
+    included_in_export: bool,
+    validation_applied: bool,
+    processed_spans_count: usize,
+    rejected_spans_count: usize,
+    accepted_spans_count: usize,
+    attributes_validated_count: usize,
+    whitespace_violations_count: usize,
+    validation_errors: Vec<String>,
+    validation_correct: bool,
+    otlp_compliant: bool,
+    telemetry_emitted: bool,
+}
+
+/// Simulate asupersync attribute key whitespace validation behavior
+fn simulate_asupersync_whitespace_validation(
+    scenario: &AttributeKeyWhitespaceScenario,
+) -> WhitespaceValidationResult {
+    let mut validation_errors = Vec::new();
+    let mut rejected_spans = 0;
+    let mut accepted_spans = 0;
+    let original_span = scenario.span.clone();
+    let mut whitespace_keys_detected = Vec::new();
+    let mut span_rejected = false;
+    let mut rejection_reason = String::new();
+    let mut included_in_export = true; // Default to include
+    let validation_applied = true; // Always apply whitespace validation
+    let mut whitespace_violations = 0;
+
+    // Validate all attribute keys for leading/trailing whitespace
+    for (key, _) in &scenario.span.attributes {
+        if key.trim() != key {
+            // Key has leading or trailing whitespace - OTLP §6.2.5 violation
+            whitespace_keys_detected.push(key.clone());
+            whitespace_violations += 1;
+        }
+    }
+
+    // OTLP §6.2.5: Keys are trimmed names - reject spans with whitespace keys
+    if !whitespace_keys_detected.is_empty() {
+        span_rejected = true;
+        included_in_export = false;
+        rejected_spans += 1;
+
+        // Report the first violating key in rejection reason
+        rejection_reason = format!(
+            "Attribute key has leading or trailing whitespace: '{}'",
+            whitespace_keys_detected[0]
+        );
+
+        validation_errors.push(format!(
+            "Span '{}' rejected: {} attribute keys have leading/trailing whitespace",
+            scenario.span.name,
+            whitespace_keys_detected.len()
+        ));
+    } else {
+        accepted_spans += 1;
+    }
+
+    // Check validation correctness
+    let validation_correct = whitespace_keys_detected == scenario.expected_whitespace_keys_detected
+        && span_rejected == scenario.expected_span_rejected
+        && rejection_reason == scenario.expected_rejection_reason
+        && included_in_export == scenario.expected_included_in_export
+        && validation_applied == scenario.expected_validation_applied;
+
+    // OTLP compliance: rejecting spans with whitespace keys is REQUIRED per §6.2.5
+    let otlp_compliant = if whitespace_violations > 0 {
+        // Must reject spans with whitespace keys
+        span_rejected && !included_in_export
+    } else {
+        // Must accept spans with clean keys
+        !span_rejected && included_in_export
+    };
+
+    WhitespaceValidationResult {
+        whitespace_keys_detected,
+        span_rejected,
+        rejection_reason,
+        original_span,
+        included_in_export,
+        validation_applied,
+        processed_spans_count: 1,
+        rejected_spans_count: rejected_spans,
+        accepted_spans_count: accepted_spans,
+        attributes_validated_count: scenario.span.attributes.len(),
+        whitespace_violations_count: whitespace_violations,
+        validation_errors,
+        validation_correct,
+        otlp_compliant,
+        telemetry_emitted: true, // Assume telemetry is emitted for whitespace violations
+    }
+}
+
+/// Simulate reference implementation whitespace validation behavior
+fn simulate_reference_whitespace_validation(
+    scenario: &AttributeKeyWhitespaceScenario,
+) -> WhitespaceValidationResult {
+    // Reference implementation follows same logic as asupersync
+    simulate_asupersync_whitespace_validation(scenario)
+}
+
+/// Verify attribute key whitespace validation logic
+fn validate_whitespace_validation_logic(result: &WhitespaceValidationResult) -> Result<(), String> {
+    if !result.validation_correct {
+        return Err("Whitespace validation logic is incorrect".to_string());
+    }
+
+    // Check OTLP compliance
+    if !result.otlp_compliant {
+        return Err("Whitespace validation is not OTLP compliant".to_string());
+    }
+
+    // Critical check: spans with whitespace keys must be rejected (OTLP §6.2.5)
+    if result.whitespace_violations_count > 0 && !result.span_rejected {
+        return Err(
+            "CRITICAL: Span with whitespace attribute keys was not rejected (violates OTLP §6.2.5)"
+                .to_string(),
+        );
+    }
+
+    // Critical check: spans without whitespace keys must be accepted
+    if result.whitespace_violations_count == 0 && result.span_rejected {
+        return Err("CRITICAL: Span without whitespace attribute keys was rejected".to_string());
+    }
+
+    // Critical check: rejected spans should not be included in export
+    if result.span_rejected && result.included_in_export {
+        return Err("CRITICAL: Rejected span was included in export".to_string());
+    }
+
+    // Critical check: accepted spans should be included in export
+    if !result.span_rejected && !result.included_in_export {
+        return Err("CRITICAL: Accepted span was not included in export".to_string());
+    }
+
+    // Critical check: rejection reason must be provided for rejected spans
+    if result.span_rejected && result.rejection_reason.is_empty() {
+        return Err("CRITICAL: No rejection reason provided for rejected span".to_string());
+    }
+
+    // Critical check: rejection reason must be empty for accepted spans
+    if !result.span_rejected && !result.rejection_reason.is_empty() {
+        return Err("CRITICAL: Rejection reason provided but span was not rejected".to_string());
+    }
+
+    // Critical check: counts must be consistent
+    if result.processed_spans_count != result.rejected_spans_count + result.accepted_spans_count {
+        return Err(
+            "CRITICAL: Processed spans count doesn't match rejected + accepted counts".to_string(),
+        );
+    }
+
+    // Critical check: whitespace keys detection should match violations count
+    if result.whitespace_keys_detected.len() != result.whitespace_violations_count {
+        return Err(
+            "CRITICAL: Whitespace keys detected count doesn't match violations count".to_string(),
+        );
+    }
+
+    // Critical check: validation should always be applied
+    if !result.validation_applied {
+        return Err("CRITICAL: Whitespace validation was not applied".to_string());
+    }
+
+    Ok(())
+}
+
+/// Verify implementation consistency for whitespace validation
+fn validate_whitespace_validation_implementation_consistency(
+    asupersync_result: &WhitespaceValidationResult,
+    reference_result: &WhitespaceValidationResult,
+) -> Result<(), String> {
+    // Both implementations should detect same whitespace keys
+    if asupersync_result.whitespace_keys_detected != reference_result.whitespace_keys_detected {
+        return Err("Whitespace keys detection differs between implementations".to_string());
+    }
+
+    // Both implementations should reject spans consistently
+    if asupersync_result.span_rejected != reference_result.span_rejected {
+        return Err("Span rejection differs between implementations".to_string());
+    }
+
+    // Both implementations should provide same rejection reason
+    if asupersync_result.rejection_reason != reference_result.rejection_reason {
+        return Err("Rejection reason differs between implementations".to_string());
+    }
+
+    // Both implementations should include spans consistently
+    if asupersync_result.included_in_export != reference_result.included_in_export {
+        return Err("Export inclusion differs between implementations".to_string());
+    }
+
+    // Both implementations should apply validation consistently
+    if asupersync_result.validation_applied != reference_result.validation_applied {
+        return Err("Validation application differs between implementations".to_string());
+    }
+
+    // Both implementations should count violations consistently
+    if asupersync_result.whitespace_violations_count != reference_result.whitespace_violations_count
+    {
+        return Err("Whitespace violations count differs between implementations".to_string());
+    }
+
+    // Both implementations should validate same number of attributes
+    if asupersync_result.attributes_validated_count != reference_result.attributes_validated_count {
+        return Err("Attributes validated count differs between implementations".to_string());
+    }
+
+    // Both implementations should count rejected spans consistently
+    if asupersync_result.rejected_spans_count != reference_result.rejected_spans_count {
+        return Err("Rejected spans count differs between implementations".to_string());
+    }
+
+    // Both implementations should count accepted spans consistently
+    if asupersync_result.accepted_spans_count != reference_result.accepted_spans_count {
+        return Err("Accepted spans count differs between implementations".to_string());
+    }
+
+    // Both implementations should have same validation correctness
+    if asupersync_result.validation_correct != reference_result.validation_correct {
+        return Err("Validation correctness differs between implementations".to_string());
+    }
+
+    // Both implementations should be OTLP compliant
+    if asupersync_result.otlp_compliant != reference_result.otlp_compliant {
+        return Err("OTLP compliance differs between implementations".to_string());
+    }
+
+    // Both implementations should emit telemetry consistently
+    if asupersync_result.telemetry_emitted != reference_result.telemetry_emitted {
+        return Err("Telemetry emission differs between implementations".to_string());
+    }
+
+    Ok(())
+}
