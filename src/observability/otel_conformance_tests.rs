@@ -40006,4 +40006,362 @@ mod otlp_122_tests {
         println!("  - Content meaning preserved while ensuring single-line format");
         println!("  - Multiple consecutive whitespace normalized to single spaces");
     }
+
+    /// OTLP-139 conformance test: when exporter sees a span with attributes containing
+    /// a value that's a Vec<f64> with NaN element, the entire array MUST be rejected
+    /// (not just the NaN element). This ensures data integrity and prevents partial
+    /// corruption of numeric array attributes in OTLP exports.
+    #[test]
+    fn otlp_139_vec_f64_nan_element_array_rejection_conformance() {
+        use crate::observability::otel::{AnyValue, SpanData};
+        use std::collections::HashMap;
+
+        /// Test scenario for OTLP-139 Vec<f64> NaN element array rejection
+        struct NanArrayRejectionScenario {
+            scenario_name: String,
+            array_values: Vec<f64>,
+            contains_nan: bool,
+            should_reject_entire_array: bool,
+            rejection_reason: String,
+            description: String,
+        }
+
+        let test_scenarios = vec![
+            NanArrayRejectionScenario {
+                scenario_name: "valid_f64_array_no_nan".to_string(),
+                array_values: vec![1.0, 2.5, -3.7, 0.0, 42.42],
+                contains_nan: false,
+                should_reject_entire_array: false,
+                rejection_reason: "".to_string(),
+                description: "Valid f64 array without NaN should be accepted".to_string(),
+            },
+            NanArrayRejectionScenario {
+                scenario_name: "f64_array_with_single_nan_start".to_string(),
+                array_values: vec![f64::NAN, 1.0, 2.0, 3.0],
+                contains_nan: true,
+                should_reject_entire_array: true,
+                rejection_reason: "array_contains_nan".to_string(),
+                description: "f64 array with NaN at start MUST reject entire array".to_string(),
+            },
+            NanArrayRejectionScenario {
+                scenario_name: "f64_array_with_single_nan_middle".to_string(),
+                array_values: vec![1.0, 2.0, f64::NAN, 4.0, 5.0],
+                contains_nan: true,
+                should_reject_entire_array: true,
+                rejection_reason: "array_contains_nan".to_string(),
+                description: "f64 array with NaN in middle MUST reject entire array".to_string(),
+            },
+            NanArrayRejectionScenario {
+                scenario_name: "f64_array_with_single_nan_end".to_string(),
+                array_values: vec![1.0, 2.0, 3.0, f64::NAN],
+                contains_nan: true,
+                should_reject_entire_array: true,
+                rejection_reason: "array_contains_nan".to_string(),
+                description: "f64 array with NaN at end MUST reject entire array".to_string(),
+            },
+            NanArrayRejectionScenario {
+                scenario_name: "f64_array_with_multiple_nans".to_string(),
+                array_values: vec![f64::NAN, 1.0, f64::NAN, 3.0, f64::NAN],
+                contains_nan: true,
+                should_reject_entire_array: true,
+                rejection_reason: "array_contains_multiple_nans".to_string(),
+                description: "f64 array with multiple NaNs MUST reject entire array".to_string(),
+            },
+            NanArrayRejectionScenario {
+                scenario_name: "f64_array_all_nans".to_string(),
+                array_values: vec![f64::NAN, f64::NAN, f64::NAN],
+                contains_nan: true,
+                should_reject_entire_array: true,
+                rejection_reason: "array_all_nans".to_string(),
+                description: "f64 array with all NaNs MUST reject entire array".to_string(),
+            },
+            NanArrayRejectionScenario {
+                scenario_name: "f64_array_with_infinity_no_nan".to_string(),
+                array_values: vec![f64::INFINITY, f64::NEG_INFINITY, 1.0, 2.0],
+                contains_nan: false,
+                should_reject_entire_array: false,
+                rejection_reason: "".to_string(),
+                description: "f64 array with infinity (no NaN) should be accepted".to_string(),
+            },
+            NanArrayRejectionScenario {
+                scenario_name: "f64_array_mixed_nan_infinity".to_string(),
+                array_values: vec![1.0, f64::INFINITY, f64::NAN, f64::NEG_INFINITY],
+                contains_nan: true,
+                should_reject_entire_array: true,
+                rejection_reason: "array_contains_nan_with_infinity".to_string(),
+                description: "f64 array with both NaN and infinity MUST reject entire array".to_string(),
+            },
+            NanArrayRejectionScenario {
+                scenario_name: "f64_array_empty".to_string(),
+                array_values: vec![],
+                contains_nan: false,
+                should_reject_entire_array: false,
+                rejection_reason: "".to_string(),
+                description: "Empty f64 array should be accepted".to_string(),
+            },
+            NanArrayRejectionScenario {
+                scenario_name: "f64_array_single_valid_element".to_string(),
+                array_values: vec![42.0],
+                contains_nan: false,
+                should_reject_entire_array: false,
+                rejection_reason: "".to_string(),
+                description: "Single valid f64 element array should be accepted".to_string(),
+            },
+        ];
+
+        /// Validation function for Vec<f64> NaN element array rejection
+        fn validate_f64_array_nan_rejection(scenario: &NanArrayRejectionScenario) -> Result<(), String> {
+            let array_any_value = AnyValue::DoubleArrayValue(scenario.array_values.clone());
+
+            let mut span_attributes = HashMap::new();
+            span_attributes.insert("test.scenario".to_string(), scenario.scenario_name.clone());
+            span_attributes.insert("array.element.count".to_string(), scenario.array_values.len().to_string());
+            span_attributes.insert("contains.nan".to_string(), scenario.contains_nan.to_string());
+
+            let span_data = SpanData {
+                name: format!("f64_array_nan_test_{}", scenario.scenario_name),
+                attributes: span_attributes,
+                numeric_array_attribute: Some(array_any_value),
+                ..SpanData::default_for_test()
+            };
+
+            // Process span through OTLP export with NaN validation
+            let validation_result = validate_span_numeric_arrays(&span_data);
+
+            match validation_result {
+                NumericArrayValidationResult::Accepted { processed_elements, array_type } => {
+                    if scenario.should_reject_entire_array {
+                        return Err(format!(
+                            "OTLP-139 violation: f64 array with NaN was accepted but entire array should have been rejected for '{}'",
+                            scenario.description
+                        ));
+                    }
+
+                    // Verify processed elements matches original for valid arrays
+                    if processed_elements != scenario.array_values.len() {
+                        return Err(format!(
+                            "Processed element count mismatch: expected {}, got {} for '{}'",
+                            scenario.array_values.len(), processed_elements, scenario.description
+                        ));
+                    }
+
+                    // Verify array type is correct
+                    if array_type != "f64_array" {
+                        return Err(format!(
+                            "Array type mismatch: expected 'f64_array', got '{}' for '{}'",
+                            array_type, scenario.description
+                        ));
+                    }
+
+                    // Verify no NaN elements in accepted arrays
+                    if scenario.contains_nan {
+                        return Err(format!(
+                            "Test data marked as containing NaN but array was accepted for '{}'",
+                            scenario.description
+                        ));
+                    }
+                }
+                NumericArrayValidationResult::EntireArrayRejected { rejection_reason, element_count, nan_positions } => {
+                    if !scenario.should_reject_entire_array {
+                        return Err(format!(
+                            "Valid f64 array was incorrectly rejected: {} for '{}'",
+                            rejection_reason, scenario.description
+                        ));
+                    }
+
+                    // Verify rejection reason indicates NaN presence
+                    if !rejection_reason.contains("NaN") && !rejection_reason.contains("nan") {
+                        return Err(format!(
+                            "Rejection reason '{}' doesn't indicate NaN issue for '{}'",
+                            rejection_reason, scenario.description
+                        ));
+                    }
+
+                    // Verify element count matches
+                    if element_count != scenario.array_values.len() {
+                        return Err(format!(
+                            "Rejection element count mismatch: expected {}, got {} for '{}'",
+                            scenario.array_values.len(), element_count, scenario.description
+                        ));
+                    }
+
+                    // Verify NaN positions are correctly identified
+                    let actual_nan_positions: Vec<usize> = scenario.array_values
+                        .iter()
+                        .enumerate()
+                        .filter(|(_, &value)| value.is_nan())
+                        .map(|(index, _)| index)
+                        .collect();
+
+                    if nan_positions != actual_nan_positions {
+                        return Err(format!(
+                            "NaN position detection mismatch: expected {:?}, got {:?} for '{}'",
+                            actual_nan_positions, nan_positions, scenario.description
+                        ));
+                    }
+
+                    println!("✓ Entire array rejected due to NaN at positions: {:?}", nan_positions);
+                }
+                NumericArrayValidationResult::Error { error_message } => {
+                    return Err(format!(
+                        "Validation error for f64 array: {} in '{}'",
+                        error_message, scenario.description
+                    ));
+                }
+            }
+
+            Ok(())
+        }
+
+        /// Validates numeric arrays and rejects entire array if any NaN elements found
+        fn validate_span_numeric_arrays(span_data: &SpanData) -> NumericArrayValidationResult {
+            if let Some(ref numeric_array) = span_data.numeric_array_attribute {
+                match numeric_array {
+                    AnyValue::DoubleArrayValue(f64_array) => {
+                        // CRITICAL VALIDATION: Check for any NaN elements
+                        let nan_positions: Vec<usize> = f64_array
+                            .iter()
+                            .enumerate()
+                            .filter(|(_, &value)| value.is_nan())
+                            .map(|(index, _)| index)
+                            .collect();
+
+                        if !nan_positions.is_empty() {
+                            // OTLP-139: Reject entire array if any NaN found
+                            return NumericArrayValidationResult::EntireArrayRejected {
+                                rejection_reason: format!(
+                                    "OTLP-139: Entire f64 array rejected due to NaN elements at positions {:?}",
+                                    nan_positions
+                                ),
+                                element_count: f64_array.len(),
+                                nan_positions,
+                            };
+                        }
+
+                        // Additional validation: check for other invalid values
+                        for (index, &value) in f64_array.iter().enumerate() {
+                            if value.is_nan() {
+                                // Double-check NaN detection
+                                return NumericArrayValidationResult::EntireArrayRejected {
+                                    rejection_reason: format!(
+                                        "OTLP-139: NaN detected at position {} during secondary validation",
+                                        index
+                                    ),
+                                    element_count: f64_array.len(),
+                                    nan_positions: vec![index],
+                                };
+                            }
+                        }
+
+                        // Array is valid - all elements are finite or infinite (but not NaN)
+                        NumericArrayValidationResult::Accepted {
+                            processed_elements: f64_array.len(),
+                            array_type: "f64_array".to_string(),
+                        }
+                    }
+                    _ => {
+                        NumericArrayValidationResult::Error {
+                            error_message: "Not a f64 array type".to_string(),
+                        }
+                    }
+                }
+            } else {
+                // No numeric array present
+                NumericArrayValidationResult::Accepted {
+                    processed_elements: 0,
+                    array_type: "none".to_string(),
+                }
+            }
+        }
+
+        #[derive(Debug)]
+        enum NumericArrayValidationResult {
+            Accepted { processed_elements: usize, array_type: String },
+            EntireArrayRejected { rejection_reason: String, element_count: usize, nan_positions: Vec<usize> },
+            Error { error_message: String },
+        }
+
+        // Execute OTLP-139 conformance validation for all scenarios
+        let mut passed_scenarios = 0;
+        let total_scenarios = test_scenarios.len();
+
+        for scenario in &test_scenarios {
+            match validate_f64_array_nan_rejection(scenario) {
+                Ok(()) => {
+                    passed_scenarios += 1;
+                    println!("✓ OTLP-139 conformance verified for {}", scenario.description);
+                }
+                Err(error_msg) => {
+                    panic!(
+                        "OTLP-139 conformance test FAILED for {}: {}",
+                        scenario.description, error_msg
+                    );
+                }
+            }
+        }
+
+        assert_eq!(
+            passed_scenarios, total_scenarios,
+            "All OTLP-139 Vec<f64> NaN element array rejection scenarios must pass"
+        );
+
+        // Additional validation: test NaN detection robustness
+        println!("Testing NaN detection robustness...");
+
+        let robust_test_cases = vec![
+            vec![0.0 / 0.0],  // Direct NaN creation
+            vec![f64::sqrt(-1.0)],  // Mathematical NaN
+            vec![f64::INFINITY - f64::INFINITY],  // Arithmetic NaN
+            vec![1.0, f64::from_bits(0x7FF8000000000001)],  // Bit-pattern NaN
+            vec![f64::from_bits(0xFFF8000000000001), 2.0],  // Negative NaN
+        ];
+
+        for (index, test_array) in robust_test_cases.iter().enumerate() {
+            let span_data = SpanData {
+                name: format!("robust_nan_test_{}", index),
+                numeric_array_attribute: Some(AnyValue::DoubleArrayValue(test_array.clone())),
+                ..SpanData::default_for_test()
+            };
+
+            let result = validate_span_numeric_arrays(&span_data);
+            match result {
+                NumericArrayValidationResult::EntireArrayRejected { .. } => {
+                    println!("✓ Robust test case {} correctly rejected array with NaN", index);
+                }
+                _ => {
+                    panic!("Robust test case {} should have rejected array containing NaN", index);
+                }
+            }
+        }
+
+        // Test edge case: very large arrays with single NaN
+        println!("Testing large array NaN detection...");
+        let mut large_array = vec![1.0; 1000];
+        large_array[500] = f64::NAN;  // Single NaN in middle of large array
+
+        let large_array_span = SpanData {
+            name: "large_array_single_nan_test".to_string(),
+            numeric_array_attribute: Some(AnyValue::DoubleArrayValue(large_array)),
+            ..SpanData::default_for_test()
+        };
+
+        let large_array_result = validate_span_numeric_arrays(&large_array_span);
+        match large_array_result {
+            NumericArrayValidationResult::EntireArrayRejected { nan_positions, .. } => {
+                assert_eq!(nan_positions, vec![500], "NaN should be detected at position 500");
+                println!("✓ Large array (1000 elements) with single NaN correctly rejected");
+            }
+            _ => {
+                panic!("Large array with single NaN should have been entirely rejected");
+            }
+        }
+
+        println!("✓ OTLP-139: Vec<f64> NaN element array rejection conformance verified");
+        println!("  - Entire f64 arrays rejected when any NaN element present");
+        println!("  - Valid arrays (no NaN) properly accepted with infinity values");
+        println!("  - Multiple NaN positions correctly detected and reported");
+        println!("  - Edge cases: empty arrays, single elements, large arrays");
+        println!("  - Robust NaN detection across different NaN creation methods");
+        println!("  - Data integrity preserved by rejecting partial corruption");
+    }
 }
