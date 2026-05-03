@@ -135,10 +135,116 @@
           }
         ],
         "disabled_pending_count_before_release": 4,
+        "disabled_queue_depth_by_cohort_before_release": [
+          0,
+          0
+        ],
+        "disabled_global_pending_count_before_release": 4,
         "disabled_local_queue_dispatches": 0,
         "disabled_spill_dispatches": 0,
         "disabled_fallback_dispatches": 0,
         "cohort_biased_pending_count_before_release": 4,
+        "cohort_biased_queue_depth_by_cohort_before_release": [
+          1,
+          0
+        ],
+        "cohort_biased_global_pending_count_before_release": 3,
+        "cohort_biased_local_queue_dispatches": 3,
+        "cohort_biased_spill_dispatches": 3,
+        "cohort_biased_fallback_dispatches": 3,
+        "shutdown_drain_verdict": "clean"
+      }
+    },
+    {
+      "scenario_id": "AA-BLOCKING-POOL-AFFINITY-MIXED-ASYNC-BLOCKING-2C",
+      "description": "Drive blocking helpers from async coordinators through a live runtime handle and freeze the mixed-workload locality, queue-depth, and spill report.",
+      "output_root": "target/blocking-pool-affinity-smoke",
+      "execution_policy": "execute_or_dry_run",
+      "host_requirements": {
+        "min_worker_threads": 2,
+        "min_memory_gib": 1,
+        "notes": [
+          "Execute mode builds a real runtime with 2 async workers and a 2-thread blocking pool, then uses async coordinators to enqueue cohort-targeted blocking helpers.",
+          "The workload is deterministic because the worker/cohort map, async coordinator count, blocking spawn count, and release barriers are all fixed by the scenario contract."
+        ]
+      },
+      "template_env": {
+        "BLOCKING_POOL_AFFINITY_SMOKE_OUTPUT_DIR": "Override the bundle/report output root.",
+        "BLOCKING_POOL_AFFINITY_SMOKE_ARTIFACT_ROOT": "Override the retrieved affinity-report output root."
+      },
+      "workload_model": {
+        "workload_seed": 4117,
+        "worker_threads": 2,
+        "cohort_count": 2,
+        "queued_task_count": 4,
+        "async_coordinator_task_count": 2,
+        "repeated_samples": 5,
+        "selected_affinity_profiles": [
+          "disabled",
+          "cohort_biased"
+        ],
+        "queue_distribution": [
+          {
+            "cohort": 0,
+            "queued_task_count": 4
+          },
+          {
+            "cohort": 1,
+            "queued_task_count": 0
+          }
+        ]
+      },
+      "operator_notes": {
+        "recommended_for": [
+          "64+ core hosts where async coordinators fan out bursts of CPU-heavy or blocking helper work",
+          "operators who want an end-to-end proof that cohort-biased blocking helpers improve locality without stranding mixed workloads"
+        ],
+        "avoid_when": [
+          "blocking helpers are extremely sparse and the disabled profile is already sufficient",
+          "host topology hints are unavailable and only the conservative disabled path is desired"
+        ],
+        "safe_fallback_profile": "disabled",
+        "no_win_trigger": "pin the disabled profile if the mixed async-plus-blocking report stops showing lower global queue spill or if cohort-biased p95 completion latency exceeds the disabled profile by 4x"
+      },
+      "capture_plan": [
+        "Build a runtime with 2 async workers, a 2-thread blocking pool, and an explicit 2-cohort worker map.",
+        "Use async coordinators to enqueue cohort-targeted blocking helpers while both blocking workers are held behind release barriers, then snapshot pending queue depths, local-vs-remote execution, spill counts, and fallback activations before release.",
+        "Extract the blocking-pool affinity report JSON from the test log, persist it beside the run manifest, and validate its stable report_projection fields against this contract."
+      ],
+      "expected_report_projection": {
+        "schema_version": "blocking-pool-affinity-projection-v1",
+        "scenario_id": "AA-BLOCKING-POOL-AFFINITY-MIXED-ASYNC-BLOCKING-2C",
+        "workload_seed": 4117,
+        "worker_threads": 2,
+        "cohort_count": 2,
+        "queued_task_count": 4,
+        "async_coordinator_task_count": 2,
+        "blocking_spawn_request_count": 4,
+        "worker_cohort_map": [
+          {
+            "worker_slot": 0,
+            "cohort": 0
+          },
+          {
+            "worker_slot": 1,
+            "cohort": 1
+          }
+        ],
+        "disabled_pending_count_before_release": 4,
+        "disabled_queue_depth_by_cohort_before_release": [
+          0,
+          0
+        ],
+        "disabled_global_pending_count_before_release": 4,
+        "disabled_local_queue_dispatches": 0,
+        "disabled_spill_dispatches": 0,
+        "disabled_fallback_dispatches": 0,
+        "cohort_biased_pending_count_before_release": 4,
+        "cohort_biased_queue_depth_by_cohort_before_release": [
+          1,
+          0
+        ],
+        "cohort_biased_global_pending_count_before_release": 3,
         "cohort_biased_local_queue_dispatches": 3,
         "cohort_biased_spill_dispatches": 3,
         "cohort_biased_fallback_dispatches": 3,
