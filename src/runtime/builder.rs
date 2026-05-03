@@ -2432,6 +2432,13 @@ impl RuntimeBuilder {
         self
     }
 
+    /// Enable the cached draining-region fast path for governor snapshots.
+    #[must_use]
+    pub fn enable_read_biased_region_snapshot(mut self, enable: bool) -> Self {
+        self.config.enable_read_biased_region_snapshot = enable;
+        self
+    }
+
     /// Enable or disable adaptive cancel-streak scheduling.
     ///
     /// When enabled, workers run a deterministic no-regret online policy that
@@ -3581,6 +3588,7 @@ impl RuntimeInner {
         if let Some(source) = entropy_source {
             runtime_state.set_entropy_source(source);
         }
+        runtime_state.set_read_biased_region_snapshot(config.enable_read_biased_region_snapshot);
         runtime_state
     }
 
@@ -5503,6 +5511,10 @@ mod tests {
                 defaults.governor_interval
             );
             assert_eq!(
+                runtime.config().enable_read_biased_region_snapshot,
+                defaults.enable_read_biased_region_snapshot
+            );
+            assert_eq!(
                 runtime.config().enable_adaptive_cancel_streak,
                 defaults.enable_adaptive_cancel_streak
             );
@@ -6180,6 +6192,22 @@ worker_threads = 16
             state.capacity_hints(),
             RuntimeCapacityHints::new(4096, 1024, 2048),
             "explicit runtime capacity hints should flow into the live runtime state"
+        );
+    }
+
+    #[test]
+    fn initialize_runtime_state_applies_read_biased_region_snapshot_gate() {
+        init_test_logging();
+
+        let config = RuntimeConfig {
+            enable_read_biased_region_snapshot: true,
+            ..RuntimeConfig::default()
+        };
+        let state = RuntimeInner::initialize_runtime_state(&config, None, None, None, None);
+
+        assert!(
+            state.read_biased_region_snapshot_enabled(),
+            "builder config should enable the cached draining-region snapshot path"
         );
     }
 }

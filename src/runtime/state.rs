@@ -54,13 +54,155 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::fmt;
 use std::future::Future;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::task::Poll;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 static NEXT_RUNTIME_INSTANCE_ID: AtomicU64 = AtomicU64::new(1);
+const READ_BIASED_REGION_SNAPSHOT_WRITE_HEAVY_THRESHOLD: usize = 32;
 
 type BoxedAsyncFinalizer = std::pin::Pin<Box<dyn Future<Output = ()> + Send>>;
+
+fn nanos_saturating_u64(duration: Duration) -> u64 {
+    duration.as_nanos().min(u128::from(u64::MAX)) as u64
+}
+
+#[derive(Debug, Clone, Copy, Default, Eq, PartialEq)]
+/// Observability counters for the cached draining-region snapshot path.
+pub struct ReadBiasedRegionSnapshotStats {
+    /// Reads served directly from the cached draining-region count.
+    pub cache_hits: u64,
+    /// Reads that fell back to the authoritative `RegionTable` scan.
+    pub fallback_scans: u64,
+    /// Explicit cache invalidations.
+    pub invalidations: u64,
+    /// Fallback scans triggered after a write-heavy burst.
+    pub write_heavy_fallbacks: u64,
+    /// Runtime-side cached-count adjustments applied on region transitions.
+    pub writer_adjustments: u64,
+    /// Total nanoseconds spent applying writer-side cached-count adjustments.
+    pub writer_adjustment_ns: u64,
+    /// Total nanoseconds spent on authoritative fallback scans.
+    pub fallback_scan_ns: u64,
+    /// Most recently published cached draining-region count.
+    pub cached_draining_regions: usize,
+    /// Number of counted-region transitions observed since the last read.
+    pub writes_since_last_read: usize,
+}
+
+#[derive(Debug, Default)]
+struct ReadBiasedDrainingRegionSnapshot {
+    enabled: AtomicBool,
+    valid: AtomicBool,
+    cached_count: AtomicUsize,
+    writes_since_last_read: AtomicUsize,
+    cache_hits: AtomicU64,
+    fallback_scans: AtomicU64,
+    #[allow(dead_code)]
+    invalidations: AtomicU64,
+    write_heavy_fallbacks: AtomicU64,
+    writer_adjustments: AtomicU64,
+    writer_adjustment_ns: AtomicU64,
+    fallback_scan_ns: AtomicU64,
+}
+
+impl ReadBiasedDrainingRegionSnapshot {
+    fn configure(&self, enabled: bool, initial_count: usize) {
+        self.enabled.store(enabled, Ordering::Release);
+        self.valid.store(enabled, Ordering::Release);
+        self.cached_count.store(initial_count, Ordering::Release);
+        self.writes_since_last_read.store(0, Ordering::Release);
+    }
+
+    #[allow(dead_code)]
+    fn invalidate(&self) {
+        if self.enabled.load(Ordering::Acquire) {
+            self.valid.store(false, Ordering::Release);
+            self.invalidations.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    fn note_transition(&self, old_state: RegionState, new_state: RegionState) {
+        if !self.enabled.load(Ordering::Acquire) {
+            return;
+        }
+
+        let started = Instant::now();
+        let old_counted = matches!(old_state, RegionState::Draining | RegionState::Finalizing);
+        let new_counted = matches!(new_state, RegionState::Draining | RegionState::Finalizing);
+
+        match (old_counted, new_counted) {
+            (false, true) => {
+                self.cached_count.fetch_add(1, Ordering::AcqRel);
+                self.writes_since_last_read.fetch_add(1, Ordering::Relaxed);
+                self.writer_adjustments.fetch_add(1, Ordering::Relaxed);
+                self.valid.store(true, Ordering::Release);
+            }
+            (true, false) => {
+                let _ =
+                    self.cached_count
+                        .fetch_update(Ordering::AcqRel, Ordering::Acquire, |count| {
+                            Some(count.saturating_sub(1))
+                        });
+                self.writes_since_last_read.fetch_add(1, Ordering::Relaxed);
+                self.writer_adjustments.fetch_add(1, Ordering::Relaxed);
+                self.valid.store(true, Ordering::Release);
+            }
+            _ => {}
+        }
+
+        self.writer_adjustment_ns
+            .fetch_add(nanos_saturating_u64(started.elapsed()), Ordering::Relaxed);
+    }
+
+    fn read_or_scan(&self, regions: &RegionTable) -> usize {
+        if !self.enabled.load(Ordering::Acquire) {
+            return regions.draining_region_count();
+        }
+
+        let writes = self.writes_since_last_read.load(Ordering::Relaxed);
+        if self.valid.load(Ordering::Acquire)
+            && writes < READ_BIASED_REGION_SNAPSHOT_WRITE_HEAVY_THRESHOLD
+        {
+            self.cache_hits.fetch_add(1, Ordering::Relaxed);
+            self.writes_since_last_read.store(0, Ordering::Release);
+            return self.cached_count.load(Ordering::Acquire);
+        }
+
+        let started = Instant::now();
+        let scanned = regions.draining_region_count();
+        if writes >= READ_BIASED_REGION_SNAPSHOT_WRITE_HEAVY_THRESHOLD {
+            self.write_heavy_fallbacks.fetch_add(1, Ordering::Relaxed);
+        }
+        self.fallback_scans.fetch_add(1, Ordering::Relaxed);
+        self.fallback_scan_ns
+            .fetch_add(nanos_saturating_u64(started.elapsed()), Ordering::Relaxed);
+        self.cached_count.store(scanned, Ordering::Release);
+        self.valid.store(true, Ordering::Release);
+        self.writes_since_last_read.store(0, Ordering::Release);
+        scanned
+    }
+
+    #[allow(dead_code)]
+    fn stats(&self) -> ReadBiasedRegionSnapshotStats {
+        ReadBiasedRegionSnapshotStats {
+            cache_hits: self.cache_hits.load(Ordering::Relaxed),
+            fallback_scans: self.fallback_scans.load(Ordering::Relaxed),
+            invalidations: self.invalidations.load(Ordering::Relaxed),
+            write_heavy_fallbacks: self.write_heavy_fallbacks.load(Ordering::Relaxed),
+            writer_adjustments: self.writer_adjustments.load(Ordering::Relaxed),
+            writer_adjustment_ns: self.writer_adjustment_ns.load(Ordering::Relaxed),
+            fallback_scan_ns: self.fallback_scan_ns.load(Ordering::Relaxed),
+            cached_draining_regions: self.cached_count.load(Ordering::Relaxed),
+            writes_since_last_read: self.writes_since_last_read.load(Ordering::Relaxed),
+        }
+    }
+
+    #[allow(dead_code)]
+    fn enabled(&self) -> bool {
+        self.enabled.load(Ordering::Acquire)
+    }
+}
 
 fn log_cancel_protocol_violation(operation: &'static str, validation_result: &TransitionResult) {
     let _ = operation;
@@ -497,6 +639,8 @@ pub struct RuntimeState {
     leak_escalation: Option<LeakEscalation>,
     /// Cumulative count of obligation leaks (for escalation threshold).
     leak_count: u64,
+    /// Optional cached draining-region count for governor/diagnostic snapshots.
+    read_biased_draining_region_snapshot: ReadBiasedDrainingRegionSnapshot,
     /// Leak-handling recursion depth for diagnostics.
     ///
     /// Distinct leak batches may be processed reentrantly (for example when a
@@ -650,6 +794,7 @@ impl RuntimeState {
             obligation_leak_response: ObligationLeakResponse::Panic,
             leak_escalation: None,
             leak_count: 0,
+            read_biased_draining_region_snapshot: ReadBiasedDrainingRegionSnapshot::default(),
             handling_leaks: 0,
             in_flight_leak_ids: HashSet::new(),
             finalizing_regions: SmallVec::new(),
@@ -798,6 +943,13 @@ impl RuntimeState {
             trace_capacity,
             metrics,
         )
+    }
+
+    /// Enable or disable the cached draining-region snapshot fast path.
+    pub fn set_read_biased_region_snapshot(&mut self, enable: bool) {
+        let initial_count = self.regions.draining_region_count();
+        self.read_biased_draining_region_snapshot
+            .configure(enable, initial_count);
     }
 
     /// Creates a runtime state without a reactor (Lab mode).
@@ -2371,6 +2523,43 @@ impl RuntimeState {
         self.obligations.pending_reserved_at_sum_ns()
     }
 
+    #[inline]
+    pub(crate) fn draining_region_count_for_snapshot(&self) -> usize {
+        self.read_biased_draining_region_snapshot
+            .read_or_scan(&self.regions)
+    }
+
+    #[cfg(any(test, feature = "test-internals"))]
+    #[allow(dead_code)]
+    #[must_use]
+    pub(crate) fn read_biased_region_snapshot_enabled(&self) -> bool {
+        self.read_biased_draining_region_snapshot.enabled()
+    }
+
+    #[cfg(any(test, feature = "test-internals"))]
+    #[allow(dead_code)]
+    #[must_use]
+    pub(crate) fn read_biased_region_snapshot_stats(&self) -> ReadBiasedRegionSnapshotStats {
+        self.read_biased_draining_region_snapshot.stats()
+    }
+
+    #[cfg(any(test, feature = "test-internals"))]
+    #[allow(dead_code)]
+    /// Invalidates the cached draining-region snapshot so the next read uses
+    /// the authoritative region-table scan.
+    pub fn invalidate_read_biased_region_snapshot_for_testing(&self) {
+        self.read_biased_draining_region_snapshot.invalidate();
+    }
+
+    fn note_read_biased_region_snapshot_transition(
+        &self,
+        old_state: RegionState,
+        new_state: RegionState,
+    ) {
+        self.read_biased_draining_region_snapshot
+            .note_transition(old_state, new_state);
+    }
+
     /// Returns true if the runtime is quiescent (no live work).
     ///
     /// A runtime is quiescent when:
@@ -3437,10 +3626,18 @@ impl RuntimeState {
                                 // Continue with transition but log violation
                             }
 
-                            let old_state = region.state();
-                            if region.begin_finalize() {
-                                let new_state = region.state();
-                                let _ = (old_state, new_state); // br-yj9czm: counter recomputed authoritatively, no-op transition note
+                            let transition = {
+                                let old_state = region.state();
+                                if region.begin_finalize() {
+                                    Some((old_state, region.state()))
+                                } else {
+                                    None
+                                }
+                            };
+                            if let Some((old_state, new_state)) = transition {
+                                self.note_read_biased_region_snapshot_transition(
+                                    old_state, new_state,
+                                );
                                 true
                             } else {
                                 false
@@ -3478,7 +3675,9 @@ impl RuntimeState {
                                 let old_state = region.state();
                                 region.begin_drain();
                                 let new_state = region.state();
-                                let _ = (old_state, new_state); // br-yj9czm: counter recomputed authoritatively, no-op transition note
+                                self.note_read_biased_region_snapshot_transition(
+                                    old_state, new_state,
+                                );
 
                                 self.notify_runtime_epoch_advance(
                                     super::epoch_tracker::ModuleId::RegionTable,
@@ -3569,10 +3768,14 @@ impl RuntimeState {
                                 // Continue with transition but log violation
                             }
 
-                            region.complete_close()
+                            let old_state = region.state();
+                            let closed = region.complete_close();
+                            let new_state = region.state();
+                            (closed, old_state, new_state)
                         };
 
-                        if closed {
+                        if closed.0 {
+                            self.note_read_biased_region_snapshot_transition(closed.1, closed.2);
                             if let Some(pos) =
                                 self.finalizing_regions.iter().position(|&r| r == region_id)
                             {
@@ -11602,5 +11805,162 @@ mod tests {
         );
 
         crate::test_complete!("live_task_count_matches_arena_scan_under_churn");
+    }
+
+    #[test]
+    fn read_biased_region_snapshot_disabled_matches_authoritative_scan() {
+        init_test("read_biased_region_snapshot_disabled_matches_authoritative_scan");
+
+        let mut state = RuntimeState::new();
+        let root = state.create_root_region(Budget::INFINITE);
+        let child = create_child_region(&mut state, root);
+        let _grandchild = create_child_region(&mut state, child);
+        let _ = state.cancel_request(child, &CancelReason::user("drain"), None);
+
+        let expected = state.regions.draining_region_count() as u32;
+        let snapshot = crate::obligation::lyapunov::StateSnapshot::from_runtime_state(&state);
+
+        crate::assert_with_log!(
+            snapshot.draining_regions == expected,
+            "disabled path matches authoritative scan",
+            expected,
+            snapshot.draining_regions
+        );
+        crate::assert_with_log!(
+            state.read_biased_region_snapshot_stats() == ReadBiasedRegionSnapshotStats::default(),
+            "disabled path should not mutate snapshot counters",
+            format!("{:?}", ReadBiasedRegionSnapshotStats::default()),
+            format!("{:?}", state.read_biased_region_snapshot_stats())
+        );
+
+        crate::test_complete!("read_biased_region_snapshot_disabled_matches_authoritative_scan");
+    }
+
+    #[test]
+    fn read_biased_region_snapshot_tracks_draining_runtime_transitions() {
+        init_test("read_biased_region_snapshot_tracks_draining_runtime_transitions");
+
+        let mut state = RuntimeState::new();
+        let root = state.create_root_region(Budget::INFINITE);
+        let child = create_child_region(&mut state, root);
+        let grandchild = create_child_region(&mut state, child);
+        state.set_read_biased_region_snapshot(true);
+
+        let _ = state.cancel_request(child, &CancelReason::user("drain"), None);
+        let draining_snapshot =
+            crate::obligation::lyapunov::StateSnapshot::from_runtime_state(&state);
+        crate::assert_with_log!(
+            draining_snapshot.draining_regions == state.regions.draining_region_count() as u32,
+            "cached draining count matches authoritative scan after Closing->Draining",
+            state.regions.draining_region_count() as u32,
+            draining_snapshot.draining_regions
+        );
+
+        let _ = state.cancel_request(grandchild, &CancelReason::user("close"), None);
+        state.advance_region_state(child);
+        let closed_snapshot =
+            crate::obligation::lyapunov::StateSnapshot::from_runtime_state(&state);
+        crate::assert_with_log!(
+            closed_snapshot.draining_regions == state.regions.draining_region_count() as u32,
+            "cached draining count matches authoritative scan after close completion",
+            state.regions.draining_region_count() as u32,
+            closed_snapshot.draining_regions
+        );
+
+        let stats = state.read_biased_region_snapshot_stats();
+        crate::assert_with_log!(
+            stats.cache_hits >= 2,
+            "read-heavy reads should hit the cached path",
+            true,
+            stats.cache_hits >= 2
+        );
+        crate::assert_with_log!(
+            stats.writer_adjustments >= 2,
+            "runtime transitions should update the cached draining count",
+            true,
+            stats.writer_adjustments >= 2
+        );
+
+        crate::test_complete!("read_biased_region_snapshot_tracks_draining_runtime_transitions");
+    }
+
+    #[test]
+    fn read_biased_region_snapshot_invalidation_forces_fallback_scan() {
+        init_test("read_biased_region_snapshot_invalidation_forces_fallback_scan");
+
+        let mut state = RuntimeState::new();
+        let root = state.create_root_region(Budget::INFINITE);
+        let child = create_child_region(&mut state, root);
+        let _grandchild = create_child_region(&mut state, child);
+        state.set_read_biased_region_snapshot(true);
+        let _ = state.cancel_request(child, &CancelReason::user("drain"), None);
+
+        let _ = crate::obligation::lyapunov::StateSnapshot::from_runtime_state(&state);
+        let before = state.read_biased_region_snapshot_stats();
+        state.invalidate_read_biased_region_snapshot_for_testing();
+
+        let snapshot = crate::obligation::lyapunov::StateSnapshot::from_runtime_state(&state);
+        let after = state.read_biased_region_snapshot_stats();
+        crate::assert_with_log!(
+            snapshot.draining_regions == state.regions.draining_region_count() as u32,
+            "fallback scan still returns the authoritative draining count",
+            state.regions.draining_region_count() as u32,
+            snapshot.draining_regions
+        );
+        crate::assert_with_log!(
+            after.invalidations == before.invalidations + 1,
+            "manual invalidation should be recorded",
+            before.invalidations + 1,
+            after.invalidations
+        );
+        crate::assert_with_log!(
+            after.fallback_scans == before.fallback_scans + 1,
+            "invalidated read should use the conservative scan fallback",
+            before.fallback_scans + 1,
+            after.fallback_scans
+        );
+
+        crate::test_complete!("read_biased_region_snapshot_invalidation_forces_fallback_scan");
+    }
+
+    #[test]
+    fn read_biased_region_snapshot_write_heavy_mix_falls_back_to_scan() {
+        init_test("read_biased_region_snapshot_write_heavy_mix_falls_back_to_scan");
+
+        let mut state = RuntimeState::new();
+        let root = state.create_root_region(Budget::INFINITE);
+        let mut draining_regions = Vec::new();
+        for _ in 0..READ_BIASED_REGION_SNAPSHOT_WRITE_HEAVY_THRESHOLD {
+            let child = create_child_region(&mut state, root);
+            let _grandchild = create_child_region(&mut state, child);
+            draining_regions.push(child);
+        }
+        state.set_read_biased_region_snapshot(true);
+        for child in draining_regions {
+            let _ = state.cancel_request(child, &CancelReason::user("drain"), None);
+        }
+
+        let snapshot = crate::obligation::lyapunov::StateSnapshot::from_runtime_state(&state);
+        let stats = state.read_biased_region_snapshot_stats();
+        crate::assert_with_log!(
+            snapshot.draining_regions == state.regions.draining_region_count() as u32,
+            "write-heavy fallback scan preserves correctness",
+            state.regions.draining_region_count() as u32,
+            snapshot.draining_regions
+        );
+        crate::assert_with_log!(
+            stats.write_heavy_fallbacks >= 1,
+            "burst of region transitions should trigger the conservative fallback",
+            true,
+            stats.write_heavy_fallbacks >= 1
+        );
+        crate::assert_with_log!(
+            stats.fallback_scans >= 1,
+            "write-heavy read should perform an authoritative scan",
+            true,
+            stats.fallback_scans >= 1
+        );
+
+        crate::test_complete!("read_biased_region_snapshot_write_heavy_mix_falls_back_to_scan");
     }
 }

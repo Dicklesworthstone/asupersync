@@ -23,6 +23,7 @@
 //! | `observability` | `None` |
 //! | `enable_governor` | `false` |
 //! | `governor_interval` | `32` |
+//! | `enable_read_biased_region_snapshot` | `false` |
 //! | `enable_adaptive_cancel_streak` | `true` |
 //! | `adaptive_cancel_streak_epoch_steps` | `128` |
 
@@ -577,6 +578,13 @@ pub struct RuntimeConfig {
     /// Lower values increase responsiveness but add snapshot overhead.
     /// Only relevant when `enable_governor` is true.
     pub governor_interval: u32,
+    /// Enable the cached draining-region fast path for governor/diagnostics snapshots.
+    ///
+    /// When enabled, `RuntimeState` maintains a conservative cached count for
+    /// regions in `Draining`/`Finalizing`. Read-heavy snapshot paths can use
+    /// that count directly, while write-heavy or invalidated cases fall back to
+    /// the authoritative region-table scan.
+    pub enable_read_biased_region_snapshot: bool,
     /// Enable adaptive cancel-lane streak selection.
     ///
     /// When enabled, workers use a deterministic Hedge-style online policy
@@ -727,6 +735,7 @@ impl Default for RuntimeConfig {
             leak_escalation: None,
             enable_governor: false,
             governor_interval: 32,
+            enable_read_biased_region_snapshot: false,
             enable_adaptive_cancel_streak: true,
             adaptive_cancel_streak_epoch_steps: 128,
         }
@@ -831,6 +840,12 @@ mod tests {
             "adaptive_cancel_streak_epoch_steps",
             128,
             config.adaptive_cancel_streak_epoch_steps
+        );
+        crate::assert_with_log!(
+            !config.enable_read_biased_region_snapshot,
+            "enable_read_biased_region_snapshot",
+            false,
+            config.enable_read_biased_region_snapshot
         );
         crate::assert_with_log!(
             config.logical_clock_mode.is_none(),
@@ -949,6 +964,7 @@ mod tests {
             logical_clock_mode: None,
             enable_governor: false,
             governor_interval: 0,
+            enable_read_biased_region_snapshot: false,
             enable_adaptive_cancel_streak: false,
             adaptive_cancel_streak_epoch_steps: 0,
         }
@@ -1212,6 +1228,7 @@ mod tests {
             logical_clock_mode: None,
             enable_governor: false,
             governor_interval: 7,
+            enable_read_biased_region_snapshot: true,
             enable_adaptive_cancel_streak: true,
             adaptive_cancel_streak_epoch_steps: 64,
         };
@@ -1516,6 +1533,12 @@ mod tests {
             "default governor interval",
             32,
             config.governor_interval
+        );
+        crate::assert_with_log!(
+            !config.enable_read_biased_region_snapshot,
+            "read-biased region snapshot disabled by default",
+            false,
+            config.enable_read_biased_region_snapshot
         );
         crate::assert_with_log!(
             config.enable_adaptive_cancel_streak,
