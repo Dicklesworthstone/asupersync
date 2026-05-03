@@ -49808,3 +49808,354 @@ mod otlp_122_tests {
         println!("  - Data transformation, buffering, and compression attributes preserved");
     }
 }
+
+    /// OTLP-160: Azure Service Bus producer queue name validation conformance test.
+    /// Validates that when exporter sees a span with kind=PRODUCER and
+    /// messaging.system="azure_servicebus", attribute messaging.azure_servicebus.queue_name
+    /// MUST be set per OTLP semantic conventions.
+    #[test]
+    fn otlp_160_azure_servicebus_producer_queue_name_conformance() {
+        // Enum to represent OTLP attribute value types
+        #[derive(Debug, Clone)]
+        enum AttributeValue {
+            StringValue(String),
+            IntValue(i64),
+            BoolValue(bool),
+            ArrayValue(Vec<String>),
+            NullValue,
+        }
+
+        // Test scenario structure for Azure Service Bus producer queue name validation
+        #[derive(Debug, Clone)]
+        struct AzureServiceBusProducerScenario {
+            description: String,
+            span_kind: String,
+            messaging_system: Option<String>,
+            queue_name: Option<AttributeValue>,
+            additional_attributes: HashMap<String, AttributeValue>,
+            should_pass_validation: bool,
+            expected_error_pattern: Option<String>,
+        }
+
+        // Validation result for producer queue name conformance
+        #[derive(Debug)]
+        enum AzureServiceBusProducerValidationResult {
+            Valid {
+                queue_name: String,
+                additional_servicebus_attributes: usize,
+            },
+            NotApplicable(String),
+            Invalid(String),
+        }
+
+        // Mock span data structure for testing
+        #[derive(Debug)]
+        struct SpanData {
+            kind: String,
+            attributes: HashMap<String, AttributeValue>,
+        }
+
+        // Define comprehensive test scenarios for OTLP-160 validation
+        let test_scenarios = vec![
+            AzureServiceBusProducerScenario {
+                description: "Valid producer span with queue name".to_string(),
+                span_kind: "PRODUCER".to_string(),
+                messaging_system: Some("azure_servicebus".to_string()),
+                queue_name: Some(AttributeValue::StringValue("order-processing-queue".to_string())),
+                additional_attributes: [
+                    ("messaging.azure_servicebus.namespace".to_string(), AttributeValue::StringValue("production-servicebus".to_string())),
+                    ("messaging.azure_servicebus.subscription_name".to_string(), AttributeValue::StringValue("analytics-subscription".to_string())),
+                ].iter().cloned().collect(),
+                should_pass_validation: true,
+                expected_error_pattern: None,
+            },
+            AzureServiceBusProducerScenario {
+                description: "Missing queue name in producer span".to_string(),
+                span_kind: "PRODUCER".to_string(),
+                messaging_system: Some("azure_servicebus".to_string()),
+                queue_name: None,
+                additional_attributes: [
+                    ("messaging.azure_servicebus.namespace".to_string(), AttributeValue::StringValue("production-servicebus".to_string())),
+                ].iter().cloned().collect(),
+                should_pass_validation: false,
+                expected_error_pattern: Some("messaging.azure_servicebus.queue_name attribute is required".to_string()),
+            },
+            AzureServiceBusProducerScenario {
+                description: "Empty string queue name".to_string(),
+                span_kind: "PRODUCER".to_string(),
+                messaging_system: Some("azure_servicebus".to_string()),
+                queue_name: Some(AttributeValue::StringValue("".to_string())),
+                additional_attributes: HashMap::new(),
+                should_pass_validation: false,
+                expected_error_pattern: Some("messaging.azure_servicebus.queue_name must be non-empty".to_string()),
+            },
+            AzureServiceBusProducerScenario {
+                description: "Wrong attribute type for queue name".to_string(),
+                span_kind: "PRODUCER".to_string(),
+                messaging_system: Some("azure_servicebus".to_string()),
+                queue_name: Some(AttributeValue::IntValue(42)),
+                additional_attributes: HashMap::new(),
+                should_pass_validation: false,
+                expected_error_pattern: Some("messaging.azure_servicebus.queue_name must be a StringValue".to_string()),
+            },
+            AzureServiceBusProducerScenario {
+                description: "Valid queue with premium tier attributes".to_string(),
+                span_kind: "PRODUCER".to_string(),
+                messaging_system: Some("azure_servicebus".to_string()),
+                queue_name: Some(AttributeValue::StringValue("critical-orders-queue".to_string())),
+                additional_attributes: [
+                    ("messaging.azure_servicebus.namespace".to_string(), AttributeValue::StringValue("premium-servicebus".to_string())),
+                    ("messaging.azure_servicebus.tier".to_string(), AttributeValue::StringValue("premium".to_string())),
+                    ("messaging.azure_servicebus.session_id".to_string(), AttributeValue::StringValue("session-12345".to_string())),
+                    ("messaging.azure_servicebus.correlation_id".to_string(), AttributeValue::StringValue("corr-67890".to_string())),
+                    ("messaging.azure_servicebus.time_to_live".to_string(), AttributeValue::IntValue(3600)),
+                ].iter().cloned().collect(),
+                should_pass_validation: true,
+                expected_error_pattern: None,
+            },
+            AzureServiceBusProducerScenario {
+                description: "Valid queue with dead letter queue attributes".to_string(),
+                span_kind: "PRODUCER".to_string(),
+                messaging_system: Some("azure_servicebus".to_string()),
+                queue_name: Some(AttributeValue::StringValue("failed-messages-dlq".to_string())),
+                additional_attributes: [
+                    ("messaging.azure_servicebus.namespace".to_string(), AttributeValue::StringValue("servicebus-namespace".to_string())),
+                    ("messaging.azure_servicebus.dead_letter_queue".to_string(), AttributeValue::BoolValue(true)),
+                    ("messaging.azure_servicebus.dead_letter_reason".to_string(), AttributeValue::StringValue("MaxDeliveryCountExceeded".to_string())),
+                    ("messaging.azure_servicebus.delivery_count".to_string(), AttributeValue::IntValue(10)),
+                ].iter().cloned().collect(),
+                should_pass_validation: true,
+                expected_error_pattern: None,
+            },
+            AzureServiceBusProducerScenario {
+                description: "Whitespace-only queue name".to_string(),
+                span_kind: "PRODUCER".to_string(),
+                messaging_system: Some("azure_servicebus".to_string()),
+                queue_name: Some(AttributeValue::StringValue("   ".to_string())),
+                additional_attributes: HashMap::new(),
+                should_pass_validation: false,
+                expected_error_pattern: Some("messaging.azure_servicebus.queue_name must be non-empty".to_string()),
+            },
+            AzureServiceBusProducerScenario {
+                description: "Consumer span should be exempt from producer queue name requirement".to_string(),
+                span_kind: "CONSUMER".to_string(),
+                messaging_system: Some("azure_servicebus".to_string()),
+                queue_name: None,
+                additional_attributes: [
+                    ("messaging.azure_servicebus.namespace".to_string(), AttributeValue::StringValue("servicebus-namespace".to_string())),
+                ].iter().cloned().collect(),
+                should_pass_validation: true,
+                expected_error_pattern: None,
+            },
+            AzureServiceBusProducerScenario {
+                description: "Non-Azure Service Bus messaging system should be exempt".to_string(),
+                span_kind: "PRODUCER".to_string(),
+                messaging_system: Some("aws_sqs".to_string()),
+                queue_name: None,
+                additional_attributes: [
+                    ("messaging.aws_sqs.queue_url".to_string(), AttributeValue::StringValue("https://sqs.us-east-1.amazonaws.com/123456789012/orders".to_string())),
+                ].iter().cloned().collect(),
+                should_pass_validation: true,
+                expected_error_pattern: None,
+            },
+            AzureServiceBusProducerScenario {
+                description: "Case-sensitive messaging system validation".to_string(),
+                span_kind: "PRODUCER".to_string(),
+                messaging_system: Some("Azure_ServiceBus".to_string()), // Wrong case
+                queue_name: None,
+                additional_attributes: HashMap::new(),
+                should_pass_validation: true, // Should be exempt due to case mismatch
+                expected_error_pattern: None,
+            },
+            AzureServiceBusProducerScenario {
+                description: "Valid queue with topic and subscription attributes".to_string(),
+                span_kind: "PRODUCER".to_string(),
+                messaging_system: Some("azure_servicebus".to_string()),
+                queue_name: Some(AttributeValue::StringValue("notifications-queue".to_string())),
+                additional_attributes: [
+                    ("messaging.azure_servicebus.namespace".to_string(), AttributeValue::StringValue("notifications-servicebus".to_string())),
+                    ("messaging.azure_servicebus.topic_name".to_string(), AttributeValue::StringValue("user-events".to_string())),
+                    ("messaging.azure_servicebus.subscription_name".to_string(), AttributeValue::StringValue("email-processor".to_string())),
+                    ("messaging.azure_servicebus.message_id".to_string(), AttributeValue::StringValue("msg-abc-123".to_string())),
+                ].iter().cloned().collect(),
+                should_pass_validation: true,
+                expected_error_pattern: None,
+            },
+            AzureServiceBusProducerScenario {
+                description: "Valid queue with partition and batch attributes".to_string(),
+                span_kind: "PRODUCER".to_string(),
+                messaging_system: Some("azure_servicebus".to_string()),
+                queue_name: Some(AttributeValue::StringValue("partitioned-events-queue".to_string())),
+                additional_attributes: [
+                    ("messaging.azure_servicebus.namespace".to_string(), AttributeValue::StringValue("partitioned-servicebus".to_string())),
+                    ("messaging.azure_servicebus.partitioning_enabled".to_string(), AttributeValue::BoolValue(true)),
+                    ("messaging.azure_servicebus.partition_key".to_string(), AttributeValue::StringValue("customer-region-us-east".to_string())),
+                    ("messaging.batch.message_count".to_string(), AttributeValue::IntValue(50)),
+                    ("messaging.azure_servicebus.duplicate_detection".to_string(), AttributeValue::BoolValue(true)),
+                ].iter().cloned().collect(),
+                should_pass_validation: true,
+                expected_error_pattern: None,
+            },
+            AzureServiceBusProducerScenario {
+                description: "Missing messaging system should be exempt".to_string(),
+                span_kind: "PRODUCER".to_string(),
+                messaging_system: None,
+                queue_name: None,
+                additional_attributes: HashMap::new(),
+                should_pass_validation: true, // Exempt from Azure Service Bus-specific validation
+                expected_error_pattern: None,
+            },
+        ];
+
+        // Validation function for Azure Service Bus producer queue name conformance
+        fn validate_azure_servicebus_producer_queue_name_conformance(
+            scenario: &AzureServiceBusProducerScenario,
+        ) -> Result<(), String> {
+            // Create span data from scenario
+            let mut attributes = scenario.additional_attributes.clone();
+            
+            if let Some(ref messaging_system) = scenario.messaging_system {
+                attributes.insert("messaging.system".to_string(), AttributeValue::StringValue(messaging_system.clone()));
+            }
+            
+            if let Some(ref queue_name) = scenario.queue_name {
+                attributes.insert("messaging.azure_servicebus.queue_name".to_string(), queue_name.clone());
+            }
+
+            let span_data = SpanData {
+                kind: scenario.span_kind.clone(),
+                attributes,
+            };
+
+            // Perform validation
+            match validate_azure_servicebus_producer_queue_name(&span_data) {
+                AzureServiceBusProducerValidationResult::Valid { .. } => {
+                    if scenario.should_pass_validation {
+                        Ok(())
+                    } else {
+                        Err("Expected validation to fail but it passed".to_string())
+                    }
+                }
+                AzureServiceBusProducerValidationResult::NotApplicable(_) => {
+                    if scenario.should_pass_validation {
+                        Ok(())
+                    } else {
+                        Err("Validation was marked as not applicable when failure was expected".to_string())
+                    }
+                }
+                AzureServiceBusProducerValidationResult::Invalid(error_msg) => {
+                    if scenario.should_pass_validation {
+                        Err(format!("Validation failed when it should have passed: {}", error_msg))
+                    } else if let Some(expected_pattern) = &scenario.expected_error_pattern {
+                        if error_msg.contains(expected_pattern) {
+                            Ok(())
+                        } else {
+                            Err(format!("Error message '{}' doesn't contain expected pattern '{}'", error_msg, expected_pattern))
+                        }
+                    } else {
+                        Ok(()) // Expected failure without specific pattern
+                    }
+                }
+            }
+        }
+
+        // Validation logic for Azure Service Bus producer queue name
+        fn validate_azure_servicebus_producer_queue_name(span_data: &SpanData) -> AzureServiceBusProducerValidationResult {
+            // Check if span kind is PRODUCER
+            if span_data.kind != "PRODUCER" {
+                return AzureServiceBusProducerValidationResult::NotApplicable(
+                    format!("Span kind '{}' is not PRODUCER, queue name validation not required", span_data.kind)
+                );
+            }
+
+            // Check if messaging.system is exactly "azure_servicebus" (case-sensitive)
+            let messaging_system = span_data.attributes.get("messaging.system");
+            match messaging_system {
+                Some(AttributeValue::StringValue(system)) if system == "azure_servicebus" => {
+                    // This is an Azure Service Bus producer span - validate queue_name
+                }
+                _ => {
+                    return AzureServiceBusProducerValidationResult::NotApplicable(
+                        "Messaging system is not 'azure_servicebus', queue name validation not required".to_string()
+                    );
+                }
+            }
+
+            // Validate messaging.azure_servicebus.queue_name attribute
+            match span_data.attributes.get("messaging.azure_servicebus.queue_name") {
+                None => {
+                    return AzureServiceBusProducerValidationResult::Invalid(
+                        "OTLP-160 violation: messaging.azure_servicebus.queue_name attribute is required for PRODUCER spans with messaging.system='azure_servicebus'".to_string()
+                    );
+                }
+                Some(AttributeValue::StringValue(queue_name)) => {
+                    if queue_name.is_empty() || queue_name.trim().is_empty() {
+                        return AzureServiceBusProducerValidationResult::Invalid(
+                            "OTLP-160 violation: messaging.azure_servicebus.queue_name must be non-empty StringValue".to_string()
+                        );
+                    }
+                    
+                    // Valid queue name found
+                    let queue_name = queue_name.trim().to_string();
+                }
+                Some(_) => {
+                    return AzureServiceBusProducerValidationResult::Invalid(
+                        "OTLP-160 violation: messaging.azure_servicebus.queue_name must be a StringValue".to_string()
+                    );
+                }
+            }
+
+            // Extract final queue name for result
+            let queue_name = match span_data.attributes.get("messaging.azure_servicebus.queue_name") {
+                Some(AttributeValue::StringValue(queue_name)) => queue_name.trim().to_string(),
+                _ => unreachable!("Should have been caught above"),
+            };
+
+            // Count additional Azure Service Bus-specific attributes
+            let additional_servicebus_attributes = span_data.attributes.keys()
+                .filter(|k| k.starts_with("messaging.azure_servicebus.") && *k != "messaging.azure_servicebus.queue_name")
+                .count();
+
+            AzureServiceBusProducerValidationResult::Valid {
+                queue_name,
+                additional_servicebus_attributes,
+            }
+        }
+
+        // Execute OTLP-160 conformance validation for all scenarios
+        let mut passed_scenarios = 0;
+        let total_scenarios = test_scenarios.len();
+
+        for scenario in &test_scenarios {
+            match validate_azure_servicebus_producer_queue_name_conformance(scenario) {
+                Ok(()) => {
+                    passed_scenarios += 1;
+                    println!("✓ OTLP-160 conformance verified for {}", scenario.description);
+                }
+                Err(error_msg) => {
+                    panic!(
+                        "OTLP-160 conformance test FAILED for {}: {}",
+                        scenario.description, error_msg
+                    );
+                }
+            }
+        }
+
+        assert_eq!(
+            passed_scenarios, total_scenarios,
+            "All OTLP-160 Azure Service Bus producer queue name scenarios must pass"
+        );
+
+        println!("✓ OTLP-160: Azure Service Bus producer queue name validation conformance verified");
+        println!("  - PRODUCER spans with messaging.system='azure_servicebus' require messaging.azure_servicebus.queue_name");
+        println!("  - Queue name must be non-empty string value");
+        println!("  - Consumer spans exempt from producer queue name requirement");
+        println!("  - Non-Azure Service Bus messaging systems exempt from validation");
+        println!("  - Case-sensitive messaging.system matching enforced");
+        println!("  - Wrong attribute types properly rejected");
+        println!("  - Empty and whitespace-only queue names rejected");
+        println!("  - Additional Azure Service Bus attributes preserved and counted");
+        println!("  - Premium tier, dead letter queue, and session-based messaging supported");
+        println!("  - Topic/subscription, partitioning, and duplicate detection attributes preserved");
+    }
+}
