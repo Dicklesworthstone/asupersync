@@ -18,6 +18,14 @@ const CONTROLLER_LEDGER_PLANNER_ROWS_OUT_ENV: &str =
 const CONTROLLER_LEDGER_STDOUT_ENV: &str = "ASUPERSYNC_CONTROLLER_LEDGER_STDOUT";
 const CONTROLLER_LEDGER_PLANNER_ROWS_STDOUT_ENV: &str =
     "ASUPERSYNC_CONTROLLER_LEDGER_PLANNER_ROWS_STDOUT";
+const CONTROLLER_INTERFERENCE_MATRIX_ARTIFACT_OUT_ENV: &str =
+    "ASUPERSYNC_CONTROLLER_INTERFERENCE_MATRIX_ARTIFACT_OUT";
+const CONTROLLER_INTERFERENCE_REPORT_OUT_ENV: &str =
+    "ASUPERSYNC_CONTROLLER_INTERFERENCE_REPORT_OUT";
+const CONTROLLER_INTERFERENCE_MATRIX_STDOUT_ENV: &str =
+    "ASUPERSYNC_CONTROLLER_INTERFERENCE_MATRIX_STDOUT";
+const CONTROLLER_INTERFERENCE_REPORT_STDOUT_ENV: &str =
+    "ASUPERSYNC_CONTROLLER_INTERFERENCE_REPORT_STDOUT";
 
 fn repo_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -63,6 +71,7 @@ fn doc_has_required_sections() {
         "Rollback Contract",
         "Evidence Ledger Contract",
         "Structured Logging Contract",
+        "Controller Interference Contract",
         "Comparator-Smoke Runner",
         "Validation",
         "Cross-References",
@@ -218,6 +227,107 @@ fn controller_snapshot_ledger_field_units_are_stable() {
     );
 }
 
+#[test]
+fn controller_interference_matrix_schema_is_stable() {
+    let artifact = load_artifact();
+    let matrix = &artifact["controller_interference_matrix"];
+    assert_eq!(
+        matrix["schema_version"].as_str(),
+        Some("controller-interference-matrix-v1")
+    );
+    let catalog_fields: Vec<String> = matrix["catalog_fields"]
+        .as_array()
+        .expect("catalog_fields must be array")
+        .iter()
+        .map(|value| value.as_str().unwrap().to_string())
+        .collect();
+    assert_eq!(
+        catalog_fields,
+        vec![
+            "controller_key",
+            "controller_name",
+            "inputs",
+            "outputs",
+            "fallback_mode",
+            "update_cadence_ticks",
+        ]
+    );
+    let pair_rule_fields: Vec<String> = matrix["pair_rule_fields"]
+        .as_array()
+        .expect("pair_rule_fields must be array")
+        .iter()
+        .map(|value| value.as_str().unwrap().to_string())
+        .collect();
+    assert_eq!(
+        pair_rule_fields,
+        vec![
+            "pair_id",
+            "controllers",
+            "shared_telemetry_fields",
+            "shared_knob_surfaces",
+            "compose_verdict",
+            "safe_mode_precedence",
+            "timescale_separation",
+        ]
+    );
+}
+
+#[test]
+fn controller_interference_catalog_and_pair_rules_are_stable() {
+    let matrix = &load_artifact()["controller_interference_matrix"];
+    let controller_keys: Vec<String> = matrix["controllers"]
+        .as_array()
+        .expect("controllers must be array")
+        .iter()
+        .map(|controller| controller["controller_key"].as_str().unwrap().to_string())
+        .collect();
+    assert_eq!(
+        controller_keys,
+        vec![
+            "scheduler_recommend",
+            "brownout_guard",
+            "tail_risk_admission",
+            "admission_steering",
+        ]
+    );
+
+    let pair_rules = matrix["pair_rules"]
+        .as_array()
+        .expect("pair_rules must be array");
+    let actual: BTreeSet<(String, String, String)> = pair_rules
+        .iter()
+        .map(|pair| {
+            (
+                pair["pair_id"].as_str().unwrap().to_string(),
+                pair["compose_verdict"].as_str().unwrap().to_string(),
+                pair["safe_mode_precedence"].as_str().unwrap().to_string(),
+            )
+        })
+        .collect();
+    let expected: BTreeSet<(String, String, String)> = [
+        (
+            "scheduler_recommend+brownout_guard",
+            "safe",
+            "brownout_guard",
+        ),
+        (
+            "tail_risk_admission+admission_steering",
+            "do_not_compose",
+            "tail_risk_admission",
+        ),
+    ]
+    .into_iter()
+    .map(|(pair_id, verdict, precedence)| {
+        (
+            pair_id.to_string(),
+            verdict.to_string(),
+            precedence.to_string(),
+        )
+    })
+    .collect();
+    assert_eq!(actual, expected, "pair rules must remain stable");
+}
+
 // ── Promotion pipeline stability ─────────────────────────────────────
 
 #[test]
@@ -292,6 +402,8 @@ fn validation_scenario_ids_are_complete() {
         "AA023-RECOVERY-REMEDIATION",
         "AA023-CONTROLLER-LEDGER-DEFAULTS",
         "AA023-CONTROLLER-LEDGER-MULTI-CONTROLLER",
+        "AA023-CONTROLLER-INTERFERENCE-STABLE",
+        "AA023-CONTROLLER-INTERFERENCE-FORBIDDEN",
     ]
     .into_iter()
     .map(ToOwned::to_owned)
@@ -399,6 +511,32 @@ fn controller_ledger_smoke_scenario_declares_expected_artifacts() {
 }
 
 #[test]
+fn controller_interference_smoke_scenario_declares_expected_artifacts() {
+    let artifact = load_artifact();
+    let scenario = artifact["smoke_scenarios"]
+        .as_array()
+        .expect("smoke_scenarios must be array")
+        .iter()
+        .find(|scenario| {
+            scenario["scenario_id"].as_str() == Some("AA023-SMOKE-CONTROLLER-INTERFERENCE")
+        })
+        .expect("controller-interference smoke scenario must exist");
+    let expected_artifacts: Vec<String> = scenario["expected_artifacts"]
+        .as_array()
+        .expect("expected_artifacts must be array")
+        .iter()
+        .map(|value| value.as_str().unwrap().to_string())
+        .collect();
+    assert_eq!(
+        expected_artifacts,
+        vec![
+            ".decision-plane-validation-smoke-artifacts/run_*/AA023-SMOKE-CONTROLLER-INTERFERENCE/controller_interference_matrix.json",
+            ".decision-plane-validation-smoke-artifacts/run_*/AA023-SMOKE-CONTROLLER-INTERFERENCE/controller_interference_report.json",
+        ]
+    );
+}
+
+#[test]
 fn runner_script_exists_and_declares_modes() {
     let root = repo_root();
     let script_path = root.join(RUNNER_SCRIPT_PATH);
@@ -422,6 +560,17 @@ fn runner_script_exists_and_declares_modes() {
         "extract_log_json_artifact",
         "controller_snapshot_ledger_artifact_path",
         "controller_snapshot_planner_rows_artifact_path",
+        "controller_interference_matrix_schema_version",
+        "controller_interference_catalog",
+        "controller_interference_pair_rules",
+        "controller_interference_env_fingerprint_fields",
+        "controller_interference_decision_trace_fields",
+        "ASUPERSYNC_CONTROLLER_INTERFERENCE_MATRIX_STDOUT",
+        "ASUPERSYNC_CONTROLLER_INTERFERENCE_REPORT_STDOUT",
+        "ASUPERSYNC_CONTROLLER_INTERFERENCE_MATRIX_JSON=",
+        "ASUPERSYNC_CONTROLLER_INTERFERENCE_REPORT_JSON=",
+        "controller_interference_matrix_artifact_path",
+        "controller_interference_report_artifact_path",
     ] {
         assert!(script.contains(token), "runner missing token: {token}");
     }
@@ -503,6 +652,20 @@ fn controller_snapshot_planner_render_order() -> Vec<String> {
         .iter()
         .map(|value| value.as_str().unwrap().to_string())
         .collect()
+}
+
+fn controller_interference_matrix() -> Value {
+    load_artifact()["controller_interference_matrix"].clone()
+}
+
+fn controller_interference_pair_rule(pair_id: &str) -> Value {
+    controller_interference_matrix()["pair_rules"]
+        .as_array()
+        .expect("pair_rules must be array")
+        .iter()
+        .find(|pair| pair["pair_id"].as_str() == Some(pair_id))
+        .cloned()
+        .expect("pair rule must exist")
 }
 
 fn planner_row(controller_json: &Value, fields: &[String]) -> Vec<String> {
@@ -1249,5 +1412,211 @@ fn controller_snapshot_ledger_multi_controller_rendering_is_stable() {
             "planner_render_order": render_order,
             "rendered_rows": [primary_row, secondary_row],
         }),
+    );
+}
+
+#[test]
+fn controller_interference_replay_report_is_stable() {
+    let matrix = controller_interference_matrix();
+    let stable_pair = controller_interference_pair_rule("scheduler_recommend+brownout_guard");
+    let forbidden_pair =
+        controller_interference_pair_rule("tail_risk_admission+admission_steering");
+
+    let env_fingerprint = serde_json::json!({
+        "host_class": "64c-256g",
+        "worker_count": 64,
+        "memory_gib": 256,
+        "evidence_stream_id": "aa023-controller-interference-v1",
+        "lab_runtime": true,
+    });
+
+    let mut registry = ControllerRegistry::new();
+    let scheduler_id = registry
+        .register(test_registration("scheduler_recommend"))
+        .expect("scheduler controller must register");
+    let brownout_id = registry
+        .register(test_registration("brownout_guard"))
+        .expect("brownout controller must register");
+
+    registry.record_decision(&ControllerDecision {
+        controller_id: brownout_id,
+        snapshot_id: SnapshotId(200),
+        label: "optional_surface_mode=normal".to_string(),
+        payload: serde_json::json!({
+            "tick": 0,
+            "knob_surface": "optional_surface_mode",
+            "value": "normal",
+        }),
+        confidence: 0.82,
+        fallback_label: "preserve_current_mode".to_string(),
+    });
+    registry.record_decision(&ControllerDecision {
+        controller_id: scheduler_id,
+        snapshot_id: SnapshotId(200),
+        label: "cancel_streak_limit=16".to_string(),
+        payload: serde_json::json!({
+            "tick": 0,
+            "knob_surface": "cancel_streak_limit",
+            "value": 16,
+        }),
+        confidence: 0.74,
+        fallback_label: "conservative_baseline".to_string(),
+    });
+    registry.advance_epoch();
+    registry.record_decision(&ControllerDecision {
+        controller_id: brownout_id,
+        snapshot_id: SnapshotId(204),
+        label: "optional_surface_mode=degraded".to_string(),
+        payload: serde_json::json!({
+            "tick": 4,
+            "knob_surface": "optional_surface_mode",
+            "value": "degraded",
+        }),
+        confidence: 0.79,
+        fallback_label: "preserve_current_mode".to_string(),
+    });
+    registry.record_decision(&ControllerDecision {
+        controller_id: scheduler_id,
+        snapshot_id: SnapshotId(204),
+        label: "cancel_streak_limit=20".to_string(),
+        payload: serde_json::json!({
+            "tick": 4,
+            "knob_surface": "cancel_streak_limit",
+            "value": 20,
+        }),
+        confidence: 0.88,
+        fallback_label: "conservative_baseline".to_string(),
+    });
+
+    let scheduler_tick = registry
+        .controller_snapshot_ledger()
+        .controllers
+        .into_iter()
+        .find(|controller| controller.controller_name == "scheduler_recommend")
+        .expect("scheduler controller state must exist")
+        .last_evidence_tick
+        .expect("scheduler must have evidence tick");
+    let brownout_tick = registry
+        .controller_snapshot_ledger()
+        .controllers
+        .into_iter()
+        .find(|controller| controller.controller_name == "brownout_guard")
+        .expect("brownout controller state must exist")
+        .last_evidence_tick
+        .expect("brownout must have evidence tick");
+
+    let stable_report = serde_json::json!({
+        "scenario_id": "AA023-CONTROLLER-INTERFERENCE-STABLE",
+        "selected_controller_set": ["scheduler_recommend", "brownout_guard"],
+        "compose_verdict": stable_pair["compose_verdict"].as_str().unwrap(),
+        "safe_mode_precedence": stable_pair["safe_mode_precedence"].as_str().unwrap(),
+        "shared_telemetry_fields": stable_pair["shared_telemetry_fields"].clone(),
+        "shared_knob_surfaces": stable_pair["shared_knob_surfaces"].clone(),
+        "timescale_ratio": stable_pair["timescale_separation"]["minimum_ratio"].as_u64().unwrap(),
+        "oscillation_detected": false,
+        "fallback_activation_counts": {
+            "scheduler_recommend": 0,
+            "brownout_guard": 0
+        },
+        "decision_trace": [
+            {
+                "tick": 0,
+                "controller_key": "brownout_guard",
+                "action_label": "optional_surface_mode=normal",
+                "knob_surface": "optional_surface_mode",
+                "value": "normal",
+                "fallback_activated": false,
+                "ledger_tick": brownout_tick.saturating_sub(1)
+            },
+            {
+                "tick": 0,
+                "controller_key": "scheduler_recommend",
+                "action_label": "cancel_streak_limit=16",
+                "knob_surface": "cancel_streak_limit",
+                "value": 16,
+                "fallback_activated": false,
+                "ledger_tick": scheduler_tick.saturating_sub(1)
+            },
+            {
+                "tick": 4,
+                "controller_key": "brownout_guard",
+                "action_label": "optional_surface_mode=degraded",
+                "knob_surface": "optional_surface_mode",
+                "value": "degraded",
+                "fallback_activated": false,
+                "ledger_tick": brownout_tick
+            },
+            {
+                "tick": 4,
+                "controller_key": "scheduler_recommend",
+                "action_label": "cancel_streak_limit=20",
+                "knob_surface": "cancel_streak_limit",
+                "value": 20,
+                "fallback_activated": false,
+                "ledger_tick": scheduler_tick
+            }
+        ],
+        "env_fingerprint": env_fingerprint.clone(),
+        "explanation": stable_pair["timescale_separation"]["statement"].as_str().unwrap(),
+    });
+    assert_eq!(stable_report["compose_verdict"], "safe");
+    assert_eq!(stable_report["timescale_ratio"], 4);
+    assert_eq!(stable_report["oscillation_detected"], false);
+    assert_eq!(stable_report["decision_trace"].as_array().unwrap().len(), 4);
+
+    let forbidden_report = serde_json::json!({
+        "scenario_id": "AA023-CONTROLLER-INTERFERENCE-FORBIDDEN",
+        "selected_controller_set": ["tail_risk_admission", "admission_steering"],
+        "compose_verdict": forbidden_pair["compose_verdict"].as_str().unwrap(),
+        "safe_mode_precedence": forbidden_pair["safe_mode_precedence"].as_str().unwrap(),
+        "shared_telemetry_fields": forbidden_pair["shared_telemetry_fields"].clone(),
+        "shared_knob_surfaces": forbidden_pair["shared_knob_surfaces"].clone(),
+        "timescale_ratio": forbidden_pair["timescale_separation"]["minimum_ratio"].as_u64().unwrap(),
+        "oscillation_detected": false,
+        "fallback_activation_counts": {
+            "tail_risk_admission": 0,
+            "admission_steering": 0
+        },
+        "decision_trace": [],
+        "env_fingerprint": env_fingerprint,
+        "rejected_pairings": [
+            {
+                "pair_id": forbidden_pair["pair_id"].as_str().unwrap(),
+                "reason": forbidden_pair["forbidden_reason"].as_str().unwrap(),
+            }
+        ],
+        "explanation": forbidden_pair["timescale_separation"]["statement"].as_str().unwrap(),
+    });
+    assert_eq!(forbidden_report["compose_verdict"], "do_not_compose");
+    assert_eq!(
+        forbidden_report["shared_knob_surfaces"],
+        serde_json::json!(["admission_window"])
+    );
+    assert!(
+        forbidden_report["decision_trace"]
+            .as_array()
+            .expect("forbidden decision_trace must be array")
+            .is_empty()
+    );
+
+    let report = serde_json::json!({
+        "schema_version": "controller-interference-proof-v1",
+        "matrix_schema_version": matrix["schema_version"].as_str().unwrap(),
+        "env_fingerprint_fields": matrix["env_fingerprint_fields"].clone(),
+        "decision_trace_fields": matrix["decision_trace_fields"].clone(),
+        "scenario_reports": [stable_report, forbidden_report],
+    });
+
+    maybe_write_json_artifact(CONTROLLER_INTERFERENCE_MATRIX_ARTIFACT_OUT_ENV, &matrix);
+    maybe_write_json_artifact(CONTROLLER_INTERFERENCE_REPORT_OUT_ENV, &report);
+    maybe_emit_json_stdout(
+        CONTROLLER_INTERFERENCE_MATRIX_STDOUT_ENV,
+        "ASUPERSYNC_CONTROLLER_INTERFERENCE_MATRIX_JSON=",
+        &matrix,
+    );
+    maybe_emit_json_stdout(
+        CONTROLLER_INTERFERENCE_REPORT_STDOUT_ENV,
+        "ASUPERSYNC_CONTROLLER_INTERFERENCE_REPORT_JSON=",
+        &report,
     );
 }

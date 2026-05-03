@@ -4,7 +4,7 @@ Bead: `asupersync-1508v.2.6`
 
 ## Purpose
 
-This contract defines deterministic validation scenarios for decision-plane controller operations: shadow execution, canary gating, promotion pipeline, rollback drills, hold/release lifecycle, and evidence-ledger completeness. It ensures that controller rollout cannot bypass verification gates and that failed rollouts produce actionable recovery commands.
+This contract defines deterministic validation scenarios for decision-plane controller operations: shadow execution, canary gating, promotion pipeline, rollback drills, hold/release lifecycle, evidence-ledger completeness, and controller-composition safety. It ensures that controller rollout cannot bypass verification gates, that failed rollouts produce actionable recovery commands, and that multiple adaptive controllers do not silently fight over shared telemetry or knob surfaces.
 
 ## Contract Artifacts
 
@@ -83,6 +83,45 @@ Decision-plane operations MUST emit structured logs including:
 - `fallback_active`: Whether fallback is currently active
 - `recovery_command`: Recovery command payload (on rollback)
 - `ledger_entry_count`: Total ledger entries for this controller
+- `active_controller_set`: Controllers participating in a composition replay
+- `shared_telemetry_fields`: Shared evidence fields read by a controller pair
+- `shared_knob_surfaces`: Shared knob surfaces written by a controller pair
+- `timescale_ratio`: Faster-to-slower update ratio for a composed controller pair
+- `compose_verdict`: `safe` or `do_not_compose`
+- `safe_mode_precedence`: Which controller wins if conservative fallback must dominate
+- `oscillation_detected`: Whether the replay observed contradictory action churn
+
+## Controller Interference Contract
+
+The canonical interference matrix is embedded under `controller_interference_matrix` in
+`artifacts/decision_plane_validation_v1.json` with schema version
+`controller-interference-matrix-v1`.
+
+It freezes:
+
+1. A controller catalog with explicit inputs, outputs, fallback mode, and update cadence.
+2. Pair-level rules for shared telemetry fields, shared knob surfaces, precedence, and
+   timescale-separation statements.
+3. A deterministic safe pair:
+   - `scheduler_recommend + brownout_guard`
+   - shared telemetry: `ready_backlog_p95`
+   - shared knobs: none
+   - safe-mode precedence: `brownout_guard`
+   - minimum faster/slower cadence ratio: `4`
+4. A deterministic forbidden pair:
+   - `tail_risk_admission + admission_steering`
+   - shared telemetry: `ready_backlog_p95`, `tail_latency_p99`
+   - shared knob: `admission_window`
+   - verdict: `do_not_compose`
+
+The proof harness emits an operator-readable composition report with:
+
+- env fingerprint (`host_class`, `worker_count`, `memory_gib`, `evidence_stream_id`, `lab_runtime`)
+- selected controller set
+- fallback activation counts
+- decision trace entries with ledger ticks
+- explicit `safe` or `do_not_compose` verdict per scenario
+- explanation of why the pair is allowed or blocked
 
 ## Comparator-Smoke Runner
 
@@ -95,6 +134,9 @@ The runner reads `artifacts/decision_plane_validation_v1.json` and emits:
 3. For `AA023-SMOKE-CONTROLLER-LEDGER`, deterministic exported controller-state artifacts:
    - `.decision-plane-validation-smoke-artifacts/run_*/AA023-SMOKE-CONTROLLER-LEDGER/controller_snapshot_ledger.json`
    - `.decision-plane-validation-smoke-artifacts/run_*/AA023-SMOKE-CONTROLLER-LEDGER/controller_snapshot_planner_rows.json`
+4. For `AA023-SMOKE-CONTROLLER-INTERFERENCE`, deterministic composition artifacts:
+   - `.decision-plane-validation-smoke-artifacts/run_*/AA023-SMOKE-CONTROLLER-INTERFERENCE/controller_interference_matrix.json`
+   - `.decision-plane-validation-smoke-artifacts/run_*/AA023-SMOKE-CONTROLLER-INTERFERENCE/controller_interference_report.json`
 
 Examples:
 
@@ -107,6 +149,9 @@ bash ./scripts/run_decision_plane_validation_smoke.sh --scenario AA023-SMOKE-TRA
 
 # Execute one scenario
 bash ./scripts/run_decision_plane_validation_smoke.sh --scenario AA023-SMOKE-TRANSITIONS --execute
+
+# Execute controller-composition proof
+bash ./scripts/run_decision_plane_validation_smoke.sh --scenario AA023-SMOKE-CONTROLLER-INTERFERENCE --execute
 ```
 
 ## Validation

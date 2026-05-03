@@ -74,6 +74,26 @@ controller_snapshot_ledger_planner_render_order_json() {
     jq -c '.controller_snapshot_ledger.planner_render_order' "$CONTRACT_ARTIFACT"
 }
 
+controller_interference_matrix_schema_version() {
+    jq -r '.controller_interference_matrix.schema_version' "$CONTRACT_ARTIFACT"
+}
+
+controller_interference_catalog_json() {
+    jq -c '.controller_interference_matrix.controllers' "$CONTRACT_ARTIFACT"
+}
+
+controller_interference_pair_rules_json() {
+    jq -c '.controller_interference_matrix.pair_rules' "$CONTRACT_ARTIFACT"
+}
+
+controller_interference_env_fingerprint_fields_json() {
+    jq -c '.controller_interference_matrix.env_fingerprint_fields' "$CONTRACT_ARTIFACT"
+}
+
+controller_interference_decision_trace_fields_json() {
+    jq -c '.controller_interference_matrix.decision_trace_fields' "$CONTRACT_ARTIFACT"
+}
+
 list_scenarios() {
     jq -r '.smoke_scenarios[] | [.scenario_id, .description] | @tsv' "$CONTRACT_ARTIFACT" \
         | while IFS=$'\t' read -r sid desc; do
@@ -137,6 +157,8 @@ run_scenario() {
     local artifact_mirror_dir="${ARTIFACT_MIRROR_ROOT}/run_${TIMESTAMP}/${sid}"
     local controller_ledger_artifact="${artifact_mirror_dir}/controller_snapshot_ledger.json"
     local planner_rows_artifact="${artifact_mirror_dir}/controller_snapshot_planner_rows.json"
+    local controller_interference_matrix_artifact="${artifact_mirror_dir}/controller_interference_matrix.json"
+    local controller_interference_report_artifact="${artifact_mirror_dir}/controller_interference_report.json"
     local command_for_execution="$command"
     local started_ts ended_ts status rc
 
@@ -154,6 +176,8 @@ run_scenario() {
     else
         if [[ "$sid" == "AA023-SMOKE-CONTROLLER-LEDGER" ]]; then
             command_for_execution="${command/rch exec -- env /rch exec -- env ASUPERSYNC_CONTROLLER_LEDGER_STDOUT=1 ASUPERSYNC_CONTROLLER_LEDGER_PLANNER_ROWS_STDOUT=1 }"
+        elif [[ "$sid" == "AA023-SMOKE-CONTROLLER-INTERFERENCE" ]]; then
+            command_for_execution="${command/rch exec -- env /rch exec -- env ASUPERSYNC_CONTROLLER_INTERFERENCE_MATRIX_STDOUT=1 ASUPERSYNC_CONTROLLER_INTERFERENCE_REPORT_STDOUT=1 }"
         fi
         rc=0
         eval "$command_for_execution" > "$log_file" 2>&1 || rc=$?
@@ -165,6 +189,15 @@ run_scenario() {
                 fi
                 if ! extract_log_json_artifact "ASUPERSYNC_CONTROLLER_LEDGER_PLANNER_ROWS_JSON=" "$log_file" "$planner_rows_artifact"; then
                     echo "FATAL: planner rows artifact marker missing from run log" >> "$log_file"
+                    rc=1
+                fi
+            elif [[ "$sid" == "AA023-SMOKE-CONTROLLER-INTERFERENCE" ]]; then
+                if ! extract_log_json_artifact "ASUPERSYNC_CONTROLLER_INTERFERENCE_MATRIX_JSON=" "$log_file" "$controller_interference_matrix_artifact"; then
+                    echo "FATAL: controller interference matrix marker missing from run log" >> "$log_file"
+                    rc=1
+                fi
+                if ! extract_log_json_artifact "ASUPERSYNC_CONTROLLER_INTERFERENCE_REPORT_JSON=" "$log_file" "$controller_interference_report_artifact"; then
+                    echo "FATAL: controller interference report marker missing from run log" >> "$log_file"
                     rc=1
                 fi
             fi
@@ -188,12 +221,19 @@ run_scenario() {
   "controller_snapshot_ledger_top_level_fields": $(controller_snapshot_ledger_top_level_fields_json),
   "controller_snapshot_ledger_controller_fields": $(controller_snapshot_ledger_controller_fields_json),
   "controller_snapshot_ledger_planner_render_order": $(controller_snapshot_ledger_planner_render_order_json),
+  "controller_interference_matrix_schema_version": "$(json_escape "$(controller_interference_matrix_schema_version)")",
+  "controller_interference_catalog": $(controller_interference_catalog_json),
+  "controller_interference_pair_rules": $(controller_interference_pair_rules_json),
+  "controller_interference_env_fingerprint_fields": $(controller_interference_env_fingerprint_fields_json),
+  "controller_interference_decision_trace_fields": $(controller_interference_decision_trace_fields_json),
   "scenario_id": "$(json_escape "$sid")",
   "description": "$(json_escape "$description")",
   "command": "$(json_escape "$command")",
   "expected_artifacts": ${expected_artifacts},
   "controller_snapshot_ledger_artifact_path": $( [[ -f "$controller_ledger_artifact" ]] && printf '"%s"' "$(json_escape "$(manifest_path_value "$controller_ledger_artifact")")" || printf 'null' ),
   "controller_snapshot_planner_rows_artifact_path": $( [[ -f "$planner_rows_artifact" ]] && printf '"%s"' "$(json_escape "$(manifest_path_value "$planner_rows_artifact")")" || printf 'null' ),
+  "controller_interference_matrix_artifact_path": $( [[ -f "$controller_interference_matrix_artifact" ]] && printf '"%s"' "$(json_escape "$(manifest_path_value "$controller_interference_matrix_artifact")")" || printf 'null' ),
+  "controller_interference_report_artifact_path": $( [[ -f "$controller_interference_report_artifact" ]] && printf '"%s"' "$(json_escape "$(manifest_path_value "$controller_interference_report_artifact")")" || printf 'null' ),
   "artifact_path": "$(json_escape "$summary_file")",
   "run_log_path": "$(json_escape "$log_file")",
   "status": "$(json_escape "$status")",
@@ -273,6 +313,11 @@ cat >"$RUN_REPORT" <<JSON
   "controller_snapshot_ledger_top_level_fields": $(controller_snapshot_ledger_top_level_fields_json),
   "controller_snapshot_ledger_controller_fields": $(controller_snapshot_ledger_controller_fields_json),
   "controller_snapshot_ledger_planner_render_order": $(controller_snapshot_ledger_planner_render_order_json),
+  "controller_interference_matrix_schema_version": "$(json_escape "$(controller_interference_matrix_schema_version)")",
+  "controller_interference_catalog": $(controller_interference_catalog_json),
+  "controller_interference_pair_rules": $(controller_interference_pair_rules_json),
+  "controller_interference_env_fingerprint_fields": $(controller_interference_env_fingerprint_fields_json),
+  "controller_interference_decision_trace_fields": $(controller_interference_decision_trace_fields_json),
   "artifact_path": "$(json_escape "$RUN_REPORT")",
   "run_dir": "$(json_escape "$RUN_DIR")",
   "selected_scenarios": $(jq -nc --argjson ids "$(printf '%s\n' "${SELECTED_SCENARIOS[@]}" | jq -Rsc 'split("\n") | map(select(length > 0))')" '$ids'),

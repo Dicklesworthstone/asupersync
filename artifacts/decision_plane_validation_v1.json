@@ -66,6 +66,124 @@
       "proof_artifact_id"
     ]
   },
+  "controller_interference_matrix": {
+    "schema_version": "controller-interference-matrix-v1",
+    "catalog_fields": [
+      "controller_key",
+      "controller_name",
+      "inputs",
+      "outputs",
+      "fallback_mode",
+      "update_cadence_ticks"
+    ],
+    "pair_rule_fields": [
+      "pair_id",
+      "controllers",
+      "shared_telemetry_fields",
+      "shared_knob_surfaces",
+      "compose_verdict",
+      "safe_mode_precedence",
+      "timescale_separation"
+    ],
+    "env_fingerprint_fields": [
+      "host_class",
+      "worker_count",
+      "memory_gib",
+      "evidence_stream_id",
+      "lab_runtime"
+    ],
+    "decision_trace_fields": [
+      "tick",
+      "controller_key",
+      "action_label",
+      "knob_surface",
+      "value",
+      "fallback_activated",
+      "ledger_tick"
+    ],
+    "controllers": [
+      {
+        "controller_key": "scheduler_recommend",
+        "controller_name": "Scheduler Recommend",
+        "inputs": [
+          "ready_backlog_p95",
+          "cancel_debt_p95",
+          "worker_count",
+          "memory_gib"
+        ],
+        "outputs": ["cancel_streak_limit"],
+        "fallback_mode": "conservative_baseline",
+        "update_cadence_ticks": 4
+      },
+      {
+        "controller_key": "brownout_guard",
+        "controller_name": "Brownout Guard",
+        "inputs": [
+          "ready_backlog_p95",
+          "otlp_drop_rate",
+          "optional_surface_errors"
+        ],
+        "outputs": ["optional_surface_mode"],
+        "fallback_mode": "preserve_current_mode",
+        "update_cadence_ticks": 1
+      },
+      {
+        "controller_key": "tail_risk_admission",
+        "controller_name": "Tail Risk Admission",
+        "inputs": [
+          "ready_backlog_p95",
+          "tail_latency_p99",
+          "cancel_debt_p95"
+        ],
+        "outputs": ["admission_window"],
+        "fallback_mode": "conservative_baseline",
+        "update_cadence_ticks": 2
+      },
+      {
+        "controller_key": "admission_steering",
+        "controller_name": "Admission Steering",
+        "inputs": [
+          "ready_backlog_p95",
+          "remote_spill_rate",
+          "tail_latency_p99"
+        ],
+        "outputs": ["admission_window"],
+        "fallback_mode": "freeze_last_safe_value",
+        "update_cadence_ticks": 2
+      }
+    ],
+    "pair_rules": [
+      {
+        "pair_id": "scheduler_recommend+brownout_guard",
+        "controllers": ["scheduler_recommend", "brownout_guard"],
+        "shared_telemetry_fields": ["ready_backlog_p95"],
+        "shared_knob_surfaces": [],
+        "compose_verdict": "safe",
+        "safe_mode_precedence": "brownout_guard",
+        "timescale_separation": {
+          "faster_controller": "brownout_guard",
+          "slower_controller": "scheduler_recommend",
+          "minimum_ratio": 4,
+          "statement": "Brownout decisions may update every tick while scheduler retuning must wait at least 4 ticks between adjustments."
+        }
+      },
+      {
+        "pair_id": "tail_risk_admission+admission_steering",
+        "controllers": ["tail_risk_admission", "admission_steering"],
+        "shared_telemetry_fields": ["ready_backlog_p95", "tail_latency_p99"],
+        "shared_knob_surfaces": ["admission_window"],
+        "compose_verdict": "do_not_compose",
+        "safe_mode_precedence": "tail_risk_admission",
+        "forbidden_reason": "Same-timescale writers to admission_window would thrash the request budget.",
+        "timescale_separation": {
+          "faster_controller": "tail_risk_admission",
+          "slower_controller": "admission_steering",
+          "minimum_ratio": 1,
+          "statement": "No separation is available because both controllers react on the same cadence and target the same knob."
+        }
+      }
+    ]
+  },
   "evidence_ledger_event_types": [
     "Registered",
     "Promoted",
@@ -92,7 +210,14 @@
     "rollback_reason",
     "fallback_active",
     "recovery_command",
-    "ledger_entry_count"
+    "ledger_entry_count",
+    "active_controller_set",
+    "shared_telemetry_fields",
+    "shared_knob_surfaces",
+    "timescale_ratio",
+    "compose_verdict",
+    "safe_mode_precedence",
+    "oscillation_detected"
   ],
   "validation_scenarios": [
     {
@@ -222,6 +347,20 @@
       "category": "controller-ledger",
       "expect_controller_snapshot_schema": true,
       "expect_planner_renderable": true
+    },
+    {
+      "scenario_id": "AA023-CONTROLLER-INTERFERENCE-STABLE",
+      "description": "Timescale-separated scheduler and brownout controllers share telemetry without oscillation or fallback churn.",
+      "category": "controller-interference",
+      "expect_compose_verdict": "safe",
+      "expect_oscillation_detected": false
+    },
+    {
+      "scenario_id": "AA023-CONTROLLER-INTERFERENCE-FORBIDDEN",
+      "description": "Same-timescale admission controllers targeting the same knob surface are rejected before replay with a do-not-compose verdict.",
+      "category": "controller-interference",
+      "expect_compose_verdict": "do_not_compose",
+      "expect_oscillation_detected": false
     }
   ],
   "smoke_scenarios": [
@@ -250,6 +389,15 @@
       "expected_artifacts": [
         ".decision-plane-validation-smoke-artifacts/run_*/AA023-SMOKE-CONTROLLER-LEDGER/controller_snapshot_ledger.json",
         ".decision-plane-validation-smoke-artifacts/run_*/AA023-SMOKE-CONTROLLER-LEDGER/controller_snapshot_planner_rows.json"
+      ]
+    },
+    {
+      "scenario_id": "AA023-SMOKE-CONTROLLER-INTERFERENCE",
+      "description": "Validate controller interference matrix schema and deterministic safe versus forbidden composition reports",
+      "command": "rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=/tmp/rch-codex-aa023 cargo test --test decision_plane_validation_contract controller_interference -- --nocapture",
+      "expected_artifacts": [
+        ".decision-plane-validation-smoke-artifacts/run_*/AA023-SMOKE-CONTROLLER-INTERFERENCE/controller_interference_matrix.json",
+        ".decision-plane-validation-smoke-artifacts/run_*/AA023-SMOKE-CONTROLLER-INTERFERENCE/controller_interference_report.json"
       ]
     }
   ],
