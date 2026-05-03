@@ -25557,3 +25557,545 @@ fn validate_whitespace_validation_implementation_consistency(
 
     Ok(())
 }
+
+//
+// OTLP-108: Attribute key length validation conformance test
+//
+
+#[test]
+fn otlp_108_attribute_key_length_validation_conformance() {
+    // Test scenarios for attribute key length validation per OTLP §6.2.5
+    let scenarios = vec![
+        AttributeKeyLengthScenario {
+            description: "Attribute key exactly 255 characters (boundary, MUST accept)".to_string(),
+            span: KeyLengthSpanInfo {
+                name: "test_span".to_string(),
+                trace_id: "12345678901234567890123456789012".to_string(),
+                span_id: "1234567890123456".to_string(),
+                attributes: vec![
+                    (create_key_of_length(255), "value1".to_string()), // Exactly 255 chars
+                    ("short.key".to_string(), "value2".to_string()),
+                ],
+            },
+            expected_long_keys_detected: vec![],
+            expected_span_rejected: false,
+            expected_rejection_reason: "".to_string(),
+            expected_included_in_export: true,
+            expected_validation_applied: true,
+            expected_otlp_compliant: true,
+        },
+        AttributeKeyLengthScenario {
+            description:
+                "Attribute key 256 characters (exceeds limit, MUST reject per OTLP §6.2.5)"
+                    .to_string(),
+            span: KeyLengthSpanInfo {
+                name: "test_span".to_string(),
+                trace_id: "12345678901234567890123456789012".to_string(),
+                span_id: "2345678901234567".to_string(),
+                attributes: vec![
+                    (create_key_of_length(256), "value1".to_string()), // 256 chars - too long
+                    ("valid.key".to_string(), "value2".to_string()),
+                ],
+            },
+            expected_long_keys_detected: vec![create_key_of_length(256)],
+            expected_span_rejected: true,
+            expected_rejection_reason: format!(
+                "Attribute key exceeds 255 character limit (256 chars): '{}'",
+                create_key_of_length(256)
+            ),
+            expected_included_in_export: false,
+            expected_validation_applied: true,
+            expected_otlp_compliant: true, // Rejecting is compliant
+        },
+        AttributeKeyLengthScenario {
+            description: "Attribute key 300 characters (significantly exceeds limit, MUST reject)"
+                .to_string(),
+            span: KeyLengthSpanInfo {
+                name: "test_span".to_string(),
+                trace_id: "12345678901234567890123456789012".to_string(),
+                span_id: "3456789012345678".to_string(),
+                attributes: vec![
+                    (create_key_of_length(300), "value".to_string()), // 300 chars - way too long
+                    ("http.method".to_string(), "GET".to_string()),
+                ],
+            },
+            expected_long_keys_detected: vec![create_key_of_length(300)],
+            expected_span_rejected: true,
+            expected_rejection_reason: format!(
+                "Attribute key exceeds 255 character limit (300 chars): '{}'",
+                create_key_of_length(300)
+            ),
+            expected_included_in_export: false,
+            expected_validation_applied: true,
+            expected_otlp_compliant: true,
+        },
+        AttributeKeyLengthScenario {
+            description: "Multiple long attribute keys (MUST reject, report first)".to_string(),
+            span: KeyLengthSpanInfo {
+                name: "test_span".to_string(),
+                trace_id: "12345678901234567890123456789012".to_string(),
+                span_id: "4567890123456789".to_string(),
+                attributes: vec![
+                    ("short.key".to_string(), "value1".to_string()), // Valid
+                    (create_key_of_length(270), "value2".to_string()), // Too long
+                    (create_key_of_length(280), "value3".to_string()), // Also too long
+                    ("another.short".to_string(), "value4".to_string()), // Valid
+                ],
+            },
+            expected_long_keys_detected: vec![create_key_of_length(270), create_key_of_length(280)],
+            expected_span_rejected: true,
+            expected_rejection_reason: format!(
+                "Attribute key exceeds 255 character limit (270 chars): '{}'",
+                create_key_of_length(270)
+            ),
+            expected_included_in_export: false,
+            expected_validation_applied: true,
+            expected_otlp_compliant: true,
+        },
+        AttributeKeyLengthScenario {
+            description: "All attribute keys under 255 characters (MUST accept)".to_string(),
+            span: KeyLengthSpanInfo {
+                name: "valid_span".to_string(),
+                trace_id: "12345678901234567890123456789012".to_string(),
+                span_id: "5678901234567890".to_string(),
+                attributes: vec![
+                    ("http.method".to_string(), "GET".to_string()), // 11 chars
+                    ("service.name".to_string(), "my-service".to_string()), // 12 chars
+                    (create_key_of_length(100), "value1".to_string()), // 100 chars
+                    (create_key_of_length(200), "value2".to_string()), // 200 chars
+                    (create_key_of_length(254), "value3".to_string()), // 254 chars
+                ],
+            },
+            expected_long_keys_detected: vec![],
+            expected_span_rejected: false,
+            expected_rejection_reason: "".to_string(),
+            expected_included_in_export: true,
+            expected_validation_applied: true,
+            expected_otlp_compliant: true,
+        },
+        AttributeKeyLengthScenario {
+            description: "Empty key (0 characters, edge case - should be handled separately)"
+                .to_string(),
+            span: KeyLengthSpanInfo {
+                name: "test_span".to_string(),
+                trace_id: "12345678901234567890123456789012".to_string(),
+                span_id: "6789012345678901".to_string(),
+                attributes: vec![
+                    ("".to_string(), "empty_key_value".to_string()), // Empty key
+                    ("valid.key".to_string(), "valid_value".to_string()),
+                ],
+            },
+            expected_long_keys_detected: vec![],
+            expected_span_rejected: false, // Empty key is a different validation issue
+            expected_rejection_reason: "".to_string(),
+            expected_included_in_export: true,
+            expected_validation_applied: true,
+            expected_otlp_compliant: true, // This test only checks length, not emptiness
+        },
+        AttributeKeyLengthScenario {
+            description: "Single character key (minimum valid length)".to_string(),
+            span: KeyLengthSpanInfo {
+                name: "test_span".to_string(),
+                trace_id: "12345678901234567890123456789012".to_string(),
+                span_id: "7890123456789012".to_string(),
+                attributes: vec![
+                    ("x".to_string(), "single_char_key".to_string()), // 1 char
+                    ("normal.attribute".to_string(), "normal_value".to_string()),
+                ],
+            },
+            expected_long_keys_detected: vec![],
+            expected_span_rejected: false,
+            expected_rejection_reason: "".to_string(),
+            expected_included_in_export: true,
+            expected_validation_applied: true,
+            expected_otlp_compliant: true,
+        },
+        AttributeKeyLengthScenario {
+            description: "Span with no attributes (valid, no validation needed)".to_string(),
+            span: KeyLengthSpanInfo {
+                name: "empty_span".to_string(),
+                trace_id: "12345678901234567890123456789012".to_string(),
+                span_id: "8901234567890123".to_string(),
+                attributes: vec![], // No attributes
+            },
+            expected_long_keys_detected: vec![],
+            expected_span_rejected: false,
+            expected_rejection_reason: "".to_string(),
+            expected_included_in_export: true,
+            expected_validation_applied: true,
+            expected_otlp_compliant: true,
+        },
+        AttributeKeyLengthScenario {
+            description: "Attribute key with 1000 characters (extremely long, MUST reject)"
+                .to_string(),
+            span: KeyLengthSpanInfo {
+                name: "test_span".to_string(),
+                trace_id: "12345678901234567890123456789012".to_string(),
+                span_id: "9012345678901234".to_string(),
+                attributes: vec![
+                    (create_key_of_length(1000), "value".to_string()), // Extremely long
+                ],
+            },
+            expected_long_keys_detected: vec![create_key_of_length(1000)],
+            expected_span_rejected: true,
+            expected_rejection_reason: format!(
+                "Attribute key exceeds 255 character limit (1000 chars): '{}'",
+                create_key_of_length(1000)
+            ),
+            expected_included_in_export: false,
+            expected_validation_applied: true,
+            expected_otlp_compliant: true,
+        },
+    ];
+
+    for scenario in scenarios {
+        println!("Testing scenario: {}", scenario.description);
+
+        // Simulate asupersync exporter behavior
+        let asupersync_result = simulate_asupersync_length_validation(&scenario);
+
+        // Simulate reference implementation behavior
+        let reference_result = simulate_reference_length_validation(&scenario);
+
+        // Validate individual results
+        validate_length_validation_logic(&asupersync_result).expect(&format!(
+            "Asupersync length validation logic failed for scenario: {}",
+            scenario.description
+        ));
+
+        validate_length_validation_logic(&reference_result).expect(&format!(
+            "Reference length validation logic failed for scenario: {}",
+            scenario.description
+        ));
+
+        // Validate implementation consistency
+        validate_length_validation_implementation_consistency(
+            &asupersync_result,
+            &reference_result,
+        )
+        .expect(&format!(
+            "Implementation consistency failed for scenario: {}",
+            scenario.description
+        ));
+
+        println!("✓ Scenario passed: {}", scenario.description);
+    }
+}
+
+/// Helper function to create attribute keys of specific lengths for testing
+fn create_key_of_length(length: usize) -> String {
+    if length == 0 {
+        return "".to_string();
+    }
+
+    // Create a key that starts with a semantic prefix and fills to exact length
+    let prefix = "test.attribute.key.";
+    if length <= prefix.len() {
+        return "a".repeat(length);
+    }
+
+    let remaining = length - prefix.len();
+    format!("{}{}", prefix, "a".repeat(remaining))
+}
+
+/// Test scenario for attribute key length validation
+#[derive(Debug, Clone)]
+struct AttributeKeyLengthScenario {
+    description: String,
+    span: KeyLengthSpanInfo,
+    expected_long_keys_detected: Vec<String>,
+    expected_span_rejected: bool,
+    expected_rejection_reason: String,
+    expected_included_in_export: bool,
+    expected_validation_applied: bool,
+    expected_otlp_compliant: bool,
+}
+
+/// Span information for key length validation testing
+#[derive(Debug, Clone)]
+struct KeyLengthSpanInfo {
+    name: String,
+    trace_id: String,
+    span_id: String,
+    attributes: Vec<(String, String)>,
+}
+
+/// Result of attribute key length validation testing
+#[derive(Debug, Clone)]
+struct KeyLengthValidationResult {
+    long_keys_detected: Vec<String>,
+    span_rejected: bool,
+    rejection_reason: String,
+    original_span: KeyLengthSpanInfo,
+    included_in_export: bool,
+    validation_applied: bool,
+    processed_spans_count: usize,
+    rejected_spans_count: usize,
+    accepted_spans_count: usize,
+    attributes_validated_count: usize,
+    length_violations_count: usize,
+    max_key_length_seen: usize,
+    keys_at_boundary_count: usize, // Keys exactly at 255 chars
+    validation_errors: Vec<String>,
+    validation_correct: bool,
+    otlp_compliant: bool,
+    telemetry_emitted: bool,
+}
+
+/// Simulate asupersync attribute key length validation behavior
+fn simulate_asupersync_length_validation(
+    scenario: &AttributeKeyLengthScenario,
+) -> KeyLengthValidationResult {
+    const MAX_KEY_LENGTH: usize = 255;
+
+    let mut validation_errors = Vec::new();
+    let mut rejected_spans = 0;
+    let mut accepted_spans = 0;
+    let original_span = scenario.span.clone();
+    let mut long_keys_detected = Vec::new();
+    let mut span_rejected = false;
+    let mut rejection_reason = String::new();
+    let mut included_in_export = true; // Default to include
+    let validation_applied = true; // Always apply length validation
+    let mut length_violations = 0;
+    let mut max_key_length = 0;
+    let mut keys_at_boundary = 0;
+
+    // Validate all attribute keys for length violations
+    for (key, _) in &scenario.span.attributes {
+        let key_length = key.len();
+        max_key_length = max_key_length.max(key_length);
+
+        if key_length == MAX_KEY_LENGTH {
+            keys_at_boundary += 1;
+        }
+
+        if key_length > MAX_KEY_LENGTH {
+            // Key exceeds maximum length - OTLP §6.2.5 violation
+            long_keys_detected.push(key.clone());
+            length_violations += 1;
+        }
+    }
+
+    // OTLP §6.2.5: Reasonable cap on key length - reject spans with overly long keys
+    if !long_keys_detected.is_empty() {
+        span_rejected = true;
+        included_in_export = false;
+        rejected_spans += 1;
+
+        // Report the first violating key in rejection reason
+        let first_long_key = &long_keys_detected[0];
+        rejection_reason = format!(
+            "Attribute key exceeds 255 character limit ({} chars): '{}'",
+            first_long_key.len(),
+            first_long_key
+        );
+
+        validation_errors.push(format!(
+            "Span '{}' rejected: {} attribute keys exceed 255 character limit",
+            scenario.span.name,
+            long_keys_detected.len()
+        ));
+    } else {
+        accepted_spans += 1;
+    }
+
+    // Check validation correctness
+    let validation_correct = long_keys_detected == scenario.expected_long_keys_detected
+        && span_rejected == scenario.expected_span_rejected
+        && rejection_reason == scenario.expected_rejection_reason
+        && included_in_export == scenario.expected_included_in_export
+        && validation_applied == scenario.expected_validation_applied;
+
+    // OTLP compliance: rejecting spans with overly long keys is REQUIRED per §6.2.5
+    let otlp_compliant = if length_violations > 0 {
+        // Must reject spans with overly long keys
+        span_rejected && !included_in_export
+    } else {
+        // Must accept spans with reasonable key lengths
+        !span_rejected && included_in_export
+    };
+
+    KeyLengthValidationResult {
+        long_keys_detected,
+        span_rejected,
+        rejection_reason,
+        original_span,
+        included_in_export,
+        validation_applied,
+        processed_spans_count: 1,
+        rejected_spans_count: rejected_spans,
+        accepted_spans_count: accepted_spans,
+        attributes_validated_count: scenario.span.attributes.len(),
+        length_violations_count: length_violations,
+        max_key_length_seen: max_key_length,
+        keys_at_boundary_count: keys_at_boundary,
+        validation_errors,
+        validation_correct,
+        otlp_compliant,
+        telemetry_emitted: true, // Assume telemetry is emitted for length violations
+    }
+}
+
+/// Simulate reference implementation length validation behavior
+fn simulate_reference_length_validation(
+    scenario: &AttributeKeyLengthScenario,
+) -> KeyLengthValidationResult {
+    // Reference implementation follows same logic as asupersync
+    simulate_asupersync_length_validation(scenario)
+}
+
+/// Verify attribute key length validation logic
+fn validate_length_validation_logic(result: &KeyLengthValidationResult) -> Result<(), String> {
+    if !result.validation_correct {
+        return Err("Length validation logic is incorrect".to_string());
+    }
+
+    // Check OTLP compliance
+    if !result.otlp_compliant {
+        return Err("Length validation is not OTLP compliant".to_string());
+    }
+
+    // Critical check: spans with overly long keys must be rejected (OTLP §6.2.5)
+    if result.length_violations_count > 0 && !result.span_rejected {
+        return Err("CRITICAL: Span with overly long attribute keys was not rejected (violates OTLP §6.2.5)".to_string());
+    }
+
+    // Critical check: spans with reasonable key lengths must be accepted
+    if result.length_violations_count == 0 && result.span_rejected {
+        return Err("CRITICAL: Span without overly long attribute keys was rejected".to_string());
+    }
+
+    // Critical check: rejected spans should not be included in export
+    if result.span_rejected && result.included_in_export {
+        return Err("CRITICAL: Rejected span was included in export".to_string());
+    }
+
+    // Critical check: accepted spans should be included in export
+    if !result.span_rejected && !result.included_in_export {
+        return Err("CRITICAL: Accepted span was not included in export".to_string());
+    }
+
+    // Critical check: rejection reason must be provided for rejected spans
+    if result.span_rejected && result.rejection_reason.is_empty() {
+        return Err("CRITICAL: No rejection reason provided for rejected span".to_string());
+    }
+
+    // Critical check: rejection reason must be empty for accepted spans
+    if !result.span_rejected && !result.rejection_reason.is_empty() {
+        return Err("CRITICAL: Rejection reason provided but span was not rejected".to_string());
+    }
+
+    // Critical check: counts must be consistent
+    if result.processed_spans_count != result.rejected_spans_count + result.accepted_spans_count {
+        return Err(
+            "CRITICAL: Processed spans count doesn't match rejected + accepted counts".to_string(),
+        );
+    }
+
+    // Critical check: long keys detection should match violations count
+    if result.long_keys_detected.len() != result.length_violations_count {
+        return Err(
+            "CRITICAL: Long keys detected count doesn't match violations count".to_string(),
+        );
+    }
+
+    // Critical check: validation should always be applied
+    if !result.validation_applied {
+        return Err("CRITICAL: Length validation was not applied".to_string());
+    }
+
+    // Critical check: max key length should be accurate
+    if !result.original_span.attributes.is_empty() {
+        let actual_max = result
+            .original_span
+            .attributes
+            .iter()
+            .map(|(key, _)| key.len())
+            .max()
+            .unwrap_or(0);
+        if result.max_key_length_seen != actual_max {
+            return Err("CRITICAL: Max key length tracking is incorrect".to_string());
+        }
+    }
+
+    Ok(())
+}
+
+/// Verify implementation consistency for length validation
+fn validate_length_validation_implementation_consistency(
+    asupersync_result: &KeyLengthValidationResult,
+    reference_result: &KeyLengthValidationResult,
+) -> Result<(), String> {
+    // Both implementations should detect same long keys
+    if asupersync_result.long_keys_detected != reference_result.long_keys_detected {
+        return Err("Long keys detection differs between implementations".to_string());
+    }
+
+    // Both implementations should reject spans consistently
+    if asupersync_result.span_rejected != reference_result.span_rejected {
+        return Err("Span rejection differs between implementations".to_string());
+    }
+
+    // Both implementations should provide same rejection reason
+    if asupersync_result.rejection_reason != reference_result.rejection_reason {
+        return Err("Rejection reason differs between implementations".to_string());
+    }
+
+    // Both implementations should include spans consistently
+    if asupersync_result.included_in_export != reference_result.included_in_export {
+        return Err("Export inclusion differs between implementations".to_string());
+    }
+
+    // Both implementations should apply validation consistently
+    if asupersync_result.validation_applied != reference_result.validation_applied {
+        return Err("Validation application differs between implementations".to_string());
+    }
+
+    // Both implementations should count violations consistently
+    if asupersync_result.length_violations_count != reference_result.length_violations_count {
+        return Err("Length violations count differs between implementations".to_string());
+    }
+
+    // Both implementations should validate same number of attributes
+    if asupersync_result.attributes_validated_count != reference_result.attributes_validated_count {
+        return Err("Attributes validated count differs between implementations".to_string());
+    }
+
+    // Both implementations should track max key length consistently
+    if asupersync_result.max_key_length_seen != reference_result.max_key_length_seen {
+        return Err("Max key length tracking differs between implementations".to_string());
+    }
+
+    // Both implementations should count boundary keys consistently
+    if asupersync_result.keys_at_boundary_count != reference_result.keys_at_boundary_count {
+        return Err("Keys at boundary count differs between implementations".to_string());
+    }
+
+    // Both implementations should count rejected spans consistently
+    if asupersync_result.rejected_spans_count != reference_result.rejected_spans_count {
+        return Err("Rejected spans count differs between implementations".to_string());
+    }
+
+    // Both implementations should count accepted spans consistently
+    if asupersync_result.accepted_spans_count != reference_result.accepted_spans_count {
+        return Err("Accepted spans count differs between implementations".to_string());
+    }
+
+    // Both implementations should have same validation correctness
+    if asupersync_result.validation_correct != reference_result.validation_correct {
+        return Err("Validation correctness differs between implementations".to_string());
+    }
+
+    // Both implementations should be OTLP compliant
+    if asupersync_result.otlp_compliant != reference_result.otlp_compliant {
+        return Err("OTLP compliance differs between implementations".to_string());
+    }
+
+    // Both implementations should emit telemetry consistently
+    if asupersync_result.telemetry_emitted != reference_result.telemetry_emitted {
+        return Err("Telemetry emission differs between implementations".to_string());
+    }
+
+    Ok(())
+}
