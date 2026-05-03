@@ -97,6 +97,8 @@ pub mod task_inspector;
 pub mod tls_configuration_audit_test;
 #[cfg(test)]
 pub mod trace_id_format_audit_test;
+#[cfg(test)]
+pub mod trace_id_high_load_audit_test;
 pub mod w3c_trace_context;
 
 pub use analyzer_plugin::{
