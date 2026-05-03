@@ -22,6 +22,7 @@
 
 #![allow(missing_docs)]
 
+use crate::runtime::scheduler::SchedulerEvidenceMetrics;
 use crate::types::RegionId;
 use crate::types::pressure::SystemPressure;
 use parking_lot::RwLock;
@@ -143,7 +144,7 @@ impl ResourceMeasurement {
 }
 
 /// Degradation level indicating severity of resource pressure.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub enum DegradationLevel {
     /// No degradation needed.
     None = 0,
@@ -678,6 +679,25 @@ impl DegradationEngine {
         }
     }
 
+    /// Evaluate a deterministic overload-admission decision using the current pressure band
+    /// plus first-party scheduler evidence.
+    #[must_use]
+    pub fn evaluate_tail_risk_admission(
+        &self,
+        scheduler: Option<&SchedulerEvidenceMetrics>,
+        retry_pressure_p99: Option<u64>,
+        memory_pressure_bps: Option<u16>,
+        profile: &TailRiskAdmissionProfile,
+    ) -> TailRiskAdmissionLedger {
+        let evidence = TailRiskAdmissionEvidence {
+            scheduler: scheduler.cloned(),
+            retry_pressure_p99,
+            memory_pressure_bps,
+            degradation_level: self.pressure.composite_degradation_level(),
+        };
+        TailRiskAdmissionLedger::evaluate(&evidence, profile)
+    }
+
     /// Get degradation statistics.
     pub fn stats(&self) -> DegradationStatsSnapshot {
         DegradationStatsSnapshot {
@@ -711,6 +731,303 @@ impl DegradationStatsSnapshot {
         }
         let total_overhead = self.decision_time_nanos + self.monitoring_overhead_nanos;
         (total_overhead as f64) / (total_runtime_nanos as f64) * 100.0
+    }
+}
+
+/// Stable version identifier for tail-risk admission ledgers.
+pub const TAIL_RISK_ADMISSION_LEDGER_SCHEMA_VERSION: &str = "asupersync.tail-risk-admission.v1";
+
+/// Admission outcome for overload-sensitive work.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TailRiskAdmissionDecision {
+    Admit,
+    Defer,
+    Shed,
+}
+
+/// Explicit reason codes for a tail-risk admission verdict.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TailRiskAdmissionReason {
+    WakeToRunTail,
+    QueueResidencyTail,
+    BacklogPressure,
+    CancelDebtPressure,
+    RetryPressure,
+    MemoryPressure,
+    ExistingDegradation,
+    ConservativeFallback,
+    BalancedBaseline,
+}
+
+/// Bounded operator-tunable thresholds for overload admission.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TailRiskAdmissionProfile {
+    pub wake_to_run_p99_ns_limit: u64,
+    pub queue_residency_p99_ns_limit: u64,
+    pub ready_backlog_p99_limit: usize,
+    pub cancel_debt_p99_limit: usize,
+    pub retry_pressure_p99_limit: u64,
+    pub memory_pressure_soft_bps: u16,
+    pub memory_pressure_hard_bps: u16,
+    pub defer_expected_loss_score: u8,
+    pub shed_expected_loss_score: u8,
+}
+
+impl Default for TailRiskAdmissionProfile {
+    fn default() -> Self {
+        Self {
+            wake_to_run_p99_ns_limit: 150_000,
+            queue_residency_p99_ns_limit: 400_000,
+            ready_backlog_p99_limit: 256,
+            cancel_debt_p99_limit: 96,
+            retry_pressure_p99_limit: 32,
+            memory_pressure_soft_bps: 8_000,
+            memory_pressure_hard_bps: 9_200,
+            defer_expected_loss_score: 35,
+            shed_expected_loss_score: 65,
+        }
+    }
+}
+
+/// Evidence vector consumed by the tail-risk admission rule.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TailRiskAdmissionEvidence {
+    pub scheduler: Option<SchedulerEvidenceMetrics>,
+    pub retry_pressure_p99: Option<u64>,
+    /// Memory pressure in basis points, where `10_000` represents 100%.
+    pub memory_pressure_bps: Option<u16>,
+    pub degradation_level: DegradationLevel,
+}
+
+impl TailRiskAdmissionEvidence {
+    fn missing_fields(&self) -> Vec<&'static str> {
+        let mut missing = Vec::new();
+        if self.scheduler.is_none() {
+            missing.push("scheduler_metrics");
+        }
+        if self.retry_pressure_p99.is_none() {
+            missing.push("retry_pressure_p99");
+        }
+        match self.memory_pressure_bps {
+            Some(value) if value <= 10_000 => {}
+            Some(_) | None => missing.push("memory_pressure_bps"),
+        }
+        missing
+    }
+}
+
+/// Flattened evidence snapshot stored in the decision ledger.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TailRiskAdmissionEvidenceSnapshot {
+    pub wake_to_run_p99_ns: Option<u64>,
+    pub queue_residency_p99_ns: Option<u64>,
+    pub ready_backlog_p99: Option<usize>,
+    pub cancel_debt_p99: Option<usize>,
+    pub retry_pressure_p99: Option<u64>,
+    pub memory_pressure_bps: Option<u16>,
+}
+
+/// Deterministic decision ledger for overload admission.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TailRiskAdmissionLedger {
+    pub schema_version: String,
+    pub decision: TailRiskAdmissionDecision,
+    pub fallback_used: bool,
+    pub expected_loss_score: u8,
+    pub confidence_percent: u8,
+    pub reason_codes: Vec<TailRiskAdmissionReason>,
+    pub missing_evidence_fields: Vec<String>,
+    pub profile: TailRiskAdmissionProfile,
+    pub degradation_level: DegradationLevel,
+    pub evidence: TailRiskAdmissionEvidenceSnapshot,
+    pub explanation: Vec<String>,
+}
+
+impl TailRiskAdmissionLedger {
+    /// Evaluate one overload-admission decision against the supplied evidence and profile.
+    #[must_use]
+    pub fn evaluate(
+        evidence: &TailRiskAdmissionEvidence,
+        profile: &TailRiskAdmissionProfile,
+    ) -> Self {
+        let snapshot = TailRiskAdmissionEvidenceSnapshot {
+            wake_to_run_p99_ns: evidence
+                .scheduler
+                .as_ref()
+                .map(|metrics| metrics.wake_to_run_p99_ns),
+            queue_residency_p99_ns: evidence
+                .scheduler
+                .as_ref()
+                .map(|metrics| metrics.queue_residency_p99_ns),
+            ready_backlog_p99: evidence
+                .scheduler
+                .as_ref()
+                .map(|metrics| metrics.ready_backlog_p99),
+            cancel_debt_p99: evidence
+                .scheduler
+                .as_ref()
+                .map(|metrics| metrics.cancel_debt_p99),
+            retry_pressure_p99: evidence.retry_pressure_p99,
+            memory_pressure_bps: evidence.memory_pressure_bps,
+        };
+        let missing_fields = evidence
+            .missing_fields()
+            .into_iter()
+            .map(str::to_string)
+            .collect::<Vec<_>>();
+
+        if !missing_fields.is_empty() {
+            return Self::conservative_fallback(evidence, profile, snapshot, missing_fields);
+        }
+
+        let scheduler = evidence.scheduler.as_ref().expect("checked above");
+        let retry_pressure = evidence.retry_pressure_p99.expect("checked above");
+        let memory_pressure = evidence.memory_pressure_bps.expect("checked above");
+
+        let mut expected_loss_score = 0u8;
+        let mut reason_codes = Vec::new();
+        let mut explanation = Vec::new();
+
+        if scheduler.wake_to_run_p99_ns >= profile.wake_to_run_p99_ns_limit {
+            expected_loss_score = expected_loss_score.saturating_add(18);
+            reason_codes.push(TailRiskAdmissionReason::WakeToRunTail);
+            explanation.push(format!(
+                "wake_to_run p99={}ns exceeded the configured limit {}ns",
+                scheduler.wake_to_run_p99_ns, profile.wake_to_run_p99_ns_limit
+            ));
+        }
+
+        if scheduler.queue_residency_p99_ns >= profile.queue_residency_p99_ns_limit {
+            expected_loss_score = expected_loss_score.saturating_add(22);
+            reason_codes.push(TailRiskAdmissionReason::QueueResidencyTail);
+            explanation.push(format!(
+                "queue_residency p99={}ns exceeded the configured limit {}ns",
+                scheduler.queue_residency_p99_ns, profile.queue_residency_p99_ns_limit
+            ));
+        }
+
+        if scheduler.ready_backlog_p99 >= profile.ready_backlog_p99_limit {
+            expected_loss_score = expected_loss_score.saturating_add(15);
+            reason_codes.push(TailRiskAdmissionReason::BacklogPressure);
+            explanation.push(format!(
+                "ready_backlog p99={} exceeded the configured limit {}",
+                scheduler.ready_backlog_p99, profile.ready_backlog_p99_limit
+            ));
+        }
+
+        if scheduler.cancel_debt_p99 >= profile.cancel_debt_p99_limit {
+            expected_loss_score = expected_loss_score.saturating_add(10);
+            reason_codes.push(TailRiskAdmissionReason::CancelDebtPressure);
+            explanation.push(format!(
+                "cancel_debt p99={} exceeded the configured limit {}",
+                scheduler.cancel_debt_p99, profile.cancel_debt_p99_limit
+            ));
+        }
+
+        if retry_pressure >= profile.retry_pressure_p99_limit {
+            expected_loss_score = expected_loss_score.saturating_add(15);
+            reason_codes.push(TailRiskAdmissionReason::RetryPressure);
+            explanation.push(format!(
+                "retry_pressure p99={} exceeded the configured limit {}",
+                retry_pressure, profile.retry_pressure_p99_limit
+            ));
+        }
+
+        if memory_pressure >= profile.memory_pressure_soft_bps {
+            let increment = if memory_pressure >= profile.memory_pressure_hard_bps {
+                25
+            } else {
+                12
+            };
+            expected_loss_score = expected_loss_score.saturating_add(increment);
+            reason_codes.push(TailRiskAdmissionReason::MemoryPressure);
+            explanation.push(format!(
+                "memory pressure {}bps exceeded the soft limit {}bps",
+                memory_pressure, profile.memory_pressure_soft_bps
+            ));
+        }
+
+        if evidence.degradation_level >= DegradationLevel::Moderate {
+            expected_loss_score = expected_loss_score.saturating_add(10);
+            reason_codes.push(TailRiskAdmissionReason::ExistingDegradation);
+            explanation.push(format!(
+                "existing degradation level {:?} tightened the admission envelope",
+                evidence.degradation_level
+            ));
+        }
+
+        if reason_codes.is_empty() {
+            reason_codes.push(TailRiskAdmissionReason::BalancedBaseline);
+            explanation.push(
+                "tail, backlog, retry, and memory evidence stayed inside the configured envelope"
+                    .to_string(),
+            );
+        }
+
+        let decision = if memory_pressure >= profile.memory_pressure_hard_bps
+            || evidence.degradation_level == DegradationLevel::Emergency
+            || expected_loss_score >= profile.shed_expected_loss_score
+        {
+            TailRiskAdmissionDecision::Shed
+        } else if evidence.degradation_level >= DegradationLevel::Moderate
+            || expected_loss_score >= profile.defer_expected_loss_score
+        {
+            TailRiskAdmissionDecision::Defer
+        } else {
+            TailRiskAdmissionDecision::Admit
+        };
+
+        let confidence_percent = 65u8
+            .saturating_add((reason_codes.len() as u8).saturating_mul(5))
+            .min(90);
+
+        Self {
+            schema_version: TAIL_RISK_ADMISSION_LEDGER_SCHEMA_VERSION.to_string(),
+            decision,
+            fallback_used: false,
+            expected_loss_score,
+            confidence_percent,
+            reason_codes,
+            missing_evidence_fields: Vec::new(),
+            profile: profile.clone(),
+            degradation_level: evidence.degradation_level,
+            evidence: snapshot,
+            explanation,
+        }
+    }
+
+    fn conservative_fallback(
+        evidence: &TailRiskAdmissionEvidence,
+        profile: &TailRiskAdmissionProfile,
+        snapshot: TailRiskAdmissionEvidenceSnapshot,
+        missing_evidence_fields: Vec<String>,
+    ) -> Self {
+        let decision = match evidence.degradation_level {
+            DegradationLevel::Emergency | DegradationLevel::Heavy => {
+                TailRiskAdmissionDecision::Shed
+            }
+            DegradationLevel::Moderate => TailRiskAdmissionDecision::Defer,
+            DegradationLevel::Light | DegradationLevel::None => TailRiskAdmissionDecision::Admit,
+        };
+
+        Self {
+            schema_version: TAIL_RISK_ADMISSION_LEDGER_SCHEMA_VERSION.to_string(),
+            decision,
+            fallback_used: true,
+            expected_loss_score: 0,
+            confidence_percent: 100,
+            reason_codes: vec![TailRiskAdmissionReason::ConservativeFallback],
+            missing_evidence_fields,
+            profile: profile.clone(),
+            degradation_level: evidence.degradation_level,
+            evidence: snapshot,
+            explanation: vec![
+                "Incomplete evidence preserved the conservative degradation-band comparator."
+                    .to_string(),
+            ],
+        }
     }
 }
 
@@ -1645,5 +1962,126 @@ mod tests {
         assert!(m.max_limit > 0, "connection ceiling > 0");
         assert!(m.soft_limit <= m.hard_limit);
         assert!(m.hard_limit <= m.max_limit);
+    }
+
+    fn sample_scheduler_metrics() -> SchedulerEvidenceMetrics {
+        SchedulerEvidenceMetrics {
+            wake_to_run_p50_ns: 8_000,
+            wake_to_run_p95_ns: 90_000,
+            wake_to_run_p99_ns: 220_000,
+            queue_residency_p50_ns: 16_000,
+            queue_residency_p95_ns: 200_000,
+            queue_residency_p99_ns: 520_000,
+            ready_backlog_p95: 192,
+            ready_backlog_p99: 320,
+            cancel_debt_p95: 48,
+            cancel_debt_p99: 128,
+            remote_steal_ratio_pct: Some(42),
+            cross_cohort_wake_p99_ns: Some(180_000),
+        }
+    }
+
+    #[test]
+    fn tail_risk_admission_falls_back_when_evidence_is_missing() {
+        let ledger = TailRiskAdmissionLedger::evaluate(
+            &TailRiskAdmissionEvidence {
+                scheduler: None,
+                retry_pressure_p99: Some(12),
+                memory_pressure_bps: Some(7_200),
+                degradation_level: DegradationLevel::Moderate,
+            },
+            &TailRiskAdmissionProfile::default(),
+        );
+        assert!(
+            ledger.fallback_used,
+            "missing evidence must trigger fallback"
+        );
+        assert_eq!(ledger.decision, TailRiskAdmissionDecision::Defer);
+        assert_eq!(
+            ledger.reason_codes,
+            vec![TailRiskAdmissionReason::ConservativeFallback]
+        );
+        assert_eq!(
+            ledger.missing_evidence_fields,
+            vec!["scheduler_metrics".to_string()]
+        );
+    }
+
+    #[test]
+    fn tail_risk_admission_is_deterministic_for_fixed_inputs() {
+        let evidence = TailRiskAdmissionEvidence {
+            scheduler: Some(sample_scheduler_metrics()),
+            retry_pressure_p99: Some(40),
+            memory_pressure_bps: Some(8_700),
+            degradation_level: DegradationLevel::Moderate,
+        };
+        let profile = TailRiskAdmissionProfile::default();
+        let first = TailRiskAdmissionLedger::evaluate(&evidence, &profile);
+        for _ in 0..8 {
+            let next = TailRiskAdmissionLedger::evaluate(&evidence, &profile);
+            assert_eq!(first, next, "fixed evidence must stay deterministic");
+        }
+    }
+
+    #[test]
+    fn tail_risk_admission_ledger_round_trips_through_json() {
+        let ledger = TailRiskAdmissionLedger::evaluate(
+            &TailRiskAdmissionEvidence {
+                scheduler: Some(sample_scheduler_metrics()),
+                retry_pressure_p99: Some(40),
+                memory_pressure_bps: Some(8_700),
+                degradation_level: DegradationLevel::Moderate,
+            },
+            &TailRiskAdmissionProfile::default(),
+        );
+        let json = serde_json::to_string_pretty(&ledger).expect("serialize ledger");
+        let reparsed: TailRiskAdmissionLedger =
+            serde_json::from_str(&json).expect("deserialize ledger");
+        assert_eq!(reparsed, ledger);
+    }
+
+    #[test]
+    fn tail_risk_admission_sheds_on_tail_and_memory_storm() {
+        let ledger = TailRiskAdmissionLedger::evaluate(
+            &TailRiskAdmissionEvidence {
+                scheduler: Some(sample_scheduler_metrics()),
+                retry_pressure_p99: Some(48),
+                memory_pressure_bps: Some(9_400),
+                degradation_level: DegradationLevel::Heavy,
+            },
+            &TailRiskAdmissionProfile::default(),
+        );
+        assert_eq!(ledger.decision, TailRiskAdmissionDecision::Shed);
+        assert!(!ledger.fallback_used);
+        assert!(
+            ledger
+                .reason_codes
+                .contains(&TailRiskAdmissionReason::MemoryPressure)
+        );
+        assert!(
+            ledger
+                .reason_codes
+                .contains(&TailRiskAdmissionReason::QueueResidencyTail)
+        );
+    }
+
+    #[test]
+    fn degradation_engine_evaluates_tail_risk_admission_from_pressure_band() {
+        let pressure = Arc::new(ResourcePressure::new());
+        let engine = DegradationEngine::new(Arc::clone(&pressure));
+        pressure.update_degradation_level(ResourceType::Memory, DegradationLevel::Moderate);
+        let ledger = engine.evaluate_tail_risk_admission(
+            Some(&sample_scheduler_metrics()),
+            Some(40),
+            Some(8_300),
+            &TailRiskAdmissionProfile::default(),
+        );
+        assert_eq!(ledger.degradation_level, DegradationLevel::Moderate);
+        assert_eq!(ledger.decision, TailRiskAdmissionDecision::Shed);
+        assert!(
+            ledger
+                .reason_codes
+                .contains(&TailRiskAdmissionReason::ExistingDegradation)
+        );
     }
 }
