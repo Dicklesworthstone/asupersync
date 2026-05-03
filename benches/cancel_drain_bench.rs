@@ -51,6 +51,34 @@ fn setup_runtime_state(max_task_id: u32) -> Arc<ContendedMutex<RuntimeState>> {
     Arc::new(ContendedMutex::new("runtime_state", state))
 }
 
+fn setup_runtime_state_with_draining_regions(
+    draining_region_count: u32,
+    enable_read_biased_snapshot: bool,
+) -> Arc<ContendedMutex<RuntimeState>> {
+    let mut state = RuntimeState::new();
+    let root = state.create_root_region(Budget::INFINITE);
+    let mut draining_regions = Vec::with_capacity(draining_region_count as usize);
+    for _ in 0..draining_region_count {
+        let child = state
+            .create_child_region(root, Budget::INFINITE)
+            .expect("child region should create");
+        let _grandchild = state
+            .create_child_region(child, Budget::INFINITE)
+            .expect("grandchild region should create");
+        draining_regions.push(child);
+    }
+
+    state.set_read_biased_region_snapshot(enable_read_biased_snapshot);
+    for child in draining_regions {
+        let _ = state.cancel_request(child, &asupersync::types::CancelReason::user("bench"), None);
+    }
+    if enable_read_biased_snapshot {
+        let _ = StateSnapshot::from_runtime_state(&state);
+    }
+
+    Arc::new(ContendedMutex::new("runtime_state", state))
+}
+
 // =============================================================================
 // CANCEL DISPATCH LATENCY
 // =============================================================================
@@ -347,6 +375,44 @@ fn bench_state_snapshot(c: &mut Criterion) {
     group.finish();
 }
 
+fn bench_state_snapshot_draining_region_bias(c: &mut Criterion) {
+    let mut group = c.benchmark_group("state_snapshot_draining_region_bias");
+
+    for &n in &[32u32, 256] {
+        group.throughput(Throughput::Elements(u64::from(n)));
+        group.bench_with_input(BenchmarkId::new("scan_disabled", n), &n, |b, &n| {
+            let state = setup_runtime_state_with_draining_regions(n, false);
+            b.iter(|| {
+                let guard = state
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                black_box(StateSnapshot::from_runtime_state(&guard))
+            })
+        });
+        group.bench_with_input(BenchmarkId::new("read_biased_hit", n), &n, |b, &n| {
+            let state = setup_runtime_state_with_draining_regions(n, true);
+            b.iter(|| {
+                let guard = state
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                black_box(StateSnapshot::from_runtime_state(&guard))
+            })
+        });
+        group.bench_with_input(BenchmarkId::new("read_biased_fallback", n), &n, |b, &n| {
+            let state = setup_runtime_state_with_draining_regions(n, true);
+            b.iter(|| {
+                let guard = state
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                guard.invalidate_read_biased_region_snapshot_for_testing();
+                black_box(StateSnapshot::from_runtime_state(&guard))
+            })
+        });
+    }
+
+    group.finish();
+}
+
 // =============================================================================
 // CONVERGENCE ANALYSIS
 // =============================================================================
@@ -469,6 +535,7 @@ criterion_group!(
     bench_governor_suggest,
     bench_potential_compute,
     bench_state_snapshot,
+    bench_state_snapshot_draining_region_bias,
     bench_convergence_analysis,
     bench_governor_overhead,
 );

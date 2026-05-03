@@ -328,7 +328,7 @@ impl StateSnapshot {
             state.pending_obligation_count_for_kind(ObligationKind::IoOp) as u32;
 
         // -- Region counter (O(1), br-asupersync-xxcss5) --
-        let draining_regions = state.regions.draining_region_count() as u32;
+        let draining_regions = state.draining_region_count_for_snapshot() as u32;
 
         Self {
             time: now,
