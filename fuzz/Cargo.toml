@@ -5015,3 +5015,9 @@ name = "h2_data_after_end_stream"
 path = "fuzz_targets/h2_data_after_end_stream.rs"
 test = false
 doc = false
+
+[[bin]]
+name = "h2_data_payload_at_max"
+path = "fuzz_targets/h2_data_payload_at_max.rs"
+test = false
+doc = false
