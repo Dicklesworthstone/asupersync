@@ -20,6 +20,7 @@
 //! - Forces manual PeriodicReader configuration, violating encapsulation
 
 #![cfg(test)]
+#![allow(dead_code)]
 
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicUsize, Ordering};

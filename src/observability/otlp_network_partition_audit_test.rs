@@ -14,6 +14,7 @@
 //! Silent drops hide data loss and break observability.
 
 #![cfg(test)]
+#![allow(dead_code)]
 
 use crate::observability::otlp_trace_exporter::{
     ExportError, LoadSheddingStats, LoadSheddingTraceExporter, OtlpSpan, SpanBatch, TraceExporter,

@@ -14,6 +14,7 @@
 //! restart, deploy, or crash, reducing observability during incidents.
 
 #![cfg(test)]
+#![allow(dead_code)]
 
 use crate::observability::otlp_trace_exporter::{
     ExportError, LoadSheddingTraceExporter, MockOtlpHttpExporter, OtlpSpan, SpanBatch,
