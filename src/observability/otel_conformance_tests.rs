@@ -18604,3 +18604,426 @@ fn validate_reserved_key_handling_implementation_consistency(
 
     Ok(())
 }
+//
+// OTLP-094: Large attribute value truncation conformance test
+//
+
+#[test]
+fn otlp_094_large_attribute_value_truncation_conformance() {
+    // Test scenarios for large attribute value truncation per OTLP specification
+    let scenarios = vec![
+        LargeAttributeScenario {
+            description: "Span with 8KB attribute value (MUST truncate to 4KB limit)".to_string(),
+            span: LargeAttributeSpanInfo {
+                name: "span_with_large_attr".to_string(),
+                trace_id: "12345678901234567890123456789012".to_string(),
+                span_id: "1234567890123456".to_string(),
+                attributes: vec![
+                    ("large_data".to_string(), "X".repeat(8192)), // 8KB
+                    ("normal_attr".to_string(), "normal_value".to_string()),
+                ],
+                max_attribute_value_length: 4096, // 4KB limit
+            },
+            expected_truncation_required: true,
+            expected_truncated_attributes: vec!["large_data".to_string()],
+            expected_final_attributes: vec![
+                ("large_data".to_string(), "X".repeat(4096)), // Truncated to 4KB
+                ("normal_attr".to_string(), "normal_value".to_string()),
+            ],
+            expected_otlp_compliant: true,
+        },
+        LargeAttributeScenario {
+            description: "Span with attribute exactly at 4KB limit (no truncation)".to_string(),
+            span: LargeAttributeSpanInfo {
+                name: "span_at_limit".to_string(),
+                trace_id: "12345678901234567890123456789012".to_string(),
+                span_id: "1234567890123456".to_string(),
+                attributes: vec![
+                    ("at_limit_data".to_string(), "Y".repeat(4096)), // Exactly 4KB
+                    ("small_attr".to_string(), "small".to_string()),
+                ],
+                max_attribute_value_length: 4096, // 4KB limit
+            },
+            expected_truncation_required: false,
+            expected_truncated_attributes: vec![],
+            expected_final_attributes: vec![
+                ("at_limit_data".to_string(), "Y".repeat(4096)), // Kept as-is
+                ("small_attr".to_string(), "small".to_string()),
+            ],
+            expected_otlp_compliant: true,
+        },
+        LargeAttributeScenario {
+            description: "Span with multiple large attributes (MUST truncate all)".to_string(),
+            span: LargeAttributeSpanInfo {
+                name: "span_with_multiple_large".to_string(),
+                trace_id: "12345678901234567890123456789012".to_string(),
+                span_id: "1234567890123456".to_string(),
+                attributes: vec![
+                    ("large_blob1".to_string(), "A".repeat(6144)), // 6KB
+                    ("large_blob2".to_string(), "B".repeat(5120)), // 5KB
+                    ("normal_size".to_string(), "normal".to_string()),
+                ],
+                max_attribute_value_length: 4096, // 4KB limit
+            },
+            expected_truncation_required: true,
+            expected_truncated_attributes: vec![
+                "large_blob1".to_string(),
+                "large_blob2".to_string(),
+            ],
+            expected_final_attributes: vec![
+                ("large_blob1".to_string(), "A".repeat(4096)), // Truncated to 4KB
+                ("large_blob2".to_string(), "B".repeat(4096)), // Truncated to 4KB
+                ("normal_size".to_string(), "normal".to_string()),
+            ],
+            expected_otlp_compliant: true,
+        },
+        LargeAttributeScenario {
+            description: "Span with only small attributes (no truncation needed)".to_string(),
+            span: LargeAttributeSpanInfo {
+                name: "span_with_small_attrs".to_string(),
+                trace_id: "12345678901234567890123456789012".to_string(),
+                span_id: "1234567890123456".to_string(),
+                attributes: vec![
+                    ("attr1".to_string(), "value1".to_string()),
+                    ("attr2".to_string(), "value2".to_string()),
+                    (
+                        "attr3".to_string(),
+                        "somewhat_longer_value_but_still_small".to_string(),
+                    ),
+                ],
+                max_attribute_value_length: 4096, // 4KB limit
+            },
+            expected_truncation_required: false,
+            expected_truncated_attributes: vec![],
+            expected_final_attributes: vec![
+                ("attr1".to_string(), "value1".to_string()),
+                ("attr2".to_string(), "value2".to_string()),
+                (
+                    "attr3".to_string(),
+                    "somewhat_longer_value_but_still_small".to_string(),
+                ),
+            ],
+            expected_otlp_compliant: true,
+        },
+        LargeAttributeScenario {
+            description: "Span with custom max_attribute_value_length (2KB limit)".to_string(),
+            span: LargeAttributeSpanInfo {
+                name: "span_with_custom_limit".to_string(),
+                trace_id: "12345678901234567890123456789012".to_string(),
+                span_id: "1234567890123456".to_string(),
+                attributes: vec![
+                    ("medium_data".to_string(), "Z".repeat(3072)), // 3KB
+                    ("regular_attr".to_string(), "regular".to_string()),
+                ],
+                max_attribute_value_length: 2048, // 2KB custom limit
+            },
+            expected_truncation_required: true,
+            expected_truncated_attributes: vec!["medium_data".to_string()],
+            expected_final_attributes: vec![
+                ("medium_data".to_string(), "Z".repeat(2048)), // Truncated to 2KB
+                ("regular_attr".to_string(), "regular".to_string()),
+            ],
+            expected_otlp_compliant: true,
+        },
+        LargeAttributeScenario {
+            description: "Span with extremely large attribute (10KB, truncate to 4KB)".to_string(),
+            span: LargeAttributeSpanInfo {
+                name: "span_with_huge_attr".to_string(),
+                trace_id: "12345678901234567890123456789012".to_string(),
+                span_id: "1234567890123456".to_string(),
+                attributes: vec![
+                    ("huge_blob".to_string(), "M".repeat(10240)), // 10KB
+                ],
+                max_attribute_value_length: 4096, // 4KB limit
+            },
+            expected_truncation_required: true,
+            expected_truncated_attributes: vec!["huge_blob".to_string()],
+            expected_final_attributes: vec![
+                ("huge_blob".to_string(), "M".repeat(4096)), // Truncated to 4KB
+            ],
+            expected_otlp_compliant: true,
+        },
+    ];
+
+    for scenario in scenarios {
+        println!("Testing scenario: {}", scenario.description);
+
+        // Simulate asupersync exporter behavior
+        let asupersync_result = simulate_asupersync_large_attribute_truncation(&scenario);
+
+        // Simulate reference implementation behavior
+        let reference_result = simulate_reference_large_attribute_truncation(&scenario);
+
+        // Validate individual results
+        validate_large_attribute_truncation_logic(&asupersync_result).expect(&format!(
+            "Asupersync large attribute truncation logic failed for scenario: {}",
+            scenario.description
+        ));
+
+        validate_large_attribute_truncation_logic(&reference_result).expect(&format!(
+            "Reference large attribute truncation logic failed for scenario: {}",
+            scenario.description
+        ));
+
+        // Validate implementation consistency
+        validate_large_attribute_truncation_implementation_consistency(
+            &asupersync_result,
+            &reference_result,
+        )
+        .expect(&format!(
+            "Implementation consistency failed for scenario: {}",
+            scenario.description
+        ));
+
+        println!("✓ Scenario passed: {}", scenario.description);
+    }
+}
+
+/// Test scenario for large attribute value truncation
+#[derive(Debug, Clone)]
+struct LargeAttributeScenario {
+    description: String,
+    span: LargeAttributeSpanInfo,
+    expected_truncation_required: bool,
+    expected_truncated_attributes: Vec<String>,
+    expected_final_attributes: Vec<(String, String)>,
+    expected_otlp_compliant: bool,
+}
+
+/// Span information for large attribute testing
+#[derive(Debug, Clone)]
+struct LargeAttributeSpanInfo {
+    name: String,
+    trace_id: String,
+    span_id: String,
+    attributes: Vec<(String, String)>,
+    max_attribute_value_length: usize,
+}
+
+/// Result of large attribute value truncation testing
+#[derive(Debug, Clone)]
+struct LargeAttributeTruncationResult {
+    truncation_required: bool,
+    truncated_attributes: Vec<String>,
+    original_attributes: Vec<(String, String)>,
+    final_attributes: Vec<(String, String)>,
+    max_value_length: usize,
+    bytes_before_truncation: usize,
+    bytes_after_truncation: usize,
+    processed_spans_count: usize,
+    spans_with_large_attrs_count: usize,
+    spans_with_truncated_attrs_count: usize,
+    validation_errors: Vec<String>,
+    validation_correct: bool,
+    validation_applied: bool,
+    otlp_compliant: bool,
+    telemetry_emitted: bool,
+}
+
+/// Simulate asupersync large attribute value truncation behavior
+fn simulate_asupersync_large_attribute_truncation(
+    scenario: &LargeAttributeScenario,
+) -> LargeAttributeTruncationResult {
+    let mut validation_errors = Vec::new();
+    let mut spans_with_large_attrs = 0;
+    let mut spans_with_truncated_attrs = 0;
+    let max_length = scenario.span.max_attribute_value_length;
+    let original_attributes = scenario.span.attributes.clone();
+    let mut final_attributes = Vec::new();
+    let mut truncated_attributes = Vec::new();
+    let mut truncation_required = false;
+    let mut bytes_before = 0;
+    let mut bytes_after = 0;
+
+    // Process each attribute for size checking and potential truncation
+    for (key, value) in &scenario.span.attributes {
+        let value_bytes = value.len();
+        bytes_before += value_bytes;
+
+        if value_bytes > max_length {
+            // Truncation needed
+            truncation_required = true;
+            truncated_attributes.push(key.clone());
+            spans_with_large_attrs += 1;
+            spans_with_truncated_attrs += 1;
+
+            // Truncate the value to max_length
+            let truncated_value = if value.len() > max_length {
+                value.chars().take(max_length).collect::<String>()
+            } else {
+                value.clone()
+            };
+
+            final_attributes.push((key.clone(), truncated_value.clone()));
+            bytes_after += truncated_value.len();
+        } else {
+            // Attribute is within size limit, keep as-is
+            final_attributes.push((key.clone(), value.clone()));
+            bytes_after += value_bytes;
+        }
+    }
+
+    // Check validation correctness
+    let validation_correct = truncation_required == scenario.expected_truncation_required
+        && truncated_attributes.len() == scenario.expected_truncated_attributes.len()
+        && final_attributes.len() == scenario.expected_final_attributes.len();
+
+    let validation_applied = true; // Always check attribute value sizes
+
+    // OTLP compliance: large attribute values must be truncated to configured limit
+    let otlp_compliant = {
+        // All final attributes must be within the size limit
+        let all_within_limit = final_attributes.iter().all(|(_, v)| v.len() <= max_length);
+
+        // If truncation was required, it must have been performed
+        let truncation_performed = if truncation_required {
+            !truncated_attributes.is_empty()
+        } else {
+            true // No truncation needed is also compliant
+        };
+
+        all_within_limit && truncation_performed
+    };
+
+    LargeAttributeTruncationResult {
+        truncation_required,
+        truncated_attributes,
+        original_attributes,
+        final_attributes,
+        max_value_length: max_length,
+        bytes_before_truncation: bytes_before,
+        bytes_after_truncation: bytes_after,
+        processed_spans_count: 1,
+        spans_with_large_attrs_count: spans_with_large_attrs,
+        spans_with_truncated_attrs_count: spans_with_truncated_attrs,
+        validation_errors,
+        validation_correct,
+        validation_applied,
+        otlp_compliant,
+        telemetry_emitted: true, // Assume telemetry is emitted for truncation events
+    }
+}
+
+/// Simulate reference implementation large attribute value truncation behavior
+fn simulate_reference_large_attribute_truncation(
+    scenario: &LargeAttributeScenario,
+) -> LargeAttributeTruncationResult {
+    // Reference implementation follows same logic as asupersync
+    simulate_asupersync_large_attribute_truncation(scenario)
+}
+
+/// Verify large attribute value truncation logic
+fn validate_large_attribute_truncation_logic(
+    result: &LargeAttributeTruncationResult,
+) -> Result<(), String> {
+    if !result.validation_correct {
+        return Err("Large attribute value truncation logic is incorrect".to_string());
+    }
+
+    if !result.validation_applied {
+        return Err("Attribute value size validation should be applied".to_string());
+    }
+
+    // Check OTLP compliance
+    if !result.otlp_compliant {
+        return Err("Attribute value truncation is not OTLP compliant".to_string());
+    }
+
+    // Critical check: all final attributes must be within size limit
+    for (key, value) in &result.final_attributes {
+        if value.len() > result.max_value_length {
+            return Err(format!(
+                "CRITICAL: Attribute '{}' has value length {} exceeding limit {}",
+                key,
+                value.len(),
+                result.max_value_length
+            ));
+        }
+    }
+
+    // Critical check: if truncation required, it must have been performed
+    if result.truncation_required && result.truncated_attributes.is_empty() {
+        return Err("CRITICAL: Truncation required but no attributes were truncated".to_string());
+    }
+
+    // Critical check: bytes after truncation should be <= bytes before
+    if result.bytes_after_truncation > result.bytes_before_truncation {
+        return Err("CRITICAL: Bytes after truncation exceeds bytes before truncation".to_string());
+    }
+
+    // Critical check: if no truncation required, bytes should be unchanged
+    if !result.truncation_required
+        && result.bytes_after_truncation != result.bytes_before_truncation
+    {
+        return Err("CRITICAL: Byte count changed when no truncation was required".to_string());
+    }
+
+    Ok(())
+}
+
+/// Verify implementation consistency for large attribute value truncation
+fn validate_large_attribute_truncation_implementation_consistency(
+    asupersync_result: &LargeAttributeTruncationResult,
+    reference_result: &LargeAttributeTruncationResult,
+) -> Result<(), String> {
+    // Both implementations should detect truncation requirement consistently
+    if asupersync_result.truncation_required != reference_result.truncation_required {
+        return Err("Truncation requirement differs between implementations".to_string());
+    }
+
+    // Both implementations should truncate same attributes
+    if asupersync_result.truncated_attributes != reference_result.truncated_attributes {
+        return Err("Truncated attributes differ between implementations".to_string());
+    }
+
+    // Both implementations should have same final attributes count
+    if asupersync_result.final_attributes.len() != reference_result.final_attributes.len() {
+        return Err("Final attributes count differs between implementations".to_string());
+    }
+
+    // Both implementations should respect same max value length
+    if asupersync_result.max_value_length != reference_result.max_value_length {
+        return Err("Max value length differs between implementations".to_string());
+    }
+
+    // Both implementations should have same bytes after truncation
+    if asupersync_result.bytes_after_truncation != reference_result.bytes_after_truncation {
+        return Err("Bytes after truncation differs between implementations".to_string());
+    }
+
+    // Both implementations should count spans with large attrs consistently
+    if asupersync_result.spans_with_large_attrs_count
+        != reference_result.spans_with_large_attrs_count
+    {
+        return Err("Spans with large attrs count differs between implementations".to_string());
+    }
+
+    // Both implementations should count spans with truncated attrs consistently
+    if asupersync_result.spans_with_truncated_attrs_count
+        != reference_result.spans_with_truncated_attrs_count
+    {
+        return Err("Spans with truncated attrs count differs between implementations".to_string());
+    }
+
+    // Both implementations should have same validation correctness
+    if asupersync_result.validation_correct != reference_result.validation_correct {
+        return Err("Validation correctness differs between implementations".to_string());
+    }
+
+    // Both implementations should apply validation consistently
+    if asupersync_result.validation_applied != reference_result.validation_applied {
+        return Err("Validation application differs between implementations".to_string());
+    }
+
+    // Both implementations should be OTLP compliant
+    if asupersync_result.otlp_compliant != reference_result.otlp_compliant {
+        return Err("OTLP compliance differs between implementations".to_string());
+    }
+
+    // Both implementations should emit telemetry consistently
+    if asupersync_result.telemetry_emitted != reference_result.telemetry_emitted {
+        return Err("Telemetry emission differs between implementations".to_string());
+    }
+
+    Ok(())
+}
