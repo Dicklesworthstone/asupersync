@@ -13,6 +13,7 @@
 //! standard observability infrastructure and distributed tracing systems.
 
 #![cfg(test)]
+#![allow(dead_code)]
 
 use crate::observability::otlp_trace_exporter::{
     LoadSheddingTraceExporter, MockOtlpHttpExporter, OtlpSpan, SpanBatch, TraceExporter,
