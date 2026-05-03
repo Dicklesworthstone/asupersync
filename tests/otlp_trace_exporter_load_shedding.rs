@@ -57,6 +57,30 @@ fn create_priority_batch(batch_id: u64, priorities: &[&str]) -> SpanBatch {
     }
 }
 
+fn create_flagged_priority_batch(batch_id: u64, priorities: &[(&str, Option<u8>)]) -> SpanBatch {
+    let spans = priorities
+        .iter()
+        .enumerate()
+        .map(|(i, (priority, trace_flags))| OtlpSpan {
+            span_id: format!("span-{}-{}", batch_id, i),
+            name: "test_operation".to_string(),
+            start_time_unix_nano: 1_000_000_000,
+            end_time_unix_nano: 1_000_001_000,
+            attributes: vec![
+                ("service".to_string(), "test".to_string()),
+                ("otlp.priority".to_string(), (*priority).to_string()),
+            ],
+            trace_flags: *trace_flags,
+        })
+        .collect();
+
+    SpanBatch {
+        batch_id,
+        spans,
+        created_at: Instant::now(),
+    }
+}
+
 fn sample_brownout_evidence() -> OverloadBrownoutEvidence {
     OverloadBrownoutEvidence {
         scheduler: Some(SchedulerEvidenceMetrics {
@@ -78,6 +102,34 @@ fn sample_brownout_evidence() -> OverloadBrownoutEvidence {
         outer_tail_risk_decision: TailRiskAdmissionDecision::Defer,
         previous_phase: OverloadBrownoutPhase::Observe,
         recovery_streak_windows: 0,
+        already_shed_surfaces: Vec::new(),
+    }
+}
+
+fn low_pressure_brownout_evidence(
+    previous_phase: OverloadBrownoutPhase,
+    recovery_streak_windows: u8,
+) -> OverloadBrownoutEvidence {
+    OverloadBrownoutEvidence {
+        scheduler: Some(SchedulerEvidenceMetrics {
+            wake_to_run_p50_ns: 8_000,
+            wake_to_run_p95_ns: 14_000,
+            wake_to_run_p99_ns: 24_000,
+            queue_residency_p50_ns: 10_000,
+            queue_residency_p95_ns: 16_000,
+            queue_residency_p99_ns: 21_000,
+            ready_backlog_p95: 4,
+            ready_backlog_p99: 8,
+            cancel_debt_p95: 1,
+            cancel_debt_p99: 2,
+            remote_steal_ratio_pct: Some(4),
+            cross_cohort_wake_p99_ns: Some(28_000),
+        }),
+        memory_pressure_bps: Some(3_200),
+        degradation_level: DegradationLevel::None,
+        outer_tail_risk_decision: TailRiskAdmissionDecision::Admit,
+        previous_phase,
+        recovery_streak_windows,
         already_shed_surfaces: Vec::new(),
     }
 }
@@ -286,4 +338,241 @@ fn brownout_policy_retains_summary_only_then_recovers_to_standalone_export() {
 
     assert_eq!(mock_exporter.exported_span_count(), 3);
     assert_eq!(exporter.load_shedding_stats().retained_summary_spans, 4);
+}
+
+#[test]
+fn disabled_brownout_policy_matches_export_all_sampling_behavior() {
+    let mock_exporter = MockOtlpHttpExporter::new(Duration::from_millis(0));
+    let exporter =
+        LoadSheddingTraceExporter::new(Box::new(mock_exporter.clone()), 8, Duration::from_secs(1));
+
+    let disabled = OverloadBrownoutLedger::evaluate(
+        &sample_brownout_evidence(),
+        &OverloadBrownoutProfile {
+            enabled: false,
+            ..OverloadBrownoutProfile::default()
+        },
+    );
+    assert_eq!(disabled.phase, OverloadBrownoutPhase::Normal);
+
+    let snapshot = exporter.update_brownout_policy(Some(&disabled));
+    assert_eq!(snapshot.action, OtlpBrownoutAction::ExportAll);
+    assert!(snapshot.fallback_used);
+    assert!(
+        snapshot
+            .shared_reason_codes
+            .contains(&OverloadBrownoutReason::Disabled)
+    );
+
+    let batch = create_flagged_priority_batch(
+        31,
+        &[
+            ("low", Some(0x01)),
+            ("high", Some(0x00)),
+            ("high", Some(0x01)),
+            ("low", None),
+        ],
+    );
+    exporter
+        .export(&batch)
+        .expect("disabled brownout mode should not fail export");
+    exporter
+        .process_queue()
+        .expect("disabled brownout mode should drain normally");
+
+    let exported_batches = mock_exporter.exported_batches();
+    assert_eq!(exported_batches.len(), 1);
+    assert_eq!(exported_batches[0].spans.len(), 3);
+    assert_eq!(
+        exported_batches[0]
+            .spans
+            .iter()
+            .filter(|span| {
+                span.attributes
+                    .iter()
+                    .any(|(key, value)| key == "otlp.priority" && value == "low")
+            })
+            .count(),
+        2,
+        "disabled mode should export low-priority spans exactly like standalone mode"
+    );
+    assert_eq!(exporter.brownout_dropped_spans_count(), 0);
+    assert_eq!(exporter.retained_summary_spans_count(), 0);
+    assert_eq!(exporter.dropped_spans_count(), 0);
+}
+
+#[test]
+fn brownout_and_queue_drops_do_not_double_count_same_span() {
+    let mock_exporter = MockOtlpHttpExporter::new(Duration::from_millis(0));
+    let exporter =
+        LoadSheddingTraceExporter::new(Box::new(mock_exporter.clone()), 1, Duration::from_secs(1));
+
+    let brownout = OverloadBrownoutLedger::evaluate(
+        &sample_brownout_evidence(),
+        &OverloadBrownoutProfile::default(),
+    );
+    assert_eq!(brownout.phase, OverloadBrownoutPhase::Degrade);
+    exporter.update_brownout_policy(Some(&brownout));
+
+    let first_batch = create_priority_batch(41, &["high", "high", "high"]);
+    let second_batch = create_priority_batch(42, &["low", "high", "low"]);
+    exporter
+        .export(&first_batch)
+        .expect("first degrade-mode export should succeed");
+    exporter
+        .export(&second_batch)
+        .expect("second degrade-mode export should succeed");
+    exporter
+        .process_queue()
+        .expect("queue drain should succeed after mixed brownout drops");
+
+    let total_sampled_spans = (first_batch.spans.len() + second_batch.spans.len()) as u64;
+    let queue_dropped_spans = exporter.dropped_spans_count();
+    let brownout_dropped_spans = exporter.brownout_dropped_spans_count();
+    let exported_spans = mock_exporter.exported_span_count() as u64;
+
+    assert_eq!(queue_dropped_spans, 3);
+    assert_eq!(brownout_dropped_spans, 2);
+    assert_eq!(exported_spans, 1);
+    assert_eq!(
+        queue_dropped_spans + brownout_dropped_spans + exported_spans,
+        total_sampled_spans,
+        "each sampled span must contribute to exactly one terminal accounting bucket"
+    );
+}
+
+#[test]
+fn recovery_hysteresis_is_idempotent_until_reenable_window_completes() {
+    let mock_exporter = MockOtlpHttpExporter::new(Duration::from_millis(0));
+    let exporter =
+        LoadSheddingTraceExporter::new(Box::new(mock_exporter.clone()), 4, Duration::from_secs(1));
+
+    let recovering = OverloadBrownoutLedger::evaluate(
+        &low_pressure_brownout_evidence(OverloadBrownoutPhase::Degrade, 0),
+        &OverloadBrownoutProfile::default(),
+    );
+    assert_eq!(recovering.phase, OverloadBrownoutPhase::Recovery);
+
+    let first_snapshot = exporter.update_brownout_policy(Some(&recovering));
+    let second_snapshot = exporter.update_brownout_policy(Some(&recovering));
+    assert_eq!(first_snapshot, second_snapshot);
+    assert_eq!(first_snapshot.action, OtlpBrownoutAction::DropLowPriority);
+
+    let reenabled = OverloadBrownoutLedger::evaluate(
+        &low_pressure_brownout_evidence(OverloadBrownoutPhase::Degrade, 1),
+        &OverloadBrownoutProfile::default(),
+    );
+    assert_eq!(reenabled.phase, OverloadBrownoutPhase::Normal);
+
+    let reenabled_snapshot = exporter.update_brownout_policy(Some(&reenabled));
+    assert_eq!(reenabled_snapshot.action, OtlpBrownoutAction::ExportAll);
+    assert!(!reenabled_snapshot.fallback_used);
+
+    let batch = create_priority_batch(51, &["low", "high"]);
+    exporter
+        .export(&batch)
+        .expect("re-enabled exporter should accept export");
+    exporter
+        .process_queue()
+        .expect("re-enabled exporter should drain normally");
+
+    let exported_batches = mock_exporter.exported_batches();
+    assert_eq!(exported_batches.len(), 1);
+    assert_eq!(exported_batches[0].spans.len(), 2);
+}
+
+#[test]
+fn missing_brownout_evidence_uses_conservative_fallback_reason_codes() {
+    let mock_exporter = MockOtlpHttpExporter::new(Duration::from_millis(0));
+    let exporter =
+        LoadSheddingTraceExporter::new(Box::new(mock_exporter.clone()), 4, Duration::from_secs(1));
+
+    let missing_evidence = OverloadBrownoutLedger::evaluate(
+        &OverloadBrownoutEvidence {
+            scheduler: None,
+            memory_pressure_bps: None,
+            degradation_level: DegradationLevel::Moderate,
+            outer_tail_risk_decision: TailRiskAdmissionDecision::Defer,
+            previous_phase: OverloadBrownoutPhase::Observe,
+            recovery_streak_windows: 0,
+            already_shed_surfaces: Vec::new(),
+        },
+        &OverloadBrownoutProfile::default(),
+    );
+    assert_eq!(missing_evidence.phase, OverloadBrownoutPhase::Degrade);
+    assert!(missing_evidence.fallback_used);
+
+    let snapshot = exporter.update_brownout_policy(Some(&missing_evidence));
+    assert_eq!(snapshot.action, OtlpBrownoutAction::DropLowPriority);
+    assert!(snapshot.fallback_used);
+    assert!(
+        snapshot
+            .shared_reason_codes
+            .contains(&OverloadBrownoutReason::MissingEvidenceFallback)
+    );
+
+    let batch = create_priority_batch(56, &["low", "high"]);
+    exporter
+        .export(&batch)
+        .expect("missing-evidence fallback export should succeed");
+    exporter
+        .process_queue()
+        .expect("missing-evidence fallback drain should succeed");
+
+    let exported_batches = mock_exporter.exported_batches();
+    assert_eq!(exported_batches.len(), 1);
+    assert_eq!(exported_batches[0].spans.len(), 1);
+    assert_eq!(exported_batches[0].spans[0].attributes[1].1, "high");
+}
+
+#[test]
+fn exporter_metadata_surfaces_do_not_leak_span_attributes() {
+    let mock_exporter = MockOtlpHttpExporter::new(Duration::from_millis(0));
+    let exporter =
+        LoadSheddingTraceExporter::new(Box::new(mock_exporter), 4, Duration::from_secs(1));
+
+    let brownout = OverloadBrownoutLedger::evaluate(
+        &sample_brownout_evidence(),
+        &OverloadBrownoutProfile::default(),
+    );
+    exporter.update_brownout_policy(Some(&brownout));
+
+    let batch = SpanBatch {
+        batch_id: 61,
+        spans: vec![OtlpSpan::new(
+            "span-61-0".to_string(),
+            "secret-bearing-operation".to_string(),
+            1_000_000_000,
+            1_000_001_000,
+            vec![
+                (
+                    "authorization".to_string(),
+                    "Bearer super-secret-token".to_string(),
+                ),
+                ("otlp.priority".to_string(), "low".to_string()),
+            ],
+        )],
+        created_at: Instant::now(),
+    };
+    exporter
+        .export(&batch)
+        .expect("metadata redaction probe export should succeed");
+
+    let snapshot_debug = format!("{:?}", exporter.brownout_policy_snapshot());
+    let stats_debug = format!("{:?}", exporter.load_shedding_stats());
+
+    for leaked_value in [
+        "authorization",
+        "Bearer super-secret-token",
+        "secret-bearing-operation",
+    ] {
+        assert!(
+            !snapshot_debug.contains(leaked_value),
+            "policy snapshots must not leak span payload metadata"
+        );
+        assert!(
+            !stats_debug.contains(leaked_value),
+            "load shedding stats must not leak span payload metadata"
+        );
+    }
 }

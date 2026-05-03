@@ -5230,3 +5230,31 @@ path = "fuzz_targets/h2_settings_max_concurrent_streams_decrease_below_active.rs
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "h2_settings_with_padding_disable_settings"
+path = "fuzz_targets/h2_settings_with_padding_disable_settings.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "h2_request_pseudo_path_with_unicode"
+path = "fuzz_targets/h2_request_pseudo_path_with_unicode.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "h2_request_with_invalid_pseudo_header_combination"
+path = "fuzz_targets/h2_request_with_invalid_pseudo_header_combination.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "h2_request_pseudo_path_starting_without_slash"
+path = "fuzz_targets/h2_request_pseudo_path_starting_without_slash.rs"
+test = false
+doc = false
+bench = false

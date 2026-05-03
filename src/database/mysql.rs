@@ -1216,6 +1216,13 @@ pub struct MySqlConnectOptions {
     /// as `caching_sha2_password` unless the operator confirms that
     /// downgrade risk separately.
     pub insecure_allow_auth_switch_downgrade: bool,
+    /// br-asupersync-charset-negotiation: requested character set for
+    /// the connection. If specified, the client validates that the server
+    /// supports a compatible charset during handshake. Setting this to
+    /// `utf8mb4` ensures 4-byte UTF-8 sequences are supported; if the
+    /// server only supports `utf8mb3`, connection will fail-fast with
+    /// a clear error rather than silently accepting data corruption.
+    pub requested_charset: Option<String>,
 }
 
 // br-asupersync-fldb34 — manual Debug impl that redacts the password field.
@@ -1240,6 +1247,7 @@ impl std::fmt::Debug for MySqlConnectOptions {
                 "insecure_allow_auth_switch_downgrade",
                 &self.insecure_allow_auth_switch_downgrade,
             )
+            .field("requested_charset", &self.requested_charset)
             .finish()
     }
 }
@@ -1432,6 +1440,7 @@ impl MySqlConnectOptions {
 
         let mut connect_timeout = None;
         let mut ssl_mode = SslMode::Disabled;
+        let mut requested_charset = None;
 
         // Parse query parameters
         if !params.is_empty() {
@@ -1459,6 +1468,10 @@ impl MySqlConnectOptions {
                         })?;
                         connect_timeout = Some(std::time::Duration::from_secs(secs));
                     }
+                    "charset" => {
+                        // Store requested charset for validation during handshake
+                        requested_charset = Some(value);
+                    }
                     _ => {
                         // Unknown parameters are silently ignored for forward-compat.
                     }
@@ -1485,6 +1498,7 @@ impl MySqlConnectOptions {
             // struct-update syntax with the field set explicitly.
             insecure_legacy_mysql_native_password: false,
             insecure_allow_auth_switch_downgrade: false,
+            requested_charset,
         })
     }
 }
@@ -2026,6 +2040,11 @@ impl MySqlConnection {
         self.inner.capabilities =
             Self::negotiated_capabilities(handshake.capabilities, client_caps);
 
+        // br-asupersync-charset-negotiation: validate requested charset compatibility
+        if let Some(requested) = &options.requested_charset {
+            Self::validate_charset_compatibility(requested, handshake.charset)?;
+        }
+
         buf.write_u32_le(client_caps);
         buf.write_u32_le(16_777_215); // Max packet size
         buf.write_byte(handshake.charset); // Character set
@@ -2106,6 +2125,52 @@ impl MySqlConnection {
         }
 
         client_caps
+    }
+
+    /// Validate that the server's charset is compatible with the requested charset.
+    /// Fails fast with clear error instead of silently accepting data corruption.
+    fn validate_charset_compatibility(requested: &str, server_charset_id: u8) -> Result<(), MySqlError> {
+        // MySQL charset ID mappings (common ones)
+        // See: https://dev.mysql.com/doc/refman/8.0/en/charset-charsets.html
+        let server_charset_name = match server_charset_id {
+            33 => "utf8",      // utf8mb3 (legacy, 3-byte max)
+            45 => "utf8mb4",   // utf8mb4 (modern, 4-byte support)
+            8 => "latin1",     // latin1
+            _ => "unknown",    // Other charsets
+        };
+
+        // Requested charset normalization (handle common aliases)
+        let normalized_requested = match requested.to_lowercase().as_str() {
+            "utf8mb4" => "utf8mb4",
+            "utf8" => "utf8",  // Ambiguous - could mean utf8mb3 or utf8mb4
+            "utf8mb3" => "utf8",
+            "latin1" => "latin1",
+            other => other,
+        };
+
+        // Compatibility check
+        match (normalized_requested, server_charset_name) {
+            // Exact matches are OK
+            ("utf8mb4", "utf8mb4") |
+            ("utf8", "utf8") |
+            ("latin1", "latin1") => Ok(()),
+
+            // utf8mb3 (server) cannot support utf8mb4 (requested) - DATA CORRUPTION RISK
+            ("utf8mb4", "utf8") => Err(MySqlError::InvalidParameter(format!(
+                "charset incompatibility: client requested '{}' but server only supports '{}' \
+                 (charset ID {}). utf8mb3 cannot store 4-byte UTF-8 sequences like emojis. \
+                 Use server charset='utf8mb4' or remove charset parameter to accept server default.",
+                requested, server_charset_name, server_charset_id
+            ))),
+
+            // Other mismatches
+            (req, srv) if req != srv => Err(MySqlError::InvalidParameter(format!(
+                "charset mismatch: client requested '{}' but server uses '{}' (charset ID {})",
+                requested, server_charset_name, server_charset_id
+            ))),
+
+            _ => Ok(()),
+        }
     }
 
     #[inline]
@@ -6280,12 +6345,61 @@ mod tests {
     }
 
     #[test]
-    fn test_connect_options_unknown_params_ignored() {
+    fn test_connect_options_charset_param_parsed() {
         let opts =
             MySqlConnectOptions::parse("mysql://user@localhost/db?charset=utf8mb4&unknown=value")
                 .unwrap();
-        // Should parse without error; unknown params silently dropped.
+        // charset parameter should now be parsed and stored
         assert_eq!(opts.host, "localhost");
+        assert_eq!(opts.requested_charset, Some("utf8mb4".to_string()));
+
+        // Test without charset parameter
+        let opts2 = MySqlConnectOptions::parse("mysql://user@localhost/db").unwrap();
+        assert_eq!(opts2.requested_charset, None);
+    }
+
+    #[test]
+    fn test_charset_validation_utf8mb4_compatible() {
+        // utf8mb4 request + utf8mb4 server = OK
+        assert!(MySqlConnection::validate_charset_compatibility("utf8mb4", 45).is_ok());
+
+        // utf8 request + utf8 server = OK
+        assert!(MySqlConnection::validate_charset_compatibility("utf8", 33).is_ok());
+
+        // latin1 request + latin1 server = OK
+        assert!(MySqlConnection::validate_charset_compatibility("latin1", 8).is_ok());
+    }
+
+    #[test]
+    fn test_charset_validation_utf8mb4_incompatible() {
+        // utf8mb4 request + utf8mb3 server = FAIL (data corruption risk)
+        let result = MySqlConnection::validate_charset_compatibility("utf8mb4", 33);
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        match err {
+            MySqlError::InvalidParameter(msg) => {
+                assert!(msg.contains("charset incompatibility"));
+                assert!(msg.contains("utf8mb4"));
+                assert!(msg.contains("utf8mb3 cannot store 4-byte UTF-8 sequences"));
+            }
+            _ => panic!("Expected InvalidParameter error, got {:?}", err),
+        }
+    }
+
+    #[test]
+    fn test_charset_validation_other_mismatches() {
+        // utf8 request + latin1 server = FAIL
+        let result = MySqlConnection::validate_charset_compatibility("utf8", 8);
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        match err {
+            MySqlError::InvalidParameter(msg) => {
+                assert!(msg.contains("charset mismatch"));
+                assert!(msg.contains("utf8"));
+                assert!(msg.contains("latin1"));
+            }
+            _ => panic!("Expected InvalidParameter error, got {:?}", err),
+        }
     }
 
     #[test]
@@ -6627,7 +6741,7 @@ mod tests {
     }
 
     #[test]
-    fn connect_ignores_charset_query_param_without_post_auth_set_names_query() {
+    fn connect_validates_charset_compatibility_without_post_auth_set_names_query() {
         use std::io::ErrorKind;
 
         let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind listener");
@@ -6676,7 +6790,7 @@ mod tests {
 
             let err = stream
                 .read_exact(&mut header)
-                .expect_err("charset query param must not trigger post-auth COM_QUERY");
+                .expect_err("charset validation during handshake must not trigger post-auth COM_QUERY");
             assert!(
                 matches!(err.kind(), ErrorKind::WouldBlock | ErrorKind::TimedOut),
                 "expected timeout waiting for forbidden post-auth query, got {err:?}"
@@ -6695,7 +6809,7 @@ mod tests {
         match outcome {
             Outcome::Ok(_conn) => {}
             other => {
-                panic!("expected connect success without charset startup query, got {other:?}")
+                panic!("expected connect success with charset validation during handshake, got {other:?}")
             }
         }
 

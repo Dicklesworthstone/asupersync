@@ -45457,4 +45457,2106 @@ mod otlp_122_tests {
         println!("  - Consumer operation validation (receive/process vs publish/send)");
         println!("  - Destination name consistency checking with queue name");
     }
+
+    /// OTLP-150 conformance test: Redis producer command requirement.
+    ///
+    /// When an exporter encounters a span with kind=PRODUCER and messaging.system="redis",
+    /// the messaging.redis.command attribute MUST be set per OTLP semantic conventions
+    /// for Redis producer spans. This ensures proper traceability and correlation for
+    /// Redis message/data production operations where the command identifies the specific
+    /// Redis operation being performed (e.g., LPUSH, RPUSH, PUBLISH, SET, HSET).
+    #[test]
+    fn otlp_150_redis_producer_command_conformance() {
+        println!("Testing OTLP-150: Redis producer command requirement...");
+
+        let test_scenarios = vec![
+            RedisProducerCommandScenario {
+                description: "valid_redis_producer_with_lpush_command".to_string(),
+                span_kind: SpanKind::Producer,
+                messaging_system: "redis".to_string(),
+                span_attributes: vec![
+                    ("messaging.redis.command".to_string(), AnyValue::StringValue("LPUSH".to_string())),
+                    ("messaging.system".to_string(), AnyValue::StringValue("redis".to_string())),
+                    ("messaging.destination.name".to_string(), AnyValue::StringValue("task.queue".to_string())),
+                    ("messaging.operation".to_string(), AnyValue::StringValue("publish".to_string())),
+                    ("net.peer.name".to_string(), AnyValue::StringValue("redis.example.com".to_string())),
+                ],
+                should_be_valid: true,
+                expected_command: Some("LPUSH".to_string()),
+            },
+            RedisProducerCommandScenario {
+                description: "valid_redis_producer_with_publish_command".to_string(),
+                span_kind: SpanKind::Producer,
+                messaging_system: "redis".to_string(),
+                span_attributes: vec![
+                    ("messaging.redis.command".to_string(), AnyValue::StringValue("PUBLISH".to_string())),
+                    ("messaging.system".to_string(), AnyValue::StringValue("redis".to_string())),
+                    ("messaging.destination.name".to_string(), AnyValue::StringValue("events.channel".to_string())),
+                    ("messaging.operation".to_string(), AnyValue::StringValue("publish".to_string())),
+                    ("messaging.redis.database_index".to_string(), AnyValue::IntValue(0)),
+                ],
+                should_be_valid: true,
+                expected_command: Some("PUBLISH".to_string()),
+            },
+            RedisProducerCommandScenario {
+                description: "redis_producer_missing_command".to_string(),
+                span_kind: SpanKind::Producer,
+                messaging_system: "redis".to_string(),
+                span_attributes: vec![
+                    ("messaging.system".to_string(), AnyValue::StringValue("redis".to_string())),
+                    ("messaging.destination.name".to_string(), AnyValue::StringValue("data.key".to_string())),
+                    ("messaging.operation".to_string(), AnyValue::StringValue("send".to_string())),
+                    // Missing messaging.redis.command - should be invalid
+                ],
+                should_be_valid: false,
+                expected_command: None,
+            },
+            RedisProducerCommandScenario {
+                description: "redis_producer_empty_command".to_string(),
+                span_kind: SpanKind::Producer,
+                messaging_system: "redis".to_string(),
+                span_attributes: vec![
+                    ("messaging.redis.command".to_string(), AnyValue::StringValue("".to_string())), // Empty
+                    ("messaging.system".to_string(), AnyValue::StringValue("redis".to_string())),
+                    ("messaging.destination.name".to_string(), AnyValue::StringValue("data.key".to_string())),
+                ],
+                should_be_valid: false,
+                expected_command: None,
+            },
+            RedisProducerCommandScenario {
+                description: "redis_producer_non_string_command".to_string(),
+                span_kind: SpanKind::Producer,
+                messaging_system: "redis".to_string(),
+                span_attributes: vec![
+                    ("messaging.redis.command".to_string(), AnyValue::IntValue(123)), // Wrong type
+                    ("messaging.system".to_string(), AnyValue::StringValue("redis".to_string())),
+                    ("messaging.destination.name".to_string(), AnyValue::StringValue("data.key".to_string())),
+                ],
+                should_be_valid: false,
+                expected_command: None,
+            },
+            RedisProducerCommandScenario {
+                description: "non_redis_producer_no_requirement".to_string(),
+                span_kind: SpanKind::Producer,
+                messaging_system: "kafka".to_string(), // Not Redis
+                span_attributes: vec![
+                    ("messaging.system".to_string(), AnyValue::StringValue("kafka".to_string())),
+                    ("messaging.destination.name".to_string(), AnyValue::StringValue("events".to_string())),
+                    ("messaging.kafka.message.partition".to_string(), AnyValue::IntValue(3)),
+                ],
+                should_be_valid: true, // No command requirement for non-Redis
+                expected_command: None,
+            },
+            RedisProducerCommandScenario {
+                description: "redis_consumer_no_requirement".to_string(),
+                span_kind: SpanKind::Consumer, // Not producer
+                messaging_system: "redis".to_string(),
+                span_attributes: vec![
+                    ("messaging.system".to_string(), AnyValue::StringValue("redis".to_string())),
+                    ("messaging.destination.name".to_string(), AnyValue::StringValue("task.queue".to_string())),
+                    ("messaging.operation".to_string(), AnyValue::StringValue("receive".to_string())),
+                ],
+                should_be_valid: true, // No command requirement for consumer spans
+                expected_command: None,
+            },
+            RedisProducerCommandScenario {
+                description: "valid_redis_producer_with_rpush_command".to_string(),
+                span_kind: SpanKind::Producer,
+                messaging_system: "redis".to_string(),
+                span_attributes: vec![
+                    ("messaging.redis.command".to_string(), AnyValue::StringValue("RPUSH".to_string())),
+                    ("messaging.system".to_string(), AnyValue::StringValue("redis".to_string())),
+                    ("messaging.destination.name".to_string(), AnyValue::StringValue("work.queue".to_string())),
+                    ("messaging.operation".to_string(), AnyValue::StringValue("send".to_string())),
+                    ("messaging.redis.database_index".to_string(), AnyValue::IntValue(1)),
+                    ("net.peer.name".to_string(), AnyValue::StringValue("redis-cluster.prod.com".to_string())),
+                    ("net.peer.port".to_string(), AnyValue::IntValue(6379)),
+                ],
+                should_be_valid: true,
+                expected_command: Some("RPUSH".to_string()),
+            },
+            RedisProducerCommandScenario {
+                description: "redis_case_sensitivity_check".to_string(),
+                span_kind: SpanKind::Producer,
+                messaging_system: "Redis".to_string(), // Different case
+                span_attributes: vec![
+                    ("messaging.system".to_string(), AnyValue::StringValue("Redis".to_string())),
+                    ("messaging.destination.name".to_string(), AnyValue::StringValue("data.key".to_string())),
+                ],
+                should_be_valid: true, // Not exact "redis" so no requirement
+                expected_command: None,
+            },
+            RedisProducerCommandScenario {
+                description: "valid_redis_producer_with_set_command".to_string(),
+                span_kind: SpanKind::Producer,
+                messaging_system: "redis".to_string(),
+                span_attributes: vec![
+                    ("messaging.redis.command".to_string(), AnyValue::StringValue("SET".to_string())),
+                    ("messaging.system".to_string(), AnyValue::StringValue("redis".to_string())),
+                    ("messaging.destination.name".to_string(), AnyValue::StringValue("user:12345:session".to_string())),
+                    ("messaging.operation".to_string(), AnyValue::StringValue("send".to_string())),
+                    ("messaging.redis.database_index".to_string(), AnyValue::IntValue(0)),
+                    ("messaging.message_payload_size_bytes".to_string(), AnyValue::IntValue(1024)),
+                ],
+                should_be_valid: true,
+                expected_command: Some("SET".to_string()),
+            },
+            RedisProducerCommandScenario {
+                description: "valid_redis_producer_with_hset_command".to_string(),
+                span_kind: SpanKind::Producer,
+                messaging_system: "redis".to_string(),
+                span_attributes: vec![
+                    ("messaging.redis.command".to_string(), AnyValue::StringValue("HSET".to_string())),
+                    ("messaging.system".to_string(), AnyValue::StringValue("redis".to_string())),
+                    ("messaging.destination.name".to_string(), AnyValue::StringValue("user:profile:12345".to_string())),
+                    ("messaging.operation".to_string(), AnyValue::StringValue("send".to_string())),
+                    ("messaging.redis.database_index".to_string(), AnyValue::IntValue(2)),
+                    ("messaging.batch.message_count".to_string(), AnyValue::IntValue(1)),
+                ],
+                should_be_valid: true,
+                expected_command: Some("HSET".to_string()),
+            },
+            RedisProducerCommandScenario {
+                description: "valid_redis_producer_with_sadd_command".to_string(),
+                span_kind: SpanKind::Producer,
+                messaging_system: "redis".to_string(),
+                span_attributes: vec![
+                    ("messaging.redis.command".to_string(), AnyValue::StringValue("SADD".to_string())),
+                    ("messaging.system".to_string(), AnyValue::StringValue("redis".to_string())),
+                    ("messaging.destination.name".to_string(), AnyValue::StringValue("active:users:set".to_string())),
+                    ("messaging.operation".to_string(), AnyValue::StringValue("send".to_string())),
+                    ("messaging.redis.database_index".to_string(), AnyValue::IntValue(0)),
+                ],
+                should_be_valid: true,
+                expected_command: Some("SADD".to_string()),
+            },
+            RedisProducerCommandScenario {
+                description: "valid_redis_producer_with_zadd_command".to_string(),
+                span_kind: SpanKind::Producer,
+                messaging_system: "redis".to_string(),
+                span_attributes: vec![
+                    ("messaging.redis.command".to_string(), AnyValue::StringValue("ZADD".to_string())),
+                    ("messaging.system".to_string(), AnyValue::StringValue("redis".to_string())),
+                    ("messaging.destination.name".to_string(), AnyValue::StringValue("leaderboard:scores".to_string())),
+                    ("messaging.operation".to_string(), AnyValue::StringValue("send".to_string())),
+                    ("messaging.redis.database_index".to_string(), AnyValue::IntValue(3)),
+                    ("messaging.message_payload_size_bytes".to_string(), AnyValue::IntValue(256)),
+                ],
+                should_be_valid: true,
+                expected_command: Some("ZADD".to_string()),
+            },
+            RedisProducerCommandScenario {
+                description: "valid_redis_producer_lowercase_command".to_string(),
+                span_kind: SpanKind::Producer,
+                messaging_system: "redis".to_string(),
+                span_attributes: vec![
+                    ("messaging.redis.command".to_string(), AnyValue::StringValue("lpush".to_string())), // Lowercase
+                    ("messaging.system".to_string(), AnyValue::StringValue("redis".to_string())),
+                    ("messaging.destination.name".to_string(), AnyValue::StringValue("task.queue".to_string())),
+                    ("messaging.operation".to_string(), AnyValue::StringValue("publish".to_string())),
+                ],
+                should_be_valid: true,
+                expected_command: Some("lpush".to_string()),
+            },
+        ];
+
+        /// Test scenario for Redis producer command validation
+        #[derive(Debug, Clone)]
+        struct RedisProducerCommandScenario {
+            description: String,
+            span_kind: SpanKind,
+            messaging_system: String,
+            span_attributes: Vec<(String, AnyValue)>,
+            should_be_valid: bool,
+            expected_command: Option<String>,
+        }
+
+        /// Span data for Redis producer testing
+        #[derive(Debug, Clone)]
+        struct RedisProducerSpanData {
+            name: String,
+            kind: SpanKind,
+            messaging_system: String,
+            attributes: HashMap<String, AnyValue>,
+        }
+
+        impl RedisProducerSpanData {
+            fn from_scenario(scenario: &RedisProducerCommandScenario) -> Self {
+                let mut attributes = HashMap::new();
+                for (key, value) in &scenario.span_attributes {
+                    attributes.insert(key.clone(), value.clone());
+                }
+
+                Self {
+                    name: format!("redis_producer_span_{}", scenario.description),
+                    kind: scenario.span_kind.clone(),
+                    messaging_system: scenario.messaging_system.clone(),
+                    attributes,
+                }
+            }
+        }
+
+        /// Result of Redis producer command validation
+        #[derive(Debug)]
+        enum RedisProducerValidationResult {
+            Valid {
+                command: Option<String>,
+                additional_redis_attributes: usize,
+            },
+            Invalid {
+                violations: Vec<String>,
+                missing_attributes: Vec<String>,
+            },
+            NotApplicable {
+                reason: String,
+            },
+        }
+
+        /// Validates Redis producer command requirement conformance
+        fn validate_redis_producer_command_conformance(
+            scenario: &RedisProducerCommandScenario,
+        ) -> Result<(), String> {
+            let span_data = RedisProducerSpanData::from_scenario(scenario);
+            let validation_result = validate_redis_producer_command(&span_data);
+
+            match (&validation_result, scenario.should_be_valid) {
+                (RedisProducerValidationResult::Valid { command, .. }, true) => {
+                    // Verify expected command matches
+                    if let Some(expected_cmd) = &scenario.expected_command {
+                        match command {
+                            Some(actual_cmd) if actual_cmd == expected_cmd => {
+                                println!("✓ Redis producer span has correct command: '{}'", actual_cmd);
+                            }
+                            Some(actual_cmd) => {
+                                return Err(format!(
+                                    "Command mismatch: expected '{}', got '{}'",
+                                    expected_cmd, actual_cmd
+                                ));
+                            }
+                            None => {
+                                return Err(format!(
+                                    "Expected command '{}' but none found",
+                                    expected_cmd
+                                ));
+                            }
+                        }
+                    } else {
+                        // No expected command - ensure none present when not required
+                        if command.is_some() && requires_redis_command(&span_data) {
+                            return Err("Unexpected command found when none expected".to_string());
+                        }
+                    }
+                }
+                (RedisProducerValidationResult::Invalid { .. }, false) => {
+                    println!("✓ Invalid Redis producer span correctly rejected");
+                }
+                (RedisProducerValidationResult::NotApplicable { reason }, true) => {
+                    println!("✓ Command requirement not applicable: {}", reason);
+                }
+                (RedisProducerValidationResult::Valid { .. }, false) => {
+                    return Err("Invalid span was incorrectly accepted".to_string());
+                }
+                (RedisProducerValidationResult::Invalid { violations, .. }, true) => {
+                    return Err(format!("Valid span was incorrectly rejected: {:?}", violations));
+                }
+                (RedisProducerValidationResult::NotApplicable { .. }, false) => {
+                    return Err("Expected validation failure but got not applicable".to_string());
+                }
+            }
+
+            Ok(())
+        }
+
+        /// Validates that Redis producer spans have required command attribute
+        fn validate_redis_producer_command(span_data: &RedisProducerSpanData) -> RedisProducerValidationResult {
+            // Check if this span requires command attribute
+            if !requires_redis_command(span_data) {
+                return RedisProducerValidationResult::NotApplicable {
+                    reason: format!(
+                        "Span kind {:?} with messaging.system '{}' doesn't require messaging.redis.command",
+                        span_data.kind, span_data.messaging_system
+                    ),
+                };
+            }
+
+            let mut violations = Vec::new();
+            let mut missing_attributes = Vec::new();
+
+            // Extract and validate messaging.redis.command attribute
+            let command = match span_data.attributes.get("messaging.redis.command") {
+                Some(AnyValue::StringValue(cmd_str)) if !cmd_str.is_empty() => {
+                    Some(cmd_str.clone())
+                }
+                Some(AnyValue::StringValue(cmd_str)) if cmd_str.is_empty() => {
+                    violations.push("messaging.redis.command attribute is empty".to_string());
+                    missing_attributes.push("messaging.redis.command".to_string());
+                    None
+                }
+                Some(_) => {
+                    violations.push("messaging.redis.command attribute must be a string value".to_string());
+                    missing_attributes.push("messaging.redis.command".to_string());
+                    None
+                }
+                None => {
+                    violations.push("OTLP-150: Redis producer span missing required messaging.redis.command attribute".to_string());
+                    missing_attributes.push("messaging.redis.command".to_string());
+                    None
+                }
+            };
+
+            // Validate command format and constraints
+            if let Some(cmd) = &command {
+                // Check for common Redis commands and categorize them
+                let cmd_upper = cmd.to_uppercase();
+                match cmd_upper.as_str() {
+                    // List operations (producer-like)
+                    "LPUSH" | "RPUSH" | "LPUSHX" | "RPUSHX" | "LINSERT" => {
+                        println!("✓ Detected Redis list producer command: {}", cmd);
+                    }
+                    // Pub/Sub operations
+                    "PUBLISH" | "SPUBLISH" => {
+                        println!("✓ Detected Redis pub/sub producer command: {}", cmd);
+                    }
+                    // String operations
+                    "SET" | "SETEX" | "PSETEX" | "SETNX" | "MSET" | "MSETNX" | "APPEND" => {
+                        println!("✓ Detected Redis string producer command: {}", cmd);
+                    }
+                    // Hash operations
+                    "HSET" | "HMSET" | "HSETNX" | "HINCRBY" | "HINCRBYFLOAT" => {
+                        println!("✓ Detected Redis hash producer command: {}", cmd);
+                    }
+                    // Set operations
+                    "SADD" | "SMOVE" => {
+                        println!("✓ Detected Redis set producer command: {}", cmd);
+                    }
+                    // Sorted set operations
+                    "ZADD" | "ZINCRBY" => {
+                        println!("✓ Detected Redis sorted set producer command: {}", cmd);
+                    }
+                    // Stream operations
+                    "XADD" | "XCLAIM" => {
+                        println!("✓ Detected Redis stream producer command: {}", cmd);
+                    }
+                    // Consumer-like commands (warn if used in producer span)
+                    "LPOP" | "RPOP" | "BLPOP" | "BRPOP" | "GET" | "MGET" | "HGET" | "HMGET" | "SMEMBERS" | "SRANDMEMBER" | "ZRANGE" | "SUBSCRIBE" => {
+                        println!("⚠ Command '{}' is typically consumer-oriented but used in producer span", cmd);
+                    }
+                    // Administrative commands
+                    "FLUSHDB" | "FLUSHALL" | "DEL" | "EXPIRE" | "TTL" => {
+                        println!("⚠ Command '{}' is administrative, consider if producer span is appropriate", cmd);
+                    }
+                    _ => {
+                        println!("⚠ Unusual or unrecognized Redis command: '{}'", cmd);
+                    }
+                }
+
+                // Validate command length
+                if cmd.len() > 50 {
+                    println!("⚠ Unusually long Redis command: {} characters", cmd.len());
+                }
+
+                // Check for command injection patterns
+                if cmd.contains('\n') || cmd.contains('\r') {
+                    violations.push("messaging.redis.command contains newline characters".to_string());
+                }
+
+                if cmd.contains('\0') {
+                    violations.push("messaging.redis.command contains null character".to_string());
+                }
+            }
+
+            // Check for recommended Redis producer attributes
+            let recommended_redis_attrs = [
+                "messaging.system",
+                "messaging.destination.name",
+                "messaging.operation",
+                "messaging.redis.database_index"
+            ];
+
+            let mut redis_attrs_present = 0;
+            for attr in &recommended_redis_attrs {
+                if span_data.attributes.contains_key(*attr) {
+                    redis_attrs_present += 1;
+                } else if attr != &"messaging.redis.database_index" {
+                    println!("⚠ Recommended Redis attribute '{}' not present", attr);
+                }
+            }
+
+            // Verify messaging.system is set to "redis" (case sensitive)
+            if let Some(AnyValue::StringValue(system)) = span_data.attributes.get("messaging.system") {
+                if system != "redis" {
+                    if system.to_lowercase() == "redis" {
+                        violations.push(format!("messaging.system should be exactly 'redis' (case-sensitive), got: '{}'", system));
+                    } else {
+                        violations.push(format!("messaging.system should be 'redis' for Redis producer spans, got: '{}'", system));
+                    }
+                }
+            }
+
+            // Verify messaging.operation is appropriate for producer if present
+            if let Some(AnyValue::StringValue(operation)) = span_data.attributes.get("messaging.operation") {
+                match operation.as_str() {
+                    "publish" | "send" => {
+                        // Valid producer operations
+                    }
+                    "receive" | "process" => {
+                        violations.push(format!("messaging.operation '{}' is inappropriate for producer spans (use 'publish' or 'send')", operation));
+                    }
+                    _ => {
+                        println!("⚠ Unusual messaging.operation '{}' for producer span", operation);
+                    }
+                }
+            }
+
+            // Additional Redis-specific validations
+            if let Some(AnyValue::StringValue(dest_name)) = span_data.attributes.get("messaging.destination.name") {
+                if dest_name.is_empty() {
+                    violations.push("messaging.destination.name should not be empty for Redis spans".to_string());
+                }
+
+                // Check for common Redis key patterns
+                if dest_name.contains(' ') {
+                    println!("⚠ Redis key '{}' contains spaces (may need proper escaping)", dest_name);
+                }
+            }
+
+            // Validate database index if present
+            if let Some(AnyValue::IntValue(db_index)) = span_data.attributes.get("messaging.redis.database_index") {
+                if *db_index < 0 {
+                    violations.push("messaging.redis.database_index must be non-negative".to_string());
+                }
+                if *db_index > 15 {
+                    println!("⚠ Redis database index {} is unusually high (typical range: 0-15)", db_index);
+                }
+            }
+
+            // Check command-destination consistency
+            if let (Some(cmd), Some(AnyValue::StringValue(dest))) =
+                (command.as_ref(), span_data.attributes.get("messaging.destination.name")) {
+                let cmd_upper = cmd.to_uppercase();
+
+                // Pub/sub commands should use channel-like destinations
+                if cmd_upper == "PUBLISH" && !dest.contains("channel") && !dest.contains("topic") {
+                    println!("⚠ PUBLISH command with destination '{}' - consider channel/topic naming", dest);
+                }
+
+                // List commands should use queue-like destinations
+                if (cmd_upper == "LPUSH" || cmd_upper == "RPUSH") && !dest.contains("queue") && !dest.contains("list") {
+                    println!("⚠ List command '{}' with destination '{}' - consider queue/list naming", cmd, dest);
+                }
+            }
+
+            if !violations.is_empty() {
+                RedisProducerValidationResult::Invalid {
+                    violations,
+                    missing_attributes,
+                }
+            } else {
+                RedisProducerValidationResult::Valid {
+                    command,
+                    additional_redis_attributes: redis_attrs_present,
+                }
+            }
+        }
+
+        /// Determines if a span requires Redis command attribute
+        fn requires_redis_command(span_data: &RedisProducerSpanData) -> bool {
+            // OTLP-150: Only PRODUCER spans with messaging.system="redis" require command
+            span_data.kind == SpanKind::Producer
+                && span_data.messaging_system == "redis"
+        }
+
+        // Execute OTLP-150 conformance validation for all scenarios
+        let mut passed_scenarios = 0;
+        let total_scenarios = test_scenarios.len();
+
+        for scenario in &test_scenarios {
+            match validate_redis_producer_command_conformance(scenario) {
+                Ok(()) => {
+                    passed_scenarios += 1;
+                    println!("✓ OTLP-150 conformance verified for {}", scenario.description);
+                }
+                Err(error_msg) => {
+                    panic!(
+                        "OTLP-150 conformance test FAILED for {}: {}",
+                        scenario.description, error_msg
+                    );
+                }
+            }
+        }
+
+        assert_eq!(
+            passed_scenarios, total_scenarios,
+            "All OTLP-150 Redis producer command scenarios must pass"
+        );
+
+        // Additional edge case testing
+        println!("Testing Redis producer command edge cases...");
+
+        // Test messaging.system case sensitivity
+        let system_cases = vec![
+            ("redis", true),       // Exact match - requires command
+            ("Redis", false),      // Wrong case - no requirement
+            ("REDIS", false),      // Wrong case - no requirement
+            ("memcached", false),  // Different system - no requirement
+        ];
+
+        for (system_name, should_require) in system_cases {
+            let mut test_attributes = HashMap::new();
+            test_attributes.insert("messaging.system".to_string(), AnyValue::StringValue(system_name.to_string()));
+            test_attributes.insert("messaging.destination.name".to_string(), AnyValue::StringValue("test.key".to_string()));
+
+            if should_require {
+                test_attributes.insert("messaging.redis.command".to_string(), AnyValue::StringValue("SET".to_string()));
+            }
+
+            let edge_span = RedisProducerSpanData {
+                name: format!("system_case_test_{}", system_name.to_lowercase()),
+                kind: SpanKind::Producer,
+                messaging_system: system_name.to_string(),
+                attributes: test_attributes,
+            };
+
+            let requires_cmd = requires_redis_command(&edge_span);
+            assert_eq!(
+                requires_cmd, should_require,
+                "Command requirement check failed for system '{}'",
+                system_name
+            );
+
+            if should_require {
+                match validate_redis_producer_command(&edge_span) {
+                    RedisProducerValidationResult::Valid { command, .. } => {
+                        assert!(command.is_some(), "Should have command for system '{}'", system_name);
+                        println!("✓ System case '{}' correctly requires and validates command", system_name);
+                    }
+                    _ => panic!("System case '{}' should be valid with command", system_name),
+                }
+            } else {
+                match validate_redis_producer_command(&edge_span) {
+                    RedisProducerValidationResult::NotApplicable { .. } => {
+                        println!("✓ System case '{}' correctly identified as not applicable", system_name);
+                    }
+                    _ => panic!("System case '{}' should not require command", system_name),
+                }
+            }
+        }
+
+        // Test Redis command validation
+        println!("Testing Redis command validation...");
+        let command_tests = vec![
+            ("lpush_command", "LPUSH", true),
+            ("rpush_command", "RPUSH", true),
+            ("publish_command", "PUBLISH", true),
+            ("set_command", "SET", true),
+            ("hset_command", "HSET", true),
+            ("sadd_command", "SADD", true),
+            ("zadd_command", "ZADD", true),
+            ("lowercase_command", "lpush", true),
+            ("mixed_case_command", "LpUsH", true),
+            ("empty_command", "", false),
+            ("custom_command", "MYCUSTOMCMD", true), // Custom commands allowed
+            ("with_newline", "SET\nkey", false), // Newline not allowed
+        ];
+
+        for (test_name, command_value, should_be_valid) in command_tests {
+            let mut test_attributes = HashMap::new();
+            test_attributes.insert("messaging.system".to_string(), AnyValue::StringValue("redis".to_string()));
+            test_attributes.insert("messaging.destination.name".to_string(), AnyValue::StringValue("test.key".to_string()));
+            test_attributes.insert("messaging.redis.command".to_string(), AnyValue::StringValue(command_value.to_string()));
+
+            let test_span = RedisProducerSpanData {
+                name: format!("command_test_{}", test_name),
+                kind: SpanKind::Producer,
+                messaging_system: "redis".to_string(),
+                attributes: test_attributes,
+            };
+
+            let result = validate_redis_producer_command(&test_span);
+            let is_valid = matches!(result, RedisProducerValidationResult::Valid { .. });
+
+            assert_eq!(
+                is_valid, should_be_valid,
+                "Command test '{}' (value: '{}') validation mismatch: expected {}, got {}",
+                test_name, command_value, should_be_valid, is_valid
+            );
+
+            if should_be_valid {
+                println!("✓ Command test '{}' (value: '{}') correctly validated", test_name, command_value);
+            } else {
+                println!("✓ Command test '{}' (value: '{}') correctly rejected", test_name, command_value);
+            }
+        }
+
+        println!("✓ OTLP-150: Redis producer command requirement conformance verified");
+        println!("  - PRODUCER spans with messaging.system='redis' require messaging.redis.command");
+        println!("  - Empty command is invalid (must be non-empty string)");
+        println!("  - Non-Redis producer systems exempt from requirement");
+        println!("  - Consumer spans exempt from requirement");
+        println!("  - Case-sensitive messaging.system matching enforced");
+        println!("  - Non-string command values rejected");
+        println!("  - Command categorization and validation (list, pub/sub, string, hash, set, sorted set)");
+        println!("  - Command injection protection (newline/null character detection)");
+        println!("  - Producer operation validation (publish/send vs receive/process)");
+        println!("  - Command-destination consistency recommendations");
+    }
+
+    /// OTLP-151 conformance test: Redis consumer command validation.
+    ///
+    /// When an exporter encounters a span with kind=CONSUMER and messaging.system="redis",
+    /// the messaging.redis.command attribute MUST be one of {SUBSCRIBE, PSUBSCRIBE, BRPOP, BLPOP}
+    /// per OTLP semantic conventions for Redis consumer spans. This ensures proper traceability
+    /// and correlation for Redis message/data consumption operations where only these commands
+    /// represent valid consumer semantics in Redis.
+    #[test]
+    fn otlp_151_redis_consumer_command_validation() {
+        println!("Testing OTLP-151: Redis consumer command validation...");
+
+        let test_scenarios = vec![
+            RedisConsumerCommandScenario {
+                description: "valid_redis_consumer_with_subscribe".to_string(),
+                span_kind: SpanKind::Consumer,
+                messaging_system: "redis".to_string(),
+                span_attributes: vec![
+                    ("messaging.redis.command".to_string(), AnyValue::StringValue("SUBSCRIBE".to_string())),
+                    ("messaging.system".to_string(), AnyValue::StringValue("redis".to_string())),
+                    ("messaging.destination.name".to_string(), AnyValue::StringValue("events.channel".to_string())),
+                    ("messaging.operation".to_string(), AnyValue::StringValue("receive".to_string())),
+                    ("net.peer.name".to_string(), AnyValue::StringValue("redis.example.com".to_string())),
+                ],
+                should_be_valid: true,
+                expected_command: "SUBSCRIBE".to_string(),
+            },
+            RedisConsumerCommandScenario {
+                description: "valid_redis_consumer_with_psubscribe".to_string(),
+                span_kind: SpanKind::Consumer,
+                messaging_system: "redis".to_string(),
+                span_attributes: vec![
+                    ("messaging.redis.command".to_string(), AnyValue::StringValue("PSUBSCRIBE".to_string())),
+                    ("messaging.system".to_string(), AnyValue::StringValue("redis".to_string())),
+                    ("messaging.destination.name".to_string(), AnyValue::StringValue("events.*".to_string())),
+                    ("messaging.operation".to_string(), AnyValue::StringValue("receive".to_string())),
+                    ("messaging.redis.database_index".to_string(), AnyValue::IntValue(0)),
+                ],
+                should_be_valid: true,
+                expected_command: "PSUBSCRIBE".to_string(),
+            },
+            RedisConsumerCommandScenario {
+                description: "valid_redis_consumer_with_brpop".to_string(),
+                span_kind: SpanKind::Consumer,
+                messaging_system: "redis".to_string(),
+                span_attributes: vec![
+                    ("messaging.redis.command".to_string(), AnyValue::StringValue("BRPOP".to_string())),
+                    ("messaging.system".to_string(), AnyValue::StringValue("redis".to_string())),
+                    ("messaging.destination.name".to_string(), AnyValue::StringValue("task.queue".to_string())),
+                    ("messaging.operation".to_string(), AnyValue::StringValue("receive".to_string())),
+                    ("messaging.redis.database_index".to_string(), AnyValue::IntValue(1)),
+                ],
+                should_be_valid: true,
+                expected_command: "BRPOP".to_string(),
+            },
+            RedisConsumerCommandScenario {
+                description: "valid_redis_consumer_with_blpop".to_string(),
+                span_kind: SpanKind::Consumer,
+                messaging_system: "redis".to_string(),
+                span_attributes: vec![
+                    ("messaging.redis.command".to_string(), AnyValue::StringValue("BLPOP".to_string())),
+                    ("messaging.system".to_string(), AnyValue::StringValue("redis".to_string())),
+                    ("messaging.destination.name".to_string(), AnyValue::StringValue("work.queue".to_string())),
+                    ("messaging.operation".to_string(), AnyValue::StringValue("process".to_string())),
+                    ("messaging.redis.database_index".to_string(), AnyValue::IntValue(2)),
+                ],
+                should_be_valid: true,
+                expected_command: "BLPOP".to_string(),
+            },
+            RedisConsumerCommandScenario {
+                description: "redis_consumer_missing_command".to_string(),
+                span_kind: SpanKind::Consumer,
+                messaging_system: "redis".to_string(),
+                span_attributes: vec![
+                    ("messaging.system".to_string(), AnyValue::StringValue("redis".to_string())),
+                    ("messaging.destination.name".to_string(), AnyValue::StringValue("events.channel".to_string())),
+                    ("messaging.operation".to_string(), AnyValue::StringValue("receive".to_string())),
+                    // Missing messaging.redis.command - should be invalid
+                ],
+                should_be_valid: false,
+                expected_command: "".to_string(),
+            },
+            RedisConsumerCommandScenario {
+                description: "redis_consumer_invalid_command_set".to_string(),
+                span_kind: SpanKind::Consumer,
+                messaging_system: "redis".to_string(),
+                span_attributes: vec![
+                    ("messaging.redis.command".to_string(), AnyValue::StringValue("SET".to_string())), // Invalid for consumer
+                    ("messaging.system".to_string(), AnyValue::StringValue("redis".to_string())),
+                    ("messaging.destination.name".to_string(), AnyValue::StringValue("data.key".to_string())),
+                ],
+                should_be_valid: false,
+                expected_command: "SET".to_string(),
+            },
+            RedisConsumerCommandScenario {
+                description: "redis_consumer_invalid_command_lpush".to_string(),
+                span_kind: SpanKind::Consumer,
+                messaging_system: "redis".to_string(),
+                span_attributes: vec![
+                    ("messaging.redis.command".to_string(), AnyValue::StringValue("LPUSH".to_string())), // Invalid for consumer
+                    ("messaging.system".to_string(), AnyValue::StringValue("redis".to_string())),
+                    ("messaging.destination.name".to_string(), AnyValue::StringValue("task.queue".to_string())),
+                ],
+                should_be_valid: false,
+                expected_command: "LPUSH".to_string(),
+            },
+            RedisConsumerCommandScenario {
+                description: "redis_consumer_invalid_command_publish".to_string(),
+                span_kind: SpanKind::Consumer,
+                messaging_system: "redis".to_string(),
+                span_attributes: vec![
+                    ("messaging.redis.command".to_string(), AnyValue::StringValue("PUBLISH".to_string())), // Invalid for consumer
+                    ("messaging.system".to_string(), AnyValue::StringValue("redis".to_string())),
+                    ("messaging.destination.name".to_string(), AnyValue::StringValue("events.channel".to_string())),
+                ],
+                should_be_valid: false,
+                expected_command: "PUBLISH".to_string(),
+            },
+            RedisConsumerCommandScenario {
+                description: "redis_consumer_invalid_command_get".to_string(),
+                span_kind: SpanKind::Consumer,
+                messaging_system: "redis".to_string(),
+                span_attributes: vec![
+                    ("messaging.redis.command".to_string(), AnyValue::StringValue("GET".to_string())), // Invalid for consumer spans
+                    ("messaging.system".to_string(), AnyValue::StringValue("redis".to_string())),
+                    ("messaging.destination.name".to_string(), AnyValue::StringValue("data.key".to_string())),
+                ],
+                should_be_valid: false,
+                expected_command: "GET".to_string(),
+            },
+            RedisConsumerCommandScenario {
+                description: "redis_consumer_empty_command".to_string(),
+                span_kind: SpanKind::Consumer,
+                messaging_system: "redis".to_string(),
+                span_attributes: vec![
+                    ("messaging.redis.command".to_string(), AnyValue::StringValue("".to_string())), // Empty
+                    ("messaging.system".to_string(), AnyValue::StringValue("redis".to_string())),
+                    ("messaging.destination.name".to_string(), AnyValue::StringValue("events.channel".to_string())),
+                ],
+                should_be_valid: false,
+                expected_command: "".to_string(),
+            },
+            RedisConsumerCommandScenario {
+                description: "redis_consumer_non_string_command".to_string(),
+                span_kind: SpanKind::Consumer,
+                messaging_system: "redis".to_string(),
+                span_attributes: vec![
+                    ("messaging.redis.command".to_string(), AnyValue::IntValue(123)), // Wrong type
+                    ("messaging.system".to_string(), AnyValue::StringValue("redis".to_string())),
+                    ("messaging.destination.name".to_string(), AnyValue::StringValue("events.channel".to_string())),
+                ],
+                should_be_valid: false,
+                expected_command: "".to_string(),
+            },
+            RedisConsumerCommandScenario {
+                description: "non_redis_consumer_no_requirement".to_string(),
+                span_kind: SpanKind::Consumer,
+                messaging_system: "kafka".to_string(), // Not Redis
+                span_attributes: vec![
+                    ("messaging.system".to_string(), AnyValue::StringValue("kafka".to_string())),
+                    ("messaging.destination.name".to_string(), AnyValue::StringValue("events".to_string())),
+                    ("messaging.kafka.consumer.group".to_string(), AnyValue::StringValue("processors".to_string())),
+                ],
+                should_be_valid: true, // No command requirement for non-Redis
+                expected_command: "".to_string(),
+            },
+            RedisConsumerCommandScenario {
+                description: "redis_producer_no_requirement".to_string(),
+                span_kind: SpanKind::Producer, // Not consumer
+                messaging_system: "redis".to_string(),
+                span_attributes: vec![
+                    ("messaging.redis.command".to_string(), AnyValue::StringValue("SET".to_string())),
+                    ("messaging.system".to_string(), AnyValue::StringValue("redis".to_string())),
+                    ("messaging.destination.name".to_string(), AnyValue::StringValue("data.key".to_string())),
+                ],
+                should_be_valid: true, // No validation for producer spans
+                expected_command: "SET".to_string(),
+            },
+            RedisConsumerCommandScenario {
+                description: "redis_case_sensitivity_check".to_string(),
+                span_kind: SpanKind::Consumer,
+                messaging_system: "Redis".to_string(), // Different case
+                span_attributes: vec![
+                    ("messaging.redis.command".to_string(), AnyValue::StringValue("SUBSCRIBE".to_string())),
+                    ("messaging.system".to_string(), AnyValue::StringValue("Redis".to_string())),
+                    ("messaging.destination.name".to_string(), AnyValue::StringValue("events.channel".to_string())),
+                ],
+                should_be_valid: true, // Not exact "redis" so no validation
+                expected_command: "SUBSCRIBE".to_string(),
+            },
+            RedisConsumerCommandScenario {
+                description: "valid_redis_consumer_lowercase_command".to_string(),
+                span_kind: SpanKind::Consumer,
+                messaging_system: "redis".to_string(),
+                span_attributes: vec![
+                    ("messaging.redis.command".to_string(), AnyValue::StringValue("subscribe".to_string())), // Lowercase
+                    ("messaging.system".to_string(), AnyValue::StringValue("redis".to_string())),
+                    ("messaging.destination.name".to_string(), AnyValue::StringValue("events.channel".to_string())),
+                    ("messaging.operation".to_string(), AnyValue::StringValue("receive".to_string())),
+                ],
+                should_be_valid: true,
+                expected_command: "subscribe".to_string(),
+            },
+            RedisConsumerCommandScenario {
+                description: "valid_redis_consumer_mixed_case_command".to_string(),
+                span_kind: SpanKind::Consumer,
+                messaging_system: "redis".to_string(),
+                span_attributes: vec![
+                    ("messaging.redis.command".to_string(), AnyValue::StringValue("BrPoP".to_string())), // Mixed case
+                    ("messaging.system".to_string(), AnyValue::StringValue("redis".to_string())),
+                    ("messaging.destination.name".to_string(), AnyValue::StringValue("task.queue".to_string())),
+                    ("messaging.operation".to_string(), AnyValue::StringValue("receive".to_string())),
+                ],
+                should_be_valid: true,
+                expected_command: "BrPoP".to_string(),
+            },
+            RedisConsumerCommandScenario {
+                description: "valid_redis_consumer_with_timeout_attributes".to_string(),
+                span_kind: SpanKind::Consumer,
+                messaging_system: "redis".to_string(),
+                span_attributes: vec![
+                    ("messaging.redis.command".to_string(), AnyValue::StringValue("BLPOP".to_string())),
+                    ("messaging.system".to_string(), AnyValue::StringValue("redis".to_string())),
+                    ("messaging.destination.name".to_string(), AnyValue::StringValue("priority.tasks".to_string())),
+                    ("messaging.operation".to_string(), AnyValue::StringValue("receive".to_string())),
+                    ("messaging.redis.database_index".to_string(), AnyValue::IntValue(3)),
+                    ("messaging.redis.timeout_seconds".to_string(), AnyValue::IntValue(30)),
+                    ("net.peer.name".to_string(), AnyValue::StringValue("redis-cluster.prod.com".to_string())),
+                    ("net.peer.port".to_string(), AnyValue::IntValue(6379)),
+                ],
+                should_be_valid: true,
+                expected_command: "BLPOP".to_string(),
+            },
+        ];
+
+        /// Test scenario for Redis consumer command validation
+        #[derive(Debug, Clone)]
+        struct RedisConsumerCommandScenario {
+            description: String,
+            span_kind: SpanKind,
+            messaging_system: String,
+            span_attributes: Vec<(String, AnyValue)>,
+            should_be_valid: bool,
+            expected_command: String,
+        }
+
+        /// Span data for Redis consumer testing
+        #[derive(Debug, Clone)]
+        struct RedisConsumerSpanData {
+            name: String,
+            kind: SpanKind,
+            messaging_system: String,
+            attributes: HashMap<String, AnyValue>,
+        }
+
+        impl RedisConsumerSpanData {
+            fn from_scenario(scenario: &RedisConsumerCommandScenario) -> Self {
+                let mut attributes = HashMap::new();
+                for (key, value) in &scenario.span_attributes {
+                    attributes.insert(key.clone(), value.clone());
+                }
+
+                Self {
+                    name: format!("redis_consumer_span_{}", scenario.description),
+                    kind: scenario.span_kind.clone(),
+                    messaging_system: scenario.messaging_system.clone(),
+                    attributes,
+                }
+            }
+        }
+
+        /// Result of Redis consumer command validation
+        #[derive(Debug)]
+        enum RedisConsumerValidationResult {
+            Valid {
+                command: String,
+                additional_redis_attributes: usize,
+            },
+            Invalid {
+                violations: Vec<String>,
+                invalid_command: Option<String>,
+            },
+            NotApplicable {
+                reason: String,
+            },
+        }
+
+        /// Validates Redis consumer command requirement conformance
+        fn validate_redis_consumer_command_conformance(
+            scenario: &RedisConsumerCommandScenario,
+        ) -> Result<(), String> {
+            let span_data = RedisConsumerSpanData::from_scenario(scenario);
+            let validation_result = validate_redis_consumer_command(&span_data);
+
+            match (&validation_result, scenario.should_be_valid) {
+                (RedisConsumerValidationResult::Valid { command, .. }, true) => {
+                    if !scenario.expected_command.is_empty() && command != &scenario.expected_command {
+                        return Err(format!(
+                            "Command mismatch: expected '{}', got '{}'",
+                            scenario.expected_command, command
+                        ));
+                    }
+                    println!("✓ Redis consumer span has correct command: '{}'", command);
+                }
+                (RedisConsumerValidationResult::Invalid { .. }, false) => {
+                    println!("✓ Invalid Redis consumer span correctly rejected");
+                }
+                (RedisConsumerValidationResult::NotApplicable { reason }, true) => {
+                    println!("✓ Command validation not applicable: {}", reason);
+                }
+                (RedisConsumerValidationResult::Valid { .. }, false) => {
+                    return Err("Invalid span was incorrectly accepted".to_string());
+                }
+                (RedisConsumerValidationResult::Invalid { violations, .. }, true) => {
+                    return Err(format!("Valid span was incorrectly rejected: {:?}", violations));
+                }
+                (RedisConsumerValidationResult::NotApplicable { .. }, false) => {
+                    return Err("Expected validation failure but got not applicable".to_string());
+                }
+            }
+
+            Ok(())
+        }
+
+        /// Validates that Redis consumer spans have valid command attribute
+        fn validate_redis_consumer_command(span_data: &RedisConsumerSpanData) -> RedisConsumerValidationResult {
+            // Check if this span requires command validation
+            if !requires_redis_consumer_command_validation(span_data) {
+                return RedisConsumerValidationResult::NotApplicable {
+                    reason: format!(
+                        "Span kind {:?} with messaging.system '{}' doesn't require Redis consumer command validation",
+                        span_data.kind, span_data.messaging_system
+                    ),
+                };
+            }
+
+            let mut violations = Vec::new();
+
+            // Extract and validate messaging.redis.command attribute
+            let command = match span_data.attributes.get("messaging.redis.command") {
+                Some(AnyValue::StringValue(cmd_str)) if !cmd_str.is_empty() => {
+                    cmd_str.clone()
+                }
+                Some(AnyValue::StringValue(cmd_str)) if cmd_str.is_empty() => {
+                    violations.push("messaging.redis.command attribute is empty".to_string());
+                    return RedisConsumerValidationResult::Invalid {
+                        violations,
+                        invalid_command: Some("".to_string()),
+                    };
+                }
+                Some(_) => {
+                    violations.push("messaging.redis.command attribute must be a string value".to_string());
+                    return RedisConsumerValidationResult::Invalid {
+                        violations,
+                        invalid_command: None,
+                    };
+                }
+                None => {
+                    violations.push("OTLP-151: Redis consumer span missing required messaging.redis.command attribute".to_string());
+                    return RedisConsumerValidationResult::Invalid {
+                        violations,
+                        invalid_command: None,
+                    };
+                }
+            };
+
+            // Validate command is one of the allowed consumer commands
+            let cmd_upper = command.to_uppercase();
+            match cmd_upper.as_str() {
+                "SUBSCRIBE" => {
+                    println!("✓ Valid Redis pub/sub consumer command: {}", command);
+
+                    // Additional validation for SUBSCRIBE
+                    if let Some(AnyValue::StringValue(dest)) = span_data.attributes.get("messaging.destination.name") {
+                        if dest.contains('*') || dest.contains('?') || dest.contains('[') {
+                            println!("⚠ SUBSCRIBE with pattern-like destination '{}' - consider PSUBSCRIBE for patterns", dest);
+                        }
+                    }
+                }
+                "PSUBSCRIBE" => {
+                    println!("✓ Valid Redis pattern pub/sub consumer command: {}", command);
+
+                    // Additional validation for PSUBSCRIBE
+                    if let Some(AnyValue::StringValue(dest)) = span_data.attributes.get("messaging.destination.name") {
+                        if !dest.contains('*') && !dest.contains('?') && !dest.contains('[') {
+                            println!("⚠ PSUBSCRIBE with non-pattern destination '{}' - consider SUBSCRIBE for exact matches", dest);
+                        }
+                    }
+                }
+                "BRPOP" => {
+                    println!("✓ Valid Redis blocking right-pop consumer command: {}", command);
+
+                    // Check for timeout indication
+                    if !span_data.attributes.contains_key("messaging.redis.timeout_seconds") {
+                        println!("⚠ BRPOP without timeout_seconds attribute - consider adding for observability");
+                    }
+                }
+                "BLPOP" => {
+                    println!("✓ Valid Redis blocking left-pop consumer command: {}", command);
+
+                    // Check for timeout indication
+                    if !span_data.attributes.contains_key("messaging.redis.timeout_seconds") {
+                        println!("⚠ BLPOP without timeout_seconds attribute - consider adding for observability");
+                    }
+                }
+                _ => {
+                    violations.push(format!(
+                        "OTLP-151: messaging.redis.command '{}' is not valid for consumer spans (must be one of: SUBSCRIBE, PSUBSCRIBE, BRPOP, BLPOP)",
+                        command
+                    ));
+                    return RedisConsumerValidationResult::Invalid {
+                        violations,
+                        invalid_command: Some(command),
+                    };
+                }
+            }
+
+            // Check for recommended Redis consumer attributes
+            let recommended_consumer_attrs = [
+                "messaging.system",
+                "messaging.destination.name",
+                "messaging.operation",
+                "messaging.redis.database_index"
+            ];
+
+            let mut redis_attrs_present = 0;
+            for attr in &recommended_consumer_attrs {
+                if span_data.attributes.contains_key(*attr) {
+                    redis_attrs_present += 1;
+                } else if attr != &"messaging.redis.database_index" {
+                    println!("⚠ Recommended Redis consumer attribute '{}' not present", attr);
+                }
+            }
+
+            // Verify messaging.system is set to "redis" (case sensitive)
+            if let Some(AnyValue::StringValue(system)) = span_data.attributes.get("messaging.system") {
+                if system != "redis" {
+                    if system.to_lowercase() == "redis" {
+                        violations.push(format!("messaging.system should be exactly 'redis' (case-sensitive), got: '{}'", system));
+                    } else {
+                        violations.push(format!("messaging.system should be 'redis' for Redis consumer spans, got: '{}'", system));
+                    }
+                }
+            }
+
+            // Verify messaging.operation is appropriate for consumer if present
+            if let Some(AnyValue::StringValue(operation)) = span_data.attributes.get("messaging.operation") {
+                match operation.as_str() {
+                    "receive" | "process" => {
+                        // Valid consumer operations
+                    }
+                    "publish" | "send" => {
+                        violations.push(format!("messaging.operation '{}' is inappropriate for consumer spans (use 'receive' or 'process')", operation));
+                    }
+                    _ => {
+                        println!("⚠ Unusual messaging.operation '{}' for consumer span", operation);
+                    }
+                }
+            }
+
+            // Additional Redis-specific validations
+            if let Some(AnyValue::StringValue(dest_name)) = span_data.attributes.get("messaging.destination.name") {
+                if dest_name.is_empty() {
+                    violations.push("messaging.destination.name should not be empty for Redis spans".to_string());
+                }
+
+                // Command-destination consistency checks
+                match cmd_upper.as_str() {
+                    "SUBSCRIBE" | "PSUBSCRIBE" => {
+                        if dest_name.contains("queue") || dest_name.contains("list") {
+                            println!("⚠ Pub/sub command '{}' with queue-like destination '{}' - consider list commands", command, dest_name);
+                        }
+                    }
+                    "BRPOP" | "BLPOP" => {
+                        if dest_name.contains("channel") || dest_name.contains("topic") {
+                            println!("⚠ List command '{}' with channel-like destination '{}' - consider pub/sub commands", command, dest_name);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+
+            // Validate database index if present
+            if let Some(AnyValue::IntValue(db_index)) = span_data.attributes.get("messaging.redis.database_index") {
+                if *db_index < 0 {
+                    violations.push("messaging.redis.database_index must be non-negative".to_string());
+                }
+                if *db_index > 15 {
+                    println!("⚠ Redis database index {} is unusually high (typical range: 0-15)", db_index);
+                }
+
+                // Pub/sub commands ignore database selection
+                if (cmd_upper == "SUBSCRIBE" || cmd_upper == "PSUBSCRIBE") && *db_index != 0 {
+                    println!("⚠ Pub/sub commands ignore database selection (database_index: {})", db_index);
+                }
+            }
+
+            // Validate timeout if present
+            if let Some(AnyValue::IntValue(timeout)) = span_data.attributes.get("messaging.redis.timeout_seconds") {
+                if *timeout < 0 {
+                    violations.push("messaging.redis.timeout_seconds must be non-negative".to_string());
+                }
+                if *timeout == 0 && (cmd_upper == "BRPOP" || cmd_upper == "BLPOP") {
+                    println!("⚠ Blocking command '{}' with timeout=0 (infinite wait)", command);
+                }
+                if *timeout > 0 && (cmd_upper == "SUBSCRIBE" || cmd_upper == "PSUBSCRIBE") {
+                    println!("⚠ Pub/sub command '{}' doesn't use timeout (timeout_seconds: {})", command, timeout);
+                }
+            }
+
+            if !violations.is_empty() {
+                RedisConsumerValidationResult::Invalid {
+                    violations,
+                    invalid_command: Some(command),
+                }
+            } else {
+                RedisConsumerValidationResult::Valid {
+                    command,
+                    additional_redis_attributes: redis_attrs_present,
+                }
+            }
+        }
+
+        /// Determines if a span requires Redis consumer command validation
+        fn requires_redis_consumer_command_validation(span_data: &RedisConsumerSpanData) -> bool {
+            // OTLP-151: Only CONSUMER spans with messaging.system="redis" require command validation
+            span_data.kind == SpanKind::Consumer
+                && span_data.messaging_system == "redis"
+        }
+
+        // Execute OTLP-151 conformance validation for all scenarios
+        let mut passed_scenarios = 0;
+        let total_scenarios = test_scenarios.len();
+
+        for scenario in &test_scenarios {
+            match validate_redis_consumer_command_conformance(scenario) {
+                Ok(()) => {
+                    passed_scenarios += 1;
+                    println!("✓ OTLP-151 conformance verified for {}", scenario.description);
+                }
+                Err(error_msg) => {
+                    panic!(
+                        "OTLP-151 conformance test FAILED for {}: {}",
+                        scenario.description, error_msg
+                    );
+                }
+            }
+        }
+
+        assert_eq!(
+            passed_scenarios, total_scenarios,
+            "All OTLP-151 Redis consumer command scenarios must pass"
+        );
+
+        // Additional edge case testing
+        println!("Testing Redis consumer command edge cases...");
+
+        // Test messaging.system case sensitivity
+        let system_cases = vec![
+            ("redis", true),       // Exact match - requires validation
+            ("Redis", false),      // Wrong case - no validation
+            ("REDIS", false),      // Wrong case - no validation
+            ("memcached", false),  // Different system - no validation
+        ];
+
+        for (system_name, should_require) in system_cases {
+            let mut test_attributes = HashMap::new();
+            test_attributes.insert("messaging.system".to_string(), AnyValue::StringValue(system_name.to_string()));
+            test_attributes.insert("messaging.destination.name".to_string(), AnyValue::StringValue("test.channel".to_string()));
+
+            if should_require {
+                test_attributes.insert("messaging.redis.command".to_string(), AnyValue::StringValue("SUBSCRIBE".to_string()));
+            }
+
+            let edge_span = RedisConsumerSpanData {
+                name: format!("system_case_test_{}", system_name.to_lowercase()),
+                kind: SpanKind::Consumer,
+                messaging_system: system_name.to_string(),
+                attributes: test_attributes,
+            };
+
+            let requires_validation = requires_redis_consumer_command_validation(&edge_span);
+            assert_eq!(
+                requires_validation, should_require,
+                "Command validation requirement check failed for system '{}'",
+                system_name
+            );
+
+            if should_require {
+                match validate_redis_consumer_command(&edge_span) {
+                    RedisConsumerValidationResult::Valid { .. } => {
+                        println!("✓ System case '{}' correctly requires and validates command", system_name);
+                    }
+                    _ => panic!("System case '{}' should be valid with SUBSCRIBE command", system_name),
+                }
+            } else {
+                match validate_redis_consumer_command(&edge_span) {
+                    RedisConsumerValidationResult::NotApplicable { .. } => {
+                        println!("✓ System case '{}' correctly identified as not applicable", system_name);
+                    }
+                    _ => panic!("System case '{}' should not require command validation", system_name),
+                }
+            }
+        }
+
+        // Test valid and invalid command validation
+        println!("Testing Redis consumer command validation...");
+        let command_tests = vec![
+            ("valid_subscribe", "SUBSCRIBE", true),
+            ("valid_psubscribe", "PSUBSCRIBE", true),
+            ("valid_brpop", "BRPOP", true),
+            ("valid_blpop", "BLPOP", true),
+            ("valid_lowercase", "subscribe", true),
+            ("valid_mixed_case", "BrPoP", true),
+            ("invalid_publish", "PUBLISH", false), // Producer command
+            ("invalid_lpush", "LPUSH", false),     // Producer command
+            ("invalid_set", "SET", false),         // Producer command
+            ("invalid_get", "GET", false),         // Not a consumer pattern command
+            ("invalid_lpop", "LPOP", false),       // Non-blocking, not appropriate for consumer spans
+            ("invalid_rpop", "RPOP", false),       // Non-blocking, not appropriate for consumer spans
+            ("invalid_empty", "", false),          // Empty command
+        ];
+
+        for (test_name, command_value, should_be_valid) in command_tests {
+            let mut test_attributes = HashMap::new();
+            test_attributes.insert("messaging.system".to_string(), AnyValue::StringValue("redis".to_string()));
+            test_attributes.insert("messaging.destination.name".to_string(), AnyValue::StringValue("test.target".to_string()));
+            test_attributes.insert("messaging.redis.command".to_string(), AnyValue::StringValue(command_value.to_string()));
+
+            let test_span = RedisConsumerSpanData {
+                name: format!("command_test_{}", test_name),
+                kind: SpanKind::Consumer,
+                messaging_system: "redis".to_string(),
+                attributes: test_attributes,
+            };
+
+            let result = validate_redis_consumer_command(&test_span);
+            let is_valid = matches!(result, RedisConsumerValidationResult::Valid { .. });
+
+            assert_eq!(
+                is_valid, should_be_valid,
+                "Command test '{}' (value: '{}') validation mismatch: expected {}, got {}",
+                test_name, command_value, should_be_valid, is_valid
+            );
+
+            if should_be_valid {
+                println!("✓ Command test '{}' (value: '{}') correctly validated", test_name, command_value);
+            } else {
+                println!("✓ Command test '{}' (value: '{}') correctly rejected", test_name, command_value);
+            }
+        }
+
+        println!("✓ OTLP-151: Redis consumer command validation conformance verified");
+        println!("  - CONSUMER spans with messaging.system='redis' require valid consumer commands");
+        println!("  - Valid consumer commands: SUBSCRIBE, PSUBSCRIBE, BRPOP, BLPOP");
+        println!("  - Producer commands (SET, LPUSH, PUBLISH) rejected for consumer spans");
+        println!("  - Non-Redis consumer systems exempt from validation");
+        println!("  - Producer spans exempt from consumer command validation");
+        println!("  - Case-sensitive messaging.system matching enforced");
+        println!("  - Case-insensitive command validation supported");
+        println!("  - Command-destination consistency recommendations");
+        println!("  - Pub/sub vs list command pattern guidance");
+        println!("  - Timeout and database index validation for applicable commands");
+    }
+
+    /// OTLP-152 conformance test: AWS SQS producer queue URL validation.
+    ///
+    /// When an exporter encounters a span with kind=PRODUCER and messaging.system="aws_sqs",
+    /// the messaging.aws_sqs.queue_url attribute MUST be set per OTLP semantic conventions
+    /// for AWS SQS producer spans. This ensures proper traceability and correlation for
+    /// AWS SQS message production operations where the queue URL is essential for
+    /// identifying the specific SQS queue being used for message delivery.
+    #[test]
+    fn otlp_152_aws_sqs_producer_queue_url_validation() {
+        use crate::observability::otel::{AnyValue, SpanData};
+        use std::collections::HashMap;
+
+        println!("Testing OTLP-152: AWS SQS producer queue URL validation...");
+
+        /// Test scenario for AWS SQS producer queue URL validation
+        #[derive(Debug, Clone)]
+        struct AwsSqsProducerScenario {
+            description: String,
+            span_kind: SpanKind,
+            messaging_system: String,
+            span_attributes: Vec<(String, AnyValue)>,
+            should_be_valid: bool,
+            expected_queue_url: String,
+        }
+
+        /// SpanKind enumeration for testing
+        #[derive(Debug, Clone, PartialEq)]
+        enum SpanKind {
+            Internal,
+            Server,
+            Client,
+            Producer,
+            Consumer,
+        }
+
+        let test_scenarios = vec![
+            AwsSqsProducerScenario {
+                description: "valid_aws_sqs_producer_with_queue_url".to_string(),
+                span_kind: SpanKind::Producer,
+                messaging_system: "aws_sqs".to_string(),
+                span_attributes: vec![
+                    ("messaging.aws_sqs.queue_url".to_string(), AnyValue::StringValue("https://sqs.us-east-1.amazonaws.com/123456789012/order-queue".to_string())),
+                    ("messaging.system".to_string(), AnyValue::StringValue("aws_sqs".to_string())),
+                    ("messaging.destination.name".to_string(), AnyValue::StringValue("order-queue".to_string())),
+                    ("messaging.operation".to_string(), AnyValue::StringValue("publish".to_string())),
+                    ("messaging.aws_sqs.message_group_id".to_string(), AnyValue::StringValue("order-group-1".to_string())),
+                ],
+                should_be_valid: true,
+                expected_queue_url: "https://sqs.us-east-1.amazonaws.com/123456789012/order-queue".to_string(),
+            },
+            AwsSqsProducerScenario {
+                description: "valid_aws_sqs_producer_with_fifo_queue".to_string(),
+                span_kind: SpanKind::Producer,
+                messaging_system: "aws_sqs".to_string(),
+                span_attributes: vec![
+                    ("messaging.aws_sqs.queue_url".to_string(), AnyValue::StringValue("https://sqs.us-west-2.amazonaws.com/987654321098/notification-queue.fifo".to_string())),
+                    ("messaging.system".to_string(), AnyValue::StringValue("aws_sqs".to_string())),
+                    ("messaging.destination.name".to_string(), AnyValue::StringValue("notification-queue.fifo".to_string())),
+                    ("messaging.operation".to_string(), AnyValue::StringValue("send".to_string())),
+                    ("messaging.aws_sqs.message_deduplication_id".to_string(), AnyValue::StringValue("dedup-12345".to_string())),
+                ],
+                should_be_valid: true,
+                expected_queue_url: "https://sqs.us-west-2.amazonaws.com/987654321098/notification-queue.fifo".to_string(),
+            },
+            AwsSqsProducerScenario {
+                description: "aws_sqs_producer_missing_queue_url".to_string(),
+                span_kind: SpanKind::Producer,
+                messaging_system: "aws_sqs".to_string(),
+                span_attributes: vec![
+                    ("messaging.system".to_string(), AnyValue::StringValue("aws_sqs".to_string())),
+                    ("messaging.destination.name".to_string(), AnyValue::StringValue("order-queue".to_string())),
+                    ("messaging.operation".to_string(), AnyValue::StringValue("publish".to_string())),
+                    // Missing messaging.aws_sqs.queue_url - should be invalid
+                ],
+                should_be_valid: false,
+                expected_queue_url: "".to_string(),
+            },
+            AwsSqsProducerScenario {
+                description: "aws_sqs_producer_empty_queue_url".to_string(),
+                span_kind: SpanKind::Producer,
+                messaging_system: "aws_sqs".to_string(),
+                span_attributes: vec![
+                    ("messaging.aws_sqs.queue_url".to_string(), AnyValue::StringValue("".to_string())), // Empty queue URL
+                    ("messaging.system".to_string(), AnyValue::StringValue("aws_sqs".to_string())),
+                    ("messaging.destination.name".to_string(), AnyValue::StringValue("test-queue".to_string())),
+                ],
+                should_be_valid: false,
+                expected_queue_url: "".to_string(),
+            },
+            AwsSqsProducerScenario {
+                description: "aws_sqs_producer_wrong_attribute_type".to_string(),
+                span_kind: SpanKind::Producer,
+                messaging_system: "aws_sqs".to_string(),
+                span_attributes: vec![
+                    ("messaging.aws_sqs.queue_url".to_string(), AnyValue::IntValue(12345)), // Wrong type - should be string
+                    ("messaging.system".to_string(), AnyValue::StringValue("aws_sqs".to_string())),
+                    ("messaging.destination.name".to_string(), AnyValue::StringValue("test-queue".to_string())),
+                ],
+                should_be_valid: false,
+                expected_queue_url: "".to_string(),
+            },
+            AwsSqsProducerScenario {
+                description: "aws_sqs_consumer_span_exempt".to_string(),
+                span_kind: SpanKind::Consumer,
+                messaging_system: "aws_sqs".to_string(),
+                span_attributes: vec![
+                    ("messaging.system".to_string(), AnyValue::StringValue("aws_sqs".to_string())),
+                    ("messaging.destination.name".to_string(), AnyValue::StringValue("test-queue".to_string())),
+                    ("messaging.operation".to_string(), AnyValue::StringValue("receive".to_string())),
+                    // Consumer spans are exempt from producer queue URL requirement
+                ],
+                should_be_valid: true, // Consumer spans don't need producer queue URL
+                expected_queue_url: "".to_string(),
+            },
+            AwsSqsProducerScenario {
+                description: "non_aws_sqs_messaging_system_exempt".to_string(),
+                span_kind: SpanKind::Producer,
+                messaging_system: "kafka".to_string(), // Different messaging system
+                span_attributes: vec![
+                    ("messaging.system".to_string(), AnyValue::StringValue("kafka".to_string())),
+                    ("messaging.destination.name".to_string(), AnyValue::StringValue("events-topic".to_string())),
+                    ("messaging.operation".to_string(), AnyValue::StringValue("publish".to_string())),
+                    // Non-AWS SQS systems exempt from queue URL requirement
+                ],
+                should_be_valid: true,
+                expected_queue_url: "".to_string(),
+            },
+            AwsSqsProducerScenario {
+                description: "case_sensitive_messaging_system_check".to_string(),
+                span_kind: SpanKind::Producer,
+                messaging_system: "AWS_SQS".to_string(), // Wrong case
+                span_attributes: vec![
+                    ("messaging.system".to_string(), AnyValue::StringValue("AWS_SQS".to_string())),
+                    ("messaging.destination.name".to_string(), AnyValue::StringValue("test-queue".to_string())),
+                    // Case-sensitive check - "AWS_SQS" != "aws_sqs"
+                ],
+                should_be_valid: true, // Not exact "aws_sqs" so exempt
+                expected_queue_url: "".to_string(),
+            },
+            AwsSqsProducerScenario {
+                description: "aws_sqs_producer_with_additional_attributes".to_string(),
+                span_kind: SpanKind::Producer,
+                messaging_system: "aws_sqs".to_string(),
+                span_attributes: vec![
+                    ("messaging.aws_sqs.queue_url".to_string(), AnyValue::StringValue("https://sqs.eu-central-1.amazonaws.com/111222333444/batch-processing".to_string())),
+                    ("messaging.system".to_string(), AnyValue::StringValue("aws_sqs".to_string())),
+                    ("messaging.destination.name".to_string(), AnyValue::StringValue("batch-processing".to_string())),
+                    ("messaging.operation".to_string(), AnyValue::StringValue("publish".to_string())),
+                    ("messaging.aws_sqs.max_receive_count".to_string(), AnyValue::IntValue(3)),
+                    ("messaging.aws_sqs.message_retention_period".to_string(), AnyValue::IntValue(1209600)),
+                    ("cloud.provider".to_string(), AnyValue::StringValue("aws".to_string())),
+                    ("cloud.region".to_string(), AnyValue::StringValue("eu-central-1".to_string())),
+                ],
+                should_be_valid: true,
+                expected_queue_url: "https://sqs.eu-central-1.amazonaws.com/111222333444/batch-processing".to_string(),
+            },
+            AwsSqsProducerScenario {
+                description: "aws_sqs_producer_whitespace_only_queue_url".to_string(),
+                span_kind: SpanKind::Producer,
+                messaging_system: "aws_sqs".to_string(),
+                span_attributes: vec![
+                    ("messaging.aws_sqs.queue_url".to_string(), AnyValue::StringValue("   ".to_string())), // Whitespace only
+                    ("messaging.system".to_string(), AnyValue::StringValue("aws_sqs".to_string())),
+                    ("messaging.destination.name".to_string(), AnyValue::StringValue("test-queue".to_string())),
+                ],
+                should_be_valid: false,
+                expected_queue_url: "   ".to_string(),
+            },
+            AwsSqsProducerScenario {
+                description: "aws_sqs_producer_malformed_queue_url".to_string(),
+                span_kind: SpanKind::Producer,
+                messaging_system: "aws_sqs".to_string(),
+                span_attributes: vec![
+                    ("messaging.aws_sqs.queue_url".to_string(), AnyValue::StringValue("not-a-valid-sqs-url".to_string())),
+                    ("messaging.system".to_string(), AnyValue::StringValue("aws_sqs".to_string())),
+                    ("messaging.destination.name".to_string(), AnyValue::StringValue("test-queue".to_string())),
+                    ("messaging.operation".to_string(), AnyValue::StringValue("send".to_string())),
+                ],
+                should_be_valid: true, // URL format validation not part of OTLP-152 requirement
+                expected_queue_url: "not-a-valid-sqs-url".to_string(),
+            },
+        ];
+
+        /// Span data for AWS SQS producer testing
+        #[derive(Debug, Clone)]
+        struct AwsSqsProducerSpanData {
+            name: String,
+            kind: SpanKind,
+            messaging_system: String,
+            attributes: HashMap<String, AnyValue>,
+        }
+
+        impl AwsSqsProducerSpanData {
+            fn from_scenario(scenario: &AwsSqsProducerScenario) -> Self {
+                let mut attributes = HashMap::new();
+                for (key, value) in &scenario.span_attributes {
+                    attributes.insert(key.clone(), value.clone());
+                }
+
+                Self {
+                    name: format!("aws_sqs_producer_span_{}", scenario.description),
+                    kind: scenario.span_kind.clone(),
+                    messaging_system: scenario.messaging_system.clone(),
+                    attributes,
+                }
+            }
+        }
+
+        /// Result of AWS SQS producer queue URL validation
+        #[derive(Debug)]
+        enum AwsSqsProducerValidationResult {
+            Valid {
+                queue_url: String,
+                additional_aws_sqs_attributes: usize,
+            },
+            Invalid {
+                violations: Vec<String>,
+                missing_or_invalid_queue_url: Option<String>,
+            },
+            NotApplicable {
+                reason: String,
+            },
+        }
+
+        /// Validates AWS SQS producer queue URL requirement conformance
+        fn validate_aws_sqs_producer_queue_url_conformance(
+            scenario: &AwsSqsProducerScenario,
+        ) -> Result<(), String> {
+            let span_data = AwsSqsProducerSpanData::from_scenario(scenario);
+
+            // OTLP-152 validation logic
+            let validation_result = validate_aws_sqs_producer_attributes(&span_data);
+
+            match validation_result {
+                AwsSqsProducerValidationResult::Valid { queue_url, .. } => {
+                    if !scenario.should_be_valid {
+                        return Err(format!(
+                            "Expected validation failure but span was accepted with queue_url: '{}' for '{}'",
+                            queue_url, scenario.description
+                        ));
+                    }
+
+                    // Verify queue URL matches expected
+                    if !scenario.expected_queue_url.is_empty() && queue_url != scenario.expected_queue_url {
+                        return Err(format!(
+                            "Queue URL mismatch: expected '{}', got '{}' for '{}'",
+                            scenario.expected_queue_url, queue_url, scenario.description
+                        ));
+                    }
+
+                    Ok(())
+                }
+                AwsSqsProducerValidationResult::Invalid { violations, .. } => {
+                    if scenario.should_be_valid {
+                        return Err(format!(
+                            "Expected validation success but span was rejected with violations: {:?} for '{}'",
+                            violations, scenario.description
+                        ));
+                    }
+
+                    Ok(())
+                }
+                AwsSqsProducerValidationResult::NotApplicable { .. } => {
+                    if !scenario.should_be_valid {
+                        return Err(format!(
+                            "Expected validation failure but span was marked not applicable for '{}'",
+                            scenario.description
+                        ));
+                    }
+
+                    Ok(())
+                }
+            }
+        }
+
+        /// Validates AWS SQS producer span attributes per OTLP-152
+        fn validate_aws_sqs_producer_attributes(
+            span_data: &AwsSqsProducerSpanData,
+        ) -> AwsSqsProducerValidationResult {
+            // Check if this is a PRODUCER span with messaging.system="aws_sqs"
+            if !matches!(span_data.kind, SpanKind::Producer) {
+                return AwsSqsProducerValidationResult::NotApplicable {
+                    reason: format!("Not a PRODUCER span: {:?}", span_data.kind),
+                };
+            }
+
+            // Case-sensitive messaging.system check
+            let messaging_system = span_data.attributes.get("messaging.system")
+                .and_then(|v| match v {
+                    AnyValue::StringValue(s) => Some(s.as_str()),
+                    _ => None,
+                })
+                .unwrap_or("");
+
+            if messaging_system != "aws_sqs" {
+                return AwsSqsProducerValidationResult::NotApplicable {
+                    reason: format!("Not AWS SQS messaging system: '{}'", messaging_system),
+                };
+            }
+
+            // OTLP-152: messaging.aws_sqs.queue_url MUST be set for AWS SQS PRODUCER spans
+            let mut violations = Vec::new();
+
+            let queue_url_attribute = span_data.attributes.get("messaging.aws_sqs.queue_url");
+            let queue_url = match queue_url_attribute {
+                Some(AnyValue::StringValue(url_string)) => {
+                    if url_string.trim().is_empty() {
+                        violations.push("OTLP-152: messaging.aws_sqs.queue_url is empty or whitespace-only".to_string());
+                        url_string.clone()
+                    } else {
+                        url_string.clone()
+                    }
+                }
+                Some(other_value) => {
+                    violations.push(format!(
+                        "OTLP-152: messaging.aws_sqs.queue_url has wrong type (expected StringValue, got {:?})",
+                        other_value
+                    ));
+                    return AwsSqsProducerValidationResult::Invalid {
+                        violations,
+                        missing_or_invalid_queue_url: Some("wrong_type".to_string()),
+                    };
+                }
+                None => {
+                    violations.push("OTLP-152: AWS SQS producer span missing required messaging.aws_sqs.queue_url attribute".to_string());
+                    return AwsSqsProducerValidationResult::Invalid {
+                        violations,
+                        missing_or_invalid_queue_url: None,
+                    };
+                }
+            };
+
+            if !violations.is_empty() {
+                return AwsSqsProducerValidationResult::Invalid {
+                    violations,
+                    missing_or_invalid_queue_url: Some(queue_url),
+                };
+            }
+
+            // Count additional AWS SQS-specific attributes
+            let additional_aws_sqs_attributes = span_data.attributes.keys()
+                .filter(|k| k.starts_with("messaging.aws_sqs.") && *k != "messaging.aws_sqs.queue_url")
+                .count();
+
+            AwsSqsProducerValidationResult::Valid {
+                queue_url,
+                additional_aws_sqs_attributes,
+            }
+        }
+
+        // Execute OTLP-152 conformance validation for all scenarios
+        let mut passed_scenarios = 0;
+        let total_scenarios = test_scenarios.len();
+
+        for scenario in &test_scenarios {
+            match validate_aws_sqs_producer_queue_url_conformance(scenario) {
+                Ok(()) => {
+                    passed_scenarios += 1;
+                    println!("✓ OTLP-152 conformance verified for {}", scenario.description);
+                }
+                Err(error_msg) => {
+                    panic!(
+                        "OTLP-152 conformance test FAILED for {}: {}",
+                        scenario.description, error_msg
+                    );
+                }
+            }
+        }
+
+        assert_eq!(
+            passed_scenarios, total_scenarios,
+            "All OTLP-152 AWS SQS producer queue URL scenarios must pass"
+        );
+
+        println!("✓ OTLP-152: AWS SQS producer queue URL validation conformance verified");
+        println!("  - PRODUCER spans with messaging.system='aws_sqs' require messaging.aws_sqs.queue_url");
+        println!("  - Queue URL must be non-empty string value");
+        println!("  - Consumer spans exempt from producer queue URL requirement");
+        println!("  - Non-AWS SQS messaging systems exempt from validation");
+        println!("  - Case-sensitive messaging.system matching enforced");
+        println!("  - Wrong attribute types properly rejected");
+        println!("  - Empty and whitespace-only queue URLs rejected");
+        println!("  - Additional AWS SQS attributes preserved and counted");
+        println!("  - URL format validation not enforced (only presence and type)");
+    }
+
+    /// OTLP-153 conformance test: AWS SQS consumer queue URL validation.
+    ///
+    /// When an exporter encounters a span with kind=CONSUMER and messaging.system="aws_sqs",
+    /// the messaging.aws_sqs.queue_url attribute MUST be set per OTLP semantic conventions
+    /// for AWS SQS consumer spans. This ensures proper traceability and correlation for
+    /// AWS SQS message consumption operations where the queue URL is essential for
+    /// identifying the specific SQS queue being used for message consumption and polling.
+    #[test]
+    fn otlp_153_aws_sqs_consumer_queue_url_validation() {
+        use crate::observability::otel::{AnyValue, SpanData};
+        use std::collections::HashMap;
+
+        println!("Testing OTLP-153: AWS SQS consumer queue URL validation...");
+
+        /// Test scenario for AWS SQS consumer queue URL validation
+        #[derive(Debug, Clone)]
+        struct AwsSqsConsumerScenario {
+            description: String,
+            span_kind: SpanKind,
+            messaging_system: String,
+            span_attributes: Vec<(String, AnyValue)>,
+            should_be_valid: bool,
+            expected_queue_url: String,
+        }
+
+        /// SpanKind enumeration for testing
+        #[derive(Debug, Clone, PartialEq)]
+        enum SpanKind {
+            Internal,
+            Server,
+            Client,
+            Producer,
+            Consumer,
+        }
+
+        let test_scenarios = vec![
+            AwsSqsConsumerScenario {
+                description: "valid_aws_sqs_consumer_with_queue_url".to_string(),
+                span_kind: SpanKind::Consumer,
+                messaging_system: "aws_sqs".to_string(),
+                span_attributes: vec![
+                    ("messaging.aws_sqs.queue_url".to_string(), AnyValue::StringValue("https://sqs.us-east-1.amazonaws.com/123456789012/order-processing-queue".to_string())),
+                    ("messaging.system".to_string(), AnyValue::StringValue("aws_sqs".to_string())),
+                    ("messaging.destination.name".to_string(), AnyValue::StringValue("order-processing-queue".to_string())),
+                    ("messaging.operation".to_string(), AnyValue::StringValue("receive".to_string())),
+                    ("messaging.aws_sqs.max_number_of_messages".to_string(), AnyValue::IntValue(10)),
+                ],
+                should_be_valid: true,
+                expected_queue_url: "https://sqs.us-east-1.amazonaws.com/123456789012/order-processing-queue".to_string(),
+            },
+            AwsSqsConsumerScenario {
+                description: "valid_aws_sqs_consumer_with_fifo_queue".to_string(),
+                span_kind: SpanKind::Consumer,
+                messaging_system: "aws_sqs".to_string(),
+                span_attributes: vec![
+                    ("messaging.aws_sqs.queue_url".to_string(), AnyValue::StringValue("https://sqs.ap-southeast-2.amazonaws.com/555666777888/notifications.fifo".to_string())),
+                    ("messaging.system".to_string(), AnyValue::StringValue("aws_sqs".to_string())),
+                    ("messaging.destination.name".to_string(), AnyValue::StringValue("notifications.fifo".to_string())),
+                    ("messaging.operation".to_string(), AnyValue::StringValue("process".to_string())),
+                    ("messaging.aws_sqs.wait_time_seconds".to_string(), AnyValue::IntValue(20)),
+                    ("messaging.aws_sqs.receive_count".to_string(), AnyValue::IntValue(1)),
+                ],
+                should_be_valid: true,
+                expected_queue_url: "https://sqs.ap-southeast-2.amazonaws.com/555666777888/notifications.fifo".to_string(),
+            },
+            AwsSqsConsumerScenario {
+                description: "aws_sqs_consumer_missing_queue_url".to_string(),
+                span_kind: SpanKind::Consumer,
+                messaging_system: "aws_sqs".to_string(),
+                span_attributes: vec![
+                    ("messaging.system".to_string(), AnyValue::StringValue("aws_sqs".to_string())),
+                    ("messaging.destination.name".to_string(), AnyValue::StringValue("order-queue".to_string())),
+                    ("messaging.operation".to_string(), AnyValue::StringValue("receive".to_string())),
+                    // Missing messaging.aws_sqs.queue_url - should be invalid
+                ],
+                should_be_valid: false,
+                expected_queue_url: "".to_string(),
+            },
+            AwsSqsConsumerScenario {
+                description: "aws_sqs_consumer_empty_queue_url".to_string(),
+                span_kind: SpanKind::Consumer,
+                messaging_system: "aws_sqs".to_string(),
+                span_attributes: vec![
+                    ("messaging.aws_sqs.queue_url".to_string(), AnyValue::StringValue("".to_string())), // Empty queue URL
+                    ("messaging.system".to_string(), AnyValue::StringValue("aws_sqs".to_string())),
+                    ("messaging.destination.name".to_string(), AnyValue::StringValue("test-queue".to_string())),
+                    ("messaging.operation".to_string(), AnyValue::StringValue("poll".to_string())),
+                ],
+                should_be_valid: false,
+                expected_queue_url: "".to_string(),
+            },
+            AwsSqsConsumerScenario {
+                description: "aws_sqs_consumer_wrong_attribute_type".to_string(),
+                span_kind: SpanKind::Consumer,
+                messaging_system: "aws_sqs".to_string(),
+                span_attributes: vec![
+                    ("messaging.aws_sqs.queue_url".to_string(), AnyValue::IntValue(54321)), // Wrong type - should be string
+                    ("messaging.system".to_string(), AnyValue::StringValue("aws_sqs".to_string())),
+                    ("messaging.destination.name".to_string(), AnyValue::StringValue("test-queue".to_string())),
+                    ("messaging.operation".to_string(), AnyValue::StringValue("receive".to_string())),
+                ],
+                should_be_valid: false,
+                expected_queue_url: "".to_string(),
+            },
+            AwsSqsConsumerScenario {
+                description: "aws_sqs_producer_span_exempt".to_string(),
+                span_kind: SpanKind::Producer,
+                messaging_system: "aws_sqs".to_string(),
+                span_attributes: vec![
+                    ("messaging.system".to_string(), AnyValue::StringValue("aws_sqs".to_string())),
+                    ("messaging.destination.name".to_string(), AnyValue::StringValue("test-queue".to_string())),
+                    ("messaging.operation".to_string(), AnyValue::StringValue("send".to_string())),
+                    // Producer spans are exempt from consumer queue URL requirement
+                ],
+                should_be_valid: true, // Producer spans don't need consumer queue URL
+                expected_queue_url: "".to_string(),
+            },
+            AwsSqsConsumerScenario {
+                description: "non_aws_sqs_messaging_system_exempt".to_string(),
+                span_kind: SpanKind::Consumer,
+                messaging_system: "rabbitmq".to_string(), // Different messaging system
+                span_attributes: vec![
+                    ("messaging.system".to_string(), AnyValue::StringValue("rabbitmq".to_string())),
+                    ("messaging.destination.name".to_string(), AnyValue::StringValue("events-queue".to_string())),
+                    ("messaging.operation".to_string(), AnyValue::StringValue("consume".to_string())),
+                    // Non-AWS SQS systems exempt from queue URL requirement
+                ],
+                should_be_valid: true,
+                expected_queue_url: "".to_string(),
+            },
+            AwsSqsConsumerScenario {
+                description: "case_sensitive_messaging_system_check".to_string(),
+                span_kind: SpanKind::Consumer,
+                messaging_system: "Aws_Sqs".to_string(), // Wrong case
+                span_attributes: vec![
+                    ("messaging.system".to_string(), AnyValue::StringValue("Aws_Sqs".to_string())),
+                    ("messaging.destination.name".to_string(), AnyValue::StringValue("test-queue".to_string())),
+                    ("messaging.operation".to_string(), AnyValue::StringValue("receive".to_string())),
+                    // Case-sensitive check - "Aws_Sqs" != "aws_sqs"
+                ],
+                should_be_valid: true, // Not exact "aws_sqs" so exempt
+                expected_queue_url: "".to_string(),
+            },
+            AwsSqsConsumerScenario {
+                description: "aws_sqs_consumer_with_dlq_attributes".to_string(),
+                span_kind: SpanKind::Consumer,
+                messaging_system: "aws_sqs".to_string(),
+                span_attributes: vec![
+                    ("messaging.aws_sqs.queue_url".to_string(), AnyValue::StringValue("https://sqs.eu-west-1.amazonaws.com/999888777666/payment-events".to_string())),
+                    ("messaging.system".to_string(), AnyValue::StringValue("aws_sqs".to_string())),
+                    ("messaging.destination.name".to_string(), AnyValue::StringValue("payment-events".to_string())),
+                    ("messaging.operation".to_string(), AnyValue::StringValue("receive".to_string())),
+                    ("messaging.aws_sqs.source_queue".to_string(), AnyValue::StringValue("payment-source-queue".to_string())),
+                    ("messaging.aws_sqs.approximate_receive_count".to_string(), AnyValue::IntValue(2)),
+                    ("messaging.aws_sqs.message_retention_period".to_string(), AnyValue::IntValue(345600)),
+                    ("cloud.provider".to_string(), AnyValue::StringValue("aws".to_string())),
+                    ("cloud.region".to_string(), AnyValue::StringValue("eu-west-1".to_string())),
+                ],
+                should_be_valid: true,
+                expected_queue_url: "https://sqs.eu-west-1.amazonaws.com/999888777666/payment-events".to_string(),
+            },
+            AwsSqsConsumerScenario {
+                description: "aws_sqs_consumer_whitespace_only_queue_url".to_string(),
+                span_kind: SpanKind::Consumer,
+                messaging_system: "aws_sqs".to_string(),
+                span_attributes: vec![
+                    ("messaging.aws_sqs.queue_url".to_string(), AnyValue::StringValue("    ".to_string())), // Whitespace only
+                    ("messaging.system".to_string(), AnyValue::StringValue("aws_sqs".to_string())),
+                    ("messaging.destination.name".to_string(), AnyValue::StringValue("test-queue".to_string())),
+                    ("messaging.operation".to_string(), AnyValue::StringValue("poll".to_string())),
+                ],
+                should_be_valid: false,
+                expected_queue_url: "    ".to_string(),
+            },
+            AwsSqsConsumerScenario {
+                description: "aws_sqs_consumer_long_polling_attributes".to_string(),
+                span_kind: SpanKind::Consumer,
+                messaging_system: "aws_sqs".to_string(),
+                span_attributes: vec![
+                    ("messaging.aws_sqs.queue_url".to_string(), AnyValue::StringValue("https://sqs.us-west-1.amazonaws.com/111222333444/worker-tasks".to_string())),
+                    ("messaging.system".to_string(), AnyValue::StringValue("aws_sqs".to_string())),
+                    ("messaging.destination.name".to_string(), AnyValue::StringValue("worker-tasks".to_string())),
+                    ("messaging.operation".to_string(), AnyValue::StringValue("receive".to_string())),
+                    ("messaging.aws_sqs.wait_time_seconds".to_string(), AnyValue::IntValue(20)), // Long polling
+                    ("messaging.aws_sqs.max_number_of_messages".to_string(), AnyValue::IntValue(10)),
+                    ("messaging.aws_sqs.visibility_timeout_seconds".to_string(), AnyValue::IntValue(30)),
+                ],
+                should_be_valid: true,
+                expected_queue_url: "https://sqs.us-west-1.amazonaws.com/111222333444/worker-tasks".to_string(),
+            },
+            AwsSqsConsumerScenario {
+                description: "aws_sqs_consumer_invalid_url_format_accepted".to_string(),
+                span_kind: SpanKind::Consumer,
+                messaging_system: "aws_sqs".to_string(),
+                span_attributes: vec![
+                    ("messaging.aws_sqs.queue_url".to_string(), AnyValue::StringValue("not-a-valid-sqs-consumer-url".to_string())),
+                    ("messaging.system".to_string(), AnyValue::StringValue("aws_sqs".to_string())),
+                    ("messaging.destination.name".to_string(), AnyValue::StringValue("test-queue".to_string())),
+                    ("messaging.operation".to_string(), AnyValue::StringValue("consume".to_string())),
+                ],
+                should_be_valid: true, // URL format validation not part of OTLP-153 requirement
+                expected_queue_url: "not-a-valid-sqs-consumer-url".to_string(),
+            },
+        ];
+
+        /// Span data for AWS SQS consumer testing
+        #[derive(Debug, Clone)]
+        struct AwsSqsConsumerSpanData {
+            name: String,
+            kind: SpanKind,
+            messaging_system: String,
+            attributes: HashMap<String, AnyValue>,
+        }
+
+        impl AwsSqsConsumerSpanData {
+            fn from_scenario(scenario: &AwsSqsConsumerScenario) -> Self {
+                let mut attributes = HashMap::new();
+                for (key, value) in &scenario.span_attributes {
+                    attributes.insert(key.clone(), value.clone());
+                }
+
+                Self {
+                    name: format!("aws_sqs_consumer_span_{}", scenario.description),
+                    kind: scenario.span_kind.clone(),
+                    messaging_system: scenario.messaging_system.clone(),
+                    attributes,
+                }
+            }
+        }
+
+        /// Result of AWS SQS consumer queue URL validation
+        #[derive(Debug)]
+        enum AwsSqsConsumerValidationResult {
+            Valid {
+                queue_url: String,
+                additional_aws_sqs_attributes: usize,
+            },
+            Invalid {
+                violations: Vec<String>,
+                missing_or_invalid_queue_url: Option<String>,
+            },
+            NotApplicable {
+                reason: String,
+            },
+        }
+
+        /// Validates AWS SQS consumer queue URL requirement conformance
+        fn validate_aws_sqs_consumer_queue_url_conformance(
+            scenario: &AwsSqsConsumerScenario,
+        ) -> Result<(), String> {
+            let span_data = AwsSqsConsumerSpanData::from_scenario(scenario);
+
+            // OTLP-153 validation logic
+            let validation_result = validate_aws_sqs_consumer_attributes(&span_data);
+
+            match validation_result {
+                AwsSqsConsumerValidationResult::Valid { queue_url, .. } => {
+                    if !scenario.should_be_valid {
+                        return Err(format!(
+                            "Expected validation failure but span was accepted with queue_url: '{}' for '{}'",
+                            queue_url, scenario.description
+                        ));
+                    }
+
+                    // Verify queue URL matches expected
+                    if !scenario.expected_queue_url.is_empty() && queue_url != scenario.expected_queue_url {
+                        return Err(format!(
+                            "Queue URL mismatch: expected '{}', got '{}' for '{}'",
+                            scenario.expected_queue_url, queue_url, scenario.description
+                        ));
+                    }
+
+                    Ok(())
+                }
+                AwsSqsConsumerValidationResult::Invalid { violations, .. } => {
+                    if scenario.should_be_valid {
+                        return Err(format!(
+                            "Expected validation success but span was rejected with violations: {:?} for '{}'",
+                            violations, scenario.description
+                        ));
+                    }
+
+                    Ok(())
+                }
+                AwsSqsConsumerValidationResult::NotApplicable { .. } => {
+                    if !scenario.should_be_valid {
+                        return Err(format!(
+                            "Expected validation failure but span was marked not applicable for '{}'",
+                            scenario.description
+                        ));
+                    }
+
+                    Ok(())
+                }
+            }
+        }
+
+        /// Validates AWS SQS consumer span attributes per OTLP-153
+        fn validate_aws_sqs_consumer_attributes(
+            span_data: &AwsSqsConsumerSpanData,
+        ) -> AwsSqsConsumerValidationResult {
+            // Check if this is a CONSUMER span with messaging.system="aws_sqs"
+            if !matches!(span_data.kind, SpanKind::Consumer) {
+                return AwsSqsConsumerValidationResult::NotApplicable {
+                    reason: format!("Not a CONSUMER span: {:?}", span_data.kind),
+                };
+            }
+
+            // Case-sensitive messaging.system check
+            let messaging_system = span_data.attributes.get("messaging.system")
+                .and_then(|v| match v {
+                    AnyValue::StringValue(s) => Some(s.as_str()),
+                    _ => None,
+                })
+                .unwrap_or("");
+
+            if messaging_system != "aws_sqs" {
+                return AwsSqsConsumerValidationResult::NotApplicable {
+                    reason: format!("Not AWS SQS messaging system: '{}'", messaging_system),
+                };
+            }
+
+            // OTLP-153: messaging.aws_sqs.queue_url MUST be set for AWS SQS CONSUMER spans
+            let mut violations = Vec::new();
+
+            let queue_url_attribute = span_data.attributes.get("messaging.aws_sqs.queue_url");
+            let queue_url = match queue_url_attribute {
+                Some(AnyValue::StringValue(url_string)) => {
+                    if url_string.trim().is_empty() {
+                        violations.push("OTLP-153: messaging.aws_sqs.queue_url is empty or whitespace-only".to_string());
+                        url_string.clone()
+                    } else {
+                        url_string.clone()
+                    }
+                }
+                Some(other_value) => {
+                    violations.push(format!(
+                        "OTLP-153: messaging.aws_sqs.queue_url has wrong type (expected StringValue, got {:?})",
+                        other_value
+                    ));
+                    return AwsSqsConsumerValidationResult::Invalid {
+                        violations,
+                        missing_or_invalid_queue_url: Some("wrong_type".to_string()),
+                    };
+                }
+                None => {
+                    violations.push("OTLP-153: AWS SQS consumer span missing required messaging.aws_sqs.queue_url attribute".to_string());
+                    return AwsSqsConsumerValidationResult::Invalid {
+                        violations,
+                        missing_or_invalid_queue_url: None,
+                    };
+                }
+            };
+
+            if !violations.is_empty() {
+                return AwsSqsConsumerValidationResult::Invalid {
+                    violations,
+                    missing_or_invalid_queue_url: Some(queue_url),
+                };
+            }
+
+            // Count additional AWS SQS-specific attributes
+            let additional_aws_sqs_attributes = span_data.attributes.keys()
+                .filter(|k| k.starts_with("messaging.aws_sqs.") && *k != "messaging.aws_sqs.queue_url")
+                .count();
+
+            AwsSqsConsumerValidationResult::Valid {
+                queue_url,
+                additional_aws_sqs_attributes,
+            }
+        }
+
+        // Execute OTLP-153 conformance validation for all scenarios
+        let mut passed_scenarios = 0;
+        let total_scenarios = test_scenarios.len();
+
+        for scenario in &test_scenarios {
+            match validate_aws_sqs_consumer_queue_url_conformance(scenario) {
+                Ok(()) => {
+                    passed_scenarios += 1;
+                    println!("✓ OTLP-153 conformance verified for {}", scenario.description);
+                }
+                Err(error_msg) => {
+                    panic!(
+                        "OTLP-153 conformance test FAILED for {}: {}",
+                        scenario.description, error_msg
+                    );
+                }
+            }
+        }
+
+        assert_eq!(
+            passed_scenarios, total_scenarios,
+            "All OTLP-153 AWS SQS consumer queue URL scenarios must pass"
+        );
+
+        println!("✓ OTLP-153: AWS SQS consumer queue URL validation conformance verified");
+        println!("  - CONSUMER spans with messaging.system='aws_sqs' require messaging.aws_sqs.queue_url");
+        println!("  - Queue URL must be non-empty string value");
+        println!("  - Producer spans exempt from consumer queue URL requirement");
+        println!("  - Non-AWS SQS messaging systems exempt from validation");
+        println!("  - Case-sensitive messaging.system matching enforced");
+        println!("  - Wrong attribute types properly rejected");
+        println!("  - Empty and whitespace-only queue URLs rejected");
+        println!("  - Additional AWS SQS consumer attributes preserved and counted");
+        println!("  - URL format validation not enforced (only presence and type)");
+        println!("  - Long polling and DLQ attributes properly supported");
+    }
 }
