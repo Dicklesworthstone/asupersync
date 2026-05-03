@@ -5039,3 +5039,9 @@ name = "h2_settings_recv_first_then_send"
 path = "fuzz_targets/h2_settings_recv_first_then_send.rs"
 test = false
 doc = false
+
+[[bin]]
+name = "h2_request_method_too_long"
+path = "fuzz_targets/h2_request_method_too_long.rs"
+test = false
+doc = false
