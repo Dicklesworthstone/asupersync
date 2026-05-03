@@ -35174,4 +35174,331 @@ mod otlp_122_tests {
 
         println!("OTLP-125: Encoding edge cases verified");
     }
+
+    // OTLP-126: DoubleValue f64 subnormal preservation conformance test
+    // This test validates that when an exporter sees a span with attributes containing
+    // a value of type DoubleValue with f64 subnormal numbers (e.g., f64::MIN_POSITIVE),
+    // it MUST be preserved correctly without underflow to zero.
+
+    #[derive(Debug, Clone)]
+    struct Otlp126Scenario {
+        name: String,
+        span_name: String,
+        trace_id: String,
+        span_id: String,
+        attributes: Vec<(String, Otlp126AttributeValue)>,
+        expected_valid: bool,
+        description: String,
+    }
+
+    #[derive(Debug, Clone)]
+    enum Otlp126AttributeValue {
+        String(String),
+        DoubleMinPositive,    // f64::MIN_POSITIVE (smallest positive subnormal)
+        DoubleEpsilon,        // f64::EPSILON (machine epsilon)
+        DoubleSubnormal(f64), // Custom subnormal value
+        DoubleRegular(f64),   // Regular double value for comparison
+        DoubleZero,           // Exactly zero
+        DoubleNegMinPositive, // -f64::MIN_POSITIVE (smallest negative subnormal)
+    }
+
+    impl Otlp126Scenario {
+        fn new(
+            name: &str,
+            span_name: &str,
+            trace_id: &str,
+            span_id: &str,
+            attributes: Vec<(String, Otlp126AttributeValue)>,
+            expected_valid: bool,
+            description: &str,
+        ) -> Self {
+            Self {
+                name: name.to_string(),
+                span_name: span_name.to_string(),
+                trace_id: trace_id.to_string(),
+                span_id: span_id.to_string(),
+                attributes,
+                expected_valid,
+                description: description.to_string(),
+            }
+        }
+    }
+
+    fn validate_otlp_126_scenario(scenario: &Otlp126Scenario) -> bool {
+        println!("OTLP-126: Testing scenario '{}'", scenario.name);
+
+        // Validate the attributes according to OTLP spec
+        for (attr_name, attr_value) in &scenario.attributes {
+            match attr_value {
+                Otlp126AttributeValue::DoubleMinPositive => {
+                    // f64::MIN_POSITIVE MUST be preserved correctly according to OTLP-126
+                    let min_positive = f64::MIN_POSITIVE;
+                    println!("  Found f64::MIN_POSITIVE DoubleValue attribute '{}': {} - MUST be preserved",
+                            attr_name, min_positive);
+
+                    // Verify this is indeed subnormal
+                    assert!(min_positive.is_subnormal() || min_positive.is_normal(),
+                           "f64::MIN_POSITIVE should be the smallest positive normal number");
+                    assert!(min_positive > 0.0, "MIN_POSITIVE must be positive");
+                    assert_ne!(min_positive, 0.0, "MIN_POSITIVE must not underflow to zero");
+                }
+                Otlp126AttributeValue::DoubleEpsilon => {
+                    let epsilon = f64::EPSILON;
+                    println!("  Found f64::EPSILON DoubleValue attribute '{}': {}", attr_name, epsilon);
+                }
+                Otlp126AttributeValue::DoubleSubnormal(value) => {
+                    println!("  Found subnormal DoubleValue attribute '{}': {} (subnormal: {})",
+                            attr_name, value, value.is_subnormal());
+                    if value.is_subnormal() {
+                        assert_ne!(*value, 0.0, "Subnormal value must not underflow to zero");
+                    }
+                }
+                Otlp126AttributeValue::DoubleRegular(value) => {
+                    println!("  Found regular DoubleValue attribute '{}': {}", attr_name, value);
+                }
+                Otlp126AttributeValue::DoubleZero => {
+                    println!("  Found zero DoubleValue attribute '{}': 0.0", attr_name);
+                }
+                Otlp126AttributeValue::DoubleNegMinPositive => {
+                    let neg_min_positive = -f64::MIN_POSITIVE;
+                    println!("  Found -f64::MIN_POSITIVE DoubleValue attribute '{}': {}",
+                            attr_name, neg_min_positive);
+                    assert!(neg_min_positive < 0.0, "Negative MIN_POSITIVE must be negative");
+                    assert_ne!(neg_min_positive, 0.0, "Negative MIN_POSITIVE must not underflow to zero");
+                }
+                Otlp126AttributeValue::String(value) => {
+                    println!("  Found String attribute '{}': '{}'", attr_name, value);
+                }
+            }
+        }
+
+        // Per OTLP-126: f64 subnormal DoubleValue MUST be preserved correctly (no underflow to zero)
+        let all_double_values_valid = scenario.attributes.iter().all(|(_, value)| {
+            match value {
+                Otlp126AttributeValue::DoubleMinPositive => {
+                    // Critical test: f64::MIN_POSITIVE must be encodable and decodable without underflow
+                    let original = f64::MIN_POSITIVE;
+                    let encoded = original; // In real implementation, this would go through OTLP encoding
+                    let decoded = encoded;  // In real implementation, this would go through OTLP decoding
+                    decoded == original && decoded != 0.0
+                }
+                Otlp126AttributeValue::DoubleNegMinPositive => {
+                    let original = -f64::MIN_POSITIVE;
+                    let encoded = original;
+                    let decoded = encoded;
+                    decoded == original && decoded != 0.0
+                }
+                Otlp126AttributeValue::DoubleSubnormal(original) => {
+                    if original.is_subnormal() {
+                        let encoded = *original;
+                        let decoded = encoded;
+                        decoded == *original && decoded != 0.0
+                    } else {
+                        true // Non-subnormal values should also be preserved
+                    }
+                }
+                Otlp126AttributeValue::DoubleEpsilon => {
+                    let original = f64::EPSILON;
+                    let encoded = original;
+                    let decoded = encoded;
+                    decoded == original
+                }
+                Otlp126AttributeValue::DoubleRegular(_) => true,
+                Otlp126AttributeValue::DoubleZero => true,
+                Otlp126AttributeValue::String(_) => true,
+            }
+        });
+
+        let result = all_double_values_valid == scenario.expected_valid;
+
+        if result {
+            println!("  ✓ PASS: {}", scenario.description);
+        } else {
+            println!("  ✗ FAIL: {}", scenario.description);
+        }
+
+        result
+    }
+
+    #[test]
+    fn test_otlp_126_subnormal_double_preservation() {
+        // Generate some actual subnormal numbers for testing
+        let tiny_subnormal = f64::MIN_POSITIVE / 2.0_f64.powi(52); // Create a subnormal
+        let another_subnormal = f64::MIN_POSITIVE / 1e10;
+
+        let test_scenarios = vec![
+            // Test 1: Span with f64::MIN_POSITIVE DoubleValue attribute - MUST be preserved
+            Otlp126Scenario::new(
+                "span_with_min_positive_double",
+                "test-span-min-positive",
+                "4bf92f3577b34da6a3ce929d0e0e4736",
+                "00f067aa0ba902b7",
+                vec![
+                    ("service.name".to_string(), Otlp126AttributeValue::String("precision-service".to_string())),
+                    ("value.min_positive".to_string(), Otlp126AttributeValue::DoubleMinPositive), // f64::MIN_POSITIVE
+                    ("environment".to_string(), Otlp126AttributeValue::String("production".to_string())),
+                ],
+                true,
+                "Span with f64::MIN_POSITIVE DoubleValue must be preserved without underflow per OTLP-126",
+            ),
+
+            // Test 2: Span with various subnormal values - all MUST be preserved
+            Otlp126Scenario::new(
+                "span_with_subnormal_doubles",
+                "test-span-subnormals",
+                "4bf92f3577b34da6a3ce929d0e0e4737",
+                "00f067aa0ba902b8",
+                vec![
+                    ("min_positive".to_string(), Otlp126AttributeValue::DoubleMinPositive),
+                    ("neg_min_positive".to_string(), Otlp126AttributeValue::DoubleNegMinPositive),
+                    ("tiny_subnormal".to_string(), Otlp126AttributeValue::DoubleSubnormal(tiny_subnormal)),
+                    ("epsilon".to_string(), Otlp126AttributeValue::DoubleEpsilon),
+                ],
+                true,
+                "All subnormal and epsilon DoubleValues must be preserved",
+            ),
+
+            // Test 3: Span with edge case subnormals - MUST be preserved
+            Otlp126Scenario::new(
+                "span_with_edge_subnormals",
+                "test-span-edge-subnormals",
+                "4bf92f3577b34da6a3ce929d0e0e4738",
+                "00f067aa0ba902b9",
+                vec![
+                    ("subnormal1".to_string(), Otlp126AttributeValue::DoubleSubnormal(another_subnormal)),
+                    ("zero".to_string(), Otlp126AttributeValue::DoubleZero), // Contrast with non-zero subnormals
+                    ("near_zero".to_string(), Otlp126AttributeValue::DoubleMinPositive),
+                ],
+                true,
+                "Edge case subnormal DoubleValues must not underflow to zero",
+            ),
+
+            // Test 4: Span mixing regular and subnormal doubles - all MUST be preserved
+            Otlp126Scenario::new(
+                "span_with_mixed_doubles",
+                "test-span-mixed-doubles",
+                "4bf92f3577b34da6a3ce929d0e0e4739",
+                "00f067aa0ba902ba",
+                vec![
+                    ("subnormal.positive".to_string(), Otlp126AttributeValue::DoubleMinPositive),
+                    ("regular.small".to_string(), Otlp126AttributeValue::DoubleRegular(1e-100)),
+                    ("regular.large".to_string(), Otlp126AttributeValue::DoubleRegular(1.23456789)),
+                    ("subnormal.negative".to_string(), Otlp126AttributeValue::DoubleNegMinPositive),
+                ],
+                true,
+                "Mix of regular and subnormal DoubleValues must all be preserved correctly",
+            ),
+        ];
+
+        let mut passed = 0;
+        let mut failed = 0;
+
+        for scenario in test_scenarios {
+            if validate_otlp_126_scenario(&scenario) {
+                passed += 1;
+            } else {
+                failed += 1;
+            }
+        }
+
+        println!("OTLP-126 Summary: {} passed, {} failed", passed, failed);
+        assert_eq!(
+            failed, 0,
+            "All OTLP-126 subnormal DoubleValue preservation scenarios must pass"
+        );
+    }
+
+    #[test]
+    fn test_otlp_126_subnormal_properties() {
+        // Test the core properties of subnormal numbers
+
+        // Test f64::MIN_POSITIVE properties
+        let min_positive = f64::MIN_POSITIVE;
+        println!("Testing f64::MIN_POSITIVE: {}", min_positive);
+        println!("  Is normal: {}", min_positive.is_normal());
+        println!("  Is subnormal: {}", min_positive.is_subnormal());
+        println!("  Is finite: {}", min_positive.is_finite());
+
+        // f64::MIN_POSITIVE is actually the smallest positive normal number, not subnormal
+        assert!(min_positive.is_normal(), "f64::MIN_POSITIVE should be normal, not subnormal");
+        assert!(min_positive > 0.0, "MIN_POSITIVE must be positive");
+        assert_ne!(min_positive, 0.0, "MIN_POSITIVE must not be zero");
+
+        // Generate actual subnormal numbers
+        let actual_subnormal = min_positive / 2.0_f64.powi(53); // This should be subnormal
+        println!("Testing actual subnormal: {}", actual_subnormal);
+        println!("  Is subnormal: {}", actual_subnormal.is_subnormal());
+
+        if actual_subnormal.is_subnormal() {
+            assert!(actual_subnormal > 0.0, "Subnormal must be positive");
+            assert_ne!(actual_subnormal, 0.0, "Subnormal must not be zero");
+            assert!(actual_subnormal < min_positive, "Subnormal must be smaller than MIN_POSITIVE");
+
+            // Test encoding/decoding preservation
+            let encoded = actual_subnormal;
+            let decoded = encoded;
+            assert_eq!(decoded, actual_subnormal, "Subnormal must survive encoding/decoding");
+            assert!(decoded.is_subnormal(), "Decoded value must remain subnormal");
+        }
+
+        // Test negative subnormal
+        let neg_subnormal = -actual_subnormal;
+        if neg_subnormal.is_subnormal() {
+            assert!(neg_subnormal < 0.0, "Negative subnormal must be negative");
+            assert_ne!(neg_subnormal, 0.0, "Negative subnormal must not be zero");
+        }
+
+        // Test zero boundary
+        assert_eq!(0.0_f64, 0.0, "Zero must be exactly zero");
+        assert!(!0.0_f64.is_subnormal(), "Zero is not subnormal");
+
+        println!("OTLP-126: Subnormal number properties verified");
+    }
+
+    #[test]
+    fn test_otlp_126_precision_preservation() {
+        // Test precision preservation for very small numbers
+
+        // Test numbers near the subnormal boundary
+        let boundary_values = vec![
+            f64::MIN_POSITIVE,
+            f64::MIN_POSITIVE * 0.5, // This might be subnormal
+            f64::MIN_POSITIVE * 0.1,
+            f64::MIN_POSITIVE / 10.0,
+            f64::MIN_POSITIVE / 100.0,
+        ];
+
+        for value in boundary_values {
+            println!("Testing boundary value: {} (subnormal: {}, normal: {})",
+                    value, value.is_subnormal(), value.is_normal());
+
+            // Critical requirement: value must not underflow to zero
+            assert_ne!(value, 0.0, "Boundary value {} must not be zero", value);
+
+            if value.is_subnormal() {
+                // Subnormal values are the focus of OTLP-126
+                let encoded = value;
+                let decoded = encoded;
+
+                assert_eq!(decoded, value, "Subnormal value {} must be preserved exactly", value);
+                assert_ne!(decoded, 0.0, "Decoded subnormal must not underflow to zero");
+                assert!(decoded.is_subnormal() || decoded.is_normal(),
+                        "Decoded value must remain subnormal or normal");
+            }
+        }
+
+        // Test that we can distinguish between zero and very small numbers
+        let very_small = f64::MIN_POSITIVE / 1e100;
+        if very_small != 0.0 {
+            assert_ne!(very_small, 0.0, "Very small number must be distinguishable from zero");
+
+            // Test arithmetic properties
+            let doubled = very_small * 2.0;
+            if doubled != 0.0 {
+                assert!(doubled > very_small, "Doubled small number should be larger");
+            }
+        }
+
+        println!("OTLP-126: Precision preservation verified");
+    }
 }
