@@ -16,6 +16,7 @@
 //! | `enable_parking` | true |
 //! | `poll_budget` | 128 |
 //! | `capacity_hints` | `None` (auto from `worker_threads`) |
+//! | `trace_storage_profile` | `TraceStorageProfile::Default` |
 //! | `browser_ready_handoff_limit` | 0 (disabled) |
 //! | `browser_worker_offload` | disabled, min cost 1024, max in-flight 16 |
 //! | `root_region_limits` | `None` |
@@ -165,6 +166,127 @@ impl Default for RuntimeCapacityHints {
             Self::DEFAULT_REGION_CAPACITY,
             Self::DEFAULT_OBLIGATION_CAPACITY,
         )
+    }
+}
+
+/// Readable storage profiles for runtime trace and diagnostic retention.
+///
+/// These profiles are deliberately policy-only: they scale hot/cold trace
+/// buffers without changing scheduling semantics, task ordering, or
+/// cancellation behavior.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TraceStorageProfile {
+    /// Historical baseline tuned for general-purpose hosts.
+    Default,
+    /// High-retention profile for 256GB-class hosts.
+    LargeMemory256G,
+}
+
+/// Operator-facing budget summary for a [`TraceStorageProfile`].
+///
+/// The byte totals are planning estimates derived from explicit per-slot
+/// assumptions so operators can see the memory tradeoff before enabling a
+/// richer profile.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TraceStorageBudget {
+    /// Selected storage profile.
+    pub profile: TraceStorageProfile,
+    /// Hot trace ring capacity (event slots).
+    pub trace_event_slots: usize,
+    /// Cancellation trace retention slots.
+    pub cancellation_trace_slots: usize,
+    /// Distributed trace retention slots.
+    pub distributed_trace_slots: usize,
+    /// Planning assumption for one hot trace slot.
+    pub assumed_trace_event_bytes: usize,
+    /// Planning assumption for one retained cancellation trace.
+    pub assumed_cancellation_trace_bytes: usize,
+    /// Planning assumption for one retained distributed trace.
+    pub assumed_distributed_trace_bytes: usize,
+}
+
+impl TraceStorageBudget {
+    /// Estimated bytes consumed by the hot trace ring.
+    #[must_use]
+    pub const fn estimated_hot_bytes(&self) -> usize {
+        self.trace_event_slots
+            .saturating_mul(self.assumed_trace_event_bytes)
+    }
+
+    /// Estimated bytes consumed by cold retained traces.
+    #[must_use]
+    pub const fn estimated_cold_bytes(&self) -> usize {
+        self.cancellation_trace_slots
+            .saturating_mul(self.assumed_cancellation_trace_bytes)
+            .saturating_add(
+                self.distributed_trace_slots
+                    .saturating_mul(self.assumed_distributed_trace_bytes),
+            )
+    }
+
+    /// Estimated total bytes across hot and cold trace storage.
+    #[must_use]
+    pub const fn estimated_total_bytes(&self) -> usize {
+        self.estimated_hot_bytes()
+            .saturating_add(self.estimated_cold_bytes())
+    }
+}
+
+impl TraceStorageProfile {
+    /// Historical runtime trace ring size.
+    pub const DEFAULT_TRACE_BUFFER_CAPACITY: usize = 4_096;
+    /// Large-memory runtime trace ring size.
+    pub const LARGE_MEMORY_TRACE_BUFFER_CAPACITY: usize = 262_144;
+
+    const DEFAULT_CANCELLATION_TRACE_SLOTS: usize = 10_000;
+    const LARGE_MEMORY_CANCELLATION_TRACE_SLOTS: usize = 200_000;
+
+    const DEFAULT_DISTRIBUTED_TRACE_SLOTS: usize = 10_000;
+    const LARGE_MEMORY_DISTRIBUTED_TRACE_SLOTS: usize = 200_000;
+
+    const ASSUMED_TRACE_EVENT_BYTES: usize = 256;
+    const ASSUMED_CANCELLATION_TRACE_BYTES: usize = 2_048;
+    const ASSUMED_DISTRIBUTED_TRACE_BYTES: usize = 1_536;
+
+    /// Returns the hot trace ring capacity for the profile.
+    #[must_use]
+    pub const fn trace_buffer_capacity(self) -> usize {
+        match self {
+            Self::Default => Self::DEFAULT_TRACE_BUFFER_CAPACITY,
+            Self::LargeMemory256G => Self::LARGE_MEMORY_TRACE_BUFFER_CAPACITY,
+        }
+    }
+
+    /// Returns the cancellation trace retention limit for the profile.
+    #[must_use]
+    pub const fn cancellation_trace_slots(self) -> usize {
+        match self {
+            Self::Default => Self::DEFAULT_CANCELLATION_TRACE_SLOTS,
+            Self::LargeMemory256G => Self::LARGE_MEMORY_CANCELLATION_TRACE_SLOTS,
+        }
+    }
+
+    /// Returns the distributed trace retention limit for the profile.
+    #[must_use]
+    pub const fn distributed_trace_slots(self) -> usize {
+        match self {
+            Self::Default => Self::DEFAULT_DISTRIBUTED_TRACE_SLOTS,
+            Self::LargeMemory256G => Self::LARGE_MEMORY_DISTRIBUTED_TRACE_SLOTS,
+        }
+    }
+
+    /// Returns an operator-facing storage budget summary for this profile.
+    #[must_use]
+    pub const fn budget(self) -> TraceStorageBudget {
+        TraceStorageBudget {
+            profile: self,
+            trace_event_slots: self.trace_buffer_capacity(),
+            cancellation_trace_slots: self.cancellation_trace_slots(),
+            distributed_trace_slots: self.distributed_trace_slots(),
+            assumed_trace_event_bytes: Self::ASSUMED_TRACE_EVENT_BYTES,
+            assumed_cancellation_trace_bytes: Self::ASSUMED_CANCELLATION_TRACE_BYTES,
+            assumed_distributed_trace_bytes: Self::ASSUMED_DISTRIBUTED_TRACE_BYTES,
+        }
     }
 }
 
@@ -342,6 +464,8 @@ pub struct RuntimeConfig {
     /// When `None`, capacities auto-scale from `worker_threads` using the
     /// historical 4-worker baseline (512 tasks / 128 regions / 256 obligations).
     pub capacity_hints: Option<RuntimeCapacityHints>,
+    /// Trace and diagnostic retention policy for the runtime.
+    pub trace_storage_profile: TraceStorageProfile,
     /// Browser pump fairness bound for consecutive ready dispatches.
     ///
     /// When non-zero, browser-style single-thread pumps can yield to the host
@@ -457,6 +581,12 @@ impl RuntimeConfig {
             .unwrap_or_else(|| RuntimeCapacityHints::for_worker_threads(self.worker_threads))
     }
 
+    /// Returns the operator-facing trace storage budget for the selected profile.
+    #[must_use]
+    pub const fn trace_storage_budget(&self) -> TraceStorageBudget {
+        self.trace_storage_profile.budget()
+    }
+
     /// Default worker thread count for a `RuntimeConfig::default()`.
     ///
     /// br-asupersync-ry2trw: this is now a deterministic constant,
@@ -519,6 +649,7 @@ impl Default for RuntimeConfig {
             enable_parking: true,
             poll_budget: 128,
             capacity_hints: None,
+            trace_storage_profile: TraceStorageProfile::Default,
             browser_ready_handoff_limit: 0,
             browser_worker_offload: BrowserWorkerOffloadConfig::default(),
             cancel_lane_max_streak: 16,
@@ -595,6 +726,12 @@ mod tests {
             "poll_budget",
             128,
             config.poll_budget
+        );
+        crate::assert_with_log!(
+            config.trace_storage_profile == TraceStorageProfile::Default,
+            "trace_storage_profile",
+            TraceStorageProfile::Default,
+            config.trace_storage_profile
         );
         crate::assert_with_log!(
             config.browser_ready_handoff_limit == 0,
@@ -674,6 +811,7 @@ mod tests {
             enable_parking: true,
             poll_budget: 0,
             capacity_hints: Some(RuntimeCapacityHints::new(0, 0, 0)),
+            trace_storage_profile: TraceStorageProfile::Default,
             browser_ready_handoff_limit: 0,
             browser_worker_offload: BrowserWorkerOffloadConfig {
                 enabled: true,
@@ -936,6 +1074,7 @@ mod tests {
             enable_parking: false,
             poll_budget: 32,
             capacity_hints: Some(RuntimeCapacityHints::new(4096, 1024, 2048)),
+            trace_storage_profile: TraceStorageProfile::LargeMemory256G,
             browser_ready_handoff_limit: 64,
             browser_worker_offload: BrowserWorkerOffloadConfig {
                 enabled: true,
@@ -993,6 +1132,12 @@ mod tests {
             "poll_budget",
             32,
             config.poll_budget
+        );
+        crate::assert_with_log!(
+            config.trace_storage_profile == TraceStorageProfile::LargeMemory256G,
+            "trace_storage_profile",
+            TraceStorageProfile::LargeMemory256G,
+            config.trace_storage_profile
         );
         let capacity_hints = config
             .capacity_hints

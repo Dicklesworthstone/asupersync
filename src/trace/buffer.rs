@@ -188,6 +188,13 @@ impl TraceBufferHandle {
         buffer.len()
     }
 
+    /// Returns the configured buffer capacity.
+    #[must_use]
+    pub fn capacity(&self) -> usize {
+        let buffer = self.inner.buffer.lock();
+        buffer.capacity()
+    }
+
     /// Returns the total number of events pushed since creation.
     ///
     /// This includes events that may no longer be present in the ring buffer

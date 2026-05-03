@@ -2327,6 +2327,19 @@ impl RuntimeBuilder {
         self
     }
 
+    /// Select a trace and diagnostic retention profile.
+    ///
+    /// This changes only storage envelopes and retention limits. Scheduling
+    /// semantics, cancellation behavior, and fairness remain unchanged.
+    #[must_use]
+    pub fn trace_storage_profile(
+        mut self,
+        profile: crate::runtime::config::TraceStorageProfile,
+    ) -> Self {
+        self.config.trace_storage_profile = profile;
+        self
+    }
+
     /// Set browser-style ready-lane burst handoff limit.
     ///
     /// When non-zero, scheduler workers can force a one-shot handoff after
@@ -3203,6 +3216,17 @@ impl Runtime {
         guard.is_quiescent()
     }
 
+    /// Returns the configured hot trace-ring capacity for this runtime.
+    #[must_use]
+    pub fn trace_buffer_capacity(&self) -> usize {
+        let guard = self
+            .inner
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        guard.trace_buffer_capacity()
+    }
+
     /// Spawns a blocking task on the blocking pool.
     ///
     /// Returns `None` if the blocking pool is not configured (max_threads = 0).
@@ -3523,20 +3547,23 @@ impl RuntimeInner {
         entropy_source: Option<Arc<dyn EntropySource>>,
     ) -> RuntimeState {
         let capacity_hints = config.resolved_capacity_hints();
+        let trace_capacity = config.trace_storage_profile.trace_buffer_capacity();
         let mut runtime_state = reactor.map_or_else(
             || {
-                RuntimeState::with_capacity_hints(
+                RuntimeState::with_capacity_hints_and_trace_capacity(
                     capacity_hints.task_capacity,
                     capacity_hints.region_capacity,
                     capacity_hints.obligation_capacity,
+                    trace_capacity,
                     config.metrics_provider.clone(),
                 )
             },
             |reactor| {
-                let mut state = RuntimeState::with_capacity_hints(
+                let mut state = RuntimeState::with_capacity_hints_and_trace_capacity(
                     capacity_hints.task_capacity,
                     capacity_hints.region_capacity,
                     capacity_hints.obligation_capacity,
+                    trace_capacity,
                     config.metrics_provider.clone(),
                 );
                 state.set_io_driver(IoDriverHandle::new(reactor));
