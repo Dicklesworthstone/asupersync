@@ -130,8 +130,8 @@
 //! would all be caught by the structural pins below.
 
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
 fn read(rel: &str) -> String {
     let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(rel);
@@ -146,7 +146,9 @@ fn request_cancel_with_budget_returns_false_when_task_already_terminal() {
     let source = read("src/record/task.rs");
 
     let fn_marker = "pub fn request_cancel_with_budget(";
-    let start = source.find(fn_marker).expect("request_cancel_with_budget fn");
+    let start = source
+        .find(fn_marker)
+        .expect("request_cancel_with_budget fn");
     let window_end = (start + 8000).min(source.len());
     let safe_end = source
         .char_indices()
@@ -157,8 +159,7 @@ fn request_cancel_with_budget_returns_false_when_task_already_terminal() {
     let body = &source[start..safe_end];
 
     assert!(
-        body.contains("if self.state.is_terminal() {")
-            && body.contains("return false;"),
+        body.contains("if self.state.is_terminal() {") && body.contains("return false;"),
         "REGRESSION: request_cancel_with_budget no longer \
          early-returns on terminal state. Cancels on \
          completed tasks would mutate state — UB pathway \
@@ -201,7 +202,9 @@ fn state_match_arms_strengthen_existing_reason_for_already_cancelling_states() {
     let source = read("src/record/task.rs");
 
     let fn_marker = "pub fn request_cancel_with_budget(";
-    let start = source.find(fn_marker).expect("request_cancel_with_budget fn");
+    let start = source
+        .find(fn_marker)
+        .expect("request_cancel_with_budget fn");
     let window_end = (start + 8000).min(source.len());
     let safe_end = source
         .char_indices()
@@ -211,9 +214,7 @@ fn state_match_arms_strengthen_existing_reason_for_already_cancelling_states() {
         .unwrap_or(window_end);
     let body = &source[start..safe_end];
 
-    let strengthen_count = body
-        .matches("existing_reason.strengthen(&reason);")
-        .count();
+    let strengthen_count = body.matches("existing_reason.strengthen(&reason);").count();
     assert!(
         strengthen_count >= 3,
         "REGRESSION: only {strengthen_count} \
@@ -249,7 +250,9 @@ fn state_match_arms_combine_budgets_via_meet_for_tightest_constraint() {
     let source = read("src/record/task.rs");
 
     let fn_marker = "pub fn request_cancel_with_budget(";
-    let start = source.find(fn_marker).expect("request_cancel_with_budget fn");
+    let start = source
+        .find(fn_marker)
+        .expect("request_cancel_with_budget fn");
     let window_end = (start + 8000).min(source.len());
     let safe_end = source
         .char_indices()
@@ -259,9 +262,7 @@ fn state_match_arms_combine_budgets_via_meet_for_tightest_constraint() {
         .unwrap_or(window_end);
     let body = &source[start..safe_end];
 
-    let combine_count = body
-        .matches(".combine(cleanup_budget)")
-        .count();
+    let combine_count = body.matches(".combine(cleanup_budget)").count();
     assert!(
         combine_count >= 3,
         "REGRESSION: only {combine_count} \
@@ -281,7 +282,9 @@ fn state_match_arms_for_cancelling_states_return_false_not_true() {
     let source = read("src/record/task.rs");
 
     let fn_marker = "pub fn request_cancel_with_budget(";
-    let start = source.find(fn_marker).expect("request_cancel_with_budget fn");
+    let start = source
+        .find(fn_marker)
+        .expect("request_cancel_with_budget fn");
     let window_end = (start + 8000).min(source.len());
     let safe_end = source
         .char_indices()
@@ -294,7 +297,9 @@ fn state_match_arms_for_cancelling_states_return_false_not_true() {
     // Each of the three already-cancelling arms returns
     // false. We count returns inside the matching arms by
     // looking for the trace + strengthen + false pattern.
-    let already_cancelled_returns = body.matches("\n                false\n            }").count();
+    let already_cancelled_returns = body
+        .matches("\n                false\n            }")
+        .count();
     assert!(
         already_cancelled_returns >= 3,
         "REGRESSION: state match arms for already-cancelling \
@@ -315,7 +320,9 @@ fn cancel_epoch_increments_only_on_first_transition_to_cancel_requested() {
     let source = read("src/record/task.rs");
 
     let fn_marker = "pub fn request_cancel_with_budget(";
-    let start = source.find(fn_marker).expect("request_cancel_with_budget fn");
+    let start = source
+        .find(fn_marker)
+        .expect("request_cancel_with_budget fn");
     let window_end = (start + 8000).min(source.len());
     let safe_end = source
         .char_indices()
@@ -394,8 +401,7 @@ fn cancel_request_returns_vec_for_per_task_priority_routing() {
     let source = read("src/runtime/state.rs");
 
     assert!(
-        source.contains("pub fn cancel_request(")
-            && source.contains("-> Vec<(TaskId, u8)>"),
+        source.contains("pub fn cancel_request(") && source.contains("-> Vec<(TaskId, u8)>"),
         "REGRESSION: cancel_request signature no longer \
          returns Vec<(TaskId, u8)>. The coalescing signal \
          can't be conveyed to the scheduler — every cancel \
@@ -411,10 +417,7 @@ fn no_alternate_cancel_publish_path_bypasses_request_cancel_with_budget() {
     // chokepoint is what enforces coalescing.
     let source = read("src/runtime/state.rs");
 
-    let suspect_alternate_paths = [
-        "task.cancel_requested = true;",
-        ".fast_cancel.store(true,",
-    ];
+    let suspect_alternate_paths = ["task.cancel_requested = true;", ".fast_cancel.store(true,"];
 
     let mut findings: Vec<String> = Vec::new();
     for pat in &suspect_alternate_paths {
