@@ -5265,3 +5265,10 @@ path = "fuzz_targets/h2_request_pseudo_authority_starting_with_at.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "h2_request_with_too_many_pseudo_headers"
+path = "fuzz_targets/h2_request_with_too_many_pseudo_headers.rs"
+test = false
+doc = false
+bench = false
