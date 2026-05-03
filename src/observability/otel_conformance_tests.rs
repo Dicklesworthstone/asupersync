@@ -49461,8 +49461,6 @@ mod otlp_122_tests {
         println!("  - Enhanced fan-out consumers, batch processing, and cross-region shards supported");
         println!("  - Consumer ARNs, approximate arrival timestamps, and partition keys preserved");
     }
-}
-
     /// OTLP-159: AWS Kinesis Firehose producer delivery stream name validation conformance test.
     /// Validates that when exporter sees a span with kind=PRODUCER and
     /// messaging.system="aws_kinesis_firehose", attribute messaging.aws_kinesis_firehose.delivery_stream_name
@@ -49807,8 +49805,6 @@ mod otlp_122_tests {
         println!("  - S3, Redshift, and OpenSearch destinations supported");
         println!("  - Data transformation, buffering, and compression attributes preserved");
     }
-}
-
     /// OTLP-160: Azure Service Bus producer queue name validation conformance test.
     /// Validates that when exporter sees a span with kind=PRODUCER and
     /// messaging.system="azure_servicebus", attribute messaging.azure_servicebus.queue_name
@@ -50158,4 +50154,3 @@ mod otlp_122_tests {
         println!("  - Premium tier, dead letter queue, and session-based messaging supported");
         println!("  - Topic/subscription, partitioning, and duplicate detection attributes preserved");
     }
-}
