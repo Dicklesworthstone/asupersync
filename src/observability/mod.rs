@@ -36,6 +36,8 @@
 //! ```
 
 pub mod analyzer_plugin;
+#[cfg(test)]
+pub mod batch_span_processor_flush_audit_test;
 pub mod cancellation_analyzer;
 pub mod cancellation_debt_monitor;
 pub mod cancellation_tracer;
