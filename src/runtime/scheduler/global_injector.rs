@@ -8,9 +8,13 @@ use crate::util::CachePadded;
 use parking_lot::Mutex;
 use std::cmp::Ordering as CmpOrdering;
 use std::collections::BinaryHeap;
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 
 use super::global_queue::{CountReservation, FaaFifoQueue};
+
+const READY_COMBINER_IN_FLIGHT_THRESHOLD: usize = 4;
+const READY_COMBINER_BACKLOG_THRESHOLD: usize = 256;
+const READY_COMBINER_MAX_BATCH: usize = 64;
 
 /// A scheduled task with its priority metadata.
 #[derive(Debug, Clone, Copy)]
@@ -19,6 +23,93 @@ pub struct PriorityTask {
     pub task: TaskId,
     /// Scheduling priority (0-255, higher = more important).
     pub priority: u8,
+}
+
+/// Snapshot of the adaptive ready-lane combiner counters.
+#[derive(Debug, Clone, Copy, Default, Eq, PartialEq)]
+pub struct ReadyCombinerSnapshot {
+    /// Ready injections that stayed on the direct low-contention path.
+    pub direct_injections: usize,
+    /// Ready injections deposited into the active combiner's pending batch.
+    pub deferred_injections: usize,
+    /// Ready injections published by the combiner batch path.
+    pub combined_injections: usize,
+    /// Ready injections that fell back to the direct queue while combining.
+    pub fallback_injections: usize,
+    /// Failed compare-exchange attempts to become the active combiner.
+    pub combiner_claim_failures: usize,
+    /// Number of times the ready lane entered combining mode.
+    pub mode_entries: usize,
+    /// Number of times the ready lane exited combining mode.
+    pub mode_exits: usize,
+    /// Number of combiner flushes into the ready queue.
+    pub flushes: usize,
+    /// Largest batch published by one combiner flush.
+    pub max_batch: usize,
+    /// Highest observed number of concurrent ready injections in flight.
+    pub max_in_flight: usize,
+    /// Current number of ready injections in flight.
+    pub current_in_flight: usize,
+    /// Current number of ready tasks waiting in the combiner pending buffer.
+    pub pending_len: usize,
+    /// Current approximate ready-queue length.
+    pub ready_len: usize,
+}
+
+#[derive(Debug, Default)]
+struct ReadyCombiner {
+    active: CachePadded<AtomicBool>,
+    in_flight: CachePadded<AtomicUsize>,
+    pending: Mutex<Vec<PriorityTask>>,
+    direct_injections: CachePadded<AtomicUsize>,
+    deferred_injections: CachePadded<AtomicUsize>,
+    combined_injections: CachePadded<AtomicUsize>,
+    fallback_injections: CachePadded<AtomicUsize>,
+    combiner_claim_failures: CachePadded<AtomicUsize>,
+    mode_entries: CachePadded<AtomicUsize>,
+    mode_exits: CachePadded<AtomicUsize>,
+    flushes: CachePadded<AtomicUsize>,
+    max_batch: CachePadded<AtomicUsize>,
+    max_in_flight: CachePadded<AtomicUsize>,
+}
+
+impl ReadyCombiner {
+    #[inline]
+    fn begin_injection(&self) -> usize {
+        let observed = self.in_flight.fetch_add(1, Ordering::AcqRel) + 1;
+        self.max_in_flight.fetch_max(observed, Ordering::Relaxed);
+        observed
+    }
+
+    #[inline]
+    fn finish_injection(&self) {
+        let _ = self.in_flight.fetch_sub(1, Ordering::AcqRel);
+    }
+
+    #[inline]
+    fn should_combine(in_flight: usize, ready_backlog: usize) -> bool {
+        in_flight >= READY_COMBINER_IN_FLIGHT_THRESHOLD
+            || (in_flight > 1 && ready_backlog >= READY_COMBINER_BACKLOG_THRESHOLD)
+    }
+
+    #[inline]
+    fn snapshot(&self, ready_len: usize) -> ReadyCombinerSnapshot {
+        ReadyCombinerSnapshot {
+            direct_injections: self.direct_injections.load(Ordering::Relaxed),
+            deferred_injections: self.deferred_injections.load(Ordering::Relaxed),
+            combined_injections: self.combined_injections.load(Ordering::Relaxed),
+            fallback_injections: self.fallback_injections.load(Ordering::Relaxed),
+            combiner_claim_failures: self.combiner_claim_failures.load(Ordering::Relaxed),
+            mode_entries: self.mode_entries.load(Ordering::Relaxed),
+            mode_exits: self.mode_exits.load(Ordering::Relaxed),
+            flushes: self.flushes.load(Ordering::Relaxed),
+            max_batch: self.max_batch.load(Ordering::Relaxed),
+            max_in_flight: self.max_in_flight.load(Ordering::Relaxed),
+            current_in_flight: self.in_flight.load(Ordering::Relaxed),
+            pending_len: self.pending.lock().len(),
+            ready_len,
+        }
+    }
 }
 
 /// A scheduled task with a deadline.
@@ -81,6 +172,8 @@ pub struct GlobalInjector {
     timed_queue: Mutex<TimedQueue>,
     /// Ready lane: general ready tasks.
     ready_queue: FaaFifoQueue<PriorityTask>,
+    /// Contention-gated combiner for ready-lane producer storms.
+    ready_combiner: ReadyCombiner,
     /// Approximate count of timed-lane tasks, allowing callers to skip
     /// acquiring the timed_queue mutex when the lane is empty.
     timed_count: CachePadded<AtomicUsize>,
@@ -111,6 +204,7 @@ impl Default for GlobalInjector {
             cancel_queue: FaaFifoQueue::default(),
             timed_queue: Mutex::new(TimedQueue::default()),
             ready_queue: FaaFifoQueue::default(),
+            ready_combiner: ReadyCombiner::default(),
             timed_count: CachePadded::new(AtomicUsize::new(0)),
             cached_earliest_deadline: CachePadded::new(AtomicU64::new(u64::MAX)),
         }
@@ -184,7 +278,105 @@ impl GlobalInjector {
     /// ordering is applied by the local `PriorityScheduler` after stealing.
     #[inline]
     pub fn inject_ready(&self, task: TaskId, priority: u8) {
-        self.ready_queue.push(PriorityTask { task, priority });
+        let entry = PriorityTask { task, priority };
+        let in_flight = self.ready_combiner.begin_injection();
+        let ready_backlog = self.ready_queue.len();
+
+        if ReadyCombiner::should_combine(in_flight, ready_backlog) {
+            self.inject_ready_contentious(entry);
+        } else {
+            self.ready_queue.push(entry);
+            self.ready_combiner
+                .direct_injections
+                .fetch_add(1, Ordering::Relaxed);
+        }
+
+        self.ready_combiner.finish_injection();
+    }
+
+    fn inject_ready_contentious(&self, entry: PriorityTask) {
+        if self
+            .ready_combiner
+            .active
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_ok()
+        {
+            self.ready_combiner
+                .mode_entries
+                .fetch_add(1, Ordering::Relaxed);
+            self.flush_ready_combiner_with(entry);
+            return;
+        }
+
+        self.ready_combiner
+            .combiner_claim_failures
+            .fetch_add(1, Ordering::Relaxed);
+
+        if let Some(mut pending) = self.ready_combiner.pending.try_lock() {
+            if self.ready_combiner.active.load(Ordering::Acquire) {
+                pending.push(entry);
+                self.ready_combiner
+                    .deferred_injections
+                    .fetch_add(1, Ordering::Relaxed);
+                return;
+            }
+        }
+
+        self.ready_queue.push(entry);
+        self.ready_combiner
+            .fallback_injections
+            .fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn flush_ready_combiner_with(&self, first: PriorityTask) {
+        let mut batch = Vec::with_capacity(READY_COMBINER_MAX_BATCH);
+        batch.push(first);
+
+        loop {
+            {
+                let mut pending = self.ready_combiner.pending.lock();
+                let take = READY_COMBINER_MAX_BATCH.saturating_sub(batch.len());
+                if take > 0 {
+                    let drain_len = take.min(pending.len());
+                    batch.extend(pending.drain(..drain_len));
+                }
+            }
+
+            self.publish_ready_batch(&mut batch);
+
+            let mut pending = self.ready_combiner.pending.lock();
+            if pending.is_empty() {
+                self.ready_combiner.active.store(false, Ordering::Release);
+                self.ready_combiner
+                    .mode_exits
+                    .fetch_add(1, Ordering::Relaxed);
+                break;
+            }
+
+            let take = READY_COMBINER_MAX_BATCH.min(pending.len());
+            batch.extend(pending.drain(..take));
+        }
+    }
+
+    fn publish_ready_batch(&self, batch: &mut Vec<PriorityTask>) {
+        let count = batch.len();
+        if count == 0 {
+            return;
+        }
+
+        self.ready_combiner
+            .max_batch
+            .fetch_max(count, Ordering::Relaxed);
+        self.ready_combiner.flushes.fetch_add(1, Ordering::Relaxed);
+        self.ready_combiner
+            .combined_injections
+            .fetch_add(count, Ordering::Relaxed);
+
+        let mut reservation = self.ready_queue.reserve_count(count);
+        for entry in batch.drain(..) {
+            self.ready_queue.push_uncounted(entry);
+            reservation.publish_one();
+        }
     }
 
     /// Injects a ready task without incrementing the atomic counter.
@@ -380,6 +572,13 @@ impl GlobalInjector {
     pub fn ready_count(&self) -> usize {
         self.ready_queue.len()
     }
+
+    /// Returns a point-in-time snapshot of adaptive ready-lane combiner metrics.
+    #[inline]
+    #[must_use]
+    pub fn ready_combiner_snapshot(&self) -> ReadyCombinerSnapshot {
+        self.ready_combiner.snapshot(self.ready_queue.len())
+    }
 }
 
 #[cfg(test)]
@@ -393,11 +592,112 @@ mod tests {
         clippy::future_not_send
     )]
     use super::*;
+    use std::collections::HashSet;
     use std::sync::{Arc, Barrier};
     use std::thread;
+    use std::time::Instant;
 
     fn task(id: u32) -> TaskId {
         TaskId::new_for_test(1, id)
+    }
+
+    fn contention_task(producer: usize, offset: usize) -> TaskId {
+        TaskId::new_for_test(
+            u32::try_from(producer + 10).expect("producer id should fit in u32"),
+            u32::try_from(offset).expect("task offset should fit in u32"),
+        )
+    }
+
+    fn run_ready_combiner_contention_case(
+        producers: usize,
+        items_per_producer: usize,
+    ) -> ReadyCombinerSnapshot {
+        let injector = Arc::new(GlobalInjector::new());
+        let barrier = Arc::new(Barrier::new(producers));
+        let max_enqueue_tail_ns = Arc::new(AtomicU64::new(0));
+        let start = Instant::now();
+
+        let handles = (0..producers)
+            .map(|producer| {
+                let injector = Arc::clone(&injector);
+                let barrier = Arc::clone(&barrier);
+                let max_enqueue_tail_ns = Arc::clone(&max_enqueue_tail_ns);
+
+                thread::spawn(move || {
+                    barrier.wait();
+                    for offset in 0..items_per_producer {
+                        let enqueue_start = Instant::now();
+                        injector.inject_ready(contention_task(producer, offset), 50);
+                        let elapsed_ns =
+                            u64::try_from(enqueue_start.elapsed().as_nanos()).unwrap_or(u64::MAX);
+                        max_enqueue_tail_ns.fetch_max(elapsed_ns, Ordering::Relaxed);
+                    }
+                })
+            })
+            .collect::<Vec<_>>();
+
+        for handle in handles {
+            handle
+                .join()
+                .expect("ready combiner producer should complete");
+        }
+
+        let mut seen = HashSet::new();
+        while let Some(task) = injector.pop_ready() {
+            assert!(
+                seen.insert(task.task),
+                "ready combiner scenario must not double-enqueue task {:?}",
+                task.task
+            );
+        }
+
+        let total_items = producers * items_per_producer;
+        assert_eq!(
+            seen.len(),
+            total_items,
+            "ready combiner scenario must not lose tasks"
+        );
+
+        let snapshot = injector.ready_combiner_snapshot();
+        assert_eq!(
+            snapshot.direct_injections
+                + snapshot.fallback_injections
+                + snapshot.combined_injections,
+            total_items,
+            "direct + fallback + combined publications must account for every injected task"
+        );
+        assert_eq!(
+            snapshot.mode_entries, snapshot.mode_exits,
+            "combining mode should not remain active after producers finish"
+        );
+        assert_eq!(
+            snapshot.pending_len, 0,
+            "combiner pending buffer should drain completely"
+        );
+        assert_eq!(snapshot.ready_len, 0, "ready queue should drain completely");
+        assert_eq!(
+            snapshot.current_in_flight, 0,
+            "ready injection in-flight count should converge to zero"
+        );
+
+        println!(
+            "READY_COMBINER_SCENARIO producers={producers} items_per_producer={items_per_producer} total_items={total_items} elapsed_ns={} max_enqueue_tail_ns={} direct_injections={} deferred_injections={} combined_injections={} fallback_injections={} combiner_claim_failures={} mode_entries={} mode_exits={} mode_switches={} flushes={} max_batch={} max_in_flight={}",
+            u64::try_from(start.elapsed().as_nanos()).unwrap_or(u64::MAX),
+            max_enqueue_tail_ns.load(Ordering::Relaxed),
+            snapshot.direct_injections,
+            snapshot.deferred_injections,
+            snapshot.combined_injections,
+            snapshot.fallback_injections,
+            snapshot.combiner_claim_failures,
+            snapshot.mode_entries,
+            snapshot.mode_exits,
+            snapshot.mode_entries + snapshot.mode_exits,
+            snapshot.flushes,
+            snapshot.max_batch,
+            snapshot.max_in_flight
+        );
+
+        snapshot
     }
 
     #[test]
@@ -799,6 +1099,150 @@ mod tests {
                 injector.ready_queue.len(),
                 0,
                 "ready counter must saturate at zero"
+            );
+        }
+    }
+
+    #[test]
+    fn ready_combiner_low_contention_preserves_direct_path() {
+        let injector = GlobalInjector::new();
+
+        injector.inject_ready(task(31), 90);
+
+        let snapshot = injector.ready_combiner_snapshot();
+        assert_eq!(
+            snapshot.direct_injections, 1,
+            "single ready injection should stay on the direct fast path"
+        );
+        assert_eq!(
+            snapshot.mode_entries, 0,
+            "low-contention ready injection must not enter combining mode"
+        );
+        assert_eq!(snapshot.ready_len, 1, "direct path should publish one task");
+
+        let popped = injector.pop_ready().expect("direct ready task should pop");
+        assert_eq!(popped.task, task(31));
+        assert_eq!(popped.priority, 90);
+    }
+
+    #[test]
+    fn ready_combiner_falls_back_to_direct_queue_when_pending_buffer_is_busy() {
+        let injector = GlobalInjector::new();
+
+        injector
+            .ready_combiner
+            .in_flight
+            .store(READY_COMBINER_IN_FLIGHT_THRESHOLD - 1, Ordering::Release);
+        injector
+            .ready_combiner
+            .active
+            .store(true, Ordering::Release);
+        let pending_guard = injector.ready_combiner.pending.lock();
+
+        injector.inject_ready(task(32), 10);
+
+        drop(pending_guard);
+        injector
+            .ready_combiner
+            .active
+            .store(false, Ordering::Release);
+        injector
+            .ready_combiner
+            .in_flight
+            .store(0, Ordering::Release);
+
+        let snapshot = injector.ready_combiner_snapshot();
+        assert_eq!(
+            snapshot.fallback_injections, 1,
+            "busy pending buffer should fall back to the baseline queue path"
+        );
+        assert_eq!(
+            snapshot.combiner_claim_failures, 1,
+            "fallback should record the failed active-combiner CAS"
+        );
+
+        let popped = injector
+            .pop_ready()
+            .expect("fallback direct ready task should pop");
+        assert_eq!(popped.task, task(32));
+        assert!(
+            injector.pop_ready().is_none(),
+            "fallback path must not double-enqueue"
+        );
+    }
+
+    #[test]
+    fn ready_combiner_handoff_flushes_deferred_batch_without_loss_or_duplicates() {
+        let injector = GlobalInjector::new();
+
+        injector
+            .ready_combiner
+            .active
+            .store(true, Ordering::Release);
+        {
+            let mut pending = injector.ready_combiner.pending.lock();
+            pending.push(PriorityTask {
+                task: task(42),
+                priority: 7,
+            });
+            pending.push(PriorityTask {
+                task: task(43),
+                priority: 8,
+            });
+        }
+
+        injector.flush_ready_combiner_with(PriorityTask {
+            task: task(41),
+            priority: 6,
+        });
+
+        let snapshot = injector.ready_combiner_snapshot();
+        assert_eq!(
+            snapshot.combined_injections, 3,
+            "combiner should publish the owner task and deferred suffix"
+        );
+        assert_eq!(snapshot.flushes, 1, "three tasks fit in one combiner flush");
+        assert_eq!(
+            snapshot.max_batch, 3,
+            "max batch should record handoff size"
+        );
+        assert_eq!(
+            snapshot.pending_len, 0,
+            "handoff should leave no pending ready tasks"
+        );
+
+        let drained = std::iter::from_fn(|| injector.pop_ready()).collect::<Vec<_>>();
+        assert_eq!(
+            drained.len(),
+            3,
+            "handoff should publish exactly three tasks"
+        );
+        assert_eq!(drained[0].task, task(41));
+        assert_eq!(drained[1].task, task(42));
+        assert_eq!(drained[2].task, task(43));
+        assert!(
+            injector.pop_ready().is_none(),
+            "combiner handoff must not leave duplicate tasks behind"
+        );
+    }
+
+    #[test]
+    fn ready_combiner_contention_scenario_logs_required_producer_counts() {
+        let one = run_ready_combiner_contention_case(1, 128);
+        assert_eq!(
+            one.mode_entries, 0,
+            "single-producer run should preserve the low-contention direct path"
+        );
+        assert_eq!(
+            one.direct_injections, 128,
+            "single-producer run should account for all tasks as direct injections"
+        );
+
+        for producers in [8, 32, 64] {
+            let snapshot = run_ready_combiner_contention_case(producers, 128);
+            assert!(
+                snapshot.max_in_flight >= 1,
+                "scenario should report an in-flight pressure metric"
             );
         }
     }
