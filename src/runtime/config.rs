@@ -244,6 +244,9 @@ impl TraceStorageProfile {
     const DEFAULT_DISTRIBUTED_TRACE_SLOTS: usize = 10_000;
     const LARGE_MEMORY_DISTRIBUTED_TRACE_SLOTS: usize = 200_000;
 
+    const DEFAULT_DISTRIBUTED_TRACE_MAX_AGE_SECS: u64 = 60 * 60;
+    const LARGE_MEMORY_DISTRIBUTED_TRACE_MAX_AGE_SECS: u64 = 24 * 60 * 60;
+
     const ASSUMED_TRACE_EVENT_BYTES: usize = 256;
     const ASSUMED_CANCELLATION_TRACE_BYTES: usize = 2_048;
     const ASSUMED_DISTRIBUTED_TRACE_BYTES: usize = 1_536;
@@ -272,6 +275,19 @@ impl TraceStorageProfile {
         match self {
             Self::Default => Self::DEFAULT_DISTRIBUTED_TRACE_SLOTS,
             Self::LargeMemory256G => Self::LARGE_MEMORY_DISTRIBUTED_TRACE_SLOTS,
+        }
+    }
+
+    /// Returns the distributed-trace eviction horizon for the profile.
+    #[must_use]
+    pub const fn distributed_trace_max_age(self) -> std::time::Duration {
+        match self {
+            Self::Default => {
+                std::time::Duration::from_secs(Self::DEFAULT_DISTRIBUTED_TRACE_MAX_AGE_SECS)
+            }
+            Self::LargeMemory256G => {
+                std::time::Duration::from_secs(Self::LARGE_MEMORY_DISTRIBUTED_TRACE_MAX_AGE_SECS)
+            }
         }
     }
 

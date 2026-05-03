@@ -3,6 +3,7 @@
 use super::context::RegionTag;
 use super::id::DistTraceId;
 use super::span::{SymbolSpan, SymbolSpanKind, SymbolSpanStatus};
+use crate::runtime::TraceStorageProfile;
 use crate::types::Time;
 use crate::types::symbol::ObjectId;
 use parking_lot::RwLock;
@@ -111,6 +112,14 @@ impl SymbolTraceCollector {
         self
     }
 
+    /// Applies a runtime trace-storage profile to cold distributed-trace retention.
+    #[must_use]
+    pub fn with_trace_storage_profile(mut self, profile: TraceStorageProfile) -> Self {
+        self.max_traces = profile.distributed_trace_slots();
+        self.max_age = profile.distributed_trace_max_age();
+        self
+    }
+
     /// Sets the clock skew tolerance.
     #[must_use]
     pub fn with_clock_skew_tolerance(mut self, tolerance: Duration) -> Self {
@@ -122,6 +131,18 @@ impl SymbolTraceCollector {
     #[must_use]
     pub const fn clock_skew_tolerance(&self) -> Duration {
         self.clock_skew_tolerance
+    }
+
+    /// Returns the configured maximum retained traces.
+    #[must_use]
+    pub const fn max_traces(&self) -> usize {
+        self.max_traces
+    }
+
+    /// Returns the configured maximum age before eviction.
+    #[must_use]
+    pub const fn max_age(&self) -> Duration {
+        self.max_age
     }
 
     /// Records a span.
