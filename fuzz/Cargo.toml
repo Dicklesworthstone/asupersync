@@ -4534,6 +4534,20 @@ doc = false
 bench = false
 
 [[bin]]
+name = "h2_priority_circular_dependency"
+path = "fuzz_targets/h2_priority_circular_dependency.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "h1_request_chunked_with_content_length"
+path = "fuzz_targets/h1_request_chunked_with_content_length.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "h2_settings_max_concurrent_streams_zero"
 path = "fuzz_targets/h2_settings_max_concurrent_streams_zero.rs"
 test = false
