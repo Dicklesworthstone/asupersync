@@ -5216,3 +5216,10 @@ path = "fuzz_targets/h2_request_with_priority_then_data.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "h2_settings_initial_window_negative_via_window_update"
+path = "fuzz_targets/h2_settings_initial_window_negative_via_window_update.rs"
+test = false
+doc = false
+bench = false

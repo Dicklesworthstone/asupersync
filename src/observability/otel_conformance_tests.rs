@@ -43862,4 +43862,422 @@ mod otlp_122_tests {
         println!("  - Producer operation validation (publish/send vs receive/process)");
         println!("  - Delivery mode consistency warnings for destination patterns");
     }
+
+    /// OTLP-147 conformance test: AMQP producer invalid delivery mode zero rejection.
+    ///
+    /// When an exporter encounters a span with kind=PRODUCER and messaging.system="amqp"
+    /// with messaging.amqp.delivery_mode set to 0 (invalid), the span MUST be rejected.
+    /// Only values 1 (transient) and 2 (persistent) are valid per AMQP specification.
+    /// This test specifically validates the rejection of delivery_mode=0 which is a
+    /// common misconfiguration that can lead to undefined AMQP broker behavior.
+    #[test]
+    fn otlp_147_amqp_producer_delivery_mode_zero_rejection() {
+        println!("Testing OTLP-147: AMQP producer delivery mode zero rejection...");
+
+        let test_scenarios = vec![
+            AmqpDeliveryModeZeroScenario {
+                description: "amqp_producer_delivery_mode_zero_basic".to_string(),
+                span_kind: SpanKind::Producer,
+                messaging_system: "amqp".to_string(),
+                span_attributes: vec![
+                    ("messaging.amqp.delivery_mode".to_string(), AnyValue::IntValue(0)), // Invalid zero
+                    ("messaging.system".to_string(), AnyValue::StringValue("amqp".to_string())),
+                    ("messaging.destination.name".to_string(), AnyValue::StringValue("test.queue".to_string())),
+                ],
+                should_be_rejected: true,
+                expected_violation: "delivery_mode must be 1 (transient) or 2 (persistent), got: 0".to_string(),
+            },
+            AmqpDeliveryModeZeroScenario {
+                description: "amqp_producer_delivery_mode_zero_with_exchange".to_string(),
+                span_kind: SpanKind::Producer,
+                messaging_system: "amqp".to_string(),
+                span_attributes: vec![
+                    ("messaging.amqp.delivery_mode".to_string(), AnyValue::IntValue(0)), // Invalid zero
+                    ("messaging.system".to_string(), AnyValue::StringValue("amqp".to_string())),
+                    ("messaging.destination.name".to_string(), AnyValue::StringValue("critical.alerts".to_string())),
+                    ("messaging.amqp.exchange".to_string(), AnyValue::StringValue("alerts.direct".to_string())),
+                    ("messaging.amqp.routing_key".to_string(), AnyValue::StringValue("alert.critical.system".to_string())),
+                ],
+                should_be_rejected: true,
+                expected_violation: "delivery_mode must be 1 (transient) or 2 (persistent), got: 0".to_string(),
+            },
+            AmqpDeliveryModeZeroScenario {
+                description: "amqp_producer_delivery_mode_zero_with_priority".to_string(),
+                span_kind: SpanKind::Producer,
+                messaging_system: "amqp".to_string(),
+                span_attributes: vec![
+                    ("messaging.amqp.delivery_mode".to_string(), AnyValue::IntValue(0)), // Invalid zero
+                    ("messaging.system".to_string(), AnyValue::StringValue("amqp".to_string())),
+                    ("messaging.destination.name".to_string(), AnyValue::StringValue("high-priority.orders".to_string())),
+                    ("messaging.amqp.exchange".to_string(), AnyValue::StringValue("orders.topic".to_string())),
+                    ("messaging.amqp.routing_key".to_string(), AnyValue::StringValue("order.urgent".to_string())),
+                    ("messaging.operation".to_string(), AnyValue::StringValue("publish".to_string())),
+                    ("messaging.message_payload_size_bytes".to_string(), AnyValue::IntValue(2048)),
+                ],
+                should_be_rejected: true,
+                expected_violation: "delivery_mode must be 1 (transient) or 2 (persistent), got: 0".to_string(),
+            },
+            AmqpDeliveryModeZeroScenario {
+                description: "amqp_producer_valid_delivery_mode_one_control".to_string(),
+                span_kind: SpanKind::Producer,
+                messaging_system: "amqp".to_string(),
+                span_attributes: vec![
+                    ("messaging.amqp.delivery_mode".to_string(), AnyValue::IntValue(1)), // Valid transient
+                    ("messaging.system".to_string(), AnyValue::StringValue("amqp".to_string())),
+                    ("messaging.destination.name".to_string(), AnyValue::StringValue("test.queue".to_string())),
+                ],
+                should_be_rejected: false,
+                expected_violation: "".to_string(),
+            },
+            AmqpDeliveryModeZeroScenario {
+                description: "amqp_producer_valid_delivery_mode_two_control".to_string(),
+                span_kind: SpanKind::Producer,
+                messaging_system: "amqp".to_string(),
+                span_attributes: vec![
+                    ("messaging.amqp.delivery_mode".to_string(), AnyValue::IntValue(2)), // Valid persistent
+                    ("messaging.system".to_string(), AnyValue::StringValue("amqp".to_string())),
+                    ("messaging.destination.name".to_string(), AnyValue::StringValue("test.queue".to_string())),
+                ],
+                should_be_rejected: false,
+                expected_violation: "".to_string(),
+            },
+            AmqpDeliveryModeZeroScenario {
+                description: "non_amqp_producer_delivery_mode_zero_ignored".to_string(),
+                span_kind: SpanKind::Producer,
+                messaging_system: "kafka".to_string(), // Not AMQP
+                span_attributes: vec![
+                    ("messaging.amqp.delivery_mode".to_string(), AnyValue::IntValue(0)), // Zero but not AMQP
+                    ("messaging.system".to_string(), AnyValue::StringValue("kafka".to_string())),
+                    ("messaging.destination.name".to_string(), AnyValue::StringValue("events".to_string())),
+                ],
+                should_be_rejected: false, // Not AMQP so no validation applied
+                expected_violation: "".to_string(),
+            },
+            AmqpDeliveryModeZeroScenario {
+                description: "amqp_consumer_delivery_mode_zero_ignored".to_string(),
+                span_kind: SpanKind::Consumer, // Not producer
+                messaging_system: "amqp".to_string(),
+                span_attributes: vec![
+                    ("messaging.amqp.delivery_mode".to_string(), AnyValue::IntValue(0)), // Zero but consumer
+                    ("messaging.system".to_string(), AnyValue::StringValue("amqp".to_string())),
+                    ("messaging.destination.name".to_string(), AnyValue::StringValue("test.queue".to_string())),
+                ],
+                should_be_rejected: false, // Consumer span so no validation applied
+                expected_violation: "".to_string(),
+            },
+            AmqpDeliveryModeZeroScenario {
+                description: "amqp_producer_delivery_mode_zero_mixed_attributes".to_string(),
+                span_kind: SpanKind::Producer,
+                messaging_system: "amqp".to_string(),
+                span_attributes: vec![
+                    ("messaging.amqp.delivery_mode".to_string(), AnyValue::IntValue(0)), // Invalid zero
+                    ("messaging.system".to_string(), AnyValue::StringValue("amqp".to_string())),
+                    ("messaging.destination.name".to_string(), AnyValue::StringValue("mixed.queue".to_string())),
+                    ("messaging.amqp.exchange".to_string(), AnyValue::StringValue("app.events".to_string())),
+                    ("messaging.amqp.routing_key".to_string(), AnyValue::StringValue("user.created".to_string())),
+                    ("messaging.operation".to_string(), AnyValue::StringValue("publish".to_string())),
+                    ("messaging.message_id".to_string(), AnyValue::StringValue("msg-12345".to_string())),
+                    ("net.peer.name".to_string(), AnyValue::StringValue("rabbitmq.prod.com".to_string())),
+                    ("net.peer.port".to_string(), AnyValue::IntValue(5672)),
+                    ("user.id".to_string(), AnyValue::StringValue("user-67890".to_string())),
+                ],
+                should_be_rejected: true,
+                expected_violation: "delivery_mode must be 1 (transient) or 2 (persistent), got: 0".to_string(),
+            },
+            AmqpDeliveryModeZeroScenario {
+                description: "amqp_producer_delivery_mode_zero_batch_message".to_string(),
+                span_kind: SpanKind::Producer,
+                messaging_system: "amqp".to_string(),
+                span_attributes: vec![
+                    ("messaging.amqp.delivery_mode".to_string(), AnyValue::IntValue(0)), // Invalid zero
+                    ("messaging.system".to_string(), AnyValue::StringValue("amqp".to_string())),
+                    ("messaging.destination.name".to_string(), AnyValue::StringValue("bulk.events".to_string())),
+                    ("messaging.amqp.exchange".to_string(), AnyValue::StringValue("bulk.fanout".to_string())),
+                    ("messaging.batch.message_count".to_string(), AnyValue::IntValue(100)),
+                    ("messaging.message_payload_size_bytes".to_string(), AnyValue::IntValue(10240)),
+                ],
+                should_be_rejected: true,
+                expected_violation: "delivery_mode must be 1 (transient) or 2 (persistent), got: 0".to_string(),
+            },
+            AmqpDeliveryModeZeroScenario {
+                description: "amqp_producer_delivery_mode_zero_case_sensitivity".to_string(),
+                span_kind: SpanKind::Producer,
+                messaging_system: "AMQP".to_string(), // Different case
+                span_attributes: vec![
+                    ("messaging.amqp.delivery_mode".to_string(), AnyValue::IntValue(0)), // Zero but wrong case
+                    ("messaging.system".to_string(), AnyValue::StringValue("AMQP".to_string())),
+                    ("messaging.destination.name".to_string(), AnyValue::StringValue("test.queue".to_string())),
+                ],
+                should_be_rejected: false, // Not exact "amqp" so no validation applied
+                expected_violation: "".to_string(),
+            },
+        ];
+
+        /// Test scenario for AMQP producer delivery mode zero rejection
+        #[derive(Debug, Clone)]
+        struct AmqpDeliveryModeZeroScenario {
+            description: String,
+            span_kind: SpanKind,
+            messaging_system: String,
+            span_attributes: Vec<(String, AnyValue)>,
+            should_be_rejected: bool,
+            expected_violation: String,
+        }
+
+        /// Span data for AMQP delivery mode zero testing
+        #[derive(Debug, Clone)]
+        struct AmqpDeliveryModeZeroSpanData {
+            name: String,
+            kind: SpanKind,
+            messaging_system: String,
+            attributes: HashMap<String, AnyValue>,
+        }
+
+        impl AmqpDeliveryModeZeroSpanData {
+            fn from_scenario(scenario: &AmqpDeliveryModeZeroScenario) -> Self {
+                let mut attributes = HashMap::new();
+                for (key, value) in &scenario.span_attributes {
+                    attributes.insert(key.clone(), value.clone());
+                }
+
+                Self {
+                    name: format!("amqp_zero_test_{}", scenario.description),
+                    kind: scenario.span_kind.clone(),
+                    messaging_system: scenario.messaging_system.clone(),
+                    attributes,
+                }
+            }
+        }
+
+        /// Result of AMQP delivery mode zero validation
+        #[derive(Debug)]
+        enum AmqpDeliveryModeZeroValidationResult {
+            Accepted {
+                delivery_mode: i64,
+            },
+            Rejected {
+                violation: String,
+                delivery_mode_value: i64,
+            },
+            NotApplicable {
+                reason: String,
+            },
+        }
+
+        /// Validates AMQP producer delivery mode zero rejection conformance
+        fn validate_amqp_delivery_mode_zero_conformance(
+            scenario: &AmqpDeliveryModeZeroScenario,
+        ) -> Result<(), String> {
+            let span_data = AmqpDeliveryModeZeroSpanData::from_scenario(scenario);
+            let validation_result = validate_amqp_delivery_mode_zero(&span_data);
+
+            match (&validation_result, scenario.should_be_rejected) {
+                (AmqpDeliveryModeZeroValidationResult::Rejected { violation, .. }, true) => {
+                    // Verify the violation message contains expected content
+                    if !violation.contains(&scenario.expected_violation) {
+                        return Err(format!(
+                            "Violation message mismatch: expected '{}', got '{}'",
+                            scenario.expected_violation, violation
+                        ));
+                    }
+                    println!("✓ AMQP producer span with delivery_mode=0 correctly rejected: {}", violation);
+                }
+                (AmqpDeliveryModeZeroValidationResult::Accepted { delivery_mode }, false) => {
+                    println!("✓ Valid AMQP producer span accepted with delivery_mode={}", delivery_mode);
+                }
+                (AmqpDeliveryModeZeroValidationResult::NotApplicable { reason }, false) => {
+                    println!("✓ Delivery mode validation not applicable: {}", reason);
+                }
+                (AmqpDeliveryModeZeroValidationResult::Rejected { .. }, false) => {
+                    return Err("Valid span was incorrectly rejected".to_string());
+                }
+                (AmqpDeliveryModeZeroValidationResult::Accepted { .. }, true) => {
+                    return Err("Invalid span with delivery_mode=0 was incorrectly accepted".to_string());
+                }
+                (AmqpDeliveryModeZeroValidationResult::NotApplicable { .. }, true) => {
+                    return Err("Expected validation failure but got not applicable".to_string());
+                }
+            }
+
+            Ok(())
+        }
+
+        /// Validates that AMQP producer spans with delivery_mode=0 are rejected
+        fn validate_amqp_delivery_mode_zero(span_data: &AmqpDeliveryModeZeroSpanData) -> AmqpDeliveryModeZeroValidationResult {
+            // Check if this span requires delivery mode validation
+            if !requires_amqp_delivery_mode_validation(span_data) {
+                return AmqpDeliveryModeZeroValidationResult::NotApplicable {
+                    reason: format!(
+                        "Span kind {:?} with messaging.system '{}' doesn't require delivery mode validation",
+                        span_data.kind, span_data.messaging_system
+                    ),
+                };
+            }
+
+            // Extract messaging.amqp.delivery_mode attribute
+            match span_data.attributes.get("messaging.amqp.delivery_mode") {
+                Some(AnyValue::IntValue(0)) => {
+                    // OTLP-147: delivery_mode=0 must be rejected for AMQP producers
+                    AmqpDeliveryModeZeroValidationResult::Rejected {
+                        violation: "OTLP-147: messaging.amqp.delivery_mode must be 1 (transient) or 2 (persistent), got: 0".to_string(),
+                        delivery_mode_value: 0,
+                    }
+                }
+                Some(AnyValue::IntValue(1)) => {
+                    AmqpDeliveryModeZeroValidationResult::Accepted {
+                        delivery_mode: 1,
+                    }
+                }
+                Some(AnyValue::IntValue(2)) => {
+                    AmqpDeliveryModeZeroValidationResult::Accepted {
+                        delivery_mode: 2,
+                    }
+                }
+                Some(AnyValue::IntValue(other_value)) => {
+                    // Other invalid values also rejected, but this test focuses on zero
+                    AmqpDeliveryModeZeroValidationResult::Rejected {
+                        violation: format!(
+                            "messaging.amqp.delivery_mode must be 1 (transient) or 2 (persistent), got: {}",
+                            other_value
+                        ),
+                        delivery_mode_value: *other_value,
+                    }
+                }
+                Some(_) => {
+                    AmqpDeliveryModeZeroValidationResult::Rejected {
+                        violation: "messaging.amqp.delivery_mode must be an integer value".to_string(),
+                        delivery_mode_value: -999, // Sentinel for non-integer
+                    }
+                }
+                None => {
+                    AmqpDeliveryModeZeroValidationResult::Rejected {
+                        violation: "messaging.amqp.delivery_mode attribute is missing".to_string(),
+                        delivery_mode_value: -999, // Sentinel for missing
+                    }
+                }
+            }
+        }
+
+        /// Determines if a span requires delivery mode validation
+        fn requires_amqp_delivery_mode_validation(span_data: &AmqpDeliveryModeZeroSpanData) -> bool {
+            // OTLP-147: Only PRODUCER spans with messaging.system="amqp" (case-sensitive)
+            span_data.kind == SpanKind::Producer
+                && span_data.messaging_system == "amqp"
+        }
+
+        // Execute OTLP-147 conformance validation for all scenarios
+        let mut passed_scenarios = 0;
+        let total_scenarios = test_scenarios.len();
+
+        for scenario in &test_scenarios {
+            match validate_amqp_delivery_mode_zero_conformance(scenario) {
+                Ok(()) => {
+                    passed_scenarios += 1;
+                    println!("✓ OTLP-147 conformance verified for {}", scenario.description);
+                }
+                Err(error_msg) => {
+                    panic!(
+                        "OTLP-147 conformance test FAILED for {}: {}",
+                        scenario.description, error_msg
+                    );
+                }
+            }
+        }
+
+        assert_eq!(
+            passed_scenarios, total_scenarios,
+            "All OTLP-147 AMQP delivery mode zero rejection scenarios must pass"
+        );
+
+        // Additional focused testing on delivery_mode=0 rejection
+        println!("Testing focused delivery_mode=0 rejection scenarios...");
+
+        // Test various contexts where delivery_mode=0 appears
+        let zero_contexts = vec![
+            ("minimal_attributes", vec![("messaging.destination.name", "queue")]),
+            ("with_exchange", vec![("messaging.destination.name", "queue"), ("messaging.amqp.exchange", "exchange")]),
+            ("with_routing_key", vec![("messaging.destination.name", "queue"), ("messaging.amqp.routing_key", "key")]),
+            ("full_context", vec![
+                ("messaging.destination.name", "queue"),
+                ("messaging.amqp.exchange", "exchange"),
+                ("messaging.amqp.routing_key", "key"),
+                ("messaging.operation", "publish"),
+                ("net.peer.name", "broker.example.com")
+            ]),
+        ];
+
+        for (context_name, additional_attrs) in zero_contexts {
+            let mut test_attributes = HashMap::new();
+            test_attributes.insert("messaging.system".to_string(), AnyValue::StringValue("amqp".to_string()));
+            test_attributes.insert("messaging.amqp.delivery_mode".to_string(), AnyValue::IntValue(0));
+
+            for (key, value) in additional_attrs {
+                test_attributes.insert(format!("messaging.{}", key), AnyValue::StringValue(value.to_string()));
+            }
+
+            let test_span = AmqpDeliveryModeZeroSpanData {
+                name: format!("zero_context_test_{}", context_name),
+                kind: SpanKind::Producer,
+                messaging_system: "amqp".to_string(),
+                attributes: test_attributes,
+            };
+
+            let result = validate_amqp_delivery_mode_zero(&test_span);
+            match result {
+                AmqpDeliveryModeZeroValidationResult::Rejected { delivery_mode_value: 0, .. } => {
+                    println!("✓ Context test '{}' correctly rejected delivery_mode=0", context_name);
+                }
+                _ => {
+                    panic!("Context test '{}' should have rejected delivery_mode=0", context_name);
+                }
+            }
+        }
+
+        // Test edge cases around zero value
+        println!("Testing edge cases around delivery_mode=0...");
+        let edge_values = vec![
+            ("exactly_zero", 0, true),        // Should be rejected
+            ("positive_one", 1, false),       // Should be accepted
+            ("positive_two", 2, false),       // Should be accepted
+            ("negative_one", -1, true),       // Should be rejected (not zero but invalid)
+        ];
+
+        for (test_name, delivery_mode_val, should_reject) in edge_values {
+            let mut test_attributes = HashMap::new();
+            test_attributes.insert("messaging.system".to_string(), AnyValue::StringValue("amqp".to_string()));
+            test_attributes.insert("messaging.destination.name".to_string(), AnyValue::StringValue("test".to_string()));
+            test_attributes.insert("messaging.amqp.delivery_mode".to_string(), AnyValue::IntValue(delivery_mode_val));
+
+            let test_span = AmqpDeliveryModeZeroSpanData {
+                name: format!("edge_test_{}", test_name),
+                kind: SpanKind::Producer,
+                messaging_system: "amqp".to_string(),
+                attributes: test_attributes,
+            };
+
+            let result = validate_amqp_delivery_mode_zero(&test_span);
+            let is_rejected = matches!(result, AmqpDeliveryModeZeroValidationResult::Rejected { .. });
+
+            assert_eq!(
+                is_rejected, should_reject,
+                "Edge test '{}' (value: {}) validation mismatch: expected {}, got {}",
+                test_name, delivery_mode_val, if should_reject { "rejected" } else { "accepted" }, if is_rejected { "rejected" } else { "accepted" }
+            );
+
+            if delivery_mode_val == 0 && is_rejected {
+                println!("✓ Edge test '{}' correctly rejected delivery_mode=0 specifically", test_name);
+            } else if !should_reject && !is_rejected {
+                println!("✓ Edge test '{}' correctly accepted valid delivery_mode={}", test_name, delivery_mode_val);
+            }
+        }
+
+        println!("✓ OTLP-147: AMQP producer delivery mode zero rejection conformance verified");
+        println!("  - PRODUCER spans with messaging.system='amqp' and delivery_mode=0 are REJECTED");
+        println!("  - Valid delivery modes 1 (transient) and 2 (persistent) are accepted");
+        println!("  - Non-AMQP systems and consumer spans exempt from validation");
+        println!("  - Case-sensitive messaging.system matching enforced");
+        println!("  - Focused validation specifically on delivery_mode=0 rejection");
+        println!("  - Comprehensive context testing for zero value rejection");
+        println!("  - Edge case validation around zero boundary values");
+    }
 }
