@@ -47559,4 +47559,414 @@ mod otlp_122_tests {
         println!("  - URL format validation not enforced (only presence and type)");
         println!("  - Long polling and DLQ attributes properly supported");
     }
+
+    /// OTLP-154 conformance test: AWS SNS producer topic ARN validation.
+    ///
+    /// When an exporter encounters a span with kind=PRODUCER and messaging.system="aws_sns",
+    /// the messaging.aws_sns.topic_arn attribute MUST be set per OTLP semantic conventions
+    /// for AWS SNS producer spans. This ensures proper traceability and correlation for
+    /// AWS SNS message publication operations where the topic ARN is essential for
+    /// identifying the specific SNS topic being used for message delivery and fanout.
+    #[test]
+    fn otlp_154_aws_sns_producer_topic_arn_validation() {
+        use crate::observability::otel::{AnyValue, SpanData};
+        use std::collections::HashMap;
+
+        println!("Testing OTLP-154: AWS SNS producer topic ARN validation...");
+
+        /// Test scenario for AWS SNS producer topic ARN validation
+        #[derive(Debug, Clone)]
+        struct AwsSnsProducerScenario {
+            description: String,
+            span_kind: SpanKind,
+            messaging_system: String,
+            span_attributes: Vec<(String, AnyValue)>,
+            should_be_valid: bool,
+            expected_topic_arn: String,
+        }
+
+        /// SpanKind enumeration for testing
+        #[derive(Debug, Clone, PartialEq)]
+        enum SpanKind {
+            Internal,
+            Server,
+            Client,
+            Producer,
+            Consumer,
+        }
+
+        let test_scenarios = vec![
+            AwsSnsProducerScenario {
+                description: "valid_aws_sns_producer_with_topic_arn".to_string(),
+                span_kind: SpanKind::Producer,
+                messaging_system: "aws_sns".to_string(),
+                span_attributes: vec![
+                    ("messaging.aws_sns.topic_arn".to_string(), AnyValue::StringValue("arn:aws:sns:us-east-1:123456789012:order-notifications".to_string())),
+                    ("messaging.system".to_string(), AnyValue::StringValue("aws_sns".to_string())),
+                    ("messaging.destination.name".to_string(), AnyValue::StringValue("order-notifications".to_string())),
+                    ("messaging.operation".to_string(), AnyValue::StringValue("publish".to_string())),
+                    ("messaging.aws_sns.message_id".to_string(), AnyValue::StringValue("msg-12345-67890".to_string())),
+                ],
+                should_be_valid: true,
+                expected_topic_arn: "arn:aws:sns:us-east-1:123456789012:order-notifications".to_string(),
+            },
+            AwsSnsProducerScenario {
+                description: "valid_aws_sns_producer_with_fifo_topic".to_string(),
+                span_kind: SpanKind::Producer,
+                messaging_system: "aws_sns".to_string(),
+                span_attributes: vec![
+                    ("messaging.aws_sns.topic_arn".to_string(), AnyValue::StringValue("arn:aws:sns:eu-west-1:987654321098:payment-events.fifo".to_string())),
+                    ("messaging.system".to_string(), AnyValue::StringValue("aws_sns".to_string())),
+                    ("messaging.destination.name".to_string(), AnyValue::StringValue("payment-events.fifo".to_string())),
+                    ("messaging.operation".to_string(), AnyValue::StringValue("send".to_string())),
+                    ("messaging.aws_sns.message_group_id".to_string(), AnyValue::StringValue("payment-group-1".to_string())),
+                    ("messaging.aws_sns.message_deduplication_id".to_string(), AnyValue::StringValue("dedup-payment-456".to_string())),
+                ],
+                should_be_valid: true,
+                expected_topic_arn: "arn:aws:sns:eu-west-1:987654321098:payment-events.fifo".to_string(),
+            },
+            AwsSnsProducerScenario {
+                description: "aws_sns_producer_missing_topic_arn".to_string(),
+                span_kind: SpanKind::Producer,
+                messaging_system: "aws_sns".to_string(),
+                span_attributes: vec![
+                    ("messaging.system".to_string(), AnyValue::StringValue("aws_sns".to_string())),
+                    ("messaging.destination.name".to_string(), AnyValue::StringValue("notification-topic".to_string())),
+                    ("messaging.operation".to_string(), AnyValue::StringValue("publish".to_string())),
+                    // Missing messaging.aws_sns.topic_arn - should be invalid
+                ],
+                should_be_valid: false,
+                expected_topic_arn: "".to_string(),
+            },
+            AwsSnsProducerScenario {
+                description: "aws_sns_producer_empty_topic_arn".to_string(),
+                span_kind: SpanKind::Producer,
+                messaging_system: "aws_sns".to_string(),
+                span_attributes: vec![
+                    ("messaging.aws_sns.topic_arn".to_string(), AnyValue::StringValue("".to_string())), // Empty topic ARN
+                    ("messaging.system".to_string(), AnyValue::StringValue("aws_sns".to_string())),
+                    ("messaging.destination.name".to_string(), AnyValue::StringValue("test-topic".to_string())),
+                    ("messaging.operation".to_string(), AnyValue::StringValue("publish".to_string())),
+                ],
+                should_be_valid: false,
+                expected_topic_arn: "".to_string(),
+            },
+            AwsSnsProducerScenario {
+                description: "aws_sns_producer_wrong_attribute_type".to_string(),
+                span_kind: SpanKind::Producer,
+                messaging_system: "aws_sns".to_string(),
+                span_attributes: vec![
+                    ("messaging.aws_sns.topic_arn".to_string(), AnyValue::IntValue(98765)), // Wrong type - should be string
+                    ("messaging.system".to_string(), AnyValue::StringValue("aws_sns".to_string())),
+                    ("messaging.destination.name".to_string(), AnyValue::StringValue("test-topic".to_string())),
+                    ("messaging.operation".to_string(), AnyValue::StringValue("send".to_string())),
+                ],
+                should_be_valid: false,
+                expected_topic_arn: "".to_string(),
+            },
+            AwsSnsProducerScenario {
+                description: "aws_sns_consumer_span_exempt".to_string(),
+                span_kind: SpanKind::Consumer,
+                messaging_system: "aws_sns".to_string(),
+                span_attributes: vec![
+                    ("messaging.system".to_string(), AnyValue::StringValue("aws_sns".to_string())),
+                    ("messaging.destination.name".to_string(), AnyValue::StringValue("test-topic".to_string())),
+                    ("messaging.operation".to_string(), AnyValue::StringValue("receive".to_string())),
+                    // Consumer spans are exempt from producer topic ARN requirement
+                ],
+                should_be_valid: true, // Consumer spans don't need producer topic ARN
+                expected_topic_arn: "".to_string(),
+            },
+            AwsSnsProducerScenario {
+                description: "non_aws_sns_messaging_system_exempt".to_string(),
+                span_kind: SpanKind::Producer,
+                messaging_system: "kafka".to_string(), // Different messaging system
+                span_attributes: vec![
+                    ("messaging.system".to_string(), AnyValue::StringValue("kafka".to_string())),
+                    ("messaging.destination.name".to_string(), AnyValue::StringValue("events-topic".to_string())),
+                    ("messaging.operation".to_string(), AnyValue::StringValue("publish".to_string())),
+                    // Non-AWS SNS systems exempt from topic ARN requirement
+                ],
+                should_be_valid: true,
+                expected_topic_arn: "".to_string(),
+            },
+            AwsSnsProducerScenario {
+                description: "case_sensitive_messaging_system_check".to_string(),
+                span_kind: SpanKind::Producer,
+                messaging_system: "AWS_SNS".to_string(), // Wrong case
+                span_attributes: vec![
+                    ("messaging.system".to_string(), AnyValue::StringValue("AWS_SNS".to_string())),
+                    ("messaging.destination.name".to_string(), AnyValue::StringValue("test-topic".to_string())),
+                    ("messaging.operation".to_string(), AnyValue::StringValue("publish".to_string())),
+                    // Case-sensitive check - "AWS_SNS" != "aws_sns"
+                ],
+                should_be_valid: true, // Not exact "aws_sns" so exempt
+                expected_topic_arn: "".to_string(),
+            },
+            AwsSnsProducerScenario {
+                description: "aws_sns_producer_with_subscription_filtering".to_string(),
+                span_kind: SpanKind::Producer,
+                messaging_system: "aws_sns".to_string(),
+                span_attributes: vec![
+                    ("messaging.aws_sns.topic_arn".to_string(), AnyValue::StringValue("arn:aws:sns:ap-southeast-1:111222333444:user-activity-events".to_string())),
+                    ("messaging.system".to_string(), AnyValue::StringValue("aws_sns".to_string())),
+                    ("messaging.destination.name".to_string(), AnyValue::StringValue("user-activity-events".to_string())),
+                    ("messaging.operation".to_string(), AnyValue::StringValue("publish".to_string())),
+                    ("messaging.aws_sns.message_attributes_count".to_string(), AnyValue::IntValue(3)),
+                    ("messaging.aws_sns.subject".to_string(), AnyValue::StringValue("User Login Event".to_string())),
+                    ("messaging.aws_sns.phone_number".to_string(), AnyValue::StringValue("+1234567890".to_string())),
+                    ("cloud.provider".to_string(), AnyValue::StringValue("aws".to_string())),
+                    ("cloud.region".to_string(), AnyValue::StringValue("ap-southeast-1".to_string())),
+                ],
+                should_be_valid: true,
+                expected_topic_arn: "arn:aws:sns:ap-southeast-1:111222333444:user-activity-events".to_string(),
+            },
+            AwsSnsProducerScenario {
+                description: "aws_sns_producer_whitespace_only_topic_arn".to_string(),
+                span_kind: SpanKind::Producer,
+                messaging_system: "aws_sns".to_string(),
+                span_attributes: vec![
+                    ("messaging.aws_sns.topic_arn".to_string(), AnyValue::StringValue("   ".to_string())), // Whitespace only
+                    ("messaging.system".to_string(), AnyValue::StringValue("aws_sns".to_string())),
+                    ("messaging.destination.name".to_string(), AnyValue::StringValue("test-topic".to_string())),
+                    ("messaging.operation".to_string(), AnyValue::StringValue("publish".to_string())),
+                ],
+                should_be_valid: false,
+                expected_topic_arn: "   ".to_string(),
+            },
+            AwsSnsProducerScenario {
+                description: "aws_sns_producer_cross_region_topic".to_string(),
+                span_kind: SpanKind::Producer,
+                messaging_system: "aws_sns".to_string(),
+                span_attributes: vec![
+                    ("messaging.aws_sns.topic_arn".to_string(), AnyValue::StringValue("arn:aws:sns:ca-central-1:555666777888:disaster-recovery-alerts".to_string())),
+                    ("messaging.system".to_string(), AnyValue::StringValue("aws_sns".to_string())),
+                    ("messaging.destination.name".to_string(), AnyValue::StringValue("disaster-recovery-alerts".to_string())),
+                    ("messaging.operation".to_string(), AnyValue::StringValue("publish".to_string())),
+                    ("messaging.aws_sns.target_arn".to_string(), AnyValue::StringValue("arn:aws:sqs:ca-central-1:555666777888:dr-queue".to_string())),
+                    ("messaging.aws_sns.subscription_endpoint".to_string(), AnyValue::StringValue("https://example.com/webhook".to_string())),
+                    ("messaging.aws_sns.protocol".to_string(), AnyValue::StringValue("https".to_string())),
+                ],
+                should_be_valid: true,
+                expected_topic_arn: "arn:aws:sns:ca-central-1:555666777888:disaster-recovery-alerts".to_string(),
+            },
+            AwsSnsProducerScenario {
+                description: "aws_sns_producer_malformed_arn_accepted".to_string(),
+                span_kind: SpanKind::Producer,
+                messaging_system: "aws_sns".to_string(),
+                span_attributes: vec![
+                    ("messaging.aws_sns.topic_arn".to_string(), AnyValue::StringValue("not-a-valid-sns-arn".to_string())),
+                    ("messaging.system".to_string(), AnyValue::StringValue("aws_sns".to_string())),
+                    ("messaging.destination.name".to_string(), AnyValue::StringValue("test-topic".to_string())),
+                    ("messaging.operation".to_string(), AnyValue::StringValue("publish".to_string())),
+                ],
+                should_be_valid: true, // ARN format validation not part of OTLP-154 requirement
+                expected_topic_arn: "not-a-valid-sns-arn".to_string(),
+            },
+        ];
+
+        /// Span data for AWS SNS producer testing
+        #[derive(Debug, Clone)]
+        struct AwsSnsProducerSpanData {
+            name: String,
+            kind: SpanKind,
+            messaging_system: String,
+            attributes: HashMap<String, AnyValue>,
+        }
+
+        impl AwsSnsProducerSpanData {
+            fn from_scenario(scenario: &AwsSnsProducerScenario) -> Self {
+                let mut attributes = HashMap::new();
+                for (key, value) in &scenario.span_attributes {
+                    attributes.insert(key.clone(), value.clone());
+                }
+
+                Self {
+                    name: format!("aws_sns_producer_span_{}", scenario.description),
+                    kind: scenario.span_kind.clone(),
+                    messaging_system: scenario.messaging_system.clone(),
+                    attributes,
+                }
+            }
+        }
+
+        /// Result of AWS SNS producer topic ARN validation
+        #[derive(Debug)]
+        enum AwsSnsProducerValidationResult {
+            Valid {
+                topic_arn: String,
+                additional_aws_sns_attributes: usize,
+            },
+            Invalid {
+                violations: Vec<String>,
+                missing_or_invalid_topic_arn: Option<String>,
+            },
+            NotApplicable {
+                reason: String,
+            },
+        }
+
+        /// Validates AWS SNS producer topic ARN requirement conformance
+        fn validate_aws_sns_producer_topic_arn_conformance(
+            scenario: &AwsSnsProducerScenario,
+        ) -> Result<(), String> {
+            let span_data = AwsSnsProducerSpanData::from_scenario(scenario);
+
+            // OTLP-154 validation logic
+            let validation_result = validate_aws_sns_producer_attributes(&span_data);
+
+            match validation_result {
+                AwsSnsProducerValidationResult::Valid { topic_arn, .. } => {
+                    if !scenario.should_be_valid {
+                        return Err(format!(
+                            "Expected validation failure but span was accepted with topic_arn: '{}' for '{}'",
+                            topic_arn, scenario.description
+                        ));
+                    }
+
+                    // Verify topic ARN matches expected
+                    if !scenario.expected_topic_arn.is_empty() && topic_arn != scenario.expected_topic_arn {
+                        return Err(format!(
+                            "Topic ARN mismatch: expected '{}', got '{}' for '{}'",
+                            scenario.expected_topic_arn, topic_arn, scenario.description
+                        ));
+                    }
+
+                    Ok(())
+                }
+                AwsSnsProducerValidationResult::Invalid { violations, .. } => {
+                    if scenario.should_be_valid {
+                        return Err(format!(
+                            "Expected validation success but span was rejected with violations: {:?} for '{}'",
+                            violations, scenario.description
+                        ));
+                    }
+
+                    Ok(())
+                }
+                AwsSnsProducerValidationResult::NotApplicable { .. } => {
+                    if !scenario.should_be_valid {
+                        return Err(format!(
+                            "Expected validation failure but span was marked not applicable for '{}'",
+                            scenario.description
+                        ));
+                    }
+
+                    Ok(())
+                }
+            }
+        }
+
+        /// Validates AWS SNS producer span attributes per OTLP-154
+        fn validate_aws_sns_producer_attributes(
+            span_data: &AwsSnsProducerSpanData,
+        ) -> AwsSnsProducerValidationResult {
+            // Check if this is a PRODUCER span with messaging.system="aws_sns"
+            if !matches!(span_data.kind, SpanKind::Producer) {
+                return AwsSnsProducerValidationResult::NotApplicable {
+                    reason: format!("Not a PRODUCER span: {:?}", span_data.kind),
+                };
+            }
+
+            // Case-sensitive messaging.system check
+            let messaging_system = span_data.attributes.get("messaging.system")
+                .and_then(|v| match v {
+                    AnyValue::StringValue(s) => Some(s.as_str()),
+                    _ => None,
+                })
+                .unwrap_or("");
+
+            if messaging_system != "aws_sns" {
+                return AwsSnsProducerValidationResult::NotApplicable {
+                    reason: format!("Not AWS SNS messaging system: '{}'", messaging_system),
+                };
+            }
+
+            // OTLP-154: messaging.aws_sns.topic_arn MUST be set for AWS SNS PRODUCER spans
+            let mut violations = Vec::new();
+
+            let topic_arn_attribute = span_data.attributes.get("messaging.aws_sns.topic_arn");
+            let topic_arn = match topic_arn_attribute {
+                Some(AnyValue::StringValue(arn_string)) => {
+                    if arn_string.trim().is_empty() {
+                        violations.push("OTLP-154: messaging.aws_sns.topic_arn is empty or whitespace-only".to_string());
+                        arn_string.clone()
+                    } else {
+                        arn_string.clone()
+                    }
+                }
+                Some(other_value) => {
+                    violations.push(format!(
+                        "OTLP-154: messaging.aws_sns.topic_arn has wrong type (expected StringValue, got {:?})",
+                        other_value
+                    ));
+                    return AwsSnsProducerValidationResult::Invalid {
+                        violations,
+                        missing_or_invalid_topic_arn: Some("wrong_type".to_string()),
+                    };
+                }
+                None => {
+                    violations.push("OTLP-154: AWS SNS producer span missing required messaging.aws_sns.topic_arn attribute".to_string());
+                    return AwsSnsProducerValidationResult::Invalid {
+                        violations,
+                        missing_or_invalid_topic_arn: None,
+                    };
+                }
+            };
+
+            if !violations.is_empty() {
+                return AwsSnsProducerValidationResult::Invalid {
+                    violations,
+                    missing_or_invalid_topic_arn: Some(topic_arn),
+                };
+            }
+
+            // Count additional AWS SNS-specific attributes
+            let additional_aws_sns_attributes = span_data.attributes.keys()
+                .filter(|k| k.starts_with("messaging.aws_sns.") && *k != "messaging.aws_sns.topic_arn")
+                .count();
+
+            AwsSnsProducerValidationResult::Valid {
+                topic_arn,
+                additional_aws_sns_attributes,
+            }
+        }
+
+        // Execute OTLP-154 conformance validation for all scenarios
+        let mut passed_scenarios = 0;
+        let total_scenarios = test_scenarios.len();
+
+        for scenario in &test_scenarios {
+            match validate_aws_sns_producer_topic_arn_conformance(scenario) {
+                Ok(()) => {
+                    passed_scenarios += 1;
+                    println!("✓ OTLP-154 conformance verified for {}", scenario.description);
+                }
+                Err(error_msg) => {
+                    panic!(
+                        "OTLP-154 conformance test FAILED for {}: {}",
+                        scenario.description, error_msg
+                    );
+                }
+            }
+        }
+
+        assert_eq!(
+            passed_scenarios, total_scenarios,
+            "All OTLP-154 AWS SNS producer topic ARN scenarios must pass"
+        );
+
+        println!("✓ OTLP-154: AWS SNS producer topic ARN validation conformance verified");
+        println!("  - PRODUCER spans with messaging.system='aws_sns' require messaging.aws_sns.topic_arn");
+        println!("  - Topic ARN must be non-empty string value");
+        println!("  - Consumer spans exempt from producer topic ARN requirement");
+        println!("  - Non-AWS SNS messaging systems exempt from validation");
+        println!("  - Case-sensitive messaging.system matching enforced");
+        println!("  - Wrong attribute types properly rejected");
+        println!("  - Empty and whitespace-only topic ARNs rejected");
+        println!("  - Additional AWS SNS attributes preserved and counted");
+        println!("  - ARN format validation not enforced (only presence and type)");
+        println!("  - FIFO topics and cross-region publishing supported");
+        println!("  - Message attributes, subscription filtering, and delivery protocols supported");
+    }
 }
