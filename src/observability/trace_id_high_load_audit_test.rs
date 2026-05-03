@@ -344,6 +344,8 @@ fn audit_thread_local_id_generation_optimization() {
     let start = Instant::now();
     for _ in 0..iterations {
         let _id = get_optimized_span_id();
+        let trace_id = get_optimized_trace_id();
+        assert_eq!(trace_id.len(), 16, "trace ID pool must emit 16-byte IDs");
     }
     let optimized_duration = start.elapsed();
 

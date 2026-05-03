@@ -181,6 +181,13 @@ fn audit_old_api_subscriber_conflict_defect() {
     // Phase 1: Application installs subscriber
     let app_subscriber = MockApplicationSubscriber::new("OldApiApp".to_string());
     let app_dispatch = tracing::Dispatch::new(app_subscriber.clone());
+    tracing::dispatcher::with_default(&app_dispatch, || {
+        crate::tracing_compat::info!("Old API app subscriber baseline event");
+    });
+    assert!(
+        !app_subscriber.captured_events().is_empty(),
+        "old-API conflict fixture should prove the app subscriber can capture events"
+    );
 
     // For this test, we need to work around the Once guard limitation
     // We simulate the conflict by checking what happens when init_test_logging is called
@@ -223,6 +230,9 @@ fn audit_new_api_subscriber_isolation_fix() {
     // Phase 1: Application subscriber (global)
     let app_subscriber = MockApplicationSubscriber::new("GlobalApp".to_string());
     let app_dispatch = tracing::Dispatch::new(app_subscriber.clone());
+    tracing::dispatcher::with_default(&app_dispatch, || {
+        crate::tracing_compat::info!("Global app subscriber baseline event");
+    });
 
     // Phase 2: Runtime-specific subscriber (isolated)
     let runtime_subscriber = init_runtime_logging("isolated_runtime".to_string());
@@ -238,11 +248,17 @@ fn audit_new_api_subscriber_isolation_fix() {
     // Global subscriber still works
     crate::tracing_compat::info!("Another global app message");
     let final_events = app_subscriber.event_count();
+    let captured_events = app_subscriber.captured_events();
 
     println!("📊 Isolation verification:");
     println!("   Global subscriber events: {}", final_events);
     println!("   Runtime subscriber: isolated scope");
 
+    assert_eq!(
+        captured_events.len(),
+        final_events,
+        "captured event list should match event_count for the audit fixture"
+    );
     assert!(
         final_events >= global_events,
         "Global subscriber should continue working independently"

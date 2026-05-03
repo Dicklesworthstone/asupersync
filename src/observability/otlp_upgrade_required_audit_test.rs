@@ -21,10 +21,10 @@
 
 /// Mock HTTP response for testing 426 Upgrade Required scenarios.
 #[derive(Debug, Clone)]
-pub struct MockUpgradeResponse {
-    pub status: u16,
-    pub headers: Vec<(String, String)>,
-    pub body: Vec<u8>,
+struct MockUpgradeResponse {
+    status: u16,
+    headers: Vec<(String, String)>,
+    body: Vec<u8>,
 }
 
 impl MockUpgradeResponse {
@@ -75,9 +75,9 @@ impl MockUpgradeResponse {
 
 /// Mock OTLP error handler for testing upgrade required scenarios.
 #[derive(Debug)]
-pub struct MockUpgradeHandler {
-    pub responses_received: Vec<MockUpgradeResponse>,
-    pub error_messages: Vec<String>,
+struct MockUpgradeHandler {
+    responses_received: Vec<MockUpgradeResponse>,
+    error_messages: Vec<String>,
 }
 
 impl MockUpgradeHandler {
@@ -266,6 +266,42 @@ fn audit_upgrade_required_h2_scenario() {
 
     println!("✅ CORRECT: Protocol-specific guidance (h2)");
     println!("⚠️  DEFECTIVE: Generic error loses upgrade protocol context");
+}
+
+/// **AUDIT TEST**: Verify 426 handling for HTTP/3 upgrade requirement.
+///
+/// **SCENARIO**: Collector requires HTTP/3 and returns 426 with h3 upgrade.
+/// **REQUIREMENT**: Should preserve h3 protocol guidance and alternate service details.
+#[test]
+fn audit_upgrade_required_h3_scenario() {
+    println!("🔍 AUDIT: OTLP 426 Upgrade Required (HTTP/3) response handling");
+
+    let h3_upgrade_response = MockUpgradeResponse::new_upgrade_required_h3();
+    assert!(
+        String::from_utf8_lossy(&h3_upgrade_response.body).contains("HTTP/3"),
+        "HTTP/3 upgrade fixture body should describe the requested protocol"
+    );
+    assert!(
+        h3_upgrade_response
+            .headers
+            .iter()
+            .any(|(name, value)| name == "alt-svc" && value.contains("h3")),
+        "HTTP/3 upgrade responses should carry an h3 Alt-Svc hint"
+    );
+
+    let mut correct_handler = MockUpgradeHandler::new();
+    let correct_result = correct_handler.handle_response_correct(h3_upgrade_response);
+
+    assert!(correct_result.is_err());
+    let correct_error = correct_handler.error_messages.last().unwrap();
+    assert!(
+        correct_error.contains("upgrade to h3"),
+        "HTTP/3 426 handling should preserve the required protocol: {correct_error}"
+    );
+    assert!(
+        correct_error.contains("RFC 9110"),
+        "HTTP/3 426 handling should keep the standards reference: {correct_error}"
+    );
 }
 
 /// **AUDIT TEST**: Verify 426 handling without Upgrade header.
