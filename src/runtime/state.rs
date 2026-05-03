@@ -24,7 +24,7 @@ use crate::record::{
     region::RegionState,
     task::TaskState,
 };
-use crate::runtime::config::{LeakEscalation, ObligationLeakResponse};
+use crate::runtime::config::{LeakEscalation, ObligationLeakResponse, RuntimeCapacityHints};
 use crate::runtime::io_driver::{IoDriver, IoDriverHandle};
 use crate::runtime::reactor::Reactor;
 use crate::runtime::resource_monitor::{
@@ -633,17 +633,13 @@ impl RuntimeState {
     /// Creates a new runtime state with an explicit metrics provider.
     #[must_use]
     pub fn new_with_metrics(metrics: Arc<dyn MetricsProvider>) -> Self {
-        // Default capacity hints based on benchmark analysis showing 28% of allocations
-        // from arena growth. These values reduce reallocation overhead for typical workloads.
-        const DEFAULT_TASK_CAPACITY: usize = 512;
-        const DEFAULT_REGION_CAPACITY: usize = 128;
-        const DEFAULT_OBLIGATION_CAPACITY: usize = 256;
+        let capacity_hints = RuntimeCapacityHints::default();
 
         Self {
             instance_id: NEXT_RUNTIME_INSTANCE_ID.fetch_add(1, Ordering::Relaxed),
-            regions: RegionTable::with_capacity(DEFAULT_REGION_CAPACITY),
-            tasks: TaskTable::with_capacity(DEFAULT_TASK_CAPACITY),
-            obligations: ObligationTable::with_capacity(DEFAULT_OBLIGATION_CAPACITY),
+            regions: RegionTable::with_capacity(capacity_hints.region_capacity),
+            tasks: TaskTable::with_capacity(capacity_hints.task_capacity),
+            obligations: ObligationTable::with_capacity(capacity_hints.obligation_capacity),
             now: Time::ZERO,
             root_region: None,
             trace: TraceBufferHandle::new(4096),
@@ -686,6 +682,18 @@ impl RuntimeState {
             debt_monitor: Arc::new(crate::observability::CancellationDebtMonitor::default()),
             resource_monitor: Arc::new(ResourceMonitor::new(MonitorConfig::default())),
         }
+    }
+
+    /// Returns the effective initial table capacities used by this runtime state.
+    #[cfg(any(test, feature = "test-internals"))]
+    #[allow(dead_code)]
+    #[must_use]
+    pub(crate) fn capacity_hints(&self) -> RuntimeCapacityHints {
+        RuntimeCapacityHints::new(
+            self.tasks.capacity(),
+            self.regions.capacity(),
+            self.obligations.capacity(),
+        )
     }
 
     /// Creates a runtime state with a real reactor and metrics provider.

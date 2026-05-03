@@ -133,6 +133,15 @@ impl RegionTable {
         }
     }
 
+    /// Returns the reserved region arena capacity.
+    #[cfg(any(test, feature = "test-internals"))]
+    #[allow(dead_code)]
+    #[inline]
+    #[must_use]
+    pub(crate) fn capacity(&self) -> usize {
+        self.regions.capacity()
+    }
+
     // =========================================================================
     // Low-level arena access
     // =========================================================================
