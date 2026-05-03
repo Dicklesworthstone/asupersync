@@ -29,7 +29,7 @@ use asupersync::runtime::scheduler::{
     GlobalQueue, IntrusiveRing, IntrusiveStack, LocalQueue, Parker, QUEUE_TAG_READY, Scheduler,
     ThreeLaneScheduler,
 };
-use asupersync::runtime::{BlockingPool, BlockingPoolOptions};
+use asupersync::runtime::{BlockingPool, BlockingPoolOptions, Runtime, RuntimeBuilder};
 use asupersync::sync::ContendedMutex;
 use asupersync::types::{Budget, RegionId, TaskId, Time};
 use asupersync::util::{Arena, DetRng};
@@ -172,6 +172,29 @@ fn blocking_affinity_bench_pool(
     BlockingPool::with_config(2, 2, options)
 }
 
+#[derive(Clone, Copy)]
+enum BlockingAffinityDispatchMode {
+    CohortTargeted,
+    UnhintedGlobal,
+}
+
+fn blocking_affinity_bench_runtime(
+    affinity_profile: BlockingPoolAffinityProfile,
+    worker_threads: usize,
+    cohort_count: usize,
+) -> Runtime {
+    let worker_cohort_map: Vec<_> = (0..worker_threads)
+        .map(|worker_slot| worker_slot % cohort_count.max(1))
+        .collect();
+    RuntimeBuilder::new()
+        .worker_threads(worker_threads)
+        .worker_cohorts(worker_cohort_map)
+        .blocking_threads(2, 2)
+        .blocking_affinity_profile(affinity_profile)
+        .build()
+        .expect("blocking affinity benchmark runtime should build")
+}
+
 fn run_blocking_affinity_saturation_case(
     affinity_profile: BlockingPoolAffinityProfile,
     cohort_count: usize,
@@ -214,6 +237,96 @@ fn run_blocking_affinity_saturation_case(
         pool.shutdown_and_wait(Duration::from_secs(1)),
         "blocking affinity bench pool should shutdown cleanly"
     );
+    (
+        metrics.local_queue_dispatches,
+        metrics.spill_dispatches,
+        metrics.fallback_dispatches,
+    )
+}
+
+fn run_blocking_affinity_mixed_case(
+    affinity_profile: BlockingPoolAffinityProfile,
+    cohort_count: usize,
+    queued_task_count: usize,
+    async_coordinator_task_count: usize,
+    dispatch_mode: BlockingAffinityDispatchMode,
+) -> (usize, usize, usize) {
+    let runtime = blocking_affinity_bench_runtime(affinity_profile, 2, cohort_count);
+    let blocking_handle = runtime
+        .blocking_handle()
+        .expect("mixed blocking affinity benchmark should expose a blocking handle");
+    let start_barrier = Arc::new(Barrier::new(3));
+    let release_barrier = Arc::new(Barrier::new(3));
+
+    let blocker0_start = Arc::clone(&start_barrier);
+    let blocker0_release = Arc::clone(&release_barrier);
+    let blocker0 = match dispatch_mode {
+        BlockingAffinityDispatchMode::CohortTargeted => runtime
+            .spawn_blocking_on_cohort(0, move || {
+                blocker0_start.wait();
+                blocker0_release.wait();
+            })
+            .expect("mixed benchmark should accept cohort-0 blocker"),
+        BlockingAffinityDispatchMode::UnhintedGlobal => runtime
+            .spawn_blocking(move || {
+                blocker0_start.wait();
+                blocker0_release.wait();
+            })
+            .expect("mixed benchmark should accept unhinted blocker"),
+    };
+
+    let blocker1_start = Arc::clone(&start_barrier);
+    let blocker1_release = Arc::clone(&release_barrier);
+    let blocker1 = match dispatch_mode {
+        BlockingAffinityDispatchMode::CohortTargeted => runtime
+            .spawn_blocking_on_cohort(1 % cohort_count.max(1), move || {
+                blocker1_start.wait();
+                blocker1_release.wait();
+            })
+            .expect("mixed benchmark should accept cohort-1 blocker"),
+        BlockingAffinityDispatchMode::UnhintedGlobal => runtime
+            .spawn_blocking(move || {
+                blocker1_start.wait();
+                blocker1_release.wait();
+            })
+            .expect("mixed benchmark should accept unhinted blocker"),
+    };
+
+    start_barrier.wait();
+
+    let base_spawn_requests = queued_task_count / async_coordinator_task_count.max(1);
+    let remainder = queued_task_count % async_coordinator_task_count.max(1);
+    let queued_handles = runtime.block_on(async {
+        let runtime_handle =
+            Runtime::current_handle().expect("mixed benchmark should run inside a runtime");
+        let mut handles = Vec::with_capacity(queued_task_count);
+        for coordinator_index in 0..async_coordinator_task_count {
+            let spawn_requests = base_spawn_requests + usize::from(coordinator_index < remainder);
+            for _ in 0..spawn_requests {
+                let handle = match dispatch_mode {
+                    BlockingAffinityDispatchMode::CohortTargeted => runtime_handle
+                        .spawn_blocking_on_cohort(0, thread::yield_now)
+                        .expect("mixed benchmark should enqueue cohort-targeted helper"),
+                    BlockingAffinityDispatchMode::UnhintedGlobal => runtime_handle
+                        .spawn_blocking(thread::yield_now)
+                        .expect("mixed benchmark should enqueue unhinted helper"),
+                };
+                handles.push(handle);
+            }
+            asupersync::runtime::yield_now().await;
+        }
+        handles
+    });
+
+    release_barrier.wait();
+
+    blocker0.wait();
+    blocker1.wait();
+    for handle in queued_handles {
+        handle.wait();
+    }
+
+    let metrics = blocking_handle.affinity_metrics();
     (
         metrics.local_queue_dispatches,
         metrics.spill_dispatches,
@@ -1962,6 +2075,88 @@ fn bench_blocking_pool_affinity(c: &mut Criterion) {
             BatchSize::PerIteration,
         )
     });
+
+    group.bench_function(
+        "mixed_async_blocking_disabled",
+        |b: &mut criterion::Bencher| {
+            b.iter_batched(
+                || (),
+                |_| {
+                    black_box(run_blocking_affinity_mixed_case(
+                        BlockingPoolAffinityProfile::Disabled,
+                        2,
+                        4,
+                        2,
+                        BlockingAffinityDispatchMode::CohortTargeted,
+                    ))
+                },
+                BatchSize::PerIteration,
+            )
+        },
+    );
+
+    group.bench_function(
+        "mixed_async_blocking_cohort_biased",
+        |b: &mut criterion::Bencher| {
+            b.iter_batched(
+                || (),
+                |_| {
+                    black_box(run_blocking_affinity_mixed_case(
+                        BlockingPoolAffinityProfile::CohortBiased {
+                            local_queue_soft_limit: 1,
+                            spill_check_interval: 1,
+                        },
+                        2,
+                        4,
+                        2,
+                        BlockingAffinityDispatchMode::CohortTargeted,
+                    ))
+                },
+                BatchSize::PerIteration,
+            )
+        },
+    );
+
+    group.bench_function(
+        "mixed_async_unhinted_disabled",
+        |b: &mut criterion::Bencher| {
+            b.iter_batched(
+                || (),
+                |_| {
+                    black_box(run_blocking_affinity_mixed_case(
+                        BlockingPoolAffinityProfile::Disabled,
+                        2,
+                        4,
+                        2,
+                        BlockingAffinityDispatchMode::UnhintedGlobal,
+                    ))
+                },
+                BatchSize::PerIteration,
+            )
+        },
+    );
+
+    group.bench_function(
+        "mixed_async_unhinted_cohort_biased",
+        |b: &mut criterion::Bencher| {
+            b.iter_batched(
+                || (),
+                |_| {
+                    black_box(run_blocking_affinity_mixed_case(
+                        BlockingPoolAffinityProfile::CohortBiased {
+                            local_queue_soft_limit: 1,
+                            spill_check_interval: 1,
+                        },
+                        2,
+                        4,
+                        2,
+                        BlockingAffinityDispatchMode::UnhintedGlobal,
+                    ))
+                },
+                BatchSize::PerIteration,
+            )
+        },
+    );
 
     group.finish();
 }

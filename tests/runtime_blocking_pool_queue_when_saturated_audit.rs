@@ -422,6 +422,8 @@ mod behavioral {
         "AA-BLOCKING-POOL-AFFINITY-SATURATION-2C";
     const BLOCKING_POOL_AFFINITY_MIXED_ASYNC_SCENARIO_ID: &str =
         "AA-BLOCKING-POOL-AFFINITY-MIXED-ASYNC-BLOCKING-2C";
+    const BLOCKING_POOL_AFFINITY_NO_WIN_SCENARIO_ID: &str =
+        "AA-BLOCKING-POOL-AFFINITY-MIXED-ASYNC-NO-WIN-2C";
     const BLOCKING_POOL_AFFINITY_CONTRACT_PATH_ENV: &str =
         "ASUPERSYNC_BLOCKING_POOL_AFFINITY_CONTRACT_PATH";
     const BLOCKING_POOL_AFFINITY_SCENARIO_ENV: &str = "ASUPERSYNC_BLOCKING_POOL_AFFINITY_SCENARIO";
@@ -443,6 +445,12 @@ mod behavioral {
         global_pending_count_before_release: usize,
         async_coordinator_task_count: usize,
         blocking_spawn_request_count: usize,
+    }
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum MixedAsyncAffinityDispatchMode {
+        CohortTargeted,
+        UnhintedGlobal,
     }
 
     fn affinity_test_pool(
@@ -582,6 +590,7 @@ mod behavioral {
         cohort_count: usize,
         queued_task_count: usize,
         async_coordinator_task_count: usize,
+        dispatch_mode: MixedAsyncAffinityDispatchMode,
     ) -> AffinityScenarioSummary {
         let worker_threads = 2;
         let runtime = affinity_test_runtime(affinity_profile, worker_threads, cohort_count);
@@ -593,21 +602,37 @@ mod behavioral {
 
         let blocker0_start = Arc::clone(&start_barrier);
         let blocker0_release = Arc::clone(&release_barrier);
-        let blocker0 = runtime
-            .spawn_blocking_on_cohort(0, move || {
-                blocker0_start.wait();
-                blocker0_release.wait();
-            })
-            .expect("blocking runtime should accept cohort-0 blocker");
+        let blocker0 = match dispatch_mode {
+            MixedAsyncAffinityDispatchMode::CohortTargeted => runtime
+                .spawn_blocking_on_cohort(0, move || {
+                    blocker0_start.wait();
+                    blocker0_release.wait();
+                })
+                .expect("blocking runtime should accept cohort-0 blocker"),
+            MixedAsyncAffinityDispatchMode::UnhintedGlobal => runtime
+                .spawn_blocking(move || {
+                    blocker0_start.wait();
+                    blocker0_release.wait();
+                })
+                .expect("blocking runtime should accept unhinted blocker"),
+        };
 
         let blocker1_start = Arc::clone(&start_barrier);
         let blocker1_release = Arc::clone(&release_barrier);
-        let blocker1 = runtime
-            .spawn_blocking_on_cohort(1 % cohort_count.max(1), move || {
-                blocker1_start.wait();
-                blocker1_release.wait();
-            })
-            .expect("blocking runtime should accept cohort-1 blocker");
+        let blocker1 = match dispatch_mode {
+            MixedAsyncAffinityDispatchMode::CohortTargeted => runtime
+                .spawn_blocking_on_cohort(1 % cohort_count.max(1), move || {
+                    blocker1_start.wait();
+                    blocker1_release.wait();
+                })
+                .expect("blocking runtime should accept cohort-1 blocker"),
+            MixedAsyncAffinityDispatchMode::UnhintedGlobal => runtime
+                .spawn_blocking(move || {
+                    blocker1_start.wait();
+                    blocker1_release.wait();
+                })
+                .expect("blocking runtime should accept unhinted blocker"),
+        };
 
         start_barrier.wait();
 
@@ -621,11 +646,17 @@ mod behavioral {
                 let spawn_requests =
                     base_spawn_requests + usize::from(coordinator_index < remainder);
                 for _ in 0..spawn_requests {
-                    handles.push(
-                        runtime_handle
+                    let handle = match dispatch_mode {
+                        MixedAsyncAffinityDispatchMode::CohortTargeted => runtime_handle
                             .spawn_blocking_on_cohort(0, || std::thread::yield_now())
-                            .expect("async coordinator should enqueue blocking helper"),
-                    );
+                            .expect(
+                                "async coordinator should enqueue cohort-targeted blocking helper",
+                            ),
+                        MixedAsyncAffinityDispatchMode::UnhintedGlobal => runtime_handle
+                            .spawn_blocking(|| std::thread::yield_now())
+                            .expect("async coordinator should enqueue unhinted blocking helper"),
+                    };
+                    handles.push(handle);
                 }
                 asupersync::runtime::yield_now().await;
             }
@@ -738,6 +769,7 @@ mod behavioral {
             "cohort_count": 2,
             "queued_task_count": 4,
             "async_coordinator_task_count": 2,
+            "dispatch_mode": "cohort_targeted",
             "repeated_samples": 5,
             "selected_affinity_profiles": ["disabled", "cohort_biased"],
             "queue_distribution": [
@@ -788,6 +820,67 @@ mod behavioral {
             "cohort_biased_local_queue_dispatches": 3,
             "cohort_biased_spill_dispatches": 3,
             "cohort_biased_fallback_dispatches": 3,
+            "shutdown_drain_verdict": "clean"
+        })
+    }
+
+    fn default_no_win_affinity_workload_model() -> Value {
+        json!({
+            "workload_seed": 4126,
+            "worker_threads": 2,
+            "cohort_count": 2,
+            "queued_task_count": 4,
+            "async_coordinator_task_count": 2,
+            "dispatch_mode": "unhinted_global",
+            "repeated_samples": 5,
+            "selected_affinity_profiles": ["disabled", "cohort_biased"],
+            "queue_distribution": [
+                {"cohort": "global", "queued_task_count": 4}
+            ]
+        })
+    }
+
+    fn default_no_win_affinity_operator_notes() -> Value {
+        json!({
+            "recommended_for": [
+                "operators validating that topology-aware affinity can safely stand down when blocking helpers arrive without cohort hints",
+                "shared 64+ core hosts where some producers are topology-blind and the runtime must prove it will not fabricate locality wins"
+            ],
+            "avoid_when": [
+                "the workload already carries reliable cohort hints and should be measured with the targeted mixed scenario instead",
+                "you need the aggressive locality-biased path even when no worker/cohort metadata is available"
+            ],
+            "safe_fallback_profile": "disabled",
+            "no_win_trigger": "keep the disabled profile pinned whenever the unhinted async-plus-blocking replay shows identical queue pressure and zero locality wins across both profiles"
+        })
+    }
+
+    fn default_no_win_affinity_expected_projection() -> Value {
+        json!({
+            "schema_version": "blocking-pool-affinity-projection-v1",
+            "scenario_id": BLOCKING_POOL_AFFINITY_NO_WIN_SCENARIO_ID,
+            "workload_seed": 4126,
+            "worker_threads": 2,
+            "cohort_count": 2,
+            "queued_task_count": 4,
+            "async_coordinator_task_count": 2,
+            "blocking_spawn_request_count": 4,
+            "worker_cohort_map": [
+                {"worker_slot": 0, "cohort": 0},
+                {"worker_slot": 1, "cohort": 1}
+            ],
+            "disabled_pending_count_before_release": 4,
+            "disabled_queue_depth_by_cohort_before_release": [0, 0],
+            "disabled_global_pending_count_before_release": 4,
+            "disabled_local_queue_dispatches": 0,
+            "disabled_spill_dispatches": 0,
+            "disabled_fallback_dispatches": 0,
+            "cohort_biased_pending_count_before_release": 4,
+            "cohort_biased_queue_depth_by_cohort_before_release": [0, 0],
+            "cohort_biased_global_pending_count_before_release": 4,
+            "cohort_biased_local_queue_dispatches": 0,
+            "cohort_biased_spill_dispatches": 0,
+            "cohort_biased_fallback_dispatches": 0,
             "shutdown_drain_verdict": "clean"
         })
     }
@@ -1029,6 +1122,7 @@ mod behavioral {
         workload_model: &Value,
         operator_notes: &Value,
         include_hash_probe: bool,
+        dispatch_mode: MixedAsyncAffinityDispatchMode,
     ) -> Value {
         let workload_seed = workload_model["workload_seed"].as_u64().unwrap_or(4117);
         let cohort_count = workload_model["cohort_count"].as_u64().unwrap_or(2) as usize;
@@ -1046,6 +1140,7 @@ mod behavioral {
                     cohort_count,
                     queued_task_count,
                     async_coordinator_task_count,
+                    dispatch_mode,
                 )
             })
             .collect();
@@ -1059,6 +1154,7 @@ mod behavioral {
                     cohort_count,
                     queued_task_count,
                     async_coordinator_task_count,
+                    dispatch_mode,
                 )
             })
             .collect();
@@ -1127,12 +1223,43 @@ mod behavioral {
         } else {
             true
         };
-        let verdict_winner = if cohort_biased.global_pending_count_before_release
-            < disabled.global_pending_count_before_release
-        {
-            "cohort_biased"
-        } else {
-            "disabled"
+        let (benchmark_cases, verdict_winner, pass, reason) = match dispatch_mode {
+            MixedAsyncAffinityDispatchMode::CohortTargeted => (
+                [
+                    "mixed_async_blocking_disabled",
+                    "mixed_async_blocking_cohort_biased",
+                ],
+                if cohort_biased.global_pending_count_before_release
+                    < disabled.global_pending_count_before_release
+                {
+                    "cohort_biased"
+                } else {
+                    "disabled"
+                },
+                disabled.pending_count_before_release == cohort_biased.pending_count_before_release
+                    && disabled.async_coordinator_task_count == async_coordinator_task_count
+                    && cohort_biased.async_coordinator_task_count == async_coordinator_task_count
+                    && cohort_biased.global_pending_count_before_release
+                        < disabled.global_pending_count_before_release,
+                "cohort-biased affinity preserved clean mixed-workload drain while reducing global spill pressure under async-coordinated blocking bursts",
+            ),
+            MixedAsyncAffinityDispatchMode::UnhintedGlobal => (
+                [
+                    "mixed_async_unhinted_disabled",
+                    "mixed_async_unhinted_cohort_biased",
+                ],
+                "disabled",
+                disabled.pending_count_before_release == cohort_biased.pending_count_before_release
+                    && disabled.global_pending_count_before_release
+                        == cohort_biased.global_pending_count_before_release
+                    && disabled.local_queue_dispatches == 0
+                    && disabled.spill_dispatches == 0
+                    && disabled.fallback_dispatches == 0
+                    && cohort_biased.local_queue_dispatches == 0
+                    && cohort_biased.spill_dispatches == 0
+                    && cohort_biased.fallback_dispatches == 0,
+                "without cohort hints the affinity profile produces no locality win, so the conservative disabled profile remains the correct operator choice",
+            ),
         };
 
         json!({
@@ -1182,19 +1309,15 @@ mod behavioral {
             },
             "benchmark_surface": {
                 "criterion_group": "runtime/blocking_pool_affinity",
-                "cases": ["mixed_async_blocking_disabled", "mixed_async_blocking_cohort_biased"],
+                "cases": benchmark_cases,
                 "compile_gate": "cargo check -p asupersync --bench scheduler_benchmark --features test-internals",
                 "no_run_gate": "cargo bench -p asupersync --bench scheduler_benchmark --features test-internals --no-run"
             },
             "operator_verdict": {
                 "winner_profile": verdict_winner,
                 "safe_fallback_profile": "disabled",
-                "pass": disabled.pending_count_before_release == cohort_biased.pending_count_before_release
-                    && disabled.async_coordinator_task_count == async_coordinator_task_count
-                    && cohort_biased.async_coordinator_task_count == async_coordinator_task_count
-                    && cohort_biased.global_pending_count_before_release
-                        < disabled.global_pending_count_before_release,
-                "reason": "cohort-biased affinity preserved clean mixed-workload drain while reducing global spill pressure under async-coordinated blocking bursts",
+                "pass": pass,
+                "reason": reason,
                 "no_win_trigger": operator_notes["no_win_trigger"].clone()
             },
             "operator_notes": operator_notes
@@ -1216,6 +1339,17 @@ mod behavioral {
                     workload_model,
                     operator_notes,
                     include_hash_probe,
+                    MixedAsyncAffinityDispatchMode::CohortTargeted,
+                )
+            }
+            BLOCKING_POOL_AFFINITY_NO_WIN_SCENARIO_ID => {
+                build_mixed_async_blocking_pool_affinity_report(
+                    &scenario_id,
+                    description,
+                    workload_model,
+                    operator_notes,
+                    include_hash_probe,
+                    MixedAsyncAffinityDispatchMode::UnhintedGlobal,
                 )
             }
             _ => build_saturation_blocking_pool_affinity_report(
@@ -1433,8 +1567,13 @@ mod behavioral {
 
     #[test]
     fn blocking_pool_affinity_mixed_async_summary_emits_queue_depth_and_locality() {
-        let disabled =
-            run_mixed_async_blocking_case(BlockingPoolAffinityProfile::Disabled, 2, 4, 2);
+        let disabled = run_mixed_async_blocking_case(
+            BlockingPoolAffinityProfile::Disabled,
+            2,
+            4,
+            2,
+            MixedAsyncAffinityDispatchMode::CohortTargeted,
+        );
         let cohort_biased = run_mixed_async_blocking_case(
             BlockingPoolAffinityProfile::CohortBiased {
                 local_queue_soft_limit: 1,
@@ -1443,6 +1582,7 @@ mod behavioral {
             2,
             4,
             2,
+            MixedAsyncAffinityDispatchMode::CohortTargeted,
         );
 
         assert_eq!(disabled.pending_count_before_release, 4);
@@ -1488,6 +1628,76 @@ mod behavioral {
     }
 
     #[test]
+    fn blocking_pool_affinity_no_win_summary_stays_on_disabled_profile() {
+        let disabled = run_mixed_async_blocking_case(
+            BlockingPoolAffinityProfile::Disabled,
+            2,
+            4,
+            2,
+            MixedAsyncAffinityDispatchMode::UnhintedGlobal,
+        );
+        let cohort_biased = run_mixed_async_blocking_case(
+            BlockingPoolAffinityProfile::CohortBiased {
+                local_queue_soft_limit: 1,
+                spill_check_interval: 1,
+            },
+            2,
+            4,
+            2,
+            MixedAsyncAffinityDispatchMode::UnhintedGlobal,
+        );
+
+        assert_eq!(disabled.pending_count_before_release, 4);
+        assert_eq!(disabled.queue_depth_by_cohort, vec![0, 0]);
+        assert_eq!(disabled.global_pending_count_before_release, 4);
+        assert_eq!(disabled.local_queue_dispatches, 0);
+        assert_eq!(disabled.spill_dispatches, 0);
+        assert_eq!(disabled.fallback_dispatches, 0);
+
+        assert_eq!(cohort_biased.pending_count_before_release, 4);
+        assert_eq!(cohort_biased.queue_depth_by_cohort, vec![0, 0]);
+        assert_eq!(cohort_biased.global_pending_count_before_release, 4);
+        assert_eq!(cohort_biased.local_queue_dispatches, 0);
+        assert_eq!(cohort_biased.spill_dispatches, 0);
+        assert_eq!(cohort_biased.fallback_dispatches, 0);
+
+        let summary = json!({
+            "scenario_id": BLOCKING_POOL_AFFINITY_NO_WIN_SCENARIO_ID,
+            "profiles": {
+                "disabled": {
+                    "queue_depth_by_cohort_before_release": disabled.queue_depth_by_cohort,
+                    "global_pending_count_before_release": disabled.global_pending_count_before_release,
+                    "async_coordinator_task_count": disabled.async_coordinator_task_count,
+                    "blocking_spawn_request_count": disabled.blocking_spawn_request_count,
+                    "local_queue_dispatches": disabled.local_queue_dispatches,
+                    "spill_dispatches": disabled.spill_dispatches,
+                    "fallback_dispatches": disabled.fallback_dispatches
+                },
+                "cohort_biased": {
+                    "queue_depth_by_cohort_before_release": cohort_biased.queue_depth_by_cohort,
+                    "global_pending_count_before_release": cohort_biased.global_pending_count_before_release,
+                    "async_coordinator_task_count": cohort_biased.async_coordinator_task_count,
+                    "blocking_spawn_request_count": cohort_biased.blocking_spawn_request_count,
+                    "local_queue_dispatches": cohort_biased.local_queue_dispatches,
+                    "spill_dispatches": cohort_biased.spill_dispatches,
+                    "fallback_dispatches": cohort_biased.fallback_dispatches
+                }
+            },
+            "operator_verdict": {
+                "winner_profile": "disabled",
+                "pass": true
+            }
+        });
+        println!("BLOCKING_POOL_AFFINITY_NO_WIN_SUMMARY_JSON_BEGIN");
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&summary)
+                .expect("serialize no-win blocking affinity summary")
+        );
+        println!("BLOCKING_POOL_AFFINITY_NO_WIN_SUMMARY_JSON_END");
+    }
+
+    #[test]
     fn blocking_pool_affinity_smoke_contract_emits_report() {
         let (description, workload_model, operator_notes, expected_report_projection) =
             maybe_load_blocking_pool_affinity_contract_scenario().unwrap_or_else(|| {
@@ -1498,6 +1708,13 @@ mod behavioral {
                         default_mixed_async_affinity_workload_model(),
                         default_mixed_async_affinity_operator_notes(),
                         default_mixed_async_affinity_expected_projection(),
+                    ),
+                    BLOCKING_POOL_AFFINITY_NO_WIN_SCENARIO_ID => (
+                        "Drive unhinted blocking helpers from async coordinators and prove that the conservative disabled profile remains the correct no-win fallback."
+                            .to_string(),
+                        default_no_win_affinity_workload_model(),
+                        default_no_win_affinity_operator_notes(),
+                        default_no_win_affinity_expected_projection(),
                     ),
                     _ => (
                         "Compare disabled and cohort-biased blocking-pool affinity under deterministic saturation and freeze the operator-visible locality report."
