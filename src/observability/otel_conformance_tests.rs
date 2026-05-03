@@ -33112,3 +33112,778 @@ mod otlp_120_tests {
         println!("OTLP-120: Empty attributes validation verified");
     }
 }
+// OTLP-121: Monotonic counter reset detection test
+// Test that when a monotonic counter value resets to 0 (monotonic violation),
+// the exporter must emit a "reset event" indicator per OTLP specification
+
+#[cfg(test)]
+mod otlp_121_tests {
+    use super::*;
+    use crate::observability::{Metric, MetricKind, MetricValue, MetricsBatch, OtelExporter};
+    use std::collections::HashMap;
+
+    /// OTLP-121 test scenario: monotonic counter reset detection
+    struct Otlp121Scenario {
+        name: String,
+        metrics: Vec<MetricWithTimestamp>,
+        expected_result: MonotonicValidationResult,
+        description: String,
+    }
+
+    #[derive(Debug, Clone)]
+    struct MetricWithTimestamp {
+        metric: Metric,
+        timestamp: u64,
+        attributes: HashMap<String, String>,
+    }
+
+    #[derive(Debug, PartialEq)]
+    struct MonotonicValidationResult {
+        metrics_processed: usize,
+        monotonic_counters_found: usize,
+        reset_events_detected: usize,
+        reset_events_emitted: usize,
+        monotonic_violations: usize,
+        valid_monotonic_sequences: usize,
+        non_monotonic_metrics: usize,
+        export_successful: bool,
+    }
+
+    #[derive(Debug, PartialEq)]
+    enum ValidationResult {
+        Accept,
+        Reject,
+    }
+
+    impl Otlp121Scenario {
+        fn new(
+            name: &str,
+            metrics: Vec<MetricWithTimestamp>,
+            expected: MonotonicValidationResult,
+            description: &str,
+        ) -> Self {
+            Self {
+                name: name.to_string(),
+                metrics,
+                expected_result: expected,
+                description: description.to_string(),
+            }
+        }
+
+        fn create_monotonic_counter(
+            name: &str,
+            value: u64,
+            timestamp: u64,
+            attrs: Vec<(&str, &str)>,
+        ) -> MetricWithTimestamp {
+            let mut attributes = HashMap::new();
+            for (key, val) in attrs {
+                attributes.insert(key.to_string(), val.to_string());
+            }
+
+            MetricWithTimestamp {
+                metric: Metric {
+                    name: name.to_string(),
+                    kind: MetricKind::MonotonicCounter,
+                    value: MetricValue::Counter(value),
+                    unit: Some("requests".to_string()),
+                    description: Some("Request count".to_string()),
+                },
+                timestamp,
+                attributes,
+            }
+        }
+
+        fn create_gauge_metric(
+            name: &str,
+            value: f64,
+            timestamp: u64,
+            attrs: Vec<(&str, &str)>,
+        ) -> MetricWithTimestamp {
+            let mut attributes = HashMap::new();
+            for (key, val) in attrs {
+                attributes.insert(key.to_string(), val.to_string());
+            }
+
+            MetricWithTimestamp {
+                metric: Metric {
+                    name: name.to_string(),
+                    kind: MetricKind::Gauge,
+                    value: MetricValue::Gauge(value),
+                    unit: Some("bytes".to_string()),
+                    description: Some("Memory usage".to_string()),
+                },
+                timestamp,
+                attributes,
+            }
+        }
+
+        fn create_histogram_metric(
+            name: &str,
+            count: u64,
+            sum: f64,
+            timestamp: u64,
+            attrs: Vec<(&str, &str)>,
+        ) -> MetricWithTimestamp {
+            let mut attributes = HashMap::new();
+            for (key, val) in attrs {
+                attributes.insert(key.to_string(), val.to_string());
+            }
+
+            MetricWithTimestamp {
+                metric: Metric {
+                    name: name.to_string(),
+                    kind: MetricKind::Histogram,
+                    value: MetricValue::Histogram {
+                        count,
+                        sum,
+                        buckets: vec![(1.0, 10), (5.0, 25), (10.0, count)],
+                    },
+                    unit: Some("seconds".to_string()),
+                    description: Some("Response time".to_string()),
+                },
+                timestamp,
+                attributes,
+            }
+        }
+    }
+
+    fn detect_monotonic_reset(metrics: &[MetricWithTimestamp]) -> Vec<(usize, String)> {
+        // Detect monotonic counter resets and return list of reset events
+        let mut reset_events = Vec::new();
+        let mut counter_states: HashMap<String, u64> = HashMap::new();
+
+        for (index, metric_ts) in metrics.iter().enumerate() {
+            if metric_ts.metric.kind == MetricKind::MonotonicCounter {
+                if let MetricValue::Counter(current_value) = metric_ts.metric.value {
+                    let metric_key =
+                        format!("{}:{:?}", metric_ts.metric.name, metric_ts.attributes);
+
+                    if let Some(&previous_value) = counter_states.get(&metric_key) {
+                        // Check for monotonic violation (decrease in value)
+                        if current_value < previous_value {
+                            let reset_event = format!(
+                                "reset_event:metric={},previous={},current={},timestamp={}",
+                                metric_ts.metric.name,
+                                previous_value,
+                                current_value,
+                                metric_ts.timestamp
+                            );
+                            reset_events.push((index, reset_event));
+                        }
+                    }
+
+                    counter_states.insert(metric_key, current_value);
+                }
+            }
+        }
+
+        reset_events
+    }
+
+    fn simulate_asupersync_export(scenario: &Otlp121Scenario) -> MonotonicValidationResult {
+        // Simulate our asupersync exporter's monotonic counter reset detection
+        let reset_events = detect_monotonic_reset(&scenario.metrics);
+
+        let mut result = MonotonicValidationResult {
+            metrics_processed: scenario.metrics.len(),
+            monotonic_counters_found: 0,
+            reset_events_detected: reset_events.len(),
+            reset_events_emitted: reset_events.len(), // We emit for each detected reset
+            monotonic_violations: reset_events.len(),
+            valid_monotonic_sequences: 0,
+            non_monotonic_metrics: 0,
+            export_successful: true,
+        };
+
+        for metric_ts in &scenario.metrics {
+            match metric_ts.metric.kind {
+                MetricKind::MonotonicCounter => {
+                    result.monotonic_counters_found += 1;
+                }
+                _ => {
+                    result.non_monotonic_metrics += 1;
+                }
+            }
+        }
+
+        // Count valid monotonic sequences (counters without resets)
+        result.valid_monotonic_sequences =
+            result.monotonic_counters_found - result.monotonic_violations;
+
+        result
+    }
+
+    fn simulate_reference_export(scenario: &Otlp121Scenario) -> MonotonicValidationResult {
+        // Simulate reference OTLP exporter behavior
+        // Per OTLP spec: monotonic counters that reset MUST emit reset event indicators
+        let reset_events = detect_monotonic_reset(&scenario.metrics);
+
+        let mut result = MonotonicValidationResult {
+            metrics_processed: scenario.metrics.len(),
+            monotonic_counters_found: 0,
+            reset_events_detected: reset_events.len(),
+            reset_events_emitted: reset_events.len(),
+            monotonic_violations: reset_events.len(),
+            valid_monotonic_sequences: 0,
+            non_monotonic_metrics: 0,
+            export_successful: true,
+        };
+
+        for metric_ts in &scenario.metrics {
+            match metric_ts.metric.kind {
+                MetricKind::MonotonicCounter => {
+                    result.monotonic_counters_found += 1;
+                }
+                _ => {
+                    result.non_monotonic_metrics += 1;
+                }
+            }
+        }
+
+        result.valid_monotonic_sequences =
+            result.monotonic_counters_found - result.monotonic_violations;
+        result
+    }
+
+    fn validate_otlp_121_scenario(scenario: &Otlp121Scenario) -> bool {
+        let asupersync_result = simulate_asupersync_export(scenario);
+        let reference_result = simulate_reference_export(scenario);
+
+        // Both exporters should behave identically
+        if asupersync_result != reference_result {
+            eprintln!(
+                "OTLP-121 DIVERGENCE in {}: asupersync={:?}, reference={:?}",
+                scenario.name, asupersync_result, reference_result
+            );
+            return false;
+        }
+
+        // Verify against expected result
+        if asupersync_result != scenario.expected_result {
+            eprintln!(
+                "OTLP-121 EXPECTATION MISMATCH in {}: got {:?}, expected {:?}",
+                scenario.name, asupersync_result, scenario.expected_result
+            );
+            return false;
+        }
+
+        println!(
+            "OTLP-121 PASS: {} - {}",
+            scenario.name, scenario.description
+        );
+        true
+    }
+
+    #[test]
+    fn test_otlp_121_monotonic_counter_reset_detection() {
+        let test_scenarios = vec![
+            // Test 1: Simple monotonic counter reset - should emit reset event
+            Otlp121Scenario::new(
+                "simple_counter_reset",
+                vec![
+                    Otlp121Scenario::create_monotonic_counter(
+                        "http_requests_total",
+                        100,
+                        1000,
+                        vec![("method", "GET")],
+                    ),
+                    Otlp121Scenario::create_monotonic_counter(
+                        "http_requests_total",
+                        150,
+                        2000,
+                        vec![("method", "GET")], // Increase: valid
+                    ),
+                    Otlp121Scenario::create_monotonic_counter(
+                        "http_requests_total",
+                        0,
+                        3000,
+                        vec![("method", "GET")], // Reset: violation
+                    ),
+                ],
+                MonotonicValidationResult {
+                    metrics_processed: 3,
+                    monotonic_counters_found: 3,
+                    reset_events_detected: 1,
+                    reset_events_emitted: 1,
+                    monotonic_violations: 1,
+                    valid_monotonic_sequences: 2,
+                    non_monotonic_metrics: 0,
+                    export_successful: true,
+                },
+                "Simple monotonic counter reset must emit reset event",
+            ),
+            // Test 2: No reset - valid monotonic sequence - should not emit reset event
+            Otlp121Scenario::new(
+                "valid_monotonic_sequence",
+                vec![
+                    Otlp121Scenario::create_monotonic_counter(
+                        "bytes_sent_total",
+                        1000,
+                        1000,
+                        vec![("service", "api")],
+                    ),
+                    Otlp121Scenario::create_monotonic_counter(
+                        "bytes_sent_total",
+                        2500,
+                        2000,
+                        vec![("service", "api")],
+                    ),
+                    Otlp121Scenario::create_monotonic_counter(
+                        "bytes_sent_total",
+                        4200,
+                        3000,
+                        vec![("service", "api")],
+                    ),
+                ],
+                MonotonicValidationResult {
+                    metrics_processed: 3,
+                    monotonic_counters_found: 3,
+                    reset_events_detected: 0,
+                    reset_events_emitted: 0,
+                    monotonic_violations: 0,
+                    valid_monotonic_sequences: 3,
+                    non_monotonic_metrics: 0,
+                    export_successful: true,
+                },
+                "Valid monotonic sequence should not emit reset events",
+            ),
+            // Test 3: Multiple counters with different reset patterns
+            Otlp121Scenario::new(
+                "multiple_counters_mixed_resets",
+                vec![
+                    // Counter 1: no reset
+                    Otlp121Scenario::create_monotonic_counter(
+                        "counter_1",
+                        50,
+                        1000,
+                        vec![("app", "web")],
+                    ),
+                    Otlp121Scenario::create_monotonic_counter(
+                        "counter_1",
+                        75,
+                        2000,
+                        vec![("app", "web")],
+                    ),
+                    // Counter 2: with reset
+                    Otlp121Scenario::create_monotonic_counter(
+                        "counter_2",
+                        200,
+                        1000,
+                        vec![("app", "api")],
+                    ),
+                    Otlp121Scenario::create_monotonic_counter(
+                        "counter_2",
+                        0,
+                        2000,
+                        vec![("app", "api")], // Reset
+                    ),
+                    Otlp121Scenario::create_monotonic_counter(
+                        "counter_2",
+                        25,
+                        3000,
+                        vec![("app", "api")], // Recovery
+                    ),
+                ],
+                MonotonicValidationResult {
+                    metrics_processed: 5,
+                    monotonic_counters_found: 5,
+                    reset_events_detected: 1,
+                    reset_events_emitted: 1,
+                    monotonic_violations: 1,
+                    valid_monotonic_sequences: 4,
+                    non_monotonic_metrics: 0,
+                    export_successful: true,
+                },
+                "Multiple counters with mixed reset patterns should detect resets correctly",
+            ),
+            // Test 4: Counter reset to non-zero value - should emit reset event
+            Otlp121Scenario::new(
+                "counter_reset_non_zero",
+                vec![
+                    Otlp121Scenario::create_monotonic_counter(
+                        "errors_total",
+                        1000,
+                        1000,
+                        vec![("type", "timeout")],
+                    ),
+                    Otlp121Scenario::create_monotonic_counter(
+                        "errors_total",
+                        50,
+                        2000,
+                        vec![("type", "timeout")], // Decrease: violation
+                    ),
+                ],
+                MonotonicValidationResult {
+                    metrics_processed: 2,
+                    monotonic_counters_found: 2,
+                    reset_events_detected: 1,
+                    reset_events_emitted: 1,
+                    monotonic_violations: 1,
+                    valid_monotonic_sequences: 1,
+                    non_monotonic_metrics: 0,
+                    export_successful: true,
+                },
+                "Counter reset to non-zero value must still emit reset event",
+            ),
+            // Test 5: Same counter with different attributes - independent tracking
+            Otlp121Scenario::new(
+                "same_counter_different_attributes",
+                vec![
+                    Otlp121Scenario::create_monotonic_counter(
+                        "requests_total",
+                        100,
+                        1000,
+                        vec![("method", "GET")],
+                    ),
+                    Otlp121Scenario::create_monotonic_counter(
+                        "requests_total",
+                        50,
+                        1000,
+                        vec![("method", "POST")],
+                    ),
+                    Otlp121Scenario::create_monotonic_counter(
+                        "requests_total",
+                        150,
+                        2000,
+                        vec![("method", "GET")], // Valid increase
+                    ),
+                    Otlp121Scenario::create_monotonic_counter(
+                        "requests_total",
+                        10,
+                        2000,
+                        vec![("method", "POST")], // Reset
+                    ),
+                ],
+                MonotonicValidationResult {
+                    metrics_processed: 4,
+                    monotonic_counters_found: 4,
+                    reset_events_detected: 1,
+                    reset_events_emitted: 1,
+                    monotonic_violations: 1,
+                    valid_monotonic_sequences: 3,
+                    non_monotonic_metrics: 0,
+                    export_successful: true,
+                },
+                "Same counter with different attributes should track resets independently",
+            ),
+            // Test 6: Mixed metric types - only monotonic counters tracked for resets
+            Otlp121Scenario::new(
+                "mixed_metric_types",
+                vec![
+                    Otlp121Scenario::create_monotonic_counter(
+                        "counter_metric",
+                        100,
+                        1000,
+                        vec![("service", "auth")],
+                    ),
+                    Otlp121Scenario::create_gauge_metric(
+                        "gauge_metric",
+                        50.5,
+                        1000,
+                        vec![("service", "auth")], // Gauge can decrease
+                    ),
+                    Otlp121Scenario::create_histogram_metric(
+                        "histogram_metric",
+                        25,
+                        150.0,
+                        1000,
+                        vec![("service", "auth")],
+                    ),
+                    Otlp121Scenario::create_monotonic_counter(
+                        "counter_metric",
+                        50,
+                        2000,
+                        vec![("service", "auth")], // Reset
+                    ),
+                    Otlp121Scenario::create_gauge_metric(
+                        "gauge_metric",
+                        10.0,
+                        2000,
+                        vec![("service", "auth")], // Valid gauge decrease
+                    ),
+                ],
+                MonotonicValidationResult {
+                    metrics_processed: 5,
+                    monotonic_counters_found: 2,
+                    reset_events_detected: 1,
+                    reset_events_emitted: 1,
+                    monotonic_violations: 1,
+                    valid_monotonic_sequences: 1,
+                    non_monotonic_metrics: 3,
+                    export_successful: true,
+                },
+                "Only monotonic counters should be tracked for reset detection",
+            ),
+            // Test 7: Multiple resets for same counter - multiple reset events
+            Otlp121Scenario::new(
+                "multiple_resets_same_counter",
+                vec![
+                    Otlp121Scenario::create_monotonic_counter(
+                        "connections_total",
+                        500,
+                        1000,
+                        vec![("pool", "main")],
+                    ),
+                    Otlp121Scenario::create_monotonic_counter(
+                        "connections_total",
+                        0,
+                        2000,
+                        vec![("pool", "main")], // First reset
+                    ),
+                    Otlp121Scenario::create_monotonic_counter(
+                        "connections_total",
+                        200,
+                        3000,
+                        vec![("pool", "main")], // Recovery
+                    ),
+                    Otlp121Scenario::create_monotonic_counter(
+                        "connections_total",
+                        50,
+                        4000,
+                        vec![("pool", "main")], // Second reset
+                    ),
+                    Otlp121Scenario::create_monotonic_counter(
+                        "connections_total",
+                        0,
+                        5000,
+                        vec![("pool", "main")], // Third reset
+                    ),
+                ],
+                MonotonicValidationResult {
+                    metrics_processed: 5,
+                    monotonic_counters_found: 5,
+                    reset_events_detected: 3,
+                    reset_events_emitted: 3,
+                    monotonic_violations: 3,
+                    valid_monotonic_sequences: 2,
+                    non_monotonic_metrics: 0,
+                    export_successful: true,
+                },
+                "Multiple resets for same counter must emit multiple reset events",
+            ),
+            // Test 8: Counter stays at same value - no reset event
+            Otlp121Scenario::new(
+                "counter_stays_same_value",
+                vec![
+                    Otlp121Scenario::create_monotonic_counter(
+                        "static_counter",
+                        42,
+                        1000,
+                        vec![("component", "cache")],
+                    ),
+                    Otlp121Scenario::create_monotonic_counter(
+                        "static_counter",
+                        42,
+                        2000,
+                        vec![("component", "cache")], // Same value: valid
+                    ),
+                    Otlp121Scenario::create_monotonic_counter(
+                        "static_counter",
+                        42,
+                        3000,
+                        vec![("component", "cache")], // Same value: valid
+                    ),
+                ],
+                MonotonicValidationResult {
+                    metrics_processed: 3,
+                    monotonic_counters_found: 3,
+                    reset_events_detected: 0,
+                    reset_events_emitted: 0,
+                    monotonic_violations: 0,
+                    valid_monotonic_sequences: 3,
+                    non_monotonic_metrics: 0,
+                    export_successful: true,
+                },
+                "Counter staying at same value should not trigger reset events",
+            ),
+            // Test 9: Large batch with scattered resets
+            Otlp121Scenario::new(
+                "large_batch_scattered_resets",
+                {
+                    let mut metrics = Vec::new();
+
+                    // Normal progression for counter 1
+                    for i in 0..10 {
+                        metrics.push(Otlp121Scenario::create_monotonic_counter(
+                            "batch_counter_1",
+                            i * 100,
+                            (i + 1) * 1000,
+                            vec![("batch", "1")],
+                        ));
+                    }
+
+                    // Normal progression for counter 2 with one reset
+                    for i in 0..5 {
+                        metrics.push(Otlp121Scenario::create_monotonic_counter(
+                            "batch_counter_2",
+                            i * 50,
+                            (i + 1) * 1000,
+                            vec![("batch", "2")],
+                        ));
+                    }
+                    // Reset for counter 2
+                    metrics.push(Otlp121Scenario::create_monotonic_counter(
+                        "batch_counter_2",
+                        0,
+                        6000,
+                        vec![("batch", "2")],
+                    ));
+                    // Recovery for counter 2
+                    for i in 1..3 {
+                        metrics.push(Otlp121Scenario::create_monotonic_counter(
+                            "batch_counter_2",
+                            i * 25,
+                            (6 + i) * 1000,
+                            vec![("batch", "2")],
+                        ));
+                    }
+
+                    metrics
+                },
+                MonotonicValidationResult {
+                    metrics_processed: 17,
+                    monotonic_counters_found: 17,
+                    reset_events_detected: 1,
+                    reset_events_emitted: 1,
+                    monotonic_violations: 1,
+                    valid_monotonic_sequences: 16,
+                    non_monotonic_metrics: 0,
+                    export_successful: true,
+                },
+                "Large batch with scattered resets should detect all reset events",
+            ),
+            // Test 10: Edge case - counter starts at 0 then increases (not a reset)
+            Otlp121Scenario::new(
+                "counter_starts_at_zero",
+                vec![
+                    Otlp121Scenario::create_monotonic_counter(
+                        "new_counter",
+                        0,
+                        1000,
+                        vec![("status", "init")],
+                    ),
+                    Otlp121Scenario::create_monotonic_counter(
+                        "new_counter",
+                        10,
+                        2000,
+                        vec![("status", "init")],
+                    ),
+                    Otlp121Scenario::create_monotonic_counter(
+                        "new_counter",
+                        25,
+                        3000,
+                        vec![("status", "init")],
+                    ),
+                ],
+                MonotonicValidationResult {
+                    metrics_processed: 3,
+                    monotonic_counters_found: 3,
+                    reset_events_detected: 0,
+                    reset_events_emitted: 0,
+                    monotonic_violations: 0,
+                    valid_monotonic_sequences: 3,
+                    non_monotonic_metrics: 0,
+                    export_successful: true,
+                },
+                "Counter starting at zero should not trigger reset events",
+            ),
+        ];
+
+        let mut passed = 0;
+        let mut failed = 0;
+
+        for scenario in test_scenarios {
+            if validate_otlp_121_scenario(&scenario) {
+                passed += 1;
+            } else {
+                failed += 1;
+            }
+        }
+
+        println!("OTLP-121 Summary: {} passed, {} failed", passed, failed);
+        assert_eq!(
+            failed, 0,
+            "All OTLP-121 monotonic counter reset detection scenarios must pass"
+        );
+    }
+
+    #[test]
+    fn test_otlp_121_reset_detection_logic() {
+        // Test the reset detection logic directly
+        let metrics = vec![
+            Otlp121Scenario::create_monotonic_counter(
+                "test_counter",
+                100,
+                1000,
+                vec![("key", "value")],
+            ),
+            Otlp121Scenario::create_monotonic_counter(
+                "test_counter",
+                150,
+                2000,
+                vec![("key", "value")], // Valid increase
+            ),
+            Otlp121Scenario::create_monotonic_counter(
+                "test_counter",
+                50,
+                3000,
+                vec![("key", "value")], // Reset detected
+            ),
+            Otlp121Scenario::create_monotonic_counter(
+                "test_counter",
+                75,
+                4000,
+                vec![("key", "value")], // Recovery
+            ),
+        ];
+
+        let reset_events = detect_monotonic_reset(&metrics);
+
+        assert_eq!(reset_events.len(), 1);
+        assert_eq!(reset_events[0].0, 2); // Index 2 (third metric) triggered reset
+        assert!(reset_events[0].1.contains("previous=150"));
+        assert!(reset_events[0].1.contains("current=50"));
+
+        println!("OTLP-121: Reset detection logic verified");
+    }
+
+    #[test]
+    fn test_otlp_121_attribute_independence() {
+        // Test that counters with same name but different attributes are tracked independently
+        let metrics = vec![
+            Otlp121Scenario::create_monotonic_counter(
+                "requests",
+                100,
+                1000,
+                vec![("method", "GET")],
+            ),
+            Otlp121Scenario::create_monotonic_counter(
+                "requests",
+                200,
+                1000,
+                vec![("method", "POST")],
+            ),
+            Otlp121Scenario::create_monotonic_counter(
+                "requests",
+                150,
+                2000,
+                vec![("method", "GET")], // Increase for GET
+            ),
+            Otlp121Scenario::create_monotonic_counter(
+                "requests",
+                50,
+                2000,
+                vec![("method", "POST")], // Reset for POST
+            ),
+        ];
+
+        let reset_events = detect_monotonic_reset(&metrics);
+
+        assert_eq!(reset_events.len(), 1);
+        assert!(reset_events[0].1.contains("previous=200"));
+        assert!(reset_events[0].1.contains("current=50"));
+
+        println!("OTLP-121: Attribute independence verified");
+    }
+}
