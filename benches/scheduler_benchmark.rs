@@ -26,6 +26,7 @@ use asupersync::runtime::scheduler::local_queue::Stealer;
 use asupersync::runtime::scheduler::stealing::steal_task;
 use asupersync::runtime::scheduler::{
     GlobalQueue, IntrusiveRing, IntrusiveStack, LocalQueue, Parker, QUEUE_TAG_READY, Scheduler,
+    ThreeLaneScheduler,
 };
 use asupersync::sync::ContendedMutex;
 use asupersync::types::{Budget, RegionId, TaskId, Time};
@@ -104,6 +105,52 @@ fn skipped_local_steal_case(victim_size: u32, local_prefix: u32) -> (LocalQueue,
     }
     let stealer = victim.stealer();
     (victim, stealer)
+}
+
+fn run_global_ready_contention_case(
+    producer_count: usize,
+    tasks_per_producer: usize,
+) -> (usize, u64, u64) {
+    let total_tasks = producer_count * tasks_per_producer;
+    let state = setup_runtime_state(total_tasks as u32 + 1);
+    let scheduler = Arc::new(ThreeLaneScheduler::new(1, &state));
+    let barrier = Arc::new(std::sync::Barrier::new(producer_count.max(1)));
+
+    let inject_handles: Vec<_> = (0..producer_count)
+        .map(|producer| {
+            let scheduler = Arc::clone(&scheduler);
+            let barrier = Arc::clone(&barrier);
+            thread::spawn(move || {
+                barrier.wait();
+                let base = producer * tasks_per_producer;
+                for offset in 0..tasks_per_producer {
+                    scheduler.inject_ready(task((base + offset) as u32), 50);
+                }
+            })
+        })
+        .collect();
+
+    for handle in inject_handles {
+        handle.join().expect("producer should complete");
+    }
+
+    let mut scheduler = match Arc::try_unwrap(scheduler) {
+        Ok(scheduler) => scheduler,
+        Err(_) => panic!("all producer handles should release the scheduler"),
+    };
+    let mut workers = scheduler.take_workers();
+    let worker = workers.get_mut(0).expect("benchmark requires one worker");
+    let mut total_dispatched = 0usize;
+    while worker.next_task().is_some() {
+        total_dispatched += 1;
+    }
+
+    let metrics = worker.preemption_metrics();
+    (
+        total_dispatched,
+        metrics.global_ready_batch_drains,
+        metrics.global_ready_batch_tasks,
+    )
 }
 
 // =============================================================================
@@ -751,6 +798,41 @@ fn bench_try_steal_locality(c: &mut Criterion) {
                         workers.swap_remove(thief_id)
                     },
                     |mut worker| black_box(worker.bench_try_steal()),
+                    BatchSize::SmallInput,
+                )
+            },
+        );
+    }
+
+    group.finish();
+}
+
+fn bench_global_ready_contention(c: &mut Criterion) {
+    let mut group = c.benchmark_group("scheduler/global_ready_contention");
+    group.warm_up_time(Duration::from_millis(200));
+    group.measurement_time(Duration::from_millis(600));
+    group.sample_size(20);
+
+    for &(producer_count, tasks_per_producer) in &[
+        (1usize, 32usize),
+        (8usize, 64usize),
+        (32usize, 32usize),
+        (64usize, 32usize),
+    ] {
+        let total_tasks = producer_count * tasks_per_producer;
+        group.throughput(Throughput::Elements(total_tasks as u64));
+        group.bench_with_input(
+            BenchmarkId::new("inject_ready_then_drain", producer_count),
+            &producer_count,
+            |b, _| {
+                b.iter_batched(
+                    || (),
+                    |_| {
+                        black_box(run_global_ready_contention_case(
+                            producer_count,
+                            tasks_per_producer,
+                        ))
+                    },
                     BatchSize::SmallInput,
                 )
             },
@@ -1793,6 +1875,7 @@ criterion_group!(
     bench_work_stealing,
     bench_steal_task,
     bench_try_steal_locality,
+    bench_global_ready_contention,
     bench_scheduler_throughput,
     bench_scheduler_capacity_profiles,
     bench_parker,
