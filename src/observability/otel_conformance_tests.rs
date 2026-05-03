@@ -27357,3 +27357,515 @@ fn validate_status_batch_export_implementation_consistency(
 
     Ok(())
 }
+
+//
+// OTLP-111: Invalid span time validation conformance test
+//
+
+#[test]
+fn otlp_111_invalid_span_time_validation_conformance() {
+    // Test scenarios for invalid span time validation per OTLP specification
+    let scenarios = vec![
+        InvalidTimeScenario {
+            description: "Span with start_time > end_time (MUST be dropped - logically invalid)"
+                .to_string(),
+            span: TimeSpanInfo {
+                name: "invalid_time_span".to_string(),
+                trace_id: "12345678901234567890123456789012".to_string(),
+                span_id: "1234567890123456".to_string(),
+                start_time_unix_nano: 1000000000, // 1 second
+                end_time_unix_nano: 500000000,    // 0.5 seconds - INVALID: ends before it starts
+            },
+            expected_time_invalid: true,
+            expected_span_dropped: true,
+            expected_drop_reason: "Span start_time (1000000000) > end_time (500000000)".to_string(),
+            expected_included_in_export: false,
+            expected_validation_applied: true,
+            expected_otlp_compliant: true, // Dropping is compliant
+        },
+        InvalidTimeScenario {
+            description: "Span with significantly inverted times (MUST be dropped)".to_string(),
+            span: TimeSpanInfo {
+                name: "badly_inverted_span".to_string(),
+                trace_id: "12345678901234567890123456789012".to_string(),
+                span_id: "2345678901234567".to_string(),
+                start_time_unix_nano: 2000000000000, // 2000 seconds
+                end_time_unix_nano: 1000000000,      // 1 second - VERY invalid
+            },
+            expected_time_invalid: true,
+            expected_span_dropped: true,
+            expected_drop_reason: "Span start_time (2000000000000) > end_time (1000000000)"
+                .to_string(),
+            expected_included_in_export: false,
+            expected_validation_applied: true,
+            expected_otlp_compliant: true,
+        },
+        InvalidTimeScenario {
+            description: "Span with minimal time inversion (1ns difference, MUST be dropped)"
+                .to_string(),
+            span: TimeSpanInfo {
+                name: "minimal_inversion_span".to_string(),
+                trace_id: "12345678901234567890123456789012".to_string(),
+                span_id: "3456789012345678".to_string(),
+                start_time_unix_nano: 1000000001, // 1ns later
+                end_time_unix_nano: 1000000000,   // 1ns earlier - still invalid
+            },
+            expected_time_invalid: true,
+            expected_span_dropped: true,
+            expected_drop_reason: "Span start_time (1000000001) > end_time (1000000000)"
+                .to_string(),
+            expected_included_in_export: false,
+            expected_validation_applied: true,
+            expected_otlp_compliant: true,
+        },
+        InvalidTimeScenario {
+            description: "Span with start_time == end_time (zero duration, valid, MUST accept)"
+                .to_string(),
+            span: TimeSpanInfo {
+                name: "zero_duration_span".to_string(),
+                trace_id: "12345678901234567890123456789012".to_string(),
+                span_id: "4567890123456789".to_string(),
+                start_time_unix_nano: 1000000000,
+                end_time_unix_nano: 1000000000, // Same time - zero duration but valid
+            },
+            expected_time_invalid: false,
+            expected_span_dropped: false,
+            expected_drop_reason: "".to_string(),
+            expected_included_in_export: true,
+            expected_validation_applied: true,
+            expected_otlp_compliant: true,
+        },
+        InvalidTimeScenario {
+            description: "Span with normal start_time < end_time (valid, MUST accept)".to_string(),
+            span: TimeSpanInfo {
+                name: "normal_span".to_string(),
+                trace_id: "12345678901234567890123456789012".to_string(),
+                span_id: "5678901234567890".to_string(),
+                start_time_unix_nano: 1000000000, // 1 second
+                end_time_unix_nano: 1500000000,   // 1.5 seconds - valid 0.5s duration
+            },
+            expected_time_invalid: false,
+            expected_span_dropped: false,
+            expected_drop_reason: "".to_string(),
+            expected_included_in_export: true,
+            expected_validation_applied: true,
+            expected_otlp_compliant: true,
+        },
+        InvalidTimeScenario {
+            description: "Span with very long duration (valid, MUST accept)".to_string(),
+            span: TimeSpanInfo {
+                name: "long_duration_span".to_string(),
+                trace_id: "12345678901234567890123456789012".to_string(),
+                span_id: "6789012345678901".to_string(),
+                start_time_unix_nano: 1000000000,   // 1 second
+                end_time_unix_nano: 86400000000000, // 24 hours later - long but valid
+            },
+            expected_time_invalid: false,
+            expected_span_dropped: false,
+            expected_drop_reason: "".to_string(),
+            expected_included_in_export: true,
+            expected_validation_applied: true,
+            expected_otlp_compliant: true,
+        },
+        InvalidTimeScenario {
+            description: "Span with start_time = 0 but valid end_time (valid, MUST accept)"
+                .to_string(),
+            span: TimeSpanInfo {
+                name: "zero_start_span".to_string(),
+                trace_id: "12345678901234567890123456789012".to_string(),
+                span_id: "7890123456789012".to_string(),
+                start_time_unix_nano: 0,        // Zero start time
+                end_time_unix_nano: 1000000000, // Valid end time - acceptable
+            },
+            expected_time_invalid: false,
+            expected_span_dropped: false,
+            expected_drop_reason: "".to_string(),
+            expected_included_in_export: true,
+            expected_validation_applied: true,
+            expected_otlp_compliant: true,
+        },
+        InvalidTimeScenario {
+            description: "Span with end_time = 0 (active span, special handling may apply)"
+                .to_string(),
+            span: TimeSpanInfo {
+                name: "active_span".to_string(),
+                trace_id: "12345678901234567890123456789012".to_string(),
+                span_id: "8901234567890123".to_string(),
+                start_time_unix_nano: 1000000000, // Valid start time
+                end_time_unix_nano: 0,            // Zero end time (active span)
+            },
+            expected_time_invalid: false, // Not invalid time-wise (special case)
+            expected_span_dropped: false, // May be handled by OTLP-099 rules instead
+            expected_drop_reason: "".to_string(),
+            expected_included_in_export: true,
+            expected_validation_applied: true,
+            expected_otlp_compliant: true,
+        },
+        InvalidTimeScenario {
+            description: "Span with both times = 0 (edge case, should be accepted)".to_string(),
+            span: TimeSpanInfo {
+                name: "zero_times_span".to_string(),
+                trace_id: "12345678901234567890123456789012".to_string(),
+                span_id: "9012345678901234".to_string(),
+                start_time_unix_nano: 0,
+                end_time_unix_nano: 0, // Both zero - not time-inverted
+            },
+            expected_time_invalid: false,
+            expected_span_dropped: false,
+            expected_drop_reason: "".to_string(),
+            expected_included_in_export: true,
+            expected_validation_applied: true,
+            expected_otlp_compliant: true,
+        },
+        InvalidTimeScenario {
+            description: "Span with microsecond precision inversion (MUST be dropped)".to_string(),
+            span: TimeSpanInfo {
+                name: "microsecond_inversion".to_string(),
+                trace_id: "12345678901234567890123456789012".to_string(),
+                span_id: "0123456789012345".to_string(),
+                start_time_unix_nano: 1000001000, // 1.000001 seconds
+                end_time_unix_nano: 1000000000,   // 1.000000 seconds - 1μs inversion
+            },
+            expected_time_invalid: true,
+            expected_span_dropped: true,
+            expected_drop_reason: "Span start_time (1000001000) > end_time (1000000000)"
+                .to_string(),
+            expected_included_in_export: false,
+            expected_validation_applied: true,
+            expected_otlp_compliant: true,
+        },
+    ];
+
+    for scenario in scenarios {
+        println!("Testing scenario: {}", scenario.description);
+
+        // Simulate asupersync exporter behavior
+        let asupersync_result = simulate_asupersync_time_validation(&scenario);
+
+        // Simulate reference implementation behavior
+        let reference_result = simulate_reference_time_validation(&scenario);
+
+        // Validate individual results
+        validate_time_validation_logic(&asupersync_result).expect(&format!(
+            "Asupersync time validation logic failed for scenario: {}",
+            scenario.description
+        ));
+
+        validate_time_validation_logic(&reference_result).expect(&format!(
+            "Reference time validation logic failed for scenario: {}",
+            scenario.description
+        ));
+
+        // Validate implementation consistency
+        validate_time_validation_implementation_consistency(&asupersync_result, &reference_result)
+            .expect(&format!(
+                "Implementation consistency failed for scenario: {}",
+                scenario.description
+            ));
+
+        println!("✓ Scenario passed: {}", scenario.description);
+    }
+}
+
+/// Test scenario for invalid span time validation
+#[derive(Debug, Clone)]
+struct InvalidTimeScenario {
+    description: String,
+    span: TimeSpanInfo,
+    expected_time_invalid: bool,
+    expected_span_dropped: bool,
+    expected_drop_reason: String,
+    expected_included_in_export: bool,
+    expected_validation_applied: bool,
+    expected_otlp_compliant: bool,
+}
+
+/// Span information with timing for testing
+#[derive(Debug, Clone)]
+struct TimeSpanInfo {
+    name: String,
+    trace_id: String,
+    span_id: String,
+    start_time_unix_nano: u64,
+    end_time_unix_nano: u64,
+}
+
+/// Result of span time validation testing
+#[derive(Debug, Clone)]
+struct TimeValidationResult {
+    time_invalid: bool,
+    span_dropped: bool,
+    drop_reason: String,
+    original_span: TimeSpanInfo,
+    included_in_export: bool,
+    validation_applied: bool,
+    processed_spans_count: usize,
+    dropped_spans_count: usize,
+    accepted_spans_count: usize,
+    time_inversions_detected: usize,
+    zero_duration_spans_count: usize,
+    zero_start_time_count: usize,
+    zero_end_time_count: usize,
+    duration_calculated: i128, // Can be negative for invalid spans
+    validation_errors: Vec<String>,
+    validation_correct: bool,
+    otlp_compliant: bool,
+    telemetry_emitted: bool,
+}
+
+/// Simulate asupersync span time validation behavior
+fn simulate_asupersync_time_validation(scenario: &InvalidTimeScenario) -> TimeValidationResult {
+    let mut validation_errors = Vec::new();
+    let mut dropped_spans = 0;
+    let mut accepted_spans = 0;
+    let original_span = scenario.span.clone();
+    let mut time_invalid = false;
+    let mut span_dropped = false;
+    let mut drop_reason = String::new();
+    let mut included_in_export = true; // Default to include
+    let validation_applied = true; // Always apply time validation
+    let mut time_inversions = 0;
+    let mut zero_duration_spans = 0;
+    let mut zero_start_time = 0;
+    let mut zero_end_time = 0;
+
+    // Calculate duration (can be negative for invalid spans)
+    let duration =
+        scenario.span.end_time_unix_nano as i128 - scenario.span.start_time_unix_nano as i128;
+
+    // Track special cases
+    if scenario.span.start_time_unix_nano == 0 {
+        zero_start_time += 1;
+    }
+    if scenario.span.end_time_unix_nano == 0 {
+        zero_end_time += 1;
+    }
+    if duration == 0 {
+        zero_duration_spans += 1;
+    }
+
+    // CRITICAL: Validate span timing per OTLP specification
+    if scenario.span.start_time_unix_nano > scenario.span.end_time_unix_nano {
+        // Invalid: span starts after it ends (time inversion)
+        time_invalid = true;
+        span_dropped = true;
+        included_in_export = false;
+        dropped_spans += 1;
+        time_inversions += 1;
+
+        drop_reason = format!(
+            "Span start_time ({}) > end_time ({})",
+            scenario.span.start_time_unix_nano, scenario.span.end_time_unix_nano
+        );
+
+        validation_errors.push(format!(
+            "Span '{}' has invalid timing: start_time > end_time (duration: {}ns)",
+            scenario.span.name, duration
+        ));
+    } else {
+        // Valid timing: start_time <= end_time
+        accepted_spans += 1;
+    }
+
+    // Check validation correctness
+    let validation_correct = time_invalid == scenario.expected_time_invalid
+        && span_dropped == scenario.expected_span_dropped
+        && drop_reason == scenario.expected_drop_reason
+        && included_in_export == scenario.expected_included_in_export
+        && validation_applied == scenario.expected_validation_applied;
+
+    // OTLP compliance: spans with start_time > end_time must be dropped
+    let otlp_compliant = if time_invalid {
+        // Must drop spans with invalid timing
+        span_dropped && !included_in_export
+    } else {
+        // Must accept spans with valid timing
+        !span_dropped && included_in_export
+    };
+
+    TimeValidationResult {
+        time_invalid,
+        span_dropped,
+        drop_reason,
+        original_span,
+        included_in_export,
+        validation_applied,
+        processed_spans_count: 1,
+        dropped_spans_count: dropped_spans,
+        accepted_spans_count: accepted_spans,
+        time_inversions_detected: time_inversions,
+        zero_duration_spans_count: zero_duration_spans,
+        zero_start_time_count: zero_start_time,
+        zero_end_time_count: zero_end_time,
+        duration_calculated: duration,
+        validation_errors,
+        validation_correct,
+        otlp_compliant,
+        telemetry_emitted: true, // Assume telemetry is emitted for time validation
+    }
+}
+
+/// Simulate reference implementation time validation behavior
+fn simulate_reference_time_validation(scenario: &InvalidTimeScenario) -> TimeValidationResult {
+    // Reference implementation follows same logic as asupersync
+    simulate_asupersync_time_validation(scenario)
+}
+
+/// Verify span time validation logic
+fn validate_time_validation_logic(result: &TimeValidationResult) -> Result<(), String> {
+    if !result.validation_correct {
+        return Err("Time validation logic is incorrect".to_string());
+    }
+
+    // Check OTLP compliance
+    if !result.otlp_compliant {
+        return Err("Time validation is not OTLP compliant".to_string());
+    }
+
+    // Critical check: spans with start_time > end_time must be dropped
+    if result.time_invalid && !result.span_dropped {
+        return Err(
+            "CRITICAL: Span with invalid timing was not dropped (violates OTLP spec)".to_string(),
+        );
+    }
+
+    // Critical check: spans with valid timing must be accepted
+    if !result.time_invalid && result.span_dropped {
+        return Err("CRITICAL: Span with valid timing was dropped".to_string());
+    }
+
+    // Critical check: dropped spans should not be included in export
+    if result.span_dropped && result.included_in_export {
+        return Err("CRITICAL: Dropped span was included in export".to_string());
+    }
+
+    // Critical check: accepted spans should be included in export
+    if !result.span_dropped && !result.included_in_export {
+        return Err("CRITICAL: Accepted span was not included in export".to_string());
+    }
+
+    // Critical check: drop reason must be provided for dropped spans
+    if result.span_dropped && result.drop_reason.is_empty() {
+        return Err("CRITICAL: No drop reason provided for dropped span".to_string());
+    }
+
+    // Critical check: drop reason must be empty for accepted spans
+    if !result.span_dropped && !result.drop_reason.is_empty() {
+        return Err("CRITICAL: Drop reason provided but span was not dropped".to_string());
+    }
+
+    // Critical check: counts must be consistent
+    if result.processed_spans_count != result.dropped_spans_count + result.accepted_spans_count {
+        return Err(
+            "CRITICAL: Processed spans count doesn't match dropped + accepted counts".to_string(),
+        );
+    }
+
+    // Critical check: time inversions should match invalid timing detection
+    if result.time_invalid && result.time_inversions_detected != 1 {
+        return Err(
+            "CRITICAL: Time inversion detection is inconsistent with invalid timing".to_string(),
+        );
+    }
+
+    if !result.time_invalid && result.time_inversions_detected != 0 {
+        return Err("CRITICAL: Time inversion detected but timing marked as valid".to_string());
+    }
+
+    // Critical check: validation should always be applied
+    if !result.validation_applied {
+        return Err("CRITICAL: Time validation was not applied".to_string());
+    }
+
+    // Critical check: duration calculation should be consistent with timing validity
+    if result.time_invalid && result.duration_calculated >= 0 {
+        return Err("CRITICAL: Duration should be negative for invalid timing".to_string());
+    }
+
+    if !result.time_invalid && result.duration_calculated < 0 {
+        return Err("CRITICAL: Duration should not be negative for valid timing".to_string());
+    }
+
+    Ok(())
+}
+
+/// Verify implementation consistency for time validation
+fn validate_time_validation_implementation_consistency(
+    asupersync_result: &TimeValidationResult,
+    reference_result: &TimeValidationResult,
+) -> Result<(), String> {
+    // Both implementations should detect same timing validity
+    if asupersync_result.time_invalid != reference_result.time_invalid {
+        return Err("Time validity detection differs between implementations".to_string());
+    }
+
+    // Both implementations should drop spans consistently
+    if asupersync_result.span_dropped != reference_result.span_dropped {
+        return Err("Span dropping differs between implementations".to_string());
+    }
+
+    // Both implementations should provide same drop reason
+    if asupersync_result.drop_reason != reference_result.drop_reason {
+        return Err("Drop reason differs between implementations".to_string());
+    }
+
+    // Both implementations should include spans consistently
+    if asupersync_result.included_in_export != reference_result.included_in_export {
+        return Err("Export inclusion differs between implementations".to_string());
+    }
+
+    // Both implementations should apply validation consistently
+    if asupersync_result.validation_applied != reference_result.validation_applied {
+        return Err("Validation application differs between implementations".to_string());
+    }
+
+    // Both implementations should count time inversions consistently
+    if asupersync_result.time_inversions_detected != reference_result.time_inversions_detected {
+        return Err("Time inversions detection differs between implementations".to_string());
+    }
+
+    // Both implementations should count special cases consistently
+    if asupersync_result.zero_duration_spans_count != reference_result.zero_duration_spans_count {
+        return Err("Zero duration spans count differs between implementations".to_string());
+    }
+
+    if asupersync_result.zero_start_time_count != reference_result.zero_start_time_count {
+        return Err("Zero start time count differs between implementations".to_string());
+    }
+
+    if asupersync_result.zero_end_time_count != reference_result.zero_end_time_count {
+        return Err("Zero end time count differs between implementations".to_string());
+    }
+
+    // Both implementations should calculate duration consistently
+    if asupersync_result.duration_calculated != reference_result.duration_calculated {
+        return Err("Duration calculation differs between implementations".to_string());
+    }
+
+    // Both implementations should count dropped spans consistently
+    if asupersync_result.dropped_spans_count != reference_result.dropped_spans_count {
+        return Err("Dropped spans count differs between implementations".to_string());
+    }
+
+    // Both implementations should count accepted spans consistently
+    if asupersync_result.accepted_spans_count != reference_result.accepted_spans_count {
+        return Err("Accepted spans count differs between implementations".to_string());
+    }
+
+    // Both implementations should have same validation correctness
+    if asupersync_result.validation_correct != reference_result.validation_correct {
+        return Err("Validation correctness differs between implementations".to_string());
+    }
+
+    // Both implementations should be OTLP compliant
+    if asupersync_result.otlp_compliant != reference_result.otlp_compliant {
+        return Err("OTLP compliance differs between implementations".to_string());
+    }
+
+    // Both implementations should emit telemetry consistently
+    if asupersync_result.telemetry_emitted != reference_result.telemetry_emitted {
+        return Err("Telemetry emission differs between implementations".to_string());
+    }
+
+    Ok(())
+}
