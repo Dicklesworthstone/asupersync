@@ -1842,13 +1842,37 @@ impl RedisConnection {
                 &self.config.protocol_limits,
             )? {
                 self.read_buf.consume(consumed);
-                if matches!(value, RespValue::Attribute(_)) {
-                    // RESP3 attributes are metadata that prefix the actual
-                    // reply; they must not be surfaced as standalone command
-                    // responses or left queued to desynchronize the socket.
-                    continue;
+                match value {
+                    RespValue::Attribute(_) => {
+                        // RESP3 attributes are metadata that prefix the actual
+                        // reply; they must not be surfaced as standalone command
+                        // responses or left queued to desynchronize the socket.
+                        continue;
+                    }
+                    RespValue::Push(push_items) => {
+                        // RESP3 push frames (server-initiated messages like cache
+                        // invalidations, monitoring events) must not be returned as
+                        // command responses. They should be handled separately or
+                        // buffered. For now, we log and discard them to prevent
+                        // protocol desynchronization. A full implementation would
+                        // buffer these for client tracking or monitoring APIs.
+                        cx.trace(&format!(
+                            "redis: received RESP3 push frame during command response, discarding: {:?}",
+                            push_items.first()
+                                .and_then(|v| match v {
+                                    RespValue::BulkString(Some(bytes)) =>
+                                        std::str::from_utf8(bytes).ok(),
+                                    RespValue::SimpleString(s) => Some(s),
+                                    _ => None
+                                })
+                                .unwrap_or("unknown")
+                        ));
+                        continue;
+                    }
+                    other => {
+                        return Ok(other);
+                    }
                 }
-                return Ok(value);
             }
 
             let frame_limit = self.config.protocol_limits.max_frame_size;
@@ -9839,10 +9863,8 @@ mod tests {
             b"|-\r\n".as_slice(),
             b"|12x34\r\n".as_slice(),
             b"|\r\n".as_slice(), // Empty length
-
             // Negative length (invalid for aggregate types)
             b"|-5\r\n".as_slice(),
-
             // Integer overflow cases
             b"|99999999999999999999\r\n".as_slice(),
         ];
@@ -9903,10 +9925,7 @@ mod tests {
                     // Also acceptable - some truncation patterns may be detected as protocol errors
                 }
                 Err(other) => {
-                    panic!(
-                        "Truncated test {i}: Unexpected error type: {:?}",
-                        other
-                    );
+                    panic!("Truncated test {i}: Unexpected error type: {:?}", other);
                 }
             }
         }
@@ -9915,15 +9934,13 @@ mod tests {
         // Parser should never panic on malformed input - always return Result
         let extreme_cases = [
             b"|999999999999999999999999999999\r\n".as_slice(), // Extreme overflow
-            b"|\x00\x01\x02\r\n".as_slice(),                  // Binary in length field
-            b"|\xFF\xFF\xFF\r\n".as_slice(),                  // Invalid UTF-8 bytes
+            b"|\x00\x01\x02\r\n".as_slice(),                   // Binary in length field
+            b"|\xFF\xFF\xFF\r\n".as_slice(),                   // Invalid UTF-8 bytes
         ];
 
         for (i, extreme_input) in extreme_cases.iter().enumerate() {
             // The key test: parser must not panic
-            let result = std::panic::catch_unwind(|| {
-                RespValue::try_decode(extreme_input)
-            });
+            let result = std::panic::catch_unwind(|| RespValue::try_decode(extreme_input));
 
             assert!(
                 result.is_ok(),
@@ -9944,3 +9961,8 @@ mod tests {
         // ✅ Truncated input correctly detected as incomplete (Ok(None))
     }
 }
+
+// RESP3 push-frame interleaving audit
+#[cfg(test)]
+#[path = "redis_resp3_push_interleaving_audit.rs"]
+mod redis_resp3_push_interleaving_audit;
