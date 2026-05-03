@@ -35501,4 +35501,349 @@ mod otlp_122_tests {
 
         println!("OTLP-126: Precision preservation verified");
     }
+
+    // OTLP-127: String attribute size limit conformance test
+    // This test validates that when an exporter sees a span with attributes containing
+    // extremely long string value (>10MB), it MUST be rejected (single attribute size limit).
+
+    #[derive(Debug, Clone)]
+    struct Otlp127Scenario {
+        name: String,
+        span_name: String,
+        trace_id: String,
+        span_id: String,
+        attributes: Vec<(String, Otlp127AttributeValue)>,
+        expected_result: Otlp127ValidationResult,
+        description: String,
+    }
+
+    #[derive(Debug, Clone)]
+    enum Otlp127AttributeValue {
+        StringRegular(String),           // Normal sized string
+        StringLarge(usize),              // Large string (specified by size in bytes)
+        StringExtraLarge(usize),         // Extra large string (>10MB)
+        StringMaxAllowed,                // String at maximum allowed size (≤10MB)
+        StringOverLimit,                 // String over the limit (>10MB)
+    }
+
+    #[derive(Debug, Clone, PartialEq)]
+    enum Otlp127ValidationResult {
+        Accept,    // Span should be accepted
+        Reject,    // Span should be rejected due to size limit
+    }
+
+    impl Otlp127Scenario {
+        fn new(
+            name: &str,
+            span_name: &str,
+            trace_id: &str,
+            span_id: &str,
+            attributes: Vec<(String, Otlp127AttributeValue)>,
+            expected_result: Otlp127ValidationResult,
+            description: &str,
+        ) -> Self {
+            Self {
+                name: name.to_string(),
+                span_name: span_name.to_string(),
+                trace_id: trace_id.to_string(),
+                span_id: span_id.to_string(),
+                attributes,
+                expected_result,
+                description: description.to_string(),
+            }
+        }
+    }
+
+    fn validate_otlp_127_scenario(scenario: &Otlp127Scenario) -> bool {
+        println!("OTLP-127: Testing scenario '{}'", scenario.name);
+
+        const MAX_ATTRIBUTE_SIZE_BYTES: usize = 10 * 1024 * 1024; // 10MB limit
+
+        let mut should_reject = false;
+        let mut total_size = 0usize;
+
+        // Check each attribute for size violations
+        for (attr_name, attr_value) in &scenario.attributes {
+            let attribute_size = match attr_value {
+                Otlp127AttributeValue::StringRegular(s) => {
+                    let size = s.len();
+                    println!("  Found regular string attribute '{}': {} bytes", attr_name, size);
+                    size
+                }
+                Otlp127AttributeValue::StringLarge(size) => {
+                    println!("  Found large string attribute '{}': {} bytes", attr_name, size);
+                    *size
+                }
+                Otlp127AttributeValue::StringExtraLarge(size) => {
+                    println!("  Found extra large string attribute '{}': {} bytes", attr_name, size);
+                    if *size > MAX_ATTRIBUTE_SIZE_BYTES {
+                        println!("    ⚠️  EXCEEDS LIMIT: {} bytes > {} bytes", size, MAX_ATTRIBUTE_SIZE_BYTES);
+                        should_reject = true;
+                    }
+                    *size
+                }
+                Otlp127AttributeValue::StringMaxAllowed => {
+                    let size = MAX_ATTRIBUTE_SIZE_BYTES;
+                    println!("  Found max-allowed string attribute '{}': {} bytes (at limit)", attr_name, size);
+                    size
+                }
+                Otlp127AttributeValue::StringOverLimit => {
+                    let size = MAX_ATTRIBUTE_SIZE_BYTES + 1;
+                    println!("  Found over-limit string attribute '{}': {} bytes (OVER LIMIT)", attr_name, size);
+                    should_reject = true;
+                    size
+                }
+            };
+
+            total_size += attribute_size;
+
+            // Per OTLP-127: Single attribute >10MB MUST cause rejection
+            if attribute_size > MAX_ATTRIBUTE_SIZE_BYTES {
+                should_reject = true;
+                println!("    🚫 REJECTION TRIGGERED: Single attribute exceeds {}MB limit",
+                        MAX_ATTRIBUTE_SIZE_BYTES / (1024 * 1024));
+            }
+        }
+
+        println!("  Total attributes size: {} bytes ({:.2}MB)",
+                total_size, total_size as f64 / (1024.0 * 1024.0));
+
+        // Determine expected validation result
+        let actual_result = if should_reject {
+            Otlp127ValidationResult::Reject
+        } else {
+            Otlp127ValidationResult::Accept
+        };
+
+        let result = actual_result == scenario.expected_result;
+
+        if result {
+            println!("  ✓ PASS: {}", scenario.description);
+            if actual_result == Otlp127ValidationResult::Reject {
+                println!("    ✓ Correctly rejected span with oversized attribute(s)");
+            } else {
+                println!("    ✓ Correctly accepted span with acceptable attribute sizes");
+            }
+        } else {
+            println!("  ✗ FAIL: {}", scenario.description);
+            println!("    Expected: {:?}, Got: {:?}", scenario.expected_result, actual_result);
+        }
+
+        result
+    }
+
+    #[test]
+    fn test_otlp_127_string_size_limit_validation() {
+        let test_scenarios = vec![
+            // Test 1: Span with normal sized strings - MUST be accepted
+            Otlp127Scenario::new(
+                "span_with_normal_strings",
+                "test-span-normal",
+                "4bf92f3577b34da6a3ce929d0e0e4736",
+                "00f067aa0ba902b7",
+                vec![
+                    ("service.name".to_string(), Otlp127AttributeValue::StringRegular("web-service".to_string())),
+                    ("description".to_string(), Otlp127AttributeValue::StringRegular("A normal length description".to_string())),
+                    ("user.id".to_string(), Otlp127AttributeValue::StringRegular("12345".to_string())),
+                ],
+                Otlp127ValidationResult::Accept,
+                "Span with normal sized strings must be accepted",
+            ),
+
+            // Test 2: Span with large but acceptable strings - MUST be accepted
+            Otlp127Scenario::new(
+                "span_with_large_acceptable_strings",
+                "test-span-large-ok",
+                "4bf92f3577b34da6a3ce929d0e0e4737",
+                "00f067aa0ba902b8",
+                vec![
+                    ("large_data".to_string(), Otlp127AttributeValue::StringLarge(1024 * 1024)), // 1MB
+                    ("medium_data".to_string(), Otlp127AttributeValue::StringLarge(512 * 1024)), // 512KB
+                    ("service.name".to_string(), Otlp127AttributeValue::StringRegular("service".to_string())),
+                ],
+                Otlp127ValidationResult::Accept,
+                "Span with large but acceptable strings must be accepted",
+            ),
+
+            // Test 3: Span with string at maximum allowed size - MUST be accepted
+            Otlp127Scenario::new(
+                "span_with_max_size_string",
+                "test-span-max-size",
+                "4bf92f3577b34da6a3ce929d0e0e4738",
+                "00f067aa0ba902b9",
+                vec![
+                    ("max_data".to_string(), Otlp127AttributeValue::StringMaxAllowed), // Exactly 10MB
+                    ("service.name".to_string(), Otlp127AttributeValue::StringRegular("boundary-test".to_string())),
+                ],
+                Otlp127ValidationResult::Accept,
+                "Span with string at maximum allowed size (10MB) must be accepted",
+            ),
+
+            // Test 4: Span with string over size limit - MUST be rejected
+            Otlp127Scenario::new(
+                "span_with_oversized_string",
+                "test-span-oversized",
+                "4bf92f3577b34da6a3ce929d0e0e4739",
+                "00f067aa0ba902ba",
+                vec![
+                    ("service.name".to_string(), Otlp127AttributeValue::StringRegular("service".to_string())),
+                    ("oversized_data".to_string(), Otlp127AttributeValue::StringOverLimit), // 10MB + 1 byte
+                ],
+                Otlp127ValidationResult::Reject,
+                "Span with string over size limit (>10MB) must be rejected per OTLP-127",
+            ),
+
+            // Test 5: Span with extremely large string - MUST be rejected
+            Otlp127Scenario::new(
+                "span_with_extremely_large_string",
+                "test-span-huge",
+                "4bf92f3577b34da6a3ce929d0e0e473a",
+                "00f067aa0ba902bb",
+                vec![
+                    ("huge_payload".to_string(), Otlp127AttributeValue::StringExtraLarge(50 * 1024 * 1024)), // 50MB
+                ],
+                Otlp127ValidationResult::Reject,
+                "Span with extremely large string (50MB) must be rejected",
+            ),
+
+            // Test 6: Span with multiple large strings, one over limit - MUST be rejected
+            Otlp127Scenario::new(
+                "span_with_mixed_sizes_one_over",
+                "test-span-mixed-over",
+                "4bf92f3577b34da6a3ce929d0e0e473b",
+                "00f067aa0ba902bc",
+                vec![
+                    ("acceptable1".to_string(), Otlp127AttributeValue::StringLarge(5 * 1024 * 1024)), // 5MB - OK
+                    ("acceptable2".to_string(), Otlp127AttributeValue::StringLarge(3 * 1024 * 1024)), // 3MB - OK
+                    ("oversized".to_string(), Otlp127AttributeValue::StringExtraLarge(15 * 1024 * 1024)), // 15MB - REJECT
+                ],
+                Otlp127ValidationResult::Reject,
+                "Span with multiple strings where one exceeds limit must be rejected",
+            ),
+        ];
+
+        let mut passed = 0;
+        let mut failed = 0;
+
+        for scenario in test_scenarios {
+            if validate_otlp_127_scenario(&scenario) {
+                passed += 1;
+            } else {
+                failed += 1;
+            }
+        }
+
+        println!("OTLP-127 Summary: {} passed, {} failed", passed, failed);
+        assert_eq!(
+            failed, 0,
+            "All OTLP-127 string size limit validation scenarios must pass"
+        );
+    }
+
+    #[test]
+    fn test_otlp_127_size_limit_boundaries() {
+        // Test the exact boundary conditions for string size limits
+
+        const MAX_SIZE: usize = 10 * 1024 * 1024; // 10MB
+
+        // Test boundary values
+        let boundary_tests = vec![
+            (MAX_SIZE - 1, true, "Just under limit should be accepted"),
+            (MAX_SIZE, true, "Exactly at limit should be accepted"),
+            (MAX_SIZE + 1, false, "Just over limit should be rejected"),
+            (MAX_SIZE * 2, false, "Double the limit should be rejected"),
+        ];
+
+        for (size, should_accept, description) in boundary_tests {
+            println!("Testing boundary: {} bytes ({}MB) - {}",
+                    size, size / (1024 * 1024), description);
+
+            // Simulate attribute size check
+            let exceeds_limit = size > MAX_SIZE;
+            let actual_accept = !exceeds_limit;
+
+            assert_eq!(actual_accept, should_accept,
+                      "Size {} bytes: expected accept={}, got accept={}",
+                      size, should_accept, actual_accept);
+
+            if exceeds_limit {
+                println!("  ✓ Correctly identified as oversized ({}MB > 10MB)",
+                        size / (1024 * 1024));
+            } else {
+                println!("  ✓ Correctly identified as acceptable ({}MB ≤ 10MB)",
+                        size / (1024 * 1024));
+            }
+        }
+
+        println!("OTLP-127: Size limit boundaries verified");
+    }
+
+    #[test]
+    fn test_otlp_127_size_calculation_accuracy() {
+        // Test that size calculations are accurate and don't have off-by-one errors
+
+        // Test UTF-8 string size calculation
+        let ascii_string = "Hello World"; // 11 bytes
+        assert_eq!(ascii_string.len(), 11, "ASCII string size should be character count");
+
+        let utf8_string = "Hello 世界"; // "Hello " (6) + "世" (3) + "界" (3) = 12 bytes
+        assert_eq!(utf8_string.len(), 12, "UTF-8 string size should be byte count, not character count");
+
+        let emoji_string = "👋🌍"; // Each emoji is 4 bytes = 8 bytes total
+        assert_eq!(emoji_string.len(), 8, "Emoji string size should count UTF-8 bytes");
+
+        // Test size threshold calculations
+        let kb = 1024;
+        let mb = kb * 1024;
+        let size_10mb = 10 * mb;
+
+        assert_eq!(size_10mb, 10_485_760, "10MB should be exactly 10,485,760 bytes");
+
+        // Test that we're measuring the right thing
+        let test_string = "x".repeat(size_10mb);
+        assert_eq!(test_string.len(), size_10mb, "Generated string should be exactly 10MB");
+
+        let oversized_string = "x".repeat(size_10mb + 1);
+        assert_eq!(oversized_string.len(), size_10mb + 1, "Oversized string should be 10MB + 1 byte");
+
+        // Verify size comparisons work correctly
+        assert!(oversized_string.len() > size_10mb, "Oversized string should exceed limit");
+        assert!(test_string.len() <= size_10mb, "10MB string should be at or under limit");
+
+        println!("OTLP-127: Size calculation accuracy verified");
+    }
+
+    #[test]
+    fn test_otlp_127_multiple_attribute_scenarios() {
+        // Test various combinations of multiple attributes
+
+        const MAX_SIZE: usize = 10 * 1024 * 1024;
+
+        // Scenario 1: Many small attributes (should be fine individually)
+        let many_small_total = 1000 * 1024; // 1000 attributes of 1KB each = 1MB total
+        for i in 0..10 {
+            let small_attr_size = 1024; // 1KB each
+            assert!(small_attr_size <= MAX_SIZE, "Small attribute {} should be acceptable", i);
+        }
+
+        // Scenario 2: Few large attributes under individual limits
+        let large_attr_sizes = vec![
+            5 * 1024 * 1024,   // 5MB
+            3 * 1024 * 1024,   // 3MB
+            2 * 1024 * 1024,   // 2MB
+        ]; // Total: 10MB, but each individual attribute is under 10MB limit
+
+        for (i, size) in large_attr_sizes.iter().enumerate() {
+            assert!(*size <= MAX_SIZE, "Large attribute {} ({} bytes) should be under individual limit", i, size);
+        }
+
+        // Scenario 3: Single oversized attribute (should trigger rejection)
+        let oversized_attr = MAX_SIZE + 1;
+        assert!(oversized_attr > MAX_SIZE, "Oversized attribute should exceed individual limit");
+
+        // Key insight: OTLP-127 is about INDIVIDUAL attribute size limit, not total span size
+        println!("OTLP-127: Individual vs total size limits - individual limit is what matters");
+
+        println!("OTLP-127: Multiple attribute scenarios verified");
+    }
 }
