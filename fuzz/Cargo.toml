@@ -4931,3 +4931,9 @@ name = "h2_window_update_combined_increments"
 path = "fuzz_targets/h2_window_update_combined_increments.rs"
 test = false
 doc = false
+
+[[bin]]
+name = "h2_continuation_after_settings"
+path = "fuzz_targets/h2_continuation_after_settings.rs"
+test = false
+doc = false
