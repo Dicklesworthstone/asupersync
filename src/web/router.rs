@@ -1072,20 +1072,11 @@ mod tests {
         /// over parameter segments to prevent unintended parameter capture.
         #[test]
         fn audit_literal_beats_parameter_core_requirement() {
-            use crate::web::extract::Path;
-            use crate::web::handler::FnHandler1;
-
-            fn param_route_handler(Path(_id): Path<String>) -> StatusCode {
-                StatusCode::ACCEPTED
-            }
-
             // Test case 1: Literal route registered first
             let router1 = Router::new()
                 .route("/users/me", get(FnHandler::new(literal_handler)))
-                .route(
-                    "/users/:id",
-                    get(FnHandler1::<_, Path<String>>::new(param_route_handler)),
-                );
+                .route("/users/:id", get(FnHandler::new(param_handler)))
+                .route("/users/*", get(FnHandler::new(wildcard_handler)));
 
             let resp1 = router1.handle(Request::new("GET", "/users/me"));
             assert_eq!(
@@ -1096,10 +1087,8 @@ mod tests {
 
             // Test case 2: Parameter route registered first
             let router2 = Router::new()
-                .route(
-                    "/users/:id",
-                    get(FnHandler1::<_, Path<String>>::new(param_route_handler)),
-                )
+                .route("/users/:id", get(FnHandler::new(param_handler)))
+                .route("/users/*", get(FnHandler::new(wildcard_handler)))
                 .route("/users/me", get(FnHandler::new(literal_handler)));
 
             let resp2 = router2.handle(Request::new("GET", "/users/me"));
@@ -1111,6 +1100,19 @@ mod tests {
 
             // AUDIT VERIFICATION: Registration order does not affect precedence
             // Literal segments always beat parameter segments due to specificity
+            let resp3 = router2.handle(Request::new("GET", "/users/someone"));
+            assert_eq!(
+                resp3.status,
+                StatusCode::ACCEPTED,
+                "Parameter route should still handle non-literal single-segment users"
+            );
+
+            let resp4 = router2.handle(Request::new("GET", "/users/some/path"));
+            assert_eq!(
+                resp4.status,
+                StatusCode::CREATED,
+                "Wildcard route should remain the least-specific fallback"
+            );
         }
 
         /// AUDIT: Verify multiple literal segments beat mixed patterns
@@ -1221,9 +1223,6 @@ mod tests {
         /// Test edge cases with multiple competing routes to ensure consistent behavior.
         #[test]
         fn audit_complex_precedence_scenarios() {
-            use crate::web::extract::Path;
-            use crate::web::handler::FnHandler1;
-
             fn route_a() -> &'static str {
                 "route_a"
             }
@@ -1234,34 +1233,15 @@ mod tests {
                 "route_c"
             }
 
-            fn param_handler(Path(_): Path<HashMap<String, String>>) -> &'static str {
-                "param_handler"
-            }
-
             let router = Router::new()
                 // Exact match should win
                 .route("/api/v1/users/me", get(FnHandler::new(route_a)))
                 // Less specific - one parameter
-                .route(
-                    "/api/v1/users/:id",
-                    get(FnHandler1::<_, Path<HashMap<String, String>>>::new(
-                        param_handler,
-                    )),
-                )
+                .route("/api/v1/users/:id", get(FnHandler::new(route_b)))
                 // Even less specific - two parameters
-                .route(
-                    "/api/:version/users/:id",
-                    get(FnHandler1::<_, Path<HashMap<String, String>>>::new(
-                        param_handler,
-                    )),
-                )
+                .route("/api/:version/users/:id", get(FnHandler::new(route_c)))
                 // Wildcard should be least specific
-                .route(
-                    "/api/*",
-                    get(FnHandler1::<_, Path<HashMap<String, String>>>::new(
-                        param_handler,
-                    )),
-                );
+                .route("/api/*", get(FnHandler::new(|| "wildcard")));
 
             let resp = router.handle(Request::new("GET", "/api/v1/users/me"));
             assert_eq!(resp.status, StatusCode::OK);
@@ -1273,8 +1253,16 @@ mod tests {
             assert_eq!(resp2.status, StatusCode::OK);
             let body2 = String::from_utf8(resp2.body.to_vec()).unwrap();
             assert_eq!(
-                body2, "param_handler",
+                body2, "route_b",
                 "Parameter route should handle non-literal values"
+            );
+
+            let resp3 = router.handle(Request::new("GET", "/api/v2/users/123"));
+            assert_eq!(resp3.status, StatusCode::OK);
+            let body3 = String::from_utf8(resp3.body.to_vec()).unwrap();
+            assert_eq!(
+                body3, "route_c",
+                "Less-specific parameter route should handle non-v1 versions"
             );
         }
 
