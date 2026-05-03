@@ -271,6 +271,13 @@ fn scheduler_recommend_smoke_contract_matches_tuning_projection() {
             .any(|field| field.as_str() == Some("throughput_summary"))
     );
     assert!(
+        contract["required_bundle_fields"]
+            .as_array()
+            .expect("required_bundle_fields")
+            .iter()
+            .any(|field| field.as_str() == Some("config_snapshot"))
+    );
+    assert!(
         contract["required_run_report_fields"]
             .as_array()
             .expect("required_run_report_fields")
@@ -283,6 +290,13 @@ fn scheduler_recommend_smoke_contract_matches_tuning_projection() {
             .expect("required_run_report_fields")
             .iter()
             .any(|field| field.as_str() == Some("latency_summary"))
+    );
+    assert!(
+        contract["required_run_report_fields"]
+            .as_array()
+            .expect("required_run_report_fields")
+            .iter()
+            .any(|field| field.as_str() == Some("verdict_summary"))
     );
 
     let scenarios = contract["smoke_scenarios"]

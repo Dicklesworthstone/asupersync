@@ -124,6 +124,67 @@ report_fallback_activations_json() {
     }' "$report_file"
 }
 
+evidence_config_snapshot_json() {
+    local evidence_file="$1"
+    jq -c '{
+        source: "scheduler_evidence.current_knobs",
+        run_label: .run_label,
+        workload_class: .workload_class,
+        topology: .topology,
+        current_knobs: .current_knobs
+    }' "$evidence_file"
+}
+
+merged_config_snapshot_json() {
+    local evidence_file="$1"
+    local report_file="$2"
+    jq -cn \
+        --slurpfile evidence "$evidence_file" \
+        --slurpfile report "$report_file" \
+        '{
+            source: "scheduler_evidence.current_knobs + scheduler_report",
+            run_label: $evidence[0].run_label,
+            workload_class: $evidence[0].workload_class,
+            topology: $evidence[0].topology,
+            current_knobs: $evidence[0].current_knobs,
+            recommended_knobs: $report[0].recommended_knobs,
+            fallback_profile: $report[0].fallback_profile
+        }'
+}
+
+verdict_summary_json() {
+    local status="$1"
+    local message="$2"
+    local validation_passed="$3"
+    local command_exit_code="$4"
+    local script_exit_code="$5"
+    local scenario_class="$6"
+    local execution_policy="$7"
+    local expected_profile_name="$8"
+    local actual_profile_name="$9"
+    jq -nc \
+        --arg status "$status" \
+        --arg message "$message" \
+        --argjson validation_passed "$validation_passed" \
+        --argjson command_exit_code "$command_exit_code" \
+        --argjson script_exit_code "$script_exit_code" \
+        --arg scenario_class "$scenario_class" \
+        --arg execution_policy "$execution_policy" \
+        --arg expected_profile_name "$expected_profile_name" \
+        --arg actual_profile_name "$actual_profile_name" \
+        '{
+            status: $status,
+            message: $message,
+            validation_passed: $validation_passed,
+            command_exit_code: $command_exit_code,
+            script_exit_code: $script_exit_code,
+            scenario_class: $scenario_class,
+            execution_policy: $execution_policy,
+            expected_profile_name: $expected_profile_name,
+            actual_profile_name: (if $actual_profile_name == "" then null else $actual_profile_name end)
+        }'
+}
+
 write_bundle_manifest() {
     local bundle_path="$1"
     local scenario_id="$2"
@@ -178,6 +239,8 @@ write_bundle_manifest() {
         --argjson throughput_summary "$THROUGHPUT_SUMMARY_JSON" \
         --argjson fallback_activations "$FALLBACK_ACTIVATIONS_JSON" \
         --argjson controller_state_references "$CONTROLLER_STATE_REFERENCES_JSON" \
+        --argjson config_snapshot "$CONFIG_SNAPSHOT_JSON" \
+        --argjson verdict_summary "$VERDICT_SUMMARY_JSON" \
         --arg expected_profile_name "$expected_profile_name" \
         --argjson expected_reason_codes "$expected_reason_codes_json" \
         --argjson command_exit_code "$command_exit_code" \
@@ -216,6 +279,8 @@ write_bundle_manifest() {
             throughput_summary: $throughput_summary,
             fallback_activations: $fallback_activations,
             controller_state_references: $controller_state_references,
+            config_snapshot: $config_snapshot,
+            verdict_summary: $verdict_summary,
             expected_profile_name: $expected_profile_name,
             expected_reason_codes: $expected_reason_codes,
             command_exit_code: $command_exit_code,
@@ -280,6 +345,8 @@ write_run_report() {
         --argjson throughput_summary "$THROUGHPUT_SUMMARY_JSON" \
         --argjson fallback_activations "$FALLBACK_ACTIVATIONS_JSON" \
         --argjson controller_state_references "$CONTROLLER_STATE_REFERENCES_JSON" \
+        --argjson config_snapshot "$CONFIG_SNAPSHOT_JSON" \
+        --argjson verdict_summary "$VERDICT_SUMMARY_JSON" \
         --argjson expected_report_projection "$expected_report_json" \
         --argjson actual_report_projection "$actual_report_json" \
         --arg capture_mode "$capture_mode" \
@@ -313,6 +380,8 @@ write_run_report() {
             throughput_summary: $throughput_summary,
             fallback_activations: $fallback_activations,
             controller_state_references: $controller_state_references,
+            config_snapshot: $config_snapshot,
+            verdict_summary: $verdict_summary,
             expected_report_projection: $expected_report_projection,
             actual_report_projection: $actual_report_projection,
             capture_mode: $capture_mode,
@@ -463,6 +532,9 @@ MESSAGE="dry-run mode: command not executed"
 ACTUAL_REPORT_JSON='{}'
 HOST_FINGERPRINT_JSON="$(host_fingerprint_json)"
 LATENCY_SUMMARY_JSON='{}'
+CONFIG_SNAPSHOT_JSON='{}'
+VERDICT_SUMMARY_JSON='{}'
+ACTUAL_PROFILE_NAME=""
 
 set +e
 capture_evidence "$CAPTURE_MODE" "$CAPTURE_COMMAND"
@@ -478,6 +550,7 @@ else
     cat "$EVIDENCE_FILE"
     echo ""
     LATENCY_SUMMARY_JSON="$(evidence_latency_summary_json "$EVIDENCE_FILE")"
+    CONFIG_SNAPSHOT_JSON="$(evidence_config_snapshot_json "$EVIDENCE_FILE")"
 fi
 
 if [[ "$CAPTURE_COMMAND_EXIT_CODE" -ne 0 ]]; then
@@ -518,6 +591,8 @@ else
             }' "$REPORT_FILE"
         )"
         FALLBACK_ACTIVATIONS_JSON="$(report_fallback_activations_json "$REPORT_FILE")"
+        CONFIG_SNAPSHOT_JSON="$(merged_config_snapshot_json "$EVIDENCE_FILE" "$REPORT_FILE")"
+        ACTUAL_PROFILE_NAME="$(jq -r '.profile_name // ""' "$REPORT_FILE")"
 
         if [[ "$HAS_EXPECTED_REPORT" == "true" ]] && jq -e --argjson expected "$EXPECTED_REPORT_JSON" '{
                 schema_version,
@@ -555,6 +630,19 @@ if [[ "$MODE" == "execute" ]]; then
         SCRIPT_EXIT_CODE=1
     fi
 fi
+
+VERDICT_SUMMARY_JSON="$(
+    verdict_summary_json \
+        "$STATUS" \
+        "$MESSAGE" \
+        "$VALIDATION_PASSED" \
+        "$COMMAND_EXIT_CODE" \
+        "$SCRIPT_EXIT_CODE" \
+        "$SCENARIO_CLASS" \
+        "$EXECUTION_POLICY" \
+        "$EXPECTED_PROFILE_NAME" \
+        "$ACTUAL_PROFILE_NAME"
+)"
 
 ENDED_TS="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 
