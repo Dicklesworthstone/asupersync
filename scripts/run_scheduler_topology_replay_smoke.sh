@@ -258,16 +258,24 @@ fi
 
 ACTUAL_TRACE_JSON='{}'
 if [[ -f "$TOPOLOGY_TRACE" ]]; then
-    ACTUAL_TRACE_JSON="$(jq -c '{first_hash: .first_trace_hash, second_hash: .second_trace_hash, event_count, remote_spill_count, locality_sequence}' "$TOPOLOGY_TRACE")"
+    ACTUAL_TRACE_JSON="$(jq -cS '{first_hash: .first_trace_hash, second_hash: .second_trace_hash, event_count, local_steal_count, remote_spill_count, locality_sequence, cohort_event_counts, wake_to_run_latency_by_cohort, fairness_checks}' "$TOPOLOGY_TRACE")"
 
     ACTUAL_FIRST_HASH="$(jq -r '.first_trace_hash' "$TOPOLOGY_TRACE")"
     ACTUAL_SECOND_HASH="$(jq -r '.second_trace_hash' "$TOPOLOGY_TRACE")"
     ACTUAL_EVENT_COUNT="$(jq -r '.event_count' "$TOPOLOGY_TRACE")"
+    ACTUAL_LOCAL_STEALS="$(jq -r '.local_steal_count' "$TOPOLOGY_TRACE")"
     ACTUAL_REMOTE_SPILLS="$(jq -r '.remote_spill_count' "$TOPOLOGY_TRACE")"
     ACTUAL_LOCALITY_SEQUENCE="$(jq -c '.locality_sequence' "$TOPOLOGY_TRACE")"
+    ACTUAL_COHORT_EVENT_COUNTS="$(jq -c '.cohort_event_counts' "$TOPOLOGY_TRACE")"
+    ACTUAL_WAKE_TO_RUN_LATENCY_BY_COHORT="$(jq -cS '.wake_to_run_latency_by_cohort' "$TOPOLOGY_TRACE")"
+    ACTUAL_FAIRNESS_CHECKS="$(jq -cS '.fairness_checks' "$TOPOLOGY_TRACE")"
     EXPECTED_EVENT_COUNT="$(jq -r '.expected_trace.event_count' <<<"$SCENARIO_JSON")"
+    EXPECTED_LOCAL_STEALS="$(jq -r '.expected_trace.local_steal_count // empty' <<<"$SCENARIO_JSON")"
     EXPECTED_REMOTE_SPILLS="$(jq -r '.expected_trace.remote_spill_count' <<<"$SCENARIO_JSON")"
     EXPECTED_LOCALITY_SEQUENCE="$(jq -c '.expected_trace.locality_sequence' <<<"$SCENARIO_JSON")"
+    EXPECTED_COHORT_EVENT_COUNTS="$(jq -c '.expected_trace.cohort_event_counts // []' <<<"$SCENARIO_JSON")"
+    EXPECTED_WAKE_TO_RUN_LATENCY_BY_COHORT="$(jq -cS '.expected_trace.wake_to_run_latency_by_cohort // []' <<<"$SCENARIO_JSON")"
+    EXPECTED_FAIRNESS_CHECKS="$(jq -cS '.expected_trace.fairness_checks // null' <<<"$SCENARIO_JSON")"
 
     if [[ "$ACTUAL_FIRST_HASH" != "$EXPECTED_FIRST_HASH" || "$ACTUAL_SECOND_HASH" != "$EXPECTED_SECOND_HASH" ]]; then
         STATUS="failed"
@@ -281,6 +289,12 @@ if [[ -f "$TOPOLOGY_TRACE" ]]; then
         SCRIPT_EXIT_CODE=1
         MESSAGE="topology replay event count mismatch"
     fi
+    if [[ -n "$EXPECTED_LOCAL_STEALS" && "$ACTUAL_LOCAL_STEALS" != "$EXPECTED_LOCAL_STEALS" ]]; then
+        STATUS="failed"
+        VALIDATION_PASSED=false
+        SCRIPT_EXIT_CODE=1
+        MESSAGE="topology replay local steal mismatch"
+    fi
     if [[ "$ACTUAL_REMOTE_SPILLS" != "$EXPECTED_REMOTE_SPILLS" ]]; then
         STATUS="failed"
         VALIDATION_PASSED=false
@@ -292,6 +306,24 @@ if [[ -f "$TOPOLOGY_TRACE" ]]; then
         VALIDATION_PASSED=false
         SCRIPT_EXIT_CODE=1
         MESSAGE="topology replay locality sequence mismatch"
+    fi
+    if [[ "$EXPECTED_COHORT_EVENT_COUNTS" != "[]" && "$ACTUAL_COHORT_EVENT_COUNTS" != "$EXPECTED_COHORT_EVENT_COUNTS" ]]; then
+        STATUS="failed"
+        VALIDATION_PASSED=false
+        SCRIPT_EXIT_CODE=1
+        MESSAGE="topology replay cohort event counts mismatch"
+    fi
+    if [[ "$EXPECTED_WAKE_TO_RUN_LATENCY_BY_COHORT" != "[]" && "$ACTUAL_WAKE_TO_RUN_LATENCY_BY_COHORT" != "$EXPECTED_WAKE_TO_RUN_LATENCY_BY_COHORT" ]]; then
+        STATUS="failed"
+        VALIDATION_PASSED=false
+        SCRIPT_EXIT_CODE=1
+        MESSAGE="topology replay wake-to-run latency by cohort mismatch"
+    fi
+    if [[ "$EXPECTED_FAIRNESS_CHECKS" != "null" && "$ACTUAL_FAIRNESS_CHECKS" != "$EXPECTED_FAIRNESS_CHECKS" ]]; then
+        STATUS="failed"
+        VALIDATION_PASSED=false
+        SCRIPT_EXIT_CODE=1
+        MESSAGE="topology replay fairness check mismatch"
     fi
     if [[ "$(jq -r '.hashes_match' "$TOPOLOGY_TRACE")" != "true" ]]; then
         STATUS="failed"
