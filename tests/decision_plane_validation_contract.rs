@@ -124,6 +124,93 @@ fn artifact_versions_are_stable() {
     );
 }
 
+#[test]
+fn controller_snapshot_ledger_schema_is_stable() {
+    let artifact = load_artifact();
+    let schema = &artifact["controller_snapshot_ledger"];
+    assert_eq!(
+        schema["schema_version"].as_str(),
+        Some("controller-snapshot-ledger-v1")
+    );
+    let top_level_fields: Vec<String> = schema["top_level_fields"]
+        .as_array()
+        .expect("top_level_fields must be array")
+        .iter()
+        .map(|value| value.as_str().unwrap().to_string())
+        .collect();
+    assert_eq!(
+        top_level_fields,
+        vec![
+            "schema_version",
+            "registered_controllers",
+            "shadow_controllers",
+            "controllers",
+        ]
+    );
+    let planner_render_order: Vec<String> = schema["planner_render_order"]
+        .as_array()
+        .expect("planner_render_order must be array")
+        .iter()
+        .map(|value| value.as_str().unwrap().to_string())
+        .collect();
+    assert_eq!(
+        planner_render_order,
+        vec![
+            "controller_name",
+            "mode",
+            "calibration_score",
+            "last_decision_confidence",
+            "decisions_this_epoch",
+            "fallback_active",
+            "last_action_label",
+            "last_evidence_tick",
+            "last_snapshot_id",
+            "epochs_in_current_mode",
+            "budget_overruns",
+            "proof_artifact_id",
+        ]
+    );
+}
+
+#[test]
+fn controller_snapshot_ledger_field_units_are_stable() {
+    let artifact = load_artifact();
+    let actual: BTreeSet<(String, String)> =
+        artifact["controller_snapshot_ledger"]["controller_fields"]
+            .as_array()
+            .expect("controller_fields must be array")
+            .iter()
+            .map(|field| {
+                (
+                    field["name"].as_str().unwrap().to_string(),
+                    field["units"].as_str().unwrap().to_string(),
+                )
+            })
+            .collect();
+    let expected: BTreeSet<(String, String)> = [
+        ("controller_id", "controller id"),
+        ("controller_name", "string"),
+        ("mode", "enum"),
+        ("decisions_this_epoch", "decisions"),
+        ("fallback_active", "flag"),
+        ("calibration_score", "unit interval [0,1]"),
+        ("last_decision_confidence", "unit interval [0,1] or null"),
+        ("last_action_label", "string or null"),
+        ("last_evidence_tick", "ledger entry id or null"),
+        ("last_snapshot_id", "SnapshotId(u64) or null"),
+        ("epochs_in_current_mode", "epochs"),
+        ("budget_overruns", "count"),
+        ("proof_artifact_id", "artifact id or null"),
+    ]
+    .into_iter()
+    .map(|(name, units)| (name.to_string(), units.to_string()))
+    .collect();
+    assert_eq!(
+        actual, expected,
+        "controller snapshot field units must remain stable"
+    );
+}
+
 // ── Promotion pipeline stability ─────────────────────────────────────
 
 #[test]
@@ -196,6 +283,8 @@ fn validation_scenario_ids_are_complete() {
         "AA023-EVIDENCE-COMPLETENESS",
         "AA023-EVIDENCE-DECISION-BUDGET",
         "AA023-RECOVERY-REMEDIATION",
+        "AA023-CONTROLLER-LEDGER-DEFAULTS",
+        "AA023-CONTROLLER-LEDGER-MULTI-CONTROLLER",
     ]
     .into_iter()
     .map(ToOwned::to_owned)
@@ -291,6 +380,10 @@ fn runner_script_exists_and_declares_modes() {
         "--execute",
         "decision-plane-validation-smoke-bundle-v1",
         "decision-plane-validation-smoke-run-report-v1",
+        "controller_snapshot_ledger_schema_version",
+        "controller_snapshot_ledger_top_level_fields",
+        "controller_snapshot_ledger_controller_fields",
+        "controller_snapshot_ledger_planner_render_order",
     ] {
         assert!(script.contains(token), "runner missing token: {token}");
     }
@@ -313,9 +406,9 @@ fn downstream_beads_are_in_aa_namespace() {
 // ── Functional: State transition tests ───────────────────────────────
 
 use asupersync::runtime::kernel::{
-    ControllerBudget, ControllerDecision, ControllerMode, ControllerRegistration,
-    ControllerRegistry, LedgerEvent, PromotionPolicy, PromotionRejection, RollbackReason,
-    SnapshotId, SnapshotVersion,
+    CONTROLLER_SNAPSHOT_LEDGER_SCHEMA_VERSION, ControllerBudget, ControllerDecision,
+    ControllerMode, ControllerRegistration, ControllerRegistry, LedgerEvent, PromotionPolicy,
+    PromotionRejection, RollbackReason, SnapshotId, SnapshotVersion,
 };
 
 fn test_registration(name: &str) -> ControllerRegistration {
@@ -363,6 +456,30 @@ fn promote_through_canary(
     registry
         .try_promote(id, ControllerMode::Active)
         .expect("canary->active must succeed");
+}
+
+fn controller_snapshot_planner_render_order() -> Vec<String> {
+    load_artifact()["controller_snapshot_ledger"]["planner_render_order"]
+        .as_array()
+        .expect("planner_render_order must be array")
+        .iter()
+        .map(|value| value.as_str().unwrap().to_string())
+        .collect()
+}
+
+fn planner_row(controller_json: &Value, fields: &[String]) -> Vec<String> {
+    fields
+        .iter()
+        .map(
+            |field| match controller_json.get(field).unwrap_or(&Value::Null) {
+                Value::Null => "null".to_string(),
+                Value::Bool(value) => value.to_string(),
+                Value::Number(value) => value.to_string(),
+                Value::String(value) => value.clone(),
+                other => panic!("unexpected planner value for {field}: {other:?}"),
+            },
+        )
+        .collect()
 }
 
 #[test]
@@ -842,5 +959,194 @@ fn evidence_fallback_clear_after_recovery() {
     assert!(
         !registry.is_fallback_active(id),
         "fallback must be clearable after recovery"
+    );
+}
+
+#[test]
+fn controller_snapshot_ledger_defaults_when_registry_is_empty() {
+    let registry = ControllerRegistry::new();
+    let ledger = registry.controller_snapshot_ledger();
+    assert_eq!(
+        ledger.schema_version,
+        CONTROLLER_SNAPSHOT_LEDGER_SCHEMA_VERSION
+    );
+    assert_eq!(ledger.registered_controllers, 0);
+    assert_eq!(ledger.shadow_controllers, 0);
+    assert!(ledger.controllers.is_empty());
+}
+
+#[test]
+fn controller_snapshot_ledger_defaults_for_new_controller() {
+    let mut registry = ControllerRegistry::new();
+    let id = registry
+        .register(test_registration("controller-ledger-defaults"))
+        .unwrap();
+    let ledger = registry.controller_snapshot_ledger();
+    assert_eq!(ledger.registered_controllers, 1);
+    assert_eq!(ledger.shadow_controllers, 1);
+    let controller = ledger
+        .controllers
+        .iter()
+        .find(|controller| controller.controller_id == id)
+        .expect("registered controller must appear in snapshot ledger");
+    assert_eq!(controller.controller_name, "controller-ledger-defaults");
+    assert_eq!(controller.mode, ControllerMode::Shadow);
+    assert_eq!(controller.decisions_this_epoch, 0);
+    assert!(!controller.fallback_active);
+    assert_eq!(controller.calibration_score, 0.0);
+    assert_eq!(controller.last_decision_confidence, None);
+    assert_eq!(controller.last_action_label.as_deref(), Some("registered"));
+    assert_eq!(controller.last_evidence_tick, Some(1));
+    assert_eq!(controller.last_snapshot_id, None);
+    assert_eq!(controller.epochs_in_current_mode, 0);
+    assert_eq!(controller.budget_overruns, 0);
+    assert_eq!(controller.proof_artifact_id, None);
+}
+
+#[test]
+fn controller_snapshot_ledger_decision_counters_and_ticks_are_monotone() {
+    let mut registry = ControllerRegistry::new();
+    let id = registry
+        .register(test_registration("controller-ledger-monotone"))
+        .unwrap();
+
+    let first_decision = ControllerDecision {
+        controller_id: id,
+        snapshot_id: SnapshotId(11),
+        label: "raise-limit".to_string(),
+        payload: serde_json::json!({ "cancel_streak_limit": 12 }),
+        confidence: 0.71,
+        fallback_label: "hold".to_string(),
+    };
+    registry.record_decision(&first_decision);
+    let first = registry
+        .controller_snapshot_ledger()
+        .controllers
+        .into_iter()
+        .find(|controller| controller.controller_id == id)
+        .expect("controller state after first decision");
+
+    let second_decision = ControllerDecision {
+        controller_id: id,
+        snapshot_id: SnapshotId(13),
+        label: "tighten-budget".to_string(),
+        payload: serde_json::json!({ "budget_us": 800 }),
+        confidence: 0.83,
+        fallback_label: "rollback".to_string(),
+    };
+    registry.record_decision(&second_decision);
+    let second = registry
+        .controller_snapshot_ledger()
+        .controllers
+        .into_iter()
+        .find(|controller| controller.controller_id == id)
+        .expect("controller state after second decision");
+
+    assert_eq!(first.decisions_this_epoch, 1);
+    assert_eq!(second.decisions_this_epoch, 2);
+    assert!(second.last_evidence_tick.unwrap() > first.last_evidence_tick.unwrap());
+    assert_eq!(first.last_snapshot_id, Some(SnapshotId(11)));
+    assert_eq!(second.last_snapshot_id, Some(SnapshotId(13)));
+    assert_eq!(second.last_decision_confidence, Some(0.83));
+    assert_eq!(
+        second.last_action_label.as_deref(),
+        Some("decision:tighten-budget")
+    );
+}
+
+#[test]
+fn controller_snapshot_ledger_multi_controller_rendering_is_stable() {
+    let mut registry = ControllerRegistry::new();
+    registry.set_promotion_policy(fast_policy());
+
+    let primary = registry
+        .register(test_registration("primary-ledger"))
+        .unwrap();
+    let secondary = registry
+        .register(test_registration("secondary-ledger"))
+        .unwrap();
+
+    promote_through_shadow(&mut registry, primary);
+    promote_through_canary(&mut registry, primary);
+    registry.update_calibration(primary, 0.42);
+    let primary_decision = ControllerDecision {
+        controller_id: primary,
+        snapshot_id: SnapshotId(10),
+        label: "primary-steer".to_string(),
+        payload: serde_json::json!({ "cancel_streak_limit": 8 }),
+        confidence: 0.91,
+        fallback_label: "shadow".to_string(),
+    };
+    registry.record_decision(&primary_decision);
+    registry
+        .rollback(
+            primary,
+            RollbackReason::CalibrationRegression { score: 0.42 },
+        )
+        .expect("primary rollback should produce a recovery command");
+
+    let secondary_decision = ControllerDecision {
+        controller_id: secondary,
+        snapshot_id: SnapshotId(11),
+        label: "secondary-observe".to_string(),
+        payload: serde_json::json!({ "sample": "keep" }),
+        confidence: 0.73,
+        fallback_label: "noop".to_string(),
+    };
+    registry.record_decision(&secondary_decision);
+    assert!(registry.hold(secondary));
+
+    let ledger = registry.controller_snapshot_ledger();
+    assert_eq!(
+        ledger.schema_version,
+        CONTROLLER_SNAPSHOT_LEDGER_SCHEMA_VERSION
+    );
+    assert_eq!(ledger.registered_controllers, 2);
+    assert_eq!(ledger.shadow_controllers, 1);
+    assert_eq!(ledger.controllers.len(), 2);
+
+    let primary_state = &ledger.controllers[0];
+    let secondary_state = &ledger.controllers[1];
+    assert_eq!(primary_state.controller_name, "primary-ledger");
+    assert_eq!(primary_state.mode, ControllerMode::Shadow);
+    assert!(primary_state.fallback_active);
+    assert_eq!(primary_state.calibration_score, 0.42);
+    assert_eq!(primary_state.last_decision_confidence, Some(0.91));
+    assert_eq!(
+        primary_state.last_action_label.as_deref(),
+        Some("rolled_back:calibration_regression")
+    );
+    assert_eq!(primary_state.last_evidence_tick, Some(6));
+    assert_eq!(primary_state.last_snapshot_id, Some(SnapshotId(10)));
+    assert_eq!(primary_state.decisions_this_epoch, 1);
+    assert_eq!(primary_state.epochs_in_current_mode, 0);
+
+    assert_eq!(secondary_state.controller_name, "secondary-ledger");
+    assert_eq!(secondary_state.mode, ControllerMode::Hold);
+    assert!(!secondary_state.fallback_active);
+    assert_eq!(secondary_state.last_decision_confidence, Some(0.73));
+    assert_eq!(secondary_state.last_action_label.as_deref(), Some("held"));
+    assert_eq!(secondary_state.last_evidence_tick, Some(8));
+    assert_eq!(secondary_state.last_snapshot_id, Some(SnapshotId(11)));
+
+    let render_order = controller_snapshot_planner_render_order();
+    let ledger_json = serde_json::to_value(&ledger).expect("ledger must serialize");
+    let primary_row = planner_row(&ledger_json["controllers"][0], &render_order);
+    assert_eq!(
+        primary_row,
+        vec![
+            "primary-ledger",
+            "Shadow",
+            "0.42",
+            "0.91",
+            "1",
+            "true",
+            "rolled_back:calibration_regression",
+            "6",
+            "10",
+            "0",
+            "0",
+            "null",
+        ]
     );
 }

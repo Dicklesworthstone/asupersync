@@ -30,6 +30,9 @@ use std::sync::Arc;
 /// Current snapshot schema version.
 pub const SNAPSHOT_VERSION: SnapshotVersion = SnapshotVersion { major: 1, minor: 0 };
 
+/// Schema version for exported controller snapshot ledgers.
+pub const CONTROLLER_SNAPSHOT_LEDGER_SCHEMA_VERSION: &str = "controller-snapshot-ledger-v1";
+
 /// Schema version for runtime kernel snapshots.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct SnapshotVersion {
@@ -188,6 +191,50 @@ pub struct ControllerDecision {
 /// Unique identifier for a registered controller.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct ControllerId(pub u64);
+
+/// Planner-facing snapshot of one controller's observable runtime state.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ControllerSnapshotState {
+    /// Unique identifier for the controller.
+    pub controller_id: ControllerId,
+    /// Human-readable controller name.
+    pub controller_name: String,
+    /// Current operating mode.
+    pub mode: ControllerMode,
+    /// Decisions recorded in the current epoch.
+    pub decisions_this_epoch: u32,
+    /// Whether the controller is running on a conservative fallback path.
+    pub fallback_active: bool,
+    /// Latest calibration score tracked for this controller.
+    pub calibration_score: f64,
+    /// Latest decision confidence observed for this controller, if any.
+    pub last_decision_confidence: Option<f64>,
+    /// Last high-level action recorded for this controller, if any.
+    pub last_action_label: Option<String>,
+    /// Monotonic evidence tick (ledger entry ID) of the last recorded action.
+    pub last_evidence_tick: Option<u64>,
+    /// Latest runtime snapshot ID consumed by the controller, if any.
+    pub last_snapshot_id: Option<SnapshotId>,
+    /// Epochs spent in the current operating mode.
+    pub epochs_in_current_mode: u64,
+    /// Budget overruns accumulated since the last successful promotion.
+    pub budget_overruns: u32,
+    /// Proof artifact associated with the controller registration, if any.
+    pub proof_artifact_id: Option<String>,
+}
+
+/// Deterministic controller-state ledger exported for operator bundles.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ControllerSnapshotLedger {
+    /// Version tag for the controller snapshot ledger schema.
+    pub schema_version: String,
+    /// Number of registered controllers included in this ledger.
+    pub registered_controllers: usize,
+    /// Number of controllers currently operating in shadow mode.
+    pub shadow_controllers: usize,
+    /// Stable controller state rows sorted by controller ID.
+    pub controllers: Vec<ControllerSnapshotState>,
+}
 
 /// Metadata a controller must provide at registration time.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -534,11 +581,13 @@ struct RegisteredController {
     decisions_this_epoch: u32,
     last_snapshot_id: Option<SnapshotId>,
     calibration_score: f64,
+    last_decision_confidence: Option<f64>,
     epochs_in_current_mode: u64,
     budget_overruns: u32,
     /// Mode before entering Hold, so we can restore on release.
     held_from_mode: Option<ControllerMode>,
     fallback_active: bool,
+    last_evidence_tick: Option<u64>,
     last_action_label: String,
 }
 
@@ -654,10 +703,12 @@ impl ControllerRegistry {
                 decisions_this_epoch: 0,
                 last_snapshot_id: None,
                 calibration_score: 0.0,
+                last_decision_confidence: None,
                 epochs_in_current_mode: 0,
                 budget_overruns: 0,
                 held_from_mode: None,
                 fallback_active: false,
+                last_evidence_tick: None,
                 last_action_label: String::new(),
             },
         );
@@ -795,7 +846,7 @@ impl ControllerRegistry {
                     current.max(decision.snapshot_id)
                 }),
         );
-        controller.last_action_label.clone_from(&decision.label);
+        controller.last_decision_confidence = Some(decision.confidence);
         let within_budget = controller.decisions_this_epoch
             < controller.registration.budget.max_decisions_per_epoch;
         controller.decisions_this_epoch = controller.decisions_this_epoch.saturating_add(1);
@@ -1108,6 +1159,7 @@ impl ControllerRegistry {
     pub fn clear_fallback(&mut self, id: ControllerId) {
         if let Some(controller) = self.controllers.get_mut(&id) {
             controller.fallback_active = false;
+            controller.last_action_label = "fallback_cleared".to_string();
         }
     }
 
@@ -1138,25 +1190,99 @@ impl ControllerRegistry {
         self.controllers.get(&id).map(|c| c.budget_overruns)
     }
 
+    /// Export deterministic planner-facing controller state.
+    #[must_use]
+    pub fn controller_snapshot_ledger(&self) -> ControllerSnapshotLedger {
+        let controllers = self
+            .controllers
+            .iter()
+            .map(|(&controller_id, controller)| ControllerSnapshotState {
+                controller_id,
+                controller_name: controller.registration.name.clone(),
+                mode: controller.mode,
+                decisions_this_epoch: controller.decisions_this_epoch,
+                fallback_active: controller.fallback_active,
+                calibration_score: controller.calibration_score,
+                last_decision_confidence: controller.last_decision_confidence,
+                last_action_label: (!controller.last_action_label.is_empty())
+                    .then(|| controller.last_action_label.clone()),
+                last_evidence_tick: controller.last_evidence_tick,
+                last_snapshot_id: controller.last_snapshot_id,
+                epochs_in_current_mode: controller.epochs_in_current_mode,
+                budget_overruns: controller.budget_overruns,
+                proof_artifact_id: controller.registration.proof_artifact_id.clone(),
+            })
+            .collect();
+        ControllerSnapshotLedger {
+            schema_version: CONTROLLER_SNAPSHOT_LEDGER_SCHEMA_VERSION.to_string(),
+            registered_controllers: self.len(),
+            shadow_controllers: self.shadow_count(),
+            controllers,
+        }
+    }
+
     fn record_ledger_entry(
         &mut self,
         controller_id: ControllerId,
         snapshot_id: Option<SnapshotId>,
         event: LedgerEvent,
     ) {
+        let entry_id = self.next_ledger_id;
+        let action_label = Self::ledger_event_action_label(&event);
         let entry = EvidenceLedgerEntry {
-            entry_id: self.next_ledger_id,
+            entry_id,
             controller_id,
             snapshot_id,
             event,
             policy_id: self.promotion_policy.policy_id.clone(),
             timestamp: Time::ZERO, // Logical time injected by caller in production
         };
+        if let Some(controller) = self.controllers.get_mut(&controller_id) {
+            controller.last_evidence_tick = Some(entry_id);
+            controller.last_action_label = action_label;
+        }
         self.next_ledger_id = self
             .next_ledger_id
             .checked_add(1)
             .expect("ledger ID overflow");
         self.evidence_ledger.push(entry);
+    }
+
+    fn ledger_event_action_label(event: &LedgerEvent) -> String {
+        match event {
+            LedgerEvent::Registered { .. } => "registered".to_string(),
+            LedgerEvent::Promoted { to, .. } => format!("promoted:{to:?}"),
+            LedgerEvent::RolledBack { reason, .. } => {
+                format!("rolled_back:{}", Self::rollback_reason_code(reason))
+            }
+            LedgerEvent::Held { .. } => "held".to_string(),
+            LedgerEvent::Released { to } => format!("released:{to:?}"),
+            LedgerEvent::Deregistered => "deregistered".to_string(),
+            LedgerEvent::PromotionRejected { target, rejection } => format!(
+                "promotion_rejected:{target:?}:{}",
+                Self::promotion_rejection_code(rejection)
+            ),
+            LedgerEvent::DecisionRecorded { label, .. } => format!("decision:{label}"),
+        }
+    }
+
+    fn promotion_rejection_code(rejection: &PromotionRejection) -> &'static str {
+        match rejection {
+            PromotionRejection::ControllerNotFound => "controller_not_found",
+            PromotionRejection::CalibrationTooLow { .. } => "calibration_too_low",
+            PromotionRejection::InsufficientEpochs { .. } => "insufficient_epochs",
+            PromotionRejection::InvalidTransition { .. } => "invalid_transition",
+            PromotionRejection::HeldForInvestigation => "held_for_investigation",
+        }
+    }
+
+    fn rollback_reason_code(reason: &RollbackReason) -> &'static str {
+        match reason {
+            RollbackReason::CalibrationRegression { .. } => "calibration_regression",
+            RollbackReason::BudgetOverruns { .. } => "budget_overruns",
+            RollbackReason::ManualRollback => "manual_rollback",
+            RollbackReason::FallbackTriggered { .. } => "fallback_triggered",
+        }
     }
 
     fn log_promotion_rejection(
