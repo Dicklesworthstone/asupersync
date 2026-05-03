@@ -5237,3 +5237,10 @@ path = "fuzz_targets/h2_settings_with_padding_disable_settings.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "h2_request_pseudo_path_with_unicode"
+path = "fuzz_targets/h2_request_pseudo_path_with_unicode.rs"
+test = false
+doc = false
+bench = false
