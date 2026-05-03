@@ -4387,7 +4387,8 @@ mod tests {
             let _ = mw.call(make_request());
             let rate_limited = mw.call(make_request());
 
-            let body = String::from_utf8(rate_limited.body).expect("Response body should be UTF-8");
+            let body = String::from_utf8(rate_limited.body.to_vec())
+                .expect("Response body should be UTF-8");
 
             // AUDIT REQUIREMENT 1: Message should mention "Too Many Requests"
             assert!(

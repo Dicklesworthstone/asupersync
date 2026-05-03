@@ -3944,6 +3944,8 @@ mod tests {
                         stream: "ORDERS".to_string(),
                         name: "processor".to_string(),
                         prefix: "$JS.API".to_string(),
+                        pending_acks: Arc::new(AtomicUsize::new(0)),
+                        max_ack_pending: 1000,
                     };
 
                     let messages = consumer
@@ -4187,6 +4189,7 @@ mod tests {
                         delivered: 1,
                         reply_subject: reply_subjects[0].clone(),
                         ack_state: AtomicU8::new(ACK_STATE_PENDING),
+                        pending_acks: None,
                     };
                     let earlier_message = JsMessage {
                         subject: "orders.created".to_string(),
@@ -4195,6 +4198,7 @@ mod tests {
                         delivered: 1,
                         reply_subject: reply_subjects[1].clone(),
                         ack_state: AtomicU8::new(ACK_STATE_PENDING),
+                        pending_acks: None,
                     };
 
                     late_message
@@ -4362,6 +4366,7 @@ mod tests {
                 delivered: 1,
                 reply_subject,
                 ack_state: AtomicU8::new(ACK_STATE_PENDING),
+                pending_acks: None,
             };
 
             assert!(!msg.is_acked());
@@ -4888,9 +4893,10 @@ mod tests {
         /// AUDIT: Verify client-side fail-fast behavior
         #[test]
         fn audit_client_side_fail_fast_validation() {
+            let too_long_name = "a".repeat(129);
             let invalid_cases = vec![
                 ("", "empty name"),
-                ("a".repeat(129).as_str(), "too long name"),
+                (too_long_name.as_str(), "too long name"),
                 ("invalid name with spaces", "invalid characters"),
             ];
 

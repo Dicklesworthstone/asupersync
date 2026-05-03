@@ -1265,13 +1265,13 @@ mod tests {
 
             let resp = router.handle(Request::new("GET", "/api/v1/users/me"));
             assert_eq!(resp.status, StatusCode::OK);
-            let body = String::from_utf8(resp.body).unwrap();
+            let body = String::from_utf8(resp.body.to_vec()).unwrap();
             assert_eq!(body, "route_a", "Most specific literal route should win");
 
             // Test that parameter route still works for other values
             let resp2 = router.handle(Request::new("GET", "/api/v1/users/123"));
             assert_eq!(resp2.status, StatusCode::OK);
-            let body2 = String::from_utf8(resp2.body).unwrap();
+            let body2 = String::from_utf8(resp2.body.to_vec()).unwrap();
             assert_eq!(
                 body2, "param_handler",
                 "Parameter route should handle non-literal values"
@@ -1290,13 +1290,16 @@ mod tests {
 
             // Each literal path should match only itself
             let resp_me = router.handle(Request::new("GET", "/users/me"));
-            assert_eq!(String::from_utf8(resp_me.body).unwrap(), "me");
+            assert_eq!(String::from_utf8(resp_me.body.to_vec()).unwrap(), "me");
 
             let resp_menu = router.handle(Request::new("GET", "/users/menu"));
-            assert_eq!(String::from_utf8(resp_menu.body).unwrap(), "menu");
+            assert_eq!(String::from_utf8(resp_menu.body.to_vec()).unwrap(), "menu");
 
             let resp_metrics = router.handle(Request::new("GET", "/users/metrics"));
-            assert_eq!(String::from_utf8(resp_metrics.body).unwrap(), "metrics");
+            assert_eq!(
+                String::from_utf8(resp_metrics.body.to_vec()).unwrap(),
+                "metrics"
+            );
         }
 
         /// AUDIT: Verify precedence with mixed HTTP methods
@@ -1337,11 +1340,17 @@ mod tests {
 
             // GET method should prefer literal route
             let resp_get = router.handle(Request::new("GET", "/users/me"));
-            assert_eq!(String::from_utf8(resp_get.body).unwrap(), "literal_get");
+            assert_eq!(
+                String::from_utf8(resp_get.body.to_vec()).unwrap(),
+                "literal_get"
+            );
 
             // POST method should prefer literal route
             let resp_post = router.handle(Request::new("POST", "/users/me"));
-            assert_eq!(String::from_utf8(resp_post.body).unwrap(), "literal_post");
+            assert_eq!(
+                String::from_utf8(resp_post.body.to_vec()).unwrap(),
+                "literal_post"
+            );
         }
 
         /// AUDIT: Verify that parameter routes still capture when appropriate
@@ -1368,15 +1377,21 @@ mod tests {
 
             // Literal should win for exact match
             let resp_me = router.handle(Request::new("GET", "/users/me"));
-            assert_eq!(String::from_utf8(resp_me.body).unwrap(), "literal:me");
+            assert_eq!(
+                String::from_utf8(resp_me.body.to_vec()).unwrap(),
+                "literal:me"
+            );
 
             // Parameter should capture other values
             let resp_123 = router.handle(Request::new("GET", "/users/123"));
-            assert_eq!(String::from_utf8(resp_123.body).unwrap(), "captured:123");
+            assert_eq!(
+                String::from_utf8(resp_123.body.to_vec()).unwrap(),
+                "captured:123"
+            );
 
             let resp_admin = router.handle(Request::new("GET", "/users/admin"));
             assert_eq!(
-                String::from_utf8(resp_admin.body).unwrap(),
+                String::from_utf8(resp_admin.body.to_vec()).unwrap(),
                 "captured:admin"
             );
         }
