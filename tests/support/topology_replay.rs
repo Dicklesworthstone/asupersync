@@ -144,7 +144,10 @@ impl TopologyFixture {
             for offset in 0..seeded.task_count {
                 let task_id = TaskId::new_for_test(seeded.task_id_start + offset as u32, 0);
                 queues[seeded.worker_id].push(task_id);
-                task_source.insert(task_id, seeded.worker_id);
+                assert!(
+                    task_source.insert(task_id, seeded.worker_id).is_none(),
+                    "duplicate seeded task id {task_id:?} in topology fixture"
+                );
                 total_seeded += 1;
             }
         }
