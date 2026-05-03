@@ -1,0 +1,128 @@
+{
+  "contract_version": "adaptive-batch-sizing-smoke-contract-v1",
+  "runner_script": "scripts/run_adaptive_batch_sizing_smoke.sh",
+  "required_execute_output_files": [
+    "bundle_manifest.json",
+    "run_report.json",
+    "adaptive_batch_sizing_report.json",
+    "run.log"
+  ],
+  "smoke_scenarios": [
+    {
+      "scenario_id": "AA-ADAPTIVE-BATCH-SIZING-CONTENTION-WIN-32P",
+      "description": "High ready-lane contention replay where adaptive batching should scale up beyond the fixed batch size and reduce shared ready-queue touches.",
+      "workload_seed": 320320,
+      "output_root": "target/adaptive-batch-sizing-smoke",
+      "fixture": {
+        "producer_count": 32,
+        "tasks_per_producer": 32,
+        "priority": 50,
+        "fixed_batch_size": 1,
+        "adaptive_profile": {
+          "enabled": true,
+          "min_batch_size": 1,
+          "max_batch_size": 8,
+          "scale_up_ready_depth": 32,
+          "scale_up_in_flight": 4,
+          "scale_up_claim_failures": 1,
+          "cancel_debt_floor": 4,
+          "cooldown_steps": 2
+        }
+      },
+      "expected_winner_profile": "adaptive",
+      "safe_fallback_profile": "fixed",
+      "expected_report_projection": {
+        "schema_version": "adaptive-batch-sizing-projection-v1",
+        "scenario_id": "AA-ADAPTIVE-BATCH-SIZING-CONTENTION-WIN-32P",
+        "workload_seed": 320320,
+        "producer_count": 32,
+        "tasks_per_producer": 32,
+        "fixed_batch_size": 1,
+        "fixed": {
+          "selected_batch_size": 1,
+          "batch_mode_activated": false,
+          "shared_ready_touches": 1024,
+          "scale_up_events": 0,
+          "cancel_floor_hits": 0,
+          "cooldown_holds": 0,
+          "batch_reason": "disabled",
+          "wake_to_run_p99_ns": 666030
+        },
+        "adaptive": {
+          "selected_batch_size": 8,
+          "batch_mode_activated": true,
+          "shared_ready_touches": 1003,
+          "scale_up_events": 1,
+          "cancel_floor_hits": 0,
+          "cooldown_holds": 2,
+          "batch_reason": "ready_contention_scale_up",
+          "wake_to_run_p99_ns": 607790
+        },
+        "comparison": {
+          "shared_ready_touches_delta": 21,
+          "wake_to_run_p99_improvement_ns": 58240,
+          "winner_profile": "adaptive",
+          "no_win_trigger": false
+        }
+      }
+    },
+    {
+      "scenario_id": "AA-ADAPTIVE-BATCH-SIZING-KEEP-FIXED-1P",
+      "description": "Low-contention replay where adaptive batching should not beat the fixed profile and the operator should keep the conservative fixed profile pinned.",
+      "workload_seed": 101010,
+      "output_root": "target/adaptive-batch-sizing-smoke",
+      "fixture": {
+        "producer_count": 1,
+        "tasks_per_producer": 32,
+        "priority": 50,
+        "fixed_batch_size": 4,
+        "adaptive_profile": {
+          "enabled": true,
+          "min_batch_size": 1,
+          "max_batch_size": 8,
+          "scale_up_ready_depth": 64,
+          "scale_up_in_flight": 4,
+          "scale_up_claim_failures": 1,
+          "cancel_debt_floor": 4,
+          "cooldown_steps": 2
+        }
+      },
+      "expected_winner_profile": "fixed",
+      "safe_fallback_profile": "fixed",
+      "expected_report_projection": {
+        "schema_version": "adaptive-batch-sizing-projection-v1",
+        "scenario_id": "AA-ADAPTIVE-BATCH-SIZING-KEEP-FIXED-1P",
+        "workload_seed": 101010,
+        "producer_count": 1,
+        "tasks_per_producer": 32,
+        "fixed_batch_size": 4,
+        "fixed": {
+          "selected_batch_size": 4,
+          "batch_mode_activated": true,
+          "shared_ready_touches": 11,
+          "scale_up_events": 0,
+          "cancel_floor_hits": 0,
+          "cooldown_holds": 0,
+          "batch_reason": "disabled",
+          "wake_to_run_p99_ns": 77780
+        },
+        "adaptive": {
+          "selected_batch_size": 4,
+          "batch_mode_activated": true,
+          "shared_ready_touches": 11,
+          "scale_up_events": 0,
+          "cancel_floor_hits": 0,
+          "cooldown_holds": 0,
+          "batch_reason": "fixed_fallback",
+          "wake_to_run_p99_ns": 77780
+        },
+        "comparison": {
+          "shared_ready_touches_delta": 0,
+          "wake_to_run_p99_improvement_ns": 0,
+          "winner_profile": "fixed",
+          "no_win_trigger": true
+        }
+      }
+    }
+  ]
+}

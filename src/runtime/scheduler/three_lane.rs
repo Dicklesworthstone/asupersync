@@ -516,6 +516,91 @@ impl AdaptiveCancelStreakPolicyBench {
     }
 }
 
+/// Deterministic reasons for selecting a ready-lane batch size.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum AdaptiveBatchDecisionReason {
+    /// Adaptive batching is disabled; use the fixed scheduler batch size.
+    Disabled,
+    /// No adaptive win was detected; keep the fixed scheduler batch size.
+    FixedFallback,
+    /// Producer contention and backlog justify a temporary larger batch.
+    ReadyContentionScaleUp,
+    /// Cancel backlog is high enough that ready batching should contract.
+    CancelDebtFloor,
+    /// Hold the previously-selected larger batch for a short cooldown window.
+    CooldownHold,
+}
+
+/// Test-facing profile for adaptive ready-batch sizing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AdaptiveBatchSizingProfile {
+    /// Enables adaptive selection when `true`.
+    pub enabled: bool,
+    /// Smallest batch size allowed while the profile is active.
+    pub min_batch_size: usize,
+    /// Largest batch size allowed while the profile is active.
+    pub max_batch_size: usize,
+    /// Minimum ready depth required before the scheduler can scale up.
+    pub scale_up_ready_depth: usize,
+    /// Minimum observed combiner in-flight depth required before scale-up.
+    pub scale_up_in_flight: usize,
+    /// Minimum combiner claim-failure delta required before scale-up.
+    pub scale_up_claim_failures: usize,
+    /// Cancel-debt floor that forces the batch size down to `min_batch_size`.
+    pub cancel_debt_floor: usize,
+    /// Number of subsequent batch drains that should keep the scaled-up size.
+    pub cooldown_steps: usize,
+}
+
+impl AdaptiveBatchSizingProfile {
+    #[inline]
+    fn normalized(self, fixed_batch_size: usize) -> Self {
+        let fixed_batch_size = fixed_batch_size.max(1);
+        let min_batch_size = self.min_batch_size.max(1);
+        let max_batch_size = self
+            .max_batch_size
+            .max(min_batch_size)
+            .max(fixed_batch_size);
+        Self {
+            enabled: self.enabled,
+            min_batch_size,
+            max_batch_size,
+            scale_up_ready_depth: self.scale_up_ready_depth,
+            scale_up_in_flight: self.scale_up_in_flight,
+            scale_up_claim_failures: self.scale_up_claim_failures,
+            cancel_debt_floor: self.cancel_debt_floor,
+            cooldown_steps: self.cooldown_steps,
+        }
+    }
+}
+
+/// Snapshot of the last adaptive ready-batch decision.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AdaptiveBatchDecisionSnapshot {
+    /// Batch size selected for the most recent global-ready drain decision.
+    pub selected_batch_size: usize,
+    /// Fixed scheduler batch size configured by the operator.
+    pub fixed_batch_size: usize,
+    /// Ready depth observed at the decision point.
+    pub ready_depth: usize,
+    /// Cancel backlog observed at the decision point.
+    pub cancel_debt: usize,
+    /// Highest observed combiner concurrency used to justify the decision.
+    pub combiner_in_flight: usize,
+    /// Delta in combiner claim failures since the prior decision point.
+    pub combiner_claim_failures_delta: usize,
+    /// Deterministic reason code for the selected batch size.
+    pub reason: AdaptiveBatchDecisionReason,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct AdaptiveBatchRuntimeState {
+    active_batch_size: usize,
+    cooldown_remaining: usize,
+    last_combiner_claim_failures: usize,
+    last_snapshot: Option<AdaptiveBatchDecisionSnapshot>,
+}
+
 /// Coordination for waking workers.
 #[derive(Debug)]
 pub(crate) struct WorkerCoordinator {
@@ -1264,6 +1349,8 @@ impl ThreeLaneScheduler {
                 fast_queue_fairness_limit: 4, // Allow max 4 consecutive stolen work dispatches
                 timed_dispatch_streak: 0,
                 timed_fairness_limit: 6, // Allow max 6 consecutive EDF dispatches before FIFO fairness
+                adaptive_batch_profile: None,
+                adaptive_batch_state: AdaptiveBatchRuntimeState::default(),
                 steal_locality_counters: StealLocalityCounters::default(),
                 scheduler_evidence: scheduler_evidence.clone(),
             });
@@ -1360,6 +1447,25 @@ impl ThreeLaneScheduler {
                     .global_ready_buffer
                     .reserve(size - worker.global_ready_buffer.capacity());
             }
+            worker.reset_adaptive_batch_state();
+        }
+    }
+
+    /// Installs or removes the adaptive ready-batch sizing profile used by
+    /// test and smoke-contract harnesses.
+    #[doc(hidden)]
+    #[cfg(any(test, feature = "test-internals"))]
+    pub fn set_adaptive_batch_profile_for_test(
+        &mut self,
+        profile: Option<AdaptiveBatchSizingProfile>,
+    ) {
+        for worker in &mut self.workers {
+            worker.adaptive_batch_profile = profile;
+            worker.reset_adaptive_batch_state();
+            worker.preemption_metrics.adaptive_batch_scale_up_events = 0;
+            worker.preemption_metrics.adaptive_batch_cancel_floor_hits = 0;
+            worker.preemption_metrics.adaptive_batch_cooldown_holds = 0;
+            worker.preemption_metrics.adaptive_batch_max_selected = worker.fixed_ready_batch_size();
         }
     }
 
@@ -2164,6 +2270,10 @@ pub struct ThreeLaneWorker {
     /// Fairness guarantee: FIFO work will be checked after at most this many
     /// consecutive EDF dispatches, ensuring 1/N quantum fairness invariant.
     timed_fairness_limit: usize,
+    /// Optional adaptive profile for ready-lane batch sizing.
+    adaptive_batch_profile: Option<AdaptiveBatchSizingProfile>,
+    /// Runtime state for the adaptive ready-batch controller.
+    adaptive_batch_state: AdaptiveBatchRuntimeState,
     /// Counters tracking preferred-vs-remote steal outcomes.
     steal_locality_counters: StealLocalityCounters,
     /// Optional shared collector for runtime scheduler evidence snapshots.
@@ -2455,6 +2565,14 @@ pub struct PreemptionMetrics {
     pub global_ready_batch_drains: u64,
     /// Total ready tasks drained through the global prefetch path.
     pub global_ready_batch_tasks: u64,
+    /// Number of times adaptive ready batching scaled above the fixed size.
+    pub adaptive_batch_scale_up_events: u64,
+    /// Number of times cancel debt forced the batch size down to the floor.
+    pub adaptive_batch_cancel_floor_hits: u64,
+    /// Number of cooldown windows that held the prior larger batch size.
+    pub adaptive_batch_cooldown_holds: u64,
+    /// Largest batch size selected by the adaptive ready-batch controller.
+    pub adaptive_batch_max_selected: usize,
 }
 
 impl PreemptionMetrics {
@@ -3719,6 +3837,109 @@ impl ThreeLaneWorker {
         }
     }
 
+    #[inline]
+    fn fixed_ready_batch_size(&self) -> usize {
+        self.steal_batch_size.max(1)
+    }
+
+    #[inline]
+    fn reset_adaptive_batch_state(&mut self) {
+        let fixed_batch_size = self.fixed_ready_batch_size();
+        let last_combiner_claim_failures = self
+            .global
+            .ready_combiner_snapshot()
+            .combiner_claim_failures;
+        self.adaptive_batch_state = AdaptiveBatchRuntimeState {
+            active_batch_size: fixed_batch_size,
+            cooldown_remaining: 0,
+            last_combiner_claim_failures,
+            last_snapshot: None,
+        };
+    }
+
+    #[doc(hidden)]
+    #[cfg(any(test, feature = "test-internals"))]
+    pub fn adaptive_batch_snapshot_for_test(&self) -> Option<AdaptiveBatchDecisionSnapshot> {
+        self.adaptive_batch_state.last_snapshot
+    }
+
+    #[inline]
+    fn select_ready_batch_decision(&mut self) -> AdaptiveBatchDecisionSnapshot {
+        let fixed_batch_size = self.fixed_ready_batch_size();
+        let ready_depth = self.global.ready_count();
+        let combiner = self.global.ready_combiner_snapshot();
+        let cancel_debt = self.cancel_debt_signal();
+        let claim_failures_delta = combiner
+            .combiner_claim_failures
+            .saturating_sub(self.adaptive_batch_state.last_combiner_claim_failures);
+        self.adaptive_batch_state.last_combiner_claim_failures = combiner.combiner_claim_failures;
+
+        let mut selected_batch_size = fixed_batch_size;
+        let mut reason = AdaptiveBatchDecisionReason::Disabled;
+
+        if let Some(profile) = self.adaptive_batch_profile {
+            let profile = profile.normalized(fixed_batch_size);
+            if profile.enabled {
+                if self.adaptive_batch_state.cooldown_remaining > 0 {
+                    selected_batch_size = self
+                        .adaptive_batch_state
+                        .active_batch_size
+                        .max(fixed_batch_size)
+                        .clamp(profile.min_batch_size, profile.max_batch_size);
+                    self.adaptive_batch_state.cooldown_remaining = self
+                        .adaptive_batch_state
+                        .cooldown_remaining
+                        .saturating_sub(1);
+                    self.preemption_metrics.adaptive_batch_cooldown_holds += 1;
+                    reason = AdaptiveBatchDecisionReason::CooldownHold;
+                } else if cancel_debt >= profile.cancel_debt_floor
+                    && fixed_batch_size > profile.min_batch_size
+                {
+                    selected_batch_size = profile.min_batch_size;
+                    self.adaptive_batch_state.active_batch_size = selected_batch_size;
+                    self.preemption_metrics.adaptive_batch_cancel_floor_hits += 1;
+                    reason = AdaptiveBatchDecisionReason::CancelDebtFloor;
+                } else {
+                    let combiner_ready = combiner.max_in_flight >= profile.scale_up_in_flight
+                        || combiner.current_in_flight >= profile.scale_up_in_flight;
+                    let claim_ready = claim_failures_delta >= profile.scale_up_claim_failures;
+                    if ready_depth >= profile.scale_up_ready_depth
+                        && combiner_ready
+                        && claim_ready
+                        && profile.max_batch_size > fixed_batch_size
+                    {
+                        selected_batch_size = profile.max_batch_size;
+                        self.adaptive_batch_state.active_batch_size = selected_batch_size;
+                        self.adaptive_batch_state.cooldown_remaining = profile.cooldown_steps;
+                        self.preemption_metrics.adaptive_batch_scale_up_events += 1;
+                        reason = AdaptiveBatchDecisionReason::ReadyContentionScaleUp;
+                    } else {
+                        selected_batch_size = fixed_batch_size;
+                        self.adaptive_batch_state.active_batch_size = selected_batch_size;
+                        reason = AdaptiveBatchDecisionReason::FixedFallback;
+                    }
+                }
+            }
+        }
+
+        self.preemption_metrics.adaptive_batch_max_selected = self
+            .preemption_metrics
+            .adaptive_batch_max_selected
+            .max(selected_batch_size);
+
+        let snapshot = AdaptiveBatchDecisionSnapshot {
+            selected_batch_size,
+            fixed_batch_size,
+            ready_depth,
+            cancel_debt,
+            combiner_in_flight: combiner.max_in_flight.max(combiner.current_in_flight),
+            combiner_claim_failures_delta: claim_failures_delta,
+            reason,
+        };
+        self.adaptive_batch_state.last_snapshot = Some(snapshot);
+        snapshot
+    }
+
     /// Select the next task to dispatch, respecting lane priorities and fairness.
     ///
     /// Returns `None` when no work is available across any lane or steal target.
@@ -3984,7 +4205,8 @@ impl ThreeLaneWorker {
             return Some(prefetched);
         }
 
-        let batch_size = self.steal_batch_size.max(1);
+        let decision = self.select_ready_batch_decision();
+        let batch_size = decision.selected_batch_size.max(1);
         let batch_threshold = batch_size
             .saturating_mul(2)
             .max(GLOBAL_READY_BATCH_DRAIN_MIN_DEPTH);
@@ -7143,6 +7365,168 @@ mod tests {
             worker.global_ready_buffer.is_empty(),
             "prefetch buffer should be empty after draining"
         );
+    }
+
+    fn inject_ready_burst(
+        scheduler: Arc<ThreeLaneScheduler>,
+        producer_count: usize,
+        tasks_per_producer: usize,
+        priority: u8,
+    ) {
+        let barrier = Arc::new(std::sync::Barrier::new(producer_count.max(1)));
+        let inject_handles: Vec<_> = (0..producer_count)
+            .map(|producer| {
+                let scheduler = Arc::clone(&scheduler);
+                let barrier = Arc::clone(&barrier);
+                thread::spawn(move || {
+                    barrier.wait();
+                    let base = producer * tasks_per_producer;
+                    for offset in 0..tasks_per_producer {
+                        scheduler.inject_ready(
+                            TaskId::new_for_test((base + offset) as u32, 0),
+                            priority,
+                        );
+                    }
+                })
+            })
+            .collect();
+
+        for handle in inject_handles {
+            handle.join().expect("producer should complete");
+        }
+    }
+
+    fn shared_ready_touches(total_dispatched: usize, metrics: &PreemptionMetrics) -> u64 {
+        if metrics.global_ready_batch_drains == 0 {
+            total_dispatched as u64
+        } else {
+            metrics.global_ready_batch_drains.saturating_add(
+                (total_dispatched as u64).saturating_sub(metrics.global_ready_batch_tasks),
+            )
+        }
+    }
+
+    #[test]
+    fn adaptive_ready_batch_scaling_replays_contention_win_profile() {
+        let total_injected = 32 * 32;
+        let (mut scheduler, _state, _task_table) =
+            task_table_scheduler(1, total_injected as u32 + 1);
+        scheduler.set_steal_batch_size(1);
+        scheduler.set_adaptive_batch_profile_for_test(Some(AdaptiveBatchSizingProfile {
+            enabled: true,
+            min_batch_size: 1,
+            max_batch_size: 8,
+            scale_up_ready_depth: 32,
+            scale_up_in_flight: 4,
+            scale_up_claim_failures: 1,
+            cancel_debt_floor: 4,
+            cooldown_steps: 2,
+        }));
+
+        let scheduler = Arc::new(scheduler);
+        inject_ready_burst(Arc::clone(&scheduler), 32, 32, 50);
+
+        let mut scheduler =
+            Arc::try_unwrap(scheduler).expect("all producers should release the scheduler");
+        let mut workers = scheduler.take_workers();
+        let worker = workers
+            .get_mut(0)
+            .expect("contention replay requires one worker");
+
+        assert!(
+            worker.next_task().is_some(),
+            "contention replay should dispatch one ready task"
+        );
+        let first_snapshot = worker
+            .adaptive_batch_snapshot_for_test()
+            .expect("adaptive controller should publish a decision snapshot");
+        assert_eq!(
+            first_snapshot.reason,
+            AdaptiveBatchDecisionReason::ReadyContentionScaleUp
+        );
+        assert_eq!(first_snapshot.fixed_batch_size, 1);
+        assert_eq!(first_snapshot.selected_batch_size, 8);
+        assert!(
+            first_snapshot.ready_depth >= 32,
+            "contention replay should expose the backlog gate"
+        );
+        assert!(
+            first_snapshot.combiner_in_flight >= 4,
+            "contention replay should observe combiner concurrency"
+        );
+        assert!(
+            first_snapshot.combiner_claim_failures_delta >= 1,
+            "contention replay should observe combiner claim pressure"
+        );
+
+        let mut total_dispatched = 1usize;
+        while worker.next_task().is_some() {
+            total_dispatched += 1;
+        }
+
+        assert_eq!(total_dispatched, total_injected);
+        let metrics = worker.preemption_metrics();
+        assert_eq!(metrics.adaptive_batch_scale_up_events, 1);
+        assert_eq!(metrics.adaptive_batch_cooldown_holds, 2);
+        assert_eq!(metrics.adaptive_batch_cancel_floor_hits, 0);
+        assert_eq!(metrics.adaptive_batch_max_selected, 8);
+        assert_eq!(metrics.global_ready_batch_drains, 3);
+        assert_eq!(metrics.global_ready_batch_tasks, 24);
+        assert_eq!(shared_ready_touches(total_dispatched, metrics), 1003);
+    }
+
+    #[test]
+    fn adaptive_ready_batch_keeps_fixed_profile_when_contention_signal_is_weak() {
+        let total_injected = 32;
+        let (mut scheduler, _state, _task_table) =
+            task_table_scheduler(1, total_injected as u32 + 1);
+        scheduler.set_steal_batch_size(4);
+        scheduler.set_adaptive_batch_profile_for_test(Some(AdaptiveBatchSizingProfile {
+            enabled: true,
+            min_batch_size: 1,
+            max_batch_size: 8,
+            scale_up_ready_depth: 64,
+            scale_up_in_flight: 4,
+            scale_up_claim_failures: 1,
+            cancel_debt_floor: 4,
+            cooldown_steps: 2,
+        }));
+
+        let scheduler = Arc::new(scheduler);
+        inject_ready_burst(Arc::clone(&scheduler), 1, 32, 50);
+
+        let mut scheduler =
+            Arc::try_unwrap(scheduler).expect("all producers should release the scheduler");
+        let mut workers = scheduler.take_workers();
+        let worker = workers
+            .get_mut(0)
+            .expect("low-contention replay requires one worker");
+
+        assert_eq!(worker.next_task(), Some(TaskId::new_for_test(0, 0)));
+        let first_snapshot = worker
+            .adaptive_batch_snapshot_for_test()
+            .expect("adaptive controller should publish a decision snapshot");
+        assert_eq!(
+            first_snapshot.reason,
+            AdaptiveBatchDecisionReason::FixedFallback
+        );
+        assert_eq!(first_snapshot.selected_batch_size, 4);
+        assert_eq!(first_snapshot.fixed_batch_size, 4);
+
+        let mut total_dispatched = 1usize;
+        while worker.next_task().is_some() {
+            total_dispatched += 1;
+        }
+
+        assert_eq!(total_dispatched, total_injected);
+        let metrics = worker.preemption_metrics();
+        assert_eq!(metrics.adaptive_batch_scale_up_events, 0);
+        assert_eq!(metrics.adaptive_batch_cooldown_holds, 0);
+        assert_eq!(metrics.adaptive_batch_cancel_floor_hits, 0);
+        assert_eq!(metrics.adaptive_batch_max_selected, 4);
+        assert_eq!(metrics.global_ready_batch_drains, 7);
+        assert_eq!(metrics.global_ready_batch_tasks, 28);
+        assert_eq!(shared_ready_touches(total_dispatched, metrics), 11);
     }
 
     #[test]
@@ -14395,8 +14779,8 @@ mod tests {
     fn scheduler_state_dump_deadline_ordering_golden() {
         use crate::runtime::scheduler::priority::DeadlineSet;
         use crate::runtime::stored_task::{StoredTask, TaskState};
+        use crate::types::{Budget, Time};
         use crate::util::DetRng;
-        use crate::types::{Time, Budget};
         use serde::Serialize;
         use std::collections::BTreeMap;
 
@@ -14457,9 +14841,11 @@ mod tests {
         // Task 2: Medium priority, near deadline (timed lane)
         let task2 = TaskId::new_for_test(2, 2);
         // Schedule with deadline that puts it in timed lane
-        scheduler
-            .global_ready
-            .enqueue(PriorityTask::new(task2, 150, Some(current_time + Time::from_millis(50))));
+        scheduler.global_ready.enqueue(PriorityTask::new(
+            task2,
+            150,
+            Some(current_time + Time::from_millis(50)),
+        ));
         task_details.insert(
             format!("task_2_{}", task2.0),
             TaskDetail {
@@ -14473,9 +14859,11 @@ mod tests {
 
         // Task 3: Low priority, immediate deadline (timed lane)
         let task3 = TaskId::new_for_test(3, 3);
-        scheduler
-            .global_ready
-            .enqueue(PriorityTask::new(task3, 100, Some(current_time + Time::from_millis(5))));
+        scheduler.global_ready.enqueue(PriorityTask::new(
+            task3,
+            100,
+            Some(current_time + Time::from_millis(5)),
+        ));
         task_details.insert(
             format!("task_3_{}", task3.0),
             TaskDetail {
@@ -14574,10 +14962,8 @@ mod tests {
         drop(local_sched);
 
         // Timed lane state (global ready with deadlines)
-        let global_ready_tasks: Vec<String> = vec![
-            format!("task_2_{}", task2.0),
-            format!("task_3_{}", task3.0),
-        ];
+        let global_ready_tasks: Vec<String> =
+            vec![format!("task_2_{}", task2.0), format!("task_3_{}", task3.0)];
         let mut timed_priority_dist = BTreeMap::new();
         timed_priority_dist.insert(150u8, 1);
         timed_priority_dist.insert(100u8, 1);
@@ -14594,11 +14980,11 @@ mod tests {
         // Simulate scheduling order based on 3-lane priority: cancel > timed > ready
         let scheduling_order = vec![
             format!("cancel_task_{}", cancel_task.0), // Cancel lane preempts all
-            format!("task_3_{}", task3.0),              // Immediate deadline (5ms)
-            format!("task_2_{}", task2.0),              // Near deadline (50ms)
-            format!("task_1_{}", task1.0),              // High priority ready
-            format!("task_4_{}", task4.0),              // Medium priority ready
-            format!("task_5_{}", task5.0),              // Low priority ready
+            format!("task_3_{}", task3.0),            // Immediate deadline (5ms)
+            format!("task_2_{}", task2.0),            // Near deadline (50ms)
+            format!("task_1_{}", task1.0),            // High priority ready
+            format!("task_4_{}", task4.0),            // Medium priority ready
+            format!("task_5_{}", task5.0),            // Low priority ready
         ];
 
         // Create scheduler state dump
@@ -14727,8 +15113,16 @@ mod tests {
 
         // Verify the scheduling invariants for this specific state
         assert_eq!(state_dump.lane_states.len(), 3, "Must have exactly 3 lanes");
-        assert_eq!(state_dump.task_details.len(), 6, "Must have exactly 5 tasks + 1 cancel");
-        assert_eq!(state_dump.scheduling_order.len(), 6, "Scheduling order must include all tasks");
+        assert_eq!(
+            state_dump.task_details.len(),
+            6,
+            "Must have exactly 5 tasks + 1 cancel"
+        );
+        assert_eq!(
+            state_dump.scheduling_order.len(),
+            6,
+            "Scheduling order must include all tasks"
+        );
 
         // Verify cancel lane preemption
         assert_eq!(
