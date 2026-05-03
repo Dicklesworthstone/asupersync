@@ -13968,4 +13968,256 @@ mod tests {
             // - Connection state must remain consistent for ordering guarantees
         }
     }
+
+    /// AUDIT MODULE: PostgreSQL reconnect on idle disconnect behavior
+    ///
+    /// AUDIT FINDING: DEFECT - PostgreSQL client does NOT transparently reconnect
+    /// on idle disconnect. When server times out idle connections (default 8h),
+    /// next query immediately errors without reconnection attempt.
+    ///
+    /// Per pgbouncer/connection-pool best practice: client should (a) detect
+    /// disconnect, (b) transparently reconnect, (c) retry query. Current
+    /// implementation does (b) error query (poor UX).
+    #[cfg(test)]
+    mod postgres_reconnect_on_idle_disconnect_audit {
+        use super::*;
+
+        /// AUDIT: Document current defective behavior - queries error on closed connection
+        ///
+        /// This test documents the DEFECTIVE behavior where queries immediately
+        /// return ConnectionClosed errors when the connection is marked closed,
+        /// rather than attempting transparent reconnection.
+        #[test]
+        fn audit_current_idle_disconnect_behavior_is_defective() {
+            init_test("audit_current_idle_disconnect_behavior_is_defective");
+
+            let mut conn = make_test_connection();
+            let cx = crate::cx::Cx::for_testing();
+
+            // Simulate server idle timeout - mark connection as closed
+            conn.inner.closed = true;
+
+            // AUDIT VERIFICATION: Current behavior is DEFECTIVE
+            // Query immediately errors without reconnection attempt
+            let result = run(conn.query_params(&cx, "SELECT 1", &[]));
+
+            match result {
+                Outcome::Err(PgError::ConnectionClosed) => {
+                    // DEFECT CONFIRMED: Connection closed error returned immediately
+                    // No reconnection attempted
+                }
+                other => panic!(
+                    "Expected ConnectionClosed error documenting defective behavior, got: {:?}",
+                    other
+                ),
+            }
+
+            // AUDIT VERIFICATION: Connection remains closed after failed query
+            assert!(
+                conn.inner.closed,
+                "DEFECT: Connection stays closed, no reconnection attempted"
+            );
+
+            eprintln!(
+                "{{\"audit\":\"IDLE_DISCONNECT\",\"status\":\"DEFECTIVE\",\"behavior\":\"immediate error without reconnect\"}}"
+            );
+
+            test_complete!("audit_current_idle_disconnect_behavior_is_defective");
+        }
+
+        /// AUDIT: Document required transparent reconnection behavior
+        ///
+        /// This test documents the REQUIRED behavior per connection-pool best
+        /// practices: detect disconnect, transparently reconnect, retry query.
+        #[test]
+        fn audit_required_transparent_reconnection_behavior_specification() {
+            init_test("audit_required_transparent_reconnection_behavior_specification");
+
+            // REQUIREMENT: Transparent reconnection on idle disconnect
+            // Per pgbouncer and connection-pool patterns:
+            //
+            // 1. Client detects connection error (ConnectionClosed, IO error)
+            // 2. Client transparently establishes new connection using original options
+            // 3. Client retries the failed query on new connection
+            // 4. Client only surfaces error if reconnection fails
+            // 5. Application code is unaware of the reconnection
+
+            // CURRENT STATE: ✗ NOT IMPLEMENTED
+            // - query_params immediately returns ConnectionClosed
+            // - execute_params immediately returns ConnectionClosed
+            // - query_prepared immediately returns ConnectionClosed
+            // - No reconnection logic exists
+            // - Applications must handle reconnection manually
+
+            // REQUIRED IMPLEMENTATION:
+            // 1. Wrap connection access in reconnect-aware wrapper
+            // 2. On ConnectionClosed/IO error, attempt reconnection
+            // 3. Store original PgConnectOptions for reconnection
+            // 4. Retry original query after successful reconnection
+            // 5. Limit reconnection attempts to prevent infinite loops
+
+            eprintln!(
+                "{{\"requirement\":\"TRANSPARENT_RECONNECT\",\"status\":\"NOT_IMPLEMENTED\",\"impact\":\"poor UX\"}}"
+            );
+
+            test_complete!("audit_required_transparent_reconnection_behavior_specification");
+        }
+
+        /// AUDIT: Test connection error detection logic is sound
+        ///
+        /// Verify that is_connection_error() correctly identifies errors that
+        /// should trigger reconnection attempts. This part is SOUND.
+        #[test]
+        fn audit_connection_error_detection_is_sound() {
+            init_test("audit_connection_error_detection_is_sound");
+
+            // Test connection errors that should trigger reconnection
+            let connection_errors = vec![
+                PgError::ConnectionClosed,
+                PgError::Io(std::io::Error::new(
+                    std::io::ErrorKind::BrokenPipe,
+                    "broken",
+                )),
+                PgError::Io(std::io::Error::new(
+                    std::io::ErrorKind::ConnectionAborted,
+                    "aborted",
+                )),
+                PgError::TlsRequired,
+            ];
+
+            for error in &connection_errors {
+                assert!(
+                    error.is_connection_error(),
+                    "Error {:?} must be classified as connection error",
+                    error
+                );
+
+                assert!(
+                    error.is_transient(),
+                    "Connection error {:?} must be classified as transient",
+                    error
+                );
+            }
+
+            // Test non-connection errors that should NOT trigger reconnection
+            let non_connection_errors = vec![
+                PgError::Server {
+                    code: "23505".to_string(),
+                    message: "duplicate key".to_string(),
+                    detail: None,
+                    hint: None,
+                    diagnostic: PgErrorDiagnostic::default(),
+                },
+                PgError::ColumnNotFound("missing_col".to_string()),
+                PgError::TypeConversion {
+                    column: "col".to_string(),
+                    expected: "i32",
+                    actual_oid: 25,
+                },
+            ];
+
+            for error in &non_connection_errors {
+                assert!(
+                    !error.is_connection_error(),
+                    "Error {:?} must NOT be classified as connection error",
+                    error
+                );
+            }
+
+            eprintln!(
+                "{{\"audit\":\"CONNECTION_ERROR_DETECTION\",\"status\":\"SOUND\",\"requirement\":\"proper error classification\"}}"
+            );
+
+            test_complete!("audit_connection_error_detection_is_sound");
+        }
+
+        /// AUDIT: Verify idle timeout behavior simulation
+        ///
+        /// Tests that we can properly simulate PostgreSQL server idle timeout
+        /// scenarios for reconnection testing.
+        #[test]
+        fn audit_idle_timeout_simulation_capability() {
+            init_test("audit_idle_timeout_simulation_capability");
+
+            let mut conn = make_test_connection();
+            let cx = crate::cx::Cx::for_testing();
+
+            // Verify initial connection state
+            assert!(!conn.inner.closed, "Connection should start open");
+
+            // Simulate PostgreSQL server idle timeout (e.g. default 8 hours)
+            // In real scenarios, this would happen when:
+            // 1. Connection sits idle beyond idle_session_timeout
+            // 2. Server closes TCP socket due to keepalive timeout
+            // 3. Network disruption causes connection break
+            conn.inner.closed = true;
+
+            // Verify simulation worked
+            assert!(
+                conn.inner.closed,
+                "Connection should be marked closed after timeout simulation"
+            );
+
+            // AUDIT VERIFICATION: Closed connection detection works
+            let result = run(conn.query_params(&cx, "SELECT current_timestamp", &[]));
+            match result {
+                Outcome::Err(PgError::ConnectionClosed) => {
+                    // Expected - connection is properly detected as closed
+                }
+                other => panic!(
+                    "Expected ConnectionClosed after idle timeout simulation, got: {:?}",
+                    other
+                ),
+            }
+
+            eprintln!(
+                "{{\"audit\":\"IDLE_TIMEOUT_SIMULATION\",\"status\":\"SOUND\",\"capability\":\"can simulate server timeout\"}}"
+            );
+
+            test_complete!("audit_idle_timeout_simulation_capability");
+        }
+
+        /// AUDIT: Verify connection pooling context and requirements
+        ///
+        /// Documents the connection pooling patterns this fix should support,
+        /// ensuring compatibility with existing pool infrastructure.
+        #[test]
+        fn audit_connection_pooling_context_requirements() {
+            init_test("audit_connection_pooling_context_requirements");
+
+            // Connection pooling context:
+            // - PgConnectionManager implements AsyncConnectionManager
+            // - Pool manages connection lifecycle (create, validate, release)
+            // - Applications get connections from pool, not direct TCP
+            // - Reconnection should work both in-pool and standalone contexts
+
+            // REQUIREMENT: Reconnection must preserve original connect options
+            let original_options = PgConnectOptions {
+                host: "localhost".to_string(),
+                port: 5432,
+                username: "test_user".to_string(),
+                password: Some("test_pass".into()),
+                database: "test_db".to_string(),
+                sslmode: SslMode::Prefer,
+                application_name: Some("test_app".to_string()),
+                connect_timeout: Some(std::time::Duration::from_secs(30)),
+            };
+
+            // REQUIREMENT: Reconnection must not interfere with transaction state
+            // - Only reconnect when transaction_status = 'I' (Idle)
+            // - Never reconnect mid-transaction ('T') or in error ('E')
+            // - Preserve prepared statements after reconnection if possible
+
+            // REQUIREMENT: Reconnection must respect pool semantics
+            // - Pool health checks use is_connection_error() classification
+            // - Pool release_check uses needs_discard flag for safety
+            // - Transparent reconnection should not affect pool return behavior
+
+            eprintln!(
+                "{{\"audit\":\"POOLING_REQUIREMENTS\",\"status\":\"DOCUMENTED\",\"context\":\"pool compatibility needed\"}}"
+            );
+
+            test_complete!("audit_connection_pooling_context_requirements");
+        }
+    }
 }

@@ -3803,4 +3803,94 @@ mod tests {
 
         crate::test_complete!("audit_receiver_spurious_wakeup_resilience");
     }
+
+    #[test]
+    fn audit_try_recv_sender_drop_returns_disconnected() {
+        // Audit: Sender dropped without sending: receiver.try_recv() should return
+        // Err(TryRecvError::Closed) immediately, NOT Err(TryRecvError::Empty).
+        // This verifies proper disconnection detection in try_recv.
+
+        init_test("audit_try_recv_sender_drop_returns_disconnected");
+
+        let (tx, mut rx) = channel::<i32>();
+
+        // Phase 1: Before sender drop - should return Empty
+        let before_drop = rx.try_recv();
+        match before_drop {
+            Err(TryRecvError::Empty) => {
+                // ✅ Expected: no value sent, sender still alive
+            }
+            other => {
+                panic!(
+                    "❌ DEFECT: try_recv() before sender drop returned {:?}, expected Err(TryRecvError::Empty)",
+                    other
+                );
+            }
+        }
+
+        // Phase 2: Drop sender without sending anything
+        drop(tx);
+
+        // Phase 3: After sender drop - should return Closed (NOT Empty)
+        let after_drop = rx.try_recv();
+        match after_drop {
+            Err(TryRecvError::Closed) => {
+                // ✅ Expected: sender dropped, no value available
+            }
+            Err(TryRecvError::Empty) => {
+                panic!(
+                    "❌ DEFECT: try_recv() after sender drop incorrectly returned Err(TryRecvError::Empty), should be Err(TryRecvError::Closed)"
+                );
+            }
+            Ok(value) => {
+                panic!(
+                    "❌ DEFECT: try_recv() after sender drop returned Ok({:?}), no value was sent!",
+                    value
+                );
+            }
+        }
+
+        // Phase 4: Verify idempotent behavior - multiple calls should return Closed
+        for i in 1..=5 {
+            let repeat_call = rx.try_recv();
+            crate::assert_with_log!(
+                matches!(repeat_call, Err(TryRecvError::Closed)),
+                &format!("Repeat try_recv call {} returns Closed", i),
+                "Err(Closed)",
+                format!("{:?}", repeat_call)
+            );
+        }
+
+        // Phase 5: Verify is_closed() consistency
+        crate::assert_with_log!(
+            rx.is_closed(),
+            "is_closed() returns true after sender drop",
+            true,
+            rx.is_closed()
+        );
+
+        // Phase 6: Test with different value types to ensure type-independence
+        let (tx_str, mut rx_str) = channel::<String>();
+        drop(tx_str);
+
+        let str_result = rx_str.try_recv();
+        crate::assert_with_log!(
+            matches!(str_result, Err(TryRecvError::Closed)),
+            "String channel also returns Closed after sender drop",
+            "Err(Closed)",
+            format!("{:?}", str_result)
+        );
+
+        println!("✅ SOUND: try_recv sender drop behavior verified:");
+        println!("  - try_recv() returns Err(TryRecvError::Empty) when sender alive, no value ✓");
+        println!(
+            "  - try_recv() returns Err(TryRecvError::Closed) immediately when sender dropped ✓"
+        );
+        println!("  - NOT Err(TryRecvError::Empty) after disconnection ✓");
+        println!("  - Idempotent behavior: repeated calls return Closed ✓");
+        println!("  - is_closed() consistency maintained ✓");
+        println!("  - Type-independent behavior ✓");
+
+        crate::test_complete!("audit_try_recv_sender_drop_returns_disconnected");
+    }
 }
