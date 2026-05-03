@@ -30,6 +30,8 @@ pub mod ready_dispatch_invariance_metamorphic;
 #[cfg(test)]
 pub mod shutdown_behavior_audit_test;
 pub mod stealing;
+/// Versioned swarm-evidence artifacts and offline tuning contracts.
+pub mod swarm_evidence;
 pub mod three_lane;
 pub mod work_stealing_checker;
 #[cfg(test)]
@@ -51,6 +53,11 @@ pub use priority::{
 pub use priority_inversion_oracle::{
     InversionId, InversionImpact, InversionOracleConfig, InversionSeverity, InversionStats,
     InversionType, Priority, PriorityInversion, PriorityInversionOracle, ResourceId,
+};
+pub use swarm_evidence::{
+    SCHEDULER_EVIDENCE_SCHEMA_VERSION, SchedulerEvidenceArtifact, SchedulerEvidenceError,
+    SchedulerEvidenceMetrics, SchedulerKnobProfile, SchedulerRecommendationReason,
+    SchedulerTopologyDescriptor, SchedulerTuneReport, SchedulerWorkloadClass,
 };
 pub use three_lane::{ThreeLaneScheduler, ThreeLaneWorker};
 pub use work_stealing_checker::{

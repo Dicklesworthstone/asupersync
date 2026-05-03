@@ -29,6 +29,7 @@ use serde_json;
 
 use asupersync::raptorq::gf256::{Gf256ArchitectureClass, active_kernel};
 use asupersync::raptorq::offline_tuner::{OfflineTuner, OptimizationCriteria};
+use asupersync::runtime::scheduler::SchedulerEvidenceArtifact;
 
 /// Test configuration for bit-exactness validation scenarios.
 #[derive(Debug, Clone)]
@@ -150,7 +151,7 @@ fn validate_addmul_slice_bit_exact(config: &ValidationConfig, verbose: bool) -> 
 
 #[derive(Parser)]
 #[command(name = "offline_tuner")]
-#[command(about = "Offline kernel superoptimization for RaptorQ GF(256) operations")]
+#[command(about = "Offline tuning workflows for RaptorQ kernels and scheduler evidence artifacts")]
 #[command(version)]
 struct Cli {
     #[command(subcommand)]
@@ -221,6 +222,17 @@ enum Commands {
         /// Profile pack to validate
         #[arg(long)]
         profile_file: Option<PathBuf>,
+    },
+
+    /// Ingest a scheduler evidence artifact and emit tuning guidance
+    SchedulerRecommend {
+        /// Path to the scheduler evidence artifact JSON file
+        #[arg(long)]
+        evidence_file: PathBuf,
+
+        /// Output path for the generated tuning report
+        #[arg(long, default_value = "scheduler_tuning_report.json")]
+        output_file: PathBuf,
     },
 }
 
@@ -293,6 +305,11 @@ fn main() {
         Commands::Validate { arch, profile_file } => {
             validate_kernels(arch.into(), profile_file, cli.verbose)
         }
+
+        Commands::SchedulerRecommend {
+            evidence_file,
+            output_file,
+        } => emit_scheduler_recommendation(evidence_file, output_file, cli.verbose),
     };
 
     if let Err(e) = result {
@@ -479,7 +496,7 @@ fn emit_profile_pack(
 
     let criteria: OptimizationCriteria =
         serde_json::from_value(results["optimization_criteria"].clone())?;
-    let optimal: asupersync::raptorq::offline_tuner::CandidateConfiguration =
+    let optimal: asupersync::raptorq::offline_tuner::KernelCandidate =
         serde_json::from_value(selected_candidate.clone())?;
 
     if verbose {
@@ -602,4 +619,34 @@ fn validate_kernels(
         )
         .into())
     }
+}
+
+fn emit_scheduler_recommendation(
+    evidence_file: PathBuf,
+    output_file: PathBuf,
+    verbose: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    println!(
+        "Loading scheduler evidence artifact from: {}",
+        evidence_file.display()
+    );
+
+    let artifact_json = fs::read_to_string(&evidence_file)?;
+    let artifact: SchedulerEvidenceArtifact = serde_json::from_str(&artifact_json)?;
+    let report = artifact.tune_report()?;
+
+    if verbose {
+        println!("Run label: {}", report.source_run_label);
+        println!("Profile: {}", report.profile_name);
+        println!("Confidence: {}%", report.confidence_percent);
+        println!("Reasons: {:?}", report.reason_codes);
+    }
+
+    fs::write(&output_file, serde_json::to_string_pretty(&report)?)?;
+    println!(
+        "Scheduler tuning report generated and saved to: {}",
+        output_file.display()
+    );
+
+    Ok(())
 }
