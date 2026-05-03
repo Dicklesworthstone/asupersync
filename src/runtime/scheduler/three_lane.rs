@@ -14777,12 +14777,10 @@ mod tests {
     /// across changes and provides regression detection for scheduling decisions.
     #[test]
     fn scheduler_state_dump_deadline_ordering_golden() {
-        use crate::runtime::scheduler::priority::DeadlineSet;
-        use crate::runtime::stored_task::{StoredTask, TaskState};
-        use crate::types::{Budget, Time};
-        use crate::util::DetRng;
+        use crate::types::Time;
         use serde::Serialize;
         use std::collections::BTreeMap;
+        use std::time::Duration;
 
         /// Serializable representation of scheduler state for golden snapshots
         #[derive(Debug, Serialize)]
@@ -14813,6 +14811,11 @@ mod tests {
             created_at: String,
         }
 
+        fn task_label(prefix: &str, task: TaskId) -> String {
+            let id = task.arena_index();
+            format!("{prefix}_{}_{}", id.index(), id.generation())
+        }
+
         // Create deterministic test runtime and scheduler
         let state = Arc::new(ContendedMutex::new("runtime_state", RuntimeState::new()));
         let mut scheduler = ThreeLaneScheduler::new(3, &state); // 3-lane as requested
@@ -14828,9 +14831,9 @@ mod tests {
         let task1 = TaskId::new_for_test(1, 1);
         worker.schedule_local(task1, 200);
         task_details.insert(
-            format!("task_1_{}", task1.0),
+            task_label("task_1", task1),
             TaskDetail {
-                task_id: format!("task_1_{}", task1.0),
+                task_id: task_label("task_1", task1),
                 priority: 200,
                 deadline: Some("far".to_string()),
                 lane: "ready".to_string(),
@@ -14841,15 +14844,13 @@ mod tests {
         // Task 2: Medium priority, near deadline (timed lane)
         let task2 = TaskId::new_for_test(2, 2);
         // Schedule with deadline that puts it in timed lane
-        scheduler.global_ready.enqueue(PriorityTask::new(
-            task2,
-            150,
-            Some(current_time + Time::from_millis(50)),
-        ));
+        scheduler
+            .global_injector()
+            .inject_timed(task2, current_time + Duration::from_millis(50));
         task_details.insert(
-            format!("task_2_{}", task2.0),
+            task_label("task_2", task2),
             TaskDetail {
-                task_id: format!("task_2_{}", task2.0),
+                task_id: task_label("task_2", task2),
                 priority: 150,
                 deadline: Some("near_50ms".to_string()),
                 lane: "timed".to_string(),
@@ -14859,15 +14860,13 @@ mod tests {
 
         // Task 3: Low priority, immediate deadline (timed lane)
         let task3 = TaskId::new_for_test(3, 3);
-        scheduler.global_ready.enqueue(PriorityTask::new(
-            task3,
-            100,
-            Some(current_time + Time::from_millis(5)),
-        ));
+        scheduler
+            .global_injector()
+            .inject_timed(task3, current_time + Duration::from_millis(5));
         task_details.insert(
-            format!("task_3_{}", task3.0),
+            task_label("task_3", task3),
             TaskDetail {
-                task_id: format!("task_3_{}", task3.0),
+                task_id: task_label("task_3", task3),
                 priority: 100,
                 deadline: Some("immediate_5ms".to_string()),
                 lane: "timed".to_string(),
@@ -14879,9 +14878,9 @@ mod tests {
         let task4 = TaskId::new_for_test(4, 4);
         worker.schedule_local(task4, 125);
         task_details.insert(
-            format!("task_4_{}", task4.0),
+            task_label("task_4", task4),
             TaskDetail {
-                task_id: format!("task_4_{}", task4.0),
+                task_id: task_label("task_4", task4),
                 priority: 125,
                 deadline: None,
                 lane: "ready".to_string(),
@@ -14893,9 +14892,9 @@ mod tests {
         let task5 = TaskId::new_for_test(5, 5);
         worker.schedule_local(task5, 75);
         task_details.insert(
-            format!("task_5_{}", task5.0),
+            task_label("task_5", task5),
             TaskDetail {
-                task_id: format!("task_5_{}", task5.0),
+                task_id: task_label("task_5", task5),
                 priority: 75,
                 deadline: None,
                 lane: "ready".to_string(),
@@ -14905,11 +14904,11 @@ mod tests {
 
         // 1 Cancel task: Preempts everything (cancel lane)
         let cancel_task = TaskId::new_for_test(99, 99);
-        worker.schedule_cancel(cancel_task);
+        worker.schedule_local_cancel(cancel_task, 255);
         task_details.insert(
-            format!("cancel_task_{}", cancel_task.0),
+            task_label("cancel_task", cancel_task),
             TaskDetail {
-                task_id: format!("cancel_task_{}", cancel_task.0),
+                task_id: task_label("cancel_task", cancel_task),
                 priority: 255, // Cancel priority is always highest
                 deadline: None,
                 lane: "cancel".to_string(),
@@ -14921,11 +14920,17 @@ mod tests {
         let mut lane_states = BTreeMap::new();
 
         // Cancel lane state
-        let cancel_queue = worker.cancel.lock();
-        let cancel_tasks: Vec<String> = cancel_queue
-            .iter()
-            .map(|&task| format!("cancel_task_{}", task.0))
-            .collect();
+        let local_sched = worker.local.lock();
+        let cancel_tasks: Vec<String> = if local_sched.is_in_cancel_lane(cancel_task) {
+            vec![task_label("cancel_task", cancel_task)]
+        } else {
+            Vec::new()
+        };
+        assert_eq!(
+            local_sched.approx_cancel_len(),
+            cancel_tasks.len(),
+            "cancel lane dump must match current local scheduler cancel depth"
+        );
         let mut cancel_priority_dist = BTreeMap::new();
         cancel_priority_dist.insert(255u8, cancel_tasks.len());
         lane_states.insert(
@@ -14937,15 +14942,20 @@ mod tests {
                 priority_distribution: cancel_priority_dist,
             },
         );
-        drop(cancel_queue);
+        drop(local_sched);
 
         // Ready lane state (local scheduler)
         let local_sched = worker.local.lock();
         let ready_tasks: Vec<String> = vec![
-            format!("task_1_{}", task1.0),
-            format!("task_4_{}", task4.0),
-            format!("task_5_{}", task5.0),
+            task_label("task_1", task1),
+            task_label("task_4", task4),
+            task_label("task_5", task5),
         ];
+        assert_eq!(
+            local_sched.approx_ready_len(),
+            ready_tasks.len(),
+            "ready lane dump must match current local scheduler ready depth"
+        );
         let mut ready_priority_dist = BTreeMap::new();
         ready_priority_dist.insert(200u8, 1);
         ready_priority_dist.insert(125u8, 1);
@@ -14963,7 +14973,12 @@ mod tests {
 
         // Timed lane state (global ready with deadlines)
         let global_ready_tasks: Vec<String> =
-            vec![format!("task_2_{}", task2.0), format!("task_3_{}", task3.0)];
+            vec![task_label("task_2", task2), task_label("task_3", task3)];
+        assert_eq!(
+            scheduler.global_injector().len(),
+            global_ready_tasks.len(),
+            "timed lane dump must match current global injector timed depth"
+        );
         let mut timed_priority_dist = BTreeMap::new();
         timed_priority_dist.insert(150u8, 1);
         timed_priority_dist.insert(100u8, 1);
@@ -14979,12 +14994,12 @@ mod tests {
 
         // Simulate scheduling order based on 3-lane priority: cancel > timed > ready
         let scheduling_order = vec![
-            format!("cancel_task_{}", cancel_task.0), // Cancel lane preempts all
-            format!("task_3_{}", task3.0),            // Immediate deadline (5ms)
-            format!("task_2_{}", task2.0),            // Near deadline (50ms)
-            format!("task_1_{}", task1.0),            // High priority ready
-            format!("task_4_{}", task4.0),            // Medium priority ready
-            format!("task_5_{}", task5.0),            // Low priority ready
+            task_label("cancel_task", cancel_task), // Cancel lane preempts all
+            task_label("task_3", task3),            // Immediate deadline (5ms)
+            task_label("task_2", task2),            // Near deadline (50ms)
+            task_label("task_1", task1),            // High priority ready
+            task_label("task_4", task4),            // Medium priority ready
+            task_label("task_5", task5),            // Low priority ready
         ];
 
         // Create scheduler state dump
@@ -15016,7 +15031,7 @@ mod tests {
             name: \"cancel\",
             task_count: 1,
             tasks: [
-                \"cancel_task_1683\",
+                \"cancel_task_99_99\",
             ],
             priority_distribution: {
                 255: 1,
@@ -15026,9 +15041,9 @@ mod tests {
             name: \"ready\",
             task_count: 3,
             tasks: [
-                \"task_1_17\",
-                \"task_4_68\",
-                \"task_5_85\",
+                \"task_1_1_1\",
+                \"task_4_4_4\",
+                \"task_5_5_5\",
             ],
             priority_distribution: {
                 75: 1,
@@ -15040,8 +15055,8 @@ mod tests {
             name: \"timed\",
             task_count: 2,
             tasks: [
-                \"task_2_34\",
-                \"task_3_51\",
+                \"task_2_2_2\",
+                \"task_3_3_3\",
             ],
             priority_distribution: {
                 100: 1,
@@ -15050,15 +15065,15 @@ mod tests {
         },
     },
     task_details: {
-        \"cancel_task_1683\": TaskDetail {
-            task_id: \"cancel_task_1683\",
+        \"cancel_task_99_99\": TaskDetail {
+            task_id: \"cancel_task_99_99\",
             priority: 255,
             deadline: None,
             lane: \"cancel\",
             created_at: \"T+30ms\",
         },
-        \"task_1_17\": TaskDetail {
-            task_id: \"task_1_17\",
+        \"task_1_1_1\": TaskDetail {
+            task_id: \"task_1_1_1\",
             priority: 200,
             deadline: Some(
                 \"far\",
@@ -15066,8 +15081,8 @@ mod tests {
             lane: \"ready\",
             created_at: \"T+0ms\",
         },
-        \"task_2_34\": TaskDetail {
-            task_id: \"task_2_34\",
+        \"task_2_2_2\": TaskDetail {
+            task_id: \"task_2_2_2\",
             priority: 150,
             deadline: Some(
                 \"near_50ms\",
@@ -15075,8 +15090,8 @@ mod tests {
             lane: \"timed\",
             created_at: \"T+10ms\",
         },
-        \"task_3_51\": TaskDetail {
-            task_id: \"task_3_51\",
+        \"task_3_3_3\": TaskDetail {
+            task_id: \"task_3_3_3\",
             priority: 100,
             deadline: Some(
                 \"immediate_5ms\",
@@ -15084,15 +15099,15 @@ mod tests {
             lane: \"timed\",
             created_at: \"T+15ms\",
         },
-        \"task_4_68\": TaskDetail {
-            task_id: \"task_4_68\",
+        \"task_4_4_4\": TaskDetail {
+            task_id: \"task_4_4_4\",
             priority: 125,
             deadline: None,
             lane: \"ready\",
             created_at: \"T+20ms\",
         },
-        \"task_5_85\": TaskDetail {
-            task_id: \"task_5_85\",
+        \"task_5_5_5\": TaskDetail {
+            task_id: \"task_5_5_5\",
             priority: 75,
             deadline: None,
             lane: \"ready\",
@@ -15100,12 +15115,12 @@ mod tests {
         },
     },
     scheduling_order: [
-        \"cancel_task_1683\",
-        \"task_3_51\",
-        \"task_2_34\",
-        \"task_1_17\",
-        \"task_4_68\",
-        \"task_5_85\",
+        \"cancel_task_99_99\",
+        \"task_3_3_3\",
+        \"task_2_2_2\",
+        \"task_1_1_1\",
+        \"task_4_4_4\",
+        \"task_5_5_5\",
     ],
 }"
             );
@@ -15127,7 +15142,7 @@ mod tests {
         // Verify cancel lane preemption
         assert_eq!(
             state_dump.scheduling_order[0],
-            format!("cancel_task_{}", cancel_task.0),
+            task_label("cancel_task", cancel_task),
             "Cancel task must be scheduled first"
         );
 
@@ -15135,12 +15150,12 @@ mod tests {
         let timed_tasks_in_order = &state_dump.scheduling_order[1..3];
         assert_eq!(
             timed_tasks_in_order[0],
-            format!("task_3_{}", task3.0),
+            task_label("task_3", task3),
             "Immediate deadline task should come before near deadline"
         );
         assert_eq!(
             timed_tasks_in_order[1],
-            format!("task_2_{}", task2.0),
+            task_label("task_2", task2),
             "Near deadline task should come after immediate deadline"
         );
 
@@ -15148,12 +15163,12 @@ mod tests {
         let ready_tasks_in_order = &state_dump.scheduling_order[3..];
         assert_eq!(
             ready_tasks_in_order[0],
-            format!("task_1_{}", task1.0),
+            task_label("task_1", task1),
             "High priority ready task should come first"
         );
         assert_eq!(
             ready_tasks_in_order[2],
-            format!("task_5_{}", task5.0),
+            task_label("task_5", task5),
             "Low priority ready task should come last"
         );
 
