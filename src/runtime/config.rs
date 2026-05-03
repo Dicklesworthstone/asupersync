@@ -924,6 +924,7 @@ mod tests {
         init_test("test_normalize_preserves_custom_values");
         let mut config = RuntimeConfig {
             worker_threads: 4,
+            worker_cohort_map: None,
             thread_stack_size: 1024,
             thread_name_prefix: "custom".to_string(),
             global_queue_limit: 64,

@@ -664,7 +664,7 @@ mod tests {
     use crate::test_utils::init_test_logging;
     use crate::types::Budget;
     use crate::util::ArenaIndex;
-    use crate::{LabRuntime, RegionId, TaskId};
+    use crate::{RegionId, TaskId};
     use futures_lite::future::block_on;
     use serde_json::Value;
     use std::sync::Mutex as StdMutex;
@@ -2064,19 +2064,20 @@ mod tests {
         // Compile-time test: This function should NOT compile if MutexGuard is Send
         fn test_guard_not_send() {
             fn require_send<T: Send>(_: T) {}
+            require_send(());
 
             // Uncomment the following lines to test - they should fail to compile:
             // let mutex = Mutex::new(42);
             // let guard = unsafe { std::mem::zeroed::<MutexGuard<i32>>() };
             // require_send(guard); // This MUST fail to compile
         }
+        test_guard_not_send();
 
         // Runtime test: Verify normal usage still works
         let mutex = Mutex::new(42);
         let cx = test_cx();
-        let runtime = LabRuntime::new();
 
-        runtime.block_on(async {
+        block_on(async {
             let guard = mutex.lock(&cx).await.expect("lock should succeed");
             assert_eq!(*guard, 42);
 
@@ -2220,7 +2221,7 @@ mod tests {
                 cx: &Cx,
             ) -> Result<i32, LockError> {
                 let guard = mutex.lock(cx).await?;
-                let value = *guard;
+                let _value = *guard;
 
                 // Simulate some async work that causes potential yield point
                 // The guard is held across this await, but within same task context
@@ -2550,7 +2551,7 @@ mod tests {
 
                 // ✓ CORRECT: Acquire, use, and drop guard before await
                 let value = {
-                    let guard = mutex.lock(&cx).await?;
+                    let guard = mutex.lock(&cx).await.expect("mutex lock should succeed");
                     *guard // Copy value out
                     // Guard drops here, before any await point
                 };
@@ -2559,7 +2560,7 @@ mod tests {
                 crate::time::sleep(crate::types::Time::ZERO, std::time::Duration::from_nanos(1))
                     .await;
 
-                Ok(value)
+                Ok::<i32, crate::error::Error>(value)
             })
         }));
 

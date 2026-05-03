@@ -4098,7 +4098,6 @@ mod tests {
 
         // Test with semaphore having fewer permits than requested
         let sem = Semaphore::new(5);
-        let cx = test_cx();
 
         // Phase 1: Verify try_acquire respects atomicity
         let partial_try = sem.try_acquire(10); // Request 10, only 5 available
@@ -4127,8 +4126,8 @@ mod tests {
             let cx1 = test_cx();
             let start_time = std::time::Instant::now();
 
-            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                block_on(async { sem1.acquire(&cx1, 5).await })
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
+                block_on(async move { OwnedSemaphorePermit::acquire(sem1, &cx1, 5).await })
             }));
 
             (result, start_time.elapsed())
@@ -4141,7 +4140,7 @@ mod tests {
         let sem2 = sem_clone.clone();
         let handle2 = std::thread::spawn(move || {
             let cx2 = test_cx();
-            block_on(async { sem2.acquire(&cx2, 2).await })
+            block_on(async move { OwnedSemaphorePermit::acquire(sem2, &cx2, 2).await })
         });
 
         // Task 2 should complete quickly with 2 permits

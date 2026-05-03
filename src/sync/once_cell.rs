@@ -2503,7 +2503,7 @@ mod tests {
             let cell_clone = Arc::clone(&cell3);
             let counter_clone = Arc::clone(&init_count);
             let handle = std::thread::spawn(move || {
-                block_on(cell_clone.get_or_init(|| async {
+                *block_on(cell_clone.get_or_init(|| async {
                     counter_clone.fetch_add(1, Ordering::SeqCst);
                     500u32 + i // Only winner's value should be used
                 }))
@@ -2514,7 +2514,7 @@ mod tests {
         let mut results = Vec::new();
         for handle in handles {
             let result = handle.join().expect("thread should complete");
-            results.push(*result);
+            results.push(result);
         }
 
         // All results should be the same (winner's value)
@@ -2606,7 +2606,7 @@ mod tests {
                 // At this point, set() has completed. The happens-before relationship
                 // established by Release-Acquire on state field means get() MUST
                 // see the written value immediately.
-                cell_reader.get()
+                cell_reader.get().copied()
             });
 
             let set_result = writer.join().expect("writer thread panicked");
@@ -2622,12 +2622,12 @@ mod tests {
 
             // CRITICAL: verify happens-before - get() must see set() value immediately
             crate::assert_with_log!(
-                get_result == Some(&expected_value),
+                get_result == Some(expected_value),
                 &format!(
                     "iteration {}: get() sees set() value immediately after set() completes",
                     iteration
                 ),
-                Some(&expected_value),
+                Some(expected_value),
                 get_result
             );
 
@@ -2780,7 +2780,7 @@ mod tests {
                         "iteration {}: stored value should match winner's value",
                         iteration
                     ),
-                    **winner_value,
+                    *winner_value,
                     *stored_value
                 );
             }
@@ -2887,7 +2887,6 @@ mod tests {
         use std::sync::Arc;
         use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
         use std::thread;
-        use std::time::Duration;
 
         // Stress test: verify that OnceCell::set() and OnceCell::get() have proper
         // happens-before relationship via Release/Acquire ordering.
@@ -2927,7 +2926,7 @@ mod tests {
                                 // Value became visible after 1+ polls - potential ordering issue
                                 late_visibility.fetch_add(1, Ordering::SeqCst);
                             }
-                            return (true, poll_attempts, value);
+                            return (true, poll_attempts, *value);
                         }
                         None => {
                             if poll_attempts > 100 {

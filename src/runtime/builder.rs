@@ -6089,11 +6089,14 @@ worker_threads = 16
     fn runtime_builder_rejects_mismatched_worker_cohort_map() {
         init_test_logging();
 
-        let err = RuntimeBuilder::new()
+        let err = match RuntimeBuilder::new()
             .worker_threads(4)
             .worker_cohorts(vec![0, 1])
             .build()
-            .expect_err("mismatched cohort map should fail closed");
+        {
+            Err(err) => err,
+            Ok(_) => panic!("mismatched cohort map should fail closed"),
+        };
 
         assert_eq!(err.kind(), crate::error::ErrorKind::ConfigError);
         assert!(
