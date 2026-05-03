@@ -4985,3 +4985,9 @@ name = "h2_data_padding_size_max"
 path = "fuzz_targets/h2_data_padding_size_max.rs"
 test = false
 doc = false
+
+[[bin]]
+name = "h2_settings_zero_window_after_init"
+path = "fuzz_targets/h2_settings_zero_window_after_init.rs"
+test = false
+doc = false
