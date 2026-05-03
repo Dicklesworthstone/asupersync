@@ -3407,7 +3407,8 @@ mod tests {
         );
 
         // Phase 6: Test receiver still works normally
-        let changed_future = rx.changed();
+        let cx = test_cx();
+        let changed_future = rx.changed(&cx);
         tx.send_modify(|x| *x = 100)
             .expect("final modify should work");
 
