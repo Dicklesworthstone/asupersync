@@ -25,6 +25,7 @@ use asupersync::runtime::RuntimeState;
 use asupersync::runtime::config::BlockingPoolAffinityProfile;
 use asupersync::runtime::scheduler::local_queue::Stealer;
 use asupersync::runtime::scheduler::stealing::steal_task;
+use asupersync::runtime::scheduler::three_lane::AdaptiveBatchSizingProfile;
 use asupersync::runtime::scheduler::{
     GlobalQueue, IntrusiveRing, IntrusiveStack, LocalQueue, Parker, QUEUE_TAG_READY, Scheduler,
     ThreeLaneScheduler,
@@ -152,6 +153,62 @@ fn run_global_ready_contention_case(
         total_dispatched,
         metrics.global_ready_batch_drains,
         metrics.global_ready_batch_tasks,
+    )
+}
+
+fn run_adaptive_batch_contention_case(
+    producer_count: usize,
+    tasks_per_producer: usize,
+    fixed_batch_size: usize,
+    adaptive_profile: Option<AdaptiveBatchSizingProfile>,
+) -> (usize, u64, u64, usize) {
+    let total_tasks = producer_count * tasks_per_producer;
+    let state = setup_runtime_state(total_tasks as u32 + 1);
+    let mut scheduler = ThreeLaneScheduler::new(1, &state);
+    scheduler.set_steal_batch_size(fixed_batch_size.max(1));
+    scheduler.set_adaptive_batch_profile_for_test(adaptive_profile);
+    let scheduler = Arc::new(scheduler);
+    let barrier = Arc::new(std::sync::Barrier::new(producer_count.max(1)));
+
+    let inject_handles: Vec<_> = (0..producer_count)
+        .map(|producer| {
+            let scheduler = Arc::clone(&scheduler);
+            let barrier = Arc::clone(&barrier);
+            thread::spawn(move || {
+                barrier.wait();
+                let base = producer * tasks_per_producer;
+                for offset in 0..tasks_per_producer {
+                    scheduler.inject_ready(task((base + offset) as u32), 50);
+                }
+            })
+        })
+        .collect();
+
+    for handle in inject_handles {
+        handle.join().expect("producer should complete");
+    }
+
+    let mut scheduler = match Arc::try_unwrap(scheduler) {
+        Ok(scheduler) => scheduler,
+        Err(_) => panic!("all producer handles should release the scheduler"),
+    };
+    let mut workers = scheduler.take_workers();
+    let worker = workers.get_mut(0).expect("benchmark requires one worker");
+    let mut total_dispatched = 0usize;
+    while worker.next_task().is_some() {
+        total_dispatched += 1;
+    }
+
+    let metrics = worker.preemption_metrics();
+    let selected_batch_size = worker
+        .adaptive_batch_snapshot_for_test()
+        .map(|snapshot| snapshot.selected_batch_size)
+        .unwrap_or(fixed_batch_size.max(1));
+    (
+        total_dispatched,
+        metrics.global_ready_batch_drains,
+        metrics.global_ready_batch_tasks,
+        selected_batch_size,
     )
 }
 
@@ -1012,6 +1069,72 @@ fn bench_global_ready_contention(c: &mut Criterion) {
                         black_box(run_global_ready_contention_case(
                             producer_count,
                             tasks_per_producer,
+                        ))
+                    },
+                    BatchSize::SmallInput,
+                )
+            },
+        );
+    }
+
+    group.finish();
+}
+
+fn bench_adaptive_batch_sizing(c: &mut Criterion) {
+    let mut group = c.benchmark_group("scheduler/adaptive_batch_sizing");
+    group.warm_up_time(Duration::from_millis(200));
+    group.measurement_time(Duration::from_millis(600));
+    group.sample_size(20);
+
+    let adaptive_profile = AdaptiveBatchSizingProfile {
+        enabled: true,
+        min_batch_size: 1,
+        max_batch_size: 8,
+        scale_up_ready_depth: 32,
+        scale_up_in_flight: 4,
+        scale_up_claim_failures: 1,
+        cancel_debt_floor: 4,
+        cooldown_steps: 2,
+    };
+
+    for &(producer_count, tasks_per_producer, fixed_batch_size) in &[
+        (1usize, 32usize, 4usize),
+        (8usize, 64usize, 1usize),
+        (32usize, 32usize, 1usize),
+        (64usize, 32usize, 1usize),
+    ] {
+        let total_tasks = producer_count * tasks_per_producer;
+        group.throughput(Throughput::Elements(total_tasks as u64));
+        group.bench_with_input(
+            BenchmarkId::new("fixed", producer_count),
+            &producer_count,
+            |b, _| {
+                b.iter_batched(
+                    || (),
+                    |_| {
+                        black_box(run_adaptive_batch_contention_case(
+                            producer_count,
+                            tasks_per_producer,
+                            fixed_batch_size,
+                            None,
+                        ))
+                    },
+                    BatchSize::SmallInput,
+                )
+            },
+        );
+        group.bench_with_input(
+            BenchmarkId::new("adaptive", producer_count),
+            &producer_count,
+            |b, _| {
+                b.iter_batched(
+                    || (),
+                    |_| {
+                        black_box(run_adaptive_batch_contention_case(
+                            producer_count,
+                            tasks_per_producer,
+                            fixed_batch_size,
+                            Some(adaptive_profile),
                         ))
                     },
                     BatchSize::SmallInput,
@@ -2177,6 +2300,7 @@ criterion_group!(
     bench_steal_task,
     bench_try_steal_locality,
     bench_global_ready_contention,
+    bench_adaptive_batch_sizing,
     bench_scheduler_throughput,
     bench_scheduler_capacity_profiles,
     bench_parker,
