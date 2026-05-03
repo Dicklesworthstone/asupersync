@@ -8871,7 +8871,7 @@ fn simulate_asupersync_w3c_tracecontext_propagation(
 ) -> W3CTraceContextResult {
     let mut sampled_propagations = 0;
     let mut trace_flag_updates = 0;
-    let mut w3c_violations = Vec::new();
+    let w3c_violations = Vec::new();
     let mut propagation_metric_value = 0u64;
 
     // Validate W3C tracecontext propagation for each span relationship
@@ -8918,7 +8918,7 @@ fn simulate_reference_w3c_tracecontext_propagation(
 ) -> W3CTraceContextResult {
     let mut sampled_propagations = 0;
     let mut trace_flag_updates = 0;
-    let mut w3c_violations = Vec::new();
+    let w3c_violations = Vec::new();
     let mut propagation_metric_value = 0u64;
 
     // OpenTelemetry SDK W3C tracecontext propagation logic simulation
@@ -9377,7 +9377,7 @@ struct EmptyResourceSpansResult {
 fn simulate_asupersync_empty_resource_spans_handling(
     scenario: &EmptyResourceSpansScenario,
 ) -> EmptyResourceSpansResult {
-    let mut processing_errors = Vec::new();
+    let processing_errors = Vec::new();
 
     // Simulate OTLP spec §6.1 compliance: empty resource_spans MUST return 200/OK
     let response_status = if scenario.request_data.total_spans_count == 0 {
@@ -9421,7 +9421,7 @@ fn simulate_asupersync_empty_resource_spans_handling(
 fn simulate_reference_empty_resource_spans_handling(
     scenario: &EmptyResourceSpansScenario,
 ) -> EmptyResourceSpansResult {
-    let mut processing_errors = Vec::new();
+    let processing_errors = Vec::new();
 
     // OpenTelemetry SDK should follow OTLP spec §6.1
     let response_status = if scenario.request_data.total_spans_count == 0 {
@@ -11273,7 +11273,7 @@ fn simulate_asupersync_producer_messaging_validation(
 ) -> ProducerMessagingResult {
     let mut accepted_count = 0;
     let mut dropped_count = 0;
-    let mut warning_count = 0;
+    let warning_count = 0;
     let mut validation_errors = Vec::new();
     let mut validation_metric_value = 0u64;
 
@@ -11331,7 +11331,7 @@ fn simulate_reference_producer_messaging_validation(
 ) -> ProducerMessagingResult {
     let mut accepted_count = 0;
     let mut dropped_count = 0;
-    let mut warning_count = 0;
+    let warning_count = 0;
     let mut validation_errors = Vec::new();
     let mut validation_metric_value = 0u64;
 
@@ -11998,7 +11998,7 @@ fn simulate_asupersync_consumer_operation_validation(
 ) -> ConsumerOperationResult {
     let mut processed_count = 0;
     let mut operation_set_count = 0;
-    let mut operation_errors = Vec::new();
+    let operation_errors = Vec::new();
     let mut operation_metric_value = 0u64;
 
     // Validate each span for CONSUMER operation conventions
@@ -12048,7 +12048,7 @@ fn simulate_reference_consumer_operation_validation(
 ) -> ConsumerOperationResult {
     let mut processed_count = 0;
     let mut operation_set_count = 0;
-    let mut operation_errors = Vec::new();
+    let operation_errors = Vec::new();
     let mut operation_metric_value = 0u64;
 
     // OpenTelemetry SDK CONSUMER operation convention logic simulation
@@ -12633,8 +12633,8 @@ fn simulate_reference_instrumentation_scope_validation(
     }
 }
 
-/// Helper function to create test span with specific scope name
-fn create_test_span_with_scope(span_name: &str, scope_name: &str) -> TestSpan {
+/// Helper function to create test span with specific scope metadata
+fn create_test_span_with_scope(span_name: &str, scope: &InstrumentationScopeInfo) -> TestSpan {
     TestSpan {
         name: span_name.to_string(),
         trace_id: "12345678901234567890123456789012".to_string(),
@@ -12644,8 +12644,8 @@ fn create_test_span_with_scope(span_name: &str, scope_name: &str) -> TestSpan {
         start_time: 1000000,
         end_time: 2000000,
         attributes: HashMap::new(),
-        instrumentation_scope_name: scope_name.to_string(),
-        instrumentation_scope_version: Some("1.0.0".to_string()),
+        instrumentation_scope_name: scope.name.clone(),
+        instrumentation_scope_version: scope.version.clone(),
     }
 }
 
@@ -12935,7 +12935,7 @@ fn simulate_asupersync_span_status_message_processing(
 ) -> StatusMessageProcessingResult {
     let mut omitted_messages = 0;
     let mut preserved_messages = 0;
-    let mut validation_errors = Vec::new();
+    let validation_errors = Vec::new();
     let mut message_omitted = false;
     let mut message_preserved = false;
     let mut processed_message = scenario.span.status_message.clone();
@@ -13014,7 +13014,7 @@ fn simulate_reference_span_status_message_processing(
 ) -> StatusMessageProcessingResult {
     let mut omitted_messages = 0;
     let mut preserved_messages = 0;
-    let mut validation_errors = Vec::new();
+    let validation_errors = Vec::new();
     let mut message_omitted = false;
     let mut message_preserved = false;
     let mut processed_message = scenario.span.status_message.clone();
@@ -14006,7 +14006,7 @@ fn simulate_asupersync_monotonic_reset_detection(
     let mut reset_timestamps = Vec::new();
     let mut reset_positions = Vec::new();
     let mut synthetic_events = Vec::new();
-    let mut validation_errors = Vec::new();
+    let validation_errors = Vec::new();
     let mut monotonic_violations = 0;
 
     // Only process monotonic metrics for reset detection
@@ -14092,7 +14092,7 @@ fn simulate_reference_monotonic_reset_detection(
     let mut reset_timestamps = Vec::new();
     let mut reset_positions = Vec::new();
     let mut synthetic_events = Vec::new();
-    let mut validation_errors = Vec::new();
+    let validation_errors = Vec::new();
     let mut monotonic_violations = 0;
 
     // Reference implementation only processes monotonic metrics
@@ -14484,7 +14484,7 @@ fn simulate_asupersync_timeout_config_validation(
     let mut accepted_configs = 0;
     let mut silent_conversions = 0;
     let mut config_accepted = false;
-    let mut behavior_type = TimeoutBehavior::RejectConfig;
+    let behavior_type;
     let mut error_type = None;
     let mut silent_conversion_detected = false;
     let mut final_timeout = None;
@@ -14603,7 +14603,7 @@ fn simulate_reference_timeout_config_validation(
     let mut accepted_configs = 0;
     let mut silent_conversions = 0;
     let mut config_accepted = false;
-    let mut behavior_type = TimeoutBehavior::RejectConfig;
+    let behavior_type;
     let mut error_type = None;
     let mut silent_conversion_detected = false;
     let mut final_timeout = None;
@@ -16126,7 +16126,7 @@ struct ArrayTruncationResult {
 fn simulate_asupersync_array_truncation(
     scenario: &ArrayTruncationScenario,
 ) -> ArrayTruncationResult {
-    let mut validation_errors = Vec::new();
+    let validation_errors = Vec::new();
     let mut truncated_arrays = 0;
     let mut truncation_markers = 0;
     let mut original_lengths = Vec::new();
@@ -16194,7 +16194,7 @@ fn simulate_asupersync_array_truncation(
 fn simulate_reference_array_truncation(
     scenario: &ArrayTruncationScenario,
 ) -> ArrayTruncationResult {
-    let mut validation_errors = Vec::new();
+    let validation_errors = Vec::new();
     let mut truncated_arrays = 0;
     let mut truncation_markers = 0;
     let mut original_lengths = Vec::new();
@@ -16593,7 +16593,7 @@ fn simulate_asupersync_error_status_handling(
     let mut unset_status_spans = 0;
     let mut silent_demotions = 0;
     let mut status_preserved = true;
-    let mut final_status = scenario.span.status_code.clone();
+    let final_status;
     let mut silent_demotion_detected = false;
     let mut description_handling = DescriptionHandling::PreserveNonEmpty;
     let mut final_description = scenario.span.status_description.clone();
@@ -16700,7 +16700,7 @@ fn simulate_reference_error_status_handling(
     let mut unset_status_spans = 0;
     let mut silent_demotions = 0;
     let mut status_preserved = true;
-    let mut final_status = scenario.span.status_code.clone();
+    let final_status;
     let mut silent_demotion_detected = false;
     let mut description_handling = DescriptionHandling::PreserveNonEmpty;
     let mut final_description = scenario.span.status_description.clone();
@@ -17585,7 +17585,7 @@ fn simulate_asupersync_span_name_sanitization(
 ) -> NameSanitizationResult {
     let mut sanitization_required = false;
     let mut sanitized = false;
-    let mut rejected = false;
+    let rejected = false;
     let mut sanitization_method = NameSanitizationMethod::None;
     let mut final_name = Some(scenario.span.name.clone());
 
@@ -18409,7 +18409,7 @@ struct ReservedKeyHandlingResult {
 fn simulate_asupersync_reserved_key_handling(
     scenario: &ReservedKeyScenario,
 ) -> ReservedKeyHandlingResult {
-    let mut validation_errors = Vec::new();
+    let validation_errors = Vec::new();
     let mut spans_with_reserved_keys = 0;
     let mut spans_with_moved_keys = 0;
     let original_attributes = scenario.span.attributes.clone();
@@ -18846,7 +18846,7 @@ struct LargeAttributeTruncationResult {
 fn simulate_asupersync_large_attribute_truncation(
     scenario: &LargeAttributeScenario,
 ) -> LargeAttributeTruncationResult {
-    let mut validation_errors = Vec::new();
+    let validation_errors = Vec::new();
     let mut spans_with_large_attrs = 0;
     let mut spans_with_truncated_attrs = 0;
     let max_length = scenario.span.max_attribute_value_length;
@@ -19275,13 +19275,12 @@ struct DuplicateKeyHandlingResult {
 fn simulate_asupersync_duplicate_key_handling(
     scenario: &DuplicateKeyScenario,
 ) -> DuplicateKeyHandlingResult {
-    let mut validation_errors = Vec::new();
+    let validation_errors = Vec::new();
     let mut spans_with_duplicates = 0;
     let mut spans_deduplicated = 0;
     let original_attributes = scenario.span.attributes.clone();
     let original_count = original_attributes.len();
     let mut final_attributes = Vec::new();
-    let mut seen_keys = std::collections::HashSet::<String>::new();
     let mut duplicate_keys = Vec::new();
     let mut duplicates_detected = false;
 
@@ -20605,7 +20604,7 @@ fn simulate_asupersync_active_span_filtering(
     let mut active_detected = false;
     let mut span_excluded = false;
     let mut exclusion_reason = String::new();
-    let mut included_in_export = true; // Default to include
+    let included_in_export;
 
     let start_time = scenario.span.start_time_unix_nano;
     let end_time = scenario.span.end_time_unix_nano;
@@ -21086,12 +21085,12 @@ fn simulate_asupersync_cross_trace_validation(
     let mut validation_errors = Vec::new();
     let mut cross_trace_spans = 0;
     let mut accepted_spans = 0;
-    let mut rejected_spans = 0;
+    let rejected_spans = 0;
     let original_span = scenario.span.clone();
     let mut cross_trace_detected = false;
-    let mut span_accepted = true; // Default to accept
-    let mut rejection_reason = String::new();
-    let mut included_in_export = true;
+    let span_accepted;
+    let rejection_reason = String::new();
+    let included_in_export;
 
     // Check if this is a cross-trace scenario
     if let Some(parent_id) = &scenario.span.parent_span_id {
@@ -22278,10 +22277,11 @@ fn validate_bounds_validation_implementation_consistency(
 // OTLP-103: CONSUMER span messaging operation validation conformance test
 //
 
-#[test]
-fn otlp_103_consumer_messaging_operation_conformance() {
-    // Test scenarios for CONSUMER span messaging operation validation per OTLP semantic conventions
-    let scenarios = vec![
+mod otlp_103_consumer_messaging_operation_validation {
+    #[test]
+    fn otlp_103_consumer_messaging_operation_conformance() {
+        // Test scenarios for CONSUMER span messaging operation validation per OTLP semantic conventions
+        let scenarios = vec![
         ConsumerOperationScenario {
             description: "CONSUMER span with valid 'receive' operation (should be accepted)".to_string(),
             span: ConsumerOperationSpanInfo {
@@ -22442,356 +22442,366 @@ fn otlp_103_consumer_messaging_operation_conformance() {
         },
     ];
 
-    for scenario in scenarios {
-        println!("Testing scenario: {}", scenario.description);
+        for scenario in scenarios {
+            println!("Testing scenario: {}", scenario.description);
 
-        // Simulate asupersync exporter behavior
-        let asupersync_result = simulate_asupersync_consumer_operation_validation(&scenario);
+            // Simulate asupersync exporter behavior
+            let asupersync_result = simulate_asupersync_consumer_operation_validation(&scenario);
 
-        // Simulate reference implementation behavior
-        let reference_result = simulate_reference_consumer_operation_validation(&scenario);
+            // Simulate reference implementation behavior
+            let reference_result = simulate_reference_consumer_operation_validation(&scenario);
 
-        // Validate individual results
-        validate_consumer_operation_validation_logic(&asupersync_result).expect(&format!(
-            "Asupersync consumer operation validation logic failed for scenario: {}",
-            scenario.description
-        ));
+            // Validate individual results
+            validate_consumer_operation_validation_logic(&asupersync_result).expect(&format!(
+                "Asupersync consumer operation validation logic failed for scenario: {}",
+                scenario.description
+            ));
 
-        validate_consumer_operation_validation_logic(&reference_result).expect(&format!(
-            "Reference consumer operation validation logic failed for scenario: {}",
-            scenario.description
-        ));
+            validate_consumer_operation_validation_logic(&reference_result).expect(&format!(
+                "Reference consumer operation validation logic failed for scenario: {}",
+                scenario.description
+            ));
 
-        // Validate implementation consistency
-        validate_consumer_operation_validation_implementation_consistency(
-            &asupersync_result,
-            &reference_result,
-        )
-        .expect(&format!(
-            "Implementation consistency failed for scenario: {}",
-            scenario.description
-        ));
+            // Validate implementation consistency
+            validate_consumer_operation_validation_implementation_consistency(
+                &asupersync_result,
+                &reference_result,
+            )
+            .expect(&format!(
+                "Implementation consistency failed for scenario: {}",
+                scenario.description
+            ));
 
-        println!("✓ Scenario passed: {}", scenario.description);
-    }
-}
-
-/// Test scenario for CONSUMER span messaging operation validation
-#[derive(Debug, Clone)]
-struct ConsumerOperationScenario {
-    description: String,
-    span: ConsumerOperationSpanInfo,
-    expected_invalid_operation_detected: bool,
-    expected_span_rejected: bool,
-    expected_rejection_reason: String,
-    expected_included_in_export: bool,
-    expected_otlp_compliant: bool,
-}
-
-/// Span information for consumer operation validation testing
-#[derive(Debug, Clone)]
-struct ConsumerOperationSpanInfo {
-    name: String,
-    trace_id: String,
-    span_id: String,
-    span_kind: SpanKind,
-    attributes: Vec<(String, String)>,
-}
-
-/// Span kind enumeration
-#[derive(Debug, Clone, PartialEq)]
-enum SpanKind {
-    Unspecified,
-    Internal,
-    Server,
-    Client,
-    Producer,
-    Consumer,
-}
-
-/// Result of consumer operation validation testing
-#[derive(Debug, Clone)]
-struct ConsumerOperationValidationResult {
-    invalid_operation_detected: bool,
-    span_rejected: bool,
-    rejection_reason: String,
-    original_span: ConsumerOperationSpanInfo,
-    included_in_export: bool,
-    messaging_operation_value: Option<String>,
-    is_consumer_span: bool,
-    validated: bool, // Whether validation was applied (only for CONSUMER spans)
-    processed_spans_count: usize,
-    consumer_spans_count: usize,
-    rejected_spans_count: usize,
-    accepted_spans_count: usize,
-    validation_errors: Vec<String>,
-    validation_correct: bool,
-    validation_applied: bool,
-    otlp_compliant: bool,
-    telemetry_emitted: bool,
-}
-
-/// Valid messaging operations for CONSUMER spans per OTLP semantic conventions
-const VALID_CONSUMER_MESSAGING_OPERATIONS: &[&str] = &["publish", "receive", "process"];
-
-/// Simulate asupersync consumer operation validation behavior
-fn simulate_asupersync_consumer_operation_validation(
-    scenario: &ConsumerOperationScenario,
-) -> ConsumerOperationValidationResult {
-    let mut validation_errors = Vec::new();
-    let mut consumer_spans = 0;
-    let mut rejected_spans = 0;
-    let mut accepted_spans = 0;
-    let original_span = scenario.span.clone();
-    let mut invalid_operation_detected = false;
-    let mut span_rejected = false;
-    let mut rejection_reason = String::new();
-    let mut included_in_export = true; // Default to include
-    let mut validated = false;
-
-    let is_consumer_span = scenario.span.span_kind == SpanKind::Consumer;
-    if is_consumer_span {
-        consumer_spans += 1;
+            println!("✓ Scenario passed: {}", scenario.description);
+        }
     }
 
-    // Extract messaging.operation attribute value
-    let messaging_operation_value = scenario
-        .span
-        .attributes
-        .iter()
-        .find(|(key, _)| key == "messaging.operation")
-        .map(|(_, value)| value.clone());
+    /// Test scenario for CONSUMER span messaging operation validation
+    #[derive(Debug, Clone)]
+    struct ConsumerOperationScenario {
+        description: String,
+        span: ConsumerOperationSpanInfo,
+        expected_invalid_operation_detected: bool,
+        expected_span_rejected: bool,
+        expected_rejection_reason: String,
+        expected_included_in_export: bool,
+        expected_otlp_compliant: bool,
+    }
 
-    // Only validate messaging.operation for CONSUMER spans
-    if is_consumer_span {
-        validated = true;
+    /// Span information for consumer operation validation testing
+    #[derive(Debug, Clone)]
+    struct ConsumerOperationSpanInfo {
+        name: String,
+        trace_id: String,
+        span_id: String,
+        span_kind: SpanKind,
+        attributes: Vec<(String, String)>,
+    }
 
-        if let Some(operation) = &messaging_operation_value {
-            // Check if the operation is in the allowed list
-            if !VALID_CONSUMER_MESSAGING_OPERATIONS.contains(&operation.as_str()) {
-                invalid_operation_detected = true;
-                span_rejected = true;
-                included_in_export = false;
-                rejected_spans += 1;
-                rejection_reason = format!(
-                    "Invalid messaging.operation '{}' for CONSUMER span (must be one of: {})",
-                    operation,
-                    VALID_CONSUMER_MESSAGING_OPERATIONS.join(", ")
-                );
-                validation_errors.push(format!(
-                    "CONSUMER span has invalid messaging.operation: '{}'",
-                    operation
-                ));
+    /// Span kind enumeration
+    #[derive(Debug, Clone, PartialEq)]
+    enum SpanKind {
+        Unspecified,
+        Internal,
+        Server,
+        Client,
+        Producer,
+        Consumer,
+    }
+
+    /// Result of consumer operation validation testing
+    #[derive(Debug, Clone)]
+    struct ConsumerOperationValidationResult {
+        invalid_operation_detected: bool,
+        span_rejected: bool,
+        rejection_reason: String,
+        original_span: ConsumerOperationSpanInfo,
+        included_in_export: bool,
+        messaging_operation_value: Option<String>,
+        is_consumer_span: bool,
+        validated: bool, // Whether validation was applied (only for CONSUMER spans)
+        processed_spans_count: usize,
+        consumer_spans_count: usize,
+        rejected_spans_count: usize,
+        accepted_spans_count: usize,
+        validation_errors: Vec<String>,
+        validation_correct: bool,
+        validation_applied: bool,
+        otlp_compliant: bool,
+        telemetry_emitted: bool,
+    }
+
+    /// Valid messaging operations for CONSUMER spans per OTLP semantic conventions
+    const VALID_CONSUMER_MESSAGING_OPERATIONS: &[&str] = &["publish", "receive", "process"];
+
+    /// Simulate asupersync consumer operation validation behavior
+    fn simulate_asupersync_consumer_operation_validation(
+        scenario: &ConsumerOperationScenario,
+    ) -> ConsumerOperationValidationResult {
+        let mut validation_errors = Vec::new();
+        let mut consumer_spans = 0;
+        let mut rejected_spans = 0;
+        let mut accepted_spans = 0;
+        let original_span = scenario.span.clone();
+        let mut invalid_operation_detected = false;
+        let mut span_rejected = false;
+        let mut rejection_reason = String::new();
+        let mut included_in_export = true; // Default to include
+        let mut validated = false;
+
+        let is_consumer_span = scenario.span.span_kind == SpanKind::Consumer;
+        if is_consumer_span {
+            consumer_spans += 1;
+        }
+
+        // Extract messaging.operation attribute value
+        let messaging_operation_value = scenario
+            .span
+            .attributes
+            .iter()
+            .find(|(key, _)| key == "messaging.operation")
+            .map(|(_, value)| value.clone());
+
+        // Only validate messaging.operation for CONSUMER spans
+        if is_consumer_span {
+            validated = true;
+
+            if let Some(operation) = &messaging_operation_value {
+                // Check if the operation is in the allowed list
+                if !VALID_CONSUMER_MESSAGING_OPERATIONS.contains(&operation.as_str()) {
+                    invalid_operation_detected = true;
+                    span_rejected = true;
+                    included_in_export = false;
+                    rejected_spans += 1;
+                    rejection_reason = format!(
+                        "Invalid messaging.operation '{}' for CONSUMER span (must be one of: {})",
+                        operation,
+                        VALID_CONSUMER_MESSAGING_OPERATIONS.join(", ")
+                    );
+                    validation_errors.push(format!(
+                        "CONSUMER span has invalid messaging.operation: '{}'",
+                        operation
+                    ));
+                } else {
+                    // Valid operation
+                    accepted_spans += 1;
+                }
             } else {
-                // Valid operation
+                // No messaging.operation attribute - this is allowed
                 accepted_spans += 1;
             }
         } else {
-            // No messaging.operation attribute - this is allowed
+            // Non-CONSUMER spans are not validated for messaging.operation
             accepted_spans += 1;
         }
-    } else {
-        // Non-CONSUMER spans are not validated for messaging.operation
-        accepted_spans += 1;
-    }
 
-    // Check validation correctness
-    let validation_correct = invalid_operation_detected
-        == scenario.expected_invalid_operation_detected
-        && span_rejected == scenario.expected_span_rejected
-        && rejection_reason == scenario.expected_rejection_reason
-        && included_in_export == scenario.expected_included_in_export;
+        // Check validation correctness
+        let validation_correct = invalid_operation_detected
+            == scenario.expected_invalid_operation_detected
+            && span_rejected == scenario.expected_span_rejected
+            && rejection_reason == scenario.expected_rejection_reason
+            && included_in_export == scenario.expected_included_in_export;
 
-    let validation_applied = is_consumer_span; // Only apply validation to CONSUMER spans
+        let validation_applied = is_consumer_span; // Only apply validation to CONSUMER spans
 
-    // OTLP compliance: CONSUMER spans with invalid messaging.operation must be rejected
-    let otlp_compliant = if is_consumer_span && messaging_operation_value.is_some() {
-        let operation = messaging_operation_value.as_ref().unwrap();
-        if VALID_CONSUMER_MESSAGING_OPERATIONS.contains(&operation.as_str()) {
-            // Valid operation - should be accepted
-            !span_rejected && included_in_export
+        // OTLP compliance: CONSUMER spans with invalid messaging.operation must be rejected
+        let otlp_compliant = if is_consumer_span && messaging_operation_value.is_some() {
+            let operation = messaging_operation_value.as_ref().unwrap();
+            if VALID_CONSUMER_MESSAGING_OPERATIONS.contains(&operation.as_str()) {
+                // Valid operation - should be accepted
+                !span_rejected && included_in_export
+            } else {
+                // Invalid operation - should be rejected
+                span_rejected && !included_in_export
+            }
         } else {
-            // Invalid operation - should be rejected
-            span_rejected && !included_in_export
+            // No messaging.operation or non-CONSUMER span - should be accepted
+            !span_rejected && included_in_export
+        };
+
+        ConsumerOperationValidationResult {
+            invalid_operation_detected,
+            span_rejected,
+            rejection_reason,
+            original_span,
+            included_in_export,
+            messaging_operation_value,
+            is_consumer_span,
+            validated,
+            processed_spans_count: 1,
+            consumer_spans_count: consumer_spans,
+            rejected_spans_count: rejected_spans,
+            accepted_spans_count: accepted_spans,
+            validation_errors,
+            validation_correct,
+            validation_applied,
+            otlp_compliant,
+            telemetry_emitted: true, // Assume telemetry is emitted for validation events
         }
-    } else {
-        // No messaging.operation or non-CONSUMER span - should be accepted
-        !span_rejected && included_in_export
-    };
-
-    ConsumerOperationValidationResult {
-        invalid_operation_detected,
-        span_rejected,
-        rejection_reason,
-        original_span,
-        included_in_export,
-        messaging_operation_value,
-        is_consumer_span,
-        validated,
-        processed_spans_count: 1,
-        consumer_spans_count: consumer_spans,
-        rejected_spans_count: rejected_spans,
-        accepted_spans_count: accepted_spans,
-        validation_errors,
-        validation_correct,
-        validation_applied,
-        otlp_compliant,
-        telemetry_emitted: true, // Assume telemetry is emitted for validation events
-    }
-}
-
-/// Simulate reference implementation consumer operation validation behavior
-fn simulate_reference_consumer_operation_validation(
-    scenario: &ConsumerOperationScenario,
-) -> ConsumerOperationValidationResult {
-    // Reference implementation follows same logic as asupersync
-    simulate_asupersync_consumer_operation_validation(scenario)
-}
-
-/// Verify consumer operation validation logic
-fn validate_consumer_operation_validation_logic(
-    result: &ConsumerOperationValidationResult,
-) -> Result<(), String> {
-    if !result.validation_correct {
-        return Err("Consumer operation validation logic is incorrect".to_string());
     }
 
-    if result.is_consumer_span != result.validation_applied {
-        return Err("Validation should only be applied to CONSUMER spans".to_string());
+    /// Simulate reference implementation consumer operation validation behavior
+    fn simulate_reference_consumer_operation_validation(
+        scenario: &ConsumerOperationScenario,
+    ) -> ConsumerOperationValidationResult {
+        // Reference implementation follows same logic as asupersync
+        simulate_asupersync_consumer_operation_validation(scenario)
     }
 
-    // Check OTLP compliance
-    if !result.otlp_compliant {
-        return Err("Consumer operation validation is not OTLP compliant".to_string());
-    }
+    /// Verify consumer operation validation logic
+    fn validate_consumer_operation_validation_logic(
+        result: &ConsumerOperationValidationResult,
+    ) -> Result<(), String> {
+        if !result.validation_correct {
+            return Err("Consumer operation validation logic is incorrect".to_string());
+        }
 
-    // Critical check: CONSUMER spans with invalid operations must be rejected
-    if result.is_consumer_span && result.invalid_operation_detected && !result.span_rejected {
-        return Err(
-            "CRITICAL: CONSUMER span with invalid messaging.operation was not rejected".to_string(),
-        );
-    }
+        if result.is_consumer_span != result.validation_applied {
+            return Err("Validation should only be applied to CONSUMER spans".to_string());
+        }
 
-    // Critical check: rejected spans should not be included in export
-    if result.span_rejected && result.included_in_export {
-        return Err("CRITICAL: Rejected span was still included in export".to_string());
-    }
+        // Check OTLP compliance
+        if !result.otlp_compliant {
+            return Err("Consumer operation validation is not OTLP compliant".to_string());
+        }
 
-    // Critical check: rejection reason must be provided when rejecting
-    if result.span_rejected && result.rejection_reason.is_empty() {
-        return Err("CRITICAL: Span rejected but no rejection reason provided".to_string());
-    }
+        // Critical check: CONSUMER spans with invalid operations must be rejected
+        if result.is_consumer_span && result.invalid_operation_detected && !result.span_rejected {
+            return Err(
+                "CRITICAL: CONSUMER span with invalid messaging.operation was not rejected"
+                    .to_string(),
+            );
+        }
 
-    // Critical check: no rejection reason when span is accepted
-    if !result.span_rejected && !result.rejection_reason.is_empty() {
-        return Err("CRITICAL: Rejection reason provided but span was not rejected".to_string());
-    }
+        // Critical check: rejected spans should not be included in export
+        if result.span_rejected && result.included_in_export {
+            return Err("CRITICAL: Rejected span was still included in export".to_string());
+        }
 
-    // Critical check: counts must be consistent
-    if result.processed_spans_count != result.rejected_spans_count + result.accepted_spans_count {
-        return Err(
-            "CRITICAL: Processed spans count doesn't match rejected + accepted counts".to_string(),
-        );
-    }
+        // Critical check: rejection reason must be provided when rejecting
+        if result.span_rejected && result.rejection_reason.is_empty() {
+            return Err("CRITICAL: Span rejected but no rejection reason provided".to_string());
+        }
 
-    // Critical check: valid operations should be accepted
-    if result.is_consumer_span && result.messaging_operation_value.is_some() {
-        let operation = result.messaging_operation_value.as_ref().unwrap();
-        if VALID_CONSUMER_MESSAGING_OPERATIONS.contains(&operation.as_str()) && result.span_rejected
+        // Critical check: no rejection reason when span is accepted
+        if !result.span_rejected && !result.rejection_reason.is_empty() {
+            return Err(
+                "CRITICAL: Rejection reason provided but span was not rejected".to_string(),
+            );
+        }
+
+        // Critical check: counts must be consistent
+        if result.processed_spans_count != result.rejected_spans_count + result.accepted_spans_count
         {
-            return Err(format!(
-                "CRITICAL: CONSUMER span with valid messaging.operation '{}' was rejected",
-                operation
-            ));
+            return Err(
+                "CRITICAL: Processed spans count doesn't match rejected + accepted counts"
+                    .to_string(),
+            );
         }
+
+        // Critical check: valid operations should be accepted
+        if result.is_consumer_span && result.messaging_operation_value.is_some() {
+            let operation = result.messaging_operation_value.as_ref().unwrap();
+            if VALID_CONSUMER_MESSAGING_OPERATIONS.contains(&operation.as_str())
+                && result.span_rejected
+            {
+                return Err(format!(
+                    "CRITICAL: CONSUMER span with valid messaging.operation '{}' was rejected",
+                    operation
+                ));
+            }
+        }
+
+        // Critical check: non-CONSUMER spans should not be validated for messaging.operation
+        if !result.is_consumer_span && result.validated {
+            return Err(
+                "CRITICAL: Non-CONSUMER span was validated for messaging.operation".to_string(),
+            );
+        }
+
+        Ok(())
     }
 
-    // Critical check: non-CONSUMER spans should not be validated for messaging.operation
-    if !result.is_consumer_span && result.validated {
-        return Err(
-            "CRITICAL: Non-CONSUMER span was validated for messaging.operation".to_string(),
-        );
+    /// Verify implementation consistency for consumer operation validation
+    fn validate_consumer_operation_validation_implementation_consistency(
+        asupersync_result: &ConsumerOperationValidationResult,
+        reference_result: &ConsumerOperationValidationResult,
+    ) -> Result<(), String> {
+        // Both implementations should detect invalid operations consistently
+        if asupersync_result.invalid_operation_detected
+            != reference_result.invalid_operation_detected
+        {
+            return Err("Invalid operation detection differs between implementations".to_string());
+        }
+
+        // Both implementations should reject spans consistently
+        if asupersync_result.span_rejected != reference_result.span_rejected {
+            return Err("Span rejection differs between implementations".to_string());
+        }
+
+        // Both implementations should provide same rejection reason
+        if asupersync_result.rejection_reason != reference_result.rejection_reason {
+            return Err("Rejection reason differs between implementations".to_string());
+        }
+
+        // Both implementations should include spans consistently
+        if asupersync_result.included_in_export != reference_result.included_in_export {
+            return Err("Export inclusion differs between implementations".to_string());
+        }
+
+        // Both implementations should extract same messaging operation value
+        if asupersync_result.messaging_operation_value != reference_result.messaging_operation_value
+        {
+            return Err("Messaging operation value differs between implementations".to_string());
+        }
+
+        // Both implementations should identify CONSUMER spans consistently
+        if asupersync_result.is_consumer_span != reference_result.is_consumer_span {
+            return Err("CONSUMER span identification differs between implementations".to_string());
+        }
+
+        // Both implementations should validate consistently
+        if asupersync_result.validated != reference_result.validated {
+            return Err("Validation application differs between implementations".to_string());
+        }
+
+        // Both implementations should count consumer spans consistently
+        if asupersync_result.consumer_spans_count != reference_result.consumer_spans_count {
+            return Err("Consumer spans count differs between implementations".to_string());
+        }
+
+        // Both implementations should count rejected spans consistently
+        if asupersync_result.rejected_spans_count != reference_result.rejected_spans_count {
+            return Err("Rejected spans count differs between implementations".to_string());
+        }
+
+        // Both implementations should count accepted spans consistently
+        if asupersync_result.accepted_spans_count != reference_result.accepted_spans_count {
+            return Err("Accepted spans count differs between implementations".to_string());
+        }
+
+        // Both implementations should have same validation correctness
+        if asupersync_result.validation_correct != reference_result.validation_correct {
+            return Err("Validation correctness differs between implementations".to_string());
+        }
+
+        // Both implementations should apply validation consistently
+        if asupersync_result.validation_applied != reference_result.validation_applied {
+            return Err("Validation application differs between implementations".to_string());
+        }
+
+        // Both implementations should be OTLP compliant
+        if asupersync_result.otlp_compliant != reference_result.otlp_compliant {
+            return Err("OTLP compliance differs between implementations".to_string());
+        }
+
+        // Both implementations should emit telemetry consistently
+        if asupersync_result.telemetry_emitted != reference_result.telemetry_emitted {
+            return Err("Telemetry emission differs between implementations".to_string());
+        }
+
+        Ok(())
     }
-
-    Ok(())
-}
-
-/// Verify implementation consistency for consumer operation validation
-fn validate_consumer_operation_validation_implementation_consistency(
-    asupersync_result: &ConsumerOperationValidationResult,
-    reference_result: &ConsumerOperationValidationResult,
-) -> Result<(), String> {
-    // Both implementations should detect invalid operations consistently
-    if asupersync_result.invalid_operation_detected != reference_result.invalid_operation_detected {
-        return Err("Invalid operation detection differs between implementations".to_string());
-    }
-
-    // Both implementations should reject spans consistently
-    if asupersync_result.span_rejected != reference_result.span_rejected {
-        return Err("Span rejection differs between implementations".to_string());
-    }
-
-    // Both implementations should provide same rejection reason
-    if asupersync_result.rejection_reason != reference_result.rejection_reason {
-        return Err("Rejection reason differs between implementations".to_string());
-    }
-
-    // Both implementations should include spans consistently
-    if asupersync_result.included_in_export != reference_result.included_in_export {
-        return Err("Export inclusion differs between implementations".to_string());
-    }
-
-    // Both implementations should extract same messaging operation value
-    if asupersync_result.messaging_operation_value != reference_result.messaging_operation_value {
-        return Err("Messaging operation value differs between implementations".to_string());
-    }
-
-    // Both implementations should identify CONSUMER spans consistently
-    if asupersync_result.is_consumer_span != reference_result.is_consumer_span {
-        return Err("CONSUMER span identification differs between implementations".to_string());
-    }
-
-    // Both implementations should validate consistently
-    if asupersync_result.validated != reference_result.validated {
-        return Err("Validation application differs between implementations".to_string());
-    }
-
-    // Both implementations should count consumer spans consistently
-    if asupersync_result.consumer_spans_count != reference_result.consumer_spans_count {
-        return Err("Consumer spans count differs between implementations".to_string());
-    }
-
-    // Both implementations should count rejected spans consistently
-    if asupersync_result.rejected_spans_count != reference_result.rejected_spans_count {
-        return Err("Rejected spans count differs between implementations".to_string());
-    }
-
-    // Both implementations should count accepted spans consistently
-    if asupersync_result.accepted_spans_count != reference_result.accepted_spans_count {
-        return Err("Accepted spans count differs between implementations".to_string());
-    }
-
-    // Both implementations should have same validation correctness
-    if asupersync_result.validation_correct != reference_result.validation_correct {
-        return Err("Validation correctness differs between implementations".to_string());
-    }
-
-    // Both implementations should apply validation consistently
-    if asupersync_result.validation_applied != reference_result.validation_applied {
-        return Err("Validation application differs between implementations".to_string());
-    }
-
-    // Both implementations should be OTLP compliant
-    if asupersync_result.otlp_compliant != reference_result.otlp_compliant {
-        return Err("OTLP compliance differs between implementations".to_string());
-    }
-
-    // Both implementations should emit telemetry consistently
-    if asupersync_result.telemetry_emitted != reference_result.telemetry_emitted {
-        return Err("Telemetry emission differs between implementations".to_string());
-    }
-
-    Ok(())
 }
 //
 // OTLP-104: u64 attribute value encoding conformance test
@@ -23403,10 +23413,11 @@ fn validate_u64_encoding_implementation_consistency(
 // OTLP-105: ArrayValue element type homogeneity conformance test
 //
 
-#[test]
-fn otlp_105_array_element_type_homogeneity_conformance() {
-    // Test scenarios for ArrayValue element type validation per OTLP specification
-    let scenarios = vec![
+mod otlp_105_array_element_type_homogeneity {
+    #[test]
+    fn otlp_105_array_element_type_homogeneity_conformance() {
+        // Test scenarios for ArrayValue element type validation per OTLP specification
+        let scenarios = vec![
         ArrayElementTypeScenario {
             description: "Span with mixed string+int array attribute (MUST reject)".to_string(),
             span: ArrayElementSpanInfo {
@@ -23584,408 +23595,426 @@ fn otlp_105_array_element_type_homogeneity_conformance() {
         },
     ];
 
-    for scenario in scenarios {
-        println!("Testing scenario: {}", scenario.description);
+        for scenario in scenarios {
+            println!("Testing scenario: {}", scenario.description);
 
-        // Simulate asupersync exporter behavior
-        let asupersync_result = simulate_asupersync_array_type_validation(&scenario);
+            // Simulate asupersync exporter behavior
+            let asupersync_result = simulate_asupersync_array_type_validation(&scenario);
 
-        // Simulate reference implementation behavior
-        let reference_result = simulate_reference_array_type_validation(&scenario);
+            // Simulate reference implementation behavior
+            let reference_result = simulate_reference_array_type_validation(&scenario);
 
-        // Validate individual results
-        validate_array_type_validation_logic(&asupersync_result).expect(&format!(
-            "Asupersync array type validation logic failed for scenario: {}",
-            scenario.description
-        ));
+            // Validate individual results
+            validate_array_type_validation_logic(&asupersync_result).expect(&format!(
+                "Asupersync array type validation logic failed for scenario: {}",
+                scenario.description
+            ));
 
-        validate_array_type_validation_logic(&reference_result).expect(&format!(
-            "Reference array type validation logic failed for scenario: {}",
-            scenario.description
-        ));
+            validate_array_type_validation_logic(&reference_result).expect(&format!(
+                "Reference array type validation logic failed for scenario: {}",
+                scenario.description
+            ));
 
-        // Validate implementation consistency
-        validate_array_type_validation_implementation_consistency(
-            &asupersync_result,
-            &reference_result,
-        )
-        .expect(&format!(
-            "Implementation consistency failed for scenario: {}",
-            scenario.description
-        ));
+            // Validate implementation consistency
+            validate_array_type_validation_implementation_consistency(
+                &asupersync_result,
+                &reference_result,
+            )
+            .expect(&format!(
+                "Implementation consistency failed for scenario: {}",
+                scenario.description
+            ));
 
-        println!("✓ Scenario passed: {}", scenario.description);
-    }
-}
-
-/// Test scenario for ArrayValue element type validation
-#[derive(Debug, Clone)]
-struct ArrayElementTypeScenario {
-    description: String,
-    span: ArrayElementSpanInfo,
-    expected_type_mismatch_detected: bool,
-    expected_mismatched_attributes: Vec<String>,
-    expected_span_rejected: bool,
-    expected_rejection_reason: String,
-    expected_included_in_export: bool,
-    expected_otlp_compliant: bool,
-}
-
-/// Span information for array element type testing
-#[derive(Debug, Clone)]
-struct ArrayElementSpanInfo {
-    name: String,
-    trace_id: String,
-    span_id: String,
-    attributes: Vec<ArrayAttribute>,
-}
-
-/// Attribute types for array testing
-#[derive(Debug, Clone)]
-enum ArrayAttribute {
-    Simple(String, SimpleAttributeValue),  // key, value
-    Array(String, Vec<ArrayElementValue>), // key, array elements
-}
-
-/// Simple attribute value types
-#[derive(Debug, Clone)]
-enum SimpleAttributeValue {
-    String(String),
-    Int(i64),
-    Double(f64),
-    Bool(bool),
-}
-
-/// Array element value types
-#[derive(Debug, Clone, PartialEq)]
-enum ArrayElementValue {
-    String(String),
-    Int(i64),
-    Double(f64),
-    Bool(bool),
-    Bytes(Vec<u8>),
-}
-
-/// Array element type enum for validation
-#[derive(Debug, Clone, PartialEq)]
-enum ArrayElementType {
-    String,
-    Int,
-    Double,
-    Bool,
-    Bytes,
-}
-
-/// Result of array element type validation testing
-#[derive(Debug, Clone)]
-struct ArrayTypeValidationResult {
-    type_mismatch_detected: bool,
-    mismatched_attribute_keys: Vec<String>,
-    span_rejected: bool,
-    rejection_reason: String,
-    original_span: ArrayElementSpanInfo,
-    included_in_export: bool,
-    array_attributes_analyzed: usize,
-    heterogeneous_arrays_found: usize,
-    homogeneous_arrays_found: usize,
-    processed_spans_count: usize,
-    rejected_spans_count: usize,
-    accepted_spans_count: usize,
-    validation_errors: Vec<String>,
-    validation_correct: bool,
-    validation_applied: bool,
-    otlp_compliant: bool,
-    telemetry_emitted: bool,
-}
-
-impl ArrayElementValue {
-    fn get_type(&self) -> ArrayElementType {
-        match self {
-            ArrayElementValue::String(_) => ArrayElementType::String,
-            ArrayElementValue::Int(_) => ArrayElementType::Int,
-            ArrayElementValue::Double(_) => ArrayElementType::Double,
-            ArrayElementValue::Bool(_) => ArrayElementType::Bool,
-            ArrayElementValue::Bytes(_) => ArrayElementType::Bytes,
+            println!("✓ Scenario passed: {}", scenario.description);
         }
     }
-}
 
-/// Simulate asupersync array type validation behavior
-fn simulate_asupersync_array_type_validation(
-    scenario: &ArrayElementTypeScenario,
-) -> ArrayTypeValidationResult {
-    let mut validation_errors = Vec::new();
-    let mut rejected_spans = 0;
-    let mut accepted_spans = 0;
-    let mut array_attributes_analyzed = 0;
-    let mut heterogeneous_arrays_found = 0;
-    let mut homogeneous_arrays_found = 0;
-    let mut mismatched_attribute_keys = Vec::new();
-    let original_span = scenario.span.clone();
-    let mut type_mismatch_detected = false;
-    let mut span_rejected = false;
-    let mut rejection_reason = String::new();
-    let mut included_in_export = true; // Default to include
+    /// Test scenario for ArrayValue element type validation
+    #[derive(Debug, Clone)]
+    struct ArrayElementTypeScenario {
+        description: String,
+        span: ArrayElementSpanInfo,
+        expected_type_mismatch_detected: bool,
+        expected_mismatched_attributes: Vec<String>,
+        expected_span_rejected: bool,
+        expected_rejection_reason: String,
+        expected_included_in_export: bool,
+        expected_otlp_compliant: bool,
+    }
 
-    // Analyze each attribute
-    for attribute in &scenario.span.attributes {
-        match attribute {
-            ArrayAttribute::Simple(_, _) => {
-                // Simple attributes don't need array homogeneity validation
-                continue;
+    /// Span information for array element type testing
+    #[derive(Debug, Clone)]
+    struct ArrayElementSpanInfo {
+        name: String,
+        trace_id: String,
+        span_id: String,
+        attributes: Vec<ArrayAttribute>,
+    }
+
+    /// Attribute types for array testing
+    #[derive(Debug, Clone)]
+    enum ArrayAttribute {
+        Simple(String, SimpleAttributeValue),  // key, value
+        Array(String, Vec<ArrayElementValue>), // key, array elements
+    }
+
+    /// Simple attribute value types
+    #[derive(Debug, Clone)]
+    enum SimpleAttributeValue {
+        String(String),
+        Int(i64),
+        Double(f64),
+        Bool(bool),
+    }
+
+    /// Array element value types
+    #[derive(Debug, Clone, PartialEq)]
+    enum ArrayElementValue {
+        String(String),
+        Int(i64),
+        Double(f64),
+        Bool(bool),
+        Bytes(Vec<u8>),
+    }
+
+    /// Array element type enum for validation
+    #[derive(Debug, Clone, PartialEq)]
+    enum ArrayElementType {
+        String,
+        Int,
+        Double,
+        Bool,
+        Bytes,
+    }
+
+    /// Result of array element type validation testing
+    #[derive(Debug, Clone)]
+    struct ArrayTypeValidationResult {
+        type_mismatch_detected: bool,
+        mismatched_attribute_keys: Vec<String>,
+        span_rejected: bool,
+        rejection_reason: String,
+        original_span: ArrayElementSpanInfo,
+        included_in_export: bool,
+        array_attributes_analyzed: usize,
+        heterogeneous_arrays_found: usize,
+        homogeneous_arrays_found: usize,
+        processed_spans_count: usize,
+        rejected_spans_count: usize,
+        accepted_spans_count: usize,
+        validation_errors: Vec<String>,
+        validation_correct: bool,
+        validation_applied: bool,
+        otlp_compliant: bool,
+        telemetry_emitted: bool,
+    }
+
+    impl ArrayElementValue {
+        fn get_type(&self) -> ArrayElementType {
+            match self {
+                ArrayElementValue::String(_) => ArrayElementType::String,
+                ArrayElementValue::Int(_) => ArrayElementType::Int,
+                ArrayElementValue::Double(_) => ArrayElementType::Double,
+                ArrayElementValue::Bool(_) => ArrayElementType::Bool,
+                ArrayElementValue::Bytes(_) => ArrayElementType::Bytes,
             }
-            ArrayAttribute::Array(key, elements) => {
-                array_attributes_analyzed += 1;
+        }
+    }
 
-                // Empty arrays are valid (no type to check)
-                if elements.is_empty() {
-                    homogeneous_arrays_found += 1;
+    /// Simulate asupersync array type validation behavior
+    fn simulate_asupersync_array_type_validation(
+        scenario: &ArrayElementTypeScenario,
+    ) -> ArrayTypeValidationResult {
+        let mut validation_errors = Vec::new();
+        let mut rejected_spans = 0;
+        let mut accepted_spans = 0;
+        let mut array_attributes_analyzed = 0;
+        let mut heterogeneous_arrays_found = 0;
+        let mut homogeneous_arrays_found = 0;
+        let mut mismatched_attribute_keys = Vec::new();
+        let original_span = scenario.span.clone();
+        let mut type_mismatch_detected = false;
+        let mut span_rejected = false;
+        let mut rejection_reason = String::new();
+        let mut included_in_export = true; // Default to include
+
+        // Analyze each attribute
+        for attribute in &scenario.span.attributes {
+            match attribute {
+                ArrayAttribute::Simple(_, _) => {
+                    // Simple attributes don't need array homogeneity validation
                     continue;
                 }
+                ArrayAttribute::Array(key, elements) => {
+                    array_attributes_analyzed += 1;
 
-                // Check type homogeneity for non-empty arrays
-                let first_element_type = elements[0].get_type();
-                let mut is_homogeneous = true;
-                let mut found_types = vec![first_element_type.clone()];
+                    // Empty arrays are valid (no type to check)
+                    if elements.is_empty() {
+                        homogeneous_arrays_found += 1;
+                        continue;
+                    }
 
-                for element in elements.iter().skip(1) {
-                    let element_type = element.get_type();
-                    if element_type != first_element_type {
-                        is_homogeneous = false;
-                        if !found_types.contains(&element_type) {
-                            found_types.push(element_type);
+                    // Check type homogeneity for non-empty arrays
+                    let first_element_type = elements[0].get_type();
+                    let mut is_homogeneous = true;
+                    let mut found_types = vec![first_element_type.clone()];
+
+                    for element in elements.iter().skip(1) {
+                        let element_type = element.get_type();
+                        if element_type != first_element_type {
+                            is_homogeneous = false;
+                            if !found_types.contains(&element_type) {
+                                found_types.push(element_type);
+                            }
                         }
                     }
-                }
 
-                if !is_homogeneous {
-                    // Heterogeneous array - MUST reject
-                    type_mismatch_detected = true;
-                    span_rejected = true;
-                    included_in_export = false;
-                    rejected_spans += 1;
-                    heterogeneous_arrays_found += 1;
-                    mismatched_attribute_keys.push(key.clone());
+                    if !is_homogeneous {
+                        // Heterogeneous array - MUST reject
+                        type_mismatch_detected = true;
+                        span_rejected = true;
+                        included_in_export = false;
+                        rejected_spans += 1;
+                        heterogeneous_arrays_found += 1;
+                        mismatched_attribute_keys.push(key.clone());
 
-                    let type_names: Vec<String> =
-                        found_types.iter().map(|t| format!("{:?}", t)).collect();
-                    rejection_reason = format!(
-                        "ArrayValue '{}' contains mixed element types: {} (arrays must be homogeneous)",
-                        key,
-                        type_names.join(", ")
-                    );
+                        let type_names: Vec<String> =
+                            found_types.iter().map(|t| format!("{:?}", t)).collect();
+                        rejection_reason = format!(
+                            "ArrayValue '{}' contains mixed element types: {} (arrays must be homogeneous)",
+                            key,
+                            type_names.join(", ")
+                        );
 
-                    validation_errors.push(format!(
-                        "Heterogeneous array '{}' with types: {:?}",
-                        key, found_types
-                    ));
+                        validation_errors.push(format!(
+                            "Heterogeneous array '{}' with types: {:?}",
+                            key, found_types
+                        ));
 
-                    // Stop at first heterogeneous array found
-                    break;
-                } else {
-                    homogeneous_arrays_found += 1;
+                        // Stop at first heterogeneous array found
+                        break;
+                    } else {
+                        homogeneous_arrays_found += 1;
+                    }
                 }
             }
         }
+
+        if !span_rejected {
+            accepted_spans += 1;
+        }
+
+        // Check validation correctness
+        let validation_correct = type_mismatch_detected == scenario.expected_type_mismatch_detected
+            && mismatched_attribute_keys.len() == scenario.expected_mismatched_attributes.len()
+            && span_rejected == scenario.expected_span_rejected
+            && rejection_reason == scenario.expected_rejection_reason
+            && included_in_export == scenario.expected_included_in_export;
+
+        let validation_applied = array_attributes_analyzed > 0; // Only if there were arrays to check
+
+        // OTLP compliance: heterogeneous arrays must be rejected
+        let otlp_compliant = if type_mismatch_detected {
+            span_rejected && !included_in_export && !rejection_reason.is_empty()
+        } else {
+            !span_rejected && included_in_export && rejection_reason.is_empty()
+        };
+
+        ArrayTypeValidationResult {
+            type_mismatch_detected,
+            mismatched_attribute_keys,
+            span_rejected,
+            rejection_reason,
+            original_span,
+            included_in_export,
+            array_attributes_analyzed,
+            heterogeneous_arrays_found,
+            homogeneous_arrays_found,
+            processed_spans_count: 1,
+            rejected_spans_count: rejected_spans,
+            accepted_spans_count: accepted_spans,
+            validation_errors,
+            validation_correct,
+            validation_applied,
+            otlp_compliant,
+            telemetry_emitted: true, // Assume telemetry is emitted for type mismatch detection
+        }
     }
 
-    if !span_rejected {
-        accepted_spans += 1;
+    /// Simulate reference implementation array type validation behavior
+    fn simulate_reference_array_type_validation(
+        scenario: &ArrayElementTypeScenario,
+    ) -> ArrayTypeValidationResult {
+        // Reference implementation follows same logic as asupersync
+        simulate_asupersync_array_type_validation(scenario)
     }
 
-    // Check validation correctness
-    let validation_correct = type_mismatch_detected == scenario.expected_type_mismatch_detected
-        && mismatched_attribute_keys.len() == scenario.expected_mismatched_attributes.len()
-        && span_rejected == scenario.expected_span_rejected
-        && rejection_reason == scenario.expected_rejection_reason
-        && included_in_export == scenario.expected_included_in_export;
+    /// Verify array type validation logic
+    fn validate_array_type_validation_logic(
+        result: &ArrayTypeValidationResult,
+    ) -> Result<(), String> {
+        if !result.validation_correct {
+            return Err("Array type validation logic is incorrect".to_string());
+        }
 
-    let validation_applied = array_attributes_analyzed > 0; // Only if there were arrays to check
+        if result.array_attributes_analyzed == 0 && result.validation_applied {
+            return Err("Validation should not be applied when no arrays are present".to_string());
+        }
 
-    // OTLP compliance: heterogeneous arrays must be rejected
-    let otlp_compliant = if type_mismatch_detected {
-        span_rejected && !included_in_export && !rejection_reason.is_empty()
-    } else {
-        !span_rejected && included_in_export && rejection_reason.is_empty()
-    };
+        // Check OTLP compliance
+        if !result.otlp_compliant {
+            return Err("Array type validation is not OTLP compliant".to_string());
+        }
 
-    ArrayTypeValidationResult {
-        type_mismatch_detected,
-        mismatched_attribute_keys,
-        span_rejected,
-        rejection_reason,
-        original_span,
-        included_in_export,
-        array_attributes_analyzed,
-        heterogeneous_arrays_found,
-        homogeneous_arrays_found,
-        processed_spans_count: 1,
-        rejected_spans_count: rejected_spans,
-        accepted_spans_count: accepted_spans,
-        validation_errors,
-        validation_correct,
-        validation_applied,
-        otlp_compliant,
-        telemetry_emitted: true, // Assume telemetry is emitted for type mismatch detection
-    }
-}
+        // Critical check: heterogeneous arrays must be rejected
+        if result.type_mismatch_detected && !result.span_rejected {
+            return Err("CRITICAL: Type mismatch detected but span was not rejected".to_string());
+        }
 
-/// Simulate reference implementation array type validation behavior
-fn simulate_reference_array_type_validation(
-    scenario: &ArrayElementTypeScenario,
-) -> ArrayTypeValidationResult {
-    // Reference implementation follows same logic as asupersync
-    simulate_asupersync_array_type_validation(scenario)
-}
+        // Critical check: rejected spans should not be included in export
+        if result.span_rejected && result.included_in_export {
+            return Err("CRITICAL: Rejected span was still included in export".to_string());
+        }
 
-/// Verify array type validation logic
-fn validate_array_type_validation_logic(result: &ArrayTypeValidationResult) -> Result<(), String> {
-    if !result.validation_correct {
-        return Err("Array type validation logic is incorrect".to_string());
-    }
+        // Critical check: rejection reason must be provided when rejecting
+        if result.span_rejected && result.rejection_reason.is_empty() {
+            return Err("CRITICAL: Span rejected but no rejection reason provided".to_string());
+        }
 
-    if result.array_attributes_analyzed == 0 && result.validation_applied {
-        return Err("Validation should not be applied when no arrays are present".to_string());
-    }
+        // Critical check: no rejection reason when span is accepted
+        if !result.span_rejected && !result.rejection_reason.is_empty() {
+            return Err(
+                "CRITICAL: Rejection reason provided but span was not rejected".to_string(),
+            );
+        }
 
-    // Check OTLP compliance
-    if !result.otlp_compliant {
-        return Err("Array type validation is not OTLP compliant".to_string());
-    }
+        // Critical check: counts must be consistent
+        if result.processed_spans_count != result.rejected_spans_count + result.accepted_spans_count
+        {
+            return Err(
+                "CRITICAL: Processed spans count doesn't match rejected + accepted counts"
+                    .to_string(),
+            );
+        }
 
-    // Critical check: heterogeneous arrays must be rejected
-    if result.type_mismatch_detected && !result.span_rejected {
-        return Err("CRITICAL: Type mismatch detected but span was not rejected".to_string());
-    }
-
-    // Critical check: rejected spans should not be included in export
-    if result.span_rejected && result.included_in_export {
-        return Err("CRITICAL: Rejected span was still included in export".to_string());
-    }
-
-    // Critical check: rejection reason must be provided when rejecting
-    if result.span_rejected && result.rejection_reason.is_empty() {
-        return Err("CRITICAL: Span rejected but no rejection reason provided".to_string());
-    }
-
-    // Critical check: no rejection reason when span is accepted
-    if !result.span_rejected && !result.rejection_reason.is_empty() {
-        return Err("CRITICAL: Rejection reason provided but span was not rejected".to_string());
-    }
-
-    // Critical check: counts must be consistent
-    if result.processed_spans_count != result.rejected_spans_count + result.accepted_spans_count {
-        return Err(
-            "CRITICAL: Processed spans count doesn't match rejected + accepted counts".to_string(),
-        );
-    }
-
-    // Critical check: array analysis counts should be consistent
-    if result.array_attributes_analyzed
-        != result.heterogeneous_arrays_found + result.homogeneous_arrays_found
-    {
-        return Err(
+        // Critical check: array analysis counts should be consistent
+        if result.array_attributes_analyzed
+            != result.heterogeneous_arrays_found + result.homogeneous_arrays_found
+        {
+            return Err(
             "CRITICAL: Array attributes analyzed doesn't match heterogeneous + homogeneous counts"
                 .to_string(),
         );
-    }
+        }
 
-    // Critical check: heterogeneous arrays found should match mismatched attribute keys
-    if result.heterogeneous_arrays_found != result.mismatched_attribute_keys.len() {
-        return Err(
+        // Critical check: heterogeneous arrays found should match mismatched attribute keys
+        if result.heterogeneous_arrays_found != result.mismatched_attribute_keys.len() {
+            return Err(
             "CRITICAL: Heterogeneous arrays found doesn't match mismatched attribute keys count"
                 .to_string(),
         );
+        }
+
+        Ok(())
     }
 
-    Ok(())
-}
+    /// Verify implementation consistency for array type validation
+    fn validate_array_type_validation_implementation_consistency(
+        asupersync_result: &ArrayTypeValidationResult,
+        reference_result: &ArrayTypeValidationResult,
+    ) -> Result<(), String> {
+        // Both implementations should detect type mismatches consistently
+        if asupersync_result.type_mismatch_detected != reference_result.type_mismatch_detected {
+            return Err("Type mismatch detection differs between implementations".to_string());
+        }
 
-/// Verify implementation consistency for array type validation
-fn validate_array_type_validation_implementation_consistency(
-    asupersync_result: &ArrayTypeValidationResult,
-    reference_result: &ArrayTypeValidationResult,
-) -> Result<(), String> {
-    // Both implementations should detect type mismatches consistently
-    if asupersync_result.type_mismatch_detected != reference_result.type_mismatch_detected {
-        return Err("Type mismatch detection differs between implementations".to_string());
+        // Both implementations should identify same mismatched attributes
+        if asupersync_result.mismatched_attribute_keys != reference_result.mismatched_attribute_keys
+        {
+            return Err("Mismatched attribute keys differ between implementations".to_string());
+        }
+
+        // Both implementations should reject spans consistently
+        if asupersync_result.span_rejected != reference_result.span_rejected {
+            return Err("Span rejection differs between implementations".to_string());
+        }
+
+        // Both implementations should provide same rejection reason
+        if asupersync_result.rejection_reason != reference_result.rejection_reason {
+            return Err("Rejection reason differs between implementations".to_string());
+        }
+
+        // Both implementations should include spans consistently
+        if asupersync_result.included_in_export != reference_result.included_in_export {
+            return Err("Export inclusion differs between implementations".to_string());
+        }
+
+        // Both implementations should analyze same number of array attributes
+        if asupersync_result.array_attributes_analyzed != reference_result.array_attributes_analyzed
+        {
+            return Err(
+                "Array attributes analyzed count differs between implementations".to_string(),
+            );
+        }
+
+        // Both implementations should find same number of heterogeneous arrays
+        if asupersync_result.heterogeneous_arrays_found
+            != reference_result.heterogeneous_arrays_found
+        {
+            return Err(
+                "Heterogeneous arrays found count differs between implementations".to_string(),
+            );
+        }
+
+        // Both implementations should find same number of homogeneous arrays
+        if asupersync_result.homogeneous_arrays_found != reference_result.homogeneous_arrays_found {
+            return Err(
+                "Homogeneous arrays found count differs between implementations".to_string(),
+            );
+        }
+
+        // Both implementations should count rejected spans consistently
+        if asupersync_result.rejected_spans_count != reference_result.rejected_spans_count {
+            return Err("Rejected spans count differs between implementations".to_string());
+        }
+
+        // Both implementations should count accepted spans consistently
+        if asupersync_result.accepted_spans_count != reference_result.accepted_spans_count {
+            return Err("Accepted spans count differs between implementations".to_string());
+        }
+
+        // Both implementations should have same validation correctness
+        if asupersync_result.validation_correct != reference_result.validation_correct {
+            return Err("Validation correctness differs between implementations".to_string());
+        }
+
+        // Both implementations should apply validation consistently
+        if asupersync_result.validation_applied != reference_result.validation_applied {
+            return Err("Validation application differs between implementations".to_string());
+        }
+
+        // Both implementations should be OTLP compliant
+        if asupersync_result.otlp_compliant != reference_result.otlp_compliant {
+            return Err("OTLP compliance differs between implementations".to_string());
+        }
+
+        // Both implementations should emit telemetry consistently
+        if asupersync_result.telemetry_emitted != reference_result.telemetry_emitted {
+            return Err("Telemetry emission differs between implementations".to_string());
+        }
+
+        Ok(())
     }
-
-    // Both implementations should identify same mismatched attributes
-    if asupersync_result.mismatched_attribute_keys != reference_result.mismatched_attribute_keys {
-        return Err("Mismatched attribute keys differ between implementations".to_string());
-    }
-
-    // Both implementations should reject spans consistently
-    if asupersync_result.span_rejected != reference_result.span_rejected {
-        return Err("Span rejection differs between implementations".to_string());
-    }
-
-    // Both implementations should provide same rejection reason
-    if asupersync_result.rejection_reason != reference_result.rejection_reason {
-        return Err("Rejection reason differs between implementations".to_string());
-    }
-
-    // Both implementations should include spans consistently
-    if asupersync_result.included_in_export != reference_result.included_in_export {
-        return Err("Export inclusion differs between implementations".to_string());
-    }
-
-    // Both implementations should analyze same number of array attributes
-    if asupersync_result.array_attributes_analyzed != reference_result.array_attributes_analyzed {
-        return Err("Array attributes analyzed count differs between implementations".to_string());
-    }
-
-    // Both implementations should find same number of heterogeneous arrays
-    if asupersync_result.heterogeneous_arrays_found != reference_result.heterogeneous_arrays_found {
-        return Err("Heterogeneous arrays found count differs between implementations".to_string());
-    }
-
-    // Both implementations should find same number of homogeneous arrays
-    if asupersync_result.homogeneous_arrays_found != reference_result.homogeneous_arrays_found {
-        return Err("Homogeneous arrays found count differs between implementations".to_string());
-    }
-
-    // Both implementations should count rejected spans consistently
-    if asupersync_result.rejected_spans_count != reference_result.rejected_spans_count {
-        return Err("Rejected spans count differs between implementations".to_string());
-    }
-
-    // Both implementations should count accepted spans consistently
-    if asupersync_result.accepted_spans_count != reference_result.accepted_spans_count {
-        return Err("Accepted spans count differs between implementations".to_string());
-    }
-
-    // Both implementations should have same validation correctness
-    if asupersync_result.validation_correct != reference_result.validation_correct {
-        return Err("Validation correctness differs between implementations".to_string());
-    }
-
-    // Both implementations should apply validation consistently
-    if asupersync_result.validation_applied != reference_result.validation_applied {
-        return Err("Validation application differs between implementations".to_string());
-    }
-
-    // Both implementations should be OTLP compliant
-    if asupersync_result.otlp_compliant != reference_result.otlp_compliant {
-        return Err("OTLP compliance differs between implementations".to_string());
-    }
-
-    // Both implementations should emit telemetry consistently
-    if asupersync_result.telemetry_emitted != reference_result.telemetry_emitted {
-        return Err("Telemetry emission differs between implementations".to_string());
-    }
-
-    Ok(())
 }
 //
 // OTLP-106: PRODUCER span without messaging attributes validation conformance test
 //
 
-#[test]
-fn otlp_106_producer_non_messaging_validation_conformance() {
-    // Test scenarios for PRODUCER span validation per OTLP specification
-    let scenarios = vec![
+mod otlp_106_producer_non_messaging_validation_first {
+    #[test]
+    fn otlp_106_producer_non_messaging_validation_conformance() {
+        // Test scenarios for PRODUCER span validation per OTLP specification
+        let scenarios = vec![
         ProducerNonMessagingScenario {
             description: "PRODUCER span without messaging.* attributes (valid RPC producer, MUST accept)".to_string(),
             span: ProducerSpanInfo {
@@ -24152,368 +24181,383 @@ fn otlp_106_producer_non_messaging_validation_conformance() {
         },
     ];
 
-    for scenario in scenarios {
-        println!("Testing scenario: {}", scenario.description);
+        for scenario in scenarios {
+            println!("Testing scenario: {}", scenario.description);
 
-        // Simulate asupersync exporter behavior
-        let asupersync_result = simulate_asupersync_producer_validation(&scenario);
+            // Simulate asupersync exporter behavior
+            let asupersync_result = simulate_asupersync_producer_validation(&scenario);
 
-        // Simulate reference implementation behavior
-        let reference_result = simulate_reference_producer_validation(&scenario);
+            // Simulate reference implementation behavior
+            let reference_result = simulate_reference_producer_validation(&scenario);
 
-        // Validate individual results
-        validate_producer_validation_logic(&asupersync_result).expect(&format!(
-            "Asupersync producer validation logic failed for scenario: {}",
-            scenario.description
-        ));
+            // Validate individual results
+            validate_producer_validation_logic(&asupersync_result).expect(&format!(
+                "Asupersync producer validation logic failed for scenario: {}",
+                scenario.description
+            ));
 
-        validate_producer_validation_logic(&reference_result).expect(&format!(
-            "Reference producer validation logic failed for scenario: {}",
-            scenario.description
-        ));
+            validate_producer_validation_logic(&reference_result).expect(&format!(
+                "Reference producer validation logic failed for scenario: {}",
+                scenario.description
+            ));
 
-        // Validate implementation consistency
-        validate_producer_validation_implementation_consistency(
-            &asupersync_result,
-            &reference_result,
-        )
-        .expect(&format!(
-            "Implementation consistency failed for scenario: {}",
-            scenario.description
-        ));
+            // Validate implementation consistency
+            validate_producer_validation_implementation_consistency(
+                &asupersync_result,
+                &reference_result,
+            )
+            .expect(&format!(
+                "Implementation consistency failed for scenario: {}",
+                scenario.description
+            ));
 
-        println!("✓ Scenario passed: {}", scenario.description);
+            println!("✓ Scenario passed: {}", scenario.description);
+        }
     }
-}
 
-/// Test scenario for PRODUCER span validation
-#[derive(Debug, Clone)]
-struct ProducerNonMessagingScenario {
-    description: String,
-    span: ProducerSpanInfo,
-    expected_messaging_attributes_detected: bool,
-    expected_span_rejected: bool,
-    expected_rejection_reason: String,
-    expected_included_in_export: bool,
-    expected_validation_applied: bool,
-    expected_otlp_compliant: bool,
-}
+    /// Test scenario for PRODUCER span validation
+    #[derive(Debug, Clone)]
+    struct ProducerNonMessagingScenario {
+        description: String,
+        span: ProducerSpanInfo,
+        expected_messaging_attributes_detected: bool,
+        expected_span_rejected: bool,
+        expected_rejection_reason: String,
+        expected_included_in_export: bool,
+        expected_validation_applied: bool,
+        expected_otlp_compliant: bool,
+    }
 
-/// Span information for producer validation testing
-#[derive(Debug, Clone)]
-struct ProducerSpanInfo {
-    name: String,
-    trace_id: String,
-    span_id: String,
-    span_kind: SpanKind,
-    attributes: Vec<(String, String)>,
-}
+    /// Span information for producer validation testing
+    #[derive(Debug, Clone)]
+    struct ProducerSpanInfo {
+        name: String,
+        trace_id: String,
+        span_id: String,
+        span_kind: SpanKind,
+        attributes: Vec<(String, String)>,
+    }
 
-/// Span kind enumeration
-#[derive(Debug, Clone, PartialEq)]
-enum SpanKind {
-    Unspecified,
-    Internal,
-    Server,
-    Client,
-    Producer,
-    Consumer,
-}
+    /// Span kind enumeration
+    #[derive(Debug, Clone, PartialEq)]
+    enum SpanKind {
+        Unspecified,
+        Internal,
+        Server,
+        Client,
+        Producer,
+        Consumer,
+    }
 
-/// Result of producer span validation testing
-#[derive(Debug, Clone)]
-struct ProducerValidationResult {
-    messaging_attributes_detected: bool,
-    span_rejected: bool,
-    rejection_reason: String,
-    original_span: ProducerSpanInfo,
-    included_in_export: bool,
-    is_producer_span: bool,
-    validation_applied: bool,
-    messaging_attribute_keys_found: Vec<String>,
-    processed_spans_count: usize,
-    producer_spans_count: usize,
-    producer_with_messaging_count: usize,
-    producer_without_messaging_count: usize,
-    rejected_spans_count: usize,
-    accepted_spans_count: usize,
-    validation_errors: Vec<String>,
-    validation_correct: bool,
-    otlp_compliant: bool,
-    telemetry_emitted: bool,
-}
+    /// Result of producer span validation testing
+    #[derive(Debug, Clone)]
+    struct ProducerValidationResult {
+        messaging_attributes_detected: bool,
+        span_rejected: bool,
+        rejection_reason: String,
+        original_span: ProducerSpanInfo,
+        included_in_export: bool,
+        is_producer_span: bool,
+        validation_applied: bool,
+        messaging_attribute_keys_found: Vec<String>,
+        processed_spans_count: usize,
+        producer_spans_count: usize,
+        producer_with_messaging_count: usize,
+        producer_without_messaging_count: usize,
+        rejected_spans_count: usize,
+        accepted_spans_count: usize,
+        validation_errors: Vec<String>,
+        validation_correct: bool,
+        otlp_compliant: bool,
+        telemetry_emitted: bool,
+    }
 
-/// Simulate asupersync producer validation behavior
-fn simulate_asupersync_producer_validation(
-    scenario: &ProducerNonMessagingScenario,
-) -> ProducerValidationResult {
-    let mut validation_errors = Vec::new();
-    let mut producer_spans = 0;
-    let mut producer_with_messaging = 0;
-    let mut producer_without_messaging = 0;
-    let mut rejected_spans = 0;
-    let mut accepted_spans = 0;
-    let original_span = scenario.span.clone();
-    let mut messaging_attributes_detected = false;
-    let mut span_rejected = false;
-    let mut rejection_reason = String::new();
-    let mut included_in_export = true; // Default to include
-    let mut validation_applied = false;
-    let mut messaging_attribute_keys_found = Vec::new();
+    /// Simulate asupersync producer validation behavior
+    fn simulate_asupersync_producer_validation(
+        scenario: &ProducerNonMessagingScenario,
+    ) -> ProducerValidationResult {
+        let mut validation_errors = Vec::new();
+        let mut producer_spans = 0;
+        let mut producer_with_messaging = 0;
+        let mut producer_without_messaging = 0;
+        let rejected_spans = 0;
+        let mut accepted_spans = 0;
+        let original_span = scenario.span.clone();
+        let mut messaging_attributes_detected = false;
+        let mut span_rejected = false;
+        let rejection_reason = String::new();
+        let mut included_in_export = true; // Default to include
+        let mut validation_applied = false;
+        let mut messaging_attribute_keys_found = Vec::new();
 
-    let is_producer_span = scenario.span.span_kind == SpanKind::Producer;
+        let is_producer_span = scenario.span.span_kind == SpanKind::Producer;
 
-    // Only validate PRODUCER spans for messaging attribute requirements
-    if is_producer_span {
-        producer_spans += 1;
-        validation_applied = true;
+        // Only validate PRODUCER spans for messaging attribute requirements
+        if is_producer_span {
+            producer_spans += 1;
+            validation_applied = true;
 
-        // Check for messaging.* attributes
-        for (key, _) in &scenario.span.attributes {
-            if key.starts_with("messaging.") {
-                messaging_attributes_detected = true;
-                messaging_attribute_keys_found.push(key.clone());
+            // Check for messaging.* attributes
+            for (key, _) in &scenario.span.attributes {
+                if key.starts_with("messaging.") {
+                    messaging_attributes_detected = true;
+                    messaging_attribute_keys_found.push(key.clone());
+                }
             }
-        }
 
-        if messaging_attributes_detected {
-            producer_with_messaging += 1;
-        } else {
-            producer_without_messaging += 1;
-        }
+            if messaging_attributes_detected {
+                producer_with_messaging += 1;
+            } else {
+                producer_without_messaging += 1;
+            }
 
-        // IMPORTANT: OTLP specification allows PRODUCER spans WITHOUT messaging.* attributes
-        // PRODUCER spans can be used for:
-        // - Non-messaging RPC calls (gRPC, HTTP clients, etc.)
-        // - Database operations that "produce" data
-        // - Any operation that initiates work in another system
-        // - Custom producer patterns not related to messaging
+            // IMPORTANT: OTLP specification allows PRODUCER spans WITHOUT messaging.* attributes
+            // PRODUCER spans can be used for:
+            // - Non-messaging RPC calls (gRPC, HTTP clients, etc.)
+            // - Database operations that "produce" data
+            // - Any operation that initiates work in another system
+            // - Custom producer patterns not related to messaging
 
-        // The absence of messaging.* attributes does NOT make a PRODUCER span invalid
-        // We must NOT reject PRODUCER spans just because they lack messaging attributes
+            // The absence of messaging.* attributes does NOT make a PRODUCER span invalid
+            // We must NOT reject PRODUCER spans just because they lack messaging attributes
 
-        span_rejected = false; // Never reject PRODUCER spans for lack of messaging attributes
-        included_in_export = true;
-        accepted_spans += 1;
+            span_rejected = false; // Never reject PRODUCER spans for lack of messaging attributes
+            included_in_export = true;
+            accepted_spans += 1;
 
-        if !messaging_attributes_detected {
-            validation_errors.push(format!(
+            if !messaging_attributes_detected {
+                validation_errors.push(format!(
                 "PRODUCER span '{}' has no messaging.* attributes (this is valid for non-messaging producers)",
                 scenario.span.name
             ));
+            }
+        } else {
+            // Non-PRODUCER spans are not subject to this validation
+            accepted_spans += 1;
         }
-    } else {
-        // Non-PRODUCER spans are not subject to this validation
-        accepted_spans += 1;
+
+        // Check validation correctness
+        let validation_correct = messaging_attributes_detected
+            == scenario.expected_messaging_attributes_detected
+            && span_rejected == scenario.expected_span_rejected
+            && rejection_reason == scenario.expected_rejection_reason
+            && included_in_export == scenario.expected_included_in_export
+            && validation_applied == scenario.expected_validation_applied;
+
+        // OTLP compliance: PRODUCER spans without messaging.* attributes are VALID
+        let otlp_compliant = if is_producer_span {
+            // PRODUCER spans should ALWAYS be accepted, regardless of messaging attributes
+            !span_rejected && included_in_export
+        } else {
+            // Non-PRODUCER spans should be accepted (not subject to this validation)
+            !span_rejected && included_in_export
+        };
+
+        ProducerValidationResult {
+            messaging_attributes_detected,
+            span_rejected,
+            rejection_reason,
+            original_span,
+            included_in_export,
+            is_producer_span,
+            validation_applied,
+            messaging_attribute_keys_found,
+            processed_spans_count: 1,
+            producer_spans_count: producer_spans,
+            producer_with_messaging_count: producer_with_messaging,
+            producer_without_messaging_count: producer_without_messaging,
+            rejected_spans_count: rejected_spans,
+            accepted_spans_count: accepted_spans,
+            validation_errors,
+            validation_correct,
+            otlp_compliant,
+            telemetry_emitted: true, // Assume telemetry is emitted for producer span analysis
+        }
     }
 
-    // Check validation correctness
-    let validation_correct = messaging_attributes_detected
-        == scenario.expected_messaging_attributes_detected
-        && span_rejected == scenario.expected_span_rejected
-        && rejection_reason == scenario.expected_rejection_reason
-        && included_in_export == scenario.expected_included_in_export
-        && validation_applied == scenario.expected_validation_applied;
-
-    // OTLP compliance: PRODUCER spans without messaging.* attributes are VALID
-    let otlp_compliant = if is_producer_span {
-        // PRODUCER spans should ALWAYS be accepted, regardless of messaging attributes
-        !span_rejected && included_in_export
-    } else {
-        // Non-PRODUCER spans should be accepted (not subject to this validation)
-        !span_rejected && included_in_export
-    };
-
-    ProducerValidationResult {
-        messaging_attributes_detected,
-        span_rejected,
-        rejection_reason,
-        original_span,
-        included_in_export,
-        is_producer_span,
-        validation_applied,
-        messaging_attribute_keys_found,
-        processed_spans_count: 1,
-        producer_spans_count: producer_spans,
-        producer_with_messaging_count: producer_with_messaging,
-        producer_without_messaging_count: producer_without_messaging,
-        rejected_spans_count: rejected_spans,
-        accepted_spans_count: accepted_spans,
-        validation_errors,
-        validation_correct,
-        otlp_compliant,
-        telemetry_emitted: true, // Assume telemetry is emitted for producer span analysis
-    }
-}
-
-/// Simulate reference implementation producer validation behavior
-fn simulate_reference_producer_validation(
-    scenario: &ProducerNonMessagingScenario,
-) -> ProducerValidationResult {
-    // Reference implementation follows same logic as asupersync
-    simulate_asupersync_producer_validation(scenario)
-}
-
-/// Verify producer validation logic
-fn validate_producer_validation_logic(result: &ProducerValidationResult) -> Result<(), String> {
-    if !result.validation_correct {
-        return Err("Producer validation logic is incorrect".to_string());
+    /// Simulate reference implementation producer validation behavior
+    fn simulate_reference_producer_validation(
+        scenario: &ProducerNonMessagingScenario,
+    ) -> ProducerValidationResult {
+        // Reference implementation follows same logic as asupersync
+        simulate_asupersync_producer_validation(scenario)
     }
 
-    if result.is_producer_span != result.validation_applied {
-        return Err("Validation should only be applied to PRODUCER spans".to_string());
-    }
+    /// Verify producer validation logic
+    fn validate_producer_validation_logic(result: &ProducerValidationResult) -> Result<(), String> {
+        if !result.validation_correct {
+            return Err("Producer validation logic is incorrect".to_string());
+        }
 
-    // Check OTLP compliance
-    if !result.otlp_compliant {
-        return Err("Producer validation is not OTLP compliant".to_string());
-    }
+        if result.is_producer_span != result.validation_applied {
+            return Err("Validation should only be applied to PRODUCER spans".to_string());
+        }
 
-    // Critical check: PRODUCER spans must NEVER be rejected for lack of messaging attributes
-    if result.is_producer_span && result.span_rejected {
-        return Err("CRITICAL: PRODUCER span was rejected (violates OTLP specification - PRODUCER spans without messaging.* are valid)".to_string());
-    }
+        // Check OTLP compliance
+        if !result.otlp_compliant {
+            return Err("Producer validation is not OTLP compliant".to_string());
+        }
 
-    // Critical check: accepted spans should be included in export
-    if !result.span_rejected && !result.included_in_export {
-        return Err("CRITICAL: Accepted span was not included in export".to_string());
-    }
+        // Critical check: PRODUCER spans must NEVER be rejected for lack of messaging attributes
+        if result.is_producer_span && result.span_rejected {
+            return Err("CRITICAL: PRODUCER span was rejected (violates OTLP specification - PRODUCER spans without messaging.* are valid)".to_string());
+        }
 
-    // Critical check: rejected spans should not be included in export
-    if result.span_rejected && result.included_in_export {
-        return Err("CRITICAL: Rejected span was included in export".to_string());
-    }
+        // Critical check: accepted spans should be included in export
+        if !result.span_rejected && !result.included_in_export {
+            return Err("CRITICAL: Accepted span was not included in export".to_string());
+        }
 
-    // Critical check: rejection reason must be empty when span is accepted
-    if !result.span_rejected && !result.rejection_reason.is_empty() {
-        return Err("CRITICAL: Rejection reason provided but span was not rejected".to_string());
-    }
+        // Critical check: rejected spans should not be included in export
+        if result.span_rejected && result.included_in_export {
+            return Err("CRITICAL: Rejected span was included in export".to_string());
+        }
 
-    // Critical check: counts must be consistent
-    if result.processed_spans_count != result.rejected_spans_count + result.accepted_spans_count {
-        return Err(
-            "CRITICAL: Processed spans count doesn't match rejected + accepted counts".to_string(),
-        );
-    }
+        // Critical check: rejection reason must be empty when span is accepted
+        if !result.span_rejected && !result.rejection_reason.is_empty() {
+            return Err(
+                "CRITICAL: Rejection reason provided but span was not rejected".to_string(),
+            );
+        }
 
-    // Critical check: producer messaging counts should be consistent
-    if result.is_producer_span {
-        if result.producer_spans_count
-            != result.producer_with_messaging_count + result.producer_without_messaging_count
+        // Critical check: counts must be consistent
+        if result.processed_spans_count != result.rejected_spans_count + result.accepted_spans_count
         {
-            return Err("CRITICAL: Producer spans count doesn't match with messaging + without messaging counts".to_string());
+            return Err(
+                "CRITICAL: Processed spans count doesn't match rejected + accepted counts"
+                    .to_string(),
+            );
         }
+
+        // Critical check: producer messaging counts should be consistent
+        if result.is_producer_span {
+            if result.producer_spans_count
+                != result.producer_with_messaging_count + result.producer_without_messaging_count
+            {
+                return Err("CRITICAL: Producer spans count doesn't match with messaging + without messaging counts".to_string());
+            }
+        }
+
+        // Critical check: messaging attributes detection should match found keys
+        if result.messaging_attributes_detected != !result.messaging_attribute_keys_found.is_empty()
+        {
+            return Err(
+                "CRITICAL: Messaging attributes detection doesn't match found keys".to_string(),
+            );
+        }
+
+        Ok(())
     }
 
-    // Critical check: messaging attributes detection should match found keys
-    if result.messaging_attributes_detected != !result.messaging_attribute_keys_found.is_empty() {
-        return Err(
-            "CRITICAL: Messaging attributes detection doesn't match found keys".to_string(),
-        );
+    /// Verify implementation consistency for producer validation
+    fn validate_producer_validation_implementation_consistency(
+        asupersync_result: &ProducerValidationResult,
+        reference_result: &ProducerValidationResult,
+    ) -> Result<(), String> {
+        // Both implementations should detect messaging attributes consistently
+        if asupersync_result.messaging_attributes_detected
+            != reference_result.messaging_attributes_detected
+        {
+            return Err(
+                "Messaging attributes detection differs between implementations".to_string(),
+            );
+        }
+
+        // Both implementations should reject spans consistently (should always be false for PRODUCER)
+        if asupersync_result.span_rejected != reference_result.span_rejected {
+            return Err("Span rejection differs between implementations".to_string());
+        }
+
+        // Both implementations should provide same rejection reason (should always be empty)
+        if asupersync_result.rejection_reason != reference_result.rejection_reason {
+            return Err("Rejection reason differs between implementations".to_string());
+        }
+
+        // Both implementations should include spans consistently
+        if asupersync_result.included_in_export != reference_result.included_in_export {
+            return Err("Export inclusion differs between implementations".to_string());
+        }
+
+        // Both implementations should identify PRODUCER spans consistently
+        if asupersync_result.is_producer_span != reference_result.is_producer_span {
+            return Err("PRODUCER span identification differs between implementations".to_string());
+        }
+
+        // Both implementations should apply validation consistently
+        if asupersync_result.validation_applied != reference_result.validation_applied {
+            return Err("Validation application differs between implementations".to_string());
+        }
+
+        // Both implementations should find same messaging attribute keys
+        if asupersync_result.messaging_attribute_keys_found
+            != reference_result.messaging_attribute_keys_found
+        {
+            return Err(
+                "Messaging attribute keys found differ between implementations".to_string(),
+            );
+        }
+
+        // Both implementations should count producer spans consistently
+        if asupersync_result.producer_spans_count != reference_result.producer_spans_count {
+            return Err("Producer spans count differs between implementations".to_string());
+        }
+
+        // Both implementations should count producer spans with messaging consistently
+        if asupersync_result.producer_with_messaging_count
+            != reference_result.producer_with_messaging_count
+        {
+            return Err(
+                "Producer with messaging count differs between implementations".to_string(),
+            );
+        }
+
+        // Both implementations should count producer spans without messaging consistently
+        if asupersync_result.producer_without_messaging_count
+            != reference_result.producer_without_messaging_count
+        {
+            return Err(
+                "Producer without messaging count differs between implementations".to_string(),
+            );
+        }
+
+        // Both implementations should count rejected spans consistently
+        if asupersync_result.rejected_spans_count != reference_result.rejected_spans_count {
+            return Err("Rejected spans count differs between implementations".to_string());
+        }
+
+        // Both implementations should count accepted spans consistently
+        if asupersync_result.accepted_spans_count != reference_result.accepted_spans_count {
+            return Err("Accepted spans count differs between implementations".to_string());
+        }
+
+        // Both implementations should have same validation correctness
+        if asupersync_result.validation_correct != reference_result.validation_correct {
+            return Err("Validation correctness differs between implementations".to_string());
+        }
+
+        // Both implementations should be OTLP compliant
+        if asupersync_result.otlp_compliant != reference_result.otlp_compliant {
+            return Err("OTLP compliance differs between implementations".to_string());
+        }
+
+        // Both implementations should emit telemetry consistently
+        if asupersync_result.telemetry_emitted != reference_result.telemetry_emitted {
+            return Err("Telemetry emission differs between implementations".to_string());
+        }
+
+        Ok(())
     }
-
-    Ok(())
-}
-
-/// Verify implementation consistency for producer validation
-fn validate_producer_validation_implementation_consistency(
-    asupersync_result: &ProducerValidationResult,
-    reference_result: &ProducerValidationResult,
-) -> Result<(), String> {
-    // Both implementations should detect messaging attributes consistently
-    if asupersync_result.messaging_attributes_detected
-        != reference_result.messaging_attributes_detected
-    {
-        return Err("Messaging attributes detection differs between implementations".to_string());
-    }
-
-    // Both implementations should reject spans consistently (should always be false for PRODUCER)
-    if asupersync_result.span_rejected != reference_result.span_rejected {
-        return Err("Span rejection differs between implementations".to_string());
-    }
-
-    // Both implementations should provide same rejection reason (should always be empty)
-    if asupersync_result.rejection_reason != reference_result.rejection_reason {
-        return Err("Rejection reason differs between implementations".to_string());
-    }
-
-    // Both implementations should include spans consistently
-    if asupersync_result.included_in_export != reference_result.included_in_export {
-        return Err("Export inclusion differs between implementations".to_string());
-    }
-
-    // Both implementations should identify PRODUCER spans consistently
-    if asupersync_result.is_producer_span != reference_result.is_producer_span {
-        return Err("PRODUCER span identification differs between implementations".to_string());
-    }
-
-    // Both implementations should apply validation consistently
-    if asupersync_result.validation_applied != reference_result.validation_applied {
-        return Err("Validation application differs between implementations".to_string());
-    }
-
-    // Both implementations should find same messaging attribute keys
-    if asupersync_result.messaging_attribute_keys_found
-        != reference_result.messaging_attribute_keys_found
-    {
-        return Err("Messaging attribute keys found differ between implementations".to_string());
-    }
-
-    // Both implementations should count producer spans consistently
-    if asupersync_result.producer_spans_count != reference_result.producer_spans_count {
-        return Err("Producer spans count differs between implementations".to_string());
-    }
-
-    // Both implementations should count producer spans with messaging consistently
-    if asupersync_result.producer_with_messaging_count
-        != reference_result.producer_with_messaging_count
-    {
-        return Err("Producer with messaging count differs between implementations".to_string());
-    }
-
-    // Both implementations should count producer spans without messaging consistently
-    if asupersync_result.producer_without_messaging_count
-        != reference_result.producer_without_messaging_count
-    {
-        return Err("Producer without messaging count differs between implementations".to_string());
-    }
-
-    // Both implementations should count rejected spans consistently
-    if asupersync_result.rejected_spans_count != reference_result.rejected_spans_count {
-        return Err("Rejected spans count differs between implementations".to_string());
-    }
-
-    // Both implementations should count accepted spans consistently
-    if asupersync_result.accepted_spans_count != reference_result.accepted_spans_count {
-        return Err("Accepted spans count differs between implementations".to_string());
-    }
-
-    // Both implementations should have same validation correctness
-    if asupersync_result.validation_correct != reference_result.validation_correct {
-        return Err("Validation correctness differs between implementations".to_string());
-    }
-
-    // Both implementations should be OTLP compliant
-    if asupersync_result.otlp_compliant != reference_result.otlp_compliant {
-        return Err("OTLP compliance differs between implementations".to_string());
-    }
-
-    // Both implementations should emit telemetry consistently
-    if asupersync_result.telemetry_emitted != reference_result.telemetry_emitted {
-        return Err("Telemetry emission differs between implementations".to_string());
-    }
-
-    Ok(())
 }
 
 //
 // OTLP-106: PRODUCER span without messaging attributes validation conformance test
 //
 
-#[test]
-fn otlp_106_producer_non_messaging_validation_conformance() {
-    // Test scenarios for PRODUCER span validation per OTLP specification
-    let scenarios = vec![
+mod otlp_106_producer_non_messaging_validation_second {
+    #[test]
+    fn otlp_106_producer_non_messaging_validation_conformance() {
+        // Test scenarios for PRODUCER span validation per OTLP specification
+        let scenarios = vec![
         ProducerNonMessagingScenario {
             description: "PRODUCER span without messaging.* attributes (valid RPC producer, MUST accept)".to_string(),
             span: ProducerSpanInfo {
@@ -24680,358 +24724,372 @@ fn otlp_106_producer_non_messaging_validation_conformance() {
         },
     ];
 
-    for scenario in scenarios {
-        println!("Testing scenario: {}", scenario.description);
+        for scenario in scenarios {
+            println!("Testing scenario: {}", scenario.description);
 
-        // Simulate asupersync exporter behavior
-        let asupersync_result = simulate_asupersync_producer_validation(&scenario);
+            // Simulate asupersync exporter behavior
+            let asupersync_result = simulate_asupersync_producer_validation(&scenario);
 
-        // Simulate reference implementation behavior
-        let reference_result = simulate_reference_producer_validation(&scenario);
+            // Simulate reference implementation behavior
+            let reference_result = simulate_reference_producer_validation(&scenario);
 
-        // Validate individual results
-        validate_producer_validation_logic(&asupersync_result).expect(&format!(
-            "Asupersync producer validation logic failed for scenario: {}",
-            scenario.description
-        ));
+            // Validate individual results
+            validate_producer_validation_logic(&asupersync_result).expect(&format!(
+                "Asupersync producer validation logic failed for scenario: {}",
+                scenario.description
+            ));
 
-        validate_producer_validation_logic(&reference_result).expect(&format!(
-            "Reference producer validation logic failed for scenario: {}",
-            scenario.description
-        ));
+            validate_producer_validation_logic(&reference_result).expect(&format!(
+                "Reference producer validation logic failed for scenario: {}",
+                scenario.description
+            ));
 
-        // Validate implementation consistency
-        validate_producer_validation_implementation_consistency(
-            &asupersync_result,
-            &reference_result,
-        )
-        .expect(&format!(
-            "Implementation consistency failed for scenario: {}",
-            scenario.description
-        ));
+            // Validate implementation consistency
+            validate_producer_validation_implementation_consistency(
+                &asupersync_result,
+                &reference_result,
+            )
+            .expect(&format!(
+                "Implementation consistency failed for scenario: {}",
+                scenario.description
+            ));
 
-        println!("✓ Scenario passed: {}", scenario.description);
+            println!("✓ Scenario passed: {}", scenario.description);
+        }
     }
-}
 
-/// Test scenario for PRODUCER span validation
-#[derive(Debug, Clone)]
-struct ProducerNonMessagingScenario {
-    description: String,
-    span: ProducerSpanInfo,
-    expected_messaging_attributes_detected: bool,
-    expected_span_rejected: bool,
-    expected_rejection_reason: String,
-    expected_included_in_export: bool,
-    expected_validation_applied: bool,
-    expected_otlp_compliant: bool,
-}
+    /// Test scenario for PRODUCER span validation
+    #[derive(Debug, Clone)]
+    struct ProducerNonMessagingScenario {
+        description: String,
+        span: ProducerSpanInfo,
+        expected_messaging_attributes_detected: bool,
+        expected_span_rejected: bool,
+        expected_rejection_reason: String,
+        expected_included_in_export: bool,
+        expected_validation_applied: bool,
+        expected_otlp_compliant: bool,
+    }
 
-/// Span information for producer validation testing
-#[derive(Debug, Clone)]
-struct ProducerSpanInfo {
-    name: String,
-    trace_id: String,
-    span_id: String,
-    span_kind: SpanKind,
-    attributes: Vec<(String, String)>,
-}
+    /// Span information for producer validation testing
+    #[derive(Debug, Clone)]
+    struct ProducerSpanInfo {
+        name: String,
+        trace_id: String,
+        span_id: String,
+        span_kind: SpanKind,
+        attributes: Vec<(String, String)>,
+    }
 
-/// Span kind enumeration
-#[derive(Debug, Clone, PartialEq)]
-enum SpanKind {
-    Unspecified,
-    Internal,
-    Server,
-    Client,
-    Producer,
-    Consumer,
-}
+    /// Span kind enumeration
+    #[derive(Debug, Clone, PartialEq)]
+    enum SpanKind {
+        Unspecified,
+        Internal,
+        Server,
+        Client,
+        Producer,
+        Consumer,
+    }
 
-/// Result of producer span validation testing
-#[derive(Debug, Clone)]
-struct ProducerValidationResult {
-    messaging_attributes_detected: bool,
-    span_rejected: bool,
-    rejection_reason: String,
-    original_span: ProducerSpanInfo,
-    included_in_export: bool,
-    is_producer_span: bool,
-    validation_applied: bool,
-    messaging_attribute_keys_found: Vec<String>,
-    processed_spans_count: usize,
-    producer_spans_count: usize,
-    producer_with_messaging_count: usize,
-    producer_without_messaging_count: usize,
-    rejected_spans_count: usize,
-    accepted_spans_count: usize,
-    validation_errors: Vec<String>,
-    validation_correct: bool,
-    otlp_compliant: bool,
-    telemetry_emitted: bool,
-}
+    /// Result of producer span validation testing
+    #[derive(Debug, Clone)]
+    struct ProducerValidationResult {
+        messaging_attributes_detected: bool,
+        span_rejected: bool,
+        rejection_reason: String,
+        original_span: ProducerSpanInfo,
+        included_in_export: bool,
+        is_producer_span: bool,
+        validation_applied: bool,
+        messaging_attribute_keys_found: Vec<String>,
+        processed_spans_count: usize,
+        producer_spans_count: usize,
+        producer_with_messaging_count: usize,
+        producer_without_messaging_count: usize,
+        rejected_spans_count: usize,
+        accepted_spans_count: usize,
+        validation_errors: Vec<String>,
+        validation_correct: bool,
+        otlp_compliant: bool,
+        telemetry_emitted: bool,
+    }
 
-/// Simulate asupersync producer validation behavior
-fn simulate_asupersync_producer_validation(
-    scenario: &ProducerNonMessagingScenario,
-) -> ProducerValidationResult {
-    let mut validation_errors = Vec::new();
-    let mut producer_spans = 0;
-    let mut producer_with_messaging = 0;
-    let mut producer_without_messaging = 0;
-    let mut rejected_spans = 0;
-    let mut accepted_spans = 0;
-    let original_span = scenario.span.clone();
-    let mut messaging_attributes_detected = false;
-    let mut span_rejected = false;
-    let mut rejection_reason = String::new();
-    let mut included_in_export = true; // Default to include
-    let mut validation_applied = false;
-    let mut messaging_attribute_keys_found = Vec::new();
+    /// Simulate asupersync producer validation behavior
+    fn simulate_asupersync_producer_validation(
+        scenario: &ProducerNonMessagingScenario,
+    ) -> ProducerValidationResult {
+        let mut validation_errors = Vec::new();
+        let mut producer_spans = 0;
+        let mut producer_with_messaging = 0;
+        let mut producer_without_messaging = 0;
+        let rejected_spans = 0;
+        let mut accepted_spans = 0;
+        let original_span = scenario.span.clone();
+        let mut messaging_attributes_detected = false;
+        let mut span_rejected = false;
+        let rejection_reason = String::new();
+        let mut included_in_export = true; // Default to include
+        let mut validation_applied = false;
+        let mut messaging_attribute_keys_found = Vec::new();
 
-    let is_producer_span = scenario.span.span_kind == SpanKind::Producer;
+        let is_producer_span = scenario.span.span_kind == SpanKind::Producer;
 
-    // Only validate PRODUCER spans for messaging attribute requirements
-    if is_producer_span {
-        producer_spans += 1;
-        validation_applied = true;
+        // Only validate PRODUCER spans for messaging attribute requirements
+        if is_producer_span {
+            producer_spans += 1;
+            validation_applied = true;
 
-        // Check for messaging.* attributes
-        for (key, _) in &scenario.span.attributes {
-            if key.starts_with("messaging.") {
-                messaging_attributes_detected = true;
-                messaging_attribute_keys_found.push(key.clone());
+            // Check for messaging.* attributes
+            for (key, _) in &scenario.span.attributes {
+                if key.starts_with("messaging.") {
+                    messaging_attributes_detected = true;
+                    messaging_attribute_keys_found.push(key.clone());
+                }
             }
-        }
 
-        if messaging_attributes_detected {
-            producer_with_messaging += 1;
-        } else {
-            producer_without_messaging += 1;
-        }
+            if messaging_attributes_detected {
+                producer_with_messaging += 1;
+            } else {
+                producer_without_messaging += 1;
+            }
 
-        // IMPORTANT: OTLP specification allows PRODUCER spans WITHOUT messaging.* attributes
-        // PRODUCER spans can be used for:
-        // - Non-messaging RPC calls (gRPC, HTTP clients, etc.)
-        // - Database operations that "produce" data
-        // - Any operation that initiates work in another system
-        // - Custom producer patterns not related to messaging
+            // IMPORTANT: OTLP specification allows PRODUCER spans WITHOUT messaging.* attributes
+            // PRODUCER spans can be used for:
+            // - Non-messaging RPC calls (gRPC, HTTP clients, etc.)
+            // - Database operations that "produce" data
+            // - Any operation that initiates work in another system
+            // - Custom producer patterns not related to messaging
 
-        // The absence of messaging.* attributes does NOT make a PRODUCER span invalid
-        // We must NOT reject PRODUCER spans just because they lack messaging attributes
+            // The absence of messaging.* attributes does NOT make a PRODUCER span invalid
+            // We must NOT reject PRODUCER spans just because they lack messaging attributes
 
-        span_rejected = false; // Never reject PRODUCER spans for lack of messaging attributes
-        included_in_export = true;
-        accepted_spans += 1;
+            span_rejected = false; // Never reject PRODUCER spans for lack of messaging attributes
+            included_in_export = true;
+            accepted_spans += 1;
 
-        if !messaging_attributes_detected {
-            validation_errors.push(format!(
+            if !messaging_attributes_detected {
+                validation_errors.push(format!(
                 "PRODUCER span '{}' has no messaging.* attributes (this is valid for non-messaging producers)",
                 scenario.span.name
             ));
+            }
+        } else {
+            // Non-PRODUCER spans are not subject to this validation
+            accepted_spans += 1;
         }
-    } else {
-        // Non-PRODUCER spans are not subject to this validation
-        accepted_spans += 1;
+
+        // Check validation correctness
+        let validation_correct = messaging_attributes_detected
+            == scenario.expected_messaging_attributes_detected
+            && span_rejected == scenario.expected_span_rejected
+            && rejection_reason == scenario.expected_rejection_reason
+            && included_in_export == scenario.expected_included_in_export
+            && validation_applied == scenario.expected_validation_applied;
+
+        // OTLP compliance: PRODUCER spans without messaging.* attributes are VALID
+        let otlp_compliant = if is_producer_span {
+            // PRODUCER spans should ALWAYS be accepted, regardless of messaging attributes
+            !span_rejected && included_in_export
+        } else {
+            // Non-PRODUCER spans should be accepted (not subject to this validation)
+            !span_rejected && included_in_export
+        };
+
+        ProducerValidationResult {
+            messaging_attributes_detected,
+            span_rejected,
+            rejection_reason,
+            original_span,
+            included_in_export,
+            is_producer_span,
+            validation_applied,
+            messaging_attribute_keys_found,
+            processed_spans_count: 1,
+            producer_spans_count: producer_spans,
+            producer_with_messaging_count: producer_with_messaging,
+            producer_without_messaging_count: producer_without_messaging,
+            rejected_spans_count: rejected_spans,
+            accepted_spans_count: accepted_spans,
+            validation_errors,
+            validation_correct,
+            otlp_compliant,
+            telemetry_emitted: true, // Assume telemetry is emitted for producer span analysis
+        }
     }
 
-    // Check validation correctness
-    let validation_correct = messaging_attributes_detected
-        == scenario.expected_messaging_attributes_detected
-        && span_rejected == scenario.expected_span_rejected
-        && rejection_reason == scenario.expected_rejection_reason
-        && included_in_export == scenario.expected_included_in_export
-        && validation_applied == scenario.expected_validation_applied;
-
-    // OTLP compliance: PRODUCER spans without messaging.* attributes are VALID
-    let otlp_compliant = if is_producer_span {
-        // PRODUCER spans should ALWAYS be accepted, regardless of messaging attributes
-        !span_rejected && included_in_export
-    } else {
-        // Non-PRODUCER spans should be accepted (not subject to this validation)
-        !span_rejected && included_in_export
-    };
-
-    ProducerValidationResult {
-        messaging_attributes_detected,
-        span_rejected,
-        rejection_reason,
-        original_span,
-        included_in_export,
-        is_producer_span,
-        validation_applied,
-        messaging_attribute_keys_found,
-        processed_spans_count: 1,
-        producer_spans_count: producer_spans,
-        producer_with_messaging_count: producer_with_messaging,
-        producer_without_messaging_count: producer_without_messaging,
-        rejected_spans_count: rejected_spans,
-        accepted_spans_count: accepted_spans,
-        validation_errors,
-        validation_correct,
-        otlp_compliant,
-        telemetry_emitted: true, // Assume telemetry is emitted for producer span analysis
-    }
-}
-
-/// Simulate reference implementation producer validation behavior
-fn simulate_reference_producer_validation(
-    scenario: &ProducerNonMessagingScenario,
-) -> ProducerValidationResult {
-    // Reference implementation follows same logic as asupersync
-    simulate_asupersync_producer_validation(scenario)
-}
-
-/// Verify producer validation logic
-fn validate_producer_validation_logic(result: &ProducerValidationResult) -> Result<(), String> {
-    if !result.validation_correct {
-        return Err("Producer validation logic is incorrect".to_string());
+    /// Simulate reference implementation producer validation behavior
+    fn simulate_reference_producer_validation(
+        scenario: &ProducerNonMessagingScenario,
+    ) -> ProducerValidationResult {
+        // Reference implementation follows same logic as asupersync
+        simulate_asupersync_producer_validation(scenario)
     }
 
-    if result.is_producer_span != result.validation_applied {
-        return Err("Validation should only be applied to PRODUCER spans".to_string());
-    }
+    /// Verify producer validation logic
+    fn validate_producer_validation_logic(result: &ProducerValidationResult) -> Result<(), String> {
+        if !result.validation_correct {
+            return Err("Producer validation logic is incorrect".to_string());
+        }
 
-    // Check OTLP compliance
-    if !result.otlp_compliant {
-        return Err("Producer validation is not OTLP compliant".to_string());
-    }
+        if result.is_producer_span != result.validation_applied {
+            return Err("Validation should only be applied to PRODUCER spans".to_string());
+        }
 
-    // Critical check: PRODUCER spans must NEVER be rejected for lack of messaging attributes
-    if result.is_producer_span && result.span_rejected {
-        return Err("CRITICAL: PRODUCER span was rejected (violates OTLP specification - PRODUCER spans without messaging.* are valid)".to_string());
-    }
+        // Check OTLP compliance
+        if !result.otlp_compliant {
+            return Err("Producer validation is not OTLP compliant".to_string());
+        }
 
-    // Critical check: accepted spans should be included in export
-    if !result.span_rejected && !result.included_in_export {
-        return Err("CRITICAL: Accepted span was not included in export".to_string());
-    }
+        // Critical check: PRODUCER spans must NEVER be rejected for lack of messaging attributes
+        if result.is_producer_span && result.span_rejected {
+            return Err("CRITICAL: PRODUCER span was rejected (violates OTLP specification - PRODUCER spans without messaging.* are valid)".to_string());
+        }
 
-    // Critical check: rejected spans should not be included in export
-    if result.span_rejected && result.included_in_export {
-        return Err("CRITICAL: Rejected span was included in export".to_string());
-    }
+        // Critical check: accepted spans should be included in export
+        if !result.span_rejected && !result.included_in_export {
+            return Err("CRITICAL: Accepted span was not included in export".to_string());
+        }
 
-    // Critical check: rejection reason must be empty when span is accepted
-    if !result.span_rejected && !result.rejection_reason.is_empty() {
-        return Err("CRITICAL: Rejection reason provided but span was not rejected".to_string());
-    }
+        // Critical check: rejected spans should not be included in export
+        if result.span_rejected && result.included_in_export {
+            return Err("CRITICAL: Rejected span was included in export".to_string());
+        }
 
-    // Critical check: counts must be consistent
-    if result.processed_spans_count != result.rejected_spans_count + result.accepted_spans_count {
-        return Err(
-            "CRITICAL: Processed spans count doesn't match rejected + accepted counts".to_string(),
-        );
-    }
+        // Critical check: rejection reason must be empty when span is accepted
+        if !result.span_rejected && !result.rejection_reason.is_empty() {
+            return Err(
+                "CRITICAL: Rejection reason provided but span was not rejected".to_string(),
+            );
+        }
 
-    // Critical check: producer messaging counts should be consistent
-    if result.is_producer_span {
-        if result.producer_spans_count
-            != result.producer_with_messaging_count + result.producer_without_messaging_count
+        // Critical check: counts must be consistent
+        if result.processed_spans_count != result.rejected_spans_count + result.accepted_spans_count
         {
-            return Err("CRITICAL: Producer spans count doesn't match with messaging + without messaging counts".to_string());
+            return Err(
+                "CRITICAL: Processed spans count doesn't match rejected + accepted counts"
+                    .to_string(),
+            );
         }
+
+        // Critical check: producer messaging counts should be consistent
+        if result.is_producer_span {
+            if result.producer_spans_count
+                != result.producer_with_messaging_count + result.producer_without_messaging_count
+            {
+                return Err("CRITICAL: Producer spans count doesn't match with messaging + without messaging counts".to_string());
+            }
+        }
+
+        // Critical check: messaging attributes detection should match found keys
+        if result.messaging_attributes_detected != !result.messaging_attribute_keys_found.is_empty()
+        {
+            return Err(
+                "CRITICAL: Messaging attributes detection doesn't match found keys".to_string(),
+            );
+        }
+
+        Ok(())
     }
 
-    // Critical check: messaging attributes detection should match found keys
-    if result.messaging_attributes_detected != !result.messaging_attribute_keys_found.is_empty() {
-        return Err(
-            "CRITICAL: Messaging attributes detection doesn't match found keys".to_string(),
-        );
+    /// Verify implementation consistency for producer validation
+    fn validate_producer_validation_implementation_consistency(
+        asupersync_result: &ProducerValidationResult,
+        reference_result: &ProducerValidationResult,
+    ) -> Result<(), String> {
+        // Both implementations should detect messaging attributes consistently
+        if asupersync_result.messaging_attributes_detected
+            != reference_result.messaging_attributes_detected
+        {
+            return Err(
+                "Messaging attributes detection differs between implementations".to_string(),
+            );
+        }
+
+        // Both implementations should reject spans consistently (should always be false for PRODUCER)
+        if asupersync_result.span_rejected != reference_result.span_rejected {
+            return Err("Span rejection differs between implementations".to_string());
+        }
+
+        // Both implementations should provide same rejection reason (should always be empty)
+        if asupersync_result.rejection_reason != reference_result.rejection_reason {
+            return Err("Rejection reason differs between implementations".to_string());
+        }
+
+        // Both implementations should include spans consistently
+        if asupersync_result.included_in_export != reference_result.included_in_export {
+            return Err("Export inclusion differs between implementations".to_string());
+        }
+
+        // Both implementations should identify PRODUCER spans consistently
+        if asupersync_result.is_producer_span != reference_result.is_producer_span {
+            return Err("PRODUCER span identification differs between implementations".to_string());
+        }
+
+        // Both implementations should apply validation consistently
+        if asupersync_result.validation_applied != reference_result.validation_applied {
+            return Err("Validation application differs between implementations".to_string());
+        }
+
+        // Both implementations should find same messaging attribute keys
+        if asupersync_result.messaging_attribute_keys_found
+            != reference_result.messaging_attribute_keys_found
+        {
+            return Err(
+                "Messaging attribute keys found differ between implementations".to_string(),
+            );
+        }
+
+        // Both implementations should count producer spans consistently
+        if asupersync_result.producer_spans_count != reference_result.producer_spans_count {
+            return Err("Producer spans count differs between implementations".to_string());
+        }
+
+        // Both implementations should count producer spans with messaging consistently
+        if asupersync_result.producer_with_messaging_count
+            != reference_result.producer_with_messaging_count
+        {
+            return Err(
+                "Producer with messaging count differs between implementations".to_string(),
+            );
+        }
+
+        // Both implementations should count producer spans without messaging consistently
+        if asupersync_result.producer_without_messaging_count
+            != reference_result.producer_without_messaging_count
+        {
+            return Err(
+                "Producer without messaging count differs between implementations".to_string(),
+            );
+        }
+
+        // Both implementations should count rejected spans consistently
+        if asupersync_result.rejected_spans_count != reference_result.rejected_spans_count {
+            return Err("Rejected spans count differs between implementations".to_string());
+        }
+
+        // Both implementations should count accepted spans consistently
+        if asupersync_result.accepted_spans_count != reference_result.accepted_spans_count {
+            return Err("Accepted spans count differs between implementations".to_string());
+        }
+
+        // Both implementations should have same validation correctness
+        if asupersync_result.validation_correct != reference_result.validation_correct {
+            return Err("Validation correctness differs between implementations".to_string());
+        }
+
+        // Both implementations should be OTLP compliant
+        if asupersync_result.otlp_compliant != reference_result.otlp_compliant {
+            return Err("OTLP compliance differs between implementations".to_string());
+        }
+
+        // Both implementations should emit telemetry consistently
+        if asupersync_result.telemetry_emitted != reference_result.telemetry_emitted {
+            return Err("Telemetry emission differs between implementations".to_string());
+        }
+
+        Ok(())
     }
-
-    Ok(())
-}
-
-/// Verify implementation consistency for producer validation
-fn validate_producer_validation_implementation_consistency(
-    asupersync_result: &ProducerValidationResult,
-    reference_result: &ProducerValidationResult,
-) -> Result<(), String> {
-    // Both implementations should detect messaging attributes consistently
-    if asupersync_result.messaging_attributes_detected
-        != reference_result.messaging_attributes_detected
-    {
-        return Err("Messaging attributes detection differs between implementations".to_string());
-    }
-
-    // Both implementations should reject spans consistently (should always be false for PRODUCER)
-    if asupersync_result.span_rejected != reference_result.span_rejected {
-        return Err("Span rejection differs between implementations".to_string());
-    }
-
-    // Both implementations should provide same rejection reason (should always be empty)
-    if asupersync_result.rejection_reason != reference_result.rejection_reason {
-        return Err("Rejection reason differs between implementations".to_string());
-    }
-
-    // Both implementations should include spans consistently
-    if asupersync_result.included_in_export != reference_result.included_in_export {
-        return Err("Export inclusion differs between implementations".to_string());
-    }
-
-    // Both implementations should identify PRODUCER spans consistently
-    if asupersync_result.is_producer_span != reference_result.is_producer_span {
-        return Err("PRODUCER span identification differs between implementations".to_string());
-    }
-
-    // Both implementations should apply validation consistently
-    if asupersync_result.validation_applied != reference_result.validation_applied {
-        return Err("Validation application differs between implementations".to_string());
-    }
-
-    // Both implementations should find same messaging attribute keys
-    if asupersync_result.messaging_attribute_keys_found
-        != reference_result.messaging_attribute_keys_found
-    {
-        return Err("Messaging attribute keys found differ between implementations".to_string());
-    }
-
-    // Both implementations should count producer spans consistently
-    if asupersync_result.producer_spans_count != reference_result.producer_spans_count {
-        return Err("Producer spans count differs between implementations".to_string());
-    }
-
-    // Both implementations should count producer spans with messaging consistently
-    if asupersync_result.producer_with_messaging_count
-        != reference_result.producer_with_messaging_count
-    {
-        return Err("Producer with messaging count differs between implementations".to_string());
-    }
-
-    // Both implementations should count producer spans without messaging consistently
-    if asupersync_result.producer_without_messaging_count
-        != reference_result.producer_without_messaging_count
-    {
-        return Err("Producer without messaging count differs between implementations".to_string());
-    }
-
-    // Both implementations should count rejected spans consistently
-    if asupersync_result.rejected_spans_count != reference_result.rejected_spans_count {
-        return Err("Rejected spans count differs between implementations".to_string());
-    }
-
-    // Both implementations should count accepted spans consistently
-    if asupersync_result.accepted_spans_count != reference_result.accepted_spans_count {
-        return Err("Accepted spans count differs between implementations".to_string());
-    }
-
-    // Both implementations should have same validation correctness
-    if asupersync_result.validation_correct != reference_result.validation_correct {
-        return Err("Validation correctness differs between implementations".to_string());
-    }
-
-    // Both implementations should be OTLP compliant
-    if asupersync_result.otlp_compliant != reference_result.otlp_compliant {
-        return Err("OTLP compliance differs between implementations".to_string());
-    }
-
-    // Both implementations should emit telemetry consistently
-    if asupersync_result.telemetry_emitted != reference_result.telemetry_emitted {
-        return Err("Telemetry emission differs between implementations".to_string());
-    }
-
-    Ok(())
 }
 
 //
@@ -26104,10 +26162,11 @@ fn validate_length_validation_implementation_consistency(
 // OTLP-109: Nested array validation conformance test
 //
 
-#[test]
-fn otlp_109_nested_array_validation_conformance() {
-    // Test scenarios for nested array validation per OTLP specification
-    let scenarios = vec![
+mod otlp_109_nested_array_validation {
+    #[test]
+    fn otlp_109_nested_array_validation_conformance() {
+        // Test scenarios for nested array validation per OTLP specification
+        let scenarios = vec![
         NestedArrayScenario {
             description:
                 "Attribute with nested string arrays (MUST reject - arrays of arrays not allowed)"
@@ -26398,382 +26457,391 @@ fn otlp_109_nested_array_validation_conformance() {
         },
     ];
 
-    for scenario in scenarios {
-        println!("Testing scenario: {}", scenario.description);
+        for scenario in scenarios {
+            println!("Testing scenario: {}", scenario.description);
 
-        // Simulate asupersync exporter behavior
-        let asupersync_result = simulate_asupersync_nested_array_validation(&scenario);
+            // Simulate asupersync exporter behavior
+            let asupersync_result = simulate_asupersync_nested_array_validation(&scenario);
 
-        // Simulate reference implementation behavior
-        let reference_result = simulate_reference_nested_array_validation(&scenario);
+            // Simulate reference implementation behavior
+            let reference_result = simulate_reference_nested_array_validation(&scenario);
 
-        // Validate individual results
-        validate_nested_array_validation_logic(&asupersync_result).expect(&format!(
-            "Asupersync nested array validation logic failed for scenario: {}",
-            scenario.description
-        ));
+            // Validate individual results
+            validate_nested_array_validation_logic(&asupersync_result).expect(&format!(
+                "Asupersync nested array validation logic failed for scenario: {}",
+                scenario.description
+            ));
 
-        validate_nested_array_validation_logic(&reference_result).expect(&format!(
-            "Reference nested array validation logic failed for scenario: {}",
-            scenario.description
-        ));
+            validate_nested_array_validation_logic(&reference_result).expect(&format!(
+                "Reference nested array validation logic failed for scenario: {}",
+                scenario.description
+            ));
 
-        // Validate implementation consistency
-        validate_nested_array_validation_implementation_consistency(
-            &asupersync_result,
-            &reference_result,
-        )
-        .expect(&format!(
-            "Implementation consistency failed for scenario: {}",
-            scenario.description
-        ));
+            // Validate implementation consistency
+            validate_nested_array_validation_implementation_consistency(
+                &asupersync_result,
+                &reference_result,
+            )
+            .expect(&format!(
+                "Implementation consistency failed for scenario: {}",
+                scenario.description
+            ));
 
-        println!("✓ Scenario passed: {}", scenario.description);
-    }
-}
-
-/// Test scenario for nested array validation
-#[derive(Debug, Clone)]
-struct NestedArrayScenario {
-    description: String,
-    span: NestedArraySpanInfo,
-    expected_nested_arrays_detected: Vec<String>,
-    expected_span_rejected: bool,
-    expected_rejection_reason: String,
-    expected_included_in_export: bool,
-    expected_validation_applied: bool,
-    expected_otlp_compliant: bool,
-}
-
-/// Span information for nested array validation testing
-#[derive(Debug, Clone)]
-struct NestedArraySpanInfo {
-    name: String,
-    trace_id: String,
-    span_id: String,
-    attributes: Vec<(String, AttributeValue)>,
-}
-
-/// Attribute value types for testing
-#[derive(Debug, Clone, PartialEq)]
-enum AttributeValue {
-    String(String),
-    IntValue(i64),
-    BoolValue(bool),
-    ArrayValue(Vec<AttributeValue>),
-}
-
-/// Result of nested array validation testing
-#[derive(Debug, Clone)]
-struct NestedArrayValidationResult {
-    nested_arrays_detected: Vec<String>,
-    span_rejected: bool,
-    rejection_reason: String,
-    original_span: NestedArraySpanInfo,
-    included_in_export: bool,
-    validation_applied: bool,
-    processed_spans_count: usize,
-    rejected_spans_count: usize,
-    accepted_spans_count: usize,
-    attributes_validated_count: usize,
-    array_attributes_count: usize,
-    nested_violations_count: usize,
-    max_nesting_depth_seen: usize,
-    validation_errors: Vec<String>,
-    validation_correct: bool,
-    otlp_compliant: bool,
-    telemetry_emitted: bool,
-}
-
-/// Check if an attribute value contains nested arrays
-fn contains_nested_arrays(value: &AttributeValue, depth: usize) -> (bool, usize) {
-    match value {
-        AttributeValue::ArrayValue(array) => {
-            let mut has_nested = false;
-            let mut max_depth = depth;
-
-            for item in array {
-                match item {
-                    AttributeValue::ArrayValue(_) => {
-                        has_nested = true; // Found nested array
-                        let (_, item_depth) = contains_nested_arrays(item, depth + 1);
-                        max_depth = max_depth.max(item_depth);
-                    }
-                    _ => {
-                        // Primitive values are fine
-                    }
-                }
-            }
-
-            (has_nested, max_depth)
+            println!("✓ Scenario passed: {}", scenario.description);
         }
-        _ => (false, depth),
     }
-}
 
-/// Simulate asupersync nested array validation behavior
-fn simulate_asupersync_nested_array_validation(
-    scenario: &NestedArrayScenario,
-) -> NestedArrayValidationResult {
-    let mut validation_errors = Vec::new();
-    let mut rejected_spans = 0;
-    let mut accepted_spans = 0;
-    let original_span = scenario.span.clone();
-    let mut nested_arrays_detected = Vec::new();
-    let mut span_rejected = false;
-    let mut rejection_reason = String::new();
-    let mut included_in_export = true; // Default to include
-    let validation_applied = true; // Always apply nested array validation
-    let mut nested_violations = 0;
-    let mut array_attributes = 0;
-    let mut max_nesting_depth = 0;
+    /// Test scenario for nested array validation
+    #[derive(Debug, Clone)]
+    struct NestedArrayScenario {
+        description: String,
+        span: NestedArraySpanInfo,
+        expected_nested_arrays_detected: Vec<String>,
+        expected_span_rejected: bool,
+        expected_rejection_reason: String,
+        expected_included_in_export: bool,
+        expected_validation_applied: bool,
+        expected_otlp_compliant: bool,
+    }
 
-    // Validate all attribute values for nested arrays
-    for (key, value) in &scenario.span.attributes {
+    /// Span information for nested array validation testing
+    #[derive(Debug, Clone)]
+    struct NestedArraySpanInfo {
+        name: String,
+        trace_id: String,
+        span_id: String,
+        attributes: Vec<(String, AttributeValue)>,
+    }
+
+    /// Attribute value types for testing
+    #[derive(Debug, Clone, PartialEq)]
+    enum AttributeValue {
+        String(String),
+        IntValue(i64),
+        BoolValue(bool),
+        ArrayValue(Vec<AttributeValue>),
+    }
+
+    /// Result of nested array validation testing
+    #[derive(Debug, Clone)]
+    struct NestedArrayValidationResult {
+        nested_arrays_detected: Vec<String>,
+        span_rejected: bool,
+        rejection_reason: String,
+        original_span: NestedArraySpanInfo,
+        included_in_export: bool,
+        validation_applied: bool,
+        processed_spans_count: usize,
+        rejected_spans_count: usize,
+        accepted_spans_count: usize,
+        attributes_validated_count: usize,
+        array_attributes_count: usize,
+        nested_violations_count: usize,
+        max_nesting_depth_seen: usize,
+        validation_errors: Vec<String>,
+        validation_correct: bool,
+        otlp_compliant: bool,
+        telemetry_emitted: bool,
+    }
+
+    /// Check if an attribute value contains nested arrays
+    fn contains_nested_arrays(value: &AttributeValue, depth: usize) -> (bool, usize) {
         match value {
-            AttributeValue::ArrayValue(_) => {
-                array_attributes += 1;
-                let (has_nested, depth) = contains_nested_arrays(value, 1);
-                max_nesting_depth = max_nesting_depth.max(depth);
+            AttributeValue::ArrayValue(array) => {
+                let mut has_nested = false;
+                let mut max_depth = depth;
 
-                if has_nested {
-                    // Found nested array - OTLP violation
-                    nested_arrays_detected.push(key.clone());
-                    nested_violations += 1;
+                for item in array {
+                    match item {
+                        AttributeValue::ArrayValue(_) => {
+                            has_nested = true; // Found nested array
+                            let (_, item_depth) = contains_nested_arrays(item, depth + 1);
+                            max_depth = max_depth.max(item_depth);
+                        }
+                        _ => {
+                            // Primitive values are fine
+                        }
+                    }
                 }
+
+                (has_nested, max_depth)
             }
-            _ => {
-                // Non-array attributes are fine
-            }
+            _ => (false, depth),
         }
     }
 
-    // OTLP spec: only flat arrays of primitives allowed - reject spans with nested arrays
-    if !nested_arrays_detected.is_empty() {
-        span_rejected = true;
-        included_in_export = false;
-        rejected_spans += 1;
+    /// Simulate asupersync nested array validation behavior
+    fn simulate_asupersync_nested_array_validation(
+        scenario: &NestedArrayScenario,
+    ) -> NestedArrayValidationResult {
+        let mut validation_errors = Vec::new();
+        let mut rejected_spans = 0;
+        let mut accepted_spans = 0;
+        let original_span = scenario.span.clone();
+        let mut nested_arrays_detected = Vec::new();
+        let mut span_rejected = false;
+        let mut rejection_reason = String::new();
+        let mut included_in_export = true; // Default to include
+        let validation_applied = true; // Always apply nested array validation
+        let mut nested_violations = 0;
+        let mut array_attributes = 0;
+        let mut max_nesting_depth = 0;
 
-        // Report the first violating attribute in rejection reason
-        rejection_reason = format!(
-            "Attribute contains nested arrays (not allowed): '{}'",
-            nested_arrays_detected[0]
-        );
+        // Validate all attribute values for nested arrays
+        for (key, value) in &scenario.span.attributes {
+            match value {
+                AttributeValue::ArrayValue(_) => {
+                    array_attributes += 1;
+                    let (has_nested, depth) = contains_nested_arrays(value, 1);
+                    max_nesting_depth = max_nesting_depth.max(depth);
 
-        validation_errors.push(format!(
-            "Span '{}' rejected: {} attributes contain nested arrays",
-            scenario.span.name,
-            nested_arrays_detected.len()
-        ));
-    } else {
-        accepted_spans += 1;
+                    if has_nested {
+                        // Found nested array - OTLP violation
+                        nested_arrays_detected.push(key.clone());
+                        nested_violations += 1;
+                    }
+                }
+                _ => {
+                    // Non-array attributes are fine
+                }
+            }
+        }
+
+        // OTLP spec: only flat arrays of primitives allowed - reject spans with nested arrays
+        if !nested_arrays_detected.is_empty() {
+            span_rejected = true;
+            included_in_export = false;
+            rejected_spans += 1;
+
+            // Report the first violating attribute in rejection reason
+            rejection_reason = format!(
+                "Attribute contains nested arrays (not allowed): '{}'",
+                nested_arrays_detected[0]
+            );
+
+            validation_errors.push(format!(
+                "Span '{}' rejected: {} attributes contain nested arrays",
+                scenario.span.name,
+                nested_arrays_detected.len()
+            ));
+        } else {
+            accepted_spans += 1;
+        }
+
+        // Check validation correctness
+        let validation_correct = nested_arrays_detected == scenario.expected_nested_arrays_detected
+            && span_rejected == scenario.expected_span_rejected
+            && rejection_reason == scenario.expected_rejection_reason
+            && included_in_export == scenario.expected_included_in_export
+            && validation_applied == scenario.expected_validation_applied;
+
+        // OTLP compliance: rejecting spans with nested arrays is REQUIRED
+        let otlp_compliant = if nested_violations > 0 {
+            // Must reject spans with nested arrays
+            span_rejected && !included_in_export
+        } else {
+            // Must accept spans with only flat arrays or primitives
+            !span_rejected && included_in_export
+        };
+
+        NestedArrayValidationResult {
+            nested_arrays_detected,
+            span_rejected,
+            rejection_reason,
+            original_span,
+            included_in_export,
+            validation_applied,
+            processed_spans_count: 1,
+            rejected_spans_count: rejected_spans,
+            accepted_spans_count: accepted_spans,
+            attributes_validated_count: scenario.span.attributes.len(),
+            array_attributes_count: array_attributes,
+            nested_violations_count: nested_violations,
+            max_nesting_depth_seen: max_nesting_depth,
+            validation_errors,
+            validation_correct,
+            otlp_compliant,
+            telemetry_emitted: true, // Assume telemetry is emitted for nested array violations
+        }
     }
 
-    // Check validation correctness
-    let validation_correct = nested_arrays_detected == scenario.expected_nested_arrays_detected
-        && span_rejected == scenario.expected_span_rejected
-        && rejection_reason == scenario.expected_rejection_reason
-        && included_in_export == scenario.expected_included_in_export
-        && validation_applied == scenario.expected_validation_applied;
-
-    // OTLP compliance: rejecting spans with nested arrays is REQUIRED
-    let otlp_compliant = if nested_violations > 0 {
-        // Must reject spans with nested arrays
-        span_rejected && !included_in_export
-    } else {
-        // Must accept spans with only flat arrays or primitives
-        !span_rejected && included_in_export
-    };
-
-    NestedArrayValidationResult {
-        nested_arrays_detected,
-        span_rejected,
-        rejection_reason,
-        original_span,
-        included_in_export,
-        validation_applied,
-        processed_spans_count: 1,
-        rejected_spans_count: rejected_spans,
-        accepted_spans_count: accepted_spans,
-        attributes_validated_count: scenario.span.attributes.len(),
-        array_attributes_count: array_attributes,
-        nested_violations_count: nested_violations,
-        max_nesting_depth_seen: max_nesting_depth,
-        validation_errors,
-        validation_correct,
-        otlp_compliant,
-        telemetry_emitted: true, // Assume telemetry is emitted for nested array violations
-    }
-}
-
-/// Simulate reference implementation nested array validation behavior
-fn simulate_reference_nested_array_validation(
-    scenario: &NestedArrayScenario,
-) -> NestedArrayValidationResult {
-    // Reference implementation follows same logic as asupersync
-    simulate_asupersync_nested_array_validation(scenario)
-}
-
-/// Verify nested array validation logic
-fn validate_nested_array_validation_logic(
-    result: &NestedArrayValidationResult,
-) -> Result<(), String> {
-    if !result.validation_correct {
-        return Err("Nested array validation logic is incorrect".to_string());
+    /// Simulate reference implementation nested array validation behavior
+    fn simulate_reference_nested_array_validation(
+        scenario: &NestedArrayScenario,
+    ) -> NestedArrayValidationResult {
+        // Reference implementation follows same logic as asupersync
+        simulate_asupersync_nested_array_validation(scenario)
     }
 
-    // Check OTLP compliance
-    if !result.otlp_compliant {
-        return Err("Nested array validation is not OTLP compliant".to_string());
+    /// Verify nested array validation logic
+    fn validate_nested_array_validation_logic(
+        result: &NestedArrayValidationResult,
+    ) -> Result<(), String> {
+        if !result.validation_correct {
+            return Err("Nested array validation logic is incorrect".to_string());
+        }
+
+        // Check OTLP compliance
+        if !result.otlp_compliant {
+            return Err("Nested array validation is not OTLP compliant".to_string());
+        }
+
+        // Critical check: spans with nested arrays must be rejected
+        if result.nested_violations_count > 0 && !result.span_rejected {
+            return Err(
+                "CRITICAL: Span with nested arrays was not rejected (violates OTLP spec)"
+                    .to_string(),
+            );
+        }
+
+        // Critical check: spans without nested arrays must be accepted
+        if result.nested_violations_count == 0 && result.span_rejected {
+            return Err("CRITICAL: Span without nested arrays was rejected".to_string());
+        }
+
+        // Critical check: rejected spans should not be included in export
+        if result.span_rejected && result.included_in_export {
+            return Err("CRITICAL: Rejected span was included in export".to_string());
+        }
+
+        // Critical check: accepted spans should be included in export
+        if !result.span_rejected && !result.included_in_export {
+            return Err("CRITICAL: Accepted span was not included in export".to_string());
+        }
+
+        // Critical check: rejection reason must be provided for rejected spans
+        if result.span_rejected && result.rejection_reason.is_empty() {
+            return Err("CRITICAL: No rejection reason provided for rejected span".to_string());
+        }
+
+        // Critical check: rejection reason must be empty for accepted spans
+        if !result.span_rejected && !result.rejection_reason.is_empty() {
+            return Err(
+                "CRITICAL: Rejection reason provided but span was not rejected".to_string(),
+            );
+        }
+
+        // Critical check: counts must be consistent
+        if result.processed_spans_count != result.rejected_spans_count + result.accepted_spans_count
+        {
+            return Err(
+                "CRITICAL: Processed spans count doesn't match rejected + accepted counts"
+                    .to_string(),
+            );
+        }
+
+        // Critical check: nested arrays detection should match violations count
+        if result.nested_arrays_detected.len() != result.nested_violations_count {
+            return Err(
+                "CRITICAL: Nested arrays detected count doesn't match violations count".to_string(),
+            );
+        }
+
+        // Critical check: validation should always be applied
+        if !result.validation_applied {
+            return Err("CRITICAL: Nested array validation was not applied".to_string());
+        }
+
+        // Critical check: max nesting depth should be reasonable (if nested arrays found, depth > 1)
+        if result.nested_violations_count > 0 && result.max_nesting_depth_seen <= 1 {
+            return Err(
+                "CRITICAL: Max nesting depth tracking is incorrect for nested arrays".to_string(),
+            );
+        }
+
+        Ok(())
     }
 
-    // Critical check: spans with nested arrays must be rejected
-    if result.nested_violations_count > 0 && !result.span_rejected {
-        return Err(
-            "CRITICAL: Span with nested arrays was not rejected (violates OTLP spec)".to_string(),
-        );
+    /// Verify implementation consistency for nested array validation
+    fn validate_nested_array_validation_implementation_consistency(
+        asupersync_result: &NestedArrayValidationResult,
+        reference_result: &NestedArrayValidationResult,
+    ) -> Result<(), String> {
+        // Both implementations should detect same nested arrays
+        if asupersync_result.nested_arrays_detected != reference_result.nested_arrays_detected {
+            return Err("Nested arrays detection differs between implementations".to_string());
+        }
+
+        // Both implementations should reject spans consistently
+        if asupersync_result.span_rejected != reference_result.span_rejected {
+            return Err("Span rejection differs between implementations".to_string());
+        }
+
+        // Both implementations should provide same rejection reason
+        if asupersync_result.rejection_reason != reference_result.rejection_reason {
+            return Err("Rejection reason differs between implementations".to_string());
+        }
+
+        // Both implementations should include spans consistently
+        if asupersync_result.included_in_export != reference_result.included_in_export {
+            return Err("Export inclusion differs between implementations".to_string());
+        }
+
+        // Both implementations should apply validation consistently
+        if asupersync_result.validation_applied != reference_result.validation_applied {
+            return Err("Validation application differs between implementations".to_string());
+        }
+
+        // Both implementations should count violations consistently
+        if asupersync_result.nested_violations_count != reference_result.nested_violations_count {
+            return Err("Nested violations count differs between implementations".to_string());
+        }
+
+        // Both implementations should count array attributes consistently
+        if asupersync_result.array_attributes_count != reference_result.array_attributes_count {
+            return Err("Array attributes count differs between implementations".to_string());
+        }
+
+        // Both implementations should track max nesting depth consistently
+        if asupersync_result.max_nesting_depth_seen != reference_result.max_nesting_depth_seen {
+            return Err("Max nesting depth tracking differs between implementations".to_string());
+        }
+
+        // Both implementations should validate same number of attributes
+        if asupersync_result.attributes_validated_count
+            != reference_result.attributes_validated_count
+        {
+            return Err("Attributes validated count differs between implementations".to_string());
+        }
+
+        // Both implementations should count rejected spans consistently
+        if asupersync_result.rejected_spans_count != reference_result.rejected_spans_count {
+            return Err("Rejected spans count differs between implementations".to_string());
+        }
+
+        // Both implementations should count accepted spans consistently
+        if asupersync_result.accepted_spans_count != reference_result.accepted_spans_count {
+            return Err("Accepted spans count differs between implementations".to_string());
+        }
+
+        // Both implementations should have same validation correctness
+        if asupersync_result.validation_correct != reference_result.validation_correct {
+            return Err("Validation correctness differs between implementations".to_string());
+        }
+
+        // Both implementations should be OTLP compliant
+        if asupersync_result.otlp_compliant != reference_result.otlp_compliant {
+            return Err("OTLP compliance differs between implementations".to_string());
+        }
+
+        // Both implementations should emit telemetry consistently
+        if asupersync_result.telemetry_emitted != reference_result.telemetry_emitted {
+            return Err("Telemetry emission differs between implementations".to_string());
+        }
+
+        Ok(())
     }
-
-    // Critical check: spans without nested arrays must be accepted
-    if result.nested_violations_count == 0 && result.span_rejected {
-        return Err("CRITICAL: Span without nested arrays was rejected".to_string());
-    }
-
-    // Critical check: rejected spans should not be included in export
-    if result.span_rejected && result.included_in_export {
-        return Err("CRITICAL: Rejected span was included in export".to_string());
-    }
-
-    // Critical check: accepted spans should be included in export
-    if !result.span_rejected && !result.included_in_export {
-        return Err("CRITICAL: Accepted span was not included in export".to_string());
-    }
-
-    // Critical check: rejection reason must be provided for rejected spans
-    if result.span_rejected && result.rejection_reason.is_empty() {
-        return Err("CRITICAL: No rejection reason provided for rejected span".to_string());
-    }
-
-    // Critical check: rejection reason must be empty for accepted spans
-    if !result.span_rejected && !result.rejection_reason.is_empty() {
-        return Err("CRITICAL: Rejection reason provided but span was not rejected".to_string());
-    }
-
-    // Critical check: counts must be consistent
-    if result.processed_spans_count != result.rejected_spans_count + result.accepted_spans_count {
-        return Err(
-            "CRITICAL: Processed spans count doesn't match rejected + accepted counts".to_string(),
-        );
-    }
-
-    // Critical check: nested arrays detection should match violations count
-    if result.nested_arrays_detected.len() != result.nested_violations_count {
-        return Err(
-            "CRITICAL: Nested arrays detected count doesn't match violations count".to_string(),
-        );
-    }
-
-    // Critical check: validation should always be applied
-    if !result.validation_applied {
-        return Err("CRITICAL: Nested array validation was not applied".to_string());
-    }
-
-    // Critical check: max nesting depth should be reasonable (if nested arrays found, depth > 1)
-    if result.nested_violations_count > 0 && result.max_nesting_depth_seen <= 1 {
-        return Err(
-            "CRITICAL: Max nesting depth tracking is incorrect for nested arrays".to_string(),
-        );
-    }
-
-    Ok(())
-}
-
-/// Verify implementation consistency for nested array validation
-fn validate_nested_array_validation_implementation_consistency(
-    asupersync_result: &NestedArrayValidationResult,
-    reference_result: &NestedArrayValidationResult,
-) -> Result<(), String> {
-    // Both implementations should detect same nested arrays
-    if asupersync_result.nested_arrays_detected != reference_result.nested_arrays_detected {
-        return Err("Nested arrays detection differs between implementations".to_string());
-    }
-
-    // Both implementations should reject spans consistently
-    if asupersync_result.span_rejected != reference_result.span_rejected {
-        return Err("Span rejection differs between implementations".to_string());
-    }
-
-    // Both implementations should provide same rejection reason
-    if asupersync_result.rejection_reason != reference_result.rejection_reason {
-        return Err("Rejection reason differs between implementations".to_string());
-    }
-
-    // Both implementations should include spans consistently
-    if asupersync_result.included_in_export != reference_result.included_in_export {
-        return Err("Export inclusion differs between implementations".to_string());
-    }
-
-    // Both implementations should apply validation consistently
-    if asupersync_result.validation_applied != reference_result.validation_applied {
-        return Err("Validation application differs between implementations".to_string());
-    }
-
-    // Both implementations should count violations consistently
-    if asupersync_result.nested_violations_count != reference_result.nested_violations_count {
-        return Err("Nested violations count differs between implementations".to_string());
-    }
-
-    // Both implementations should count array attributes consistently
-    if asupersync_result.array_attributes_count != reference_result.array_attributes_count {
-        return Err("Array attributes count differs between implementations".to_string());
-    }
-
-    // Both implementations should track max nesting depth consistently
-    if asupersync_result.max_nesting_depth_seen != reference_result.max_nesting_depth_seen {
-        return Err("Max nesting depth tracking differs between implementations".to_string());
-    }
-
-    // Both implementations should validate same number of attributes
-    if asupersync_result.attributes_validated_count != reference_result.attributes_validated_count {
-        return Err("Attributes validated count differs between implementations".to_string());
-    }
-
-    // Both implementations should count rejected spans consistently
-    if asupersync_result.rejected_spans_count != reference_result.rejected_spans_count {
-        return Err("Rejected spans count differs between implementations".to_string());
-    }
-
-    // Both implementations should count accepted spans consistently
-    if asupersync_result.accepted_spans_count != reference_result.accepted_spans_count {
-        return Err("Accepted spans count differs between implementations".to_string());
-    }
-
-    // Both implementations should have same validation correctness
-    if asupersync_result.validation_correct != reference_result.validation_correct {
-        return Err("Validation correctness differs between implementations".to_string());
-    }
-
-    // Both implementations should be OTLP compliant
-    if asupersync_result.otlp_compliant != reference_result.otlp_compliant {
-        return Err("OTLP compliance differs between implementations".to_string());
-    }
-
-    // Both implementations should emit telemetry consistently
-    if asupersync_result.telemetry_emitted != reference_result.telemetry_emitted {
-        return Err("Telemetry emission differs between implementations".to_string());
-    }
-
-    Ok(())
 }
 
 //
 // OTLP-110: Mixed status code batch export conformance test
 //
 
-#[test]
-fn otlp_110_mixed_status_code_batch_export_conformance() {
-    // Test scenarios for mixed status code batch export per OTLP specification
-    let scenarios = vec![
+mod otlp_110_mixed_status_code_batch_export {
+    #[test]
+    fn otlp_110_mixed_status_code_batch_export_conformance() {
+        // Test scenarios for mixed status code batch export per OTLP specification
+        let scenarios = vec![
         MixedStatusScenario {
             description: "Batch with mixed OK and ERROR spans (all MUST be exported regardless of status)".to_string(),
             batch: StatusCodeBatch {
@@ -27045,317 +27113,320 @@ fn otlp_110_mixed_status_code_batch_export_conformance() {
         },
     ];
 
-    for scenario in scenarios {
-        println!("Testing scenario: {}", scenario.description);
+        for scenario in scenarios {
+            println!("Testing scenario: {}", scenario.description);
 
-        // Simulate asupersync exporter behavior
-        let asupersync_result = simulate_asupersync_status_batch_export(&scenario);
+            // Simulate asupersync exporter behavior
+            let asupersync_result = simulate_asupersync_status_batch_export(&scenario);
 
-        // Simulate reference implementation behavior
-        let reference_result = simulate_reference_status_batch_export(&scenario);
+            // Simulate reference implementation behavior
+            let reference_result = simulate_reference_status_batch_export(&scenario);
 
-        // Validate individual results
-        validate_status_batch_export_logic(&asupersync_result).expect(&format!(
-            "Asupersync status batch export logic failed for scenario: {}",
-            scenario.description
-        ));
+            // Validate individual results
+            validate_status_batch_export_logic(&asupersync_result).expect(&format!(
+                "Asupersync status batch export logic failed for scenario: {}",
+                scenario.description
+            ));
 
-        validate_status_batch_export_logic(&reference_result).expect(&format!(
-            "Reference status batch export logic failed for scenario: {}",
-            scenario.description
-        ));
+            validate_status_batch_export_logic(&reference_result).expect(&format!(
+                "Reference status batch export logic failed for scenario: {}",
+                scenario.description
+            ));
 
-        // Validate implementation consistency
-        validate_status_batch_export_implementation_consistency(
-            &asupersync_result,
-            &reference_result,
-        )
-        .expect(&format!(
-            "Implementation consistency failed for scenario: {}",
-            scenario.description
-        ));
+            // Validate implementation consistency
+            validate_status_batch_export_implementation_consistency(
+                &asupersync_result,
+                &reference_result,
+            )
+            .expect(&format!(
+                "Implementation consistency failed for scenario: {}",
+                scenario.description
+            ));
 
-        println!("✓ Scenario passed: {}", scenario.description);
-    }
-}
-
-/// Test scenario for mixed status code batch export
-#[derive(Debug, Clone)]
-struct MixedStatusScenario {
-    description: String,
-    batch: StatusCodeBatch,
-    expected_exported_count: usize,
-    expected_ok_count: usize,
-    expected_error_count: usize,
-    expected_unset_count: usize,
-    expected_filtered_by_status: bool,
-    expected_batch_rejected: bool,
-    expected_rejection_reason: String,
-    expected_validation_applied: bool,
-    expected_otlp_compliant: bool,
-}
-
-/// Batch of spans with status codes for testing
-#[derive(Debug, Clone)]
-struct StatusCodeBatch {
-    spans: Vec<StatusSpanInfo>,
-}
-
-/// Span information with status code for testing
-#[derive(Debug, Clone)]
-struct StatusSpanInfo {
-    name: String,
-    trace_id: String,
-    span_id: String,
-    status: SpanStatus,
-}
-
-/// Span status enumeration
-#[derive(Debug, Clone, PartialEq)]
-enum SpanStatus {
-    Unset,
-    Ok,
-    Error(String), // Error with message
-}
-
-/// Result of status code batch export testing
-#[derive(Debug, Clone)]
-struct StatusBatchExportResult {
-    exported_spans_count: usize,
-    ok_spans_count: usize,
-    error_spans_count: usize,
-    unset_spans_count: usize,
-    filtered_by_status: bool,
-    batch_rejected: bool,
-    rejection_reason: String,
-    original_batch: StatusCodeBatch,
-    export_decisions: Vec<bool>, // True = exported, False = filtered
-    processed_batches_count: usize,
-    total_spans_processed: usize,
-    validation_applied: bool,
-    validation_errors: Vec<String>,
-    validation_correct: bool,
-    otlp_compliant: bool,
-    telemetry_emitted: bool,
-}
-
-/// Simulate asupersync status code batch export behavior
-fn simulate_asupersync_status_batch_export(
-    scenario: &MixedStatusScenario,
-) -> StatusBatchExportResult {
-    let mut validation_errors = Vec::new();
-    let original_batch = scenario.batch.clone();
-    let mut exported_spans = 0;
-    let mut ok_spans = 0;
-    let mut error_spans = 0;
-    let mut unset_spans = 0;
-    let mut export_decisions = Vec::new();
-    let batch_rejected = false; // Batches should not be rejected based on status
-    let rejection_reason = String::new();
-    let validation_applied = true; // Always apply status export validation
-    let filtered_by_status = false; // OTLP: status should NOT filter export
-
-    // Process each span in the batch
-    for span in &scenario.batch.spans {
-        // Count spans by status
-        match &span.status {
-            SpanStatus::Ok => ok_spans += 1,
-            SpanStatus::Error(_) => error_spans += 1,
-            SpanStatus::Unset => unset_spans += 1,
-        }
-
-        // CRITICAL: All spans must be exported regardless of status
-        // Status code is metadata, not a filter criteria
-        let export_decision = true; // Always export, regardless of status
-        export_decisions.push(export_decision);
-
-        if export_decision {
-            exported_spans += 1;
+            println!("✓ Scenario passed: {}", scenario.description);
         }
     }
 
-    // OTLP compliance check: verify no status-based filtering occurred
-    if exported_spans != scenario.batch.spans.len() {
-        validation_errors.push(format!(
-            "OTLP violation: {} spans were filtered based on status (should export all {})",
-            scenario.batch.spans.len() - exported_spans,
-            scenario.batch.spans.len()
-        ));
+    /// Test scenario for mixed status code batch export
+    #[derive(Debug, Clone)]
+    struct MixedStatusScenario {
+        description: String,
+        batch: StatusCodeBatch,
+        expected_exported_count: usize,
+        expected_ok_count: usize,
+        expected_error_count: usize,
+        expected_unset_count: usize,
+        expected_filtered_by_status: bool,
+        expected_batch_rejected: bool,
+        expected_rejection_reason: String,
+        expected_validation_applied: bool,
+        expected_otlp_compliant: bool,
     }
 
-    // Check validation correctness
-    let validation_correct = exported_spans == scenario.expected_exported_count
-        && ok_spans == scenario.expected_ok_count
-        && error_spans == scenario.expected_error_count
-        && unset_spans == scenario.expected_unset_count
-        && filtered_by_status == scenario.expected_filtered_by_status
-        && batch_rejected == scenario.expected_batch_rejected
-        && rejection_reason == scenario.expected_rejection_reason
-        && validation_applied == scenario.expected_validation_applied;
-
-    // OTLP compliance: all spans must be exported regardless of status
-    let otlp_compliant =
-        exported_spans == scenario.batch.spans.len() && !filtered_by_status && !batch_rejected;
-
-    StatusBatchExportResult {
-        exported_spans_count: exported_spans,
-        ok_spans_count: ok_spans,
-        error_spans_count: error_spans,
-        unset_spans_count: unset_spans,
-        filtered_by_status,
-        batch_rejected,
-        rejection_reason,
-        original_batch,
-        export_decisions,
-        processed_batches_count: 1,
-        total_spans_processed: scenario.batch.spans.len(),
-        validation_applied,
-        validation_errors,
-        validation_correct,
-        otlp_compliant,
-        telemetry_emitted: true, // Assume telemetry is emitted for export operations
-    }
-}
-
-/// Simulate reference implementation status batch export behavior
-fn simulate_reference_status_batch_export(
-    scenario: &MixedStatusScenario,
-) -> StatusBatchExportResult {
-    // Reference implementation follows same logic as asupersync
-    simulate_asupersync_status_batch_export(scenario)
-}
-
-/// Verify status code batch export logic
-fn validate_status_batch_export_logic(result: &StatusBatchExportResult) -> Result<(), String> {
-    if !result.validation_correct {
-        return Err("Status batch export logic is incorrect".to_string());
+    /// Batch of spans with status codes for testing
+    #[derive(Debug, Clone)]
+    struct StatusCodeBatch {
+        spans: Vec<StatusSpanInfo>,
     }
 
-    // Check OTLP compliance
-    if !result.otlp_compliant {
-        return Err("Status batch export is not OTLP compliant".to_string());
+    /// Span information with status code for testing
+    #[derive(Debug, Clone)]
+    struct StatusSpanInfo {
+        name: String,
+        trace_id: String,
+        span_id: String,
+        status: SpanStatus,
     }
 
-    // Critical check: all spans must be exported (no status-based filtering)
-    if result.exported_spans_count != result.total_spans_processed {
-        return Err("CRITICAL: Spans were filtered based on status (violates OTLP - all spans must be exported)".to_string());
+    /// Span status enumeration
+    #[derive(Debug, Clone, PartialEq)]
+    enum SpanStatus {
+        Unset,
+        Ok,
+        Error(String), // Error with message
     }
 
-    // Critical check: status should never be used as filter criteria
-    if result.filtered_by_status {
-        return Err(
-            "CRITICAL: Status was used as filter criteria (violates OTLP specification)"
-                .to_string(),
-        );
+    /// Result of status code batch export testing
+    #[derive(Debug, Clone)]
+    struct StatusBatchExportResult {
+        exported_spans_count: usize,
+        ok_spans_count: usize,
+        error_spans_count: usize,
+        unset_spans_count: usize,
+        filtered_by_status: bool,
+        batch_rejected: bool,
+        rejection_reason: String,
+        original_batch: StatusCodeBatch,
+        export_decisions: Vec<bool>, // True = exported, False = filtered
+        processed_batches_count: usize,
+        total_spans_processed: usize,
+        validation_applied: bool,
+        validation_errors: Vec<String>,
+        validation_correct: bool,
+        otlp_compliant: bool,
+        telemetry_emitted: bool,
     }
 
-    // Critical check: batches should not be rejected based on status mix
-    if result.batch_rejected {
-        return Err(
-            "CRITICAL: Batch was rejected based on status codes (violates OTLP specification)"
-                .to_string(),
-        );
-    }
+    /// Simulate asupersync status code batch export behavior
+    fn simulate_asupersync_status_batch_export(
+        scenario: &MixedStatusScenario,
+    ) -> StatusBatchExportResult {
+        let mut validation_errors = Vec::new();
+        let original_batch = scenario.batch.clone();
+        let mut exported_spans = 0;
+        let mut ok_spans = 0;
+        let mut error_spans = 0;
+        let mut unset_spans = 0;
+        let mut export_decisions = Vec::new();
+        let batch_rejected = false; // Batches should not be rejected based on status
+        let rejection_reason = String::new();
+        let validation_applied = true; // Always apply status export validation
+        let filtered_by_status = false; // OTLP: status should NOT filter export
 
-    // Critical check: export decisions should all be true (no filtering)
-    for (i, decision) in result.export_decisions.iter().enumerate() {
-        if !decision {
-            return Err(format!(
-                "CRITICAL: Span {} was not exported (status-based filtering detected)",
-                i
+        // Process each span in the batch
+        for span in &scenario.batch.spans {
+            // Count spans by status
+            match &span.status {
+                SpanStatus::Ok => ok_spans += 1,
+                SpanStatus::Error(_) => error_spans += 1,
+                SpanStatus::Unset => unset_spans += 1,
+            }
+
+            // CRITICAL: All spans must be exported regardless of status
+            // Status code is metadata, not a filter criteria
+            let export_decision = true; // Always export, regardless of status
+            export_decisions.push(export_decision);
+
+            if export_decision {
+                exported_spans += 1;
+            }
+        }
+
+        // OTLP compliance check: verify no status-based filtering occurred
+        if exported_spans != scenario.batch.spans.len() {
+            validation_errors.push(format!(
+                "OTLP violation: {} spans were filtered based on status (should export all {})",
+                scenario.batch.spans.len() - exported_spans,
+                scenario.batch.spans.len()
             ));
         }
+
+        // Check validation correctness
+        let validation_correct = exported_spans == scenario.expected_exported_count
+            && ok_spans == scenario.expected_ok_count
+            && error_spans == scenario.expected_error_count
+            && unset_spans == scenario.expected_unset_count
+            && filtered_by_status == scenario.expected_filtered_by_status
+            && batch_rejected == scenario.expected_batch_rejected
+            && rejection_reason == scenario.expected_rejection_reason
+            && validation_applied == scenario.expected_validation_applied;
+
+        // OTLP compliance: all spans must be exported regardless of status
+        let otlp_compliant =
+            exported_spans == scenario.batch.spans.len() && !filtered_by_status && !batch_rejected;
+
+        StatusBatchExportResult {
+            exported_spans_count: exported_spans,
+            ok_spans_count: ok_spans,
+            error_spans_count: error_spans,
+            unset_spans_count: unset_spans,
+            filtered_by_status,
+            batch_rejected,
+            rejection_reason,
+            original_batch,
+            export_decisions,
+            processed_batches_count: 1,
+            total_spans_processed: scenario.batch.spans.len(),
+            validation_applied,
+            validation_errors,
+            validation_correct,
+            otlp_compliant,
+            telemetry_emitted: true, // Assume telemetry is emitted for export operations
+        }
     }
 
-    // Critical check: status counts should be accurate
-    let expected_total =
-        result.ok_spans_count + result.error_spans_count + result.unset_spans_count;
-    if expected_total != result.total_spans_processed {
-        return Err("CRITICAL: Status count totals don't match processed spans".to_string());
+    /// Simulate reference implementation status batch export behavior
+    fn simulate_reference_status_batch_export(
+        scenario: &MixedStatusScenario,
+    ) -> StatusBatchExportResult {
+        // Reference implementation follows same logic as asupersync
+        simulate_asupersync_status_batch_export(scenario)
     }
 
-    // Critical check: validation should always be applied
-    if !result.validation_applied {
-        return Err("CRITICAL: Status batch export validation was not applied".to_string());
+    /// Verify status code batch export logic
+    fn validate_status_batch_export_logic(result: &StatusBatchExportResult) -> Result<(), String> {
+        if !result.validation_correct {
+            return Err("Status batch export logic is incorrect".to_string());
+        }
+
+        // Check OTLP compliance
+        if !result.otlp_compliant {
+            return Err("Status batch export is not OTLP compliant".to_string());
+        }
+
+        // Critical check: all spans must be exported (no status-based filtering)
+        if result.exported_spans_count != result.total_spans_processed {
+            return Err("CRITICAL: Spans were filtered based on status (violates OTLP - all spans must be exported)".to_string());
+        }
+
+        // Critical check: status should never be used as filter criteria
+        if result.filtered_by_status {
+            return Err(
+                "CRITICAL: Status was used as filter criteria (violates OTLP specification)"
+                    .to_string(),
+            );
+        }
+
+        // Critical check: batches should not be rejected based on status mix
+        if result.batch_rejected {
+            return Err(
+                "CRITICAL: Batch was rejected based on status codes (violates OTLP specification)"
+                    .to_string(),
+            );
+        }
+
+        // Critical check: export decisions should all be true (no filtering)
+        for (i, decision) in result.export_decisions.iter().enumerate() {
+            if !decision {
+                return Err(format!(
+                    "CRITICAL: Span {} was not exported (status-based filtering detected)",
+                    i
+                ));
+            }
+        }
+
+        // Critical check: status counts should be accurate
+        let expected_total =
+            result.ok_spans_count + result.error_spans_count + result.unset_spans_count;
+        if expected_total != result.total_spans_processed {
+            return Err("CRITICAL: Status count totals don't match processed spans".to_string());
+        }
+
+        // Critical check: validation should always be applied
+        if !result.validation_applied {
+            return Err("CRITICAL: Status batch export validation was not applied".to_string());
+        }
+
+        // Critical check: no rejection reason should be provided when not rejected
+        if !result.batch_rejected && !result.rejection_reason.is_empty() {
+            return Err(
+                "CRITICAL: Rejection reason provided but batch was not rejected".to_string(),
+            );
+        }
+
+        Ok(())
     }
 
-    // Critical check: no rejection reason should be provided when not rejected
-    if !result.batch_rejected && !result.rejection_reason.is_empty() {
-        return Err("CRITICAL: Rejection reason provided but batch was not rejected".to_string());
+    /// Verify implementation consistency for status batch export
+    fn validate_status_batch_export_implementation_consistency(
+        asupersync_result: &StatusBatchExportResult,
+        reference_result: &StatusBatchExportResult,
+    ) -> Result<(), String> {
+        // Both implementations should export same number of spans
+        if asupersync_result.exported_spans_count != reference_result.exported_spans_count {
+            return Err("Exported spans count differs between implementations".to_string());
+        }
+
+        // Both implementations should count status types consistently
+        if asupersync_result.ok_spans_count != reference_result.ok_spans_count {
+            return Err("OK spans count differs between implementations".to_string());
+        }
+
+        if asupersync_result.error_spans_count != reference_result.error_spans_count {
+            return Err("Error spans count differs between implementations".to_string());
+        }
+
+        if asupersync_result.unset_spans_count != reference_result.unset_spans_count {
+            return Err("Unset spans count differs between implementations".to_string());
+        }
+
+        // Both implementations should have same filtering behavior
+        if asupersync_result.filtered_by_status != reference_result.filtered_by_status {
+            return Err("Status filtering behavior differs between implementations".to_string());
+        }
+
+        // Both implementations should reject batches consistently
+        if asupersync_result.batch_rejected != reference_result.batch_rejected {
+            return Err("Batch rejection differs between implementations".to_string());
+        }
+
+        // Both implementations should provide same rejection reason
+        if asupersync_result.rejection_reason != reference_result.rejection_reason {
+            return Err("Rejection reason differs between implementations".to_string());
+        }
+
+        // Both implementations should make same export decisions
+        if asupersync_result.export_decisions != reference_result.export_decisions {
+            return Err("Export decisions differ between implementations".to_string());
+        }
+
+        // Both implementations should process same number of spans
+        if asupersync_result.total_spans_processed != reference_result.total_spans_processed {
+            return Err("Total spans processed differs between implementations".to_string());
+        }
+
+        // Both implementations should apply validation consistently
+        if asupersync_result.validation_applied != reference_result.validation_applied {
+            return Err("Validation application differs between implementations".to_string());
+        }
+
+        // Both implementations should have same validation correctness
+        if asupersync_result.validation_correct != reference_result.validation_correct {
+            return Err("Validation correctness differs between implementations".to_string());
+        }
+
+        // Both implementations should be OTLP compliant
+        if asupersync_result.otlp_compliant != reference_result.otlp_compliant {
+            return Err("OTLP compliance differs between implementations".to_string());
+        }
+
+        // Both implementations should emit telemetry consistently
+        if asupersync_result.telemetry_emitted != reference_result.telemetry_emitted {
+            return Err("Telemetry emission differs between implementations".to_string());
+        }
+
+        Ok(())
     }
-
-    Ok(())
-}
-
-/// Verify implementation consistency for status batch export
-fn validate_status_batch_export_implementation_consistency(
-    asupersync_result: &StatusBatchExportResult,
-    reference_result: &StatusBatchExportResult,
-) -> Result<(), String> {
-    // Both implementations should export same number of spans
-    if asupersync_result.exported_spans_count != reference_result.exported_spans_count {
-        return Err("Exported spans count differs between implementations".to_string());
-    }
-
-    // Both implementations should count status types consistently
-    if asupersync_result.ok_spans_count != reference_result.ok_spans_count {
-        return Err("OK spans count differs between implementations".to_string());
-    }
-
-    if asupersync_result.error_spans_count != reference_result.error_spans_count {
-        return Err("Error spans count differs between implementations".to_string());
-    }
-
-    if asupersync_result.unset_spans_count != reference_result.unset_spans_count {
-        return Err("Unset spans count differs between implementations".to_string());
-    }
-
-    // Both implementations should have same filtering behavior
-    if asupersync_result.filtered_by_status != reference_result.filtered_by_status {
-        return Err("Status filtering behavior differs between implementations".to_string());
-    }
-
-    // Both implementations should reject batches consistently
-    if asupersync_result.batch_rejected != reference_result.batch_rejected {
-        return Err("Batch rejection differs between implementations".to_string());
-    }
-
-    // Both implementations should provide same rejection reason
-    if asupersync_result.rejection_reason != reference_result.rejection_reason {
-        return Err("Rejection reason differs between implementations".to_string());
-    }
-
-    // Both implementations should make same export decisions
-    if asupersync_result.export_decisions != reference_result.export_decisions {
-        return Err("Export decisions differ between implementations".to_string());
-    }
-
-    // Both implementations should process same number of spans
-    if asupersync_result.total_spans_processed != reference_result.total_spans_processed {
-        return Err("Total spans processed differs between implementations".to_string());
-    }
-
-    // Both implementations should apply validation consistently
-    if asupersync_result.validation_applied != reference_result.validation_applied {
-        return Err("Validation application differs between implementations".to_string());
-    }
-
-    // Both implementations should have same validation correctness
-    if asupersync_result.validation_correct != reference_result.validation_correct {
-        return Err("Validation correctness differs between implementations".to_string());
-    }
-
-    // Both implementations should be OTLP compliant
-    if asupersync_result.otlp_compliant != reference_result.otlp_compliant {
-        return Err("OTLP compliance differs between implementations".to_string());
-    }
-
-    // Both implementations should emit telemetry consistently
-    if asupersync_result.telemetry_emitted != reference_result.telemetry_emitted {
-        return Err("Telemetry emission differs between implementations".to_string());
-    }
-
-    Ok(())
 }
 
 //
@@ -27874,10 +27945,11 @@ fn validate_time_validation_implementation_consistency(
 // OTLP-112: PRODUCER span messaging operation validation conformance test
 //
 
-#[test]
-fn otlp_112_producer_messaging_operation_validation_conformance() {
-    // Test scenarios for PRODUCER span messaging operation validation per OTLP specification
-    let scenarios = vec![
+mod otlp_112_producer_messaging_operation_validation {
+    #[test]
+    fn otlp_112_producer_messaging_operation_validation_conformance() {
+        // Test scenarios for PRODUCER span messaging operation validation per OTLP specification
+        let scenarios = vec![
         ProducerMessagingScenario {
             description: "PRODUCER span with messaging.system and operation=publish (valid, MUST accept)".to_string(),
             span: MessagingSpanInfo {
@@ -28096,439 +28168,455 @@ fn otlp_112_producer_messaging_operation_validation_conformance() {
         },
     ];
 
-    for scenario in scenarios {
-        println!("Testing scenario: {}", scenario.description);
+        for scenario in scenarios {
+            println!("Testing scenario: {}", scenario.description);
 
-        // Simulate asupersync exporter behavior
-        let asupersync_result = simulate_asupersync_producer_messaging_validation(&scenario);
+            // Simulate asupersync exporter behavior
+            let asupersync_result = simulate_asupersync_producer_messaging_validation(&scenario);
 
-        // Simulate reference implementation behavior
-        let reference_result = simulate_reference_producer_messaging_validation(&scenario);
+            // Simulate reference implementation behavior
+            let reference_result = simulate_reference_producer_messaging_validation(&scenario);
 
-        // Validate individual results
-        validate_producer_messaging_validation_logic(&asupersync_result).expect(&format!(
-            "Asupersync producer messaging validation logic failed for scenario: {}",
-            scenario.description
-        ));
+            // Validate individual results
+            validate_producer_messaging_validation_logic(&asupersync_result).expect(&format!(
+                "Asupersync producer messaging validation logic failed for scenario: {}",
+                scenario.description
+            ));
 
-        validate_producer_messaging_validation_logic(&reference_result).expect(&format!(
-            "Reference producer messaging validation logic failed for scenario: {}",
-            scenario.description
-        ));
+            validate_producer_messaging_validation_logic(&reference_result).expect(&format!(
+                "Reference producer messaging validation logic failed for scenario: {}",
+                scenario.description
+            ));
 
-        // Validate implementation consistency
-        validate_producer_messaging_validation_implementation_consistency(
-            &asupersync_result,
-            &reference_result,
-        )
-        .expect(&format!(
-            "Implementation consistency failed for scenario: {}",
-            scenario.description
-        ));
+            // Validate implementation consistency
+            validate_producer_messaging_validation_implementation_consistency(
+                &asupersync_result,
+                &reference_result,
+            )
+            .expect(&format!(
+                "Implementation consistency failed for scenario: {}",
+                scenario.description
+            ));
 
-        println!("✓ Scenario passed: {}", scenario.description);
-    }
-}
-
-/// Test scenario for PRODUCER span messaging operation validation
-#[derive(Debug, Clone)]
-struct ProducerMessagingScenario {
-    description: String,
-    span: MessagingSpanInfo,
-    expected_messaging_system_detected: bool,
-    expected_operation_valid: bool,
-    expected_operation_found: Option<String>,
-    expected_span_rejected: bool,
-    expected_rejection_reason: String,
-    expected_included_in_export: bool,
-    expected_validation_applied: bool,
-    expected_otlp_compliant: bool,
-}
-
-/// Span information for messaging operation validation testing
-#[derive(Debug, Clone)]
-struct MessagingSpanInfo {
-    name: String,
-    trace_id: String,
-    span_id: String,
-    span_kind: MessagingSpanKind,
-    attributes: Vec<(String, String)>,
-}
-
-/// Span kind enumeration for messaging validation
-#[derive(Debug, Clone, PartialEq)]
-enum MessagingSpanKind {
-    Unspecified,
-    Internal,
-    Server,
-    Client,
-    Producer,
-    Consumer,
-}
-
-/// Result of PRODUCER messaging operation validation testing
-#[derive(Debug, Clone)]
-struct ProducerMessagingValidationResult {
-    messaging_system_detected: bool,
-    operation_valid: bool,
-    operation_found: Option<String>,
-    span_rejected: bool,
-    rejection_reason: String,
-    original_span: MessagingSpanInfo,
-    included_in_export: bool,
-    is_producer_span: bool,
-    validation_applied: bool,
-    processed_spans_count: usize,
-    producer_messaging_spans_count: usize,
-    rejected_spans_count: usize,
-    accepted_spans_count: usize,
-    invalid_operations_detected: usize,
-    valid_operations_detected: usize,
-    missing_operations_count: usize,
-    validation_errors: Vec<String>,
-    validation_correct: bool,
-    otlp_compliant: bool,
-    telemetry_emitted: bool,
-}
-
-/// Valid messaging operations for PRODUCER spans
-const VALID_PRODUCER_OPERATIONS: &[&str] = &["publish"];
-
-/// Check if messaging operation is valid for PRODUCER spans
-fn is_valid_producer_operation(operation: &str) -> bool {
-    VALID_PRODUCER_OPERATIONS.contains(&operation)
-}
-
-/// Simulate asupersync PRODUCER messaging operation validation behavior
-fn simulate_asupersync_producer_messaging_validation(
-    scenario: &ProducerMessagingScenario,
-) -> ProducerMessagingValidationResult {
-    let mut validation_errors = Vec::new();
-    let mut producer_messaging_spans = 0;
-    let mut rejected_spans = 0;
-    let mut accepted_spans = 0;
-    let original_span = scenario.span.clone();
-    let mut messaging_system_detected = false;
-    let mut operation_found = None;
-    let mut operation_valid = true; // Default to valid
-    let mut span_rejected = false;
-    let mut rejection_reason = String::new();
-    let mut included_in_export = true; // Default to include
-    let mut validation_applied = false;
-    let mut invalid_operations = 0;
-    let mut valid_operations = 0;
-    let mut missing_operations = 0;
-
-    let is_producer_span = scenario.span.span_kind == MessagingSpanKind::Producer;
-
-    // Check for messaging.system attribute
-    for (key, value) in &scenario.span.attributes {
-        if key == "messaging.system" {
-            messaging_system_detected = true;
-            break;
+            println!("✓ Scenario passed: {}", scenario.description);
         }
     }
 
-    // Only validate PRODUCER spans with messaging.system
-    if is_producer_span && messaging_system_detected {
-        producer_messaging_spans += 1;
-        validation_applied = true;
+    /// Test scenario for PRODUCER span messaging operation validation
+    #[derive(Debug, Clone)]
+    struct ProducerMessagingScenario {
+        description: String,
+        span: MessagingSpanInfo,
+        expected_messaging_system_detected: bool,
+        expected_operation_valid: bool,
+        expected_operation_found: Option<String>,
+        expected_span_rejected: bool,
+        expected_rejection_reason: String,
+        expected_included_in_export: bool,
+        expected_validation_applied: bool,
+        expected_otlp_compliant: bool,
+    }
 
-        // Look for messaging.operation attribute
-        for (key, value) in &scenario.span.attributes {
-            if key == "messaging.operation" {
-                operation_found = Some(value.clone());
+    /// Span information for messaging operation validation testing
+    #[derive(Debug, Clone)]
+    struct MessagingSpanInfo {
+        name: String,
+        trace_id: String,
+        span_id: String,
+        span_kind: MessagingSpanKind,
+        attributes: Vec<(String, String)>,
+    }
+
+    /// Span kind enumeration for messaging validation
+    #[derive(Debug, Clone, PartialEq)]
+    enum MessagingSpanKind {
+        Unspecified,
+        Internal,
+        Server,
+        Client,
+        Producer,
+        Consumer,
+    }
+
+    /// Result of PRODUCER messaging operation validation testing
+    #[derive(Debug, Clone)]
+    struct ProducerMessagingValidationResult {
+        messaging_system_detected: bool,
+        operation_valid: bool,
+        operation_found: Option<String>,
+        span_rejected: bool,
+        rejection_reason: String,
+        original_span: MessagingSpanInfo,
+        included_in_export: bool,
+        is_producer_span: bool,
+        validation_applied: bool,
+        processed_spans_count: usize,
+        producer_messaging_spans_count: usize,
+        rejected_spans_count: usize,
+        accepted_spans_count: usize,
+        invalid_operations_detected: usize,
+        valid_operations_detected: usize,
+        missing_operations_count: usize,
+        validation_errors: Vec<String>,
+        validation_correct: bool,
+        otlp_compliant: bool,
+        telemetry_emitted: bool,
+    }
+
+    /// Valid messaging operations for PRODUCER spans
+    const VALID_PRODUCER_OPERATIONS: &[&str] = &["publish"];
+
+    /// Check if messaging operation is valid for PRODUCER spans
+    fn is_valid_producer_operation(operation: &str) -> bool {
+        VALID_PRODUCER_OPERATIONS.contains(&operation)
+    }
+
+    /// Simulate asupersync PRODUCER messaging operation validation behavior
+    fn simulate_asupersync_producer_messaging_validation(
+        scenario: &ProducerMessagingScenario,
+    ) -> ProducerMessagingValidationResult {
+        let mut validation_errors = Vec::new();
+        let mut producer_messaging_spans = 0;
+        let mut rejected_spans = 0;
+        let mut accepted_spans = 0;
+        let original_span = scenario.span.clone();
+        let mut messaging_system_detected = false;
+        let mut operation_found = None;
+        let mut operation_valid = true; // Default to valid
+        let mut span_rejected = false;
+        let mut rejection_reason = String::new();
+        let mut included_in_export = true; // Default to include
+        let mut validation_applied = false;
+        let mut invalid_operations = 0;
+        let mut valid_operations = 0;
+        let mut missing_operations = 0;
+
+        let is_producer_span = scenario.span.span_kind == MessagingSpanKind::Producer;
+
+        // Check for messaging.system attribute
+        for (key, _value) in &scenario.span.attributes {
+            if key == "messaging.system" {
+                messaging_system_detected = true;
                 break;
             }
         }
 
-        match &operation_found {
-            Some(operation) => {
-                if operation.is_empty() {
-                    // Empty operation is invalid
-                    operation_valid = false;
-                    invalid_operations += 1;
-                } else if is_valid_producer_operation(operation) {
-                    // Valid operation for PRODUCER
-                    valid_operations += 1;
-                } else {
-                    // Invalid operation for PRODUCER
-                    operation_valid = false;
-                    invalid_operations += 1;
+        // Only validate PRODUCER spans with messaging.system
+        if is_producer_span && messaging_system_detected {
+            producer_messaging_spans += 1;
+            validation_applied = true;
+
+            // Look for messaging.operation attribute
+            for (key, value) in &scenario.span.attributes {
+                if key == "messaging.operation" {
+                    operation_found = Some(value.clone());
+                    break;
                 }
             }
-            None => {
-                // No operation specified - this is acceptable for PRODUCER spans
-                missing_operations += 1;
+
+            match &operation_found {
+                Some(operation) => {
+                    if operation.is_empty() {
+                        // Empty operation is invalid
+                        operation_valid = false;
+                        invalid_operations += 1;
+                    } else if is_valid_producer_operation(operation) {
+                        // Valid operation for PRODUCER
+                        valid_operations += 1;
+                    } else {
+                        // Invalid operation for PRODUCER
+                        operation_valid = false;
+                        invalid_operations += 1;
+                    }
+                }
+                None => {
+                    // No operation specified - this is acceptable for PRODUCER spans
+                    missing_operations += 1;
+                }
             }
-        }
 
-        // Reject span if operation is invalid
-        if !operation_valid {
-            span_rejected = true;
-            included_in_export = false;
-            rejected_spans += 1;
+            // Reject span if operation is invalid
+            if !operation_valid {
+                span_rejected = true;
+                included_in_export = false;
+                rejected_spans += 1;
 
-            let operation_str = operation_found.as_deref().unwrap_or("");
-            rejection_reason = format!(
-                "PRODUCER span has invalid messaging.operation '{}' (must be 'publish')",
-                operation_str
-            );
+                let operation_str = operation_found.as_deref().unwrap_or("");
+                rejection_reason = format!(
+                    "PRODUCER span has invalid messaging.operation '{}' (must be 'publish')",
+                    operation_str
+                );
 
-            validation_errors.push(format!(
-                "PRODUCER span '{}' has invalid messaging operation: '{}'",
-                scenario.span.name, operation_str
-            ));
+                validation_errors.push(format!(
+                    "PRODUCER span '{}' has invalid messaging operation: '{}'",
+                    scenario.span.name, operation_str
+                ));
+            } else {
+                accepted_spans += 1;
+            }
         } else {
+            // Non-PRODUCER spans or spans without messaging.system are not subject to this validation
             accepted_spans += 1;
         }
-    } else {
-        // Non-PRODUCER spans or spans without messaging.system are not subject to this validation
-        accepted_spans += 1;
-    }
 
-    // Check validation correctness
-    let validation_correct = messaging_system_detected
-        == scenario.expected_messaging_system_detected
-        && operation_valid == scenario.expected_operation_valid
-        && operation_found == scenario.expected_operation_found
-        && span_rejected == scenario.expected_span_rejected
-        && rejection_reason == scenario.expected_rejection_reason
-        && included_in_export == scenario.expected_included_in_export
-        && validation_applied == scenario.expected_validation_applied;
+        // Check validation correctness
+        let validation_correct = messaging_system_detected
+            == scenario.expected_messaging_system_detected
+            && operation_valid == scenario.expected_operation_valid
+            && operation_found == scenario.expected_operation_found
+            && span_rejected == scenario.expected_span_rejected
+            && rejection_reason == scenario.expected_rejection_reason
+            && included_in_export == scenario.expected_included_in_export
+            && validation_applied == scenario.expected_validation_applied;
 
-    // OTLP compliance: PRODUCER spans with messaging.system must have valid operations
-    let otlp_compliant = if is_producer_span && messaging_system_detected {
-        // Must reject spans with invalid operations, accept spans with valid or missing operations
-        if operation_valid {
+        // OTLP compliance: PRODUCER spans with messaging.system must have valid operations
+        let otlp_compliant = if is_producer_span && messaging_system_detected {
+            // Must reject spans with invalid operations, accept spans with valid or missing operations
+            if operation_valid {
+                !span_rejected && included_in_export
+            } else {
+                span_rejected && !included_in_export
+            }
+        } else {
+            // Non-PRODUCER or non-messaging spans should be accepted
             !span_rejected && included_in_export
-        } else {
-            span_rejected && !included_in_export
+        };
+
+        ProducerMessagingValidationResult {
+            messaging_system_detected,
+            operation_valid,
+            operation_found,
+            span_rejected,
+            rejection_reason,
+            original_span,
+            included_in_export,
+            is_producer_span,
+            validation_applied,
+            processed_spans_count: 1,
+            producer_messaging_spans_count: producer_messaging_spans,
+            rejected_spans_count: rejected_spans,
+            accepted_spans_count: accepted_spans,
+            invalid_operations_detected: invalid_operations,
+            valid_operations_detected: valid_operations,
+            missing_operations_count: missing_operations,
+            validation_errors,
+            validation_correct,
+            otlp_compliant,
+            telemetry_emitted: true, // Assume telemetry is emitted for messaging validation
         }
-    } else {
-        // Non-PRODUCER or non-messaging spans should be accepted
-        !span_rejected && included_in_export
-    };
-
-    ProducerMessagingValidationResult {
-        messaging_system_detected,
-        operation_valid,
-        operation_found,
-        span_rejected,
-        rejection_reason,
-        original_span,
-        included_in_export,
-        is_producer_span,
-        validation_applied,
-        processed_spans_count: 1,
-        producer_messaging_spans_count: producer_messaging_spans,
-        rejected_spans_count: rejected_spans,
-        accepted_spans_count: accepted_spans,
-        invalid_operations_detected: invalid_operations,
-        valid_operations_detected: valid_operations,
-        missing_operations_count: missing_operations,
-        validation_errors,
-        validation_correct,
-        otlp_compliant,
-        telemetry_emitted: true, // Assume telemetry is emitted for messaging validation
-    }
-}
-
-/// Simulate reference implementation producer messaging validation behavior
-fn simulate_reference_producer_messaging_validation(
-    scenario: &ProducerMessagingScenario,
-) -> ProducerMessagingValidationResult {
-    // Reference implementation follows same logic as asupersync
-    simulate_asupersync_producer_messaging_validation(scenario)
-}
-
-/// Verify PRODUCER messaging operation validation logic
-fn validate_producer_messaging_validation_logic(
-    result: &ProducerMessagingValidationResult,
-) -> Result<(), String> {
-    if !result.validation_correct {
-        return Err("Producer messaging validation logic is incorrect".to_string());
     }
 
-    // Check OTLP compliance
-    if !result.otlp_compliant {
-        return Err("Producer messaging validation is not OTLP compliant".to_string());
+    /// Simulate reference implementation producer messaging validation behavior
+    fn simulate_reference_producer_messaging_validation(
+        scenario: &ProducerMessagingScenario,
+    ) -> ProducerMessagingValidationResult {
+        // Reference implementation follows same logic as asupersync
+        simulate_asupersync_producer_messaging_validation(scenario)
     }
 
-    // Critical check: validation should only apply to PRODUCER spans with messaging.system
-    if result.validation_applied && (!result.is_producer_span || !result.messaging_system_detected)
-    {
-        return Err(
-            "CRITICAL: Validation was applied to non-PRODUCER or non-messaging span".to_string(),
-        );
-    }
+    /// Verify PRODUCER messaging operation validation logic
+    fn validate_producer_messaging_validation_logic(
+        result: &ProducerMessagingValidationResult,
+    ) -> Result<(), String> {
+        if !result.validation_correct {
+            return Err("Producer messaging validation logic is incorrect".to_string());
+        }
 
-    // Critical check: PRODUCER messaging spans with invalid operations must be rejected
-    if result.is_producer_span
-        && result.messaging_system_detected
-        && !result.operation_valid
-        && !result.span_rejected
-    {
-        return Err(
-            "CRITICAL: PRODUCER messaging span with invalid operation was not rejected".to_string(),
-        );
-    }
+        // Check OTLP compliance
+        if !result.otlp_compliant {
+            return Err("Producer messaging validation is not OTLP compliant".to_string());
+        }
 
-    // Critical check: PRODUCER messaging spans with valid operations must be accepted
-    if result.is_producer_span
-        && result.messaging_system_detected
-        && result.operation_valid
-        && result.span_rejected
-    {
-        return Err(
-            "CRITICAL: PRODUCER messaging span with valid operation was rejected".to_string(),
-        );
-    }
-
-    // Critical check: rejected spans should not be included in export
-    if result.span_rejected && result.included_in_export {
-        return Err("CRITICAL: Rejected span was included in export".to_string());
-    }
-
-    // Critical check: accepted spans should be included in export
-    if !result.span_rejected && !result.included_in_export {
-        return Err("CRITICAL: Accepted span was not included in export".to_string());
-    }
-
-    // Critical check: rejection reason must be provided for rejected spans
-    if result.span_rejected && result.rejection_reason.is_empty() {
-        return Err("CRITICAL: No rejection reason provided for rejected span".to_string());
-    }
-
-    // Critical check: rejection reason must be empty for accepted spans
-    if !result.span_rejected && !result.rejection_reason.is_empty() {
-        return Err("CRITICAL: Rejection reason provided but span was not rejected".to_string());
-    }
-
-    // Critical check: counts must be consistent
-    if result.processed_spans_count != result.rejected_spans_count + result.accepted_spans_count {
-        return Err(
-            "CRITICAL: Processed spans count doesn't match rejected + accepted counts".to_string(),
-        );
-    }
-
-    // Critical check: operation counts should be consistent
-    if result.is_producer_span && result.messaging_system_detected {
-        let total_operations = result.valid_operations_detected
-            + result.invalid_operations_detected
-            + result.missing_operations_count;
-        if total_operations != result.producer_messaging_spans_count {
+        // Critical check: validation should only apply to PRODUCER spans with messaging.system
+        if result.validation_applied
+            && (!result.is_producer_span || !result.messaging_system_detected)
+        {
             return Err(
-                "CRITICAL: Operation counts don't match producer messaging spans count".to_string(),
+                "CRITICAL: Validation was applied to non-PRODUCER or non-messaging span"
+                    .to_string(),
             );
         }
+
+        // Critical check: PRODUCER messaging spans with invalid operations must be rejected
+        if result.is_producer_span
+            && result.messaging_system_detected
+            && !result.operation_valid
+            && !result.span_rejected
+        {
+            return Err(
+                "CRITICAL: PRODUCER messaging span with invalid operation was not rejected"
+                    .to_string(),
+            );
+        }
+
+        // Critical check: PRODUCER messaging spans with valid operations must be accepted
+        if result.is_producer_span
+            && result.messaging_system_detected
+            && result.operation_valid
+            && result.span_rejected
+        {
+            return Err(
+                "CRITICAL: PRODUCER messaging span with valid operation was rejected".to_string(),
+            );
+        }
+
+        // Critical check: rejected spans should not be included in export
+        if result.span_rejected && result.included_in_export {
+            return Err("CRITICAL: Rejected span was included in export".to_string());
+        }
+
+        // Critical check: accepted spans should be included in export
+        if !result.span_rejected && !result.included_in_export {
+            return Err("CRITICAL: Accepted span was not included in export".to_string());
+        }
+
+        // Critical check: rejection reason must be provided for rejected spans
+        if result.span_rejected && result.rejection_reason.is_empty() {
+            return Err("CRITICAL: No rejection reason provided for rejected span".to_string());
+        }
+
+        // Critical check: rejection reason must be empty for accepted spans
+        if !result.span_rejected && !result.rejection_reason.is_empty() {
+            return Err(
+                "CRITICAL: Rejection reason provided but span was not rejected".to_string(),
+            );
+        }
+
+        // Critical check: counts must be consistent
+        if result.processed_spans_count != result.rejected_spans_count + result.accepted_spans_count
+        {
+            return Err(
+                "CRITICAL: Processed spans count doesn't match rejected + accepted counts"
+                    .to_string(),
+            );
+        }
+
+        // Critical check: operation counts should be consistent
+        if result.is_producer_span && result.messaging_system_detected {
+            let total_operations = result.valid_operations_detected
+                + result.invalid_operations_detected
+                + result.missing_operations_count;
+            if total_operations != result.producer_messaging_spans_count {
+                return Err(
+                    "CRITICAL: Operation counts don't match producer messaging spans count"
+                        .to_string(),
+                );
+            }
+        }
+
+        Ok(())
     }
 
-    Ok(())
-}
+    /// Verify implementation consistency for producer messaging validation
+    fn validate_producer_messaging_validation_implementation_consistency(
+        asupersync_result: &ProducerMessagingValidationResult,
+        reference_result: &ProducerMessagingValidationResult,
+    ) -> Result<(), String> {
+        // Both implementations should detect messaging system consistently
+        if asupersync_result.messaging_system_detected != reference_result.messaging_system_detected
+        {
+            return Err("Messaging system detection differs between implementations".to_string());
+        }
 
-/// Verify implementation consistency for producer messaging validation
-fn validate_producer_messaging_validation_implementation_consistency(
-    asupersync_result: &ProducerMessagingValidationResult,
-    reference_result: &ProducerMessagingValidationResult,
-) -> Result<(), String> {
-    // Both implementations should detect messaging system consistently
-    if asupersync_result.messaging_system_detected != reference_result.messaging_system_detected {
-        return Err("Messaging system detection differs between implementations".to_string());
+        // Both implementations should validate operations consistently
+        if asupersync_result.operation_valid != reference_result.operation_valid {
+            return Err("Operation validity differs between implementations".to_string());
+        }
+
+        // Both implementations should find same operations
+        if asupersync_result.operation_found != reference_result.operation_found {
+            return Err("Operation found differs between implementations".to_string());
+        }
+
+        // Both implementations should reject spans consistently
+        if asupersync_result.span_rejected != reference_result.span_rejected {
+            return Err("Span rejection differs between implementations".to_string());
+        }
+
+        // Both implementations should provide same rejection reason
+        if asupersync_result.rejection_reason != reference_result.rejection_reason {
+            return Err("Rejection reason differs between implementations".to_string());
+        }
+
+        // Both implementations should include spans consistently
+        if asupersync_result.included_in_export != reference_result.included_in_export {
+            return Err("Export inclusion differs between implementations".to_string());
+        }
+
+        // Both implementations should identify PRODUCER spans consistently
+        if asupersync_result.is_producer_span != reference_result.is_producer_span {
+            return Err("PRODUCER span identification differs between implementations".to_string());
+        }
+
+        // Both implementations should apply validation consistently
+        if asupersync_result.validation_applied != reference_result.validation_applied {
+            return Err("Validation application differs between implementations".to_string());
+        }
+
+        // Both implementations should count spans consistently
+        if asupersync_result.producer_messaging_spans_count
+            != reference_result.producer_messaging_spans_count
+        {
+            return Err(
+                "Producer messaging spans count differs between implementations".to_string(),
+            );
+        }
+
+        // Both implementations should count operations consistently
+        if asupersync_result.invalid_operations_detected
+            != reference_result.invalid_operations_detected
+        {
+            return Err("Invalid operations count differs between implementations".to_string());
+        }
+
+        if asupersync_result.valid_operations_detected != reference_result.valid_operations_detected
+        {
+            return Err("Valid operations count differs between implementations".to_string());
+        }
+
+        if asupersync_result.missing_operations_count != reference_result.missing_operations_count {
+            return Err("Missing operations count differs between implementations".to_string());
+        }
+
+        // Both implementations should count rejected spans consistently
+        if asupersync_result.rejected_spans_count != reference_result.rejected_spans_count {
+            return Err("Rejected spans count differs between implementations".to_string());
+        }
+
+        // Both implementations should count accepted spans consistently
+        if asupersync_result.accepted_spans_count != reference_result.accepted_spans_count {
+            return Err("Accepted spans count differs between implementations".to_string());
+        }
+
+        // Both implementations should have same validation correctness
+        if asupersync_result.validation_correct != reference_result.validation_correct {
+            return Err("Validation correctness differs between implementations".to_string());
+        }
+
+        // Both implementations should be OTLP compliant
+        if asupersync_result.otlp_compliant != reference_result.otlp_compliant {
+            return Err("OTLP compliance differs between implementations".to_string());
+        }
+
+        // Both implementations should emit telemetry consistently
+        if asupersync_result.telemetry_emitted != reference_result.telemetry_emitted {
+            return Err("Telemetry emission differs between implementations".to_string());
+        }
+
+        Ok(())
     }
-
-    // Both implementations should validate operations consistently
-    if asupersync_result.operation_valid != reference_result.operation_valid {
-        return Err("Operation validity differs between implementations".to_string());
-    }
-
-    // Both implementations should find same operations
-    if asupersync_result.operation_found != reference_result.operation_found {
-        return Err("Operation found differs between implementations".to_string());
-    }
-
-    // Both implementations should reject spans consistently
-    if asupersync_result.span_rejected != reference_result.span_rejected {
-        return Err("Span rejection differs between implementations".to_string());
-    }
-
-    // Both implementations should provide same rejection reason
-    if asupersync_result.rejection_reason != reference_result.rejection_reason {
-        return Err("Rejection reason differs between implementations".to_string());
-    }
-
-    // Both implementations should include spans consistently
-    if asupersync_result.included_in_export != reference_result.included_in_export {
-        return Err("Export inclusion differs between implementations".to_string());
-    }
-
-    // Both implementations should identify PRODUCER spans consistently
-    if asupersync_result.is_producer_span != reference_result.is_producer_span {
-        return Err("PRODUCER span identification differs between implementations".to_string());
-    }
-
-    // Both implementations should apply validation consistently
-    if asupersync_result.validation_applied != reference_result.validation_applied {
-        return Err("Validation application differs between implementations".to_string());
-    }
-
-    // Both implementations should count spans consistently
-    if asupersync_result.producer_messaging_spans_count
-        != reference_result.producer_messaging_spans_count
-    {
-        return Err("Producer messaging spans count differs between implementations".to_string());
-    }
-
-    // Both implementations should count operations consistently
-    if asupersync_result.invalid_operations_detected != reference_result.invalid_operations_detected
-    {
-        return Err("Invalid operations count differs between implementations".to_string());
-    }
-
-    if asupersync_result.valid_operations_detected != reference_result.valid_operations_detected {
-        return Err("Valid operations count differs between implementations".to_string());
-    }
-
-    if asupersync_result.missing_operations_count != reference_result.missing_operations_count {
-        return Err("Missing operations count differs between implementations".to_string());
-    }
-
-    // Both implementations should count rejected spans consistently
-    if asupersync_result.rejected_spans_count != reference_result.rejected_spans_count {
-        return Err("Rejected spans count differs between implementations".to_string());
-    }
-
-    // Both implementations should count accepted spans consistently
-    if asupersync_result.accepted_spans_count != reference_result.accepted_spans_count {
-        return Err("Accepted spans count differs between implementations".to_string());
-    }
-
-    // Both implementations should have same validation correctness
-    if asupersync_result.validation_correct != reference_result.validation_correct {
-        return Err("Validation correctness differs between implementations".to_string());
-    }
-
-    // Both implementations should be OTLP compliant
-    if asupersync_result.otlp_compliant != reference_result.otlp_compliant {
-        return Err("OTLP compliance differs between implementations".to_string());
-    }
-
-    // Both implementations should emit telemetry consistently
-    if asupersync_result.telemetry_emitted != reference_result.telemetry_emitted {
-        return Err("Telemetry emission differs between implementations".to_string());
-    }
-
-    Ok(())
 }
 
 //
 // OTLP-113: Negative metric scale validation conformance test
 //
 
-#[test]
-fn otlp_113_negative_metric_scale_validation_conformance() {
-    // Test scenarios for negative metric scale validation per OTLP §6 specification
-    let scenarios = vec![
+mod otlp_113_negative_metric_scale_validation_first {
+    #[test]
+    fn otlp_113_negative_metric_scale_validation_conformance() {
+        // Test scenarios for negative metric scale validation per OTLP §6 specification
+        let scenarios =
+            vec![
         NegativeScaleScenario {
             description: "Histogram with scale=-1 (MUST be rejected per OTLP §6)".to_string(),
             metric: ScaleMetricInfo {
@@ -28716,400 +28804,418 @@ fn otlp_113_negative_metric_scale_validation_conformance() {
         },
     ];
 
-    for scenario in scenarios {
-        println!("Testing scenario: {}", scenario.description);
+        for scenario in scenarios {
+            println!("Testing scenario: {}", scenario.description);
 
-        // Simulate asupersync exporter behavior
-        let asupersync_result = simulate_asupersync_scale_validation(&scenario);
+            // Simulate asupersync exporter behavior
+            let asupersync_result = simulate_asupersync_scale_validation(&scenario);
 
-        // Simulate reference implementation behavior
-        let reference_result = simulate_reference_scale_validation(&scenario);
+            // Simulate reference implementation behavior
+            let reference_result = simulate_reference_scale_validation(&scenario);
 
-        // Validate individual results
-        validate_scale_validation_logic(&asupersync_result).expect(&format!(
-            "Asupersync scale validation logic failed for scenario: {}",
-            scenario.description
-        ));
+            // Validate individual results
+            validate_scale_validation_logic(&asupersync_result).expect(&format!(
+                "Asupersync scale validation logic failed for scenario: {}",
+                scenario.description
+            ));
 
-        validate_scale_validation_logic(&reference_result).expect(&format!(
-            "Reference scale validation logic failed for scenario: {}",
-            scenario.description
-        ));
+            validate_scale_validation_logic(&reference_result).expect(&format!(
+                "Reference scale validation logic failed for scenario: {}",
+                scenario.description
+            ));
 
-        // Validate implementation consistency
-        validate_scale_validation_implementation_consistency(&asupersync_result, &reference_result)
+            // Validate implementation consistency
+            validate_scale_validation_implementation_consistency(
+                &asupersync_result,
+                &reference_result,
+            )
             .expect(&format!(
                 "Implementation consistency failed for scenario: {}",
                 scenario.description
             ));
 
-        println!("✓ Scenario passed: {}", scenario.description);
+            println!("✓ Scenario passed: {}", scenario.description);
+        }
     }
-}
 
-/// Test scenario for negative metric scale validation
-#[derive(Debug, Clone)]
-struct NegativeScaleScenario {
-    description: String,
-    metric: ScaleMetricInfo,
-    expected_scale_invalid: bool,
-    expected_metric_rejected: bool,
-    expected_rejection_reason: String,
-    expected_included_in_export: bool,
-    expected_validation_applied: bool,
-    expected_otlp_compliant: bool,
-}
+    /// Test scenario for negative metric scale validation
+    #[derive(Debug, Clone)]
+    struct NegativeScaleScenario {
+        description: String,
+        metric: ScaleMetricInfo,
+        expected_scale_invalid: bool,
+        expected_metric_rejected: bool,
+        expected_rejection_reason: String,
+        expected_included_in_export: bool,
+        expected_validation_applied: bool,
+        expected_otlp_compliant: bool,
+    }
 
-/// Metric information for scale validation testing
-#[derive(Debug, Clone)]
-struct ScaleMetricInfo {
-    name: String,
-    metric_type: MetricType,
-    scale: Option<i32>, // Scale parameter (can be negative, zero, or positive)
-    bucket_counts: Vec<u64>,
-    explicit_bounds: Vec<f64>,
-}
+    /// Metric information for scale validation testing
+    #[derive(Debug, Clone)]
+    struct ScaleMetricInfo {
+        name: String,
+        metric_type: MetricType,
+        scale: Option<i32>, // Scale parameter (can be negative, zero, or positive)
+        bucket_counts: Vec<u64>,
+        explicit_bounds: Vec<f64>,
+    }
 
-/// Metric type enumeration for scale validation
-#[derive(Debug, Clone, PartialEq)]
-enum MetricType {
-    Counter,
-    Gauge,
-    Histogram,
-    ExponentialHistogram,
-}
+    /// Metric type enumeration for scale validation
+    #[derive(Debug, Clone, PartialEq)]
+    enum MetricType {
+        Counter,
+        Gauge,
+        Histogram,
+        ExponentialHistogram,
+    }
 
-/// Result of negative metric scale validation testing
-#[derive(Debug, Clone)]
-struct ScaleValidationResult {
-    scale_invalid: bool,
-    metric_rejected: bool,
-    rejection_reason: String,
-    original_metric: ScaleMetricInfo,
-    included_in_export: bool,
-    validation_applied: bool,
-    processed_metrics_count: usize,
-    rejected_metrics_count: usize,
-    accepted_metrics_count: usize,
-    histogram_metrics_count: usize,
-    negative_scales_detected: usize,
-    zero_scales_count: usize,
-    positive_scales_count: usize,
-    missing_scales_count: usize,
-    scale_value_found: Option<i32>,
-    validation_errors: Vec<String>,
-    validation_correct: bool,
-    otlp_compliant: bool,
-    telemetry_emitted: bool,
-}
+    /// Result of negative metric scale validation testing
+    #[derive(Debug, Clone)]
+    struct ScaleValidationResult {
+        scale_invalid: bool,
+        metric_rejected: bool,
+        rejection_reason: String,
+        original_metric: ScaleMetricInfo,
+        included_in_export: bool,
+        validation_applied: bool,
+        processed_metrics_count: usize,
+        rejected_metrics_count: usize,
+        accepted_metrics_count: usize,
+        histogram_metrics_count: usize,
+        negative_scales_detected: usize,
+        zero_scales_count: usize,
+        positive_scales_count: usize,
+        missing_scales_count: usize,
+        scale_value_found: Option<i32>,
+        validation_errors: Vec<String>,
+        validation_correct: bool,
+        otlp_compliant: bool,
+        telemetry_emitted: bool,
+    }
 
-/// Check if metric type supports scale parameter validation
-fn metric_supports_scale_validation(metric_type: &MetricType) -> bool {
-    matches!(
-        metric_type,
-        MetricType::Histogram | MetricType::ExponentialHistogram
-    )
-}
+    /// Check if metric type supports scale parameter validation
+    fn metric_supports_scale_validation(metric_type: &MetricType) -> bool {
+        matches!(
+            metric_type,
+            MetricType::Histogram | MetricType::ExponentialHistogram
+        )
+    }
 
-/// Check if scale value is valid (non-negative)
-fn is_valid_scale(scale: i32) -> bool {
-    scale >= 0
-}
+    /// Check if scale value is valid (non-negative)
+    fn is_valid_scale(scale: i32) -> bool {
+        scale >= 0
+    }
 
-/// Simulate asupersync negative metric scale validation behavior
-fn simulate_asupersync_scale_validation(scenario: &NegativeScaleScenario) -> ScaleValidationResult {
-    let mut validation_errors = Vec::new();
-    let mut rejected_metrics = 0;
-    let mut accepted_metrics = 0;
-    let original_metric = scenario.metric.clone();
-    let mut scale_invalid = false;
-    let mut metric_rejected = false;
-    let mut rejection_reason = String::new();
-    let mut included_in_export = true; // Default to include
-    let mut validation_applied = false;
-    let mut histogram_metrics = 0;
-    let mut negative_scales = 0;
-    let mut zero_scales = 0;
-    let mut positive_scales = 0;
-    let mut missing_scales = 0;
-    let scale_value_found = scenario.metric.scale;
+    /// Simulate asupersync negative metric scale validation behavior
+    fn simulate_asupersync_scale_validation(
+        scenario: &NegativeScaleScenario,
+    ) -> ScaleValidationResult {
+        let mut validation_errors = Vec::new();
+        let mut rejected_metrics = 0;
+        let mut accepted_metrics = 0;
+        let original_metric = scenario.metric.clone();
+        let mut scale_invalid = false;
+        let mut metric_rejected = false;
+        let mut rejection_reason = String::new();
+        let mut included_in_export = true; // Default to include
+        let mut validation_applied = false;
+        let mut histogram_metrics = 0;
+        let mut negative_scales = 0;
+        let mut zero_scales = 0;
+        let mut positive_scales = 0;
+        let mut missing_scales = 0;
+        let scale_value_found = scenario.metric.scale;
 
-    // Check if this metric type supports scale validation
-    let supports_scale = metric_supports_scale_validation(&scenario.metric.metric_type);
+        // Check if this metric type supports scale validation
+        let supports_scale = metric_supports_scale_validation(&scenario.metric.metric_type);
 
-    if supports_scale {
-        histogram_metrics += 1;
-        validation_applied = true;
+        if supports_scale {
+            histogram_metrics += 1;
+            validation_applied = true;
 
-        // Analyze scale parameter
-        match scenario.metric.scale {
-            Some(scale) => {
-                if scale < 0 {
-                    // Negative scale - OTLP §6 violation
-                    negative_scales += 1;
-                    scale_invalid = true;
-                } else if scale == 0 {
-                    zero_scales += 1;
-                } else {
-                    positive_scales += 1;
+            // Analyze scale parameter
+            match scenario.metric.scale {
+                Some(scale) => {
+                    if scale < 0 {
+                        // Negative scale - OTLP §6 violation
+                        negative_scales += 1;
+                        scale_invalid = true;
+                    } else if scale == 0 {
+                        zero_scales += 1;
+                    } else {
+                        positive_scales += 1;
+                    }
+                }
+                None => {
+                    // No scale specified - acceptable (uses default)
+                    missing_scales += 1;
                 }
             }
-            None => {
-                // No scale specified - acceptable (uses default)
-                missing_scales += 1;
+
+            // Reject metric if scale is invalid
+            if scale_invalid {
+                metric_rejected = true;
+                included_in_export = false;
+                rejected_metrics += 1;
+
+                let scale_value = scenario.metric.scale.unwrap_or(0);
+                rejection_reason = format!(
+                    "{} metric has invalid negative scale: {}",
+                    match scenario.metric.metric_type {
+                        MetricType::Histogram => "Histogram",
+                        MetricType::ExponentialHistogram => "ExponentialHistogram",
+                        _ => "Metric",
+                    },
+                    scale_value
+                );
+
+                validation_errors.push(format!(
+                    "Metric '{}' has invalid negative scale: {}",
+                    scenario.metric.name, scale_value
+                ));
+            } else {
+                accepted_metrics += 1;
             }
-        }
-
-        // Reject metric if scale is invalid
-        if scale_invalid {
-            metric_rejected = true;
-            included_in_export = false;
-            rejected_metrics += 1;
-
-            let scale_value = scenario.metric.scale.unwrap_or(0);
-            rejection_reason = format!(
-                "{} metric has invalid negative scale: {}",
-                match scenario.metric.metric_type {
-                    MetricType::Histogram => "Histogram",
-                    MetricType::ExponentialHistogram => "ExponentialHistogram",
-                    _ => "Metric",
-                },
-                scale_value
-            );
-
-            validation_errors.push(format!(
-                "Metric '{}' has invalid negative scale: {}",
-                scenario.metric.name, scale_value
-            ));
         } else {
+            // Non-histogram metrics are not subject to scale validation
             accepted_metrics += 1;
         }
-    } else {
-        // Non-histogram metrics are not subject to scale validation
-        accepted_metrics += 1;
+
+        // Check validation correctness
+        let validation_correct = scale_invalid == scenario.expected_scale_invalid
+            && metric_rejected == scenario.expected_metric_rejected
+            && rejection_reason == scenario.expected_rejection_reason
+            && included_in_export == scenario.expected_included_in_export
+            && validation_applied == scenario.expected_validation_applied;
+
+        // OTLP compliance: metrics with negative scales must be rejected per §6
+        let otlp_compliant = if supports_scale && scale_invalid {
+            // Must reject metrics with negative scales
+            metric_rejected && !included_in_export
+        } else {
+            // Must accept metrics with valid scales or non-histogram metrics
+            !metric_rejected && included_in_export
+        };
+
+        ScaleValidationResult {
+            scale_invalid,
+            metric_rejected,
+            rejection_reason,
+            original_metric,
+            included_in_export,
+            validation_applied,
+            processed_metrics_count: 1,
+            rejected_metrics_count: rejected_metrics,
+            accepted_metrics_count: accepted_metrics,
+            histogram_metrics_count: histogram_metrics,
+            negative_scales_detected: negative_scales,
+            zero_scales_count: zero_scales,
+            positive_scales_count: positive_scales,
+            missing_scales_count: missing_scales,
+            scale_value_found,
+            validation_errors,
+            validation_correct,
+            otlp_compliant,
+            telemetry_emitted: true, // Assume telemetry is emitted for scale validation
+        }
     }
 
-    // Check validation correctness
-    let validation_correct = scale_invalid == scenario.expected_scale_invalid
-        && metric_rejected == scenario.expected_metric_rejected
-        && rejection_reason == scenario.expected_rejection_reason
-        && included_in_export == scenario.expected_included_in_export
-        && validation_applied == scenario.expected_validation_applied;
-
-    // OTLP compliance: metrics with negative scales must be rejected per §6
-    let otlp_compliant = if supports_scale && scale_invalid {
-        // Must reject metrics with negative scales
-        metric_rejected && !included_in_export
-    } else {
-        // Must accept metrics with valid scales or non-histogram metrics
-        !metric_rejected && included_in_export
-    };
-
-    ScaleValidationResult {
-        scale_invalid,
-        metric_rejected,
-        rejection_reason,
-        original_metric,
-        included_in_export,
-        validation_applied,
-        processed_metrics_count: 1,
-        rejected_metrics_count: rejected_metrics,
-        accepted_metrics_count: accepted_metrics,
-        histogram_metrics_count: histogram_metrics,
-        negative_scales_detected: negative_scales,
-        zero_scales_count: zero_scales,
-        positive_scales_count: positive_scales,
-        missing_scales_count: missing_scales,
-        scale_value_found,
-        validation_errors,
-        validation_correct,
-        otlp_compliant,
-        telemetry_emitted: true, // Assume telemetry is emitted for scale validation
-    }
-}
-
-/// Simulate reference implementation scale validation behavior
-fn simulate_reference_scale_validation(scenario: &NegativeScaleScenario) -> ScaleValidationResult {
-    // Reference implementation follows same logic as asupersync
-    simulate_asupersync_scale_validation(scenario)
-}
-
-/// Verify negative metric scale validation logic
-fn validate_scale_validation_logic(result: &ScaleValidationResult) -> Result<(), String> {
-    if !result.validation_correct {
-        return Err("Scale validation logic is incorrect".to_string());
+    /// Simulate reference implementation scale validation behavior
+    fn simulate_reference_scale_validation(
+        scenario: &NegativeScaleScenario,
+    ) -> ScaleValidationResult {
+        // Reference implementation follows same logic as asupersync
+        simulate_asupersync_scale_validation(scenario)
     }
 
-    // Check OTLP compliance
-    if !result.otlp_compliant {
-        return Err("Scale validation is not OTLP compliant".to_string());
+    /// Verify negative metric scale validation logic
+    fn validate_scale_validation_logic(result: &ScaleValidationResult) -> Result<(), String> {
+        if !result.validation_correct {
+            return Err("Scale validation logic is incorrect".to_string());
+        }
+
+        // Check OTLP compliance
+        if !result.otlp_compliant {
+            return Err("Scale validation is not OTLP compliant".to_string());
+        }
+
+        // Critical check: metrics with negative scales must be rejected (OTLP §6)
+        if result.scale_invalid && !result.metric_rejected {
+            return Err(
+                "CRITICAL: Metric with negative scale was not rejected (violates OTLP §6)"
+                    .to_string(),
+            );
+        }
+
+        // Critical check: metrics with valid scales must be accepted
+        if !result.scale_invalid && result.metric_rejected {
+            return Err("CRITICAL: Metric with valid scale was rejected".to_string());
+        }
+
+        // Critical check: rejected metrics should not be included in export
+        if result.metric_rejected && result.included_in_export {
+            return Err("CRITICAL: Rejected metric was included in export".to_string());
+        }
+
+        // Critical check: accepted metrics should be included in export
+        if !result.metric_rejected && !result.included_in_export {
+            return Err("CRITICAL: Accepted metric was not included in export".to_string());
+        }
+
+        // Critical check: rejection reason must be provided for rejected metrics
+        if result.metric_rejected && result.rejection_reason.is_empty() {
+            return Err("CRITICAL: No rejection reason provided for rejected metric".to_string());
+        }
+
+        // Critical check: rejection reason must be empty for accepted metrics
+        if !result.metric_rejected && !result.rejection_reason.is_empty() {
+            return Err(
+                "CRITICAL: Rejection reason provided but metric was not rejected".to_string(),
+            );
+        }
+
+        // Critical check: counts must be consistent
+        if result.processed_metrics_count
+            != result.rejected_metrics_count + result.accepted_metrics_count
+        {
+            return Err(
+                "CRITICAL: Processed metrics count doesn't match rejected + accepted counts"
+                    .to_string(),
+            );
+        }
+
+        // Critical check: validation should only apply to histogram-type metrics
+        let supports_scale = metric_supports_scale_validation(&result.original_metric.metric_type);
+        if result.validation_applied != supports_scale {
+            return Err(
+                "CRITICAL: Scale validation application doesn't match metric type support"
+                    .to_string(),
+            );
+        }
+
+        // Critical check: negative scale detection should match invalid scale flag
+        if result.scale_invalid && result.negative_scales_detected == 0 {
+            return Err(
+                "CRITICAL: Scale marked invalid but no negative scales detected".to_string(),
+            );
+        }
+
+        if !result.scale_invalid && result.negative_scales_detected > 0 {
+            return Err(
+                "CRITICAL: Negative scales detected but scale not marked invalid".to_string(),
+            );
+        }
+
+        // Critical check: scale counts should be consistent
+        let total_scales = result.negative_scales_detected
+            + result.zero_scales_count
+            + result.positive_scales_count
+            + result.missing_scales_count;
+        if result.histogram_metrics_count > 0 && total_scales != result.histogram_metrics_count {
+            return Err("CRITICAL: Scale counts don't match histogram metrics count".to_string());
+        }
+
+        Ok(())
     }
 
-    // Critical check: metrics with negative scales must be rejected (OTLP §6)
-    if result.scale_invalid && !result.metric_rejected {
-        return Err(
-            "CRITICAL: Metric with negative scale was not rejected (violates OTLP §6)".to_string(),
-        );
+    /// Verify implementation consistency for scale validation
+    fn validate_scale_validation_implementation_consistency(
+        asupersync_result: &ScaleValidationResult,
+        reference_result: &ScaleValidationResult,
+    ) -> Result<(), String> {
+        // Both implementations should detect same scale validity
+        if asupersync_result.scale_invalid != reference_result.scale_invalid {
+            return Err("Scale validity detection differs between implementations".to_string());
+        }
+
+        // Both implementations should reject metrics consistently
+        if asupersync_result.metric_rejected != reference_result.metric_rejected {
+            return Err("Metric rejection differs between implementations".to_string());
+        }
+
+        // Both implementations should provide same rejection reason
+        if asupersync_result.rejection_reason != reference_result.rejection_reason {
+            return Err("Rejection reason differs between implementations".to_string());
+        }
+
+        // Both implementations should include metrics consistently
+        if asupersync_result.included_in_export != reference_result.included_in_export {
+            return Err("Export inclusion differs between implementations".to_string());
+        }
+
+        // Both implementations should apply validation consistently
+        if asupersync_result.validation_applied != reference_result.validation_applied {
+            return Err("Validation application differs between implementations".to_string());
+        }
+
+        // Both implementations should count histogram metrics consistently
+        if asupersync_result.histogram_metrics_count != reference_result.histogram_metrics_count {
+            return Err("Histogram metrics count differs between implementations".to_string());
+        }
+
+        // Both implementations should count negative scales consistently
+        if asupersync_result.negative_scales_detected != reference_result.negative_scales_detected {
+            return Err("Negative scales detection differs between implementations".to_string());
+        }
+
+        // Both implementations should count scale types consistently
+        if asupersync_result.zero_scales_count != reference_result.zero_scales_count {
+            return Err("Zero scales count differs between implementations".to_string());
+        }
+
+        if asupersync_result.positive_scales_count != reference_result.positive_scales_count {
+            return Err("Positive scales count differs between implementations".to_string());
+        }
+
+        if asupersync_result.missing_scales_count != reference_result.missing_scales_count {
+            return Err("Missing scales count differs between implementations".to_string());
+        }
+
+        // Both implementations should find same scale value
+        if asupersync_result.scale_value_found != reference_result.scale_value_found {
+            return Err("Scale value found differs between implementations".to_string());
+        }
+
+        // Both implementations should count rejected metrics consistently
+        if asupersync_result.rejected_metrics_count != reference_result.rejected_metrics_count {
+            return Err("Rejected metrics count differs between implementations".to_string());
+        }
+
+        // Both implementations should count accepted metrics consistently
+        if asupersync_result.accepted_metrics_count != reference_result.accepted_metrics_count {
+            return Err("Accepted metrics count differs between implementations".to_string());
+        }
+
+        // Both implementations should have same validation correctness
+        if asupersync_result.validation_correct != reference_result.validation_correct {
+            return Err("Validation correctness differs between implementations".to_string());
+        }
+
+        // Both implementations should be OTLP compliant
+        if asupersync_result.otlp_compliant != reference_result.otlp_compliant {
+            return Err("OTLP compliance differs between implementations".to_string());
+        }
+
+        // Both implementations should emit telemetry consistently
+        if asupersync_result.telemetry_emitted != reference_result.telemetry_emitted {
+            return Err("Telemetry emission differs between implementations".to_string());
+        }
+
+        Ok(())
     }
-
-    // Critical check: metrics with valid scales must be accepted
-    if !result.scale_invalid && result.metric_rejected {
-        return Err("CRITICAL: Metric with valid scale was rejected".to_string());
-    }
-
-    // Critical check: rejected metrics should not be included in export
-    if result.metric_rejected && result.included_in_export {
-        return Err("CRITICAL: Rejected metric was included in export".to_string());
-    }
-
-    // Critical check: accepted metrics should be included in export
-    if !result.metric_rejected && !result.included_in_export {
-        return Err("CRITICAL: Accepted metric was not included in export".to_string());
-    }
-
-    // Critical check: rejection reason must be provided for rejected metrics
-    if result.metric_rejected && result.rejection_reason.is_empty() {
-        return Err("CRITICAL: No rejection reason provided for rejected metric".to_string());
-    }
-
-    // Critical check: rejection reason must be empty for accepted metrics
-    if !result.metric_rejected && !result.rejection_reason.is_empty() {
-        return Err("CRITICAL: Rejection reason provided but metric was not rejected".to_string());
-    }
-
-    // Critical check: counts must be consistent
-    if result.processed_metrics_count
-        != result.rejected_metrics_count + result.accepted_metrics_count
-    {
-        return Err(
-            "CRITICAL: Processed metrics count doesn't match rejected + accepted counts"
-                .to_string(),
-        );
-    }
-
-    // Critical check: validation should only apply to histogram-type metrics
-    let supports_scale = metric_supports_scale_validation(&result.original_metric.metric_type);
-    if result.validation_applied != supports_scale {
-        return Err(
-            "CRITICAL: Scale validation application doesn't match metric type support".to_string(),
-        );
-    }
-
-    // Critical check: negative scale detection should match invalid scale flag
-    if result.scale_invalid && result.negative_scales_detected == 0 {
-        return Err("CRITICAL: Scale marked invalid but no negative scales detected".to_string());
-    }
-
-    if !result.scale_invalid && result.negative_scales_detected > 0 {
-        return Err("CRITICAL: Negative scales detected but scale not marked invalid".to_string());
-    }
-
-    // Critical check: scale counts should be consistent
-    let total_scales = result.negative_scales_detected
-        + result.zero_scales_count
-        + result.positive_scales_count
-        + result.missing_scales_count;
-    if result.histogram_metrics_count > 0 && total_scales != result.histogram_metrics_count {
-        return Err("CRITICAL: Scale counts don't match histogram metrics count".to_string());
-    }
-
-    Ok(())
-}
-
-/// Verify implementation consistency for scale validation
-fn validate_scale_validation_implementation_consistency(
-    asupersync_result: &ScaleValidationResult,
-    reference_result: &ScaleValidationResult,
-) -> Result<(), String> {
-    // Both implementations should detect same scale validity
-    if asupersync_result.scale_invalid != reference_result.scale_invalid {
-        return Err("Scale validity detection differs between implementations".to_string());
-    }
-
-    // Both implementations should reject metrics consistently
-    if asupersync_result.metric_rejected != reference_result.metric_rejected {
-        return Err("Metric rejection differs between implementations".to_string());
-    }
-
-    // Both implementations should provide same rejection reason
-    if asupersync_result.rejection_reason != reference_result.rejection_reason {
-        return Err("Rejection reason differs between implementations".to_string());
-    }
-
-    // Both implementations should include metrics consistently
-    if asupersync_result.included_in_export != reference_result.included_in_export {
-        return Err("Export inclusion differs between implementations".to_string());
-    }
-
-    // Both implementations should apply validation consistently
-    if asupersync_result.validation_applied != reference_result.validation_applied {
-        return Err("Validation application differs between implementations".to_string());
-    }
-
-    // Both implementations should count histogram metrics consistently
-    if asupersync_result.histogram_metrics_count != reference_result.histogram_metrics_count {
-        return Err("Histogram metrics count differs between implementations".to_string());
-    }
-
-    // Both implementations should count negative scales consistently
-    if asupersync_result.negative_scales_detected != reference_result.negative_scales_detected {
-        return Err("Negative scales detection differs between implementations".to_string());
-    }
-
-    // Both implementations should count scale types consistently
-    if asupersync_result.zero_scales_count != reference_result.zero_scales_count {
-        return Err("Zero scales count differs between implementations".to_string());
-    }
-
-    if asupersync_result.positive_scales_count != reference_result.positive_scales_count {
-        return Err("Positive scales count differs between implementations".to_string());
-    }
-
-    if asupersync_result.missing_scales_count != reference_result.missing_scales_count {
-        return Err("Missing scales count differs between implementations".to_string());
-    }
-
-    // Both implementations should find same scale value
-    if asupersync_result.scale_value_found != reference_result.scale_value_found {
-        return Err("Scale value found differs between implementations".to_string());
-    }
-
-    // Both implementations should count rejected metrics consistently
-    if asupersync_result.rejected_metrics_count != reference_result.rejected_metrics_count {
-        return Err("Rejected metrics count differs between implementations".to_string());
-    }
-
-    // Both implementations should count accepted metrics consistently
-    if asupersync_result.accepted_metrics_count != reference_result.accepted_metrics_count {
-        return Err("Accepted metrics count differs between implementations".to_string());
-    }
-
-    // Both implementations should have same validation correctness
-    if asupersync_result.validation_correct != reference_result.validation_correct {
-        return Err("Validation correctness differs between implementations".to_string());
-    }
-
-    // Both implementations should be OTLP compliant
-    if asupersync_result.otlp_compliant != reference_result.otlp_compliant {
-        return Err("OTLP compliance differs between implementations".to_string());
-    }
-
-    // Both implementations should emit telemetry consistently
-    if asupersync_result.telemetry_emitted != reference_result.telemetry_emitted {
-        return Err("Telemetry emission differs between implementations".to_string());
-    }
-
-    Ok(())
 }
 
 //
 // OTLP-113: Negative metric scale validation conformance test
 //
 
-#[test]
-fn otlp_113_negative_metric_scale_validation_conformance() {
-    // Test scenarios for negative metric scale validation per OTLP §6 specification
-    let scenarios = vec![
+mod otlp_113_negative_metric_scale_validation_second {
+    #[test]
+    fn otlp_113_negative_metric_scale_validation_conformance() {
+        // Test scenarios for negative metric scale validation per OTLP §6 specification
+        let scenarios =
+            vec![
         NegativeScaleScenario {
             description: "Histogram with scale=-1 (MUST be rejected per OTLP §6)".to_string(),
             metric: ScaleMetricInfo {
@@ -29297,399 +29403,483 @@ fn otlp_113_negative_metric_scale_validation_conformance() {
         },
     ];
 
-    for scenario in scenarios {
-        println!("Testing scenario: {}", scenario.description);
+        for scenario in scenarios {
+            println!("Testing scenario: {}", scenario.description);
 
-        // Simulate asupersync exporter behavior
-        let asupersync_result = simulate_asupersync_scale_validation(&scenario);
+            // Simulate asupersync exporter behavior
+            let asupersync_result = simulate_asupersync_scale_validation(&scenario);
 
-        // Simulate reference implementation behavior
-        let reference_result = simulate_reference_scale_validation(&scenario);
+            // Simulate reference implementation behavior
+            let reference_result = simulate_reference_scale_validation(&scenario);
 
-        // Validate individual results
-        validate_scale_validation_logic(&asupersync_result).expect(&format!(
-            "Asupersync scale validation logic failed for scenario: {}",
-            scenario.description
-        ));
+            // Validate individual results
+            validate_scale_validation_logic(&asupersync_result).expect(&format!(
+                "Asupersync scale validation logic failed for scenario: {}",
+                scenario.description
+            ));
 
-        validate_scale_validation_logic(&reference_result).expect(&format!(
-            "Reference scale validation logic failed for scenario: {}",
-            scenario.description
-        ));
+            validate_scale_validation_logic(&reference_result).expect(&format!(
+                "Reference scale validation logic failed for scenario: {}",
+                scenario.description
+            ));
 
-        // Validate implementation consistency
-        validate_scale_validation_implementation_consistency(&asupersync_result, &reference_result)
+            // Validate implementation consistency
+            validate_scale_validation_implementation_consistency(
+                &asupersync_result,
+                &reference_result,
+            )
             .expect(&format!(
                 "Implementation consistency failed for scenario: {}",
                 scenario.description
             ));
 
-        println!("✓ Scenario passed: {}", scenario.description);
+            println!("✓ Scenario passed: {}", scenario.description);
+        }
     }
-}
 
-/// Test scenario for negative metric scale validation
-#[derive(Debug, Clone)]
-struct NegativeScaleScenario {
-    description: String,
-    metric: ScaleMetricInfo,
-    expected_scale_invalid: bool,
-    expected_metric_rejected: bool,
-    expected_rejection_reason: String,
-    expected_included_in_export: bool,
-    expected_validation_applied: bool,
-    expected_otlp_compliant: bool,
-}
+    /// Test scenario for negative metric scale validation
+    #[derive(Debug, Clone)]
+    struct NegativeScaleScenario {
+        description: String,
+        metric: ScaleMetricInfo,
+        expected_scale_invalid: bool,
+        expected_metric_rejected: bool,
+        expected_rejection_reason: String,
+        expected_included_in_export: bool,
+        expected_validation_applied: bool,
+        expected_otlp_compliant: bool,
+    }
 
-/// Metric information for scale validation testing
-#[derive(Debug, Clone)]
-struct ScaleMetricInfo {
-    name: String,
-    metric_type: MetricType,
-    scale: Option<i32>, // Scale parameter (can be negative, zero, or positive)
-    bucket_counts: Vec<u64>,
-    explicit_bounds: Vec<f64>,
-}
+    /// Metric information for scale validation testing
+    #[derive(Debug, Clone)]
+    struct ScaleMetricInfo {
+        name: String,
+        metric_type: MetricType,
+        scale: Option<i32>, // Scale parameter (can be negative, zero, or positive)
+        bucket_counts: Vec<u64>,
+        explicit_bounds: Vec<f64>,
+    }
 
-/// Metric type enumeration for scale validation
-#[derive(Debug, Clone, PartialEq)]
-enum MetricType {
-    Counter,
-    Gauge,
-    Histogram,
-    ExponentialHistogram,
-}
+    /// Metric type enumeration for scale validation
+    #[derive(Debug, Clone, PartialEq)]
+    enum MetricType {
+        Counter,
+        Gauge,
+        Histogram,
+        ExponentialHistogram,
+    }
 
-/// Result of negative metric scale validation testing
-#[derive(Debug, Clone)]
-struct ScaleValidationResult {
-    scale_invalid: bool,
-    metric_rejected: bool,
-    rejection_reason: String,
-    original_metric: ScaleMetricInfo,
-    included_in_export: bool,
-    validation_applied: bool,
-    processed_metrics_count: usize,
-    rejected_metrics_count: usize,
-    accepted_metrics_count: usize,
-    histogram_metrics_count: usize,
-    negative_scales_detected: usize,
-    zero_scales_count: usize,
-    positive_scales_count: usize,
-    missing_scales_count: usize,
-    scale_value_found: Option<i32>,
-    validation_errors: Vec<String>,
-    validation_correct: bool,
-    otlp_compliant: bool,
-    telemetry_emitted: bool,
-}
+    /// Result of negative metric scale validation testing
+    #[derive(Debug, Clone)]
+    struct ScaleValidationResult {
+        scale_invalid: bool,
+        metric_rejected: bool,
+        rejection_reason: String,
+        original_metric: ScaleMetricInfo,
+        included_in_export: bool,
+        validation_applied: bool,
+        processed_metrics_count: usize,
+        rejected_metrics_count: usize,
+        accepted_metrics_count: usize,
+        histogram_metrics_count: usize,
+        negative_scales_detected: usize,
+        zero_scales_count: usize,
+        positive_scales_count: usize,
+        missing_scales_count: usize,
+        scale_value_found: Option<i32>,
+        validation_errors: Vec<String>,
+        validation_correct: bool,
+        otlp_compliant: bool,
+        telemetry_emitted: bool,
+    }
 
-/// Check if metric type supports scale parameter validation
-fn metric_supports_scale_validation(metric_type: &MetricType) -> bool {
-    matches!(
-        metric_type,
-        MetricType::Histogram | MetricType::ExponentialHistogram
-    )
-}
+    /// Check if metric type supports scale parameter validation
+    fn metric_supports_scale_validation(metric_type: &MetricType) -> bool {
+        matches!(
+            metric_type,
+            MetricType::Histogram | MetricType::ExponentialHistogram
+        )
+    }
 
-/// Check if scale value is valid (non-negative)
-fn is_valid_scale(scale: i32) -> bool {
-    scale >= 0
-}
+    /// Check if scale value is valid (non-negative)
+    fn is_valid_scale(scale: i32) -> bool {
+        scale >= 0
+    }
 
-/// Simulate asupersync negative metric scale validation behavior
-fn simulate_asupersync_scale_validation(scenario: &NegativeScaleScenario) -> ScaleValidationResult {
-    let mut validation_errors = Vec::new();
-    let mut rejected_metrics = 0;
-    let mut accepted_metrics = 0;
-    let original_metric = scenario.metric.clone();
-    let mut scale_invalid = false;
-    let mut metric_rejected = false;
-    let mut rejection_reason = String::new();
-    let mut included_in_export = true; // Default to include
-    let mut validation_applied = false;
-    let mut histogram_metrics = 0;
-    let mut negative_scales = 0;
-    let mut zero_scales = 0;
-    let mut positive_scales = 0;
-    let mut missing_scales = 0;
-    let scale_value_found = scenario.metric.scale;
+    /// Simulate asupersync negative metric scale validation behavior
+    fn simulate_asupersync_scale_validation(
+        scenario: &NegativeScaleScenario,
+    ) -> ScaleValidationResult {
+        let mut validation_errors = Vec::new();
+        let mut rejected_metrics = 0;
+        let mut accepted_metrics = 0;
+        let original_metric = scenario.metric.clone();
+        let mut scale_invalid = false;
+        let mut metric_rejected = false;
+        let mut rejection_reason = String::new();
+        let mut included_in_export = true; // Default to include
+        let mut validation_applied = false;
+        let mut histogram_metrics = 0;
+        let mut negative_scales = 0;
+        let mut zero_scales = 0;
+        let mut positive_scales = 0;
+        let mut missing_scales = 0;
+        let scale_value_found = scenario.metric.scale;
 
-    // Check if this metric type supports scale validation
-    let supports_scale = metric_supports_scale_validation(&scenario.metric.metric_type);
+        // Check if this metric type supports scale validation
+        let supports_scale = metric_supports_scale_validation(&scenario.metric.metric_type);
 
-    if supports_scale {
-        histogram_metrics += 1;
-        validation_applied = true;
+        if supports_scale {
+            histogram_metrics += 1;
+            validation_applied = true;
 
-        // Analyze scale parameter
-        match scenario.metric.scale {
-            Some(scale) => {
-                if scale < 0 {
-                    // Negative scale - OTLP §6 violation
-                    negative_scales += 1;
-                    scale_invalid = true;
-                } else if scale == 0 {
-                    zero_scales += 1;
-                } else {
-                    positive_scales += 1;
+            // Analyze scale parameter
+            match scenario.metric.scale {
+                Some(scale) => {
+                    if scale < 0 {
+                        // Negative scale - OTLP §6 violation
+                        negative_scales += 1;
+                        scale_invalid = true;
+                    } else if scale == 0 {
+                        zero_scales += 1;
+                    } else {
+                        positive_scales += 1;
+                    }
+                }
+                None => {
+                    // No scale specified - acceptable (uses default)
+                    missing_scales += 1;
                 }
             }
-            None => {
-                // No scale specified - acceptable (uses default)
-                missing_scales += 1;
+
+            // Reject metric if scale is invalid
+            if scale_invalid {
+                metric_rejected = true;
+                included_in_export = false;
+                rejected_metrics += 1;
+
+                let scale_value = scenario.metric.scale.unwrap_or(0);
+                rejection_reason = format!(
+                    "{} metric has invalid negative scale: {}",
+                    match scenario.metric.metric_type {
+                        MetricType::Histogram => "Histogram",
+                        MetricType::ExponentialHistogram => "ExponentialHistogram",
+                        _ => "Metric",
+                    },
+                    scale_value
+                );
+
+                validation_errors.push(format!(
+                    "Metric '{}' has invalid negative scale: {}",
+                    scenario.metric.name, scale_value
+                ));
+            } else {
+                accepted_metrics += 1;
             }
-        }
-
-        // Reject metric if scale is invalid
-        if scale_invalid {
-            metric_rejected = true;
-            included_in_export = false;
-            rejected_metrics += 1;
-
-            let scale_value = scenario.metric.scale.unwrap_or(0);
-            rejection_reason = format!(
-                "{} metric has invalid negative scale: {}",
-                match scenario.metric.metric_type {
-                    MetricType::Histogram => "Histogram",
-                    MetricType::ExponentialHistogram => "ExponentialHistogram",
-                    _ => "Metric",
-                },
-                scale_value
-            );
-
-            validation_errors.push(format!(
-                "Metric '{}' has invalid negative scale: {}",
-                scenario.metric.name, scale_value
-            ));
         } else {
+            // Non-histogram metrics are not subject to scale validation
             accepted_metrics += 1;
         }
-    } else {
-        // Non-histogram metrics are not subject to scale validation
-        accepted_metrics += 1;
+
+        // Check validation correctness
+        let validation_correct = scale_invalid == scenario.expected_scale_invalid
+            && metric_rejected == scenario.expected_metric_rejected
+            && rejection_reason == scenario.expected_rejection_reason
+            && included_in_export == scenario.expected_included_in_export
+            && validation_applied == scenario.expected_validation_applied;
+
+        // OTLP compliance: metrics with negative scales must be rejected per §6
+        let otlp_compliant = if supports_scale && scale_invalid {
+            // Must reject metrics with negative scales
+            metric_rejected && !included_in_export
+        } else {
+            // Must accept metrics with valid scales or non-histogram metrics
+            !metric_rejected && included_in_export
+        };
+
+        ScaleValidationResult {
+            scale_invalid,
+            metric_rejected,
+            rejection_reason,
+            original_metric,
+            included_in_export,
+            validation_applied,
+            processed_metrics_count: 1,
+            rejected_metrics_count: rejected_metrics,
+            accepted_metrics_count: accepted_metrics,
+            histogram_metrics_count: histogram_metrics,
+            negative_scales_detected: negative_scales,
+            zero_scales_count: zero_scales,
+            positive_scales_count: positive_scales,
+            missing_scales_count: missing_scales,
+            scale_value_found,
+            validation_errors,
+            validation_correct,
+            otlp_compliant,
+            telemetry_emitted: true, // Assume telemetry is emitted for scale validation
+        }
     }
 
-    // Check validation correctness
-    let validation_correct = scale_invalid == scenario.expected_scale_invalid
-        && metric_rejected == scenario.expected_metric_rejected
-        && rejection_reason == scenario.expected_rejection_reason
-        && included_in_export == scenario.expected_included_in_export
-        && validation_applied == scenario.expected_validation_applied;
-
-    // OTLP compliance: metrics with negative scales must be rejected per §6
-    let otlp_compliant = if supports_scale && scale_invalid {
-        // Must reject metrics with negative scales
-        metric_rejected && !included_in_export
-    } else {
-        // Must accept metrics with valid scales or non-histogram metrics
-        !metric_rejected && included_in_export
-    };
-
-    ScaleValidationResult {
-        scale_invalid,
-        metric_rejected,
-        rejection_reason,
-        original_metric,
-        included_in_export,
-        validation_applied,
-        processed_metrics_count: 1,
-        rejected_metrics_count: rejected_metrics,
-        accepted_metrics_count: accepted_metrics,
-        histogram_metrics_count: histogram_metrics,
-        negative_scales_detected: negative_scales,
-        zero_scales_count: zero_scales,
-        positive_scales_count: positive_scales,
-        missing_scales_count: missing_scales,
-        scale_value_found,
-        validation_errors,
-        validation_correct,
-        otlp_compliant,
-        telemetry_emitted: true, // Assume telemetry is emitted for scale validation
-    }
-}
-
-/// Simulate reference implementation scale validation behavior
-fn simulate_reference_scale_validation(scenario: &NegativeScaleScenario) -> ScaleValidationResult {
-    // Reference implementation follows same logic as asupersync
-    simulate_asupersync_scale_validation(scenario)
-}
-
-/// Verify negative metric scale validation logic
-fn validate_scale_validation_logic(result: &ScaleValidationResult) -> Result<(), String> {
-    if !result.validation_correct {
-        return Err("Scale validation logic is incorrect".to_string());
+    /// Simulate reference implementation scale validation behavior
+    fn simulate_reference_scale_validation(
+        scenario: &NegativeScaleScenario,
+    ) -> ScaleValidationResult {
+        // Reference implementation follows same logic as asupersync
+        simulate_asupersync_scale_validation(scenario)
     }
 
-    // Check OTLP compliance
-    if !result.otlp_compliant {
-        return Err("Scale validation is not OTLP compliant".to_string());
+    /// Verify negative metric scale validation logic
+    fn validate_scale_validation_logic(result: &ScaleValidationResult) -> Result<(), String> {
+        if !result.validation_correct {
+            return Err("Scale validation logic is incorrect".to_string());
+        }
+
+        // Check OTLP compliance
+        if !result.otlp_compliant {
+            return Err("Scale validation is not OTLP compliant".to_string());
+        }
+
+        // Critical check: metrics with negative scales must be rejected (OTLP §6)
+        if result.scale_invalid && !result.metric_rejected {
+            return Err(
+                "CRITICAL: Metric with negative scale was not rejected (violates OTLP §6)"
+                    .to_string(),
+            );
+        }
+
+        // Critical check: metrics with valid scales must be accepted
+        if !result.scale_invalid && result.metric_rejected {
+            return Err("CRITICAL: Metric with valid scale was rejected".to_string());
+        }
+
+        // Critical check: rejected metrics should not be included in export
+        if result.metric_rejected && result.included_in_export {
+            return Err("CRITICAL: Rejected metric was included in export".to_string());
+        }
+
+        // Critical check: accepted metrics should be included in export
+        if !result.metric_rejected && !result.included_in_export {
+            return Err("CRITICAL: Accepted metric was not included in export".to_string());
+        }
+
+        // Critical check: rejection reason must be provided for rejected metrics
+        if result.metric_rejected && result.rejection_reason.is_empty() {
+            return Err("CRITICAL: No rejection reason provided for rejected metric".to_string());
+        }
+
+        // Critical check: rejection reason must be empty for accepted metrics
+        if !result.metric_rejected && !result.rejection_reason.is_empty() {
+            return Err(
+                "CRITICAL: Rejection reason provided but metric was not rejected".to_string(),
+            );
+        }
+
+        // Critical check: counts must be consistent
+        if result.processed_metrics_count
+            != result.rejected_metrics_count + result.accepted_metrics_count
+        {
+            return Err(
+                "CRITICAL: Processed metrics count doesn't match rejected + accepted counts"
+                    .to_string(),
+            );
+        }
+
+        // Critical check: validation should only apply to histogram-type metrics
+        let supports_scale = metric_supports_scale_validation(&result.original_metric.metric_type);
+        if result.validation_applied != supports_scale {
+            return Err(
+                "CRITICAL: Scale validation application doesn't match metric type support"
+                    .to_string(),
+            );
+        }
+
+        // Critical check: negative scale detection should match invalid scale flag
+        if result.scale_invalid && result.negative_scales_detected == 0 {
+            return Err(
+                "CRITICAL: Scale marked invalid but no negative scales detected".to_string(),
+            );
+        }
+
+        if !result.scale_invalid && result.negative_scales_detected > 0 {
+            return Err(
+                "CRITICAL: Negative scales detected but scale not marked invalid".to_string(),
+            );
+        }
+
+        // Critical check: scale counts should be consistent
+        let total_scales = result.negative_scales_detected
+            + result.zero_scales_count
+            + result.positive_scales_count
+            + result.missing_scales_count;
+        if result.histogram_metrics_count > 0 && total_scales != result.histogram_metrics_count {
+            return Err("CRITICAL: Scale counts don't match histogram metrics count".to_string());
+        }
+
+        Ok(())
     }
 
-    // Critical check: metrics with negative scales must be rejected (OTLP §6)
-    if result.scale_invalid && !result.metric_rejected {
-        return Err(
-            "CRITICAL: Metric with negative scale was not rejected (violates OTLP §6)".to_string(),
-        );
+    /// Verify implementation consistency for scale validation
+    fn validate_scale_validation_implementation_consistency(
+        asupersync_result: &ScaleValidationResult,
+        reference_result: &ScaleValidationResult,
+    ) -> Result<(), String> {
+        // Both implementations should detect same scale validity
+        if asupersync_result.scale_invalid != reference_result.scale_invalid {
+            return Err("Scale validity detection differs between implementations".to_string());
+        }
+
+        // Both implementations should reject metrics consistently
+        if asupersync_result.metric_rejected != reference_result.metric_rejected {
+            return Err("Metric rejection differs between implementations".to_string());
+        }
+
+        // Both implementations should provide same rejection reason
+        if asupersync_result.rejection_reason != reference_result.rejection_reason {
+            return Err("Rejection reason differs between implementations".to_string());
+        }
+
+        // Both implementations should include metrics consistently
+        if asupersync_result.included_in_export != reference_result.included_in_export {
+            return Err("Export inclusion differs between implementations".to_string());
+        }
+
+        // Both implementations should apply validation consistently
+        if asupersync_result.validation_applied != reference_result.validation_applied {
+            return Err("Validation application differs between implementations".to_string());
+        }
+
+        // Both implementations should count histogram metrics consistently
+        if asupersync_result.histogram_metrics_count != reference_result.histogram_metrics_count {
+            return Err("Histogram metrics count differs between implementations".to_string());
+        }
+
+        // Both implementations should count negative scales consistently
+        if asupersync_result.negative_scales_detected != reference_result.negative_scales_detected {
+            return Err("Negative scales detection differs between implementations".to_string());
+        }
+
+        // Both implementations should count scale types consistently
+        if asupersync_result.zero_scales_count != reference_result.zero_scales_count {
+            return Err("Zero scales count differs between implementations".to_string());
+        }
+
+        if asupersync_result.positive_scales_count != reference_result.positive_scales_count {
+            return Err("Positive scales count differs between implementations".to_string());
+        }
+
+        if asupersync_result.missing_scales_count != reference_result.missing_scales_count {
+            return Err("Missing scales count differs between implementations".to_string());
+        }
+
+        // Both implementations should find same scale value
+        if asupersync_result.scale_value_found != reference_result.scale_value_found {
+            return Err("Scale value found differs between implementations".to_string());
+        }
+
+        // Both implementations should count rejected metrics consistently
+        if asupersync_result.rejected_metrics_count != reference_result.rejected_metrics_count {
+            return Err("Rejected metrics count differs between implementations".to_string());
+        }
+
+        // Both implementations should count accepted metrics consistently
+        if asupersync_result.accepted_metrics_count != reference_result.accepted_metrics_count {
+            return Err("Accepted metrics count differs between implementations".to_string());
+        }
+
+        // Both implementations should have same validation correctness
+        if asupersync_result.validation_correct != reference_result.validation_correct {
+            return Err("Validation correctness differs between implementations".to_string());
+        }
+
+        // Both implementations should be OTLP compliant
+        if asupersync_result.otlp_compliant != reference_result.otlp_compliant {
+            return Err("OTLP compliance differs between implementations".to_string());
+        }
+
+        // Both implementations should emit telemetry consistently
+        if asupersync_result.telemetry_emitted != reference_result.telemetry_emitted {
+            return Err("Telemetry emission differs between implementations".to_string());
+        }
+
+        Ok(())
     }
-
-    // Critical check: metrics with valid scales must be accepted
-    if !result.scale_invalid && result.metric_rejected {
-        return Err("CRITICAL: Metric with valid scale was rejected".to_string());
-    }
-
-    // Critical check: rejected metrics should not be included in export
-    if result.metric_rejected && result.included_in_export {
-        return Err("CRITICAL: Rejected metric was included in export".to_string());
-    }
-
-    // Critical check: accepted metrics should be included in export
-    if !result.metric_rejected && !result.included_in_export {
-        return Err("CRITICAL: Accepted metric was not included in export".to_string());
-    }
-
-    // Critical check: rejection reason must be provided for rejected metrics
-    if result.metric_rejected && result.rejection_reason.is_empty() {
-        return Err("CRITICAL: No rejection reason provided for rejected metric".to_string());
-    }
-
-    // Critical check: rejection reason must be empty for accepted metrics
-    if !result.metric_rejected && !result.rejection_reason.is_empty() {
-        return Err("CRITICAL: Rejection reason provided but metric was not rejected".to_string());
-    }
-
-    // Critical check: counts must be consistent
-    if result.processed_metrics_count
-        != result.rejected_metrics_count + result.accepted_metrics_count
-    {
-        return Err(
-            "CRITICAL: Processed metrics count doesn't match rejected + accepted counts"
-                .to_string(),
-        );
-    }
-
-    // Critical check: validation should only apply to histogram-type metrics
-    let supports_scale = metric_supports_scale_validation(&result.original_metric.metric_type);
-    if result.validation_applied != supports_scale {
-        return Err(
-            "CRITICAL: Scale validation application doesn't match metric type support".to_string(),
-        );
-    }
-
-    // Critical check: negative scale detection should match invalid scale flag
-    if result.scale_invalid && result.negative_scales_detected == 0 {
-        return Err("CRITICAL: Scale marked invalid but no negative scales detected".to_string());
-    }
-
-    if !result.scale_invalid && result.negative_scales_detected > 0 {
-        return Err("CRITICAL: Negative scales detected but scale not marked invalid".to_string());
-    }
-
-    // Critical check: scale counts should be consistent
-    let total_scales = result.negative_scales_detected
-        + result.zero_scales_count
-        + result.positive_scales_count
-        + result.missing_scales_count;
-    if result.histogram_metrics_count > 0 && total_scales != result.histogram_metrics_count {
-        return Err("CRITICAL: Scale counts don't match histogram metrics count".to_string());
-    }
-
-    Ok(())
-}
-
-/// Verify implementation consistency for scale validation
-fn validate_scale_validation_implementation_consistency(
-    asupersync_result: &ScaleValidationResult,
-    reference_result: &ScaleValidationResult,
-) -> Result<(), String> {
-    // Both implementations should detect same scale validity
-    if asupersync_result.scale_invalid != reference_result.scale_invalid {
-        return Err("Scale validity detection differs between implementations".to_string());
-    }
-
-    // Both implementations should reject metrics consistently
-    if asupersync_result.metric_rejected != reference_result.metric_rejected {
-        return Err("Metric rejection differs between implementations".to_string());
-    }
-
-    // Both implementations should provide same rejection reason
-    if asupersync_result.rejection_reason != reference_result.rejection_reason {
-        return Err("Rejection reason differs between implementations".to_string());
-    }
-
-    // Both implementations should include metrics consistently
-    if asupersync_result.included_in_export != reference_result.included_in_export {
-        return Err("Export inclusion differs between implementations".to_string());
-    }
-
-    // Both implementations should apply validation consistently
-    if asupersync_result.validation_applied != reference_result.validation_applied {
-        return Err("Validation application differs between implementations".to_string());
-    }
-
-    // Both implementations should count histogram metrics consistently
-    if asupersync_result.histogram_metrics_count != reference_result.histogram_metrics_count {
-        return Err("Histogram metrics count differs between implementations".to_string());
-    }
-
-    // Both implementations should count negative scales consistently
-    if asupersync_result.negative_scales_detected != reference_result.negative_scales_detected {
-        return Err("Negative scales detection differs between implementations".to_string());
-    }
-
-    // Both implementations should count scale types consistently
-    if asupersync_result.zero_scales_count != reference_result.zero_scales_count {
-        return Err("Zero scales count differs between implementations".to_string());
-    }
-
-    if asupersync_result.positive_scales_count != reference_result.positive_scales_count {
-        return Err("Positive scales count differs between implementations".to_string());
-    }
-
-    if asupersync_result.missing_scales_count != reference_result.missing_scales_count {
-        return Err("Missing scales count differs between implementations".to_string());
-    }
-
-    // Both implementations should find same scale value
-    if asupersync_result.scale_value_found != reference_result.scale_value_found {
-        return Err("Scale value found differs between implementations".to_string());
-    }
-
-    // Both implementations should count rejected metrics consistently
-    if asupersync_result.rejected_metrics_count != reference_result.rejected_metrics_count {
-        return Err("Rejected metrics count differs between implementations".to_string());
-    }
-
-    // Both implementations should count accepted metrics consistently
-    if asupersync_result.accepted_metrics_count != reference_result.accepted_metrics_count {
-        return Err("Accepted metrics count differs between implementations".to_string());
-    }
-
-    // Both implementations should have same validation correctness
-    if asupersync_result.validation_correct != reference_result.validation_correct {
-        return Err("Validation correctness differs between implementations".to_string());
-    }
-
-    // Both implementations should be OTLP compliant
-    if asupersync_result.otlp_compliant != reference_result.otlp_compliant {
-        return Err("OTLP compliance differs between implementations".to_string());
-    }
-
-    // Both implementations should emit telemetry consistently
-    if asupersync_result.telemetry_emitted != reference_result.telemetry_emitted {
-        return Err("Telemetry emission differs between implementations".to_string());
-    }
-
-    Ok(())
 }
 // OTLP-115: f64::INFINITY validation test
 // Test that spans with f64::INFINITY (positive or negative) are rejected
 // because they cannot be serialized to protobuf AnyValue.double_value
 
 #[cfg(test)]
+mod otlp_late_test_support {
+    use std::collections::HashMap;
+
+    #[derive(Debug, Clone, PartialEq)]
+    pub(super) enum AttributeValue {
+        String(String),
+        Int(i64),
+        Double(f64),
+        Array(Vec<AttributeValue>),
+    }
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub(super) enum SpanStatus {
+        Unset,
+        Ok,
+        Error,
+    }
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub(super) enum SpanKind {
+        Internal,
+        Server,
+        Client,
+        Producer,
+        Consumer,
+    }
+
+    #[derive(Debug, Clone, PartialEq)]
+    pub(super) struct Span {
+        pub(super) trace_id: String,
+        pub(super) span_id: String,
+        pub(super) parent_span_id: Option<String>,
+        pub(super) operation_name: String,
+        pub(super) start_time: u64,
+        pub(super) end_time: u64,
+        pub(super) attributes: HashMap<String, AttributeValue>,
+        pub(super) status: SpanStatus,
+        pub(super) kind: SpanKind,
+    }
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub(super) enum MetricKind {
+        MonotonicCounter,
+        Gauge,
+        Histogram,
+    }
+
+    #[derive(Debug, Clone, PartialEq)]
+    pub(super) enum MetricValue {
+        Counter(u64),
+        Gauge(f64),
+        Histogram {
+            count: u64,
+            sum: f64,
+            buckets: Vec<(f64, u64)>,
+        },
+    }
+
+    #[derive(Debug, Clone, PartialEq)]
+    pub(super) struct Metric {
+        pub(super) name: String,
+        pub(super) kind: MetricKind,
+        pub(super) value: MetricValue,
+        pub(super) unit: Option<String>,
+        pub(super) description: Option<String>,
+    }
+}
+
+#[cfg(test)]
 mod otlp_115_tests {
-    use super::*;
-    use crate::observability::{AttributeValue, OtelExporter, Span, SpanBatch};
+    use super::otlp_late_test_support::{AttributeValue, Span, SpanKind, SpanStatus};
     use std::collections::HashMap;
 
     /// OTLP-115 test scenario: spans with f64::INFINITY values
@@ -29738,8 +29928,8 @@ mod otlp_115_tests {
                 start_time: 1000000000,
                 end_time: 1000001000,
                 attributes,
-                status: crate::observability::SpanStatus::Ok,
-                kind: crate::observability::SpanKind::Internal,
+                status: SpanStatus::Ok,
+                kind: SpanKind::Internal,
             }
         }
 
@@ -29764,8 +29954,8 @@ mod otlp_115_tests {
                 start_time: 1000000000,
                 end_time: 1000001000,
                 attributes,
-                status: crate::observability::SpanStatus::Ok,
-                kind: crate::observability::SpanKind::Internal,
+                status: SpanStatus::Ok,
+                kind: SpanKind::Internal,
             }
         }
     }
@@ -30100,8 +30290,7 @@ mod otlp_115_tests {
 
 #[cfg(test)]
 mod otlp_116_tests {
-    use super::*;
-    use crate::observability::{AttributeValue, OtelExporter, Span, SpanBatch};
+    use super::otlp_late_test_support::{AttributeValue, Span, SpanKind, SpanStatus};
     use std::collections::HashMap;
 
     /// OTLP-116 test scenario: spans with whitespace-only attribute keys
@@ -30150,8 +30339,8 @@ mod otlp_116_tests {
                 start_time: 1000000000,
                 end_time: 1000001000,
                 attributes,
-                status: crate::observability::SpanStatus::Ok,
-                kind: crate::observability::SpanKind::Internal,
+                status: SpanStatus::Ok,
+                kind: SpanKind::Internal,
             }
         }
 
@@ -30173,8 +30362,8 @@ mod otlp_116_tests {
                 start_time: 1000000000,
                 end_time: 1000001000,
                 attributes,
-                status: crate::observability::SpanStatus::Ok,
-                kind: crate::observability::SpanKind::Internal,
+                status: SpanStatus::Ok,
+                kind: SpanKind::Internal,
             }
         }
 
@@ -30195,8 +30384,8 @@ mod otlp_116_tests {
                 start_time: 1000000000,
                 end_time: 1000001000,
                 attributes,
-                status: crate::observability::SpanStatus::Ok,
-                kind: crate::observability::SpanKind::Internal,
+                status: SpanStatus::Ok,
+                kind: SpanKind::Internal,
             }
         }
     }
@@ -30550,9 +30739,22 @@ mod otlp_116_tests {
 
 #[cfg(test)]
 mod otlp_117_tests {
-    use super::*;
-    use crate::observability::{AttributeValue, OtelExporter, Span, SpanBatch, SpanStatus};
+    use super::otlp_late_test_support::{AttributeValue, SpanKind, SpanStatus};
     use std::collections::HashMap;
+
+    #[derive(Debug, Clone, PartialEq)]
+    struct Span {
+        trace_id: String,
+        span_id: String,
+        parent_span_id: Option<String>,
+        operation_name: String,
+        start_time: u64,
+        end_time: u64,
+        attributes: HashMap<String, AttributeValue>,
+        status: SpanStatus,
+        kind: SpanKind,
+        status_message: Option<String>,
+    }
 
     /// OTLP-117 test scenario: spans with ERROR status and empty descriptions
     struct Otlp117Scenario {
@@ -30600,7 +30802,7 @@ mod otlp_117_tests {
                 end_time: 1000001000,
                 attributes,
                 status,
-                kind: crate::observability::SpanKind::Internal,
+                kind: SpanKind::Internal,
                 status_message: status_message.map(|s| s.to_string()),
             }
         }
@@ -30626,7 +30828,7 @@ mod otlp_117_tests {
                 end_time: 1000001000,
                 attributes,
                 status,
-                kind: crate::observability::SpanKind::Internal,
+                kind: SpanKind::Internal,
                 status_message: status_message.map(|s| s.to_string()),
             }
         }
@@ -30656,6 +30858,7 @@ mod otlp_117_tests {
             match &span.status_message {
                 Some(msg) if !msg.is_empty() => result.descriptions_preserved += 1,
                 Some(msg) if msg.is_empty() => result.empty_descriptions_handled += 1,
+                Some(_) => result.descriptions_preserved += 1,
                 None => result.empty_descriptions_handled += 1,
             }
         }
@@ -30688,6 +30891,7 @@ mod otlp_117_tests {
             match &span.status_message {
                 Some(msg) if !msg.is_empty() => result.descriptions_preserved += 1,
                 Some(msg) if msg.is_empty() => result.empty_descriptions_handled += 1,
+                Some(_) => result.descriptions_preserved += 1,
                 None => result.empty_descriptions_handled += 1,
             }
         }
@@ -31065,8 +31269,7 @@ mod otlp_117_tests {
 
 #[cfg(test)]
 mod otlp_118_tests {
-    use super::*;
-    use crate::observability::{AttributeValue, OtelExporter, Span, SpanBatch, SpanKind};
+    use super::otlp_late_test_support::{AttributeValue, Span, SpanKind, SpanStatus};
     use std::collections::HashMap;
 
     /// OTLP-118 test scenario: HTTP server spans semantic convention validation
@@ -31137,7 +31340,7 @@ mod otlp_118_tests {
                     start_time: 1000000000,
                     end_time: 1000001000,
                     attributes,
-                    status: crate::observability::SpanStatus::Ok,
+                    status: SpanStatus::Ok,
                     kind: SpanKind::Server,
                 },
                 instrumentation_scope_name: scope_name.to_string(),
@@ -31165,7 +31368,7 @@ mod otlp_118_tests {
                     start_time: 1000000000,
                     end_time: 1000001000,
                     attributes,
-                    status: crate::observability::SpanStatus::Ok,
+                    status: SpanStatus::Ok,
                     kind: SpanKind::Client,
                 },
                 instrumentation_scope_name: scope_name.to_string(),
@@ -31193,7 +31396,7 @@ mod otlp_118_tests {
                     start_time: 1000000000,
                     end_time: 1000001000,
                     attributes,
-                    status: crate::observability::SpanStatus::Ok,
+                    status: SpanStatus::Ok,
                     kind: SpanKind::Internal,
                 },
                 instrumentation_scope_name: scope_name.to_string(),
@@ -31637,7 +31840,7 @@ mod otlp_118_tests {
             start_time: 1000000000,
             end_time: 1000001000,
             attributes: HashMap::new(),
-            status: crate::observability::SpanStatus::Ok,
+            status: SpanStatus::Ok,
             kind: SpanKind::Server,
         };
 
@@ -31687,8 +31890,7 @@ mod otlp_118_tests {
 
 #[cfg(test)]
 mod otlp_119_tests {
-    use super::*;
-    use crate::observability::{AttributeValue, OtelExporter, Span, SpanBatch, SpanKind};
+    use super::otlp_late_test_support::{AttributeValue, Span, SpanKind, SpanStatus};
     use std::collections::HashMap;
 
     /// OTLP-119 test scenario: HTTP client spans semantic convention validation
@@ -31761,7 +31963,7 @@ mod otlp_119_tests {
                     start_time: 1000000000,
                     end_time: 1000001000,
                     attributes,
-                    status: crate::observability::SpanStatus::Ok,
+                    status: SpanStatus::Ok,
                     kind: SpanKind::Client,
                 },
                 instrumentation_scope_name: scope_name.to_string(),
@@ -31789,7 +31991,7 @@ mod otlp_119_tests {
                     start_time: 1000000000,
                     end_time: 1000001000,
                     attributes,
-                    status: crate::observability::SpanStatus::Ok,
+                    status: SpanStatus::Ok,
                     kind: SpanKind::Server,
                 },
                 instrumentation_scope_name: scope_name.to_string(),
@@ -31817,7 +32019,7 @@ mod otlp_119_tests {
                     start_time: 1000000000,
                     end_time: 1000001000,
                     attributes,
-                    status: crate::observability::SpanStatus::Ok,
+                    status: SpanStatus::Ok,
                     kind: SpanKind::Internal,
                 },
                 instrumentation_scope_name: scope_name.to_string(),
@@ -32369,7 +32571,7 @@ mod otlp_119_tests {
             start_time: 1000000000,
             end_time: 1000001000,
             attributes: HashMap::new(),
-            status: crate::observability::SpanStatus::Ok,
+            status: SpanStatus::Ok,
             kind: SpanKind::Client,
         };
 
@@ -32407,8 +32609,7 @@ mod otlp_119_tests {
 
 #[cfg(test)]
 mod otlp_120_tests {
-    use super::*;
-    use crate::observability::{AttributeValue, OtelExporter, Span, SpanBatch, SpanKind};
+    use super::otlp_late_test_support::{AttributeValue, Span, SpanKind, SpanStatus};
     use std::collections::HashMap;
 
     /// OTLP-120 test scenario: INTERNAL spans with empty attributes
@@ -32482,7 +32683,7 @@ mod otlp_120_tests {
                     start_time: 1000000000,
                     end_time: 1000001000,
                     attributes,
-                    status: crate::observability::SpanStatus::Ok,
+                    status: SpanStatus::Ok,
                     kind: SpanKind::Internal,
                 },
                 instrumentation_scope_name: scope_name.to_string(),
@@ -32519,7 +32720,7 @@ mod otlp_120_tests {
                     start_time: 1000000000,
                     end_time: 1000001000,
                     attributes,
-                    status: crate::observability::SpanStatus::Ok,
+                    status: SpanStatus::Ok,
                     kind,
                 },
                 instrumentation_scope_name: scope_name.to_string(),
@@ -32547,7 +32748,7 @@ mod otlp_120_tests {
                     start_time: 1000000000,
                     end_time: 1000001000,
                     attributes,
-                    status: crate::observability::SpanStatus::Ok,
+                    status: SpanStatus::Ok,
                     kind: SpanKind::Internal,
                 },
                 instrumentation_scope_name: scope_name.to_string(),
@@ -32912,7 +33113,7 @@ mod otlp_120_tests {
                             "service-ok",
                             None,
                         );
-                        span.span.status = crate::observability::SpanStatus::Ok;
+                        span.span.status = SpanStatus::Ok;
                         span
                     },
                     {
@@ -32923,7 +33124,7 @@ mod otlp_120_tests {
                             "service-error",
                             None,
                         );
-                        span.span.status = crate::observability::SpanStatus::Error;
+                        span.span.status = SpanStatus::Error;
                         span
                     },
                     {
@@ -32934,7 +33135,7 @@ mod otlp_120_tests {
                             "service-unset",
                             None,
                         );
-                        span.span.status = crate::observability::SpanStatus::Unset;
+                        span.span.status = SpanStatus::Unset;
                         span
                     },
                 ],
@@ -33118,8 +33319,7 @@ mod otlp_120_tests {
 
 #[cfg(test)]
 mod otlp_121_tests {
-    use super::*;
-    use crate::observability::{Metric, MetricKind, MetricValue, MetricsBatch, OtelExporter};
+    use super::otlp_late_test_support::{Metric, MetricKind, MetricValue};
     use std::collections::HashMap;
 
     /// OTLP-121 test scenario: monotonic counter reset detection
@@ -33255,13 +33455,13 @@ mod otlp_121_tests {
 
         for (index, metric_ts) in metrics.iter().enumerate() {
             if metric_ts.metric.kind == MetricKind::MonotonicCounter {
-                if let MetricValue::Counter(current_value) = metric_ts.metric.value {
+                if let MetricValue::Counter(current_value) = &metric_ts.metric.value {
                     let metric_key =
                         format!("{}:{:?}", metric_ts.metric.name, metric_ts.attributes);
 
                     if let Some(&previous_value) = counter_states.get(&metric_key) {
                         // Check for monotonic violation (decrease in value)
-                        if current_value < previous_value {
+                        if *current_value < previous_value {
                             let reset_event = format!(
                                 "reset_event:metric={},previous={},current={},timestamp={}",
                                 metric_ts.metric.name,
@@ -33273,7 +33473,7 @@ mod otlp_121_tests {
                         }
                     }
 
-                    counter_states.insert(metric_key, current_value);
+                    counter_states.insert(metric_key, *current_value);
                 }
             }
         }
@@ -33893,8 +34093,7 @@ mod otlp_121_tests {
 
 #[cfg(test)]
 mod otlp_122_tests {
-    use super::*;
-    use crate::observability::{AttributeValue, OtelExporter, Span, SpanBatch, SpanKind, SpanLink};
+    use super::otlp_late_test_support::{AttributeValue, Span, SpanKind, SpanStatus};
     use std::collections::HashMap;
 
     /// OTLP-122 test scenario: span links with invalid trace IDs
@@ -33972,7 +34171,7 @@ mod otlp_122_tests {
                     start_time: 1000000000,
                     end_time: 1000001000,
                     attributes,
-                    status: crate::observability::SpanStatus::Ok,
+                    status: SpanStatus::Ok,
                     kind: SpanKind::Internal,
                 },
                 links,
@@ -33998,7 +34197,7 @@ mod otlp_122_tests {
                     start_time: 1000000000,
                     end_time: 1000001000,
                     attributes,
-                    status: crate::observability::SpanStatus::Ok,
+                    status: SpanStatus::Ok,
                     kind: SpanKind::Internal,
                 },
                 links: Vec::new(),
