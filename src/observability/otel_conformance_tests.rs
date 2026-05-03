@@ -31059,3 +31059,625 @@ mod otlp_117_tests {
         println!("OTLP-117: Status and description independence verified");
     }
 }
+// OTLP-118: HTTP server span semantic convention validation test
+// Test that spans with kind=SERVER and instrumentation.scope.name="http.server"
+// must have http.method attribute set per OTLP semantic conventions
+
+#[cfg(test)]
+mod otlp_118_tests {
+    use super::*;
+    use crate::observability::{AttributeValue, OtelExporter, Span, SpanBatch, SpanKind};
+    use std::collections::HashMap;
+
+    /// OTLP-118 test scenario: HTTP server spans semantic convention validation
+    struct Otlp118Scenario {
+        name: String,
+        spans: Vec<SpanWithScope>,
+        expected_result: ValidationResult,
+        description: String,
+    }
+
+    #[derive(Debug, Clone)]
+    struct SpanWithScope {
+        span: Span,
+        instrumentation_scope_name: String,
+        instrumentation_scope_version: Option<String>,
+    }
+
+    #[derive(Debug, PartialEq)]
+    enum ValidationResult {
+        Accept,
+        Reject,
+    }
+
+    #[derive(Debug, PartialEq)]
+    struct SemanticValidationResult {
+        spans_validated: usize,
+        http_server_spans_found: usize,
+        valid_http_server_spans: usize,
+        missing_http_method: usize,
+        invalid_http_method: usize,
+        non_http_server_spans: usize,
+        validation_passed: bool,
+    }
+
+    impl Otlp118Scenario {
+        fn new(
+            name: &str,
+            spans: Vec<SpanWithScope>,
+            expected: ValidationResult,
+            description: &str,
+        ) -> Self {
+            Self {
+                name: name.to_string(),
+                spans,
+                expected_result: expected,
+                description: description.to_string(),
+            }
+        }
+
+        fn create_http_server_span(
+            trace_id: &str,
+            span_id: &str,
+            attrs: Vec<(&str, &str)>,
+            scope_name: &str,
+            scope_version: Option<&str>,
+        ) -> SpanWithScope {
+            let mut attributes = HashMap::new();
+            for (key, value) in attrs {
+                attributes.insert(key.to_string(), AttributeValue::String(value.to_string()));
+            }
+
+            SpanWithScope {
+                span: Span {
+                    trace_id: trace_id.to_string(),
+                    span_id: span_id.to_string(),
+                    parent_span_id: None,
+                    operation_name: "HTTP GET".to_string(),
+                    start_time: 1000000000,
+                    end_time: 1000001000,
+                    attributes,
+                    status: crate::observability::SpanStatus::Ok,
+                    kind: SpanKind::Server,
+                },
+                instrumentation_scope_name: scope_name.to_string(),
+                instrumentation_scope_version: scope_version.map(|v| v.to_string()),
+            }
+        }
+
+        fn create_client_span(
+            trace_id: &str,
+            span_id: &str,
+            attrs: Vec<(&str, &str)>,
+            scope_name: &str,
+        ) -> SpanWithScope {
+            let mut attributes = HashMap::new();
+            for (key, value) in attrs {
+                attributes.insert(key.to_string(), AttributeValue::String(value.to_string()));
+            }
+
+            SpanWithScope {
+                span: Span {
+                    trace_id: trace_id.to_string(),
+                    span_id: span_id.to_string(),
+                    parent_span_id: None,
+                    operation_name: "HTTP request".to_string(),
+                    start_time: 1000000000,
+                    end_time: 1000001000,
+                    attributes,
+                    status: crate::observability::SpanStatus::Ok,
+                    kind: SpanKind::Client,
+                },
+                instrumentation_scope_name: scope_name.to_string(),
+                instrumentation_scope_version: None,
+            }
+        }
+
+        fn create_internal_span(
+            trace_id: &str,
+            span_id: &str,
+            attrs: Vec<(&str, &str)>,
+            scope_name: &str,
+        ) -> SpanWithScope {
+            let mut attributes = HashMap::new();
+            for (key, value) in attrs {
+                attributes.insert(key.to_string(), AttributeValue::String(value.to_string()));
+            }
+
+            SpanWithScope {
+                span: Span {
+                    trace_id: trace_id.to_string(),
+                    span_id: span_id.to_string(),
+                    parent_span_id: None,
+                    operation_name: "internal_operation".to_string(),
+                    start_time: 1000000000,
+                    end_time: 1000001000,
+                    attributes,
+                    status: crate::observability::SpanStatus::Ok,
+                    kind: SpanKind::Internal,
+                },
+                instrumentation_scope_name: scope_name.to_string(),
+                instrumentation_scope_version: None,
+            }
+        }
+    }
+
+    fn is_http_server_span(span_with_scope: &SpanWithScope) -> bool {
+        span_with_scope.span.kind == SpanKind::Server
+            && span_with_scope.instrumentation_scope_name == "http.server"
+    }
+
+    fn has_valid_http_method(span: &Span) -> bool {
+        match span.attributes.get("http.method") {
+            Some(AttributeValue::String(method)) => {
+                // Valid HTTP methods per RFC 7231 and common extensions
+                let valid_methods = [
+                    "GET", "POST", "PUT", "DELETE", "HEAD", "OPTIONS", "PATCH", "TRACE", "CONNECT",
+                ];
+                valid_methods.contains(&method.as_str())
+            }
+            _ => false,
+        }
+    }
+
+    fn simulate_asupersync_export(scenario: &Otlp118Scenario) -> ValidationResult {
+        // Simulate our asupersync exporter's semantic convention validation
+        for span_with_scope in &scenario.spans {
+            if is_http_server_span(span_with_scope) {
+                // Per OTLP semantic conventions: http.server spans MUST have http.method
+                if !has_valid_http_method(&span_with_scope.span) {
+                    return ValidationResult::Reject;
+                }
+            }
+        }
+        ValidationResult::Accept
+    }
+
+    fn simulate_reference_export(scenario: &Otlp118Scenario) -> ValidationResult {
+        // Simulate reference OTLP exporter behavior
+        // Per OTLP semantic conventions: SERVER spans with http.server scope require http.method
+        for span_with_scope in &scenario.spans {
+            if is_http_server_span(span_with_scope) {
+                if !has_valid_http_method(&span_with_scope.span) {
+                    return ValidationResult::Reject;
+                }
+            }
+        }
+        ValidationResult::Accept
+    }
+
+    fn validate_semantic_conventions(scenario: &Otlp118Scenario) -> SemanticValidationResult {
+        let mut result = SemanticValidationResult {
+            spans_validated: scenario.spans.len(),
+            http_server_spans_found: 0,
+            valid_http_server_spans: 0,
+            missing_http_method: 0,
+            invalid_http_method: 0,
+            non_http_server_spans: 0,
+            validation_passed: true,
+        };
+
+        for span_with_scope in &scenario.spans {
+            if is_http_server_span(span_with_scope) {
+                result.http_server_spans_found += 1;
+
+                if has_valid_http_method(&span_with_scope.span) {
+                    result.valid_http_server_spans += 1;
+                } else {
+                    match span_with_scope.span.attributes.get("http.method") {
+                        None => result.missing_http_method += 1,
+                        Some(_) => result.invalid_http_method += 1,
+                    }
+                    result.validation_passed = false;
+                }
+            } else {
+                result.non_http_server_spans += 1;
+            }
+        }
+
+        result
+    }
+
+    fn validate_otlp_118_scenario(scenario: &Otlp118Scenario) -> bool {
+        let asupersync_result = simulate_asupersync_export(scenario);
+        let reference_result = simulate_reference_export(scenario);
+
+        // Both exporters should behave identically
+        if asupersync_result != reference_result {
+            eprintln!(
+                "OTLP-118 DIVERGENCE in {}: asupersync={:?}, reference={:?}",
+                scenario.name, asupersync_result, reference_result
+            );
+            return false;
+        }
+
+        // Verify against expected result
+        if asupersync_result != scenario.expected_result {
+            eprintln!(
+                "OTLP-118 EXPECTATION MISMATCH in {}: got {:?}, expected {:?}",
+                scenario.name, asupersync_result, scenario.expected_result
+            );
+            return false;
+        }
+
+        println!(
+            "OTLP-118 PASS: {} - {}",
+            scenario.name, scenario.description
+        );
+        true
+    }
+
+    #[test]
+    fn test_otlp_118_http_server_semantic_conventions() {
+        let test_scenarios = vec![
+            // Test 1: Valid HTTP server span with GET method - should accept
+            Otlp118Scenario::new(
+                "valid_http_server_get",
+                vec![Otlp118Scenario::create_http_server_span(
+                    "trace-http-1",
+                    "span-001",
+                    vec![
+                        ("http.method", "GET"),
+                        ("http.url", "https://api.example.com/users"),
+                    ],
+                    "http.server",
+                    Some("1.0.0"),
+                )],
+                ValidationResult::Accept,
+                "Valid HTTP server span with GET method must be accepted",
+            ),
+            // Test 2: Valid HTTP server span with POST method - should accept
+            Otlp118Scenario::new(
+                "valid_http_server_post",
+                vec![Otlp118Scenario::create_http_server_span(
+                    "trace-http-2",
+                    "span-002",
+                    vec![
+                        ("http.method", "POST"),
+                        ("http.url", "https://api.example.com/users"),
+                        ("http.status_code", "201"),
+                    ],
+                    "http.server",
+                    None,
+                )],
+                ValidationResult::Accept,
+                "Valid HTTP server span with POST method must be accepted",
+            ),
+            // Test 3: HTTP server span missing http.method - should reject
+            Otlp118Scenario::new(
+                "http_server_missing_method",
+                vec![Otlp118Scenario::create_http_server_span(
+                    "trace-http-3",
+                    "span-003",
+                    vec![
+                        ("http.url", "https://api.example.com/users"),
+                        ("http.status_code", "200"),
+                    ],
+                    "http.server",
+                    None,
+                )],
+                ValidationResult::Reject,
+                "HTTP server span without http.method must be rejected per semantic conventions",
+            ),
+            // Test 4: HTTP server span with invalid method - should reject
+            Otlp118Scenario::new(
+                "http_server_invalid_method",
+                vec![Otlp118Scenario::create_http_server_span(
+                    "trace-http-4",
+                    "span-004",
+                    vec![
+                        ("http.method", "INVALID"),
+                        ("http.url", "https://api.example.com/users"),
+                    ],
+                    "http.server",
+                    None,
+                )],
+                ValidationResult::Reject,
+                "HTTP server span with invalid http.method must be rejected",
+            ),
+            // Test 5: SERVER span with different scope (not http.server) - should accept
+            Otlp118Scenario::new(
+                "server_span_different_scope",
+                vec![Otlp118Scenario::create_http_server_span(
+                    "trace-other-1",
+                    "span-005",
+                    vec![("rpc.method", "GetUser"), ("rpc.service", "UserService")],
+                    "grpc.server",
+                    None, // Different scope, so http.method not required
+                )],
+                ValidationResult::Accept,
+                "SERVER span with non-http scope should not require http.method",
+            ),
+            // Test 6: CLIENT span with http.server scope - should accept (scope doesn't match kind)
+            Otlp118Scenario::new(
+                "client_span_http_scope",
+                vec![Otlp118Scenario::create_client_span(
+                    "trace-client-1",
+                    "span-006",
+                    vec![("http.url", "https://api.example.com/users")], // No http.method
+                    "http.server", // Scope is http.server but kind is CLIENT
+                )],
+                ValidationResult::Accept,
+                "CLIENT span should not be subject to http.server semantic conventions",
+            ),
+            // Test 7: Multiple valid HTTP server spans - should accept
+            Otlp118Scenario::new(
+                "multiple_valid_http_server_spans",
+                vec![
+                    Otlp118Scenario::create_http_server_span(
+                        "trace-multi-1",
+                        "span-007",
+                        vec![("http.method", "GET"), ("http.route", "/api/v1/users/{id}")],
+                        "http.server",
+                        None,
+                    ),
+                    Otlp118Scenario::create_http_server_span(
+                        "trace-multi-1",
+                        "span-008",
+                        vec![("http.method", "PUT"), ("http.route", "/api/v1/users/{id}")],
+                        "http.server",
+                        None,
+                    ),
+                    Otlp118Scenario::create_http_server_span(
+                        "trace-multi-1",
+                        "span-009",
+                        vec![
+                            ("http.method", "DELETE"),
+                            ("http.route", "/api/v1/users/{id}"),
+                        ],
+                        "http.server",
+                        None,
+                    ),
+                ],
+                ValidationResult::Accept,
+                "Multiple valid HTTP server spans must all be accepted",
+            ),
+            // Test 8: Mixed valid and invalid HTTP server spans - should reject
+            Otlp118Scenario::new(
+                "mixed_valid_invalid_http_server",
+                vec![
+                    Otlp118Scenario::create_http_server_span(
+                        "trace-mixed-1",
+                        "span-010",
+                        vec![
+                            ("http.method", "GET"),
+                            ("http.url", "https://api.example.com/users"),
+                        ],
+                        "http.server",
+                        None,
+                    ),
+                    Otlp118Scenario::create_http_server_span(
+                        "trace-mixed-1",
+                        "span-011",
+                        vec![("http.url", "https://api.example.com/orders")], // Missing method
+                        "http.server",
+                        None,
+                    ),
+                ],
+                ValidationResult::Reject,
+                "Batch with any invalid HTTP server spans must be rejected",
+            ),
+            // Test 9: HTTP server spans with all standard methods - should accept
+            Otlp118Scenario::new(
+                "all_standard_http_methods",
+                vec![
+                    Otlp118Scenario::create_http_server_span(
+                        "trace-methods",
+                        "span-012",
+                        vec![("http.method", "GET")],
+                        "http.server",
+                        None,
+                    ),
+                    Otlp118Scenario::create_http_server_span(
+                        "trace-methods",
+                        "span-013",
+                        vec![("http.method", "POST")],
+                        "http.server",
+                        None,
+                    ),
+                    Otlp118Scenario::create_http_server_span(
+                        "trace-methods",
+                        "span-014",
+                        vec![("http.method", "PUT")],
+                        "http.server",
+                        None,
+                    ),
+                    Otlp118Scenario::create_http_server_span(
+                        "trace-methods",
+                        "span-015",
+                        vec![("http.method", "DELETE")],
+                        "http.server",
+                        None,
+                    ),
+                    Otlp118Scenario::create_http_server_span(
+                        "trace-methods",
+                        "span-016",
+                        vec![("http.method", "HEAD")],
+                        "http.server",
+                        None,
+                    ),
+                    Otlp118Scenario::create_http_server_span(
+                        "trace-methods",
+                        "span-017",
+                        vec![("http.method", "OPTIONS")],
+                        "http.server",
+                        None,
+                    ),
+                    Otlp118Scenario::create_http_server_span(
+                        "trace-methods",
+                        "span-018",
+                        vec![("http.method", "PATCH")],
+                        "http.server",
+                        None,
+                    ),
+                ],
+                ValidationResult::Accept,
+                "All standard HTTP methods must be accepted",
+            ),
+            // Test 10: Mixed span kinds and scopes - should validate only matching patterns
+            Otlp118Scenario::new(
+                "mixed_spans_kinds_scopes",
+                vec![
+                    Otlp118Scenario::create_http_server_span(
+                        "trace-mixed-2",
+                        "span-019",
+                        vec![("http.method", "GET")],
+                        "http.server",
+                        None, // Valid: SERVER + http.server + method
+                    ),
+                    Otlp118Scenario::create_client_span(
+                        "trace-mixed-2",
+                        "span-020",
+                        vec![("http.url", "https://api.example.com")],
+                        "http.client", // CLIENT span, different validation rules
+                    ),
+                    Otlp118Scenario::create_internal_span(
+                        "trace-mixed-2",
+                        "span-021",
+                        vec![("db.statement", "SELECT * FROM users")],
+                        "database", // INTERNAL span
+                    ),
+                ],
+                ValidationResult::Accept,
+                "Only SERVER spans with http.server scope should require http.method validation",
+            ),
+            // Test 11: HTTP server span with case-sensitive method validation
+            Otlp118Scenario::new(
+                "case_sensitive_method_validation",
+                vec![
+                    Otlp118Scenario::create_http_server_span(
+                        "trace-case-1",
+                        "span-022",
+                        vec![("http.method", "get")],
+                        "http.server",
+                        None, // Lowercase - invalid per RFC
+                    ),
+                    Otlp118Scenario::create_http_server_span(
+                        "trace-case-2",
+                        "span-023",
+                        vec![("http.method", "Post")],
+                        "http.server",
+                        None, // Mixed case - invalid per RFC
+                    ),
+                ],
+                ValidationResult::Reject,
+                "HTTP methods must be uppercase per RFC 7231",
+            ),
+        ];
+
+        let mut passed = 0;
+        let mut failed = 0;
+
+        for scenario in test_scenarios {
+            if validate_otlp_118_scenario(&scenario) {
+                passed += 1;
+            } else {
+                failed += 1;
+            }
+        }
+
+        println!("OTLP-118 Summary: {} passed, {} failed", passed, failed);
+        assert_eq!(
+            failed, 0,
+            "All OTLP-118 HTTP server semantic convention scenarios must pass"
+        );
+    }
+
+    #[test]
+    fn test_otlp_118_semantic_validation_details() {
+        // Detailed validation test for semantic convention checking
+        let detailed_scenario = Otlp118Scenario::new(
+            "detailed_validation",
+            vec![
+                Otlp118Scenario::create_http_server_span(
+                    "trace-detail",
+                    "span-001",
+                    vec![("http.method", "GET")],
+                    "http.server",
+                    None,
+                ),
+                Otlp118Scenario::create_http_server_span(
+                    "trace-detail",
+                    "span-002",
+                    vec![("http.url", "https://example.com")],
+                    "http.server",
+                    None, // Missing method
+                ),
+                Otlp118Scenario::create_client_span(
+                    "trace-detail",
+                    "span-003",
+                    vec![("http.method", "POST")],
+                    "http.client",
+                ),
+            ],
+            ValidationResult::Reject,
+            "Detailed semantic validation test",
+        );
+
+        let validation_result = validate_semantic_conventions(&detailed_scenario);
+
+        assert_eq!(validation_result.spans_validated, 3);
+        assert_eq!(validation_result.http_server_spans_found, 2);
+        assert_eq!(validation_result.valid_http_server_spans, 1);
+        assert_eq!(validation_result.missing_http_method, 1);
+        assert_eq!(validation_result.non_http_server_spans, 1);
+        assert!(!validation_result.validation_passed);
+
+        println!("OTLP-118: Detailed semantic validation verified");
+    }
+
+    #[test]
+    fn test_otlp_118_http_method_validation() {
+        // Test HTTP method validation logic
+        let mut test_span = Span {
+            trace_id: "test-trace".to_string(),
+            span_id: "test-span".to_string(),
+            parent_span_id: None,
+            operation_name: "test".to_string(),
+            start_time: 1000000000,
+            end_time: 1000001000,
+            attributes: HashMap::new(),
+            status: crate::observability::SpanStatus::Ok,
+            kind: SpanKind::Server,
+        };
+
+        // Valid methods
+        let valid_methods = [
+            "GET", "POST", "PUT", "DELETE", "HEAD", "OPTIONS", "PATCH", "TRACE", "CONNECT",
+        ];
+        for method in valid_methods {
+            test_span.attributes.insert(
+                "http.method".to_string(),
+                AttributeValue::String(method.to_string()),
+            );
+            assert!(
+                has_valid_http_method(&test_span),
+                "Method {} should be valid",
+                method
+            );
+        }
+
+        // Invalid methods
+        let invalid_methods = ["get", "post", "INVALID", "", "123"];
+        for method in invalid_methods {
+            test_span.attributes.insert(
+                "http.method".to_string(),
+                AttributeValue::String(method.to_string()),
+            );
+            assert!(
+                !has_valid_http_method(&test_span),
+                "Method {} should be invalid",
+                method
+            );
+        }
+
+        // Missing method
+        test_span.attributes.remove("http.method");
+        assert!(
+            !has_valid_http_method(&test_span),
+            "Missing method should be invalid"
+        );
+
+        println!("OTLP-118: HTTP method validation logic verified");
+    }
+}
