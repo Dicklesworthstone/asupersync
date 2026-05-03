@@ -349,8 +349,7 @@ impl TaskTable {
         // way to do this without changing the closure signature.
         if let Some(record) = self.tasks.get(idx) {
             let phase = record.phase.load();
-            let deadline = record.cx.as_ref().and_then(|cx| cx.budget().deadline);
-            self.note_task_added(phase, deadline);
+            self.note_task_added(phase, record.deadline);
         }
         idx
     }
@@ -688,6 +687,24 @@ mod tests {
         let canonical_id = TaskId::from_arena(idx);
         let record = table.task(canonical_id).expect("task should exist");
         assert_eq!(record.id, canonical_id);
+    }
+
+    #[test]
+    fn insert_task_with_tracks_deadline_without_cx() {
+        let mut table = TaskTable::new();
+        let owner = RegionId::from_arena(ArenaIndex::new(1, 0));
+        let deadline = crate::types::Time::from_nanos(1_000);
+        let budget = Budget::INFINITE.with_deadline(deadline);
+
+        let idx = table.insert_task_with(|_idx| {
+            TaskRecord::new(TaskId::from_arena(ArenaIndex::new(0, 0)), owner, budget)
+        });
+
+        let canonical_id = TaskId::from_arena(idx);
+        let record = table.task(canonical_id).expect("task should exist");
+        assert_eq!(record.deadline, Some(deadline));
+        assert_eq!(table.tasks_with_deadline_count(), 1);
+        assert_eq!(table.deadline_sum_ns(), u128::from(deadline.as_nanos()));
     }
 
     #[test]

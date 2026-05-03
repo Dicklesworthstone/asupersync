@@ -1,0 +1,141 @@
+{
+  "contract_version": "governor-state-snapshot-equivalence-smoke-contract-v1",
+  "bead_id": "asupersync-k7nx5t",
+  "description": "Contract-backed equivalence proof for the current O(1) governor snapshot path versus an authoritative full scan, including the exact case where a region-count fallback is still required.",
+  "runner_script": "scripts/run_governor_state_snapshot_smoke.sh",
+  "runner_bundle_schema_version": "governor-state-snapshot-smoke-bundle-v1",
+  "runner_report_schema_version": "governor-state-snapshot-smoke-run-report-v1",
+  "required_bundle_fields": [
+    "schema_version",
+    "contract_version",
+    "scenario_id",
+    "description",
+    "run_id",
+    "mode",
+    "artifact_path",
+    "report_path",
+    "run_log_path",
+    "command",
+    "fixture",
+    "host_fingerprint",
+    "expected_report_projection",
+    "actual_report_projection",
+    "command_exit_code",
+    "script_exit_code",
+    "validation_passed",
+    "status",
+    "started_ts",
+    "ended_ts"
+  ],
+  "required_run_report_fields": [
+    "schema_version",
+    "contract_version",
+    "artifact_path",
+    "bundle_manifest_path",
+    "run_id",
+    "scenario_id",
+    "mode",
+    "command_exit_code",
+    "script_exit_code",
+    "validation_passed",
+    "status",
+    "message",
+    "fixture",
+    "host_fingerprint",
+    "report_path",
+    "expected_report_projection",
+    "actual_report_projection"
+  ],
+  "required_execute_output_files": [
+    "bundle_manifest.json",
+    "run_report.json",
+    "governor_state_snapshot_report.json",
+    "run.log"
+  ],
+  "required_dry_run_output_files": [
+    "bundle_manifest.json",
+    "run_report.json",
+    "run.log"
+  ],
+  "smoke_scenarios": [
+    {
+      "scenario_id": "AA-GOVERNOR-SNAPSHOT-EQUIVALENCE-BASELINE",
+      "description": "Drive a deterministic cancel storm with the conservative region-scan path pinned, then prove the current O(1) summary counters remain equivalent to an authoritative full scan.",
+      "output_root": "target/governor-state-snapshot-smoke",
+      "execution_policy": "execute_or_dry_run",
+      "fixture": {
+        "region_count": 4,
+        "tasks_per_region": 2,
+        "read_biased_enabled": false,
+        "manual_invalidation_step": null
+      },
+      "template_env": {
+        "GOVERNOR_STATE_SNAPSHOT_SMOKE_OUTPUT_DIR": "Override the bundle/report output root.",
+        "GOVERNOR_STATE_SNAPSHOT_SMOKE_ARTIFACT_ROOT": "Override the retrieved JSON report root."
+      },
+      "expected_report_projection": {
+        "schema_version": "governor-state-snapshot-projection-v1",
+        "scenario_id": "AA-GOVERNOR-SNAPSHOT-EQUIVALENCE-BASELINE",
+        "read_biased_enabled": false,
+        "step_count": 5,
+        "full_region_scan_steps": 5,
+        "cached_region_count_steps": 0,
+        "manual_invalidation_steps": 0,
+        "all_steps_equivalent": true,
+        "repeated_run_hash_match": true,
+        "changed_component_union": [
+          "cancel_requested_tasks",
+          "deadline_pressure",
+          "live_tasks",
+          "obligation_age_sum_ns",
+          "pending_obligations",
+          "pending_send_permits",
+          "time"
+        ],
+        "fallback_reason_counts": {
+          "disabled_exact_baseline": 5
+        }
+      }
+    },
+    {
+      "scenario_id": "AA-GOVERNOR-SNAPSHOT-EQUIVALENCE-MANUAL-FALLBACK",
+      "description": "Drive the same cancel storm with the read-biased region counter enabled, then force exactly one manual invalidation to prove cached snapshots and authoritative fallback remain equivalent.",
+      "output_root": "target/governor-state-snapshot-smoke",
+      "execution_policy": "execute_or_dry_run",
+      "fixture": {
+        "region_count": 4,
+        "tasks_per_region": 2,
+        "read_biased_enabled": true,
+        "manual_invalidation_step": 4
+      },
+      "template_env": {
+        "GOVERNOR_STATE_SNAPSHOT_SMOKE_OUTPUT_DIR": "Override the bundle/report output root.",
+        "GOVERNOR_STATE_SNAPSHOT_SMOKE_ARTIFACT_ROOT": "Override the retrieved JSON report root."
+      },
+      "expected_report_projection": {
+        "schema_version": "governor-state-snapshot-projection-v1",
+        "scenario_id": "AA-GOVERNOR-SNAPSHOT-EQUIVALENCE-MANUAL-FALLBACK",
+        "read_biased_enabled": true,
+        "step_count": 5,
+        "full_region_scan_steps": 1,
+        "cached_region_count_steps": 4,
+        "manual_invalidation_steps": 1,
+        "all_steps_equivalent": true,
+        "repeated_run_hash_match": true,
+        "changed_component_union": [
+          "cancel_requested_tasks",
+          "deadline_pressure",
+          "live_tasks",
+          "obligation_age_sum_ns",
+          "pending_obligations",
+          "pending_send_permits",
+          "time"
+        ],
+        "fallback_reason_counts": {
+          "cached_region_count": 4,
+          "manual_invalidation": 1
+        }
+      }
+    }
+  ]
+}

@@ -736,9 +736,21 @@ mod tests {
     use super::*;
     use crate::lab::runtime::InvariantViolation;
     use crate::record::ObligationKind;
+    use crate::record::obligation::ObligationRecord;
+    use crate::record::region::{RegionRecord, RegionState};
+    use crate::record::task::{TaskPhase, TaskRecord};
     use crate::runtime::RuntimeState;
+    use crate::runtime::state::ReadBiasedRegionSnapshotStats;
     use crate::types::Budget;
     use proptest::prelude::*;
+    use serde::Deserialize;
+    use serde_json::{Value, json};
+    use std::collections::{BTreeMap, BTreeSet, hash_map::DefaultHasher};
+    use std::fs;
+    use std::hash::{Hash, Hasher};
+    use std::mem::size_of;
+    use std::path::Path;
+    use std::time::Instant;
 
     fn init_test(name: &str) {
         crate::test_utils::init_test_logging();
@@ -2318,6 +2330,710 @@ mod tests {
         crate::assert_with_log!(v_zero, "V = 0", true, v_zero);
 
         crate::test_complete!("lab_quiescence_snapshot_zero_with_obligations");
+    }
+
+    const GOVERNOR_STATE_SNAPSHOT_CONTRACT_PATH_ENV: &str =
+        "ASUPERSYNC_GOVERNOR_STATE_SNAPSHOT_CONTRACT_PATH";
+    const GOVERNOR_STATE_SNAPSHOT_SCENARIO_ENV: &str =
+        "ASUPERSYNC_GOVERNOR_STATE_SNAPSHOT_SCENARIO";
+    const GOVERNOR_STATE_SNAPSHOT_REPORT_PATH_ENV: &str =
+        "ASUPERSYNC_GOVERNOR_STATE_SNAPSHOT_REPORT_PATH";
+    const GOVERNOR_STATE_SNAPSHOT_REPORT_SCHEMA_VERSION: &str = "governor-state-snapshot-report-v1";
+    const GOVERNOR_STATE_SNAPSHOT_PROJECTION_SCHEMA_VERSION: &str =
+        "governor-state-snapshot-projection-v1";
+    const GOVERNOR_STATE_SNAPSHOT_BASELINE_SCENARIO_ID: &str =
+        "AA-GOVERNOR-SNAPSHOT-EQUIVALENCE-BASELINE";
+    const GOVERNOR_STATE_SNAPSHOT_MANUAL_FALLBACK_SCENARIO_ID: &str =
+        "AA-GOVERNOR-SNAPSHOT-EQUIVALENCE-MANUAL-FALLBACK";
+
+    #[derive(Debug, Clone, Deserialize)]
+    struct GovernorStateSnapshotSmokeContract {
+        smoke_scenarios: Vec<GovernorStateSnapshotScenario>,
+    }
+
+    #[derive(Debug, Clone, Deserialize)]
+    struct GovernorStateSnapshotScenario {
+        scenario_id: String,
+        description: String,
+        fixture: GovernorStateSnapshotFixture,
+        expected_report_projection: Value,
+    }
+
+    #[derive(Debug, Clone, Deserialize)]
+    struct GovernorStateSnapshotFixture {
+        region_count: usize,
+        tasks_per_region: usize,
+        read_biased_enabled: bool,
+        manual_invalidation_step: Option<usize>,
+    }
+
+    #[derive(Debug)]
+    struct GovernorStateScenarioState {
+        state: RuntimeState,
+        child_regions: Vec<crate::types::RegionId>,
+        task_ids: Vec<crate::types::TaskId>,
+        obligation_ids: Vec<crate::types::ObligationId>,
+    }
+
+    fn default_governor_state_snapshot_scenarios() -> Vec<GovernorStateSnapshotScenario> {
+        let changed_component_union = json!([
+            "cancel_requested_tasks",
+            "deadline_pressure",
+            "live_tasks",
+            "obligation_age_sum_ns",
+            "pending_obligations",
+            "pending_send_permits",
+            "time"
+        ]);
+        vec![
+            GovernorStateSnapshotScenario {
+                scenario_id: GOVERNOR_STATE_SNAPSHOT_BASELINE_SCENARIO_ID.to_string(),
+                description: "Drive a deterministic cancel storm with the conservative region-scan path pinned, then prove the current O(1) summary counters remain equivalent to an authoritative full scan.".to_string(),
+                fixture: GovernorStateSnapshotFixture {
+                    region_count: 4,
+                    tasks_per_region: 2,
+                    read_biased_enabled: false,
+                    manual_invalidation_step: None,
+                },
+                expected_report_projection: json!({
+                    "schema_version": GOVERNOR_STATE_SNAPSHOT_PROJECTION_SCHEMA_VERSION,
+                    "scenario_id": GOVERNOR_STATE_SNAPSHOT_BASELINE_SCENARIO_ID,
+                    "read_biased_enabled": false,
+                    "step_count": 5,
+                    "full_region_scan_steps": 5,
+                    "cached_region_count_steps": 0,
+                    "manual_invalidation_steps": 0,
+                    "all_steps_equivalent": true,
+                    "repeated_run_hash_match": true,
+                    "changed_component_union": changed_component_union,
+                    "fallback_reason_counts": {
+                        "disabled_exact_baseline": 5
+                    }
+                }),
+            },
+            GovernorStateSnapshotScenario {
+                scenario_id: GOVERNOR_STATE_SNAPSHOT_MANUAL_FALLBACK_SCENARIO_ID.to_string(),
+                description: "Drive the same cancel storm with the read-biased region counter enabled, then force exactly one manual invalidation to prove cached snapshots and authoritative fallback remain equivalent.".to_string(),
+                fixture: GovernorStateSnapshotFixture {
+                    region_count: 4,
+                    tasks_per_region: 2,
+                    read_biased_enabled: true,
+                    manual_invalidation_step: Some(4),
+                },
+                expected_report_projection: json!({
+                    "schema_version": GOVERNOR_STATE_SNAPSHOT_PROJECTION_SCHEMA_VERSION,
+                    "scenario_id": GOVERNOR_STATE_SNAPSHOT_MANUAL_FALLBACK_SCENARIO_ID,
+                    "read_biased_enabled": true,
+                    "step_count": 5,
+                    "full_region_scan_steps": 1,
+                    "cached_region_count_steps": 4,
+                    "manual_invalidation_steps": 1,
+                    "all_steps_equivalent": true,
+                    "repeated_run_hash_match": true,
+                    "changed_component_union": changed_component_union,
+                    "fallback_reason_counts": {
+                        "cached_region_count": 4,
+                        "manual_invalidation": 1
+                    }
+                }),
+            },
+        ]
+    }
+
+    fn load_governor_state_snapshot_scenarios() -> Vec<GovernorStateSnapshotScenario> {
+        let Some(contract_path) = std::env::var(GOVERNOR_STATE_SNAPSHOT_CONTRACT_PATH_ENV).ok()
+        else {
+            return default_governor_state_snapshot_scenarios();
+        };
+        let contract: GovernorStateSnapshotSmokeContract = serde_json::from_str(
+            &fs::read_to_string(&contract_path)
+                .expect("read governor state snapshot smoke contract"),
+        )
+        .expect("parse governor state snapshot smoke contract");
+        contract.smoke_scenarios
+    }
+
+    fn selected_governor_state_snapshot_scenario() -> String {
+        std::env::var(GOVERNOR_STATE_SNAPSHOT_SCENARIO_ENV)
+            .unwrap_or_else(|_| GOVERNOR_STATE_SNAPSHOT_BASELINE_SCENARIO_ID.to_string())
+    }
+
+    fn maybe_write_governor_state_snapshot_report(path: &str, report: &Value) {
+        let report_path = Path::new(path);
+        if let Some(parent) = report_path.parent() {
+            fs::create_dir_all(parent).expect("create governor snapshot report directory");
+        }
+        fs::write(
+            report_path,
+            serde_json::to_string_pretty(report).expect("serialize governor snapshot report"),
+        )
+        .expect("write governor snapshot report");
+    }
+
+    fn round4(value: f64) -> f64 {
+        (value * 10_000.0).round() / 10_000.0
+    }
+
+    fn percentile_slice_u64(samples: &[u64], numerator: usize, denominator: usize) -> u64 {
+        if samples.is_empty() {
+            return 0;
+        }
+        let mut sorted = samples.to_vec();
+        sorted.sort_unstable();
+        let index = ((sorted.len() - 1) * numerator) / denominator;
+        sorted[index]
+    }
+
+    fn mean_u64(samples: &[u64]) -> f64 {
+        if samples.is_empty() {
+            return 0.0;
+        }
+        round4(samples.iter().map(|sample| *sample as f64).sum::<f64>() / samples.len() as f64)
+    }
+
+    fn latency_summary(samples: &[u64]) -> Value {
+        json!({
+            "sample_count": samples.len(),
+            "min_ns": samples.iter().copied().min().unwrap_or(0),
+            "p50_ns": percentile_slice_u64(samples, 50, 100),
+            "p95_ns": percentile_slice_u64(samples, 95, 100),
+            "p99_ns": percentile_slice_u64(samples, 99, 100),
+            "max_ns": samples.iter().copied().max().unwrap_or(0),
+            "mean_ns": mean_u64(samples),
+        })
+    }
+
+    fn hash_json_value(value: &Value) -> u64 {
+        let mut hasher = DefaultHasher::new();
+        serde_json::to_string(value)
+            .expect("serialize stable governor snapshot hash input")
+            .hash(&mut hasher);
+        hasher.finish()
+    }
+
+    fn changed_components(
+        previous: Option<&StateSnapshot>,
+        current: &StateSnapshot,
+    ) -> Vec<String> {
+        let Some(previous) = previous else {
+            return vec!["initial_capture".to_string()];
+        };
+
+        let mut changed = Vec::new();
+        if previous.time != current.time {
+            changed.push("time".to_string());
+        }
+        if previous.live_tasks != current.live_tasks {
+            changed.push("live_tasks".to_string());
+        }
+        if previous.pending_obligations != current.pending_obligations {
+            changed.push("pending_obligations".to_string());
+        }
+        if previous.obligation_age_sum_ns != current.obligation_age_sum_ns {
+            changed.push("obligation_age_sum_ns".to_string());
+        }
+        if previous.draining_regions != current.draining_regions {
+            changed.push("draining_regions".to_string());
+        }
+        if (previous.deadline_pressure - current.deadline_pressure).abs() > 1e-9 {
+            changed.push("deadline_pressure".to_string());
+        }
+        if previous.pending_send_permits != current.pending_send_permits {
+            changed.push("pending_send_permits".to_string());
+        }
+        if previous.pending_acks != current.pending_acks {
+            changed.push("pending_acks".to_string());
+        }
+        if previous.pending_leases != current.pending_leases {
+            changed.push("pending_leases".to_string());
+        }
+        if previous.pending_io_ops != current.pending_io_ops {
+            changed.push("pending_io_ops".to_string());
+        }
+        if previous.cancel_requested_tasks != current.cancel_requested_tasks {
+            changed.push("cancel_requested_tasks".to_string());
+        }
+        if previous.cancelling_tasks != current.cancelling_tasks {
+            changed.push("cancelling_tasks".to_string());
+        }
+        if previous.finalizing_tasks != current.finalizing_tasks {
+            changed.push("finalizing_tasks".to_string());
+        }
+        if previous.ready_queue_depth != current.ready_queue_depth {
+            changed.push("ready_queue_depth".to_string());
+        }
+        changed
+    }
+
+    fn authoritative_state_snapshot(state: &RuntimeState) -> StateSnapshot {
+        const DEADLINE_PRESSURE_D0_NS: f64 = 1_000_000_000.0;
+
+        let now = state.now;
+        let mut live_tasks = 0u32;
+        let mut cancel_requested_tasks = 0u32;
+        let mut cancelling_tasks = 0u32;
+        let mut finalizing_tasks = 0u32;
+        let mut tasks_with_deadline = 0u64;
+        let mut deadline_sum_ns = 0u128;
+
+        for (_, record) in state.tasks.iter() {
+            let phase = record.phase();
+            let is_live = !phase.is_terminal();
+            if is_live {
+                live_tasks = live_tasks.saturating_add(1);
+            }
+            match phase {
+                TaskPhase::CancelRequested => {
+                    cancel_requested_tasks = cancel_requested_tasks.saturating_add(1);
+                }
+                TaskPhase::Cancelling => {
+                    cancelling_tasks = cancelling_tasks.saturating_add(1);
+                }
+                TaskPhase::Finalizing => {
+                    finalizing_tasks = finalizing_tasks.saturating_add(1);
+                }
+                _ => {}
+            }
+            if is_live {
+                if let Some(deadline) = record.deadline {
+                    tasks_with_deadline = tasks_with_deadline.saturating_add(1);
+                    deadline_sum_ns =
+                        deadline_sum_ns.saturating_add(u128::from(deadline.as_nanos()));
+                }
+            }
+        }
+
+        let deadline_pressure = if tasks_with_deadline > 0 {
+            let now_ns = u128::from(now.as_nanos());
+            #[allow(clippy::cast_precision_loss)]
+            let count = tasks_with_deadline as f64;
+            let sum_d = deadline_sum_ns as f64;
+            let now_f = now_ns as f64;
+            let p = count - (sum_d / DEADLINE_PRESSURE_D0_NS)
+                + (count * now_f / DEADLINE_PRESSURE_D0_NS);
+            p.max(0.0)
+        } else {
+            0.0
+        };
+
+        let mut pending_obligations = 0u32;
+        let mut obligation_age_sum_ns = 0u64;
+        let mut pending_send_permits = 0u32;
+        let mut pending_acks = 0u32;
+        let mut pending_leases = 0u32;
+        let mut pending_io_ops = 0u32;
+        for (_, record) in state.obligations.iter() {
+            if !record.is_pending() {
+                continue;
+            }
+            pending_obligations = pending_obligations.saturating_add(1);
+            let age_ns = now.as_nanos().saturating_sub(record.reserved_at.as_nanos());
+            obligation_age_sum_ns = obligation_age_sum_ns.saturating_add(age_ns);
+            match record.kind {
+                ObligationKind::SendPermit => {
+                    pending_send_permits = pending_send_permits.saturating_add(1);
+                }
+                ObligationKind::Ack => {
+                    pending_acks = pending_acks.saturating_add(1);
+                }
+                ObligationKind::Lease | ObligationKind::SemaphorePermit => {
+                    pending_leases = pending_leases.saturating_add(1);
+                }
+                ObligationKind::IoOp => {
+                    pending_io_ops = pending_io_ops.saturating_add(1);
+                }
+            }
+        }
+
+        let mut draining_regions = 0u32;
+        for (_, region) in state.regions.iter() {
+            if matches!(
+                region.state(),
+                RegionState::Draining | RegionState::Finalizing
+            ) {
+                draining_regions = draining_regions.saturating_add(1);
+            }
+        }
+
+        StateSnapshot {
+            time: now,
+            live_tasks,
+            pending_obligations,
+            obligation_age_sum_ns,
+            draining_regions,
+            deadline_pressure,
+            pending_send_permits,
+            pending_acks,
+            pending_leases,
+            pending_io_ops,
+            cancel_requested_tasks,
+            cancelling_tasks,
+            finalizing_tasks,
+            ready_queue_depth: 0,
+        }
+    }
+
+    fn snapshots_equivalent(expected: &StateSnapshot, actual: &StateSnapshot) -> bool {
+        expected.time == actual.time
+            && expected.live_tasks == actual.live_tasks
+            && expected.pending_obligations == actual.pending_obligations
+            && expected.obligation_age_sum_ns == actual.obligation_age_sum_ns
+            && expected.draining_regions == actual.draining_regions
+            && (expected.deadline_pressure - actual.deadline_pressure).abs() < 1e-9
+            && expected.pending_send_permits == actual.pending_send_permits
+            && expected.pending_acks == actual.pending_acks
+            && expected.pending_leases == actual.pending_leases
+            && expected.pending_io_ops == actual.pending_io_ops
+            && expected.cancel_requested_tasks == actual.cancel_requested_tasks
+            && expected.cancelling_tasks == actual.cancelling_tasks
+            && expected.finalizing_tasks == actual.finalizing_tasks
+            && expected.ready_queue_depth == actual.ready_queue_depth
+    }
+
+    fn summary_snapshot_bytes_copied_estimate() -> usize {
+        size_of::<StateSnapshot>()
+    }
+
+    fn authoritative_scan_bytes_estimate(state: &RuntimeState) -> usize {
+        state.tasks.iter().count() * size_of::<TaskRecord>()
+            + state.obligations.iter().count() * size_of::<ObligationRecord>()
+            + state.regions.iter().count() * size_of::<RegionRecord>()
+            + size_of::<StateSnapshot>()
+    }
+
+    fn governor_snapshot_fallback_reason(
+        state: &RuntimeState,
+        before: ReadBiasedRegionSnapshotStats,
+        after: ReadBiasedRegionSnapshotStats,
+    ) -> &'static str {
+        if !state.read_biased_region_snapshot_enabled() {
+            return "disabled_exact_baseline";
+        }
+        if after.fallback_scans > before.fallback_scans {
+            if after.invalidations > before.invalidations {
+                return "manual_invalidation";
+            }
+            if after.write_heavy_fallbacks > before.write_heavy_fallbacks {
+                return "write_heavy_threshold_exceeded";
+            }
+            return "authoritative_region_scan";
+        }
+        "cached_region_count"
+    }
+
+    fn build_governor_state_snapshot_state(
+        fixture: &GovernorStateSnapshotFixture,
+    ) -> GovernorStateScenarioState {
+        let mut state = RuntimeState::new();
+        let root = state.create_root_region(Budget::unlimited());
+        state.set_read_biased_region_snapshot(fixture.read_biased_enabled);
+
+        let mut child_regions = Vec::with_capacity(fixture.region_count);
+        for _ in 0..fixture.region_count {
+            let child = state
+                .create_child_region(root, Budget::unlimited())
+                .expect("child region");
+            let _grandchild = state
+                .create_child_region(child, Budget::unlimited())
+                .expect("grandchild region");
+            child_regions.push(child);
+        }
+
+        let mut task_ids = Vec::with_capacity(fixture.region_count * fixture.tasks_per_region);
+        let mut obligation_ids =
+            Vec::with_capacity(fixture.region_count * fixture.tasks_per_region);
+        for (region_index, region_id) in child_regions.iter().enumerate() {
+            for task_index in 0..fixture.tasks_per_region {
+                let deadline_ns = 1_000_000_000
+                    + (region_index * fixture.tasks_per_region + task_index) as u64 * 50_000_000;
+                let budget = Budget::INFINITE.with_deadline(Time::from_nanos(deadline_ns));
+                let (task_id, _handle) = state
+                    .create_task(*region_id, budget, async {})
+                    .expect("create task");
+                let obligation_id = state
+                    .create_obligation(ObligationKind::SendPermit, task_id, *region_id, None)
+                    .expect("create obligation");
+                task_ids.push(task_id);
+                obligation_ids.push(obligation_id);
+            }
+        }
+        state.now = Time::from_nanos(250_000_000);
+
+        GovernorStateScenarioState {
+            state,
+            child_regions,
+            task_ids,
+            obligation_ids,
+        }
+    }
+
+    fn scenario_step_plan() -> [(u64, usize, usize, usize); 5] {
+        [
+            (0, 0, 0, 0),
+            (50_000_000, 2, 0, 0),
+            (50_000_000, 0, 3, 0),
+            (50_000_000, 0, 0, 2),
+            (50_000_000, 0, 0, 0),
+        ]
+    }
+
+    fn bump_time(state: &mut RuntimeState, delta_ns: u64) {
+        state.now = Time::from_nanos(state.now.as_nanos().saturating_add(delta_ns));
+    }
+
+    fn execute_governor_state_snapshot_scenario_once(
+        scenario: &GovernorStateSnapshotScenario,
+    ) -> (Value, u64) {
+        let mut scenario_state = build_governor_state_snapshot_state(&scenario.fixture);
+        let mut previous_summary = None;
+        let mut step_reports = Vec::new();
+        let mut summary_latencies = Vec::new();
+        let mut authoritative_latencies = Vec::new();
+        let mut fallback_reason_counts = BTreeMap::<String, u64>::new();
+        let mut changed_component_union = BTreeSet::<String>::new();
+
+        let step_plan = scenario_step_plan();
+        for (step_index, (advance_ns, cancel_regions, commit_obligations, complete_tasks)) in
+            step_plan.into_iter().enumerate()
+        {
+            if advance_ns > 0 {
+                bump_time(&mut scenario_state.state, advance_ns);
+            }
+            if cancel_regions > 0 {
+                for region_id in scenario_state.child_regions.iter().take(cancel_regions) {
+                    let _ = scenario_state.state.cancel_request(
+                        *region_id,
+                        &crate::types::CancelReason::shutdown(),
+                        None,
+                    );
+                }
+            }
+            if commit_obligations > 0 {
+                for obligation_id in scenario_state
+                    .obligation_ids
+                    .iter()
+                    .take(commit_obligations)
+                    .copied()
+                {
+                    scenario_state
+                        .state
+                        .commit_obligation(obligation_id)
+                        .expect("commit obligation");
+                }
+            }
+            if complete_tasks > 0 {
+                for task_id in scenario_state.task_ids.iter().take(complete_tasks).copied() {
+                    let _ = scenario_state
+                        .state
+                        .complete_task(task_id, crate::types::Outcome::Ok(()));
+                }
+            }
+
+            let before_stats = scenario_state.state.read_biased_region_snapshot_stats();
+            if scenario.fixture.manual_invalidation_step == Some(step_index) {
+                scenario_state
+                    .state
+                    .invalidate_read_biased_region_snapshot_for_testing();
+            }
+
+            let summary_started = Instant::now();
+            let summary_snapshot = StateSnapshot::from_runtime_state(&scenario_state.state);
+            let summary_latency_ns = summary_started
+                .elapsed()
+                .as_nanos()
+                .min(u128::from(u64::MAX)) as u64;
+            let after_stats = scenario_state.state.read_biased_region_snapshot_stats();
+
+            let authoritative_started = Instant::now();
+            let authoritative_snapshot = authoritative_state_snapshot(&scenario_state.state);
+            let authoritative_latency_ns = authoritative_started
+                .elapsed()
+                .as_nanos()
+                .min(u128::from(u64::MAX)) as u64;
+
+            let equivalent = snapshots_equivalent(&summary_snapshot, &authoritative_snapshot);
+            let changed = changed_components(previous_summary.as_ref(), &summary_snapshot);
+            for component in changed
+                .iter()
+                .filter(|component| component.as_str() != "initial_capture")
+            {
+                changed_component_union.insert(component.clone());
+            }
+            let fallback_reason =
+                governor_snapshot_fallback_reason(&scenario_state.state, before_stats, after_stats);
+            *fallback_reason_counts
+                .entry(fallback_reason.to_string())
+                .or_insert(0) += 1;
+
+            summary_latencies.push(summary_latency_ns);
+            authoritative_latencies.push(authoritative_latency_ns);
+            step_reports.push(json!({
+                "step_index": step_index,
+                "changed_components": changed,
+                "fallback_reason": fallback_reason,
+                "summary_snapshot": {
+                    "time_ns": summary_snapshot.time.as_nanos(),
+                    "live_tasks": summary_snapshot.live_tasks,
+                    "pending_obligations": summary_snapshot.pending_obligations,
+                    "obligation_age_sum_ns": summary_snapshot.obligation_age_sum_ns,
+                    "draining_regions": summary_snapshot.draining_regions,
+                    "deadline_pressure": round4(summary_snapshot.deadline_pressure),
+                    "pending_send_permits": summary_snapshot.pending_send_permits,
+                    "cancel_requested_tasks": summary_snapshot.cancel_requested_tasks,
+                },
+                "authoritative_snapshot": {
+                    "time_ns": authoritative_snapshot.time.as_nanos(),
+                    "live_tasks": authoritative_snapshot.live_tasks,
+                    "pending_obligations": authoritative_snapshot.pending_obligations,
+                    "obligation_age_sum_ns": authoritative_snapshot.obligation_age_sum_ns,
+                    "draining_regions": authoritative_snapshot.draining_regions,
+                    "deadline_pressure": round4(authoritative_snapshot.deadline_pressure),
+                    "pending_send_permits": authoritative_snapshot.pending_send_permits,
+                    "cancel_requested_tasks": authoritative_snapshot.cancel_requested_tasks,
+                },
+                "equivalent": equivalent,
+                "summary_latency_ns": summary_latency_ns,
+                "authoritative_latency_ns": authoritative_latency_ns,
+                "summary_bytes_copied_estimate": summary_snapshot_bytes_copied_estimate(),
+                "authoritative_scan_bytes_estimate": authoritative_scan_bytes_estimate(&scenario_state.state),
+            }));
+            previous_summary = Some(summary_snapshot);
+        }
+
+        let full_region_scan_steps = fallback_reason_counts
+            .iter()
+            .filter(|(reason, _)| reason.as_str() != "cached_region_count")
+            .map(|(_, count)| *count)
+            .sum::<u64>();
+        let cached_region_count_steps = *fallback_reason_counts
+            .get("cached_region_count")
+            .unwrap_or(&0);
+        let manual_invalidation_steps = *fallback_reason_counts
+            .get("manual_invalidation")
+            .unwrap_or(&0);
+        let step_count = step_reports.len() as u64;
+        let all_steps_equivalent = step_reports
+            .iter()
+            .all(|step| step["equivalent"].as_bool() == Some(true));
+        let changed_component_union_json: Vec<Value> = changed_component_union
+            .into_iter()
+            .map(Value::String)
+            .collect();
+        let projection_without_repeat = json!({
+            "schema_version": GOVERNOR_STATE_SNAPSHOT_PROJECTION_SCHEMA_VERSION,
+            "scenario_id": scenario.scenario_id,
+            "read_biased_enabled": scenario.fixture.read_biased_enabled,
+            "step_count": step_count,
+            "full_region_scan_steps": full_region_scan_steps,
+            "cached_region_count_steps": cached_region_count_steps,
+            "manual_invalidation_steps": manual_invalidation_steps,
+            "all_steps_equivalent": all_steps_equivalent,
+            "changed_component_union": changed_component_union_json,
+            "fallback_reason_counts": fallback_reason_counts,
+        });
+        let stable_hash = hash_json_value(&json!({
+            "projection": projection_without_repeat,
+            "steps": step_reports.iter().map(|step| {
+                json!({
+                    "step_index": step["step_index"],
+                    "changed_components": step["changed_components"],
+                    "fallback_reason": step["fallback_reason"],
+                    "summary_snapshot": step["summary_snapshot"],
+                    "authoritative_snapshot": step["authoritative_snapshot"],
+                    "equivalent": step["equivalent"],
+                })
+            }).collect::<Vec<_>>(),
+        }));
+
+        let report = json!({
+            "schema_version": GOVERNOR_STATE_SNAPSHOT_REPORT_SCHEMA_VERSION,
+            "scenario_id": scenario.scenario_id,
+            "description": scenario.description,
+            "fixture": {
+                "region_count": scenario.fixture.region_count,
+                "tasks_per_region": scenario.fixture.tasks_per_region,
+                "read_biased_enabled": scenario.fixture.read_biased_enabled,
+                "manual_invalidation_step": scenario.fixture.manual_invalidation_step,
+            },
+            "summary_path": {
+                "latency_summary": latency_summary(&summary_latencies),
+                "bytes_copied_estimate": summary_snapshot_bytes_copied_estimate(),
+            },
+            "authoritative_full_scan": {
+                "latency_summary": latency_summary(&authoritative_latencies),
+                "bytes_copied_estimate": step_reports
+                    .last()
+                    .and_then(|step| step["authoritative_scan_bytes_estimate"].as_u64())
+                    .unwrap_or(0),
+            },
+            "equivalence_verdict": {
+                "all_steps_equivalent": all_steps_equivalent,
+                "repeated_run_hash": stable_hash,
+            },
+            "step_reports": step_reports,
+            "report_projection": projection_without_repeat,
+        });
+
+        (report, stable_hash)
+    }
+
+    fn run_governor_state_snapshot_scenario(scenario: &GovernorStateSnapshotScenario) -> Value {
+        let (mut report, first_hash) = execute_governor_state_snapshot_scenario_once(scenario);
+        let (_, second_hash) = execute_governor_state_snapshot_scenario_once(scenario);
+        let repeated_run_hash_match = first_hash == second_hash;
+
+        report["equivalence_verdict"]["repeated_run_hash_match"] =
+            Value::Bool(repeated_run_hash_match);
+        let mut projection = report["report_projection"]
+            .as_object()
+            .expect("projection object")
+            .clone();
+        projection.insert(
+            "repeated_run_hash_match".to_string(),
+            Value::Bool(repeated_run_hash_match),
+        );
+        report["report_projection"] = Value::Object(projection);
+        report
+    }
+
+    #[test]
+    fn governor_state_snapshot_smoke_contract_emits_report() {
+        init_test("governor_state_snapshot_smoke_contract_emits_report");
+
+        let selected_scenario = selected_governor_state_snapshot_scenario();
+        let mut selected_report = None;
+        for scenario in load_governor_state_snapshot_scenarios() {
+            let report = run_governor_state_snapshot_scenario(&scenario);
+            let actual_projection = report["report_projection"].clone();
+            let assertion_actual = json!({
+                "projection": actual_projection,
+                "report": report,
+            });
+            crate::assert_with_log!(
+                actual_projection == scenario.expected_report_projection,
+                "governor snapshot smoke projection should remain stable",
+                scenario.expected_report_projection.to_string(),
+                assertion_actual.to_string()
+            );
+            if scenario.scenario_id == selected_scenario {
+                selected_report = Some(report);
+            }
+        }
+
+        if let Ok(report_path) = std::env::var(GOVERNOR_STATE_SNAPSHOT_REPORT_PATH_ENV) {
+            let report =
+                selected_report.expect("selected governor snapshot scenario should emit report");
+            maybe_write_governor_state_snapshot_report(&report_path, &report);
+            println!("governor_state_snapshot_report_path={report_path}");
+            println!("GOVERNOR_STATE_SNAPSHOT_REPORT_JSON_BEGIN");
+            println!(
+                "{}",
+                serde_json::to_string(&report).expect("serialize compact governor snapshot report")
+            );
+            println!("GOVERNOR_STATE_SNAPSHOT_REPORT_JSON_END");
+        }
+
+        crate::test_complete!("governor_state_snapshot_smoke_contract_emits_report");
     }
 
     #[test]
