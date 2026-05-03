@@ -41,6 +41,7 @@
 //! let result = handle.await?;
 //! ```
 
+use crate::runtime::config::BlockingPoolAffinityProfile;
 use crossbeam_queue::SegQueue;
 use parking_lot::{Condvar, Mutex};
 use std::fmt;
@@ -125,6 +126,25 @@ pub struct BlockingPool {
     inner: Arc<BlockingPoolInner>,
 }
 
+/// Snapshot of blocking-pool affinity activity.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BlockingPoolAffinityMetricsSnapshot {
+    /// Whether cohort-aware queue routing is enabled.
+    pub enabled: bool,
+    /// Number of configured cohorts for affinity routing.
+    pub cohort_count: usize,
+    /// Number of tasks executed directly from a same-cohort queue.
+    pub local_queue_dispatches: usize,
+    /// Number of preferred-cohort tasks executed from the global spill queue.
+    pub spill_dispatches: usize,
+    /// Number of times a cohort hint fell back to global spill routing.
+    pub fallback_dispatches: usize,
+    /// Pending task counts for each cohort-local queue.
+    pub cohort_pending_counts: Vec<usize>,
+    /// Pending task count in the global spill/default queue.
+    pub global_pending_count: usize,
+}
+
 impl fmt::Debug for BlockingPool {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let handles_len = self.inner.thread_handles.lock().len();
@@ -141,6 +161,88 @@ impl fmt::Debug for BlockingPool {
             )
             .field("thread_handles", &handles_len)
             .finish()
+    }
+}
+
+impl BlockingPoolAffinityState {
+    fn from_options(options: &BlockingPoolOptions) -> Option<Self> {
+        match options.affinity_profile {
+            BlockingPoolAffinityProfile::Disabled => None,
+            BlockingPoolAffinityProfile::CohortBiased {
+                local_queue_soft_limit,
+                spill_check_interval,
+            } => {
+                let cohort_count = options.cohort_count?;
+                if cohort_count == 0 {
+                    return None;
+                }
+                Some(Self {
+                    cohort_count,
+                    local_queue_soft_limit,
+                    spill_check_interval,
+                    cohort_queues: (0..cohort_count).map(|_| SegQueue::new()).collect(),
+                    cohort_pending_counts: (0..cohort_count).map(|_| AtomicUsize::new(0)).collect(),
+                    local_queue_dispatches: AtomicUsize::new(0),
+                    spill_dispatches: AtomicUsize::new(0),
+                    fallback_dispatches: AtomicUsize::new(0),
+                })
+            }
+        }
+    }
+
+    fn route_task(
+        &self,
+        global_pending_count: &AtomicUsize,
+        task: BlockingTask,
+    ) -> Result<(), BlockingTask> {
+        let Some(preferred_cohort) = task.preferred_cohort else {
+            return Err(task);
+        };
+        if preferred_cohort >= self.cohort_count {
+            self.fallback_dispatches.fetch_add(1, Ordering::Relaxed);
+            return Err(task);
+        }
+
+        let local_pending = self.cohort_pending_counts[preferred_cohort].load(Ordering::Relaxed);
+        if local_pending >= self.local_queue_soft_limit {
+            self.fallback_dispatches.fetch_add(1, Ordering::Relaxed);
+            return Err(task);
+        }
+
+        self.cohort_pending_counts[preferred_cohort].fetch_add(1, Ordering::Relaxed);
+        global_pending_count.fetch_add(1, Ordering::Relaxed);
+        self.cohort_queues[preferred_cohort].push(task);
+        Ok(())
+    }
+
+    fn pop_local(&self, cohort: usize) -> Option<(BlockingTask, BlockingTaskDequeueKind)> {
+        self.cohort_queues.get(cohort).and_then(|queue| {
+            queue.pop().map(|task| {
+                self.cohort_pending_counts[cohort].fetch_sub(1, Ordering::Relaxed);
+                self.local_queue_dispatches.fetch_add(1, Ordering::Relaxed);
+                (task, BlockingTaskDequeueKind::Local)
+            })
+        })
+    }
+
+    fn record_spill_dispatch(&self) {
+        self.spill_dispatches.fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn snapshot(&self, global_pending_count: usize) -> BlockingPoolAffinityMetricsSnapshot {
+        BlockingPoolAffinityMetricsSnapshot {
+            enabled: true,
+            cohort_count: self.cohort_count,
+            local_queue_dispatches: self.local_queue_dispatches.load(Ordering::Relaxed),
+            spill_dispatches: self.spill_dispatches.load(Ordering::Relaxed),
+            fallback_dispatches: self.fallback_dispatches.load(Ordering::Relaxed),
+            cohort_pending_counts: self
+                .cohort_pending_counts
+                .iter()
+                .map(|count| count.load(Ordering::Relaxed))
+                .collect(),
+            global_pending_count,
+        }
     }
 }
 
@@ -161,6 +263,8 @@ struct BlockingPoolInner {
     next_thread_id: AtomicU64,
     /// Work queue.
     queue: SegQueue<BlockingTask>,
+    /// Optional cohort-aware blocking affinity state.
+    affinity: Option<BlockingPoolAffinityState>,
     /// Shutdown flag.
     shutdown: AtomicBool,
     /// Condition variable for thread parking.
@@ -183,6 +287,24 @@ struct BlockingPoolInner {
     thread_handles: Mutex<Vec<ThreadJoinHandle<()>>>,
 }
 
+struct BlockingPoolAffinityState {
+    cohort_count: usize,
+    local_queue_soft_limit: usize,
+    spill_check_interval: usize,
+    cohort_queues: Vec<SegQueue<BlockingTask>>,
+    cohort_pending_counts: Vec<AtomicUsize>,
+    local_queue_dispatches: AtomicUsize,
+    spill_dispatches: AtomicUsize,
+    fallback_dispatches: AtomicUsize,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum BlockingTaskDequeueKind {
+    Global,
+    Local,
+    Spill,
+}
+
 /// A task submitted to the blocking pool.
 struct BlockingTask {
     /// The work to execute.
@@ -190,6 +312,8 @@ struct BlockingTask {
     /// Priority (higher = more important, for future use).
     #[allow(dead_code)]
     priority: u8,
+    /// Preferred cohort for locality-biased routing.
+    preferred_cohort: Option<usize>,
     /// Cancellation flag.
     cancelled: Arc<AtomicBool>,
     /// Completion signal.
@@ -355,6 +479,7 @@ impl BlockingPool {
             "thread_name_prefix may not contain interior NUL bytes"
         );
 
+        let affinity = BlockingPoolAffinityState::from_options(&options);
         let inner = Arc::new(BlockingPoolInner {
             min_threads,
             max_threads,
@@ -364,6 +489,7 @@ impl BlockingPool {
             next_task_id: AtomicU64::new(1),
             next_thread_id: AtomicU64::new(1),
             queue: SegQueue::new(),
+            affinity,
             shutdown: AtomicBool::new(false),
             condvar: Condvar::new(),
             mutex: Mutex::new(()),
@@ -405,7 +531,15 @@ impl BlockingPool {
     where
         F: FnOnce() + Send + 'static,
     {
-        self.spawn_with_priority(f, 128)
+        self.spawn_with_affinity(f, 128, None)
+    }
+
+    /// Spawns a blocking task with a preferred cohort for locality-biased routing.
+    pub fn spawn_on_cohort<F>(&self, cohort: usize, f: F) -> BlockingTaskHandle
+    where
+        F: FnOnce() + Send + 'static,
+    {
+        self.spawn_with_affinity(f, 128, Some(cohort))
     }
 
     /// Spawns a blocking task with a priority.
@@ -413,6 +547,18 @@ impl BlockingPool {
     /// Higher priority values are executed first (currently unused,
     /// reserved for future priority queue implementation).
     pub fn spawn_with_priority<F>(&self, f: F, priority: u8) -> BlockingTaskHandle
+    where
+        F: FnOnce() + Send + 'static,
+    {
+        self.spawn_with_affinity(f, priority, None)
+    }
+
+    fn spawn_with_affinity<F>(
+        &self,
+        f: F,
+        priority: u8,
+        preferred_cohort: Option<usize>,
+    ) -> BlockingTaskHandle
     where
         F: FnOnce() + Send + 'static,
     {
@@ -436,6 +582,7 @@ impl BlockingPool {
         let task = BlockingTask {
             work: Box::new(f),
             priority,
+            preferred_cohort,
             cancelled: Arc::clone(&cancelled),
             completion: Arc::clone(&completion),
         };
@@ -451,6 +598,12 @@ impl BlockingPool {
         self.notify_one();
 
         handle
+    }
+
+    /// Returns a snapshot of locality-routing activity for this pool.
+    #[must_use]
+    pub fn affinity_metrics(&self) -> BlockingPoolAffinityMetricsSnapshot {
+        blocking_pool_affinity_metrics(&self.inner)
     }
 
     /// Returns the number of pending tasks in the queue.
@@ -560,11 +713,31 @@ impl BlockingPoolHandle {
     where
         F: FnOnce() + Send + 'static,
     {
-        self.spawn_with_priority(f, 128)
+        self.spawn_with_affinity(f, 128, None)
+    }
+
+    /// Spawns a blocking task with a preferred cohort for locality-biased routing.
+    pub fn spawn_on_cohort<F>(&self, cohort: usize, f: F) -> BlockingTaskHandle
+    where
+        F: FnOnce() + Send + 'static,
+    {
+        self.spawn_with_affinity(f, 128, Some(cohort))
     }
 
     /// Spawns a blocking task with a priority.
     pub fn spawn_with_priority<F>(&self, f: F, priority: u8) -> BlockingTaskHandle
+    where
+        F: FnOnce() + Send + 'static,
+    {
+        self.spawn_with_affinity(f, priority, None)
+    }
+
+    fn spawn_with_affinity<F>(
+        &self,
+        f: F,
+        priority: u8,
+        preferred_cohort: Option<usize>,
+    ) -> BlockingTaskHandle
     where
         F: FnOnce() + Send + 'static,
     {
@@ -587,6 +760,7 @@ impl BlockingPoolHandle {
         let task = BlockingTask {
             work: Box::new(f),
             priority,
+            preferred_cohort,
             cancelled: Arc::clone(&cancelled),
             completion: Arc::clone(&completion),
         };
@@ -619,6 +793,12 @@ impl BlockingPoolHandle {
         self.inner.active_threads.load(Ordering::Relaxed)
     }
 
+    /// Returns a snapshot of locality-routing activity for this handle's pool.
+    #[must_use]
+    pub fn affinity_metrics(&self) -> BlockingPoolAffinityMetricsSnapshot {
+        blocking_pool_affinity_metrics(&self.inner)
+    }
+
     /// Returns `true` if the pool is shut down.
     #[must_use]
     pub fn is_shutdown(&self) -> bool {
@@ -631,9 +811,89 @@ fn try_enqueue_task(inner: &Arc<BlockingPoolInner>, task: BlockingTask) -> bool 
     if inner.shutdown.load(Ordering::Acquire) {
         return false;
     }
+    if let Some(affinity) = inner.affinity.as_ref() {
+        match affinity.route_task(&inner.pending_count, task) {
+            Ok(()) => return true,
+            Err(task) => {
+                inner.queue.push(task);
+                inner.pending_count.fetch_add(1, Ordering::Relaxed);
+                return true;
+            }
+        }
+    }
     inner.queue.push(task);
     inner.pending_count.fetch_add(1, Ordering::Relaxed);
     true
+}
+
+fn blocking_pool_has_pending_work(inner: &BlockingPoolInner) -> bool {
+    inner.pending_count.load(Ordering::Acquire) > 0
+}
+
+fn blocking_pool_affinity_metrics(
+    inner: &BlockingPoolInner,
+) -> BlockingPoolAffinityMetricsSnapshot {
+    let global_pending_count = inner.pending_count.load(Ordering::Relaxed).saturating_sub(
+        inner
+            .affinity
+            .as_ref()
+            .map(|affinity| {
+                affinity
+                    .cohort_pending_counts
+                    .iter()
+                    .map(|count| count.load(Ordering::Relaxed))
+                    .sum::<usize>()
+            })
+            .unwrap_or(0),
+    );
+
+    match inner.affinity.as_ref() {
+        Some(affinity) => affinity.snapshot(global_pending_count),
+        None => BlockingPoolAffinityMetricsSnapshot {
+            enabled: false,
+            cohort_count: 0,
+            local_queue_dispatches: 0,
+            spill_dispatches: 0,
+            fallback_dispatches: 0,
+            cohort_pending_counts: Vec::new(),
+            global_pending_count,
+        },
+    }
+}
+
+fn pop_next_blocking_task(
+    inner: &BlockingPoolInner,
+    assigned_cohort: Option<usize>,
+    prefer_local_turn: bool,
+) -> Option<(BlockingTask, BlockingTaskDequeueKind)> {
+    let pop_global = || {
+        inner.queue.pop().map(|task| {
+            let kind = if task.preferred_cohort.is_some() && inner.affinity.is_some() {
+                inner
+                    .affinity
+                    .as_ref()
+                    .expect("checked above")
+                    .record_spill_dispatch();
+                BlockingTaskDequeueKind::Spill
+            } else {
+                BlockingTaskDequeueKind::Global
+            };
+            (task, kind)
+        })
+    };
+
+    let Some(cohort) = assigned_cohort else {
+        return pop_global();
+    };
+    let Some(affinity) = inner.affinity.as_ref() else {
+        return pop_global();
+    };
+
+    if prefer_local_turn {
+        affinity.pop_local(cohort).or_else(pop_global)
+    } else {
+        pop_global().or_else(|| affinity.pop_local(cohort))
+    }
 }
 
 /// Configuration options for the blocking pool.
@@ -657,6 +917,10 @@ pub struct BlockingPoolOptions {
     pub on_thread_start: Option<Arc<dyn Fn() + Send + Sync>>,
     /// Callback when a thread stops.
     pub on_thread_stop: Option<Arc<dyn Fn() + Send + Sync>>,
+    /// Explicit affinity profile for locality-aware blocking queues.
+    pub affinity_profile: BlockingPoolAffinityProfile,
+    /// Number of scheduler cohorts available for blocking-pool routing.
+    pub cohort_count: Option<usize>,
 }
 
 impl Default for BlockingPoolOptions {
@@ -668,6 +932,8 @@ impl Default for BlockingPoolOptions {
             thread_name_prefix: "asupersync".to_string(),
             on_thread_start: None,
             on_thread_stop: None,
+            affinity_profile: BlockingPoolAffinityProfile::Disabled,
+            cohort_count: None,
         }
     }
 }
@@ -687,6 +953,8 @@ impl fmt::Debug for BlockingPoolOptions {
             .field("thread_name_prefix", &self.thread_name_prefix)
             .field("on_thread_start", &self.on_thread_start.is_some())
             .field("on_thread_stop", &self.on_thread_stop.is_some())
+            .field("affinity_profile", &self.affinity_profile)
+            .field("cohort_count", &self.cohort_count)
             .finish()
     }
 }
@@ -700,6 +968,10 @@ fn spawn_thread_on_inner(inner: &Arc<BlockingPoolInner>) {
     let thread_id = inner.next_thread_id.fetch_add(1, Ordering::Relaxed);
     let name = format!("{}-blocking-{}", inner.thread_name_prefix, thread_id);
     let builder = thread::Builder::new().name(name);
+    let assigned_cohort = inner
+        .affinity
+        .as_ref()
+        .map(|affinity| ((thread_id.saturating_sub(1)) as usize) % affinity.cohort_count);
 
     // Enforce max_threads atomically to prevent overshoot during concurrent spawns
     loop {
@@ -738,9 +1010,7 @@ fn spawn_thread_on_inner(inner: &Arc<BlockingPoolInner>) {
                     // while this worker is already on the exit path. If this
                     // was the last active worker, hand the task off before the
                     // pool goes quiescent and strands the accepted work.
-                    if self.inner.pending_count.load(Ordering::Acquire) > 0
-                        && !self.inner.queue.is_empty()
-                    {
+                    if blocking_pool_has_pending_work(self.inner) {
                         maybe_spawn_thread_on_inner(self.inner);
                         let _guard = self.inner.mutex.lock();
                         self.inner.condvar.notify_one();
@@ -758,7 +1028,7 @@ fn spawn_thread_on_inner(inner: &Arc<BlockingPoolInner>) {
             callback();
         }
 
-        guard.retired_with_claim = blocking_worker_loop(&inner_clone);
+        guard.retired_with_claim = blocking_worker_loop(&inner_clone, assigned_cohort);
         let _ = guard.retired_with_claim;
     }) {
         Ok(handle) => {
@@ -821,13 +1091,26 @@ fn try_claim_idle_retirement(inner: &BlockingPoolInner) -> bool {
 
 /// The worker loop for blocking pool threads.
 #[allow(clippy::significant_drop_tightening)] // Condvar wait pattern intentionally holds and rechecks under mutex.
-fn blocking_worker_loop(inner: &BlockingPoolInner) -> bool {
+fn blocking_worker_loop(inner: &BlockingPoolInner, assigned_cohort: Option<usize>) -> bool {
     let mut idle_since: Option<Instant> = None;
+    let mut local_dispatch_streak = 0usize;
 
     loop {
         // Try to get work from the queue
-        if let Some(task) = inner.queue.pop() {
+        let prefer_local_turn = assigned_cohort.is_some()
+            && inner
+                .affinity
+                .as_ref()
+                .map(|affinity| local_dispatch_streak < affinity.spill_check_interval)
+                .unwrap_or(false);
+        if let Some((task, dequeue_kind)) =
+            pop_next_blocking_task(inner, assigned_cohort, prefer_local_turn)
+        {
             idle_since = None; // Reset idle timer since we got work
+            local_dispatch_streak = match dequeue_kind {
+                BlockingTaskDequeueKind::Local => local_dispatch_streak.saturating_add(1),
+                BlockingTaskDequeueKind::Global | BlockingTaskDequeueKind::Spill => 0,
+            };
 
             inner.busy_threads.fetch_add(1, Ordering::Relaxed);
             inner.pending_count.fetch_sub(1, Ordering::Relaxed);
@@ -870,11 +1153,11 @@ fn blocking_worker_loop(inner: &BlockingPoolInner) -> bool {
 
             if elapsed >= inner.idle_timeout {
                 // If we've been idle long enough and there's still no work, consider retiring
-                if inner.queue.is_empty() && try_claim_idle_retirement(inner) {
+                if !blocking_pool_has_pending_work(inner) && try_claim_idle_retirement(inner) {
                     // We claimed the retirement slot, meaning active_threads was decremented.
                     // Re-check the queue to ensure we didn't miss a concurrent spawn that
                     // observed our pre-retirement active_threads count and decided not to spawn.
-                    if inner.queue.is_empty() {
+                    if !blocking_pool_has_pending_work(inner) {
                         // Retire this thread; active_threads was already decremented atomically.
                         return true;
                     }
@@ -920,7 +1203,7 @@ fn blocking_worker_loop(inner: &BlockingPoolInner) -> bool {
             let mut guard = inner.mutex.lock();
 
             // Re-check queue under lock to prevent lost wakeup.
-            if !inner.queue.is_empty() {
+            if blocking_pool_has_pending_work(inner) {
                 drop(guard);
                 continue;
             }
@@ -939,7 +1222,7 @@ fn blocking_worker_loop(inner: &BlockingPoolInner) -> bool {
             let mut guard = inner.mutex.lock();
 
             // Re-check queue under lock to prevent lost wakeup.
-            if !inner.queue.is_empty() {
+            if blocking_pool_has_pending_work(inner) {
                 drop(guard);
                 continue;
             }
@@ -1007,6 +1290,48 @@ mod tests {
         SCRIPTED_TIME_OFFSET_MS.fetch_add(millis, Ordering::Relaxed);
     }
 
+    fn test_blocking_task(preferred_cohort: Option<usize>) -> BlockingTask {
+        BlockingTask {
+            work: Box::new(|| {}),
+            priority: 128,
+            preferred_cohort,
+            cancelled: Arc::new(AtomicBool::new(false)),
+            completion: Arc::new(BlockingTaskCompletion::new(wall_clock_now)),
+        }
+    }
+
+    fn test_blocking_inner_with_affinity(
+        affinity_profile: BlockingPoolAffinityProfile,
+        cohort_count: Option<usize>,
+    ) -> Arc<BlockingPoolInner> {
+        let options = BlockingPoolOptions {
+            affinity_profile,
+            cohort_count,
+            ..Default::default()
+        };
+        Arc::new(BlockingPoolInner {
+            min_threads: 0,
+            max_threads: 4,
+            active_threads: AtomicUsize::new(0),
+            busy_threads: AtomicUsize::new(0),
+            pending_count: AtomicUsize::new(0),
+            next_task_id: AtomicU64::new(1),
+            next_thread_id: AtomicU64::new(1),
+            queue: SegQueue::new(),
+            affinity: BlockingPoolAffinityState::from_options(&options),
+            shutdown: AtomicBool::new(false),
+            condvar: Condvar::new(),
+            mutex: Mutex::new(()),
+            idle_timeout: Duration::from_millis(10),
+            time_getter: wall_clock_now,
+            sleep_fn: blocking_thread_sleep,
+            thread_name_prefix: "affinity-test".to_string(),
+            on_thread_start: None,
+            on_thread_stop: None,
+            thread_handles: Mutex::new(Vec::new()),
+        })
+    }
+
     #[test]
     fn basic_spawn_and_wait() {
         let pool = BlockingPool::new(1, 4);
@@ -1020,6 +1345,72 @@ mod tests {
         handle.wait();
         assert!(handle.is_done());
         assert_eq!(counter.load(Ordering::Relaxed), 1);
+    }
+
+    #[test]
+    fn affinity_routes_preferred_tasks_into_local_queue() {
+        let inner = test_blocking_inner_with_affinity(
+            BlockingPoolAffinityProfile::CohortBiased {
+                local_queue_soft_limit: 2,
+                spill_check_interval: 1,
+            },
+            Some(2),
+        );
+
+        assert!(try_enqueue_task(&inner, test_blocking_task(Some(1))));
+
+        let metrics = blocking_pool_affinity_metrics(&inner);
+        assert_eq!(metrics.cohort_pending_counts, vec![0, 1]);
+        assert_eq!(metrics.global_pending_count, 0);
+
+        let (task, kind) =
+            pop_next_blocking_task(&inner, Some(1), true).expect("local queue should yield work");
+        assert_eq!(kind, BlockingTaskDequeueKind::Local);
+        inner.pending_count.fetch_sub(1, Ordering::Relaxed);
+        drop(task);
+
+        let metrics = blocking_pool_affinity_metrics(&inner);
+        assert_eq!(metrics.local_queue_dispatches, 1);
+        assert_eq!(metrics.global_pending_count, 0);
+        assert_eq!(metrics.cohort_pending_counts, vec![0, 0]);
+    }
+
+    #[test]
+    fn affinity_spills_when_local_queue_is_saturated() {
+        let inner = test_blocking_inner_with_affinity(
+            BlockingPoolAffinityProfile::CohortBiased {
+                local_queue_soft_limit: 1,
+                spill_check_interval: 1,
+            },
+            Some(1),
+        );
+
+        assert!(try_enqueue_task(&inner, test_blocking_task(Some(0))));
+        assert!(try_enqueue_task(&inner, test_blocking_task(Some(0))));
+
+        let metrics = blocking_pool_affinity_metrics(&inner);
+        assert_eq!(metrics.cohort_pending_counts, vec![1]);
+        assert_eq!(metrics.global_pending_count, 1);
+        assert_eq!(metrics.fallback_dispatches, 1);
+
+        let (_task, kind) = pop_next_blocking_task(&inner, Some(0), false)
+            .expect("spill queue should be checked before local queue");
+        assert_eq!(kind, BlockingTaskDequeueKind::Spill);
+    }
+
+    #[test]
+    fn affinity_disabled_keeps_spawn_on_cohort_equivalent_to_global_queue() {
+        let inner = test_blocking_inner_with_affinity(BlockingPoolAffinityProfile::Disabled, None);
+
+        assert!(try_enqueue_task(&inner, test_blocking_task(Some(3))));
+        let metrics = blocking_pool_affinity_metrics(&inner);
+        assert!(!metrics.enabled);
+        assert_eq!(metrics.global_pending_count, 1);
+        assert!(metrics.cohort_pending_counts.is_empty());
+
+        let (_task, kind) = pop_next_blocking_task(&inner, Some(0), true)
+            .expect("disabled affinity should still use the global queue");
+        assert_eq!(kind, BlockingTaskDequeueKind::Global);
     }
 
     #[test]
@@ -1563,6 +1954,7 @@ mod tests {
             next_task_id: AtomicU64::new(1),
             next_thread_id: AtomicU64::new(1),
             queue: SegQueue::new(),
+            affinity: None,
             shutdown: AtomicBool::new(false),
             condvar: Condvar::new(),
             mutex: Mutex::new(()),
@@ -1666,6 +2058,7 @@ mod tests {
             next_task_id: AtomicU64::new(1),
             next_thread_id: AtomicU64::new(1),
             queue: SegQueue::new(),
+            affinity: None,
             shutdown: AtomicBool::new(false),
             condvar: Condvar::new(),
             mutex: Mutex::new(()),
@@ -1703,6 +2096,7 @@ mod tests {
             next_task_id: AtomicU64::new(1),
             next_thread_id: AtomicU64::new(1),
             queue: SegQueue::new(),
+            affinity: None,
             shutdown: AtomicBool::new(false),
             condvar: Condvar::new(),
             mutex: Mutex::new(()),
@@ -1995,6 +2389,7 @@ mod tests {
                 ran_clone.fetch_add(1, Ordering::Relaxed);
             }),
             priority: 128,
+            preferred_cohort: None,
             cancelled: Arc::clone(&cancelled),
             completion: Arc::clone(&completion),
         };

@@ -38,12 +38,52 @@ use std::str::FromStr;
 use std::sync::Arc;
 
 /// Configuration for the blocking pool.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BlockingPoolAffinityProfile {
+    /// Do not apply cohort-aware queue routing.
+    Disabled,
+    /// Bias tasks toward same-cohort blocking workers before spilling globally.
+    CohortBiased {
+        /// Soft cap for tasks queued on a preferred cohort before global spillover.
+        local_queue_soft_limit: usize,
+        /// Maximum consecutive local dequeues before re-checking global spill work.
+        spill_check_interval: usize,
+    },
+}
+
+impl BlockingPoolAffinityProfile {
+    /// Normalize profile parameters to safe non-zero bounds.
+    pub fn normalize(&mut self) {
+        if let Self::CohortBiased {
+            local_queue_soft_limit,
+            spill_check_interval,
+        } = self
+        {
+            if *local_queue_soft_limit == 0 {
+                *local_queue_soft_limit = 1;
+            }
+            if *spill_check_interval == 0 {
+                *spill_check_interval = 1;
+            }
+        }
+    }
+}
+
+impl Default for BlockingPoolAffinityProfile {
+    fn default() -> Self {
+        Self::Disabled
+    }
+}
+
+/// Configuration for the blocking pool.
 #[derive(Clone, Default)]
 pub struct BlockingPoolConfig {
     /// Minimum number of blocking threads.
     pub min_threads: usize,
     /// Maximum number of blocking threads.
     pub max_threads: usize,
+    /// Optional cohort-aware affinity profile for blocking work.
+    pub affinity_profile: BlockingPoolAffinityProfile,
 }
 
 impl BlockingPoolConfig {
@@ -52,6 +92,7 @@ impl BlockingPoolConfig {
         if self.max_threads < self.min_threads {
             self.max_threads = self.min_threads;
         }
+        self.affinity_profile.normalize();
     }
 }
 
@@ -936,6 +977,7 @@ mod tests {
             blocking: BlockingPoolConfig {
                 min_threads: 4,
                 max_threads: 1,
+                affinity_profile: BlockingPoolAffinityProfile::Disabled,
             },
             enable_parking: true,
             poll_budget: 0,
@@ -1088,6 +1130,10 @@ mod tests {
         let mut blocking = BlockingPoolConfig {
             min_threads: 2,
             max_threads: 1,
+            affinity_profile: BlockingPoolAffinityProfile::CohortBiased {
+                local_queue_soft_limit: 0,
+                spill_check_interval: 0,
+            },
         };
         blocking.normalize();
         crate::assert_with_log!(
@@ -1095,6 +1141,19 @@ mod tests {
             "blocking max>=min",
             blocking.min_threads,
             blocking.max_threads
+        );
+        crate::assert_with_log!(
+            blocking.affinity_profile
+                == BlockingPoolAffinityProfile::CohortBiased {
+                    local_queue_soft_limit: 1,
+                    spill_check_interval: 1,
+                },
+            "blocking affinity profile normalized",
+            BlockingPoolAffinityProfile::CohortBiased {
+                local_queue_soft_limit: 1,
+                spill_check_interval: 1,
+            },
+            blocking.affinity_profile
         );
         crate::test_complete!("test_blocking_pool_normalize");
     }
@@ -1200,6 +1259,7 @@ mod tests {
             blocking: BlockingPoolConfig {
                 min_threads: 2,
                 max_threads: 4,
+                affinity_profile: BlockingPoolAffinityProfile::Disabled,
             },
             enable_parking: false,
             poll_budget: 32,
@@ -1448,6 +1508,7 @@ mod tests {
         let bp = BlockingPoolConfig::default();
         assert_eq!(bp.min_threads, 0);
         assert_eq!(bp.max_threads, 0);
+        assert_eq!(bp.affinity_profile, BlockingPoolAffinityProfile::Disabled);
     }
 
     #[test]
@@ -1455,10 +1516,15 @@ mod tests {
         let bp = BlockingPoolConfig {
             min_threads: 2,
             max_threads: 8,
+            affinity_profile: BlockingPoolAffinityProfile::CohortBiased {
+                local_queue_soft_limit: 16,
+                spill_check_interval: 4,
+            },
         };
-        let cloned = bp;
+        let cloned = bp.clone();
         assert_eq!(cloned.min_threads, 2);
         assert_eq!(cloned.max_threads, 8);
+        assert_eq!(cloned.affinity_profile, bp.affinity_profile);
     }
 
     #[test]

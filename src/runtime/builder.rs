@@ -2275,6 +2275,16 @@ impl RuntimeBuilder {
         self
     }
 
+    /// Configure cohort-aware affinity routing for the blocking pool.
+    #[must_use]
+    pub fn blocking_affinity_profile(
+        mut self,
+        profile: crate::runtime::config::BlockingPoolAffinityProfile,
+    ) -> Self {
+        self.config.blocking.affinity_profile = profile;
+        self
+    }
+
     /// Enable or disable parking for idle workers.
     #[must_use]
     pub fn enable_parking(mut self, enable: bool) -> Self {
@@ -3259,6 +3269,23 @@ impl Runtime {
         self.inner.blocking_pool.as_ref().map(|pool| pool.spawn(f))
     }
 
+    /// Spawns a blocking task with an explicit preferred cohort hint.
+    ///
+    /// Returns `None` if the blocking pool is not configured (max_threads = 0).
+    pub fn spawn_blocking_on_cohort<F>(
+        &self,
+        cohort: usize,
+        f: F,
+    ) -> Option<crate::runtime::blocking_pool::BlockingTaskHandle>
+    where
+        F: FnOnce() + Send + 'static,
+    {
+        self.inner
+            .blocking_pool
+            .as_ref()
+            .map(|pool| pool.spawn_on_cohort(cohort, f))
+    }
+
     /// Returns a handle to the blocking pool, if configured.
     #[must_use]
     pub fn blocking_handle(&self) -> Option<crate::runtime::blocking_pool::BlockingPoolHandle> {
@@ -3414,6 +3441,25 @@ impl RuntimeHandle {
     {
         let inner = self.try_inner().ok()?;
         inner.blocking_pool.as_ref().map(|pool| pool.spawn(f))
+    }
+
+    /// Spawns a blocking task with an explicit preferred cohort hint.
+    ///
+    /// Returns `None` if the blocking pool is not configured or if this handle
+    /// is stale.
+    pub fn spawn_blocking_on_cohort<F>(
+        &self,
+        cohort: usize,
+        f: F,
+    ) -> Option<crate::runtime::blocking_pool::BlockingTaskHandle>
+    where
+        F: FnOnce() + Send + 'static,
+    {
+        let inner = self.try_inner().ok()?;
+        inner
+            .blocking_pool
+            .as_ref()
+            .map(|pool| pool.spawn_on_cohort(cohort, f))
     }
 
     /// Returns a handle to the blocking pool, if configured and the runtime is
@@ -3723,6 +3769,11 @@ impl RuntimeInner {
             thread_name_prefix: format!("{}-blocking", config.thread_name_prefix),
             on_thread_start: config.on_thread_start.clone(),
             on_thread_stop: config.on_thread_stop.clone(),
+            affinity_profile: config.blocking.affinity_profile,
+            cohort_count: config
+                .worker_cohort_map
+                .as_ref()
+                .map(crate::runtime::config::WorkerCohortMapping::cohort_count),
             ..Default::default()
         };
         Some(crate::runtime::blocking_pool::BlockingPool::with_config(
@@ -6158,6 +6209,52 @@ worker_threads = 16
         assert_eq!(
             runtime.config().worker_cohort_map,
             Some(WorkerCohortMapping::new(vec![0, 1]))
+        );
+    }
+
+    #[test]
+    fn runtime_builder_blocking_affinity_profile_sets_explicit_profile() {
+        init_test_logging();
+
+        let builder = RuntimeBuilder::new().blocking_affinity_profile(
+            crate::runtime::config::BlockingPoolAffinityProfile::CohortBiased {
+                local_queue_soft_limit: 8,
+                spill_check_interval: 2,
+            },
+        );
+
+        assert_eq!(
+            builder.config.blocking.affinity_profile,
+            crate::runtime::config::BlockingPoolAffinityProfile::CohortBiased {
+                local_queue_soft_limit: 8,
+                spill_check_interval: 2,
+            }
+        );
+    }
+
+    #[test]
+    fn runtime_builder_build_preserves_blocking_affinity_profile() {
+        init_test_logging();
+
+        let runtime = RuntimeBuilder::new()
+            .worker_threads(2)
+            .worker_cohorts(vec![0, 1])
+            .blocking_threads(1, 2)
+            .blocking_affinity_profile(
+                crate::runtime::config::BlockingPoolAffinityProfile::CohortBiased {
+                    local_queue_soft_limit: 4,
+                    spill_check_interval: 1,
+                },
+            )
+            .build()
+            .expect("cohort-aware blocking profile should build");
+
+        assert_eq!(
+            runtime.config().blocking.affinity_profile,
+            crate::runtime::config::BlockingPoolAffinityProfile::CohortBiased {
+                local_queue_soft_limit: 4,
+                spill_check_interval: 1,
+            }
         );
     }
 
