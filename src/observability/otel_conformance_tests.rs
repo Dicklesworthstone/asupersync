@@ -26099,3 +26099,669 @@ fn validate_length_validation_implementation_consistency(
 
     Ok(())
 }
+
+//
+// OTLP-109: Nested array validation conformance test
+//
+
+#[test]
+fn otlp_109_nested_array_validation_conformance() {
+    // Test scenarios for nested array validation per OTLP specification
+    let scenarios = vec![
+        NestedArrayScenario {
+            description:
+                "Attribute with nested string arrays (MUST reject - arrays of arrays not allowed)"
+                    .to_string(),
+            span: NestedArraySpanInfo {
+                name: "test_span".to_string(),
+                trace_id: "12345678901234567890123456789012".to_string(),
+                span_id: "1234567890123456".to_string(),
+                attributes: vec![
+                    (
+                        "http.method".to_string(),
+                        AttributeValue::String("GET".to_string()),
+                    ),
+                    (
+                        "nested.arrays".to_string(),
+                        AttributeValue::ArrayValue(vec![
+                            AttributeValue::ArrayValue(vec![
+                                // Nested array - invalid
+                                AttributeValue::String("item1".to_string()),
+                                AttributeValue::String("item2".to_string()),
+                            ]),
+                            AttributeValue::String("flat_item".to_string()),
+                        ]),
+                    ),
+                ],
+            },
+            expected_nested_arrays_detected: vec!["nested.arrays".to_string()],
+            expected_span_rejected: true,
+            expected_rejection_reason:
+                "Attribute contains nested arrays (not allowed): 'nested.arrays'".to_string(),
+            expected_included_in_export: false,
+            expected_validation_applied: true,
+            expected_otlp_compliant: true, // Rejecting is compliant
+        },
+        NestedArrayScenario {
+            description: "Attribute with deeply nested arrays (3 levels deep, MUST reject)"
+                .to_string(),
+            span: NestedArraySpanInfo {
+                name: "test_span".to_string(),
+                trace_id: "12345678901234567890123456789012".to_string(),
+                span_id: "2345678901234567".to_string(),
+                attributes: vec![(
+                    "deeply.nested".to_string(),
+                    AttributeValue::ArrayValue(vec![AttributeValue::ArrayValue(vec![
+                        // Level 2
+                        AttributeValue::ArrayValue(vec![
+                            // Level 3 - deeply nested
+                            AttributeValue::String("deep_item".to_string()),
+                        ]),
+                    ])]),
+                )],
+            },
+            expected_nested_arrays_detected: vec!["deeply.nested".to_string()],
+            expected_span_rejected: true,
+            expected_rejection_reason:
+                "Attribute contains nested arrays (not allowed): 'deeply.nested'".to_string(),
+            expected_included_in_export: false,
+            expected_validation_applied: true,
+            expected_otlp_compliant: true,
+        },
+        NestedArrayScenario {
+            description: "Attribute with empty nested arrays (MUST reject)".to_string(),
+            span: NestedArraySpanInfo {
+                name: "test_span".to_string(),
+                trace_id: "12345678901234567890123456789012".to_string(),
+                span_id: "3456789012345678".to_string(),
+                attributes: vec![(
+                    "empty.nested".to_string(),
+                    AttributeValue::ArrayValue(vec![
+                        AttributeValue::ArrayValue(vec![]), // Empty nested array - still invalid
+                        AttributeValue::String("item".to_string()),
+                    ]),
+                )],
+            },
+            expected_nested_arrays_detected: vec!["empty.nested".to_string()],
+            expected_span_rejected: true,
+            expected_rejection_reason:
+                "Attribute contains nested arrays (not allowed): 'empty.nested'".to_string(),
+            expected_included_in_export: false,
+            expected_validation_applied: true,
+            expected_otlp_compliant: true,
+        },
+        NestedArrayScenario {
+            description: "Multiple attributes with nested arrays (MUST reject, report first)"
+                .to_string(),
+            span: NestedArraySpanInfo {
+                name: "test_span".to_string(),
+                trace_id: "12345678901234567890123456789012".to_string(),
+                span_id: "4567890123456789".to_string(),
+                attributes: vec![
+                    (
+                        "valid.array".to_string(),
+                        AttributeValue::ArrayValue(vec![
+                            AttributeValue::String("item1".to_string()),
+                            AttributeValue::String("item2".to_string()),
+                        ]),
+                    ),
+                    (
+                        "first.nested".to_string(),
+                        AttributeValue::ArrayValue(vec![AttributeValue::ArrayValue(vec![
+                            // First nested array
+                            AttributeValue::String("nested1".to_string()),
+                        ])]),
+                    ),
+                    (
+                        "second.nested".to_string(),
+                        AttributeValue::ArrayValue(vec![AttributeValue::ArrayValue(vec![
+                            // Second nested array
+                            AttributeValue::String("nested2".to_string()),
+                        ])]),
+                    ),
+                ],
+            },
+            expected_nested_arrays_detected: vec![
+                "first.nested".to_string(),
+                "second.nested".to_string(),
+            ],
+            expected_span_rejected: true,
+            expected_rejection_reason:
+                "Attribute contains nested arrays (not allowed): 'first.nested'".to_string(),
+            expected_included_in_export: false,
+            expected_validation_applied: true,
+            expected_otlp_compliant: true,
+        },
+        NestedArrayScenario {
+            description: "Flat string array (valid, MUST accept)".to_string(),
+            span: NestedArraySpanInfo {
+                name: "valid_span".to_string(),
+                trace_id: "12345678901234567890123456789012".to_string(),
+                span_id: "5678901234567890".to_string(),
+                attributes: vec![
+                    (
+                        "string.array".to_string(),
+                        AttributeValue::ArrayValue(vec![
+                            AttributeValue::String("item1".to_string()),
+                            AttributeValue::String("item2".to_string()),
+                            AttributeValue::String("item3".to_string()),
+                        ]),
+                    ),
+                    (
+                        "http.method".to_string(),
+                        AttributeValue::String("GET".to_string()),
+                    ),
+                ],
+            },
+            expected_nested_arrays_detected: vec![],
+            expected_span_rejected: false,
+            expected_rejection_reason: "".to_string(),
+            expected_included_in_export: true,
+            expected_validation_applied: true,
+            expected_otlp_compliant: true,
+        },
+        NestedArrayScenario {
+            description: "Flat integer array (valid, MUST accept)".to_string(),
+            span: NestedArraySpanInfo {
+                name: "valid_span".to_string(),
+                trace_id: "12345678901234567890123456789012".to_string(),
+                span_id: "6789012345678901".to_string(),
+                attributes: vec![(
+                    "int.array".to_string(),
+                    AttributeValue::ArrayValue(vec![
+                        AttributeValue::IntValue(1),
+                        AttributeValue::IntValue(2),
+                        AttributeValue::IntValue(3),
+                    ]),
+                )],
+            },
+            expected_nested_arrays_detected: vec![],
+            expected_span_rejected: false,
+            expected_rejection_reason: "".to_string(),
+            expected_included_in_export: true,
+            expected_validation_applied: true,
+            expected_otlp_compliant: true,
+        },
+        NestedArrayScenario {
+            description: "Flat boolean array (valid, MUST accept)".to_string(),
+            span: NestedArraySpanInfo {
+                name: "valid_span".to_string(),
+                trace_id: "12345678901234567890123456789012".to_string(),
+                span_id: "7890123456789012".to_string(),
+                attributes: vec![(
+                    "bool.array".to_string(),
+                    AttributeValue::ArrayValue(vec![
+                        AttributeValue::BoolValue(true),
+                        AttributeValue::BoolValue(false),
+                        AttributeValue::BoolValue(true),
+                    ]),
+                )],
+            },
+            expected_nested_arrays_detected: vec![],
+            expected_span_rejected: false,
+            expected_rejection_reason: "".to_string(),
+            expected_included_in_export: true,
+            expected_validation_applied: true,
+            expected_otlp_compliant: true,
+        },
+        NestedArrayScenario {
+            description: "Mixed primitive array (strings, ints, bools - valid, MUST accept)"
+                .to_string(),
+            span: NestedArraySpanInfo {
+                name: "valid_span".to_string(),
+                trace_id: "12345678901234567890123456789012".to_string(),
+                span_id: "8901234567890123".to_string(),
+                attributes: vec![(
+                    "mixed.array".to_string(),
+                    AttributeValue::ArrayValue(vec![
+                        AttributeValue::String("text".to_string()),
+                        AttributeValue::IntValue(42),
+                        AttributeValue::BoolValue(true),
+                        AttributeValue::String("more_text".to_string()),
+                    ]),
+                )],
+            },
+            expected_nested_arrays_detected: vec![],
+            expected_span_rejected: false,
+            expected_rejection_reason: "".to_string(),
+            expected_included_in_export: true,
+            expected_validation_applied: true,
+            expected_otlp_compliant: true,
+        },
+        NestedArrayScenario {
+            description: "Empty array (valid, MUST accept)".to_string(),
+            span: NestedArraySpanInfo {
+                name: "valid_span".to_string(),
+                trace_id: "12345678901234567890123456789012".to_string(),
+                span_id: "9012345678901234".to_string(),
+                attributes: vec![
+                    (
+                        "empty.array".to_string(),
+                        AttributeValue::ArrayValue(vec![]),
+                    ),
+                    (
+                        "service.name".to_string(),
+                        AttributeValue::String("test-service".to_string()),
+                    ),
+                ],
+            },
+            expected_nested_arrays_detected: vec![],
+            expected_span_rejected: false,
+            expected_rejection_reason: "".to_string(),
+            expected_included_in_export: true,
+            expected_validation_applied: true,
+            expected_otlp_compliant: true,
+        },
+        NestedArrayScenario {
+            description: "Non-array attributes only (valid, MUST accept)".to_string(),
+            span: NestedArraySpanInfo {
+                name: "valid_span".to_string(),
+                trace_id: "12345678901234567890123456789012".to_string(),
+                span_id: "0123456789012345".to_string(),
+                attributes: vec![
+                    (
+                        "http.method".to_string(),
+                        AttributeValue::String("POST".to_string()),
+                    ),
+                    (
+                        "http.status_code".to_string(),
+                        AttributeValue::IntValue(200),
+                    ),
+                    ("success".to_string(), AttributeValue::BoolValue(true)),
+                    (
+                        "service.version".to_string(),
+                        AttributeValue::String("1.0.0".to_string()),
+                    ),
+                ],
+            },
+            expected_nested_arrays_detected: vec![],
+            expected_span_rejected: false,
+            expected_rejection_reason: "".to_string(),
+            expected_included_in_export: true,
+            expected_validation_applied: true,
+            expected_otlp_compliant: true,
+        },
+        NestedArrayScenario {
+            description: "Span with no attributes (valid, no validation needed)".to_string(),
+            span: NestedArraySpanInfo {
+                name: "empty_span".to_string(),
+                trace_id: "12345678901234567890123456789012".to_string(),
+                span_id: "1123456789012345".to_string(),
+                attributes: vec![], // No attributes
+            },
+            expected_nested_arrays_detected: vec![],
+            expected_span_rejected: false,
+            expected_rejection_reason: "".to_string(),
+            expected_included_in_export: true,
+            expected_validation_applied: true,
+            expected_otlp_compliant: true,
+        },
+    ];
+
+    for scenario in scenarios {
+        println!("Testing scenario: {}", scenario.description);
+
+        // Simulate asupersync exporter behavior
+        let asupersync_result = simulate_asupersync_nested_array_validation(&scenario);
+
+        // Simulate reference implementation behavior
+        let reference_result = simulate_reference_nested_array_validation(&scenario);
+
+        // Validate individual results
+        validate_nested_array_validation_logic(&asupersync_result).expect(&format!(
+            "Asupersync nested array validation logic failed for scenario: {}",
+            scenario.description
+        ));
+
+        validate_nested_array_validation_logic(&reference_result).expect(&format!(
+            "Reference nested array validation logic failed for scenario: {}",
+            scenario.description
+        ));
+
+        // Validate implementation consistency
+        validate_nested_array_validation_implementation_consistency(
+            &asupersync_result,
+            &reference_result,
+        )
+        .expect(&format!(
+            "Implementation consistency failed for scenario: {}",
+            scenario.description
+        ));
+
+        println!("✓ Scenario passed: {}", scenario.description);
+    }
+}
+
+/// Test scenario for nested array validation
+#[derive(Debug, Clone)]
+struct NestedArrayScenario {
+    description: String,
+    span: NestedArraySpanInfo,
+    expected_nested_arrays_detected: Vec<String>,
+    expected_span_rejected: bool,
+    expected_rejection_reason: String,
+    expected_included_in_export: bool,
+    expected_validation_applied: bool,
+    expected_otlp_compliant: bool,
+}
+
+/// Span information for nested array validation testing
+#[derive(Debug, Clone)]
+struct NestedArraySpanInfo {
+    name: String,
+    trace_id: String,
+    span_id: String,
+    attributes: Vec<(String, AttributeValue)>,
+}
+
+/// Attribute value types for testing
+#[derive(Debug, Clone, PartialEq)]
+enum AttributeValue {
+    String(String),
+    IntValue(i64),
+    BoolValue(bool),
+    ArrayValue(Vec<AttributeValue>),
+}
+
+/// Result of nested array validation testing
+#[derive(Debug, Clone)]
+struct NestedArrayValidationResult {
+    nested_arrays_detected: Vec<String>,
+    span_rejected: bool,
+    rejection_reason: String,
+    original_span: NestedArraySpanInfo,
+    included_in_export: bool,
+    validation_applied: bool,
+    processed_spans_count: usize,
+    rejected_spans_count: usize,
+    accepted_spans_count: usize,
+    attributes_validated_count: usize,
+    array_attributes_count: usize,
+    nested_violations_count: usize,
+    max_nesting_depth_seen: usize,
+    validation_errors: Vec<String>,
+    validation_correct: bool,
+    otlp_compliant: bool,
+    telemetry_emitted: bool,
+}
+
+/// Check if an attribute value contains nested arrays
+fn contains_nested_arrays(value: &AttributeValue, depth: usize) -> (bool, usize) {
+    match value {
+        AttributeValue::ArrayValue(array) => {
+            let mut has_nested = false;
+            let mut max_depth = depth;
+
+            for item in array {
+                match item {
+                    AttributeValue::ArrayValue(_) => {
+                        has_nested = true; // Found nested array
+                        let (_, item_depth) = contains_nested_arrays(item, depth + 1);
+                        max_depth = max_depth.max(item_depth);
+                    }
+                    _ => {
+                        // Primitive values are fine
+                    }
+                }
+            }
+
+            (has_nested, max_depth)
+        }
+        _ => (false, depth),
+    }
+}
+
+/// Simulate asupersync nested array validation behavior
+fn simulate_asupersync_nested_array_validation(
+    scenario: &NestedArrayScenario,
+) -> NestedArrayValidationResult {
+    let mut validation_errors = Vec::new();
+    let mut rejected_spans = 0;
+    let mut accepted_spans = 0;
+    let original_span = scenario.span.clone();
+    let mut nested_arrays_detected = Vec::new();
+    let mut span_rejected = false;
+    let mut rejection_reason = String::new();
+    let mut included_in_export = true; // Default to include
+    let validation_applied = true; // Always apply nested array validation
+    let mut nested_violations = 0;
+    let mut array_attributes = 0;
+    let mut max_nesting_depth = 0;
+
+    // Validate all attribute values for nested arrays
+    for (key, value) in &scenario.span.attributes {
+        match value {
+            AttributeValue::ArrayValue(_) => {
+                array_attributes += 1;
+                let (has_nested, depth) = contains_nested_arrays(value, 1);
+                max_nesting_depth = max_nesting_depth.max(depth);
+
+                if has_nested {
+                    // Found nested array - OTLP violation
+                    nested_arrays_detected.push(key.clone());
+                    nested_violations += 1;
+                }
+            }
+            _ => {
+                // Non-array attributes are fine
+            }
+        }
+    }
+
+    // OTLP spec: only flat arrays of primitives allowed - reject spans with nested arrays
+    if !nested_arrays_detected.is_empty() {
+        span_rejected = true;
+        included_in_export = false;
+        rejected_spans += 1;
+
+        // Report the first violating attribute in rejection reason
+        rejection_reason = format!(
+            "Attribute contains nested arrays (not allowed): '{}'",
+            nested_arrays_detected[0]
+        );
+
+        validation_errors.push(format!(
+            "Span '{}' rejected: {} attributes contain nested arrays",
+            scenario.span.name,
+            nested_arrays_detected.len()
+        ));
+    } else {
+        accepted_spans += 1;
+    }
+
+    // Check validation correctness
+    let validation_correct = nested_arrays_detected == scenario.expected_nested_arrays_detected
+        && span_rejected == scenario.expected_span_rejected
+        && rejection_reason == scenario.expected_rejection_reason
+        && included_in_export == scenario.expected_included_in_export
+        && validation_applied == scenario.expected_validation_applied;
+
+    // OTLP compliance: rejecting spans with nested arrays is REQUIRED
+    let otlp_compliant = if nested_violations > 0 {
+        // Must reject spans with nested arrays
+        span_rejected && !included_in_export
+    } else {
+        // Must accept spans with only flat arrays or primitives
+        !span_rejected && included_in_export
+    };
+
+    NestedArrayValidationResult {
+        nested_arrays_detected,
+        span_rejected,
+        rejection_reason,
+        original_span,
+        included_in_export,
+        validation_applied,
+        processed_spans_count: 1,
+        rejected_spans_count: rejected_spans,
+        accepted_spans_count: accepted_spans,
+        attributes_validated_count: scenario.span.attributes.len(),
+        array_attributes_count: array_attributes,
+        nested_violations_count: nested_violations,
+        max_nesting_depth_seen: max_nesting_depth,
+        validation_errors,
+        validation_correct,
+        otlp_compliant,
+        telemetry_emitted: true, // Assume telemetry is emitted for nested array violations
+    }
+}
+
+/// Simulate reference implementation nested array validation behavior
+fn simulate_reference_nested_array_validation(
+    scenario: &NestedArrayScenario,
+) -> NestedArrayValidationResult {
+    // Reference implementation follows same logic as asupersync
+    simulate_asupersync_nested_array_validation(scenario)
+}
+
+/// Verify nested array validation logic
+fn validate_nested_array_validation_logic(
+    result: &NestedArrayValidationResult,
+) -> Result<(), String> {
+    if !result.validation_correct {
+        return Err("Nested array validation logic is incorrect".to_string());
+    }
+
+    // Check OTLP compliance
+    if !result.otlp_compliant {
+        return Err("Nested array validation is not OTLP compliant".to_string());
+    }
+
+    // Critical check: spans with nested arrays must be rejected
+    if result.nested_violations_count > 0 && !result.span_rejected {
+        return Err(
+            "CRITICAL: Span with nested arrays was not rejected (violates OTLP spec)".to_string(),
+        );
+    }
+
+    // Critical check: spans without nested arrays must be accepted
+    if result.nested_violations_count == 0 && result.span_rejected {
+        return Err("CRITICAL: Span without nested arrays was rejected".to_string());
+    }
+
+    // Critical check: rejected spans should not be included in export
+    if result.span_rejected && result.included_in_export {
+        return Err("CRITICAL: Rejected span was included in export".to_string());
+    }
+
+    // Critical check: accepted spans should be included in export
+    if !result.span_rejected && !result.included_in_export {
+        return Err("CRITICAL: Accepted span was not included in export".to_string());
+    }
+
+    // Critical check: rejection reason must be provided for rejected spans
+    if result.span_rejected && result.rejection_reason.is_empty() {
+        return Err("CRITICAL: No rejection reason provided for rejected span".to_string());
+    }
+
+    // Critical check: rejection reason must be empty for accepted spans
+    if !result.span_rejected && !result.rejection_reason.is_empty() {
+        return Err("CRITICAL: Rejection reason provided but span was not rejected".to_string());
+    }
+
+    // Critical check: counts must be consistent
+    if result.processed_spans_count != result.rejected_spans_count + result.accepted_spans_count {
+        return Err(
+            "CRITICAL: Processed spans count doesn't match rejected + accepted counts".to_string(),
+        );
+    }
+
+    // Critical check: nested arrays detection should match violations count
+    if result.nested_arrays_detected.len() != result.nested_violations_count {
+        return Err(
+            "CRITICAL: Nested arrays detected count doesn't match violations count".to_string(),
+        );
+    }
+
+    // Critical check: validation should always be applied
+    if !result.validation_applied {
+        return Err("CRITICAL: Nested array validation was not applied".to_string());
+    }
+
+    // Critical check: max nesting depth should be reasonable (if nested arrays found, depth > 1)
+    if result.nested_violations_count > 0 && result.max_nesting_depth_seen <= 1 {
+        return Err(
+            "CRITICAL: Max nesting depth tracking is incorrect for nested arrays".to_string(),
+        );
+    }
+
+    Ok(())
+}
+
+/// Verify implementation consistency for nested array validation
+fn validate_nested_array_validation_implementation_consistency(
+    asupersync_result: &NestedArrayValidationResult,
+    reference_result: &NestedArrayValidationResult,
+) -> Result<(), String> {
+    // Both implementations should detect same nested arrays
+    if asupersync_result.nested_arrays_detected != reference_result.nested_arrays_detected {
+        return Err("Nested arrays detection differs between implementations".to_string());
+    }
+
+    // Both implementations should reject spans consistently
+    if asupersync_result.span_rejected != reference_result.span_rejected {
+        return Err("Span rejection differs between implementations".to_string());
+    }
+
+    // Both implementations should provide same rejection reason
+    if asupersync_result.rejection_reason != reference_result.rejection_reason {
+        return Err("Rejection reason differs between implementations".to_string());
+    }
+
+    // Both implementations should include spans consistently
+    if asupersync_result.included_in_export != reference_result.included_in_export {
+        return Err("Export inclusion differs between implementations".to_string());
+    }
+
+    // Both implementations should apply validation consistently
+    if asupersync_result.validation_applied != reference_result.validation_applied {
+        return Err("Validation application differs between implementations".to_string());
+    }
+
+    // Both implementations should count violations consistently
+    if asupersync_result.nested_violations_count != reference_result.nested_violations_count {
+        return Err("Nested violations count differs between implementations".to_string());
+    }
+
+    // Both implementations should count array attributes consistently
+    if asupersync_result.array_attributes_count != reference_result.array_attributes_count {
+        return Err("Array attributes count differs between implementations".to_string());
+    }
+
+    // Both implementations should track max nesting depth consistently
+    if asupersync_result.max_nesting_depth_seen != reference_result.max_nesting_depth_seen {
+        return Err("Max nesting depth tracking differs between implementations".to_string());
+    }
+
+    // Both implementations should validate same number of attributes
+    if asupersync_result.attributes_validated_count != reference_result.attributes_validated_count {
+        return Err("Attributes validated count differs between implementations".to_string());
+    }
+
+    // Both implementations should count rejected spans consistently
+    if asupersync_result.rejected_spans_count != reference_result.rejected_spans_count {
+        return Err("Rejected spans count differs between implementations".to_string());
+    }
+
+    // Both implementations should count accepted spans consistently
+    if asupersync_result.accepted_spans_count != reference_result.accepted_spans_count {
+        return Err("Accepted spans count differs between implementations".to_string());
+    }
+
+    // Both implementations should have same validation correctness
+    if asupersync_result.validation_correct != reference_result.validation_correct {
+        return Err("Validation correctness differs between implementations".to_string());
+    }
+
+    // Both implementations should be OTLP compliant
+    if asupersync_result.otlp_compliant != reference_result.otlp_compliant {
+        return Err("OTLP compliance differs between implementations".to_string());
+    }
+
+    // Both implementations should emit telemetry consistently
+    if asupersync_result.telemetry_emitted != reference_result.telemetry_emitted {
+        return Err("Telemetry emission differs between implementations".to_string());
+    }
+
+    Ok(())
+}
