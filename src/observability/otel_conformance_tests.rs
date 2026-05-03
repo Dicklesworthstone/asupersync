@@ -42162,4 +42162,566 @@ mod otlp_122_tests {
         println!("  - Service and method format validation (protobuf/gRPC conventions)");
         println!("  - Additional recommended gRPC attributes detected and validated");
     }
+
+    /// OTLP-144 conformance test: Kafka producer instrumentation scope partition requirement.
+    ///
+    /// When an exporter encounters a span with kind=PRODUCER and instrumentation.scope.name="messaging.kafka",
+    /// the messaging.kafka.message.partition attribute MUST be set if the partition is known. This ensures
+    /// proper traceability and correlation for Kafka message production operations in distributed messaging
+    /// scenarios where partition information is available.
+    #[test]
+    fn otlp_144_kafka_producer_partition_conformance() {
+        println!("Testing OTLP-144: Kafka producer instrumentation scope partition requirement...");
+
+        let test_scenarios = vec![
+            KafkaProducerPartitionScenario {
+                description: "valid_kafka_producer_with_partition".to_string(),
+                span_kind: SpanKind::Producer,
+                instrumentation_scope_name: "messaging.kafka".to_string(),
+                instrumentation_scope_version: Some("1.0.0".to_string()),
+                span_attributes: vec![
+                    ("messaging.kafka.message.partition".to_string(), AnyValue::IntValue(3)),
+                    ("messaging.system".to_string(), AnyValue::StringValue("kafka".to_string())),
+                    ("messaging.destination.name".to_string(), AnyValue::StringValue("user.events".to_string())),
+                    ("messaging.kafka.message.key".to_string(), AnyValue::StringValue("user-12345".to_string())),
+                    ("messaging.kafka.message.offset".to_string(), AnyValue::IntValue(98765)),
+                ],
+                partition_is_known: true,
+                should_be_valid: true,
+                expected_partition: Some(3),
+            },
+            KafkaProducerPartitionScenario {
+                description: "kafka_producer_missing_partition_when_known".to_string(),
+                span_kind: SpanKind::Producer,
+                instrumentation_scope_name: "messaging.kafka".to_string(),
+                instrumentation_scope_version: Some("1.0.0".to_string()),
+                span_attributes: vec![
+                    ("messaging.system".to_string(), AnyValue::StringValue("kafka".to_string())),
+                    ("messaging.destination.name".to_string(), AnyValue::StringValue("user.events".to_string())),
+                    ("messaging.kafka.message.key".to_string(), AnyValue::StringValue("user-12345".to_string())),
+                    // Missing messaging.kafka.message.partition when partition is known - should be invalid
+                ],
+                partition_is_known: true,
+                should_be_valid: false,
+                expected_partition: None,
+            },
+            KafkaProducerPartitionScenario {
+                description: "kafka_producer_partition_unknown_no_requirement".to_string(),
+                span_kind: SpanKind::Producer,
+                instrumentation_scope_name: "messaging.kafka".to_string(),
+                instrumentation_scope_version: Some("1.0.0".to_string()),
+                span_attributes: vec![
+                    ("messaging.system".to_string(), AnyValue::StringValue("kafka".to_string())),
+                    ("messaging.destination.name".to_string(), AnyValue::StringValue("user.events".to_string())),
+                    ("messaging.kafka.message.key".to_string(), AnyValue::StringValue("user-12345".to_string())),
+                    // No partition attribute when partition is unknown - should be valid
+                ],
+                partition_is_known: false,
+                should_be_valid: true,
+                expected_partition: None,
+            },
+            KafkaProducerPartitionScenario {
+                description: "kafka_producer_non_integer_partition".to_string(),
+                span_kind: SpanKind::Producer,
+                instrumentation_scope_name: "messaging.kafka".to_string(),
+                instrumentation_scope_version: Some("1.0.0".to_string()),
+                span_attributes: vec![
+                    ("messaging.kafka.message.partition".to_string(), AnyValue::StringValue("3".to_string())), // Wrong type
+                    ("messaging.system".to_string(), AnyValue::StringValue("kafka".to_string())),
+                    ("messaging.destination.name".to_string(), AnyValue::StringValue("user.events".to_string())),
+                ],
+                partition_is_known: true,
+                should_be_valid: false,
+                expected_partition: None,
+            },
+            KafkaProducerPartitionScenario {
+                description: "kafka_producer_negative_partition".to_string(),
+                span_kind: SpanKind::Producer,
+                instrumentation_scope_name: "messaging.kafka".to_string(),
+                instrumentation_scope_version: Some("1.0.0".to_string()),
+                span_attributes: vec![
+                    ("messaging.kafka.message.partition".to_string(), AnyValue::IntValue(-1)), // Negative partition
+                    ("messaging.system".to_string(), AnyValue::StringValue("kafka".to_string())),
+                    ("messaging.destination.name".to_string(), AnyValue::StringValue("user.events".to_string())),
+                ],
+                partition_is_known: true,
+                should_be_valid: false,
+                expected_partition: None,
+            },
+            KafkaProducerPartitionScenario {
+                description: "non_kafka_producer_scope_no_requirement".to_string(),
+                span_kind: SpanKind::Producer,
+                instrumentation_scope_name: "messaging.rabbitmq".to_string(), // Not Kafka
+                instrumentation_scope_version: Some("1.0.0".to_string()),
+                span_attributes: vec![
+                    ("messaging.system".to_string(), AnyValue::StringValue("rabbitmq".to_string())),
+                    ("messaging.destination.name".to_string(), AnyValue::StringValue("user.events".to_string())),
+                ],
+                partition_is_known: true,
+                should_be_valid: true, // No partition requirement for non-Kafka
+                expected_partition: None,
+            },
+            KafkaProducerPartitionScenario {
+                description: "kafka_consumer_scope_no_requirement".to_string(),
+                span_kind: SpanKind::Consumer, // Not producer
+                instrumentation_scope_name: "messaging.kafka".to_string(),
+                instrumentation_scope_version: Some("1.0.0".to_string()),
+                span_attributes: vec![
+                    ("messaging.system".to_string(), AnyValue::StringValue("kafka".to_string())),
+                    ("messaging.destination.name".to_string(), AnyValue::StringValue("user.events".to_string())),
+                    // No partition requirement for consumer spans
+                ],
+                partition_is_known: true,
+                should_be_valid: true, // No requirement for consumer spans
+                expected_partition: None,
+            },
+            KafkaProducerPartitionScenario {
+                description: "valid_kafka_producer_zero_partition".to_string(),
+                span_kind: SpanKind::Producer,
+                instrumentation_scope_name: "messaging.kafka".to_string(),
+                instrumentation_scope_version: Some("1.0.0".to_string()),
+                span_attributes: vec![
+                    ("messaging.kafka.message.partition".to_string(), AnyValue::IntValue(0)), // Valid zero partition
+                    ("messaging.system".to_string(), AnyValue::StringValue("kafka".to_string())),
+                    ("messaging.destination.name".to_string(), AnyValue::StringValue("logs".to_string())),
+                    ("messaging.kafka.consumer.group".to_string(), AnyValue::StringValue("log-processors".to_string())),
+                ],
+                partition_is_known: true,
+                should_be_valid: true,
+                expected_partition: Some(0),
+            },
+            KafkaProducerPartitionScenario {
+                description: "kafka_producer_large_partition_number".to_string(),
+                span_kind: SpanKind::Producer,
+                instrumentation_scope_name: "messaging.kafka".to_string(),
+                instrumentation_scope_version: Some("1.0.0".to_string()),
+                span_attributes: vec![
+                    ("messaging.kafka.message.partition".to_string(), AnyValue::IntValue(4095)), // Large but valid
+                    ("messaging.system".to_string(), AnyValue::StringValue("kafka".to_string())),
+                    ("messaging.destination.name".to_string(), AnyValue::StringValue("high.volume.events".to_string())),
+                    ("messaging.kafka.message.key".to_string(), AnyValue::StringValue("event-999999".to_string())),
+                ],
+                partition_is_known: true,
+                should_be_valid: true,
+                expected_partition: Some(4095),
+            },
+            KafkaProducerPartitionScenario {
+                description: "kafka_producer_case_sensitive_scope_check".to_string(),
+                span_kind: SpanKind::Producer,
+                instrumentation_scope_name: "MESSAGING.KAFKA".to_string(), // Wrong case
+                instrumentation_scope_version: Some("1.0.0".to_string()),
+                span_attributes: vec![
+                    ("messaging.system".to_string(), AnyValue::StringValue("kafka".to_string())),
+                    ("messaging.destination.name".to_string(), AnyValue::StringValue("events".to_string())),
+                ],
+                partition_is_known: true,
+                should_be_valid: true, // Not exact "messaging.kafka" so no requirement
+                expected_partition: None,
+            },
+            KafkaProducerPartitionScenario {
+                description: "kafka_producer_with_full_kafka_attributes".to_string(),
+                span_kind: SpanKind::Producer,
+                instrumentation_scope_name: "messaging.kafka".to_string(),
+                instrumentation_scope_version: Some("2.1.0".to_string()),
+                span_attributes: vec![
+                    ("messaging.kafka.message.partition".to_string(), AnyValue::IntValue(7)),
+                    ("messaging.system".to_string(), AnyValue::StringValue("kafka".to_string())),
+                    ("messaging.destination.name".to_string(), AnyValue::StringValue("transaction.events".to_string())),
+                    ("messaging.kafka.message.key".to_string(), AnyValue::StringValue("txn-abc123".to_string())),
+                    ("messaging.kafka.message.offset".to_string(), AnyValue::IntValue(123456789)),
+                    ("messaging.kafka.consumer.group".to_string(), AnyValue::StringValue("transaction-processors".to_string())),
+                    ("messaging.kafka.client_id".to_string(), AnyValue::StringValue("producer-01".to_string())),
+                    ("messaging.kafka.destination.partition_count".to_string(), AnyValue::IntValue(16)),
+                    ("net.peer.name".to_string(), AnyValue::StringValue("kafka.example.com".to_string())),
+                    ("net.peer.port".to_string(), AnyValue::IntValue(9092)),
+                ],
+                partition_is_known: true,
+                should_be_valid: true,
+                expected_partition: Some(7),
+            },
+            KafkaProducerPartitionScenario {
+                description: "kafka_producer_scope_variation_no_requirement".to_string(),
+                span_kind: SpanKind::Producer,
+                instrumentation_scope_name: "messaging.kafka.producer".to_string(), // Has suffix
+                instrumentation_scope_version: Some("1.0.0".to_string()),
+                span_attributes: vec![
+                    ("messaging.system".to_string(), AnyValue::StringValue("kafka".to_string())),
+                    ("producer.type".to_string(), AnyValue::StringValue("async".to_string())),
+                ],
+                partition_is_known: true,
+                should_be_valid: true, // Not exact "messaging.kafka" so no requirement
+                expected_partition: None,
+            },
+            KafkaProducerPartitionScenario {
+                description: "kafka_producer_partition_unknown_but_present".to_string(),
+                span_kind: SpanKind::Producer,
+                instrumentation_scope_name: "messaging.kafka".to_string(),
+                instrumentation_scope_version: None, // No version
+                span_attributes: vec![
+                    ("messaging.kafka.message.partition".to_string(), AnyValue::IntValue(5)),
+                    ("messaging.system".to_string(), AnyValue::StringValue("kafka".to_string())),
+                    ("messaging.destination.name".to_string(), AnyValue::StringValue("events".to_string())),
+                ],
+                partition_is_known: false, // Partition unknown but attribute present (valid)
+                should_be_valid: true,
+                expected_partition: Some(5),
+            },
+        ];
+
+        /// Test scenario for Kafka producer partition validation
+        #[derive(Debug, Clone)]
+        struct KafkaProducerPartitionScenario {
+            description: String,
+            span_kind: SpanKind,
+            instrumentation_scope_name: String,
+            instrumentation_scope_version: Option<String>,
+            span_attributes: Vec<(String, AnyValue)>,
+            partition_is_known: bool, // Whether the partition is known at producer time
+            should_be_valid: bool,
+            expected_partition: Option<i64>,
+        }
+
+        /// Span data with instrumentation scope for Kafka producer testing
+        #[derive(Debug, Clone)]
+        struct KafkaProducerSpanData {
+            name: String,
+            kind: SpanKind,
+            instrumentation_scope: InstrumentationScope,
+            attributes: HashMap<String, AnyValue>,
+            partition_is_known: bool,
+        }
+
+        impl KafkaProducerSpanData {
+            fn from_scenario(scenario: &KafkaProducerPartitionScenario) -> Self {
+                let mut attributes = HashMap::new();
+                for (key, value) in &scenario.span_attributes {
+                    attributes.insert(key.clone(), value.clone());
+                }
+
+                Self {
+                    name: format!("kafka_producer_span_{}", scenario.description),
+                    kind: scenario.span_kind.clone(),
+                    instrumentation_scope: InstrumentationScope {
+                        name: scenario.instrumentation_scope_name.clone(),
+                        version: scenario.instrumentation_scope_version.clone(),
+                        attributes: vec![],
+                    },
+                    attributes,
+                    partition_is_known: scenario.partition_is_known,
+                }
+            }
+        }
+
+        /// Result of Kafka producer partition validation
+        #[derive(Debug)]
+        enum KafkaProducerValidationResult {
+            Valid {
+                partition: Option<i64>,
+                additional_kafka_attributes: usize,
+            },
+            Invalid {
+                violations: Vec<String>,
+                missing_attributes: Vec<String>,
+            },
+            NotApplicable {
+                reason: String,
+            },
+        }
+
+        /// Validates Kafka producer partition requirement conformance
+        fn validate_kafka_producer_partition_conformance(
+            scenario: &KafkaProducerPartitionScenario,
+        ) -> Result<(), String> {
+            let span_data = KafkaProducerSpanData::from_scenario(scenario);
+            let validation_result = validate_kafka_producer_partition(&span_data);
+
+            match (&validation_result, scenario.should_be_valid) {
+                (KafkaProducerValidationResult::Valid { partition, .. }, true) => {
+                    // Verify expected partition matches
+                    if let Some(expected_partition) = scenario.expected_partition {
+                        match partition {
+                            Some(actual_partition) if *actual_partition == expected_partition => {
+                                println!("✓ Kafka producer span has correct partition: {}", actual_partition);
+                            }
+                            Some(actual_partition) => {
+                                return Err(format!(
+                                    "Partition mismatch: expected {}, got {}",
+                                    expected_partition, actual_partition
+                                ));
+                            }
+                            None => {
+                                return Err(format!(
+                                    "Expected partition {} but none found",
+                                    expected_partition
+                                ));
+                            }
+                        }
+                    } else {
+                        // No expected partition - ensure none present when not required
+                        if partition.is_some() && requires_partition_if_known(&span_data) && span_data.partition_is_known {
+                            return Err("Unexpected partition found when none expected".to_string());
+                        }
+                    }
+                }
+                (KafkaProducerValidationResult::Invalid { .. }, false) => {
+                    println!("✓ Invalid Kafka producer span correctly rejected");
+                }
+                (KafkaProducerValidationResult::NotApplicable { reason }, true) => {
+                    println!("✓ Partition requirement not applicable: {}", reason);
+                }
+                (KafkaProducerValidationResult::Valid { .. }, false) => {
+                    return Err("Invalid span was incorrectly accepted".to_string());
+                }
+                (KafkaProducerValidationResult::Invalid { violations, .. }, true) => {
+                    return Err(format!("Valid span was incorrectly rejected: {:?}", violations));
+                }
+                (KafkaProducerValidationResult::NotApplicable { .. }, false) => {
+                    return Err("Expected validation failure but got not applicable".to_string());
+                }
+            }
+
+            Ok(())
+        }
+
+        /// Validates that Kafka producer spans have required partition attribute when known
+        fn validate_kafka_producer_partition(span_data: &KafkaProducerSpanData) -> KafkaProducerValidationResult {
+            // Check if this span requires partition attribute when known
+            if !requires_partition_if_known(span_data) {
+                return KafkaProducerValidationResult::NotApplicable {
+                    reason: format!(
+                        "Span kind {:?} with scope '{}' doesn't require messaging.kafka.message.partition",
+                        span_data.kind, span_data.instrumentation_scope.name
+                    ),
+                };
+            }
+
+            let mut violations = Vec::new();
+            let mut missing_attributes = Vec::new();
+
+            // Extract and validate messaging.kafka.message.partition attribute
+            let partition = match span_data.attributes.get("messaging.kafka.message.partition") {
+                Some(AnyValue::IntValue(partition_val)) if *partition_val >= 0 => {
+                    Some(*partition_val)
+                }
+                Some(AnyValue::IntValue(partition_val)) if *partition_val < 0 => {
+                    violations.push(format!("messaging.kafka.message.partition must be non-negative, got: {}", partition_val));
+                    None
+                }
+                Some(_) => {
+                    violations.push("messaging.kafka.message.partition attribute must be an integer value".to_string());
+                    None
+                }
+                None => {
+                    if span_data.partition_is_known {
+                        violations.push("OTLP-144: Kafka producer span missing required messaging.kafka.message.partition attribute when partition is known".to_string());
+                        missing_attributes.push("messaging.kafka.message.partition".to_string());
+                    }
+                    None
+                }
+            };
+
+            // Validate partition bounds (Kafka partitions are typically bounded)
+            if let Some(partition_val) = partition {
+                if partition_val > 100_000 {
+                    println!("⚠ Unusually large partition number: {} (typical max ~10,000)", partition_val);
+                }
+            }
+
+            // Check for recommended Kafka attributes
+            let recommended_kafka_attrs = [
+                "messaging.system",
+                "messaging.destination.name",
+                "messaging.kafka.message.key",
+                "messaging.kafka.message.offset"
+            ];
+
+            let mut kafka_attrs_present = 0;
+            for attr in &recommended_kafka_attrs {
+                if span_data.attributes.contains_key(*attr) {
+                    kafka_attrs_present += 1;
+                } else {
+                    println!("⚠ Recommended Kafka attribute '{}' not present", attr);
+                }
+            }
+
+            // Verify messaging.system is set to "kafka" if present
+            if let Some(AnyValue::StringValue(system)) = span_data.attributes.get("messaging.system") {
+                if system != "kafka" {
+                    violations.push(format!("messaging.system should be 'kafka' for Kafka producer spans, got: '{}'", system));
+                }
+            }
+
+            // Additional Kafka-specific validations
+            if let Some(AnyValue::StringValue(dest_name)) = span_data.attributes.get("messaging.destination.name") {
+                if dest_name.is_empty() {
+                    violations.push("messaging.destination.name should not be empty for Kafka spans".to_string());
+                }
+            }
+
+            // Check for invalid partition count relationship
+            if let (Some(partition_val), Some(AnyValue::IntValue(partition_count))) =
+                (partition, span_data.attributes.get("messaging.kafka.destination.partition_count")) {
+                if partition_val >= *partition_count {
+                    violations.push(format!(
+                        "messaging.kafka.message.partition ({}) should be less than partition_count ({})",
+                        partition_val, partition_count
+                    ));
+                }
+            }
+
+            if !violations.is_empty() {
+                KafkaProducerValidationResult::Invalid {
+                    violations,
+                    missing_attributes,
+                }
+            } else {
+                KafkaProducerValidationResult::Valid {
+                    partition,
+                    additional_kafka_attributes: kafka_attrs_present,
+                }
+            }
+        }
+
+        /// Determines if a span requires partition attribute when partition is known
+        fn requires_partition_if_known(span_data: &KafkaProducerSpanData) -> bool {
+            // OTLP-144: Only PRODUCER spans with instrumentation scope "messaging.kafka" require partition when known
+            span_data.kind == SpanKind::Producer
+                && span_data.instrumentation_scope.name == "messaging.kafka"
+        }
+
+        // Execute OTLP-144 conformance validation for all scenarios
+        let mut passed_scenarios = 0;
+        let total_scenarios = test_scenarios.len();
+
+        for scenario in &test_scenarios {
+            match validate_kafka_producer_partition_conformance(scenario) {
+                Ok(()) => {
+                    passed_scenarios += 1;
+                    println!("✓ OTLP-144 conformance verified for {}", scenario.description);
+                }
+                Err(error_msg) => {
+                    panic!(
+                        "OTLP-144 conformance test FAILED for {}: {}",
+                        scenario.description, error_msg
+                    );
+                }
+            }
+        }
+
+        assert_eq!(
+            passed_scenarios, total_scenarios,
+            "All OTLP-144 Kafka producer partition scenarios must pass"
+        );
+
+        // Additional edge case testing
+        println!("Testing Kafka producer partition edge cases...");
+
+        // Test with exactly "messaging.kafka" scope (case sensitive)
+        let edge_cases = vec![
+            ("messaging.kafka", true),       // Exact match - requires partition when known
+            ("messaging.Kafka", false),      // Wrong case - no requirement
+            ("messaging.kafka.producer", false), // Suffix - no requirement
+            ("my.messaging.kafka", false),   // Prefix - no requirement
+            ("kafka", false),                // Partial match - no requirement
+        ];
+
+        for (scope_name, should_require) in edge_cases {
+            let mut test_attributes = HashMap::new();
+            test_attributes.insert("messaging.system".to_string(), AnyValue::StringValue("kafka".to_string()));
+            test_attributes.insert("messaging.destination.name".to_string(), AnyValue::StringValue("test.topic".to_string()));
+
+            if should_require {
+                test_attributes.insert("messaging.kafka.message.partition".to_string(), AnyValue::IntValue(1));
+            }
+
+            let edge_span = KafkaProducerSpanData {
+                name: format!("edge_case_test_{}", scope_name.replace('.', "_")),
+                kind: SpanKind::Producer,
+                instrumentation_scope: InstrumentationScope {
+                    name: scope_name.to_string(),
+                    version: Some("1.0.0".to_string()),
+                    attributes: vec![],
+                },
+                attributes: test_attributes,
+                partition_is_known: true, // Test when partition is known
+            };
+
+            let requires_partition = requires_partition_if_known(&edge_span);
+            assert_eq!(
+                requires_partition, should_require,
+                "Partition requirement check failed for scope '{}'",
+                scope_name
+            );
+
+            if should_require {
+                match validate_kafka_producer_partition(&edge_span) {
+                    KafkaProducerValidationResult::Valid { partition, .. } => {
+                        assert!(partition.is_some(), "Should have partition for scope '{}'", scope_name);
+                        println!("✓ Edge case '{}' correctly requires and validates partition", scope_name);
+                    }
+                    _ => panic!("Edge case '{}' should be valid with partition", scope_name),
+                }
+            } else {
+                match validate_kafka_producer_partition(&edge_span) {
+                    KafkaProducerValidationResult::NotApplicable { .. } => {
+                        println!("✓ Edge case '{}' correctly identified as not applicable", scope_name);
+                    }
+                    _ => panic!("Edge case '{}' should not require partition", scope_name),
+                }
+            }
+        }
+
+        // Test partition known vs unknown scenarios
+        println!("Testing partition known vs unknown scenarios...");
+        let known_tests = vec![
+            ("partition_known_missing_attr", true, false, false),   // Known, missing attr - invalid
+            ("partition_known_with_attr", true, true, true),        // Known, with attr - valid
+            ("partition_unknown_missing_attr", false, false, true), // Unknown, missing attr - valid
+            ("partition_unknown_with_attr", false, true, true),     // Unknown, with attr - valid
+        ];
+
+        for (test_name, partition_known, has_partition_attr, should_be_valid) in known_tests {
+            let mut test_attributes = HashMap::new();
+            test_attributes.insert("messaging.system".to_string(), AnyValue::StringValue("kafka".to_string()));
+            test_attributes.insert("messaging.destination.name".to_string(), AnyValue::StringValue("test.events".to_string()));
+
+            if has_partition_attr {
+                test_attributes.insert("messaging.kafka.message.partition".to_string(), AnyValue::IntValue(2));
+            }
+
+            let test_span = KafkaProducerSpanData {
+                name: format!("known_test_{}", test_name),
+                kind: SpanKind::Producer,
+                instrumentation_scope: InstrumentationScope {
+                    name: "messaging.kafka".to_string(),
+                    version: Some("1.0.0".to_string()),
+                    attributes: vec![],
+                },
+                attributes: test_attributes,
+                partition_is_known: partition_known,
+            };
+
+            let result = validate_kafka_producer_partition(&test_span);
+            let is_valid = matches!(result, KafkaProducerValidationResult::Valid { .. });
+
+            assert_eq!(
+                is_valid, should_be_valid,
+                "Known test '{}' validation mismatch: expected {}, got {}",
+                test_name, should_be_valid, is_valid
+            );
+
+            println!("✓ Known test '{}' correctly evaluated as {}",
+                    test_name, if is_valid { "valid" } else { "invalid" });
+        }
+
+        println!("✓ OTLP-144: Kafka producer partition requirement conformance verified");
+        println!("  - PRODUCER spans with 'messaging.kafka' scope require partition when known");
+        println!("  - Non-Kafka producer scopes exempt from requirement");
+        println!("  - Consumer spans exempt from requirement");
+        println!("  - Case-sensitive scope name matching enforced");
+        println!("  - Negative partition values rejected");
+        println!("  - Non-integer partition values rejected");
+        println!("  - Partition bounds validation and relationship checks");
+        println!("  - Additional recommended Kafka attributes detected and validated");
+    }
 }
