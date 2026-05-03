@@ -117,11 +117,31 @@ It freezes:
 The proof harness emits an operator-readable composition report with:
 
 - env fingerprint (`host_class`, `worker_count`, `memory_gib`, `evidence_stream_id`, `lab_runtime`)
-- selected controller set
+- active controller set
+- knob writes derived from the decision trace
 - fallback activation counts
 - decision trace entries with ledger ticks
+- decision-rate mismatch summaries when cadence assumptions are violated
+- fallback churn counts when conservative fallback toggles repeatedly
 - explicit `safe` or `do_not_compose` verdict per scenario
+- exact conservative-baseline retention when required evidence is missing
 - explanation of why the pair is allowed or blocked
+
+Deterministic replay scenarios currently required:
+
+1. `AA023-CONTROLLER-INTERFERENCE-STABLE`
+   - scheduler retuning stays 4x slower than brownout feedback
+   - no oscillation
+   - no fallback churn
+2. `AA023-CONTROLLER-INTERFERENCE-FORBIDDEN`
+   - same-knob admission pair is rejected before replay
+   - emits rejected pairing and `do_not_compose`
+3. `AA023-CONTROLLER-INTERFERENCE-OSCILLATION`
+   - scheduler retuning illegally collapses to the same cadence as brownout decisions
+   - emits decision-rate mismatch, oscillation detection, and fallback churn
+4. `AA023-CONTROLLER-INTERFERENCE-MISSING-EVIDENCE-FALLBACK`
+   - shared evidence is missing
+   - emits conservative-baseline retention with no composed action applied
 
 ## Comparator-Smoke Runner
 
