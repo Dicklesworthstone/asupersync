@@ -24,7 +24,9 @@ use crate::record::{
     region::RegionState,
     task::TaskState,
 };
-use crate::runtime::config::{LeakEscalation, ObligationLeakResponse, RuntimeCapacityHints};
+use crate::runtime::config::{
+    LeakEscalation, ObligationLeakResponse, RuntimeCapacityHints, TraceStorageProfile,
+};
 use crate::runtime::io_driver::{IoDriver, IoDriverHandle};
 use crate::runtime::reactor::Reactor;
 use crate::runtime::resource_monitor::{
@@ -621,20 +623,11 @@ impl std::fmt::Debug for RuntimeState {
 impl RuntimeState {
     const RECENTLY_CLOSED_REGION_CAPACITY: usize = 4096;
 
-    /// Creates a new empty runtime state without a reactor.
-    ///
-    /// This is equivalent to [`without_reactor()`](Self::without_reactor) and creates
-    /// a runtime suitable for Lab mode or pure computation without I/O.
-    #[must_use]
-    pub fn new() -> Self {
-        Self::new_with_metrics(Arc::new(NoOpMetrics))
-    }
-
-    /// Creates a new runtime state with an explicit metrics provider.
-    #[must_use]
-    pub fn new_with_metrics(metrics: Arc<dyn MetricsProvider>) -> Self {
-        let capacity_hints = RuntimeCapacityHints::default();
-
+    fn new_with_layout(
+        capacity_hints: RuntimeCapacityHints,
+        trace_capacity: usize,
+        metrics: Arc<dyn MetricsProvider>,
+    ) -> Self {
         Self {
             instance_id: NEXT_RUNTIME_INSTANCE_ID.fetch_add(1, Ordering::Relaxed),
             regions: RegionTable::with_capacity(capacity_hints.region_capacity),
@@ -642,7 +635,7 @@ impl RuntimeState {
             obligations: ObligationTable::with_capacity(capacity_hints.obligation_capacity),
             now: Time::ZERO,
             root_region: None,
-            trace: TraceBufferHandle::new(4096),
+            trace: TraceBufferHandle::new(trace_capacity),
             metrics,
             io_driver: None,
             timer_driver: None,
@@ -682,6 +675,25 @@ impl RuntimeState {
             debt_monitor: Arc::new(crate::observability::CancellationDebtMonitor::default()),
             resource_monitor: Arc::new(ResourceMonitor::new(MonitorConfig::default())),
         }
+    }
+
+    /// Creates a new empty runtime state without a reactor.
+    ///
+    /// This is equivalent to [`without_reactor()`](Self::without_reactor) and creates
+    /// a runtime suitable for Lab mode or pure computation without I/O.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::new_with_metrics(Arc::new(NoOpMetrics))
+    }
+
+    /// Creates a new runtime state with an explicit metrics provider.
+    #[must_use]
+    pub fn new_with_metrics(metrics: Arc<dyn MetricsProvider>) -> Self {
+        Self::new_with_layout(
+            RuntimeCapacityHints::default(),
+            TraceStorageProfile::Default.trace_buffer_capacity(),
+            metrics,
+        )
     }
 
     /// Returns the effective initial table capacities used by this runtime state.
@@ -763,53 +775,29 @@ impl RuntimeState {
         obligation_capacity: usize,
         metrics: Arc<dyn MetricsProvider>,
     ) -> Self {
-        Self {
-            instance_id: NEXT_RUNTIME_INSTANCE_ID.fetch_add(1, Ordering::Relaxed),
-            regions: RegionTable::with_capacity(region_capacity),
-            tasks: TaskTable::with_capacity(task_capacity),
-            obligations: ObligationTable::with_capacity(obligation_capacity),
-            now: Time::ZERO,
-            root_region: None,
-            trace: TraceBufferHandle::new(4096),
+        Self::with_capacity_hints_and_trace_capacity(
+            task_capacity,
+            region_capacity,
+            obligation_capacity,
+            TraceStorageProfile::Default.trace_buffer_capacity(),
             metrics,
-            io_driver: None,
-            timer_driver: None,
-            logical_clock_mode: LogicalClockMode::Lamport,
-            cancel_attribution: CancelAttributionConfig::default(),
-            entropy_source: Arc::new(OsEntropy),
-            observability: None,
-            blocking_pool: None,
-            // br-asupersync-qp2tfx: internal constructors Panic on obligation
-            // leak so the lab/test paths surface bugs the same way the
-            // user-facing default (Fail, set in br-gi61n1) does.
-            obligation_leak_response: ObligationLeakResponse::Panic,
-            leak_escalation: None,
-            leak_count: 0,
-            handling_leaks: 0,
-            in_flight_leak_ids: HashSet::new(),
-            finalizing_regions: SmallVec::new(),
-            recently_closed_regions: HashSet::new(),
-            recently_closed_region_outcomes: HashMap::new(),
-            recently_closed_region_order: VecDeque::new(),
-            pending_finalizer_ids: HashMap::new(),
-            async_finalizer_tasks: HashMap::new(),
-            active_async_finalizers: HashMap::new(),
-            finalizer_history: Vec::new(),
-            loser_drain_history: LoserDrainHistoryRecorder::new_handle(),
-            next_finalizer_id: 0,
-            region_table_epoch: EpochId::GENESIS,
-            task_table_epoch: EpochId::GENESIS,
-            obligation_table_epoch: EpochId::GENESIS,
-            epoch_tracker: super::epoch_tracker::EpochConsistencyTracker::new(),
-            state_verifier: Arc::new(super::state_verifier::StateTransitionVerifier::new(
-                super::state_verifier::StateVerifierConfig::default(),
-            )),
-            cancel_protocol_validator: Arc::new(parking_lot::Mutex::new(
-                CancelProtocolValidator::new(CancelValidationLevel::Basic),
-            )),
-            debt_monitor: Arc::new(crate::observability::CancellationDebtMonitor::default()),
-            resource_monitor: Arc::new(ResourceMonitor::new(MonitorConfig::default())),
-        }
+        )
+    }
+
+    /// Creates a runtime state with custom arena and trace-buffer capacities.
+    #[must_use]
+    pub fn with_capacity_hints_and_trace_capacity(
+        task_capacity: usize,
+        region_capacity: usize,
+        obligation_capacity: usize,
+        trace_capacity: usize,
+        metrics: Arc<dyn MetricsProvider>,
+    ) -> Self {
+        Self::new_with_layout(
+            RuntimeCapacityHints::new(task_capacity, region_capacity, obligation_capacity),
+            trace_capacity,
+            metrics,
+        )
     }
 
     /// Creates a runtime state without a reactor (Lab mode).
@@ -1099,6 +1087,12 @@ impl RuntimeState {
     #[must_use]
     pub fn trace_handle(&self) -> TraceBufferHandle {
         self.trace.clone()
+    }
+
+    /// Returns the configured hot trace-ring capacity.
+    #[must_use]
+    pub fn trace_buffer_capacity(&self) -> usize {
+        self.trace.capacity()
     }
 
     /// Returns the stable identity of this runtime state instance.

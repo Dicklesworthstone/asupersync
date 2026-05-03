@@ -176,7 +176,7 @@ pub use builder::{
     BrowserWorkerFallbackTarget, DeadlineMonitoringBuilder, JoinHandle, Runtime, RuntimeBuilder,
     RuntimeHandle,
 };
-pub use config::{BlockingPoolConfig, RuntimeConfig};
+pub use config::{BlockingPoolConfig, RuntimeConfig, TraceStorageBudget, TraceStorageProfile};
 pub use deadline_monitor::{
     AdaptiveDeadlineConfig, DeadlineMonitor, DeadlineWarning, MonitorConfig, WarningReason,
 };
