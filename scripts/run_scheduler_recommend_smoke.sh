@@ -53,6 +53,77 @@ list_scenarios() {
     jq -r '.smoke_scenarios[] | "  \(.scenario_id) [\(.scenario_class // "deterministic_lab_safe")/\(.execution_policy // "execute_or_dry_run")]: \(.description)"' "$ARTIFACT"
 }
 
+host_fingerprint_json() {
+    local host="unknown"
+    local os="unknown"
+    local kernel_release="unknown"
+    local arch="unknown"
+    local cpu_threads=0
+    local mem_total_kib=0
+
+    host="$(hostname 2>/dev/null || printf 'unknown')"
+    os="$(uname -s 2>/dev/null || printf 'unknown')"
+    kernel_release="$(uname -r 2>/dev/null || printf 'unknown')"
+    arch="$(uname -m 2>/dev/null || printf 'unknown')"
+    cpu_threads="$(getconf _NPROCESSORS_ONLN 2>/dev/null || nproc 2>/dev/null || printf '0')"
+    mem_total_kib="$(awk '/MemTotal:/ { print $2; exit }' /proc/meminfo 2>/dev/null || printf '0')"
+
+    jq -nc \
+        --arg hostname "$host" \
+        --arg os "$os" \
+        --arg kernel_release "$kernel_release" \
+        --arg arch "$arch" \
+        --argjson cpu_threads "${cpu_threads:-0}" \
+        --argjson mem_total_kib "${mem_total_kib:-0}" \
+        '{
+            hostname: $hostname,
+            os: $os,
+            kernel_release: $kernel_release,
+            arch: $arch,
+            cpu_threads: $cpu_threads,
+            mem_total_kib: $mem_total_kib
+        }'
+}
+
+evidence_latency_summary_json() {
+    local evidence_file="$1"
+    jq -c '{
+        wake_to_run_ns: {
+            p50: .metrics.wake_to_run_p50_ns,
+            p95: .metrics.wake_to_run_p95_ns,
+            p99: .metrics.wake_to_run_p99_ns
+        },
+        queue_residency_ns: {
+            p50: .metrics.queue_residency_p50_ns,
+            p95: .metrics.queue_residency_p95_ns,
+            p99: .metrics.queue_residency_p99_ns
+        },
+        ready_backlog: {
+            p95: .metrics.ready_backlog_p95,
+            p99: .metrics.ready_backlog_p99
+        },
+        cancel_debt: {
+            p95: .metrics.cancel_debt_p95,
+            p99: .metrics.cancel_debt_p99
+        }
+    }' "$evidence_file"
+}
+
+report_fallback_activations_json() {
+    local report_file="$1"
+    jq -c '{
+        activated: (.profile_name == "conservative_baseline" or (.recommended_knobs == .fallback_profile)),
+        active_profile_names: (
+            if (.profile_name == "conservative_baseline" or (.recommended_knobs == .fallback_profile))
+            then [.profile_name]
+            else []
+            end
+        ),
+        fallback_profile: .fallback_profile,
+        reason_codes: .reason_codes
+    }' "$report_file"
+}
+
 write_bundle_manifest() {
     local bundle_path="$1"
     local scenario_id="$2"
@@ -97,6 +168,16 @@ write_bundle_manifest() {
         --argjson host_requirements "$host_requirements_json" \
         --argjson template_env "$template_env_json" \
         --argjson capture_plan "$capture_plan_json" \
+        --argjson host_fingerprint "$HOST_FINGERPRINT_JSON" \
+        --argjson topology_profile "$TOPOLOGY_PROFILE_JSON" \
+        --argjson memory_profile "$MEMORY_PROFILE_JSON" \
+        --argjson workload_seed "$WORKLOAD_SEED_JSON" \
+        --argjson queue_storm_shape "$QUEUE_STORM_SHAPE_JSON" \
+        --argjson cancel_storm_shape "$CANCEL_STORM_SHAPE_JSON" \
+        --argjson latency_summary "$LATENCY_SUMMARY_JSON" \
+        --argjson throughput_summary "$THROUGHPUT_SUMMARY_JSON" \
+        --argjson fallback_activations "$FALLBACK_ACTIVATIONS_JSON" \
+        --argjson controller_state_references "$CONTROLLER_STATE_REFERENCES_JSON" \
         --arg expected_profile_name "$expected_profile_name" \
         --argjson expected_reason_codes "$expected_reason_codes_json" \
         --argjson command_exit_code "$command_exit_code" \
@@ -125,6 +206,16 @@ write_bundle_manifest() {
             host_requirements: $host_requirements,
             template_env: $template_env,
             capture_plan: $capture_plan,
+            host_fingerprint: $host_fingerprint,
+            topology_profile: $topology_profile,
+            memory_profile: $memory_profile,
+            workload_seed: $workload_seed,
+            queue_storm_shape: $queue_storm_shape,
+            cancel_storm_shape: $cancel_storm_shape,
+            latency_summary: $latency_summary,
+            throughput_summary: $throughput_summary,
+            fallback_activations: $fallback_activations,
+            controller_state_references: $controller_state_references,
             expected_profile_name: $expected_profile_name,
             expected_reason_codes: $expected_reason_codes,
             command_exit_code: $command_exit_code,
@@ -179,6 +270,16 @@ write_run_report() {
         --argjson host_requirements "$host_requirements_json" \
         --argjson template_env "$template_env_json" \
         --argjson capture_plan "$capture_plan_json" \
+        --argjson host_fingerprint "$HOST_FINGERPRINT_JSON" \
+        --argjson topology_profile "$TOPOLOGY_PROFILE_JSON" \
+        --argjson memory_profile "$MEMORY_PROFILE_JSON" \
+        --argjson workload_seed "$WORKLOAD_SEED_JSON" \
+        --argjson queue_storm_shape "$QUEUE_STORM_SHAPE_JSON" \
+        --argjson cancel_storm_shape "$CANCEL_STORM_SHAPE_JSON" \
+        --argjson latency_summary "$LATENCY_SUMMARY_JSON" \
+        --argjson throughput_summary "$THROUGHPUT_SUMMARY_JSON" \
+        --argjson fallback_activations "$FALLBACK_ACTIVATIONS_JSON" \
+        --argjson controller_state_references "$CONTROLLER_STATE_REFERENCES_JSON" \
         --argjson expected_report_projection "$expected_report_json" \
         --argjson actual_report_projection "$actual_report_json" \
         --arg capture_mode "$capture_mode" \
@@ -202,6 +303,16 @@ write_run_report() {
             host_requirements: $host_requirements,
             template_env: $template_env,
             capture_plan: $capture_plan,
+            host_fingerprint: $host_fingerprint,
+            topology_profile: $topology_profile,
+            memory_profile: $memory_profile,
+            workload_seed: $workload_seed,
+            queue_storm_shape: $queue_storm_shape,
+            cancel_storm_shape: $cancel_storm_shape,
+            latency_summary: $latency_summary,
+            throughput_summary: $throughput_summary,
+            fallback_activations: $fallback_activations,
+            controller_state_references: $controller_state_references,
             expected_report_projection: $expected_report_projection,
             actual_report_projection: $actual_report_projection,
             capture_mode: $capture_mode,
@@ -275,6 +386,14 @@ EXPECTED_PROFILE_NAME="$(jq -r 'if .expected_report != null then (.expected_repo
 EXPECTED_REASON_CODES_JSON="$(jq -c 'if .expected_report != null then (.expected_report.reason_codes // []) else (.expected_reason_codes_hint // []) end' <<<"$SCENARIO_JSON")"
 CAPTURE_MODE="$(jq -r '.capture_mode // "embedded_contract_artifact"' <<<"$SCENARIO_JSON")"
 CAPTURE_COMMAND="$(jq -r '.capture_command // empty' <<<"$SCENARIO_JSON")"
+TOPOLOGY_PROFILE_JSON="$(jq -c '.topology_profile // (.evidence_artifact.topology // {})' <<<"$SCENARIO_JSON")"
+MEMORY_PROFILE_JSON="$(jq -c '.memory_profile // { name: "derived_from_evidence", budget_gib: (.evidence_artifact.topology.memory_budget_gib // null) }' <<<"$SCENARIO_JSON")"
+WORKLOAD_SEED_JSON="$(jq -c '.workload_seed // null' <<<"$SCENARIO_JSON")"
+QUEUE_STORM_SHAPE_JSON="$(jq -c '.queue_storm_shape // {}' <<<"$SCENARIO_JSON")"
+CANCEL_STORM_SHAPE_JSON="$(jq -c '.cancel_storm_shape // {}' <<<"$SCENARIO_JSON")"
+THROUGHPUT_SUMMARY_JSON="$(jq -c '.throughput_summary // { units: "evidence_owned", observed: null, source: "unspecified", note: "throughput is owned by upstream evidence capture rather than this replay step" }' <<<"$SCENARIO_JSON")"
+FALLBACK_ACTIVATIONS_JSON="$(jq -c '.fallback_activations_hint // { activated: false, active_profile_names: [] }' <<<"$SCENARIO_JSON")"
+CONTROLLER_STATE_REFERENCES_JSON="$(jq -c '.controller_state_references // ["scheduler_report.profile_name","scheduler_report.recommended_knobs","scheduler_report.fallback_profile","scheduler_report.reason_codes"]' <<<"$SCENARIO_JSON")"
 OUTPUT_ROOT="${OUTPUT_ROOT_OVERRIDE:-${PROJECT_ROOT}/${SCENARIO_OUTPUT_ROOT}}"
 TIMESTAMP="$(date +%Y%m%d_%H%M%S)"
 RUN_ID="run_${TIMESTAMP}"
@@ -342,6 +461,8 @@ VALIDATION_PASSED=true
 STATUS="dry_run"
 MESSAGE="dry-run mode: command not executed"
 ACTUAL_REPORT_JSON='{}'
+HOST_FINGERPRINT_JSON="$(host_fingerprint_json)"
+LATENCY_SUMMARY_JSON='{}'
 
 set +e
 capture_evidence "$CAPTURE_MODE" "$CAPTURE_COMMAND"
@@ -356,6 +477,7 @@ if [[ "$CAPTURE_COMMAND_EXIT_CODE" -ne 0 ]]; then
 else
     cat "$EVIDENCE_FILE"
     echo ""
+    LATENCY_SUMMARY_JSON="$(evidence_latency_summary_json "$EVIDENCE_FILE")"
 fi
 
 if [[ "$CAPTURE_COMMAND_EXIT_CODE" -ne 0 ]]; then
@@ -395,6 +517,7 @@ else
                 reason_codes
             }' "$REPORT_FILE"
         )"
+        FALLBACK_ACTIVATIONS_JSON="$(report_fallback_activations_json "$REPORT_FILE")"
 
         if [[ "$HAS_EXPECTED_REPORT" == "true" ]] && jq -e --argjson expected "$EXPECTED_REPORT_JSON" '{
                 schema_version,

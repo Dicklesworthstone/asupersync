@@ -256,6 +256,34 @@ fn scheduler_recommend_smoke_contract_matches_tuning_projection() {
             .iter()
             .any(|field| field.as_str() == Some("capture_command_exit_code"))
     );
+    assert!(
+        contract["required_bundle_fields"]
+            .as_array()
+            .expect("required_bundle_fields")
+            .iter()
+            .any(|field| field.as_str() == Some("host_fingerprint"))
+    );
+    assert!(
+        contract["required_bundle_fields"]
+            .as_array()
+            .expect("required_bundle_fields")
+            .iter()
+            .any(|field| field.as_str() == Some("throughput_summary"))
+    );
+    assert!(
+        contract["required_run_report_fields"]
+            .as_array()
+            .expect("required_run_report_fields")
+            .iter()
+            .any(|field| field.as_str() == Some("controller_state_references"))
+    );
+    assert!(
+        contract["required_run_report_fields"]
+            .as_array()
+            .expect("required_run_report_fields")
+            .iter()
+            .any(|field| field.as_str() == Some("latency_summary"))
+    );
 
     let scenarios = contract["smoke_scenarios"]
         .as_array()
@@ -278,6 +306,30 @@ fn scheduler_recommend_smoke_contract_matches_tuning_projection() {
     assert_eq!(
         scenario["execution_policy"].as_str(),
         Some("execute_or_dry_run")
+    );
+    assert_eq!(
+        scenario["topology_profile"]["name"].as_str(),
+        Some("dual_cohort_64c")
+    );
+    assert_eq!(scenario["memory_profile"]["budget_gib"].as_u64(), Some(256));
+    assert_eq!(
+        scenario["workload_seed"].as_str(),
+        Some("mixed-burst-64c-seed-v1")
+    );
+    assert_eq!(
+        scenario["queue_storm_shape"]["shape"].as_str(),
+        Some("mixed_burst_ready_spike")
+    );
+    assert_eq!(
+        scenario["cancel_storm_shape"]["shape"].as_str(),
+        Some("moderate_cancel_debt")
+    );
+    assert_eq!(
+        scenario["controller_state_references"]
+            .as_array()
+            .expect("controller_state_references")
+            .len(),
+        4
     );
 
     let evidence: SchedulerEvidenceArtifact =
@@ -334,6 +386,19 @@ fn scheduler_recommend_smoke_contract_declares_runtime_capture_scenario() {
             .is_some(),
         "runner-managed capture path should be documented"
     );
+    assert_eq!(
+        scenario["throughput_summary"]["source"].as_str(),
+        Some("runtime_capture_test")
+    );
+    assert_eq!(scenario["throughput_summary"]["observed"].as_u64(), Some(5));
+    assert_eq!(
+        scenario["queue_storm_shape"]["dispatch_samples"].as_u64(),
+        Some(5)
+    );
+    assert_eq!(
+        scenario["fallback_activations_hint"]["activated"].as_bool(),
+        Some(true)
+    );
 }
 
 #[test]
@@ -367,6 +432,22 @@ fn scheduler_recommend_smoke_contract_declares_real_host_template() {
         scenario["template_env"]["ASUPERSYNC_SCHEDULER_EVIDENCE_CAPTURE"]
             .as_str()
             .is_some()
+    );
+    assert_eq!(
+        scenario["throughput_summary"]["source"].as_str(),
+        Some("operator_capture")
+    );
+    assert_eq!(
+        scenario["queue_storm_shape"]["shape"].as_str(),
+        Some("operator_supplied")
+    );
+    assert_eq!(
+        scenario["cancel_storm_shape"]["shape"].as_str(),
+        Some("operator_supplied")
+    );
+    assert_eq!(
+        scenario["memory_profile"]["name"].as_str(),
+        Some("operator_template_256g")
     );
 
     let evidence: SchedulerEvidenceArtifact =
