@@ -373,3 +373,120 @@ fn validate_percentiles<T: Ord>(
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn baseline_artifact() -> SchedulerEvidenceArtifact {
+        SchedulerEvidenceArtifact {
+            schema_version: SCHEDULER_EVIDENCE_SCHEMA_VERSION.to_string(),
+            run_label: "unit-baseline-64c".to_string(),
+            workload_class: SchedulerWorkloadClass::InteractiveSwarm,
+            topology: SchedulerTopologyDescriptor {
+                worker_threads: 64,
+                cohort_count: 2,
+                memory_budget_gib: 256,
+            },
+            current_knobs: SchedulerKnobProfile {
+                worker_threads: 64,
+                steal_batch_size: 8,
+                cancel_streak_limit: 16,
+                global_queue_limit: 0,
+                parking_enabled: true,
+            },
+            metrics: SchedulerEvidenceMetrics {
+                wake_to_run_p50_ns: 5_000,
+                wake_to_run_p95_ns: 20_000,
+                wake_to_run_p99_ns: 60_000,
+                queue_residency_p50_ns: 8_000,
+                queue_residency_p95_ns: 30_000,
+                queue_residency_p99_ns: 90_000,
+                ready_backlog_p95: 32,
+                ready_backlog_p99: 96,
+                cancel_debt_p95: 4,
+                cancel_debt_p99: 8,
+                remote_steal_ratio_pct: Some(12),
+                cross_cohort_wake_p99_ns: Some(70_000),
+            },
+            notes: vec!["unit".to_string()],
+        }
+    }
+
+    #[test]
+    fn validate_rejects_schema_and_required_zero_fields() {
+        let mut artifact = baseline_artifact();
+        artifact.schema_version = "asupersync.scheduler-evidence.v0".to_string();
+        assert_eq!(
+            artifact.validate(),
+            Err(SchedulerEvidenceError::UnsupportedSchemaVersion {
+                expected: SCHEDULER_EVIDENCE_SCHEMA_VERSION.to_string(),
+                found: "asupersync.scheduler-evidence.v0".to_string(),
+            })
+        );
+
+        let mut artifact = baseline_artifact();
+        artifact.run_label = "   ".to_string();
+        assert_eq!(
+            artifact.validate(),
+            Err(SchedulerEvidenceError::EmptyRunLabel)
+        );
+
+        let mut artifact = baseline_artifact();
+        artifact.topology.worker_threads = 0;
+        assert_eq!(
+            artifact.validate(),
+            Err(SchedulerEvidenceError::ZeroWorkerThreads)
+        );
+
+        let mut artifact = baseline_artifact();
+        artifact.current_knobs.steal_batch_size = 0;
+        assert_eq!(
+            artifact.validate(),
+            Err(SchedulerEvidenceError::ZeroStealBatchSize)
+        );
+    }
+
+    #[test]
+    fn validate_rejects_metric_boundary_violations() {
+        let mut artifact = baseline_artifact();
+        artifact.metrics.wake_to_run_p95_ns = artifact.metrics.wake_to_run_p50_ns - 1;
+        assert_eq!(
+            artifact.validate(),
+            Err(SchedulerEvidenceError::NonMonotonicPercentiles {
+                field: "wake_to_run",
+            })
+        );
+
+        let mut artifact = baseline_artifact();
+        artifact.metrics.remote_steal_ratio_pct = Some(101);
+        assert_eq!(
+            artifact.validate(),
+            Err(SchedulerEvidenceError::RemoteStealRatioOutOfRange(101))
+        );
+    }
+
+    #[test]
+    fn tune_report_keeps_conservative_fallback_for_balanced_baseline() {
+        let artifact = baseline_artifact();
+        let report = artifact
+            .tune_report()
+            .expect("balanced artifact should tune");
+
+        assert_eq!(report.profile_name, "conservative_baseline");
+        assert_eq!(report.recommended_knobs, artifact.current_knobs);
+        assert_eq!(report.fallback_profile, artifact.current_knobs);
+        assert_eq!(report.global_queue_limit_hint, None);
+        assert_eq!(
+            report.reason_codes,
+            vec![SchedulerRecommendationReason::BalancedBaseline]
+        );
+        assert_eq!(report.confidence_percent, 65);
+        assert!(
+            report
+                .explanation
+                .iter()
+                .any(|line| line.contains("conservative baseline envelope"))
+        );
+    }
+}
