@@ -4913,3 +4913,9 @@ name = "h2_request_authority_with_userinfo"
 path = "fuzz_targets/h2_request_authority_with_userinfo.rs"
 test = false
 doc = false
+
+[[bin]]
+name = "h2_data_with_padding_full_frame"
+path = "fuzz_targets/h2_data_with_padding_full_frame.rs"
+test = false
+doc = false
