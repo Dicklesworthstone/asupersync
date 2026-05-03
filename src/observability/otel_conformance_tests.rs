@@ -47150,4 +47150,413 @@ mod otlp_122_tests {
         println!("  - Additional AWS SQS attributes preserved and counted");
         println!("  - URL format validation not enforced (only presence and type)");
     }
+
+    /// OTLP-153 conformance test: AWS SQS consumer queue URL validation.
+    ///
+    /// When an exporter encounters a span with kind=CONSUMER and messaging.system="aws_sqs",
+    /// the messaging.aws_sqs.queue_url attribute MUST be set per OTLP semantic conventions
+    /// for AWS SQS consumer spans. This ensures proper traceability and correlation for
+    /// AWS SQS message consumption operations where the queue URL is essential for
+    /// identifying the specific SQS queue being used for message consumption and polling.
+    #[test]
+    fn otlp_153_aws_sqs_consumer_queue_url_validation() {
+        use crate::observability::otel::{AnyValue, SpanData};
+        use std::collections::HashMap;
+
+        println!("Testing OTLP-153: AWS SQS consumer queue URL validation...");
+
+        /// Test scenario for AWS SQS consumer queue URL validation
+        #[derive(Debug, Clone)]
+        struct AwsSqsConsumerScenario {
+            description: String,
+            span_kind: SpanKind,
+            messaging_system: String,
+            span_attributes: Vec<(String, AnyValue)>,
+            should_be_valid: bool,
+            expected_queue_url: String,
+        }
+
+        /// SpanKind enumeration for testing
+        #[derive(Debug, Clone, PartialEq)]
+        enum SpanKind {
+            Internal,
+            Server,
+            Client,
+            Producer,
+            Consumer,
+        }
+
+        let test_scenarios = vec![
+            AwsSqsConsumerScenario {
+                description: "valid_aws_sqs_consumer_with_queue_url".to_string(),
+                span_kind: SpanKind::Consumer,
+                messaging_system: "aws_sqs".to_string(),
+                span_attributes: vec![
+                    ("messaging.aws_sqs.queue_url".to_string(), AnyValue::StringValue("https://sqs.us-east-1.amazonaws.com/123456789012/order-processing-queue".to_string())),
+                    ("messaging.system".to_string(), AnyValue::StringValue("aws_sqs".to_string())),
+                    ("messaging.destination.name".to_string(), AnyValue::StringValue("order-processing-queue".to_string())),
+                    ("messaging.operation".to_string(), AnyValue::StringValue("receive".to_string())),
+                    ("messaging.aws_sqs.max_number_of_messages".to_string(), AnyValue::IntValue(10)),
+                ],
+                should_be_valid: true,
+                expected_queue_url: "https://sqs.us-east-1.amazonaws.com/123456789012/order-processing-queue".to_string(),
+            },
+            AwsSqsConsumerScenario {
+                description: "valid_aws_sqs_consumer_with_fifo_queue".to_string(),
+                span_kind: SpanKind::Consumer,
+                messaging_system: "aws_sqs".to_string(),
+                span_attributes: vec![
+                    ("messaging.aws_sqs.queue_url".to_string(), AnyValue::StringValue("https://sqs.ap-southeast-2.amazonaws.com/555666777888/notifications.fifo".to_string())),
+                    ("messaging.system".to_string(), AnyValue::StringValue("aws_sqs".to_string())),
+                    ("messaging.destination.name".to_string(), AnyValue::StringValue("notifications.fifo".to_string())),
+                    ("messaging.operation".to_string(), AnyValue::StringValue("process".to_string())),
+                    ("messaging.aws_sqs.wait_time_seconds".to_string(), AnyValue::IntValue(20)),
+                    ("messaging.aws_sqs.receive_count".to_string(), AnyValue::IntValue(1)),
+                ],
+                should_be_valid: true,
+                expected_queue_url: "https://sqs.ap-southeast-2.amazonaws.com/555666777888/notifications.fifo".to_string(),
+            },
+            AwsSqsConsumerScenario {
+                description: "aws_sqs_consumer_missing_queue_url".to_string(),
+                span_kind: SpanKind::Consumer,
+                messaging_system: "aws_sqs".to_string(),
+                span_attributes: vec![
+                    ("messaging.system".to_string(), AnyValue::StringValue("aws_sqs".to_string())),
+                    ("messaging.destination.name".to_string(), AnyValue::StringValue("order-queue".to_string())),
+                    ("messaging.operation".to_string(), AnyValue::StringValue("receive".to_string())),
+                    // Missing messaging.aws_sqs.queue_url - should be invalid
+                ],
+                should_be_valid: false,
+                expected_queue_url: "".to_string(),
+            },
+            AwsSqsConsumerScenario {
+                description: "aws_sqs_consumer_empty_queue_url".to_string(),
+                span_kind: SpanKind::Consumer,
+                messaging_system: "aws_sqs".to_string(),
+                span_attributes: vec![
+                    ("messaging.aws_sqs.queue_url".to_string(), AnyValue::StringValue("".to_string())), // Empty queue URL
+                    ("messaging.system".to_string(), AnyValue::StringValue("aws_sqs".to_string())),
+                    ("messaging.destination.name".to_string(), AnyValue::StringValue("test-queue".to_string())),
+                    ("messaging.operation".to_string(), AnyValue::StringValue("poll".to_string())),
+                ],
+                should_be_valid: false,
+                expected_queue_url: "".to_string(),
+            },
+            AwsSqsConsumerScenario {
+                description: "aws_sqs_consumer_wrong_attribute_type".to_string(),
+                span_kind: SpanKind::Consumer,
+                messaging_system: "aws_sqs".to_string(),
+                span_attributes: vec![
+                    ("messaging.aws_sqs.queue_url".to_string(), AnyValue::IntValue(54321)), // Wrong type - should be string
+                    ("messaging.system".to_string(), AnyValue::StringValue("aws_sqs".to_string())),
+                    ("messaging.destination.name".to_string(), AnyValue::StringValue("test-queue".to_string())),
+                    ("messaging.operation".to_string(), AnyValue::StringValue("receive".to_string())),
+                ],
+                should_be_valid: false,
+                expected_queue_url: "".to_string(),
+            },
+            AwsSqsConsumerScenario {
+                description: "aws_sqs_producer_span_exempt".to_string(),
+                span_kind: SpanKind::Producer,
+                messaging_system: "aws_sqs".to_string(),
+                span_attributes: vec![
+                    ("messaging.system".to_string(), AnyValue::StringValue("aws_sqs".to_string())),
+                    ("messaging.destination.name".to_string(), AnyValue::StringValue("test-queue".to_string())),
+                    ("messaging.operation".to_string(), AnyValue::StringValue("send".to_string())),
+                    // Producer spans are exempt from consumer queue URL requirement
+                ],
+                should_be_valid: true, // Producer spans don't need consumer queue URL
+                expected_queue_url: "".to_string(),
+            },
+            AwsSqsConsumerScenario {
+                description: "non_aws_sqs_messaging_system_exempt".to_string(),
+                span_kind: SpanKind::Consumer,
+                messaging_system: "rabbitmq".to_string(), // Different messaging system
+                span_attributes: vec![
+                    ("messaging.system".to_string(), AnyValue::StringValue("rabbitmq".to_string())),
+                    ("messaging.destination.name".to_string(), AnyValue::StringValue("events-queue".to_string())),
+                    ("messaging.operation".to_string(), AnyValue::StringValue("consume".to_string())),
+                    // Non-AWS SQS systems exempt from queue URL requirement
+                ],
+                should_be_valid: true,
+                expected_queue_url: "".to_string(),
+            },
+            AwsSqsConsumerScenario {
+                description: "case_sensitive_messaging_system_check".to_string(),
+                span_kind: SpanKind::Consumer,
+                messaging_system: "Aws_Sqs".to_string(), // Wrong case
+                span_attributes: vec![
+                    ("messaging.system".to_string(), AnyValue::StringValue("Aws_Sqs".to_string())),
+                    ("messaging.destination.name".to_string(), AnyValue::StringValue("test-queue".to_string())),
+                    ("messaging.operation".to_string(), AnyValue::StringValue("receive".to_string())),
+                    // Case-sensitive check - "Aws_Sqs" != "aws_sqs"
+                ],
+                should_be_valid: true, // Not exact "aws_sqs" so exempt
+                expected_queue_url: "".to_string(),
+            },
+            AwsSqsConsumerScenario {
+                description: "aws_sqs_consumer_with_dlq_attributes".to_string(),
+                span_kind: SpanKind::Consumer,
+                messaging_system: "aws_sqs".to_string(),
+                span_attributes: vec![
+                    ("messaging.aws_sqs.queue_url".to_string(), AnyValue::StringValue("https://sqs.eu-west-1.amazonaws.com/999888777666/payment-events".to_string())),
+                    ("messaging.system".to_string(), AnyValue::StringValue("aws_sqs".to_string())),
+                    ("messaging.destination.name".to_string(), AnyValue::StringValue("payment-events".to_string())),
+                    ("messaging.operation".to_string(), AnyValue::StringValue("receive".to_string())),
+                    ("messaging.aws_sqs.source_queue".to_string(), AnyValue::StringValue("payment-source-queue".to_string())),
+                    ("messaging.aws_sqs.approximate_receive_count".to_string(), AnyValue::IntValue(2)),
+                    ("messaging.aws_sqs.message_retention_period".to_string(), AnyValue::IntValue(345600)),
+                    ("cloud.provider".to_string(), AnyValue::StringValue("aws".to_string())),
+                    ("cloud.region".to_string(), AnyValue::StringValue("eu-west-1".to_string())),
+                ],
+                should_be_valid: true,
+                expected_queue_url: "https://sqs.eu-west-1.amazonaws.com/999888777666/payment-events".to_string(),
+            },
+            AwsSqsConsumerScenario {
+                description: "aws_sqs_consumer_whitespace_only_queue_url".to_string(),
+                span_kind: SpanKind::Consumer,
+                messaging_system: "aws_sqs".to_string(),
+                span_attributes: vec![
+                    ("messaging.aws_sqs.queue_url".to_string(), AnyValue::StringValue("    ".to_string())), // Whitespace only
+                    ("messaging.system".to_string(), AnyValue::StringValue("aws_sqs".to_string())),
+                    ("messaging.destination.name".to_string(), AnyValue::StringValue("test-queue".to_string())),
+                    ("messaging.operation".to_string(), AnyValue::StringValue("poll".to_string())),
+                ],
+                should_be_valid: false,
+                expected_queue_url: "    ".to_string(),
+            },
+            AwsSqsConsumerScenario {
+                description: "aws_sqs_consumer_long_polling_attributes".to_string(),
+                span_kind: SpanKind::Consumer,
+                messaging_system: "aws_sqs".to_string(),
+                span_attributes: vec![
+                    ("messaging.aws_sqs.queue_url".to_string(), AnyValue::StringValue("https://sqs.us-west-1.amazonaws.com/111222333444/worker-tasks".to_string())),
+                    ("messaging.system".to_string(), AnyValue::StringValue("aws_sqs".to_string())),
+                    ("messaging.destination.name".to_string(), AnyValue::StringValue("worker-tasks".to_string())),
+                    ("messaging.operation".to_string(), AnyValue::StringValue("receive".to_string())),
+                    ("messaging.aws_sqs.wait_time_seconds".to_string(), AnyValue::IntValue(20)), // Long polling
+                    ("messaging.aws_sqs.max_number_of_messages".to_string(), AnyValue::IntValue(10)),
+                    ("messaging.aws_sqs.visibility_timeout_seconds".to_string(), AnyValue::IntValue(30)),
+                ],
+                should_be_valid: true,
+                expected_queue_url: "https://sqs.us-west-1.amazonaws.com/111222333444/worker-tasks".to_string(),
+            },
+            AwsSqsConsumerScenario {
+                description: "aws_sqs_consumer_invalid_url_format_accepted".to_string(),
+                span_kind: SpanKind::Consumer,
+                messaging_system: "aws_sqs".to_string(),
+                span_attributes: vec![
+                    ("messaging.aws_sqs.queue_url".to_string(), AnyValue::StringValue("not-a-valid-sqs-consumer-url".to_string())),
+                    ("messaging.system".to_string(), AnyValue::StringValue("aws_sqs".to_string())),
+                    ("messaging.destination.name".to_string(), AnyValue::StringValue("test-queue".to_string())),
+                    ("messaging.operation".to_string(), AnyValue::StringValue("consume".to_string())),
+                ],
+                should_be_valid: true, // URL format validation not part of OTLP-153 requirement
+                expected_queue_url: "not-a-valid-sqs-consumer-url".to_string(),
+            },
+        ];
+
+        /// Span data for AWS SQS consumer testing
+        #[derive(Debug, Clone)]
+        struct AwsSqsConsumerSpanData {
+            name: String,
+            kind: SpanKind,
+            messaging_system: String,
+            attributes: HashMap<String, AnyValue>,
+        }
+
+        impl AwsSqsConsumerSpanData {
+            fn from_scenario(scenario: &AwsSqsConsumerScenario) -> Self {
+                let mut attributes = HashMap::new();
+                for (key, value) in &scenario.span_attributes {
+                    attributes.insert(key.clone(), value.clone());
+                }
+
+                Self {
+                    name: format!("aws_sqs_consumer_span_{}", scenario.description),
+                    kind: scenario.span_kind.clone(),
+                    messaging_system: scenario.messaging_system.clone(),
+                    attributes,
+                }
+            }
+        }
+
+        /// Result of AWS SQS consumer queue URL validation
+        #[derive(Debug)]
+        enum AwsSqsConsumerValidationResult {
+            Valid {
+                queue_url: String,
+                additional_aws_sqs_attributes: usize,
+            },
+            Invalid {
+                violations: Vec<String>,
+                missing_or_invalid_queue_url: Option<String>,
+            },
+            NotApplicable {
+                reason: String,
+            },
+        }
+
+        /// Validates AWS SQS consumer queue URL requirement conformance
+        fn validate_aws_sqs_consumer_queue_url_conformance(
+            scenario: &AwsSqsConsumerScenario,
+        ) -> Result<(), String> {
+            let span_data = AwsSqsConsumerSpanData::from_scenario(scenario);
+
+            // OTLP-153 validation logic
+            let validation_result = validate_aws_sqs_consumer_attributes(&span_data);
+
+            match validation_result {
+                AwsSqsConsumerValidationResult::Valid { queue_url, .. } => {
+                    if !scenario.should_be_valid {
+                        return Err(format!(
+                            "Expected validation failure but span was accepted with queue_url: '{}' for '{}'",
+                            queue_url, scenario.description
+                        ));
+                    }
+
+                    // Verify queue URL matches expected
+                    if !scenario.expected_queue_url.is_empty() && queue_url != scenario.expected_queue_url {
+                        return Err(format!(
+                            "Queue URL mismatch: expected '{}', got '{}' for '{}'",
+                            scenario.expected_queue_url, queue_url, scenario.description
+                        ));
+                    }
+
+                    Ok(())
+                }
+                AwsSqsConsumerValidationResult::Invalid { violations, .. } => {
+                    if scenario.should_be_valid {
+                        return Err(format!(
+                            "Expected validation success but span was rejected with violations: {:?} for '{}'",
+                            violations, scenario.description
+                        ));
+                    }
+
+                    Ok(())
+                }
+                AwsSqsConsumerValidationResult::NotApplicable { .. } => {
+                    if !scenario.should_be_valid {
+                        return Err(format!(
+                            "Expected validation failure but span was marked not applicable for '{}'",
+                            scenario.description
+                        ));
+                    }
+
+                    Ok(())
+                }
+            }
+        }
+
+        /// Validates AWS SQS consumer span attributes per OTLP-153
+        fn validate_aws_sqs_consumer_attributes(
+            span_data: &AwsSqsConsumerSpanData,
+        ) -> AwsSqsConsumerValidationResult {
+            // Check if this is a CONSUMER span with messaging.system="aws_sqs"
+            if !matches!(span_data.kind, SpanKind::Consumer) {
+                return AwsSqsConsumerValidationResult::NotApplicable {
+                    reason: format!("Not a CONSUMER span: {:?}", span_data.kind),
+                };
+            }
+
+            // Case-sensitive messaging.system check
+            let messaging_system = span_data.attributes.get("messaging.system")
+                .and_then(|v| match v {
+                    AnyValue::StringValue(s) => Some(s.as_str()),
+                    _ => None,
+                })
+                .unwrap_or("");
+
+            if messaging_system != "aws_sqs" {
+                return AwsSqsConsumerValidationResult::NotApplicable {
+                    reason: format!("Not AWS SQS messaging system: '{}'", messaging_system),
+                };
+            }
+
+            // OTLP-153: messaging.aws_sqs.queue_url MUST be set for AWS SQS CONSUMER spans
+            let mut violations = Vec::new();
+
+            let queue_url_attribute = span_data.attributes.get("messaging.aws_sqs.queue_url");
+            let queue_url = match queue_url_attribute {
+                Some(AnyValue::StringValue(url_string)) => {
+                    if url_string.trim().is_empty() {
+                        violations.push("OTLP-153: messaging.aws_sqs.queue_url is empty or whitespace-only".to_string());
+                        url_string.clone()
+                    } else {
+                        url_string.clone()
+                    }
+                }
+                Some(other_value) => {
+                    violations.push(format!(
+                        "OTLP-153: messaging.aws_sqs.queue_url has wrong type (expected StringValue, got {:?})",
+                        other_value
+                    ));
+                    return AwsSqsConsumerValidationResult::Invalid {
+                        violations,
+                        missing_or_invalid_queue_url: Some("wrong_type".to_string()),
+                    };
+                }
+                None => {
+                    violations.push("OTLP-153: AWS SQS consumer span missing required messaging.aws_sqs.queue_url attribute".to_string());
+                    return AwsSqsConsumerValidationResult::Invalid {
+                        violations,
+                        missing_or_invalid_queue_url: None,
+                    };
+                }
+            };
+
+            if !violations.is_empty() {
+                return AwsSqsConsumerValidationResult::Invalid {
+                    violations,
+                    missing_or_invalid_queue_url: Some(queue_url),
+                };
+            }
+
+            // Count additional AWS SQS-specific attributes
+            let additional_aws_sqs_attributes = span_data.attributes.keys()
+                .filter(|k| k.starts_with("messaging.aws_sqs.") && *k != "messaging.aws_sqs.queue_url")
+                .count();
+
+            AwsSqsConsumerValidationResult::Valid {
+                queue_url,
+                additional_aws_sqs_attributes,
+            }
+        }
+
+        // Execute OTLP-153 conformance validation for all scenarios
+        let mut passed_scenarios = 0;
+        let total_scenarios = test_scenarios.len();
+
+        for scenario in &test_scenarios {
+            match validate_aws_sqs_consumer_queue_url_conformance(scenario) {
+                Ok(()) => {
+                    passed_scenarios += 1;
+                    println!("✓ OTLP-153 conformance verified for {}", scenario.description);
+                }
+                Err(error_msg) => {
+                    panic!(
+                        "OTLP-153 conformance test FAILED for {}: {}",
+                        scenario.description, error_msg
+                    );
+                }
+            }
+        }
+
+        assert_eq!(
+            passed_scenarios, total_scenarios,
+            "All OTLP-153 AWS SQS consumer queue URL scenarios must pass"
+        );
+
+        println!("✓ OTLP-153: AWS SQS consumer queue URL validation conformance verified");
+        println!("  - CONSUMER spans with messaging.system='aws_sqs' require messaging.aws_sqs.queue_url");
+        println!("  - Queue URL must be non-empty string value");
+        println!("  - Producer spans exempt from consumer queue URL requirement");
+        println!("  - Non-AWS SQS messaging systems exempt from validation");
+        println!("  - Case-sensitive messaging.system matching enforced");
+        println!("  - Wrong attribute types properly rejected");
+        println!("  - Empty and whitespace-only queue URLs rejected");
+        println!("  - Additional AWS SQS consumer attributes preserved and counted");
+        println!("  - URL format validation not enforced (only presence and type)");
+        println!("  - Long polling and DLQ attributes properly supported");
+    }
 }

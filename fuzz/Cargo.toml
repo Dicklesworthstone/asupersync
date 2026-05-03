@@ -5251,3 +5251,10 @@ path = "fuzz_targets/h2_request_with_invalid_pseudo_header_combination.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "h2_request_pseudo_path_starting_without_slash"
+path = "fuzz_targets/h2_request_pseudo_path_starting_without_slash.rs"
+test = false
+doc = false
+bench = false
