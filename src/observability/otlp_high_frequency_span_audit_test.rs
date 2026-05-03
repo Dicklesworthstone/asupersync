@@ -341,10 +341,10 @@ fn audit_queue_operation_latency_profile() {
     ));
 
     // Create test span batches
-    let batch_count = 1000;
+    let batch_count: usize = 1000;
     let batches: Vec<SpanBatch> = (0..batch_count)
         .map(|i| SpanBatch {
-            batch_id: i,
+            batch_id: i as u64,
             spans: vec![create_test_span(&format!("span-{}", i), "latency_test")],
             created_at: Instant::now(),
         })
@@ -381,14 +381,12 @@ fn audit_queue_operation_latency_profile() {
                 for batch in thread_batches {
                     let op_start = Instant::now();
                     let _ = exporter.export(&batch);
-                    let op_duration = op_start.elapsed();
-                    op_duration
+                    let _op_duration = op_start.elapsed();
                 }
             })
         })
         .collect();
 
-    let mut concurrent_latencies = Vec::new();
     for handle in handles {
         if let Ok(_latencies) = handle.join() {
             // In a real implementation, we'd collect individual latencies

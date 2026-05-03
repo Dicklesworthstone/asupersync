@@ -145,12 +145,15 @@ fn audit_graceful_shutdown_flushes_pending_spans() {
     );
 
     // Enqueue multiple span batches
-    let batch_count = 5;
-    let spans_per_batch = 100;
+    let batch_count: u64 = 5;
+    let spans_per_batch: usize = 100;
     println!("📊 Test setup:");
     println!("   Batches queued: {}", batch_count);
     println!("   Spans per batch: {}", spans_per_batch);
-    println!("   Total pending spans: {}", batch_count * spans_per_batch);
+    println!(
+        "   Total pending spans: {}",
+        batch_count as usize * spans_per_batch
+    );
 
     for i in 0..batch_count {
         let batch = create_test_batch(i, spans_per_batch);
@@ -176,7 +179,7 @@ fn audit_graceful_shutdown_flushes_pending_spans() {
 
     // **ASSESSMENT**: Check if graceful shutdown happened
     let exported_span_count = mock_exporter.exported_span_count();
-    let total_expected = batch_count * spans_per_batch;
+    let total_expected = batch_count as usize * spans_per_batch;
 
     println!("   Spans exported during drop: {}", exported_span_count);
     println!("   Total expected spans: {}", total_expected);
