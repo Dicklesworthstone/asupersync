@@ -5051,3 +5051,9 @@ name = "h2_request_authority_empty"
 path = "fuzz_targets/h2_request_authority_empty.rs"
 test = false
 doc = false
+
+[[bin]]
+name = "h2_settings_max_frame_size_at_max"
+path = "fuzz_targets/h2_settings_max_frame_size_at_max.rs"
+test = false
+doc = false
