@@ -5057,3 +5057,9 @@ name = "h2_settings_max_frame_size_at_max"
 path = "fuzz_targets/h2_settings_max_frame_size_at_max.rs"
 test = false
 doc = false
+
+[[bin]]
+name = "h2_request_pseudo_header_unknown"
+path = "fuzz_targets/h2_request_pseudo_header_unknown.rs"
+test = false
+doc = false
