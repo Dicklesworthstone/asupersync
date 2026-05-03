@@ -1102,6 +1102,17 @@ impl Scheduler {
         self.ready_lane.len()
     }
 
+    /// Returns an approximate count of queued cancel-lane entries.
+    ///
+    /// This may include stale heap entries awaiting pruning after the task was
+    /// removed elsewhere, so it is suitable for scheduler heuristics and
+    /// observability but not for exact invariant checks.
+    #[inline]
+    #[must_use]
+    pub fn approx_cancel_len(&self) -> usize {
+        self.cancel_lane.len()
+    }
+
     /// Returns the current ready-lane head without removing it.
     #[inline]
     #[must_use]

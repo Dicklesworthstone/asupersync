@@ -1420,7 +1420,7 @@ fn bench_cancel_preemption(c: &mut Criterion) {
 // =============================================================================
 
 fn bench_three_lane_decision(c: &mut Criterion) {
-    use asupersync::runtime::scheduler::ThreeLaneScheduler;
+    use asupersync::runtime::scheduler::{SchedulerWorkloadClass, ThreeLaneScheduler};
 
     let mut group = c.benchmark_group("scheduler/three_lane_decision");
     group.sample_size(30);
@@ -1542,6 +1542,48 @@ fn bench_three_lane_decision(c: &mut Criterion) {
                 )
             },
         );
+    }
+
+    for &(label, sample_window) in &[
+        ("global_ready_burst_evidence_off", 0usize),
+        ("global_ready_burst_evidence_on", 256usize),
+    ] {
+        let count = 256usize;
+        group.throughput(Throughput::Elements(count as u64));
+        group.bench_function(label, |b: &mut criterion::Bencher| {
+            b.iter_batched(
+                || {
+                    let max_id = count as u32 - 1;
+                    let state = setup_runtime_state(max_id);
+                    let mut scheduler = ThreeLaneScheduler::new_with_cancel_limit(1, &state, 16);
+                    if sample_window > 0 {
+                        scheduler.set_scheduler_evidence_window(sample_window);
+                    }
+                    for i in 0..count as u32 {
+                        scheduler.inject_ready(task(i), 50);
+                    }
+                    scheduler
+                },
+                |mut scheduler| {
+                    let mut drained = 0usize;
+                    {
+                        let worker = scheduler.worker_mut_for_test(0);
+                        while worker.next_task().is_some() {
+                            drained += 1;
+                        }
+                    }
+                    if sample_window > 0 {
+                        black_box(scheduler.scheduler_evidence_artifact(
+                            "bench-capture",
+                            SchedulerWorkloadClass::MixedBurst,
+                            256,
+                        ));
+                    }
+                    black_box(drained)
+                },
+                BatchSize::SmallInput,
+            )
+        });
     }
 
     group.finish();

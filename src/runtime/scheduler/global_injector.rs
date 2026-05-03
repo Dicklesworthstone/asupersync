@@ -353,6 +353,13 @@ impl GlobalInjector {
         !self.cancel_queue.is_empty()
     }
 
+    /// Returns the approximate number of tasks in the cancel lane.
+    #[inline]
+    #[must_use]
+    pub fn cancel_count(&self) -> usize {
+        self.cancel_queue.len()
+    }
+
     /// Returns true if the timed lane has pending work.
     #[inline]
     #[must_use]
