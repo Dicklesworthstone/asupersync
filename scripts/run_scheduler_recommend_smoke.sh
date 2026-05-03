@@ -8,6 +8,7 @@ MODE="execute"
 SCENARIO=""
 LIST_ONLY=0
 OUTPUT_ROOT_OVERRIDE="${SCHEDULER_RECOMMEND_SMOKE_OUTPUT_DIR:-}"
+RUN_ID_OVERRIDE="${SCHEDULER_RECOMMEND_SMOKE_RUN_ID:-}"
 
 usage() {
     cat <<'USAGE'
@@ -465,7 +466,7 @@ FALLBACK_ACTIVATIONS_JSON="$(jq -c '.fallback_activations_hint // { activated: f
 CONTROLLER_STATE_REFERENCES_JSON="$(jq -c '.controller_state_references // ["scheduler_report.profile_name","scheduler_report.recommended_knobs","scheduler_report.fallback_profile","scheduler_report.reason_codes"]' <<<"$SCENARIO_JSON")"
 OUTPUT_ROOT="${OUTPUT_ROOT_OVERRIDE:-${PROJECT_ROOT}/${SCENARIO_OUTPUT_ROOT}}"
 TIMESTAMP="$(date +%Y%m%d_%H%M%S)"
-RUN_ID="run_${TIMESTAMP}"
+RUN_ID="${RUN_ID_OVERRIDE:-run_${TIMESTAMP}}"
 RUN_DIR="${OUTPUT_ROOT}/${RUN_ID}/${SCENARIO}"
 EVIDENCE_FILE="${RUN_DIR}/scheduler_evidence.json"
 REPORT_FILE="${RUN_DIR}/scheduler_report.json"
