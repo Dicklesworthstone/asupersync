@@ -4765,6 +4765,13 @@ test = false
 doc = false
 
 [[bin]]
+name = "h2_request_pseudo_method_with_special_chars"
+path = "fuzz_targets/h2_request_pseudo_method_with_special_chars.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "h2_pseudo_header_order"
 path = "fuzz_targets/h2_pseudo_header_order.rs"
 test = false
