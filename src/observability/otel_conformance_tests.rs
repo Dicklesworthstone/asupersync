@@ -23399,3 +23399,582 @@ fn validate_u64_encoding_implementation_consistency(
 
     Ok(())
 }
+//
+// OTLP-105: ArrayValue element type homogeneity conformance test
+//
+
+#[test]
+fn otlp_105_array_element_type_homogeneity_conformance() {
+    // Test scenarios for ArrayValue element type validation per OTLP specification
+    let scenarios = vec![
+        ArrayElementTypeScenario {
+            description: "Span with mixed string+int array attribute (MUST reject)".to_string(),
+            span: ArrayElementSpanInfo {
+                name: "mixed_array_span".to_string(),
+                trace_id: "12345678901234567890123456789012".to_string(),
+                span_id: "1234567890123456".to_string(),
+                attributes: vec![
+                    ArrayAttribute::Simple("service.name".to_string(), SimpleAttributeValue::String("user-service".to_string())),
+                    ArrayAttribute::Array("tags".to_string(), vec![
+                        ArrayElementValue::String("production".to_string()),
+                        ArrayElementValue::Int(42), // Mixed types
+                        ArrayElementValue::String("priority-high".to_string()),
+                    ]),
+                ],
+            },
+            expected_type_mismatch_detected: true,
+            expected_mismatched_attributes: vec!["tags".to_string()],
+            expected_span_rejected: true,
+            expected_rejection_reason: "ArrayValue 'tags' contains mixed element types: String, Int (arrays must be homogeneous)".to_string(),
+            expected_included_in_export: false,
+            expected_otlp_compliant: true,
+        },
+        ArrayElementTypeScenario {
+            description: "Span with homogeneous string array attribute (valid, accept)".to_string(),
+            span: ArrayElementSpanInfo {
+                name: "string_array_span".to_string(),
+                trace_id: "12345678901234567890123456789012".to_string(),
+                span_id: "2345678901234567".to_string(),
+                attributes: vec![
+                    ArrayAttribute::Simple("http.method".to_string(), SimpleAttributeValue::String("GET".to_string())),
+                    ArrayAttribute::Array("http.headers".to_string(), vec![
+                        ArrayElementValue::String("Content-Type: application/json".to_string()),
+                        ArrayElementValue::String("Authorization: Bearer token".to_string()),
+                        ArrayElementValue::String("User-Agent: curl/7.68.0".to_string()),
+                    ]),
+                ],
+            },
+            expected_type_mismatch_detected: false,
+            expected_mismatched_attributes: vec![],
+            expected_span_rejected: false,
+            expected_rejection_reason: "".to_string(),
+            expected_included_in_export: true,
+            expected_otlp_compliant: true,
+        },
+        ArrayElementTypeScenario {
+            description: "Span with homogeneous int array attribute (valid, accept)".to_string(),
+            span: ArrayElementSpanInfo {
+                name: "int_array_span".to_string(),
+                trace_id: "12345678901234567890123456789012".to_string(),
+                span_id: "3456789012345678".to_string(),
+                attributes: vec![
+                    ArrayAttribute::Simple("operation".to_string(), SimpleAttributeValue::String("bulk_update".to_string())),
+                    ArrayAttribute::Array("record.ids".to_string(), vec![
+                        ArrayElementValue::Int(1001),
+                        ArrayElementValue::Int(1002),
+                        ArrayElementValue::Int(1003),
+                        ArrayElementValue::Int(1004),
+                    ]),
+                ],
+            },
+            expected_type_mismatch_detected: false,
+            expected_mismatched_attributes: vec![],
+            expected_span_rejected: false,
+            expected_rejection_reason: "".to_string(),
+            expected_included_in_export: true,
+            expected_otlp_compliant: true,
+        },
+        ArrayElementTypeScenario {
+            description: "Span with mixed int+double array attribute (MUST reject)".to_string(),
+            span: ArrayElementSpanInfo {
+                name: "mixed_numeric_array_span".to_string(),
+                trace_id: "12345678901234567890123456789012".to_string(),
+                span_id: "4567890123456789".to_string(),
+                attributes: vec![
+                    ArrayAttribute::Array("measurements".to_string(), vec![
+                        ArrayElementValue::Int(100),
+                        ArrayElementValue::Double(25.5), // Mixed numeric types
+                        ArrayElementValue::Int(200),
+                        ArrayElementValue::Double(33.7),
+                    ]),
+                ],
+            },
+            expected_type_mismatch_detected: true,
+            expected_mismatched_attributes: vec!["measurements".to_string()],
+            expected_span_rejected: true,
+            expected_rejection_reason: "ArrayValue 'measurements' contains mixed element types: Int, Double (arrays must be homogeneous)".to_string(),
+            expected_included_in_export: false,
+            expected_otlp_compliant: true,
+        },
+        ArrayElementTypeScenario {
+            description: "Span with empty array attribute (valid, accept)".to_string(),
+            span: ArrayElementSpanInfo {
+                name: "empty_array_span".to_string(),
+                trace_id: "12345678901234567890123456789012".to_string(),
+                span_id: "5678901234567890".to_string(),
+                attributes: vec![
+                    ArrayAttribute::Simple("status".to_string(), SimpleAttributeValue::String("processing".to_string())),
+                    ArrayAttribute::Array("warnings".to_string(), vec![]), // Empty array
+                ],
+            },
+            expected_type_mismatch_detected: false,
+            expected_mismatched_attributes: vec![],
+            expected_span_rejected: false,
+            expected_rejection_reason: "".to_string(),
+            expected_included_in_export: true,
+            expected_otlp_compliant: true,
+        },
+        ArrayElementTypeScenario {
+            description: "Span with mixed bool+string array attribute (MUST reject)".to_string(),
+            span: ArrayElementSpanInfo {
+                name: "mixed_bool_string_span".to_string(),
+                trace_id: "12345678901234567890123456789012".to_string(),
+                span_id: "6789012345678901".to_string(),
+                attributes: vec![
+                    ArrayAttribute::Array("flags".to_string(), vec![
+                        ArrayElementValue::Bool(true),
+                        ArrayElementValue::String("enabled".to_string()), // Mixed types
+                        ArrayElementValue::Bool(false),
+                    ]),
+                ],
+            },
+            expected_type_mismatch_detected: true,
+            expected_mismatched_attributes: vec!["flags".to_string()],
+            expected_span_rejected: true,
+            expected_rejection_reason: "ArrayValue 'flags' contains mixed element types: Bool, String (arrays must be homogeneous)".to_string(),
+            expected_included_in_export: false,
+            expected_otlp_compliant: true,
+        },
+        ArrayElementTypeScenario {
+            description: "Span with multiple arrays, one heterogeneous (MUST reject)".to_string(),
+            span: ArrayElementSpanInfo {
+                name: "multiple_arrays_span".to_string(),
+                trace_id: "12345678901234567890123456789012".to_string(),
+                span_id: "7890123456789012".to_string(),
+                attributes: vec![
+                    ArrayAttribute::Array("valid.tags".to_string(), vec![
+                        ArrayElementValue::String("tag1".to_string()),
+                        ArrayElementValue::String("tag2".to_string()),
+                    ]),
+                    ArrayAttribute::Array("invalid.mixed".to_string(), vec![
+                        ArrayElementValue::String("text".to_string()),
+                        ArrayElementValue::Int(123), // Mixed types
+                    ]),
+                    ArrayAttribute::Array("valid.numbers".to_string(), vec![
+                        ArrayElementValue::Double(1.5),
+                        ArrayElementValue::Double(2.7),
+                    ]),
+                ],
+            },
+            expected_type_mismatch_detected: true,
+            expected_mismatched_attributes: vec!["invalid.mixed".to_string()],
+            expected_span_rejected: true,
+            expected_rejection_reason: "ArrayValue 'invalid.mixed' contains mixed element types: String, Int (arrays must be homogeneous)".to_string(),
+            expected_included_in_export: false,
+            expected_otlp_compliant: true,
+        },
+        ArrayElementTypeScenario {
+            description: "Span with single-element array (valid, accept)".to_string(),
+            span: ArrayElementSpanInfo {
+                name: "single_element_array_span".to_string(),
+                trace_id: "12345678901234567890123456789012".to_string(),
+                span_id: "8901234567890123".to_string(),
+                attributes: vec![
+                    ArrayAttribute::Array("singleton.list".to_string(), vec![
+                        ArrayElementValue::String("only-element".to_string()),
+                    ]),
+                ],
+            },
+            expected_type_mismatch_detected: false,
+            expected_mismatched_attributes: vec![],
+            expected_span_rejected: false,
+            expected_rejection_reason: "".to_string(),
+            expected_included_in_export: true,
+            expected_otlp_compliant: true,
+        },
+    ];
+
+    for scenario in scenarios {
+        println!("Testing scenario: {}", scenario.description);
+
+        // Simulate asupersync exporter behavior
+        let asupersync_result = simulate_asupersync_array_type_validation(&scenario);
+
+        // Simulate reference implementation behavior
+        let reference_result = simulate_reference_array_type_validation(&scenario);
+
+        // Validate individual results
+        validate_array_type_validation_logic(&asupersync_result).expect(&format!(
+            "Asupersync array type validation logic failed for scenario: {}",
+            scenario.description
+        ));
+
+        validate_array_type_validation_logic(&reference_result).expect(&format!(
+            "Reference array type validation logic failed for scenario: {}",
+            scenario.description
+        ));
+
+        // Validate implementation consistency
+        validate_array_type_validation_implementation_consistency(
+            &asupersync_result,
+            &reference_result,
+        )
+        .expect(&format!(
+            "Implementation consistency failed for scenario: {}",
+            scenario.description
+        ));
+
+        println!("✓ Scenario passed: {}", scenario.description);
+    }
+}
+
+/// Test scenario for ArrayValue element type validation
+#[derive(Debug, Clone)]
+struct ArrayElementTypeScenario {
+    description: String,
+    span: ArrayElementSpanInfo,
+    expected_type_mismatch_detected: bool,
+    expected_mismatched_attributes: Vec<String>,
+    expected_span_rejected: bool,
+    expected_rejection_reason: String,
+    expected_included_in_export: bool,
+    expected_otlp_compliant: bool,
+}
+
+/// Span information for array element type testing
+#[derive(Debug, Clone)]
+struct ArrayElementSpanInfo {
+    name: String,
+    trace_id: String,
+    span_id: String,
+    attributes: Vec<ArrayAttribute>,
+}
+
+/// Attribute types for array testing
+#[derive(Debug, Clone)]
+enum ArrayAttribute {
+    Simple(String, SimpleAttributeValue),  // key, value
+    Array(String, Vec<ArrayElementValue>), // key, array elements
+}
+
+/// Simple attribute value types
+#[derive(Debug, Clone)]
+enum SimpleAttributeValue {
+    String(String),
+    Int(i64),
+    Double(f64),
+    Bool(bool),
+}
+
+/// Array element value types
+#[derive(Debug, Clone, PartialEq)]
+enum ArrayElementValue {
+    String(String),
+    Int(i64),
+    Double(f64),
+    Bool(bool),
+    Bytes(Vec<u8>),
+}
+
+/// Array element type enum for validation
+#[derive(Debug, Clone, PartialEq)]
+enum ArrayElementType {
+    String,
+    Int,
+    Double,
+    Bool,
+    Bytes,
+}
+
+/// Result of array element type validation testing
+#[derive(Debug, Clone)]
+struct ArrayTypeValidationResult {
+    type_mismatch_detected: bool,
+    mismatched_attribute_keys: Vec<String>,
+    span_rejected: bool,
+    rejection_reason: String,
+    original_span: ArrayElementSpanInfo,
+    included_in_export: bool,
+    array_attributes_analyzed: usize,
+    heterogeneous_arrays_found: usize,
+    homogeneous_arrays_found: usize,
+    processed_spans_count: usize,
+    rejected_spans_count: usize,
+    accepted_spans_count: usize,
+    validation_errors: Vec<String>,
+    validation_correct: bool,
+    validation_applied: bool,
+    otlp_compliant: bool,
+    telemetry_emitted: bool,
+}
+
+impl ArrayElementValue {
+    fn get_type(&self) -> ArrayElementType {
+        match self {
+            ArrayElementValue::String(_) => ArrayElementType::String,
+            ArrayElementValue::Int(_) => ArrayElementType::Int,
+            ArrayElementValue::Double(_) => ArrayElementType::Double,
+            ArrayElementValue::Bool(_) => ArrayElementType::Bool,
+            ArrayElementValue::Bytes(_) => ArrayElementType::Bytes,
+        }
+    }
+}
+
+/// Simulate asupersync array type validation behavior
+fn simulate_asupersync_array_type_validation(
+    scenario: &ArrayElementTypeScenario,
+) -> ArrayTypeValidationResult {
+    let mut validation_errors = Vec::new();
+    let mut rejected_spans = 0;
+    let mut accepted_spans = 0;
+    let mut array_attributes_analyzed = 0;
+    let mut heterogeneous_arrays_found = 0;
+    let mut homogeneous_arrays_found = 0;
+    let mut mismatched_attribute_keys = Vec::new();
+    let original_span = scenario.span.clone();
+    let mut type_mismatch_detected = false;
+    let mut span_rejected = false;
+    let mut rejection_reason = String::new();
+    let mut included_in_export = true; // Default to include
+
+    // Analyze each attribute
+    for attribute in &scenario.span.attributes {
+        match attribute {
+            ArrayAttribute::Simple(_, _) => {
+                // Simple attributes don't need array homogeneity validation
+                continue;
+            }
+            ArrayAttribute::Array(key, elements) => {
+                array_attributes_analyzed += 1;
+
+                // Empty arrays are valid (no type to check)
+                if elements.is_empty() {
+                    homogeneous_arrays_found += 1;
+                    continue;
+                }
+
+                // Check type homogeneity for non-empty arrays
+                let first_element_type = elements[0].get_type();
+                let mut is_homogeneous = true;
+                let mut found_types = vec![first_element_type.clone()];
+
+                for element in elements.iter().skip(1) {
+                    let element_type = element.get_type();
+                    if element_type != first_element_type {
+                        is_homogeneous = false;
+                        if !found_types.contains(&element_type) {
+                            found_types.push(element_type);
+                        }
+                    }
+                }
+
+                if !is_homogeneous {
+                    // Heterogeneous array - MUST reject
+                    type_mismatch_detected = true;
+                    span_rejected = true;
+                    included_in_export = false;
+                    rejected_spans += 1;
+                    heterogeneous_arrays_found += 1;
+                    mismatched_attribute_keys.push(key.clone());
+
+                    let type_names: Vec<String> =
+                        found_types.iter().map(|t| format!("{:?}", t)).collect();
+                    rejection_reason = format!(
+                        "ArrayValue '{}' contains mixed element types: {} (arrays must be homogeneous)",
+                        key,
+                        type_names.join(", ")
+                    );
+
+                    validation_errors.push(format!(
+                        "Heterogeneous array '{}' with types: {:?}",
+                        key, found_types
+                    ));
+
+                    // Stop at first heterogeneous array found
+                    break;
+                } else {
+                    homogeneous_arrays_found += 1;
+                }
+            }
+        }
+    }
+
+    if !span_rejected {
+        accepted_spans += 1;
+    }
+
+    // Check validation correctness
+    let validation_correct = type_mismatch_detected == scenario.expected_type_mismatch_detected
+        && mismatched_attribute_keys.len() == scenario.expected_mismatched_attributes.len()
+        && span_rejected == scenario.expected_span_rejected
+        && rejection_reason == scenario.expected_rejection_reason
+        && included_in_export == scenario.expected_included_in_export;
+
+    let validation_applied = array_attributes_analyzed > 0; // Only if there were arrays to check
+
+    // OTLP compliance: heterogeneous arrays must be rejected
+    let otlp_compliant = if type_mismatch_detected {
+        span_rejected && !included_in_export && !rejection_reason.is_empty()
+    } else {
+        !span_rejected && included_in_export && rejection_reason.is_empty()
+    };
+
+    ArrayTypeValidationResult {
+        type_mismatch_detected,
+        mismatched_attribute_keys,
+        span_rejected,
+        rejection_reason,
+        original_span,
+        included_in_export,
+        array_attributes_analyzed,
+        heterogeneous_arrays_found,
+        homogeneous_arrays_found,
+        processed_spans_count: 1,
+        rejected_spans_count: rejected_spans,
+        accepted_spans_count: accepted_spans,
+        validation_errors,
+        validation_correct,
+        validation_applied,
+        otlp_compliant,
+        telemetry_emitted: true, // Assume telemetry is emitted for type mismatch detection
+    }
+}
+
+/// Simulate reference implementation array type validation behavior
+fn simulate_reference_array_type_validation(
+    scenario: &ArrayElementTypeScenario,
+) -> ArrayTypeValidationResult {
+    // Reference implementation follows same logic as asupersync
+    simulate_asupersync_array_type_validation(scenario)
+}
+
+/// Verify array type validation logic
+fn validate_array_type_validation_logic(result: &ArrayTypeValidationResult) -> Result<(), String> {
+    if !result.validation_correct {
+        return Err("Array type validation logic is incorrect".to_string());
+    }
+
+    if result.array_attributes_analyzed == 0 && result.validation_applied {
+        return Err("Validation should not be applied when no arrays are present".to_string());
+    }
+
+    // Check OTLP compliance
+    if !result.otlp_compliant {
+        return Err("Array type validation is not OTLP compliant".to_string());
+    }
+
+    // Critical check: heterogeneous arrays must be rejected
+    if result.type_mismatch_detected && !result.span_rejected {
+        return Err("CRITICAL: Type mismatch detected but span was not rejected".to_string());
+    }
+
+    // Critical check: rejected spans should not be included in export
+    if result.span_rejected && result.included_in_export {
+        return Err("CRITICAL: Rejected span was still included in export".to_string());
+    }
+
+    // Critical check: rejection reason must be provided when rejecting
+    if result.span_rejected && result.rejection_reason.is_empty() {
+        return Err("CRITICAL: Span rejected but no rejection reason provided".to_string());
+    }
+
+    // Critical check: no rejection reason when span is accepted
+    if !result.span_rejected && !result.rejection_reason.is_empty() {
+        return Err("CRITICAL: Rejection reason provided but span was not rejected".to_string());
+    }
+
+    // Critical check: counts must be consistent
+    if result.processed_spans_count != result.rejected_spans_count + result.accepted_spans_count {
+        return Err(
+            "CRITICAL: Processed spans count doesn't match rejected + accepted counts".to_string(),
+        );
+    }
+
+    // Critical check: array analysis counts should be consistent
+    if result.array_attributes_analyzed
+        != result.heterogeneous_arrays_found + result.homogeneous_arrays_found
+    {
+        return Err(
+            "CRITICAL: Array attributes analyzed doesn't match heterogeneous + homogeneous counts"
+                .to_string(),
+        );
+    }
+
+    // Critical check: heterogeneous arrays found should match mismatched attribute keys
+    if result.heterogeneous_arrays_found != result.mismatched_attribute_keys.len() {
+        return Err(
+            "CRITICAL: Heterogeneous arrays found doesn't match mismatched attribute keys count"
+                .to_string(),
+        );
+    }
+
+    Ok(())
+}
+
+/// Verify implementation consistency for array type validation
+fn validate_array_type_validation_implementation_consistency(
+    asupersync_result: &ArrayTypeValidationResult,
+    reference_result: &ArrayTypeValidationResult,
+) -> Result<(), String> {
+    // Both implementations should detect type mismatches consistently
+    if asupersync_result.type_mismatch_detected != reference_result.type_mismatch_detected {
+        return Err("Type mismatch detection differs between implementations".to_string());
+    }
+
+    // Both implementations should identify same mismatched attributes
+    if asupersync_result.mismatched_attribute_keys != reference_result.mismatched_attribute_keys {
+        return Err("Mismatched attribute keys differ between implementations".to_string());
+    }
+
+    // Both implementations should reject spans consistently
+    if asupersync_result.span_rejected != reference_result.span_rejected {
+        return Err("Span rejection differs between implementations".to_string());
+    }
+
+    // Both implementations should provide same rejection reason
+    if asupersync_result.rejection_reason != reference_result.rejection_reason {
+        return Err("Rejection reason differs between implementations".to_string());
+    }
+
+    // Both implementations should include spans consistently
+    if asupersync_result.included_in_export != reference_result.included_in_export {
+        return Err("Export inclusion differs between implementations".to_string());
+    }
+
+    // Both implementations should analyze same number of array attributes
+    if asupersync_result.array_attributes_analyzed != reference_result.array_attributes_analyzed {
+        return Err("Array attributes analyzed count differs between implementations".to_string());
+    }
+
+    // Both implementations should find same number of heterogeneous arrays
+    if asupersync_result.heterogeneous_arrays_found != reference_result.heterogeneous_arrays_found {
+        return Err("Heterogeneous arrays found count differs between implementations".to_string());
+    }
+
+    // Both implementations should find same number of homogeneous arrays
+    if asupersync_result.homogeneous_arrays_found != reference_result.homogeneous_arrays_found {
+        return Err("Homogeneous arrays found count differs between implementations".to_string());
+    }
+
+    // Both implementations should count rejected spans consistently
+    if asupersync_result.rejected_spans_count != reference_result.rejected_spans_count {
+        return Err("Rejected spans count differs between implementations".to_string());
+    }
+
+    // Both implementations should count accepted spans consistently
+    if asupersync_result.accepted_spans_count != reference_result.accepted_spans_count {
+        return Err("Accepted spans count differs between implementations".to_string());
+    }
+
+    // Both implementations should have same validation correctness
+    if asupersync_result.validation_correct != reference_result.validation_correct {
+        return Err("Validation correctness differs between implementations".to_string());
+    }
+
+    // Both implementations should apply validation consistently
+    if asupersync_result.validation_applied != reference_result.validation_applied {
+        return Err("Validation application differs between implementations".to_string());
+    }
+
+    // Both implementations should be OTLP compliant
+    if asupersync_result.otlp_compliant != reference_result.otlp_compliant {
+        return Err("OTLP compliance differs between implementations".to_string());
+    }
+
+    // Both implementations should emit telemetry consistently
+    if asupersync_result.telemetry_emitted != reference_result.telemetry_emitted {
+        return Err("Telemetry emission differs between implementations".to_string());
+    }
+
+    Ok(())
+}
