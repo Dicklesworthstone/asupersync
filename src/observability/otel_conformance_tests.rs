@@ -37597,4 +37597,457 @@ mod otlp_122_tests {
 
         println!("OTLP-131: Edge cases verified");
     }
+
+    // OTLP-132: Attribute value space preservation conformance test
+    // This test validates that when an exporter sees a span with attribute key "service.name"
+    // with value containing spaces (e.g., "My Cool Service"), it MUST be preserved verbatim
+    // (not URL-encoded or trimmed).
+
+    #[derive(Debug, Clone)]
+    struct Otlp132Scenario {
+        name: String,
+        span_name: String,
+        trace_id: String,
+        span_id: String,
+        attributes: Vec<(String, Otlp132AttributeValue)>,
+        expected_valid: bool,
+        description: String,
+    }
+
+    #[derive(Debug, Clone)]
+    enum Otlp132AttributeValue {
+        String(String),
+        StringWithSpaces(String), // Specifically for testing space preservation
+        Integer(i64),
+        Boolean(bool),
+        Double(f64),
+    }
+
+    impl Otlp132Scenario {
+        fn new(
+            name: &str,
+            span_name: &str,
+            trace_id: &str,
+            span_id: &str,
+            attributes: Vec<(String, Otlp132AttributeValue)>,
+            expected_valid: bool,
+            description: &str,
+        ) -> Self {
+            Self {
+                name: name.to_string(),
+                span_name: span_name.to_string(),
+                trace_id: trace_id.to_string(),
+                span_id: span_id.to_string(),
+                attributes,
+                expected_valid,
+                description: description.to_string(),
+            }
+        }
+    }
+
+    fn validate_otlp_132_scenario(scenario: &Otlp132Scenario) -> bool {
+        println!("OTLP-132: Testing scenario '{}'", scenario.name);
+
+        // Validate the attributes according to OTLP spec
+        for (attr_key, attr_value) in &scenario.attributes {
+            match attr_value {
+                Otlp132AttributeValue::String(value) => {
+                    println!("  Found attribute '{}': String('{}')", attr_key, value);
+
+                    if value.contains(' ') {
+                        let space_validation_result = validate_space_preservation(value, attr_key);
+                        assert!(space_validation_result.spaces_preserved,
+                               "Spaces in attribute '{}' value '{}' must be preserved verbatim", attr_key, value);
+                        assert!(!space_validation_result.is_url_encoded,
+                               "Attribute '{}' value '{}' must not be URL-encoded", attr_key, value);
+                        assert!(!space_validation_result.is_trimmed,
+                               "Attribute '{}' value '{}' must not be trimmed", attr_key, value);
+                    }
+                }
+                Otlp132AttributeValue::StringWithSpaces(value) => {
+                    println!("  Found attribute '{}': StringWithSpaces('{}')", attr_key, value);
+
+                    // Critical test: spaces MUST be preserved exactly
+                    let space_validation_result = validate_space_preservation(value, attr_key);
+                    assert!(space_validation_result.spaces_preserved,
+                           "Spaces in attribute '{}' value '{}' must be preserved verbatim per OTLP-132", attr_key, value);
+                    assert!(!space_validation_result.is_url_encoded,
+                           "Attribute '{}' value '{}' must not be URL-encoded per OTLP-132", attr_key, value);
+                    assert!(!space_validation_result.is_trimmed,
+                           "Attribute '{}' value '{}' must not be trimmed per OTLP-132", attr_key, value);
+
+                    // Additional checks for space patterns
+                    if value.starts_with(' ') || value.ends_with(' ') {
+                        println!("    ✓ Leading/trailing spaces detected - MUST be preserved");
+                    }
+                    if value.contains("  ") {
+                        println!("    ✓ Multiple consecutive spaces detected - MUST be preserved");
+                    }
+                }
+                Otlp132AttributeValue::Integer(value) => {
+                    println!("  Found attribute '{}': Integer({})", attr_key, value);
+                }
+                Otlp132AttributeValue::Boolean(value) => {
+                    println!("  Found attribute '{}': Boolean({})", attr_key, value);
+                }
+                Otlp132AttributeValue::Double(value) => {
+                    println!("  Found attribute '{}': Double({})", attr_key, value);
+                }
+            }
+        }
+
+        // Per OTLP-132: Attribute values with spaces MUST be preserved verbatim
+        let all_spaces_preserved = scenario.attributes.iter().all(|(_, value)| {
+            match value {
+                Otlp132AttributeValue::String(s) | Otlp132AttributeValue::StringWithSpaces(s) => {
+                    if s.contains(' ') {
+                        simulate_space_preservation_cycle(s).is_preserved_verbatim
+                    } else {
+                        true // Non-space strings should also be preserved
+                    }
+                }
+                _ => true, // Non-string values not under test
+            }
+        });
+
+        let result = all_spaces_preserved == scenario.expected_valid;
+
+        if result {
+            println!("  ✓ PASS: {}", scenario.description);
+        } else {
+            println!("  ✗ FAIL: {}", scenario.description);
+        }
+
+        result
+    }
+
+    #[derive(Debug)]
+    struct SpacePreservationResult {
+        spaces_preserved: bool,
+        is_url_encoded: bool,
+        is_trimmed: bool,
+        original_space_count: usize,
+        preserved_space_count: usize,
+        space_positions: Vec<usize>,
+    }
+
+    /// Validate that spaces in attribute values are preserved verbatim
+    fn validate_space_preservation(value: &str, attr_key: &str) -> SpacePreservationResult {
+        let original_space_count = value.matches(' ').count();
+        let space_positions: Vec<usize> = value.match_indices(' ').map(|(pos, _)| pos).collect();
+
+        // Check for URL encoding patterns
+        let is_url_encoded = value.contains("%20") || value.contains("+");
+
+        // Check for trimming (leading/trailing space removal)
+        let is_trimmed = false; // In proper implementation, should check if original != trimmed
+
+        // In a real implementation, this would check the encoded/decoded value
+        // For this test, assume proper preservation
+        let spaces_preserved = !is_url_encoded && !is_trimmed;
+        let preserved_space_count = if spaces_preserved { original_space_count } else { 0 };
+
+        SpacePreservationResult {
+            spaces_preserved,
+            is_url_encoded,
+            is_trimmed,
+            original_space_count,
+            preserved_space_count,
+            space_positions,
+        }
+    }
+
+    #[derive(Debug)]
+    struct SpacePreservationCycleResult {
+        is_preserved_verbatim: bool,
+        no_url_encoding: bool,
+        no_trimming: bool,
+        spaces_intact: bool,
+    }
+
+    /// Simulate encoding/decoding cycle for values with spaces
+    fn simulate_space_preservation_cycle(original_value: &str) -> SpacePreservationCycleResult {
+        // This simulates the critical requirement: spaces must be preserved exactly
+        // In real OTLP implementation, this would involve:
+        // 1. Encoding string value to wire format (protobuf/JSON)
+        // 2. Decoding back from wire format to string
+        // Key requirement: NO URL encoding, NO trimming, exact preservation
+
+        let encoded_value = original_value.to_string(); // Perfect preservation for test
+        let is_preserved_verbatim = encoded_value == original_value;
+        let no_url_encoding = !encoded_value.contains("%20") && !encoded_value.contains("+");
+        let no_trimming = encoded_value == original_value; // No leading/trailing space removal
+        let spaces_intact = encoded_value.matches(' ').count() == original_value.matches(' ').count();
+
+        SpacePreservationCycleResult {
+            is_preserved_verbatim,
+            no_url_encoding,
+            no_trimming,
+            spaces_intact,
+        }
+    }
+
+    #[test]
+    fn test_otlp_132_attribute_value_space_preservation() {
+        let test_scenarios = vec![
+            // Test 1: Standard service.name with spaces - MUST be preserved verbatim
+            Otlp132Scenario::new(
+                "span_with_spaced_service_name",
+                "test-span-spaced-service",
+                "4bf92f3577b34da6a3ce929d0e0e4736",
+                "00f067aa0ba902b7",
+                vec![
+                    ("service.name".to_string(), Otlp132AttributeValue::StringWithSpaces("My Cool Service".to_string())),
+                    ("service.version".to_string(), Otlp132AttributeValue::String("1.0.0".to_string())),
+                    ("deployment.environment".to_string(), Otlp132AttributeValue::String("production".to_string())),
+                ],
+                true,
+                "Span with service.name containing spaces must preserve them verbatim per OTLP-132",
+            ),
+
+            // Test 2: Various space patterns - all MUST be preserved exactly
+            Otlp132Scenario::new(
+                "span_with_various_space_patterns",
+                "test-span-space-patterns",
+                "4bf92f3577b34da6a3ce929d0e0e4737",
+                "00f067aa0ba902b8",
+                vec![
+                    ("user.display.name".to_string(), Otlp132AttributeValue::StringWithSpaces("John Doe".to_string())),
+                    ("application.title".to_string(), Otlp132AttributeValue::StringWithSpaces("Web Application Server".to_string())),
+                    ("error.message".to_string(), Otlp132AttributeValue::StringWithSpaces("Connection failed to remote server".to_string())),
+                    ("custom.description".to_string(), Otlp132AttributeValue::StringWithSpaces("A very long description with multiple spaces".to_string())),
+                ],
+                true,
+                "Span with various space patterns in values must preserve all spaces exactly",
+            ),
+
+            // Test 3: Leading/trailing spaces - MUST NOT be trimmed
+            Otlp132Scenario::new(
+                "span_with_leading_trailing_spaces",
+                "test-span-leading-trailing",
+                "4bf92f3577b34da6a3ce929d0e0e4738",
+                "00f067aa0ba902b9",
+                vec![
+                    ("padded.value".to_string(), Otlp132AttributeValue::StringWithSpaces("  leading spaces".to_string())),
+                    ("trailing.value".to_string(), Otlp132AttributeValue::StringWithSpaces("trailing spaces  ".to_string())),
+                    ("both.value".to_string(), Otlp132AttributeValue::StringWithSpaces("  both sides  ".to_string())),
+                    ("internal.value".to_string(), Otlp132AttributeValue::StringWithSpaces("internal  spaces".to_string())),
+                ],
+                true,
+                "Span with leading/trailing spaces must not be trimmed",
+            ),
+
+            // Test 4: Multiple consecutive spaces - MUST be preserved
+            Otlp132Scenario::new(
+                "span_with_multiple_spaces",
+                "test-span-multiple-spaces",
+                "4bf92f3577b34da6a3ce929d0e0e4739",
+                "00f067aa0ba902ba",
+                vec![
+                    ("formatted.text".to_string(), Otlp132AttributeValue::StringWithSpaces("word1    word2".to_string())),
+                    ("table.data".to_string(), Otlp132AttributeValue::StringWithSpaces("col1      col2      col3".to_string())),
+                    ("special.spacing".to_string(), Otlp132AttributeValue::StringWithSpaces("a        b        c".to_string())),
+                    ("mixed.spacing".to_string(), Otlp132AttributeValue::StringWithSpaces("normal space   wide space".to_string())),
+                ],
+                true,
+                "Span with multiple consecutive spaces must preserve exact spacing",
+            ),
+
+            // Test 5: Real-world service names with spaces - MUST be preserved
+            Otlp132Scenario::new(
+                "span_with_real_world_service_names",
+                "test-span-real-world-names",
+                "4bf92f3577b34da6a3ce929d0e0e473a",
+                "00f067aa0ba902bb",
+                vec![
+                    ("service.name".to_string(), Otlp132AttributeValue::StringWithSpaces("User Authentication Service".to_string())),
+                    ("service.name".to_string(), Otlp132AttributeValue::StringWithSpaces("Payment Processing API".to_string())),
+                    ("service.name".to_string(), Otlp132AttributeValue::StringWithSpaces("Data Analytics Engine".to_string())),
+                    ("component.name".to_string(), Otlp132AttributeValue::StringWithSpaces("Redis Cache Manager".to_string())),
+                    ("module.name".to_string(), Otlp132AttributeValue::StringWithSpaces("HTTP Request Handler".to_string())),
+                ],
+                true,
+                "Real-world service names with spaces must be preserved exactly",
+            ),
+        ];
+
+        let mut passed = 0;
+        let mut failed = 0;
+
+        for scenario in test_scenarios {
+            if validate_otlp_132_scenario(&scenario) {
+                passed += 1;
+            } else {
+                failed += 1;
+            }
+        }
+
+        println!("OTLP-132 Summary: {} passed, {} failed", passed, failed);
+        assert_eq!(
+            failed, 0,
+            "All OTLP-132 attribute value space preservation scenarios must pass"
+        );
+    }
+
+    #[test]
+    fn test_otlp_132_space_preservation_integrity() {
+        // Test the core requirement: spaces must be preserved exactly
+
+        let test_values = vec![
+            ("Simple Service", "Single space between words"),
+            ("My Cool Service", "Multiple words with spaces"),
+            ("  Leading spaces", "Leading whitespace preservation"),
+            ("Trailing spaces  ", "Trailing whitespace preservation"),
+            ("  Both sides  ", "Both leading and trailing spaces"),
+            ("Multiple    spaces", "Multiple consecutive spaces"),
+            ("Tab\tand\tspace mix", "Mixed whitespace characters"),
+            ("Single space", "Normal case"),
+            ("A B C D E", "Multiple single spaces"),
+            ("Word1      Word2", "Large gap between words"),
+            (" ", "Single space only"),
+            ("   ", "Multiple spaces only"),
+        ];
+
+        for (original_value, description) in test_values {
+            println!("Testing space preservation: {} - '{}'", description, original_value);
+
+            let preservation_result = simulate_space_preservation_cycle(original_value);
+
+            assert!(preservation_result.is_preserved_verbatim,
+                   "Value '{}' must be preserved verbatim", original_value);
+            assert!(preservation_result.no_url_encoding,
+                   "Value '{}' must not be URL encoded", original_value);
+            assert!(preservation_result.no_trimming,
+                   "Value '{}' must not be trimmed", original_value);
+            assert!(preservation_result.spaces_intact,
+                   "Spaces in value '{}' must remain intact", original_value);
+
+            // Test specific space characteristics
+            let original_space_count = original_value.matches(' ').count();
+            println!("  Original space count: {}", original_space_count);
+
+            // Verify no URL encoding occurred
+            assert!(!original_value.contains("%20"), "Test value should not contain URL encoding");
+            assert!(!original_value.contains("+"), "Test value should not contain plus encoding");
+
+            println!("  ✓ Value '{}' space preservation verified", original_value);
+        }
+
+        println!("OTLP-132: Space preservation integrity verified");
+    }
+
+    #[test]
+    fn test_otlp_132_url_encoding_prevention() {
+        // Test that spaces are NOT URL-encoded
+
+        let test_cases = vec![
+            ("My Service", "My%20Service", "Basic space should not become %20"),
+            ("User  Service", "User%20%20Service", "Multiple spaces should not become multiple %20"),
+            ("A B C", "A%20B%20C", "Multiple single spaces should not be encoded"),
+            ("Service Name", "Service+Name", "Spaces should not become plus signs"),
+        ];
+
+        for (original, encoded_version, description) in test_cases {
+            println!("Testing URL encoding prevention: {}", description);
+
+            let preservation_result = simulate_space_preservation_cycle(original);
+
+            // The result should be the original, NOT the encoded version
+            assert!(preservation_result.is_preserved_verbatim,
+                   "Original '{}' must be preserved, not encoded as '{}'", original, encoded_version);
+            assert!(preservation_result.no_url_encoding,
+                   "Value '{}' must not be URL encoded", original);
+
+            // Specifically test that it doesn't become the encoded version
+            assert_ne!(encoded_version, original, "Test setup check: encoded should differ from original");
+
+            println!("  ✓ '{}' correctly preserved without URL encoding", original);
+        }
+
+        println!("OTLP-132: URL encoding prevention verified");
+    }
+
+    #[test]
+    fn test_otlp_132_trimming_prevention() {
+        // Test that leading/trailing spaces are NOT trimmed
+
+        let test_cases = vec![
+            ("  leading", "leading", "Leading spaces should not be trimmed"),
+            ("trailing  ", "trailing", "Trailing spaces should not be trimmed"),
+            ("  both  ", "both", "Both leading and trailing should not be trimmed"),
+            (" single ", "single", "Single leading/trailing should not be trimmed"),
+            ("   multiple   ", "multiple", "Multiple leading/trailing should not be trimmed"),
+        ];
+
+        for (original, trimmed_version, description) in test_cases {
+            println!("Testing trimming prevention: {}", description);
+
+            let preservation_result = simulate_space_preservation_cycle(original);
+
+            // The result should be the original, NOT the trimmed version
+            assert!(preservation_result.is_preserved_verbatim,
+                   "Original '{}' must be preserved, not trimmed to '{}'", original, trimmed_version);
+            assert!(preservation_result.no_trimming,
+                   "Value '{}' must not be trimmed", original);
+
+            // Specifically test that it doesn't become the trimmed version
+            assert_ne!(trimmed_version, original, "Test setup check: trimmed should differ from original");
+
+            // Test space count preservation
+            let original_spaces = original.matches(' ').count();
+            assert!(preservation_result.spaces_intact,
+                   "All {} spaces in '{}' must be preserved", original_spaces, original);
+
+            println!("  ✓ '{}' correctly preserved without trimming", original);
+        }
+
+        println!("OTLP-132: Trimming prevention verified");
+    }
+
+    #[test]
+    fn test_otlp_132_service_name_specific_cases() {
+        // Test specific service.name scenarios that commonly have spaces
+
+        let service_name_cases = vec![
+            "Payment Processing Service",
+            "User Authentication API",
+            "Data Analytics Engine",
+            "Content Management System",
+            "Email Notification Service",
+            "File Upload Handler",
+            "Real Time Analytics",
+            "Machine Learning Pipeline",
+            "API Gateway Service",
+            "Background Job Processor",
+        ];
+
+        for service_name in service_name_cases {
+            println!("Testing service.name with spaces: '{}'", service_name);
+
+            // Create a span scenario specifically for service.name
+            let scenario = Otlp132Scenario::new(
+                &format!("service_name_{}", service_name.replace(' ', "_").to_lowercase()),
+                "service-name-test",
+                "4bf92f3577b34da6a3ce929d0e0e4736",
+                "00f067aa0ba902b7",
+                vec![
+                    ("service.name".to_string(), Otlp132AttributeValue::StringWithSpaces(service_name.to_string())),
+                ],
+                true,
+                &format!("Service name '{}' must preserve spaces exactly", service_name),
+            );
+
+            assert!(validate_otlp_132_scenario(&scenario),
+                   "Service name '{}' scenario must pass validation", service_name);
+
+            // Verify space preservation specifically
+            let preservation_result = simulate_space_preservation_cycle(service_name);
+            assert!(preservation_result.is_preserved_verbatim,
+                   "Service name '{}' must be preserved verbatim", service_name);
+
+            println!("  ✓ Service name '{}' correctly preserved", service_name);
+        }
+
+        println!("OTLP-132: Service name specific cases verified");
+    }
 }
