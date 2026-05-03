@@ -1,0 +1,150 @@
+{
+  "contract_version": "scheduler-global-ready-contention-smoke-contract-v1",
+  "bead_id": "asupersync-g0kwgh",
+  "description": "Contract-backed smoke proof for global-ready batch contention metrics across producer counts.",
+  "runner_script": "scripts/run_scheduler_global_ready_contention_smoke.sh",
+  "runner_bundle_schema_version": "scheduler-global-ready-contention-smoke-bundle-v1",
+  "runner_report_schema_version": "scheduler-global-ready-contention-smoke-run-report-v1",
+  "required_bundle_fields": [
+    "schema_version",
+    "contract_version",
+    "scenario_id",
+    "description",
+    "scenario_class",
+    "execution_policy",
+    "run_id",
+    "mode",
+    "artifact_path",
+    "run_log_path",
+    "contention_manifest_file",
+    "contention_metrics_file",
+    "command",
+    "command_exit_code",
+    "script_exit_code",
+    "validation_passed",
+    "status",
+    "started_ts",
+    "ended_ts"
+  ],
+  "required_run_report_fields": [
+    "schema_version",
+    "contract_version",
+    "artifact_path",
+    "bundle_manifest_path",
+    "run_id",
+    "scenario_id",
+    "mode",
+    "command_exit_code",
+    "script_exit_code",
+    "validation_passed",
+    "status",
+    "message",
+    "expected_metrics_projection",
+    "actual_metrics_projection"
+  ],
+  "required_execute_output_files": [
+    "bundle_manifest.json",
+    "run_report.json",
+    "contention_manifest.json",
+    "contention_metrics.json",
+    "run.log"
+  ],
+  "smoke_scenarios": [
+    {
+      "scenario_id": "AA-SCHED-GLOBAL-READY-FALLBACK-1P",
+      "description": "Single-producer shallow burst should stay on the baseline single-pop path with no batch-mode activation.",
+      "output_root": "target/scheduler-global-ready-contention-smoke",
+      "command_prefix": "cargo test -p asupersync --lib global_ready_contention_contract_scenarios_match_expected_metrics -- --nocapture",
+      "scenario_class": "deterministic_lab_safe",
+      "execution_policy": "execute_only",
+      "fixture": {
+        "producer_count": 1,
+        "tasks_per_producer": 3,
+        "priority": 50
+      },
+      "expected_metrics": {
+        "total_injected": 3,
+        "batch_mode_activated": false,
+        "fallback_to_baseline": true,
+        "min_batch_drains": 0,
+        "min_batch_tasks": 0,
+        "max_duplicate_dispatches": 0,
+        "max_lost_tasks": 0,
+        "configured_batch_size": 4,
+        "activation_threshold": 8
+      }
+    },
+    {
+      "scenario_id": "AA-SCHED-GLOBAL-READY-CONTENTION-8P",
+      "description": "Eight simultaneous producers should trigger the bounded batch-prefetch path while preserving no-loss dispatch.",
+      "output_root": "target/scheduler-global-ready-contention-smoke",
+      "command_prefix": "cargo test -p asupersync --lib global_ready_contention_contract_scenarios_match_expected_metrics -- --nocapture",
+      "scenario_class": "deterministic_lab_safe",
+      "execution_policy": "execute_only",
+      "fixture": {
+        "producer_count": 8,
+        "tasks_per_producer": 64,
+        "priority": 50
+      },
+      "expected_metrics": {
+        "total_injected": 512,
+        "batch_mode_activated": true,
+        "fallback_to_baseline": false,
+        "min_batch_drains": 1,
+        "min_batch_tasks": 4,
+        "max_duplicate_dispatches": 0,
+        "max_lost_tasks": 0,
+        "configured_batch_size": 4,
+        "activation_threshold": 8
+      }
+    },
+    {
+      "scenario_id": "AA-SCHED-GLOBAL-READY-CONTENTION-32P",
+      "description": "Thirty-two simultaneous producers should keep the bounded batch-prefetch path active and drain all injected work exactly once.",
+      "output_root": "target/scheduler-global-ready-contention-smoke",
+      "command_prefix": "cargo test -p asupersync --lib global_ready_contention_contract_scenarios_match_expected_metrics -- --nocapture",
+      "scenario_class": "deterministic_lab_safe",
+      "execution_policy": "execute_only",
+      "fixture": {
+        "producer_count": 32,
+        "tasks_per_producer": 32,
+        "priority": 50
+      },
+      "expected_metrics": {
+        "total_injected": 1024,
+        "batch_mode_activated": true,
+        "fallback_to_baseline": false,
+        "min_batch_drains": 1,
+        "min_batch_tasks": 4,
+        "max_duplicate_dispatches": 0,
+        "max_lost_tasks": 0,
+        "configured_batch_size": 4,
+        "activation_threshold": 8
+      }
+    },
+    {
+      "scenario_id": "AA-SCHED-GLOBAL-READY-CONTENTION-64P",
+      "description": "Sixty-four simultaneous producers should keep the bounded batch-prefetch path active at the highest supported producer fan-in.",
+      "output_root": "target/scheduler-global-ready-contention-smoke",
+      "command_prefix": "cargo test -p asupersync --lib global_ready_contention_contract_scenarios_match_expected_metrics -- --nocapture",
+      "scenario_class": "deterministic_lab_safe",
+      "execution_policy": "execute_only",
+      "fixture": {
+        "producer_count": 64,
+        "tasks_per_producer": 32,
+        "priority": 50
+      },
+      "expected_metrics": {
+        "total_injected": 2048,
+        "batch_mode_activated": true,
+        "fallback_to_baseline": false,
+        "min_batch_drains": 1,
+        "min_batch_tasks": 4,
+        "max_duplicate_dispatches": 0,
+        "max_lost_tasks": 0,
+        "configured_batch_size": 4,
+        "activation_threshold": 8
+      }
+    }
+  ]
+}

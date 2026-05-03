@@ -5844,8 +5844,76 @@ mod tests {
     use crate::time::{TimerDriverHandle, VirtualClock};
     use crate::types::{Budget, CancelKind, CancelReason, CxInner, RegionId, TaskId};
     use parking_lot::RwLock;
+    use serde::Deserialize;
     use serde_json::{Value, json};
-    use std::time::Duration;
+    use std::collections::HashSet;
+    use std::env;
+    use std::fs;
+    use std::path::Path;
+    use std::time::{Duration, Instant};
+
+    const GLOBAL_READY_CONTENTION_CONTRACT_JSON: &str =
+        include_str!("../../../artifacts/scheduler_global_ready_contention_smoke_contract_v1.json");
+    const GLOBAL_READY_CONTENTION_OUTPUT_DIR_ENV: &str =
+        "ASUPERSYNC_GLOBAL_READY_CONTENTION_OUTPUT_DIR";
+    const GLOBAL_READY_CONTENTION_SCENARIO_ENV: &str =
+        "ASUPERSYNC_GLOBAL_READY_CONTENTION_SCENARIO";
+
+    #[derive(Debug, Deserialize)]
+    struct GlobalReadyContentionContract {
+        runner_script: String,
+        required_execute_output_files: Vec<String>,
+        smoke_scenarios: Vec<GlobalReadyContentionScenario>,
+    }
+
+    #[derive(Debug, Deserialize)]
+    struct GlobalReadyContentionScenario {
+        scenario_id: String,
+        fixture: GlobalReadyContentionFixture,
+        expected_metrics: GlobalReadyContentionExpectedMetrics,
+    }
+
+    #[derive(Debug, Deserialize)]
+    struct GlobalReadyContentionFixture {
+        producer_count: usize,
+        tasks_per_producer: usize,
+        priority: u8,
+    }
+
+    #[derive(Debug, Deserialize)]
+    struct GlobalReadyContentionExpectedMetrics {
+        total_injected: usize,
+        batch_mode_activated: bool,
+        fallback_to_baseline: bool,
+        min_batch_drains: u64,
+        min_batch_tasks: u64,
+        max_duplicate_dispatches: usize,
+        max_lost_tasks: usize,
+        configured_batch_size: usize,
+        activation_threshold: usize,
+    }
+
+    struct GlobalReadyContentionActualMetrics {
+        producer_count: usize,
+        tasks_per_producer: usize,
+        total_injected: usize,
+        ready_count_before_drain: usize,
+        total_dispatched: usize,
+        unique_dispatched: usize,
+        duplicate_dispatches: usize,
+        lost_tasks: usize,
+        batch_mode_activated: bool,
+        fallback_to_baseline: bool,
+        global_ready_batch_drains: u64,
+        global_ready_batch_tasks: u64,
+        configured_batch_size: usize,
+        activation_threshold: usize,
+        enqueue_latency_p50_ns: u64,
+        enqueue_latency_p95_ns: u64,
+        enqueue_latency_p99_ns: u64,
+        enqueue_latency_max_ns: u64,
+        mean_batch_size: f64,
+    }
 
     #[derive(Default)]
     struct TaskIdScrubber {
@@ -7075,6 +7143,313 @@ mod tests {
             worker.global_ready_buffer.is_empty(),
             "prefetch buffer should be empty after draining"
         );
+    }
+
+    #[test]
+    fn global_ready_contention_contract_scenarios_match_expected_metrics() {
+        let contract: GlobalReadyContentionContract =
+            serde_json::from_str(GLOBAL_READY_CONTENTION_CONTRACT_JSON)
+                .expect("global-ready contention contract must parse");
+        assert_eq!(
+            contract.runner_script,
+            "scripts/run_scheduler_global_ready_contention_smoke.sh"
+        );
+        assert_eq!(
+            contract.required_execute_output_files,
+            [
+                "bundle_manifest.json",
+                "run_report.json",
+                "contention_manifest.json",
+                "contention_metrics.json",
+                "run.log",
+            ]
+        );
+
+        let selected_scenario = env::var(GLOBAL_READY_CONTENTION_SCENARIO_ENV).ok();
+        let output_dir = env::var(GLOBAL_READY_CONTENTION_OUTPUT_DIR_ENV).ok();
+        let mut emitted_selected = false;
+
+        for scenario in &contract.smoke_scenarios {
+            let actual = execute_global_ready_contention_scenario(&scenario.fixture);
+
+            if selected_scenario.as_deref() == Some(scenario.scenario_id.as_str()) {
+                let output_dir = output_dir
+                    .as_deref()
+                    .expect("output directory must be set when selecting a scenario");
+                emit_global_ready_contention_artifacts(Path::new(output_dir), scenario, &actual)
+                    .expect("selected scenario should emit contention artifacts");
+                eprintln!(
+                    "selected scenario summary: id={} producers={} tasks_per_producer={} total_injected={} ready_before_drain={} drains={} drain_tasks={} fallback={} batch_mode={} duplicates={} lost={} enqueue_latency_ns={{p50:{},p95:{},p99:{},max:{}}}",
+                    scenario.scenario_id,
+                    actual.producer_count,
+                    actual.tasks_per_producer,
+                    actual.total_injected,
+                    actual.ready_count_before_drain,
+                    actual.global_ready_batch_drains,
+                    actual.global_ready_batch_tasks,
+                    actual.fallback_to_baseline,
+                    actual.batch_mode_activated,
+                    actual.duplicate_dispatches,
+                    actual.lost_tasks,
+                    actual.enqueue_latency_p50_ns,
+                    actual.enqueue_latency_p95_ns,
+                    actual.enqueue_latency_p99_ns,
+                    actual.enqueue_latency_max_ns
+                );
+                emitted_selected = true;
+            }
+
+            assert_eq!(
+                actual.total_injected, scenario.expected_metrics.total_injected,
+                "scenario {} injected an unexpected task count",
+                scenario.scenario_id
+            );
+            assert_eq!(
+                actual.unique_dispatched, scenario.expected_metrics.total_injected,
+                "scenario {} must dispatch every injected task exactly once",
+                scenario.scenario_id
+            );
+            assert!(
+                actual.duplicate_dispatches <= scenario.expected_metrics.max_duplicate_dispatches,
+                "scenario {} duplicated too many dispatches: actual={}, max={}",
+                scenario.scenario_id,
+                actual.duplicate_dispatches,
+                scenario.expected_metrics.max_duplicate_dispatches
+            );
+            assert!(
+                actual.lost_tasks <= scenario.expected_metrics.max_lost_tasks,
+                "scenario {} lost too many tasks: actual={}, max={}",
+                scenario.scenario_id,
+                actual.lost_tasks,
+                scenario.expected_metrics.max_lost_tasks
+            );
+            assert_eq!(
+                actual.batch_mode_activated, scenario.expected_metrics.batch_mode_activated,
+                "scenario {} batch-mode activation mismatch",
+                scenario.scenario_id
+            );
+            assert_eq!(
+                actual.fallback_to_baseline, scenario.expected_metrics.fallback_to_baseline,
+                "scenario {} fallback mismatch",
+                scenario.scenario_id
+            );
+            assert!(
+                actual.global_ready_batch_drains >= scenario.expected_metrics.min_batch_drains,
+                "scenario {} batch drain count below minimum: actual={}, min={}",
+                scenario.scenario_id,
+                actual.global_ready_batch_drains,
+                scenario.expected_metrics.min_batch_drains
+            );
+            assert!(
+                actual.global_ready_batch_tasks >= scenario.expected_metrics.min_batch_tasks,
+                "scenario {} batch task count below minimum: actual={}, min={}",
+                scenario.scenario_id,
+                actual.global_ready_batch_tasks,
+                scenario.expected_metrics.min_batch_tasks
+            );
+            assert_eq!(
+                actual.configured_batch_size, scenario.expected_metrics.configured_batch_size,
+                "scenario {} configured batch size mismatch",
+                scenario.scenario_id
+            );
+            assert_eq!(
+                actual.activation_threshold, scenario.expected_metrics.activation_threshold,
+                "scenario {} activation threshold mismatch",
+                scenario.scenario_id
+            );
+            assert_eq!(
+                actual.total_dispatched,
+                actual.unique_dispatched + actual.duplicate_dispatches,
+                "scenario {} dispatch accounting should stay balanced",
+                scenario.scenario_id
+            );
+            assert!(
+                actual.enqueue_latency_p95_ns >= actual.enqueue_latency_p50_ns,
+                "scenario {} enqueue latency p95 must be >= p50",
+                scenario.scenario_id
+            );
+            assert!(
+                actual.enqueue_latency_p99_ns >= actual.enqueue_latency_p95_ns,
+                "scenario {} enqueue latency p99 must be >= p95",
+                scenario.scenario_id
+            );
+            assert!(
+                actual.enqueue_latency_max_ns >= actual.enqueue_latency_p99_ns,
+                "scenario {} enqueue latency max must be >= p99",
+                scenario.scenario_id
+            );
+        }
+
+        if let Some(selected_scenario) = selected_scenario {
+            assert!(
+                emitted_selected,
+                "selected scenario {selected_scenario} was not found in the contract"
+            );
+        }
+    }
+
+    fn execute_global_ready_contention_scenario(
+        fixture: &GlobalReadyContentionFixture,
+    ) -> GlobalReadyContentionActualMetrics {
+        let total_injected = fixture.producer_count * fixture.tasks_per_producer;
+        let (scheduler, _state, _task_table) = task_table_scheduler(1, total_injected as u32 + 1);
+        let scheduler = Arc::new(scheduler);
+        let barrier = Arc::new(std::sync::Barrier::new(fixture.producer_count.max(1)));
+
+        let inject_handles: Vec<_> = (0..fixture.producer_count)
+            .map(|producer| {
+                let scheduler = Arc::clone(&scheduler);
+                let barrier = Arc::clone(&barrier);
+                let tasks_per_producer = fixture.tasks_per_producer;
+                let priority = fixture.priority;
+                std::thread::spawn(move || {
+                    let mut latencies = Vec::with_capacity(tasks_per_producer);
+                    barrier.wait();
+                    let base = producer * tasks_per_producer;
+                    for offset in 0..tasks_per_producer {
+                        let task_id = TaskId::new_for_test((base + offset) as u32, 0);
+                        let start = Instant::now();
+                        scheduler.inject_ready(task_id, priority);
+                        latencies.push(nanos_saturating_u64(start.elapsed()));
+                    }
+                    latencies
+                })
+            })
+            .collect();
+
+        let mut enqueue_latencies = Vec::with_capacity(total_injected);
+        for handle in inject_handles {
+            enqueue_latencies.extend(handle.join().expect("producer should complete"));
+        }
+
+        let mut scheduler = match Arc::try_unwrap(scheduler) {
+            Ok(scheduler) => scheduler,
+            Err(_) => panic!("all producer handles should release the scheduler"),
+        };
+        let mut workers = scheduler.take_workers();
+        let worker = workers
+            .get_mut(0)
+            .expect("contention scenario requires one worker");
+        let ready_count_before_drain = worker.ready_count();
+
+        let mut seen = HashSet::with_capacity(total_injected);
+        let mut total_dispatched = 0usize;
+        while let Some(task_id) = worker.try_ready_work() {
+            total_dispatched += 1;
+            seen.insert(task_id);
+        }
+
+        let unique_dispatched = seen.len();
+        let duplicate_dispatches = total_dispatched.saturating_sub(unique_dispatched);
+        let lost_tasks = total_injected.saturating_sub(unique_dispatched);
+        let metrics = worker.preemption_metrics();
+        let configured_batch_size = worker.steal_batch_size.max(1);
+        let activation_threshold = configured_batch_size
+            .saturating_mul(2)
+            .max(GLOBAL_READY_BATCH_DRAIN_MIN_DEPTH);
+
+        GlobalReadyContentionActualMetrics {
+            producer_count: fixture.producer_count,
+            tasks_per_producer: fixture.tasks_per_producer,
+            total_injected,
+            ready_count_before_drain,
+            total_dispatched,
+            unique_dispatched,
+            duplicate_dispatches,
+            lost_tasks,
+            batch_mode_activated: metrics.global_ready_batch_drains > 0,
+            fallback_to_baseline: metrics.global_ready_batch_drains == 0,
+            global_ready_batch_drains: metrics.global_ready_batch_drains,
+            global_ready_batch_tasks: metrics.global_ready_batch_tasks,
+            configured_batch_size,
+            activation_threshold,
+            enqueue_latency_p50_ns: percentile_slice_u64(&enqueue_latencies, 50),
+            enqueue_latency_p95_ns: percentile_slice_u64(&enqueue_latencies, 95),
+            enqueue_latency_p99_ns: percentile_slice_u64(&enqueue_latencies, 99),
+            enqueue_latency_max_ns: enqueue_latencies.iter().copied().max().unwrap_or(0),
+            mean_batch_size: if metrics.global_ready_batch_drains > 0 {
+                metrics.global_ready_batch_tasks as f64 / metrics.global_ready_batch_drains as f64
+            } else {
+                0.0
+            },
+        }
+    }
+
+    fn emit_global_ready_contention_artifacts(
+        output_dir: &Path,
+        scenario: &GlobalReadyContentionScenario,
+        actual: &GlobalReadyContentionActualMetrics,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        fs::create_dir_all(output_dir)?;
+
+        let contention_manifest_path = output_dir.join("contention_manifest.json");
+        let contention_metrics_path = output_dir.join("contention_metrics.json");
+
+        let contention_manifest = json!({
+            "scenario_id": scenario.scenario_id,
+            "fixture": {
+                "producer_count": scenario.fixture.producer_count,
+                "tasks_per_producer": scenario.fixture.tasks_per_producer,
+                "priority": scenario.fixture.priority,
+            }
+        });
+
+        let contention_metrics = json!({
+            "scenario_id": scenario.scenario_id,
+            "producer_count": actual.producer_count,
+            "tasks_per_producer": actual.tasks_per_producer,
+            "total_injected": actual.total_injected,
+            "ready_count_before_drain": actual.ready_count_before_drain,
+            "total_dispatched": actual.total_dispatched,
+            "unique_dispatched": actual.unique_dispatched,
+            "duplicate_dispatches": actual.duplicate_dispatches,
+            "lost_tasks": actual.lost_tasks,
+            "batch_mode_activated": actual.batch_mode_activated,
+            "fallback_to_baseline": actual.fallback_to_baseline,
+            "global_ready_batch_drains": actual.global_ready_batch_drains,
+            "global_ready_batch_tasks": actual.global_ready_batch_tasks,
+            "configured_batch_size": actual.configured_batch_size,
+            "activation_threshold": actual.activation_threshold,
+            "mean_batch_size": actual.mean_batch_size,
+            "enqueue_latency_ns": {
+                "p50": actual.enqueue_latency_p50_ns,
+                "p95": actual.enqueue_latency_p95_ns,
+                "p99": actual.enqueue_latency_p99_ns,
+                "max": actual.enqueue_latency_max_ns,
+            },
+            "contention_counters": {
+                "available": false,
+                "retry_count": 0,
+                "cas_failures": 0,
+                "notes": [
+                    "GlobalQueue currently exposes batch-drain counters but not internal CAS retry counters.",
+                    "This artifact freezes the currently available contention signals without inventing opaque estimates."
+                ]
+            }
+        });
+
+        fs::write(
+            contention_manifest_path,
+            serde_json::to_vec_pretty(&contention_manifest)?,
+        )?;
+        fs::write(
+            contention_metrics_path,
+            serde_json::to_vec_pretty(&contention_metrics)?,
+        )?;
+        Ok(())
+    }
+
+    fn percentile_slice_u64(samples: &[u64], percentile: usize) -> u64 {
+        if samples.is_empty() {
+            return 0;
+        }
+        let mut values = samples.to_vec();
+        values.sort_unstable();
+        values[percentile_index(values.len(), percentile)]
+    }
+
+    fn nanos_saturating_u64(duration: Duration) -> u64 {
+        duration.as_nanos().min(u128::from(u64::MAX)) as u64
     }
 
     #[test]
