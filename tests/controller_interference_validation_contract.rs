@@ -377,6 +377,14 @@ fn runner_declares_operator_grade_bundle_fields() {
         .expect("runner_bundle_required_fields must be array");
     let required = [
         "artifact_path",
+        "log_path",
+        "command",
+        "timeout_seconds",
+        "command_exit_code",
+        "timeout_observed",
+        "rch_remote_success_observed",
+        "required_log_markers",
+        "missing_log_markers",
         "env_fingerprint",
         "active_controller_set",
         "shared_telemetry_fields",
@@ -450,6 +458,34 @@ fn smoke_scenarios_declare_operator_metadata() {
 }
 
 #[test]
+fn smoke_scenarios_declare_required_log_markers() {
+    let art = load_artifact();
+    let scenarios = art["smoke_scenarios"].as_array().unwrap();
+    for scenario in scenarios {
+        let sid = scenario["scenario_id"].as_str().unwrap();
+        let markers = scenario["required_log_markers"]
+            .as_array()
+            .unwrap_or_else(|| panic!("{sid}: required_log_markers must be array"));
+        assert!(
+            markers.len() >= 3,
+            "{sid}: must require scenario-specific test markers plus rch success markers"
+        );
+        assert!(
+            markers
+                .iter()
+                .any(|m| m.as_str() == Some("test result: ok")),
+            "{sid}: must require cargo test success marker"
+        );
+        assert!(
+            markers
+                .iter()
+                .any(|m| m.as_str() == Some("Remote command finished: exit=0")),
+            "{sid}: must require rch remote success marker"
+        );
+    }
+}
+
+#[test]
 fn runner_dry_run_emits_operator_grade_bundle_and_report() {
     let temp = tempfile::tempdir().expect("tempdir");
     let output_root = temp.path().join("controller-interference-smoke");
@@ -487,6 +523,14 @@ fn runner_dry_run_emits_operator_grade_bundle_and_report() {
     );
     assert_eq!(bundle["status"].as_str(), Some("dry_run"));
     assert!(bundle["artifact_path"].as_str().is_some());
+    assert!(bundle["log_path"].as_str().is_some());
+    assert!(bundle["command"].as_str().is_some());
+    assert_eq!(bundle["timeout_seconds"].as_u64(), Some(120));
+    assert_eq!(bundle["command_exit_code"].as_u64(), Some(0));
+    assert_eq!(bundle["timeout_observed"].as_bool(), Some(false));
+    assert_eq!(bundle["rch_remote_success_observed"].as_bool(), Some(false));
+    assert!(bundle["required_log_markers"].is_array());
+    assert!(bundle["missing_log_markers"].is_array());
     assert!(bundle["env_fingerprint"].is_object());
     assert!(bundle["active_controller_set"].is_array());
     assert!(bundle["shared_telemetry_fields"].is_array());
@@ -507,6 +551,27 @@ fn runner_dry_run_emits_operator_grade_bundle_and_report() {
     assert_eq!(
         report["results"].as_array().expect("results array").len(),
         1
+    );
+}
+
+#[test]
+fn runner_enforces_bounded_execute_mode_with_marker_logging() {
+    let runner = load_runner();
+    assert!(
+        runner.contains("--timeout-seconds"),
+        "runner must expose bounded execute timeout"
+    );
+    assert!(
+        runner.contains("CIV_MARKER_CHECK"),
+        "runner must log per-marker validation results"
+    );
+    assert!(
+        runner.contains("missing_log_markers"),
+        "runner bundles must record missing marker diagnostics"
+    );
+    assert!(
+        runner.contains("passed_after_rch_retrieval_timeout"),
+        "runner must classify rch retrieval timeout after remote success"
     );
 }
 
