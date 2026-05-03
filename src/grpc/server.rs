@@ -3741,6 +3741,7 @@ mod tests {
     /// the handler and respond with DEADLINE_EXCEEDED status if deadline is exceeded.
     mod grpc_deadline_enforcement_audit {
         use super::*;
+        use crate::grpc::MetadataValue;
         use std::sync::Arc;
         use std::sync::atomic::{AtomicBool, Ordering};
         use std::time::{Duration, Instant};
@@ -3762,16 +3763,10 @@ mod tests {
 
             let expected_deadline = now + Duration::from_secs(5);
             crate::assert_with_log!(
-                deadline
-                    .duration_since(expected_deadline)
-                    .unwrap_or(Duration::ZERO)
-                    < Duration::from_millis(1),
+                deadline.abs_diff(expected_deadline) < Duration::from_millis(1),
                 "grpc-timeout header correctly parsed to deadline",
                 true,
-                deadline
-                    .duration_since(expected_deadline)
-                    .unwrap_or(Duration::ZERO)
-                    < Duration::from_millis(1)
+                deadline.abs_diff(expected_deadline) < Duration::from_millis(1)
             );
 
             // Verify deadline checking methods work
@@ -4003,7 +3998,7 @@ mod tests {
             let propagated_header = outbound_metadata
                 .get("grpc-timeout")
                 .expect("grpc-timeout should be present");
-            if let super::streaming::MetadataValue::Ascii(header_value) = propagated_header {
+            if let MetadataValue::Ascii(header_value) = propagated_header {
                 let parsed_timeout = parse_grpc_timeout(header_value);
                 assert!(
                     parsed_timeout.is_some(),
@@ -4032,8 +4027,9 @@ mod tests {
     /// trailer in the HEADERS frame after final DATA frames, including on
     /// cancellation paths.
     mod grpc_streaming_trailer_emission_audit {
-        use super::super::streaming::{Metadata, MetadataValue};
         use super::*;
+        use crate::grpc::{Code, Metadata, MetadataValue, Status};
+        use crate::http::h2::frame::{DataFrame, HeadersFrame};
 
         /// AUDIT: Verify gRPC status trailer ordering requirement understanding
         ///
@@ -4094,13 +4090,13 @@ mod tests {
             // This documents the expected protocol flow
 
             // Step 1: Server sends DATA frames for streaming responses
-            let data_frame_1 = crate::http::h2::DataFrame::new(
+            let data_frame_1 = DataFrame::new(
                 1, // stream_id
                 crate::bytes::Bytes::from_static(b"response-1"),
                 false, // end_stream = false (more data coming)
             );
 
-            let data_frame_2 = crate::http::h2::DataFrame::new(
+            let data_frame_2 = DataFrame::new(
                 1, // stream_id
                 crate::bytes::Bytes::from_static(b"response-2"),
                 false, // end_stream = false (more data coming)
@@ -4109,7 +4105,7 @@ mod tests {
             // Step 2: Server sends final HEADERS frame with trailers
             let trailer_headers =
                 crate::bytes::Bytes::from_static(b"grpc-status: 0\r\ngrpc-message: success\r\n");
-            let final_headers_frame = crate::http::h2::HeadersFrame::new(
+            let final_headers_frame = HeadersFrame::new(
                 1, // stream_id
                 trailer_headers,
                 true, // end_stream = true (stream complete)
@@ -4161,8 +4157,7 @@ mod tests {
             // 2. Server-side timeout/deadline exceeded
             // 3. Handler error during streaming
 
-            let cancellation_status =
-                super::super::Status::cancelled("client requested cancellation");
+            let cancellation_status = Status::cancelled("client requested cancellation");
 
             // AUDIT VERIFICATION: Cancellation must generate proper grpc-status trailer
             let status_code = cancellation_status.code() as i32;
@@ -4219,19 +4214,19 @@ mod tests {
 
             // Test valid gRPC status codes that servers may emit
             let valid_statuses = vec![
-                (super::super::Code::Ok, 0),
-                (super::super::Code::Cancelled, 1),
-                (super::super::Code::Unknown, 2),
-                (super::super::Code::InvalidArgument, 3),
-                (super::super::Code::DeadlineExceeded, 4),
-                (super::super::Code::NotFound, 5),
-                (super::super::Code::Internal, 13),
-                (super::super::Code::Unavailable, 14),
-                (super::super::Code::Unauthenticated, 16),
+                (Code::Ok, 0),
+                (Code::Cancelled, 1),
+                (Code::Unknown, 2),
+                (Code::InvalidArgument, 3),
+                (Code::DeadlineExceeded, 4),
+                (Code::NotFound, 5),
+                (Code::Internal, 13),
+                (Code::Unavailable, 14),
+                (Code::Unauthenticated, 16),
             ];
 
             for (status_code, expected_wire_value) in valid_statuses {
-                let status = super::super::Status::new(status_code, "test message");
+                let status = Status::new(status_code, "test message");
 
                 // AUDIT VERIFICATION: Status codes map correctly to wire values
                 let wire_value = status.code() as i32;
