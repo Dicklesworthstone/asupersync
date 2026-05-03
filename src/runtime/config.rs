@@ -783,6 +783,1044 @@ impl Default for RuntimeConfig {
     }
 }
 
+/// Objective used when selecting a host profile automatically.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HostProfilePlannerObjective {
+    /// Prefer locality- and throughput-oriented bundles.
+    LocalityFirst,
+    /// Prefer latency-protection bundles under overload.
+    TailProtectionFirst,
+    /// Prefer observability retention bundles on large hosts.
+    EvidenceRetentionFirst,
+}
+
+impl HostProfilePlannerObjective {
+    /// Stable operator-facing name for the objective.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::LocalityFirst => "locality_first",
+            Self::TailProtectionFirst => "tail_protection_first",
+            Self::EvidenceRetentionFirst => "evidence_retention_first",
+        }
+    }
+
+    #[must_use]
+    pub const fn candidate_order(self) -> &'static [HostProfileId] {
+        match self {
+            Self::LocalityFirst => &[
+                HostProfileId::LocalityFirst64C256G,
+                HostProfileId::TailProtectionFirst64C256G,
+                HostProfileId::LargeMemoryEvidenceRetention256G,
+                HostProfileId::ConservativeBaseline,
+            ],
+            Self::TailProtectionFirst => &[
+                HostProfileId::TailProtectionFirst64C256G,
+                HostProfileId::LocalityFirst64C256G,
+                HostProfileId::LargeMemoryEvidenceRetention256G,
+                HostProfileId::ConservativeBaseline,
+            ],
+            Self::EvidenceRetentionFirst => &[
+                HostProfileId::LargeMemoryEvidenceRetention256G,
+                HostProfileId::LocalityFirst64C256G,
+                HostProfileId::TailProtectionFirst64C256G,
+                HostProfileId::ConservativeBaseline,
+            ],
+        }
+    }
+}
+
+impl fmt::Display for HostProfilePlannerObjective {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// Explicit runtime bundle identifiers for large-host planning.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum HostProfileId {
+    /// Preserve the stock runtime defaults and conservative controller stances.
+    ConservativeBaseline,
+    /// Bias for cohort locality on 64-core / 256GB hosts.
+    LocalityFirst64C256G,
+    /// Bias for tail-latency protection under overload on large hosts.
+    TailProtectionFirst64C256G,
+    /// Bias for evidence retention on 256GB-class hosts.
+    LargeMemoryEvidenceRetention256G,
+}
+
+impl HostProfileId {
+    /// Stable operator-facing profile identifier.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::ConservativeBaseline => "conservative_baseline",
+            Self::LocalityFirst64C256G => "locality_first_64c_256g",
+            Self::TailProtectionFirst64C256G => "tail_protection_first_64c_256g",
+            Self::LargeMemoryEvidenceRetention256G => "large_memory_evidence_retention_256g",
+        }
+    }
+
+    #[must_use]
+    pub const fn required_cpu_cores(self) -> usize {
+        match self {
+            Self::ConservativeBaseline => 1,
+            Self::LocalityFirst64C256G
+            | Self::TailProtectionFirst64C256G
+            | Self::LargeMemoryEvidenceRetention256G => 64,
+        }
+    }
+
+    #[must_use]
+    pub const fn required_memory_gib(self) -> usize {
+        match self {
+            Self::ConservativeBaseline => 1,
+            Self::LocalityFirst64C256G
+            | Self::TailProtectionFirst64C256G
+            | Self::LargeMemoryEvidenceRetention256G => 256,
+        }
+    }
+
+    #[must_use]
+    pub const fn required_evidence(self) -> &'static [HostProfileEvidenceKind] {
+        match self {
+            Self::ConservativeBaseline => &[],
+            Self::LocalityFirst64C256G
+            | Self::TailProtectionFirst64C256G
+            | Self::LargeMemoryEvidenceRetention256G => &[
+                HostProfileEvidenceKind::Brownout,
+                HostProfileEvidenceKind::OtlpBrownout,
+                HostProfileEvidenceKind::AdmissionSteering,
+                HostProfileEvidenceKind::AdaptiveBatchSizing,
+                HostProfileEvidenceKind::BlockingPoolAffinity,
+                HostProfileEvidenceKind::TraceStorageProfile,
+            ],
+        }
+    }
+
+    #[must_use]
+    pub const fn rationale(self) -> &'static [&'static str] {
+        match self {
+            Self::ConservativeBaseline => &[
+                "Preserve the stock runtime defaults until proof-backed large-host controls are available.",
+                "Use this bundle when operator telemetry is incomplete or when any child proof drifts out of contract.",
+            ],
+            Self::LocalityFirst64C256G => &[
+                "Exploit explicit worker cohorts and blocking-pool affinity to keep hot work local on 64-core / 256GB hosts.",
+                "Widen capacity hints and trace retention together so the locality gains are not erased by avoidable reallocation or diagnostic churn.",
+            ],
+            Self::TailProtectionFirst64C256G => &[
+                "Trade some throughput headroom for tighter queue pressure and smaller steal batches when overload latency is the primary operator concern.",
+                "Keep proof-backed brownout, OTLP shedding, admission steering, adaptive batching, and blocking affinity in the same explainable bundle.",
+            ],
+            Self::LargeMemoryEvidenceRetention256G => &[
+                "Spend 256GB-class memory budget on larger trace retention without reintroducing hidden runtime heuristics.",
+                "Keep the same proof-backed controller set, but bias the config bundle toward richer postmortem evidence on large hosts.",
+            ],
+        }
+    }
+
+    #[must_use]
+    pub const fn when_not_to_use(self) -> &'static [&'static str] {
+        match self {
+            Self::ConservativeBaseline => &[
+                "Do not pin the conservative baseline on a large host once proof-backed locality, overload, and retention bundles are validated for your workload.",
+            ],
+            Self::LocalityFirst64C256G => &[
+                "Do not use when the host has fewer than 64 cores or less than 256 GiB of RAM.",
+                "Do not use when the shared controller proofs are missing, stale, or unvalidated.",
+                "Do not use if operator policy requires the smallest possible queue envelope over locality wins.",
+            ],
+            Self::TailProtectionFirst64C256G => &[
+                "Do not use when throughput maximization matters more than overload latency protection.",
+                "Do not use when the shared controller proofs are missing, stale, or unvalidated.",
+                "Do not use on hosts smaller than the 64-core / 256 GiB target class.",
+            ],
+            Self::LargeMemoryEvidenceRetention256G => &[
+                "Do not use on hosts without a real 256 GiB memory envelope.",
+                "Do not use when operator policy forbids the additional retention budget or when the retention proofs are missing.",
+            ],
+        }
+    }
+}
+
+impl fmt::Display for HostProfileId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// Named proof surfaces consumed by the host-profile planner.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum HostProfileEvidenceKind {
+    /// Brownout proof for optional runtime surfaces.
+    Brownout,
+    /// OTLP brownout/shedding proof.
+    OtlpBrownout,
+    /// Admission steering proof.
+    AdmissionSteering,
+    /// Adaptive batch sizing proof.
+    AdaptiveBatchSizing,
+    /// Blocking-pool affinity proof.
+    BlockingPoolAffinity,
+    /// Large-memory trace storage proof.
+    TraceStorageProfile,
+}
+
+impl HostProfileEvidenceKind {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Brownout => "brownout",
+            Self::OtlpBrownout => "otlp_brownout",
+            Self::AdmissionSteering => "admission_steering",
+            Self::AdaptiveBatchSizing => "adaptive_batch_sizing",
+            Self::BlockingPoolAffinity => "blocking_pool_affinity",
+            Self::TraceStorageProfile => "trace_storage_profile",
+        }
+    }
+}
+
+impl fmt::Display for HostProfileEvidenceKind {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// Proof artifact reference for one controller surface.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HostProfileEvidenceArtifact {
+    /// Stable artifact or contract identifier for the proof surface.
+    pub artifact_id: String,
+    /// Contract version used by the proof surface.
+    pub contract_version: String,
+    /// Whether the proof was validated successfully.
+    pub validation_passed: bool,
+}
+
+impl HostProfileEvidenceArtifact {
+    fn validate(&self) -> Result<(), String> {
+        if self.artifact_id.is_empty() {
+            return Err("artifact_id must not be empty".to_string());
+        }
+        if !self.artifact_id.ends_with(".json") {
+            return Err("artifact_id must end with .json".to_string());
+        }
+        if self.artifact_id.contains("..") {
+            return Err("artifact_id must not contain parent-directory traversals".to_string());
+        }
+        if self
+            .artifact_id
+            .chars()
+            .any(|c| !(c.is_ascii_alphanumeric() || matches!(c, '/' | '.' | '_' | '-')))
+        {
+            return Err("artifact_id contains unsupported characters".to_string());
+        }
+        if self.contract_version.trim().is_empty() {
+            return Err("contract_version must not be empty".to_string());
+        }
+        if !self.validation_passed {
+            return Err("validation_passed is false".to_string());
+        }
+        Ok(())
+    }
+}
+
+/// The controller-proof ledger fed into the host-profile planner.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct HostProfileEvidenceSet {
+    /// Brownout smoke-contract proof.
+    pub brownout: Option<HostProfileEvidenceArtifact>,
+    /// OTLP brownout/shedding smoke-contract proof.
+    pub otlp_brownout: Option<HostProfileEvidenceArtifact>,
+    /// Cohort-admission steering smoke-contract proof.
+    pub admission_steering: Option<HostProfileEvidenceArtifact>,
+    /// Adaptive batch sizing smoke-contract proof.
+    pub adaptive_batch_sizing: Option<HostProfileEvidenceArtifact>,
+    /// Blocking-pool affinity smoke-contract proof.
+    pub blocking_pool_affinity: Option<HostProfileEvidenceArtifact>,
+    /// Trace-storage profile smoke-contract proof.
+    pub trace_storage_profile: Option<HostProfileEvidenceArtifact>,
+}
+
+impl HostProfileEvidenceSet {
+    #[must_use]
+    pub fn input_artifact_ids(&self) -> Vec<String> {
+        let mut ids = Vec::new();
+        for kind in [
+            HostProfileEvidenceKind::Brownout,
+            HostProfileEvidenceKind::OtlpBrownout,
+            HostProfileEvidenceKind::AdmissionSteering,
+            HostProfileEvidenceKind::AdaptiveBatchSizing,
+            HostProfileEvidenceKind::BlockingPoolAffinity,
+            HostProfileEvidenceKind::TraceStorageProfile,
+        ] {
+            if let Some(artifact) = self.for_kind(kind) {
+                ids.push(artifact.artifact_id.clone());
+            }
+        }
+        ids
+    }
+
+    #[must_use]
+    pub fn for_kind(&self, kind: HostProfileEvidenceKind) -> Option<&HostProfileEvidenceArtifact> {
+        match kind {
+            HostProfileEvidenceKind::Brownout => self.brownout.as_ref(),
+            HostProfileEvidenceKind::OtlpBrownout => self.otlp_brownout.as_ref(),
+            HostProfileEvidenceKind::AdmissionSteering => self.admission_steering.as_ref(),
+            HostProfileEvidenceKind::AdaptiveBatchSizing => self.adaptive_batch_sizing.as_ref(),
+            HostProfileEvidenceKind::BlockingPoolAffinity => self.blocking_pool_affinity.as_ref(),
+            HostProfileEvidenceKind::TraceStorageProfile => self.trace_storage_profile.as_ref(),
+        }
+    }
+}
+
+/// Host resources supplied to the planner.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HostProfileHostResources {
+    /// Online CPU cores available to the runtime.
+    pub cpu_cores: usize,
+    /// Available RAM in GiB.
+    pub memory_gib: usize,
+}
+
+/// Manual escape hatches applied after the profile bundle is composed.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct HostProfileManualOverrides {
+    /// Explicit worker-thread override.
+    pub worker_threads: Option<usize>,
+    /// Explicit worker-cohort override.
+    pub worker_cohort_map: Option<WorkerCohortMapping>,
+    /// Explicit global-queue limit override.
+    pub global_queue_limit: Option<usize>,
+    /// Explicit steal-batch override.
+    pub steal_batch_size: Option<usize>,
+    /// Explicit blocking-affinity override.
+    pub blocking_affinity_profile: Option<BlockingPoolAffinityProfile>,
+    /// Explicit capacity-hint override.
+    pub capacity_hints: Option<RuntimeCapacityHints>,
+    /// Explicit trace-storage profile override.
+    pub trace_storage_profile: Option<TraceStorageProfile>,
+    /// Explicit governor override.
+    pub enable_governor: Option<bool>,
+    /// Explicit read-biased snapshot override.
+    pub enable_read_biased_region_snapshot: Option<bool>,
+    /// Explicit adaptive cancel-streak override.
+    pub enable_adaptive_cancel_streak: Option<bool>,
+    /// Explicit browser ready-handoff override.
+    pub browser_ready_handoff_limit: Option<usize>,
+}
+
+impl HostProfileManualOverrides {
+    #[must_use]
+    pub fn applied_field_names(&self) -> Vec<&'static str> {
+        let mut fields = Vec::new();
+        if self.worker_threads.is_some() {
+            fields.push("worker_threads");
+        }
+        if self.worker_cohort_map.is_some() {
+            fields.push("worker_cohort_map");
+        }
+        if self.global_queue_limit.is_some() {
+            fields.push("global_queue_limit");
+        }
+        if self.steal_batch_size.is_some() {
+            fields.push("steal_batch_size");
+        }
+        if self.blocking_affinity_profile.is_some() {
+            fields.push("blocking.affinity_profile");
+        }
+        if self.capacity_hints.is_some() {
+            fields.push("capacity_hints");
+        }
+        if self.trace_storage_profile.is_some() {
+            fields.push("trace_storage_profile");
+        }
+        if self.enable_governor.is_some() {
+            fields.push("enable_governor");
+        }
+        if self.enable_read_biased_region_snapshot.is_some() {
+            fields.push("enable_read_biased_region_snapshot");
+        }
+        if self.enable_adaptive_cancel_streak.is_some() {
+            fields.push("enable_adaptive_cancel_streak");
+        }
+        if self.browser_ready_handoff_limit.is_some() {
+            fields.push("browser_ready_handoff_limit");
+        }
+        fields
+    }
+
+    pub fn apply_to_config(&self, config: &mut RuntimeConfig) {
+        if let Some(worker_threads) = self.worker_threads {
+            config.worker_threads = worker_threads;
+        }
+        if let Some(worker_cohort_map) = self.worker_cohort_map.clone() {
+            config.worker_cohort_map = Some(worker_cohort_map);
+        }
+        if let Some(global_queue_limit) = self.global_queue_limit {
+            config.global_queue_limit = global_queue_limit;
+        }
+        if let Some(steal_batch_size) = self.steal_batch_size {
+            config.steal_batch_size = steal_batch_size;
+        }
+        if let Some(blocking_affinity_profile) = self.blocking_affinity_profile {
+            config.blocking.affinity_profile = blocking_affinity_profile;
+        }
+        if let Some(capacity_hints) = self.capacity_hints {
+            config.capacity_hints = Some(capacity_hints);
+        }
+        if let Some(trace_storage_profile) = self.trace_storage_profile {
+            config.trace_storage_profile = trace_storage_profile;
+        }
+        if let Some(enable_governor) = self.enable_governor {
+            config.enable_governor = enable_governor;
+        }
+        if let Some(enable_read_biased_region_snapshot) = self.enable_read_biased_region_snapshot {
+            config.enable_read_biased_region_snapshot = enable_read_biased_region_snapshot;
+        }
+        if let Some(enable_adaptive_cancel_streak) = self.enable_adaptive_cancel_streak {
+            config.enable_adaptive_cancel_streak = enable_adaptive_cancel_streak;
+        }
+        if let Some(browser_ready_handoff_limit) = self.browser_ready_handoff_limit {
+            config.browser_ready_handoff_limit = browser_ready_handoff_limit;
+        }
+    }
+}
+
+/// Planner input for an explainable runtime host-profile bundle.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HostProfilePlannerRequest {
+    /// Automatic recommendation objective.
+    pub objective: HostProfilePlannerObjective,
+    /// Optional explicit profile request. When set, the planner either selects
+    /// it or falls back conservatively; it does not silently pick a sibling.
+    pub requested_profile: Option<HostProfileId>,
+    /// The host envelope the plan targets.
+    pub host_resources: HostProfileHostResources,
+    /// Proof surfaces available to justify a non-baseline bundle.
+    pub controller_evidence: HostProfileEvidenceSet,
+    /// Manual overrides that win over the bundle.
+    pub manual_overrides: HostProfileManualOverrides,
+    /// Optional operator note rendered through a secret scrubber.
+    pub operator_note: Option<String>,
+}
+
+impl HostProfilePlannerRequest {
+    /// Compute the explainable host-profile plan.
+    #[must_use]
+    pub fn plan(&self) -> HostProfilePlan {
+        let baseline = RuntimeConfig::default();
+        let candidate_profiles: Vec<HostProfileId> = if let Some(profile) = self.requested_profile {
+            vec![profile]
+        } else {
+            self.objective.candidate_order().to_vec()
+        };
+
+        let fallback_profile = HostProfileId::ConservativeBaseline;
+        let input_evidence_artifact_ids = self.controller_evidence.input_artifact_ids();
+        let sanitized_operator_note = self.operator_note.as_deref().map(redact_sensitive_note);
+        let manual_overrides_applied = self
+            .manual_overrides
+            .applied_field_names()
+            .into_iter()
+            .map(str::to_string)
+            .collect::<Vec<_>>();
+        let mut refusal_reasons = Vec::new();
+
+        for profile in candidate_profiles {
+            match self.try_plan_profile(profile) {
+                Ok(candidate) => {
+                    let mut final_bundle = candidate.profile_bundle.clone();
+                    self.manual_overrides.apply_to_config(&mut final_bundle);
+                    final_bundle.normalize();
+                    let config_diff = build_host_profile_config_diff(
+                        &baseline,
+                        &candidate.profile_bundle,
+                        &final_bundle,
+                    );
+                    return HostProfilePlan {
+                        objective: self.objective,
+                        requested_profile: self.requested_profile,
+                        selected_profile: profile,
+                        fallback_profile,
+                        profile_bundle: candidate.profile_bundle,
+                        final_bundle,
+                        rationale: candidate.rationale,
+                        refusal_reasons,
+                        when_not_to_use: candidate.when_not_to_use,
+                        controller_ledger_state: candidate.controller_ledger_state,
+                        input_evidence_artifact_ids,
+                        manual_overrides_applied,
+                        config_diff,
+                        sanitized_operator_note,
+                    };
+                }
+                Err(mut reasons) => refusal_reasons.append(&mut reasons),
+            }
+        }
+
+        let mut final_bundle = baseline.clone();
+        self.manual_overrides.apply_to_config(&mut final_bundle);
+        final_bundle.normalize();
+        let profile_bundle = host_profile_bundle(fallback_profile);
+        let config_diff = build_host_profile_config_diff(&baseline, &profile_bundle, &final_bundle);
+        HostProfilePlan {
+            objective: self.objective,
+            requested_profile: self.requested_profile,
+            selected_profile: fallback_profile,
+            fallback_profile,
+            profile_bundle,
+            final_bundle,
+            rationale: HostProfileId::ConservativeBaseline
+                .rationale()
+                .iter()
+                .copied()
+                .map(str::to_string)
+                .collect(),
+            refusal_reasons,
+            when_not_to_use: HostProfileId::ConservativeBaseline
+                .when_not_to_use()
+                .iter()
+                .copied()
+                .map(str::to_string)
+                .collect(),
+            controller_ledger_state: controller_ledger_entries(
+                fallback_profile,
+                &self.controller_evidence,
+            ),
+            input_evidence_artifact_ids,
+            manual_overrides_applied,
+            config_diff,
+            sanitized_operator_note,
+        }
+    }
+
+    fn try_plan_profile(
+        &self,
+        profile: HostProfileId,
+    ) -> Result<HostProfileCandidate, Vec<String>> {
+        let mut refusal_reasons = Vec::new();
+        if self.host_resources.cpu_cores < profile.required_cpu_cores() {
+            refusal_reasons.push(format!(
+                "{} requires at least {} CPU cores, but the host only reports {}",
+                profile,
+                profile.required_cpu_cores(),
+                self.host_resources.cpu_cores
+            ));
+        }
+        if self.host_resources.memory_gib < profile.required_memory_gib() {
+            refusal_reasons.push(format!(
+                "{} requires at least {} GiB of RAM, but the host only reports {} GiB",
+                profile,
+                profile.required_memory_gib(),
+                self.host_resources.memory_gib
+            ));
+        }
+        for kind in profile.required_evidence() {
+            match self.controller_evidence.for_kind(*kind) {
+                Some(artifact) => {
+                    if let Err(reason) = artifact.validate() {
+                        refusal_reasons.push(format!("{kind} proof rejected: {reason}"));
+                    }
+                }
+                None => refusal_reasons.push(format!("{kind} proof is missing")),
+            }
+        }
+        if !refusal_reasons.is_empty() {
+            return Err(refusal_reasons);
+        }
+        Ok(HostProfileCandidate {
+            profile_bundle: host_profile_bundle(profile),
+            rationale: profile
+                .rationale()
+                .iter()
+                .copied()
+                .map(str::to_string)
+                .collect(),
+            when_not_to_use: profile
+                .when_not_to_use()
+                .iter()
+                .copied()
+                .map(str::to_string)
+                .collect(),
+            controller_ledger_state: controller_ledger_entries(profile, &self.controller_evidence),
+        })
+    }
+}
+
+/// One composed plan ready for dry-run rendering or runtime adoption.
+#[derive(Clone)]
+pub struct HostProfilePlan {
+    /// Objective that drove automatic ordering.
+    pub objective: HostProfilePlannerObjective,
+    /// Explicit requested profile, when one was supplied.
+    pub requested_profile: Option<HostProfileId>,
+    /// Selected named bundle.
+    pub selected_profile: HostProfileId,
+    /// Safe fallback profile when no proof-backed bundle is valid.
+    pub fallback_profile: HostProfileId,
+    /// Bundle before manual overrides are applied.
+    pub profile_bundle: RuntimeConfig,
+    /// Bundle after manual overrides are applied and normalized.
+    pub final_bundle: RuntimeConfig,
+    /// Positive explanation for why the planner picked this bundle.
+    pub rationale: Vec<String>,
+    /// Reasons a more aggressive bundle was refused before fallback.
+    pub refusal_reasons: Vec<String>,
+    /// Operator-facing warnings for when not to use the selected bundle.
+    pub when_not_to_use: Vec<String>,
+    /// Fixed-order controller ledger snapshot used by the planner.
+    pub controller_ledger_state: Vec<HostProfileControllerLedgerEntry>,
+    /// All input proof artifact IDs, in deterministic order.
+    pub input_evidence_artifact_ids: Vec<String>,
+    /// Manual overrides applied to the final bundle.
+    pub manual_overrides_applied: Vec<String>,
+    /// Dry-run config diff from baseline to profile to final bundle.
+    pub config_diff: Vec<HostProfileConfigDiffEntry>,
+    /// Optional operator note rendered through the secret scrubber.
+    pub sanitized_operator_note: Option<String>,
+}
+
+impl HostProfilePlan {
+    /// Whether the planner had to refuse the requested or preferred profile.
+    #[must_use]
+    pub fn used_safe_fallback(&self) -> bool {
+        self.selected_profile == self.fallback_profile && !self.refusal_reasons.is_empty()
+    }
+}
+
+/// One controller snapshot entry cited by the planner.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HostProfileControllerLedgerEntry {
+    /// Controller surface name.
+    pub controller: String,
+    /// Stance selected for the controller.
+    pub stance: String,
+    /// Proof artifact reference, when one was supplied.
+    pub proof_artifact_id: Option<String>,
+    /// Whether the proof validated cleanly.
+    pub validation_passed: bool,
+}
+
+/// One line of explainable dry-run config diff.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HostProfileConfigDiffEntry {
+    /// Field name in `RuntimeConfig`.
+    pub field_path: String,
+    /// Baseline runtime value.
+    pub baseline_value: String,
+    /// Value from the selected named bundle.
+    pub profile_value: String,
+    /// Final value after manual overrides.
+    pub final_value: String,
+    /// Whether the final value came from the bundle or a manual override.
+    pub source: HostProfileConfigDiffSource,
+}
+
+impl HostProfileConfigDiffEntry {
+    /// Render a stable human-readable diff line.
+    #[must_use]
+    pub fn render(&self) -> String {
+        format!(
+            "{}: {} -> {} -> {} ({})",
+            self.field_path, self.baseline_value, self.profile_value, self.final_value, self.source
+        )
+    }
+}
+
+/// Source of the final value in a config diff entry.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HostProfileConfigDiffSource {
+    /// Final value comes directly from the named profile bundle.
+    ProfileBundle,
+    /// Final value was overridden manually after bundle composition.
+    ManualOverride,
+}
+
+impl HostProfileConfigDiffSource {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::ProfileBundle => "profile_bundle",
+            Self::ManualOverride => "manual_override",
+        }
+    }
+}
+
+impl fmt::Display for HostProfileConfigDiffSource {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+#[derive(Clone)]
+struct HostProfileCandidate {
+    profile_bundle: RuntimeConfig,
+    rationale: Vec<String>,
+    when_not_to_use: Vec<String>,
+    controller_ledger_state: Vec<HostProfileControllerLedgerEntry>,
+}
+
+fn host_profile_bundle(profile: HostProfileId) -> RuntimeConfig {
+    match profile {
+        HostProfileId::ConservativeBaseline => RuntimeConfig::default(),
+        HostProfileId::LocalityFirst64C256G => {
+            let mut config = RuntimeConfig::default();
+            config.worker_threads = 64;
+            config.worker_cohort_map = Some(large_host_worker_cohort_map());
+            config.global_queue_limit = 65_536;
+            config.steal_batch_size = 8;
+            config.blocking.affinity_profile = BlockingPoolAffinityProfile::CohortBiased {
+                local_queue_soft_limit: 32,
+                spill_check_interval: 4,
+            };
+            config.capacity_hints =
+                Some(RuntimeCapacityHints::from_expected_concurrent_tasks(16_384));
+            config.trace_storage_profile = TraceStorageProfile::LargeMemory256G;
+            config.enable_governor = true;
+            config.enable_read_biased_region_snapshot = true;
+            config.enable_adaptive_cancel_streak = true;
+            config.browser_ready_handoff_limit = 0;
+            config.normalize();
+            config
+        }
+        HostProfileId::TailProtectionFirst64C256G => {
+            let mut config = RuntimeConfig::default();
+            config.worker_threads = 64;
+            config.worker_cohort_map = Some(large_host_worker_cohort_map());
+            config.global_queue_limit = 32_768;
+            config.steal_batch_size = 4;
+            config.blocking.affinity_profile = BlockingPoolAffinityProfile::CohortBiased {
+                local_queue_soft_limit: 16,
+                spill_check_interval: 2,
+            };
+            config.capacity_hints =
+                Some(RuntimeCapacityHints::from_expected_concurrent_tasks(8_192));
+            config.trace_storage_profile = TraceStorageProfile::Default;
+            config.enable_governor = true;
+            config.enable_read_biased_region_snapshot = true;
+            config.enable_adaptive_cancel_streak = true;
+            config.browser_ready_handoff_limit = 0;
+            config.normalize();
+            config
+        }
+        HostProfileId::LargeMemoryEvidenceRetention256G => {
+            let mut config = RuntimeConfig::default();
+            config.worker_threads = 64;
+            config.worker_cohort_map = Some(large_host_worker_cohort_map());
+            config.global_queue_limit = 65_536;
+            config.steal_batch_size = 16;
+            config.blocking.affinity_profile = BlockingPoolAffinityProfile::CohortBiased {
+                local_queue_soft_limit: 24,
+                spill_check_interval: 4,
+            };
+            config.capacity_hints =
+                Some(RuntimeCapacityHints::from_expected_concurrent_tasks(12_288));
+            config.trace_storage_profile = TraceStorageProfile::LargeMemory256G;
+            config.enable_governor = true;
+            config.enable_read_biased_region_snapshot = true;
+            config.enable_adaptive_cancel_streak = true;
+            config.browser_ready_handoff_limit = 0;
+            config.normalize();
+            config
+        }
+    }
+}
+
+fn large_host_worker_cohort_map() -> WorkerCohortMapping {
+    let mut worker_to_cohort = Vec::with_capacity(64);
+    for cohort in 0..8 {
+        for _ in 0..8 {
+            worker_to_cohort.push(cohort);
+        }
+    }
+    WorkerCohortMapping::new(worker_to_cohort)
+}
+
+fn controller_ledger_entries(
+    profile: HostProfileId,
+    evidence: &HostProfileEvidenceSet,
+) -> Vec<HostProfileControllerLedgerEntry> {
+    [
+        HostProfileEvidenceKind::Brownout,
+        HostProfileEvidenceKind::OtlpBrownout,
+        HostProfileEvidenceKind::AdmissionSteering,
+        HostProfileEvidenceKind::AdaptiveBatchSizing,
+        HostProfileEvidenceKind::BlockingPoolAffinity,
+        HostProfileEvidenceKind::TraceStorageProfile,
+    ]
+    .into_iter()
+    .map(|kind| {
+        let artifact = evidence.for_kind(kind);
+        let proof_artifact_id = artifact.map(|item| item.artifact_id.clone());
+        let validation_passed = artifact
+            .map(|item| item.validation_passed && item.validate().is_ok())
+            .unwrap_or(false);
+        HostProfileControllerLedgerEntry {
+            controller: kind.as_str().to_string(),
+            stance: controller_stance(profile, kind).to_string(),
+            proof_artifact_id,
+            validation_passed,
+        }
+    })
+    .collect()
+}
+
+fn controller_stance(profile: HostProfileId, kind: HostProfileEvidenceKind) -> &'static str {
+    match (profile, kind) {
+        (HostProfileId::ConservativeBaseline, HostProfileEvidenceKind::Brownout) => "full_surfaces",
+        (HostProfileId::ConservativeBaseline, HostProfileEvidenceKind::OtlpBrownout) => {
+            "standalone_fallback"
+        }
+        (HostProfileId::ConservativeBaseline, HostProfileEvidenceKind::AdmissionSteering) => {
+            "conservative_global"
+        }
+        (HostProfileId::ConservativeBaseline, HostProfileEvidenceKind::AdaptiveBatchSizing) => {
+            "conservative_fixed"
+        }
+        (HostProfileId::ConservativeBaseline, HostProfileEvidenceKind::BlockingPoolAffinity) => {
+            "disabled"
+        }
+        (HostProfileId::ConservativeBaseline, HostProfileEvidenceKind::TraceStorageProfile) => {
+            "default"
+        }
+        (HostProfileId::LocalityFirst64C256G, HostProfileEvidenceKind::Brownout)
+        | (HostProfileId::TailProtectionFirst64C256G, HostProfileEvidenceKind::Brownout)
+        | (HostProfileId::LargeMemoryEvidenceRetention256G, HostProfileEvidenceKind::Brownout) => {
+            "optional_first"
+        }
+        (HostProfileId::LocalityFirst64C256G, HostProfileEvidenceKind::OtlpBrownout)
+        | (HostProfileId::TailProtectionFirst64C256G, HostProfileEvidenceKind::OtlpBrownout)
+        | (
+            HostProfileId::LargeMemoryEvidenceRetention256G,
+            HostProfileEvidenceKind::OtlpBrownout,
+        ) => "priority_gate",
+        (HostProfileId::LocalityFirst64C256G, HostProfileEvidenceKind::AdmissionSteering) => {
+            "cohort_locality"
+        }
+        (HostProfileId::TailProtectionFirst64C256G, HostProfileEvidenceKind::AdmissionSteering) => {
+            "tail_risk_admission"
+        }
+        (
+            HostProfileId::LargeMemoryEvidenceRetention256G,
+            HostProfileEvidenceKind::AdmissionSteering,
+        ) => "cohort_locality",
+        (HostProfileId::LocalityFirst64C256G, HostProfileEvidenceKind::AdaptiveBatchSizing)
+        | (
+            HostProfileId::TailProtectionFirst64C256G,
+            HostProfileEvidenceKind::AdaptiveBatchSizing,
+        )
+        | (
+            HostProfileId::LargeMemoryEvidenceRetention256G,
+            HostProfileEvidenceKind::AdaptiveBatchSizing,
+        ) => "builtin_adaptive",
+        (HostProfileId::LocalityFirst64C256G, HostProfileEvidenceKind::BlockingPoolAffinity)
+        | (
+            HostProfileId::TailProtectionFirst64C256G,
+            HostProfileEvidenceKind::BlockingPoolAffinity,
+        )
+        | (
+            HostProfileId::LargeMemoryEvidenceRetention256G,
+            HostProfileEvidenceKind::BlockingPoolAffinity,
+        ) => "cohort_biased",
+        (HostProfileId::LocalityFirst64C256G, HostProfileEvidenceKind::TraceStorageProfile)
+        | (
+            HostProfileId::LargeMemoryEvidenceRetention256G,
+            HostProfileEvidenceKind::TraceStorageProfile,
+        ) => "large_memory_256g",
+        (
+            HostProfileId::TailProtectionFirst64C256G,
+            HostProfileEvidenceKind::TraceStorageProfile,
+        ) => "default",
+    }
+}
+
+fn build_host_profile_config_diff(
+    baseline: &RuntimeConfig,
+    profile_bundle: &RuntimeConfig,
+    final_bundle: &RuntimeConfig,
+) -> Vec<HostProfileConfigDiffEntry> {
+    let mut diff = Vec::new();
+    maybe_push_diff_entry(
+        &mut diff,
+        "worker_threads",
+        baseline.worker_threads.to_string(),
+        profile_bundle.worker_threads.to_string(),
+        final_bundle.worker_threads.to_string(),
+    );
+    maybe_push_diff_entry(
+        &mut diff,
+        "worker_cohort_map",
+        format_worker_cohort_map(baseline.worker_cohort_map.as_ref()),
+        format_worker_cohort_map(profile_bundle.worker_cohort_map.as_ref()),
+        format_worker_cohort_map(final_bundle.worker_cohort_map.as_ref()),
+    );
+    maybe_push_diff_entry(
+        &mut diff,
+        "global_queue_limit",
+        baseline.global_queue_limit.to_string(),
+        profile_bundle.global_queue_limit.to_string(),
+        final_bundle.global_queue_limit.to_string(),
+    );
+    maybe_push_diff_entry(
+        &mut diff,
+        "steal_batch_size",
+        baseline.steal_batch_size.to_string(),
+        profile_bundle.steal_batch_size.to_string(),
+        final_bundle.steal_batch_size.to_string(),
+    );
+    maybe_push_diff_entry(
+        &mut diff,
+        "blocking.affinity_profile",
+        format_blocking_affinity_profile(baseline.blocking.affinity_profile),
+        format_blocking_affinity_profile(profile_bundle.blocking.affinity_profile),
+        format_blocking_affinity_profile(final_bundle.blocking.affinity_profile),
+    );
+    maybe_push_diff_entry(
+        &mut diff,
+        "capacity_hints",
+        format_capacity_hints(baseline.capacity_hints),
+        format_capacity_hints(profile_bundle.capacity_hints),
+        format_capacity_hints(final_bundle.capacity_hints),
+    );
+    maybe_push_diff_entry(
+        &mut diff,
+        "trace_storage_profile",
+        baseline.trace_storage_profile.to_string(),
+        profile_bundle.trace_storage_profile.to_string(),
+        final_bundle.trace_storage_profile.to_string(),
+    );
+    maybe_push_diff_entry(
+        &mut diff,
+        "browser_ready_handoff_limit",
+        baseline.browser_ready_handoff_limit.to_string(),
+        profile_bundle.browser_ready_handoff_limit.to_string(),
+        final_bundle.browser_ready_handoff_limit.to_string(),
+    );
+    maybe_push_diff_entry(
+        &mut diff,
+        "enable_governor",
+        format_bool(baseline.enable_governor),
+        format_bool(profile_bundle.enable_governor),
+        format_bool(final_bundle.enable_governor),
+    );
+    maybe_push_diff_entry(
+        &mut diff,
+        "enable_read_biased_region_snapshot",
+        format_bool(baseline.enable_read_biased_region_snapshot),
+        format_bool(profile_bundle.enable_read_biased_region_snapshot),
+        format_bool(final_bundle.enable_read_biased_region_snapshot),
+    );
+    maybe_push_diff_entry(
+        &mut diff,
+        "enable_adaptive_cancel_streak",
+        format_bool(baseline.enable_adaptive_cancel_streak),
+        format_bool(profile_bundle.enable_adaptive_cancel_streak),
+        format_bool(final_bundle.enable_adaptive_cancel_streak),
+    );
+    diff
+}
+
+fn maybe_push_diff_entry(
+    diff: &mut Vec<HostProfileConfigDiffEntry>,
+    field_path: &str,
+    baseline_value: String,
+    profile_value: String,
+    final_value: String,
+) {
+    if baseline_value == profile_value && profile_value == final_value {
+        return;
+    }
+    let source = if profile_value == final_value {
+        HostProfileConfigDiffSource::ProfileBundle
+    } else {
+        HostProfileConfigDiffSource::ManualOverride
+    };
+    diff.push(HostProfileConfigDiffEntry {
+        field_path: field_path.to_string(),
+        baseline_value,
+        profile_value,
+        final_value,
+        source,
+    });
+}
+
+fn format_bool(value: bool) -> String {
+    if value {
+        "true".to_string()
+    } else {
+        "false".to_string()
+    }
+}
+
+fn format_capacity_hints(value: Option<RuntimeCapacityHints>) -> String {
+    match value {
+        Some(hints) => format!(
+            "tasks={},regions={},obligations={}",
+            hints.task_capacity, hints.region_capacity, hints.obligation_capacity
+        ),
+        None => "auto".to_string(),
+    }
+}
+
+fn format_worker_cohort_map(value: Option<&WorkerCohortMapping>) -> String {
+    let Some(mapping) = value else {
+        return "none".to_string();
+    };
+    if mapping.worker_to_cohort.is_empty() {
+        return "[]".to_string();
+    }
+    let mut compressed = Vec::new();
+    let mut current = mapping.worker_to_cohort[0];
+    let mut count = 0usize;
+    for cohort in &mapping.worker_to_cohort {
+        if *cohort == current {
+            count += 1;
+        } else {
+            compressed.push(format!("{current}x{count}"));
+            current = *cohort;
+            count = 1;
+        }
+    }
+    compressed.push(format!("{current}x{count}"));
+    format!("[{}]", compressed.join(","))
+}
+
+fn format_blocking_affinity_profile(profile: BlockingPoolAffinityProfile) -> String {
+    match profile {
+        BlockingPoolAffinityProfile::Disabled => "disabled".to_string(),
+        BlockingPoolAffinityProfile::CohortBiased {
+            local_queue_soft_limit,
+            spill_check_interval,
+        } => format!(
+            "cohort_biased(local_queue_soft_limit={local_queue_soft_limit},spill_check_interval={spill_check_interval})"
+        ),
+    }
+}
+
+fn redact_sensitive_note(note: &str) -> String {
+    note.split_whitespace()
+        .map(|token| {
+            let Some((key, _value)) = token.split_once('=') else {
+                return token.to_string();
+            };
+            let key_lower = key.to_ascii_lowercase();
+            if key_lower.contains("token")
+                || key_lower.contains("secret")
+                || key_lower.contains("password")
+                || key_lower == "apikey"
+                || key_lower == "api_key"
+            {
+                format!("{key}=[REDACTED]")
+            } else {
+                token.to_string()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 #[cfg(test)]
 mod tests {
     #![allow(
