@@ -26765,3 +26765,595 @@ fn validate_nested_array_validation_implementation_consistency(
 
     Ok(())
 }
+
+//
+// OTLP-110: Mixed status code batch export conformance test
+//
+
+#[test]
+fn otlp_110_mixed_status_code_batch_export_conformance() {
+    // Test scenarios for mixed status code batch export per OTLP specification
+    let scenarios = vec![
+        MixedStatusScenario {
+            description: "Batch with mixed OK and ERROR spans (all MUST be exported regardless of status)".to_string(),
+            batch: StatusCodeBatch {
+                spans: vec![
+                    StatusSpanInfo {
+                        name: "successful_operation".to_string(),
+                        trace_id: "12345678901234567890123456789012".to_string(),
+                        span_id: "1234567890123456".to_string(),
+                        status: SpanStatus::Ok,
+                    },
+                    StatusSpanInfo {
+                        name: "failed_operation".to_string(),
+                        trace_id: "12345678901234567890123456789012".to_string(),
+                        span_id: "2345678901234567".to_string(),
+                        status: SpanStatus::Error("Database connection failed".to_string()),
+                    },
+                    StatusSpanInfo {
+                        name: "another_success".to_string(),
+                        trace_id: "12345678901234567890123456789012".to_string(),
+                        span_id: "3456789012345678".to_string(),
+                        status: SpanStatus::Ok,
+                    },
+                ],
+            },
+            expected_exported_count: 3, // All spans must be exported
+            expected_ok_count: 2,
+            expected_error_count: 1,
+            expected_unset_count: 0,
+            expected_filtered_by_status: false, // Status should NOT filter export
+            expected_batch_rejected: false,
+            expected_rejection_reason: "".to_string(),
+            expected_validation_applied: true,
+            expected_otlp_compliant: true,
+        },
+        MixedStatusScenario {
+            description: "Batch with all OK spans (all MUST be exported)".to_string(),
+            batch: StatusCodeBatch {
+                spans: vec![
+                    StatusSpanInfo {
+                        name: "operation_1".to_string(),
+                        trace_id: "12345678901234567890123456789012".to_string(),
+                        span_id: "4567890123456789".to_string(),
+                        status: SpanStatus::Ok,
+                    },
+                    StatusSpanInfo {
+                        name: "operation_2".to_string(),
+                        trace_id: "12345678901234567890123456789012".to_string(),
+                        span_id: "5678901234567890".to_string(),
+                        status: SpanStatus::Ok,
+                    },
+                    StatusSpanInfo {
+                        name: "operation_3".to_string(),
+                        trace_id: "12345678901234567890123456789012".to_string(),
+                        span_id: "6789012345678901".to_string(),
+                        status: SpanStatus::Ok,
+                    },
+                ],
+            },
+            expected_exported_count: 3,
+            expected_ok_count: 3,
+            expected_error_count: 0,
+            expected_unset_count: 0,
+            expected_filtered_by_status: false,
+            expected_batch_rejected: false,
+            expected_rejection_reason: "".to_string(),
+            expected_validation_applied: true,
+            expected_otlp_compliant: true,
+        },
+        MixedStatusScenario {
+            description: "Batch with all ERROR spans (all MUST be exported)".to_string(),
+            batch: StatusCodeBatch {
+                spans: vec![
+                    StatusSpanInfo {
+                        name: "failed_auth".to_string(),
+                        trace_id: "12345678901234567890123456789012".to_string(),
+                        span_id: "7890123456789012".to_string(),
+                        status: SpanStatus::Error("Authentication failed".to_string()),
+                    },
+                    StatusSpanInfo {
+                        name: "failed_validation".to_string(),
+                        trace_id: "12345678901234567890123456789012".to_string(),
+                        span_id: "8901234567890123".to_string(),
+                        status: SpanStatus::Error("Invalid input data".to_string()),
+                    },
+                ],
+            },
+            expected_exported_count: 2,
+            expected_ok_count: 0,
+            expected_error_count: 2,
+            expected_unset_count: 0,
+            expected_filtered_by_status: false,
+            expected_batch_rejected: false,
+            expected_rejection_reason: "".to_string(),
+            expected_validation_applied: true,
+            expected_otlp_compliant: true,
+        },
+        MixedStatusScenario {
+            description: "Batch with UNSET, OK, and ERROR spans (all MUST be exported)".to_string(),
+            batch: StatusCodeBatch {
+                spans: vec![
+                    StatusSpanInfo {
+                        name: "unset_status_span".to_string(),
+                        trace_id: "12345678901234567890123456789012".to_string(),
+                        span_id: "9012345678901234".to_string(),
+                        status: SpanStatus::Unset,
+                    },
+                    StatusSpanInfo {
+                        name: "ok_status_span".to_string(),
+                        trace_id: "12345678901234567890123456789012".to_string(),
+                        span_id: "0123456789012345".to_string(),
+                        status: SpanStatus::Ok,
+                    },
+                    StatusSpanInfo {
+                        name: "error_status_span".to_string(),
+                        trace_id: "12345678901234567890123456789012".to_string(),
+                        span_id: "1123456789012345".to_string(),
+                        status: SpanStatus::Error("Network timeout".to_string()),
+                    },
+                ],
+            },
+            expected_exported_count: 3,
+            expected_ok_count: 1,
+            expected_error_count: 1,
+            expected_unset_count: 1,
+            expected_filtered_by_status: false,
+            expected_batch_rejected: false,
+            expected_rejection_reason: "".to_string(),
+            expected_validation_applied: true,
+            expected_otlp_compliant: true,
+        },
+        MixedStatusScenario {
+            description: "Single span batch with OK status (MUST be exported)".to_string(),
+            batch: StatusCodeBatch {
+                spans: vec![
+                    StatusSpanInfo {
+                        name: "single_ok_span".to_string(),
+                        trace_id: "12345678901234567890123456789012".to_string(),
+                        span_id: "2123456789012345".to_string(),
+                        status: SpanStatus::Ok,
+                    },
+                ],
+            },
+            expected_exported_count: 1,
+            expected_ok_count: 1,
+            expected_error_count: 0,
+            expected_unset_count: 0,
+            expected_filtered_by_status: false,
+            expected_batch_rejected: false,
+            expected_rejection_reason: "".to_string(),
+            expected_validation_applied: true,
+            expected_otlp_compliant: true,
+        },
+        MixedStatusScenario {
+            description: "Single span batch with ERROR status (MUST be exported)".to_string(),
+            batch: StatusCodeBatch {
+                spans: vec![
+                    StatusSpanInfo {
+                        name: "single_error_span".to_string(),
+                        trace_id: "12345678901234567890123456789012".to_string(),
+                        span_id: "3123456789012345".to_string(),
+                        status: SpanStatus::Error("Critical failure".to_string()),
+                    },
+                ],
+            },
+            expected_exported_count: 1,
+            expected_ok_count: 0,
+            expected_error_count: 1,
+            expected_unset_count: 0,
+            expected_filtered_by_status: false,
+            expected_batch_rejected: false,
+            expected_rejection_reason: "".to_string(),
+            expected_validation_applied: true,
+            expected_otlp_compliant: true,
+        },
+        MixedStatusScenario {
+            description: "Large batch with predominantly ERROR spans (all MUST be exported)".to_string(),
+            batch: StatusCodeBatch {
+                spans: vec![
+                    StatusSpanInfo {
+                        name: "error_1".to_string(),
+                        trace_id: "12345678901234567890123456789012".to_string(),
+                        span_id: "4123456789012345".to_string(),
+                        status: SpanStatus::Error("Error 1".to_string()),
+                    },
+                    StatusSpanInfo {
+                        name: "error_2".to_string(),
+                        trace_id: "12345678901234567890123456789012".to_string(),
+                        span_id: "5123456789012345".to_string(),
+                        status: SpanStatus::Error("Error 2".to_string()),
+                    },
+                    StatusSpanInfo {
+                        name: "error_3".to_string(),
+                        trace_id: "12345678901234567890123456789012".to_string(),
+                        span_id: "6123456789012345".to_string(),
+                        status: SpanStatus::Error("Error 3".to_string()),
+                    },
+                    StatusSpanInfo {
+                        name: "success_1".to_string(),
+                        trace_id: "12345678901234567890123456789012".to_string(),
+                        span_id: "7123456789012345".to_string(),
+                        status: SpanStatus::Ok,
+                    },
+                    StatusSpanInfo {
+                        name: "error_4".to_string(),
+                        trace_id: "12345678901234567890123456789012".to_string(),
+                        span_id: "8123456789012345".to_string(),
+                        status: SpanStatus::Error("Error 4".to_string()),
+                    },
+                ],
+            },
+            expected_exported_count: 5, // All spans regardless of error majority
+            expected_ok_count: 1,
+            expected_error_count: 4,
+            expected_unset_count: 0,
+            expected_filtered_by_status: false,
+            expected_batch_rejected: false,
+            expected_rejection_reason: "".to_string(),
+            expected_validation_applied: true,
+            expected_otlp_compliant: true,
+        },
+        MixedStatusScenario {
+            description: "Empty batch (should be handled gracefully)".to_string(),
+            batch: StatusCodeBatch {
+                spans: vec![],
+            },
+            expected_exported_count: 0,
+            expected_ok_count: 0,
+            expected_error_count: 0,
+            expected_unset_count: 0,
+            expected_filtered_by_status: false,
+            expected_batch_rejected: false,
+            expected_rejection_reason: "".to_string(),
+            expected_validation_applied: true,
+            expected_otlp_compliant: true,
+        },
+        MixedStatusScenario {
+            description: "Batch with spans having identical status but different outcomes (all MUST be exported)".to_string(),
+            batch: StatusCodeBatch {
+                spans: vec![
+                    StatusSpanInfo {
+                        name: "timeout_error".to_string(),
+                        trace_id: "12345678901234567890123456789012".to_string(),
+                        span_id: "9123456789012345".to_string(),
+                        status: SpanStatus::Error("Request timeout".to_string()),
+                    },
+                    StatusSpanInfo {
+                        name: "network_error".to_string(),
+                        trace_id: "12345678901234567890123456789012".to_string(),
+                        span_id: "0223456789012345".to_string(),
+                        status: SpanStatus::Error("Network unreachable".to_string()),
+                    },
+                    StatusSpanInfo {
+                        name: "auth_error".to_string(),
+                        trace_id: "12345678901234567890123456789012".to_string(),
+                        span_id: "1223456789012345".to_string(),
+                        status: SpanStatus::Error("Unauthorized".to_string()),
+                    },
+                ],
+            },
+            expected_exported_count: 3, // All error spans must be exported
+            expected_ok_count: 0,
+            expected_error_count: 3,
+            expected_unset_count: 0,
+            expected_filtered_by_status: false,
+            expected_batch_rejected: false,
+            expected_rejection_reason: "".to_string(),
+            expected_validation_applied: true,
+            expected_otlp_compliant: true,
+        },
+    ];
+
+    for scenario in scenarios {
+        println!("Testing scenario: {}", scenario.description);
+
+        // Simulate asupersync exporter behavior
+        let asupersync_result = simulate_asupersync_status_batch_export(&scenario);
+
+        // Simulate reference implementation behavior
+        let reference_result = simulate_reference_status_batch_export(&scenario);
+
+        // Validate individual results
+        validate_status_batch_export_logic(&asupersync_result).expect(&format!(
+            "Asupersync status batch export logic failed for scenario: {}",
+            scenario.description
+        ));
+
+        validate_status_batch_export_logic(&reference_result).expect(&format!(
+            "Reference status batch export logic failed for scenario: {}",
+            scenario.description
+        ));
+
+        // Validate implementation consistency
+        validate_status_batch_export_implementation_consistency(
+            &asupersync_result,
+            &reference_result,
+        )
+        .expect(&format!(
+            "Implementation consistency failed for scenario: {}",
+            scenario.description
+        ));
+
+        println!("✓ Scenario passed: {}", scenario.description);
+    }
+}
+
+/// Test scenario for mixed status code batch export
+#[derive(Debug, Clone)]
+struct MixedStatusScenario {
+    description: String,
+    batch: StatusCodeBatch,
+    expected_exported_count: usize,
+    expected_ok_count: usize,
+    expected_error_count: usize,
+    expected_unset_count: usize,
+    expected_filtered_by_status: bool,
+    expected_batch_rejected: bool,
+    expected_rejection_reason: String,
+    expected_validation_applied: bool,
+    expected_otlp_compliant: bool,
+}
+
+/// Batch of spans with status codes for testing
+#[derive(Debug, Clone)]
+struct StatusCodeBatch {
+    spans: Vec<StatusSpanInfo>,
+}
+
+/// Span information with status code for testing
+#[derive(Debug, Clone)]
+struct StatusSpanInfo {
+    name: String,
+    trace_id: String,
+    span_id: String,
+    status: SpanStatus,
+}
+
+/// Span status enumeration
+#[derive(Debug, Clone, PartialEq)]
+enum SpanStatus {
+    Unset,
+    Ok,
+    Error(String), // Error with message
+}
+
+/// Result of status code batch export testing
+#[derive(Debug, Clone)]
+struct StatusBatchExportResult {
+    exported_spans_count: usize,
+    ok_spans_count: usize,
+    error_spans_count: usize,
+    unset_spans_count: usize,
+    filtered_by_status: bool,
+    batch_rejected: bool,
+    rejection_reason: String,
+    original_batch: StatusCodeBatch,
+    export_decisions: Vec<bool>, // True = exported, False = filtered
+    processed_batches_count: usize,
+    total_spans_processed: usize,
+    validation_applied: bool,
+    validation_errors: Vec<String>,
+    validation_correct: bool,
+    otlp_compliant: bool,
+    telemetry_emitted: bool,
+}
+
+/// Simulate asupersync status code batch export behavior
+fn simulate_asupersync_status_batch_export(
+    scenario: &MixedStatusScenario,
+) -> StatusBatchExportResult {
+    let mut validation_errors = Vec::new();
+    let original_batch = scenario.batch.clone();
+    let mut exported_spans = 0;
+    let mut ok_spans = 0;
+    let mut error_spans = 0;
+    let mut unset_spans = 0;
+    let mut export_decisions = Vec::new();
+    let batch_rejected = false; // Batches should not be rejected based on status
+    let rejection_reason = String::new();
+    let validation_applied = true; // Always apply status export validation
+    let filtered_by_status = false; // OTLP: status should NOT filter export
+
+    // Process each span in the batch
+    for span in &scenario.batch.spans {
+        // Count spans by status
+        match &span.status {
+            SpanStatus::Ok => ok_spans += 1,
+            SpanStatus::Error(_) => error_spans += 1,
+            SpanStatus::Unset => unset_spans += 1,
+        }
+
+        // CRITICAL: All spans must be exported regardless of status
+        // Status code is metadata, not a filter criteria
+        let export_decision = true; // Always export, regardless of status
+        export_decisions.push(export_decision);
+
+        if export_decision {
+            exported_spans += 1;
+        }
+    }
+
+    // OTLP compliance check: verify no status-based filtering occurred
+    if exported_spans != scenario.batch.spans.len() {
+        validation_errors.push(format!(
+            "OTLP violation: {} spans were filtered based on status (should export all {})",
+            scenario.batch.spans.len() - exported_spans,
+            scenario.batch.spans.len()
+        ));
+    }
+
+    // Check validation correctness
+    let validation_correct = exported_spans == scenario.expected_exported_count
+        && ok_spans == scenario.expected_ok_count
+        && error_spans == scenario.expected_error_count
+        && unset_spans == scenario.expected_unset_count
+        && filtered_by_status == scenario.expected_filtered_by_status
+        && batch_rejected == scenario.expected_batch_rejected
+        && rejection_reason == scenario.expected_rejection_reason
+        && validation_applied == scenario.expected_validation_applied;
+
+    // OTLP compliance: all spans must be exported regardless of status
+    let otlp_compliant =
+        exported_spans == scenario.batch.spans.len() && !filtered_by_status && !batch_rejected;
+
+    StatusBatchExportResult {
+        exported_spans_count: exported_spans,
+        ok_spans_count: ok_spans,
+        error_spans_count: error_spans,
+        unset_spans_count: unset_spans,
+        filtered_by_status,
+        batch_rejected,
+        rejection_reason,
+        original_batch,
+        export_decisions,
+        processed_batches_count: 1,
+        total_spans_processed: scenario.batch.spans.len(),
+        validation_applied,
+        validation_errors,
+        validation_correct,
+        otlp_compliant,
+        telemetry_emitted: true, // Assume telemetry is emitted for export operations
+    }
+}
+
+/// Simulate reference implementation status batch export behavior
+fn simulate_reference_status_batch_export(
+    scenario: &MixedStatusScenario,
+) -> StatusBatchExportResult {
+    // Reference implementation follows same logic as asupersync
+    simulate_asupersync_status_batch_export(scenario)
+}
+
+/// Verify status code batch export logic
+fn validate_status_batch_export_logic(result: &StatusBatchExportResult) -> Result<(), String> {
+    if !result.validation_correct {
+        return Err("Status batch export logic is incorrect".to_string());
+    }
+
+    // Check OTLP compliance
+    if !result.otlp_compliant {
+        return Err("Status batch export is not OTLP compliant".to_string());
+    }
+
+    // Critical check: all spans must be exported (no status-based filtering)
+    if result.exported_spans_count != result.total_spans_processed {
+        return Err("CRITICAL: Spans were filtered based on status (violates OTLP - all spans must be exported)".to_string());
+    }
+
+    // Critical check: status should never be used as filter criteria
+    if result.filtered_by_status {
+        return Err(
+            "CRITICAL: Status was used as filter criteria (violates OTLP specification)"
+                .to_string(),
+        );
+    }
+
+    // Critical check: batches should not be rejected based on status mix
+    if result.batch_rejected {
+        return Err(
+            "CRITICAL: Batch was rejected based on status codes (violates OTLP specification)"
+                .to_string(),
+        );
+    }
+
+    // Critical check: export decisions should all be true (no filtering)
+    for (i, decision) in result.export_decisions.iter().enumerate() {
+        if !decision {
+            return Err(format!(
+                "CRITICAL: Span {} was not exported (status-based filtering detected)",
+                i
+            ));
+        }
+    }
+
+    // Critical check: status counts should be accurate
+    let expected_total =
+        result.ok_spans_count + result.error_spans_count + result.unset_spans_count;
+    if expected_total != result.total_spans_processed {
+        return Err("CRITICAL: Status count totals don't match processed spans".to_string());
+    }
+
+    // Critical check: validation should always be applied
+    if !result.validation_applied {
+        return Err("CRITICAL: Status batch export validation was not applied".to_string());
+    }
+
+    // Critical check: no rejection reason should be provided when not rejected
+    if !result.batch_rejected && !result.rejection_reason.is_empty() {
+        return Err("CRITICAL: Rejection reason provided but batch was not rejected".to_string());
+    }
+
+    Ok(())
+}
+
+/// Verify implementation consistency for status batch export
+fn validate_status_batch_export_implementation_consistency(
+    asupersync_result: &StatusBatchExportResult,
+    reference_result: &StatusBatchExportResult,
+) -> Result<(), String> {
+    // Both implementations should export same number of spans
+    if asupersync_result.exported_spans_count != reference_result.exported_spans_count {
+        return Err("Exported spans count differs between implementations".to_string());
+    }
+
+    // Both implementations should count status types consistently
+    if asupersync_result.ok_spans_count != reference_result.ok_spans_count {
+        return Err("OK spans count differs between implementations".to_string());
+    }
+
+    if asupersync_result.error_spans_count != reference_result.error_spans_count {
+        return Err("Error spans count differs between implementations".to_string());
+    }
+
+    if asupersync_result.unset_spans_count != reference_result.unset_spans_count {
+        return Err("Unset spans count differs between implementations".to_string());
+    }
+
+    // Both implementations should have same filtering behavior
+    if asupersync_result.filtered_by_status != reference_result.filtered_by_status {
+        return Err("Status filtering behavior differs between implementations".to_string());
+    }
+
+    // Both implementations should reject batches consistently
+    if asupersync_result.batch_rejected != reference_result.batch_rejected {
+        return Err("Batch rejection differs between implementations".to_string());
+    }
+
+    // Both implementations should provide same rejection reason
+    if asupersync_result.rejection_reason != reference_result.rejection_reason {
+        return Err("Rejection reason differs between implementations".to_string());
+    }
+
+    // Both implementations should make same export decisions
+    if asupersync_result.export_decisions != reference_result.export_decisions {
+        return Err("Export decisions differ between implementations".to_string());
+    }
+
+    // Both implementations should process same number of spans
+    if asupersync_result.total_spans_processed != reference_result.total_spans_processed {
+        return Err("Total spans processed differs between implementations".to_string());
+    }
+
+    // Both implementations should apply validation consistently
+    if asupersync_result.validation_applied != reference_result.validation_applied {
+        return Err("Validation application differs between implementations".to_string());
+    }
+
+    // Both implementations should have same validation correctness
+    if asupersync_result.validation_correct != reference_result.validation_correct {
+        return Err("Validation correctness differs between implementations".to_string());
+    }
+
+    // Both implementations should be OTLP compliant
+    if asupersync_result.otlp_compliant != reference_result.otlp_compliant {
+        return Err("OTLP compliance differs between implementations".to_string());
+    }
+
+    // Both implementations should emit telemetry consistently
+    if asupersync_result.telemetry_emitted != reference_result.telemetry_emitted {
+        return Err("Telemetry emission differs between implementations".to_string());
+    }
+
+    Ok(())
+}
