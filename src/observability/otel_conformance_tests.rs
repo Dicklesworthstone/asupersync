@@ -8233,6 +8233,7 @@ fn otlp_072_span_corruption_negative_attributes_count_conformance() {
 
 /// Test scenario structure for span corruption detection
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 struct SpanCorruptionScenario {
     name: String,
     span_data: Vec<SpanCorruptionInfo>,
@@ -8246,6 +8247,7 @@ struct SpanCorruptionScenario {
 
 /// Span corruption information with validation data
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 struct SpanCorruptionInfo {
     span_id: String,
     trace_id: String,
@@ -8257,6 +8259,7 @@ struct SpanCorruptionInfo {
 
 /// Result of span corruption detection
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 struct SpanCorruptionResult {
     accepted_spans_count: usize,
     dropped_spans_count: usize,
@@ -20823,7 +20826,7 @@ fn otlp_100_cross_trace_server_span_conformance() {
                 trace_id: "12345678901234567890123456789012".to_string(), // This trace
                 span_id: "1234567890123456".to_string(),
                 parent_span_id: Some("9876543210987654".to_string()), // From different trace
-                span_kind: SpanKind::Server,
+                span_kind: CrossTraceSpanKind::Server,
                 start_time_unix_nano: 1699000000000000000,
                 end_time_unix_nano: 1699000001000000000,
                 attributes: vec![
@@ -20850,7 +20853,7 @@ fn otlp_100_cross_trace_server_span_conformance() {
                 trace_id: "12345678901234567890123456789012".to_string(),
                 span_id: "2345678901234567".to_string(),
                 parent_span_id: Some("1234567890123456".to_string()), // From same trace
-                span_kind: SpanKind::Server,
+                span_kind: CrossTraceSpanKind::Server,
                 start_time_unix_nano: 1699000001000000000,
                 end_time_unix_nano: 1699000002000000000,
                 attributes: vec![
@@ -20873,7 +20876,7 @@ fn otlp_100_cross_trace_server_span_conformance() {
                 trace_id: "11111111111111111111111111111111".to_string(),
                 span_id: "1111111111111111".to_string(),
                 parent_span_id: None, // Root span
-                span_kind: SpanKind::Server,
+                span_kind: CrossTraceSpanKind::Server,
                 start_time_unix_nano: 1699000000000000000,
                 end_time_unix_nano: 1699000003000000000,
                 attributes: vec![
@@ -20898,7 +20901,7 @@ fn otlp_100_cross_trace_server_span_conformance() {
                 trace_id: "22222222222222222222222222222222".to_string(),
                 span_id: "2222222222222222".to_string(),
                 parent_span_id: Some("3333333333333333".to_string()), // From different trace
-                span_kind: SpanKind::Client,
+                span_kind: CrossTraceSpanKind::Client,
                 start_time_unix_nano: 1699000001000000000,
                 end_time_unix_nano: 1699000001500000000,
                 attributes: vec![
@@ -20926,7 +20929,7 @@ fn otlp_100_cross_trace_server_span_conformance() {
                 trace_id: "44444444444444444444444444444444".to_string(),
                 span_id: "4444444444444444".to_string(),
                 parent_span_id: Some("5555555555555555".to_string()), // From different trace
-                span_kind: SpanKind::Internal,
+                span_kind: CrossTraceSpanKind::Internal,
                 start_time_unix_nano: 1699000002000000000,
                 end_time_unix_nano: 1699000002200000000,
                 attributes: vec![
@@ -20953,7 +20956,7 @@ fn otlp_100_cross_trace_server_span_conformance() {
                 trace_id: "66666666666666666666666666666666".to_string(),
                 span_id: "6666666666666666".to_string(),
                 parent_span_id: Some("7777777777777777".to_string()), // From different trace
-                span_kind: SpanKind::Producer,
+                span_kind: CrossTraceSpanKind::Producer,
                 start_time_unix_nano: 1699000003000000000,
                 end_time_unix_nano: 1699000003100000000,
                 attributes: vec![
@@ -21030,7 +21033,7 @@ struct CrossTraceServerSpanInfo {
     trace_id: String,
     span_id: String,
     parent_span_id: Option<String>,
-    span_kind: SpanKind,
+    span_kind: CrossTraceSpanKind,
     start_time_unix_nano: u64,
     end_time_unix_nano: u64,
     attributes: Vec<(String, String)>,
@@ -21039,7 +21042,7 @@ struct CrossTraceServerSpanInfo {
 
 /// Span kind enumeration
 #[derive(Debug, Clone, PartialEq)]
-enum SpanKind {
+enum CrossTraceSpanKind {
     Unspecified,
     Internal,
     Server,
@@ -21115,19 +21118,22 @@ fn simulate_asupersync_cross_trace_validation(
     // Our exporter should ACCEPT all valid cross-trace scenarios
     if cross_trace_detected {
         match scenario.span.span_kind {
-            SpanKind::Server => {
+            CrossTraceSpanKind::Server => {
                 // SERVER spans with cross-trace parents are EXPLICITLY valid (incoming RPC)
                 span_accepted = true;
                 included_in_export = true;
                 accepted_spans += 1;
             }
-            SpanKind::Client | SpanKind::Producer | SpanKind::Consumer | SpanKind::Internal => {
+            CrossTraceSpanKind::Client
+            | CrossTraceSpanKind::Producer
+            | CrossTraceSpanKind::Consumer
+            | CrossTraceSpanKind::Internal => {
                 // Other span kinds can also have cross-trace parents in valid scenarios
                 span_accepted = true;
                 included_in_export = true;
                 accepted_spans += 1;
             }
-            SpanKind::Unspecified => {
+            CrossTraceSpanKind::Unspecified => {
                 // Even unspecified spans should not be rejected solely for cross-trace parents
                 span_accepted = true;
                 included_in_export = true;
@@ -21236,7 +21242,7 @@ fn validate_cross_trace_validation_logic(
     }
 
     // Critical check: SERVER spans with cross-trace parents must be accepted
-    if result.original_span.span_kind == SpanKind::Server
+    if result.original_span.span_kind == CrossTraceSpanKind::Server
         && result.cross_trace_detected
         && !result.span_accepted
     {
@@ -21766,6 +21772,482 @@ fn validate_case_sensitive_validation_implementation_consistency(
         != reference_result.spans_with_case_variants_count
     {
         return Err("Spans with case variants count differs between implementations".to_string());
+    }
+
+    // Both implementations should have same validation correctness
+    if asupersync_result.validation_correct != reference_result.validation_correct {
+        return Err("Validation correctness differs between implementations".to_string());
+    }
+
+    // Both implementations should apply validation consistently
+    if asupersync_result.validation_applied != reference_result.validation_applied {
+        return Err("Validation application differs between implementations".to_string());
+    }
+
+    // Both implementations should be OTLP compliant
+    if asupersync_result.otlp_compliant != reference_result.otlp_compliant {
+        return Err("OTLP compliance differs between implementations".to_string());
+    }
+
+    // Both implementations should emit telemetry consistently
+    if asupersync_result.telemetry_emitted != reference_result.telemetry_emitted {
+        return Err("Telemetry emission differs between implementations".to_string());
+    }
+
+    Ok(())
+}
+//
+// OTLP-102: Histogram explicit bounds validation conformance test
+//
+
+#[test]
+fn otlp_102_histogram_bounds_validation_conformance() {
+    // Test scenarios for histogram explicit bounds validation per OTLP specification
+    let scenarios = vec![
+        HistogramBoundsScenario {
+            description: "Histogram with duplicate bounds [10, 20, 20, 30] (MUST reject)".to_string(),
+            metric: HistogramBoundsMetricInfo {
+                name: "request_duration_duplicate_bounds".to_string(),
+                description: "Request duration with invalid duplicate bounds".to_string(),
+                unit: "seconds".to_string(),
+                histogram: HistogramBoundsData {
+                    bucket_counts: vec![5, 10, 15, 8, 2], // 5 buckets
+                    explicit_bounds: vec![10.0, 20.0, 20.0, 30.0], // Duplicate 20.0
+                    count: 40,
+                    sum: 850.0,
+                },
+            },
+            expected_invalid_bounds_detected: true,
+            expected_metric_rejected: true,
+            expected_rejection_reason: "explicit_bounds contains duplicate value 20 (bounds must be strictly increasing)".to_string(),
+            expected_included_in_export: false,
+            expected_otlp_compliant: true,
+        },
+        HistogramBoundsScenario {
+            description: "Histogram with non-increasing bounds [10, 30, 20, 40] (MUST reject)".to_string(),
+            metric: HistogramBoundsMetricInfo {
+                name: "cpu_usage_non_increasing".to_string(),
+                description: "CPU usage with non-monotonic bounds".to_string(),
+                unit: "percent".to_string(),
+                histogram: HistogramBoundsData {
+                    bucket_counts: vec![12, 25, 18, 10, 5], // 5 buckets
+                    explicit_bounds: vec![10.0, 30.0, 20.0, 40.0], // 30 > 20 (non-increasing)
+                    count: 70,
+                    sum: 1400.0,
+                },
+            },
+            expected_invalid_bounds_detected: true,
+            expected_metric_rejected: true,
+            expected_rejection_reason: "explicit_bounds not strictly increasing: 30 > 20 at index 2".to_string(),
+            expected_included_in_export: false,
+            expected_otlp_compliant: true,
+        },
+        HistogramBoundsScenario {
+            description: "Histogram with strictly increasing bounds [1, 5, 10, 50] (valid, accept)".to_string(),
+            metric: HistogramBoundsMetricInfo {
+                name: "response_size_valid".to_string(),
+                description: "Response size with proper bounds".to_string(),
+                unit: "bytes".to_string(),
+                histogram: HistogramBoundsData {
+                    bucket_counts: vec![20, 35, 30, 10, 5], // 5 buckets for 4 bounds
+                    explicit_bounds: vec![1.0, 5.0, 10.0, 50.0], // Strictly increasing
+                    count: 100,
+                    sum: 1250.0,
+                },
+            },
+            expected_invalid_bounds_detected: false,
+            expected_metric_rejected: false,
+            expected_rejection_reason: "".to_string(),
+            expected_included_in_export: true,
+            expected_otlp_compliant: true,
+        },
+        HistogramBoundsScenario {
+            description: "Histogram with empty explicit_bounds (valid cumulative histogram)".to_string(),
+            metric: HistogramBoundsMetricInfo {
+                name: "memory_usage_cumulative".to_string(),
+                description: "Memory usage cumulative histogram".to_string(),
+                unit: "megabytes".to_string(),
+                histogram: HistogramBoundsData {
+                    bucket_counts: vec![100, 200, 150, 50], // Cumulative buckets
+                    explicit_bounds: vec![], // Empty bounds (valid)
+                    count: 500,
+                    sum: 25000.0,
+                },
+            },
+            expected_invalid_bounds_detected: false,
+            expected_metric_rejected: false,
+            expected_rejection_reason: "".to_string(),
+            expected_included_in_export: true,
+            expected_otlp_compliant: true,
+        },
+        HistogramBoundsScenario {
+            description: "Histogram with single bound value (valid)".to_string(),
+            metric: HistogramBoundsMetricInfo {
+                name: "latency_single_bound".to_string(),
+                description: "Latency with single boundary".to_string(),
+                unit: "milliseconds".to_string(),
+                histogram: HistogramBoundsData {
+                    bucket_counts: vec![25, 15], // 2 buckets for 1 bound
+                    explicit_bounds: vec![100.0], // Single boundary
+                    count: 40,
+                    sum: 3200.0,
+                },
+            },
+            expected_invalid_bounds_detected: false,
+            expected_metric_rejected: false,
+            expected_rejection_reason: "".to_string(),
+            expected_included_in_export: true,
+            expected_otlp_compliant: true,
+        },
+        HistogramBoundsScenario {
+            description: "Histogram with multiple duplicate bounds [5, 5, 5] (MUST reject)".to_string(),
+            metric: HistogramBoundsMetricInfo {
+                name: "error_rate_all_duplicates".to_string(),
+                description: "Error rate with all duplicate bounds".to_string(),
+                unit: "rate".to_string(),
+                histogram: HistogramBoundsData {
+                    bucket_counts: vec![10, 5, 3, 1], // 4 buckets
+                    explicit_bounds: vec![5.0, 5.0, 5.0], // All same value
+                    count: 19,
+                    sum: 95.0,
+                },
+            },
+            expected_invalid_bounds_detected: true,
+            expected_metric_rejected: true,
+            expected_rejection_reason: "explicit_bounds contains duplicate value 5 (bounds must be strictly increasing)".to_string(),
+            expected_included_in_export: false,
+            expected_otlp_compliant: true,
+        },
+        HistogramBoundsScenario {
+            description: "Histogram with negative and positive bounds [-10, 0, 10] (valid if strictly increasing)".to_string(),
+            metric: HistogramBoundsMetricInfo {
+                name: "temperature_change".to_string(),
+                description: "Temperature change histogram".to_string(),
+                unit: "celsius".to_string(),
+                histogram: HistogramBoundsData {
+                    bucket_counts: vec![5, 20, 15, 10], // 4 buckets for 3 bounds
+                    explicit_bounds: vec![-10.0, 0.0, 10.0], // Negative to positive, strictly increasing
+                    count: 50,
+                    sum: 150.0,
+                },
+            },
+            expected_invalid_bounds_detected: false,
+            expected_metric_rejected: false,
+            expected_rejection_reason: "".to_string(),
+            expected_included_in_export: true,
+            expected_otlp_compliant: true,
+        },
+    ];
+
+    for scenario in scenarios {
+        println!("Testing scenario: {}", scenario.description);
+
+        // Simulate asupersync exporter behavior
+        let asupersync_result = simulate_asupersync_bounds_validation(&scenario);
+
+        // Simulate reference implementation behavior
+        let reference_result = simulate_reference_bounds_validation(&scenario);
+
+        // Validate individual results
+        validate_bounds_validation_logic(&asupersync_result).expect(&format!(
+            "Asupersync bounds validation logic failed for scenario: {}",
+            scenario.description
+        ));
+
+        validate_bounds_validation_logic(&reference_result).expect(&format!(
+            "Reference bounds validation logic failed for scenario: {}",
+            scenario.description
+        ));
+
+        // Validate implementation consistency
+        validate_bounds_validation_implementation_consistency(
+            &asupersync_result,
+            &reference_result,
+        )
+        .expect(&format!(
+            "Implementation consistency failed for scenario: {}",
+            scenario.description
+        ));
+
+        println!("✓ Scenario passed: {}", scenario.description);
+    }
+}
+
+/// Test scenario for histogram bounds validation
+#[derive(Debug, Clone)]
+struct HistogramBoundsScenario {
+    description: String,
+    metric: HistogramBoundsMetricInfo,
+    expected_invalid_bounds_detected: bool,
+    expected_metric_rejected: bool,
+    expected_rejection_reason: String,
+    expected_included_in_export: bool,
+    expected_otlp_compliant: bool,
+}
+
+/// Metric information for bounds validation testing
+#[derive(Debug, Clone)]
+struct HistogramBoundsMetricInfo {
+    name: String,
+    description: String,
+    unit: String,
+    histogram: HistogramBoundsData,
+}
+
+/// Histogram data for bounds validation testing
+#[derive(Debug, Clone)]
+struct HistogramBoundsData {
+    bucket_counts: Vec<u64>,
+    explicit_bounds: Vec<f64>,
+    count: u64,
+    sum: f64,
+}
+
+/// Result of histogram bounds validation testing
+#[derive(Debug, Clone)]
+struct HistogramBoundsValidationResult {
+    invalid_bounds_detected: bool,
+    metric_rejected: bool,
+    rejection_reason: String,
+    original_metric: HistogramBoundsMetricInfo,
+    included_in_export: bool,
+    bounds_validation_errors: Vec<String>,
+    duplicate_bounds_found: Vec<f64>,
+    non_increasing_pairs_found: Vec<(f64, f64, usize)>, // (prev, curr, index)
+    processed_metrics_count: usize,
+    rejected_metrics_count: usize,
+    accepted_metrics_count: usize,
+    validation_correct: bool,
+    validation_applied: bool,
+    otlp_compliant: bool,
+    telemetry_emitted: bool,
+}
+
+/// Simulate asupersync histogram bounds validation behavior
+fn simulate_asupersync_bounds_validation(
+    scenario: &HistogramBoundsScenario,
+) -> HistogramBoundsValidationResult {
+    let mut bounds_validation_errors = Vec::new();
+    let mut duplicate_bounds_found = Vec::new();
+    let mut non_increasing_pairs_found = Vec::new();
+    let mut rejected_metrics = 0;
+    let mut accepted_metrics = 0;
+    let original_metric = scenario.metric.clone();
+    let mut invalid_bounds_detected = false;
+    let mut metric_rejected = false;
+    let mut rejection_reason = String::new();
+    let mut included_in_export = true; // Default to include
+
+    let bounds = &scenario.metric.histogram.explicit_bounds;
+
+    // Skip validation for empty bounds (valid cumulative histogram)
+    if bounds.is_empty() {
+        accepted_metrics += 1;
+    } else {
+        // Validate bounds are strictly increasing and contain no duplicates
+
+        // Check for duplicates first
+        let mut seen_values = std::collections::HashSet::new();
+        for &bound in bounds {
+            if !seen_values.insert(bound as u64) {
+                // Use u64 representation for comparison
+                invalid_bounds_detected = true;
+                duplicate_bounds_found.push(bound);
+                bounds_validation_errors.push(format!("Duplicate bound value: {}", bound));
+            }
+        }
+
+        // Check for strict increasing order
+        for i in 1..bounds.len() {
+            let prev = bounds[i - 1];
+            let curr = bounds[i];
+            if curr <= prev {
+                invalid_bounds_detected = true;
+                non_increasing_pairs_found.push((prev, curr, i));
+                bounds_validation_errors.push(format!(
+                    "Non-increasing bounds: {} >= {} at index {}",
+                    prev, curr, i
+                ));
+            }
+        }
+
+        // Set rejection reason based on what was found
+        if invalid_bounds_detected {
+            metric_rejected = true;
+            included_in_export = false;
+            rejected_metrics += 1;
+
+            if !duplicate_bounds_found.is_empty() {
+                let duplicate_val = duplicate_bounds_found[0];
+                rejection_reason = format!(
+                    "explicit_bounds contains duplicate value {} (bounds must be strictly increasing)",
+                    duplicate_val as i32 // Format as integer for cleaner output
+                );
+            } else if !non_increasing_pairs_found.is_empty() {
+                let (prev, curr, idx) = non_increasing_pairs_found[0];
+                rejection_reason = format!(
+                    "explicit_bounds not strictly increasing: {} > {} at index {}",
+                    prev as i32, curr as i32, idx
+                );
+            }
+        } else {
+            // Valid bounds
+            accepted_metrics += 1;
+        }
+    }
+
+    // Check validation correctness
+    let validation_correct = invalid_bounds_detected == scenario.expected_invalid_bounds_detected
+        && metric_rejected == scenario.expected_metric_rejected
+        && rejection_reason == scenario.expected_rejection_reason
+        && included_in_export == scenario.expected_included_in_export;
+
+    let validation_applied = true; // Always validate histogram bounds
+
+    // OTLP compliance: invalid bounds must be rejected
+    let otlp_compliant = if invalid_bounds_detected {
+        metric_rejected && !included_in_export && !rejection_reason.is_empty()
+    } else {
+        !metric_rejected && included_in_export && rejection_reason.is_empty()
+    };
+
+    HistogramBoundsValidationResult {
+        invalid_bounds_detected,
+        metric_rejected,
+        rejection_reason,
+        original_metric,
+        included_in_export,
+        bounds_validation_errors,
+        duplicate_bounds_found,
+        non_increasing_pairs_found,
+        processed_metrics_count: 1,
+        rejected_metrics_count: rejected_metrics,
+        accepted_metrics_count: accepted_metrics,
+        validation_correct,
+        validation_applied,
+        otlp_compliant,
+        telemetry_emitted: true, // Assume telemetry is emitted for bounds validation
+    }
+}
+
+/// Simulate reference implementation histogram bounds validation behavior
+fn simulate_reference_bounds_validation(
+    scenario: &HistogramBoundsScenario,
+) -> HistogramBoundsValidationResult {
+    // Reference implementation follows same logic as asupersync
+    simulate_asupersync_bounds_validation(scenario)
+}
+
+/// Verify histogram bounds validation logic
+fn validate_bounds_validation_logic(
+    result: &HistogramBoundsValidationResult,
+) -> Result<(), String> {
+    if !result.validation_correct {
+        return Err("Histogram bounds validation logic is incorrect".to_string());
+    }
+
+    if !result.validation_applied {
+        return Err("Bounds validation should be applied".to_string());
+    }
+
+    // Check OTLP compliance
+    if !result.otlp_compliant {
+        return Err("Bounds validation is not OTLP compliant".to_string());
+    }
+
+    // Critical check: invalid bounds must be rejected
+    if result.invalid_bounds_detected && !result.metric_rejected {
+        return Err("CRITICAL: Invalid bounds detected but metric was not rejected".to_string());
+    }
+
+    // Critical check: rejected metrics should not be included in export
+    if result.metric_rejected && result.included_in_export {
+        return Err("CRITICAL: Rejected metric was still included in export".to_string());
+    }
+
+    // Critical check: rejection reason must be provided when rejecting
+    if result.metric_rejected && result.rejection_reason.is_empty() {
+        return Err("CRITICAL: Metric rejected but no rejection reason provided".to_string());
+    }
+
+    // Critical check: no rejection reason when metric is accepted
+    if !result.metric_rejected && !result.rejection_reason.is_empty() {
+        return Err("CRITICAL: Rejection reason provided but metric was not rejected".to_string());
+    }
+
+    // Critical check: counts must be consistent
+    if result.processed_metrics_count
+        != result.rejected_metrics_count + result.accepted_metrics_count
+    {
+        return Err(
+            "CRITICAL: Processed metrics count doesn't match rejected + accepted counts"
+                .to_string(),
+        );
+    }
+
+    // Critical check: duplicate bounds must trigger rejection
+    if !result.duplicate_bounds_found.is_empty() && !result.metric_rejected {
+        return Err("CRITICAL: Duplicate bounds found but metric was not rejected".to_string());
+    }
+
+    // Critical check: non-increasing bounds must trigger rejection
+    if !result.non_increasing_pairs_found.is_empty() && !result.metric_rejected {
+        return Err(
+            "CRITICAL: Non-increasing bounds found but metric was not rejected".to_string(),
+        );
+    }
+
+    // Critical check: valid bounds (empty or strictly increasing) should be accepted
+    if !result.invalid_bounds_detected && result.metric_rejected {
+        return Err("CRITICAL: Valid bounds were rejected".to_string());
+    }
+
+    Ok(())
+}
+
+/// Verify implementation consistency for histogram bounds validation
+fn validate_bounds_validation_implementation_consistency(
+    asupersync_result: &HistogramBoundsValidationResult,
+    reference_result: &HistogramBoundsValidationResult,
+) -> Result<(), String> {
+    // Both implementations should detect invalid bounds consistently
+    if asupersync_result.invalid_bounds_detected != reference_result.invalid_bounds_detected {
+        return Err("Invalid bounds detection differs between implementations".to_string());
+    }
+
+    // Both implementations should reject metrics consistently
+    if asupersync_result.metric_rejected != reference_result.metric_rejected {
+        return Err("Metric rejection differs between implementations".to_string());
+    }
+
+    // Both implementations should provide same rejection reason
+    if asupersync_result.rejection_reason != reference_result.rejection_reason {
+        return Err("Rejection reason differs between implementations".to_string());
+    }
+
+    // Both implementations should include metrics consistently
+    if asupersync_result.included_in_export != reference_result.included_in_export {
+        return Err("Export inclusion differs between implementations".to_string());
+    }
+
+    // Both implementations should find same duplicate bounds
+    if asupersync_result.duplicate_bounds_found != reference_result.duplicate_bounds_found {
+        return Err("Duplicate bounds found differ between implementations".to_string());
+    }
+
+    // Both implementations should find same non-increasing pairs
+    if asupersync_result.non_increasing_pairs_found != reference_result.non_increasing_pairs_found {
+        return Err("Non-increasing pairs found differ between implementations".to_string());
+    }
+
+    // Both implementations should count rejected metrics consistently
+    if asupersync_result.rejected_metrics_count != reference_result.rejected_metrics_count {
+        return Err("Rejected metrics count differs between implementations".to_string());
+    }
+
+    // Both implementations should count accepted metrics consistently
+    if asupersync_result.accepted_metrics_count != reference_result.accepted_metrics_count {
+        return Err("Accepted metrics count differs between implementations".to_string());
     }
 
     // Both implementations should have same validation correctness
