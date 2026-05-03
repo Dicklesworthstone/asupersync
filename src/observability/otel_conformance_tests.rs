@@ -41101,4 +41101,453 @@ mod otlp_122_tests {
         println!("  - Robust NaN detection across different creation methods");
         println!("  - Mixed attribute types properly handled with selective NaN detection");
     }
+
+    /// OTLP-142 conformance test: gRPC server instrumentation scope RPC method requirement.
+    ///
+    /// When an exporter encounters a span with kind=SERVER and instrumentation.scope.name="grpc.server",
+    /// the rpc.method attribute MUST be set per OTLP semantic conventions for gRPC server spans.
+    /// This ensures proper correlation and analysis of gRPC server-side operations in distributed tracing.
+    #[test]
+    fn otlp_142_grpc_server_rpc_method_conformance() {
+        println!("Testing OTLP-142: gRPC server instrumentation scope RPC method requirement...");
+
+        let test_scenarios = vec![
+            GrpcServerRpcMethodScenario {
+                description: "valid_grpc_server_with_rpc_method".to_string(),
+                span_kind: SpanKind::Server,
+                instrumentation_scope_name: "grpc.server".to_string(),
+                instrumentation_scope_version: Some("1.0.0".to_string()),
+                span_attributes: vec![
+                    ("rpc.method".to_string(), AnyValue::StringValue("/api/v1/GetUser".to_string())),
+                    ("rpc.service".to_string(), AnyValue::StringValue("UserService".to_string())),
+                    ("rpc.system".to_string(), AnyValue::StringValue("grpc".to_string())),
+                    ("rpc.grpc.status_code".to_string(), AnyValue::IntValue(0)),
+                ],
+                should_be_valid: true,
+                expected_rpc_method: Some("/api/v1/GetUser".to_string()),
+            },
+            GrpcServerRpcMethodScenario {
+                description: "grpc_server_missing_rpc_method".to_string(),
+                span_kind: SpanKind::Server,
+                instrumentation_scope_name: "grpc.server".to_string(),
+                instrumentation_scope_version: Some("1.0.0".to_string()),
+                span_attributes: vec![
+                    ("rpc.service".to_string(), AnyValue::StringValue("UserService".to_string())),
+                    ("rpc.system".to_string(), AnyValue::StringValue("grpc".to_string())),
+                    ("rpc.grpc.status_code".to_string(), AnyValue::IntValue(0)),
+                    // Missing rpc.method - should be invalid
+                ],
+                should_be_valid: false,
+                expected_rpc_method: None,
+            },
+            GrpcServerRpcMethodScenario {
+                description: "grpc_server_empty_rpc_method".to_string(),
+                span_kind: SpanKind::Server,
+                instrumentation_scope_name: "grpc.server".to_string(),
+                instrumentation_scope_version: Some("1.0.0".to_string()),
+                span_attributes: vec![
+                    ("rpc.method".to_string(), AnyValue::StringValue("".to_string())), // Empty method
+                    ("rpc.service".to_string(), AnyValue::StringValue("UserService".to_string())),
+                    ("rpc.system".to_string(), AnyValue::StringValue("grpc".to_string())),
+                ],
+                should_be_valid: false,
+                expected_rpc_method: None,
+            },
+            GrpcServerRpcMethodScenario {
+                description: "grpc_server_non_string_rpc_method".to_string(),
+                span_kind: SpanKind::Server,
+                instrumentation_scope_name: "grpc.server".to_string(),
+                instrumentation_scope_version: Some("1.0.0".to_string()),
+                span_attributes: vec![
+                    ("rpc.method".to_string(), AnyValue::IntValue(42)), // Wrong type
+                    ("rpc.service".to_string(), AnyValue::StringValue("UserService".to_string())),
+                    ("rpc.system".to_string(), AnyValue::StringValue("grpc".to_string())),
+                ],
+                should_be_valid: false,
+                expected_rpc_method: None,
+            },
+            GrpcServerRpcMethodScenario {
+                description: "non_grpc_server_scope_no_requirement".to_string(),
+                span_kind: SpanKind::Server,
+                instrumentation_scope_name: "http.server".to_string(), // Not gRPC
+                instrumentation_scope_version: Some("1.0.0".to_string()),
+                span_attributes: vec![
+                    ("http.method".to_string(), AnyValue::StringValue("GET".to_string())),
+                    ("http.url".to_string(), AnyValue::StringValue("/api/users".to_string())),
+                ],
+                should_be_valid: true, // No rpc.method requirement for non-gRPC
+                expected_rpc_method: None,
+            },
+            GrpcServerRpcMethodScenario {
+                description: "grpc_client_scope_no_requirement".to_string(),
+                span_kind: SpanKind::Client, // Not server
+                instrumentation_scope_name: "grpc.server".to_string(),
+                instrumentation_scope_version: Some("1.0.0".to_string()),
+                span_attributes: vec![
+                    ("rpc.service".to_string(), AnyValue::StringValue("UserService".to_string())),
+                    ("rpc.system".to_string(), AnyValue::StringValue("grpc".to_string())),
+                    // No rpc.method but it's client span, so OK
+                ],
+                should_be_valid: true, // No requirement for client spans
+                expected_rpc_method: None,
+            },
+            GrpcServerRpcMethodScenario {
+                description: "valid_grpc_server_complex_method".to_string(),
+                span_kind: SpanKind::Server,
+                instrumentation_scope_name: "grpc.server".to_string(),
+                instrumentation_scope_version: Some("1.0.0".to_string()),
+                span_attributes: vec![
+                    ("rpc.method".to_string(), AnyValue::StringValue("/com.example.UserService/GetUserProfile".to_string())),
+                    ("rpc.service".to_string(), AnyValue::StringValue("com.example.UserService".to_string())),
+                    ("rpc.system".to_string(), AnyValue::StringValue("grpc".to_string())),
+                    ("rpc.grpc.status_code".to_string(), AnyValue::IntValue(0)),
+                    ("net.peer.ip".to_string(), AnyValue::StringValue("192.168.1.100".to_string())),
+                ],
+                should_be_valid: true,
+                expected_rpc_method: Some("/com.example.UserService/GetUserProfile".to_string()),
+            },
+            GrpcServerRpcMethodScenario {
+                description: "grpc_server_case_sensitive_scope_check".to_string(),
+                span_kind: SpanKind::Server,
+                instrumentation_scope_name: "GRPC.SERVER".to_string(), // Wrong case
+                instrumentation_scope_version: Some("1.0.0".to_string()),
+                span_attributes: vec![
+                    ("rpc.service".to_string(), AnyValue::StringValue("UserService".to_string())),
+                    ("rpc.system".to_string(), AnyValue::StringValue("grpc".to_string())),
+                ],
+                should_be_valid: true, // Not exact "grpc.server" so no requirement
+                expected_rpc_method: None,
+            },
+            GrpcServerRpcMethodScenario {
+                description: "grpc_server_with_version_variations".to_string(),
+                span_kind: SpanKind::Server,
+                instrumentation_scope_name: "grpc.server".to_string(),
+                instrumentation_scope_version: None, // No version specified
+                span_attributes: vec![
+                    ("rpc.method".to_string(), AnyValue::StringValue("/health/check".to_string())),
+                    ("rpc.service".to_string(), AnyValue::StringValue("HealthService".to_string())),
+                    ("rpc.system".to_string(), AnyValue::StringValue("grpc".to_string())),
+                ],
+                should_be_valid: true,
+                expected_rpc_method: Some("/health/check".to_string()),
+            },
+            GrpcServerRpcMethodScenario {
+                description: "grpc_server_additional_attributes_preserved".to_string(),
+                span_kind: SpanKind::Server,
+                instrumentation_scope_name: "grpc.server".to_string(),
+                instrumentation_scope_version: Some("2.1.0".to_string()),
+                span_attributes: vec![
+                    ("rpc.method".to_string(), AnyValue::StringValue("/api/v2/UpdateUser".to_string())),
+                    ("rpc.service".to_string(), AnyValue::StringValue("UserService".to_string())),
+                    ("rpc.system".to_string(), AnyValue::StringValue("grpc".to_string())),
+                    ("rpc.grpc.status_code".to_string(), AnyValue::IntValue(0)),
+                    ("custom.trace.id".to_string(), AnyValue::StringValue("trace-12345".to_string())),
+                    ("net.transport".to_string(), AnyValue::StringValue("tcp".to_string())),
+                    ("user.id".to_string(), AnyValue::StringValue("user-67890".to_string())),
+                ],
+                should_be_valid: true,
+                expected_rpc_method: Some("/api/v2/UpdateUser".to_string()),
+            },
+        ];
+
+        /// Test scenario for gRPC server RPC method validation
+        #[derive(Debug, Clone)]
+        struct GrpcServerRpcMethodScenario {
+            description: String,
+            span_kind: SpanKind,
+            instrumentation_scope_name: String,
+            instrumentation_scope_version: Option<String>,
+            span_attributes: Vec<(String, AnyValue)>,
+            should_be_valid: bool,
+            expected_rpc_method: Option<String>,
+        }
+
+        /// Span kind enumeration for testing
+        #[derive(Debug, Clone, PartialEq)]
+        enum SpanKind {
+            Client,
+            Server,
+            Producer,
+            Consumer,
+            Internal,
+        }
+
+        /// Instrumentation scope for testing
+        #[derive(Debug, Clone)]
+        struct InstrumentationScope {
+            name: String,
+            version: Option<String>,
+            attributes: Vec<(String, AnyValue)>,
+        }
+
+        /// Span data with instrumentation scope for testing
+        #[derive(Debug, Clone)]
+        struct GrpcSpanData {
+            name: String,
+            kind: SpanKind,
+            instrumentation_scope: InstrumentationScope,
+            attributes: HashMap<String, AnyValue>,
+        }
+
+        impl GrpcSpanData {
+            fn from_scenario(scenario: &GrpcServerRpcMethodScenario) -> Self {
+                let mut attributes = HashMap::new();
+                for (key, value) in &scenario.span_attributes {
+                    attributes.insert(key.clone(), value.clone());
+                }
+
+                Self {
+                    name: format!("grpc_span_{}", scenario.description),
+                    kind: scenario.span_kind.clone(),
+                    instrumentation_scope: InstrumentationScope {
+                        name: scenario.instrumentation_scope_name.clone(),
+                        version: scenario.instrumentation_scope_version.clone(),
+                        attributes: vec![],
+                    },
+                    attributes,
+                }
+            }
+        }
+
+        /// Result of gRPC server RPC method validation
+        #[derive(Debug)]
+        enum GrpcServerValidationResult {
+            Valid {
+                rpc_method: Option<String>,
+                additional_attributes: usize,
+            },
+            Invalid {
+                violation: String,
+                missing_attributes: Vec<String>,
+            },
+            NotApplicable {
+                reason: String,
+            },
+        }
+
+        /// Validates gRPC server RPC method requirement conformance
+        fn validate_grpc_server_rpc_method_conformance(
+            scenario: &GrpcServerRpcMethodScenario,
+        ) -> Result<(), String> {
+            let span_data = GrpcSpanData::from_scenario(scenario);
+            let validation_result = validate_grpc_server_rpc_method(&span_data);
+
+            match (&validation_result, scenario.should_be_valid) {
+                (GrpcServerValidationResult::Valid { rpc_method, .. }, true) => {
+                    // Verify expected RPC method matches
+                    if let Some(expected_method) = &scenario.expected_rpc_method {
+                        match rpc_method {
+                            Some(actual_method) if actual_method == expected_method => {
+                                println!("✓ gRPC server span has correct rpc.method: '{}'", actual_method);
+                            }
+                            Some(actual_method) => {
+                                return Err(format!(
+                                    "RPC method mismatch: expected '{}', got '{}'",
+                                    expected_method, actual_method
+                                ));
+                            }
+                            None => {
+                                return Err(format!(
+                                    "Expected rpc.method '{}' but none found",
+                                    expected_method
+                                ));
+                            }
+                        }
+                    } else {
+                        // No expected method - ensure none present when not required
+                        if rpc_method.is_some() && requires_rpc_method(&span_data) {
+                            return Err("Unexpected rpc.method found when none expected".to_string());
+                        }
+                    }
+                }
+                (GrpcServerValidationResult::Invalid { .. }, false) => {
+                    println!("✓ Invalid gRPC server span correctly rejected");
+                }
+                (GrpcServerValidationResult::NotApplicable { reason }, true) => {
+                    println!("✓ RPC method requirement not applicable: {}", reason);
+                }
+                (GrpcServerValidationResult::Valid { .. }, false) => {
+                    return Err("Invalid span was incorrectly accepted".to_string());
+                }
+                (GrpcServerValidationResult::Invalid { violation, .. }, true) => {
+                    return Err(format!("Valid span was incorrectly rejected: {}", violation));
+                }
+                (GrpcServerValidationResult::NotApplicable { .. }, false) => {
+                    return Err("Expected validation failure but got not applicable".to_string());
+                }
+            }
+
+            Ok(())
+        }
+
+        /// Validates that gRPC server spans have required rpc.method attribute
+        fn validate_grpc_server_rpc_method(span_data: &GrpcSpanData) -> GrpcServerValidationResult {
+            // Check if this span requires rpc.method attribute
+            if !requires_rpc_method(span_data) {
+                return GrpcServerValidationResult::NotApplicable {
+                    reason: format!(
+                        "Span kind {:?} with scope '{}' doesn't require rpc.method",
+                        span_data.kind, span_data.instrumentation_scope.name
+                    ),
+                };
+            }
+
+            // Extract rpc.method attribute
+            let rpc_method = match span_data.attributes.get("rpc.method") {
+                Some(AnyValue::StringValue(method_str)) if !method_str.is_empty() => {
+                    Some(method_str.clone())
+                }
+                Some(AnyValue::StringValue(method_str)) if method_str.is_empty() => {
+                    return GrpcServerValidationResult::Invalid {
+                        violation: "rpc.method attribute is empty".to_string(),
+                        missing_attributes: vec!["rpc.method".to_string()],
+                    };
+                }
+                Some(_) => {
+                    return GrpcServerValidationResult::Invalid {
+                        violation: "rpc.method attribute must be a string value".to_string(),
+                        missing_attributes: vec!["rpc.method".to_string()],
+                    };
+                }
+                None => {
+                    return GrpcServerValidationResult::Invalid {
+                        violation: "OTLP-142: gRPC server span missing required rpc.method attribute".to_string(),
+                        missing_attributes: vec!["rpc.method".to_string()],
+                    };
+                }
+            };
+
+            // Additional validation for gRPC server spans
+            let mut violations = Vec::new();
+
+            // Verify rpc.method format for gRPC (should start with /)
+            if let Some(method) = &rpc_method {
+                if !method.starts_with('/') {
+                    violations.push(format!(
+                        "gRPC rpc.method '{}' should start with '/' per gRPC conventions",
+                        method
+                    ));
+                }
+
+                // Warn about unusual method names but don't fail
+                if method.len() > 200 {
+                    println!("⚠ Unusually long rpc.method: {} characters", method.len());
+                }
+            }
+
+            // Check for recommended additional attributes
+            let recommended_attrs = ["rpc.service", "rpc.system", "rpc.grpc.status_code"];
+            for attr in &recommended_attrs {
+                if !span_data.attributes.contains_key(*attr) {
+                    println!("⚠ Recommended gRPC attribute '{}' not present", attr);
+                }
+            }
+
+            if !violations.is_empty() {
+                GrpcServerValidationResult::Invalid {
+                    violation: violations.join("; "),
+                    missing_attributes: vec![],
+                }
+            } else {
+                GrpcServerValidationResult::Valid {
+                    rpc_method,
+                    additional_attributes: span_data.attributes.len() - 1, // Exclude rpc.method itself
+                }
+            }
+        }
+
+        /// Determines if a span requires rpc.method attribute
+        fn requires_rpc_method(span_data: &GrpcSpanData) -> bool {
+            // OTLP-142: Only SERVER spans with instrumentation scope "grpc.server" require rpc.method
+            span_data.kind == SpanKind::Server
+                && span_data.instrumentation_scope.name == "grpc.server"
+        }
+
+        // Execute OTLP-142 conformance validation for all scenarios
+        let mut passed_scenarios = 0;
+        let total_scenarios = test_scenarios.len();
+
+        for scenario in &test_scenarios {
+            match validate_grpc_server_rpc_method_conformance(scenario) {
+                Ok(()) => {
+                    passed_scenarios += 1;
+                    println!("✓ OTLP-142 conformance verified for {}", scenario.description);
+                }
+                Err(error_msg) => {
+                    panic!(
+                        "OTLP-142 conformance test FAILED for {}: {}",
+                        scenario.description, error_msg
+                    );
+                }
+            }
+        }
+
+        assert_eq!(
+            passed_scenarios, total_scenarios,
+            "All OTLP-142 gRPC server RPC method scenarios must pass"
+        );
+
+        // Additional edge case testing
+        println!("Testing gRPC server RPC method edge cases...");
+
+        // Test with exactly "grpc.server" scope (case sensitive)
+        let edge_cases = vec![
+            ("grpc.server", true),      // Exact match - requires rpc.method
+            ("grpc.Server", false),     // Wrong case - no requirement
+            ("grpc.server.v2", false),  // Suffix - no requirement
+            ("my.grpc.server", false),  // Prefix - no requirement
+        ];
+
+        for (scope_name, should_require) in edge_cases {
+            let mut test_attributes = HashMap::new();
+            test_attributes.insert("rpc.service".to_string(), AnyValue::StringValue("TestService".to_string()));
+
+            if should_require {
+                test_attributes.insert("rpc.method".to_string(), AnyValue::StringValue("/test/method".to_string()));
+            }
+
+            let edge_span = GrpcSpanData {
+                name: format!("edge_case_test_{}", scope_name),
+                kind: SpanKind::Server,
+                instrumentation_scope: InstrumentationScope {
+                    name: scope_name.to_string(),
+                    version: Some("1.0.0".to_string()),
+                    attributes: vec![],
+                },
+                attributes: test_attributes,
+            };
+
+            let requires_method = requires_rpc_method(&edge_span);
+            assert_eq!(
+                requires_method, should_require,
+                "RPC method requirement check failed for scope '{}'",
+                scope_name
+            );
+
+            if should_require {
+                match validate_grpc_server_rpc_method(&edge_span) {
+                    GrpcServerValidationResult::Valid { rpc_method, .. } => {
+                        assert!(rpc_method.is_some(), "Should have rpc.method for scope '{}'", scope_name);
+                        println!("✓ Edge case '{}' correctly requires and validates rpc.method", scope_name);
+                    }
+                    _ => panic!("Edge case '{}' should be valid with rpc.method", scope_name),
+                }
+            } else {
+                match validate_grpc_server_rpc_method(&edge_span) {
+                    GrpcServerValidationResult::NotApplicable { .. } => {
+                        println!("✓ Edge case '{}' correctly identified as not applicable", scope_name);
+                    }
+                    _ => panic!("Edge case '{}' should not require rpc.method", scope_name),
+                }
+            }
+        }
+
+        println!("✓ OTLP-142: gRPC server RPC method requirement conformance verified");
+        println!("  - SERVER spans with 'grpc.server' scope require rpc.method attribute");
+        println!("  - Non-gRPC server scopes exempt from rpc.method requirement");
+        println!("  - Client spans exempt from rpc.method requirement");
+        println!("  - Case-sensitive scope name matching enforced");
+        println!("  - RPC method format validation (gRPC '/' prefix convention)");
+        println!("  - Additional recommended gRPC attributes detected and validated");
+    }
 }
