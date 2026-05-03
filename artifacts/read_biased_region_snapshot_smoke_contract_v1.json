@@ -1,0 +1,178 @@
+{
+  "contract_version": "read-biased-region-snapshot-smoke-contract-v1",
+  "bead_id": "asupersync-l0q0rs",
+  "description": "Contract-backed smoke proof for the read-biased draining-region snapshot cache, including fallback evidence when write-heavy bursts make the cached path lose.",
+  "runner_script": "scripts/run_read_biased_region_snapshot_smoke.sh",
+  "runner_bundle_schema_version": "read-biased-region-snapshot-smoke-bundle-v1",
+  "runner_report_schema_version": "read-biased-region-snapshot-smoke-run-report-v1",
+  "required_bundle_fields": [
+    "schema_version",
+    "contract_version",
+    "scenario_id",
+    "description",
+    "run_id",
+    "mode",
+    "artifact_path",
+    "report_path",
+    "run_log_path",
+    "command",
+    "workload_class",
+    "fixture",
+    "host_requirements",
+    "operator_notes",
+    "host_fingerprint",
+    "expected_report_projection",
+    "actual_report_projection",
+    "command_exit_code",
+    "script_exit_code",
+    "validation_passed",
+    "status",
+    "started_ts",
+    "ended_ts"
+  ],
+  "required_run_report_fields": [
+    "schema_version",
+    "contract_version",
+    "artifact_path",
+    "bundle_manifest_path",
+    "run_id",
+    "scenario_id",
+    "mode",
+    "command_exit_code",
+    "script_exit_code",
+    "validation_passed",
+    "status",
+    "message",
+    "workload_class",
+    "fixture",
+    "host_requirements",
+    "operator_notes",
+    "host_fingerprint",
+    "report_path",
+    "expected_report_projection",
+    "actual_report_projection"
+  ],
+  "required_execute_output_files": [
+    "bundle_manifest.json",
+    "run_report.json",
+    "read_biased_region_snapshot_report.json",
+    "run.log"
+  ],
+  "required_dry_run_output_files": [
+    "bundle_manifest.json",
+    "run_report.json",
+    "run.log"
+  ],
+  "smoke_scenarios": [
+    {
+      "scenario_id": "AA-READ-BIASED-REGION-SNAPSHOT-READ-HEAVY",
+      "description": "Warm the cached draining-region snapshot once, then measure steady-state read latency with no further writes.",
+      "output_root": "target/read-biased-region-snapshot-smoke",
+      "execution_policy": "execute_or_dry_run",
+      "workload_class": "read-heavy",
+      "host_requirements": {
+        "min_worker_threads": 1,
+        "notes": [
+          "Execute mode is deterministic because the proof drives RuntimeState directly without external IO.",
+          "Reader latency numbers are informative only; the pinned contract freezes qualitative cache-hit behavior and correctness."
+        ]
+      },
+      "fixture": {
+        "draining_regions": 16,
+        "read_iterations": 64,
+        "sample_count": 1
+      },
+      "template_env": {
+        "READ_BIASED_REGION_SNAPSHOT_SMOKE_OUTPUT_DIR": "Override the bundle/report output root.",
+        "READ_BIASED_REGION_SNAPSHOT_SMOKE_ARTIFACT_ROOT": "Override the retrieved JSON report root."
+      },
+      "operator_notes": {
+        "recommended_for": [
+          "Governor snapshots dominated by repeated reads of a mostly-stable region table",
+          "Low-write runtime phases where cached draining counts avoid repeated O(N) scans"
+        ],
+        "avoid_when": [
+          "Bursts that cross the write-heavy threshold before every snapshot",
+          "Phases where writer-side adjustment overhead dominates steady-state reads"
+        ],
+        "fallback_mode": "authoritative_region_scan"
+      },
+      "capture_plan": [
+        "Warm the cached path with one authoritative read after setup, then record steady-state read latency and correctness checksums.",
+        "Persist the report JSON and freeze the projection fields that prove the cache stays profitable under read-heavy access."
+      ],
+      "expected_report_projection": {
+        "schema_version": "read-biased-region-snapshot-projection-v1",
+        "scenario_id": "AA-READ-BIASED-REGION-SNAPSHOT-READ-HEAVY",
+        "workload_class": "read-heavy",
+        "draining_regions": 16,
+        "read_iterations": 64,
+        "sample_count": 1,
+        "cache_hits": 64,
+        "fallback_scans": 0,
+        "write_heavy_fallbacks": 0,
+        "cache_hit_ratio": 1.0,
+        "fallback_ratio": 0.0,
+        "checksums_match": true,
+        "final_counts_match": true,
+        "fallback_should_remain_pinned": false,
+        "fallback_preference_reason": "cache-remains-profitable"
+      }
+    },
+    {
+      "scenario_id": "AA-READ-BIASED-REGION-SNAPSHOT-WRITE-HEAVY",
+      "description": "Cross the write-heavy threshold before every snapshot and prove the fallback scan remains pinned while correctness matches the baseline.",
+      "output_root": "target/read-biased-region-snapshot-smoke",
+      "execution_policy": "execute_or_dry_run",
+      "workload_class": "write-heavy",
+      "host_requirements": {
+        "min_worker_threads": 1,
+        "notes": [
+          "Execute mode is deterministic because each sample constructs a fresh RuntimeState and performs one snapshot read.",
+          "This scenario is the negative control: it proves exactly when the cached path should lose and why the fallback stays pinned."
+        ]
+      },
+      "fixture": {
+        "draining_regions": 32,
+        "read_iterations": 1,
+        "sample_count": 8
+      },
+      "template_env": {
+        "READ_BIASED_REGION_SNAPSHOT_SMOKE_OUTPUT_DIR": "Override the bundle/report output root.",
+        "READ_BIASED_REGION_SNAPSHOT_SMOKE_ARTIFACT_ROOT": "Override the retrieved JSON report root."
+      },
+      "operator_notes": {
+        "recommended_for": [
+          "Validating that the conservative scan still wins under a burst of counted-region transitions",
+          "Auditing writer-stall and fallback-scan evidence before enabling the cache by default"
+        ],
+        "avoid_when": [
+          "You only want the positive cache-hit path and do not need the pinned fallback evidence",
+          "A different write-heavy threshold is being evaluated and the contract has not been updated"
+        ],
+        "fallback_mode": "authoritative_region_scan"
+      },
+      "capture_plan": [
+        "Create a fresh write-heavy burst for each sample, then record reader latency, writer adjustment time, and correctness checksums.",
+        "Persist the report JSON and freeze the projection fields that prove the fallback remains pinned once the threshold is crossed."
+      ],
+      "expected_report_projection": {
+        "schema_version": "read-biased-region-snapshot-projection-v1",
+        "scenario_id": "AA-READ-BIASED-REGION-SNAPSHOT-WRITE-HEAVY",
+        "workload_class": "write-heavy",
+        "draining_regions": 32,
+        "read_iterations": 1,
+        "sample_count": 8,
+        "cache_hits": 0,
+        "fallback_scans": 8,
+        "write_heavy_fallbacks": 8,
+        "cache_hit_ratio": 0.0,
+        "fallback_ratio": 1.0,
+        "checksums_match": true,
+        "final_counts_match": true,
+        "fallback_should_remain_pinned": true,
+        "fallback_preference_reason": "write-heavy-threshold-exceeded"
+      }
+    }
+  ]
+}

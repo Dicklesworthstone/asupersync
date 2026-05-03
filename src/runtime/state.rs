@@ -5057,7 +5057,10 @@ mod tests {
     use crate::types::{CancelAttributionConfig, CancelKind};
     use crate::util::ArenaIndex;
     use parking_lot::Mutex;
+    use serde::Deserialize;
     use serde_json::{Value, json};
+    use std::fs;
+    use std::path::Path;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::task::{Context, Poll, Waker};
@@ -11962,5 +11965,500 @@ mod tests {
         );
 
         crate::test_complete!("read_biased_region_snapshot_write_heavy_mix_falls_back_to_scan");
+    }
+
+    const READ_BIASED_REGION_SNAPSHOT_CONTRACT_PATH_ENV: &str =
+        "ASUPERSYNC_READ_BIASED_REGION_SNAPSHOT_CONTRACT_PATH";
+    const READ_BIASED_REGION_SNAPSHOT_SCENARIO_ENV: &str =
+        "ASUPERSYNC_READ_BIASED_REGION_SNAPSHOT_SCENARIO";
+    const READ_BIASED_REGION_SNAPSHOT_REPORT_PATH_ENV: &str =
+        "ASUPERSYNC_READ_BIASED_REGION_SNAPSHOT_REPORT_PATH";
+    const READ_BIASED_REGION_SNAPSHOT_REPORT_SCHEMA_VERSION: &str =
+        "read-biased-region-snapshot-report-v1";
+    const READ_BIASED_REGION_SNAPSHOT_PROJECTION_SCHEMA_VERSION: &str =
+        "read-biased-region-snapshot-projection-v1";
+    const READ_BIASED_REGION_SNAPSHOT_READ_HEAVY_SCENARIO_ID: &str =
+        "AA-READ-BIASED-REGION-SNAPSHOT-READ-HEAVY";
+    const READ_BIASED_REGION_SNAPSHOT_WRITE_HEAVY_SCENARIO_ID: &str =
+        "AA-READ-BIASED-REGION-SNAPSHOT-WRITE-HEAVY";
+
+    #[derive(Debug, Clone, Deserialize)]
+    struct ReadBiasedRegionSnapshotSmokeContract {
+        smoke_scenarios: Vec<ReadBiasedRegionSnapshotScenario>,
+    }
+
+    #[derive(Debug, Clone, Deserialize)]
+    struct ReadBiasedRegionSnapshotScenario {
+        scenario_id: String,
+        description: String,
+        workload_class: String,
+        fixture: ReadBiasedRegionSnapshotFixture,
+        expected_report_projection: Value,
+    }
+
+    #[derive(Debug, Clone, Deserialize)]
+    struct ReadBiasedRegionSnapshotFixture {
+        draining_regions: usize,
+        read_iterations: usize,
+        sample_count: usize,
+    }
+
+    fn default_read_biased_region_snapshot_scenarios() -> Vec<ReadBiasedRegionSnapshotScenario> {
+        vec![
+            ReadBiasedRegionSnapshotScenario {
+                scenario_id: READ_BIASED_REGION_SNAPSHOT_READ_HEAVY_SCENARIO_ID.to_string(),
+                description: "Warm the cached draining-region snapshot once, then measure steady-state read latency with no further writes.".to_string(),
+                workload_class: "read-heavy".to_string(),
+                fixture: ReadBiasedRegionSnapshotFixture {
+                    draining_regions: 16,
+                    read_iterations: 64,
+                    sample_count: 1,
+                },
+                expected_report_projection: json!({
+                    "schema_version": READ_BIASED_REGION_SNAPSHOT_PROJECTION_SCHEMA_VERSION,
+                    "scenario_id": READ_BIASED_REGION_SNAPSHOT_READ_HEAVY_SCENARIO_ID,
+                    "workload_class": "read-heavy",
+                    "draining_regions": 16,
+                    "read_iterations": 64,
+                    "sample_count": 1,
+                    "cache_hits": 64,
+                    "fallback_scans": 0,
+                    "write_heavy_fallbacks": 0,
+                    "cache_hit_ratio": 1.0,
+                    "fallback_ratio": 0.0,
+                    "checksums_match": true,
+                    "final_counts_match": true,
+                    "fallback_should_remain_pinned": false,
+                    "fallback_preference_reason": "cache-remains-profitable"
+                }),
+            },
+            ReadBiasedRegionSnapshotScenario {
+                scenario_id: READ_BIASED_REGION_SNAPSHOT_WRITE_HEAVY_SCENARIO_ID.to_string(),
+                description: "Force a write-heavy burst across the threshold and prove the fallback scan remains pinned while correctness matches the baseline.".to_string(),
+                workload_class: "write-heavy".to_string(),
+                fixture: ReadBiasedRegionSnapshotFixture {
+                    draining_regions: READ_BIASED_REGION_SNAPSHOT_WRITE_HEAVY_THRESHOLD,
+                    read_iterations: 1,
+                    sample_count: 8,
+                },
+                expected_report_projection: json!({
+                    "schema_version": READ_BIASED_REGION_SNAPSHOT_PROJECTION_SCHEMA_VERSION,
+                    "scenario_id": READ_BIASED_REGION_SNAPSHOT_WRITE_HEAVY_SCENARIO_ID,
+                    "workload_class": "write-heavy",
+                    "draining_regions": READ_BIASED_REGION_SNAPSHOT_WRITE_HEAVY_THRESHOLD,
+                    "read_iterations": 1,
+                    "sample_count": 8,
+                    "cache_hits": 0,
+                    "fallback_scans": 8,
+                    "write_heavy_fallbacks": 8,
+                    "cache_hit_ratio": 0.0,
+                    "fallback_ratio": 1.0,
+                    "checksums_match": true,
+                    "final_counts_match": true,
+                    "fallback_should_remain_pinned": true,
+                    "fallback_preference_reason": "write-heavy-threshold-exceeded"
+                }),
+            },
+        ]
+    }
+
+    fn load_read_biased_region_snapshot_scenarios() -> Vec<ReadBiasedRegionSnapshotScenario> {
+        let Some(contract_path) = std::env::var(READ_BIASED_REGION_SNAPSHOT_CONTRACT_PATH_ENV).ok()
+        else {
+            return default_read_biased_region_snapshot_scenarios();
+        };
+        let contract: ReadBiasedRegionSnapshotSmokeContract = serde_json::from_str(
+            &fs::read_to_string(&contract_path)
+                .expect("read read-biased region snapshot smoke contract"),
+        )
+        .expect("parse read-biased region snapshot smoke contract");
+        contract.smoke_scenarios
+    }
+
+    fn selected_read_biased_region_snapshot_scenario() -> String {
+        std::env::var(READ_BIASED_REGION_SNAPSHOT_SCENARIO_ENV)
+            .unwrap_or_else(|_| READ_BIASED_REGION_SNAPSHOT_READ_HEAVY_SCENARIO_ID.to_string())
+    }
+
+    fn maybe_write_read_biased_region_snapshot_report(path: &str, report: &Value) {
+        let report_path = Path::new(path);
+        if let Some(parent) = report_path.parent() {
+            fs::create_dir_all(parent)
+                .expect("create read-biased region snapshot report directory");
+        }
+        fs::write(
+            report_path,
+            serde_json::to_string_pretty(report)
+                .expect("serialize read-biased region snapshot report"),
+        )
+        .expect("write read-biased region snapshot report");
+    }
+
+    fn round4(value: f64) -> f64 {
+        (value * 10_000.0).round() / 10_000.0
+    }
+
+    fn percentile_slice_u64(samples: &[u64], numerator: usize, denominator: usize) -> u64 {
+        if samples.is_empty() {
+            return 0;
+        }
+        let mut sorted = samples.to_vec();
+        sorted.sort_unstable();
+        let index = ((sorted.len() - 1) * numerator) / denominator;
+        sorted[index]
+    }
+
+    fn mean_u64(samples: &[u64]) -> f64 {
+        if samples.is_empty() {
+            return 0.0;
+        }
+        round4(samples.iter().map(|sample| *sample as f64).sum::<f64>() / samples.len() as f64)
+    }
+
+    fn ratio_u64(numerator: u64, denominator: u64) -> f64 {
+        if denominator == 0 {
+            return 0.0;
+        }
+        round4(numerator as f64 / denominator as f64)
+    }
+
+    fn ratio_count(numerator: u64, denominator: u64) -> f64 {
+        if denominator == 0 {
+            return 0.0;
+        }
+        round4(numerator as f64 / denominator as f64)
+    }
+
+    fn checksum_fold(seed: u64, value: u64) -> u64 {
+        seed.wrapping_mul(1_099_511_628_211).wrapping_add(value)
+    }
+
+    fn latency_summary_value(samples: &[u64]) -> Value {
+        json!({
+            "sample_count": samples.len(),
+            "min_ns": samples.iter().copied().min().unwrap_or(0),
+            "p50_ns": percentile_slice_u64(samples, 50, 100),
+            "p95_ns": percentile_slice_u64(samples, 95, 100),
+            "p99_ns": percentile_slice_u64(samples, 99, 100),
+            "max_ns": samples.iter().copied().max().unwrap_or(0),
+            "mean_ns": mean_u64(samples),
+        })
+    }
+
+    fn cache_stats_value(stats: ReadBiasedRegionSnapshotStats) -> Value {
+        json!({
+            "cache_hits": stats.cache_hits,
+            "fallback_scans": stats.fallback_scans,
+            "invalidations": stats.invalidations,
+            "write_heavy_fallbacks": stats.write_heavy_fallbacks,
+            "writer_adjustments": stats.writer_adjustments,
+            "writer_adjustment_ns": stats.writer_adjustment_ns,
+            "fallback_scan_ns": stats.fallback_scan_ns,
+        })
+    }
+
+    fn delta_read_biased_region_snapshot_stats(
+        before: ReadBiasedRegionSnapshotStats,
+        after: ReadBiasedRegionSnapshotStats,
+    ) -> ReadBiasedRegionSnapshotStats {
+        ReadBiasedRegionSnapshotStats {
+            cache_hits: after.cache_hits.saturating_sub(before.cache_hits),
+            fallback_scans: after.fallback_scans.saturating_sub(before.fallback_scans),
+            invalidations: after.invalidations.saturating_sub(before.invalidations),
+            write_heavy_fallbacks: after
+                .write_heavy_fallbacks
+                .saturating_sub(before.write_heavy_fallbacks),
+            writer_adjustments: after
+                .writer_adjustments
+                .saturating_sub(before.writer_adjustments),
+            writer_adjustment_ns: after
+                .writer_adjustment_ns
+                .saturating_sub(before.writer_adjustment_ns),
+            fallback_scan_ns: after
+                .fallback_scan_ns
+                .saturating_sub(before.fallback_scan_ns),
+            cached_draining_regions: after.cached_draining_regions,
+            writes_since_last_read: after.writes_since_last_read,
+        }
+    }
+
+    fn accumulate_read_biased_region_snapshot_stats(
+        total: &mut ReadBiasedRegionSnapshotStats,
+        next: ReadBiasedRegionSnapshotStats,
+    ) {
+        total.cache_hits = total.cache_hits.saturating_add(next.cache_hits);
+        total.fallback_scans = total.fallback_scans.saturating_add(next.fallback_scans);
+        total.invalidations = total.invalidations.saturating_add(next.invalidations);
+        total.write_heavy_fallbacks = total
+            .write_heavy_fallbacks
+            .saturating_add(next.write_heavy_fallbacks);
+        total.writer_adjustments = total
+            .writer_adjustments
+            .saturating_add(next.writer_adjustments);
+        total.writer_adjustment_ns = total
+            .writer_adjustment_ns
+            .saturating_add(next.writer_adjustment_ns);
+        total.fallback_scan_ns = total.fallback_scan_ns.saturating_add(next.fallback_scan_ns);
+        total.cached_draining_regions = next.cached_draining_regions;
+        total.writes_since_last_read = next.writes_since_last_read;
+    }
+
+    fn average_stat_ns(total_ns: u64, count: u64) -> f64 {
+        if count == 0 {
+            return 0.0;
+        }
+        round4(total_ns as f64 / count as f64)
+    }
+
+    fn prepare_read_biased_region_snapshot_state(
+        draining_regions: usize,
+        enable_read_biased_path: bool,
+    ) -> RuntimeState {
+        let mut state = RuntimeState::new();
+        let root = state.create_root_region(Budget::INFINITE);
+        state.set_read_biased_region_snapshot(enable_read_biased_path);
+        for _ in 0..draining_regions {
+            let child = create_child_region(&mut state, root);
+            let _grandchild = create_child_region(&mut state, child);
+            let _ = state.cancel_request(child, &CancelReason::user("drain"), None);
+        }
+        state
+    }
+
+    fn measure_snapshot_reads(state: &RuntimeState, iterations: usize) -> (Vec<u64>, u64, u32) {
+        let mut latencies = Vec::with_capacity(iterations);
+        let mut checksum = 0u64;
+        let mut final_count = 0u32;
+        for iteration in 0..iterations {
+            let started = Instant::now();
+            let snapshot = crate::obligation::lyapunov::StateSnapshot::from_runtime_state(state);
+            latencies.push(nanos_saturating_u64(started.elapsed()));
+            final_count = snapshot.draining_regions;
+            checksum = checksum_fold(
+                checksum,
+                (u64::from(snapshot.draining_regions) << 32) ^ iteration as u64,
+            );
+        }
+        (latencies, checksum, final_count)
+    }
+
+    fn build_read_biased_region_snapshot_report(
+        scenario: &ReadBiasedRegionSnapshotScenario,
+        baseline_latencies: &[u64],
+        baseline_checksum: u64,
+        baseline_final_count: u32,
+        read_biased_latencies: &[u64],
+        read_biased_checksum: u64,
+        read_biased_final_count: u32,
+        read_biased_stats: ReadBiasedRegionSnapshotStats,
+        fallback_should_remain_pinned: bool,
+        fallback_preference_reason: &str,
+    ) -> Value {
+        let observed_reads = read_biased_stats.cache_hits + read_biased_stats.fallback_scans;
+        let cache_hit_ratio = ratio_count(read_biased_stats.cache_hits, observed_reads);
+        let fallback_ratio = ratio_count(read_biased_stats.fallback_scans, observed_reads);
+        let report_projection = json!({
+            "schema_version": READ_BIASED_REGION_SNAPSHOT_PROJECTION_SCHEMA_VERSION,
+            "scenario_id": scenario.scenario_id,
+            "workload_class": scenario.workload_class,
+            "draining_regions": scenario.fixture.draining_regions,
+            "read_iterations": scenario.fixture.read_iterations,
+            "sample_count": scenario.fixture.sample_count,
+            "cache_hits": read_biased_stats.cache_hits,
+            "fallback_scans": read_biased_stats.fallback_scans,
+            "write_heavy_fallbacks": read_biased_stats.write_heavy_fallbacks,
+            "cache_hit_ratio": cache_hit_ratio,
+            "fallback_ratio": fallback_ratio,
+            "checksums_match": baseline_checksum == read_biased_checksum,
+            "final_counts_match": baseline_final_count == read_biased_final_count,
+            "fallback_should_remain_pinned": fallback_should_remain_pinned,
+            "fallback_preference_reason": fallback_preference_reason
+        });
+
+        json!({
+            "schema_version": READ_BIASED_REGION_SNAPSHOT_REPORT_SCHEMA_VERSION,
+            "scenario_id": scenario.scenario_id,
+            "description": scenario.description,
+            "workload_class": scenario.workload_class,
+            "fixture": {
+                "draining_regions": scenario.fixture.draining_regions,
+                "read_iterations": scenario.fixture.read_iterations,
+                "sample_count": scenario.fixture.sample_count,
+            },
+            "baseline": {
+                "latency_summary": latency_summary_value(baseline_latencies),
+                "correctness_checksum": baseline_checksum,
+                "final_draining_regions": baseline_final_count,
+            },
+            "read_biased": {
+                "latency_summary": latency_summary_value(read_biased_latencies),
+                "correctness_checksum": read_biased_checksum,
+                "final_draining_regions": read_biased_final_count,
+                "cache_stats": cache_stats_value(read_biased_stats),
+            },
+            "comparison": {
+                "checksums_match": baseline_checksum == read_biased_checksum,
+                "final_counts_match": baseline_final_count == read_biased_final_count,
+                "latency_p50_ratio": ratio_u64(
+                    percentile_slice_u64(read_biased_latencies, 50, 100),
+                    percentile_slice_u64(baseline_latencies, 50, 100),
+                ),
+                "latency_p95_ratio": ratio_u64(
+                    percentile_slice_u64(read_biased_latencies, 95, 100),
+                    percentile_slice_u64(baseline_latencies, 95, 100),
+                ),
+                "latency_p99_ratio": ratio_u64(
+                    percentile_slice_u64(read_biased_latencies, 99, 100),
+                    percentile_slice_u64(baseline_latencies, 99, 100),
+                ),
+                "cache_hit_ratio": cache_hit_ratio,
+                "fallback_ratio": fallback_ratio,
+                "average_writer_adjustment_ns": average_stat_ns(
+                    read_biased_stats.writer_adjustment_ns,
+                    read_biased_stats.writer_adjustments,
+                ),
+                "average_fallback_scan_ns": average_stat_ns(
+                    read_biased_stats.fallback_scan_ns,
+                    read_biased_stats.fallback_scans,
+                ),
+                "fallback_should_remain_pinned": fallback_should_remain_pinned,
+                "fallback_preference_reason": fallback_preference_reason,
+            },
+            "report_projection": report_projection,
+        })
+    }
+
+    fn run_read_biased_region_snapshot_scenario(
+        scenario: &ReadBiasedRegionSnapshotScenario,
+    ) -> Value {
+        match scenario.workload_class.as_str() {
+            "read-heavy" => {
+                let baseline_state = prepare_read_biased_region_snapshot_state(
+                    scenario.fixture.draining_regions,
+                    false,
+                );
+                let (baseline_latencies, baseline_checksum, baseline_final_count) =
+                    measure_snapshot_reads(&baseline_state, scenario.fixture.read_iterations);
+
+                let read_biased_state = prepare_read_biased_region_snapshot_state(
+                    scenario.fixture.draining_regions,
+                    true,
+                );
+                let _ = crate::obligation::lyapunov::StateSnapshot::from_runtime_state(
+                    &read_biased_state,
+                );
+                let before = read_biased_state.read_biased_region_snapshot_stats();
+                let (read_biased_latencies, read_biased_checksum, read_biased_final_count) =
+                    measure_snapshot_reads(&read_biased_state, scenario.fixture.read_iterations);
+                let after = read_biased_state.read_biased_region_snapshot_stats();
+                let delta = delta_read_biased_region_snapshot_stats(before, after);
+
+                build_read_biased_region_snapshot_report(
+                    scenario,
+                    &baseline_latencies,
+                    baseline_checksum,
+                    baseline_final_count,
+                    &read_biased_latencies,
+                    read_biased_checksum,
+                    read_biased_final_count,
+                    delta,
+                    false,
+                    "cache-remains-profitable",
+                )
+            }
+            "write-heavy" => {
+                let mut baseline_latencies = Vec::with_capacity(
+                    scenario.fixture.read_iterations * scenario.fixture.sample_count,
+                );
+                let mut baseline_checksum = 0u64;
+                let mut baseline_final_count = 0u32;
+                for sample in 0..scenario.fixture.sample_count {
+                    let state = prepare_read_biased_region_snapshot_state(
+                        scenario.fixture.draining_regions,
+                        false,
+                    );
+                    let (latencies, checksum, final_count) =
+                        measure_snapshot_reads(&state, scenario.fixture.read_iterations);
+                    baseline_latencies.extend(latencies);
+                    baseline_checksum = checksum_fold(baseline_checksum, checksum ^ sample as u64);
+                    baseline_final_count = final_count;
+                }
+
+                let mut read_biased_latencies = Vec::with_capacity(
+                    scenario.fixture.read_iterations * scenario.fixture.sample_count,
+                );
+                let mut read_biased_checksum = 0u64;
+                let mut read_biased_final_count = 0u32;
+                let mut read_biased_stats = ReadBiasedRegionSnapshotStats::default();
+                for sample in 0..scenario.fixture.sample_count {
+                    let state = prepare_read_biased_region_snapshot_state(
+                        scenario.fixture.draining_regions,
+                        true,
+                    );
+                    let (latencies, checksum, final_count) =
+                        measure_snapshot_reads(&state, scenario.fixture.read_iterations);
+                    read_biased_latencies.extend(latencies);
+                    read_biased_checksum =
+                        checksum_fold(read_biased_checksum, checksum ^ sample as u64);
+                    read_biased_final_count = final_count;
+                    accumulate_read_biased_region_snapshot_stats(
+                        &mut read_biased_stats,
+                        state.read_biased_region_snapshot_stats(),
+                    );
+                }
+
+                build_read_biased_region_snapshot_report(
+                    scenario,
+                    &baseline_latencies,
+                    baseline_checksum,
+                    baseline_final_count,
+                    &read_biased_latencies,
+                    read_biased_checksum,
+                    read_biased_final_count,
+                    read_biased_stats,
+                    true,
+                    "write-heavy-threshold-exceeded",
+                )
+            }
+            other => panic!("unsupported read-biased region snapshot workload_class: {other}"),
+        }
+    }
+
+    #[test]
+    fn read_biased_region_snapshot_smoke_contract_emits_report() {
+        init_test("read_biased_region_snapshot_smoke_contract_emits_report");
+
+        let selected_scenario = selected_read_biased_region_snapshot_scenario();
+        let mut selected_report = None;
+        let scenarios = load_read_biased_region_snapshot_scenarios();
+        for scenario in scenarios {
+            let report = run_read_biased_region_snapshot_scenario(&scenario);
+            let actual_projection = report["report_projection"].clone();
+            crate::assert_with_log!(
+                actual_projection == scenario.expected_report_projection,
+                "read-biased region snapshot report projection should remain stable",
+                scenario.expected_report_projection.to_string(),
+                actual_projection.to_string()
+            );
+            if scenario.scenario_id == selected_scenario {
+                selected_report = Some(report);
+            }
+        }
+
+        if let Ok(report_path) = std::env::var(READ_BIASED_REGION_SNAPSHOT_REPORT_PATH_ENV) {
+            let report = selected_report
+                .expect("selected read-biased region snapshot scenario should emit a report");
+            maybe_write_read_biased_region_snapshot_report(&report_path, &report);
+            println!("read_biased_region_snapshot_report_path={report_path}");
+            println!("READ_BIASED_REGION_SNAPSHOT_REPORT_JSON_BEGIN");
+            println!(
+                "{}",
+                serde_json::to_string(&report)
+                    .expect("serialize compact read-biased region snapshot report")
+            );
+            println!("READ_BIASED_REGION_SNAPSHOT_REPORT_JSON_END");
+        }
+
+        crate::test_complete!("read_biased_region_snapshot_smoke_contract_emits_report");
     }
 }
