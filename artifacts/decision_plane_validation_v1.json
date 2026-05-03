@@ -228,22 +228,29 @@
     {
       "scenario_id": "AA023-SMOKE-TRANSITIONS",
       "description": "Validate state transition scenarios via contract tests",
-      "command": "rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=/tmp/rch-codex-aa023 cargo test --test decision_plane_validation_contract transition -- --nocapture"
+      "command": "rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=/tmp/rch-codex-aa023 cargo test --test decision_plane_validation_contract transition -- --nocapture",
+      "expected_artifacts": []
     },
     {
       "scenario_id": "AA023-SMOKE-ROLLBACKS",
       "description": "Validate rollback and recovery command scenarios",
-      "command": "rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=/tmp/rch-codex-aa023 cargo test --test decision_plane_validation_contract rollback -- --nocapture"
+      "command": "rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=/tmp/rch-codex-aa023 cargo test --test decision_plane_validation_contract rollback -- --nocapture",
+      "expected_artifacts": []
     },
     {
       "scenario_id": "AA023-SMOKE-EVIDENCE",
       "description": "Validate evidence ledger completeness and bypass prevention",
-      "command": "rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=/tmp/rch-codex-aa023 cargo test --test decision_plane_validation_contract evidence -- --nocapture"
+      "command": "rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=/tmp/rch-codex-aa023 cargo test --test decision_plane_validation_contract evidence -- --nocapture",
+      "expected_artifacts": []
     },
     {
       "scenario_id": "AA023-SMOKE-CONTROLLER-LEDGER",
       "description": "Validate controller snapshot ledger schema and planner-facing rendering",
-      "command": "rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=/tmp/rch-codex-aa023 cargo test --test decision_plane_validation_contract controller_snapshot_ledger -- --nocapture"
+      "command": "rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=/tmp/rch-codex-aa023 cargo test --test decision_plane_validation_contract controller_snapshot_ledger -- --nocapture",
+      "expected_artifacts": [
+        ".decision-plane-validation-smoke-artifacts/run_*/AA023-SMOKE-CONTROLLER-LEDGER/controller_snapshot_ledger.json",
+        ".decision-plane-validation-smoke-artifacts/run_*/AA023-SMOKE-CONTROLLER-LEDGER/controller_snapshot_planner_rows.json"
+      ]
     }
   ],
   "downstream_beads": [

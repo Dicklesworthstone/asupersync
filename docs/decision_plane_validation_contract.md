@@ -92,6 +92,9 @@ The runner reads `artifacts/decision_plane_validation_v1.json` and emits:
 
 1. Per-scenario bundle manifests with schema `decision-plane-validation-smoke-bundle-v1`
 2. Aggregate run report with schema `decision-plane-validation-smoke-run-report-v1`
+3. For `AA023-SMOKE-CONTROLLER-LEDGER`, deterministic exported controller-state artifacts:
+   - `.decision-plane-validation-smoke-artifacts/run_*/AA023-SMOKE-CONTROLLER-LEDGER/controller_snapshot_ledger.json`
+   - `.decision-plane-validation-smoke-artifacts/run_*/AA023-SMOKE-CONTROLLER-LEDGER/controller_snapshot_planner_rows.json`
 
 Examples:
 
