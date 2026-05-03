@@ -1821,6 +1821,842 @@ fn redact_sensitive_note(note: &str) -> String {
         .join(" ")
 }
 
+/// Brownout phase captured in the capacity-envelope evidence snapshot.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CapacityEnvelopeBrownoutStage {
+    /// No controller fallback has activated yet.
+    FullSurfaces,
+    /// Optional surfaces are already brownout-gated.
+    OptionalFirst,
+    /// Priority-gated observability shedding is active.
+    PriorityGate,
+    /// Conservative standalone fallback is active.
+    StandaloneFallback,
+}
+
+impl CapacityEnvelopeBrownoutStage {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::FullSurfaces => "full_surfaces",
+            Self::OptionalFirst => "optional_first",
+            Self::PriorityGate => "priority_gate",
+            Self::StandaloneFallback => "standalone_fallback",
+        }
+    }
+}
+
+impl fmt::Display for CapacityEnvelopeBrownoutStage {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// Host fingerprint used to reject stale or mismatched capacity evidence.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CapacityEnvelopeHostFingerprint {
+    /// Operator-visible host label.
+    pub hostname: String,
+    /// CPU architecture.
+    pub arch: String,
+    /// Online CPU cores for the measured host.
+    pub cpu_cores: usize,
+    /// Measured RAM envelope in GiB.
+    pub memory_gib: usize,
+}
+
+impl CapacityEnvelopeHostFingerprint {
+    fn validate_for_resources(
+        &self,
+        resources: &HostProfileHostResources,
+        label: &str,
+    ) -> Result<(), String> {
+        if self.hostname.trim().is_empty() {
+            return Err(format!("{label} hostname must not be empty"));
+        }
+        if self.arch.trim().is_empty() {
+            return Err(format!("{label} arch must not be empty"));
+        }
+        if self.cpu_cores == 0 {
+            return Err(format!("{label} cpu_cores must be positive"));
+        }
+        if self.memory_gib == 0 {
+            return Err(format!("{label} memory_gib must be positive"));
+        }
+        if self.cpu_cores != resources.cpu_cores {
+            return Err(format!(
+                "{label} cpu_cores {} did not match requested host cpu_cores {}",
+                self.cpu_cores, resources.cpu_cores
+            ));
+        }
+        if self.memory_gib != resources.memory_gib {
+            return Err(format!(
+                "{label} memory_gib {} did not match requested host memory_gib {}",
+                self.memory_gib, resources.memory_gib
+            ));
+        }
+        Ok(())
+    }
+}
+
+/// Performance and artifact evidence consumed by the capacity-envelope planner.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CapacityEnvelopeEvidenceSnapshot {
+    /// Scenario artifact identifier.
+    pub scenario_artifact_id: String,
+    /// Stable scenario artifact hash.
+    pub scenario_artifact_hash: String,
+    /// Scenario contract version.
+    pub scenario_contract_version: String,
+    /// Host fingerprint that produced the evidence.
+    pub host_fingerprint: CapacityEnvelopeHostFingerprint,
+    /// Age of the evidence in hours.
+    pub artifact_age_hours: u64,
+    /// Worker count used for the measured scenario.
+    pub measured_worker_count: usize,
+    /// Agent count used for the measured scenario.
+    pub measured_agent_count: usize,
+    /// Queue depth observed in the measured scenario.
+    pub measured_queue_depth: usize,
+    /// Throughput observed during the measured scenario.
+    pub throughput_ops_per_sec: u64,
+    /// Wake-to-run p50 in nanoseconds.
+    pub wake_to_run_p50_ns: u64,
+    /// Wake-to-run p95 in nanoseconds.
+    pub wake_to_run_p95_ns: u64,
+    /// Wake-to-run p99 in nanoseconds.
+    pub wake_to_run_p99_ns: u64,
+    /// Cancellation debt units observed during the measured scenario.
+    pub cancellation_debt_units: u64,
+    /// Observed memory pressure in basis points.
+    pub memory_pressure_basis_points: u16,
+    /// Brownout stage active while the evidence was measured.
+    pub brownout_stage: CapacityEnvelopeBrownoutStage,
+    /// Brownout risk in basis points.
+    pub brownout_risk_basis_points: u16,
+    /// Retention budget already consumed by evidence storage on the host.
+    pub retention_budget_gib: usize,
+}
+
+impl CapacityEnvelopeEvidenceSnapshot {
+    fn validate(
+        &self,
+        max_artifact_age_hours: u64,
+        resources: &HostProfileHostResources,
+        request_fingerprint: &CapacityEnvelopeHostFingerprint,
+    ) -> Result<(), String> {
+        if self.scenario_artifact_id.trim().is_empty() {
+            return Err("scenario_artifact_id must not be empty".to_string());
+        }
+        if !self.scenario_artifact_id.ends_with(".json") {
+            return Err("scenario_artifact_id must end with .json".to_string());
+        }
+        if self.scenario_artifact_id.contains("..") {
+            return Err(
+                "scenario_artifact_id must not contain parent-directory traversals".to_string(),
+            );
+        }
+        if !self
+            .scenario_artifact_hash
+            .chars()
+            .all(|c| c.is_ascii_hexdigit())
+            || self.scenario_artifact_hash.len() < 16
+        {
+            return Err("scenario_artifact_hash must be a hexadecimal digest".to_string());
+        }
+        if self.scenario_contract_version.trim().is_empty() {
+            return Err("scenario_contract_version must not be empty".to_string());
+        }
+        self.host_fingerprint
+            .validate_for_resources(resources, "scenario host fingerprint")?;
+        request_fingerprint.validate_for_resources(resources, "request host fingerprint")?;
+        if self.host_fingerprint.hostname != request_fingerprint.hostname
+            || self.host_fingerprint.arch != request_fingerprint.arch
+        {
+            return Err(
+                "scenario host fingerprint did not match the requested host fingerprint"
+                    .to_string(),
+            );
+        }
+        if self.artifact_age_hours > max_artifact_age_hours {
+            return Err(format!(
+                "artifact_age_hours {} exceeded the freshness budget {}",
+                self.artifact_age_hours, max_artifact_age_hours
+            ));
+        }
+        if self.measured_worker_count == 0 {
+            return Err("measured_worker_count must be positive".to_string());
+        }
+        if self.measured_agent_count == 0 {
+            return Err("measured_agent_count must be positive".to_string());
+        }
+        if self.wake_to_run_p50_ns == 0
+            || self.wake_to_run_p95_ns == 0
+            || self.wake_to_run_p99_ns == 0
+        {
+            return Err("wake-to-run percentiles must be positive".to_string());
+        }
+        if self.wake_to_run_p50_ns > self.wake_to_run_p95_ns
+            || self.wake_to_run_p95_ns > self.wake_to_run_p99_ns
+        {
+            return Err("wake-to-run percentiles must be monotonic".to_string());
+        }
+        if self.memory_pressure_basis_points > 10_000 {
+            return Err("memory_pressure_basis_points must be <= 10000".to_string());
+        }
+        if self.brownout_risk_basis_points > 10_000 {
+            return Err("brownout_risk_basis_points must be <= 10000".to_string());
+        }
+        Ok(())
+    }
+}
+
+/// Capacity budgets the planner refuses to exceed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CapacityEnvelopeBudget {
+    /// Maximum tolerated p99 wake-to-run latency in nanoseconds.
+    pub target_p99_ns: u64,
+    /// Maximum tolerated cancellation debt units.
+    pub target_cancel_debt_units: u64,
+    /// Maximum tolerated memory pressure in basis points.
+    pub max_memory_pressure_basis_points: u16,
+    /// Maximum tolerated brownout risk in basis points.
+    pub max_brownout_risk_basis_points: u16,
+    /// Maximum tolerated queue depth.
+    pub max_queue_depth: usize,
+    /// Maximum age for accepted evidence artifacts.
+    pub max_artifact_age_hours: u64,
+}
+
+impl Default for CapacityEnvelopeBudget {
+    fn default() -> Self {
+        Self {
+            target_p99_ns: 1_300_000,
+            target_cancel_debt_units: 130,
+            max_memory_pressure_basis_points: 7_000,
+            max_brownout_risk_basis_points: 1_400,
+            max_queue_depth: 45_000,
+            max_artifact_age_hours: 48,
+        }
+    }
+}
+
+/// Manual SLO overrides that win over the default certificate budget.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct CapacityEnvelopeBudgetOverrides {
+    /// Override for the p99 wake-to-run budget.
+    pub target_p99_ns: Option<u64>,
+    /// Override for the cancellation debt budget.
+    pub target_cancel_debt_units: Option<u64>,
+    /// Override for the memory pressure budget.
+    pub max_memory_pressure_basis_points: Option<u16>,
+    /// Override for the brownout risk budget.
+    pub max_brownout_risk_basis_points: Option<u16>,
+    /// Override for the queue depth budget.
+    pub max_queue_depth: Option<usize>,
+    /// Override for the evidence freshness budget.
+    pub max_artifact_age_hours: Option<u64>,
+}
+
+impl CapacityEnvelopeBudget {
+    #[must_use]
+    pub const fn with_overrides(self, overrides: CapacityEnvelopeBudgetOverrides) -> Self {
+        Self {
+            target_p99_ns: match overrides.target_p99_ns {
+                Some(value) => value,
+                None => self.target_p99_ns,
+            },
+            target_cancel_debt_units: match overrides.target_cancel_debt_units {
+                Some(value) => value,
+                None => self.target_cancel_debt_units,
+            },
+            max_memory_pressure_basis_points: match overrides.max_memory_pressure_basis_points {
+                Some(value) => value,
+                None => self.max_memory_pressure_basis_points,
+            },
+            max_brownout_risk_basis_points: match overrides.max_brownout_risk_basis_points {
+                Some(value) => value,
+                None => self.max_brownout_risk_basis_points,
+            },
+            max_queue_depth: match overrides.max_queue_depth {
+                Some(value) => value,
+                None => self.max_queue_depth,
+            },
+            max_artifact_age_hours: match overrides.max_artifact_age_hours {
+                Some(value) => value,
+                None => self.max_artifact_age_hours,
+            },
+        }
+    }
+}
+
+/// Request for a dry-run capacity envelope certificate.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CapacityEnvelopePlannerRequest {
+    /// Objective used when no explicit profile is forced.
+    pub objective: HostProfilePlannerObjective,
+    /// Explicit requested profile, when one is supplied.
+    pub requested_profile: Option<HostProfileId>,
+    /// Host resources for the target deployment.
+    pub host_resources: HostProfileHostResources,
+    /// Controller evidence proving the profile is eligible.
+    pub controller_evidence: HostProfileEvidenceSet,
+    /// Manual config overrides that must be reflected in the certified plan.
+    pub manual_overrides: HostProfileManualOverrides,
+    /// Requested host fingerprint.
+    pub host_fingerprint: CapacityEnvelopeHostFingerprint,
+    /// Measured evidence from the swarm scenario runner.
+    pub evidence_snapshot: CapacityEnvelopeEvidenceSnapshot,
+    /// Candidate worker counts to evaluate.
+    pub candidate_worker_counts: Vec<usize>,
+    /// Candidate agent counts to evaluate.
+    pub candidate_agent_counts: Vec<usize>,
+    /// Conservative certificate budget.
+    pub budget: CapacityEnvelopeBudget,
+    /// Manual SLO overrides applied to the certificate budget.
+    pub budget_overrides: CapacityEnvelopeBudgetOverrides,
+    /// Optional environment note that must be secret-scrubbed.
+    pub environment_note: Option<String>,
+    /// Optional validation command summary that must be secret-scrubbed.
+    pub validation_command: Option<String>,
+}
+
+impl CapacityEnvelopePlannerRequest {
+    /// Compute a dry-run capacity envelope certificate.
+    #[must_use]
+    pub fn plan(&self) -> CapacityEnvelopeCertificate {
+        let effective_budget = self.budget.with_overrides(self.budget_overrides);
+        let host_profile_plan = HostProfilePlannerRequest {
+            objective: self.objective,
+            requested_profile: self.requested_profile,
+            host_resources: self.host_resources,
+            controller_evidence: self.controller_evidence.clone(),
+            manual_overrides: self.manual_overrides.clone(),
+            operator_note: None,
+        }
+        .plan();
+        let fallback_profile = HostProfileId::ConservativeBaseline;
+        let sanitized_environment_note =
+            self.environment_note.as_deref().map(redact_sensitive_note);
+        let sanitized_validation_command = self
+            .validation_command
+            .as_deref()
+            .map(redact_sensitive_note);
+        let mut refusal_reasons = Vec::new();
+        if let Err(reason) = self
+            .host_fingerprint
+            .validate_for_resources(&self.host_resources, "request host fingerprint")
+        {
+            refusal_reasons.push(reason);
+        }
+        if let Err(reason) = self.evidence_snapshot.validate(
+            effective_budget.max_artifact_age_hours,
+            &self.host_resources,
+            &self.host_fingerprint,
+        ) {
+            refusal_reasons.push(format!("scenario evidence rejected: {reason}"));
+        }
+        if host_profile_plan.used_safe_fallback() {
+            refusal_reasons.extend(host_profile_plan.refusal_reasons.clone());
+        }
+
+        let profile = if refusal_reasons.is_empty() {
+            host_profile_plan.selected_profile
+        } else {
+            fallback_profile
+        };
+        let candidate_worker_counts = normalize_capacity_sweep(
+            &self.candidate_worker_counts,
+            host_profile_plan
+                .final_bundle
+                .worker_threads
+                .min(self.host_resources.cpu_cores)
+                .max(1),
+        );
+        let candidate_agent_counts =
+            normalize_capacity_sweep(&self.candidate_agent_counts, usize::MAX);
+        let assumptions_ledger =
+            build_capacity_assumptions(profile, &self.evidence_snapshot, effective_budget);
+
+        let mut evaluations = Vec::new();
+        if refusal_reasons.is_empty() {
+            for worker_count in &candidate_worker_counts {
+                for agent_count in &candidate_agent_counts {
+                    evaluations.push(evaluate_capacity_point(
+                        profile,
+                        &self.host_resources,
+                        &self.evidence_snapshot,
+                        effective_budget,
+                        *worker_count,
+                        *agent_count,
+                    ));
+                }
+            }
+        }
+
+        let selected_safe_point = evaluations
+            .iter()
+            .filter(|point| point.status == CapacityEnvelopePointStatus::Safe)
+            .max_by_key(|point| (point.agent_count, point.worker_count))
+            .cloned();
+        if refusal_reasons.is_empty() && selected_safe_point.is_none() {
+            refusal_reasons.push(
+                "no safe worker/agent combination satisfied the latency, cancellation, memory, and brownout budgets"
+                    .to_string(),
+            );
+        }
+
+        let selected_profile = if refusal_reasons.is_empty() {
+            profile
+        } else {
+            fallback_profile
+        };
+
+        let safe_envelope = summarize_safe_envelope(selected_safe_point, &evaluations);
+        let refused_envelope = summarize_refused_envelope(
+            &self.host_resources,
+            &candidate_worker_counts,
+            &candidate_agent_counts,
+            &evaluations,
+        );
+
+        CapacityEnvelopeCertificate {
+            objective: self.objective,
+            requested_profile: self.requested_profile,
+            selected_profile,
+            fallback_profile,
+            profile_bundle: host_profile_plan.profile_bundle,
+            final_bundle: host_profile_plan.final_bundle,
+            assumptions_ledger,
+            refusal_reasons,
+            evidence_artifact_ids: host_profile_plan.input_evidence_artifact_ids,
+            host_fingerprint: self.host_fingerprint.clone(),
+            evidence_snapshot: self.evidence_snapshot.clone(),
+            effective_budget,
+            candidate_worker_counts,
+            candidate_agent_counts,
+            safe_envelope,
+            refused_envelope,
+            evaluations,
+            sanitized_environment_note,
+            sanitized_validation_command,
+        }
+    }
+}
+
+/// Summary of the safe or refused capacity envelope.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CapacityEnvelopeRange {
+    /// Minimum worker count represented by this range.
+    pub worker_min: usize,
+    /// Maximum worker count represented by this range.
+    pub worker_max: usize,
+    /// Minimum agent count represented by this range.
+    pub agent_min: usize,
+    /// Maximum agent count represented by this range.
+    pub agent_max: usize,
+    /// Maximum predicted queue depth within the range.
+    pub max_queue_depth: usize,
+    /// Maximum predicted memory footprint within the range.
+    pub max_memory_gib: usize,
+}
+
+/// Pass/fail verdict for one evaluated capacity point.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CapacityEnvelopePointStatus {
+    /// The point is inside the safe envelope.
+    Safe,
+    /// The point is outside the safe envelope.
+    Refused,
+}
+
+/// Evaluation of one worker/agent point in the capacity sweep.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CapacityEnvelopePointEvaluation {
+    /// Candidate worker count.
+    pub worker_count: usize,
+    /// Candidate agent count.
+    pub agent_count: usize,
+    /// Predicted p50 wake-to-run in nanoseconds.
+    pub predicted_p50_ns: u64,
+    /// Predicted p95 wake-to-run in nanoseconds.
+    pub predicted_p95_ns: u64,
+    /// Predicted p99 wake-to-run in nanoseconds.
+    pub predicted_p99_ns: u64,
+    /// Predicted cancellation debt units.
+    pub predicted_cancellation_debt_units: u64,
+    /// Predicted queue depth.
+    pub predicted_queue_depth: usize,
+    /// Predicted memory footprint in GiB.
+    pub predicted_memory_gib: usize,
+    /// Predicted memory pressure in basis points.
+    pub predicted_memory_pressure_basis_points: u16,
+    /// Predicted brownout risk in basis points.
+    pub predicted_brownout_risk_basis_points: u16,
+    /// Safe/refused verdict for the point.
+    pub status: CapacityEnvelopePointStatus,
+    /// Reasons the point was refused, when applicable.
+    pub refusal_reasons: Vec<String>,
+}
+
+/// Dry-run capacity certificate consumed by operator tooling and signoff.
+#[derive(Clone)]
+pub struct CapacityEnvelopeCertificate {
+    /// Objective used for the certificate.
+    pub objective: HostProfilePlannerObjective,
+    /// Explicitly requested profile, when one was supplied.
+    pub requested_profile: Option<HostProfileId>,
+    /// Certified profile after fallback/refusal handling.
+    pub selected_profile: HostProfileId,
+    /// Conservative fallback profile.
+    pub fallback_profile: HostProfileId,
+    /// Profile bundle before manual overrides.
+    pub profile_bundle: RuntimeConfig,
+    /// Final bundle after manual overrides.
+    pub final_bundle: RuntimeConfig,
+    /// Assumptions ledger behind the certificate math.
+    pub assumptions_ledger: Vec<String>,
+    /// Reasons the requested or preferred certificate was refused.
+    pub refusal_reasons: Vec<String>,
+    /// Child evidence artifact IDs used by the certificate.
+    pub evidence_artifact_ids: Vec<String>,
+    /// Host fingerprint for the certified host.
+    pub host_fingerprint: CapacityEnvelopeHostFingerprint,
+    /// Performance evidence snapshot used by the certificate.
+    pub evidence_snapshot: CapacityEnvelopeEvidenceSnapshot,
+    /// Effective SLO/capacity budget after overrides.
+    pub effective_budget: CapacityEnvelopeBudget,
+    /// Candidate worker counts considered by the planner.
+    pub candidate_worker_counts: Vec<usize>,
+    /// Candidate agent counts considered by the planner.
+    pub candidate_agent_counts: Vec<usize>,
+    /// Safe envelope summary, when one exists.
+    pub safe_envelope: Option<CapacityEnvelopeRange>,
+    /// Refused envelope summary.
+    pub refused_envelope: CapacityEnvelopeRange,
+    /// Point-by-point sweep evaluation.
+    pub evaluations: Vec<CapacityEnvelopePointEvaluation>,
+    /// Secret-scrubbed environment note.
+    pub sanitized_environment_note: Option<String>,
+    /// Secret-scrubbed validation command summary.
+    pub sanitized_validation_command: Option<String>,
+}
+
+impl CapacityEnvelopeCertificate {
+    /// Whether the certificate had to fall back conservatively.
+    #[must_use]
+    pub fn used_safe_fallback(&self) -> bool {
+        self.selected_profile == self.fallback_profile && !self.refusal_reasons.is_empty()
+    }
+}
+
+fn normalize_capacity_sweep(values: &[usize], max_value: usize) -> Vec<usize> {
+    let mut normalized = values
+        .iter()
+        .copied()
+        .filter(|value| *value > 0)
+        .map(|value| value.min(max_value))
+        .collect::<Vec<_>>();
+    normalized.sort_unstable();
+    normalized.dedup();
+    normalized
+}
+
+fn build_capacity_assumptions(
+    profile: HostProfileId,
+    evidence: &CapacityEnvelopeEvidenceSnapshot,
+    budget: CapacityEnvelopeBudget,
+) -> Vec<String> {
+    vec![
+        format!(
+            "capacity certificate stays dry-run only; no runtime config is mutated for {}",
+            profile
+        ),
+        format!(
+            "queueing envelope uses linear underclaiming around measured {} workers / {} agents",
+            evidence.measured_worker_count, evidence.measured_agent_count
+        ),
+        format!(
+            "evidence freshness is capped at {} hours and currently observed at {} hours",
+            budget.max_artifact_age_hours, evidence.artifact_age_hours
+        ),
+        format!(
+            "p99 budget={}ns, cancellation budget={}, memory pressure budget={}bps, brownout budget={}bps",
+            budget.target_p99_ns,
+            budget.target_cancel_debt_units,
+            budget.max_memory_pressure_basis_points,
+            budget.max_brownout_risk_basis_points
+        ),
+    ]
+}
+
+fn evaluate_capacity_point(
+    profile: HostProfileId,
+    host_resources: &HostProfileHostResources,
+    evidence: &CapacityEnvelopeEvidenceSnapshot,
+    budget: CapacityEnvelopeBudget,
+    worker_count: usize,
+    agent_count: usize,
+) -> CapacityEnvelopePointEvaluation {
+    let measured_workers = evidence.measured_worker_count.max(1) as u128;
+    let measured_agents = evidence.measured_agent_count.max(1) as u128;
+    let workers = worker_count.max(1) as u128;
+    let agents = agent_count.max(1) as u128;
+    let raw_pressure = ((agents * measured_workers * 10_000) + (measured_agents * workers) - 1)
+        / (measured_agents * workers);
+    let pressure_basis_points = raw_pressure.max(10_000);
+    let throughput_headroom_basis_points = profile_throughput_headroom_basis_points(profile);
+
+    let predicted_p50_ns = saturating_mul_div(
+        u128::from(evidence.wake_to_run_p50_ns),
+        pressure_basis_points,
+        throughput_headroom_basis_points,
+    ) as u64;
+    let predicted_p95_ns = saturating_mul_div(
+        u128::from(evidence.wake_to_run_p95_ns),
+        pressure_basis_points,
+        throughput_headroom_basis_points,
+    ) as u64;
+    let predicted_p99_ns = saturating_mul_div(
+        u128::from(evidence.wake_to_run_p99_ns),
+        pressure_basis_points,
+        throughput_headroom_basis_points,
+    ) as u64;
+    let predicted_cancellation_debt_units = saturating_mul_div(
+        u128::from(evidence.cancellation_debt_units),
+        pressure_basis_points,
+        throughput_headroom_basis_points,
+    ) as u64;
+    let predicted_queue_depth = saturating_mul_div(
+        evidence.measured_queue_depth as u128,
+        pressure_basis_points,
+        10_000,
+    ) as usize;
+
+    let observed_memory_gib = ceil_div_u128(
+        (host_resources.memory_gib as u128) * u128::from(evidence.memory_pressure_basis_points),
+        10_000,
+    ) as usize;
+    let scaled_observed_memory_gib =
+        saturating_mul_div(observed_memory_gib as u128, pressure_basis_points, 10_000) as usize;
+    let modeled_memory_gib = profile_fixed_memory_gib(profile, evidence.retention_budget_gib)
+        + ceil_div_u128(
+            (agent_count as u128) * u128::from(profile_agent_resident_mib(profile)),
+            1024,
+        ) as usize;
+    let predicted_memory_gib = modeled_memory_gib.max(scaled_observed_memory_gib);
+    let predicted_memory_pressure_basis_points = ((predicted_memory_gib as u128 * 10_000)
+        / (host_resources.memory_gib.max(1) as u128))
+        .min(10_000) as u16;
+
+    let extra_pressure = pressure_basis_points.saturating_sub(10_000);
+    let predicted_brownout_risk_basis_points = (u32::from(evidence.brownout_risk_basis_points)
+        + brownout_stage_penalty_basis_points(evidence.brownout_stage)
+        + ((extra_pressure.saturating_sub(1)) / 5) as u32)
+        .min(10_000) as u16;
+
+    let mut refusal_reasons = Vec::new();
+    if predicted_p99_ns > budget.target_p99_ns {
+        refusal_reasons.push(format!(
+            "predicted p99 {}ns exceeded budget {}ns",
+            predicted_p99_ns, budget.target_p99_ns
+        ));
+    }
+    if predicted_cancellation_debt_units > budget.target_cancel_debt_units {
+        refusal_reasons.push(format!(
+            "predicted cancellation debt {} exceeded budget {}",
+            predicted_cancellation_debt_units, budget.target_cancel_debt_units
+        ));
+    }
+    if predicted_queue_depth > budget.max_queue_depth {
+        refusal_reasons.push(format!(
+            "predicted queue depth {} exceeded budget {}",
+            predicted_queue_depth, budget.max_queue_depth
+        ));
+    }
+    if predicted_memory_pressure_basis_points > budget.max_memory_pressure_basis_points {
+        refusal_reasons.push(format!(
+            "predicted memory pressure {}bps exceeded budget {}bps",
+            predicted_memory_pressure_basis_points, budget.max_memory_pressure_basis_points
+        ));
+    }
+    if predicted_brownout_risk_basis_points > budget.max_brownout_risk_basis_points {
+        refusal_reasons.push(format!(
+            "predicted brownout risk {}bps exceeded budget {}bps",
+            predicted_brownout_risk_basis_points, budget.max_brownout_risk_basis_points
+        ));
+    }
+
+    CapacityEnvelopePointEvaluation {
+        worker_count,
+        agent_count,
+        predicted_p50_ns,
+        predicted_p95_ns,
+        predicted_p99_ns,
+        predicted_cancellation_debt_units,
+        predicted_queue_depth,
+        predicted_memory_gib,
+        predicted_memory_pressure_basis_points,
+        predicted_brownout_risk_basis_points,
+        status: if refusal_reasons.is_empty() {
+            CapacityEnvelopePointStatus::Safe
+        } else {
+            CapacityEnvelopePointStatus::Refused
+        },
+        refusal_reasons,
+    }
+}
+
+fn summarize_safe_envelope(
+    selected_safe_point: Option<CapacityEnvelopePointEvaluation>,
+    evaluations: &[CapacityEnvelopePointEvaluation],
+) -> Option<CapacityEnvelopeRange> {
+    let _ = selected_safe_point?;
+    let safe_points = evaluations
+        .iter()
+        .filter(|point| point.status == CapacityEnvelopePointStatus::Safe)
+        .collect::<Vec<_>>();
+    Some(CapacityEnvelopeRange {
+        worker_min: safe_points
+            .iter()
+            .map(|point| point.worker_count)
+            .min()
+            .unwrap_or(0),
+        worker_max: safe_points
+            .iter()
+            .map(|point| point.worker_count)
+            .max()
+            .unwrap_or(0),
+        agent_min: safe_points
+            .iter()
+            .map(|point| point.agent_count)
+            .min()
+            .unwrap_or(0),
+        agent_max: safe_points
+            .iter()
+            .map(|point| point.agent_count)
+            .max()
+            .unwrap_or(0),
+        max_queue_depth: safe_points
+            .iter()
+            .map(|point| point.predicted_queue_depth)
+            .max()
+            .unwrap_or(0),
+        max_memory_gib: safe_points
+            .iter()
+            .map(|point| point.predicted_memory_gib)
+            .max()
+            .unwrap_or(0),
+    })
+}
+
+fn summarize_refused_envelope(
+    host_resources: &HostProfileHostResources,
+    worker_counts: &[usize],
+    agent_counts: &[usize],
+    evaluations: &[CapacityEnvelopePointEvaluation],
+) -> CapacityEnvelopeRange {
+    let refused_points = evaluations
+        .iter()
+        .filter(|point| point.status == CapacityEnvelopePointStatus::Refused)
+        .collect::<Vec<_>>();
+    if refused_points.is_empty() {
+        return CapacityEnvelopeRange {
+            worker_min: worker_counts.first().copied().unwrap_or(0),
+            worker_max: worker_counts.last().copied().unwrap_or(0),
+            agent_min: agent_counts.first().copied().unwrap_or(0),
+            agent_max: agent_counts.last().copied().unwrap_or(0),
+            max_queue_depth: host_resources.cpu_cores.saturating_mul(1024),
+            max_memory_gib: host_resources.memory_gib,
+        };
+    }
+    CapacityEnvelopeRange {
+        worker_min: refused_points
+            .iter()
+            .map(|point| point.worker_count)
+            .min()
+            .unwrap_or(0),
+        worker_max: refused_points
+            .iter()
+            .map(|point| point.worker_count)
+            .max()
+            .unwrap_or(0),
+        agent_min: refused_points
+            .iter()
+            .map(|point| point.agent_count)
+            .min()
+            .unwrap_or(0),
+        agent_max: refused_points
+            .iter()
+            .map(|point| point.agent_count)
+            .max()
+            .unwrap_or(0),
+        max_queue_depth: refused_points
+            .iter()
+            .map(|point| point.predicted_queue_depth)
+            .max()
+            .unwrap_or(0),
+        max_memory_gib: refused_points
+            .iter()
+            .map(|point| point.predicted_memory_gib)
+            .max()
+            .unwrap_or(0),
+    }
+}
+
+const fn profile_throughput_headroom_basis_points(profile: HostProfileId) -> u128 {
+    match profile {
+        HostProfileId::ConservativeBaseline => 9_000,
+        HostProfileId::LocalityFirst64C256G => 11_000,
+        HostProfileId::TailProtectionFirst64C256G => 9_500,
+        HostProfileId::LargeMemoryEvidenceRetention256G => 10_000,
+    }
+}
+
+const fn profile_agent_resident_mib(profile: HostProfileId) -> u64 {
+    match profile {
+        HostProfileId::ConservativeBaseline => 192,
+        HostProfileId::LocalityFirst64C256G => 320,
+        HostProfileId::TailProtectionFirst64C256G => 352,
+        HostProfileId::LargeMemoryEvidenceRetention256G => 384,
+    }
+}
+
+const fn profile_fixed_memory_gib(profile: HostProfileId, retention_budget_gib: usize) -> usize {
+    let base = match profile {
+        HostProfileId::ConservativeBaseline => 8,
+        HostProfileId::LocalityFirst64C256G => 12,
+        HostProfileId::TailProtectionFirst64C256G => 10,
+        HostProfileId::LargeMemoryEvidenceRetention256G => 16,
+    };
+    base + retention_budget_gib
+}
+
+const fn brownout_stage_penalty_basis_points(stage: CapacityEnvelopeBrownoutStage) -> u32 {
+    match stage {
+        CapacityEnvelopeBrownoutStage::FullSurfaces => 0,
+        CapacityEnvelopeBrownoutStage::OptionalFirst => 100,
+        CapacityEnvelopeBrownoutStage::PriorityGate => 180,
+        CapacityEnvelopeBrownoutStage::StandaloneFallback => 260,
+    }
+}
+
+const fn ceil_div_u128(numerator: u128, denominator: u128) -> u128 {
+    if denominator == 0 {
+        0
+    } else {
+        numerator.div_ceil(denominator)
+    }
+}
+
+const fn saturating_mul_div(numerator: u128, multiplier: u128, divisor: u128) -> u128 {
+    if divisor == 0 {
+        0
+    } else {
+        numerator.saturating_mul(multiplier) / divisor
+    }
+}
+
 #[cfg(test)]
 mod tests {
     #![allow(
