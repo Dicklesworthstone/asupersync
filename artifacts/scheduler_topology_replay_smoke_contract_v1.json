@@ -69,8 +69,8 @@
       },
       "capture_plan": [
         "Emit topology_manifest.json from the explicit fixture descriptor rather than ambient host inspection.",
-        "Emit topology_trace.json containing the stable hashes, locality sequence, and detailed steal-path events.",
-        "Validate the same fixture produces identical trace hashes across two consecutive reruns."
+        "Emit topology_trace.json containing the stable hashes, local-vs-remote steal counts, cohort event counts, replay-slot wake-to-run latency by cohort, fairness checks, and detailed steal-path events.",
+        "Validate the same fixture produces identical trace hashes across two consecutive reruns without cohort starvation."
       ],
       "fixture": {
         "topology": {
@@ -106,14 +106,48 @@
         "first_hash": 17382941096260062821,
         "second_hash": 17382941096260062821,
         "event_count": 5,
+        "local_steal_count": 3,
         "remote_spill_count": 2,
+        "cohort_event_counts": [
+          3,
+          2
+        ],
         "locality_sequence": [
           "local",
           "remote",
           "local",
           "local",
           "remote"
-        ]
+        ],
+        "wake_to_run_latency_by_cohort": [
+          {
+            "cohort_id": 0,
+            "slots": [
+              1,
+              3,
+              5
+            ]
+          },
+          {
+            "cohort_id": 1,
+            "slots": [
+              2,
+              4
+            ]
+          }
+        ],
+        "fairness_checks": {
+          "active_replay_cohorts": [
+            0,
+            1
+          ],
+          "cohorts_with_events": [
+            0,
+            1
+          ],
+          "starvation_free": true,
+          "drained_all_seeded_tasks": true
+        }
       }
     },
     {
@@ -128,13 +162,13 @@
         "min_memory_gib": 256,
         "notes": [
           "This scenario isolates the single-remote-spill shape used by the reusable topology helper tests.",
-          "It proves that locality labels and remote-spill accounting stay deterministic."
+          "It proves that locality labels, wake-to-run slot capture, and fairness checks stay deterministic."
         ]
       },
       "capture_plan": [
         "Emit the explicit two-worker topology manifest used for the remote spill proof.",
-        "Emit the remote-steal event with source/thief cohort annotations and stable hashes across reruns.",
-        "Validate the replay trace reports exactly one remote spill and no locality ambiguity."
+        "Emit the remote-steal event with source/thief cohort annotations, local-vs-remote counts, replay-slot wake-to-run latency by cohort, and stable hashes across reruns.",
+        "Validate the replay trace reports exactly one remote spill, no locality ambiguity, and no active-cohort starvation."
       ],
       "fixture": {
         "topology": {
@@ -162,10 +196,33 @@
         "first_hash": 14852217216801945704,
         "second_hash": 14852217216801945704,
         "event_count": 1,
+        "local_steal_count": 0,
         "remote_spill_count": 1,
+        "cohort_event_counts": [
+          0,
+          1
+        ],
         "locality_sequence": [
           "remote"
-        ]
+        ],
+        "wake_to_run_latency_by_cohort": [
+          {
+            "cohort_id": 1,
+            "slots": [
+              1
+            ]
+          }
+        ],
+        "fairness_checks": {
+          "active_replay_cohorts": [
+            1
+          ],
+          "cohorts_with_events": [
+            1
+          ],
+          "starvation_free": true,
+          "drained_all_seeded_tasks": true
+        }
       }
     }
   ]

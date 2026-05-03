@@ -6,6 +6,7 @@ mod topology_replay_support;
 use asupersync::runtime::scheduler::SchedulerTopologyDescriptor;
 use serde::Deserialize;
 use serde_json::json;
+use std::collections::BTreeSet;
 use std::env;
 use std::fs;
 use std::path::Path;
@@ -51,16 +52,42 @@ struct ExpectedTrace {
     first_hash: u64,
     second_hash: u64,
     event_count: usize,
+    #[serde(default)]
+    local_steal_count: Option<usize>,
     remote_spill_count: usize,
     locality_sequence: Vec<String>,
+    #[serde(default)]
+    cohort_event_counts: Vec<usize>,
+    #[serde(default)]
+    wake_to_run_latency_by_cohort: Vec<CohortLatencyByCohort>,
+    #[serde(default)]
+    fairness_checks: Option<FairnessChecks>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+struct CohortLatencyByCohort {
+    cohort_id: usize,
+    slots: Vec<usize>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+struct FairnessChecks {
+    active_replay_cohorts: Vec<usize>,
+    cohorts_with_events: Vec<usize>,
+    starvation_free: bool,
+    drained_all_seeded_tasks: bool,
 }
 
 struct ActualTrace {
     first_hash: u64,
     second_hash: u64,
     event_count: usize,
+    local_steal_count: usize,
     remote_spill_count: usize,
     locality_sequence: Vec<String>,
+    cohort_event_counts: Vec<usize>,
+    wake_to_run_latency_by_cohort: Vec<CohortLatencyByCohort>,
+    fairness_checks: FairnessChecks,
     first_trace: TopologyReplayTrace,
     second_trace: TopologyReplayTrace,
 }
@@ -98,13 +125,17 @@ fn scheduler_topology_replay_contract_scenarios_match_expected_trace() {
             emit_artifacts(Path::new(output_dir), scenario, &actual)
                 .expect("selected scenario should emit topology artifacts");
             eprintln!(
-                "selected scenario summary: id={} first_hash={} second_hash={} events={} remote_spills={} locality_sequence={:?}",
+                "selected scenario summary: id={} first_hash={} second_hash={} events={} local_steals={} remote_spills={} locality_sequence={:?} cohort_event_counts={:?} wake_to_run_latency_by_cohort={:?} fairness_checks={:?}",
                 scenario.scenario_id,
                 actual.first_hash,
                 actual.second_hash,
                 actual.event_count,
+                actual.local_steal_count,
                 actual.remote_spill_count,
-                actual.locality_sequence
+                actual.locality_sequence,
+                actual.cohort_event_counts,
+                actual.wake_to_run_latency_by_cohort,
+                actual.fairness_checks
             );
             emitted_selected = true;
         }
@@ -124,6 +155,13 @@ fn scheduler_topology_replay_contract_scenarios_match_expected_trace() {
             "scenario {} emitted an unexpected event count",
             scenario.scenario_id
         );
+        if let Some(expected_local_steal_count) = scenario.expected_trace.local_steal_count {
+            assert_eq!(
+                actual.local_steal_count, expected_local_steal_count,
+                "scenario {} emitted an unexpected local steal count",
+                scenario.scenario_id
+            );
+        }
         assert_eq!(
             actual.remote_spill_count, scenario.expected_trace.remote_spill_count,
             "scenario {} emitted an unexpected remote spill count: actual locality sequence = {:?}",
@@ -134,6 +172,32 @@ fn scheduler_topology_replay_contract_scenarios_match_expected_trace() {
                 actual.locality_sequence, scenario.expected_trace.locality_sequence,
                 "scenario {} emitted an unexpected locality sequence: actual remote spills = {}",
                 scenario.scenario_id, actual.remote_spill_count
+            );
+        }
+        if !scenario.expected_trace.cohort_event_counts.is_empty() {
+            assert_eq!(
+                actual.cohort_event_counts, scenario.expected_trace.cohort_event_counts,
+                "scenario {} emitted unexpected cohort event counts",
+                scenario.scenario_id
+            );
+        }
+        if !scenario
+            .expected_trace
+            .wake_to_run_latency_by_cohort
+            .is_empty()
+        {
+            assert_eq!(
+                actual.wake_to_run_latency_by_cohort,
+                scenario.expected_trace.wake_to_run_latency_by_cohort,
+                "scenario {} emitted unexpected wake-to-run latency slots by cohort",
+                scenario.scenario_id
+            );
+        }
+        if let Some(expected_fairness_checks) = &scenario.expected_trace.fairness_checks {
+            assert_eq!(
+                &actual.fairness_checks, expected_fairness_checks,
+                "scenario {} emitted unexpected fairness checks",
+                scenario.scenario_id
             );
         }
         if scenario.expected_trace.first_hash != 0 {
@@ -165,6 +229,11 @@ fn execute_scenario(fixture: &ReplayFixture) -> ActualTrace {
     let second_fixture = build_fixture(fixture);
     let first_trace = first_fixture.replay();
     let second_trace = second_fixture.replay();
+    let total_seeded_tasks = fixture
+        .seeded_workers
+        .iter()
+        .map(|seeded_worker| seeded_worker.task_count)
+        .sum();
     let locality_sequence = first_trace
         .events
         .iter()
@@ -175,8 +244,16 @@ fn execute_scenario(fixture: &ReplayFixture) -> ActualTrace {
         first_hash: first_trace.stable_hash(),
         second_hash: second_trace.stable_hash(),
         event_count: first_trace.events.len(),
+        local_steal_count: first_trace
+            .events
+            .iter()
+            .filter(|event| event.locality == ReplayLocality::Local)
+            .count(),
         remote_spill_count: first_trace.remote_spill_count(),
         locality_sequence,
+        cohort_event_counts: cohort_event_counts(&first_trace),
+        wake_to_run_latency_by_cohort: wake_to_run_latency_by_cohort(&first_trace),
+        fairness_checks: fairness_checks(&first_trace, total_seeded_tasks),
         first_trace,
         second_trace,
     }
@@ -228,8 +305,20 @@ fn emit_artifacts(
         "second_trace_hash": actual.second_hash,
         "hashes_match": actual.first_hash == actual.second_hash,
         "event_count": actual.event_count,
+        "local_steal_count": actual.local_steal_count,
         "remote_spill_count": actual.remote_spill_count,
         "locality_sequence": actual.locality_sequence,
+        "cohort_event_counts": actual.cohort_event_counts,
+        "wake_to_run_latency_by_cohort": actual.wake_to_run_latency_by_cohort.iter().map(|summary| json!({
+            "cohort_id": summary.cohort_id,
+            "slots": summary.slots,
+        })).collect::<Vec<_>>(),
+        "fairness_checks": {
+            "active_replay_cohorts": actual.fairness_checks.active_replay_cohorts,
+            "cohorts_with_events": actual.fairness_checks.cohorts_with_events,
+            "starvation_free": actual.fairness_checks.starvation_free,
+            "drained_all_seeded_tasks": actual.fairness_checks.drained_all_seeded_tasks,
+        },
         "events": actual.first_trace.events.iter().map(|event| json!({
             "thief_worker": event.thief_worker,
             "source_worker": event.source_worker,
@@ -256,5 +345,51 @@ fn locality_label(locality: ReplayLocality) -> String {
     match locality {
         ReplayLocality::Local => "local".to_string(),
         ReplayLocality::Remote => "remote".to_string(),
+    }
+}
+
+fn cohort_event_counts(trace: &TopologyReplayTrace) -> Vec<usize> {
+    let mut counts = vec![0; trace.topology.cohort_count];
+    for event in &trace.events {
+        counts[event.thief_cohort] += 1;
+    }
+    counts
+}
+
+fn wake_to_run_latency_by_cohort(trace: &TopologyReplayTrace) -> Vec<CohortLatencyByCohort> {
+    let mut slots_by_cohort = vec![Vec::new(); trace.topology.cohort_count];
+    for (slot_index, event) in trace.events.iter().enumerate() {
+        slots_by_cohort[event.thief_cohort].push(slot_index + 1);
+    }
+    slots_by_cohort
+        .into_iter()
+        .enumerate()
+        .filter_map(|(cohort_id, slots)| {
+            (!slots.is_empty()).then_some(CohortLatencyByCohort { cohort_id, slots })
+        })
+        .collect()
+}
+
+fn fairness_checks(trace: &TopologyReplayTrace, total_seeded_tasks: usize) -> FairnessChecks {
+    let active_replay_cohorts = trace
+        .replay_workers
+        .iter()
+        .map(|worker_id| trace.worker_to_cohort[*worker_id])
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
+    let cohorts_with_events = trace
+        .events
+        .iter()
+        .map(|event| event.thief_cohort)
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
+
+    FairnessChecks {
+        starvation_free: active_replay_cohorts == cohorts_with_events,
+        drained_all_seeded_tasks: trace.events.len() == total_seeded_tasks,
+        active_replay_cohorts,
+        cohorts_with_events,
     }
 }
