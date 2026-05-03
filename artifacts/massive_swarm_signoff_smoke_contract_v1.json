@@ -1,0 +1,278 @@
+{
+  "contract_version": "massive-swarm-signoff-smoke-contract-v1",
+  "bead_id": "asupersync-wqsael",
+  "description": "Deterministic fail-closed signoff contract for the large-host operator artifact chain of the massive-swarm responsiveness program.",
+  "runner_script": "scripts/run_massive_swarm_signoff_smoke.sh",
+  "runner_bundle_schema_version": "massive-swarm-signoff-smoke-bundle-v1",
+  "runner_report_schema_version": "massive-swarm-signoff-smoke-run-report-v1",
+  "blocked_dependency_policy": {
+    "fail_closed_conditions": [
+      "open tracker bead on a required operator-chain control",
+      "generated artifact inventory still reports fail_closed clusters",
+      "missing artifact path or runner path",
+      "missing fallback explanation",
+      "missing rollback-safe surface where required"
+    ],
+    "real_host_template_required": true,
+    "no_second_artifact_vocabulary": true,
+    "safe_default_verdict": "fail_closed"
+  },
+  "required_matrix_fields": [
+    "control_id",
+    "tracker_bead_id",
+    "tracker_status",
+    "artifact_path",
+    "contract_version",
+    "runner_path",
+    "scenario_ids",
+    "config_gate",
+    "fallback_mode",
+    "unit_proof_ref",
+    "e2e_proof_ref",
+    "operator_fields",
+    "proof_status",
+    "blocker_reason",
+    "report_glob",
+    "reproduction_command"
+  ],
+  "signoff_matrix": [
+    {
+      "control_id": "skill_provenance",
+      "tracker_bead_id": "asupersync-ndr3ev",
+      "tracker_status": "closed",
+      "artifact_path": "artifacts/massive_swarm_skill_provenance_v1.json",
+      "contract_version": "massive-swarm-skill-provenance-v1",
+      "runner_path": "scripts/run_massive_swarm_skill_provenance_smoke.sh",
+      "scenario_ids": [
+        "AA-MASSIVE-SWARM-SKILL-PROVENANCE"
+      ],
+      "config_gate": "source_skills and selected_bead_mappings are committed and deterministic",
+      "fallback_mode": "fail closed to the conservative runtime profile when required provenance or proof fields are absent",
+      "unit_proof_ref": "tests/massive_swarm_skill_provenance_contract.rs",
+      "e2e_proof_ref": "scripts/run_massive_swarm_skill_provenance_smoke.sh --scenario AA-MASSIVE-SWARM-SKILL-PROVENANCE --execute",
+      "operator_fields": [
+        "source_skills",
+        "objective_requirements",
+        "selected_bead_mappings",
+        "alien_artifact_compilation",
+        "extreme_optimization_discipline"
+      ],
+      "rollback_surface": "not_applicable",
+      "proof_status": "trusted",
+      "blocker_reason": "",
+      "report_glob": "target/massive-swarm-skill-provenance-smoke/run_*/AA-MASSIVE-SWARM-SKILL-PROVENANCE/run_report.json",
+      "reproduction_command": "scripts/run_massive_swarm_skill_provenance_smoke.sh --scenario AA-MASSIVE-SWARM-SKILL-PROVENANCE --execute"
+    },
+    {
+      "control_id": "generated_smoke_inventory",
+      "tracker_bead_id": "asupersync-beih6k",
+      "tracker_status": "closed",
+      "artifact_path": "artifacts/generated_smoke_artifact_inventory_v1.json",
+      "contract_version": "generated-smoke-artifact-inventory-v1",
+      "runner_path": "scripts/run_generated_smoke_artifact_inventory_smoke.sh",
+      "scenario_ids": [
+        "AA-GENERATED-SMOKE-ARTIFACT-INVENTORY-CURRENT-HOST"
+      ],
+      "config_gate": "local generated smoke roots must be inventoried, reproducible, and explicitly retained without deletion",
+      "fallback_mode": "preserve local generated roots and keep final signoff blocked until every retained cluster has a trusted owner decision",
+      "unit_proof_ref": "tests/generated_smoke_artifact_inventory_contract.rs",
+      "e2e_proof_ref": "scripts/run_generated_smoke_artifact_inventory_smoke.sh --scenario AA-GENERATED-SMOKE-ARTIFACT-INVENTORY-CURRENT-HOST --execute",
+      "operator_fields": [
+        "clusters",
+        "signoff_status",
+        "owner_beads",
+        "runner_path",
+        "reproduction_command",
+        "retention_decision"
+      ],
+      "rollback_surface": "not_applicable",
+      "proof_status": "fail_closed",
+      "blocker_reason": "generated artifact inventory still records fail_closed clusters for cohort_admission_steering, trace_storage_profile, and overload_brownout",
+      "report_glob": "target/generated-smoke-artifact-inventory-smoke/run_*/AA-GENERATED-SMOKE-ARTIFACT-INVENTORY-CURRENT-HOST/run_report.json",
+      "reproduction_command": "scripts/run_generated_smoke_artifact_inventory_smoke.sh --scenario AA-GENERATED-SMOKE-ARTIFACT-INVENTORY-CURRENT-HOST --execute"
+    },
+    {
+      "control_id": "host_profile_planner",
+      "tracker_bead_id": "asupersync-c1qfr9",
+      "tracker_status": "open",
+      "artifact_path": "artifacts/host_profile_planner_smoke_contract_v1.json",
+      "contract_version": "host-profile-planner-smoke-contract-v1",
+      "runner_path": "scripts/run_host_profile_planner_smoke.sh",
+      "scenario_ids": [
+        "AA-HOST-PROFILE-PLANNER-LOCALITY-FIRST-64C-256G",
+        "AA-HOST-PROFILE-PLANNER-MISSING-PROOF-FALLBACK"
+      ],
+      "config_gate": "selected_profile and fallback profile must come from committed dry-run planner output only",
+      "fallback_mode": "select conservative_baseline when proof references or evidence artifacts are missing or rejected",
+      "unit_proof_ref": "tests/host_profile_planner_contract.rs",
+      "e2e_proof_ref": "scripts/run_host_profile_planner_smoke.sh --scenario AA-HOST-PROFILE-PLANNER-LOCALITY-FIRST-64C-256G --execute",
+      "operator_fields": [
+        "selected_profile",
+        "fallback_profile",
+        "used_safe_fallback",
+        "sanitized_operator_note",
+        "sanitized_validation_command"
+      ],
+      "rollback_surface": "dry_run_only",
+      "proof_status": "fail_closed",
+      "blocker_reason": "host profile planner proof exists on main but tracker bead remains open, so final signoff must not treat the planner as closed",
+      "report_glob": "target/host-profile-planner-smoke/run_*/AA-HOST-PROFILE-PLANNER-*/run_report.json",
+      "reproduction_command": "scripts/run_host_profile_planner_smoke.sh --scenario AA-HOST-PROFILE-PLANNER-LOCALITY-FIRST-64C-256G --execute"
+    },
+    {
+      "control_id": "capacity_envelope_planner",
+      "tracker_bead_id": "asupersync-tdgqjy",
+      "tracker_status": "open",
+      "artifact_path": "artifacts/capacity_envelope_planner_smoke_contract_v1.json",
+      "contract_version": "capacity-envelope-planner-smoke-contract-v1",
+      "runner_path": "scripts/run_capacity_envelope_planner_smoke.sh",
+      "scenario_ids": [
+        "AA-CAPACITY-ENVELOPE-LOCALITY-CERT-64C-256G",
+        "AA-CAPACITY-ENVELOPE-STALE-EVIDENCE-FALLBACK"
+      ],
+      "config_gate": "capacity certificates must remain dry-run only and host fingerprint matched",
+      "fallback_mode": "refuse certificate or fall back to conservative_baseline when evidence is stale, mismatched, or outside budget assumptions",
+      "unit_proof_ref": "tests/capacity_envelope_planner_contract.rs",
+      "e2e_proof_ref": "scripts/run_capacity_envelope_planner_smoke.sh --scenario AA-CAPACITY-ENVELOPE-LOCALITY-CERT-64C-256G --execute",
+      "operator_fields": [
+        "safe_envelope",
+        "refused_envelope",
+        "assumptions_ledger",
+        "evidence_artifact_ids",
+        "refusal_reasons"
+      ],
+      "rollback_surface": "dry_run_only",
+      "proof_status": "fail_closed",
+      "blocker_reason": "capacity envelope certificates are shipped but the tracker bead remains open, so signoff must hold the operator chain closed",
+      "report_glob": "target/capacity-envelope-planner-smoke/run_*/AA-CAPACITY-ENVELOPE-*/run_report.json",
+      "reproduction_command": "scripts/run_capacity_envelope_planner_smoke.sh --scenario AA-CAPACITY-ENVELOPE-LOCALITY-CERT-64C-256G --execute"
+    },
+    {
+      "control_id": "signed_profile_bundle",
+      "tracker_bead_id": "asupersync-gk0cg3",
+      "tracker_status": "open",
+      "artifact_path": "artifacts/signed_profile_bundle_smoke_contract_v1.json",
+      "contract_version": "signed-profile-bundle-smoke-contract-v1",
+      "runner_path": "scripts/run_signed_profile_bundle_smoke.sh",
+      "scenario_ids": [
+        "AA-SIGNED-PROFILE-BUNDLE-DIGEST-ONLY-ACCEPT-64C-256G",
+        "AA-SIGNED-PROFILE-BUNDLE-TAMPER-REJECT-64C-256G"
+      ],
+      "config_gate": "bundle verification stays explicit and digest-only limitations remain visible",
+      "fallback_mode": "hold conservative_baseline and reject tampered or unsupported bundles",
+      "unit_proof_ref": "tests/signed_profile_bundle_contract.rs",
+      "e2e_proof_ref": "scripts/run_signed_profile_bundle_smoke.sh --scenario AA-SIGNED-PROFILE-BUNDLE-DIGEST-ONLY-ACCEPT-64C-256G --execute",
+      "operator_fields": [
+        "selected_profile",
+        "fallback_profile",
+        "integrity_mode",
+        "controller_versions",
+        "child_evidence_hashes",
+        "rollback_receipt"
+      ],
+      "rollback_surface": "rollback_receipt",
+      "proof_status": "fail_closed",
+      "blocker_reason": "signed profile bundle manifests and rollback receipts are shipped but the tracker bead remains open",
+      "report_glob": "target/signed-profile-bundle-smoke/run_*/AA-SIGNED-PROFILE-BUNDLE-*/run_report.json",
+      "reproduction_command": "scripts/run_signed_profile_bundle_smoke.sh --scenario AA-SIGNED-PROFILE-BUNDLE-DIGEST-ONLY-ACCEPT-64C-256G --execute"
+    },
+    {
+      "control_id": "signed_profile_shadow_run",
+      "tracker_bead_id": "asupersync-4buhgd",
+      "tracker_status": "open",
+      "artifact_path": "artifacts/signed_profile_bundle_smoke_contract_v1.json",
+      "contract_version": "signed-profile-bundle-smoke-contract-v1",
+      "runner_path": "scripts/run_signed_profile_bundle_smoke.sh",
+      "scenario_ids": [
+        "AA-SIGNED-PROFILE-BUNDLE-SHADOW-RUN-WIN-64C-256G",
+        "AA-SIGNED-PROFILE-BUNDLE-SHADOW-RUN-HOLD-64C-256G"
+      ],
+      "config_gate": "shadow-run must compare candidate and conservative baseline on the same evidence snapshot without mutating runtime state",
+      "fallback_mode": "hold the conservative baseline whenever the candidate safe agent ceiling loses, evidence is missing, or regret is insufficient",
+      "unit_proof_ref": "tests/signed_profile_bundle_contract.rs",
+      "e2e_proof_ref": "scripts/run_signed_profile_bundle_smoke.sh --scenario AA-SIGNED-PROFILE-BUNDLE-SHADOW-RUN-HOLD-64C-256G --execute",
+      "operator_fields": [
+        "shadow_run_decision",
+        "candidate_loss_basis_points",
+        "baseline_loss_basis_points",
+        "regret_margin_basis_points",
+        "hold_reasons"
+      ],
+      "rollback_surface": "rollback_receipt",
+      "proof_status": "fail_closed",
+      "blocker_reason": "shadow-run gate is shipped on main but the tracker bead remains open, so signoff must still fail closed on rollout status",
+      "report_glob": "target/signed-profile-bundle-smoke/run_*/AA-SIGNED-PROFILE-BUNDLE-SHADOW-RUN-*/run_report.json",
+      "reproduction_command": "scripts/run_signed_profile_bundle_smoke.sh --scenario AA-SIGNED-PROFILE-BUNDLE-SHADOW-RUN-HOLD-64C-256G --execute"
+    }
+  ],
+  "smoke_scenarios": [
+    {
+      "scenario_id": "AA-MASSIVE-SWARM-SIGNOFF-OPERATOR-CHAIN-SMALL-MODE",
+      "description": "Audit the current committed large-host operator artifact chain and fail closed while tracker blockers or unexplained generated artifact clusters remain.",
+      "host_template_mode": false,
+      "expected_report_projection": {
+        "signoff_verdict": "fail_closed",
+        "host_template_mode": false,
+        "child_artifact_count": 6,
+        "trusted_child_count": 1,
+        "fail_closed_child_count": 5,
+        "open_tracker_blocker_count": 4,
+        "dirty_cluster_fail_closed_count": 3,
+        "missing_artifact_path_count": 0,
+        "missing_runner_path_count": 0,
+        "no_unexplained_artifacts": false,
+        "projection_hash": "9b6e979f80c97afdacb4bbd8bbe30a62ac003cfc3143d940ce185bafe242558c"
+      },
+      "required_log_fields": [
+        "scenario_id",
+        "contract_version",
+        "host_template_mode",
+        "child_artifact_count",
+        "trusted_child_count",
+        "fail_closed_child_count",
+        "open_tracker_blocker_count",
+        "dirty_cluster_fail_closed_count",
+        "missing_artifact_path_count",
+        "missing_runner_path_count",
+        "no_unexplained_artifacts",
+        "signoff_verdict",
+        "generated_artifact_paths",
+        "final_verdict"
+      ]
+    },
+    {
+      "scenario_id": "AA-MASSIVE-SWARM-SIGNOFF-REAL-HOST-TEMPLATE",
+      "description": "Emit the real-host signoff template without requiring heavyweight host execution during ordinary scoped validation.",
+      "host_template_mode": true,
+      "expected_report_projection": {
+        "signoff_verdict": "template_only",
+        "host_template_mode": true,
+        "child_artifact_count": 6,
+        "trusted_child_count": 1,
+        "fail_closed_child_count": 5,
+        "open_tracker_blocker_count": 4,
+        "dirty_cluster_fail_closed_count": 3,
+        "missing_artifact_path_count": 0,
+        "missing_runner_path_count": 0,
+        "no_unexplained_artifacts": false,
+        "projection_hash": "5fa3411ec9368b49d558b903be1cae0cafaf0e409c83bb70601d6079af47cf3a"
+      },
+      "required_log_fields": [
+        "scenario_id",
+        "contract_version",
+        "host_template_mode",
+        "child_artifact_count",
+        "trusted_child_count",
+        "fail_closed_child_count",
+        "open_tracker_blocker_count",
+        "dirty_cluster_fail_closed_count",
+        "missing_artifact_path_count",
+        "missing_runner_path_count",
+        "no_unexplained_artifacts",
+        "signoff_verdict",
+        "generated_artifact_paths",
+        "final_verdict"
+      ]
+    }
+  ]
+}
