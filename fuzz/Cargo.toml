@@ -4723,6 +4723,12 @@ test = false
 doc = false
 
 [[bin]]
+name = "h2_settings_max_frame_size_below_default"
+path = "fuzz_targets/h2_settings_max_frame_size_below_default.rs"
+test = false
+doc = false
+
+[[bin]]
 name = "h2_settings_max_frame_size_overflow"
 path = "fuzz_targets/h2_settings_max_frame_size_overflow.rs"
 test = false
@@ -4757,6 +4763,34 @@ name = "h2_request_method_invalid"
 path = "fuzz_targets/h2_request_method_invalid.rs"
 test = false
 doc = false
+
+[[bin]]
+name = "h2_request_pseudo_method_with_special_chars"
+path = "fuzz_targets/h2_request_pseudo_method_with_special_chars.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "h2_request_pseudo_scheme_invalid"
+path = "fuzz_targets/h2_request_pseudo_scheme_invalid.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "h2_request_pseudo_scheme_https_uppercase"
+path = "fuzz_targets/h2_request_pseudo_scheme_https_uppercase.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "h2_request_huge_pseudo_path"
+path = "fuzz_targets/h2_request_huge_pseudo_path.rs"
+test = false
+doc = false
+bench = false
 
 [[bin]]
 name = "h2_pseudo_header_order"
@@ -4797,6 +4831,12 @@ doc = false
 [[bin]]
 name = "h2_priority_dependency_loop"
 path = "fuzz_targets/h2_priority_dependency_loop.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "h2_priority_dependency_chain"
+path = "fuzz_targets/h2_priority_dependency_chain.rs"
 test = false
 doc = false
 
@@ -4861,6 +4901,12 @@ test = false
 doc = false
 
 [[bin]]
+name = "h2_request_with_huge_authority"
+path = "fuzz_targets/h2_request_with_huge_authority.rs"
+test = false
+doc = false
+
+[[bin]]
 name = "sync_oneshot_cancel_recv"
 path = "fuzz_targets/sync_oneshot_cancel_recv.rs"
 test = false
@@ -4895,6 +4941,13 @@ name = "h2_settings_max_frame_size_change"
 path = "fuzz_targets/h2_settings_max_frame_size_change.rs"
 test = false
 doc = false
+
+[[bin]]
+name = "h2_settings_max_frame_size_change_mid"
+path = "fuzz_targets/h2_settings_max_frame_size_change_mid.rs"
+test = false
+doc = false
+bench = false
 
 [[bin]]
 name = "h1_te_chunked_extension_dos"
@@ -5099,3 +5152,81 @@ name = "h2_request_method_lowercase"
 path = "fuzz_targets/h2_request_method_lowercase.rs"
 test = false
 doc = false
+
+[[bin]]
+name = "h2_priority_zero_dependency"
+path = "fuzz_targets/h2_priority_zero_dependency.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "h2_settings_zero_max_concurrent"
+path = "fuzz_targets/h2_settings_zero_max_concurrent.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "h1_te_chunked_with_trailers"
+path = "fuzz_targets/h1_te_chunked_with_trailers.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "h2_request_pseudo_path_query_only"
+path = "fuzz_targets/h2_request_pseudo_path_query_only.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "h2_request_pseudo_path_with_query"
+path = "fuzz_targets/h2_request_pseudo_path_with_query.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "h2_request_pseudo_authority_with_userinfo"
+path = "fuzz_targets/h2_request_pseudo_authority_with_userinfo.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "h2_settings_initial_window_size_zero"
+path = "fuzz_targets/h2_settings_initial_window_size_zero.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "h2_settings_max_concurrent_streams_max"
+path = "fuzz_targets/h2_settings_max_concurrent_streams_max.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "h2_request_pseudo_path_with_double_slash"
+path = "fuzz_targets/h2_request_pseudo_path_with_double_slash.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "h2_request_with_priority_then_data"
+path = "fuzz_targets/h2_request_with_priority_then_data.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "h2_settings_initial_window_negative_via_window_update"
+path = "fuzz_targets/h2_settings_initial_window_negative_via_window_update.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "h2_settings_max_concurrent_streams_decrease_below_active"
+path = "fuzz_targets/h2_settings_max_concurrent_streams_decrease_below_active.rs"
+test = false
+doc = false
+bench = false

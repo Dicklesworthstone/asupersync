@@ -902,4 +902,257 @@ mod golden_tests {
             }
         }
     }
+
+    /// RaptorQ codec round-trip metamorphic test: encode(decode(encode(x))) == encode(x) for any K
+    ///
+    /// This test verifies the round-trip property that double encoding (encode after
+    /// decode-encode cycle) produces identical results to single encoding. This is a
+    /// fundamental metamorphic property that must hold for any valid RaptorQ codec
+    /// implementation regardless of the specific K value or data content.
+    #[test]
+    fn raptorq_codec_double_encoding_roundtrip_metamorphic() {
+        use crate::raptorq::decoder::{InactivationDecoder, ReceivedSymbol};
+        use crate::raptorq::systematic::SystematicEncoder;
+        use crate::util::DetRng;
+        use std::collections::HashMap;
+
+        /// Metamorphic test scenario for RaptorQ double encoding
+        struct RoundTripScenario {
+            k: usize,
+            symbol_size: usize,
+            seed: u64,
+            description: String,
+        }
+
+        let test_scenarios = vec![
+            RoundTripScenario {
+                k: 4,
+                symbol_size: 8,
+                seed: 0x1234567890ABCDEF,
+                description: "Small K=4 basic case".to_string(),
+            },
+            RoundTripScenario {
+                k: 16,
+                symbol_size: 16,
+                seed: 0xFEDCBA0987654321,
+                description: "Medium K=16 standard case".to_string(),
+            },
+            RoundTripScenario {
+                k: 32,
+                symbol_size: 32,
+                seed: 0x123456789ABCDEF0,
+                description: "Large K=32 performance case".to_string(),
+            },
+            RoundTripScenario {
+                k: 1,
+                symbol_size: 4,
+                seed: 0xABCDEF1234567890,
+                description: "Edge case K=1 minimal".to_string(),
+            },
+        ];
+
+        /// Validation function for the round-trip metamorphic property
+        fn validate_double_encoding_property(scenario: &RoundTripScenario) -> Result<(), String> {
+            let k = scenario.k;
+            let symbol_size = scenario.symbol_size;
+            let seed = scenario.seed;
+
+            // Generate deterministic source data
+            let mut rng = DetRng::new(seed);
+            let source_data: Vec<Vec<u8>> = (0..k)
+                .map(|_| (0..symbol_size).map(|_| rng.next_u64() as u8).collect())
+                .collect();
+
+            // STEP 1: Original encoding - encode(x)
+            let encoder1 = SystematicEncoder::new(&source_data, symbol_size, seed)
+                .map_err(|e| format!("Original encoder creation failed: {}", e))?;
+
+            // Collect original encoded symbols (source + some repair symbols for testing)
+            let repair_count = k / 2 + 1; // Ensure sufficient repair symbols
+            let mut original_encoded_symbols = HashMap::new();
+
+            // Store source symbols (systematic encoding)
+            for (i, data) in source_data.iter().enumerate() {
+                original_encoded_symbols.insert(i as u32, data.clone());
+            }
+
+            // Store repair symbols from original encoding
+            for esi in (k as u32)..(k as u32 + repair_count as u32) {
+                let repair_data = encoder1.repair_symbol(esi);
+                original_encoded_symbols.insert(esi, repair_data);
+            }
+
+            // STEP 2: Decode phase - decode(encode(x))
+            let decoder = InactivationDecoder::new(k, symbol_size, seed);
+            let mut received_symbols = Vec::new();
+
+            // Add source symbols to decoder
+            for (esi, data) in &original_encoded_symbols {
+                if (*esi as usize) < k {
+                    received_symbols.push(ReceivedSymbol::source(*esi, data.clone()));
+                }
+            }
+
+            // Add constraint symbols if required by decoder
+            received_symbols.extend(decoder.constraint_symbols());
+
+            // Add repair symbols as received symbols
+            for (esi, data) in &original_encoded_symbols {
+                if (*esi as usize) >= k {
+                    if let Ok((columns, coefficients)) = decoder.repair_equation(*esi) {
+                        received_symbols.push(ReceivedSymbol::repair(
+                            *esi, columns, coefficients, data.clone(),
+                        ));
+                    }
+                }
+            }
+
+            // Perform decoding to recover original source data
+            let decode_result = decoder
+                .decode(&received_symbols)
+                .map_err(|e| format!("Decoding failed in round-trip: {}", e))?;
+
+            // Verify decoding recovered original data exactly
+            if decode_result.source.len() != k {
+                return Err(format!(
+                    "Decode result has wrong symbol count: expected {}, got {}",
+                    k,
+                    decode_result.source.len()
+                ));
+            }
+
+            for (i, (original, decoded)) in source_data
+                .iter()
+                .zip(decode_result.source.iter())
+                .enumerate()
+            {
+                if original != decoded {
+                    return Err(format!(
+                        "Decode mismatch at symbol {}: original != decoded",
+                        i
+                    ));
+                }
+            }
+
+            // STEP 3: Re-encode phase - encode(decode(encode(x)))
+            let encoder2 = SystematicEncoder::new(&decode_result.source, symbol_size, seed)
+                .map_err(|e| format!("Second encoder creation failed: {}", e))?;
+
+            // METAMORPHIC PROPERTY VERIFICATION: encode(decode(encode(x))) == encode(x)
+            // Compare source symbols (systematic property)
+            for (i, (original, recovered)) in source_data
+                .iter()
+                .zip(decode_result.source.iter())
+                .enumerate()
+            {
+                if original != recovered {
+                    return Err(format!(
+                        "Source symbol {} differs after round-trip: systematic encoding violated",
+                        i
+                    ));
+                }
+            }
+
+            // Compare repair symbols - they must be identical for same ESI
+            for repair_esi in (k as u32)..(k as u32 + repair_count as u32) {
+                let original_repair = encoder1.repair_symbol(repair_esi);
+                let roundtrip_repair = encoder2.repair_symbol(repair_esi);
+
+                if original_repair != roundtrip_repair {
+                    return Err(format!(
+                        "Repair symbol ESI {} differs after round-trip: {} bytes vs {} bytes",
+                        repair_esi,
+                        original_repair.len(),
+                        roundtrip_repair.len()
+                    ));
+                }
+            }
+
+            // All checks passed - metamorphic property holds
+            Ok(())
+        }
+
+        // Execute metamorphic property test for all scenarios
+        let mut passed_scenarios = 0;
+        let total_scenarios = test_scenarios.len();
+
+        for scenario in &test_scenarios {
+            match validate_double_encoding_property(scenario) {
+                Ok(()) => {
+                    passed_scenarios += 1;
+                    println!("✓ Round-trip property holds for {}", scenario.description);
+                }
+                Err(error_msg) => {
+                    panic!(
+                        "Round-trip metamorphic property FAILED for {}: {}",
+                        scenario.description, error_msg
+                    );
+                }
+            }
+        }
+
+        // Verify all scenarios passed
+        assert_eq!(
+            passed_scenarios, total_scenarios,
+            "All round-trip scenarios must pass metamorphic property test"
+        );
+
+        // Final verification: test the metamorphic relation for edge cases
+        let edge_cases = vec![
+            (1, 1), // Minimal case
+            (2, 64), // Small K with large symbols
+            (64, 2), // Large K with small symbols
+        ];
+
+        for (k, symbol_size) in edge_cases {
+            // Quick round-trip test for edge case
+            let seed = 0x1111111111111111;
+            let mut rng = DetRng::new(seed);
+            let source_data: Vec<Vec<u8>> = (0..k)
+                .map(|_| (0..symbol_size).map(|_| rng.next_u64() as u8).collect())
+                .collect();
+
+            // Single encoding
+            let encoder1 = SystematicEncoder::new(&source_data, symbol_size, seed)
+                .expect("Edge case encoder creation");
+
+            // Round-trip: decode then re-encode
+            let decoder = InactivationDecoder::new(k, symbol_size, seed);
+            let mut received_symbols = Vec::new();
+
+            // Add all source symbols
+            for (i, data) in source_data.iter().enumerate() {
+                received_symbols.push(ReceivedSymbol::source(i as u32, data.clone()));
+            }
+            received_symbols.extend(decoder.constraint_symbols());
+
+            let decode_result = decoder
+                .decode(&received_symbols)
+                .expect("Edge case decoding");
+
+            let encoder2 = SystematicEncoder::new(&decode_result.source, symbol_size, seed)
+                .expect("Edge case re-encoder creation");
+
+            // Verify metamorphic property: encode(decode(encode(x))) == encode(x)
+            let test_esi = k as u32; // Test first repair symbol
+            let original_repair = encoder1.repair_symbol(test_esi);
+            let roundtrip_repair = encoder2.repair_symbol(test_esi);
+
+            assert_eq!(
+                original_repair, roundtrip_repair,
+                "Edge case K={}, symbol_size={}: round-trip property failed for repair symbol",
+                k, symbol_size
+            );
+        }
+
+        println!("✓ RaptorQ codec double encoding round-trip metamorphic property verified");
+        println!(
+            "  - Tested {} scenarios with different K values (1, 4, 16, 32)",
+            total_scenarios
+        );
+        println!("  - Verified encode(decode(encode(x))) == encode(x) for all cases");
+        println!("  - Edge cases tested: minimal K=1, large K=64, various symbol sizes");
+        println!("  - Systematic encoding property preserved through round-trip");
+        println!("  - Repair symbol determinism maintained across encode cycles");
+    }
 }

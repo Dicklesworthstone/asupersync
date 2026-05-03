@@ -1031,6 +1031,920 @@ impl TailRiskAdmissionLedger {
     }
 }
 
+/// Stable version identifier for cohort-aware admission steering ledgers.
+pub const COHORT_ADMISSION_STEERING_LEDGER_SCHEMA_VERSION: &str =
+    "asupersync.cohort-admission-steering.v1";
+
+/// Placement outcome for cohort-aware admission steering.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CohortAdmissionSteeringDecision {
+    AdmitLocal,
+    RedirectRemote,
+    Defer,
+}
+
+/// Explicit reason codes for cohort-aware admission steering.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CohortAdmissionSteeringReason {
+    Disabled,
+    MissingTopology,
+    LowConfidenceFallback,
+    TailRiskOuterCap,
+    LocalCapacityAvailable,
+    LocalBacklogPressure,
+    RemoteSpillBudgetSpent,
+    RemoteSpillBudgetExhausted,
+    FairnessEscapeHatch,
+    ConservativeGlobalBaseline,
+}
+
+/// Bounded knobs for cohort-aware admission steering.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CohortAdmissionSteeringProfile {
+    pub enabled: bool,
+    pub local_ready_backlog_soft_limit: usize,
+    pub local_ready_backlog_hard_limit: usize,
+    pub remote_ready_backlog_limit: usize,
+    pub remote_redirect_delta_min: usize,
+    pub remote_spill_budget_per_epoch: u16,
+    pub min_topology_confidence_percent: u8,
+    pub fairness_escape_after_consecutive_defers: u16,
+}
+
+impl Default for CohortAdmissionSteeringProfile {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            local_ready_backlog_soft_limit: 192,
+            local_ready_backlog_hard_limit: 256,
+            remote_ready_backlog_limit: 160,
+            remote_redirect_delta_min: 24,
+            remote_spill_budget_per_epoch: 2,
+            min_topology_confidence_percent: 70,
+            fairness_escape_after_consecutive_defers: 3,
+        }
+    }
+}
+
+/// Deterministic budget state for bounded remote spill steering.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CohortRemoteSpillBudgetState {
+    pub epoch: u64,
+    pub remaining_tokens: u16,
+}
+
+impl CohortRemoteSpillBudgetState {
+    #[must_use]
+    pub fn new(epoch: u64, remaining_tokens: u16) -> Self {
+        Self {
+            epoch,
+            remaining_tokens,
+        }
+    }
+
+    #[must_use]
+    pub fn normalized_for_epoch(
+        self,
+        profile: &CohortAdmissionSteeringProfile,
+        decision_epoch: u64,
+    ) -> Self {
+        if self.epoch == decision_epoch {
+            Self {
+                epoch: self.epoch,
+                remaining_tokens: self
+                    .remaining_tokens
+                    .min(profile.remote_spill_budget_per_epoch),
+            }
+        } else {
+            Self {
+                epoch: decision_epoch,
+                remaining_tokens: profile.remote_spill_budget_per_epoch,
+            }
+        }
+    }
+
+    #[must_use]
+    pub fn spend_one(self) -> Self {
+        Self {
+            epoch: self.epoch,
+            remaining_tokens: self.remaining_tokens.saturating_sub(1),
+        }
+    }
+}
+
+/// Cohort-local evidence vector for admission steering.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CohortAdmissionSteeringEvidence {
+    pub local_cohort: Option<usize>,
+    pub worker_to_cohort_map: Vec<usize>,
+    pub cohort_ready_backlog: Vec<usize>,
+    pub topology_confidence_percent: Option<u8>,
+    pub remote_spill_budget: CohortRemoteSpillBudgetState,
+    pub decision_epoch: u64,
+    pub consecutive_local_defers: u16,
+    pub outer_tail_risk_decision: TailRiskAdmissionDecision,
+}
+
+impl CohortAdmissionSteeringEvidence {
+    fn missing_fields(&self) -> Vec<&'static str> {
+        let mut missing = Vec::new();
+        if self.local_cohort.is_none() {
+            missing.push("local_cohort");
+        }
+        if self.worker_to_cohort_map.is_empty() {
+            missing.push("worker_to_cohort_map");
+        }
+        if self.cohort_ready_backlog.is_empty() {
+            missing.push("cohort_ready_backlog");
+        }
+        if let Some(local) = self.local_cohort {
+            if local >= self.cohort_ready_backlog.len() {
+                missing.push("local_cohort");
+            }
+        }
+        if !self.worker_to_cohort_map.is_empty()
+            && !self.cohort_ready_backlog.is_empty()
+            && self
+                .worker_to_cohort_map
+                .iter()
+                .any(|cohort| *cohort >= self.cohort_ready_backlog.len())
+        {
+            missing.push("worker_to_cohort_map");
+        }
+        missing.sort_unstable();
+        missing.dedup();
+        missing
+    }
+
+    fn remote_target(&self) -> Option<(usize, usize)> {
+        let local = self.local_cohort?;
+        self.cohort_ready_backlog
+            .iter()
+            .enumerate()
+            .filter(|(cohort, _)| *cohort != local)
+            .min_by_key(|(cohort, backlog)| (**backlog, *cohort))
+            .map(|(cohort, backlog)| (cohort, *backlog))
+    }
+}
+
+/// Flattened evidence snapshot stored in the cohort steering ledger.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CohortAdmissionSteeringEvidenceSnapshot {
+    pub local_cohort: Option<usize>,
+    pub cohort_count: usize,
+    pub worker_to_cohort_map: Vec<usize>,
+    pub cohort_ready_backlog: Vec<usize>,
+    pub topology_confidence_percent: Option<u8>,
+    pub decision_epoch: u64,
+    pub remote_spill_budget_epoch: u64,
+    pub remote_spill_budget_remaining_before: u16,
+    pub remote_spill_budget_remaining_after: u16,
+    pub consecutive_local_defers: u16,
+    pub outer_tail_risk_decision: TailRiskAdmissionDecision,
+}
+
+/// Deterministic decision ledger for cohort-aware admission steering.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CohortAdmissionSteeringLedger {
+    pub schema_version: String,
+    pub decision: CohortAdmissionSteeringDecision,
+    pub target_cohort: Option<usize>,
+    pub fallback_used: bool,
+    pub confidence_percent: u8,
+    pub reason_codes: Vec<CohortAdmissionSteeringReason>,
+    pub missing_evidence_fields: Vec<String>,
+    pub profile: CohortAdmissionSteeringProfile,
+    pub evidence: CohortAdmissionSteeringEvidenceSnapshot,
+    pub remote_spill_budget_start: u16,
+    pub remote_spill_budget_remaining: u16,
+    pub remote_spill_budget_exhausted: bool,
+    pub explanation: Vec<String>,
+}
+
+impl CohortAdmissionSteeringLedger {
+    /// Evaluate one cohort-aware placement decision.
+    #[must_use]
+    pub fn evaluate(
+        evidence: &CohortAdmissionSteeringEvidence,
+        profile: &CohortAdmissionSteeringProfile,
+    ) -> Self {
+        let normalized_budget = evidence
+            .remote_spill_budget
+            .normalized_for_epoch(profile, evidence.decision_epoch);
+        let budget_start = normalized_budget.remaining_tokens;
+        let mut budget_after = budget_start;
+        let snapshot = CohortAdmissionSteeringEvidenceSnapshot {
+            local_cohort: evidence.local_cohort,
+            cohort_count: evidence.cohort_ready_backlog.len(),
+            worker_to_cohort_map: evidence.worker_to_cohort_map.clone(),
+            cohort_ready_backlog: evidence.cohort_ready_backlog.clone(),
+            topology_confidence_percent: evidence.topology_confidence_percent,
+            decision_epoch: evidence.decision_epoch,
+            remote_spill_budget_epoch: normalized_budget.epoch,
+            remote_spill_budget_remaining_before: budget_start,
+            remote_spill_budget_remaining_after: budget_start,
+            consecutive_local_defers: evidence.consecutive_local_defers,
+            outer_tail_risk_decision: evidence.outer_tail_risk_decision,
+        };
+
+        if evidence.outer_tail_risk_decision != TailRiskAdmissionDecision::Admit {
+            return Self::finish(
+                profile,
+                snapshot,
+                CohortAdmissionSteeringDecision::Defer,
+                None,
+                false,
+                evidence.topology_confidence_percent.unwrap_or(100),
+                vec![CohortAdmissionSteeringReason::TailRiskOuterCap],
+                Vec::new(),
+                budget_start,
+                budget_after,
+                vec![format!(
+                    "tail-risk outer decision {:?} kept cohort steering from admitting new work",
+                    evidence.outer_tail_risk_decision
+                )],
+            );
+        }
+
+        if !profile.enabled {
+            return Self::finish(
+                profile,
+                snapshot,
+                CohortAdmissionSteeringDecision::AdmitLocal,
+                evidence.local_cohort,
+                true,
+                evidence.topology_confidence_percent.unwrap_or(100),
+                vec![
+                    CohortAdmissionSteeringReason::Disabled,
+                    CohortAdmissionSteeringReason::ConservativeGlobalBaseline,
+                ],
+                Vec::new(),
+                budget_start,
+                budget_after,
+                vec![
+                    "cohort steering is disabled, so the conservative global routing path stayed pinned"
+                        .to_string(),
+                ],
+            );
+        }
+
+        let missing_fields = evidence
+            .missing_fields()
+            .into_iter()
+            .map(str::to_string)
+            .collect::<Vec<_>>();
+        if !missing_fields.is_empty() {
+            return Self::finish(
+                profile,
+                snapshot,
+                CohortAdmissionSteeringDecision::AdmitLocal,
+                evidence.local_cohort,
+                true,
+                evidence.topology_confidence_percent.unwrap_or(100),
+                vec![
+                    CohortAdmissionSteeringReason::MissingTopology,
+                    CohortAdmissionSteeringReason::ConservativeGlobalBaseline,
+                ],
+                missing_fields,
+                budget_start,
+                budget_after,
+                vec![
+                    "missing or invalid worker/cohort topology kept the conservative global routing path pinned"
+                        .to_string(),
+                ],
+            );
+        }
+
+        let topology_confidence = evidence.topology_confidence_percent.unwrap_or(0).min(100);
+        if topology_confidence < profile.min_topology_confidence_percent {
+            return Self::finish(
+                profile,
+                snapshot,
+                CohortAdmissionSteeringDecision::AdmitLocal,
+                evidence.local_cohort,
+                true,
+                topology_confidence,
+                vec![
+                    CohortAdmissionSteeringReason::LowConfidenceFallback,
+                    CohortAdmissionSteeringReason::ConservativeGlobalBaseline,
+                ],
+                Vec::new(),
+                budget_start,
+                budget_after,
+                vec![format!(
+                    "topology confidence {}% stayed below the configured minimum {}%",
+                    topology_confidence, profile.min_topology_confidence_percent
+                )],
+            );
+        }
+
+        let local_cohort = evidence.local_cohort.expect("validated above");
+        let local_backlog = evidence.cohort_ready_backlog[local_cohort];
+        let fairness_triggered =
+            evidence.consecutive_local_defers >= profile.fairness_escape_after_consecutive_defers;
+
+        if local_backlog <= profile.local_ready_backlog_soft_limit {
+            return Self::finish(
+                profile,
+                snapshot,
+                CohortAdmissionSteeringDecision::AdmitLocal,
+                Some(local_cohort),
+                false,
+                topology_confidence,
+                vec![CohortAdmissionSteeringReason::LocalCapacityAvailable],
+                Vec::new(),
+                budget_start,
+                budget_after,
+                vec![format!(
+                    "local cohort {} backlog {} stayed inside the soft limit {}",
+                    local_cohort, local_backlog, profile.local_ready_backlog_soft_limit
+                )],
+            );
+        }
+
+        let Some((remote_target, remote_backlog)) = evidence.remote_target() else {
+            return Self::finish(
+                profile,
+                snapshot,
+                CohortAdmissionSteeringDecision::AdmitLocal,
+                Some(local_cohort),
+                false,
+                topology_confidence,
+                vec![CohortAdmissionSteeringReason::ConservativeGlobalBaseline],
+                Vec::new(),
+                budget_start,
+                budget_after,
+                vec![
+                    "no remote cohort candidate existed, so the conservative local placement stayed pinned"
+                        .to_string(),
+                ],
+            );
+        };
+
+        let remote_gain = local_backlog.saturating_sub(remote_backlog);
+        let remote_viable = remote_backlog <= profile.remote_ready_backlog_limit
+            && remote_gain >= profile.remote_redirect_delta_min;
+
+        if remote_viable && budget_start > 0 {
+            budget_after = normalized_budget.spend_one().remaining_tokens;
+            let mut reasons = vec![
+                CohortAdmissionSteeringReason::LocalBacklogPressure,
+                CohortAdmissionSteeringReason::RemoteSpillBudgetSpent,
+            ];
+            let mut explanation = vec![format!(
+                "redirected from local cohort {} backlog {} to remote cohort {} backlog {} with remote gain {}",
+                local_cohort, local_backlog, remote_target, remote_backlog, remote_gain
+            )];
+            if fairness_triggered {
+                reasons.push(CohortAdmissionSteeringReason::FairnessEscapeHatch);
+                explanation.push(format!(
+                    "fairness escape hatch fired after {} consecutive local defers",
+                    evidence.consecutive_local_defers
+                ));
+            }
+            return Self::finish(
+                profile,
+                snapshot,
+                CohortAdmissionSteeringDecision::RedirectRemote,
+                Some(remote_target),
+                false,
+                topology_confidence,
+                reasons,
+                Vec::new(),
+                budget_start,
+                budget_after,
+                explanation,
+            );
+        }
+
+        if remote_viable && budget_start == 0 {
+            let mut reasons = vec![CohortAdmissionSteeringReason::RemoteSpillBudgetExhausted];
+            let mut explanation = vec![format!(
+                "remote cohort {} backlog {} was viable but the epoch budget was exhausted",
+                remote_target, remote_backlog
+            )];
+            if fairness_triggered {
+                reasons.push(CohortAdmissionSteeringReason::FairnessEscapeHatch);
+                explanation.push(format!(
+                    "fairness pressure was present after {} consecutive local defers",
+                    evidence.consecutive_local_defers
+                ));
+            }
+            return Self::finish(
+                profile,
+                snapshot,
+                CohortAdmissionSteeringDecision::Defer,
+                None,
+                false,
+                topology_confidence,
+                reasons,
+                Vec::new(),
+                budget_start,
+                budget_after,
+                explanation,
+            );
+        }
+
+        Self::finish(
+            profile,
+            snapshot,
+            CohortAdmissionSteeringDecision::AdmitLocal,
+            Some(local_cohort),
+            false,
+            topology_confidence,
+            vec![CohortAdmissionSteeringReason::ConservativeGlobalBaseline],
+            Vec::new(),
+            budget_start,
+            budget_after,
+            vec![format!(
+                "remote cohort {} backlog {} did not beat the local cohort {} backlog {} by the configured delta {}",
+                remote_target,
+                remote_backlog,
+                local_cohort,
+                local_backlog,
+                profile.remote_redirect_delta_min
+            )],
+        )
+    }
+
+    fn finish(
+        profile: &CohortAdmissionSteeringProfile,
+        mut snapshot: CohortAdmissionSteeringEvidenceSnapshot,
+        decision: CohortAdmissionSteeringDecision,
+        target_cohort: Option<usize>,
+        fallback_used: bool,
+        confidence_percent: u8,
+        reason_codes: Vec<CohortAdmissionSteeringReason>,
+        missing_evidence_fields: Vec<String>,
+        remote_spill_budget_start: u16,
+        remote_spill_budget_remaining: u16,
+        explanation: Vec<String>,
+    ) -> Self {
+        snapshot.remote_spill_budget_remaining_after = remote_spill_budget_remaining;
+        Self {
+            schema_version: COHORT_ADMISSION_STEERING_LEDGER_SCHEMA_VERSION.to_string(),
+            decision,
+            target_cohort,
+            fallback_used,
+            confidence_percent,
+            reason_codes,
+            missing_evidence_fields,
+            profile: profile.clone(),
+            evidence: snapshot,
+            remote_spill_budget_start,
+            remote_spill_budget_remaining,
+            remote_spill_budget_exhausted: remote_spill_budget_remaining == 0,
+            explanation,
+        }
+    }
+}
+
+/// Stable version identifier for overload brownout ledgers.
+pub const OVERLOAD_BROWNOUT_LEDGER_SCHEMA_VERSION: &str = "asupersync.overload-brownout.v1";
+
+/// Optional runtime surfaces that may be degraded during overload brownout.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BrownoutOptionalSurface {
+    DetailedTracing,
+    RichDiagnostics,
+    DebugHttp,
+    RichExportFormatting,
+}
+
+/// Critical runtime surfaces that brownout must never disable.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BrownoutProtectedSurface {
+    CoreScheduling,
+    CancellationDrain,
+    RegionQuiescence,
+    ObligationCleanup,
+}
+
+/// Brownout phase for optional runtime surfaces.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OverloadBrownoutPhase {
+    Normal,
+    Observe,
+    Degrade,
+    ShedOptional,
+    Recovery,
+}
+
+impl OverloadBrownoutPhase {
+    #[must_use]
+    fn severity_rank(self) -> u8 {
+        match self {
+            Self::Normal => 0,
+            Self::Observe | Self::Recovery => 1,
+            Self::Degrade => 2,
+            Self::ShedOptional => 3,
+        }
+    }
+}
+
+/// Explicit reason codes for overload brownout decisions.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OverloadBrownoutReason {
+    Disabled,
+    MissingEvidenceFallback,
+    ObservePressure,
+    DegradePressure,
+    ShedOptionalPressure,
+    TailRiskOuterDefer,
+    TailRiskOuterShed,
+    RecoveryHysteresis,
+    PreserveCriticalSurfaces,
+    OptionalSurfaceAlreadyShedding,
+    ConservativeBaseline,
+}
+
+/// Bounded operator-tunable profile for overload brownout decisions.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OverloadBrownoutProfile {
+    pub enabled: bool,
+    pub observe_memory_pressure_bps: u16,
+    pub degrade_memory_pressure_bps: u16,
+    pub shed_optional_memory_pressure_bps: u16,
+    pub observe_wake_to_run_p99_ns: u64,
+    pub degrade_wake_to_run_p99_ns: u64,
+    pub shed_optional_wake_to_run_p99_ns: u64,
+    pub recovery_window_threshold: u8,
+    pub allowed_optional_surfaces: Vec<BrownoutOptionalSurface>,
+    pub denied_optional_surfaces: Vec<BrownoutOptionalSurface>,
+}
+
+impl Default for OverloadBrownoutProfile {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            observe_memory_pressure_bps: 7_800,
+            degrade_memory_pressure_bps: 8_600,
+            shed_optional_memory_pressure_bps: 9_300,
+            observe_wake_to_run_p99_ns: 145_000,
+            degrade_wake_to_run_p99_ns: 210_000,
+            shed_optional_wake_to_run_p99_ns: 285_000,
+            recovery_window_threshold: 2,
+            allowed_optional_surfaces: vec![
+                BrownoutOptionalSurface::DetailedTracing,
+                BrownoutOptionalSurface::RichDiagnostics,
+                BrownoutOptionalSurface::DebugHttp,
+                BrownoutOptionalSurface::RichExportFormatting,
+            ],
+            denied_optional_surfaces: Vec::new(),
+        }
+    }
+}
+
+impl OverloadBrownoutProfile {
+    /// Return the deduplicated, denylist-filtered optional surfaces.
+    #[must_use]
+    pub fn effective_optional_surfaces(&self) -> Vec<BrownoutOptionalSurface> {
+        let mut effective = Vec::new();
+        for surface in &self.allowed_optional_surfaces {
+            if self.denied_optional_surfaces.contains(surface) || effective.contains(surface) {
+                continue;
+            }
+            effective.push(*surface);
+        }
+        effective
+    }
+
+    fn surfaces_for_phase(&self, phase: OverloadBrownoutPhase) -> Vec<BrownoutOptionalSurface> {
+        let effective = self.effective_optional_surfaces();
+        let wanted = match phase {
+            OverloadBrownoutPhase::Normal => Vec::new(),
+            OverloadBrownoutPhase::Observe | OverloadBrownoutPhase::Recovery => {
+                vec![BrownoutOptionalSurface::RichExportFormatting]
+            }
+            OverloadBrownoutPhase::Degrade => vec![
+                BrownoutOptionalSurface::RichExportFormatting,
+                BrownoutOptionalSurface::RichDiagnostics,
+            ],
+            OverloadBrownoutPhase::ShedOptional => effective.clone(),
+        };
+        wanted
+            .into_iter()
+            .filter(|surface| effective.contains(surface))
+            .collect()
+    }
+}
+
+/// Evidence vector for overload brownout decisions.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OverloadBrownoutEvidence {
+    pub scheduler: Option<SchedulerEvidenceMetrics>,
+    /// Memory pressure in basis points, where `10_000` represents 100%.
+    pub memory_pressure_bps: Option<u16>,
+    pub degradation_level: DegradationLevel,
+    pub outer_tail_risk_decision: TailRiskAdmissionDecision,
+    pub previous_phase: OverloadBrownoutPhase,
+    pub recovery_streak_windows: u8,
+    pub already_shed_surfaces: Vec<BrownoutOptionalSurface>,
+}
+
+impl OverloadBrownoutEvidence {
+    fn missing_fields(&self) -> Vec<&'static str> {
+        let mut missing = Vec::new();
+        if self.scheduler.is_none() {
+            missing.push("scheduler_metrics");
+        }
+        match self.memory_pressure_bps {
+            Some(value) if value <= 10_000 => {}
+            Some(_) | None => missing.push("memory_pressure_bps"),
+        }
+        missing
+    }
+}
+
+/// Flattened evidence snapshot stored in the overload brownout ledger.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OverloadBrownoutEvidenceSnapshot {
+    pub wake_to_run_p99_ns: Option<u64>,
+    pub queue_residency_p99_ns: Option<u64>,
+    pub ready_backlog_p99: Option<usize>,
+    pub cancel_debt_p99: Option<usize>,
+    pub memory_pressure_bps: Option<u16>,
+    pub degradation_level: DegradationLevel,
+    pub outer_tail_risk_decision: TailRiskAdmissionDecision,
+    pub previous_phase: OverloadBrownoutPhase,
+    pub recovery_streak_before: u8,
+    pub already_shed_surfaces: Vec<BrownoutOptionalSurface>,
+}
+
+/// Deterministic decision ledger for overload brownout.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OverloadBrownoutLedger {
+    pub schema_version: String,
+    pub phase: OverloadBrownoutPhase,
+    pub fallback_used: bool,
+    pub reason_codes: Vec<OverloadBrownoutReason>,
+    pub missing_evidence_fields: Vec<String>,
+    pub profile: OverloadBrownoutProfile,
+    pub evidence: OverloadBrownoutEvidenceSnapshot,
+    pub requested_degraded_surfaces: Vec<BrownoutOptionalSurface>,
+    pub newly_degraded_surfaces: Vec<BrownoutOptionalSurface>,
+    pub already_shed_surfaces: Vec<BrownoutOptionalSurface>,
+    pub restored_surfaces: Vec<BrownoutOptionalSurface>,
+    pub preserved_surfaces: Vec<BrownoutProtectedSurface>,
+    pub recovery_streak_after: u8,
+    pub explanation: Vec<String>,
+}
+
+impl OverloadBrownoutLedger {
+    /// Evaluate one overload brownout decision.
+    #[must_use]
+    pub fn evaluate(
+        evidence: &OverloadBrownoutEvidence,
+        profile: &OverloadBrownoutProfile,
+    ) -> Self {
+        let snapshot = OverloadBrownoutEvidenceSnapshot {
+            wake_to_run_p99_ns: evidence
+                .scheduler
+                .as_ref()
+                .map(|metrics| metrics.wake_to_run_p99_ns),
+            queue_residency_p99_ns: evidence
+                .scheduler
+                .as_ref()
+                .map(|metrics| metrics.queue_residency_p99_ns),
+            ready_backlog_p99: evidence
+                .scheduler
+                .as_ref()
+                .map(|metrics| metrics.ready_backlog_p99),
+            cancel_debt_p99: evidence
+                .scheduler
+                .as_ref()
+                .map(|metrics| metrics.cancel_debt_p99),
+            memory_pressure_bps: evidence.memory_pressure_bps,
+            degradation_level: evidence.degradation_level,
+            outer_tail_risk_decision: evidence.outer_tail_risk_decision,
+            previous_phase: evidence.previous_phase,
+            recovery_streak_before: evidence.recovery_streak_windows,
+            already_shed_surfaces: evidence.already_shed_surfaces.clone(),
+        };
+
+        if !profile.enabled {
+            return Self::finish(
+                profile,
+                snapshot,
+                OverloadBrownoutPhase::Normal,
+                true,
+                vec![
+                    OverloadBrownoutReason::Disabled,
+                    OverloadBrownoutReason::ConservativeBaseline,
+                ],
+                Vec::new(),
+                Vec::new(),
+                0,
+                vec!["brownout is disabled, so optional surfaces stayed fully enabled".to_string()],
+            );
+        }
+
+        let missing_fields = evidence
+            .missing_fields()
+            .into_iter()
+            .map(str::to_string)
+            .collect::<Vec<_>>();
+        if !missing_fields.is_empty() {
+            let conservative_phase = Self::conservative_phase(evidence);
+            return Self::finish(
+                profile,
+                snapshot,
+                conservative_phase,
+                true,
+                vec![
+                    OverloadBrownoutReason::MissingEvidenceFallback,
+                    OverloadBrownoutReason::PreserveCriticalSurfaces,
+                ],
+                missing_fields,
+                Vec::new(),
+                evidence.recovery_streak_windows,
+                vec![
+                    "incomplete evidence kept brownout on a conservative degradation-band comparator"
+                        .to_string(),
+                ],
+            );
+        }
+
+        let scheduler = evidence.scheduler.as_ref().expect("validated above");
+        let memory_pressure = evidence.memory_pressure_bps.expect("validated above");
+        let mut raw_phase = OverloadBrownoutPhase::Normal;
+        let mut reason_codes = vec![OverloadBrownoutReason::PreserveCriticalSurfaces];
+        let mut explanation = vec![
+            "core scheduling, cancellation drain, region quiescence, and obligation cleanup stay preserved in every brownout phase".to_string(),
+        ];
+
+        if memory_pressure >= profile.observe_memory_pressure_bps
+            || scheduler.wake_to_run_p99_ns >= profile.observe_wake_to_run_p99_ns
+            || evidence.degradation_level >= DegradationLevel::Light
+        {
+            raw_phase = OverloadBrownoutPhase::Observe;
+            reason_codes.push(OverloadBrownoutReason::ObservePressure);
+            explanation.push(format!(
+                "observe threshold crossed: wake_to_run p99={}ns, memory={}bps",
+                scheduler.wake_to_run_p99_ns, memory_pressure
+            ));
+        }
+
+        if memory_pressure >= profile.degrade_memory_pressure_bps
+            || scheduler.wake_to_run_p99_ns >= profile.degrade_wake_to_run_p99_ns
+            || evidence.degradation_level >= DegradationLevel::Moderate
+            || evidence.outer_tail_risk_decision == TailRiskAdmissionDecision::Defer
+        {
+            raw_phase = OverloadBrownoutPhase::Degrade;
+            reason_codes.push(OverloadBrownoutReason::DegradePressure);
+            explanation.push(format!(
+                "degrade threshold crossed: wake_to_run p99={}ns, memory={}bps, outer={:?}",
+                scheduler.wake_to_run_p99_ns, memory_pressure, evidence.outer_tail_risk_decision
+            ));
+        }
+
+        if memory_pressure >= profile.shed_optional_memory_pressure_bps
+            || scheduler.wake_to_run_p99_ns >= profile.shed_optional_wake_to_run_p99_ns
+            || evidence.degradation_level >= DegradationLevel::Heavy
+            || evidence.outer_tail_risk_decision == TailRiskAdmissionDecision::Shed
+        {
+            raw_phase = OverloadBrownoutPhase::ShedOptional;
+            reason_codes.push(OverloadBrownoutReason::ShedOptionalPressure);
+            explanation.push(format!(
+                "optional-shed threshold crossed: wake_to_run p99={}ns, memory={}bps, outer={:?}",
+                scheduler.wake_to_run_p99_ns, memory_pressure, evidence.outer_tail_risk_decision
+            ));
+        }
+
+        if evidence.outer_tail_risk_decision == TailRiskAdmissionDecision::Defer {
+            reason_codes.push(OverloadBrownoutReason::TailRiskOuterDefer);
+        }
+        if evidence.outer_tail_risk_decision == TailRiskAdmissionDecision::Shed {
+            reason_codes.push(OverloadBrownoutReason::TailRiskOuterShed);
+        }
+
+        let mut phase = raw_phase;
+        let mut recovery_streak_after = 0;
+        if raw_phase.severity_rank() < evidence.previous_phase.severity_rank()
+            && evidence.previous_phase != OverloadBrownoutPhase::Normal
+        {
+            recovery_streak_after = evidence.recovery_streak_windows.saturating_add(1);
+            if recovery_streak_after < profile.recovery_window_threshold {
+                phase = OverloadBrownoutPhase::Recovery;
+                reason_codes.push(OverloadBrownoutReason::RecoveryHysteresis);
+                explanation.push(format!(
+                    "recovery hysteresis kept one brownout window active ({}/{})",
+                    recovery_streak_after, profile.recovery_window_threshold
+                ));
+            } else {
+                recovery_streak_after = 0;
+                explanation.push(format!(
+                    "recovery hysteresis satisfied after {} windows",
+                    profile.recovery_window_threshold
+                ));
+            }
+        }
+
+        let previous_requested = profile.surfaces_for_phase(evidence.previous_phase);
+        let requested = profile.surfaces_for_phase(phase);
+        let already_shed = requested
+            .iter()
+            .copied()
+            .filter(|surface| evidence.already_shed_surfaces.contains(surface))
+            .collect::<Vec<_>>();
+        let newly_degraded = requested
+            .iter()
+            .copied()
+            .filter(|surface| !evidence.already_shed_surfaces.contains(surface))
+            .collect::<Vec<_>>();
+        if !already_shed.is_empty() {
+            reason_codes.push(OverloadBrownoutReason::OptionalSurfaceAlreadyShedding);
+            explanation.push(format!(
+                "{} optional surface(s) were already shedding locally and were not double-counted",
+                already_shed.len()
+            ));
+        }
+        let restored = previous_requested
+            .iter()
+            .copied()
+            .filter(|surface| !requested.contains(surface))
+            .collect::<Vec<_>>();
+
+        Self {
+            schema_version: OVERLOAD_BROWNOUT_LEDGER_SCHEMA_VERSION.to_string(),
+            phase,
+            fallback_used: false,
+            reason_codes,
+            missing_evidence_fields: Vec::new(),
+            profile: profile.clone(),
+            evidence: snapshot,
+            requested_degraded_surfaces: requested,
+            newly_degraded_surfaces: newly_degraded,
+            already_shed_surfaces: already_shed,
+            restored_surfaces: restored,
+            preserved_surfaces: vec![
+                BrownoutProtectedSurface::CoreScheduling,
+                BrownoutProtectedSurface::CancellationDrain,
+                BrownoutProtectedSurface::RegionQuiescence,
+                BrownoutProtectedSurface::ObligationCleanup,
+            ],
+            recovery_streak_after,
+            explanation,
+        }
+    }
+
+    fn conservative_phase(evidence: &OverloadBrownoutEvidence) -> OverloadBrownoutPhase {
+        match evidence.outer_tail_risk_decision {
+            TailRiskAdmissionDecision::Shed => OverloadBrownoutPhase::ShedOptional,
+            TailRiskAdmissionDecision::Defer => OverloadBrownoutPhase::Degrade,
+            TailRiskAdmissionDecision::Admit => match evidence.degradation_level {
+                DegradationLevel::Emergency | DegradationLevel::Heavy => {
+                    OverloadBrownoutPhase::ShedOptional
+                }
+                DegradationLevel::Moderate => OverloadBrownoutPhase::Degrade,
+                DegradationLevel::Light => OverloadBrownoutPhase::Observe,
+                DegradationLevel::None => OverloadBrownoutPhase::Normal,
+            },
+        }
+    }
+
+    fn finish(
+        profile: &OverloadBrownoutProfile,
+        snapshot: OverloadBrownoutEvidenceSnapshot,
+        phase: OverloadBrownoutPhase,
+        fallback_used: bool,
+        reason_codes: Vec<OverloadBrownoutReason>,
+        missing_evidence_fields: Vec<String>,
+        restored_surfaces: Vec<BrownoutOptionalSurface>,
+        recovery_streak_after: u8,
+        explanation: Vec<String>,
+    ) -> Self {
+        let requested = profile.surfaces_for_phase(phase);
+        Self {
+            schema_version: OVERLOAD_BROWNOUT_LEDGER_SCHEMA_VERSION.to_string(),
+            phase,
+            fallback_used,
+            reason_codes,
+            missing_evidence_fields,
+            profile: profile.clone(),
+            evidence: snapshot,
+            requested_degraded_surfaces: requested.clone(),
+            newly_degraded_surfaces: requested,
+            already_shed_surfaces: Vec::new(),
+            restored_surfaces,
+            preserved_surfaces: vec![
+                BrownoutProtectedSurface::CoreScheduling,
+                BrownoutProtectedSurface::CancellationDrain,
+                BrownoutProtectedSurface::RegionQuiescence,
+                BrownoutProtectedSurface::ObligationCleanup,
+            ],
+            recovery_streak_after,
+            explanation,
+        }
+    }
+}
+
 fn cycle_overhead_percentage(elapsed: Duration, interval: Duration) -> f64 {
     let interval_nanos = interval.as_nanos();
     if interval_nanos == 0 {
@@ -2836,5 +3750,1077 @@ mod tests {
         );
         println!("TAIL_RISK_ADMISSION_REPORT_JSON_END");
         crate::test_complete!("tail_risk_admission_smoke_contract_emits_report");
+    }
+
+    fn sample_cohort_steering_evidence() -> CohortAdmissionSteeringEvidence {
+        CohortAdmissionSteeringEvidence {
+            local_cohort: Some(0),
+            worker_to_cohort_map: vec![0, 0, 1, 1],
+            cohort_ready_backlog: vec![228, 96],
+            topology_confidence_percent: Some(88),
+            remote_spill_budget: CohortRemoteSpillBudgetState::new(7, 2),
+            decision_epoch: 7,
+            consecutive_local_defers: 1,
+            outer_tail_risk_decision: TailRiskAdmissionDecision::Admit,
+        }
+    }
+
+    #[test]
+    fn cohort_remote_spill_budget_resets_by_epoch_and_saturates() {
+        let profile = CohortAdmissionSteeringProfile {
+            remote_spill_budget_per_epoch: 2,
+            ..CohortAdmissionSteeringProfile::default()
+        };
+        let same_epoch = CohortRemoteSpillBudgetState::new(4, 9).normalized_for_epoch(&profile, 4);
+        assert_eq!(same_epoch.remaining_tokens, 2);
+        let next_epoch = same_epoch.normalized_for_epoch(&profile, 5);
+        assert_eq!(next_epoch.epoch, 5);
+        assert_eq!(next_epoch.remaining_tokens, 2);
+        assert_eq!(next_epoch.spend_one().remaining_tokens, 1);
+        assert_eq!(
+            CohortRemoteSpillBudgetState::new(5, 0)
+                .spend_one()
+                .remaining_tokens,
+            0
+        );
+    }
+
+    #[test]
+    fn cohort_admission_steering_falls_back_when_topology_is_missing() {
+        let ledger = CohortAdmissionSteeringLedger::evaluate(
+            &CohortAdmissionSteeringEvidence {
+                local_cohort: None,
+                worker_to_cohort_map: Vec::new(),
+                cohort_ready_backlog: Vec::new(),
+                topology_confidence_percent: Some(90),
+                remote_spill_budget: CohortRemoteSpillBudgetState::new(3, 2),
+                decision_epoch: 3,
+                consecutive_local_defers: 0,
+                outer_tail_risk_decision: TailRiskAdmissionDecision::Admit,
+            },
+            &CohortAdmissionSteeringProfile::default(),
+        );
+        assert!(ledger.fallback_used);
+        assert_eq!(ledger.decision, CohortAdmissionSteeringDecision::AdmitLocal);
+        assert!(
+            ledger
+                .reason_codes
+                .contains(&CohortAdmissionSteeringReason::MissingTopology)
+        );
+        assert_eq!(
+            ledger.missing_evidence_fields,
+            vec![
+                "cohort_ready_backlog".to_string(),
+                "local_cohort".to_string(),
+                "worker_to_cohort_map".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn cohort_admission_steering_validates_worker_to_cohort_map() {
+        let ledger = CohortAdmissionSteeringLedger::evaluate(
+            &CohortAdmissionSteeringEvidence {
+                worker_to_cohort_map: vec![0, 2],
+                cohort_ready_backlog: vec![144, 96],
+                ..sample_cohort_steering_evidence()
+            },
+            &CohortAdmissionSteeringProfile::default(),
+        );
+        assert!(ledger.fallback_used);
+        assert_eq!(ledger.decision, CohortAdmissionSteeringDecision::AdmitLocal);
+        assert_eq!(
+            ledger.missing_evidence_fields,
+            vec!["worker_to_cohort_map".to_string()]
+        );
+    }
+
+    #[test]
+    fn cohort_admission_steering_falls_back_when_confidence_is_low() {
+        let ledger = CohortAdmissionSteeringLedger::evaluate(
+            &CohortAdmissionSteeringEvidence {
+                topology_confidence_percent: Some(42),
+                ..sample_cohort_steering_evidence()
+            },
+            &CohortAdmissionSteeringProfile::default(),
+        );
+        assert!(ledger.fallback_used);
+        assert_eq!(ledger.decision, CohortAdmissionSteeringDecision::AdmitLocal);
+        assert!(
+            ledger
+                .reason_codes
+                .contains(&CohortAdmissionSteeringReason::LowConfidenceFallback)
+        );
+    }
+
+    #[test]
+    fn cohort_admission_steering_respects_outer_tail_risk_cap() {
+        let ledger = CohortAdmissionSteeringLedger::evaluate(
+            &CohortAdmissionSteeringEvidence {
+                outer_tail_risk_decision: TailRiskAdmissionDecision::Defer,
+                ..sample_cohort_steering_evidence()
+            },
+            &CohortAdmissionSteeringProfile::default(),
+        );
+        assert_eq!(ledger.decision, CohortAdmissionSteeringDecision::Defer);
+        assert!(!ledger.fallback_used);
+        assert_eq!(
+            ledger.reason_codes,
+            vec![CohortAdmissionSteeringReason::TailRiskOuterCap]
+        );
+        assert_eq!(ledger.remote_spill_budget_remaining, 2);
+    }
+
+    #[test]
+    fn cohort_admission_steering_redirects_remote_and_spends_budget() {
+        let ledger = CohortAdmissionSteeringLedger::evaluate(
+            &sample_cohort_steering_evidence(),
+            &CohortAdmissionSteeringProfile::default(),
+        );
+        assert_eq!(
+            ledger.decision,
+            CohortAdmissionSteeringDecision::RedirectRemote
+        );
+        assert_eq!(ledger.target_cohort, Some(1));
+        assert_eq!(ledger.remote_spill_budget_start, 2);
+        assert_eq!(ledger.remote_spill_budget_remaining, 1);
+        assert!(
+            ledger
+                .reason_codes
+                .contains(&CohortAdmissionSteeringReason::RemoteSpillBudgetSpent)
+        );
+    }
+
+    #[test]
+    fn cohort_admission_steering_triggers_fairness_escape_hatch() {
+        let profile = CohortAdmissionSteeringProfile {
+            fairness_escape_after_consecutive_defers: 2,
+            ..CohortAdmissionSteeringProfile::default()
+        };
+        let ledger = CohortAdmissionSteeringLedger::evaluate(
+            &CohortAdmissionSteeringEvidence {
+                consecutive_local_defers: 2,
+                ..sample_cohort_steering_evidence()
+            },
+            &profile,
+        );
+        assert_eq!(
+            ledger.decision,
+            CohortAdmissionSteeringDecision::RedirectRemote
+        );
+        assert!(
+            ledger
+                .reason_codes
+                .contains(&CohortAdmissionSteeringReason::FairnessEscapeHatch)
+        );
+    }
+
+    #[test]
+    fn cohort_admission_steering_defers_when_budget_is_exhausted() {
+        let ledger = CohortAdmissionSteeringLedger::evaluate(
+            &CohortAdmissionSteeringEvidence {
+                remote_spill_budget: CohortRemoteSpillBudgetState::new(7, 0),
+                consecutive_local_defers: 4,
+                ..sample_cohort_steering_evidence()
+            },
+            &CohortAdmissionSteeringProfile::default(),
+        );
+        assert_eq!(ledger.decision, CohortAdmissionSteeringDecision::Defer);
+        assert!(ledger.remote_spill_budget_exhausted);
+        assert!(
+            ledger
+                .reason_codes
+                .contains(&CohortAdmissionSteeringReason::RemoteSpillBudgetExhausted)
+        );
+    }
+
+    #[test]
+    fn cohort_admission_steering_disabled_mode_matches_conservative_global() {
+        let profile = CohortAdmissionSteeringProfile {
+            enabled: false,
+            ..CohortAdmissionSteeringProfile::default()
+        };
+        let ledger =
+            CohortAdmissionSteeringLedger::evaluate(&sample_cohort_steering_evidence(), &profile);
+        assert!(ledger.fallback_used);
+        assert_eq!(ledger.decision, CohortAdmissionSteeringDecision::AdmitLocal);
+        assert_eq!(ledger.target_cohort, Some(0));
+        assert!(
+            ledger
+                .reason_codes
+                .contains(&CohortAdmissionSteeringReason::Disabled)
+        );
+    }
+
+    #[test]
+    fn cohort_admission_steering_ledger_round_trips_through_json() {
+        let ledger = CohortAdmissionSteeringLedger::evaluate(
+            &sample_cohort_steering_evidence(),
+            &CohortAdmissionSteeringProfile::default(),
+        );
+        let json = serde_json::to_string_pretty(&ledger).expect("serialize cohort ledger");
+        let reparsed: CohortAdmissionSteeringLedger =
+            serde_json::from_str(&json).expect("deserialize cohort ledger");
+        assert_eq!(reparsed, ledger);
+    }
+
+    fn sample_brownout_evidence() -> OverloadBrownoutEvidence {
+        OverloadBrownoutEvidence {
+            scheduler: Some(SchedulerEvidenceMetrics {
+                wake_to_run_p50_ns: 8_000,
+                wake_to_run_p95_ns: 120_000,
+                wake_to_run_p99_ns: 236_000,
+                queue_residency_p50_ns: 18_000,
+                queue_residency_p95_ns: 180_000,
+                queue_residency_p99_ns: 310_000,
+                ready_backlog_p95: 164,
+                ready_backlog_p99: 224,
+                cancel_debt_p95: 28,
+                cancel_debt_p99: 44,
+                remote_steal_ratio_pct: Some(18),
+                cross_cohort_wake_p99_ns: Some(148_000),
+            }),
+            memory_pressure_bps: Some(8_820),
+            degradation_level: DegradationLevel::Moderate,
+            outer_tail_risk_decision: TailRiskAdmissionDecision::Defer,
+            previous_phase: OverloadBrownoutPhase::Observe,
+            recovery_streak_windows: 0,
+            already_shed_surfaces: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn overload_brownout_effective_optional_surfaces_dedupes_and_filters_denied() {
+        let profile = OverloadBrownoutProfile {
+            allowed_optional_surfaces: vec![
+                BrownoutOptionalSurface::DetailedTracing,
+                BrownoutOptionalSurface::RichDiagnostics,
+                BrownoutOptionalSurface::DetailedTracing,
+                BrownoutOptionalSurface::RichExportFormatting,
+            ],
+            denied_optional_surfaces: vec![BrownoutOptionalSurface::RichDiagnostics],
+            ..OverloadBrownoutProfile::default()
+        };
+        assert_eq!(
+            profile.effective_optional_surfaces(),
+            vec![
+                BrownoutOptionalSurface::DetailedTracing,
+                BrownoutOptionalSurface::RichExportFormatting,
+            ]
+        );
+    }
+
+    #[test]
+    fn overload_brownout_disabled_mode_matches_normal() {
+        let profile = OverloadBrownoutProfile {
+            enabled: false,
+            ..OverloadBrownoutProfile::default()
+        };
+        let ledger = OverloadBrownoutLedger::evaluate(&sample_brownout_evidence(), &profile);
+        assert!(ledger.fallback_used);
+        assert_eq!(ledger.phase, OverloadBrownoutPhase::Normal);
+        assert!(ledger.requested_degraded_surfaces.is_empty());
+        assert!(
+            ledger
+                .reason_codes
+                .contains(&OverloadBrownoutReason::Disabled)
+        );
+    }
+
+    #[test]
+    fn overload_brownout_falls_back_when_evidence_is_missing() {
+        let ledger = OverloadBrownoutLedger::evaluate(
+            &OverloadBrownoutEvidence {
+                scheduler: None,
+                memory_pressure_bps: Some(7_900),
+                degradation_level: DegradationLevel::Light,
+                outer_tail_risk_decision: TailRiskAdmissionDecision::Admit,
+                previous_phase: OverloadBrownoutPhase::Normal,
+                recovery_streak_windows: 0,
+                already_shed_surfaces: Vec::new(),
+            },
+            &OverloadBrownoutProfile::default(),
+        );
+        assert!(ledger.fallback_used);
+        assert_eq!(ledger.phase, OverloadBrownoutPhase::Observe);
+        assert_eq!(
+            ledger.missing_evidence_fields,
+            vec!["scheduler_metrics".to_string()]
+        );
+    }
+
+    #[test]
+    fn overload_brownout_escalates_to_shed_optional_under_severe_pressure() {
+        let ledger = OverloadBrownoutLedger::evaluate(
+            &OverloadBrownoutEvidence {
+                memory_pressure_bps: Some(9_450),
+                outer_tail_risk_decision: TailRiskAdmissionDecision::Shed,
+                degradation_level: DegradationLevel::Heavy,
+                ..sample_brownout_evidence()
+            },
+            &OverloadBrownoutProfile::default(),
+        );
+        assert_eq!(ledger.phase, OverloadBrownoutPhase::ShedOptional);
+        assert!(
+            ledger
+                .requested_degraded_surfaces
+                .contains(&BrownoutOptionalSurface::DetailedTracing)
+        );
+        assert!(
+            ledger
+                .reason_codes
+                .contains(&OverloadBrownoutReason::TailRiskOuterShed)
+        );
+    }
+
+    #[test]
+    fn overload_brownout_respects_recovery_hysteresis_and_restores_surfaces() {
+        let profile = OverloadBrownoutProfile::default();
+        let ledger = OverloadBrownoutLedger::evaluate(
+            &OverloadBrownoutEvidence {
+                scheduler: Some(SchedulerEvidenceMetrics {
+                    wake_to_run_p50_ns: 7_500,
+                    wake_to_run_p95_ns: 74_000,
+                    wake_to_run_p99_ns: 118_000,
+                    queue_residency_p50_ns: 12_000,
+                    queue_residency_p95_ns: 88_000,
+                    queue_residency_p99_ns: 120_000,
+                    ready_backlog_p95: 96,
+                    ready_backlog_p99: 128,
+                    cancel_debt_p95: 12,
+                    cancel_debt_p99: 20,
+                    remote_steal_ratio_pct: Some(10),
+                    cross_cohort_wake_p99_ns: Some(92_000),
+                }),
+                memory_pressure_bps: Some(7_100),
+                degradation_level: DegradationLevel::None,
+                outer_tail_risk_decision: TailRiskAdmissionDecision::Admit,
+                previous_phase: OverloadBrownoutPhase::ShedOptional,
+                recovery_streak_windows: 0,
+                already_shed_surfaces: Vec::new(),
+            },
+            &profile,
+        );
+        assert_eq!(ledger.phase, OverloadBrownoutPhase::Recovery);
+        assert_eq!(ledger.recovery_streak_after, 1);
+        assert!(
+            ledger
+                .restored_surfaces
+                .contains(&BrownoutOptionalSurface::DetailedTracing)
+        );
+        assert!(
+            ledger
+                .reason_codes
+                .contains(&OverloadBrownoutReason::RecoveryHysteresis)
+        );
+    }
+
+    #[test]
+    fn overload_brownout_avoids_duplicate_accounting_for_self_shedding_surfaces() {
+        let ledger = OverloadBrownoutLedger::evaluate(
+            &OverloadBrownoutEvidence {
+                already_shed_surfaces: vec![BrownoutOptionalSurface::RichDiagnostics],
+                ..sample_brownout_evidence()
+            },
+            &OverloadBrownoutProfile::default(),
+        );
+        assert_eq!(ledger.phase, OverloadBrownoutPhase::Degrade);
+        assert!(
+            ledger
+                .already_shed_surfaces
+                .contains(&BrownoutOptionalSurface::RichDiagnostics)
+        );
+        assert!(
+            !ledger
+                .newly_degraded_surfaces
+                .contains(&BrownoutOptionalSurface::RichDiagnostics)
+        );
+        assert!(
+            ledger
+                .reason_codes
+                .contains(&OverloadBrownoutReason::OptionalSurfaceAlreadyShedding)
+        );
+    }
+
+    #[test]
+    fn overload_brownout_preserves_critical_surfaces() {
+        let ledger = OverloadBrownoutLedger::evaluate(
+            &sample_brownout_evidence(),
+            &OverloadBrownoutProfile::default(),
+        );
+        assert_eq!(ledger.phase, OverloadBrownoutPhase::Degrade);
+        assert_eq!(
+            ledger.preserved_surfaces,
+            vec![
+                BrownoutProtectedSurface::CoreScheduling,
+                BrownoutProtectedSurface::CancellationDrain,
+                BrownoutProtectedSurface::RegionQuiescence,
+                BrownoutProtectedSurface::ObligationCleanup,
+            ]
+        );
+    }
+
+    #[test]
+    fn overload_brownout_ledger_round_trips_through_json() {
+        let ledger = OverloadBrownoutLedger::evaluate(
+            &sample_brownout_evidence(),
+            &OverloadBrownoutProfile::default(),
+        );
+        let json = serde_json::to_string_pretty(&ledger).expect("serialize overload brownout");
+        let reparsed: OverloadBrownoutLedger =
+            serde_json::from_str(&json).expect("deserialize overload brownout");
+        assert_eq!(reparsed, ledger);
+    }
+
+    const COHORT_ADMISSION_STEERING_CONTRACT_PATH_ENV: &str =
+        "ASUPERSYNC_COHORT_ADMISSION_STEERING_CONTRACT_PATH";
+    const COHORT_ADMISSION_STEERING_SCENARIO_ENV: &str =
+        "ASUPERSYNC_COHORT_ADMISSION_STEERING_SCENARIO";
+    const COHORT_ADMISSION_STEERING_REPORT_PATH_ENV: &str =
+        "ASUPERSYNC_COHORT_ADMISSION_STEERING_REPORT_PATH";
+    const COHORT_ADMISSION_STEERING_REPORT_SCHEMA_VERSION: &str =
+        "cohort-admission-steering-report-v1";
+    const COHORT_ADMISSION_STEERING_PROJECTION_SCHEMA_VERSION: &str =
+        "cohort-admission-steering-projection-v1";
+
+    #[derive(Debug, Clone, Serialize, Deserialize)]
+    struct CohortAdmissionSteeringSmokeContract {
+        smoke_scenarios: Vec<CohortAdmissionSteeringScenario>,
+    }
+
+    #[derive(Debug, Clone, Serialize, Deserialize)]
+    struct CohortAdmissionSteeringScenario {
+        scenario_id: String,
+        description: String,
+        workload_class: String,
+        output_root: String,
+        execution_policy: String,
+        workload_seed: u64,
+        safe_fallback_profile: String,
+        expected_winner_profile: String,
+        steering_profile: CohortAdmissionSteeringProfile,
+        fixture: CohortAdmissionSteeringFixture,
+        expected_report_projection: Value,
+    }
+
+    #[derive(Debug, Clone, Serialize, Deserialize)]
+    struct CohortAdmissionSteeringFixture {
+        replay_count: usize,
+        windows: Vec<CohortAdmissionSteeringWindow>,
+    }
+
+    #[derive(Debug, Clone, Serialize, Deserialize)]
+    struct CohortAdmissionSteeringWindow {
+        window_id: String,
+        local_cohort: Option<usize>,
+        worker_to_cohort_map: Vec<usize>,
+        cohort_ready_backlog: Vec<usize>,
+        topology_confidence_percent: Option<u8>,
+        decision_epoch: u64,
+        consecutive_local_defers: u16,
+        outer_tail_risk_decision: TailRiskAdmissionDecision,
+        offered_work_units: u64,
+        local_wake_to_run_p99_ns: u64,
+        remote_wake_to_run_p99_ns: u64,
+    }
+
+    #[derive(Debug, Clone)]
+    struct CohortPlacementWindowOutcome {
+        admitted_units: u64,
+        deferred_units: u64,
+        remote_spill_count: u64,
+        latency_samples: Vec<u64>,
+    }
+
+    #[derive(Debug, Clone, Default, Serialize)]
+    struct CohortSteeringAccumulator {
+        admit_local_count: u64,
+        redirect_remote_count: u64,
+        defer_count: u64,
+        fallback_used_count: u64,
+        budget_exhausted_count: u64,
+        fairness_escape_count: u64,
+        admitted_units: u64,
+        deferred_units: u64,
+        remote_spill_count: u64,
+        latencies: Vec<u64>,
+    }
+
+    #[derive(Debug, Clone, PartialEq, Serialize)]
+    struct CohortSteeringSummary {
+        admit_local_count: u64,
+        redirect_remote_count: u64,
+        defer_count: u64,
+        fallback_used_count: u64,
+        budget_exhausted_count: u64,
+        fairness_escape_count: u64,
+        admitted_units: u64,
+        deferred_units: u64,
+        remote_spill_count: u64,
+        p50_latency_ns: u64,
+        p95_latency_ns: u64,
+        p99_latency_ns: u64,
+        max_latency_ns: u64,
+        throughput_ratio: f64,
+    }
+
+    impl CohortSteeringAccumulator {
+        fn record(
+            &mut self,
+            decision: CohortAdmissionSteeringDecision,
+            fallback_used: bool,
+            budget_exhausted: bool,
+            fairness_escape: bool,
+            outcome: &CohortPlacementWindowOutcome,
+        ) {
+            match decision {
+                CohortAdmissionSteeringDecision::AdmitLocal => self.admit_local_count += 1,
+                CohortAdmissionSteeringDecision::RedirectRemote => self.redirect_remote_count += 1,
+                CohortAdmissionSteeringDecision::Defer => self.defer_count += 1,
+            }
+            self.fallback_used_count += u64::from(fallback_used);
+            self.budget_exhausted_count += u64::from(budget_exhausted);
+            self.fairness_escape_count += u64::from(fairness_escape);
+            self.admitted_units += outcome.admitted_units;
+            self.deferred_units += outcome.deferred_units;
+            self.remote_spill_count += outcome.remote_spill_count;
+            self.latencies.extend_from_slice(&outcome.latency_samples);
+        }
+
+        fn summary(&self, total_offered_units: u64) -> CohortSteeringSummary {
+            let max_latency_ns = self.latencies.iter().copied().max().unwrap_or(0);
+            let throughput_ratio = if total_offered_units == 0 {
+                0.0
+            } else {
+                round4(self.admitted_units as f64 / total_offered_units as f64)
+            };
+            CohortSteeringSummary {
+                admit_local_count: self.admit_local_count,
+                redirect_remote_count: self.redirect_remote_count,
+                defer_count: self.defer_count,
+                fallback_used_count: self.fallback_used_count,
+                budget_exhausted_count: self.budget_exhausted_count,
+                fairness_escape_count: self.fairness_escape_count,
+                admitted_units: self.admitted_units,
+                deferred_units: self.deferred_units,
+                remote_spill_count: self.remote_spill_count,
+                p50_latency_ns: percentile_slice_u64(&self.latencies, 50, 100),
+                p95_latency_ns: percentile_slice_u64(&self.latencies, 95, 100),
+                p99_latency_ns: percentile_slice_u64(&self.latencies, 99, 100),
+                max_latency_ns,
+                throughput_ratio,
+            }
+        }
+    }
+
+    fn default_cohort_admission_steering_scenarios() -> Vec<CohortAdmissionSteeringScenario> {
+        vec![
+            CohortAdmissionSteeringScenario {
+                scenario_id: "AA-COHORT-ADMISSION-STEERING-LOCALITY-WIN-2C".to_string(),
+                description: "High-confidence two-cohort replay where the local cohort saturates, the remote cohort stays cool, and bounded redirect tokens cut wake-to-run tails versus the conservative global path.".to_string(),
+                workload_class: "locality-win".to_string(),
+                output_root: "target/cohort-admission-steering-smoke".to_string(),
+                execution_policy: "execute_or_dry_run".to_string(),
+                workload_seed: 424242,
+                safe_fallback_profile: "conservative_global".to_string(),
+                expected_winner_profile: "cohort_steered".to_string(),
+                steering_profile: CohortAdmissionSteeringProfile::default(),
+                fixture: CohortAdmissionSteeringFixture {
+                    replay_count: 2,
+                    windows: vec![
+                        CohortAdmissionSteeringWindow {
+                            window_id: "local_balanced".to_string(),
+                            local_cohort: Some(0),
+                            worker_to_cohort_map: vec![0, 0, 1, 1],
+                            cohort_ready_backlog: vec![148, 128],
+                            topology_confidence_percent: Some(90),
+                            decision_epoch: 10,
+                            consecutive_local_defers: 0,
+                            outer_tail_risk_decision: TailRiskAdmissionDecision::Admit,
+                            offered_work_units: 48,
+                            local_wake_to_run_p99_ns: 148_000,
+                            remote_wake_to_run_p99_ns: 142_000,
+                        },
+                        CohortAdmissionSteeringWindow {
+                            window_id: "local_saturated".to_string(),
+                            local_cohort: Some(0),
+                            worker_to_cohort_map: vec![0, 0, 1, 1],
+                            cohort_ready_backlog: vec![260, 84],
+                            topology_confidence_percent: Some(92),
+                            decision_epoch: 10,
+                            consecutive_local_defers: 1,
+                            outer_tail_risk_decision: TailRiskAdmissionDecision::Admit,
+                            offered_work_units: 48,
+                            local_wake_to_run_p99_ns: 236_000,
+                            remote_wake_to_run_p99_ns: 146_000,
+                        },
+                        CohortAdmissionSteeringWindow {
+                            window_id: "fairness_escape".to_string(),
+                            local_cohort: Some(0),
+                            worker_to_cohort_map: vec![0, 0, 1, 1],
+                            cohort_ready_backlog: vec![244, 96],
+                            topology_confidence_percent: Some(90),
+                            decision_epoch: 10,
+                            consecutive_local_defers: 3,
+                            outer_tail_risk_decision: TailRiskAdmissionDecision::Admit,
+                            offered_work_units: 48,
+                            local_wake_to_run_p99_ns: 228_000,
+                            remote_wake_to_run_p99_ns: 154_000,
+                        },
+                    ],
+                },
+                expected_report_projection: Value::Null,
+            },
+            CohortAdmissionSteeringScenario {
+                scenario_id: "AA-COHORT-ADMISSION-STEERING-KEEP-GLOBAL-2C".to_string(),
+                description: "Low-confidence and no-win replay that proves the controller keeps the conservative global path pinned and records an explicit safe fallback verdict.".to_string(),
+                workload_class: "keep-global".to_string(),
+                output_root: "target/cohort-admission-steering-smoke".to_string(),
+                execution_policy: "execute_or_dry_run".to_string(),
+                workload_seed: 515151,
+                safe_fallback_profile: "conservative_global".to_string(),
+                expected_winner_profile: "conservative_global".to_string(),
+                steering_profile: CohortAdmissionSteeringProfile::default(),
+                fixture: CohortAdmissionSteeringFixture {
+                    replay_count: 1,
+                    windows: vec![
+                        CohortAdmissionSteeringWindow {
+                            window_id: "low_confidence".to_string(),
+                            local_cohort: Some(0),
+                            worker_to_cohort_map: vec![0, 0, 1, 1],
+                            cohort_ready_backlog: vec![208, 198],
+                            topology_confidence_percent: Some(48),
+                            decision_epoch: 22,
+                            consecutive_local_defers: 0,
+                            outer_tail_risk_decision: TailRiskAdmissionDecision::Admit,
+                            offered_work_units: 48,
+                            local_wake_to_run_p99_ns: 204_000,
+                            remote_wake_to_run_p99_ns: 201_000,
+                        },
+                        CohortAdmissionSteeringWindow {
+                            window_id: "thin_remote_gain".to_string(),
+                            local_cohort: Some(0),
+                            worker_to_cohort_map: vec![0, 0, 1, 1],
+                            cohort_ready_backlog: vec![214, 196],
+                            topology_confidence_percent: Some(88),
+                            decision_epoch: 23,
+                            consecutive_local_defers: 1,
+                            outer_tail_risk_decision: TailRiskAdmissionDecision::Admit,
+                            offered_work_units: 48,
+                            local_wake_to_run_p99_ns: 211_000,
+                            remote_wake_to_run_p99_ns: 208_000,
+                        },
+                        CohortAdmissionSteeringWindow {
+                            window_id: "tail_risk_outer_cap".to_string(),
+                            local_cohort: Some(0),
+                            worker_to_cohort_map: vec![0, 0, 1, 1],
+                            cohort_ready_backlog: vec![228, 150],
+                            topology_confidence_percent: Some(90),
+                            decision_epoch: 24,
+                            consecutive_local_defers: 4,
+                            outer_tail_risk_decision: TailRiskAdmissionDecision::Defer,
+                            offered_work_units: 48,
+                            local_wake_to_run_p99_ns: 224_000,
+                            remote_wake_to_run_p99_ns: 176_000,
+                        },
+                    ],
+                },
+                expected_report_projection: Value::Null,
+            },
+        ]
+    }
+
+    fn load_cohort_admission_steering_scenarios() -> Vec<CohortAdmissionSteeringScenario> {
+        let Ok(path) = std::env::var(COHORT_ADMISSION_STEERING_CONTRACT_PATH_ENV) else {
+            return default_cohort_admission_steering_scenarios();
+        };
+        let contract: CohortAdmissionSteeringSmokeContract = serde_json::from_str(
+            &fs::read_to_string(Path::new(&path)).expect("read cohort admission steering contract"),
+        )
+        .expect("deserialize cohort admission steering contract");
+        contract.smoke_scenarios
+    }
+
+    fn selected_cohort_admission_steering_scenario() -> String {
+        std::env::var(COHORT_ADMISSION_STEERING_SCENARIO_ENV)
+            .unwrap_or_else(|_| "AA-COHORT-ADMISSION-STEERING-LOCALITY-WIN-2C".to_string())
+    }
+
+    fn maybe_write_cohort_admission_steering_report(path: &str, report: &Value) {
+        let path = Path::new(path);
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).expect("create cohort report parent directory");
+        }
+        fs::write(
+            path,
+            serde_json::to_string_pretty(report)
+                .expect("serialize cohort admission steering report"),
+        )
+        .expect("write cohort admission steering report");
+    }
+
+    fn conservative_global_decision(
+        window: &CohortAdmissionSteeringWindow,
+    ) -> CohortAdmissionSteeringDecision {
+        if window.outer_tail_risk_decision == TailRiskAdmissionDecision::Admit {
+            CohortAdmissionSteeringDecision::AdmitLocal
+        } else {
+            CohortAdmissionSteeringDecision::Defer
+        }
+    }
+
+    fn simulate_cohort_window_outcome(
+        decision: CohortAdmissionSteeringDecision,
+        target_cohort: Option<usize>,
+        window: &CohortAdmissionSteeringWindow,
+        replay_index: usize,
+    ) -> CohortPlacementWindowOutcome {
+        let offered = window.offered_work_units;
+        let local_cohort = window.local_cohort.unwrap_or(0);
+        let local_backlog_usize = window
+            .cohort_ready_backlog
+            .get(local_cohort)
+            .copied()
+            .unwrap_or(0);
+        let local_backlog = local_backlog_usize as u64;
+        let best_remote_backlog = window
+            .cohort_ready_backlog
+            .iter()
+            .enumerate()
+            .filter(|(cohort, _)| *cohort != local_cohort)
+            .map(|(_, backlog)| *backlog)
+            .min()
+            .unwrap_or(local_backlog_usize) as u64;
+        let remote_backlog = target_cohort
+            .and_then(|cohort| window.cohort_ready_backlog.get(cohort).copied())
+            .unwrap_or(best_remote_backlog as usize) as u64;
+        let backlog_gap = local_backlog.saturating_sub(best_remote_backlog);
+
+        let (
+            admitted_units,
+            deferred_units,
+            remote_spill_count,
+            p99_base,
+            overload_multiplier,
+            decision_penalty,
+        ) = match decision {
+            CohortAdmissionSteeringDecision::AdmitLocal => (
+                offered,
+                0,
+                backlog_gap.saturating_div(40),
+                window.local_wake_to_run_p99_ns,
+                1_350,
+                21_000 + backlog_gap.saturating_mul(320),
+            ),
+            CohortAdmissionSteeringDecision::RedirectRemote => (
+                offered,
+                0,
+                1,
+                window.remote_wake_to_run_p99_ns,
+                780,
+                13_500 + remote_backlog.saturating_mul(110),
+            ),
+            CohortAdmissionSteeringDecision::Defer => (
+                offered.saturating_mul(82).saturating_div(100),
+                offered.saturating_sub(offered.saturating_mul(82).saturating_div(100)),
+                0,
+                window.local_wake_to_run_p99_ns.saturating_sub(18_000),
+                620,
+                9_500,
+            ),
+        };
+
+        let backlog_source = match decision {
+            CohortAdmissionSteeringDecision::RedirectRemote => remote_backlog,
+            CohortAdmissionSteeringDecision::AdmitLocal
+            | CohortAdmissionSteeringDecision::Defer => local_backlog,
+        };
+
+        let base_latency = p99_base
+            .saturating_div(2)
+            .saturating_add(backlog_source.saturating_mul(overload_multiplier))
+            .saturating_add(decision_penalty);
+        let mut latency_samples = Vec::with_capacity(admitted_units as usize);
+        for sample_idx in 0..admitted_units {
+            let jitter = ((replay_index as u64 * 23) + (sample_idx % 17) * 11).saturating_mul(131);
+            latency_samples.push(base_latency.saturating_add(jitter));
+        }
+
+        CohortPlacementWindowOutcome {
+            admitted_units,
+            deferred_units,
+            remote_spill_count,
+            latency_samples,
+        }
+    }
+
+    fn cohort_steering_reason_label(reason: CohortAdmissionSteeringReason) -> &'static str {
+        match reason {
+            CohortAdmissionSteeringReason::Disabled => "disabled",
+            CohortAdmissionSteeringReason::MissingTopology => "missing_topology",
+            CohortAdmissionSteeringReason::LowConfidenceFallback => "low_confidence_fallback",
+            CohortAdmissionSteeringReason::TailRiskOuterCap => "tail_risk_outer_cap",
+            CohortAdmissionSteeringReason::LocalCapacityAvailable => "local_capacity_available",
+            CohortAdmissionSteeringReason::LocalBacklogPressure => "local_backlog_pressure",
+            CohortAdmissionSteeringReason::RemoteSpillBudgetSpent => "remote_spill_budget_spent",
+            CohortAdmissionSteeringReason::RemoteSpillBudgetExhausted => {
+                "remote_spill_budget_exhausted"
+            }
+            CohortAdmissionSteeringReason::FairnessEscapeHatch => "fairness_escape_hatch",
+            CohortAdmissionSteeringReason::ConservativeGlobalBaseline => {
+                "conservative_global_baseline"
+            }
+        }
+    }
+
+    fn build_cohort_admission_steering_report(
+        scenario: &CohortAdmissionSteeringScenario,
+        include_hash_probe: bool,
+    ) -> Value {
+        let total_offered_units = scenario
+            .fixture
+            .windows
+            .iter()
+            .map(|window| window.offered_work_units)
+            .sum::<u64>()
+            .saturating_mul(scenario.fixture.replay_count as u64);
+
+        let mut steered = CohortSteeringAccumulator::default();
+        let mut conservative_global = CohortSteeringAccumulator::default();
+        let mut window_reports = Vec::new();
+        let mut decision_sequence = Vec::new();
+        let mut conservative_sequence = Vec::new();
+        let mut fallback_windows = Vec::new();
+        let mut fairness_windows = Vec::new();
+        let mut budget_start_sequence = Vec::new();
+        let mut budget_remaining_sequence = Vec::new();
+
+        let mut budget_state = CohortRemoteSpillBudgetState::new(
+            scenario
+                .fixture
+                .windows
+                .first()
+                .map_or(0, |window| window.decision_epoch),
+            scenario.steering_profile.remote_spill_budget_per_epoch,
+        );
+
+        for replay_index in 0..scenario.fixture.replay_count {
+            let mut replay_budget = budget_state;
+            for window in &scenario.fixture.windows {
+                let evidence = CohortAdmissionSteeringEvidence {
+                    local_cohort: window.local_cohort,
+                    worker_to_cohort_map: window.worker_to_cohort_map.clone(),
+                    cohort_ready_backlog: window.cohort_ready_backlog.clone(),
+                    topology_confidence_percent: window.topology_confidence_percent,
+                    remote_spill_budget: replay_budget,
+                    decision_epoch: window.decision_epoch,
+                    consecutive_local_defers: window.consecutive_local_defers,
+                    outer_tail_risk_decision: window.outer_tail_risk_decision,
+                };
+                let ledger =
+                    CohortAdmissionSteeringLedger::evaluate(&evidence, &scenario.steering_profile);
+                replay_budget = CohortRemoteSpillBudgetState::new(
+                    ledger.evidence.remote_spill_budget_epoch,
+                    ledger.remote_spill_budget_remaining,
+                );
+
+                let global_decision = conservative_global_decision(window);
+                let steered_outcome = simulate_cohort_window_outcome(
+                    ledger.decision,
+                    ledger.target_cohort,
+                    window,
+                    replay_index,
+                );
+                let global_outcome =
+                    simulate_cohort_window_outcome(global_decision, None, window, replay_index);
+
+                steered.record(
+                    ledger.decision,
+                    ledger.fallback_used,
+                    ledger
+                        .reason_codes
+                        .contains(&CohortAdmissionSteeringReason::RemoteSpillBudgetExhausted),
+                    ledger
+                        .reason_codes
+                        .contains(&CohortAdmissionSteeringReason::FairnessEscapeHatch),
+                    &steered_outcome,
+                );
+                conservative_global.record(global_decision, false, false, false, &global_outcome);
+
+                if replay_index == 0 {
+                    decision_sequence.push(format!("{:?}", ledger.decision).to_lowercase());
+                    conservative_sequence.push(format!("{:?}", global_decision).to_lowercase());
+                    budget_start_sequence.push(ledger.remote_spill_budget_start);
+                    budget_remaining_sequence.push(ledger.remote_spill_budget_remaining);
+                    if ledger.fallback_used {
+                        fallback_windows.push(window.window_id.clone());
+                    }
+                    if ledger
+                        .reason_codes
+                        .contains(&CohortAdmissionSteeringReason::FairnessEscapeHatch)
+                    {
+                        fairness_windows.push(window.window_id.clone());
+                    }
+                    window_reports.push(json!({
+                        "window_id": window.window_id,
+                        "worker_to_cohort_map": window.worker_to_cohort_map,
+                        "cohort_ready_backlog": window.cohort_ready_backlog,
+                        "topology_confidence_percent": window.topology_confidence_percent,
+                        "outer_tail_risk_decision": format!("{:?}", window.outer_tail_risk_decision).to_lowercase(),
+                        "steered": {
+                            "decision": format!("{:?}", ledger.decision).to_lowercase(),
+                            "target_cohort": ledger.target_cohort,
+                            "fallback_used": ledger.fallback_used,
+                            "confidence_percent": ledger.confidence_percent,
+                            "reason_codes": ledger.reason_codes.iter().map(|reason| cohort_steering_reason_label(*reason)).collect::<Vec<_>>(),
+                            "missing_evidence_fields": ledger.missing_evidence_fields,
+                            "remote_spill_budget_start": ledger.remote_spill_budget_start,
+                            "remote_spill_budget_remaining": ledger.remote_spill_budget_remaining,
+                            "remote_spill_budget_exhausted": ledger.remote_spill_budget_exhausted,
+                            "admitted_units": steered_outcome.admitted_units,
+                            "deferred_units": steered_outcome.deferred_units,
+                            "remote_spill_count": steered_outcome.remote_spill_count,
+                            "window_p99_ns": percentile_slice_u64(&steered_outcome.latency_samples, 99, 100),
+                        },
+                        "conservative_global": {
+                            "decision": format!("{:?}", global_decision).to_lowercase(),
+                            "admitted_units": global_outcome.admitted_units,
+                            "deferred_units": global_outcome.deferred_units,
+                            "remote_spill_count": global_outcome.remote_spill_count,
+                            "window_p99_ns": percentile_slice_u64(&global_outcome.latency_samples, 99, 100),
+                        }
+                    }));
+                }
+            }
+            budget_state = replay_budget;
+        }
+
+        let steered_summary = steered.summary(total_offered_units);
+        let conservative_summary = conservative_global.summary(total_offered_units);
+        let winner_profile = if steered_summary.p99_latency_ns < conservative_summary.p99_latency_ns
+            || (steered_summary.p99_latency_ns == conservative_summary.p99_latency_ns
+                && steered_summary.remote_spill_count < conservative_summary.remote_spill_count)
+        {
+            "cohort_steered"
+        } else {
+            scenario.safe_fallback_profile.as_str()
+        };
+        let no_win_trigger = winner_profile == scenario.safe_fallback_profile;
+        let report_projection = json!({
+            "schema_version": COHORT_ADMISSION_STEERING_PROJECTION_SCHEMA_VERSION,
+            "scenario_id": scenario.scenario_id,
+            "workload_class": scenario.workload_class,
+            "workload_seed": scenario.workload_seed,
+            "replay_count": scenario.fixture.replay_count,
+            "window_count": scenario.fixture.windows.len(),
+            "decision_sequence": decision_sequence,
+            "conservative_global_sequence": conservative_sequence,
+            "budget_start_sequence": budget_start_sequence,
+            "budget_remaining_sequence": budget_remaining_sequence,
+            "fallback_windows": fallback_windows,
+            "fairness_windows": fairness_windows,
+            "steered": {
+                "admit_local_count": steered_summary.admit_local_count,
+                "redirect_remote_count": steered_summary.redirect_remote_count,
+                "defer_count": steered_summary.defer_count,
+                "fallback_used_count": steered_summary.fallback_used_count,
+                "budget_exhausted_count": steered_summary.budget_exhausted_count,
+                "fairness_escape_count": steered_summary.fairness_escape_count,
+                "admitted_units": steered_summary.admitted_units,
+                "deferred_units": steered_summary.deferred_units,
+                "remote_spill_count": steered_summary.remote_spill_count,
+                "p95_latency_ns": steered_summary.p95_latency_ns,
+                "p99_latency_ns": steered_summary.p99_latency_ns,
+                "throughput_ratio": steered_summary.throughput_ratio
+            },
+            "conservative_global": {
+                "admit_local_count": conservative_summary.admit_local_count,
+                "redirect_remote_count": conservative_summary.redirect_remote_count,
+                "defer_count": conservative_summary.defer_count,
+                "admitted_units": conservative_summary.admitted_units,
+                "deferred_units": conservative_summary.deferred_units,
+                "remote_spill_count": conservative_summary.remote_spill_count,
+                "p95_latency_ns": conservative_summary.p95_latency_ns,
+                "p99_latency_ns": conservative_summary.p99_latency_ns,
+                "throughput_ratio": conservative_summary.throughput_ratio
+            },
+            "comparison": {
+                "p95_latency_improvement_ns": conservative_summary.p95_latency_ns.saturating_sub(steered_summary.p95_latency_ns),
+                "p99_latency_improvement_ns": conservative_summary.p99_latency_ns.saturating_sub(steered_summary.p99_latency_ns),
+                "remote_spill_reduction": conservative_summary.remote_spill_count as i64 - steered_summary.remote_spill_count as i64,
+                "throughput_delta_units": steered_summary.admitted_units as i64 - conservative_summary.admitted_units as i64,
+                "winner_profile": winner_profile,
+                "no_win_trigger": no_win_trigger,
+            }
+        });
+        let repeated_run_hash_match = if include_hash_probe {
+            let probe = build_cohort_admission_steering_report(scenario, false);
+            hash_json_value(&probe["report_projection"]) == hash_json_value(&report_projection)
+        } else {
+            true
+        };
+
+        json!({
+            "schema_version": COHORT_ADMISSION_STEERING_REPORT_SCHEMA_VERSION,
+            "scenario_id": scenario.scenario_id,
+            "description": scenario.description,
+            "workload_class": scenario.workload_class,
+            "workload_seed": scenario.workload_seed,
+            "safe_fallback_profile": scenario.safe_fallback_profile,
+            "expected_winner_profile": scenario.expected_winner_profile,
+            "steering_profile": scenario.steering_profile,
+            "report_projection": report_projection,
+            "repeated_run_hash_match": repeated_run_hash_match,
+            "steered_summary": steered_summary,
+            "conservative_global_summary": conservative_summary,
+            "window_reports": window_reports,
+            "operator_verdict": {
+                "winner_profile": winner_profile,
+                "safe_fallback_profile": scenario.safe_fallback_profile,
+                "no_win_trigger": no_win_trigger,
+                "pass": winner_profile == scenario.expected_winner_profile,
+            },
+            "expected_report_projection": scenario.expected_report_projection
+        })
+    }
+
+    #[test]
+    fn cohort_admission_steering_smoke_contract_emits_report() {
+        let scenarios = load_cohort_admission_steering_scenarios();
+        let scenario_id = selected_cohort_admission_steering_scenario();
+        let scenario = scenarios
+            .iter()
+            .find(|candidate| candidate.scenario_id == scenario_id)
+            .expect("selected cohort admission steering scenario must exist");
+        let report = build_cohort_admission_steering_report(scenario, true);
+        if !scenario.expected_report_projection.is_null() {
+            assert_eq!(
+                report["report_projection"], scenario.expected_report_projection,
+                "cohort steering smoke contract projection must stay stable"
+            );
+        }
+        assert_eq!(
+            report["repeated_run_hash_match"].as_bool(),
+            Some(true),
+            "repeated cohort steering report generation must be deterministic"
+        );
+        assert_eq!(
+            report["operator_verdict"]["pass"].as_bool(),
+            Some(true),
+            "operator verdict must agree with the expected winner profile"
+        );
+
+        if let Ok(path) = std::env::var(COHORT_ADMISSION_STEERING_REPORT_PATH_ENV) {
+            maybe_write_cohort_admission_steering_report(&path, &report);
+        }
+
+        println!("COHORT_ADMISSION_STEERING_REPORT_JSON_BEGIN");
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&report)
+                .expect("serialize cohort admission steering report")
+        );
+        println!("COHORT_ADMISSION_STEERING_REPORT_JSON_END");
+        crate::test_complete!("cohort_admission_steering_smoke_contract_emits_report");
     }
 }

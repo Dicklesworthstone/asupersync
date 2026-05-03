@@ -121,6 +121,19 @@ artifacts/*
 !artifacts/raptorq_track_e_gf256_multiscenario_refresh_v2.json
 !artifacts/raptorq_track_e_gf256_multiscenario_refresh_v3.json
 !artifacts/raptorq_track_e_gf256_multiscenario_refresh_v4.json
+!artifacts/generated_smoke_artifact_inventory_v1.json
+
+# Generated smoke-run output roots. These are retained local evidence, not
+# source artifacts; the committed inventory above records ownership/checksums.
+/.blocking-pool-affinity-smoke-artifacts/
+/.cohort-admission-steering-smoke-artifacts/
+/.decision-plane-validation-smoke-artifacts/
+/.governor-state-snapshot-smoke-artifacts/
+/.overload-brownout-smoke-artifacts/
+/.read-biased-region-snapshot-smoke-artifacts/
+/.tail-risk-admission-smoke-artifacts/
+/.trace-storage-profile-smoke-artifacts/
+/topology-smoke-out/
 
 # Insta pending snapshot files (generated when tests fail or a new
 # snapshot is recorded; awaiting `cargo insta accept` review). Never
@@ -379,3 +392,4 @@ opencode.json
 /test_obligation_results.txt
 /test_out.txt
 /test_results_all.txt
+/rust_out

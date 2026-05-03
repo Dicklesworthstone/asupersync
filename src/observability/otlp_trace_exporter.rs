@@ -10,6 +10,9 @@
 //! - Maintain FIFO export order
 //! - Background batch processing with configurable timeout
 
+use crate::runtime::resource_monitor::{
+    OverloadBrownoutLedger, OverloadBrownoutPhase, OverloadBrownoutReason,
+};
 use crossbeam_queue::ArrayQueue;
 use parking_lot::Mutex;
 use std::sync::Arc;
@@ -75,6 +78,59 @@ pub struct LoadSheddingStats {
     pub queue_capacity: usize,
     /// Total number of dropped batches.
     pub dropped_batches: u64,
+    /// Total number of spans dropped by brownout priority filtering.
+    pub brownout_dropped_spans: u64,
+    /// Total number of spans retained as summary-only evidence during brownout.
+    pub retained_summary_spans: u64,
+}
+
+/// OTLP-specific action selected from the shared brownout ledger.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OtlpBrownoutAction {
+    /// Export all sampled spans through the normal queue.
+    ExportAll,
+    /// Drop spans marked low priority before they reach the queue.
+    DropLowPriority,
+    /// Skip queueing and retain only summary accounting for sampled spans.
+    RetainSummaryOnly,
+}
+
+#[derive(Debug, Clone)]
+struct OtlpBrownoutPolicyState {
+    action: OtlpBrownoutAction,
+    shared_phase: OverloadBrownoutPhase,
+    fallback_used: bool,
+    shared_reason_codes: Vec<OverloadBrownoutReason>,
+}
+
+impl Default for OtlpBrownoutPolicyState {
+    fn default() -> Self {
+        Self {
+            action: OtlpBrownoutAction::ExportAll,
+            shared_phase: OverloadBrownoutPhase::Normal,
+            fallback_used: false,
+            shared_reason_codes: Vec::new(),
+        }
+    }
+}
+
+/// Snapshot of the current OTLP brownout-aware exporter policy.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OtlpBrownoutPolicySnapshot {
+    /// Current OTLP-specific action.
+    pub action: OtlpBrownoutAction,
+    /// Shared runtime brownout phase the exporter is following.
+    pub shared_phase: OverloadBrownoutPhase,
+    /// Whether the exporter is running in standalone fallback mode.
+    pub fallback_used: bool,
+    /// Shared brownout reason codes copied into the exporter view.
+    pub shared_reason_codes: Vec<OverloadBrownoutReason>,
+    /// Total number of spans dropped by brownout priority filtering.
+    pub brownout_dropped_spans: u64,
+    /// Total number of spans retained as summary-only evidence during brownout.
+    pub retained_summary_spans: u64,
+    /// Total number of spans dropped by queue overflow replacement.
+    pub queue_dropped_spans: u64,
 }
 
 /// Bounded export queue with oldest-drop load shedding.
@@ -277,6 +333,9 @@ pub struct LoadSheddingTraceExporter {
     export_queue: BoundedExportQueue<SpanBatch>,
     batch_timeout: Duration,
     dropped_spans_metric: Arc<AtomicU64>,
+    brownout_state: Mutex<OtlpBrownoutPolicyState>,
+    brownout_dropped_spans_metric: Arc<AtomicU64>,
+    retained_summary_spans_metric: Arc<AtomicU64>,
 }
 
 impl LoadSheddingTraceExporter {
@@ -297,6 +356,9 @@ impl LoadSheddingTraceExporter {
             export_queue: BoundedExportQueue::new(batch_capacity),
             batch_timeout,
             dropped_spans_metric: Arc::new(AtomicU64::new(0)),
+            brownout_state: Mutex::new(OtlpBrownoutPolicyState::default()),
+            brownout_dropped_spans_metric: Arc::new(AtomicU64::new(0)),
+            retained_summary_spans_metric: Arc::new(AtomicU64::new(0)),
         }
     }
 
@@ -307,6 +369,8 @@ impl LoadSheddingTraceExporter {
             queue_depth: self.export_queue.len(),
             queue_capacity: self.export_queue.capacity(),
             dropped_batches: self.export_queue.dropped_count(),
+            brownout_dropped_spans: self.brownout_dropped_spans_count(),
+            retained_summary_spans: self.retained_summary_spans_count(),
         }
     }
 
@@ -319,12 +383,83 @@ impl LoadSheddingTraceExporter {
         self.dropped_spans_metric.load(Ordering::Relaxed)
     }
 
+    /// Get the total number of spans dropped by brownout priority filtering.
+    #[must_use]
+    pub fn brownout_dropped_spans_count(&self) -> u64 {
+        self.brownout_dropped_spans_metric.load(Ordering::Relaxed)
+    }
+
+    /// Get the total number of spans retained as summary-only brownout evidence.
+    #[must_use]
+    pub fn retained_summary_spans_count(&self) -> u64 {
+        self.retained_summary_spans_metric.load(Ordering::Relaxed)
+    }
+
+    /// Update the exporter's brownout policy from the shared runtime brownout ledger.
+    ///
+    /// `None` keeps the exporter in its standalone conservative fallback path.
+    pub fn update_brownout_policy(
+        &self,
+        brownout: Option<&OverloadBrownoutLedger>,
+    ) -> OtlpBrownoutPolicySnapshot {
+        let mut state = self.brownout_state.lock();
+        match brownout {
+            Some(ledger) => {
+                state.action = Self::action_for_phase(ledger.phase);
+                state.shared_phase = ledger.phase;
+                state.fallback_used = ledger.fallback_used;
+                state.shared_reason_codes = ledger.reason_codes.clone();
+            }
+            None => {
+                state.action = OtlpBrownoutAction::ExportAll;
+                state.shared_phase = OverloadBrownoutPhase::Normal;
+                state.fallback_used = true;
+                state.shared_reason_codes.clear();
+            }
+        }
+        drop(state);
+        self.brownout_policy_snapshot()
+    }
+
+    /// Read the current brownout policy snapshot.
+    #[must_use]
+    pub fn brownout_policy_snapshot(&self) -> OtlpBrownoutPolicySnapshot {
+        let state = self.brownout_state.lock().clone();
+        OtlpBrownoutPolicySnapshot {
+            action: state.action,
+            shared_phase: state.shared_phase,
+            fallback_used: state.fallback_used,
+            shared_reason_codes: state.shared_reason_codes,
+            brownout_dropped_spans: self.brownout_dropped_spans_count(),
+            retained_summary_spans: self.retained_summary_spans_count(),
+            queue_dropped_spans: self.dropped_spans_count(),
+        }
+    }
+
+    fn action_for_phase(phase: OverloadBrownoutPhase) -> OtlpBrownoutAction {
+        match phase {
+            OverloadBrownoutPhase::Normal | OverloadBrownoutPhase::Observe => {
+                OtlpBrownoutAction::ExportAll
+            }
+            OverloadBrownoutPhase::Degrade | OverloadBrownoutPhase::Recovery => {
+                OtlpBrownoutAction::DropLowPriority
+            }
+            OverloadBrownoutPhase::ShedOptional => OtlpBrownoutAction::RetainSummaryOnly,
+        }
+    }
+
+    fn is_low_priority_span(span: &OtlpSpan) -> bool {
+        span.attributes.iter().any(|(key, value)| {
+            (key == "otlp.priority" || key == "observability.priority") && value == "low"
+        })
+    }
+
     /// Process all queued span batches (called by background export task).
     ///
     /// Returns the number of batches successfully processed.
     pub fn process_queue(&self) -> Result<usize, ExportError> {
         let mut processed = 0;
-        let mut _total_spans_processed = 0;
+        let mut total_spans_processed = 0;
 
         while let Some(batch) = self.export_queue.dequeue() {
             // Track aging of batches (warn if spans are getting stale)
@@ -342,7 +477,7 @@ impl LoadSheddingTraceExporter {
             // Export the batch
             self.inner.export(&batch)?;
             processed += 1;
-            _total_spans_processed += batch.spans.len();
+            total_spans_processed += batch.spans.len();
 
             // Apply batch timeout to prevent blocking export thread too long
             if batch.created_at.elapsed() > self.batch_timeout {
@@ -397,6 +532,29 @@ impl TraceExporter for LoadSheddingTraceExporter {
         // Skip export if no spans remain after sampling
         if sampled_spans.is_empty() {
             return Ok(());
+        }
+
+        let brownout_state = self.brownout_state.lock().clone();
+        let mut sampled_spans = sampled_spans;
+        match brownout_state.action {
+            OtlpBrownoutAction::ExportAll => {}
+            OtlpBrownoutAction::DropLowPriority => {
+                let before = sampled_spans.len();
+                sampled_spans.retain(|span| !Self::is_low_priority_span(span));
+                let dropped = (before - sampled_spans.len()) as u64;
+                if dropped > 0 {
+                    self.brownout_dropped_spans_metric
+                        .fetch_add(dropped, Ordering::Relaxed);
+                }
+                if sampled_spans.is_empty() {
+                    return Ok(());
+                }
+            }
+            OtlpBrownoutAction::RetainSummaryOnly => {
+                self.retained_summary_spans_metric
+                    .fetch_add(sampled_spans.len() as u64, Ordering::Relaxed);
+                return Ok(());
+            }
         }
 
         // Create filtered batch with only sampled spans
