@@ -13,6 +13,7 @@ use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::Arc;
+use std::time::Instant;
 
 fn sample_artifact() -> SchedulerEvidenceArtifact {
     SchedulerEvidenceArtifact {
@@ -280,6 +281,133 @@ fn runtime_scheduler_evidence_artifact_captures_live_dispatch_samples() {
         let payload =
             serde_json::to_vec_pretty(&artifact).expect("serialize runtime capture artifact");
         std::fs::write(capture_path, payload).expect("write runtime capture artifact");
+    }
+}
+
+fn measure_scheduler_evidence_overhead(
+    sample_window: usize,
+    iterations: usize,
+    ready_tasks_per_iteration: usize,
+) -> (u128, usize, usize, Option<SchedulerEvidenceArtifact>) {
+    let mut total_elapsed_ns = 0u128;
+    let mut total_drained = 0usize;
+    let mut max_artifact_bytes = 0usize;
+    let mut last_artifact = None;
+
+    for _ in 0..iterations {
+        let state = Arc::new(ContendedMutex::new("runtime_state", RuntimeState::new()));
+        let mut scheduler = ThreeLaneScheduler::new_with_cancel_limit(1, &state, 16);
+        scheduler.set_scheduler_evidence_window(sample_window);
+
+        for task in 0..ready_tasks_per_iteration as u32 {
+            scheduler.inject_ready(TaskId::new_for_test(task, 0), 50);
+        }
+
+        let started = Instant::now();
+        {
+            let worker = scheduler.worker_mut_for_test(0);
+            while worker.next_task().is_some() {
+                total_drained += 1;
+            }
+        }
+
+        if sample_window > 0 {
+            let artifact = scheduler
+                .scheduler_evidence_artifact(
+                    "overhead-capture",
+                    SchedulerWorkloadClass::MixedBurst,
+                    256,
+                )
+                .expect("enabled evidence window should emit a scheduler artifact");
+            max_artifact_bytes = max_artifact_bytes.max(
+                serde_json::to_vec(&artifact)
+                    .expect("serialize overhead artifact")
+                    .len(),
+            );
+            last_artifact = Some(artifact);
+        }
+
+        total_elapsed_ns += started.elapsed().as_nanos();
+    }
+
+    (
+        total_elapsed_ns,
+        total_drained,
+        max_artifact_bytes,
+        last_artifact,
+    )
+}
+
+#[test]
+fn runtime_scheduler_evidence_overhead_stays_bounded() {
+    const ITERATIONS: usize = 8;
+    const READY_TASKS_PER_ITERATION: usize = 4096;
+    const SAMPLE_WINDOW: usize = 256;
+    const OVERHEAD_RATIO_BUDGET: f64 = 4.0;
+
+    let (baseline_elapsed_ns, baseline_drained, _, _) =
+        measure_scheduler_evidence_overhead(0, ITERATIONS, READY_TASKS_PER_ITERATION);
+    let (evidence_elapsed_ns, evidence_drained, artifact_bytes, artifact) =
+        measure_scheduler_evidence_overhead(SAMPLE_WINDOW, ITERATIONS, READY_TASKS_PER_ITERATION);
+
+    assert_eq!(
+        baseline_drained, evidence_drained,
+        "evidence capture must not change how many ready tasks drain through the worker"
+    );
+
+    let overhead_ratio = evidence_elapsed_ns as f64 / baseline_elapsed_ns.max(1) as f64;
+    assert!(
+        overhead_ratio.is_finite(),
+        "overhead ratio must remain finite"
+    );
+    assert!(
+        overhead_ratio <= OVERHEAD_RATIO_BUDGET,
+        "scheduler evidence overhead ratio {:.3} exceeded conservative budget {:.3} (baseline={}ns evidence={}ns)",
+        overhead_ratio,
+        OVERHEAD_RATIO_BUDGET,
+        baseline_elapsed_ns,
+        evidence_elapsed_ns
+    );
+    assert!(
+        artifact_bytes <= 2_048,
+        "enabled evidence artifact should stay compact during overhead capture: {} bytes",
+        artifact_bytes
+    );
+
+    let artifact = artifact.expect("enabled capture should return an artifact");
+    let report = serde_json::json!({
+        "schema_version": "scheduler-evidence-overhead-report-v1",
+        "iterations": ITERATIONS,
+        "ready_tasks_per_iteration": READY_TASKS_PER_ITERATION,
+        "sample_window": SAMPLE_WINDOW,
+        "baseline_elapsed_ns": baseline_elapsed_ns,
+        "evidence_elapsed_ns": evidence_elapsed_ns,
+        "baseline_drained_tasks": baseline_drained,
+        "evidence_drained_tasks": evidence_drained,
+        "artifact_bytes": artifact_bytes,
+        "overhead_ratio": overhead_ratio,
+        "overhead_ratio_budget": OVERHEAD_RATIO_BUDGET,
+        "bounded_overhead": overhead_ratio <= OVERHEAD_RATIO_BUDGET,
+        "capture_notes": artifact.notes,
+    });
+
+    println!("SCHEDULER_EVIDENCE_OVERHEAD_REPORT_JSON_BEGIN");
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&report).expect("serialize overhead report")
+    );
+    println!("SCHEDULER_EVIDENCE_OVERHEAD_REPORT_JSON_END");
+
+    if let Ok(report_path) = std::env::var("ASUPERSYNC_SCHEDULER_EVIDENCE_OVERHEAD_REPORT_PATH") {
+        let report_path = Path::new(&report_path);
+        if let Some(parent) = report_path.parent() {
+            std::fs::create_dir_all(parent).expect("create overhead report directory");
+        }
+        std::fs::write(
+            report_path,
+            serde_json::to_vec_pretty(&report).expect("serialize overhead report payload"),
+        )
+        .expect("write overhead report payload");
     }
 }
 
