@@ -69,6 +69,8 @@ pub mod otlp_attribute_size_cap_audit_test;
 #[cfg(test)]
 pub mod otlp_compression_audit_test;
 #[cfg(test)]
+pub mod otlp_graceful_shutdown_audit_test;
+#[cfg(test)]
 pub mod otlp_network_partition_audit_test;
 #[cfg(test)]
 pub mod otlp_resource_attributes_inheritance_audit_test;
