@@ -58,6 +58,7 @@ pub const DEFAULT_TEST_SEED: u64 = 0xDEAD_BEEF;
 #[derive(Debug, Clone)]
 pub struct RuntimeSubscriberHandle {
     _dispatch: Arc<Dispatch>,
+    #[allow(dead_code)]
     runtime_id: String,
 }
 

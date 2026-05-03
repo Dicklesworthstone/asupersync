@@ -175,6 +175,15 @@ impl ObligationTable {
         }
     }
 
+    /// Returns the reserved obligation arena capacity.
+    #[cfg(any(test, feature = "test-internals"))]
+    #[allow(dead_code)]
+    #[inline]
+    #[must_use]
+    pub(crate) fn capacity(&self) -> usize {
+        self.obligations.capacity()
+    }
+
     /// Atomically bump the pending counters for a newly-created obligation.
     #[inline]
     fn note_pending_added(&mut self, kind: ObligationKind, reserved_at: Time) {

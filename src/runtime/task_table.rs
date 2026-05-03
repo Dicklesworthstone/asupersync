@@ -88,6 +88,15 @@ impl TaskTable {
         }
     }
 
+    /// Returns the reserved task-record arena capacity.
+    #[cfg(any(test, feature = "test-internals"))]
+    #[allow(dead_code)]
+    #[inline]
+    #[must_use]
+    pub(crate) fn capacity(&self) -> usize {
+        self.tasks.capacity()
+    }
+
     /// Returns a shared reference to a task record by arena index.
     #[inline]
     #[must_use]
