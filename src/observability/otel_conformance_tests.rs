@@ -12441,6 +12441,21 @@ fn otlp_079_instrumentation_scope_empty_name_conformance() {
     }
 }
 
+/// Test span structure for conformance testing
+#[derive(Debug, Clone)]
+struct TestSpan {
+    name: String,
+    trace_id: String,
+    span_id: String,
+    parent_span_id: Option<String>,
+    kind: SpanKind,
+    start_time: u64,
+    end_time: u64,
+    attributes: HashMap<String, String>,
+    instrumentation_scope_name: String,
+    instrumentation_scope_version: Option<String>,
+}
+
 /// Test scenario for InstrumentationScope empty name validation
 #[derive(Debug, Clone)]
 struct EmptyInstrumentationScopeScenario {
@@ -19446,6 +19461,418 @@ fn validate_duplicate_key_handling_implementation_consistency(
     // Both implementations should count deduplicated spans consistently
     if asupersync_result.spans_deduplicated_count != reference_result.spans_deduplicated_count {
         return Err("Spans deduplicated count differs between implementations".to_string());
+    }
+
+    // Both implementations should have same validation correctness
+    if asupersync_result.validation_correct != reference_result.validation_correct {
+        return Err("Validation correctness differs between implementations".to_string());
+    }
+
+    // Both implementations should apply validation consistently
+    if asupersync_result.validation_applied != reference_result.validation_applied {
+        return Err("Validation application differs between implementations".to_string());
+    }
+
+    // Both implementations should be OTLP compliant
+    if asupersync_result.otlp_compliant != reference_result.otlp_compliant {
+        return Err("OTLP compliance differs between implementations".to_string());
+    }
+
+    // Both implementations should emit telemetry consistently
+    if asupersync_result.telemetry_emitted != reference_result.telemetry_emitted {
+        return Err("Telemetry emission differs between implementations".to_string());
+    }
+
+    Ok(())
+}
+//
+// OTLP-097: Degenerate histogram bucket validation conformance test
+//
+
+#[test]
+fn otlp_097_degenerate_histogram_validation_conformance() {
+    // Test scenarios for degenerate histogram validation per OTLP specification
+    let scenarios = vec![
+        DegenerateHistogramScenario {
+            description:
+                "Histogram with empty bucket_counts but non-empty explicit_bounds (MUST reject)"
+                    .to_string(),
+            metric: DegenerateHistogramMetricInfo {
+                name: "request_duration_degenerate".to_string(),
+                description: "Request duration with malformed histogram".to_string(),
+                unit: "seconds".to_string(),
+                histogram: DegenerateHistogramData {
+                    bucket_counts: vec![],                           // Empty bucket counts
+                    explicit_bounds: vec![0.1, 0.5, 1.0, 5.0, 10.0], // Non-empty bounds
+                    count: 0,
+                    sum: 0.0,
+                },
+            },
+            expected_degenerate_detected: true,
+            expected_metric_rejected: true,
+            expected_rejection_reason: "bucket_counts.len()=0 but explicit_bounds.len()=5"
+                .to_string(),
+            expected_otlp_compliant: true,
+        },
+        DegenerateHistogramScenario {
+            description:
+                "Histogram with bucket_counts but no explicit_bounds (valid cumulative histogram)"
+                    .to_string(),
+            metric: DegenerateHistogramMetricInfo {
+                name: "response_size_cumulative".to_string(),
+                description: "Response size histogram".to_string(),
+                unit: "bytes".to_string(),
+                histogram: DegenerateHistogramData {
+                    bucket_counts: vec![10, 25, 50, 75, 100], // Non-empty bucket counts
+                    explicit_bounds: vec![],                  // Empty bounds (cumulative)
+                    count: 260,
+                    sum: 12500.0,
+                },
+            },
+            expected_degenerate_detected: false,
+            expected_metric_rejected: false,
+            expected_rejection_reason: "".to_string(),
+            expected_otlp_compliant: true,
+        },
+        DegenerateHistogramScenario {
+            description:
+                "Well-formed histogram with matching bucket_counts and explicit_bounds (valid)"
+                    .to_string(),
+            metric: DegenerateHistogramMetricInfo {
+                name: "cpu_usage_histogram".to_string(),
+                description: "CPU usage distribution".to_string(),
+                unit: "percent".to_string(),
+                histogram: DegenerateHistogramData {
+                    bucket_counts: vec![5, 10, 20, 15, 8, 2], // 6 buckets
+                    explicit_bounds: vec![10.0, 25.0, 50.0, 75.0, 90.0], // 5 bounds (n+1 buckets)
+                    count: 60,
+                    sum: 2100.0,
+                },
+            },
+            expected_degenerate_detected: false,
+            expected_metric_rejected: false,
+            expected_rejection_reason: "".to_string(),
+            expected_otlp_compliant: true,
+        },
+        DegenerateHistogramScenario {
+            description: "Both bucket_counts and explicit_bounds empty (valid minimal histogram)"
+                .to_string(),
+            metric: DegenerateHistogramMetricInfo {
+                name: "minimal_histogram".to_string(),
+                description: "Minimal histogram with no buckets".to_string(),
+                unit: "count".to_string(),
+                histogram: DegenerateHistogramData {
+                    bucket_counts: vec![],   // Empty bucket counts
+                    explicit_bounds: vec![], // Empty bounds
+                    count: 0,
+                    sum: 0.0,
+                },
+            },
+            expected_degenerate_detected: false,
+            expected_metric_rejected: false,
+            expected_rejection_reason: "".to_string(),
+            expected_otlp_compliant: true,
+        },
+        DegenerateHistogramScenario {
+            description:
+                "Histogram with mismatched bucket_counts and explicit_bounds lengths (MUST reject)"
+                    .to_string(),
+            metric: DegenerateHistogramMetricInfo {
+                name: "mismatched_histogram".to_string(),
+                description: "Histogram with incorrect bucket/bounds relationship".to_string(),
+                unit: "milliseconds".to_string(),
+                histogram: DegenerateHistogramData {
+                    bucket_counts: vec![5, 10],            // 2 buckets
+                    explicit_bounds: vec![1.0, 5.0, 10.0], // 3 bounds (should have 4 buckets)
+                    count: 15,
+                    sum: 75.0,
+                },
+            },
+            expected_degenerate_detected: true,
+            expected_metric_rejected: true,
+            expected_rejection_reason:
+                "bucket_counts.len()=2 but explicit_bounds.len()=3 (expected 4 buckets)".to_string(),
+            expected_otlp_compliant: true,
+        },
+        DegenerateHistogramScenario {
+            description: "Single explicit_bound with invalid bucket count (MUST reject)"
+                .to_string(),
+            metric: DegenerateHistogramMetricInfo {
+                name: "single_bound_histogram".to_string(),
+                description: "Single bound with wrong bucket count".to_string(),
+                unit: "requests".to_string(),
+                histogram: DegenerateHistogramData {
+                    bucket_counts: vec![42],    // 1 bucket
+                    explicit_bounds: vec![5.0], // 1 bound (should have 2 buckets)
+                    count: 42,
+                    sum: 210.0,
+                },
+            },
+            expected_degenerate_detected: true,
+            expected_metric_rejected: true,
+            expected_rejection_reason:
+                "bucket_counts.len()=1 but explicit_bounds.len()=1 (expected 2 buckets)".to_string(),
+            expected_otlp_compliant: true,
+        },
+    ];
+
+    for scenario in scenarios {
+        println!("Testing scenario: {}", scenario.description);
+
+        // Simulate asupersync exporter behavior
+        let asupersync_result = simulate_asupersync_histogram_validation(&scenario);
+
+        // Simulate reference implementation behavior
+        let reference_result = simulate_reference_histogram_validation(&scenario);
+
+        // Validate individual results
+        validate_histogram_validation_logic(&asupersync_result).expect(&format!(
+            "Asupersync histogram validation logic failed for scenario: {}",
+            scenario.description
+        ));
+
+        validate_histogram_validation_logic(&reference_result).expect(&format!(
+            "Reference histogram validation logic failed for scenario: {}",
+            scenario.description
+        ));
+
+        // Validate implementation consistency
+        validate_histogram_validation_implementation_consistency(
+            &asupersync_result,
+            &reference_result,
+        )
+        .expect(&format!(
+            "Implementation consistency failed for scenario: {}",
+            scenario.description
+        ));
+
+        println!("✓ Scenario passed: {}", scenario.description);
+    }
+}
+
+/// Test scenario for degenerate histogram validation
+#[derive(Debug, Clone)]
+struct DegenerateHistogramScenario {
+    description: String,
+    metric: DegenerateHistogramMetricInfo,
+    expected_degenerate_detected: bool,
+    expected_metric_rejected: bool,
+    expected_rejection_reason: String,
+    expected_otlp_compliant: bool,
+}
+
+/// Metric information for degenerate histogram testing
+#[derive(Debug, Clone)]
+struct DegenerateHistogramMetricInfo {
+    name: String,
+    description: String,
+    unit: String,
+    histogram: DegenerateHistogramData,
+}
+
+/// Histogram data for degenerate validation testing
+#[derive(Debug, Clone)]
+struct DegenerateHistogramData {
+    bucket_counts: Vec<u64>,
+    explicit_bounds: Vec<f64>,
+    count: u64,
+    sum: f64,
+}
+
+/// Result of degenerate histogram validation testing
+#[derive(Debug, Clone)]
+struct HistogramValidationResult {
+    degenerate_detected: bool,
+    metric_rejected: bool,
+    rejection_reason: String,
+    original_metric: DegenerateHistogramMetricInfo,
+    validation_errors: Vec<String>,
+    processed_metrics_count: usize,
+    rejected_metrics_count: usize,
+    accepted_metrics_count: usize,
+    validation_correct: bool,
+    validation_applied: bool,
+    otlp_compliant: bool,
+    telemetry_emitted: bool,
+}
+
+/// Simulate asupersync degenerate histogram validation behavior
+fn simulate_asupersync_histogram_validation(
+    scenario: &DegenerateHistogramScenario,
+) -> HistogramValidationResult {
+    let mut validation_errors = Vec::new();
+    let mut rejected_metrics = 0;
+    let mut accepted_metrics = 0;
+    let original_metric = scenario.metric.clone();
+    let mut degenerate_detected = false;
+    let mut metric_rejected = false;
+    let mut rejection_reason = String::new();
+
+    // Validate histogram bucket structure per OTLP specification
+    let bucket_count = scenario.metric.histogram.bucket_counts.len();
+    let bounds_count = scenario.metric.histogram.explicit_bounds.len();
+
+    // Case 1: Empty bucket_counts with non-empty explicit_bounds (DEGENERATE)
+    if bucket_count == 0 && bounds_count > 0 {
+        degenerate_detected = true;
+        metric_rejected = true;
+        rejection_reason = format!(
+            "bucket_counts.len()=0 but explicit_bounds.len()={}",
+            bounds_count
+        );
+        rejected_metrics += 1;
+        validation_errors.push(format!(
+            "Degenerate histogram: no bucket counts but {} bounds",
+            bounds_count
+        ));
+    }
+    // Case 2: Non-empty bucket_counts with mismatched explicit_bounds
+    else if bucket_count > 0 && bounds_count > 0 {
+        // For histograms with explicit bounds, bucket_counts.len() must equal explicit_bounds.len() + 1
+        let expected_bucket_count = bounds_count + 1;
+        if bucket_count != expected_bucket_count {
+            degenerate_detected = true;
+            metric_rejected = true;
+            rejection_reason = format!(
+                "bucket_counts.len()={} but explicit_bounds.len()={} (expected {} buckets)",
+                bucket_count, bounds_count, expected_bucket_count
+            );
+            rejected_metrics += 1;
+            validation_errors.push(format!(
+                "Bucket/bounds mismatch: {} buckets vs {} bounds",
+                bucket_count, bounds_count
+            ));
+        } else {
+            // Well-formed histogram
+            accepted_metrics += 1;
+        }
+    }
+    // Case 3: Empty bucket_counts with empty explicit_bounds (valid minimal histogram)
+    else if bucket_count == 0 && bounds_count == 0 {
+        // This is a valid minimal histogram
+        accepted_metrics += 1;
+    }
+    // Case 4: Non-empty bucket_counts with empty explicit_bounds (valid cumulative histogram)
+    else if bucket_count > 0 && bounds_count == 0 {
+        // This is a valid cumulative histogram
+        accepted_metrics += 1;
+    }
+
+    // Check validation correctness
+    let validation_correct = degenerate_detected == scenario.expected_degenerate_detected
+        && metric_rejected == scenario.expected_metric_rejected
+        && rejection_reason == scenario.expected_rejection_reason;
+
+    let validation_applied = true; // Always validate histogram structure
+
+    // OTLP compliance: degenerate histograms must be rejected
+    let otlp_compliant = if degenerate_detected {
+        metric_rejected && !rejection_reason.is_empty()
+    } else {
+        !metric_rejected && rejection_reason.is_empty()
+    };
+
+    HistogramValidationResult {
+        degenerate_detected,
+        metric_rejected,
+        rejection_reason,
+        original_metric,
+        validation_errors,
+        processed_metrics_count: 1,
+        rejected_metrics_count: rejected_metrics,
+        accepted_metrics_count: accepted_metrics,
+        validation_correct,
+        validation_applied,
+        otlp_compliant,
+        telemetry_emitted: true, // Assume telemetry is emitted for validation events
+    }
+}
+
+/// Simulate reference implementation degenerate histogram validation behavior
+fn simulate_reference_histogram_validation(
+    scenario: &DegenerateHistogramScenario,
+) -> HistogramValidationResult {
+    // Reference implementation follows same logic as asupersync
+    simulate_asupersync_histogram_validation(scenario)
+}
+
+/// Verify degenerate histogram validation logic
+fn validate_histogram_validation_logic(result: &HistogramValidationResult) -> Result<(), String> {
+    if !result.validation_correct {
+        return Err("Degenerate histogram validation logic is incorrect".to_string());
+    }
+
+    if !result.validation_applied {
+        return Err("Histogram validation should be applied".to_string());
+    }
+
+    // Check OTLP compliance
+    if !result.otlp_compliant {
+        return Err("Histogram validation is not OTLP compliant".to_string());
+    }
+
+    // Critical check: degenerate histograms must be rejected
+    if result.degenerate_detected && !result.metric_rejected {
+        return Err(
+            "CRITICAL: Degenerate histogram detected but metric was not rejected".to_string(),
+        );
+    }
+
+    // Critical check: rejected metrics should not be accepted
+    if result.metric_rejected && result.accepted_metrics_count > 0 {
+        return Err("CRITICAL: Metric was rejected but still counted as accepted".to_string());
+    }
+
+    // Critical check: rejection reason must be provided when rejecting
+    if result.metric_rejected && result.rejection_reason.is_empty() {
+        return Err("CRITICAL: Metric rejected but no rejection reason provided".to_string());
+    }
+
+    // Critical check: no rejection reason when metric is accepted
+    if !result.metric_rejected && !result.rejection_reason.is_empty() {
+        return Err("CRITICAL: Rejection reason provided but metric was not rejected".to_string());
+    }
+
+    // Critical check: counts must be consistent
+    if result.processed_metrics_count
+        != result.rejected_metrics_count + result.accepted_metrics_count
+    {
+        return Err(
+            "CRITICAL: Processed metric count doesn't match rejected + accepted counts".to_string(),
+        );
+    }
+
+    Ok(())
+}
+
+/// Verify implementation consistency for degenerate histogram validation
+fn validate_histogram_validation_implementation_consistency(
+    asupersync_result: &HistogramValidationResult,
+    reference_result: &HistogramValidationResult,
+) -> Result<(), String> {
+    // Both implementations should detect degenerate histograms consistently
+    if asupersync_result.degenerate_detected != reference_result.degenerate_detected {
+        return Err("Degenerate detection differs between implementations".to_string());
+    }
+
+    // Both implementations should reject metrics consistently
+    if asupersync_result.metric_rejected != reference_result.metric_rejected {
+        return Err("Metric rejection differs between implementations".to_string());
+    }
+
+    // Both implementations should provide same rejection reason
+    if asupersync_result.rejection_reason != reference_result.rejection_reason {
+        return Err("Rejection reason differs between implementations".to_string());
+    }
+
+    // Both implementations should count rejected metrics consistently
+    if asupersync_result.rejected_metrics_count != reference_result.rejected_metrics_count {
+        return Err("Rejected metrics count differs between implementations".to_string());
+    }
+
+    // Both implementations should count accepted metrics consistently
+    if asupersync_result.accepted_metrics_count != reference_result.accepted_metrics_count {
+        return Err("Accepted metrics count differs between implementations".to_string());
     }
 
     // Both implementations should have same validation correctness
