@@ -214,10 +214,16 @@
     "active_controller_set",
     "shared_telemetry_fields",
     "shared_knob_surfaces",
+    "knob_writes",
     "timescale_ratio",
+    "decision_rate_mismatch",
+    "fallback_churn_count",
     "compose_verdict",
     "safe_mode_precedence",
-    "oscillation_detected"
+    "oscillation_detected",
+    "missing_evidence_fields",
+    "baseline_mode_retained",
+    "fallback_reason"
   ],
   "validation_scenarios": [
     {
@@ -361,6 +367,21 @@
       "category": "controller-interference",
       "expect_compose_verdict": "do_not_compose",
       "expect_oscillation_detected": false
+    },
+    {
+      "scenario_id": "AA023-CONTROLLER-INTERFERENCE-OSCILLATION",
+      "description": "A nominally allowed controller pair that violates timescale separation in replay is flagged for oscillation, fallback churn, and do-not-compose rollback.",
+      "category": "controller-interference",
+      "expect_compose_verdict": "do_not_compose",
+      "expect_oscillation_detected": true
+    },
+    {
+      "scenario_id": "AA023-CONTROLLER-INTERFERENCE-MISSING-EVIDENCE-FALLBACK",
+      "description": "Missing shared evidence forces controllers back to the exact conservative baseline without applying composed actions.",
+      "category": "controller-interference",
+      "expect_compose_verdict": "safe",
+      "expect_oscillation_detected": false,
+      "expect_missing_evidence_fallback": true
     }
   ],
   "smoke_scenarios": [
@@ -393,7 +414,7 @@
     },
     {
       "scenario_id": "AA023-SMOKE-CONTROLLER-INTERFERENCE",
-      "description": "Validate controller interference matrix schema and deterministic safe versus forbidden composition reports",
+      "description": "Validate controller interference matrix schema plus stable, oscillating, and missing-evidence composition reports",
       "command": "rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=/tmp/rch-codex-aa023 cargo test --test decision_plane_validation_contract controller_interference -- --nocapture",
       "expected_artifacts": [
         ".decision-plane-validation-smoke-artifacts/run_*/AA023-SMOKE-CONTROLLER-INTERFERENCE/controller_interference_matrix.json",

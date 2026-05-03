@@ -404,6 +404,8 @@ fn validation_scenario_ids_are_complete() {
         "AA023-CONTROLLER-LEDGER-MULTI-CONTROLLER",
         "AA023-CONTROLLER-INTERFERENCE-STABLE",
         "AA023-CONTROLLER-INTERFERENCE-FORBIDDEN",
+        "AA023-CONTROLLER-INTERFERENCE-OSCILLATION",
+        "AA023-CONTROLLER-INTERFERENCE-MISSING-EVIDENCE-FALLBACK",
     ]
     .into_iter()
     .map(ToOwned::to_owned)
@@ -1508,12 +1510,23 @@ fn controller_interference_replay_report_is_stable() {
     let stable_report = serde_json::json!({
         "scenario_id": "AA023-CONTROLLER-INTERFERENCE-STABLE",
         "selected_controller_set": ["scheduler_recommend", "brownout_guard"],
+        "active_controller_set": ["scheduler_recommend", "brownout_guard"],
         "compose_verdict": stable_pair["compose_verdict"].as_str().unwrap(),
         "safe_mode_precedence": stable_pair["safe_mode_precedence"].as_str().unwrap(),
         "shared_telemetry_fields": stable_pair["shared_telemetry_fields"].clone(),
         "shared_knob_surfaces": stable_pair["shared_knob_surfaces"].clone(),
+        "knob_writes": ["optional_surface_mode", "cancel_streak_limit"],
         "timescale_ratio": stable_pair["timescale_separation"]["minimum_ratio"].as_u64().unwrap(),
+        "decision_rate_mismatch": {
+            "required_minimum_ratio": stable_pair["timescale_separation"]["minimum_ratio"].as_u64().unwrap(),
+            "observed_ratio": 4,
+            "violates_minimum": false
+        },
         "oscillation_detected": false,
+        "fallback_churn_count": 0,
+        "missing_evidence_fields": [],
+        "baseline_mode_retained": false,
+        "fallback_reason": null,
         "fallback_activation_counts": {
             "scheduler_recommend": 0,
             "brownout_guard": 0
@@ -1562,23 +1575,35 @@ fn controller_interference_replay_report_is_stable() {
     assert_eq!(stable_report["compose_verdict"], "safe");
     assert_eq!(stable_report["timescale_ratio"], 4);
     assert_eq!(stable_report["oscillation_detected"], false);
+    assert_eq!(stable_report["fallback_churn_count"], 0);
     assert_eq!(stable_report["decision_trace"].as_array().unwrap().len(), 4);
 
     let forbidden_report = serde_json::json!({
         "scenario_id": "AA023-CONTROLLER-INTERFERENCE-FORBIDDEN",
         "selected_controller_set": ["tail_risk_admission", "admission_steering"],
+        "active_controller_set": ["tail_risk_admission", "admission_steering"],
         "compose_verdict": forbidden_pair["compose_verdict"].as_str().unwrap(),
         "safe_mode_precedence": forbidden_pair["safe_mode_precedence"].as_str().unwrap(),
         "shared_telemetry_fields": forbidden_pair["shared_telemetry_fields"].clone(),
         "shared_knob_surfaces": forbidden_pair["shared_knob_surfaces"].clone(),
+        "knob_writes": ["admission_window"],
         "timescale_ratio": forbidden_pair["timescale_separation"]["minimum_ratio"].as_u64().unwrap(),
+        "decision_rate_mismatch": {
+            "required_minimum_ratio": forbidden_pair["timescale_separation"]["minimum_ratio"].as_u64().unwrap(),
+            "observed_ratio": 1,
+            "violates_minimum": false
+        },
         "oscillation_detected": false,
+        "fallback_churn_count": 0,
+        "missing_evidence_fields": [],
+        "baseline_mode_retained": false,
+        "fallback_reason": null,
         "fallback_activation_counts": {
             "tail_risk_admission": 0,
             "admission_steering": 0
         },
         "decision_trace": [],
-        "env_fingerprint": env_fingerprint,
+        "env_fingerprint": env_fingerprint.clone(),
         "rejected_pairings": [
             {
                 "pair_id": forbidden_pair["pair_id"].as_str().unwrap(),
@@ -1598,13 +1623,165 @@ fn controller_interference_replay_report_is_stable() {
             .expect("forbidden decision_trace must be array")
             .is_empty()
     );
+    assert_eq!(forbidden_report["fallback_churn_count"], 0);
+
+    let oscillation_report = serde_json::json!({
+        "scenario_id": "AA023-CONTROLLER-INTERFERENCE-OSCILLATION",
+        "selected_controller_set": ["scheduler_recommend", "brownout_guard"],
+        "active_controller_set": ["scheduler_recommend", "brownout_guard"],
+        "compose_verdict": "do_not_compose",
+        "safe_mode_precedence": stable_pair["safe_mode_precedence"].as_str().unwrap(),
+        "shared_telemetry_fields": stable_pair["shared_telemetry_fields"].clone(),
+        "shared_knob_surfaces": stable_pair["shared_knob_surfaces"].clone(),
+        "knob_writes": ["optional_surface_mode", "cancel_streak_limit"],
+        "timescale_ratio": 1,
+        "decision_rate_mismatch": {
+            "required_minimum_ratio": stable_pair["timescale_separation"]["minimum_ratio"].as_u64().unwrap(),
+            "observed_ratio": 1,
+            "violates_minimum": true
+        },
+        "oscillation_detected": true,
+        "fallback_churn_count": 3,
+        "missing_evidence_fields": [],
+        "baseline_mode_retained": false,
+        "fallback_reason": "timescale_violation",
+        "fallback_activation_counts": {
+            "scheduler_recommend": 2,
+            "brownout_guard": 3
+        },
+        "decision_trace": [
+            {
+                "tick": 0,
+                "controller_key": "brownout_guard",
+                "action_label": "optional_surface_mode=degraded",
+                "knob_surface": "optional_surface_mode",
+                "value": "degraded",
+                "fallback_activated": true,
+                "ledger_tick": 7
+            },
+            {
+                "tick": 0,
+                "controller_key": "scheduler_recommend",
+                "action_label": "cancel_streak_limit=24",
+                "knob_surface": "cancel_streak_limit",
+                "value": 24,
+                "fallback_activated": false,
+                "ledger_tick": 8
+            },
+            {
+                "tick": 1,
+                "controller_key": "brownout_guard",
+                "action_label": "optional_surface_mode=normal",
+                "knob_surface": "optional_surface_mode",
+                "value": "normal",
+                "fallback_activated": false,
+                "ledger_tick": 9
+            },
+            {
+                "tick": 1,
+                "controller_key": "scheduler_recommend",
+                "action_label": "cancel_streak_limit=12",
+                "knob_surface": "cancel_streak_limit",
+                "value": 12,
+                "fallback_activated": true,
+                "ledger_tick": 10
+            },
+            {
+                "tick": 2,
+                "controller_key": "brownout_guard",
+                "action_label": "optional_surface_mode=degraded",
+                "knob_surface": "optional_surface_mode",
+                "value": "degraded",
+                "fallback_activated": true,
+                "ledger_tick": 11
+            },
+            {
+                "tick": 2,
+                "controller_key": "scheduler_recommend",
+                "action_label": "cancel_streak_limit=22",
+                "knob_surface": "cancel_streak_limit",
+                "value": 22,
+                "fallback_activated": false,
+                "ledger_tick": 12
+            }
+        ],
+        "env_fingerprint": env_fingerprint.clone(),
+        "rejected_pairings": [
+            {
+                "pair_id": stable_pair["pair_id"].as_str().unwrap(),
+                "reason": "Observed decision-rate mismatch collapsed the required 4:1 timescale separation and triggered fallback churn."
+            }
+        ],
+        "explanation": "Shared telemetry feedback became unstable once both controllers updated every tick, so the conservative precedence rule blocked composition."
+    });
+    assert_eq!(oscillation_report["compose_verdict"], "do_not_compose");
+    assert_eq!(oscillation_report["oscillation_detected"], true);
+    assert_eq!(oscillation_report["fallback_churn_count"], 3);
+    assert_eq!(
+        oscillation_report["decision_rate_mismatch"]["violates_minimum"],
+        true
+    );
+    assert_eq!(
+        oscillation_report["decision_trace"]
+            .as_array()
+            .expect("oscillation decision_trace must be array")
+            .len(),
+        6
+    );
+
+    let missing_evidence_report = serde_json::json!({
+        "scenario_id": "AA023-CONTROLLER-INTERFERENCE-MISSING-EVIDENCE-FALLBACK",
+        "selected_controller_set": ["scheduler_recommend", "brownout_guard"],
+        "active_controller_set": ["scheduler_recommend", "brownout_guard"],
+        "compose_verdict": "safe",
+        "safe_mode_precedence": stable_pair["safe_mode_precedence"].as_str().unwrap(),
+        "shared_telemetry_fields": stable_pair["shared_telemetry_fields"].clone(),
+        "shared_knob_surfaces": stable_pair["shared_knob_surfaces"].clone(),
+        "knob_writes": [],
+        "timescale_ratio": stable_pair["timescale_separation"]["minimum_ratio"].as_u64().unwrap(),
+        "decision_rate_mismatch": {
+            "required_minimum_ratio": stable_pair["timescale_separation"]["minimum_ratio"].as_u64().unwrap(),
+            "observed_ratio": serde_json::Value::Null,
+            "violates_minimum": false
+        },
+        "oscillation_detected": false,
+        "fallback_churn_count": 0,
+        "missing_evidence_fields": ["ready_backlog_p95"],
+        "baseline_mode_retained": true,
+        "fallback_reason": "missing_evidence",
+        "fallback_activation_counts": {
+            "scheduler_recommend": 1,
+            "brownout_guard": 1
+        },
+        "decision_trace": [],
+        "env_fingerprint": env_fingerprint,
+        "rejected_pairings": [],
+        "explanation": "Without ready_backlog_p95 the composition layer applies no coupled action and preserves the conservative per-controller baseline."
+    });
+    assert_eq!(missing_evidence_report["compose_verdict"], "safe");
+    assert_eq!(missing_evidence_report["baseline_mode_retained"], true);
+    assert_eq!(
+        missing_evidence_report["missing_evidence_fields"],
+        serde_json::json!(["ready_backlog_p95"])
+    );
+    assert!(
+        missing_evidence_report["decision_trace"]
+            .as_array()
+            .expect("missing_evidence decision_trace must be array")
+            .is_empty()
+    );
 
     let report = serde_json::json!({
         "schema_version": "controller-interference-proof-v1",
         "matrix_schema_version": matrix["schema_version"].as_str().unwrap(),
         "env_fingerprint_fields": matrix["env_fingerprint_fields"].clone(),
         "decision_trace_fields": matrix["decision_trace_fields"].clone(),
-        "scenario_reports": [stable_report, forbidden_report],
+        "scenario_reports": [
+            stable_report,
+            forbidden_report,
+            oscillation_report,
+            missing_evidence_report
+        ],
     });
 
     maybe_write_json_artifact(CONTROLLER_INTERFERENCE_MATRIX_ARTIFACT_OUT_ENV, &matrix);
