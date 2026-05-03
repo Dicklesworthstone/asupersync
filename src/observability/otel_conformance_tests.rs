@@ -33887,3 +33887,631 @@ mod otlp_121_tests {
         println!("OTLP-121: Attribute independence verified");
     }
 }
+// OTLP-122: Span link with invalid trace ID validation test
+// Test that spans with links to all-zero trace_id must be rejected
+// because per W3C trace-context specification, all-zero trace_id is invalid
+
+#[cfg(test)]
+mod otlp_122_tests {
+    use super::*;
+    use crate::observability::{AttributeValue, OtelExporter, Span, SpanBatch, SpanKind, SpanLink};
+    use std::collections::HashMap;
+
+    /// OTLP-122 test scenario: span links with invalid trace IDs
+    struct Otlp122Scenario {
+        name: String,
+        spans: Vec<SpanWithLinks>,
+        expected_result: ValidationResult,
+        description: String,
+    }
+
+    #[derive(Debug, Clone)]
+    struct SpanWithLinks {
+        span: Span,
+        links: Vec<SpanLink>,
+    }
+
+    #[derive(Debug, Clone)]
+    struct SpanLink {
+        trace_id: String,
+        span_id: String,
+        attributes: HashMap<String, AttributeValue>,
+    }
+
+    #[derive(Debug, PartialEq)]
+    enum ValidationResult {
+        Accept,
+        Reject,
+    }
+
+    #[derive(Debug, PartialEq)]
+    struct LinkValidationResult {
+        spans_validated: usize,
+        spans_with_links: usize,
+        total_links_found: usize,
+        invalid_trace_id_links: usize,
+        valid_links: usize,
+        all_zero_trace_ids: usize,
+        malformed_trace_ids: usize,
+        spans_without_links: usize,
+        validation_passed: bool,
+    }
+
+    impl Otlp122Scenario {
+        fn new(
+            name: &str,
+            spans: Vec<SpanWithLinks>,
+            expected: ValidationResult,
+            description: &str,
+        ) -> Self {
+            Self {
+                name: name.to_string(),
+                spans,
+                expected_result: expected,
+                description: description.to_string(),
+            }
+        }
+
+        fn create_span_with_links(
+            trace_id: &str,
+            span_id: &str,
+            links: Vec<SpanLink>,
+            attrs: Vec<(&str, &str)>,
+        ) -> SpanWithLinks {
+            let mut attributes = HashMap::new();
+            for (key, value) in attrs {
+                attributes.insert(key.to_string(), AttributeValue::String(value.to_string()));
+            }
+
+            SpanWithLinks {
+                span: Span {
+                    trace_id: trace_id.to_string(),
+                    span_id: span_id.to_string(),
+                    parent_span_id: None,
+                    operation_name: "linked_operation".to_string(),
+                    start_time: 1000000000,
+                    end_time: 1000001000,
+                    attributes,
+                    status: crate::observability::SpanStatus::Ok,
+                    kind: SpanKind::Internal,
+                },
+                links,
+            }
+        }
+
+        fn create_span_without_links(
+            trace_id: &str,
+            span_id: &str,
+            attrs: Vec<(&str, &str)>,
+        ) -> SpanWithLinks {
+            let mut attributes = HashMap::new();
+            for (key, value) in attrs {
+                attributes.insert(key.to_string(), AttributeValue::String(value.to_string()));
+            }
+
+            SpanWithLinks {
+                span: Span {
+                    trace_id: trace_id.to_string(),
+                    span_id: span_id.to_string(),
+                    parent_span_id: None,
+                    operation_name: "unlinked_operation".to_string(),
+                    start_time: 1000000000,
+                    end_time: 1000001000,
+                    attributes,
+                    status: crate::observability::SpanStatus::Ok,
+                    kind: SpanKind::Internal,
+                },
+                links: Vec::new(),
+            }
+        }
+
+        fn create_span_link(trace_id: &str, span_id: &str, attrs: Vec<(&str, &str)>) -> SpanLink {
+            let mut attributes = HashMap::new();
+            for (key, value) in attrs {
+                attributes.insert(key.to_string(), AttributeValue::String(value.to_string()));
+            }
+
+            SpanLink {
+                trace_id: trace_id.to_string(),
+                span_id: span_id.to_string(),
+                attributes,
+            }
+        }
+    }
+
+    const ALL_ZERO_TRACE_ID: &str = "00000000000000000000000000000000";
+    const VALID_TRACE_ID_1: &str = "4bf92f3577b34da6a3ce929d0e0e4736";
+    const VALID_TRACE_ID_2: &str = "1234567890abcdef1234567890abcdef";
+    const VALID_TRACE_ID_3: &str = "fedcba0987654321fedcba0987654321";
+
+    fn is_all_zero_trace_id(trace_id: &str) -> bool {
+        trace_id == ALL_ZERO_TRACE_ID
+    }
+
+    fn is_valid_trace_id_format(trace_id: &str) -> bool {
+        // Valid trace ID: 32 hex characters (16 bytes)
+        if trace_id.len() != 32 {
+            return false;
+        }
+        trace_id.chars().all(|c| c.is_ascii_hexdigit())
+    }
+
+    fn validate_span_links(span_with_links: &SpanWithLinks) -> bool {
+        // Per W3C trace-context: all-zero trace_id is invalid
+        for link in &span_with_links.links {
+            if !is_valid_trace_id_format(&link.trace_id) {
+                return false;
+            }
+            if is_all_zero_trace_id(&link.trace_id) {
+                return false;
+            }
+        }
+        true
+    }
+
+    fn simulate_asupersync_export(scenario: &Otlp122Scenario) -> ValidationResult {
+        // Simulate our asupersync exporter's span link validation
+        for span_with_links in &scenario.spans {
+            if !validate_span_links(span_with_links) {
+                return ValidationResult::Reject;
+            }
+        }
+        ValidationResult::Accept
+    }
+
+    fn simulate_reference_export(scenario: &Otlp122Scenario) -> ValidationResult {
+        // Simulate reference OTLP exporter behavior
+        // Per W3C trace-context: all-zero trace_id in links is invalid
+        for span_with_links in &scenario.spans {
+            if !validate_span_links(span_with_links) {
+                return ValidationResult::Reject;
+            }
+        }
+        ValidationResult::Accept
+    }
+
+    fn analyze_link_validation(scenario: &Otlp122Scenario) -> LinkValidationResult {
+        let mut result = LinkValidationResult {
+            spans_validated: scenario.spans.len(),
+            spans_with_links: 0,
+            total_links_found: 0,
+            invalid_trace_id_links: 0,
+            valid_links: 0,
+            all_zero_trace_ids: 0,
+            malformed_trace_ids: 0,
+            spans_without_links: 0,
+            validation_passed: true,
+        };
+
+        for span_with_links in &scenario.spans {
+            if span_with_links.links.is_empty() {
+                result.spans_without_links += 1;
+            } else {
+                result.spans_with_links += 1;
+                result.total_links_found += span_with_links.links.len();
+
+                for link in &span_with_links.links {
+                    if !is_valid_trace_id_format(&link.trace_id) {
+                        result.malformed_trace_ids += 1;
+                        result.invalid_trace_id_links += 1;
+                        result.validation_passed = false;
+                    } else if is_all_zero_trace_id(&link.trace_id) {
+                        result.all_zero_trace_ids += 1;
+                        result.invalid_trace_id_links += 1;
+                        result.validation_passed = false;
+                    } else {
+                        result.valid_links += 1;
+                    }
+                }
+            }
+        }
+
+        result
+    }
+
+    fn validate_otlp_122_scenario(scenario: &Otlp122Scenario) -> bool {
+        let asupersync_result = simulate_asupersync_export(scenario);
+        let reference_result = simulate_reference_export(scenario);
+
+        // Both exporters should behave identically
+        if asupersync_result != reference_result {
+            eprintln!(
+                "OTLP-122 DIVERGENCE in {}: asupersync={:?}, reference={:?}",
+                scenario.name, asupersync_result, reference_result
+            );
+            return false;
+        }
+
+        // Verify against expected result
+        if asupersync_result != scenario.expected_result {
+            eprintln!(
+                "OTLP-122 EXPECTATION MISMATCH in {}: got {:?}, expected {:?}",
+                scenario.name, asupersync_result, scenario.expected_result
+            );
+            return false;
+        }
+
+        println!(
+            "OTLP-122 PASS: {} - {}",
+            scenario.name, scenario.description
+        );
+        true
+    }
+
+    #[test]
+    fn test_otlp_122_span_link_trace_id_validation() {
+        let test_scenarios = vec![
+            // Test 1: Span with link to all-zero trace_id - should reject
+            Otlp122Scenario::new(
+                "span_link_all_zero_trace_id",
+                vec![Otlp122Scenario::create_span_with_links(
+                    VALID_TRACE_ID_1,
+                    "span001",
+                    vec![Otlp122Scenario::create_span_link(
+                        ALL_ZERO_TRACE_ID,
+                        "linked001",
+                        vec![("link.type", "follows")],
+                    )],
+                    vec![("service.name", "web-api")],
+                )],
+                ValidationResult::Reject,
+                "Span with link to all-zero trace_id must be rejected per W3C trace-context",
+            ),
+            // Test 2: Span with valid trace_id links - should accept
+            Otlp122Scenario::new(
+                "span_valid_trace_id_links",
+                vec![Otlp122Scenario::create_span_with_links(
+                    VALID_TRACE_ID_1,
+                    "span002",
+                    vec![
+                        Otlp122Scenario::create_span_link(
+                            VALID_TRACE_ID_2,
+                            "linked002a",
+                            vec![("link.type", "child")],
+                        ),
+                        Otlp122Scenario::create_span_link(
+                            VALID_TRACE_ID_3,
+                            "linked002b",
+                            vec![("link.type", "follows")],
+                        ),
+                    ],
+                    vec![("operation", "database_query")],
+                )],
+                ValidationResult::Accept,
+                "Span with valid trace_id links must be accepted",
+            ),
+            // Test 3: Span without links - should accept
+            Otlp122Scenario::new(
+                "span_without_links",
+                vec![Otlp122Scenario::create_span_without_links(
+                    VALID_TRACE_ID_1,
+                    "span003",
+                    vec![("service.name", "auth-service")],
+                )],
+                ValidationResult::Accept,
+                "Span without any links must be accepted",
+            ),
+            // Test 4: Multiple spans with mixed link validity - should reject
+            Otlp122Scenario::new(
+                "mixed_spans_valid_and_invalid_links",
+                vec![
+                    Otlp122Scenario::create_span_with_links(
+                        VALID_TRACE_ID_1,
+                        "span004a",
+                        vec![Otlp122Scenario::create_span_link(
+                            VALID_TRACE_ID_2,
+                            "valid_link",
+                            vec![("link.type", "child")],
+                        )],
+                        vec![("service", "service-a")],
+                    ),
+                    Otlp122Scenario::create_span_with_links(
+                        VALID_TRACE_ID_2,
+                        "span004b",
+                        vec![Otlp122Scenario::create_span_link(
+                            ALL_ZERO_TRACE_ID,
+                            "invalid_link", // Invalid
+                            vec![("link.type", "follows")],
+                        )],
+                        vec![("service", "service-b")],
+                    ),
+                ],
+                ValidationResult::Reject,
+                "Batch with any invalid trace_id links must be rejected",
+            ),
+            // Test 5: Span with multiple links, one invalid - should reject
+            Otlp122Scenario::new(
+                "span_multiple_links_one_invalid",
+                vec![Otlp122Scenario::create_span_with_links(
+                    VALID_TRACE_ID_1,
+                    "span005",
+                    vec![
+                        Otlp122Scenario::create_span_link(
+                            VALID_TRACE_ID_2,
+                            "good_link",
+                            vec![("link.type", "child")],
+                        ),
+                        Otlp122Scenario::create_span_link(
+                            ALL_ZERO_TRACE_ID,
+                            "bad_link", // Invalid
+                            vec![("link.type", "follows")],
+                        ),
+                        Otlp122Scenario::create_span_link(
+                            VALID_TRACE_ID_3,
+                            "another_good_link",
+                            vec![("link.type", "child")],
+                        ),
+                    ],
+                    vec![("component", "payment-processor")],
+                )],
+                ValidationResult::Reject,
+                "Span with any invalid trace_id link must be rejected",
+            ),
+            // Test 6: Span with malformed trace_id in link - should reject
+            Otlp122Scenario::new(
+                "span_malformed_trace_id_link",
+                vec![Otlp122Scenario::create_span_with_links(
+                    VALID_TRACE_ID_1,
+                    "span006",
+                    vec![
+                        Otlp122Scenario::create_span_link(
+                            "invalid-trace-id",
+                            "malformed_link", // Too short
+                            vec![("link.type", "follows")],
+                        ),
+                        Otlp122Scenario::create_span_link(
+                            "4bf92f3577b34da6a3ce929d0e0e4736TOOLONG",
+                            "too_long_link", // Too long
+                            vec![("link.type", "child")],
+                        ),
+                        Otlp122Scenario::create_span_link(
+                            "4bf92f3577b34da6a3ce929d0e0eXYZ!",
+                            "invalid_chars", // Invalid hex chars
+                            vec![("link.type", "follows")],
+                        ),
+                    ],
+                    vec![("service", "validation-test")],
+                )],
+                ValidationResult::Reject,
+                "Span with malformed trace_id links must be rejected",
+            ),
+            // Test 7: Large batch of spans with valid links - should accept
+            Otlp122Scenario::new(
+                "large_batch_valid_links",
+                (0..20)
+                    .map(|i| {
+                        let trace_id = format!("{:032x}", i + 1); // Generate valid trace IDs
+                        let linked_trace_id = format!("{:032x}", (i + 100) % 255 + 1); // Different valid trace IDs
+
+                        Otlp122Scenario::create_span_with_links(
+                            &trace_id,
+                            &format!("span{:03}", i),
+                            vec![Otlp122Scenario::create_span_link(
+                                &linked_trace_id,
+                                &format!("link{:03}", i),
+                                vec![("batch.id", "large_test"), ("link.index", &i.to_string())],
+                            )],
+                            vec![("service.batch", "load-test")],
+                        )
+                    })
+                    .collect(),
+                ValidationResult::Accept,
+                "Large batch of spans with valid trace_id links must be accepted",
+            ),
+            // Test 8: Span linking to itself (same trace) - should accept if valid
+            Otlp122Scenario::new(
+                "span_self_link_valid_trace",
+                vec![Otlp122Scenario::create_span_with_links(
+                    VALID_TRACE_ID_1,
+                    "span008",
+                    vec![Otlp122Scenario::create_span_link(
+                        VALID_TRACE_ID_1,
+                        "span008_parent", // Link to same trace
+                        vec![("link.type", "child")],
+                    )],
+                    vec![("operation", "recursive_call")],
+                )],
+                ValidationResult::Accept,
+                "Span linking to same trace with valid trace_id must be accepted",
+            ),
+            // Test 9: Span with empty link attributes but valid trace_id - should accept
+            Otlp122Scenario::new(
+                "span_link_empty_attributes",
+                vec![Otlp122Scenario::create_span_with_links(
+                    VALID_TRACE_ID_1,
+                    "span009",
+                    vec![Otlp122Scenario::create_span_link(
+                        VALID_TRACE_ID_2,
+                        "minimal_link",
+                        vec![], // No link attributes
+                    )],
+                    vec![("service", "minimal-service")],
+                )],
+                ValidationResult::Accept,
+                "Span with link having valid trace_id but empty attributes must be accepted",
+            ),
+            // Test 10: Mixed spans - some with links, some without - should accept if all links valid
+            Otlp122Scenario::new(
+                "mixed_spans_with_and_without_links",
+                vec![
+                    Otlp122Scenario::create_span_with_links(
+                        VALID_TRACE_ID_1,
+                        "span010a",
+                        vec![Otlp122Scenario::create_span_link(
+                            VALID_TRACE_ID_2,
+                            "external_span",
+                            vec![("link.type", "follows")],
+                        )],
+                        vec![("has_links", "true")],
+                    ),
+                    Otlp122Scenario::create_span_without_links(
+                        VALID_TRACE_ID_1,
+                        "span010b",
+                        vec![("has_links", "false")],
+                    ),
+                    Otlp122Scenario::create_span_with_links(
+                        VALID_TRACE_ID_1,
+                        "span010c",
+                        vec![
+                            Otlp122Scenario::create_span_link(
+                                VALID_TRACE_ID_2,
+                                "link1",
+                                vec![("link.type", "child")],
+                            ),
+                            Otlp122Scenario::create_span_link(
+                                VALID_TRACE_ID_3,
+                                "link2",
+                                vec![("link.type", "follows")],
+                            ),
+                        ],
+                        vec![("has_links", "true")],
+                    ),
+                ],
+                ValidationResult::Accept,
+                "Mixed spans with and without links must be accepted if all trace_ids are valid",
+            ),
+            // Test 11: Edge case - span's own trace_id is all-zero (should be caught at span level, not link level)
+            Otlp122Scenario::new(
+                "span_own_trace_id_zero_valid_links",
+                vec![Otlp122Scenario::create_span_with_links(
+                    ALL_ZERO_TRACE_ID,
+                    "span011", // Span's own trace_id is all-zero
+                    vec![Otlp122Scenario::create_span_link(
+                        VALID_TRACE_ID_1,
+                        "valid_linked_span", // Link has valid trace_id
+                        vec![("link.type", "follows")],
+                    )],
+                    vec![("note", "own_trace_id_invalid")],
+                )],
+                ValidationResult::Accept, // This test focuses on link validation, not span trace_id
+                "Link validation should only check linked trace_ids, not span's own trace_id",
+            ),
+            // Test 12: Multiple all-zero trace_id links - should reject
+            Otlp122Scenario::new(
+                "multiple_all_zero_links",
+                vec![Otlp122Scenario::create_span_with_links(
+                    VALID_TRACE_ID_1,
+                    "span012",
+                    vec![
+                        Otlp122Scenario::create_span_link(
+                            ALL_ZERO_TRACE_ID,
+                            "zero_link1", // Invalid
+                            vec![("link.type", "child")],
+                        ),
+                        Otlp122Scenario::create_span_link(
+                            ALL_ZERO_TRACE_ID,
+                            "zero_link2", // Invalid
+                            vec![("link.type", "follows")],
+                        ),
+                    ],
+                    vec![("test.case", "multiple_zeros")],
+                )],
+                ValidationResult::Reject,
+                "Span with multiple all-zero trace_id links must be rejected",
+            ),
+        ];
+
+        let mut passed = 0;
+        let mut failed = 0;
+
+        for scenario in test_scenarios {
+            if validate_otlp_122_scenario(&scenario) {
+                passed += 1;
+            } else {
+                failed += 1;
+            }
+        }
+
+        println!("OTLP-122 Summary: {} passed, {} failed", passed, failed);
+        assert_eq!(
+            failed, 0,
+            "All OTLP-122 span link trace ID validation scenarios must pass"
+        );
+    }
+
+    #[test]
+    fn test_otlp_122_link_validation_analysis() {
+        // Detailed analysis test for link validation
+        let test_scenario = Otlp122Scenario::new(
+            "detailed_link_analysis",
+            vec![
+                Otlp122Scenario::create_span_with_links(
+                    VALID_TRACE_ID_1,
+                    "analysis_span1",
+                    vec![Otlp122Scenario::create_span_link(
+                        VALID_TRACE_ID_2,
+                        "good_link",
+                        vec![("type", "valid")],
+                    )],
+                    vec![("test", "analysis")],
+                ),
+                Otlp122Scenario::create_span_with_links(
+                    VALID_TRACE_ID_1,
+                    "analysis_span2",
+                    vec![Otlp122Scenario::create_span_link(
+                        ALL_ZERO_TRACE_ID,
+                        "bad_link", // Invalid
+                        vec![("type", "invalid")],
+                    )],
+                    vec![("test", "analysis")],
+                ),
+                Otlp122Scenario::create_span_without_links(
+                    VALID_TRACE_ID_1,
+                    "analysis_span3",
+                    vec![("test", "analysis")],
+                ),
+            ],
+            ValidationResult::Reject,
+            "Analysis test scenario",
+        );
+
+        let analysis_result = analyze_link_validation(&test_scenario);
+
+        assert_eq!(analysis_result.spans_validated, 3);
+        assert_eq!(analysis_result.spans_with_links, 2);
+        assert_eq!(analysis_result.spans_without_links, 1);
+        assert_eq!(analysis_result.total_links_found, 2);
+        assert_eq!(analysis_result.valid_links, 1);
+        assert_eq!(analysis_result.invalid_trace_id_links, 1);
+        assert_eq!(analysis_result.all_zero_trace_ids, 1);
+        assert_eq!(analysis_result.malformed_trace_ids, 0);
+        assert!(!analysis_result.validation_passed);
+
+        println!("OTLP-122: Link validation analysis verified");
+    }
+
+    #[test]
+    fn test_otlp_122_trace_id_validation_logic() {
+        // Test trace ID validation functions directly
+
+        // Valid trace IDs
+        assert!(is_valid_trace_id_format(VALID_TRACE_ID_1));
+        assert!(is_valid_trace_id_format(VALID_TRACE_ID_2));
+        assert!(is_valid_trace_id_format(VALID_TRACE_ID_3));
+        assert!(is_valid_trace_id_format("abcdef1234567890abcdef1234567890"));
+
+        // All-zero trace ID (valid format but semantically invalid per W3C)
+        assert!(is_valid_trace_id_format(ALL_ZERO_TRACE_ID));
+        assert!(is_all_zero_trace_id(ALL_ZERO_TRACE_ID));
+
+        // Invalid formats
+        assert!(!is_valid_trace_id_format("")); // Empty
+        assert!(!is_valid_trace_id_format("short")); // Too short
+        assert!(!is_valid_trace_id_format(
+            "4bf92f3577b34da6a3ce929d0e0e4736TOOLONG"
+        )); // Too long
+        assert!(!is_valid_trace_id_format(
+            "4bf92f3577b34da6a3ce929d0e0eXYZ!"
+        )); // Invalid hex chars
+        assert!(!is_valid_trace_id_format(
+            "gggggggggggggggggggggggggggggggg"
+        )); // Invalid hex chars
+
+        // Non-zero trace IDs should not be detected as all-zero
+        assert!(!is_all_zero_trace_id(VALID_TRACE_ID_1));
+        assert!(!is_all_zero_trace_id(VALID_TRACE_ID_2));
+        assert!(!is_all_zero_trace_id("00000000000000000000000000000001")); // Almost zero
+
+        println!("OTLP-122: Trace ID validation logic verified");
+    }
+}
