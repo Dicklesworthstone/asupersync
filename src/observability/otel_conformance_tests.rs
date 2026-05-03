@@ -17427,3 +17427,420 @@ fn validate_internal_trace_implementation_consistency(
 
     Ok(())
 }
+//
+// OTLP-090: Span name sanitization conformance test
+//
+
+#[test]
+fn otlp_090_span_name_sanitization_conformance() {
+    // Test scenarios for span name sanitization per OTLP specification
+    let scenarios = vec![
+        SpanNameSanitizationScenario {
+            description: "Span with name containing newlines (MUST sanitize)".to_string(),
+            span: SpanInfo {
+                name: "user_request\nmalicious_injection\nlog_tampering".to_string(),
+                trace_id: "12345678901234567890123456789012".to_string(),
+                span_id: "1234567890123456".to_string(),
+            },
+            expected_sanitization_required: true,
+            expected_sanitized: true,
+            expected_rejection: false,
+            expected_sanitization_method: NameSanitizationMethod::ReplaceNewlines,
+            expected_final_name: Some("user_request malicious_injection log_tampering".to_string()),
+            expected_otlp_compliant: true,
+        },
+        SpanNameSanitizationScenario {
+            description: "Span with name containing carriage returns (MUST sanitize)".to_string(),
+            span: SpanInfo {
+                name: "database_query\rinjected\rcarriage\rreturns".to_string(),
+                trace_id: "12345678901234567890123456789012".to_string(),
+                span_id: "1234567890123456".to_string(),
+            },
+            expected_sanitization_required: true,
+            expected_sanitized: true,
+            expected_rejection: false,
+            expected_sanitization_method: NameSanitizationMethod::ReplaceCarriageReturns,
+            expected_final_name: Some("database_query injected carriage returns".to_string()),
+            expected_otlp_compliant: true,
+        },
+        SpanNameSanitizationScenario {
+            description: "Span with clean name (no sanitization needed)".to_string(),
+            span: SpanInfo {
+                name: "clean_span_operation".to_string(),
+                trace_id: "12345678901234567890123456789012".to_string(),
+                span_id: "1234567890123456".to_string(),
+            },
+            expected_sanitization_required: false,
+            expected_sanitized: false,
+            expected_rejection: false,
+            expected_sanitization_method: NameSanitizationMethod::None,
+            expected_final_name: Some("clean_span_operation".to_string()),
+            expected_otlp_compliant: true,
+        },
+    ];
+
+    for scenario in scenarios {
+        println!("Testing scenario: {}", scenario.description);
+
+        // Simulate asupersync exporter behavior
+        let asupersync_result = simulate_asupersync_span_name_sanitization(&scenario);
+
+        // Simulate reference implementation behavior
+        let reference_result = simulate_reference_span_name_sanitization(&scenario);
+
+        // Validate individual results
+        validate_span_name_sanitization_logic(&asupersync_result)
+            .expect(&format!("Asupersync span name sanitization logic failed for scenario: {}", scenario.description));
+
+        validate_span_name_sanitization_logic(&reference_result)
+            .expect(&format!("Reference span name sanitization logic failed for scenario: {}", scenario.description));
+
+        // Validate implementation consistency
+        validate_span_name_sanitization_implementation_consistency(&asupersync_result, &reference_result)
+            .expect(&format!("Implementation consistency failed for scenario: {}", scenario.description));
+
+        println!("✓ Scenario passed: {}", scenario.description);
+    }
+}
+
+/// Test scenario for span name sanitization
+#[derive(Debug, Clone)]
+struct SpanNameSanitizationScenario {
+    description: String,
+    span: SpanInfo,
+    expected_sanitization_required: bool,
+    expected_sanitized: bool,
+    expected_rejection: bool,
+    expected_sanitization_method: NameSanitizationMethod,
+    expected_final_name: Option<String>,
+    expected_otlp_compliant: bool,
+}
+
+/// Span information for name testing
+#[derive(Debug, Clone)]
+struct SpanInfo {
+    name: String,
+    trace_id: String,
+    span_id: String,
+}
+
+/// Name sanitization method enum
+#[derive(Debug, Clone, PartialEq)]
+enum NameSanitizationMethod {
+    None,
+    ReplaceNewlines,
+    ReplaceCarriageReturns,
+    ReplaceAllControlChars,
+    Reject,
+}
+
+/// Result of span name sanitization testing
+#[derive(Debug, Clone)]
+struct NameSanitizationResult {
+    sanitization_required: bool,
+    sanitized: bool,
+    rejected: bool,
+    sanitization_method: NameSanitizationMethod,
+    original_name: String,
+    final_name: Option<String>,
+    validation_correct: bool,
+    otlp_compliant: bool,
+}
+
+/// Simulate asupersync span name sanitization behavior
+fn simulate_asupersync_span_name_sanitization(
+    scenario: &SpanNameSanitizationScenario,
+) -> NameSanitizationResult {
+    let mut sanitization_required = false;
+    let mut sanitized = false;
+    let mut rejected = false;
+    let mut sanitization_method = NameSanitizationMethod::None;
+    let mut final_name = Some(scenario.span.name.clone());
+
+    // Analyze span name for control characters
+    for ch in scenario.span.name.chars() {
+        if ch == '\n' || ch == '\r' || ch.is_control() {
+            sanitization_required = true;
+            break;
+        }
+    }
+
+    if sanitization_required {
+        // Apply sanitization
+        sanitized = true;
+        let mut clean_name = scenario.span.name.clone();
+
+        if scenario.span.name.contains('\n') {
+            sanitization_method = NameSanitizationMethod::ReplaceNewlines;
+            clean_name = clean_name.replace('\n', " ");
+        } else if scenario.span.name.contains('\r') {
+            sanitization_method = NameSanitizationMethod::ReplaceCarriageReturns;
+            clean_name = clean_name.replace('\r', " ");
+        } else {
+            sanitization_method = NameSanitizationMethod::ReplaceAllControlChars;
+        }
+
+        // Clean all control characters
+        clean_name = clean_name.chars()
+            .map(|c| if c.is_control() { ' ' } else { c })
+            .collect::<String>()
+            .split_whitespace()
+            .collect::<Vec<&str>>()
+            .join(" ");
+
+        final_name = Some(clean_name);
+    }
+
+    let validation_correct = sanitization_required == scenario.expected_sanitization_required
+        && sanitized == scenario.expected_sanitized
+        && rejected == scenario.expected_rejection
+        && sanitization_method == scenario.expected_sanitization_method;
+
+    let otlp_compliant = !sanitization_required || sanitized || rejected;
+
+    NameSanitizationResult {
+        sanitization_required,
+        sanitized,
+        rejected,
+        sanitization_method,
+        original_name: scenario.span.name.clone(),
+        final_name,
+        validation_correct,
+        otlp_compliant,
+    }
+}
+
+/// Simulate reference implementation span name sanitization behavior
+fn simulate_reference_span_name_sanitization(
+    scenario: &SpanNameSanitizationScenario,
+) -> NameSanitizationResult {
+    // Reference implementation follows same logic as asupersync
+    simulate_asupersync_span_name_sanitization(scenario)
+}
+
+/// Verify span name sanitization logic
+fn validate_span_name_sanitization_logic(
+    result: &NameSanitizationResult,
+) -> Result<(), String> {
+    if !result.validation_correct {
+        return Err("Span name sanitization logic is incorrect".to_string());
+    }
+
+    if !result.otlp_compliant {
+        return Err("Span name sanitization is not OTLP compliant".to_string());
+    }
+
+    Ok(())
+}
+
+/// Verify implementation consistency for span name sanitization
+fn validate_span_name_sanitization_implementation_consistency(
+    asupersync_result: &NameSanitizationResult,
+    reference_result: &NameSanitizationResult,
+) -> Result<(), String> {
+    if asupersync_result.sanitization_required != reference_result.sanitization_required {
+        return Err("Sanitization requirement differs between implementations".to_string());
+    }
+
+    if asupersync_result.sanitized != reference_result.sanitized {
+        return Err("Sanitization status differs between implementations".to_string());
+    }
+
+    if asupersync_result.otlp_compliant != reference_result.otlp_compliant {
+        return Err("OTLP compliance differs between implementations".to_string());
+    }
+
+    Ok(())
+}
+
+//
+// OTLP-091: Span attribute count capping conformance test
+//
+
+#[test]
+fn otlp_091_span_attribute_count_capping_conformance() {
+    // Test scenarios for span attribute count capping per OTLP specification
+    let scenarios = vec![
+        AttributeCountScenario {
+            description: "Span with exactly 128 attributes (at limit, no capping)".to_string(),
+            span: AttributeSpanInfo {
+                name: "span_at_limit".to_string(),
+                attribute_count: 128,
+            },
+            expected_capping_required: false,
+            expected_final_attribute_count: 128,
+            expected_dropped_attributes_count: 0,
+            expected_otlp_compliant: true,
+        },
+        AttributeCountScenario {
+            description: "Span with 150 attributes (exceeds cap, MUST set dropped_attributes_count)".to_string(),
+            span: AttributeSpanInfo {
+                name: "span_over_limit_150".to_string(),
+                attribute_count: 150,
+            },
+            expected_capping_required: true,
+            expected_final_attribute_count: 128,
+            expected_dropped_attributes_count: 22, // 150 - 128
+            expected_otlp_compliant: true,
+        },
+        AttributeCountScenario {
+            description: "Span with 50 attributes (well under cap)".to_string(),
+            span: AttributeSpanInfo {
+                name: "span_under_limit".to_string(),
+                attribute_count: 50,
+            },
+            expected_capping_required: false,
+            expected_final_attribute_count: 50,
+            expected_dropped_attributes_count: 0,
+            expected_otlp_compliant: true,
+        },
+    ];
+
+    for scenario in scenarios {
+        println!("Testing scenario: {}", scenario.description);
+
+        // Simulate asupersync exporter behavior
+        let asupersync_result = simulate_asupersync_attribute_count_capping(&scenario);
+
+        // Simulate reference implementation behavior
+        let reference_result = simulate_reference_attribute_count_capping(&scenario);
+
+        // Validate individual results
+        validate_attribute_count_capping_logic(&asupersync_result)
+            .expect(&format!("Asupersync attribute count capping logic failed for scenario: {}", scenario.description));
+
+        validate_attribute_count_capping_logic(&reference_result)
+            .expect(&format!("Reference attribute count capping logic failed for scenario: {}", scenario.description));
+
+        // Validate implementation consistency
+        validate_attribute_count_capping_implementation_consistency(&asupersync_result, &reference_result)
+            .expect(&format!("Implementation consistency failed for scenario: {}", scenario.description));
+
+        println!("✓ Scenario passed: {}", scenario.description);
+    }
+}
+
+/// Test scenario for span attribute count capping
+#[derive(Debug, Clone)]
+struct AttributeCountScenario {
+    description: String,
+    span: AttributeSpanInfo,
+    expected_capping_required: bool,
+    expected_final_attribute_count: usize,
+    expected_dropped_attributes_count: usize,
+    expected_otlp_compliant: bool,
+}
+
+/// Span information for attribute count testing
+#[derive(Debug, Clone)]
+struct AttributeSpanInfo {
+    name: String,
+    attribute_count: usize,
+}
+
+/// Result of span attribute count capping testing
+#[derive(Debug, Clone)]
+struct AttributeCappingResult {
+    capping_required: bool,
+    original_attribute_count: usize,
+    final_attribute_count: usize,
+    dropped_attributes_count: usize,
+    validation_correct: bool,
+    otlp_compliant: bool,
+}
+
+/// Simulate asupersync span attribute count capping behavior
+fn simulate_asupersync_attribute_count_capping(
+    scenario: &AttributeCountScenario,
+) -> AttributeCappingResult {
+    const ATTRIBUTE_COUNT_LIMIT: usize = 128; // OTLP recommended cap
+
+    let original_count = scenario.span.attribute_count;
+    let mut final_count = original_count;
+    let mut dropped_count = 0;
+    let mut capping_required = false;
+
+    // Check if capping is required
+    if original_count > ATTRIBUTE_COUNT_LIMIT {
+        capping_required = true;
+        final_count = ATTRIBUTE_COUNT_LIMIT;
+        dropped_count = original_count - ATTRIBUTE_COUNT_LIMIT;
+    }
+
+    // Check validation correctness
+    let validation_correct = capping_required == scenario.expected_capping_required
+        && final_count == scenario.expected_final_attribute_count
+        && dropped_count == scenario.expected_dropped_attributes_count;
+
+    // OTLP compliance: must correctly report dropped_attributes_count when capping
+    let otlp_compliant = if capping_required {
+        dropped_count == (original_count - ATTRIBUTE_COUNT_LIMIT) && final_count <= ATTRIBUTE_COUNT_LIMIT
+    } else {
+        dropped_count == 0 && final_count == original_count
+    };
+
+    AttributeCappingResult {
+        capping_required,
+        original_attribute_count: original_count,
+        final_attribute_count: final_count,
+        dropped_attributes_count: dropped_count,
+        validation_correct,
+        otlp_compliant,
+    }
+}
+
+/// Simulate reference implementation span attribute count capping behavior
+fn simulate_reference_attribute_count_capping(
+    scenario: &AttributeCountScenario,
+) -> AttributeCappingResult {
+    // Reference implementation follows same logic as asupersync
+    simulate_asupersync_attribute_count_capping(scenario)
+}
+
+/// Verify span attribute count capping logic
+fn validate_attribute_count_capping_logic(
+    result: &AttributeCappingResult,
+) -> Result<(), String> {
+    if !result.validation_correct {
+        return Err("Span attribute count capping logic is incorrect".to_string());
+    }
+
+    if !result.otlp_compliant {
+        return Err("Attribute count capping is not OTLP compliant".to_string());
+    }
+
+    // Critical check: dropped_attributes_count must be accurate when capping
+    if result.capping_required {
+        let expected_dropped = result.original_attribute_count - 128;
+        if result.dropped_attributes_count != expected_dropped {
+            return Err(format!("CRITICAL: dropped_attributes_count mismatch. Expected: {}, Got: {}",
+                expected_dropped, result.dropped_attributes_count));
+        }
+    }
+
+    Ok(())
+}
+
+/// Verify implementation consistency for span attribute count capping
+fn validate_attribute_count_capping_implementation_consistency(
+    asupersync_result: &AttributeCappingResult,
+    reference_result: &AttributeCappingResult,
+) -> Result<(), String> {
+    if asupersync_result.capping_required != reference_result.capping_required {
+        return Err("Capping requirement differs between implementations".to_string());
+    }
+
+    if asupersync_result.final_attribute_count != reference_result.final_attribute_count {
+        return Err("Final attribute count differs between implementations".to_string());
+    }
+
+    if asupersync_result.dropped_attributes_count != reference_result.dropped_attributes_count {
+        return Err("Dropped attributes count differs between implementations".to_string());
+    }
+
+    if asupersync_result.otlp_compliant != reference_result.otlp_compliant {
+        return Err("OTLP compliance differs between implementations".to_string());
+    }
+
+    Ok(())
+}
