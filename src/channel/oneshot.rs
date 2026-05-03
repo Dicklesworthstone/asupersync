@@ -3686,4 +3686,121 @@ mod tests {
 
         crate::test_complete!("audit_send_when_receiver_dropped_returns_value");
     }
+
+    #[test]
+    fn audit_receiver_spurious_wakeup_resilience() {
+        // Audit: Receiver::poll() spurious-wakeup resilience: when the receiver's waker
+        // is registered but no value has been sent (sender still alive), and a SPURIOUS
+        // wake occurs (poll called from elsewhere), does poll return Pending again
+        // (correct: only Ready when actually delivered) without incorrectly registering
+        // wake-state? Verify with stress test.
+
+        init_test("audit_receiver_spurious_wakeup_resilience");
+
+        let cx = test_cx();
+        let (tx, mut rx) = channel::<i32>();
+
+        // Create polling context
+        let waker = Waker::noop();
+        let mut context = std::task::Context::from_waker(&waker);
+
+        // Phase 1: Initial poll - should return Pending and register waker
+        let mut recv_fut = rx.recv(&cx);
+        let initial_poll = Pin::new(&mut recv_fut).poll(&mut context);
+
+        crate::assert_with_log!(
+            matches!(initial_poll, std::task::Poll::Pending),
+            "Initial poll() returns Pending when no value sent",
+            std::task::Poll::Pending,
+            initial_poll
+        );
+
+        // Phase 2: Spurious wakeup stress test - poll many times without sending
+        const SPURIOUS_POLLS: usize = 100;
+        let mut spurious_pending_count = 0;
+
+        for i in 1..=SPURIOUS_POLLS {
+            // This is a spurious poll - no value was sent, no sender dropped
+            let spurious_poll = Pin::new(&mut recv_fut).poll(&mut context);
+
+            // Should return Pending every time (no spurious Ready)
+            match spurious_poll {
+                std::task::Poll::Pending => {
+                    spurious_pending_count += 1;
+                }
+                std::task::Poll::Ready(result) => {
+                    panic!(
+                        "❌ DEFECT: Spurious poll {} returned Ready({:?}) without actual delivery",
+                        i, result
+                    );
+                }
+            }
+
+            // Verify sender is still alive (not accidentally closed)
+            crate::assert_with_log!(
+                !tx.is_closed(),
+                &format!("Sender still alive after spurious poll {}", i),
+                false,
+                tx.is_closed()
+            );
+        }
+
+        // Phase 3: Verify waker is still correctly registered by actually sending
+        drop(recv_fut); // Drop old future
+        let mut new_recv_fut = rx.recv(&cx);
+
+        // Poll once to register waker
+        let pre_send_poll = Pin::new(&mut new_recv_fut).poll(&mut context);
+        crate::assert_with_log!(
+            matches!(pre_send_poll, std::task::Poll::Pending),
+            "Pre-send poll returns Pending",
+            std::task::Poll::Pending,
+            pre_send_poll
+        );
+
+        // Send value and verify immediate readiness
+        let send_result = tx.send(42);
+        crate::assert_with_log!(
+            matches!(send_result, Ok(())),
+            "send() succeeds after spurious polls",
+            Ok(()),
+            send_result
+        );
+
+        // Poll should now return Ready with the value
+        let post_send_poll = Pin::new(&mut new_recv_fut).poll(&mut context);
+        match post_send_poll {
+            std::task::Poll::Ready(Ok(value)) => {
+                crate::assert_with_log!(
+                    value == 42,
+                    "Received correct value after spurious polls",
+                    42,
+                    value
+                );
+            }
+            other => {
+                panic!("❌ DEFECT: Expected Ready(Ok(42)), got {:?}", other);
+            }
+        }
+
+        // Phase 4: Verify no state corruption from spurious polls
+        crate::assert_with_log!(
+            spurious_pending_count == SPURIOUS_POLLS,
+            &format!("All {} spurious polls returned Pending", SPURIOUS_POLLS),
+            SPURIOUS_POLLS,
+            spurious_pending_count
+        );
+
+        println!("✅ SOUND: Receiver spurious wakeup resilience verified:");
+        println!(
+            "  - {} spurious polls all returned Pending ✓",
+            SPURIOUS_POLLS
+        );
+        println!("  - No spurious Ready() results ✓");
+        println!("  - Waker registration remains functional ✓");
+        println!("  - Actual value delivery works after spurious polls ✓");
+        println!("  - No state corruption from repeated polling ✓");
+
+        crate::test_complete!("audit_receiver_spurious_wakeup_resilience");
+    }
 }

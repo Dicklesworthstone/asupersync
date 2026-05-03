@@ -79,6 +79,8 @@ pub mod otlp_compression_negotiation_audit_test;
 #[cfg(test)]
 pub mod otlp_dns_resolution_failure_audit_test;
 #[cfg(test)]
+pub mod otlp_dst_clock_jump_audit_test;
+#[cfg(test)]
 pub mod otlp_empty_resource_attributes_audit_test;
 #[cfg(test)]
 pub mod otlp_graceful_shutdown_audit_test;
@@ -106,6 +108,8 @@ pub mod otlp_span_deduplication_audit_test;
 pub mod otlp_span_event_timestamping_audit_test;
 #[cfg(test)]
 pub mod otlp_tail_based_sampling_audit_test;
+#[cfg(test)]
+pub mod otlp_tls_handshake_failure_audit_test;
 pub mod otlp_trace_exporter;
 #[cfg(test)]
 pub mod otlp_trace_state_propagation_audit_test;
@@ -139,9 +143,9 @@ pub mod tls_configuration_audit_test;
 pub mod trace_id_format_audit_test;
 #[cfg(test)]
 pub mod trace_id_high_load_audit_test;
-pub mod w3c_trace_context;
 #[cfg(test)]
 pub mod w3c_baggage_propagation_audit_test;
+pub mod w3c_trace_context;
 #[cfg(test)]
 pub mod w3c_trace_id_randomness_audit_test;
 

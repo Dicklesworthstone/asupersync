@@ -1781,7 +1781,7 @@ impl RedisConnection {
                 let is_unknown_command =
                     lower.contains("unknown command") && lower.contains("hello");
                 if !is_unknown_command {
-                    return Err(RedisError::from_redis_error_message(msg));
+                    return Err(RedisError::from_redis_error_message(&msg));
                 }
                 cx.trace("redis: HELLO 3 unsupported, falling back to RESP2");
             }
@@ -9690,18 +9690,25 @@ mod tests {
                 RedisError::NoAuth => {
                     // Expected - handles minimal form
                 }
-                other => panic!("Expected RedisError::NoAuth for bare 'NOAUTH', got {:?}", other),
+                other => panic!(
+                    "Expected RedisError::NoAuth for bare 'NOAUTH', got {:?}",
+                    other
+                ),
             }
 
             // Test Case 3: Case insensitive
             let error = RedisError::from_redis_error_message("noauth authentication required");
-            assert!(matches!(error, RedisError::NoAuth), "NOAUTH parsing must be case-insensitive");
+            assert!(
+                matches!(error, RedisError::NoAuth),
+                "NOAUTH parsing must be case-insensitive"
+            );
         }
 
         #[test]
         fn audit_redis_error_message_parsing_wrongpass() {
             // Test Case 1: Standard WRONGPASS error
-            let error = RedisError::from_redis_error_message("WRONGPASS invalid username-password pair");
+            let error =
+                RedisError::from_redis_error_message("WRONGPASS invalid username-password pair");
             match error {
                 RedisError::WrongPassword => {
                     // Expected - structured error for actionable handling
@@ -9715,12 +9722,18 @@ mod tests {
                 RedisError::WrongPassword => {
                     // Expected - handles minimal form
                 }
-                other => panic!("Expected RedisError::WrongPassword for bare 'WRONGPASS', got {:?}", other),
+                other => panic!(
+                    "Expected RedisError::WrongPassword for bare 'WRONGPASS', got {:?}",
+                    other
+                ),
             }
 
             // Test Case 3: Case insensitive
             let error = RedisError::from_redis_error_message("wrongpass invalid credentials");
-            assert!(matches!(error, RedisError::WrongPassword), "WRONGPASS parsing must be case-insensitive");
+            assert!(
+                matches!(error, RedisError::WrongPassword),
+                "WRONGPASS parsing must be case-insensitive"
+            );
         }
 
         #[test]
@@ -9729,13 +9742,22 @@ mod tests {
             let error = RedisError::from_redis_error_message("ERR syntax error");
             match error {
                 RedisError::Redis(msg) => {
-                    assert_eq!(msg, "ERR syntax error", "Generic Redis errors must preserve original message");
+                    assert_eq!(
+                        msg, "ERR syntax error",
+                        "Generic Redis errors must preserve original message"
+                    );
                 }
-                other => panic!("Expected RedisError::Redis for generic error, got {:?}", other),
+                other => panic!(
+                    "Expected RedisError::Redis for generic error, got {:?}",
+                    other
+                ),
             }
 
             let error = RedisError::from_redis_error_message("MOVED 3999 127.0.0.1:6381");
-            assert!(matches!(error, RedisError::Redis(_)), "MOVED errors should remain generic");
+            assert!(
+                matches!(error, RedisError::Redis(_)),
+                "MOVED errors should remain generic"
+            );
         }
 
         #[test]
@@ -9745,7 +9767,8 @@ mod tests {
             let display = format!("{}", error);
             assert!(
                 display.contains("NOAUTH") && display.contains("authentication required"),
-                "NoAuth display message must be actionable: {}", display
+                "NoAuth display message must be actionable: {}",
+                display
             );
 
             // Test Case 2: WrongPassword display message
@@ -9753,7 +9776,8 @@ mod tests {
             let display = format!("{}", error);
             assert!(
                 display.contains("WRONGPASS") && display.contains("authentication failed"),
-                "WrongPassword display message must be actionable: {}", display
+                "WrongPassword display message must be actionable: {}",
+                display
             );
         }
 
@@ -9770,13 +9794,22 @@ mod tests {
             }
 
             let noauth_error = RedisError::NoAuth;
-            assert_eq!(handle_redis_auth_error(&noauth_error), "prompt_for_credentials");
+            assert_eq!(
+                handle_redis_auth_error(&noauth_error),
+                "prompt_for_credentials"
+            );
 
             let wrongpass_error = RedisError::WrongPassword;
-            assert_eq!(handle_redis_auth_error(&wrongpass_error), "invalid_credentials_retry");
+            assert_eq!(
+                handle_redis_auth_error(&wrongpass_error),
+                "invalid_credentials_retry"
+            );
 
             let generic_error = RedisError::Redis("ERR syntax error".to_string());
-            assert_eq!(handle_redis_auth_error(&generic_error), "generic_error_handling");
+            assert_eq!(
+                handle_redis_auth_error(&generic_error),
+                "generic_error_handling"
+            );
         }
 
         // AUDIT VERIFICATION:

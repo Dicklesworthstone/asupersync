@@ -89,8 +89,8 @@
 //! would all be caught by the structural pins below.
 
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU32, Ordering};
 
 fn read(rel: &str) -> String {
     let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(rel);
@@ -108,14 +108,11 @@ fn sleep_drop_impl_cancels_registered_timer() {
 
     let impl_marker = "impl Drop for Sleep {";
     let start = source.find(impl_marker).expect("Sleep Drop impl");
-    let body_end = source[start..]
-        .find("\n}\n")
-        .expect("Sleep Drop close");
+    let body_end = source[start..].find("\n}\n").expect("Sleep Drop close");
     let body = &source[start..start + body_end];
 
     assert!(
-        body.contains("state.timer_handle.take()")
-            && body.contains("state.timer_driver.take()"),
+        body.contains("state.timer_handle.take()") && body.contains("state.timer_driver.take()"),
         "REGRESSION: Sleep::Drop no longer takes timer_handle \
          + timer_driver from state. The cancel call has \
          nothing to cancel — timer leaks until the driver \
@@ -142,9 +139,7 @@ fn sleep_drop_emits_timer_cancelled_trace_event_for_observability() {
 
     let impl_marker = "impl Drop for Sleep {";
     let start = source.find(impl_marker).expect("Sleep Drop impl");
-    let body_end = source[start..]
-        .find("\n}\n")
-        .expect("Sleep Drop close");
+    let body_end = source[start..].find("\n}\n").expect("Sleep Drop close");
     let body = &source[start..start + body_end];
 
     assert!(
@@ -202,8 +197,7 @@ fn sleep_reset_after_cancels_old_timer_before_re_registration() {
     let body = &source[start..start + body_end];
 
     assert!(
-        body.contains("state.timer_handle.take()")
-            && body.contains("driver.cancel(&handle);"),
+        body.contains("state.timer_handle.take()") && body.contains("driver.cancel(&handle);"),
         "REGRESSION: reset_after no longer cancels the old \
          timer before re-registration. Repeated reset_after \
          calls accumulate stale timer registrations in the \
@@ -223,9 +217,7 @@ fn sleep_drop_clears_waker_to_release_task_reference() {
 
     let impl_marker = "impl Drop for Sleep {";
     let start = source.find(impl_marker).expect("Sleep Drop impl");
-    let body_end = source[start..]
-        .find("\n}\n")
-        .expect("Sleep Drop close");
+    let body_end = source[start..].find("\n}\n").expect("Sleep Drop close");
     let body = &source[start..start + body_end];
 
     assert!(
@@ -247,9 +239,7 @@ fn sleep_drop_uses_safe_let_underscore_for_cancel_result() {
 
     let impl_marker = "impl Drop for Sleep {";
     let start = source.find(impl_marker).expect("Sleep Drop impl");
-    let body_end = source[start..]
-        .find("\n}\n")
-        .expect("Sleep Drop close");
+    let body_end = source[start..].find("\n}\n").expect("Sleep Drop close");
     let body = &source[start..start + body_end];
 
     assert!(
@@ -272,9 +262,7 @@ fn sleep_drop_detaches_fallback_threads_to_avoid_blocking() {
 
     let impl_marker = "impl Drop for Sleep {";
     let start = source.find(impl_marker).expect("Sleep Drop impl");
-    let body_end = source[start..]
-        .find("\n}\n")
-        .expect("Sleep Drop close");
+    let body_end = source[start..].find("\n}\n").expect("Sleep Drop close");
     let body = &source[start..start + body_end];
 
     assert!(

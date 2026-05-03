@@ -82,8 +82,8 @@
 
 use std::collections::VecDeque;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 fn read(rel: &str) -> String {
@@ -147,7 +147,8 @@ fn schedule_internal_does_not_touch_priority_heap_on_spawn_path() {
     // LocalQueue (O(1)).
     let source = read("src/runtime/scheduler/three_lane.rs");
 
-    let fn_marker = "fn schedule_internal(&self, task: TaskId, priority: u8, intent: ScheduleIntent) {";
+    let fn_marker =
+        "fn schedule_internal(&self, task: TaskId, priority: u8, intent: ScheduleIntent) {";
     let start = source.find(fn_marker).expect("schedule_internal fn");
     let window_end = (start + 4000).min(source.len());
     let safe_end = source
