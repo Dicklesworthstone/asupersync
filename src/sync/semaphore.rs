@@ -834,6 +834,7 @@ mod tests {
     use crate::types::Budget;
     use crate::util::ArenaIndex;
     use crate::{RegionId, TaskId};
+    use futures_lite::future::block_on;
 
     fn init_test(name: &str) {
         init_test_logging();

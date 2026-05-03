@@ -2683,7 +2683,7 @@ mod tests {
         let _wait_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             block_on(async {
                 // Cancel the context
-                cx.cancel();
+                cx.cancel_fast(crate::types::CancelKind::User);
 
                 // This should return with cancellation error, not wait indefinitely
                 // DEFECT: Currently this may not check cancellation properly
@@ -3027,6 +3027,7 @@ mod tests {
     #[test]
     fn audit_once_cell_wait_cancellation_behavior() {
         use crate::cx::Cx;
+        use crate::types::CancelKind;
         use std::sync::Arc;
         use std::thread;
         use std::time::{Duration, Instant};
@@ -3043,15 +3044,13 @@ mod tests {
         {
             let cell_clone = cell.clone();
             let handle = thread::spawn(move || {
-                let rt = crate::lab::LabRuntime::new();
-                rt.block_on(async {
-                    let cx = Cx::new();
+                block_on(async {
+                    let cx = Cx::for_testing();
 
                     // Start slow initialization in background
                     let init_cell = cell_clone.clone();
                     let _init_handle = thread::spawn(move || {
-                        let rt = crate::lab::LabRuntime::new();
-                        rt.block_on(async {
+                        block_on(async {
                             thread::sleep(Duration::from_millis(100));
                             let _ = init_cell.get_or_init(|| async { 42u32 }).await;
                         });
@@ -3061,7 +3060,7 @@ mod tests {
                     thread::sleep(Duration::from_millis(10));
 
                     // Cancel the context
-                    cx.cancel();
+                    cx.cancel_fast(CancelKind::User);
 
                     // wait() should return Cancelled immediately, not hang
                     let start = Instant::now();
@@ -3104,10 +3103,9 @@ mod tests {
         // Test 2: wait() succeeds when cell is already initialized
         {
             let initialized_cell = OnceCell::with_value(99u32);
-            let rt = crate::lab::LabRuntime::new();
-            rt.block_on(async {
-                let cx = Cx::new();
-                cx.cancel(); // Even with cancelled context
+            block_on(async {
+                let cx = Cx::for_testing();
+                cx.cancel_fast(CancelKind::User); // Even with cancelled context
 
                 let result = initialized_cell.wait(&cx).await;
                 match result {
@@ -3130,13 +3128,12 @@ mod tests {
             for i in 0..iterations {
                 let stress_cell_clone = stress_cell.clone();
                 let handle = thread::spawn(move || {
-                    let rt = crate::lab::LabRuntime::new();
-                    rt.block_on(async {
-                        let cx = Cx::new();
+                    block_on(async {
+                        let cx = Cx::for_testing();
 
                         // Cancel half the contexts
                         if i % 2 == 0 {
-                            cx.cancel();
+                            cx.cancel_fast(CancelKind::User);
                         }
 
                         let start = Instant::now();
