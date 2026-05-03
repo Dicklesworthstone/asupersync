@@ -1,0 +1,172 @@
+{
+  "contract_version": "scheduler-topology-replay-smoke-contract-v1",
+  "bead_id": "asupersync-wk0ciq",
+  "description": "Contract-backed deterministic topology replay smoke proof for multi-cohort scheduler traces.",
+  "runner_script": "scripts/run_scheduler_topology_replay_smoke.sh",
+  "runner_bundle_schema_version": "scheduler-topology-replay-smoke-bundle-v1",
+  "runner_report_schema_version": "scheduler-topology-replay-smoke-run-report-v1",
+  "required_bundle_fields": [
+    "schema_version",
+    "contract_version",
+    "scenario_id",
+    "description",
+    "scenario_class",
+    "execution_policy",
+    "run_id",
+    "mode",
+    "artifact_path",
+    "run_log_path",
+    "topology_manifest_file",
+    "topology_trace_file",
+    "command",
+    "expected_first_hash",
+    "expected_second_hash",
+    "command_exit_code",
+    "script_exit_code",
+    "validation_passed",
+    "status",
+    "started_ts",
+    "ended_ts"
+  ],
+  "required_run_report_fields": [
+    "schema_version",
+    "contract_version",
+    "artifact_path",
+    "bundle_manifest_path",
+    "run_id",
+    "scenario_id",
+    "mode",
+    "command_exit_code",
+    "script_exit_code",
+    "validation_passed",
+    "status",
+    "message",
+    "expected_trace_projection",
+    "actual_trace_projection"
+  ],
+  "required_execute_output_files": [
+    "bundle_manifest.json",
+    "run_report.json",
+    "topology_manifest.json",
+    "topology_trace.json",
+    "run.log"
+  ],
+  "smoke_scenarios": [
+    {
+      "scenario_id": "AA-SCHED-TOPOLOGY-STABLE-RERUN-4W2C",
+      "description": "Replay a two-cohort, four-worker steal-heavy fixture twice and require a stable trace hash plus identical steal decisions across reruns.",
+      "output_root": "target/scheduler-topology-replay-smoke",
+      "command_prefix": "cargo test -p asupersync --test scheduler_topology_replay_artifact -- --nocapture",
+      "scenario_class": "deterministic_lab_safe",
+      "execution_policy": "execute_only",
+      "host_requirements": {
+        "min_worker_threads": 4,
+        "min_memory_gib": 256,
+        "notes": [
+          "This scenario is entirely deterministic and safe to run under the lab/runtime test path.",
+          "It is the canonical proof that repeated topology replay reruns keep identical steal-path decisions."
+        ]
+      },
+      "capture_plan": [
+        "Emit topology_manifest.json from the explicit fixture descriptor rather than ambient host inspection.",
+        "Emit topology_trace.json containing the stable hashes, locality sequence, and detailed steal-path events.",
+        "Validate the same fixture produces identical trace hashes across two consecutive reruns."
+      ],
+      "fixture": {
+        "topology": {
+          "worker_threads": 4,
+          "cohort_count": 2,
+          "memory_budget_gib": 256
+        },
+        "worker_to_cohort": [
+          0,
+          0,
+          1,
+          1
+        ],
+        "replay_workers": [
+          1,
+          3
+        ],
+        "seed": 17,
+        "seeded_workers": [
+          {
+            "worker_id": 0,
+            "task_id_start": 10000,
+            "task_count": 3
+          },
+          {
+            "worker_id": 2,
+            "task_id_start": 20000,
+            "task_count": 2
+          }
+        ]
+      },
+      "expected_trace": {
+        "first_hash": 17382941096260062821,
+        "second_hash": 17382941096260062821,
+        "event_count": 5,
+        "remote_spill_count": 2,
+        "locality_sequence": [
+          "local",
+          "remote",
+          "local",
+          "local",
+          "remote"
+        ]
+      }
+    },
+    {
+      "scenario_id": "AA-SCHED-TOPOLOGY-REMOTE-SPILL-2W2C",
+      "description": "Replay a two-worker, two-cohort fixture that forces one remote spill and records the cross-cohort steal path deterministically.",
+      "output_root": "target/scheduler-topology-replay-smoke",
+      "command_prefix": "cargo test -p asupersync --test scheduler_topology_replay_artifact -- --nocapture",
+      "scenario_class": "deterministic_lab_safe",
+      "execution_policy": "execute_only",
+      "host_requirements": {
+        "min_worker_threads": 2,
+        "min_memory_gib": 256,
+        "notes": [
+          "This scenario isolates the single-remote-spill shape used by the reusable topology helper tests.",
+          "It proves that locality labels and remote-spill accounting stay deterministic."
+        ]
+      },
+      "capture_plan": [
+        "Emit the explicit two-worker topology manifest used for the remote spill proof.",
+        "Emit the remote-steal event with source/thief cohort annotations and stable hashes across reruns.",
+        "Validate the replay trace reports exactly one remote spill and no locality ambiguity."
+      ],
+      "fixture": {
+        "topology": {
+          "worker_threads": 2,
+          "cohort_count": 2,
+          "memory_budget_gib": 256
+        },
+        "worker_to_cohort": [
+          0,
+          1
+        ],
+        "replay_workers": [
+          1
+        ],
+        "seed": 7,
+        "seeded_workers": [
+          {
+            "worker_id": 0,
+            "task_id_start": 40000,
+            "task_count": 1
+          }
+        ]
+      },
+      "expected_trace": {
+        "first_hash": 14852217216801945704,
+        "second_hash": 14852217216801945704,
+        "event_count": 1,
+        "remote_spill_count": 1,
+        "locality_sequence": [
+          "remote"
+        ]
+      }
+    }
+  ]
+}
