@@ -568,7 +568,7 @@ elif [[ "$EXECUTION_POLICY" == "dry_run_only" ]]; then
 else
     set +e
     pushd "$PROJECT_ROOT" >/dev/null
-    bash -lc "$COMMAND" 2>&1 | tee "$LOG_FILE"
+    bash -lc "$COMMAND" 2>&1 | tee -a "$LOG_FILE"
     COMMAND_EXIT_CODE=${PIPESTATUS[0]}
     popd >/dev/null
     set -e
@@ -697,12 +697,14 @@ write_run_report \
     "$CAPTURE_COMMAND_EXIT_CODE"
 
 if [[ -f "$REPORT_FILE" ]]; then
-    echo ""
-    echo "==================================================================="
-    echo "         SCHEDULER RECOMMEND SMOKE: GENERATED REPORT               "
-    echo "==================================================================="
-    cat "$REPORT_FILE"
-    echo ""
+    {
+        echo ""
+        echo "==================================================================="
+        echo "         SCHEDULER RECOMMEND SMOKE: GENERATED REPORT               "
+        echo "==================================================================="
+        cat "$REPORT_FILE"
+        echo ""
+    } | tee -a "$LOG_FILE"
 fi
 
 echo "Smoke run artifacts:"

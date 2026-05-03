@@ -222,8 +222,65 @@ fn scenario_by_id<'a>(contract: &'a Value, scenario_id: &str) -> &'a Value {
         .unwrap_or_else(|| panic!("missing scenario: {scenario_id}"))
 }
 
+fn missing_required_fields(
+    contract: &Value,
+    field_list_key: &str,
+    artifact: &Value,
+) -> Vec<String> {
+    contract[field_list_key]
+        .as_array()
+        .unwrap_or_else(|| panic!("{field_list_key} should be an array"))
+        .iter()
+        .map(|field| {
+            field
+                .as_str()
+                .unwrap_or_else(|| panic!("{field_list_key} entries should be strings"))
+        })
+        .filter(|field| artifact.get(*field).is_none() || artifact[*field].is_null())
+        .map(str::to_string)
+        .collect()
+}
+
+fn assert_required_fields_present(
+    contract: &Value,
+    field_list_key: &str,
+    artifact: &Value,
+    label: &str,
+) {
+    let missing = missing_required_fields(contract, field_list_key, artifact);
+    assert!(
+        missing.is_empty(),
+        "{label} missing required {field_list_key} fields: {missing:?}"
+    );
+}
+
 fn repo_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+}
+
+#[test]
+fn scheduler_recommend_required_field_validator_reports_missing_fields() {
+    let contract = load_scheduler_recommend_contract();
+    let incomplete_bundle = serde_json::json!({
+        "schema_version": "scheduler-recommend-smoke-bundle-v1",
+        "contract_version": contract["contract_version"],
+        "scenario_id": "AA-SCHED-RECOMMEND-MIXED-BURST-64C",
+    });
+
+    let missing = missing_required_fields(&contract, "required_bundle_fields", &incomplete_bundle);
+
+    assert!(
+        missing.iter().any(|field| field == "host_fingerprint"),
+        "validator should report missing host_fingerprint"
+    );
+    assert!(
+        missing.iter().any(|field| field == "workload_seed"),
+        "validator should report missing workload_seed"
+    );
+    assert!(
+        missing.iter().any(|field| field == "verdict_summary"),
+        "validator should report missing verdict_summary"
+    );
 }
 
 #[test]
@@ -518,6 +575,20 @@ fn scheduler_recommend_smoke_runner_dry_run_emits_template_bundle_contract() {
     let bundle: Value = serde_json::from_str(&bundle_raw).expect("parse bundle manifest");
     let report_raw = std::fs::read_to_string(&report_path).expect("read run report");
     let report: Value = serde_json::from_str(&report_raw).expect("parse run report");
+    let contract = load_scheduler_recommend_contract();
+
+    assert_required_fields_present(
+        &contract,
+        "required_bundle_fields",
+        &bundle,
+        "real-host dry-run bundle",
+    );
+    assert_required_fields_present(
+        &contract,
+        "required_run_report_fields",
+        &report,
+        "real-host dry-run report",
+    );
 
     assert_eq!(
         bundle["schema_version"].as_str(),
@@ -567,6 +638,25 @@ fn scheduler_recommend_smoke_runner_dry_run_emits_template_bundle_contract() {
         report["queue_storm_shape"]["shape"].as_str(),
         Some("operator_supplied")
     );
+    assert_eq!(bundle["workload_seed"].as_str(), Some("operator-supplied"));
+    assert_eq!(report["workload_seed"].as_str(), Some("operator-supplied"));
+    assert_eq!(
+        bundle["verdict_summary"], report["verdict_summary"],
+        "bundle and run report should share one verdict summary"
+    );
+
+    let run_log_path = bundle["run_log_path"]
+        .as_str()
+        .expect("bundle should record run_log_path");
+    let run_log_raw = std::fs::read_to_string(run_log_path).expect("read run log");
+    assert!(
+        run_log_raw.contains("CAPTURE_EMBEDDED"),
+        "dry-run log should preserve evidence capture event"
+    );
+    assert!(
+        run_log_raw.contains("DRY_RUN"),
+        "dry-run log should record the refused command layout"
+    );
 }
 
 #[test]
@@ -608,6 +698,20 @@ fn scheduler_recommend_smoke_runner_execute_emits_config_snapshot_and_verdict() 
     let bundle: Value = serde_json::from_str(&bundle_raw).expect("parse bundle manifest");
     let report_raw = std::fs::read_to_string(&report_path).expect("read run report");
     let report: Value = serde_json::from_str(&report_raw).expect("parse run report");
+    let contract = load_scheduler_recommend_contract();
+
+    assert_required_fields_present(
+        &contract,
+        "required_bundle_fields",
+        &bundle,
+        "execute bundle",
+    );
+    assert_required_fields_present(
+        &contract,
+        "required_run_report_fields",
+        &report,
+        "execute run report",
+    );
 
     assert_eq!(bundle["status"].as_str(), Some("passed"));
     assert_eq!(report["status"].as_str(), Some("passed"));
@@ -644,5 +748,30 @@ fn scheduler_recommend_smoke_runner_execute_emits_config_snapshot_and_verdict() 
         report["bundle_manifest_path"].as_str(),
         bundle_path.to_str(),
         "run report should point back to the bundle manifest"
+    );
+    assert_eq!(
+        bundle["workload_seed"].as_str(),
+        Some("mixed-burst-64c-seed-v1")
+    );
+    assert_eq!(
+        report["workload_seed"].as_str(),
+        Some("mixed-burst-64c-seed-v1")
+    );
+    assert_eq!(
+        bundle["verdict_summary"], report["verdict_summary"],
+        "bundle and run report should share one verdict summary"
+    );
+
+    let run_log_path = bundle["run_log_path"]
+        .as_str()
+        .expect("bundle should record run_log_path");
+    let run_log_raw = std::fs::read_to_string(run_log_path).expect("read run log");
+    assert!(
+        run_log_raw.contains("CAPTURE_EMBEDDED"),
+        "execute log should preserve evidence capture event before offline_tuner output"
+    );
+    assert!(
+        run_log_raw.contains("asupersync.scheduler-evidence.v1"),
+        "execute log should include the offline_tuner report payload"
     );
 }
