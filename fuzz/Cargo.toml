@@ -5223,3 +5223,10 @@ path = "fuzz_targets/h2_settings_initial_window_negative_via_window_update.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "h2_settings_max_concurrent_streams_decrease_below_active"
+path = "fuzz_targets/h2_settings_max_concurrent_streams_decrease_below_active.rs"
+test = false
+doc = false
+bench = false
