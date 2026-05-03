@@ -5286,3 +5286,10 @@ path = "fuzz_targets/h2_request_pseudo_authority_with_brackets.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "h2_request_pseudo_authority_with_invalid_ipv6"
+path = "fuzz_targets/h2_request_pseudo_authority_with_invalid_ipv6.rs"
+test = false
+doc = false
+bench = false
