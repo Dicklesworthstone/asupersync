@@ -22,6 +22,16 @@
     "host_requirements",
     "template_env",
     "capture_plan",
+    "host_fingerprint",
+    "topology_profile",
+    "memory_profile",
+    "workload_seed",
+    "queue_storm_shape",
+    "cancel_storm_shape",
+    "latency_summary",
+    "throughput_summary",
+    "fallback_activations",
+    "controller_state_references",
     "expected_profile_name",
     "expected_reason_codes",
     "command_exit_code",
@@ -52,6 +62,16 @@
     "host_requirements",
     "template_env",
     "capture_plan",
+    "host_fingerprint",
+    "topology_profile",
+    "memory_profile",
+    "workload_seed",
+    "queue_storm_shape",
+    "cancel_storm_shape",
+    "latency_summary",
+    "throughput_summary",
+    "fallback_activations",
+    "controller_state_references",
     "capture_mode",
     "capture_command",
     "capture_command_exit_code",
@@ -101,6 +121,43 @@
       "template_env": {
         "SCHEDULER_RECOMMEND_SMOKE_OUTPUT_DIR": "Override the output root when bundling artifacts elsewhere."
       },
+      "topology_profile": {
+        "name": "dual_cohort_64c",
+        "worker_threads": 64,
+        "cohort_count": 2
+      },
+      "memory_profile": {
+        "name": "large_host_256g",
+        "budget_gib": 256,
+        "evidence_retention": "standard"
+      },
+      "workload_seed": "mixed-burst-64c-seed-v1",
+      "queue_storm_shape": {
+        "shape": "mixed_burst_ready_spike",
+        "ready_backlog_p95": 192,
+        "ready_backlog_p99": 320
+      },
+      "cancel_storm_shape": {
+        "shape": "moderate_cancel_debt",
+        "cancel_debt_p95": 48,
+        "cancel_debt_p99": 128
+      },
+      "throughput_summary": {
+        "units": "scheduler_events_per_capture",
+        "observed": null,
+        "source": "contract_fixture",
+        "note": "offline_tuner smoke replay consumes captured evidence; throughput belongs to the upstream evidence capture rather than this replay step"
+      },
+      "fallback_activations_hint": {
+        "activated": false,
+        "active_profile_names": []
+      },
+      "controller_state_references": [
+        "scheduler_report.profile_name",
+        "scheduler_report.recommended_knobs",
+        "scheduler_report.fallback_profile",
+        "scheduler_report.reason_codes"
+      ],
       "capture_plan": [
         "Use the committed evidence artifact embedded in this contract.",
         "Execute the runner directly or replay the emitted scheduler_evidence.json through offline_tuner."
@@ -189,6 +246,44 @@
       "template_env": {
         "ASUPERSYNC_SCHEDULER_EVIDENCE_CAPTURE_PATH": "Runner-managed path for the integration test to write scheduler_evidence.json."
       },
+      "topology_profile": {
+        "name": "dual_cohort_runtime_capture_2w",
+        "worker_threads": 2,
+        "cohort_count": 2
+      },
+      "memory_profile": {
+        "name": "deterministic_lab_capture",
+        "budget_gib": 256,
+        "evidence_retention": "minimal"
+      },
+      "workload_seed": "runtime-capture-2w-seed-v1",
+      "queue_storm_shape": {
+        "shape": "local_ready_plus_global_inject",
+        "dispatch_samples": 5
+      },
+      "cancel_storm_shape": {
+        "shape": "cancel_lane_idle",
+        "cancel_debt_p95": 0,
+        "cancel_debt_p99": 0
+      },
+      "throughput_summary": {
+        "units": "tasks_per_run",
+        "observed": 5,
+        "source": "runtime_capture_test",
+        "note": "proof runner captures a tiny deterministic dispatch sample rather than a throughput benchmark"
+      },
+      "fallback_activations_hint": {
+        "activated": true,
+        "active_profile_names": [
+          "conservative_baseline"
+        ]
+      },
+      "controller_state_references": [
+        "scheduler_report.profile_name",
+        "scheduler_report.recommended_knobs",
+        "scheduler_report.fallback_profile",
+        "scheduler_report.reason_codes"
+      ],
       "capture_plan": [
         "Execute the deterministic integration test with ASUPERSYNC_SCHEDULER_EVIDENCE_CAPTURE_PATH pointing at the bundle-local scheduler_evidence.json.",
         "Replay the captured evidence through offline_tuner to prove the runner path works with live runtime artifacts.",
@@ -224,6 +319,49 @@
         "ASUPERSYNC_SCHEDULER_EVIDENCE_CAPTURE": "target/scheduler-evidence/live_host_capture.json",
         "ASUPERSYNC_SCHEDULER_COMMAND_TEMPLATE": "cargo run -p asupersync --bin offline_tuner --features cli,simd-intrinsics -- scheduler-recommend --evidence-file <captured-evidence.json> --output-file <output.json>"
       },
+      "topology_profile": {
+        "name": "dual_cohort_real_host_template_64c",
+        "worker_threads": 64,
+        "cohort_count": 2
+      },
+      "memory_profile": {
+        "name": "operator_template_256g",
+        "budget_gib": 256,
+        "evidence_retention": "operator_selected"
+      },
+      "workload_seed": "operator-supplied",
+      "queue_storm_shape": {
+        "shape": "operator_supplied",
+        "required_metrics": [
+          "ready_backlog_p95",
+          "ready_backlog_p99",
+          "queue_residency_p95_ns",
+          "queue_residency_p99_ns"
+        ]
+      },
+      "cancel_storm_shape": {
+        "shape": "operator_supplied",
+        "required_metrics": [
+          "cancel_debt_p95",
+          "cancel_debt_p99"
+        ]
+      },
+      "throughput_summary": {
+        "units": "scheduler_events_per_second",
+        "observed": null,
+        "source": "operator_capture",
+        "note": "fill from real-host telemetry before execute mode outside this template run"
+      },
+      "fallback_activations_hint": {
+        "activated": false,
+        "active_profile_names": []
+      },
+      "controller_state_references": [
+        "scheduler_report.profile_name",
+        "scheduler_report.recommended_knobs",
+        "scheduler_report.fallback_profile",
+        "scheduler_report.reason_codes"
+      ],
       "capture_plan": [
         "Populate wake-to-run, queue residency, ready backlog, cancel debt, and remote steal metrics from a real 64-core / 256GiB host.",
         "Replace the placeholder notes and metrics in scheduler_evidence.json before direct offline_tuner execution.",
