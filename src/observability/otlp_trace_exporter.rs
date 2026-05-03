@@ -13,7 +13,7 @@
 use crossbeam_queue::ArrayQueue;
 use parking_lot::Mutex;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 /// Default maximum length for OTLP span attribute values per OTLP §2.5.3.
@@ -85,8 +85,8 @@ pub struct LoadSheddingStats {
 pub struct BoundedExportQueue<T> {
     queue: ArrayQueue<T>,
     capacity: usize,
-    current_len: AtomicUsize,
     dropped_count: AtomicU64,
+    overflow_lock: Mutex<()>,
 }
 
 impl<T> BoundedExportQueue<T> {
@@ -95,69 +95,55 @@ impl<T> BoundedExportQueue<T> {
         Self {
             queue: ArrayQueue::new(capacity),
             capacity,
-            current_len: AtomicUsize::new(0),
             dropped_count: AtomicU64::new(0),
+            overflow_lock: Mutex::new(()),
         }
     }
 
     /// Enqueue an item, dropping the oldest if capacity is exceeded.
-    /// Returns true if an item was dropped.
+    /// Returns the dropped item when load shedding occurs.
     ///
-    /// **LOCK-FREE**: Uses atomic operations to eliminate mutex contention.
-    /// **DROP-OLDEST**: When queue is full, removes oldest item before adding new one.
-    pub fn enqueue(&self, item: T) -> bool {
-        let mut dropped = false;
-
-        // Fast path: try to push the item directly (most common case when queue isn't full)
+    /// **FAST PATH**: The common non-full case remains lock-free.
+    /// **OVERLOAD PATH**: When full, a narrow overflow mutex serializes the
+    /// replacement so exactly one oldest item is evicted per successful enqueue.
+    pub fn enqueue(&self, item: T) -> Option<T> {
         match self.queue.push(item) {
-            Ok(()) => {
-                // Successfully enqueued
-                self.current_len.fetch_add(1, Ordering::Relaxed);
-                return false; // No item was dropped
-            }
+            Ok(()) => None,
             Err(returned_item) => {
-                // Queue is full - need to drop oldest item first
-                if let Some(_oldest) = self.queue.pop() {
-                    // Successfully dropped oldest item
-                    self.dropped_count.fetch_add(1, Ordering::Relaxed);
-                    self.current_len.fetch_sub(1, Ordering::Relaxed);
-                    dropped = true;
+                let _overflow_guard = self.overflow_lock.lock();
 
-                    // Now try to push the new item again (this should succeed)
-                    if let Err(_) = self.queue.push(returned_item) {
-                        // This shouldn't happen, but handle gracefully
-                        return dropped;
-                    }
-                } else {
-                    // Queue became empty between our push attempt and pop attempt
-                    // Try to push again with the returned item
-                    if let Err(_) = self.queue.push(returned_item) {
-                        // Still failed - something went wrong, but continue
-                        return dropped;
+                match self.queue.push(returned_item) {
+                    Ok(()) => None,
+                    Err(returned_item) => {
+                        let dropped_item = self.queue.pop();
+                        if let Some(dropped_item) = dropped_item {
+                            self.dropped_count.fetch_add(1, Ordering::Relaxed);
+                            if self.queue.push(returned_item).is_err() {
+                                panic!("overflow replacement must succeed");
+                            }
+                            Some(dropped_item)
+                        } else {
+                            if self.queue.push(returned_item).is_err() {
+                                panic!("push must succeed after transient full queue clears");
+                            }
+                            None
+                        }
                     }
                 }
             }
         }
-
-        self.current_len.fetch_add(1, Ordering::Relaxed);
-        dropped
     }
 
     /// Dequeue the oldest item.
     ///
     /// **LOCK-FREE**: Uses atomic operations for zero-contention access.
     pub fn dequeue(&self) -> Option<T> {
-        if let Some(item) = self.queue.pop() {
-            self.current_len.fetch_sub(1, Ordering::Relaxed);
-            Some(item)
-        } else {
-            None
-        }
+        self.queue.pop()
     }
 
     /// Get current queue length.
     pub fn len(&self) -> usize {
-        self.current_len.load(Ordering::Relaxed)
+        self.queue.len()
     }
 
     /// Get queue capacity.
@@ -420,20 +406,19 @@ impl TraceExporter for LoadSheddingTraceExporter {
             created_at: batch.created_at,
         };
 
-        let spans_in_batch = filtered_batch.spans.len() as u64;
-        let dropped = self.export_queue.enqueue(filtered_batch);
+        if let Some(dropped_batch) = self.export_queue.enqueue(filtered_batch) {
+            let dropped_spans = dropped_batch.spans.len() as u64;
 
-        if dropped {
             // Update dropped spans metric (required by OTLP best practices)
             self.dropped_spans_metric
-                .fetch_add(spans_in_batch, Ordering::Relaxed);
+                .fetch_add(dropped_spans, Ordering::Relaxed);
 
             #[cfg(feature = "tracing-integration")]
             crate::tracing_compat::warn!(
                 target: "asupersync::observability::otlp_trace",
                 "OTLP trace export queue full: dropped oldest span batch ({} spans). \
                  Queue capacity: {}, total dropped spans: {}",
-                spans_in_batch,
+                dropped_spans,
                 self.export_queue.capacity(),
                 self.dropped_spans_count()
             );

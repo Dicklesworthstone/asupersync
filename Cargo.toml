@@ -426,6 +426,11 @@ name = "scheduler_browser_bench"
 harness = false
 required-features = ["test-internals"]
 
+[[bench]]
+name = "otlp_trace_exporter_bench"
+harness = false
+required-features = ["test-internals"]
+
 [[example]]
 name = "spork_minimal_supervised_app"
 required-features = ["test-internals"]
