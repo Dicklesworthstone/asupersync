@@ -1501,6 +1501,450 @@ impl CohortAdmissionSteeringLedger {
     }
 }
 
+/// Stable version identifier for overload brownout ledgers.
+pub const OVERLOAD_BROWNOUT_LEDGER_SCHEMA_VERSION: &str = "asupersync.overload-brownout.v1";
+
+/// Optional runtime surfaces that may be degraded during overload brownout.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BrownoutOptionalSurface {
+    DetailedTracing,
+    RichDiagnostics,
+    DebugHttp,
+    RichExportFormatting,
+}
+
+/// Critical runtime surfaces that brownout must never disable.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BrownoutProtectedSurface {
+    CoreScheduling,
+    CancellationDrain,
+    RegionQuiescence,
+    ObligationCleanup,
+}
+
+/// Brownout phase for optional runtime surfaces.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OverloadBrownoutPhase {
+    Normal,
+    Observe,
+    Degrade,
+    ShedOptional,
+    Recovery,
+}
+
+impl OverloadBrownoutPhase {
+    #[must_use]
+    fn severity_rank(self) -> u8 {
+        match self {
+            Self::Normal => 0,
+            Self::Observe | Self::Recovery => 1,
+            Self::Degrade => 2,
+            Self::ShedOptional => 3,
+        }
+    }
+}
+
+/// Explicit reason codes for overload brownout decisions.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OverloadBrownoutReason {
+    Disabled,
+    MissingEvidenceFallback,
+    ObservePressure,
+    DegradePressure,
+    ShedOptionalPressure,
+    TailRiskOuterDefer,
+    TailRiskOuterShed,
+    RecoveryHysteresis,
+    PreserveCriticalSurfaces,
+    OptionalSurfaceAlreadyShedding,
+    ConservativeBaseline,
+}
+
+/// Bounded operator-tunable profile for overload brownout decisions.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OverloadBrownoutProfile {
+    pub enabled: bool,
+    pub observe_memory_pressure_bps: u16,
+    pub degrade_memory_pressure_bps: u16,
+    pub shed_optional_memory_pressure_bps: u16,
+    pub observe_wake_to_run_p99_ns: u64,
+    pub degrade_wake_to_run_p99_ns: u64,
+    pub shed_optional_wake_to_run_p99_ns: u64,
+    pub recovery_window_threshold: u8,
+    pub allowed_optional_surfaces: Vec<BrownoutOptionalSurface>,
+    pub denied_optional_surfaces: Vec<BrownoutOptionalSurface>,
+}
+
+impl Default for OverloadBrownoutProfile {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            observe_memory_pressure_bps: 7_800,
+            degrade_memory_pressure_bps: 8_600,
+            shed_optional_memory_pressure_bps: 9_300,
+            observe_wake_to_run_p99_ns: 145_000,
+            degrade_wake_to_run_p99_ns: 210_000,
+            shed_optional_wake_to_run_p99_ns: 285_000,
+            recovery_window_threshold: 2,
+            allowed_optional_surfaces: vec![
+                BrownoutOptionalSurface::DetailedTracing,
+                BrownoutOptionalSurface::RichDiagnostics,
+                BrownoutOptionalSurface::DebugHttp,
+                BrownoutOptionalSurface::RichExportFormatting,
+            ],
+            denied_optional_surfaces: Vec::new(),
+        }
+    }
+}
+
+impl OverloadBrownoutProfile {
+    /// Return the deduplicated, denylist-filtered optional surfaces.
+    #[must_use]
+    pub fn effective_optional_surfaces(&self) -> Vec<BrownoutOptionalSurface> {
+        let mut effective = Vec::new();
+        for surface in &self.allowed_optional_surfaces {
+            if self.denied_optional_surfaces.contains(surface) || effective.contains(surface) {
+                continue;
+            }
+            effective.push(*surface);
+        }
+        effective
+    }
+
+    fn surfaces_for_phase(&self, phase: OverloadBrownoutPhase) -> Vec<BrownoutOptionalSurface> {
+        let effective = self.effective_optional_surfaces();
+        let wanted = match phase {
+            OverloadBrownoutPhase::Normal => Vec::new(),
+            OverloadBrownoutPhase::Observe | OverloadBrownoutPhase::Recovery => {
+                vec![BrownoutOptionalSurface::RichExportFormatting]
+            }
+            OverloadBrownoutPhase::Degrade => vec![
+                BrownoutOptionalSurface::RichExportFormatting,
+                BrownoutOptionalSurface::RichDiagnostics,
+            ],
+            OverloadBrownoutPhase::ShedOptional => effective.clone(),
+        };
+        wanted
+            .into_iter()
+            .filter(|surface| effective.contains(surface))
+            .collect()
+    }
+}
+
+/// Evidence vector for overload brownout decisions.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OverloadBrownoutEvidence {
+    pub scheduler: Option<SchedulerEvidenceMetrics>,
+    /// Memory pressure in basis points, where `10_000` represents 100%.
+    pub memory_pressure_bps: Option<u16>,
+    pub degradation_level: DegradationLevel,
+    pub outer_tail_risk_decision: TailRiskAdmissionDecision,
+    pub previous_phase: OverloadBrownoutPhase,
+    pub recovery_streak_windows: u8,
+    pub already_shed_surfaces: Vec<BrownoutOptionalSurface>,
+}
+
+impl OverloadBrownoutEvidence {
+    fn missing_fields(&self) -> Vec<&'static str> {
+        let mut missing = Vec::new();
+        if self.scheduler.is_none() {
+            missing.push("scheduler_metrics");
+        }
+        match self.memory_pressure_bps {
+            Some(value) if value <= 10_000 => {}
+            Some(_) | None => missing.push("memory_pressure_bps"),
+        }
+        missing
+    }
+}
+
+/// Flattened evidence snapshot stored in the overload brownout ledger.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OverloadBrownoutEvidenceSnapshot {
+    pub wake_to_run_p99_ns: Option<u64>,
+    pub queue_residency_p99_ns: Option<u64>,
+    pub ready_backlog_p99: Option<usize>,
+    pub cancel_debt_p99: Option<usize>,
+    pub memory_pressure_bps: Option<u16>,
+    pub degradation_level: DegradationLevel,
+    pub outer_tail_risk_decision: TailRiskAdmissionDecision,
+    pub previous_phase: OverloadBrownoutPhase,
+    pub recovery_streak_before: u8,
+    pub already_shed_surfaces: Vec<BrownoutOptionalSurface>,
+}
+
+/// Deterministic decision ledger for overload brownout.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OverloadBrownoutLedger {
+    pub schema_version: String,
+    pub phase: OverloadBrownoutPhase,
+    pub fallback_used: bool,
+    pub reason_codes: Vec<OverloadBrownoutReason>,
+    pub missing_evidence_fields: Vec<String>,
+    pub profile: OverloadBrownoutProfile,
+    pub evidence: OverloadBrownoutEvidenceSnapshot,
+    pub requested_degraded_surfaces: Vec<BrownoutOptionalSurface>,
+    pub newly_degraded_surfaces: Vec<BrownoutOptionalSurface>,
+    pub already_shed_surfaces: Vec<BrownoutOptionalSurface>,
+    pub restored_surfaces: Vec<BrownoutOptionalSurface>,
+    pub preserved_surfaces: Vec<BrownoutProtectedSurface>,
+    pub recovery_streak_after: u8,
+    pub explanation: Vec<String>,
+}
+
+impl OverloadBrownoutLedger {
+    /// Evaluate one overload brownout decision.
+    #[must_use]
+    pub fn evaluate(
+        evidence: &OverloadBrownoutEvidence,
+        profile: &OverloadBrownoutProfile,
+    ) -> Self {
+        let snapshot = OverloadBrownoutEvidenceSnapshot {
+            wake_to_run_p99_ns: evidence
+                .scheduler
+                .as_ref()
+                .map(|metrics| metrics.wake_to_run_p99_ns),
+            queue_residency_p99_ns: evidence
+                .scheduler
+                .as_ref()
+                .map(|metrics| metrics.queue_residency_p99_ns),
+            ready_backlog_p99: evidence
+                .scheduler
+                .as_ref()
+                .map(|metrics| metrics.ready_backlog_p99),
+            cancel_debt_p99: evidence
+                .scheduler
+                .as_ref()
+                .map(|metrics| metrics.cancel_debt_p99),
+            memory_pressure_bps: evidence.memory_pressure_bps,
+            degradation_level: evidence.degradation_level,
+            outer_tail_risk_decision: evidence.outer_tail_risk_decision,
+            previous_phase: evidence.previous_phase,
+            recovery_streak_before: evidence.recovery_streak_windows,
+            already_shed_surfaces: evidence.already_shed_surfaces.clone(),
+        };
+
+        if !profile.enabled {
+            return Self::finish(
+                profile,
+                snapshot,
+                OverloadBrownoutPhase::Normal,
+                true,
+                vec![
+                    OverloadBrownoutReason::Disabled,
+                    OverloadBrownoutReason::ConservativeBaseline,
+                ],
+                Vec::new(),
+                Vec::new(),
+                0,
+                vec!["brownout is disabled, so optional surfaces stayed fully enabled".to_string()],
+            );
+        }
+
+        let missing_fields = evidence
+            .missing_fields()
+            .into_iter()
+            .map(str::to_string)
+            .collect::<Vec<_>>();
+        if !missing_fields.is_empty() {
+            let conservative_phase = Self::conservative_phase(evidence);
+            return Self::finish(
+                profile,
+                snapshot,
+                conservative_phase,
+                true,
+                vec![
+                    OverloadBrownoutReason::MissingEvidenceFallback,
+                    OverloadBrownoutReason::PreserveCriticalSurfaces,
+                ],
+                missing_fields,
+                Vec::new(),
+                evidence.recovery_streak_windows,
+                vec![
+                    "incomplete evidence kept brownout on a conservative degradation-band comparator"
+                        .to_string(),
+                ],
+            );
+        }
+
+        let scheduler = evidence.scheduler.as_ref().expect("validated above");
+        let memory_pressure = evidence.memory_pressure_bps.expect("validated above");
+        let mut raw_phase = OverloadBrownoutPhase::Normal;
+        let mut reason_codes = vec![OverloadBrownoutReason::PreserveCriticalSurfaces];
+        let mut explanation = vec![
+            "core scheduling, cancellation drain, region quiescence, and obligation cleanup stay preserved in every brownout phase".to_string(),
+        ];
+
+        if memory_pressure >= profile.observe_memory_pressure_bps
+            || scheduler.wake_to_run_p99_ns >= profile.observe_wake_to_run_p99_ns
+            || evidence.degradation_level >= DegradationLevel::Light
+        {
+            raw_phase = OverloadBrownoutPhase::Observe;
+            reason_codes.push(OverloadBrownoutReason::ObservePressure);
+            explanation.push(format!(
+                "observe threshold crossed: wake_to_run p99={}ns, memory={}bps",
+                scheduler.wake_to_run_p99_ns, memory_pressure
+            ));
+        }
+
+        if memory_pressure >= profile.degrade_memory_pressure_bps
+            || scheduler.wake_to_run_p99_ns >= profile.degrade_wake_to_run_p99_ns
+            || evidence.degradation_level >= DegradationLevel::Moderate
+            || evidence.outer_tail_risk_decision == TailRiskAdmissionDecision::Defer
+        {
+            raw_phase = OverloadBrownoutPhase::Degrade;
+            reason_codes.push(OverloadBrownoutReason::DegradePressure);
+            explanation.push(format!(
+                "degrade threshold crossed: wake_to_run p99={}ns, memory={}bps, outer={:?}",
+                scheduler.wake_to_run_p99_ns, memory_pressure, evidence.outer_tail_risk_decision
+            ));
+        }
+
+        if memory_pressure >= profile.shed_optional_memory_pressure_bps
+            || scheduler.wake_to_run_p99_ns >= profile.shed_optional_wake_to_run_p99_ns
+            || evidence.degradation_level >= DegradationLevel::Heavy
+            || evidence.outer_tail_risk_decision == TailRiskAdmissionDecision::Shed
+        {
+            raw_phase = OverloadBrownoutPhase::ShedOptional;
+            reason_codes.push(OverloadBrownoutReason::ShedOptionalPressure);
+            explanation.push(format!(
+                "optional-shed threshold crossed: wake_to_run p99={}ns, memory={}bps, outer={:?}",
+                scheduler.wake_to_run_p99_ns, memory_pressure, evidence.outer_tail_risk_decision
+            ));
+        }
+
+        if evidence.outer_tail_risk_decision == TailRiskAdmissionDecision::Defer {
+            reason_codes.push(OverloadBrownoutReason::TailRiskOuterDefer);
+        }
+        if evidence.outer_tail_risk_decision == TailRiskAdmissionDecision::Shed {
+            reason_codes.push(OverloadBrownoutReason::TailRiskOuterShed);
+        }
+
+        let mut phase = raw_phase;
+        let mut recovery_streak_after = 0;
+        if raw_phase.severity_rank() < evidence.previous_phase.severity_rank()
+            && evidence.previous_phase != OverloadBrownoutPhase::Normal
+        {
+            recovery_streak_after = evidence.recovery_streak_windows.saturating_add(1);
+            if recovery_streak_after < profile.recovery_window_threshold {
+                phase = OverloadBrownoutPhase::Recovery;
+                reason_codes.push(OverloadBrownoutReason::RecoveryHysteresis);
+                explanation.push(format!(
+                    "recovery hysteresis kept one brownout window active ({}/{})",
+                    recovery_streak_after, profile.recovery_window_threshold
+                ));
+            } else {
+                recovery_streak_after = 0;
+                explanation.push(format!(
+                    "recovery hysteresis satisfied after {} windows",
+                    profile.recovery_window_threshold
+                ));
+            }
+        }
+
+        let previous_requested = profile.surfaces_for_phase(evidence.previous_phase);
+        let requested = profile.surfaces_for_phase(phase);
+        let already_shed = requested
+            .iter()
+            .copied()
+            .filter(|surface| evidence.already_shed_surfaces.contains(surface))
+            .collect::<Vec<_>>();
+        let newly_degraded = requested
+            .iter()
+            .copied()
+            .filter(|surface| !evidence.already_shed_surfaces.contains(surface))
+            .collect::<Vec<_>>();
+        if !already_shed.is_empty() {
+            reason_codes.push(OverloadBrownoutReason::OptionalSurfaceAlreadyShedding);
+            explanation.push(format!(
+                "{} optional surface(s) were already shedding locally and were not double-counted",
+                already_shed.len()
+            ));
+        }
+        let restored = previous_requested
+            .iter()
+            .copied()
+            .filter(|surface| !requested.contains(surface))
+            .collect::<Vec<_>>();
+
+        Self {
+            schema_version: OVERLOAD_BROWNOUT_LEDGER_SCHEMA_VERSION.to_string(),
+            phase,
+            fallback_used: false,
+            reason_codes,
+            missing_evidence_fields: Vec::new(),
+            profile: profile.clone(),
+            evidence: snapshot,
+            requested_degraded_surfaces: requested,
+            newly_degraded_surfaces: newly_degraded,
+            already_shed_surfaces: already_shed,
+            restored_surfaces: restored,
+            preserved_surfaces: vec![
+                BrownoutProtectedSurface::CoreScheduling,
+                BrownoutProtectedSurface::CancellationDrain,
+                BrownoutProtectedSurface::RegionQuiescence,
+                BrownoutProtectedSurface::ObligationCleanup,
+            ],
+            recovery_streak_after,
+            explanation,
+        }
+    }
+
+    fn conservative_phase(evidence: &OverloadBrownoutEvidence) -> OverloadBrownoutPhase {
+        match evidence.outer_tail_risk_decision {
+            TailRiskAdmissionDecision::Shed => OverloadBrownoutPhase::ShedOptional,
+            TailRiskAdmissionDecision::Defer => OverloadBrownoutPhase::Degrade,
+            TailRiskAdmissionDecision::Admit => match evidence.degradation_level {
+                DegradationLevel::Emergency | DegradationLevel::Heavy => {
+                    OverloadBrownoutPhase::ShedOptional
+                }
+                DegradationLevel::Moderate => OverloadBrownoutPhase::Degrade,
+                DegradationLevel::Light => OverloadBrownoutPhase::Observe,
+                DegradationLevel::None => OverloadBrownoutPhase::Normal,
+            },
+        }
+    }
+
+    fn finish(
+        profile: &OverloadBrownoutProfile,
+        snapshot: OverloadBrownoutEvidenceSnapshot,
+        phase: OverloadBrownoutPhase,
+        fallback_used: bool,
+        reason_codes: Vec<OverloadBrownoutReason>,
+        missing_evidence_fields: Vec<String>,
+        restored_surfaces: Vec<BrownoutOptionalSurface>,
+        recovery_streak_after: u8,
+        explanation: Vec<String>,
+    ) -> Self {
+        let requested = profile.surfaces_for_phase(phase);
+        Self {
+            schema_version: OVERLOAD_BROWNOUT_LEDGER_SCHEMA_VERSION.to_string(),
+            phase,
+            fallback_used,
+            reason_codes,
+            missing_evidence_fields,
+            profile: profile.clone(),
+            evidence: snapshot,
+            requested_degraded_surfaces: requested.clone(),
+            newly_degraded_surfaces: requested,
+            already_shed_surfaces: Vec::new(),
+            restored_surfaces,
+            preserved_surfaces: vec![
+                BrownoutProtectedSurface::CoreScheduling,
+                BrownoutProtectedSurface::CancellationDrain,
+                BrownoutProtectedSurface::RegionQuiescence,
+                BrownoutProtectedSurface::ObligationCleanup,
+            ],
+            recovery_streak_after,
+            explanation,
+        }
+    }
+}
+
 fn cycle_overhead_percentage(elapsed: Duration, interval: Duration) -> f64 {
     let interval_nanos = interval.as_nanos();
     if interval_nanos == 0 {
@@ -3517,6 +3961,214 @@ mod tests {
         let json = serde_json::to_string_pretty(&ledger).expect("serialize cohort ledger");
         let reparsed: CohortAdmissionSteeringLedger =
             serde_json::from_str(&json).expect("deserialize cohort ledger");
+        assert_eq!(reparsed, ledger);
+    }
+
+    fn sample_brownout_evidence() -> OverloadBrownoutEvidence {
+        OverloadBrownoutEvidence {
+            scheduler: Some(SchedulerEvidenceMetrics {
+                wake_to_run_p50_ns: 8_000,
+                wake_to_run_p95_ns: 120_000,
+                wake_to_run_p99_ns: 236_000,
+                queue_residency_p50_ns: 18_000,
+                queue_residency_p95_ns: 180_000,
+                queue_residency_p99_ns: 310_000,
+                ready_backlog_p95: 164,
+                ready_backlog_p99: 224,
+                cancel_debt_p95: 28,
+                cancel_debt_p99: 44,
+                remote_steal_ratio_pct: Some(18),
+                cross_cohort_wake_p99_ns: Some(148_000),
+            }),
+            memory_pressure_bps: Some(8_820),
+            degradation_level: DegradationLevel::Moderate,
+            outer_tail_risk_decision: TailRiskAdmissionDecision::Defer,
+            previous_phase: OverloadBrownoutPhase::Observe,
+            recovery_streak_windows: 0,
+            already_shed_surfaces: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn overload_brownout_effective_optional_surfaces_dedupes_and_filters_denied() {
+        let profile = OverloadBrownoutProfile {
+            allowed_optional_surfaces: vec![
+                BrownoutOptionalSurface::DetailedTracing,
+                BrownoutOptionalSurface::RichDiagnostics,
+                BrownoutOptionalSurface::DetailedTracing,
+                BrownoutOptionalSurface::RichExportFormatting,
+            ],
+            denied_optional_surfaces: vec![BrownoutOptionalSurface::RichDiagnostics],
+            ..OverloadBrownoutProfile::default()
+        };
+        assert_eq!(
+            profile.effective_optional_surfaces(),
+            vec![
+                BrownoutOptionalSurface::DetailedTracing,
+                BrownoutOptionalSurface::RichExportFormatting,
+            ]
+        );
+    }
+
+    #[test]
+    fn overload_brownout_disabled_mode_matches_normal() {
+        let profile = OverloadBrownoutProfile {
+            enabled: false,
+            ..OverloadBrownoutProfile::default()
+        };
+        let ledger = OverloadBrownoutLedger::evaluate(&sample_brownout_evidence(), &profile);
+        assert!(ledger.fallback_used);
+        assert_eq!(ledger.phase, OverloadBrownoutPhase::Normal);
+        assert!(ledger.requested_degraded_surfaces.is_empty());
+        assert!(
+            ledger
+                .reason_codes
+                .contains(&OverloadBrownoutReason::Disabled)
+        );
+    }
+
+    #[test]
+    fn overload_brownout_falls_back_when_evidence_is_missing() {
+        let ledger = OverloadBrownoutLedger::evaluate(
+            &OverloadBrownoutEvidence {
+                scheduler: None,
+                memory_pressure_bps: Some(7_900),
+                degradation_level: DegradationLevel::Light,
+                outer_tail_risk_decision: TailRiskAdmissionDecision::Admit,
+                previous_phase: OverloadBrownoutPhase::Normal,
+                recovery_streak_windows: 0,
+                already_shed_surfaces: Vec::new(),
+            },
+            &OverloadBrownoutProfile::default(),
+        );
+        assert!(ledger.fallback_used);
+        assert_eq!(ledger.phase, OverloadBrownoutPhase::Observe);
+        assert_eq!(
+            ledger.missing_evidence_fields,
+            vec!["scheduler_metrics".to_string()]
+        );
+    }
+
+    #[test]
+    fn overload_brownout_escalates_to_shed_optional_under_severe_pressure() {
+        let ledger = OverloadBrownoutLedger::evaluate(
+            &OverloadBrownoutEvidence {
+                memory_pressure_bps: Some(9_450),
+                outer_tail_risk_decision: TailRiskAdmissionDecision::Shed,
+                degradation_level: DegradationLevel::Heavy,
+                ..sample_brownout_evidence()
+            },
+            &OverloadBrownoutProfile::default(),
+        );
+        assert_eq!(ledger.phase, OverloadBrownoutPhase::ShedOptional);
+        assert!(
+            ledger
+                .requested_degraded_surfaces
+                .contains(&BrownoutOptionalSurface::DetailedTracing)
+        );
+        assert!(
+            ledger
+                .reason_codes
+                .contains(&OverloadBrownoutReason::TailRiskOuterShed)
+        );
+    }
+
+    #[test]
+    fn overload_brownout_respects_recovery_hysteresis_and_restores_surfaces() {
+        let profile = OverloadBrownoutProfile::default();
+        let ledger = OverloadBrownoutLedger::evaluate(
+            &OverloadBrownoutEvidence {
+                scheduler: Some(SchedulerEvidenceMetrics {
+                    wake_to_run_p50_ns: 7_500,
+                    wake_to_run_p95_ns: 74_000,
+                    wake_to_run_p99_ns: 118_000,
+                    queue_residency_p50_ns: 12_000,
+                    queue_residency_p95_ns: 88_000,
+                    queue_residency_p99_ns: 120_000,
+                    ready_backlog_p95: 96,
+                    ready_backlog_p99: 128,
+                    cancel_debt_p95: 12,
+                    cancel_debt_p99: 20,
+                    remote_steal_ratio_pct: Some(10),
+                    cross_cohort_wake_p99_ns: Some(92_000),
+                }),
+                memory_pressure_bps: Some(7_100),
+                degradation_level: DegradationLevel::None,
+                outer_tail_risk_decision: TailRiskAdmissionDecision::Admit,
+                previous_phase: OverloadBrownoutPhase::ShedOptional,
+                recovery_streak_windows: 0,
+                already_shed_surfaces: Vec::new(),
+            },
+            &profile,
+        );
+        assert_eq!(ledger.phase, OverloadBrownoutPhase::Recovery);
+        assert_eq!(ledger.recovery_streak_after, 1);
+        assert!(
+            ledger
+                .restored_surfaces
+                .contains(&BrownoutOptionalSurface::DetailedTracing)
+        );
+        assert!(
+            ledger
+                .reason_codes
+                .contains(&OverloadBrownoutReason::RecoveryHysteresis)
+        );
+    }
+
+    #[test]
+    fn overload_brownout_avoids_duplicate_accounting_for_self_shedding_surfaces() {
+        let ledger = OverloadBrownoutLedger::evaluate(
+            &OverloadBrownoutEvidence {
+                already_shed_surfaces: vec![BrownoutOptionalSurface::RichDiagnostics],
+                ..sample_brownout_evidence()
+            },
+            &OverloadBrownoutProfile::default(),
+        );
+        assert_eq!(ledger.phase, OverloadBrownoutPhase::Degrade);
+        assert!(
+            ledger
+                .already_shed_surfaces
+                .contains(&BrownoutOptionalSurface::RichDiagnostics)
+        );
+        assert!(
+            !ledger
+                .newly_degraded_surfaces
+                .contains(&BrownoutOptionalSurface::RichDiagnostics)
+        );
+        assert!(
+            ledger
+                .reason_codes
+                .contains(&OverloadBrownoutReason::OptionalSurfaceAlreadyShedding)
+        );
+    }
+
+    #[test]
+    fn overload_brownout_preserves_critical_surfaces() {
+        let ledger = OverloadBrownoutLedger::evaluate(
+            &sample_brownout_evidence(),
+            &OverloadBrownoutProfile::default(),
+        );
+        assert_eq!(ledger.phase, OverloadBrownoutPhase::Degrade);
+        assert_eq!(
+            ledger.preserved_surfaces,
+            vec![
+                BrownoutProtectedSurface::CoreScheduling,
+                BrownoutProtectedSurface::CancellationDrain,
+                BrownoutProtectedSurface::RegionQuiescence,
+                BrownoutProtectedSurface::ObligationCleanup,
+            ]
+        );
+    }
+
+    #[test]
+    fn overload_brownout_ledger_round_trips_through_json() {
+        let ledger = OverloadBrownoutLedger::evaluate(
+            &sample_brownout_evidence(),
+            &OverloadBrownoutProfile::default(),
+        );
+        let json = serde_json::to_string_pretty(&ledger).expect("serialize overload brownout");
+        let reparsed: OverloadBrownoutLedger =
+            serde_json::from_str(&json).expect("deserialize overload brownout");
         assert_eq!(reparsed, ledger);
     }
 
