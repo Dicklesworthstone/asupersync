@@ -2490,7 +2490,7 @@ mod tests {
     fn audit_receiver_poll_after_send_immediate_ready() {
         init_test("audit_receiver_poll_after_send_immediate_ready");
 
-        let (tx, rx) = channel::<u32>();
+        let (tx, mut rx) = channel::<u32>();
         let cx = test_cx();
 
         // Phase 1: Send value first (sender completes transmission)
@@ -2501,7 +2501,8 @@ mod tests {
 
         // Phase 3: Critical test - poll() must return Ready immediately
         // No spurious Pending allowed since value is already available
-        let mut context = Context::from_waker(&noop_waker());
+        let waker = noop_waker();
+        let mut context = Context::from_waker(&waker);
         let poll_result = Pin::new(&mut recv_fut).poll(&mut context);
 
         // AUDIT: Verify immediate ready behavior (no spurious pending)
@@ -2548,7 +2549,8 @@ mod tests {
             rx.is_closed()
         );
 
-        let mut context = Context::from_waker(&noop_waker());
+        let waker = noop_waker();
+        let mut context = Context::from_waker(&waker);
         let initial_poll = rx.poll_closed(&mut context);
         crate::assert_with_log!(
             matches!(initial_poll, std::task::Poll::Pending),
@@ -2640,7 +2642,7 @@ mod tests {
             crate::assert_with_log!(
                 matches!(poll_result, std::task::Poll::Pending),
                 &format!("poll_closed call {} returns Pending when receiver alive", i),
-                std::task::Poll::Pending,
+                std::task::Poll::<()>::Pending,
                 poll_result
             );
 
@@ -2991,7 +2993,7 @@ mod tests {
         let cx = test_cx();
 
         // Cancel the context before sending
-        cx.cancel();
+        cx.cancel_fast(crate::types::CancelKind::User);
 
         let test_value = 42;
 
@@ -3418,8 +3420,7 @@ mod tests {
 
             // Spawn receiver in separate thread to test cross-thread notification
             let receiver_handle = std::thread::spawn(move || {
-                let rt = crate::lab::LabRuntime::new();
-                rt.block_on(async {
+                block_on(async {
                     // Create receiver future
                     let recv_result = rx.recv(&cx).await;
                     recv_result
@@ -3711,7 +3712,7 @@ mod tests {
         crate::assert_with_log!(
             matches!(initial_poll, std::task::Poll::Pending),
             "Initial poll() returns Pending when no value sent",
-            std::task::Poll::Pending,
+            std::task::Poll::<Result<i32, RecvError>>::Pending,
             initial_poll
         );
 
@@ -3754,16 +3755,16 @@ mod tests {
         crate::assert_with_log!(
             matches!(pre_send_poll, std::task::Poll::Pending),
             "Pre-send poll returns Pending",
-            std::task::Poll::Pending,
+            std::task::Poll::<Result<i32, RecvError>>::Pending,
             pre_send_poll
         );
 
         // Send value and verify immediate readiness
-        let send_result = tx.send(42);
+        let send_result = tx.send(&cx, 42);
         crate::assert_with_log!(
             matches!(send_result, Ok(())),
             "send() succeeds after spurious polls",
-            Ok(()),
+            Ok::<(), SendError<i32>>(()),
             send_result
         );
 
