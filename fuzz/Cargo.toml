@@ -5258,3 +5258,10 @@ path = "fuzz_targets/h2_request_pseudo_path_starting_without_slash.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "h2_request_pseudo_authority_starting_with_at"
+path = "fuzz_targets/h2_request_pseudo_authority_starting_with_at.rs"
+test = false
+doc = false
+bench = false
