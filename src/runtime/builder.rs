@@ -156,7 +156,7 @@ use crate::observability::metrics::MetricsProvider;
 use crate::record::RegionLimits;
 use crate::runtime::RuntimeState;
 use crate::runtime::SpawnError;
-use crate::runtime::config::{RuntimeCapacityHints, RuntimeConfig};
+use crate::runtime::config::{RuntimeCapacityHints, RuntimeConfig, WorkerCohortMapping};
 use crate::runtime::deadline_monitor::{
     AdaptiveDeadlineConfig, DeadlineTaskSnapshot, DeadlineWarning, MonitorConfig,
     default_warning_handler,
@@ -2204,6 +2204,17 @@ impl RuntimeBuilder {
         self
     }
 
+    /// Set an explicit worker-to-cohort mapping for locality-aware stealing.
+    ///
+    /// The mapping must contain exactly one cohort label per worker thread at
+    /// build time. Validation happens during [`build`](Self::build), after
+    /// worker-thread normalization has been applied.
+    #[must_use]
+    pub fn worker_cohorts(mut self, worker_to_cohort: impl Into<Vec<usize>>) -> Self {
+        self.config.worker_cohort_map = Some(WorkerCohortMapping::new(worker_to_cohort.into()));
+        self
+    }
+
     /// Set the response policy for obligation leaks.
     #[must_use]
     pub fn obligation_leak_response(
@@ -3050,6 +3061,14 @@ impl Runtime {
         host_services: &dyn RuntimeHostServices,
     ) -> Result<Self, Error> {
         config.normalize();
+        if let Some(mapping) = config.worker_cohort_map.as_ref() {
+            mapping
+                .validate_for_workers(config.worker_threads)
+                .map_err(|message| {
+                    Error::new(crate::error::ErrorKind::ConfigError)
+                        .with_message(message.to_string())
+                })?;
+        }
         #[cfg(target_arch = "wasm32")]
         {
             let _ = (reactor, io_driver, timer_driver, entropy_source);
@@ -3605,6 +3624,11 @@ impl RuntimeInner {
             config.enable_adaptive_cancel_streak,
             config.adaptive_cancel_streak_epoch_steps,
         );
+        if let Some(mapping) = config.worker_cohort_map.as_ref() {
+            scheduler
+                .set_worker_cohort_map(&mapping.worker_to_cohort)
+                .expect("validated worker cohort map should apply to scheduler");
+        }
         let workers = scheduler.take_workers();
 
         let deadline_monitor = host_services.start_deadline_monitor(&config, &state);
@@ -6044,6 +6068,54 @@ worker_threads = 16
         assert_eq!(
             builder.config.capacity_hints,
             Some(RuntimeCapacityHints::from_expected_concurrent_tasks(4096))
+        );
+    }
+
+    #[test]
+    fn runtime_builder_worker_cohorts_sets_explicit_mapping() {
+        init_test_logging();
+
+        let builder = RuntimeBuilder::new()
+            .worker_threads(4)
+            .worker_cohorts(vec![0, 0, 1, 1]);
+
+        assert_eq!(
+            builder.config.worker_cohort_map,
+            Some(WorkerCohortMapping::new(vec![0, 0, 1, 1]))
+        );
+    }
+
+    #[test]
+    fn runtime_builder_rejects_mismatched_worker_cohort_map() {
+        init_test_logging();
+
+        let err = RuntimeBuilder::new()
+            .worker_threads(4)
+            .worker_cohorts(vec![0, 1])
+            .build()
+            .expect_err("mismatched cohort map should fail closed");
+
+        assert_eq!(err.kind(), crate::error::ErrorKind::ConfigError);
+        assert!(
+            err.to_string()
+                .contains("worker cohort map length must match worker_threads"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn runtime_builder_build_preserves_worker_cohort_map() {
+        init_test_logging();
+
+        let runtime = RuntimeBuilder::new()
+            .worker_threads(2)
+            .worker_cohorts(vec![0, 1])
+            .build()
+            .expect("matching cohort map should build");
+
+        assert_eq!(
+            runtime.config().worker_cohort_map,
+            Some(WorkerCohortMapping::new(vec![0, 1]))
         );
     }
 

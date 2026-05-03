@@ -1182,9 +1182,11 @@ impl ThreeLaneScheduler {
                 id,
                 local: Arc::clone(&local_schedulers[id]),
                 stealers,
+                preferred_heap_stealer_count: worker_count.saturating_sub(1),
                 fast_queue: fast_queues[id].clone(),
                 global_ready_buffer: Vec::with_capacity(steal_batch_size),
                 fast_stealers,
+                preferred_fast_stealer_count: worker_count.saturating_sub(1),
                 local_ready: Arc::clone(&local_ready[id]),
                 all_local_ready: local_ready.clone(),
                 global: Arc::clone(&global),
@@ -1252,6 +1254,7 @@ impl ThreeLaneScheduler {
                 fast_queue_fairness_limit: 4, // Allow max 4 consecutive stolen work dispatches
                 timed_dispatch_streak: 0,
                 timed_fairness_limit: 6, // Allow max 6 consecutive EDF dispatches before FIFO fairness
+                steal_locality_counters: StealLocalityCounters::default(),
             });
         }
 
@@ -1345,6 +1348,71 @@ impl ThreeLaneScheduler {
                     .reserve(size - worker.global_ready_buffer.capacity());
             }
         }
+    }
+
+    /// Applies an explicit worker-to-cohort map for locality-aware stealing.
+    ///
+    /// Peers in the same cohort are placed at the front of each worker's
+    /// stealer lists so the steal path can prefer them deterministically while
+    /// still falling back to remote cohorts when local peers are empty.
+    pub fn set_worker_cohort_map(
+        &mut self,
+        worker_to_cohort: &[usize],
+    ) -> Result<(), crate::error::Error> {
+        let worker_count = self.workers.len();
+        if worker_count == 0 {
+            return Err(
+                crate::error::Error::new(crate::error::ErrorKind::ConfigError)
+                    .with_message("worker cohort map requires at least one worker"),
+            );
+        }
+        if worker_to_cohort.len() != worker_count {
+            return Err(
+                crate::error::Error::new(crate::error::ErrorKind::ConfigError)
+                    .with_message("worker cohort map length must match worker_threads".to_string()),
+            );
+        }
+
+        let fast_queues: Vec<_> = self
+            .workers
+            .iter()
+            .map(|worker| worker.fast_queue.clone())
+            .collect();
+        let local_schedulers = self.local_schedulers.clone();
+
+        for (worker_id, worker) in self.workers.iter_mut().enumerate() {
+            let my_cohort = worker_to_cohort[worker_id];
+            let mut preferred_fast = SmallVec::<[local_queue::Stealer; 16]>::new();
+            let mut remote_fast = SmallVec::<[local_queue::Stealer; 16]>::new();
+            let mut preferred_heap = SmallVec::<[Arc<Mutex<PriorityScheduler>>; 16]>::new();
+            let mut remote_heap = SmallVec::<[Arc<Mutex<PriorityScheduler>>; 16]>::new();
+
+            for peer_id in 0..worker_count {
+                if peer_id == worker_id {
+                    continue;
+                }
+                if worker_to_cohort[peer_id] == my_cohort {
+                    preferred_fast.push(fast_queues[peer_id].stealer());
+                    preferred_heap.push(Arc::clone(&local_schedulers[peer_id]));
+                } else {
+                    remote_fast.push(fast_queues[peer_id].stealer());
+                    remote_heap.push(Arc::clone(&local_schedulers[peer_id]));
+                }
+            }
+
+            let preferred_fast_count = preferred_fast.len();
+            preferred_fast.extend(remote_fast);
+            let preferred_heap_count = preferred_heap.len();
+            preferred_heap.extend(remote_heap);
+
+            worker.fast_stealers = preferred_fast;
+            worker.preferred_fast_stealer_count = preferred_fast_count;
+            worker.stealers = preferred_heap;
+            worker.preferred_heap_stealer_count = preferred_heap_count;
+            worker.steal_locality_counters = StealLocalityCounters::default();
+        }
+
+        Ok(())
     }
 
     #[doc(hidden)]
@@ -1836,6 +1904,8 @@ pub struct ThreeLaneWorker {
     pub local: Arc<Mutex<PriorityScheduler>>,
     /// References to other workers' local schedulers for stealing.
     pub stealers: SmallVec<[Arc<Mutex<PriorityScheduler>>; 16]>,
+    /// Number of same-cohort heap stealers at the front of `stealers`.
+    preferred_heap_stealer_count: usize,
     /// O(1) local queue for ready tasks (work-stealing fast path).
     ///
     /// Ready tasks spawned/woken on the worker thread are pushed here
@@ -1851,6 +1921,8 @@ pub struct ThreeLaneWorker {
     global_ready_buffer: Vec<PriorityTask>,
     /// Stealers for other workers' fast queues (O(1) steal).
     fast_stealers: SmallVec<[local_queue::Stealer; 16]>,
+    /// Number of same-cohort fast stealers at the front of `fast_stealers`.
+    preferred_fast_stealer_count: usize,
     /// Non-stealable queue for local (`!Send`) tasks.
     ///
     /// Local tasks are pinned to their owner worker and must never be stolen.
@@ -1958,6 +2030,21 @@ pub struct ThreeLaneWorker {
     /// Fairness guarantee: FIFO work will be checked after at most this many
     /// consecutive EDF dispatches, ensuring 1/N quantum fairness invariant.
     timed_fairness_limit: usize,
+    /// Counters tracking preferred-vs-remote steal outcomes.
+    steal_locality_counters: StealLocalityCounters,
+}
+
+/// Worker-local counters for preferred-vs-remote steal outcomes.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct StealLocalityCounters {
+    /// Successful same-cohort fast-queue steals.
+    pub preferred_fast_steals: u64,
+    /// Successful cross-cohort fast-queue steals.
+    pub remote_fast_steals: u64,
+    /// Successful same-cohort heap-batch steals.
+    pub preferred_heap_steals: u64,
+    /// Successful cross-cohort heap-batch steals.
+    pub remote_heap_steals: u64,
 }
 
 #[derive(Debug, Clone)]
@@ -2920,6 +3007,12 @@ impl ThreeLaneWorker {
     #[must_use]
     pub fn preemption_metrics(&self) -> &PreemptionMetrics {
         &self.preemption_metrics
+    }
+
+    /// Returns preferred-vs-remote steal counters for this worker.
+    #[must_use]
+    pub fn steal_locality_counters(&self) -> StealLocalityCounters {
+        self.steal_locality_counters
     }
 
     /// Builds a deterministic fairness certificate from current metrics.
@@ -4150,6 +4243,12 @@ impl ThreeLaneWorker {
         self.try_phase3_ready_work()
     }
 
+    /// Bench-only entrypoint for the isolated steal path.
+    #[cfg(any(test, feature = "test-internals"))]
+    pub fn bench_try_steal(&mut self) -> Option<TaskId> {
+        self.try_steal()
+    }
+
     /// Tries to get ready work from fast queue, global, or local queues.
     #[allow(dead_code)] // Scheduler dispatch integration path
     pub(crate) fn try_ready_work(&mut self) -> Option<TaskId> {
@@ -4191,26 +4290,54 @@ impl ThreeLaneWorker {
     pub(crate) fn try_steal(&mut self) -> Option<TaskId> {
         // Fast path: steal from other workers' LocalQueues (O(1) per task).
         if !self.fast_stealers.is_empty() {
-            let len = self.fast_stealers.len();
-            let start = self.rng.next_usize(len);
-            for i in 0..len {
-                let idx = (start + i) % len;
-                if let Some(task) = self.fast_stealers[idx].steal() {
-                    // Safety invariant: local tasks must never be in stealable queues.
-                    debug_assert!(
-                        !self.with_task_table_ref(|tt| {
-                            tt.task(task)
-                                .is_some_and(crate::record::task::TaskRecord::is_local)
-                        }),
-                        "BUG: stole a local (!Send) task {task:?} from another worker's fast_queue"
-                    );
+            let preferred_len = self
+                .preferred_fast_stealer_count
+                .min(self.fast_stealers.len());
+            if preferred_len > 0 {
+                let start = self.rng.next_usize(preferred_len);
+                for i in 0..preferred_len {
+                    let idx = (start + i) % preferred_len;
+                    if let Some(task) = self.fast_stealers[idx].steal() {
+                        // Safety invariant: local tasks must never be in stealable queues.
+                        debug_assert!(
+                            !self.with_task_table_ref(|tt| {
+                                tt.task(task)
+                                    .is_some_and(crate::record::task::TaskRecord::is_local)
+                            }),
+                            "BUG: stole a local (!Send) task {task:?} from another worker's fast_queue"
+                        );
 
-                    // Record work-stealing for invariant verification
-                    self.invariant_monitor
-                        .lock()
-                        .record_task_dispatch(task, Time::from_nanos(self.current_time_ns()));
+                        self.steal_locality_counters.preferred_fast_steals += 1;
+                        self.invariant_monitor
+                            .lock()
+                            .record_task_dispatch(task, Time::from_nanos(self.current_time_ns()));
 
-                    return Some(task);
+                        return Some(task);
+                    }
+                }
+            }
+
+            let remote_len = self.fast_stealers.len().saturating_sub(preferred_len);
+            if remote_len > 0 {
+                let start = self.rng.next_usize(remote_len);
+                for i in 0..remote_len {
+                    let idx = preferred_len + (start + i) % remote_len;
+                    if let Some(task) = self.fast_stealers[idx].steal() {
+                        debug_assert!(
+                            !self.with_task_table_ref(|tt| {
+                                tt.task(task)
+                                    .is_some_and(crate::record::task::TaskRecord::is_local)
+                            }),
+                            "BUG: stole a local (!Send) task {task:?} from another worker's fast_queue"
+                        );
+
+                        self.steal_locality_counters.remote_fast_steals += 1;
+                        self.invariant_monitor
+                            .lock()
+                            .record_task_dispatch(task, Time::from_nanos(self.current_time_ns()));
+
+                        return Some(task);
+                    }
                 }
             }
         }
@@ -4220,79 +4347,88 @@ impl ThreeLaneWorker {
             return None;
         }
 
-        let len = self.stealers.len();
-        let start = self.rng.next_usize(len);
+        let preferred_len = self.preferred_heap_stealer_count.min(self.stealers.len());
 
-        for i in 0..len {
-            let idx = (start + i) % len;
-            let stealer = &self.stealers[idx];
+        for &(segment_start, segment_len, preferred) in &[
+            (0usize, preferred_len, true),
+            (
+                preferred_len,
+                self.stealers.len().saturating_sub(preferred_len),
+                false,
+            ),
+        ] {
+            if segment_len == 0 {
+                continue;
+            }
 
-            // Try to lock without blocking (skip if contended)
-            if let Some(mut victim) = stealer.try_lock() {
-                let stolen_count =
-                    victim.steal_ready_batch_into(self.steal_batch_size, &mut self.steal_buffer);
-                if stolen_count > 0 {
-                    // Safety invariant: verify no local tasks were stolen.
-                    #[cfg(debug_assertions)]
-                    {
-                        for &(task, _) in &self.steal_buffer[..stolen_count] {
-                            let is_local = self.with_task_table_ref(|tt| {
-                                tt.task(task)
-                                    .is_some_and(crate::record::task::TaskRecord::is_local)
-                            });
-                            debug_assert!(
-                                !is_local,
-                                "BUG: stole a local (!Send) task {task:?} from PriorityScheduler"
-                            );
-                        }
-                    }
+            let start = self.rng.next_usize(segment_len);
+            for i in 0..segment_len {
+                let idx = segment_start + (start + i) % segment_len;
+                let stealer = &self.stealers[idx];
 
-                    // Take the first task to execute
-                    let (first_task, _) = self.steal_buffer[0];
-
-                    // Record work-stealing for invariant verification
-                    self.invariant_monitor
-                        .lock()
-                        .record_task_dispatch(first_task, Time::from_nanos(self.current_time_ns()));
-
-                    // If we already have local ready work pending, route the
-                    // batch remainder through our ready heap so lower-priority
-                    // stolen tasks cannot outrun higher-priority local work.
-                    let steal_back_into_local_ready =
-                        stolen_count > 1 && self.local.lock().peek_ready_priority().is_some();
-
-                    // Push remaining stolen tasks to our local ready heap or
-                    // fast queue, depending on whether we need priority-aware
-                    // steal-back.
-                    if stolen_count > 1 {
-                        if steal_back_into_local_ready {
-                            let mut local = self.local.lock();
-                            for &(task, priority) in &self.steal_buffer[1..stolen_count] {
-                                local.schedule(task, priority);
-                                self.invariant_monitor.lock().record_task_requeue(
-                                    task,
-                                    "local_ready_stolen",
-                                    priority,
-                                    Time::from_nanos(self.current_time_ns()),
+                // Try to lock without blocking (skip if contended)
+                if let Some(mut victim) = stealer.try_lock() {
+                    let stolen_count = victim
+                        .steal_ready_batch_into(self.steal_batch_size, &mut self.steal_buffer);
+                    if stolen_count > 0 {
+                        #[cfg(debug_assertions)]
+                        {
+                            for &(task, _) in &self.steal_buffer[..stolen_count] {
+                                let is_local = self.with_task_table_ref(|tt| {
+                                    tt.task(task)
+                                        .is_some_and(crate::record::task::TaskRecord::is_local)
+                                });
+                                debug_assert!(
+                                    !is_local,
+                                    "BUG: stole a local (!Send) task {task:?} from PriorityScheduler"
                                 );
                             }
+                        }
+
+                        let (first_task, _) = self.steal_buffer[0];
+                        if preferred {
+                            self.steal_locality_counters.preferred_heap_steals += 1;
                         } else {
-                            for &(task, priority) in self.steal_buffer[1..stolen_count].iter().rev()
-                            {
-                                self.fast_queue.push(task);
+                            self.steal_locality_counters.remote_heap_steals += 1;
+                        }
 
-                                // Record enqueue to our fast queue for stolen tasks
-                                self.invariant_monitor.lock().record_task_requeue(
-                                    task,
-                                    "fast_queue_stolen",
-                                    priority,
-                                    Time::from_nanos(self.current_time_ns()),
-                                );
+                        self.invariant_monitor.lock().record_task_dispatch(
+                            first_task,
+                            Time::from_nanos(self.current_time_ns()),
+                        );
+
+                        let steal_back_into_local_ready =
+                            stolen_count > 1 && self.local.lock().peek_ready_priority().is_some();
+
+                        if stolen_count > 1 {
+                            if steal_back_into_local_ready {
+                                let mut local = self.local.lock();
+                                for &(task, priority) in &self.steal_buffer[1..stolen_count] {
+                                    local.schedule(task, priority);
+                                    self.invariant_monitor.lock().record_task_requeue(
+                                        task,
+                                        "local_ready_stolen",
+                                        priority,
+                                        Time::from_nanos(self.current_time_ns()),
+                                    );
+                                }
+                            } else {
+                                for &(task, priority) in
+                                    self.steal_buffer[1..stolen_count].iter().rev()
+                                {
+                                    self.fast_queue.push(task);
+                                    self.invariant_monitor.lock().record_task_requeue(
+                                        task,
+                                        "fast_queue_stolen",
+                                        priority,
+                                        Time::from_nanos(self.current_time_ns()),
+                                    );
+                                }
                             }
                         }
-                    }
 
-                    return Some(first_task);
+                        return Some(first_task);
+                    }
                 }
             }
         }
@@ -9765,6 +9901,64 @@ mod tests {
     }
 
     #[test]
+    fn try_steal_prefers_same_cohort_fast_queue_work() {
+        let state = LocalQueue::test_state(10);
+        let mut scheduler = ThreeLaneScheduler::new(4, &state);
+        scheduler
+            .set_worker_cohort_map(&[0, 0, 1, 1])
+            .expect("cohort map should apply");
+
+        let local_task = TaskId::new_for_test(1, 0);
+        let remote_task = TaskId::new_for_test(2, 0);
+        scheduler.workers[2].fast_queue.push(local_task);
+        scheduler.workers[0].fast_queue.push(remote_task);
+
+        let mut workers = scheduler.take_workers();
+        let thief = &mut workers[3];
+
+        let stolen = thief.try_steal();
+        assert_eq!(
+            stolen,
+            Some(local_task),
+            "same-cohort fast_queue work should outrank remote cohorts"
+        );
+        assert_eq!(
+            thief.steal_locality_counters().preferred_fast_steals,
+            1,
+            "preferred fast steal counter should record the local-cohort win"
+        );
+        assert_eq!(thief.steal_locality_counters().remote_fast_steals, 0);
+    }
+
+    #[test]
+    fn try_steal_falls_back_to_remote_fast_queue_when_local_empty() {
+        let state = LocalQueue::test_state(10);
+        let mut scheduler = ThreeLaneScheduler::new(4, &state);
+        scheduler
+            .set_worker_cohort_map(&[0, 0, 1, 1])
+            .expect("cohort map should apply");
+
+        let remote_task = TaskId::new_for_test(3, 0);
+        scheduler.workers[0].fast_queue.push(remote_task);
+
+        let mut workers = scheduler.take_workers();
+        let thief = &mut workers[3];
+
+        let stolen = thief.try_steal();
+        assert_eq!(
+            stolen,
+            Some(remote_task),
+            "remote cohorts must remain a deterministic fallback"
+        );
+        assert_eq!(thief.steal_locality_counters().preferred_fast_steals, 0);
+        assert_eq!(
+            thief.steal_locality_counters().remote_fast_steals,
+            1,
+            "remote fast steal counter should record the fallback"
+        );
+    }
+
+    #[test]
     fn try_steal_falls_back_to_priority_scheduler() {
         // When fast queues are empty, steal should fall back to
         // PriorityScheduler heaps.
@@ -9784,6 +9978,36 @@ mod tests {
             Some(heap_task),
             "should fall back to PriorityScheduler steal"
         );
+    }
+
+    #[test]
+    fn try_steal_prefers_same_cohort_priority_scheduler_batches() {
+        let state = Arc::new(ContendedMutex::new("runtime_state", RuntimeState::new()));
+        let mut scheduler = ThreeLaneScheduler::new(4, &state);
+        scheduler
+            .set_worker_cohort_map(&[0, 0, 1, 1])
+            .expect("cohort map should apply");
+
+        let local_task = TaskId::new_for_test(4, 1);
+        let remote_task = TaskId::new_for_test(5, 1);
+        scheduler.workers[2].local.lock().schedule(local_task, 60);
+        scheduler.workers[0].local.lock().schedule(remote_task, 60);
+
+        let mut workers = scheduler.take_workers();
+        let thief = &mut workers[3];
+
+        let stolen = thief.try_steal();
+        assert_eq!(
+            stolen,
+            Some(local_task),
+            "same-cohort heap victims should be preferred before remote heaps"
+        );
+        assert_eq!(
+            thief.steal_locality_counters().preferred_heap_steals,
+            1,
+            "preferred heap steal counter should record the local-cohort batch"
+        );
+        assert_eq!(thief.steal_locality_counters().remote_heap_steals, 0);
     }
 
     #[test]

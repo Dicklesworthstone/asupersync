@@ -710,6 +710,56 @@ fn bench_steal_task(c: &mut Criterion) {
     group.finish();
 }
 
+fn bench_try_steal_locality(c: &mut Criterion) {
+    use asupersync::runtime::scheduler::ThreeLaneScheduler;
+
+    let mut group = c.benchmark_group("scheduler/try_steal_locality");
+    group.warm_up_time(Duration::from_millis(200));
+    group.measurement_time(Duration::from_millis(600));
+    group.sample_size(30);
+
+    for &(cohort_count, worker_threads) in &[(1usize, 4usize), (2usize, 4usize), (4usize, 8usize)] {
+        group.bench_with_input(
+            BenchmarkId::new("fast_queue_preferred_first", cohort_count),
+            &cohort_count,
+            |b, _| {
+                b.iter_batched(
+                    || {
+                        let state = LocalQueue::test_state(32);
+                        let mut scheduler = ThreeLaneScheduler::new(worker_threads, &state);
+                        let worker_to_cohort = (0..worker_threads)
+                            .map(|worker| worker % cohort_count)
+                            .collect::<Vec<_>>();
+                        scheduler
+                            .set_worker_cohort_map(&worker_to_cohort)
+                            .expect("bench cohort map should apply");
+
+                        let thief_id = worker_threads - 1;
+                        let thief_cohort = worker_to_cohort[thief_id];
+                        let local_victim = (0..thief_id)
+                            .find(|&worker| worker_to_cohort[worker] == thief_cohort)
+                            .unwrap_or(0);
+                        scheduler.seed_worker_fast_ready_for_test(local_victim, task(1));
+
+                        if let Some(remote_victim) =
+                            (0..thief_id).find(|&worker| worker_to_cohort[worker] != thief_cohort)
+                        {
+                            scheduler.seed_worker_fast_ready_for_test(remote_victim, task(2));
+                        }
+
+                        let mut workers = scheduler.take_workers();
+                        workers.swap_remove(thief_id)
+                    },
+                    |mut worker| black_box(worker.bench_try_steal()),
+                    BatchSize::SmallInput,
+                )
+            },
+        );
+    }
+
+    group.finish();
+}
+
 // =============================================================================
 // THROUGHPUT BENCHMARKS
 // =============================================================================
@@ -1700,6 +1750,7 @@ criterion_group!(
     bench_lane_priority,
     bench_work_stealing,
     bench_steal_task,
+    bench_try_steal_locality,
     bench_scheduler_throughput,
     bench_scheduler_capacity_profiles,
     bench_parker,

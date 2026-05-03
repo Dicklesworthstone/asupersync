@@ -277,11 +277,52 @@ impl LeakEscalation {
     }
 }
 
+/// Explicit worker-to-cohort mapping for topology-aware scheduling.
+///
+/// The mapping is fully caller-supplied so locality behavior remains
+/// deterministic and replay-safe across hosts.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorkerCohortMapping {
+    /// Cohort identifier for each worker index.
+    pub worker_to_cohort: Vec<usize>,
+}
+
+impl WorkerCohortMapping {
+    /// Creates a new explicit worker-to-cohort mapping.
+    #[must_use]
+    pub fn new(worker_to_cohort: Vec<usize>) -> Self {
+        Self { worker_to_cohort }
+    }
+
+    /// Returns the number of cohorts implied by the mapping.
+    #[must_use]
+    pub fn cohort_count(&self) -> usize {
+        self.worker_to_cohort
+            .iter()
+            .copied()
+            .max()
+            .map_or(0, |max| max.saturating_add(1))
+    }
+
+    /// Verifies that the mapping exactly covers the configured workers.
+    pub fn validate_for_workers(&self, worker_threads: usize) -> Result<(), &'static str> {
+        if self.worker_to_cohort.len() != worker_threads {
+            return Err("worker cohort map length must match worker_threads");
+        }
+        if worker_threads == 0 || self.worker_to_cohort.is_empty() {
+            return Err("worker cohort map must contain at least one worker");
+        }
+        Ok(())
+    }
+}
+
 /// Runtime configuration.
 #[derive(Clone)]
 pub struct RuntimeConfig {
     /// Number of worker threads (default: available parallelism).
     pub worker_threads: usize,
+    /// Optional explicit worker-to-cohort mapping for locality-aware steals.
+    pub worker_cohort_map: Option<WorkerCohortMapping>,
     /// Stack size per worker thread (default: 2MB).
     pub thread_stack_size: usize,
     /// Name prefix for worker threads.
@@ -469,6 +510,7 @@ impl Default for RuntimeConfig {
     fn default() -> Self {
         Self {
             worker_threads: Self::default_worker_threads(),
+            worker_cohort_map: None,
             thread_stack_size: 2 * 1024 * 1024,
             thread_name_prefix: "asupersync-worker".to_string(),
             global_queue_limit: 0,
@@ -529,6 +571,12 @@ mod tests {
             "worker_threads",
             true,
             config.worker_threads >= 1
+        );
+        crate::assert_with_log!(
+            config.worker_cohort_map.is_none(),
+            "worker_cohort_map",
+            "None",
+            format!("{:?}", config.worker_cohort_map)
         );
         crate::assert_with_log!(
             config.thread_stack_size == 2 * 1024 * 1024,
@@ -614,6 +662,7 @@ mod tests {
     fn zero_minimums_config() -> RuntimeConfig {
         RuntimeConfig {
             worker_threads: 0,
+            worker_cohort_map: None,
             thread_stack_size: 0,
             thread_name_prefix: String::new(),
             global_queue_limit: 0,
@@ -780,6 +829,35 @@ mod tests {
             blocking.max_threads
         );
         crate::test_complete!("test_blocking_pool_normalize");
+    }
+
+    #[test]
+    fn worker_cohort_mapping_derives_cohort_count_from_labels() {
+        init_test("worker_cohort_mapping_derives_cohort_count_from_labels");
+        let mapping = WorkerCohortMapping::new(vec![0, 0, 2, 2]);
+        crate::assert_with_log!(
+            mapping.cohort_count() == 3,
+            "cohort_count",
+            3,
+            mapping.cohort_count()
+        );
+        crate::test_complete!("worker_cohort_mapping_derives_cohort_count_from_labels");
+    }
+
+    #[test]
+    fn worker_cohort_mapping_validation_checks_worker_count() {
+        init_test("worker_cohort_mapping_validation_checks_worker_count");
+        let mapping = WorkerCohortMapping::new(vec![0, 1, 1]);
+        let err = mapping
+            .validate_for_workers(4)
+            .expect_err("length mismatch should be rejected");
+        crate::assert_with_log!(
+            err == "worker cohort map length must match worker_threads",
+            "worker cohort map length mismatch",
+            "worker cohort map length must match worker_threads",
+            err
+        );
+        crate::test_complete!("worker_cohort_mapping_validation_checks_worker_count");
     }
 
     #[test]
