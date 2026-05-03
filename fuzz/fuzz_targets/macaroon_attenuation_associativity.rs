@@ -126,13 +126,32 @@ fuzz_target!(|input: AttenuationChainFuzz| {
     let verification_context = create_verification_context(&input.verification_context);
 
     // Test 1: Attenuation composition associativity (a∘b)(t) ≡ b(a(t))
-    test_composition_associativity(&base_token, &caveats_a, &caveats_b, &root_key, &verification_context);
+    test_composition_associativity(
+        &base_token,
+        &caveats_a,
+        &caveats_b,
+        &root_key,
+        &verification_context,
+    );
 
     // Test 2: No caveat dropping - monotonic restriction property
-    test_no_caveat_dropping(&base_token, &caveats_a, &caveats_b, &root_key, &verification_context);
+    test_no_caveat_dropping(
+        &base_token,
+        &caveats_a,
+        &caveats_b,
+        &root_key,
+        &verification_context,
+    );
 
     // Test 3: Three-way associativity (a∘b)∘c ≡ a∘(b∘c)
-    test_three_way_associativity(&base_token, &caveats_a, &caveats_b, &caveats_c, &root_key, &verification_context);
+    test_three_way_associativity(
+        &base_token,
+        &caveats_a,
+        &caveats_b,
+        &caveats_c,
+        &root_key,
+        &verification_context,
+    );
 
     // Test 4: Identity element properties
     test_identity_properties(&base_token, &caveats_a, &root_key, &verification_context);
@@ -276,7 +295,7 @@ fn test_three_way_associativity(
     let result_a_bc = token_a_bc.verify(root_key, context);
 
     match (result_ab_c.clone(), result_a_bc.clone()) {
-        (Ok(()), Ok(())) => {}, // Both succeed
+        (Ok(()), Ok(())) => {} // Both succeed
         (Err(ref e1), Err(ref e2)) => {
             assert_eq!(
                 std::mem::discriminant(e1),
@@ -319,7 +338,7 @@ fn test_identity_properties(
     let result_a_only = token_a_only.verify(root_key, context);
 
     match (result_a_empty.clone(), result_a_only.clone()) {
-        (Ok(()), Ok(())) => {},
+        (Ok(()), Ok(())) => {}
         (Err(ref e1), Err(ref e2)) => {
             assert_eq!(
                 std::mem::discriminant(e1),
@@ -356,7 +375,7 @@ fn test_idempotence(
     let result_aa = token_aa.verify(root_key, context);
 
     match (result_a, result_aa) {
-        (Ok(()), Ok(())) => {},
+        (Ok(()), Ok(())) => {}
         (Err(ref e1), Err(ref e2)) => {
             // Should fail for same fundamental reason
             assert_eq!(
@@ -398,7 +417,10 @@ fn test_conflicting_caveats(
 }
 
 /// Apply a sequence of caveat sets to a token
-fn apply_caveats_sequence(mut token: MacaroonToken, caveat_sets: &[&[CaveatFuzz]]) -> MacaroonToken {
+fn apply_caveats_sequence(
+    mut token: MacaroonToken,
+    caveat_sets: &[&[CaveatFuzz]],
+) -> MacaroonToken {
     for caveat_set in caveat_sets {
         token = apply_caveats(&token, caveat_set);
     }
@@ -427,12 +449,13 @@ fn convert_caveat_fuzz(caveat: &CaveatFuzz) -> Result<CaveatPredicate, &'static 
         CaveatFuzz::ResourceScope(pattern) => {
             CaveatPredicate::ResourceScope(pattern.as_str().to_string())
         }
-        CaveatFuzz::RateLimit { max_count, window_secs } => {
-            CaveatPredicate::RateLimit {
-                max_count: *max_count,
-                window_secs: *window_secs,
-            }
-        }
+        CaveatFuzz::RateLimit {
+            max_count,
+            window_secs,
+        } => CaveatPredicate::RateLimit {
+            max_count: *max_count,
+            window_secs: *window_secs,
+        },
         CaveatFuzz::Custom { key, value } => {
             CaveatPredicate::Custom(key.as_str().to_string(), value.as_str().to_string())
         }

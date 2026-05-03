@@ -140,9 +140,7 @@ fn reference_elimination_and_pivot_checks(
         }
     }
 
-    ReferenceElimination {
-        stalled_at: None,
-    }
+    ReferenceElimination { stalled_at: None }
 }
 
 fn reference_basic_pivot(
@@ -167,7 +165,10 @@ fn reference_markowitz_pivot(
             continue;
         }
 
-        let nnz = matrix[row][col..].iter().filter(|&&value| value != 0).count();
+        let nnz = matrix[row][col..]
+            .iter()
+            .filter(|&&value| value != 0)
+            .count();
         match best {
             None => best = Some((row, nnz)),
             Some((_best_row, best_nnz)) if nnz < best_nnz => best = Some((row, nnz)),

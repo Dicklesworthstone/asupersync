@@ -118,6 +118,13 @@ impl<T> Arena<T> {
         self.len
     }
 
+    /// Returns the reserved slot capacity of the arena backing storage.
+    #[inline]
+    #[must_use]
+    pub fn capacity(&self) -> usize {
+        self.slots.capacity()
+    }
+
     /// Returns true if the arena has no occupied slots.
     #[inline]
     #[must_use]

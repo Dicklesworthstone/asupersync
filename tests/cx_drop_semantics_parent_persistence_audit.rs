@@ -193,9 +193,7 @@ fn cx_inner_field_is_arc_rwlock_not_box_or_raw_pointer() {
     // The Cx struct must declare inner with Arc<RwLock<CxInner>>.
     let struct_marker = "pub struct Cx<Caps = cap::All> {";
     let start = source.find(struct_marker).expect("Cx struct");
-    let body_end = source[start..]
-        .find("\n}\n")
-        .expect("Cx struct close");
+    let body_end = source[start..].find("\n}\n").expect("Cx struct close");
     let body = &source[start..start + body_end];
 
     assert!(
@@ -374,9 +372,7 @@ fn cx_current_returns_owned_clone_not_borrow() {
 
     let fn_marker = "pub fn current() -> Option<Self> {";
     let start = source.find(fn_marker).expect("current fn");
-    let body_end = source[start..]
-        .find("\n    }\n")
-        .expect("current close");
+    let body_end = source[start..].find("\n    }\n").expect("current close");
     let body = &source[start..start + body_end];
 
     assert!(
@@ -415,9 +411,7 @@ fn current_cx_frame_owns_full_cx_not_borrows_it() {
 
     let struct_marker = "struct CurrentCxFrame {";
     let start = source.find(struct_marker).expect("CurrentCxFrame struct");
-    let body_end = source[start..]
-        .find("\n}\n")
-        .expect("CurrentCxFrame close");
+    let body_end = source[start..].find("\n}\n").expect("CurrentCxFrame close");
     let body = &source[start..start + body_end];
 
     assert!(
@@ -484,8 +478,8 @@ fn cx_send_sync_marker_uses_phantom_data_fn_not_phantom_caps() {
 // pattern with Arc<RwLock<...>>, drop the child, verify the
 // parent still observes its own state.
 
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex as StdMutex;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 #[derive(Debug)]
 struct MockCxInner {

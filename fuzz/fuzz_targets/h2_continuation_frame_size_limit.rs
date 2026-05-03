@@ -176,7 +176,11 @@ impl MockConnection {
         }
     }
 
-    fn get_or_create_stream(&mut self, stream_id: u32, initial_state: StreamState) -> &mut MockStream {
+    fn get_or_create_stream(
+        &mut self,
+        stream_id: u32,
+        initial_state: StreamState,
+    ) -> &mut MockStream {
         self.streams.entry(stream_id).or_insert_with(|| {
             MockStream::new(stream_id, initial_state, self.default_max_header_list_size)
         })
@@ -198,32 +202,45 @@ impl MockConnection {
     }
 
     fn get_stream_stats(&self, stream_id: u32) -> Option<(usize, usize, bool)> {
-        self.streams.get(&stream_id).map(|s| (
-            s.get_accumulated_size(),
-            s.max_header_fragment_size(),
-            s.headers_complete,
-        ))
+        self.streams.get(&stream_id).map(|s| {
+            (
+                s.get_accumulated_size(),
+                s.max_header_fragment_size(),
+                s.headers_complete,
+            )
+        })
     }
 }
 
 fuzz_target!(|scenario: ContinuationSizeLimitScenario| {
     // Clamp max_header_list_size to reasonable bounds for testing
-    let max_header_list_size = scenario.max_header_list_size.max(1024).min(16 * 1024 * 1024);
+    let max_header_list_size = scenario
+        .max_header_list_size
+        .max(1024)
+        .min(16 * 1024 * 1024);
     let mut connection = MockConnection::new(max_header_list_size);
 
     // Determine stream ID from first frame or override
     let stream_id = if let Some(override_id) = scenario.stream_id_override {
         if override_id == 0 { 1 } else { override_id } // Ensure non-zero
     } else if let Some(first_frame) = scenario.continuation_frames.first() {
-        if first_frame.stream_id == 0 { 1 } else { first_frame.stream_id }
+        if first_frame.stream_id == 0 {
+            1
+        } else {
+            first_frame.stream_id
+        }
     } else {
         1 // Default stream ID
     };
 
     let mut total_accumulated = 0;
     let mut frame_count = 0;
-    let expected_limit = MockStream::new(stream_id, scenario.initial_stream_state, max_header_list_size)
-        .max_header_fragment_size();
+    let expected_limit = MockStream::new(
+        stream_id,
+        scenario.initial_stream_state,
+        max_header_list_size,
+    )
+    .max_header_fragment_size();
 
     // Process each CONTINUATION frame
     for (i, frame) in scenario.continuation_frames.iter().enumerate() {
@@ -236,7 +253,8 @@ fuzz_target!(|scenario: ContinuationSizeLimitScenario| {
             end_headers: frame.end_headers,
         };
 
-        let result = connection.process_continuation_frame(&test_frame, scenario.initial_stream_state);
+        let result =
+            connection.process_continuation_frame(&test_frame, scenario.initial_stream_state);
 
         match result {
             Ok(()) => {
@@ -244,19 +262,27 @@ fuzz_target!(|scenario: ContinuationSizeLimitScenario| {
                 total_accumulated += test_frame.header_block.len();
 
                 // Verify the accumulated size is within expected bounds
-                if let Some((actual_accumulated, limit, headers_complete)) = connection.get_stream_stats(stream_id) {
+                if let Some((actual_accumulated, limit, headers_complete)) =
+                    connection.get_stream_stats(stream_id)
+                {
                     assert_eq!(
                         actual_accumulated, total_accumulated,
-                        "Accumulated size mismatch after frame {}", i
+                        "Accumulated size mismatch after frame {}",
+                        i
                     );
                     assert!(
                         actual_accumulated <= limit,
-                        "Accepted frame exceeded limit: {} > {}", actual_accumulated, limit
+                        "Accepted frame exceeded limit: {} > {}",
+                        actual_accumulated,
+                        limit
                     );
 
                     // If this was the last frame with end_headers=true, verify completion
                     if test_frame.end_headers {
-                        assert!(headers_complete, "Headers should be complete after end_headers=true");
+                        assert!(
+                            headers_complete,
+                            "Headers should be complete after end_headers=true"
+                        );
                         break; // No more frames should be processed after end_headers
                     }
                 }
@@ -266,23 +292,29 @@ fuzz_target!(|scenario: ContinuationSizeLimitScenario| {
                 match error_code {
                     ErrorCode::EnhanceYourCalm => {
                         // Size limit exceeded - this should happen when we go over the limit
-                        let would_exceed = total_accumulated + test_frame.header_block.len() > expected_limit;
+                        let would_exceed =
+                            total_accumulated + test_frame.header_block.len() > expected_limit;
                         assert!(
                             would_exceed,
                             "ENHANCE_YOUR_CALM returned but size wouldn't exceed limit: {} + {} <= {}",
-                            total_accumulated, test_frame.header_block.len(), expected_limit
+                            total_accumulated,
+                            test_frame.header_block.len(),
+                            expected_limit
                         );
                     }
                     ErrorCode::StreamClosed => {
                         // Stream is closed
-                        assert!(scenario.initial_stream_state.is_closed(),
-                               "STREAM_CLOSED error but stream state is {:?}", scenario.initial_stream_state);
+                        assert!(
+                            scenario.initial_stream_state.is_closed(),
+                            "STREAM_CLOSED error but stream state is {:?}",
+                            scenario.initial_stream_state
+                        );
                     }
                     ErrorCode::ProtocolError => {
                         // Either stream_id=0 or unexpected CONTINUATION
                         assert!(
-                            test_frame.stream_id == 0 ||
-                            (i > 0 && scenario.continuation_frames[i-1].end_headers),
+                            test_frame.stream_id == 0
+                                || (i > 0 && scenario.continuation_frames[i - 1].end_headers),
                             "PROTOCOL_ERROR but frame seems valid"
                         );
                     }
@@ -302,9 +334,9 @@ fuzz_target!(|scenario: ContinuationSizeLimitScenario| {
 /// Test specific boundary conditions for header fragment limits
 fn test_boundary_conditions() {
     let test_cases = [
-        (1024, 4096),        // Small limit
-        (8192, 32768),       // Medium limit
-        (65536, 256 * 1024), // Large limit capped at 256KB
+        (1024, 4096),              // Small limit
+        (8192, 32768),             // Medium limit
+        (65536, 256 * 1024),       // Large limit capped at 256KB
         (1024 * 1024, 256 * 1024), // Very large limit still capped
     ];
 
@@ -328,7 +360,11 @@ fn test_boundary_conditions() {
         let mut test_stream2 = MockStream::new(1, StreamState::Open, max_header_list_size);
         let over_limit_data = vec![0u8; expected_fragment_limit + 1];
         let result2 = test_stream2.recv_continuation(over_limit_data, true);
-        assert_eq!(result2, Err(ErrorCode::EnhanceYourCalm), "Should reject data over limit");
+        assert_eq!(
+            result2,
+            Err(ErrorCode::EnhanceYourCalm),
+            "Should reject data over limit"
+        );
     }
 
     // Test multiple frames building up to the limit
@@ -356,11 +392,21 @@ fn test_boundary_conditions() {
     // Test CONTINUATION on closed stream
     let mut closed_stream = MockStream::new(2, StreamState::Closed, 8192);
     let result = closed_stream.recv_continuation(vec![0u8; 100], true);
-    assert_eq!(result, Err(ErrorCode::StreamClosed), "Should reject CONTINUATION on closed stream");
+    assert_eq!(
+        result,
+        Err(ErrorCode::StreamClosed),
+        "Should reject CONTINUATION on closed stream"
+    );
 
     // Test unexpected CONTINUATION (headers already complete)
     let mut complete_stream = MockStream::new(3, StreamState::Open, 8192);
-    complete_stream.recv_continuation(vec![0u8; 100], true).unwrap(); // Complete headers
+    complete_stream
+        .recv_continuation(vec![0u8; 100], true)
+        .unwrap(); // Complete headers
     let result = complete_stream.recv_continuation(vec![0u8; 100], true);
-    assert_eq!(result, Err(ErrorCode::ProtocolError), "Should reject unexpected CONTINUATION");
+    assert_eq!(
+        result,
+        Err(ErrorCode::ProtocolError),
+        "Should reject unexpected CONTINUATION"
+    );
 }

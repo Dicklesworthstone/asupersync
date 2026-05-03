@@ -16,16 +16,16 @@
 
 use arbitrary::Arbitrary;
 use asupersync::raptorq::{
-    gf256::Gf256,
     decoder::{InactivationDecoder, ReceivedSymbol},
+    gf256::Gf256,
 };
 use libfuzzer_sys::fuzz_target;
 use std::collections::HashSet;
 
-const MAX_K: usize = 32;           // Keep K small for faster fuzzing
+const MAX_K: usize = 32; // Keep K small for faster fuzzing
 const MAX_SYMBOL_SIZE: usize = 64; // Small symbols for performance
 const MAX_EXTRA_SYMBOLS: usize = 8; // Additional repair symbols
-const MAX_REPAIR_DEGREE: usize = 8;  // Max columns per repair symbol
+const MAX_REPAIR_DEGREE: usize = 8; // Max columns per repair symbol
 
 /// Structure-aware input for RaptorQ decoder schedule edge case testing.
 #[derive(Arbitrary, Debug)]
@@ -352,7 +352,10 @@ fn build_symbols(input: &ScheduleEdgeCaseInput) -> Vec<ReceivedSymbol> {
                 ));
             }
         }
-        RepairStrategy::TieBreakingPattern { identical_nnz_groups, target_nnz } => {
+        RepairStrategy::TieBreakingPattern {
+            identical_nnz_groups,
+            target_nnz,
+        } => {
             let tie_symbols = create_tie_breaking_symbols(
                 k as u32,
                 k,
@@ -393,7 +396,8 @@ fuzz_target!(|input: ScheduleEdgeCaseInput| {
     // Guard against excessive input sizes
     if input.k > MAX_K
         || input.symbol_size > MAX_SYMBOL_SIZE
-        || input.symbol_config.num_repairs > MAX_EXTRA_SYMBOLS as u8 {
+        || input.symbol_config.num_repairs > MAX_EXTRA_SYMBOLS as u8
+    {
         return;
     }
 
@@ -408,7 +412,9 @@ fuzz_target!(|input: ScheduleEdgeCaseInput| {
 
     // If configured for cache testing, run multiple iterations
     let iterations = if input.dense_config.cache_config.test_cache_reuse {
-        (input.dense_config.cache_config.iterations as usize).min(5).max(1)
+        (input.dense_config.cache_config.iterations as usize)
+            .min(5)
+            .max(1)
     } else {
         1
     };
@@ -416,7 +422,11 @@ fuzz_target!(|input: ScheduleEdgeCaseInput| {
     for iteration in 0..iterations {
         // For cache collision testing, modify seed slightly
         let test_decoder = if iteration > 0 && input.dense_config.cache_config.create_collision {
-            match InactivationDecoder::try_new(input.k, input.symbol_size, input.seed + iteration as u64) {
+            match InactivationDecoder::try_new(
+                input.k,
+                input.symbol_size,
+                input.seed + iteration as u64,
+            ) {
                 Ok(decoder) => decoder,
                 Err(_) => continue,
             }

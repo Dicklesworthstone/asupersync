@@ -1,12 +1,12 @@
 #![no_main]
 
-use libfuzzer_sys::fuzz_target;
 use arbitrary::{Arbitrary, Unstructured};
-use std::sync::{Arc, Mutex};
-use std::task::{Context, Poll, RawWaker, RawWakerVTable, Waker};
+use libfuzzer_sys::fuzz_target;
+use std::collections::HashMap;
 use std::future::Future;
 use std::pin::Pin;
-use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
+use std::task::{Context, Poll, RawWaker, RawWakerVTable, Waker};
 
 use asupersync::sync::Notify;
 
@@ -46,7 +46,8 @@ impl MultiWaiterTracker {
 
     fn get_ready_count(&self) -> usize {
         if let Ok(states) = self.waiters_state.lock() {
-            states.values()
+            states
+                .values()
                 .filter(|&state| *state == WaiterState::Ready)
                 .count()
         } else {
@@ -56,7 +57,8 @@ impl MultiWaiterTracker {
 
     fn get_pending_count(&self) -> usize {
         if let Ok(states) = self.waiters_state.lock() {
-            states.values()
+            states
+                .values()
                 .filter(|&state| *state == WaiterState::Pending)
                 .count()
         } else {
@@ -69,9 +71,11 @@ impl MultiWaiterTracker {
         let pending_count = self.get_pending_count();
 
         // Core invariant: notify_one() should wake exactly expected_ready waiters
-        assert_eq!(ready_count, expected_ready,
+        assert_eq!(
+            ready_count, expected_ready,
             "notify_one() violated single-wakeup invariant. Expected {} ready, got {} ready, {} pending",
-            expected_ready, ready_count, pending_count);
+            expected_ready, ready_count, pending_count
+        );
 
         // Additional invariant: ready + pending should match total registered waiters
         let total_waiters = if let Ok(states) = self.waiters_state.lock() {
@@ -81,9 +85,12 @@ impl MultiWaiterTracker {
         };
 
         if total_waiters > 0 {
-            assert!(ready_count + pending_count <= total_waiters,
+            assert!(
+                ready_count + pending_count <= total_waiters,
                 "Ready + pending ({}) exceeds total waiters ({})",
-                ready_count + pending_count, total_waiters);
+                ready_count + pending_count,
+                total_waiters
+            );
         }
     }
 }
@@ -104,16 +111,15 @@ impl TrackedWaker {
     }
 
     fn was_waked(&self) -> bool {
-        self.waked.lock().unwrap_or_else(|_| std::sync::MutexGuard::new(&false))
+        self.waked
+            .lock()
+            .unwrap_or_else(|_| std::sync::MutexGuard::new(&false))
             .clone()
     }
 
     fn create_waker(&self) -> Waker {
         let data = Arc::new(self.clone());
-        let raw = RawWaker::new(
-            Arc::into_raw(data) as *const (),
-            &TRACKED_WAKER_VTABLE,
-        );
+        let raw = RawWaker::new(Arc::into_raw(data) as *const (), &TRACKED_WAKER_VTABLE);
         unsafe { Waker::from_raw(raw) }
     }
 }
@@ -149,7 +155,8 @@ unsafe fn tracked_waker_wake(data: *const ()) {
     if let Ok(mut waked) = arc.waked.lock() {
         *waked = true;
     }
-    arc.tracker.record_waiter_state(arc.waiter_id, WaiterState::Ready);
+    arc.tracker
+        .record_waiter_state(arc.waiter_id, WaiterState::Ready);
 }
 
 unsafe fn tracked_waker_wake_by_ref(data: *const ()) {
@@ -157,7 +164,8 @@ unsafe fn tracked_waker_wake_by_ref(data: *const ()) {
     if let Ok(mut waked) = arc.waked.lock() {
         *waked = true;
     }
-    arc.tracker.record_waiter_state(arc.waiter_id, WaiterState::Ready);
+    arc.tracker
+        .record_waiter_state(arc.waiter_id, WaiterState::Ready);
     std::mem::forget(arc); // Don't drop, we only borrowed
 }
 
@@ -168,7 +176,7 @@ unsafe fn tracked_waker_drop(data: *const ()) {
 
 #[derive(Debug, Clone, Arbitrary)]
 struct MultiWaiterConfig {
-    waiter_count: u8,       // Number of waiters to create
+    waiter_count: u8, // Number of waiters to create
     notify_pattern: NotifyPattern,
 }
 
@@ -293,8 +301,12 @@ fuzz_target!(|data: &[u8]| {
             // Validate: at most notify_count waiters should be ready
             let expected_ready = notify_count.min(config.waiter_count as usize);
             let ready_count = tracker.get_ready_count();
-            assert!(ready_count <= expected_ready,
-                "Too many waiters ready: {} > {}", ready_count, expected_ready);
+            assert!(
+                ready_count <= expected_ready,
+                "Too many waiters ready: {} > {}",
+                ready_count,
+                expected_ready
+            );
         }
 
         NotifyPattern::NotifyOneThenWaiters { additional_waiters } => {
@@ -327,7 +339,8 @@ fuzz_target!(|data: &[u8]| {
             let additional = additional_waiters.min(5) as usize;
             for i in 0..additional {
                 let notified = notify.notified();
-                let extra_waker = TrackedWaker::new(config.waiter_count as usize + i, tracker.clone());
+                let extra_waker =
+                    TrackedWaker::new(config.waiter_count as usize + i, tracker.clone());
 
                 let waker = extra_waker.create_waker();
                 let mut context = Context::from_waker(&waker);
@@ -338,10 +351,12 @@ fuzz_target!(|data: &[u8]| {
         NotifyPattern::InterleavedCreateNotify { interleaving } => {
             let mut waiter_idx = 0;
 
-            for &is_create in interleaving.iter().take(20) { // Limit operations
+            for &is_create in interleaving.iter().take(20) {
+                // Limit operations
                 if is_create && waiter_idx < waiters.len() {
                     // Poll a waiter to register it
-                    let waker = std::task::Waker::from(Arc::new(tracked_wakers[waiter_idx].clone()));
+                    let waker =
+                        std::task::Waker::from(Arc::new(tracked_wakers[waiter_idx].clone()));
                     let mut context = Context::from_waker(&waker);
                     let _ = Pin::new(&mut waiters[waiter_idx]).poll(&mut context);
                     tracker.record_waiter_state(waiter_idx, WaiterState::Pending);
@@ -392,8 +407,12 @@ fuzz_target!(|data: &[u8]| {
             // Validate that we didn't wake more than the number of available waiters
             let ready_count = tracker.get_ready_count();
             let max_possible = config.waiter_count as usize;
-            assert!(ready_count <= max_possible,
-                "Rapid notify_one woke too many: {} > {}", ready_count, max_possible);
+            assert!(
+                ready_count <= max_possible,
+                "Rapid notify_one woke too many: {} > {}",
+                ready_count,
+                max_possible
+            );
         }
     }
 
@@ -401,7 +420,10 @@ fuzz_target!(|data: &[u8]| {
     // (this varies by pattern, but we should never wake more waiters than we have)
     let final_ready = tracker.get_ready_count();
     let total_waiters = config.waiter_count as usize;
-    assert!(final_ready <= total_waiters,
+    assert!(
+        final_ready <= total_waiters,
         "Final invariant violation: {} ready waiters > {} total",
-        final_ready, total_waiters);
+        final_ready,
+        total_waiters
+    );
 });

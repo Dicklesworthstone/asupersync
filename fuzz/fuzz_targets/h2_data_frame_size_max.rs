@@ -1,7 +1,7 @@
 #![no_main]
 
-use libfuzzer_sys::fuzz_target;
 use arbitrary::{Arbitrary, Unstructured};
+use libfuzzer_sys::fuzz_target;
 
 /// Default SETTINGS_MAX_FRAME_SIZE per RFC 7540 §6.5.2
 const DEFAULT_MAX_FRAME_SIZE: u32 = 16_384; // 2^14
@@ -38,8 +38,12 @@ struct DataFlags {
 impl DataFlags {
     fn to_byte(self) -> u8 {
         let mut flags = 0u8;
-        if self.end_stream { flags |= 0x1; }
-        if self.padded { flags |= 0x8; }
+        if self.end_stream {
+            flags |= 0x1;
+        }
+        if self.padded {
+            flags |= 0x8;
+        }
         flags
     }
 
@@ -91,9 +95,7 @@ impl FrameHeader {
         }
 
         // Length (24 bits)
-        let length = ((buf[0] as u32) << 16) |
-                    ((buf[1] as u32) << 8) |
-                    (buf[2] as u32);
+        let length = ((buf[0] as u32) << 16) | ((buf[1] as u32) << 8) | (buf[2] as u32);
 
         // Frame type
         let frame_type = match buf[3] {
@@ -113,10 +115,10 @@ impl FrameHeader {
         let flags = buf[4];
 
         // Stream ID (31 bits, ignore reserved bit)
-        let stream_id = ((buf[5] as u32 & 0x7F) << 24) |
-                       ((buf[6] as u32) << 16) |
-                       ((buf[7] as u32) << 8) |
-                       (buf[8] as u32);
+        let stream_id = ((buf[5] as u32 & 0x7F) << 24)
+            | ((buf[6] as u32) << 16)
+            | ((buf[7] as u32) << 8)
+            | (buf[8] as u32);
 
         Ok(FrameHeader {
             length,
@@ -312,7 +314,8 @@ enum SizeVariant {
 
 fuzz_target!(|input: FuzzInput| {
     // Clamp max_frame_size to valid range per RFC 7540 §6.5.2
-    let max_frame_size = input.max_frame_size_setting
+    let max_frame_size = input
+        .max_frame_size_setting
         .clamp(DEFAULT_MAX_FRAME_SIZE, MAX_FRAME_SIZE_LIMIT);
 
     let parser = match MockH2FrameParser::with_max_frame_size(max_frame_size) {
@@ -334,7 +337,11 @@ fuzz_target!(|input: FuzzInput| {
     let data_payload = vec![0x42u8; target_size as usize];
 
     // Ensure stream ID is non-zero (required for DATA frames)
-    let stream_id = if input.stream_id == 0 { 1 } else { input.stream_id & 0x7FFF_FFFF };
+    let stream_id = if input.stream_id == 0 {
+        1
+    } else {
+        input.stream_id & 0x7FFF_FFFF
+    };
 
     let flags = DataFlags {
         end_stream: input.end_stream,
@@ -370,10 +377,14 @@ fuzz_target!(|input: FuzzInput| {
             // 2. Not corrupted
             // 3. Complete frame present
 
-            assert!(target_size <= max_frame_size,
-                "Oversized frame should not parse successfully");
-            assert!(!input.corrupt_length,
-                "Corrupted length should not parse successfully");
+            assert!(
+                target_size <= max_frame_size,
+                "Oversized frame should not parse successfully"
+            );
+            assert!(
+                !input.corrupt_length,
+                "Corrupted length should not parse successfully"
+            );
 
             // Verify parsed frame matches expectations
             assert_eq!(parsed_frame.header.frame_type, FrameType::Data);
@@ -390,36 +401,40 @@ fuzz_target!(|input: FuzzInput| {
                 parsed_frame.data.len()
             };
             assert_eq!(parsed_frame.header.length as usize, expected_length);
-
-        },
+        }
 
         Err(FrameError::FrameSizeError) => {
             // Should only get this error for oversized frames
-            assert!(target_size > max_frame_size || input.corrupt_length,
-                "Frame size error should only occur for oversized frames");
-        },
+            assert!(
+                target_size > max_frame_size || input.corrupt_length,
+                "Frame size error should only occur for oversized frames"
+            );
+        }
 
         Err(FrameError::IncompleteFrame) => {
             // Expected when frame is truncated or corrupted
-        },
+        }
 
         Err(FrameError::IncompleteHeader) => {
             // Expected when not enough bytes for header
-        },
+        }
 
         Err(FrameError::InvalidStreamId) => {
             // Should not happen with our stream ID logic
-            panic!("Unexpected InvalidStreamId error with stream_id: {}", stream_id);
-        },
+            panic!(
+                "Unexpected InvalidStreamId error with stream_id: {}",
+                stream_id
+            );
+        }
 
         Err(FrameError::InvalidPadding) => {
             // Can occur with invalid padding setup
-        },
+        }
 
         Err(FrameError::UnknownFrameType(_)) => {
             // Should not happen since we only create DATA frames
             panic!("Unexpected UnknownFrameType error");
-        },
+        }
     }
 
     // Additional boundary testing for off-by-one errors
@@ -430,11 +445,14 @@ fuzz_target!(|input: FuzzInput| {
             match parse_result {
                 Ok(_) => {
                     // Expected - frame at limit-1 should parse
-                },
+                }
                 Err(e) => {
                     // Only acceptable errors are padding-related or incomplete frame
-                    assert!(matches!(e, FrameError::InvalidPadding | FrameError::IncompleteFrame),
-                        "Frame at max_frame_size-1 failed unexpectedly: {:?}", e);
+                    assert!(
+                        matches!(e, FrameError::InvalidPadding | FrameError::IncompleteFrame),
+                        "Frame at max_frame_size-1 failed unexpectedly: {:?}",
+                        e
+                    );
                 }
             }
         }
@@ -444,8 +462,11 @@ fuzz_target!(|input: FuzzInput| {
     if target_size == max_frame_size && !input.corrupt_length {
         // Should parse successfully unless padding is invalid
         if let Err(e) = parse_result {
-            assert!(matches!(e, FrameError::InvalidPadding | FrameError::IncompleteFrame),
-                "Frame at exact max_frame_size limit failed unexpectedly: {:?}", e);
+            assert!(
+                matches!(e, FrameError::InvalidPadding | FrameError::IncompleteFrame),
+                "Frame at exact max_frame_size limit failed unexpectedly: {:?}",
+                e
+            );
         }
     }
 
@@ -456,13 +477,13 @@ fuzz_target!(|input: FuzzInput| {
             match parse_result {
                 Err(FrameError::FrameSizeError) => {
                     // Expected
-                },
+                }
                 Err(FrameError::IncompleteFrame) => {
                     // Also acceptable - incomplete frame detected first
-                },
+                }
                 Ok(_) => {
                     panic!("Oversized frame should never parse successfully");
-                },
+                }
                 Err(e) => {
                     panic!("Unexpected error for oversized frame: {:?}", e);
                 }

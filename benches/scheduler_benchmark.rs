@@ -1460,6 +1460,40 @@ fn bench_three_lane_decision(c: &mut Criterion) {
         },
     );
 
+    for &count in &[64usize, 512] {
+        group.throughput(Throughput::Elements(count as u64));
+        group.bench_with_input(
+            BenchmarkId::new("global_ready_burst", count),
+            &count,
+            |b, &count| {
+                b.iter_batched(
+                    || {
+                        let max_id = count as u32 - 1;
+                        let state = setup_runtime_state(max_id);
+                        let mut scheduler =
+                            ThreeLaneScheduler::new_with_cancel_limit(1, &state, 16);
+                        for i in 0..count as u32 {
+                            scheduler.inject_ready(task(i), 50);
+                        }
+                        scheduler
+                            .take_workers()
+                            .into_iter()
+                            .next()
+                            .expect("single worker")
+                    },
+                    |mut worker| {
+                        let mut drained = 0usize;
+                        while worker.bench_try_phase3_ready_work().is_some() {
+                            drained += 1;
+                        }
+                        black_box(drained)
+                    },
+                    BatchSize::SmallInput,
+                )
+            },
+        );
+    }
+
     group.finish();
 }
 

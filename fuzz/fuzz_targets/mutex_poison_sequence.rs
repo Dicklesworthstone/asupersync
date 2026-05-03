@@ -1,11 +1,11 @@
 #![no_main]
 
 use arbitrary::Arbitrary;
-use asupersync::sync::{Mutex, LockError, TryLockError};
 use asupersync::cx::Cx;
+use asupersync::sync::{LockError, Mutex, TryLockError};
+use asupersync::types::Budget;
 use asupersync::util::ArenaIndex;
 use asupersync::{RegionId, TaskId};
-use asupersync::types::Budget;
 use libfuzzer_sys::fuzz_target;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -269,10 +269,7 @@ fn execute_and_verify_poison_correctness(start_poisoned: bool, operations: Vec<M
                 match mutex.try_lock() {
                     Ok(guard) => {
                         // Should only succeed if mutex is not poisoned
-                        assert!(
-                            !tracker.is_poisoned,
-                            "try_lock succeeded on poisoned mutex"
-                        );
+                        assert!(!tracker.is_poisoned, "try_lock succeeded on poisoned mutex");
 
                         tracker.record_try_acquire_success(guard_key);
                         guards.insert(guard_key, guard);
@@ -308,10 +305,7 @@ fn execute_and_verify_poison_correctness(start_poisoned: bool, operations: Vec<M
 
             MutexOperation::CheckPoisoned => {
                 let actual_poisoned = mutex.is_poisoned();
-                tracker.record_state_check(
-                    "poisoned".to_string(),
-                    actual_poisoned.to_string(),
-                );
+                tracker.record_state_check("poisoned".to_string(), actual_poisoned.to_string());
 
                 // Verify poison state matches expectation
                 assert_eq!(
@@ -323,10 +317,7 @@ fn execute_and_verify_poison_correctness(start_poisoned: bool, operations: Vec<M
 
             MutexOperation::CheckLocked => {
                 let is_locked = mutex.is_locked();
-                tracker.record_state_check(
-                    "locked".to_string(),
-                    is_locked.to_string(),
-                );
+                tracker.record_state_check("locked".to_string(), is_locked.to_string());
 
                 // If poisoned, the locked state is undefined, so we don't assert anything
                 // If not poisoned, locked should match whether we have guards
@@ -342,10 +333,7 @@ fn execute_and_verify_poison_correctness(start_poisoned: bool, operations: Vec<M
 
             MutexOperation::CheckWaiters => {
                 let waiter_count = mutex.waiters();
-                tracker.record_state_check(
-                    "waiters".to_string(),
-                    waiter_count.to_string(),
-                );
+                tracker.record_state_check("waiters".to_string(), waiter_count.to_string());
 
                 // Waiter count should always be 0 in this test since we're not doing async waits
                 assert_eq!(
@@ -416,10 +404,10 @@ mod tests {
         let operations = vec![
             MutexOperation::CheckPoisoned, // Should be false
             MutexOperation::TryAcquire { guard_id: 1 },
-            MutexOperation::CheckLocked,   // Should be true
-            MutexOperation::CheckWaiters,  // Should be 0
+            MutexOperation::CheckLocked,  // Should be true
+            MutexOperation::CheckWaiters, // Should be 0
             MutexOperation::Release { guard_id: 1 },
-            MutexOperation::CheckLocked,   // Should be false
+            MutexOperation::CheckLocked, // Should be false
         ];
         execute_and_verify_poison_correctness(false, operations);
     }
@@ -427,10 +415,10 @@ mod tests {
     #[test]
     fn test_poisoned_mutex_operations() {
         let operations = vec![
-            MutexOperation::CheckPoisoned,   // Should be true
+            MutexOperation::CheckPoisoned,              // Should be true
             MutexOperation::TryAcquire { guard_id: 1 }, // Should fail with Poisoned
-            MutexOperation::CheckLocked,     // State undefined but shouldn't crash
-            MutexOperation::CheckWaiters,    // Should be 0
+            MutexOperation::CheckLocked,                // State undefined but shouldn't crash
+            MutexOperation::CheckWaiters,               // Should be 0
         ];
         execute_and_verify_poison_correctness(true, operations);
     }
@@ -441,7 +429,7 @@ mod tests {
             MutexOperation::TryAcquire { guard_id: 1 }, // Should fail
             MutexOperation::TryAcquire { guard_id: 2 }, // Should fail
             MutexOperation::TryAcquire { guard_id: 3 }, // Should fail
-            MutexOperation::CheckPoisoned,               // Should be true
+            MutexOperation::CheckPoisoned,              // Should be true
         ];
         execute_and_verify_poison_correctness(true, operations);
     }
@@ -450,10 +438,10 @@ mod tests {
     fn test_release_nonexistent_guard() {
         let operations = vec![
             MutexOperation::Release { guard_id: 99 }, // Should be no-op
-            MutexOperation::CheckLocked,               // Should be false
+            MutexOperation::CheckLocked,              // Should be false
             MutexOperation::TryAcquire { guard_id: 1 }, // Should succeed
-            MutexOperation::Release { guard_id: 1 },     // Should work
-            MutexOperation::Release { guard_id: 1 },     // Should be no-op
+            MutexOperation::Release { guard_id: 1 },  // Should work
+            MutexOperation::Release { guard_id: 1 },  // Should be no-op
         ];
         execute_and_verify_poison_correctness(false, operations);
     }

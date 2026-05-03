@@ -1,7 +1,7 @@
 #![no_main]
 
-use libfuzzer_sys::fuzz_target;
 use arbitrary::Arbitrary;
+use libfuzzer_sys::fuzz_target;
 
 /// HTTP/2 :authority pseudo-header validation fuzz target.
 ///
@@ -79,9 +79,11 @@ impl MockAuthorityValidator {
 
         // Check length limits
         if authority.len() > self.policy.max_length {
-            return AuthorityResult::Invalid(
-                format!("Authority too long: {} > {}", authority.len(), self.policy.max_length)
-            );
+            return AuthorityResult::Invalid(format!(
+                "Authority too long: {} > {}",
+                authority.len(),
+                self.policy.max_length
+            ));
         }
 
         // Empty authority is invalid for most cases
@@ -91,10 +93,10 @@ impl MockAuthorityValidator {
 
         // RFC 3986 forbidden characters validation
         if let Some(invalid_char) = self.find_forbidden_characters(authority) {
-            return AuthorityResult::ProtocolError(
-                format!("Forbidden character in authority: {:?} (0x{:02X})",
-                       invalid_char, invalid_char as u8)
-            );
+            return AuthorityResult::ProtocolError(format!(
+                "Forbidden character in authority: {:?} (0x{:02X})",
+                invalid_char, invalid_char as u8
+            ));
         }
 
         // Parse and validate components
@@ -131,7 +133,11 @@ impl MockAuthorityValidator {
         None
     }
 
-    fn validate_authority_components(&self, authority: &str, input: &AuthorityInput) -> AuthorityResult {
+    fn validate_authority_components(
+        &self,
+        authority: &str,
+        input: &AuthorityInput,
+    ) -> AuthorityResult {
         // Check for IPv6 literal format [::1]:8080
         if authority.starts_with('[') {
             return self.validate_ipv6_authority(authority);
@@ -182,9 +188,10 @@ impl MockAuthorityValidator {
         // Check for forbidden characters in IPv6 part
         for ch in ipv6_part.chars() {
             if !ch.is_ascii_hexdigit() && ch != ':' {
-                return AuthorityResult::ProtocolError(
-                    format!("Invalid character in IPv6 address: {:?}", ch)
-                );
+                return AuthorityResult::ProtocolError(format!(
+                    "Invalid character in IPv6 address: {:?}",
+                    ch
+                ));
             }
         }
 
@@ -211,7 +218,10 @@ impl MockAuthorityValidator {
             if ch.is_control() {
                 return Err(format!("Control character in host: {:?}", ch));
             }
-            if matches!(ch, ' ' | '\t' | '/' | '\\' | '?' | '#' | '"' | '<' | '>' | '`' | '{' | '}' | '|') {
+            if matches!(
+                ch,
+                ' ' | '\t' | '/' | '\\' | '?' | '#' | '"' | '<' | '>' | '`' | '{' | '}' | '|'
+            ) {
                 return Err(format!("Forbidden character in host: {:?}", ch));
             }
         }
@@ -239,7 +249,8 @@ impl MockAuthorityValidator {
         }
 
         // Parse port number
-        let port: u32 = port_str.parse()
+        let port: u32 = port_str
+            .parse()
             .map_err(|_| "Port number too large".to_string())?;
 
         if self.policy.validate_port_range && (port == 0 || port > 65535) {
@@ -249,59 +260,57 @@ impl MockAuthorityValidator {
         Ok(())
     }
 
-    fn validate_specific_scenarios(&self, authority: &str, input: &AuthorityInput) -> AuthorityResult {
+    fn validate_specific_scenarios(
+        &self,
+        authority: &str,
+        input: &AuthorityInput,
+    ) -> AuthorityResult {
         // Scenario 1: Authority with control characters
         if authority.chars().any(|c| c.is_control()) {
             return AuthorityResult::ProtocolError(
-                "Control characters forbidden in authority".to_string()
+                "Control characters forbidden in authority".to_string(),
             );
         }
 
         // Scenario 2: Authority with spaces
         if authority.contains(' ') || authority.contains('\t') {
             return AuthorityResult::ProtocolError(
-                "Whitespace characters forbidden in authority".to_string()
+                "Whitespace characters forbidden in authority".to_string(),
             );
         }
 
         // Scenario 3: Authority with path-like characters
         if authority.contains('/') || authority.contains('\\') {
             return AuthorityResult::ProtocolError(
-                "Path separators forbidden in authority".to_string()
+                "Path separators forbidden in authority".to_string(),
             );
         }
 
         // Scenario 4: Authority with query/fragment indicators
         if authority.contains('?') || authority.contains('#') {
             return AuthorityResult::ProtocolError(
-                "Query/fragment indicators forbidden in authority".to_string()
+                "Query/fragment indicators forbidden in authority".to_string(),
             );
         }
 
         // Scenario 5: International characters without IDN support
         if !self.policy.allow_idn && authority.chars().any(|c| !c.is_ascii()) {
             return AuthorityResult::Invalid(
-                "Non-ASCII characters not allowed without IDN support".to_string()
+                "Non-ASCII characters not allowed without IDN support".to_string(),
             );
         }
 
         // Scenario 6: Multiple consecutive colons (invalid port format)
         if authority.matches(':').count() > 1 && !authority.starts_with('[') {
-            return AuthorityResult::Invalid(
-                "Multiple colons in non-IPv6 authority".to_string()
-            );
+            return AuthorityResult::Invalid("Multiple colons in non-IPv6 authority".to_string());
         }
 
         // Scenario 7: Authority with scheme-like prefix
         if authority.contains("://") {
-            return AuthorityResult::Invalid(
-                "Scheme separator in authority component".to_string()
-            );
+            return AuthorityResult::Invalid("Scheme separator in authority component".to_string());
         }
 
-        AuthorityResult::Valid(
-            format!("Valid authority: {}", authority)
-        )
+        AuthorityResult::Valid(format!("Valid authority: {}", authority))
     }
 }
 
@@ -336,42 +345,62 @@ fuzz_target!(|input: AuthorityInput| {
 
             // Control characters should always be protocol errors
             if authority.chars().any(|c| c.is_control()) {
-                assert!(msg.contains("Control") || msg.contains("Forbidden"),
-                       "Control character not properly flagged: {}", msg);
+                assert!(
+                    msg.contains("Control") || msg.contains("Forbidden"),
+                    "Control character not properly flagged: {}",
+                    msg
+                );
             }
 
             // Space/tab characters
             if authority.contains(' ') || authority.contains('\t') {
-                assert!(msg.contains("Whitespace") || msg.contains("Forbidden"),
-                       "Whitespace not properly flagged: {}", msg);
+                assert!(
+                    msg.contains("Whitespace") || msg.contains("Forbidden"),
+                    "Whitespace not properly flagged: {}",
+                    msg
+                );
             }
 
             // Path separators
             if authority.contains('/') || authority.contains('\\') {
-                assert!(msg.contains("Path") || msg.contains("Forbidden"),
-                       "Path separator not properly flagged: {}", msg);
+                assert!(
+                    msg.contains("Path") || msg.contains("Forbidden"),
+                    "Path separator not properly flagged: {}",
+                    msg
+                );
             }
 
             // Query/fragment indicators
             if authority.contains('?') || authority.contains('#') {
-                assert!(msg.contains("Query") || msg.contains("fragment") || msg.contains("Forbidden"),
-                       "Query/fragment indicator not properly flagged: {}", msg);
+                assert!(
+                    msg.contains("Query") || msg.contains("fragment") || msg.contains("Forbidden"),
+                    "Query/fragment indicator not properly flagged: {}",
+                    msg
+                );
             }
-        },
+        }
 
         AuthorityResult::Valid(_) => {
             // Valid authorities should not contain forbidden characters
             let authority = &input.authority;
 
-            assert!(!authority.chars().any(|c| c.is_control()),
-                   "Valid authority contains control characters");
-            assert!(!authority.contains(' ') && !authority.contains('\t'),
-                   "Valid authority contains whitespace");
-            assert!(!authority.contains('/') && !authority.contains('\\'),
-                   "Valid authority contains path separators");
-            assert!(!authority.contains('?') && !authority.contains('#'),
-                   "Valid authority contains query/fragment indicators");
-        },
+            assert!(
+                !authority.chars().any(|c| c.is_control()),
+                "Valid authority contains control characters"
+            );
+            assert!(
+                !authority.contains(' ') && !authority.contains('\t'),
+                "Valid authority contains whitespace"
+            );
+            assert!(
+                !authority.contains('/') && !authority.contains('\\'),
+                "Valid authority contains path separators"
+            );
+            assert!(
+                !authority.contains('?') && !authority.contains('#'),
+                "Valid authority contains query/fragment indicators"
+            );
+        }
 
         AuthorityResult::Invalid(_) => {
             // Invalid results are acceptable for edge cases
@@ -383,7 +412,7 @@ fuzz_target!(|input: AuthorityInput| {
         match result {
             AuthorityResult::Valid(_) => {
                 panic!("Empty authority should not be valid");
-            },
+            }
             _ => {} // Invalid or protocol error is expected
         }
     }
@@ -394,7 +423,7 @@ fuzz_target!(|input: AuthorityInput| {
             match result {
                 AuthorityResult::Valid(_) => {
                     panic!("IPv6 literal should be rejected when not allowed");
-                },
+                }
                 _ => {}
             }
         }

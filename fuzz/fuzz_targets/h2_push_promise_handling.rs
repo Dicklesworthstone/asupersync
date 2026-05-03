@@ -14,10 +14,10 @@
 
 #![no_main]
 
+use asupersync::bytes::{BufMut, Bytes, BytesMut};
+use asupersync::http::h2::frame::{PushPromiseFrame, Setting, SettingsFrame};
+use asupersync::http::h2::{Frame, FrameType, H2Error};
 use libfuzzer_sys::fuzz_target;
-use asupersync::bytes::{Bytes, BytesMut, BufMut};
-use asupersync::http::h2::{H2Error, Frame, FrameType};
-use asupersync::http::h2::frame::{PushPromiseFrame, SettingsFrame, Setting};
 
 /// Maximum input size to prevent OOM during fuzzing
 const MAX_INPUT_SIZE: usize = 64 * 1024;
@@ -48,20 +48,16 @@ fuzz_target!(|data: &[u8]| {
                 let _promised_id = push_frame.promised_stream_id;
                 let _headers = &push_frame.header_block;
             }
-            _ => {}, // Other frame types are acceptable for fuzzing
+            _ => {} // Other frame types are acceptable for fuzzing
         }
     }
 
     // Test 2: PUSH_PROMISE with malformed promised stream ID
     if data.len() >= 4 {
         // Create PUSH_PROMISE with potentially malformed promised stream ID
-        let promised_stream_id = u32::from_be_bytes([
-            data[0], data[1], data[2], data[3]
-        ]);
+        let promised_stream_id = u32::from_be_bytes([data[0], data[1], data[2], data[3]]);
 
-        let frame = create_push_promise_frame_with_promised_id(
-            &data[4..], 1, promised_stream_id
-        );
+        let frame = create_push_promise_frame_with_promised_id(&data[4..], 1, promised_stream_id);
 
         // Should handle invalid stream IDs gracefully during frame creation
         match frame {
@@ -69,7 +65,7 @@ fuzz_target!(|data: &[u8]| {
                 let _promised = push_frame.promised_stream_id;
                 // Should not panic regardless of promised stream ID value
             }
-            _ => {},
+            _ => {}
         }
     }
 
@@ -118,7 +114,7 @@ fuzz_target!(|data: &[u8]| {
                         let _promised_id = push_frame.promised_stream_id;
                         let _headers = &push_frame.header_block;
                     }
-                    _ => {},
+                    _ => {}
                 }
             }
             Err(_) => {
@@ -230,7 +226,7 @@ fn create_push_promise_frame(data: &[u8], stream_id: u32, promised_stream_id: u3
 fn create_push_promise_frame_with_promised_id(
     header_data: &[u8],
     stream_id: u32,
-    promised_stream_id: u32
+    promised_stream_id: u32,
 ) -> Frame {
     let push_frame = PushPromiseFrame {
         stream_id,
@@ -246,7 +242,7 @@ fn create_push_promise_frame_with_flags(
     data: &[u8],
     stream_id: u32,
     promised_stream_id: u32,
-    _flags: u8 // flags are managed by end_headers field
+    _flags: u8, // flags are managed by end_headers field
 ) -> Frame {
     let push_frame = PushPromiseFrame {
         stream_id,
@@ -264,7 +260,8 @@ fn create_large_push_promise_frame(data: &[u8]) -> Frame {
     // Repeat the data to create a large payload
     for _ in 0..100 {
         payload.put(data);
-        if payload.len() > 1024 * 1024 { // Cap at 1MB
+        if payload.len() > 1024 * 1024 {
+            // Cap at 1MB
             break;
         }
     }

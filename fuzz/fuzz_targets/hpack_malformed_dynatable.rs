@@ -1,7 +1,7 @@
 //! HPACK Decoder Fuzzing: Malformed Dynamic Table Updates
 //!
 //! Tests src/http/h2/hpack.rs Decoder::decode() with malformed dynamic table
-//! manipulation sequences. Focus: arbitrary mix of literal/indexed/resize 
+//! manipulation sequences. Focus: arbitrary mix of literal/indexed/resize
 //! operations that should result in COMPRESSION_ERROR, never panic.
 //!
 //! Target: Decoder::decode() crash detector + error handling validation
@@ -11,7 +11,7 @@
 
 use arbitrary::Arbitrary;
 use asupersync::bytes::Bytes;
-use asupersync::http::h2::{hpack::Decoder, error::H2Error};
+use asupersync::http::h2::{error::H2Error, hpack::Decoder};
 use libfuzzer_sys::fuzz_target;
 
 const MAX_BLOCK_SIZE: usize = 64 * 1024; // 64KB limit
@@ -77,9 +77,7 @@ enum HpackOperation {
         malform_lengths: bool,
     },
     /// Raw malformed bytes injection
-    RawBytes {
-        data: Vec<u8>,
-    },
+    RawBytes { data: Vec<u8> },
 }
 
 #[derive(Arbitrary, Debug)]
@@ -98,7 +96,7 @@ fuzz_target!(|input: MalformedDynamicTableFuzz| {
 
     // Build potentially malformed HPACK block
     let block_data = build_malformed_block(&input);
-    
+
     // Size guard to prevent OOM
     if block_data.len() > MAX_BLOCK_SIZE {
         return;
@@ -107,14 +105,14 @@ fuzz_target!(|input: MalformedDynamicTableFuzz| {
     // Create decoder with configurable table size
     let table_size = input.initial_max_table_size.min(65536) as usize;
     let mut decoder = Decoder::with_max_size(table_size);
-    
+
     // Apply mutations
     let mut mutated_data = apply_mutations(block_data, &input.byte_mutations);
-    
+
     // The core test: decode should never panic
     // Malformed input should result in H2Error::Compression, not panic
     let mut bytes = Bytes::from(mutated_data);
-    
+
     match decoder.decode(&mut bytes) {
         Ok(_headers) => {
             // Valid decode - this is fine
@@ -127,7 +125,7 @@ fuzz_target!(|input: MalformedDynamicTableFuzz| {
             // As long as we don't panic
         }
     }
-    
+
     // Test decoder state consistency after error
     // A second decode attempt should not panic either
     let mut bytes2 = Bytes::from(vec![0x20, 0x00]); // Simple table size update
@@ -136,74 +134,102 @@ fuzz_target!(|input: MalformedDynamicTableFuzz| {
 
 fn build_malformed_block(input: &MalformedDynamicTableFuzz) -> Vec<u8> {
     let mut block = Vec::new();
-    
+
     for operation in &input.operations {
         let op_bytes = encode_operation(operation);
         block.extend_from_slice(&op_bytes);
-        
+
         // Prevent excessive size
         if block.len() > MAX_BLOCK_SIZE / 2 {
             break;
         }
     }
-    
+
     block
 }
 
 fn encode_operation(op: &HpackOperation) -> Vec<u8> {
     match op {
-        HpackOperation::DynTableSizeUpdate { size, malformed_encoding } => {
+        HpackOperation::DynTableSizeUpdate {
+            size,
+            malformed_encoding,
+        } => {
             if *malformed_encoding {
                 encode_malformed_size_update(*size)
             } else {
                 encode_size_update(*size)
             }
         }
-        
-        HpackOperation::IndexedHeader { index, malformed_encoding } => {
+
+        HpackOperation::IndexedHeader {
+            index,
+            malformed_encoding,
+        } => {
             if *malformed_encoding {
                 encode_malformed_indexed(*index)
             } else {
                 encode_indexed(*index)
             }
         }
-        
+
         HpackOperation::LiteralWithIndexing {
-            name_index, name_literal, value_literal,
-            huffman_name, huffman_value, malform_lengths
+            name_index,
+            name_literal,
+            value_literal,
+            huffman_name,
+            huffman_value,
+            malform_lengths,
         } => {
             encode_literal(
                 0x40, // 01xxxxxx pattern
-                *name_index, name_literal, value_literal,
-                *huffman_name, *huffman_value, *malform_lengths
+                *name_index,
+                name_literal,
+                value_literal,
+                *huffman_name,
+                *huffman_value,
+                *malform_lengths,
             )
         }
-        
+
         HpackOperation::LiteralNoIndexing {
-            name_index, name_literal, value_literal,
-            huffman_name, huffman_value, malform_lengths
+            name_index,
+            name_literal,
+            value_literal,
+            huffman_name,
+            huffman_value,
+            malform_lengths,
         } => {
             encode_literal(
                 0x00, // 0000xxxx pattern
-                *name_index, name_literal, value_literal,
-                *huffman_name, *huffman_value, *malform_lengths
+                *name_index,
+                name_literal,
+                value_literal,
+                *huffman_name,
+                *huffman_value,
+                *malform_lengths,
             )
         }
-        
+
         HpackOperation::LiteralNeverIndexed {
-            name_index, name_literal, value_literal,
-            huffman_name, huffman_value, malform_lengths
+            name_index,
+            name_literal,
+            value_literal,
+            huffman_name,
+            huffman_value,
+            malform_lengths,
         } => {
             encode_literal(
                 0x10, // 0001xxxx pattern
-                *name_index, name_literal, value_literal,
-                *huffman_name, *huffman_value, *malform_lengths
+                *name_index,
+                name_literal,
+                value_literal,
+                *huffman_name,
+                *huffman_value,
+                *malform_lengths,
             )
         }
-        
-        HpackOperation::RawBytes { data } => {
-            data.clone()
-        }
+
+        HpackOperation::RawBytes { data } => data.clone(),
     }
 }
 
@@ -216,7 +242,7 @@ fn encode_size_update(size: u32) -> Vec<u8> {
 fn encode_malformed_size_update(size: u32) -> Vec<u8> {
     let mut bytes = Vec::new();
     bytes.push(0x20); // Size update pattern
-    
+
     // Malformed integer encoding - various corruption strategies
     match size % 4 {
         0 => {
@@ -242,7 +268,7 @@ fn encode_malformed_size_update(size: u32) -> Vec<u8> {
             bytes.push(0x3F); // Invalid prefix
         }
     }
-    
+
     bytes
 }
 
@@ -254,7 +280,7 @@ fn encode_indexed(index: u32) -> Vec<u8> {
 
 fn encode_malformed_indexed(index: u32) -> Vec<u8> {
     let mut bytes = Vec::new();
-    
+
     match index % 3 {
         0 => {
             // Index 0 (invalid)
@@ -274,23 +300,23 @@ fn encode_malformed_indexed(index: u32) -> Vec<u8> {
             bytes.push(0x01);
         }
     }
-    
+
     bytes
 }
 
 fn encode_literal(
     pattern: u8,
-    name_index: u32, 
-    name_literal: &[u8], 
+    name_index: u32,
+    name_literal: &[u8],
     value_literal: &[u8],
     huffman_name: bool,
     huffman_value: bool,
-    malform_lengths: bool
+    malform_lengths: bool,
 ) -> Vec<u8> {
     let mut bytes = Vec::new();
-    
+
     let prefix_bits = if pattern & 0x40 != 0 { 6 } else { 4 };
-    
+
     // Encode name
     if name_index == 0 {
         // Literal name
@@ -304,23 +330,27 @@ fn encode_literal(
         // Indexed name
         encode_hpack_integer(&mut bytes, name_index as usize, prefix_bits, pattern);
     }
-    
+
     // Encode value
     if malform_lengths {
         encode_malformed_string(&mut bytes, value_literal, huffman_value);
     } else {
         encode_string(&mut bytes, value_literal, huffman_value);
     }
-    
+
     bytes
 }
 
 fn encode_string(bytes: &mut Vec<u8>, data: &[u8], huffman: bool) -> Vec<u8> {
     let flag = if huffman { 0x80 } else { 0x00 };
-    
+
     // Truncate data to prevent excessive size
-    let truncated = if data.len() > 1024 { &data[..1024] } else { data };
-    
+    let truncated = if data.len() > 1024 {
+        &data[..1024]
+    } else {
+        data
+    };
+
     encode_hpack_integer(bytes, truncated.len(), 7, flag);
     bytes.extend_from_slice(truncated);
     bytes.clone()
@@ -328,7 +358,7 @@ fn encode_string(bytes: &mut Vec<u8>, data: &[u8], huffman: bool) -> Vec<u8> {
 
 fn encode_malformed_string(bytes: &mut Vec<u8>, data: &[u8], huffman: bool) {
     let flag = if huffman { 0x80 } else { 0x00 };
-    
+
     match data.len() % 4 {
         0 => {
             // Wrong length encoding
@@ -355,13 +385,13 @@ fn encode_malformed_string(bytes: &mut Vec<u8>, data: &[u8], huffman: bool) {
 
 fn encode_hpack_integer(dst: &mut Vec<u8>, value: usize, prefix_bits: u8, prefix: u8) {
     let max_first = (1 << prefix_bits) - 1;
-    
+
     if value < max_first {
         dst.push(prefix | (value as u8));
     } else {
         dst.push(prefix | (max_first as u8));
         let mut remaining = value - max_first;
-        
+
         while remaining >= 128 {
             dst.push(0x80 | ((remaining & 0x7F) as u8));
             remaining >>= 7;
@@ -371,13 +401,14 @@ fn encode_hpack_integer(dst: &mut Vec<u8>, value: usize, prefix_bits: u8, prefix
 }
 
 fn apply_mutations(mut data: Vec<u8>, mutations: &[ByteMutation]) -> Vec<u8> {
-    for mutation in mutations.iter().take(10) { // Limit mutations
+    for mutation in mutations.iter().take(10) {
+        // Limit mutations
         let pos = (mutation.position as usize) % data.len().max(1);
-        
+
         if mutation.mutation.is_empty() {
             continue;
         }
-        
+
         // Apply mutation at position
         for (i, &byte) in mutation.mutation.iter().enumerate() {
             if pos + i < data.len() {
@@ -385,7 +416,7 @@ fn apply_mutations(mut data: Vec<u8>, mutations: &[ByteMutation]) -> Vec<u8> {
             } else {
                 data.push(byte);
             }
-            
+
             // Prevent excessive growth
             if data.len() > MAX_BLOCK_SIZE {
                 data.truncate(MAX_BLOCK_SIZE);
@@ -393,6 +424,6 @@ fn apply_mutations(mut data: Vec<u8>, mutations: &[ByteMutation]) -> Vec<u8> {
             }
         }
     }
-    
+
     data
 }

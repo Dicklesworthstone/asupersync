@@ -48,9 +48,15 @@ const MAX_CONCURRENT: u32 = 32;
 
 #[derive(Arbitrary, Debug, Clone, Copy)]
 enum Op {
-    AddStream { stream_id: u32 },
-    UpdateActivity { stream_id: u32 },
-    RemoveStream { stream_id: u32 },
+    AddStream {
+        stream_id: u32,
+    },
+    UpdateActivity {
+        stream_id: u32,
+    },
+    RemoveStream {
+        stream_id: u32,
+    },
     /// Cleanup with timeout=0 nanoseconds — removes every stream
     /// that's older than 0ns (which, after at least one
     /// instruction has executed, is every active stream).

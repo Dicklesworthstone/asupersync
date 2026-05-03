@@ -12,17 +12,17 @@
 
 #![no_main]
 
-use libfuzzer_sys::fuzz_target;
 use arbitrary::Arbitrary;
 use asupersync::sync::Notify;
-use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::thread;
-use std::time::Duration;
+use libfuzzer_sys::fuzz_target;
 use std::future::Future;
 use std::pin::Pin;
-use std::task::{Context, Poll, Waker};
+use std::sync::Arc;
 use std::sync::Barrier;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::task::{Context, Poll, Waker};
+use std::thread;
+use std::time::Duration;
 
 /// Configuration for the notify-poll race test
 #[derive(Debug, Arbitrary)]
@@ -50,7 +50,10 @@ enum PollPattern {
     /// Poll until ready or timeout
     PollUntilReady { max_attempts: u8 },
     /// Mixed pattern: poll, delay, poll again
-    MixedPoll { initial_delay: u16, retry_delay: u16 },
+    MixedPoll {
+        initial_delay: u16,
+        retry_delay: u16,
+    },
 }
 
 #[derive(Debug, Arbitrary, Clone)]
@@ -72,19 +75,21 @@ impl NotifyPollConfig {
         self.notifier_count = (self.notifier_count % 8).max(1);
 
         // Ensure we have enough patterns
-        self.poll_patterns.resize(self.poller_count as usize, PollPattern::SinglePoll);
-        self.notify_patterns.resize(self.notifier_count as usize, NotifyPattern::SingleNotify);
+        self.poll_patterns
+            .resize(self.poller_count as usize, PollPattern::SinglePoll);
+        self.notify_patterns
+            .resize(self.notifier_count as usize, NotifyPattern::SingleNotify);
 
         // Normalize pattern parameters
         for pattern in &mut self.poll_patterns {
             match pattern {
                 PollPattern::RapidPoll { cycles } => {
                     *cycles = (*cycles % 20).max(1);
-                },
+                }
                 PollPattern::PollUntilReady { max_attempts } => {
                     *max_attempts = (*max_attempts % 50).max(1);
-                },
-                _ => {},
+                }
+                _ => {}
             }
         }
 
@@ -92,8 +97,8 @@ impl NotifyPollConfig {
             match pattern {
                 NotifyPattern::BurstNotify { count, .. } => {
                     *count = (*count % 10).max(1);
-                },
-                _ => {},
+                }
+                _ => {}
             }
         }
     }
@@ -118,7 +123,12 @@ struct CountingWaker {
 impl CountingWaker {
     fn new() -> (Self, Arc<AtomicUsize>) {
         let count = Arc::new(AtomicUsize::new(0));
-        (CountingWaker { wake_count: Arc::clone(&count) }, count)
+        (
+            CountingWaker {
+                wake_count: Arc::clone(&count),
+            },
+            count,
+        )
     }
 
     fn into_waker(self) -> Waker {
@@ -127,8 +137,13 @@ impl CountingWaker {
         unsafe fn clone_counting_waker(data: *const ()) -> RawWaker {
             unsafe {
                 let waker = &*(data as *const CountingWaker);
-                let cloned = CountingWaker { wake_count: Arc::clone(&waker.wake_count) };
-                RawWaker::new(Box::into_raw(Box::new(cloned)) as *const (), &COUNTING_WAKER_VTABLE)
+                let cloned = CountingWaker {
+                    wake_count: Arc::clone(&waker.wake_count),
+                };
+                RawWaker::new(
+                    Box::into_raw(Box::new(cloned)) as *const (),
+                    &COUNTING_WAKER_VTABLE,
+                )
             }
         }
 
@@ -162,7 +177,7 @@ impl CountingWaker {
         unsafe {
             Waker::from_raw(RawWaker::new(
                 Box::into_raw(Box::new(self)) as *const (),
-                &COUNTING_WAKER_VTABLE
+                &COUNTING_WAKER_VTABLE,
             ))
         }
     }
@@ -214,7 +229,9 @@ fuzz_target!(|data: &[u8]| {
 
     let notify = Arc::new(Notify::new());
     let results = Arc::new(TestResults::default());
-    let barrier = Arc::new(Barrier::new((config.poller_count + config.notifier_count) as usize));
+    let barrier = Arc::new(Barrier::new(
+        (config.poller_count + config.notifier_count) as usize,
+    ));
     let mut handles = Vec::new();
 
     // Spawn poller threads
@@ -242,10 +259,14 @@ fuzz_target!(|data: &[u8]| {
                         results.polls_attempted.fetch_add(1, Ordering::SeqCst);
 
                         match poll_result {
-                            Poll::Ready(()) => { results.polls_ready.fetch_add(1, Ordering::SeqCst); },
-                            Poll::Pending => { results.polls_pending.fetch_add(1, Ordering::SeqCst); },
+                            Poll::Ready(()) => {
+                                results.polls_ready.fetch_add(1, Ordering::SeqCst);
+                            }
+                            Poll::Pending => {
+                                results.polls_pending.fetch_add(1, Ordering::SeqCst);
+                            }
                         }
-                    },
+                    }
 
                     PollPattern::RapidPoll { cycles } => {
                         for _ in 0..cycles {
@@ -256,11 +277,13 @@ fuzz_target!(|data: &[u8]| {
                                 Poll::Ready(()) => {
                                     results.polls_ready.fetch_add(1, Ordering::SeqCst);
                                     break; // Stop polling once ready
-                                },
-                                Poll::Pending => { results.polls_pending.fetch_add(1, Ordering::SeqCst); },
+                                }
+                                Poll::Pending => {
+                                    results.polls_pending.fetch_add(1, Ordering::SeqCst);
+                                }
                             }
                         }
-                    },
+                    }
 
                     PollPattern::DelayedPoll { delay_micros } => {
                         if delay_micros > 0 {
@@ -271,10 +294,14 @@ fuzz_target!(|data: &[u8]| {
                         results.polls_attempted.fetch_add(1, Ordering::SeqCst);
 
                         match poll_result {
-                            Poll::Ready(()) => { results.polls_ready.fetch_add(1, Ordering::SeqCst); },
-                            Poll::Pending => { results.polls_pending.fetch_add(1, Ordering::SeqCst); },
+                            Poll::Ready(()) => {
+                                results.polls_ready.fetch_add(1, Ordering::SeqCst);
+                            }
+                            Poll::Pending => {
+                                results.polls_pending.fetch_add(1, Ordering::SeqCst);
+                            }
                         }
-                    },
+                    }
 
                     PollPattern::PollUntilReady { max_attempts } => {
                         for _ in 0..max_attempts {
@@ -285,16 +312,19 @@ fuzz_target!(|data: &[u8]| {
                                 Poll::Ready(()) => {
                                     results.polls_ready.fetch_add(1, Ordering::SeqCst);
                                     break;
-                                },
+                                }
                                 Poll::Pending => {
                                     results.polls_pending.fetch_add(1, Ordering::SeqCst);
                                     thread::sleep(Duration::from_micros(100)); // Small delay between polls
-                                },
+                                }
                             }
                         }
-                    },
+                    }
 
-                    PollPattern::MixedPoll { initial_delay, retry_delay } => {
+                    PollPattern::MixedPoll {
+                        initial_delay,
+                        retry_delay,
+                    } => {
                         // Initial delay
                         if initial_delay > 0 {
                             thread::sleep(Duration::from_micros(initial_delay as u64));
@@ -307,7 +337,7 @@ fuzz_target!(|data: &[u8]| {
                         match poll_result {
                             Poll::Ready(()) => {
                                 results.polls_ready.fetch_add(1, Ordering::SeqCst);
-                            },
+                            }
                             Poll::Pending => {
                                 results.polls_pending.fetch_add(1, Ordering::SeqCst);
 
@@ -321,22 +351,25 @@ fuzz_target!(|data: &[u8]| {
                                 results.polls_attempted.fetch_add(1, Ordering::SeqCst);
 
                                 match poll_result2 {
-                                    Poll::Ready(()) => { results.polls_ready.fetch_add(1, Ordering::SeqCst); },
-                                    Poll::Pending => { results.polls_pending.fetch_add(1, Ordering::SeqCst); },
+                                    Poll::Ready(()) => {
+                                        results.polls_ready.fetch_add(1, Ordering::SeqCst);
+                                    }
+                                    Poll::Pending => {
+                                        results.polls_pending.fetch_add(1, Ordering::SeqCst);
+                                    }
                                 };
-                            },
+                            }
                         }
-                    },
+                    }
                 }
 
                 // Check for spurious wakeups
                 let final_wake_count = wake_count.load(Ordering::SeqCst);
                 if final_wake_count > 1 {
                     // Possible spurious wakeup
-                    results.spurious_wakeups.fetch_add(
-                        final_wake_count.saturating_sub(1),
-                        Ordering::SeqCst
-                    );
+                    results
+                        .spurious_wakeups
+                        .fetch_add(final_wake_count.saturating_sub(1), Ordering::SeqCst);
                 }
             }
         });
@@ -363,7 +396,7 @@ fuzz_target!(|data: &[u8]| {
                     NotifyPattern::SingleNotify => {
                         notify.notify_one();
                         results.notifications_sent.fetch_add(1, Ordering::SeqCst);
-                    },
+                    }
 
                     NotifyPattern::DelayedNotify { delay_micros } => {
                         if delay_micros > 0 {
@@ -371,9 +404,12 @@ fuzz_target!(|data: &[u8]| {
                         }
                         notify.notify_one();
                         results.notifications_sent.fetch_add(1, Ordering::SeqCst);
-                    },
+                    }
 
-                    NotifyPattern::BurstNotify { count, interval_micros } => {
+                    NotifyPattern::BurstNotify {
+                        count,
+                        interval_micros,
+                    } => {
                         for _ in 0..count {
                             notify.notify_one();
                             results.notifications_sent.fetch_add(1, Ordering::SeqCst);
@@ -382,13 +418,13 @@ fuzz_target!(|data: &[u8]| {
                                 thread::sleep(Duration::from_micros(interval_micros as u64));
                             }
                         }
-                    },
+                    }
 
                     NotifyPattern::SynchronizedNotify => {
                         // Immediate notify right after barrier
                         notify.notify_one();
                         results.notifications_sent.fetch_add(1, Ordering::SeqCst);
-                    },
+                    }
                 }
             }
         });
@@ -413,7 +449,9 @@ fuzz_target!(|data: &[u8]| {
         polls_attempted,
         polls_ready + polls_pending,
         "Poll accounting mismatch: attempted={}, ready={}, pending={}",
-        polls_attempted, polls_ready, polls_pending
+        polls_attempted,
+        polls_ready,
+        polls_pending
     );
 
     // Verify we actually performed operations
@@ -436,6 +474,7 @@ fuzz_target!(|data: &[u8]| {
     assert!(
         spurious_wakeups < notifications_sent * 2,
         "Excessive spurious wakeups: {} (notifications: {})",
-        spurious_wakeups, notifications_sent
+        spurious_wakeups,
+        notifications_sent
     );
 });

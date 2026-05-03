@@ -65,7 +65,7 @@ impl MockChunkedDecoder {
             phase: ChunkPhase::SizeLine,
             body: Vec::new(),
             trailers: Vec::new(),
-            max_body_size: 65536,  // 64KB limit
+            max_body_size: 65536,   // 64KB limit
             max_headers_size: 8192, // 8KB trailer limit
         }
     }
@@ -75,7 +75,10 @@ impl MockChunkedDecoder {
     /// - Ok(Some((body, trailers))) when complete
     /// - Ok(None) when more data needed
     /// - Err(error) when malformed
-    fn process_fragment(&mut self, fragment: &[u8]) -> Result<Option<(Vec<u8>, Vec<(String, String)>)>, String> {
+    fn process_fragment(
+        &mut self,
+        fragment: &[u8],
+    ) -> Result<Option<(Vec<u8>, Vec<(String, String)>)>, String> {
         let mut buffer = fragment.to_vec();
         let mut pos = 0;
 
@@ -90,7 +93,8 @@ impl MockChunkedDecoder {
                     // Look for CRLF to end chunk size line
                     if let Some(crlf_pos) = find_crlf(&buffer[pos..]) {
                         let line_end = pos + crlf_pos;
-                        if line_end > 1024 {  // MAX_CHUNK_LINE_LEN
+                        if line_end > 1024 {
+                            // MAX_CHUNK_LINE_LEN
                             return Err("chunk size line too long".to_string());
                         }
 
@@ -120,7 +124,9 @@ impl MockChunkedDecoder {
                     if available < *remaining {
                         // Partial chunk data
                         self.body.extend_from_slice(&buffer[pos..]);
-                        self.phase = ChunkPhase::Data { remaining: remaining - available };
+                        self.phase = ChunkPhase::Data {
+                            remaining: remaining - available,
+                        };
                         return Ok(None);
                     } else {
                         // Complete chunk data
@@ -154,8 +160,12 @@ impl MockChunkedDecoder {
                         }
 
                         if let Some(colon_pos) = trailer_line.iter().position(|&b| b == b':') {
-                            let name = String::from_utf8_lossy(&trailer_line[..colon_pos]).trim().to_string();
-                            let value = String::from_utf8_lossy(&trailer_line[colon_pos + 1..]).trim().to_string();
+                            let name = String::from_utf8_lossy(&trailer_line[..colon_pos])
+                                .trim()
+                                .to_string();
+                            let value = String::from_utf8_lossy(&trailer_line[colon_pos + 1..])
+                                .trim()
+                                .to_string();
 
                             // Validate forbidden trailer headers
                             if is_forbidden_trailer(&name) {
@@ -201,9 +211,20 @@ fn find_crlf(data: &[u8]) -> Option<usize> {
 fn is_forbidden_trailer(name: &str) -> bool {
     matches!(
         name.to_ascii_lowercase().as_str(),
-        "content-length" | "transfer-encoding" | "content-encoding" | "content-type" |
-        "content-range" | "trailer" | "host" | "authorization" | "www-authenticate" |
-        "proxy-authorization" | "proxy-authenticate" | "cookie" | "set-cookie" | "upgrade"
+        "content-length"
+            | "transfer-encoding"
+            | "content-encoding"
+            | "content-type"
+            | "content-range"
+            | "trailer"
+            | "host"
+            | "authorization"
+            | "www-authenticate"
+            | "proxy-authorization"
+            | "proxy-authenticate"
+            | "cookie"
+            | "set-cookie"
+            | "upgrade"
     )
 }
 
@@ -382,8 +403,9 @@ fn test_deterministic_behavior(data: &[u8]) {
     let mut decoder2 = MockChunkedDecoder::new();
     let mut result2 = Ok(None);
 
-    for i in 0..data.len().min(20) { // Limit to prevent timeout
-        let fragment = &data[i..i+1];
+    for i in 0..data.len().min(20) {
+        // Limit to prevent timeout
+        let fragment = &data[i..i + 1];
         match decoder2.process_fragment(fragment) {
             Ok(Some(parsed)) => {
                 result2 = Ok(Some(parsed));
@@ -401,7 +423,10 @@ fn test_deterministic_behavior(data: &[u8]) {
     match (&result1, &result2) {
         (Ok(Some((body1, trailers1))), Ok(Some((body2, trailers2)))) => {
             assert_eq!(body1, body2, "Split-buffer parsing changed body content");
-            assert_eq!(trailers1, trailers2, "Split-buffer parsing changed trailers");
+            assert_eq!(
+                trailers1, trailers2,
+                "Split-buffer parsing changed trailers"
+            );
         }
         (Err(e1), Err(e2)) => {
             // Both errors - this is okay as long as they're for the same fundamental reason
@@ -421,14 +446,21 @@ fn test_deterministic_behavior(data: &[u8]) {
 /// Validate that a parsed result is reasonable
 fn validate_parsed_result(body: &[u8], trailers: &[(String, String)]) {
     // Body size should be reasonable
-    assert!(body.len() <= 65536, "Parsed body exceeds maximum expected size");
+    assert!(
+        body.len() <= 65536,
+        "Parsed body exceeds maximum expected size"
+    );
 
     // Trailers should be reasonable
     assert!(trailers.len() <= 100, "Too many trailer headers");
 
     for (name, value) in trailers {
         assert!(!name.is_empty(), "Trailer name cannot be empty");
-        assert!(!is_forbidden_trailer(name), "Forbidden trailer header should have been rejected: {}", name);
+        assert!(
+            !is_forbidden_trailer(name),
+            "Forbidden trailer header should have been rejected: {}",
+            name
+        );
         assert!(name.len() <= 100, "Trailer name too long: {}", name);
         assert!(value.len() <= 1024, "Trailer value too long: {}", value);
     }
@@ -490,7 +522,8 @@ mod tests {
 
     #[test]
     fn test_trailer_split() {
-        let data = b"POST / HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n0\r\nX-Trailer: value\r\n\r\n";
+        let data =
+            b"POST / HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n0\r\nX-Trailer: value\r\n\r\n";
         // Split in trailer header
         test_split_buffer_parsing(data, &[50, 60], 10);
     }
@@ -514,6 +547,9 @@ mod tests {
         let mut decoder = MockChunkedDecoder::new();
         let fragment = b"FFFFFFF\r\n"; // Large but valid hex
         let result = decoder.process_fragment(fragment);
-        assert!(result.is_ok(), "Large chunk size should parse if within limits");
+        assert!(
+            result.is_ok(),
+            "Large chunk size should parse if within limits"
+        );
     }
 }

@@ -61,6 +61,8 @@ pub mod security;
 pub mod session;
 pub mod sse;
 pub mod static_files;
+#[cfg(test)]
+pub mod static_files_audit_test;
 /// WebSocket support for the web framework.
 pub mod websocket;
 

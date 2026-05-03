@@ -1,7 +1,7 @@
 #![no_main]
 
-use libfuzzer_sys::fuzz_target;
 use arbitrary::Arbitrary;
+use libfuzzer_sys::fuzz_target;
 use std::collections::VecDeque;
 
 /// HTTP/2 SETTINGS_HEADER_TABLE_SIZE=0 HPACK fuzz target.
@@ -66,13 +66,25 @@ enum HpackRepresentation {
     IndexedHeader { index: u8 },
 
     /// Literal header with incremental indexing
-    LiteralIncremental { name_index: Option<u8>, name: String, value: String },
+    LiteralIncremental {
+        name_index: Option<u8>,
+        name: String,
+        value: String,
+    },
 
     /// Literal header without indexing
-    LiteralNoIndex { name_index: Option<u8>, name: String, value: String },
+    LiteralNoIndex {
+        name_index: Option<u8>,
+        name: String,
+        value: String,
+    },
 
     /// Literal header never indexed (sensitive)
-    LiteralNeverIndex { name_index: Option<u8>, name: String, value: String },
+    LiteralNeverIndex {
+        name_index: Option<u8>,
+        name: String,
+        value: String,
+    },
 
     /// Dynamic table size update
     TableSizeUpdate { size: u32 },
@@ -214,9 +226,10 @@ impl MockHpackDecoder {
         let old_entries = self.dynamic_table.len();
 
         if new_size > self.config.max_table_size {
-            return TableUpdateResult::Error(
-                format!("New size {} exceeds maximum {}", new_size, self.config.max_table_size)
-            );
+            return TableUpdateResult::Error(format!(
+                "New size {} exceeds maximum {}",
+                new_size, self.config.max_table_size
+            ));
         }
 
         self.table_size = new_size;
@@ -276,7 +289,7 @@ impl MockHpackDecoder {
             match update_result {
                 TableUpdateResult::Error(msg) => {
                     return HeaderBlockResult::Error(format!("Table size update failed: {}", msg));
-                },
+                }
                 _ => {} // Continue processing
             }
         }
@@ -288,7 +301,7 @@ impl MockHpackDecoder {
                     if let Some(h) = header {
                         decoded_headers.push(h);
                     }
-                },
+                }
                 Err(msg) => {
                     return HeaderBlockResult::Error(msg);
                 }
@@ -302,13 +315,18 @@ impl MockHpackDecoder {
         }
     }
 
-    fn process_representation(&mut self, repr: &HpackRepresentation) -> Result<Option<(String, String)>, String> {
+    fn process_representation(
+        &mut self,
+        repr: &HpackRepresentation,
+    ) -> Result<Option<(String, String)>, String> {
         match repr {
-            HpackRepresentation::IndexedHeader { index } => {
-                self.get_header_by_index(*index)
-            },
+            HpackRepresentation::IndexedHeader { index } => self.get_header_by_index(*index),
 
-            HpackRepresentation::LiteralIncremental { name_index, name, value } => {
+            HpackRepresentation::LiteralIncremental {
+                name_index,
+                name,
+                value,
+            } => {
                 let header_name = if let Some(idx) = name_index {
                     self.get_name_by_index(*idx)?
                 } else {
@@ -318,25 +336,33 @@ impl MockHpackDecoder {
                 // Add to dynamic table
                 self.add_to_dynamic_table(header_name.clone(), value.clone(), false)?;
                 Ok(Some((header_name, value.clone())))
-            },
+            }
 
-            HpackRepresentation::LiteralNoIndex { name_index, name, value } => {
+            HpackRepresentation::LiteralNoIndex {
+                name_index,
+                name,
+                value,
+            } => {
                 let header_name = if let Some(idx) = name_index {
                     self.get_name_by_index(*idx)?
                 } else {
                     name.clone()
                 };
                 Ok(Some((header_name, value.clone())))
-            },
+            }
 
-            HpackRepresentation::LiteralNeverIndex { name_index, name, value } => {
+            HpackRepresentation::LiteralNeverIndex {
+                name_index,
+                name,
+                value,
+            } => {
                 let header_name = if let Some(idx) = name_index {
                     self.get_name_by_index(*idx)?
                 } else {
                     name.clone()
                 };
                 Ok(Some((header_name, value.clone())))
-            },
+            }
 
             HpackRepresentation::TableSizeUpdate { size } => {
                 let update_result = self.update_table_size(*size);
@@ -364,8 +390,11 @@ impl MockHpackDecoder {
         // Dynamic table
         let dynamic_index = index - self.static_table.len() - 1;
         if dynamic_index >= self.dynamic_table.len() {
-            return Err(format!("Dynamic table index {} out of range (table size {})",
-                             dynamic_index, self.dynamic_table.len()));
+            return Err(format!(
+                "Dynamic table index {} out of range (table size {})",
+                dynamic_index,
+                self.dynamic_table.len()
+            ));
         }
 
         let entry = &self.dynamic_table[dynamic_index];
@@ -380,7 +409,12 @@ impl MockHpackDecoder {
         }
     }
 
-    fn add_to_dynamic_table(&mut self, name: String, value: String, sensitive: bool) -> Result<(), String> {
+    fn add_to_dynamic_table(
+        &mut self,
+        name: String,
+        value: String,
+        sensitive: bool,
+    ) -> Result<(), String> {
         if self.table_size == 0 {
             // Cannot add to zero-size table
             return Ok(());
@@ -474,12 +508,10 @@ fuzz_target!(|input: HpackTableInput| {
     }
 
     // Pre-populate dynamic table
-    for entry in input.initial_entries.iter().take(10) { // Limit for performance
-        let _ = decoder.add_to_dynamic_table(
-            entry.name.clone(),
-            entry.value.clone(),
-            entry.sensitive
-        );
+    for entry in input.initial_entries.iter().take(10) {
+        // Limit for performance
+        let _ =
+            decoder.add_to_dynamic_table(entry.name.clone(), entry.value.clone(), entry.sensitive);
     }
 
     let initial_state = decoder.get_table_state();
@@ -488,23 +520,36 @@ fuzz_target!(|input: HpackTableInput| {
     let zero_update_result = decoder.update_table_size(input.new_table_size);
 
     match zero_update_result {
-        TableUpdateResult::Updated { evicted_count, new_size, new_entries, .. } => {
+        TableUpdateResult::Updated {
+            evicted_count,
+            new_size,
+            new_entries,
+            ..
+        } => {
             if input.new_table_size == 0 {
                 // Verify complete eviction for zero size
-                assert_eq!(new_entries, 0,
-                          "Dynamic table should be empty after size=0 update");
-                assert_eq!(decoder.current_size, 0,
-                          "Current size should be zero after size=0 update");
+                assert_eq!(
+                    new_entries, 0,
+                    "Dynamic table should be empty after size=0 update"
+                );
+                assert_eq!(
+                    decoder.current_size, 0,
+                    "Current size should be zero after size=0 update"
+                );
 
                 if initial_state.entry_count > 0 {
-                    assert!(evicted_count > 0,
-                           "Should have evicted entries when reducing to zero size");
+                    assert!(
+                        evicted_count > 0,
+                        "Should have evicted entries when reducing to zero size"
+                    );
                 }
             }
 
-            assert_eq!(new_size, input.new_table_size,
-                      "Table size should match new setting");
-        },
+            assert_eq!(
+                new_size, input.new_table_size,
+                "Table size should match new setting"
+            );
+        }
 
         TableUpdateResult::Error(_) => {
             // Errors are acceptable for invalid sizes
@@ -514,23 +559,32 @@ fuzz_target!(|input: HpackTableInput| {
     let post_update_state = decoder.get_table_state();
 
     // Test subsequent header block processing
-    for (block_idx, block) in input.header_blocks.iter().enumerate().take(3) { // Limit for performance
+    for (block_idx, block) in input.header_blocks.iter().enumerate().take(3) {
+        // Limit for performance
         let decode_result = decoder.decode_header_block(block);
 
         match decode_result {
-            HeaderBlockResult::Success { table_entries, table_size, .. } => {
+            HeaderBlockResult::Success {
+                table_entries,
+                table_size,
+                ..
+            } => {
                 // Verify table constraints are maintained
                 if input.new_table_size == 0 {
-                    assert_eq!(table_entries, 0,
-                              "Dynamic table should remain empty with zero size limit");
-                    assert_eq!(table_size, 0,
-                              "Table size should remain zero");
+                    assert_eq!(
+                        table_entries, 0,
+                        "Dynamic table should remain empty with zero size limit"
+                    );
+                    assert_eq!(table_size, 0, "Table size should remain zero");
                 }
 
-                assert!(table_size <= decoder.table_size,
-                       "Current table size {} should not exceed limit {}",
-                       table_size, decoder.table_size);
-            },
+                assert!(
+                    table_size <= decoder.table_size,
+                    "Current table size {} should not exceed limit {}",
+                    table_size,
+                    decoder.table_size
+                );
+            }
 
             HeaderBlockResult::Error(ref msg) => {
                 // Check if error is related to invalid index references after eviction
@@ -539,8 +593,11 @@ fuzz_target!(|input: HpackTableInput| {
                     for repr in &block.headers {
                         if let HpackRepresentation::IndexedHeader { index } = repr {
                             if *index as usize > decoder.static_table.len() {
-                                assert!(msg.contains("out of range") || msg.contains("invalid"),
-                                       "Should properly detect invalid dynamic table references: {}", msg);
+                                assert!(
+                                    msg.contains("out of range") || msg.contains("invalid"),
+                                    "Should properly detect invalid dynamic table references: {}",
+                                    msg
+                                );
                                 break;
                             }
                         }
@@ -554,26 +611,36 @@ fuzz_target!(|input: HpackTableInput| {
     let final_state = decoder.get_table_state();
     let stats = &final_state.eviction_stats;
 
-    assert_eq!(stats.evictions_by_size_update + stats.evictions_by_overflow,
-              stats.total_evictions,
-              "Eviction statistics should be consistent");
+    assert_eq!(
+        stats.evictions_by_size_update + stats.evictions_by_overflow,
+        stats.total_evictions,
+        "Eviction statistics should be consistent"
+    );
 
     if input.new_table_size == 0 && initial_state.entry_count > 0 {
-        assert!(stats.zero_size_evictions > 0,
-               "Should track zero-size evictions");
+        assert!(
+            stats.zero_size_evictions > 0,
+            "Should track zero-size evictions"
+        );
     }
 
     // Verify no panics occurred during zero-size handling
     // (Implicit - if we reach here without panicking, the test passed)
 
     // Additional consistency checks
-    assert!(final_state.current_size <= final_state.size_limit,
-           "Final table size should not exceed limit");
+    assert!(
+        final_state.current_size <= final_state.size_limit,
+        "Final table size should not exceed limit"
+    );
 
     if final_state.size_limit == 0 {
-        assert_eq!(final_state.entry_count, 0,
-                  "Zero size limit should result in empty table");
-        assert_eq!(final_state.current_size, 0,
-                  "Zero size limit should result in zero current size");
+        assert_eq!(
+            final_state.entry_count, 0,
+            "Zero size limit should result in empty table"
+        );
+        assert_eq!(
+            final_state.current_size, 0,
+            "Zero size limit should result in zero current size"
+        );
     }
 });

@@ -11,11 +11,11 @@
 
 #![no_main]
 
-use libfuzzer_sys::fuzz_target;
 use arbitrary::{Arbitrary, Unstructured};
 use asupersync::sync::once_cell::OnceCell;
+use libfuzzer_sys::fuzz_target;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Barrier};
-use std::sync::atomic::{AtomicUsize, AtomicBool, Ordering};
 use std::thread;
 use std::time::Duration;
 
@@ -90,12 +90,15 @@ fuzz_target!(|data: &[u8]| {
     if sequence.config.thread_count == 0
         || sequence.config.thread_count > RaceSequence::max_threads()
         || sequence.config.operations.is_empty()
-        || sequence.config.set_values.is_empty() {
+        || sequence.config.set_values.is_empty()
+    {
         return;
     }
 
     let thread_count = sequence.config.thread_count as usize;
-    let max_ops = sequence.max_ops_per_thread.min(RaceSequence::max_operations()) as usize;
+    let max_ops = sequence
+        .max_ops_per_thread
+        .min(RaceSequence::max_operations()) as usize;
 
     // Create shared OnceCell and synchronization primitives
     let cell = Arc::new(OnceCell::<u32>::new());
@@ -120,7 +123,9 @@ fuzz_target!(|data: &[u8]| {
 
             let operations = sequence.config.operations.clone();
             let set_values = sequence.config.set_values.clone();
-            let initial_delay = sequence.config.thread_delays
+            let initial_delay = sequence
+                .config
+                .thread_delays
                 .get(thread_id)
                 .copied()
                 .unwrap_or(0);
@@ -172,15 +177,13 @@ fuzz_target!(|data: &[u8]| {
                             OpResult::InitComplete(*result_value)
                         }
 
-                        ThreadOps::Get => {
-                            match cell.get() {
-                                Some(value) => {
-                                    observed_values.lock().push(*value);
-                                    OpResult::GetSome(*value)
-                                }
-                                None => OpResult::GetNone,
+                        ThreadOps::Get => match cell.get() {
+                            Some(value) => {
+                                observed_values.lock().push(*value);
+                                OpResult::GetSome(*value)
                             }
-                        }
+                            None => OpResult::GetNone,
+                        },
 
                         ThreadOps::Delay { micros } => {
                             thread::sleep(Duration::from_micros(*micros as u64));
@@ -198,9 +201,11 @@ fuzz_target!(|data: &[u8]| {
                             // Check against previous observations from this thread
                             for prev_result in &thread_results {
                                 match prev_result {
-                                    OpResult::GetSome(prev_val) | OpResult::InitComplete(prev_val) => {
+                                    OpResult::GetSome(prev_val)
+                                    | OpResult::InitComplete(prev_val) => {
                                         if prev_val != val {
-                                            inconsistent_state_detected.store(true, Ordering::SeqCst);
+                                            inconsistent_state_detected
+                                                .store(true, Ordering::SeqCst);
                                         }
                                     }
                                     _ => {}
@@ -237,21 +242,27 @@ fuzz_target!(|data: &[u8]| {
         final_set_successes + final_init_successes,
         1,
         "Exactly one initialization should succeed: {} set + {} init = {}",
-        final_set_successes, final_init_successes,
+        final_set_successes,
+        final_init_successes,
         final_set_successes + final_init_successes
     );
 
     // Critical invariant: no inconsistent state detected
-    assert!(!inconsistent_detected, "Inconsistent state detected during race");
+    assert!(
+        !inconsistent_detected,
+        "Inconsistent state detected during race"
+    );
 
     // Check all observed values are identical
     let all_values = observed_values.lock();
     if !all_values.is_empty() {
         let first_value = all_values[0];
         for &value in all_values.iter() {
-            assert_eq!(value, first_value,
+            assert_eq!(
+                value, first_value,
                 "All observed values should be identical: got {} and {} (first)",
-                value, first_value);
+                value, first_value
+            );
         }
     }
 
@@ -264,16 +275,20 @@ fuzz_target!(|data: &[u8]| {
     if !final_values.is_empty() {
         let expected_final = final_values[0];
         for &final_value in &final_values {
-            assert_eq!(final_value, expected_final,
+            assert_eq!(
+                final_value, expected_final,
                 "All threads should observe same final value: got {} and {} (expected)",
-                final_value, expected_final);
+                final_value, expected_final
+            );
         }
 
         // Final value should match all observed values
         for &observed in all_values.iter() {
-            assert_eq!(observed, expected_final,
+            assert_eq!(
+                observed, expected_final,
                 "Final value {} should match all observed values, got {}",
-                expected_final, observed);
+                expected_final, observed
+            );
         }
     }
 
@@ -290,8 +305,11 @@ fuzz_target!(|data: &[u8]| {
         for op_result in &result.results {
             match op_result {
                 OpResult::SetOk | OpResult::InitComplete(_) => {
-                    assert!(!saw_successful_op,
-                        "Thread {} had multiple successful initializations", result.thread_id);
+                    assert!(
+                        !saw_successful_op,
+                        "Thread {} had multiple successful initializations",
+                        result.thread_id
+                    );
                     saw_successful_op = true;
                     if let OpResult::InitComplete(val) = op_result {
                         value_after_success = Some(*val);
@@ -299,8 +317,11 @@ fuzz_target!(|data: &[u8]| {
                 }
                 OpResult::GetSome(val) => {
                     if let Some(expected) = value_after_success {
-                        assert_eq!(*val, expected,
-                            "Thread {} saw inconsistent value after successful op", result.thread_id);
+                        assert_eq!(
+                            *val, expected,
+                            "Thread {} saw inconsistent value after successful op",
+                            result.thread_id
+                        );
                     }
                 }
                 _ => {} // SetErr, GetNone are normal

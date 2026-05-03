@@ -12,9 +12,9 @@
 
 #![no_main]
 
-use libfuzzer_sys::fuzz_target;
 use arbitrary::{Arbitrary, Unstructured};
 use asupersync::sync::once_cell::OnceCell;
+use libfuzzer_sys::fuzz_target;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Barrier};
 use std::thread;
@@ -112,7 +112,11 @@ impl RaiiTracker {
     }
 
     fn create_tracked_value(&self, id: usize) -> TrackedValue {
-        TrackedValue::new(id, Arc::clone(&self.creation_counter), Arc::clone(&self.drop_counter))
+        TrackedValue::new(
+            id,
+            Arc::clone(&self.creation_counter),
+            Arc::clone(&self.drop_counter),
+        )
     }
 
     fn check_invariants(&self) -> Result<(), String> {
@@ -170,7 +174,8 @@ fuzz_target!(|data: &[u8]| {
     // Validate and limit parameters
     if sequence.config.operations.is_empty()
         || sequence.config.init_values.is_empty()
-        || sequence.config.init_values.len() > RaiiSequence::max_init_values() {
+        || sequence.config.init_values.len() > RaiiSequence::max_init_values()
+    {
         return;
     }
 
@@ -195,7 +200,9 @@ fuzz_target!(|data: &[u8]| {
 
         match op {
             RaiiOperation::CreateAndSet { value_index } => {
-                let value_id = sequence.config.init_values
+                let value_id = sequence
+                    .config
+                    .init_values
                     .get(*value_index as usize % sequence.config.init_values.len())
                     .copied()
                     .unwrap_or(42) as usize;
@@ -208,7 +215,8 @@ fuzz_target!(|data: &[u8]| {
                 match new_cell.set(tracked_value) {
                     Ok(()) => {
                         // Replace current cell (dropping old one if exists)
-                        let old_cell = std::mem::replace(tracker.get_current_cell_mut(), Some(new_cell));
+                        let old_cell =
+                            std::mem::replace(tracker.get_current_cell_mut(), Some(new_cell));
                         drop(old_cell); // Explicit drop to ensure RAII ordering
 
                         tracker.advance_cell_index();
@@ -222,7 +230,9 @@ fuzz_target!(|data: &[u8]| {
 
             RaiiOperation::TrySet { value_index } => {
                 if let Some(ref cell) = tracker.active_cells[tracker.current_cell_index] {
-                    let value_id = sequence.config.init_values
+                    let value_id = sequence
+                        .config
+                        .init_values
                         .get(*value_index as usize % sequence.config.init_values.len())
                         .copied()
                         .unwrap_or(99) as usize;
@@ -330,9 +340,11 @@ fuzz_target!(|data: &[u8]| {
     let final_created = tracker.creation_counter.load(Ordering::SeqCst);
     let final_dropped = tracker.drop_counter.load(Ordering::SeqCst);
 
-    assert_eq!(final_created, final_dropped,
+    assert_eq!(
+        final_created, final_dropped,
         "Memory leak detected: created {} values but only dropped {}",
-        final_created, final_dropped);
+        final_created, final_dropped
+    );
 
     // Additional safety check: no active references should remain
     for cell_opt in &tracker.active_cells {

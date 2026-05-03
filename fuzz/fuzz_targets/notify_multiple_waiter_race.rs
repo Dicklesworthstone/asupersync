@@ -12,17 +12,17 @@
 
 #![no_main]
 
-use libfuzzer_sys::fuzz_target;
 use arbitrary::{Arbitrary, Unstructured};
 use asupersync::sync::notify::Notify;
-use std::sync::{Arc, Barrier};
-use std::sync::atomic::{AtomicUsize, AtomicBool, Ordering};
-use std::thread;
-use std::time::Duration;
-use futures::task::{noop_waker, Context};
+use futures::task::{Context, noop_waker};
+use libfuzzer_sys::fuzz_target;
 use std::future::Future;
 use std::pin::Pin;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::{Arc, Barrier};
 use std::task::Poll;
+use std::thread;
+use std::time::Duration;
 
 #[derive(Debug, Clone, Arbitrary)]
 struct NotifyConfig {
@@ -70,7 +70,7 @@ struct WaiterResult {
 struct NotifyTracker {
     total_waiters: usize,
     total_notifies: usize,
-    expected_notified: usize, // min(waiters, notifies)
+    expected_notified: usize,          // min(waiters, notifies)
     notification_counter: AtomicUsize, // Tracks order of notifications
 }
 
@@ -90,9 +90,7 @@ impl NotifyTracker {
 
     fn check_invariants(&self, results: &[WaiterResult]) -> Result<(), String> {
         // Count how many waiters were actually notified
-        let notified_count = results.iter()
-            .filter(|r| r.notified_at.is_some())
-            .count();
+        let notified_count = results.iter().filter(|r| r.notified_at.is_some()).count();
 
         // Core invariant: exactly min(M, N) waiters notified
         if notified_count != self.expected_notified {
@@ -103,9 +101,8 @@ impl NotifyTracker {
         }
 
         // FIFO order check: notification order should match registration order
-        let mut notified_waiters: Vec<_> = results.iter()
-            .filter(|r| r.notified_at.is_some())
-            .collect();
+        let mut notified_waiters: Vec<_> =
+            results.iter().filter(|r| r.notified_at.is_some()).collect();
 
         // Sort by registration order (waiter_id serves as registration order proxy)
         notified_waiters.sort_by_key(|r| r.waiter_id);
@@ -137,7 +134,8 @@ fuzz_target!(|data: &[u8]| {
     if sequence.config.waiter_count == 0
         || sequence.config.notify_count == 0
         || sequence.config.waiter_count > NotifySequence::max_waiters()
-        || sequence.config.notify_count > NotifySequence::max_notifies() {
+        || sequence.config.notify_count > NotifySequence::max_notifies()
+    {
         return;
     }
 
@@ -159,7 +157,9 @@ fuzz_target!(|data: &[u8]| {
             let tracker = Arc::clone(&tracker);
             let results = Arc::clone(&results);
             let test_complete = Arc::clone(&test_complete);
-            let initial_delay = sequence.config.waiter_delays
+            let initial_delay = sequence
+                .config
+                .waiter_delays
                 .get(waiter_id)
                 .copied()
                 .unwrap_or(0);
@@ -222,10 +222,7 @@ fuzz_target!(|data: &[u8]| {
 
     // Perform notify_one calls
     for i in 0..notify_count {
-        let delay = sequence.config.notify_delays
-            .get(i)
-            .copied()
-            .unwrap_or(0);
+        let delay = sequence.config.notify_delays.get(i).copied().unwrap_or(0);
 
         if delay > 0 {
             thread::sleep(Duration::from_micros(delay as u64));
@@ -297,28 +294,38 @@ fuzz_target!(|data: &[u8]| {
     }
 
     // Additional sanity checks
-    let actually_notified = final_results.iter()
+    let actually_notified = final_results
+        .iter()
         .filter(|r| r.notified_at.is_some())
         .count();
 
     // Ensure we got exactly the expected number of notifications
-    assert_eq!(actually_notified, tracker.expected_notified,
+    assert_eq!(
+        actually_notified, tracker.expected_notified,
         "Final notification count mismatch: expected {}, got {} notifications",
-        tracker.expected_notified, actually_notified);
+        tracker.expected_notified, actually_notified
+    );
 
     // Check notification order sequence (should be 0, 1, 2, ...)
-    let mut notification_orders: Vec<usize> = final_results.iter()
+    let mut notification_orders: Vec<usize> = final_results
+        .iter()
         .filter_map(|r| r.notification_order)
         .collect();
     notification_orders.sort();
 
     let expected_orders: Vec<usize> = (0..tracker.expected_notified).collect();
-    assert_eq!(notification_orders, expected_orders,
+    assert_eq!(
+        notification_orders, expected_orders,
         "Notification order sequence invalid: expected {:?}, got {:?}",
-        expected_orders, notification_orders);
+        expected_orders, notification_orders
+    );
 
     // Verify no duplicate notification orders
     let unique_orders: std::collections::HashSet<_> = notification_orders.iter().collect();
-    assert_eq!(unique_orders.len(), notification_orders.len(),
-        "Duplicate notification orders detected: {:?}", notification_orders);
+    assert_eq!(
+        unique_orders.len(),
+        notification_orders.len(),
+        "Duplicate notification orders detected: {:?}",
+        notification_orders
+    );
 });

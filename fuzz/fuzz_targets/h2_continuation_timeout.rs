@@ -190,10 +190,10 @@ pub enum FrameSequenceViolationType {
 /// Violation severity levels
 #[derive(Debug, PartialEq, Clone)]
 pub enum ViolationSeverity {
-    Critical,  // DoS/memory exhaustion/protocol violation
-    High,      // Timeout not enforced, security issue
-    Medium,    // RFC violation, compatibility issue
-    Low,       // Edge case, minor deviation
+    Critical, // DoS/memory exhaustion/protocol violation
+    High,     // Timeout not enforced, security issue
+    Medium,   // RFC violation, compatibility issue
+    Low,      // Edge case, minor deviation
 }
 
 /// Test execution result
@@ -224,7 +224,10 @@ impl MockH2Connection {
     }
 
     /// Execute CONTINUATION timeout test case
-    pub fn execute_test_case(&mut self, test_case: &ContinuationTimeoutTestCase) -> ContinuationTimeoutTestResult {
+    pub fn execute_test_case(
+        &mut self,
+        test_case: &ContinuationTimeoutTestCase,
+    ) -> ContinuationTimeoutTestResult {
         let mut completed_sequences = 0;
         let mut timed_out_sequences = 0;
 
@@ -253,7 +256,7 @@ impl MockH2Connection {
                     if continuation_completed {
                         completed_sequences += 1;
                     }
-                },
+                }
                 Err(timeout_violation) => {
                     self.timeout_violations.push(timeout_violation);
                     timed_out_sequences += 1;
@@ -282,11 +285,18 @@ impl MockH2Connection {
     /// Process a single frame and check CONTINUATION requirements
     fn process_frame(&mut self, frame: &TestFrame) -> Result<bool, TimeoutViolation> {
         match frame {
-            TestFrame::Headers { stream_id, header_data, end_headers, end_stream: _ } => {
+            TestFrame::Headers {
+                stream_id,
+                header_data,
+                end_headers,
+                end_stream: _,
+            } => {
                 // Add to memory usage
                 self.memory_usage_bytes += header_data.len() + 32; // frame overhead
 
-                if self.is_awaiting_continuation() && self.continuation_stream_id != Some(*stream_id) {
+                if self.is_awaiting_continuation()
+                    && self.continuation_stream_id != Some(*stream_id)
+                {
                     // Interleaved HEADERS frame during CONTINUATION sequence
                     self.frame_sequence_violations.push(FrameSequenceViolation {
                         violation_type: FrameSequenceViolationType::InterleavedFrame,
@@ -306,8 +316,12 @@ impl MockH2Connection {
                     self.clear_continuation_state();
                     Ok(true)
                 }
-            },
-            TestFrame::Continuation { stream_id, header_data, end_headers } => {
+            }
+            TestFrame::Continuation {
+                stream_id,
+                header_data,
+                end_headers,
+            } => {
                 // Add to memory usage
                 self.memory_usage_bytes += header_data.len() + 16; // frame overhead
 
@@ -341,8 +355,13 @@ impl MockH2Connection {
                     // Continue sequence
                     Ok(false)
                 }
-            },
-            TestFrame::PushPromise { stream_id, promised_stream_id, header_data, end_headers } => {
+            }
+            TestFrame::PushPromise {
+                stream_id,
+                promised_stream_id,
+                header_data,
+                end_headers,
+            } => {
                 if self.connection_type == ConnectionType::Server {
                     // Servers can't receive PUSH_PROMISE
                     return Ok(false);
@@ -367,12 +386,18 @@ impl MockH2Connection {
                     self.clear_continuation_state();
                     Ok(true)
                 }
-            },
-            TestFrame::Data { stream_id, data, end_stream: _ } => {
+            }
+            TestFrame::Data {
+                stream_id,
+                data,
+                end_stream: _,
+            } => {
                 // Add to memory usage
                 self.memory_usage_bytes += data.len() + 16;
 
-                if self.is_awaiting_continuation() && self.continuation_stream_id != Some(*stream_id) {
+                if self.is_awaiting_continuation()
+                    && self.continuation_stream_id != Some(*stream_id)
+                {
                     // DATA frame during CONTINUATION sequence
                     self.frame_sequence_violations.push(FrameSequenceViolation {
                         violation_type: FrameSequenceViolationType::InterleavedFrame,
@@ -382,13 +407,16 @@ impl MockH2Connection {
                     });
                 }
                 Ok(false)
-            },
-            TestFrame::Settings { continuation_timeout_ms, max_frame_size: _ } => {
+            }
+            TestFrame::Settings {
+                continuation_timeout_ms,
+                max_frame_size: _,
+            } => {
                 if let Some(new_timeout) = continuation_timeout_ms {
                     self.continuation_timeout_ms = *new_timeout;
                 }
                 Ok(false)
-            },
+            }
             _ => {
                 // Other frames (WINDOW_UPDATE, RST_STREAM, PING, GOAWAY)
                 // These can be interleaved during CONTINUATION but may still violate protocol
@@ -404,17 +432,17 @@ impl MockH2Connection {
                                     actual_stream_id: *stream_id,
                                 });
                             }
-                        },
+                        }
                         TestFrame::RstStream { stream_id, .. } => {
                             if self.continuation_stream_id == Some(*stream_id) {
                                 // RST_STREAM for the stream awaiting CONTINUATION
                                 self.clear_continuation_state();
                             }
-                        },
+                        }
                         TestFrame::GoAway { .. } => {
                             // GOAWAY clears all state
                             self.clear_continuation_state();
-                        },
+                        }
                         _ => {}
                     }
                 }
@@ -541,7 +569,6 @@ fn generate_continuation_timeout_test_cases() -> Vec<ContinuationTimeoutTestCase
             },
             connection_type: ConnectionType::Server,
         },
-
         // Timeout exceeded scenario
         ContinuationTimeoutTestCase {
             scenario: TimeoutScenario::TimeoutExceeded,
@@ -568,7 +595,6 @@ fn generate_continuation_timeout_test_cases() -> Vec<ContinuationTimeoutTestCase
             },
             connection_type: ConnectionType::Server,
         },
-
         // Interleaved frames (protocol violation)
         ContinuationTimeoutTestCase {
             scenario: TimeoutScenario::InterleavedFrames,
@@ -619,7 +645,9 @@ fuzz_target!(|data: &[u8]| {
             if predefined_cases.is_empty() {
                 return;
             }
-            let index = unstructured.int_in_range(0..=predefined_cases.len() - 1).unwrap_or(0);
+            let index = unstructured
+                .int_in_range(0..=predefined_cases.len() - 1)
+                .unwrap_or(0);
             predefined_cases[index].clone()
         }
     };
@@ -627,7 +655,7 @@ fuzz_target!(|data: &[u8]| {
     // Create connection with timeout configuration
     let mut connection = MockH2Connection::new(
         test_case.connection_type.clone(),
-        test_case.timeout_config.continuation_timeout_ms
+        test_case.timeout_config.continuation_timeout_ms,
     );
 
     // Execute the test case
@@ -644,7 +672,7 @@ fuzz_target!(|data: &[u8]| {
 fn test_continuation_timeout_edge_cases(test_case: &ContinuationTimeoutTestCase) {
     let mut connection = MockH2Connection::new(
         test_case.connection_type.clone(),
-        test_case.timeout_config.continuation_timeout_ms
+        test_case.timeout_config.continuation_timeout_ms,
     );
 
     // Test zero timeout (should be treated as minimal timeout)
@@ -665,7 +693,7 @@ fn test_memory_exhaustion_prevention(test_case: &ContinuationTimeoutTestCase) {
 
     let mut connection = MockH2Connection::new(
         test_case.connection_type.clone(),
-        10000 // Long timeout
+        10000, // Long timeout
     );
     connection.max_memory_usage_bytes = 1024; // Very small limit
 
@@ -674,7 +702,9 @@ fn test_memory_exhaustion_prevention(test_case: &ContinuationTimeoutTestCase) {
     connection.check_continuation_timeout();
 
     // Should detect memory leak violation
-    let has_memory_violation = connection.timeout_violations.iter()
+    let has_memory_violation = connection
+        .timeout_violations
+        .iter()
         .any(|v| v.violation_type == TimeoutViolationType::MemoryLeak);
     assert!(has_memory_violation);
 }
@@ -683,7 +713,7 @@ fn test_memory_exhaustion_prevention(test_case: &ContinuationTimeoutTestCase) {
 fn test_interleaved_frame_detection(test_case: &ContinuationTimeoutTestCase) {
     let mut connection = MockH2Connection::new(
         test_case.connection_type.clone(),
-        test_case.timeout_config.continuation_timeout_ms
+        test_case.timeout_config.continuation_timeout_ms,
     );
 
     // Start CONTINUATION sequence
@@ -700,7 +730,9 @@ fn test_interleaved_frame_detection(test_case: &ContinuationTimeoutTestCase) {
     let _ = connection.process_frame(&data_frame);
 
     // Should detect interleaved frame violation
-    let has_interleaved_violation = connection.frame_sequence_violations.iter()
+    let has_interleaved_violation = connection
+        .frame_sequence_violations
+        .iter()
         .any(|v| v.violation_type == FrameSequenceViolationType::InterleavedFrame);
     assert!(has_interleaved_violation);
 }
@@ -713,7 +745,7 @@ fn test_push_promise_continuation_timeout(test_case: &ContinuationTimeoutTestCas
 
     let mut connection = MockH2Connection::new(
         ConnectionType::Client,
-        50 // Short timeout
+        50, // Short timeout
     );
 
     // Process PUSH_PROMISE without END_HEADERS

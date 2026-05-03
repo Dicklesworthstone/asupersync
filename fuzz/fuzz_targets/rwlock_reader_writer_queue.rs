@@ -29,28 +29,28 @@ struct RwLockQueueFuzz {
 enum LockOperation {
     /// Acquire shared read lock
     AcquireRead {
-        thread_id: u8,     // Thread to execute on (0-7)
-        hold_ms: u8,       // How long to hold the lock (0-255ms)
+        thread_id: u8, // Thread to execute on (0-7)
+        hold_ms: u8,   // How long to hold the lock (0-255ms)
     },
     /// Acquire exclusive write lock
     AcquireWrite {
-        thread_id: u8,     // Thread to execute on (0-7)
-        hold_ms: u8,       // How long to hold the lock (0-255ms)
+        thread_id: u8, // Thread to execute on (0-7)
+        hold_ms: u8,   // How long to hold the lock (0-255ms)
     },
     /// Try to acquire read lock without waiting
     TryRead {
-        thread_id: u8,     // Thread to execute on (0-7)
-        hold_ms: u8,       // How long to hold if acquired
+        thread_id: u8, // Thread to execute on (0-7)
+        hold_ms: u8,   // How long to hold if acquired
     },
     /// Try to acquire write lock without waiting
     TryWrite {
-        thread_id: u8,     // Thread to execute on (0-7)
-        hold_ms: u8,       // How long to hold if acquired
+        thread_id: u8, // Thread to execute on (0-7)
+        hold_ms: u8,   // How long to hold if acquired
     },
     /// Brief delay to allow for scheduling variations
     Delay {
-        thread_id: u8,     // Thread to execute on (0-7)
-        milliseconds: u8,  // Delay duration (0-255ms)
+        thread_id: u8,    // Thread to execute on (0-7)
+        milliseconds: u8, // Delay duration (0-255ms)
     },
 }
 
@@ -76,7 +76,9 @@ const MAX_CONSECUTIVE_WRITERS_BEFORE_READER_BATCH: usize = 16;
 
 fuzz_target!(|input: RwLockQueueFuzz| {
     // Apply resource limits
-    let max_ops = (input.config.max_operations as usize).min(MAX_OPERATIONS).max(1);
+    let max_ops = (input.config.max_operations as usize)
+        .min(MAX_OPERATIONS)
+        .max(1);
     let max_threads = (input.config.max_threads as usize).min(MAX_THREADS).max(1);
     let operations: Vec<_> = input.operations.into_iter().take(max_ops).collect();
 
@@ -99,12 +101,7 @@ fuzz_target!(|input: RwLockQueueFuzz| {
     }
 
     // Execute operations and verify no starvation
-    execute_and_verify_fairness(
-        rwlock,
-        tracker,
-        operations_by_thread,
-        max_threads,
-    );
+    execute_and_verify_fairness(rwlock, tracker, operations_by_thread, max_threads);
 });
 
 /// Tracks starvation and fairness properties
@@ -203,7 +200,10 @@ impl StarvationTracker {
     fn record_release(&mut self, operation_type: AcquireType) {
         match operation_type {
             AcquireType::Read | AcquireType::TryRead => {
-                assert!(self.active_readers > 0, "Reader release with no active readers");
+                assert!(
+                    self.active_readers > 0,
+                    "Reader release with no active readers"
+                );
                 self.active_readers -= 1;
             }
             AcquireType::Write | AcquireType::TryWrite => {
@@ -227,11 +227,9 @@ impl StarvationTracker {
     /// Record the end of a waiting operation (successful or cancelled)
     fn record_wait_end(&mut self, thread_id: usize, operation_type: AcquireType) {
         // Find and remove the corresponding waiting operation
-        if let Some(pos) = self
-            .waiting_operations
-            .iter()
-            .position(|w| w.thread_id == thread_id && matches_operation_type(w.operation_type, operation_type))
-        {
+        if let Some(pos) = self.waiting_operations.iter().position(|w| {
+            w.thread_id == thread_id && matches_operation_type(w.operation_type, operation_type)
+        }) {
             self.waiting_operations.remove(pos);
         }
     }
@@ -331,7 +329,10 @@ fn verify_general_ordering(sequences: &[u64], context: &str) {
     assert!(
         inversion_rate < 0.25,
         "Too many ordering inversions for {}: {}/{} ({:.2}%)",
-        context, inversions, sequences.len(), inversion_rate * 100.0
+        context,
+        inversions,
+        sequences.len(),
+        inversion_rate * 100.0
     );
 }
 
@@ -358,7 +359,10 @@ fn execute_and_verify_fairness(
 
     // Spawn worker threads
     for thread_id in 0..max_threads {
-        let ops = operations_by_thread.get(&thread_id).cloned().unwrap_or_default();
+        let ops = operations_by_thread
+            .get(&thread_id)
+            .cloned()
+            .unwrap_or_default();
         if ops.is_empty() {
             continue;
         }
@@ -381,7 +385,8 @@ fn execute_and_verify_fairness(
         let join_result = thread_join_with_timeout(handle, remaining_time);
         assert!(
             join_result.is_ok(),
-            "Thread {} timed out - possible deadlock or starvation", i
+            "Thread {} timed out - possible deadlock or starvation",
+            i
         );
     }
 
@@ -425,13 +430,17 @@ fn execute_thread_operations(
                 let hold_duration = Duration::from_millis((hold_ms as u64).min(MAX_HOLD_MS));
 
                 // Record wait start
-                tracker.lock().record_wait_start(thread_id, AcquireType::Read);
+                tracker
+                    .lock()
+                    .record_wait_start(thread_id, AcquireType::Read);
 
                 // Acquire read lock (blocking)
                 let _guard = match futures_executor::block_on(rwlock.read(&cx)) {
                     Ok(guard) => {
                         tracker.lock().record_wait_end(thread_id, AcquireType::Read);
-                        tracker.lock().record_acquire(thread_id, AcquireType::Read, hold_duration);
+                        tracker
+                            .lock()
+                            .record_acquire(thread_id, AcquireType::Read, hold_duration);
                         guard
                     }
                     Err(_) => {
@@ -452,17 +461,25 @@ fn execute_thread_operations(
                 let hold_duration = Duration::from_millis((hold_ms as u64).min(MAX_HOLD_MS));
 
                 // Record wait start
-                tracker.lock().record_wait_start(thread_id, AcquireType::Write);
+                tracker
+                    .lock()
+                    .record_wait_start(thread_id, AcquireType::Write);
 
                 // Acquire write lock (blocking)
                 let _guard = match futures_executor::block_on(rwlock.write(&cx)) {
                     Ok(guard) => {
-                        tracker.lock().record_wait_end(thread_id, AcquireType::Write);
-                        tracker.lock().record_acquire(thread_id, AcquireType::Write, hold_duration);
+                        tracker
+                            .lock()
+                            .record_wait_end(thread_id, AcquireType::Write);
+                        tracker
+                            .lock()
+                            .record_acquire(thread_id, AcquireType::Write, hold_duration);
                         guard
                     }
                     Err(_) => {
-                        tracker.lock().record_wait_end(thread_id, AcquireType::Write);
+                        tracker
+                            .lock()
+                            .record_wait_end(thread_id, AcquireType::Write);
                         continue;
                     }
                 };
@@ -480,7 +497,9 @@ fn execute_thread_operations(
 
                 // Try to acquire read lock (non-blocking)
                 if let Ok(_guard) = rwlock.try_read() {
-                    tracker.lock().record_acquire(thread_id, AcquireType::TryRead, hold_duration);
+                    tracker
+                        .lock()
+                        .record_acquire(thread_id, AcquireType::TryRead, hold_duration);
 
                     // Hold the lock
                     thread::sleep(hold_duration);
@@ -497,7 +516,9 @@ fn execute_thread_operations(
 
                 // Try to acquire write lock (non-blocking)
                 if let Ok(_guard) = rwlock.try_write() {
-                    tracker.lock().record_acquire(thread_id, AcquireType::TryWrite, hold_duration);
+                    tracker
+                        .lock()
+                        .record_acquire(thread_id, AcquireType::TryWrite, hold_duration);
 
                     // Hold the lock
                     thread::sleep(hold_duration);

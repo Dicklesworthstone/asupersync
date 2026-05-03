@@ -13,8 +13,8 @@
 
 #![no_main]
 
-use asupersync::observability::metrics::{Counter, Metrics};
 use arbitrary::{Arbitrary, Unstructured};
+use asupersync::observability::metrics::{Counter, Metrics};
 use libfuzzer_sys::fuzz_target;
 use std::sync::{Arc, Barrier};
 use std::thread;
@@ -363,6 +363,10 @@ mod tests {
 
         assert_eq!(add_op.expected_minimum_increase(0), Some(42));
         assert_eq!(increment_op.expected_minimum_increase(10), Some(11));
-        assert!(large_op.expected_minimum_increase(u64::MAX / 2 + 1).is_none()); // Overflow
+        assert!(
+            large_op
+                .expected_minimum_increase(u64::MAX / 2 + 1)
+                .is_none()
+        ); // Overflow
     }
 }

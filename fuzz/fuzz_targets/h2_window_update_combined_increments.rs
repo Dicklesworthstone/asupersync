@@ -1,7 +1,7 @@
 #![no_main]
 
-use libfuzzer_sys::fuzz_target;
 use arbitrary::{Arbitrary, Unstructured};
+use libfuzzer_sys::fuzz_target;
 use std::collections::HashMap;
 
 /// HTTP/2 WINDOW_UPDATE frame overflow testing.
@@ -110,22 +110,29 @@ impl MockH2FlowController {
         // Apply update based on stream ID
         if frame.stream_id == 0 {
             // Connection-level window update
-            self.connection_window.update(frame.increment)
+            self.connection_window
+                .update(frame.increment)
                 .map_err(|e| format!("Connection window: {}", e))
         } else {
             // Stream-level window update
-            let window = self.stream_windows
+            let window = self
+                .stream_windows
                 .entry(frame.stream_id)
                 .or_insert_with(|| FlowControlWindow::new(65535)); // Default initial window
 
-            window.update(frame.increment)
+            window
+                .update(frame.increment)
                 .map_err(|e| format!("Stream {} window: {}", frame.stream_id, e))
         }
     }
 
     /// Process sequence of WINDOW_UPDATE frames
-    fn process_update_sequence(&mut self, updates: &[WindowUpdateFrame]) -> Vec<Result<(), String>> {
-        updates.iter()
+    fn process_update_sequence(
+        &mut self,
+        updates: &[WindowUpdateFrame],
+    ) -> Vec<Result<(), String>> {
+        updates
+            .iter()
             .map(|frame| {
                 let result = self.process_window_update(frame);
                 if let Err(ref e) = result {
@@ -139,7 +146,8 @@ impl MockH2FlowController {
     /// Get current window sizes for verification
     fn get_window_sizes(&self) -> (i64, Vec<(u32, i64)>) {
         let connection_size = self.connection_window.current_size();
-        let stream_sizes: Vec<_> = self.stream_windows
+        let stream_sizes: Vec<_> = self
+            .stream_windows
             .iter()
             .map(|(&id, window)| (id, window.current_size()))
             .collect();
@@ -172,15 +180,20 @@ fuzz_target!(|data: &[u8]| {
     for (i, frame) in input.updates.iter().enumerate() {
         if frame.increment == 0 || frame.increment > 2_147_483_647 {
             // Invalid frame should be rejected
-            assert!(results[i].is_err(),
-                "Invalid WINDOW_UPDATE should be rejected: increment={}", frame.increment);
+            assert!(
+                results[i].is_err(),
+                "Invalid WINDOW_UPDATE should be rejected: increment={}",
+                frame.increment
+            );
             continue;
         }
 
         if frame.flags != 0 {
             // Invalid flags should be rejected
-            assert!(results[i].is_err(),
-                "WINDOW_UPDATE with non-zero flags should be rejected");
+            assert!(
+                results[i].is_err(),
+                "WINDOW_UPDATE with non-zero flags should be rejected"
+            );
             continue;
         }
 
@@ -195,15 +208,22 @@ fuzz_target!(|data: &[u8]| {
         if frame.stream_id == 0 {
             let would_overflow = (initial_size as u64 + total_connection_increment) > 2_147_483_647;
             if would_overflow {
-                assert!(results[i].is_err(),
-                    "Connection window overflow should be detected at frame {}", i);
+                assert!(
+                    results[i].is_err(),
+                    "Connection window overflow should be detected at frame {}",
+                    i
+                );
             }
         } else {
             let stream_total = stream_increments.get(&frame.stream_id).unwrap_or(&0);
             let would_overflow = (65535u64 + stream_total) > 2_147_483_647; // Default initial + increments
             if would_overflow {
-                assert!(results[i].is_err(),
-                    "Stream {} window overflow should be detected at frame {}", frame.stream_id, i);
+                assert!(
+                    results[i].is_err(),
+                    "Stream {} window overflow should be detected at frame {}",
+                    frame.stream_id,
+                    i
+                );
             }
         }
     }
@@ -212,20 +232,30 @@ fuzz_target!(|data: &[u8]| {
     let (conn_size, stream_sizes) = controller.get_window_sizes();
 
     // Connection window should not exceed maximum
-    assert!(conn_size <= 2_147_483_647,
-        "Connection window size {} exceeds maximum", conn_size);
+    assert!(
+        conn_size <= 2_147_483_647,
+        "Connection window size {} exceeds maximum",
+        conn_size
+    );
 
     // Stream windows should not exceed maximum
     for (stream_id, size) in stream_sizes {
-        assert!(size <= 2_147_483_647,
-            "Stream {} window size {} exceeds maximum", stream_id, size);
+        assert!(
+            size <= 2_147_483_647,
+            "Stream {} window size {} exceeds maximum",
+            stream_id,
+            size
+        );
     }
 
     // Test 3: Verify error messages contain FLOW_CONTROL_ERROR for overflow
     for error in &controller.errors {
         if error.contains("exceeds maximum") {
-            assert!(error.contains("FLOW_CONTROL_ERROR"),
-                "Overflow error should mention FLOW_CONTROL_ERROR: {}", error);
+            assert!(
+                error.contains("FLOW_CONTROL_ERROR"),
+                "Overflow error should mention FLOW_CONTROL_ERROR: {}",
+                error
+            );
         }
     }
 });
@@ -306,12 +336,20 @@ mod tests {
             let result = controller.process_window_update(&frame);
 
             if total_increment > 2_147_483_647 {
-                assert!(result.is_err(),
-                    "Should overflow at iteration {} with total {}", i, total_increment);
+                assert!(
+                    result.is_err(),
+                    "Should overflow at iteration {} with total {}",
+                    i,
+                    total_increment
+                );
                 break;
             } else {
-                assert!(result.is_ok(),
-                    "Should not overflow at iteration {} with total {}", i, total_increment);
+                assert!(
+                    result.is_ok(),
+                    "Should not overflow at iteration {} with total {}",
+                    i,
+                    total_increment
+                );
             }
         }
     }

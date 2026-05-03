@@ -12,11 +12,11 @@
 
 #![no_main]
 
-use libfuzzer_sys::fuzz_target;
 use arbitrary::{Arbitrary, Unstructured};
 use asupersync::channel::watch;
-use std::sync::{Arc, Barrier};
+use libfuzzer_sys::fuzz_target;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Barrier};
 use std::thread;
 use std::time::Duration;
 
@@ -77,12 +77,14 @@ fuzz_target!(|data: &[u8]| {
     // Validate and limit parameters
     if sequence.config.update_values.is_empty()
         || sequence.config.update_values.len() > WatchSequence::max_updates()
-        || sequence.config.post_join_updates.len() > WatchSequence::max_post_join() {
+        || sequence.config.post_join_updates.len() > WatchSequence::max_post_join()
+    {
         return;
     }
 
     let update_count = sequence.config.update_values.len();
-    let late_join_point = (sequence.config.late_join_point as usize).min(update_count.saturating_sub(1));
+    let late_join_point =
+        (sequence.config.late_join_point as usize).min(update_count.saturating_sub(1));
 
     // Create watch channel with initial value
     let initial_value = 0u32;
@@ -150,17 +152,22 @@ fuzz_target!(|data: &[u8]| {
         expected_latest_value: expected_latest,
         historical_values: historical_snapshot.clone(),
         correct_latest_value: initial_value_seen == expected_latest,
-        not_historical_value: !historical_snapshot.contains(&initial_value_seen) || initial_value_seen == expected_latest,
+        not_historical_value: !historical_snapshot.contains(&initial_value_seen)
+            || initial_value_seen == expected_latest,
     };
 
     // Core assertions for late subscriber semantics
-    assert!(result.correct_latest_value,
+    assert!(
+        result.correct_latest_value,
         "Late subscriber saw wrong value: expected latest {} but saw {}",
-        result.expected_latest_value, result.initial_value_seen);
+        result.expected_latest_value, result.initial_value_seen
+    );
 
-    assert!(result.not_historical_value,
+    assert!(
+        result.not_historical_value,
         "Late subscriber saw historical value: saw {} which is in historical list {:?} but should see latest {}",
-        result.initial_value_seen, result.historical_values, result.expected_latest_value);
+        result.initial_value_seen, result.historical_values, result.expected_latest_value
+    );
 
     // Test change detection for late subscriber
     if sequence.test_update_tracking && !sequence.config.post_join_updates.is_empty() {
@@ -168,8 +175,10 @@ fuzz_target!(|data: &[u8]| {
 
         // The late subscriber should start with seen_version = current_version
         let initial_seen_version = late_subscriber_mut.seen_version();
-        assert!(!late_subscriber_mut.has_changed(),
-            "Late subscriber should not see changes immediately after join");
+        assert!(
+            !late_subscriber_mut.has_changed(),
+            "Late subscriber should not see changes immediately after join"
+        );
 
         // Wait for post-join updates to complete
         update_handle.join().expect("Update thread should complete");
@@ -179,14 +188,18 @@ fuzz_target!(|data: &[u8]| {
 
         // After post-join updates, late subscriber should detect changes
         if !sequence.config.post_join_updates.is_empty() {
-            assert!(late_subscriber_mut.has_changed(),
-                "Late subscriber should detect changes after post-join updates");
+            assert!(
+                late_subscriber_mut.has_changed(),
+                "Late subscriber should detect changes after post-join updates"
+            );
 
             let updated_value = late_subscriber_mut.borrow_and_clone();
             let expected_final = sequence.config.post_join_updates.last().copied().unwrap();
-            assert_eq!(updated_value, expected_final,
+            assert_eq!(
+                updated_value, expected_final,
                 "Late subscriber should see final post-join value {} but saw {}",
-                expected_final, updated_value);
+                expected_final, updated_value
+            );
         }
     } else {
         // Just wait for updates to complete
@@ -202,9 +215,11 @@ fuzz_target!(|data: &[u8]| {
         let value_3 = late_subscriber_3.borrow_and_clone();
 
         // All late subscribers should see the same current value
-        assert_eq!(value_2, value_3,
+        assert_eq!(
+            value_2, value_3,
             "Multiple late subscribers should see same value: {} vs {}",
-            value_2, value_3);
+            value_2, value_3
+        );
 
         // Send one more update to test all subscribers see it
         let final_test_value = 99999u32;
@@ -223,14 +238,18 @@ fuzz_target!(|data: &[u8]| {
 
     // Additional invariant: late subscriber should have reasonable seen_version
     let final_seen_version = late_subscriber.seen_version();
-    assert!(final_seen_version > 0 || sequence.config.update_values.is_empty(),
+    assert!(
+        final_seen_version > 0 || sequence.config.update_values.is_empty(),
         "Late subscriber seen_version should be > 0 for non-empty update sequence, got {}",
-        final_seen_version);
+        final_seen_version
+    );
 
     // Verify no value is lost - latest value should always be accessible
     let final_current_value = sender.borrow().clone();
     let receiver_final_value = late_subscriber.borrow_and_clone();
-    assert_eq!(final_current_value, receiver_final_value,
+    assert_eq!(
+        final_current_value, receiver_final_value,
         "Sender and receiver should see same final value: {} vs {}",
-        final_current_value, receiver_final_value);
+        final_current_value, receiver_final_value
+    );
 });

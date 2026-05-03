@@ -10,7 +10,7 @@
 //! ```ignore
 //! use asupersync::runtime::RuntimeBuilder;
 //!
-//! // Minimal — uses all defaults (available parallelism, 128 poll budget, etc.)
+//! // Minimal — uses all defaults (4 worker threads, 128 poll budget, etc.)
 //! let runtime = RuntimeBuilder::new().build()?;
 //!
 //! runtime.block_on(async {
@@ -112,7 +112,7 @@
 //!
 //! | Method | Default | Description |
 //! |--------|---------|-------------|
-//! | [`worker_threads`](RuntimeBuilder::worker_threads) | available parallelism | Number of async worker threads |
+//! | [`worker_threads`](RuntimeBuilder::worker_threads) | 4 (host-independent default) | Number of async worker threads |
 //! | [`thread_stack_size`](RuntimeBuilder::thread_stack_size) | 2 MiB | Stack size per worker |
 //! | [`thread_name_prefix`](RuntimeBuilder::thread_name_prefix) | `"asupersync-worker"` | Thread name prefix |
 //! | [`global_queue_limit`](RuntimeBuilder::global_queue_limit) | 0 (unbounded) | Global queue depth |
@@ -120,6 +120,8 @@
 //! | [`blocking_threads`](RuntimeBuilder::blocking_threads) | 0, 0 | Blocking pool min/max |
 //! | [`enable_parking`](RuntimeBuilder::enable_parking) | true | Park idle workers |
 //! | [`poll_budget`](RuntimeBuilder::poll_budget) | 128 | Polls before cooperative yield |
+//! | [`capacity_hints`](RuntimeBuilder::capacity_hints) | auto from `worker_threads` | Initial task/region/obligation table sizing |
+//! | [`expected_concurrent_tasks`](RuntimeBuilder::expected_concurrent_tasks) | unset | Burst-tolerant task-capacity shortcut with 50% headroom |
 //! | [`browser_ready_handoff_limit`](RuntimeBuilder::browser_ready_handoff_limit) | 0 (disabled) | Max ready dispatch burst before host-turn handoff |
 //! | [`browser_worker_offload`](RuntimeBuilder::browser_worker_offload) | disabled | Browser worker offload policy contract |
 //! | [`cancel_lane_max_streak`](RuntimeBuilder::cancel_lane_max_streak) | 16 | Max consecutive cancel dispatches |
@@ -154,7 +156,7 @@ use crate::observability::metrics::MetricsProvider;
 use crate::record::RegionLimits;
 use crate::runtime::RuntimeState;
 use crate::runtime::SpawnError;
-use crate::runtime::config::RuntimeConfig;
+use crate::runtime::config::{RuntimeCapacityHints, RuntimeConfig};
 use crate::runtime::deadline_monitor::{
     AdaptiveDeadlineConfig, DeadlineTaskSnapshot, DeadlineWarning, MonitorConfig,
     default_warning_handler,
@@ -2276,6 +2278,44 @@ impl RuntimeBuilder {
         self
     }
 
+    /// Set explicit initial table capacities for runtime state.
+    ///
+    /// This overrides the default auto-scaling derived from `worker_threads`.
+    #[must_use]
+    pub fn capacity_hints(
+        mut self,
+        task_capacity: usize,
+        region_capacity: usize,
+        obligation_capacity: usize,
+    ) -> Self {
+        self.config.capacity_hints = Some(RuntimeCapacityHints::new(
+            task_capacity,
+            region_capacity,
+            obligation_capacity,
+        ));
+        self
+    }
+
+    /// Derive runtime-state capacities from an expected concurrent task count.
+    ///
+    /// The task arena receives 50% headroom to absorb initial bursts without
+    /// immediate growth reallocations; region and obligation tables scale from
+    /// the same estimate with smaller multipliers.
+    #[must_use]
+    pub fn expected_concurrent_tasks(mut self, expected_tasks: usize) -> Self {
+        self.config.capacity_hints = Some(RuntimeCapacityHints::from_expected_concurrent_tasks(
+            expected_tasks,
+        ));
+        self
+    }
+
+    /// Clear any explicit capacity override and return to worker-scaled defaults.
+    #[must_use]
+    pub fn clear_capacity_hints(mut self) -> Self {
+        self.config.capacity_hints = None;
+        self
+    }
+
     /// Set browser-style ready-lane burst handoff limit.
     ///
     /// When non-zero, scheduler workers can force a one-shot handoff after
@@ -2773,10 +2813,10 @@ impl RuntimeBuilder {
         Self::new().worker_threads(1)
     }
 
-    /// Preset: multi-threaded runtime with default parallelism.
+    /// Preset: multi-threaded runtime with the deterministic default worker count.
     ///
-    /// Equivalent to `RuntimeBuilder::new()`. Worker count defaults to
-    /// the available CPU parallelism.
+    /// Equivalent to `RuntimeBuilder::new()`. Worker count defaults to the
+    /// host-independent `RuntimeConfig::DEFAULT_WORKER_THREADS`.
     #[must_use]
     pub fn multi_thread() -> Self {
         Self::new()
@@ -2784,8 +2824,8 @@ impl RuntimeBuilder {
 
     /// Preset: high-throughput server.
     ///
-    /// Uses 2x the available parallelism for workers and a larger
-    /// steal batch size (32) to amortize scheduling overhead.
+    /// Uses 2x the deterministic default worker count and a larger steal batch
+    /// size (32) to amortize scheduling overhead.
     ///
     /// ```ignore
     /// let rt = RuntimeBuilder::high_throughput()
@@ -3463,10 +3503,27 @@ impl RuntimeInner {
         timer_driver: Option<TimerDriverHandle>,
         entropy_source: Option<Arc<dyn EntropySource>>,
     ) -> RuntimeState {
+        let capacity_hints = config.resolved_capacity_hints();
         let mut runtime_state = reactor.map_or_else(
-            || RuntimeState::new_with_metrics(config.metrics_provider.clone()),
+            || {
+                RuntimeState::with_capacity_hints(
+                    capacity_hints.task_capacity,
+                    capacity_hints.region_capacity,
+                    capacity_hints.obligation_capacity,
+                    config.metrics_provider.clone(),
+                )
+            },
             |reactor| {
-                RuntimeState::with_reactor_and_metrics(reactor, config.metrics_provider.clone())
+                let mut state = RuntimeState::with_capacity_hints(
+                    capacity_hints.task_capacity,
+                    capacity_hints.region_capacity,
+                    capacity_hints.obligation_capacity,
+                    config.metrics_provider.clone(),
+                );
+                state.set_io_driver(IoDriverHandle::new(reactor));
+                state.set_timer_driver(TimerDriverHandle::with_wall_clock());
+                state.set_logical_clock_mode(LogicalClockMode::Hybrid);
+                state
             },
         );
         if let Some(driver) = io_driver {
@@ -5976,5 +6033,51 @@ worker_threads = 16
         // This is SOUND behavior for defensive programming, but may mask
         // genuine misconfigurations. Alternative would be strict validation
         // with clear error messages for invalid inputs.
+    }
+
+    #[test]
+    fn runtime_builder_expected_concurrent_tasks_sets_explicit_capacity_hints() {
+        init_test_logging();
+
+        let builder = RuntimeBuilder::new().expected_concurrent_tasks(4096);
+
+        assert_eq!(
+            builder.config.capacity_hints,
+            Some(RuntimeCapacityHints::from_expected_concurrent_tasks(4096))
+        );
+    }
+
+    #[test]
+    fn initialize_runtime_state_auto_scales_capacities_from_worker_threads() {
+        init_test_logging();
+
+        let config = RuntimeConfig {
+            worker_threads: 64,
+            ..RuntimeConfig::default()
+        };
+        let state = RuntimeInner::initialize_runtime_state(&config, None, None, None, None);
+
+        assert_eq!(
+            state.capacity_hints(),
+            RuntimeCapacityHints::for_worker_threads(64),
+            "worker-scaled defaults should widen the initial arena sizes on high-core runtimes"
+        );
+    }
+
+    #[test]
+    fn initialize_runtime_state_respects_explicit_capacity_hints() {
+        init_test_logging();
+
+        let config = RuntimeConfig {
+            capacity_hints: Some(RuntimeCapacityHints::new(4096, 1024, 2048)),
+            ..RuntimeConfig::default()
+        };
+        let state = RuntimeInner::initialize_runtime_state(&config, None, None, None, None);
+
+        assert_eq!(
+            state.capacity_hints(),
+            RuntimeCapacityHints::new(4096, 1024, 2048),
+            "explicit runtime capacity hints should flow into the live runtime state"
+        );
     }
 }

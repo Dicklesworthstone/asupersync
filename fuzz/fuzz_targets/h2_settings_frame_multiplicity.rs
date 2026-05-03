@@ -100,7 +100,9 @@ fuzz_target!(|data: &[u8]| {
         return;
     }
 
-    let total_params: usize = test_case.settings_frames.iter()
+    let total_params: usize = test_case
+        .settings_frames
+        .iter()
         .map(|f| f.parameters.len())
         .sum();
     if total_params > 100 {
@@ -147,8 +149,11 @@ fn test_settings_multiplicity(test_case: &SettingsMultiplicityTest) {
             mock_connection.send_settings_frame(settings_frame.clone())
         }));
 
-        assert!(send_result.is_ok(),
-            "Sending SETTINGS frame {} should not panic", frame_idx);
+        assert!(
+            send_result.is_ok(),
+            "Sending SETTINGS frame {} should not panic",
+            frame_idx
+        );
 
         if let Ok(result) = send_result {
             match result {
@@ -161,8 +166,10 @@ fn test_settings_multiplicity(test_case: &SettingsMultiplicityTest) {
                     // Send ACK if requested
                     if test_case.send_acks {
                         let ack_result = mock_connection.send_settings_ack();
-                        assert!(matches!(ack_result, AckResult::Sent),
-                            "SETTINGS ACK should be sent successfully");
+                        assert!(
+                            matches!(ack_result, AckResult::Sent),
+                            "SETTINGS ACK should be sent successfully"
+                        );
                     }
                 }
                 SettingsFrameResult::Rejected { reason } => {
@@ -180,9 +187,14 @@ fn test_settings_multiplicity(test_case: &SettingsMultiplicityTest) {
     // Verify final applied settings match expected
     for (setting_id, expected_value) in expected_final_values {
         let actual_value = mock_connection.get_setting_value(setting_id);
-        assert_eq!(actual_value, Some(expected_value),
+        assert_eq!(
+            actual_value,
+            Some(expected_value),
             "Setting {:?} should have value {} but has {:?}",
-            setting_id, expected_value, actual_value);
+            setting_id,
+            expected_value,
+            actual_value
+        );
     }
 }
 
@@ -217,9 +229,14 @@ fn test_latest_value_application(test_case: &SettingsMultiplicityTest) {
     // Verify that the connection has the latest values
     for (setting_id, expected_latest) in latest_values {
         let actual_value = mock_connection.get_setting_value(setting_id);
-        assert_eq!(actual_value, Some(expected_latest),
+        assert_eq!(
+            actual_value,
+            Some(expected_latest),
             "Latest value test failed for {:?}: expected {}, got {:?}",
-            setting_id, expected_latest, actual_value);
+            setting_id,
+            expected_latest,
+            actual_value
+        );
     }
 }
 
@@ -267,13 +284,20 @@ fn test_intra_frame_duplicates(test_case: &SettingsMultiplicityTest) {
     if let Ok(frame_result) = result {
         if let SettingsFrameResult::Accepted { .. } = frame_result {
             // The last occurrence should win
-            let window_size = mock_connection.get_setting_value(SettingIdentifier::InitialWindowSize);
-            assert_eq!(window_size, Some(65535),
-                "Last occurrence should win for intra-frame duplicates");
+            let window_size =
+                mock_connection.get_setting_value(SettingIdentifier::InitialWindowSize);
+            assert_eq!(
+                window_size,
+                Some(65535),
+                "Last occurrence should win for intra-frame duplicates"
+            );
 
             let frame_size = mock_connection.get_setting_value(SettingIdentifier::MaxFrameSize);
-            assert_eq!(frame_size, Some(16384),
-                "Non-duplicated setting should be applied normally");
+            assert_eq!(
+                frame_size,
+                Some(16384),
+                "Non-duplicated setting should be applied normally"
+            );
         }
     }
 }
@@ -285,32 +309,26 @@ fn test_parameter_independence(test_case: &SettingsMultiplicityTest) {
     // Create frames that update different parameters independently
     let independent_frames = vec![
         SettingsFrame {
-            parameters: vec![
-                SettingsParameter {
-                    setting_id: SettingIdentifier::HeaderTableSize,
-                    value: 4096,
-                },
-            ],
+            parameters: vec![SettingsParameter {
+                setting_id: SettingIdentifier::HeaderTableSize,
+                value: 4096,
+            }],
             flags: 0,
             padding: vec![],
         },
         SettingsFrame {
-            parameters: vec![
-                SettingsParameter {
-                    setting_id: SettingIdentifier::MaxConcurrentStreams,
-                    value: 100,
-                },
-            ],
+            parameters: vec![SettingsParameter {
+                setting_id: SettingIdentifier::MaxConcurrentStreams,
+                value: 100,
+            }],
             flags: 0,
             padding: vec![],
         },
         SettingsFrame {
-            parameters: vec![
-                SettingsParameter {
-                    setting_id: SettingIdentifier::HeaderTableSize,
-                    value: 8192, // Update first parameter
-                },
-            ],
+            parameters: vec![SettingsParameter {
+                setting_id: SettingIdentifier::HeaderTableSize,
+                value: 8192, // Update first parameter
+            }],
             flags: 0,
             padding: vec![],
         },
@@ -323,12 +341,18 @@ fn test_parameter_independence(test_case: &SettingsMultiplicityTest) {
 
     // Verify independent updates
     let header_table_size = mock_connection.get_setting_value(SettingIdentifier::HeaderTableSize);
-    assert_eq!(header_table_size, Some(8192),
-        "HeaderTableSize should be updated to latest value");
+    assert_eq!(
+        header_table_size,
+        Some(8192),
+        "HeaderTableSize should be updated to latest value"
+    );
 
     let max_streams = mock_connection.get_setting_value(SettingIdentifier::MaxConcurrentStreams);
-    assert_eq!(max_streams, Some(100),
-        "MaxConcurrentStreams should remain unchanged");
+    assert_eq!(
+        max_streams,
+        Some(100),
+        "MaxConcurrentStreams should remain unchanged"
+    );
 
     // Send additional test case frames if any
     for settings_frame in &test_case.settings_frames {
@@ -353,7 +377,10 @@ fn test_multiplicity_edge_cases(test_case: &SettingsMultiplicityTest) {
         mock_connection.send_settings_frame(empty_frame)
     }));
 
-    assert!(empty_result.is_ok(), "Empty SETTINGS frame should not panic");
+    assert!(
+        empty_result.is_ok(),
+        "Empty SETTINGS frame should not panic"
+    );
 
     // Test SETTINGS with unknown parameters
     let unknown_frame = SettingsFrame {
@@ -379,10 +406,12 @@ fn test_multiplicity_edge_cases(test_case: &SettingsMultiplicityTest) {
 
     // Test very large number of duplicates
     let many_duplicates = SettingsFrame {
-        parameters: (0..50).map(|i| SettingsParameter {
-            setting_id: SettingIdentifier::EnablePush,
-            value: i % 2, // Alternating 0 and 1
-        }).collect(),
+        parameters: (0..50)
+            .map(|i| SettingsParameter {
+                setting_id: SettingIdentifier::EnablePush,
+                value: i % 2, // Alternating 0 and 1
+            })
+            .collect(),
         flags: 0,
         padding: vec![],
     };
@@ -423,7 +452,10 @@ fn test_multiplicity_edge_cases(test_case: &SettingsMultiplicityTest) {
         mock_connection.send_settings_frame(boundary_frame)
     }));
 
-    assert!(boundary_result.is_ok(), "Boundary value testing should not panic");
+    assert!(
+        boundary_result.is_ok(),
+        "Boundary value testing should not panic"
+    );
     // Behavior with invalid values is implementation-defined
 
     // Test alternating valid/invalid pattern
@@ -450,7 +482,10 @@ fn test_multiplicity_edge_cases(test_case: &SettingsMultiplicityTest) {
         mock_connection.send_settings_frame(alternating_frame)
     }));
 
-    assert!(alternating_result.is_ok(), "Alternating valid/invalid should not panic");
+    assert!(
+        alternating_result.is_ok(),
+        "Alternating valid/invalid should not panic"
+    );
 }
 
 /// SETTINGS frame flags
@@ -504,8 +539,12 @@ fn is_valid_setting_value(setting_id: SettingIdentifier, value: u32) -> bool {
 /// SETTINGS frame processing result
 #[derive(Debug, Clone)]
 enum SettingsFrameResult {
-    Accepted { applied_settings: HashMap<SettingIdentifier, u32> },
-    Rejected { reason: String },
+    Accepted {
+        applied_settings: HashMap<SettingIdentifier, u32>,
+    },
+    Rejected {
+        reason: String,
+    },
 }
 
 /// ACK result
@@ -636,12 +675,10 @@ fn generate_multiplicity_scenarios() -> Vec<SettingsMultiplicityTest> {
                     padding: vec![],
                 },
                 SettingsFrame {
-                    parameters: vec![
-                        SettingsParameter {
-                            setting_id: SettingIdentifier::InitialWindowSize,
-                            value: 65535, // Override previous value
-                        },
-                    ],
+                    parameters: vec![SettingsParameter {
+                        setting_id: SettingIdentifier::InitialWindowSize,
+                        value: 65535, // Override previous value
+                    }],
                     flags: 0,
                     padding: vec![],
                 },
@@ -650,29 +687,26 @@ fn generate_multiplicity_scenarios() -> Vec<SettingsMultiplicityTest> {
             connection_config: ConnectionConfig::default(),
             test_intra_frame_duplicates: true,
         },
-
         // Intra-frame duplicates
         SettingsMultiplicityTest {
-            settings_frames: vec![
-                SettingsFrame {
-                    parameters: vec![
-                        SettingsParameter {
-                            setting_id: SettingIdentifier::HeaderTableSize,
-                            value: 4096,
-                        },
-                        SettingsParameter {
-                            setting_id: SettingIdentifier::HeaderTableSize,
-                            value: 8192, // Should win
-                        },
-                        SettingsParameter {
-                            setting_id: SettingIdentifier::EnablePush,
-                            value: 0,
-                        },
-                    ],
-                    flags: 0,
-                    padding: vec![],
-                },
-            ],
+            settings_frames: vec![SettingsFrame {
+                parameters: vec![
+                    SettingsParameter {
+                        setting_id: SettingIdentifier::HeaderTableSize,
+                        value: 4096,
+                    },
+                    SettingsParameter {
+                        setting_id: SettingIdentifier::HeaderTableSize,
+                        value: 8192, // Should win
+                    },
+                    SettingsParameter {
+                        setting_id: SettingIdentifier::EnablePush,
+                        value: 0,
+                    },
+                ],
+                flags: 0,
+                padding: vec![],
+            }],
             send_acks: false,
             connection_config: ConnectionConfig::default(),
             test_intra_frame_duplicates: true,
@@ -691,12 +725,10 @@ mod tests {
 
         // Send first SETTINGS frame
         let frame1 = SettingsFrame {
-            parameters: vec![
-                SettingsParameter {
-                    setting_id: SettingIdentifier::InitialWindowSize,
-                    value: 32768,
-                },
-            ],
+            parameters: vec![SettingsParameter {
+                setting_id: SettingIdentifier::InitialWindowSize,
+                value: 32768,
+            }],
             flags: 0,
             padding: vec![],
         };
@@ -706,12 +738,10 @@ mod tests {
 
         // Send second SETTINGS frame with different value
         let frame2 = SettingsFrame {
-            parameters: vec![
-                SettingsParameter {
-                    setting_id: SettingIdentifier::InitialWindowSize,
-                    value: 65535, // Should override first value
-                },
-            ],
+            parameters: vec![SettingsParameter {
+                setting_id: SettingIdentifier::InitialWindowSize,
+                value: 65535, // Should override first value
+            }],
             flags: 0,
             padding: vec![],
         };
@@ -783,12 +813,10 @@ mod tests {
 
         // Frame 2: Only update one parameter
         let frame2 = SettingsFrame {
-            parameters: vec![
-                SettingsParameter {
-                    setting_id: SettingIdentifier::HeaderTableSize,
-                    value: 8192,
-                },
-            ],
+            parameters: vec![SettingsParameter {
+                setting_id: SettingIdentifier::HeaderTableSize,
+                value: 8192,
+            }],
             flags: 0,
             padding: vec![],
         };
@@ -796,8 +824,14 @@ mod tests {
         conn.send_settings_frame(frame2);
 
         // Verify independence
-        assert_eq!(conn.get_setting_value(SettingIdentifier::HeaderTableSize), Some(8192));
-        assert_eq!(conn.get_setting_value(SettingIdentifier::EnablePush), Some(1));
+        assert_eq!(
+            conn.get_setting_value(SettingIdentifier::HeaderTableSize),
+            Some(8192)
+        );
+        assert_eq!(
+            conn.get_setting_value(SettingIdentifier::EnablePush),
+            Some(1)
+        );
     }
 
     #[test]
@@ -820,12 +854,10 @@ mod tests {
 
         // ACK frame with parameters (invalid)
         let invalid_ack = SettingsFrame {
-            parameters: vec![
-                SettingsParameter {
-                    setting_id: SettingIdentifier::EnablePush,
-                    value: 1,
-                },
-            ],
+            parameters: vec![SettingsParameter {
+                setting_id: SettingIdentifier::EnablePush,
+                value: 1,
+            }],
             flags: SETTINGS_ACK_FLAG,
             padding: vec![],
         };
@@ -867,9 +899,15 @@ mod tests {
         assert!(matches!(result, SettingsFrameResult::Accepted { .. }));
 
         // Known setting should be applied
-        assert_eq!(conn.get_setting_value(SettingIdentifier::InitialWindowSize), Some(32768));
+        assert_eq!(
+            conn.get_setting_value(SettingIdentifier::InitialWindowSize),
+            Some(32768)
+        );
 
         // Unknown setting should be stored (implementation-dependent)
-        assert_eq!(conn.get_setting_value(SettingIdentifier::Unknown(0x8000)), Some(12345));
+        assert_eq!(
+            conn.get_setting_value(SettingIdentifier::Unknown(0x8000)),
+            Some(12345)
+        );
     }
 }

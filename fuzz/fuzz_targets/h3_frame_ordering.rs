@@ -14,8 +14,8 @@
 #![no_main]
 
 use arbitrary::Arbitrary;
-use asupersync::http::h3_native::{H3Frame, H3NativeError, H3ConnectionConfig};
-use asupersync::net::quic_core::{encode_varint};
+use asupersync::http::h3_native::{H3ConnectionConfig, H3Frame, H3NativeError};
+use asupersync::net::quic_core::encode_varint;
 use libfuzzer_sys::fuzz_target;
 use std::collections::HashMap;
 
@@ -76,13 +76,9 @@ enum FuzzH3Frame {
         settings: Vec<(u64, u64)>, // (setting_id, value) pairs
     },
     /// GOAWAY frame
-    Goaway {
-        stream_id: u64,
-    },
+    Goaway { stream_id: u64 },
     /// CANCEL_PUSH frame
-    CancelPush {
-        push_id: u64,
-    },
+    CancelPush { push_id: u64 },
 }
 
 /// Generate bounded payload to prevent OOM
@@ -180,12 +176,16 @@ impl FrameOrderingValidator {
     }
 
     fn validate_headers_frame(&mut self, stream_id: u64) -> Result<(), String> {
-        let current_state = self.stream_states.get(&stream_id).cloned()
+        let current_state = self
+            .stream_states
+            .get(&stream_id)
+            .cloned()
             .unwrap_or(StreamState::WaitingHeaders);
 
         match current_state {
             StreamState::WaitingHeaders => {
-                self.stream_states.insert(stream_id, StreamState::HeadersReceived);
+                self.stream_states
+                    .insert(stream_id, StreamState::HeadersReceived);
                 Ok(())
             }
             StreamState::HeadersReceived => {
@@ -203,12 +203,18 @@ impl FrameOrderingValidator {
     }
 
     fn validate_data_frame(&mut self, stream_id: u64) -> Result<(), String> {
-        let current_state = self.stream_states.get(&stream_id).cloned()
+        let current_state = self
+            .stream_states
+            .get(&stream_id)
+            .cloned()
             .unwrap_or(StreamState::WaitingHeaders);
 
         match current_state {
             StreamState::WaitingHeaders => {
-                self.stream_states.insert(stream_id, StreamState::Error("DATA before HEADERS".to_string()));
+                self.stream_states.insert(
+                    stream_id,
+                    StreamState::Error("DATA before HEADERS".to_string()),
+                );
                 Err("DATA frame before HEADERS frame".to_string())
             }
             StreamState::HeadersReceived => {
@@ -287,7 +293,9 @@ fuzz_target!(|sequence: H3FrameSequence| {
     }
 
     // Skip if total payload would be too large
-    let total_size: usize = sequence.frames.iter()
+    let total_size: usize = sequence
+        .frames
+        .iter()
         .map(|frame| match frame {
             FuzzH3Frame::Headers { qpack_data } => qpack_data.len(),
             FuzzH3Frame::Data { payload } => payload.len(),
@@ -351,8 +359,11 @@ fuzz_target!(|sequence: H3FrameSequence| {
         match &sequence.scenario {
             FrameOrderingScenario::MalformedDataFirst => {
                 // DATA-first scenarios should trigger ordering errors
-                if matches!(frame, H3Frame::Data(_)) &&
-                   !final_validator.stream_states.contains_key(&sequence.stream_id) {
+                if matches!(frame, H3Frame::Data(_))
+                    && !final_validator
+                        .stream_states
+                        .contains_key(&sequence.stream_id)
+                {
                     assert!(validation_result.is_err(), "DATA-first should be rejected");
                 }
             }

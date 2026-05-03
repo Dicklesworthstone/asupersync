@@ -136,9 +136,14 @@ fn test_strict_crlf_enforcement(request: &MixedLineTerminatorRequest) {
         Ok(Some(_)) => {
             // Request was accepted - verify it only used CRLF terminators
             let request_str = String::from_utf8_lossy(&request_bytes);
-            assert!(!request_str.contains("\n\r"), "Request with CR-LF should be rejected");
-            assert!(!contains_bare_lf_or_cr(&request_bytes),
-                "Request with bare LF or CR was incorrectly accepted");
+            assert!(
+                !request_str.contains("\n\r"),
+                "Request with CR-LF should be rejected"
+            );
+            assert!(
+                !contains_bare_lf_or_cr(&request_bytes),
+                "Request with bare LF or CR was incorrectly accepted"
+            );
         }
         Ok(None) => {
             // Incomplete - this is fine, we might need more data
@@ -217,7 +222,8 @@ fn build_http_request_with_terminators(request: &MixedLineTerminatorRequest) -> 
     let mut output = Vec::new();
 
     // Request line
-    let request_line = format!("{} {} {}",
+    let request_line = format!(
+        "{} {} {}",
         request.method.as_str(),
         sanitize_uri(&request.uri),
         request.version.as_str()
@@ -225,25 +231,32 @@ fn build_http_request_with_terminators(request: &MixedLineTerminatorRequest) -> 
     output.extend_from_slice(request_line.as_bytes());
 
     // Use first terminator pattern for request line
-    let request_line_term = request.terminator_pattern.get(0)
+    let request_line_term = request
+        .terminator_pattern
+        .get(0)
         .unwrap_or(&LineTerminator::Crlf);
     output.extend_from_slice(request_line_term.as_bytes());
 
     // Headers with different terminators
     for (i, header) in request.headers.iter().enumerate() {
-        let header_line = format!("{}: {}",
+        let header_line = format!(
+            "{}: {}",
             sanitize_header_name(&header.name),
             sanitize_header_value(&header.value)
         );
         output.extend_from_slice(header_line.as_bytes());
 
-        let header_term = request.terminator_pattern.get(i + 1)
+        let header_term = request
+            .terminator_pattern
+            .get(i + 1)
             .unwrap_or(&LineTerminator::Crlf);
         output.extend_from_slice(header_term.as_bytes());
     }
 
     // Empty line before body (use pattern or default CRLF)
-    let empty_line_term = request.terminator_pattern.get(request.headers.len() + 1)
+    let empty_line_term = request
+        .terminator_pattern
+        .get(request.headers.len() + 1)
         .unwrap_or(&LineTerminator::Crlf);
     output.extend_from_slice(empty_line_term.as_bytes());
 
@@ -260,7 +273,8 @@ fn build_http_request_all_crlf(request: &MixedLineTerminatorRequest) -> Vec<u8> 
     let mut output = Vec::new();
 
     // Request line
-    let request_line = format!("{} {} {}",
+    let request_line = format!(
+        "{} {} {}",
         request.method.as_str(),
         sanitize_uri(&request.uri),
         request.version.as_str()
@@ -270,7 +284,8 @@ fn build_http_request_all_crlf(request: &MixedLineTerminatorRequest) -> Vec<u8> 
 
     // Headers
     for header in &request.headers {
-        let header_line = format!("{}: {}",
+        let header_line = format!(
+            "{}: {}",
             sanitize_header_name(&header.name),
             sanitize_header_value(&header.value)
         );
@@ -294,7 +309,8 @@ fn build_http_request_all_lf(request: &MixedLineTerminatorRequest) -> Vec<u8> {
     let mut output = Vec::new();
 
     // Request line
-    let request_line = format!("{} {} {}",
+    let request_line = format!(
+        "{} {} {}",
         request.method.as_str(),
         sanitize_uri(&request.uri),
         request.version.as_str()
@@ -304,7 +320,8 @@ fn build_http_request_all_lf(request: &MixedLineTerminatorRequest) -> Vec<u8> {
 
     // Headers
     for header in &request.headers {
-        let header_line = format!("{}: {}",
+        let header_line = format!(
+            "{}: {}",
             sanitize_header_name(&header.name),
             sanitize_header_value(&header.value)
         );
@@ -328,7 +345,8 @@ fn build_http_request_mixed_terminators(request: &MixedLineTerminatorRequest) ->
     let mut output = Vec::new();
 
     // Request line with CRLF
-    let request_line = format!("{} {} {}",
+    let request_line = format!(
+        "{} {} {}",
         request.method.as_str(),
         sanitize_uri(&request.uri),
         request.version.as_str()
@@ -338,16 +356,17 @@ fn build_http_request_mixed_terminators(request: &MixedLineTerminatorRequest) ->
 
     // Alternate headers between CRLF and LF
     for (i, header) in request.headers.iter().enumerate() {
-        let header_line = format!("{}: {}",
+        let header_line = format!(
+            "{}: {}",
             sanitize_header_name(&header.name),
             sanitize_header_value(&header.value)
         );
         output.extend_from_slice(header_line.as_bytes());
 
         if i % 2 == 0 {
-            output.extend_from_slice(b"\r\n");  // Even: CRLF
+            output.extend_from_slice(b"\r\n"); // Even: CRLF
         } else {
-            output.extend_from_slice(b"\n");    // Odd: LF only
+            output.extend_from_slice(b"\n"); // Odd: LF only
         }
     }
 

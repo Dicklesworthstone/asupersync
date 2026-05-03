@@ -111,12 +111,18 @@ fn audit_programmatic_over_environment_priority() {
     println!("🔍 AUDIT: OTLP resource detection priority - programmatic > environment");
 
     // Set environment variable
-    env::set_var("OTEL_RESOURCE_ATTRIBUTES", "service.name=env-service,environment=staging,version=env-1.0");
+    env::set_var(
+        "OTEL_RESOURCE_ATTRIBUTES",
+        "service.name=env-service,environment=staging,version=env-1.0",
+    );
 
     // Create resource with programmatic attributes that overlap with environment
     let programmatic_attrs = {
         let mut attrs = HashMap::new();
-        attrs.insert("service.name".to_string(), "programmatic-service".to_string());
+        attrs.insert(
+            "service.name".to_string(),
+            "programmatic-service".to_string(),
+        );
         attrs.insert("environment".to_string(), "production".to_string());
         attrs.insert("build.version".to_string(), "prog-2.0".to_string());
         attrs
@@ -181,7 +187,10 @@ fn audit_environment_over_defaults_priority() {
     println!("🔍 AUDIT: OTLP resource detection priority - environment > defaults");
 
     // Set environment variable that overrides defaults
-    env::set_var("OTEL_RESOURCE_ATTRIBUTES", "service.name=env-override,telemetry.sdk.name=custom-sdk");
+    env::set_var(
+        "OTEL_RESOURCE_ATTRIBUTES",
+        "service.name=env-override,telemetry.sdk.name=custom-sdk",
+    );
 
     println!("📋 Default attributes:");
     println!("   telemetry.sdk.name=asupersync");
@@ -305,9 +314,18 @@ fn audit_otel_resource_attributes_parsing() {
     // Test cases for environment variable parsing
     let test_cases = vec![
         ("service.name=test", vec![("service.name", "test")]),
-        ("key1=value1,key2=value2", vec![("key1", "value1"), ("key2", "value2")]),
-        ("service.name=my-service,environment=prod,version=1.0",
-         vec![("service.name", "my-service"), ("environment", "prod"), ("version", "1.0")]),
+        (
+            "key1=value1,key2=value2",
+            vec![("key1", "value1"), ("key2", "value2")],
+        ),
+        (
+            "service.name=my-service,environment=prod,version=1.0",
+            vec![
+                ("service.name", "my-service"),
+                ("environment", "prod"),
+                ("version", "1.0"),
+            ],
+        ),
         ("key=value with spaces", vec![("key", "value with spaces")]),
         ("", vec![]), // Empty string
     ];
@@ -325,7 +343,8 @@ fn audit_otel_resource_attributes_parsing() {
 
         assert_eq!(
             parsed, expected_map,
-            "Parsing failed for input: '{}'", input
+            "Parsing failed for input: '{}'",
+            input
         );
 
         println!("   ✓ Parsed correctly: {:?}", parsed);
@@ -344,11 +363,17 @@ fn audit_attribute_collision_resolution() {
     println!("🔍 AUDIT: OTLP resource attribute collision resolution");
 
     // All sources have "service.name" attribute
-    env::set_var("OTEL_RESOURCE_ATTRIBUTES", "service.name=env-service,region=us-west");
+    env::set_var(
+        "OTEL_RESOURCE_ATTRIBUTES",
+        "service.name=env-service,region=us-west",
+    );
 
     let programmatic_attrs = {
         let mut attrs = HashMap::new();
-        attrs.insert("service.name".to_string(), "programmatic-service".to_string());
+        attrs.insert(
+            "service.name".to_string(),
+            "programmatic-service".to_string(),
+        );
         attrs.insert("version".to_string(), "2.0.0".to_string());
         attrs
     };

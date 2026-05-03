@@ -1,7 +1,7 @@
 #![no_main]
 
-use libfuzzer_sys::fuzz_target;
 use arbitrary::{Arbitrary, Unstructured};
+use libfuzzer_sys::fuzz_target;
 
 /// HTTP/1.1 request parsing result
 #[derive(Debug, PartialEq)]
@@ -128,9 +128,9 @@ impl MockH1RequestParser {
         }
 
         // Analyze Transfer-Encoding headers
-        let has_chunked_encoding = transfer_encoding_headers.iter().any(|te| {
-            te.to_lowercase().contains("chunked")
-        });
+        let has_chunked_encoding = transfer_encoding_headers
+            .iter()
+            .any(|te| te.to_lowercase().contains("chunked"));
 
         // Analyze Content-Length headers
         let mut content_length_value = None;
@@ -141,20 +141,20 @@ impl MockH1RequestParser {
 
             if let Ok(length) = first_value.parse::<u64>() {
                 // Check if all Content-Length headers have the same value
-                let all_same = content_length_headers.iter().all(|cl| {
-                    cl.trim().parse::<u64>().map_or(false, |val| val == length)
-                });
+                let all_same = content_length_headers
+                    .iter()
+                    .all(|cl| cl.trim().parse::<u64>().map_or(false, |val| val == length));
 
                 if !all_same {
                     return RequestParseResult::ProtocolError(
-                        "Multiple Content-Length headers with different values".to_string()
+                        "Multiple Content-Length headers with different values".to_string(),
                     );
                 }
 
                 content_length_value = Some(length);
             } else {
                 return RequestParseResult::ProtocolError(
-                    "Invalid Content-Length value".to_string()
+                    "Invalid Content-Length value".to_string(),
                 );
             }
         }
@@ -165,7 +165,8 @@ impl MockH1RequestParser {
                 return RequestParseResult::ProtocolError(
                     "Request has both Transfer-Encoding: chunked AND Content-Length headers. \
                      Per RFC 9112 §6.1, this indicates potential request smuggling - \
-                     Transfer-Encoding overrides Content-Length and Content-Length MUST be removed.".to_string()
+                     Transfer-Encoding overrides Content-Length and Content-Length MUST be removed."
+                        .to_string(),
                 );
             } else {
                 // Non-strict mode: allow but prefer Transfer-Encoding
@@ -204,13 +205,13 @@ impl MockH1RequestParser {
     /// This simulates the RFC requirement to remove Content-Length before forwarding
     fn normalize_headers(&self, headers: &[(String, String)]) -> Vec<(String, String)> {
         let has_transfer_encoding = headers.iter().any(|(name, value)| {
-            name.to_lowercase() == "transfer-encoding" &&
-            value.to_lowercase().contains("chunked")
+            name.to_lowercase() == "transfer-encoding" && value.to_lowercase().contains("chunked")
         });
 
         if has_transfer_encoding && self.strict_rfc_mode {
             // Remove all Content-Length headers per RFC 9112 §6.1
-            headers.iter()
+            headers
+                .iter()
                 .filter(|(name, _)| name.to_lowercase() != "content-length")
                 .cloned()
                 .collect()
@@ -301,7 +302,11 @@ fuzz_target!(|input: FuzzInput| {
     let mut request = format!(
         "{} {} {}\r\n",
         input.method.to_string(),
-        if input.uri.is_empty() { "/" } else { &input.uri },
+        if input.uri.is_empty() {
+            "/"
+        } else {
+            &input.uri
+        },
         input.version.to_string()
     );
 
@@ -316,7 +321,10 @@ fuzz_target!(|input: FuzzInput| {
 
     // Add Content-Length headers
     if input.include_content_length {
-        request.push_str(&format!("Content-Length: {}\r\n", input.content_length_value));
+        request.push_str(&format!(
+            "Content-Length: {}\r\n",
+            input.content_length_value
+        ));
     }
 
     for extra_cl in &input.multiple_content_lengths {
@@ -392,7 +400,8 @@ fuzz_target!(|input: FuzzInput| {
             // Test header normalization (RFC requirement to remove Content-Length)
             if has_transfer_encoding_chunked && !input.use_non_strict_mode {
                 let normalized_headers = parser.normalize_headers(&headers);
-                let has_cl_after_normalization = normalized_headers.iter()
+                let has_cl_after_normalization = normalized_headers
+                    .iter()
                     .any(|(name, _)| name.to_lowercase() == "content-length");
 
                 assert!(
@@ -400,36 +409,44 @@ fuzz_target!(|input: FuzzInput| {
                     "Content-Length headers MUST be removed when Transfer-Encoding is present (RFC 9112 §6.1)"
                 );
             }
-        },
+        }
 
         RequestParseResult::ProtocolError(msg) => {
             // Expected for problematic combinations
 
-            if input.include_transfer_encoding_chunked && input.include_content_length && !input.use_non_strict_mode {
+            if input.include_transfer_encoding_chunked
+                && input.include_content_length
+                && !input.use_non_strict_mode
+            {
                 // This is the exact case we're testing - should always be a protocol error
                 assert!(
-                    msg.contains("Transfer-Encoding") && msg.contains("Content-Length") &&
-                    (msg.contains("request smuggling") || msg.contains("overrides")),
-                    "Expected specific protocol error for TE+CL combination, got: {}", msg
+                    msg.contains("Transfer-Encoding")
+                        && msg.contains("Content-Length")
+                        && (msg.contains("request smuggling") || msg.contains("overrides")),
+                    "Expected specific protocol error for TE+CL combination, got: {}",
+                    msg
                 );
             }
 
             if input.multiple_content_lengths.len() > 1 {
                 // Multiple different Content-Length values should be rejected
-                let all_same = input.multiple_content_lengths.iter()
+                let all_same = input
+                    .multiple_content_lengths
+                    .iter()
                     .all(|&cl| cl == input.content_length_value);
                 if !all_same {
                     assert!(
                         msg.contains("Multiple Content-Length") || msg.contains("different values"),
-                        "Multiple different Content-Length values should be rejected, got: {}", msg
+                        "Multiple different Content-Length values should be rejected, got: {}",
+                        msg
                     );
                 }
             }
-        },
+        }
 
         RequestParseResult::MalformedRequest => {
             // Expected for invalid request format
-        },
+        }
 
         RequestParseResult::IncompleteRequest => {
             // Expected for partial requests
@@ -438,27 +455,34 @@ fuzz_target!(|input: FuzzInput| {
 
     // CORE ASSERTION: Simultaneous Transfer-Encoding: chunked + Content-Length in strict mode
     // must be rejected to prevent request smuggling
-    if input.include_transfer_encoding_chunked && input.include_content_length && !input.use_non_strict_mode {
+    if input.include_transfer_encoding_chunked
+        && input.include_content_length
+        && !input.use_non_strict_mode
+    {
         match result {
             RequestParseResult::ProtocolError(ref msg) => {
                 // Expected - verify it's the right kind of protocol error
                 assert!(
                     msg.contains("Transfer-Encoding") && msg.contains("Content-Length"),
-                    "Wrong protocol error message for TE+CL combination: {}", msg
+                    "Wrong protocol error message for TE+CL combination: {}",
+                    msg
                 );
-            },
-            RequestParseResult::Valid { effective_transfer_mechanism: TransferMechanism::Ambiguous, .. } => {
+            }
+            RequestParseResult::Valid {
+                effective_transfer_mechanism: TransferMechanism::Ambiguous,
+                ..
+            } => {
                 panic!(
                     "CRITICAL: Ambiguous transfer mechanism in strict mode! Should be protocol error."
                 );
-            },
+            }
             RequestParseResult::Valid { .. } => {
                 panic!(
                     "CRITICAL RFC VIOLATION: Request with both Transfer-Encoding: chunked \
                      and Content-Length parsed as valid in strict mode! This violates RFC 9112 §6.1 \
                      and enables HTTP request smuggling attacks."
                 );
-            },
+            }
             _ => {
                 // Other errors (malformed, incomplete) are acceptable as long as
                 // it doesn't parse as valid
@@ -482,7 +506,7 @@ fuzz_target!(|input: FuzzInput| {
         match strict_result {
             RequestParseResult::ProtocolError(_) => {
                 // Expected - good!
-            },
+            }
             _ => {
                 panic!("Strict mode must reject CL.TE request smuggling pattern");
             }
@@ -490,12 +514,15 @@ fuzz_target!(|input: FuzzInput| {
 
         // Non-strict mode should at least mark as ambiguous (still dangerous but detectable)
         match non_strict_result {
-            RequestParseResult::Valid { effective_transfer_mechanism: TransferMechanism::Ambiguous, .. } => {
+            RequestParseResult::Valid {
+                effective_transfer_mechanism: TransferMechanism::Ambiguous,
+                ..
+            } => {
                 // Minimally acceptable - at least it's flagged as problematic
-            },
+            }
             RequestParseResult::ProtocolError(_) => {
                 // Even better - rejected entirely
-            },
+            }
             RequestParseResult::Valid { .. } => {
                 // DANGEROUS: parsed as completely valid, no warning
                 // This would enable silent request smuggling
@@ -503,21 +530,28 @@ fuzz_target!(|input: FuzzInput| {
                     "WARNING: Non-strict mode silently accepted CL.TE smuggling pattern - \
                      this could enable attacks if deployed"
                 );
-            },
+            }
             _ => {}
         }
     }
 
     // Additional edge case: Empty Transfer-Encoding value
-    if input.extra_transfer_encodings.iter().any(|te| te.trim().is_empty()) {
+    if input
+        .extra_transfer_encodings
+        .iter()
+        .any(|te| te.trim().is_empty())
+    {
         // Empty Transfer-Encoding values should be handled gracefully
         match result {
-            RequestParseResult::Valid { effective_transfer_mechanism: TransferMechanism::NoBody, .. } => {
+            RequestParseResult::Valid {
+                effective_transfer_mechanism: TransferMechanism::NoBody,
+                ..
+            } => {
                 // Acceptable - treat as no Transfer-Encoding
-            },
+            }
             RequestParseResult::ProtocolError(_) => {
                 // Also acceptable - reject malformed header
-            },
+            }
             _ => {}
         }
     }

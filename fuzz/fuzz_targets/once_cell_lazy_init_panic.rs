@@ -12,14 +12,14 @@
 
 #![no_main]
 
-use libfuzzer_sys::fuzz_target;
 use arbitrary::{Arbitrary, Unstructured};
 use asupersync::sync::OnceCell;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use libfuzzer_sys::fuzz_target;
+use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::thread;
 use std::time::Duration;
-use std::panic::{catch_unwind, AssertUnwindSafe};
 
 #[derive(Debug, Clone, Arbitrary)]
 struct PanicConfig {
@@ -142,7 +142,8 @@ fuzz_target!(|data: &[u8]| {
     // Validate and limit parameters
     if sequence.config.init_attempts.is_empty()
         || sequence.config.success_values.is_empty()
-        || sequence.config.success_values.len() > PanicSequence::max_success_values() {
+        || sequence.config.success_values.len() > PanicSequence::max_success_values()
+    {
         return;
     }
 
@@ -153,15 +154,26 @@ fuzz_target!(|data: &[u8]| {
     let tracker = Arc::new(PanicTracker::new());
 
     // Execute initialization attempts
-    for (i, attempt) in sequence.config.init_attempts.iter().take(max_attempts).enumerate() {
+    for (i, attempt) in sequence
+        .config
+        .init_attempts
+        .iter()
+        .take(max_attempts)
+        .enumerate()
+    {
         // Check invariants before each attempt
         if let Err(msg) = tracker.check_invariants(&cell) {
-            panic!("Panic recovery invariant violation at attempt {}: {}", i, msg);
+            panic!(
+                "Panic recovery invariant violation at attempt {}: {}",
+                i, msg
+            );
         }
 
         match attempt {
             InitAttempt::Success { value_index } => {
-                let value = sequence.config.success_values
+                let value = sequence
+                    .config
+                    .success_values
                     .get(*value_index as usize % sequence.config.success_values.len())
                     .copied()
                     .unwrap_or(42);
@@ -177,13 +189,18 @@ fuzz_target!(|data: &[u8]| {
                 match result {
                     Ok(_) => {
                         // Successful initialization
-                        assert!(cell.is_initialized(), "Cell should be initialized after successful init");
+                        assert!(
+                            cell.is_initialized(),
+                            "Cell should be initialized after successful init"
+                        );
 
                         // Verify the value is correct
                         if let Some(stored_value) = cell.get() {
-                            assert_eq!(*stored_value, value,
+                            assert_eq!(
+                                *stored_value, value,
                                 "Stored value {} should match expected {}",
-                                *stored_value, value);
+                                *stored_value, value
+                            );
                         }
                     }
                     Err(_) => {
@@ -194,7 +211,9 @@ fuzz_target!(|data: &[u8]| {
             }
 
             InitAttempt::Panic { message_index } => {
-                let panic_message = sequence.config.panic_messages
+                let panic_message = sequence
+                    .config
+                    .panic_messages
                     .get(*message_index as usize % sequence.config.panic_messages.len().max(1))
                     .cloned()
                     .unwrap_or_else(|| format!("test panic {}", i));
@@ -211,20 +230,29 @@ fuzz_target!(|data: &[u8]| {
                     Ok(_) => {
                         // This could happen if cell was already initialized
                         // In that case, the panic closure wasn't called
-                        assert!(cell.is_initialized(),
-                            "If init didn't panic, cell should be initialized");
+                        assert!(
+                            cell.is_initialized(),
+                            "If init didn't panic, cell should be initialized"
+                        );
                     }
                     Err(_) => {
                         // Expected panic occurred
-                        assert!(!cell.is_initialized(),
+                        assert!(
+                            !cell.is_initialized(),
                             "Cell should remain uninitialized after panic at attempt {}",
-                            i);
+                            i
+                        );
                     }
                 }
             }
 
-            InitAttempt::PanicAfterWork { work_units, message_index } => {
-                let panic_message = sequence.config.panic_messages
+            InitAttempt::PanicAfterWork {
+                work_units,
+                message_index,
+            } => {
+                let panic_message = sequence
+                    .config
+                    .panic_messages
                     .get(*message_index as usize % sequence.config.panic_messages.len().max(1))
                     .cloned()
                     .unwrap_or_else(|| format!("test panic after work {}", i));
@@ -247,9 +275,11 @@ fuzz_target!(|data: &[u8]| {
                     }
                     Err(_) => {
                         // Panic occurred after work
-                        assert!(!cell.is_initialized(),
+                        assert!(
+                            !cell.is_initialized(),
                             "Cell should remain uninitialized after panic with work at attempt {}",
-                            i);
+                            i
+                        );
                     }
                 }
             }
@@ -271,7 +301,10 @@ fuzz_target!(|data: &[u8]| {
 
         // Check invariants after each attempt
         if let Err(msg) = tracker.check_invariants(&cell) {
-            panic!("Panic recovery invariant violation after attempt {}: {}", i, msg);
+            panic!(
+                "Panic recovery invariant violation after attempt {}: {}",
+                i, msg
+            );
         }
     }
 
@@ -355,18 +388,29 @@ fuzz_target!(|data: &[u8]| {
     let final_successes = tracker.successful_init_count.load(Ordering::SeqCst);
 
     // Cell should be initialized at the end
-    assert!(cell.is_initialized(),
-        "Cell should be initialized at end of test");
+    assert!(
+        cell.is_initialized(),
+        "Cell should be initialized at end of test"
+    );
 
     // Should have exactly one successful initialization total
-    let expected_successes = if final_successes == 0 { 1 } else { final_successes };
-    assert!(expected_successes >= 1,
+    let expected_successes = if final_successes == 0 {
+        1
+    } else {
+        final_successes
+    };
+    assert!(
+        expected_successes >= 1,
         "Should have at least one successful initialization: panics={}, successes={}",
-        final_panics, expected_successes);
+        final_panics,
+        expected_successes
+    );
 
     // Verify the OnceCell behaves correctly: once initialized, always returns same value
     let value1 = *cell.get().unwrap();
     let value2 = *cell.get().unwrap();
-    assert_eq!(value1, value2,
-        "OnceCell should return same value on repeated access");
+    assert_eq!(
+        value1, value2,
+        "OnceCell should return same value on repeated access"
+    );
 });

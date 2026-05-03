@@ -1,7 +1,7 @@
 #![no_main]
 
-use libfuzzer_sys::fuzz_target;
 use arbitrary::{Arbitrary, Unstructured};
+use libfuzzer_sys::fuzz_target;
 
 /// HTTP/2 frame header length (9 bytes) per RFC 7540 §4.1
 const FRAME_HEADER_LEN: usize = 9;
@@ -58,10 +58,10 @@ enum DataFrameResult {
 /// HTTP/2 frame header per RFC 7540 §4.1
 #[derive(Debug, Clone)]
 struct FrameHeader {
-    length: u32,      // 24-bit length
-    frame_type: u8,   // 8-bit type
-    flags: u8,        // 8-bit flags
-    stream_id: u32,   // 31-bit stream ID (R bit ignored)
+    length: u32,    // 24-bit length
+    frame_type: u8, // 8-bit type
+    flags: u8,      // 8-bit flags
+    stream_id: u32, // 31-bit stream ID (R bit ignored)
 }
 
 impl FrameHeader {
@@ -97,18 +97,16 @@ impl FrameHeader {
         }
 
         // Length (24 bits)
-        let length = ((buf[0] as u32) << 16) |
-                    ((buf[1] as u32) << 8) |
-                    (buf[2] as u32);
+        let length = ((buf[0] as u32) << 16) | ((buf[1] as u32) << 8) | (buf[2] as u32);
 
         let frame_type = buf[3];
         let flags = buf[4];
 
         // Stream ID (31 bits, ignore reserved bit)
-        let stream_id = ((buf[5] as u32 & 0x7F) << 24) |
-                       ((buf[6] as u32) << 16) |
-                       ((buf[7] as u32) << 8) |
-                       (buf[8] as u32);
+        let stream_id = ((buf[5] as u32 & 0x7F) << 24)
+            | ((buf[6] as u32) << 16)
+            | ((buf[7] as u32) << 8)
+            | (buf[8] as u32);
 
         Ok(FrameHeader {
             length,
@@ -153,7 +151,8 @@ impl MockH2DataParser {
         // Must be DATA frame type
         if header.frame_type != DATA_FRAME_TYPE {
             return DataFrameResult::ProtocolError(format!(
-                "Expected DATA frame (0x0), got 0x{:x}", header.frame_type
+                "Expected DATA frame (0x0), got 0x{:x}",
+                header.frame_type
             ));
         }
 
@@ -190,7 +189,7 @@ impl MockH2DataParser {
             if payload.is_empty() {
                 // This case should have been caught above, but double-check
                 return DataFrameResult::ProtocolError(
-                    "PADDED flag set but no payload for Pad Length field".to_string()
+                    "PADDED flag set but no payload for Pad Length field".to_string(),
                 );
             }
 
@@ -200,7 +199,8 @@ impl MockH2DataParser {
             if pad_len as usize >= payload.len() {
                 return DataFrameResult::ProtocolError(format!(
                     "Pad Length {} exceeds remaining payload length {}",
-                    pad_len, payload.len() - 1
+                    pad_len,
+                    payload.len() - 1
                 ));
             }
 
@@ -221,7 +221,7 @@ impl MockH2DataParser {
         } else {
             // This can happen with invalid padding
             return DataFrameResult::ProtocolError(
-                "Invalid padding configuration - data start exceeds data end".to_string()
+                "Invalid padding configuration - data start exceeds data end".to_string(),
             );
         };
 
@@ -280,7 +280,11 @@ impl PayloadLengthVariant {
 
 fuzz_target!(|input: FuzzInput| {
     // Ensure stream ID is non-zero (required for DATA frames)
-    let stream_id = if input.stream_id == 0 { 1 } else { input.stream_id & 0x7FFF_FFFF };
+    let stream_id = if input.stream_id == 0 {
+        1
+    } else {
+        input.stream_id & 0x7FFF_FFFF
+    };
 
     // Create frame flags
     let mut flags = 0u8;
@@ -348,7 +352,12 @@ fuzz_target!(|input: FuzzInput| {
 
     // Validate behavior based on input characteristics
     match result {
-        DataFrameResult::Valid { stream_id: parsed_stream_id, flags: parsed_flags, payload: _, pad_length } => {
+        DataFrameResult::Valid {
+            stream_id: parsed_stream_id,
+            flags: parsed_flags,
+            payload: _,
+            pad_length,
+        } => {
             // Frame parsed successfully - verify this is expected
 
             // Should only be valid if:
@@ -367,7 +376,7 @@ fuzz_target!(|input: FuzzInput| {
                 );
                 assert!(pad_length.is_some(), "PADDED frame should have pad_length");
             }
-        },
+        }
 
         DataFrameResult::ProtocolError(msg) => {
             // Expected protocol error cases:
@@ -377,12 +386,13 @@ fuzz_target!(|input: FuzzInput| {
             if input.set_padded_flag && payload_length == 0 {
                 // This is the EXACT case we're testing - should always be a protocol error
                 assert!(
-                    msg.contains("PADDED flag set but payload length is 0") ||
-                    msg.contains("no room for Pad Length field"),
-                    "Expected specific protocol error for zero-length PADDED frame, got: {}", msg
+                    msg.contains("PADDED flag set but payload length is 0")
+                        || msg.contains("no room for Pad Length field"),
+                    "Expected specific protocol error for zero-length PADDED frame, got: {}",
+                    msg
                 );
             }
-        },
+        }
 
         DataFrameResult::FrameSizeError => {
             // Should only occur if payload length exceeds max frame size
@@ -390,7 +400,7 @@ fuzz_target!(|input: FuzzInput| {
                 payload_length as u32 > max_frame_size,
                 "Frame size error should only occur for oversized frames"
             );
-        },
+        }
 
         DataFrameResult::IncompleteFrame => {
             // Expected for truncated frames or frames with insufficient data
@@ -400,7 +410,7 @@ fuzz_target!(|input: FuzzInput| {
                     "Incomplete frame should only occur for actually truncated frames"
                 );
             }
-        },
+        }
 
         DataFrameResult::InvalidStreamId => {
             // Should never happen with our stream ID logic
@@ -414,18 +424,19 @@ fuzz_target!(|input: FuzzInput| {
             DataFrameResult::ProtocolError(ref msg) => {
                 // Expected - verify it's the right kind of protocol error
                 assert!(
-                    msg.contains("PADDED flag set but payload length is 0") ||
-                    msg.contains("no room for Pad Length field"),
-                    "Wrong protocol error message for zero-length PADDED: {}", msg
+                    msg.contains("PADDED flag set but payload length is 0")
+                        || msg.contains("no room for Pad Length field"),
+                    "Wrong protocol error message for zero-length PADDED: {}",
+                    msg
                 );
-            },
+            }
             DataFrameResult::Valid { .. } => {
                 panic!(
                     "CRITICAL RFC VIOLATION: Zero-length payload with PADDED flag parsed as valid! \
                      This violates RFC 7540 §6.1 - PADDED flag requires Pad Length field as first byte, \
                      but zero-length payload has no bytes."
                 );
-            },
+            }
             _ => {
                 // Other errors (frame size, incomplete, etc.) are acceptable as long as
                 // it doesn't parse as valid
@@ -437,15 +448,26 @@ fuzz_target!(|input: FuzzInput| {
     // (pad length = 0, no actual padding)
     if input.set_padded_flag && payload_length == 1 && input.truncate_at.is_none() {
         match result {
-            DataFrameResult::Valid { pad_length: Some(0), .. } => {
+            DataFrameResult::Valid {
+                pad_length: Some(0),
+                ..
+            } => {
                 // Expected: one byte payload allows pad_length=0
-            },
-            DataFrameResult::Valid { pad_length: Some(n), .. } => {
-                panic!("One-byte PADDED payload should have pad_length=0, got {}", n);
-            },
-            DataFrameResult::Valid { pad_length: None, .. } => {
+            }
+            DataFrameResult::Valid {
+                pad_length: Some(n),
+                ..
+            } => {
+                panic!(
+                    "One-byte PADDED payload should have pad_length=0, got {}",
+                    n
+                );
+            }
+            DataFrameResult::Valid {
+                pad_length: None, ..
+            } => {
                 panic!("PADDED frame should have pad_length field");
-            },
+            }
             // Errors are acceptable (parser may be strict about minimum sizes)
             _ => {}
         }

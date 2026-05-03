@@ -1,7 +1,7 @@
 #![no_main]
 
-use libfuzzer_sys::fuzz_target;
 use arbitrary::{Arbitrary, Unstructured};
+use libfuzzer_sys::fuzz_target;
 use std::collections::HashMap;
 
 // Mock HTTP/2 SETTINGS frame and HPACK dynamic table for fuzzing
@@ -194,9 +194,11 @@ fn test_table_size_reduction(test_case: &SettingsUpdateTestCase) {
     let initial_count = hpack_context.dynamic_table.len();
 
     // Find a size update that reduces table size
-    if let Some(reduction_update) = test_case.update_sequence.iter()
-        .find(|update| update.new_size < initial_size) {
-
+    if let Some(reduction_update) = test_case
+        .update_sequence
+        .iter()
+        .find(|update| update.new_size < initial_size)
+    {
         let result = hpack_context.update_header_table_size(reduction_update.new_size);
 
         match result {
@@ -205,7 +207,8 @@ fn test_table_size_reduction(test_case: &SettingsUpdateTestCase) {
                 assert!(
                     hpack_context.current_table_size <= reduction_update.new_size,
                     "Table size {} should not exceed limit {}",
-                    hpack_context.current_table_size, reduction_update.new_size
+                    hpack_context.current_table_size,
+                    reduction_update.new_size
                 );
 
                 // Verify eviction happened if necessary
@@ -226,8 +229,16 @@ fn test_table_size_reduction(test_case: &SettingsUpdateTestCase) {
 
                 // Verify remaining entries are valid and most recently used
                 for (i, entry) in hpack_context.dynamic_table.iter().enumerate() {
-                    assert!(!entry.name.is_empty(), "Entry {} name should not be empty", i);
-                    assert!(!entry.value.is_empty(), "Entry {} value should not be empty", i);
+                    assert!(
+                        !entry.name.is_empty(),
+                        "Entry {} name should not be empty",
+                        i
+                    );
+                    assert!(
+                        !entry.value.is_empty(),
+                        "Entry {} value should not be empty",
+                        i
+                    );
                 }
             }
             Err(_) => {
@@ -250,9 +261,11 @@ fn test_table_size_increase(test_case: &SettingsUpdateTestCase) {
     let initial_count = hpack_context.dynamic_table.len();
 
     // Find a size update that increases table size
-    if let Some(increase_update) = test_case.update_sequence.iter()
-        .find(|update| update.new_size > small_size && update.new_size <= MAX_HEADER_TABLE_SIZE) {
-
+    if let Some(increase_update) = test_case
+        .update_sequence
+        .iter()
+        .find(|update| update.new_size > small_size && update.new_size <= MAX_HEADER_TABLE_SIZE)
+    {
         let result = hpack_context.update_header_table_size(increase_update.new_size);
 
         match result {
@@ -262,14 +275,15 @@ fn test_table_size_increase(test_case: &SettingsUpdateTestCase) {
 
                 // Verify existing entries preserved
                 assert_eq!(
-                    hpack_context.dynamic_table.len(), initial_count,
+                    hpack_context.dynamic_table.len(),
+                    initial_count,
                     "Existing entries should be preserved during size increase"
                 );
 
                 // Verify we can now add more entries
                 let large_header_result = hpack_context.add_to_dynamic_table(
                     "x-large-new-header",
-                    "large-value-that-should-fit-in-expanded-table"
+                    "large-value-that-should-fit-in-expanded-table",
                 );
 
                 // Should succeed if there's actually more space
@@ -326,7 +340,9 @@ fn test_rapid_size_changes(test_case: &SettingsUpdateTestCase) {
                 for (j, entry) in hpack_context.dynamic_table.iter().enumerate() {
                     assert!(
                         !entry.name.is_empty(),
-                        "Entry {} should have valid name after update {}", j, i
+                        "Entry {} should have valid name after update {}",
+                        j,
+                        i
                     );
                 }
 
@@ -364,7 +380,8 @@ fn test_size_update_during_headers(test_case: &SettingsUpdateTestCase) {
             HeaderOperationType::DynamicTableSizeUpdate => {
                 // Test table size update during header processing
                 if let Some(update) = test_case.update_sequence.first() {
-                    let result = hpack_context.update_header_table_size_during_block(update.new_size);
+                    let result =
+                        hpack_context.update_header_table_size_during_block(update.new_size);
 
                     match result {
                         Ok(_) => {
@@ -374,8 +391,8 @@ fn test_size_update_during_headers(test_case: &SettingsUpdateTestCase) {
                         Err(error_msg) => {
                             // Size update during header block might be restricted
                             assert!(
-                                error_msg.contains("during header block") ||
-                                error_msg.contains("not allowed"),
+                                error_msg.contains("during header block")
+                                    || error_msg.contains("not allowed"),
                                 "Error should indicate timing restriction"
                             );
                         }
@@ -384,10 +401,8 @@ fn test_size_update_during_headers(test_case: &SettingsUpdateTestCase) {
             }
             _ => {
                 // Other operations
-                let _ = hpack_context.process_literal_header(
-                    &operation.header_name,
-                    &operation.header_value,
-                );
+                let _ = hpack_context
+                    .process_literal_header(&operation.header_name, &operation.header_value);
             }
         }
     }
@@ -439,7 +454,7 @@ fn test_maximum_table_size(test_case: &SettingsUpdateTestCase) {
     let large_sizes = [
         MAX_HEADER_TABLE_SIZE + 1,
         u32::MAX,
-        0x80000000, // Sign bit set
+        0x80000000,    // Sign bit set
         1_000_000_000, // 1GB
     ];
 
@@ -457,9 +472,9 @@ fn test_maximum_table_size(test_case: &SettingsUpdateTestCase) {
             Err(error_msg) => {
                 // Should be rejected with appropriate error
                 assert!(
-                    error_msg.contains("too large") ||
-                    error_msg.contains("exceeds maximum") ||
-                    error_msg.contains("limit"),
+                    error_msg.contains("too large")
+                        || error_msg.contains("exceeds maximum")
+                        || error_msg.contains("limit"),
                     "Large size should be rejected with appropriate error"
                 );
             }
@@ -490,8 +505,7 @@ fn test_unacknowledged_updates(test_case: &SettingsUpdateTestCase) {
             Err(error_msg) => {
                 // Or it might require acknowledgment first
                 assert!(
-                    error_msg.contains("unacknowledged") ||
-                    error_msg.contains("pending"),
+                    error_msg.contains("unacknowledged") || error_msg.contains("pending"),
                     "Should indicate unacknowledged update issue"
                 );
             }
@@ -528,8 +542,14 @@ fn test_duplicate_size_updates(test_case: &SettingsUpdateTestCase) {
             Ok(eviction_info) => {
                 // Duplicate update should be idempotent
                 assert_eq!(eviction_info.entries_evicted, 0);
-                assert_eq!(hpack_context.max_table_size, table_state_after_first.max_table_size);
-                assert_eq!(hpack_context.dynamic_table.len(), table_state_after_first.dynamic_table.len());
+                assert_eq!(
+                    hpack_context.max_table_size,
+                    table_state_after_first.max_table_size
+                );
+                assert_eq!(
+                    hpack_context.dynamic_table.len(),
+                    table_state_after_first.dynamic_table.len()
+                );
             }
             Err(_) => {
                 // Some implementations might reject duplicate updates
@@ -572,7 +592,8 @@ fn test_entry_preservation(test_case: &SettingsUpdateTestCase) {
 
                     // Verify all entries preserved
                     assert_eq!(
-                        hpack_context.dynamic_table.len(), pre_update_entries.len(),
+                        hpack_context.dynamic_table.len(),
+                        pre_update_entries.len(),
                         "All entries should be preserved"
                     );
                 }
@@ -581,7 +602,8 @@ fn test_entry_preservation(test_case: &SettingsUpdateTestCase) {
                 if eviction_info.entries_evicted > 0 {
                     let remaining_count = pre_update_entries.len() - eviction_info.entries_evicted;
                     assert_eq!(
-                        hpack_context.dynamic_table.len(), remaining_count,
+                        hpack_context.dynamic_table.len(),
+                        remaining_count,
                         "Should have exact number of remaining entries"
                     );
 
@@ -601,7 +623,8 @@ fn test_entry_preservation(test_case: &SettingsUpdateTestCase) {
             Err(_) => {
                 // Update failed, entries should be unchanged
                 assert_eq!(
-                    hpack_context.dynamic_table.len(), pre_update_entries.len(),
+                    hpack_context.dynamic_table.len(),
+                    pre_update_entries.len(),
                     "Failed update should not change table"
                 );
             }
@@ -658,7 +681,9 @@ impl HpackContext {
         }
 
         // Evict entries to make space if necessary
-        while self.current_table_size + entry_size > self.max_table_size && !self.dynamic_table.is_empty() {
+        while self.current_table_size + entry_size > self.max_table_size
+            && !self.dynamic_table.is_empty()
+        {
             if let Some(evicted) = self.dynamic_table.pop() {
                 self.current_table_size -= evicted.size;
             }
@@ -707,7 +732,10 @@ impl HpackContext {
         })
     }
 
-    fn update_header_table_size_during_block(&mut self, new_size: u32) -> Result<EvictionInfo, String> {
+    fn update_header_table_size_during_block(
+        &mut self,
+        new_size: u32,
+    ) -> Result<EvictionInfo, String> {
         if self.in_header_block {
             return Err("Header table size update not allowed during header block".to_string());
         }
@@ -731,7 +759,11 @@ impl HpackContext {
         }
     }
 
-    fn process_literal_header_with_indexing(&mut self, name: &str, value: &str) -> Result<(), String> {
+    fn process_literal_header_with_indexing(
+        &mut self,
+        name: &str,
+        value: &str,
+    ) -> Result<(), String> {
         self.add_to_dynamic_table(name, value)
     }
 

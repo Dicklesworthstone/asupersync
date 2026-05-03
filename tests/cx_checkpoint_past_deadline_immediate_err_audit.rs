@@ -142,8 +142,8 @@
 //! would all be caught by the structural pins below.
 
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 fn read(rel: &str) -> String {
     let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(rel);
@@ -184,7 +184,9 @@ fn checkpoint_budget_exhaustion_checks_is_past_deadline_first() {
     let source = read("src/cx/cx.rs");
 
     let fn_marker = "fn checkpoint_budget_exhaustion(";
-    let start = source.find(fn_marker).expect("checkpoint_budget_exhaustion fn");
+    let start = source
+        .find(fn_marker)
+        .expect("checkpoint_budget_exhaustion fn");
     let body_end = source[start..]
         .find("\n    }\n")
         .expect("checkpoint_budget_exhaustion close");
@@ -207,7 +209,9 @@ fn checkpoint_budget_exhaustion_checks_is_past_deadline_first() {
 
     // The Deadline kind must be stamped on the reason.
     assert!(
-        body.contains("CancelReason::with_origin(CancelKind::Deadline, region, now).with_task(task)"),
+        body.contains(
+            "CancelReason::with_origin(CancelKind::Deadline, region, now).with_task(task)"
+        ),
         "REGRESSION: checkpoint_budget_exhaustion no longer \
          stamps CancelKind::Deadline on past-deadline. The \
          cancel reason loses its deadline attribution — \
@@ -237,8 +241,7 @@ fn checkpoint_fast_path_falls_through_when_exhausted_is_some() {
     let body = &source[start..safe_end];
 
     assert!(
-        body.contains("if !cancelled && !exhausted {")
-            && body.contains("return Ok(());"),
+        body.contains("if !cancelled && !exhausted {") && body.contains("return Ok(());"),
         "REGRESSION: fast-path early-return predicate is no \
          longer `!cancelled && !exhausted`. Past-deadline \
          tasks may take the early Ok path — operators \
@@ -365,10 +368,7 @@ fn checkpoint_slow_path_runs_same_call_no_yield_for_past_deadline() {
         .unwrap_or(window_end);
     let body = &source[pos..safe_end];
 
-    let suspect_yield = [
-        ".await;",
-        "return Poll::Pending",
-    ];
+    let suspect_yield = [".await;", "return Poll::Pending"];
     for pat in &suspect_yield {
         assert!(
             !body.contains(pat),
@@ -425,7 +425,9 @@ fn budget_exhaustion_emits_evidence_for_deadline_observability() {
     // The exhaustion_kind label is "time" for deadline
     // (set in checkpoint_budget_exhaustion).
     let cb_marker = "fn checkpoint_budget_exhaustion(";
-    let cb_start = source.find(cb_marker).expect("checkpoint_budget_exhaustion fn");
+    let cb_start = source
+        .find(cb_marker)
+        .expect("checkpoint_budget_exhaustion fn");
     let cb_body_end = source[cb_start..]
         .find("\n    }\n")
         .expect("checkpoint_budget_exhaustion close");

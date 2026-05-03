@@ -115,6 +115,27 @@ impl<T: Send> FaaFifoQueue<T> {
     }
 
     #[inline]
+    pub(crate) fn pop_batch_into(&self, max: usize, out: &mut Vec<T>) -> usize {
+        if max == 0 {
+            return 0;
+        }
+
+        let start_len = out.len();
+        for _ in 0..max {
+            match self.inner.dequeue() {
+                Some(item) => out.push(item),
+                None => break,
+            }
+        }
+
+        let drained = out.len().saturating_sub(start_len);
+        if drained > 0 {
+            Self::saturating_sub(&self.count, drained);
+        }
+        drained
+    }
+
+    #[inline]
     pub(crate) fn len(&self) -> usize {
         self.count.load(Ordering::Relaxed)
     }

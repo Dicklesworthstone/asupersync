@@ -1,7 +1,7 @@
 #![no_main]
 
-use libfuzzer_sys::fuzz_target;
 use arbitrary::Arbitrary;
+use libfuzzer_sys::fuzz_target;
 use std::collections::HashMap;
 
 /// Fuzz target for HTTP/2 pseudo-header uppercase validation.
@@ -70,7 +70,13 @@ impl MockUppercaseHeaderConnection {
     }
 
     /// Validate a header field name according to RFC 7540 §8.1.2
-    fn validate_header_field_name(&mut self, stream_id: u32, name: &str, value: &str, is_pseudo: bool) -> Result<(), H2Error> {
+    fn validate_header_field_name(
+        &mut self,
+        stream_id: u32,
+        name: &str,
+        value: &str,
+        is_pseudo: bool,
+    ) -> Result<(), H2Error> {
         // Check if connection is already in error state
         if let Some(ref error) = self.connection_error {
             return Err(error.clone());
@@ -78,11 +84,14 @@ impl MockUppercaseHeaderConnection {
 
         // Ensure stream exists
         if !self.stream_state.contains_key(&stream_id) {
-            self.stream_state.insert(stream_id, StreamState {
-                id: stream_id,
-                state: StreamStateMachine::Open,
-                headers_complete: false,
-            });
+            self.stream_state.insert(
+                stream_id,
+                StreamState {
+                    id: stream_id,
+                    state: StreamStateMachine::Open,
+                    headers_complete: false,
+                },
+            );
         }
 
         let stream = self.stream_state.get(&stream_id).unwrap();
@@ -146,8 +155,23 @@ impl MockUppercaseHeaderConnection {
         //         "^" / "_" / "`" / "|" / "~" / DIGIT / ALPHA
         for c in name.chars() {
             match c {
-                'a'..='z' | '0'..='9' | '!' | '#' | '$' | '%' | '&' | '\'' | '*' |
-                '+' | '-' | '.' | '^' | '_' | '`' | '|' | '~' => {
+                'a'..='z'
+                | '0'..='9'
+                | '!'
+                | '#'
+                | '$'
+                | '%'
+                | '&'
+                | '\''
+                | '*'
+                | '+'
+                | '-'
+                | '.'
+                | '^'
+                | '_'
+                | '`'
+                | '|'
+                | '~' => {
                     // Valid token character
                 }
                 ':' if is_pseudo && name.starts_with(':') => {
@@ -235,12 +259,8 @@ fuzz_target!(|data: &[u8]| {
     let expected = classify_test_case(&test);
 
     // Test the header field validation
-    let result = connection.validate_header_field_name(
-        stream_id,
-        &test.name,
-        &test.value,
-        test.is_pseudo
-    );
+    let result =
+        connection.validate_header_field_name(stream_id, &test.name, &test.value, test.is_pseudo);
 
     match expected {
         ExpectedResult::Valid => {
@@ -257,13 +277,18 @@ fuzz_target!(|data: &[u8]| {
             }
 
             // Verify connection is still healthy
-            assert!(connection.get_connection_state().is_none(),
-                "Connection should not be in error state for valid header");
+            assert!(
+                connection.get_connection_state().is_none(),
+                "Connection should not be in error state for valid header"
+            );
 
             // Verify stream is still open
             if let Some(stream) = connection.get_stream_state(stream_id) {
-                assert_ne!(stream.state, StreamStateMachine::Closed(H2Error::ProtocolError),
-                    "Stream should not be closed for valid header");
+                assert_ne!(
+                    stream.state,
+                    StreamStateMachine::Closed(H2Error::ProtocolError),
+                    "Stream should not be closed for valid header"
+                );
             }
         }
 
@@ -272,13 +297,19 @@ fuzz_target!(|data: &[u8]| {
             match result {
                 Err(H2Error::ProtocolError) => {
                     // Expected! Verify connection state reflects the error
-                    assert_eq!(connection.get_connection_state(), Some(&H2Error::ProtocolError),
-                        "Connection should be in PROTOCOL_ERROR state");
+                    assert_eq!(
+                        connection.get_connection_state(),
+                        Some(&H2Error::ProtocolError),
+                        "Connection should be in PROTOCOL_ERROR state"
+                    );
 
                     // Verify stream is closed with PROTOCOL_ERROR
                     if let Some(stream) = connection.get_stream_state(stream_id) {
-                        assert_eq!(stream.state, StreamStateMachine::Closed(H2Error::ProtocolError),
-                            "Stream should be closed with PROTOCOL_ERROR");
+                        assert_eq!(
+                            stream.state,
+                            StreamStateMachine::Closed(H2Error::ProtocolError),
+                            "Stream should be closed with PROTOCOL_ERROR"
+                        );
                     }
                 }
                 Ok(_) => {
@@ -312,10 +343,17 @@ fuzz_target!(|data: &[u8]| {
         let test_result = test_conn.validate_header_field_name(1, name, value, *is_pseudo);
 
         // All of these should fail with PROTOCOL_ERROR due to uppercase
-        assert!(test_result.is_err(),
-            "Header '{}' with uppercase should be rejected", name);
-        assert_eq!(test_conn.get_connection_state(), Some(&H2Error::ProtocolError),
-            "Connection should be in error state after uppercase header '{}'", name);
+        assert!(
+            test_result.is_err(),
+            "Header '{}' with uppercase should be rejected",
+            name
+        );
+        assert_eq!(
+            test_conn.get_connection_state(),
+            Some(&H2Error::ProtocolError),
+            "Connection should be in error state after uppercase header '{}'",
+            name
+        );
     }
 
     // Test case 2: Lowercase equivalents should succeed (basic validation)
@@ -336,8 +374,11 @@ fuzz_target!(|data: &[u8]| {
         match test_result {
             Ok(_) => {
                 // Good! Verify connection remains healthy
-                assert!(test_conn.get_connection_state().is_none(),
-                    "Connection should remain healthy for lowercase header '{}'", name);
+                assert!(
+                    test_conn.get_connection_state().is_none(),
+                    "Connection should remain healthy for lowercase header '{}'",
+                    name
+                );
             }
             Err(_) => {
                 // May fail for other reasons (unknown pseudo-header, etc.), but not for case

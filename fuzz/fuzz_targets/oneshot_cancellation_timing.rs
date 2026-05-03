@@ -3,9 +3,9 @@
 use arbitrary::Arbitrary;
 use asupersync::channel::oneshot::{self, RecvError, SendError, TryRecvError};
 use asupersync::cx::Cx;
+use asupersync::types::Budget;
 use asupersync::util::ArenaIndex;
 use asupersync::{RegionId, TaskId};
-use asupersync::types::Budget;
 use libfuzzer_sys::fuzz_target;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -253,7 +253,13 @@ impl CancellationTracker {
         });
     }
 
-    fn record_reserve_attempt(&mut self, channel_id: u8, sender_id: u8, success: bool, reason: String) {
+    fn record_reserve_attempt(
+        &mut self,
+        channel_id: u8,
+        sender_id: u8,
+        success: bool,
+        reason: String,
+    ) {
         self.stats.reserve_attempts += 1;
         if success {
             self.stats.reserve_successes += 1;
@@ -296,7 +302,13 @@ impl CancellationTracker {
         });
     }
 
-    fn record_convenience_send(&mut self, channel_id: u8, value: u32, success: bool, reason: String) {
+    fn record_convenience_send(
+        &mut self,
+        channel_id: u8,
+        value: u32,
+        success: bool,
+        reason: String,
+    ) {
         self.stats.send_attempts += 1;
         if success {
             self.stats.send_successes += 1;
@@ -305,13 +317,14 @@ impl CancellationTracker {
                 channel_info.expected_value = Some(value);
             }
         }
-        self.operations_log.push(OperationEvent::ConvenienceSendAttempted {
-            channel_id,
-            value,
-            success,
-            reason,
-            timestamp: Instant::now(),
-        });
+        self.operations_log
+            .push(OperationEvent::ConvenienceSendAttempted {
+                channel_id,
+                value,
+                success,
+                reason,
+                timestamp: Instant::now(),
+            });
     }
 
     fn record_try_receive(&mut self, channel_id: u8, result: &str) {
@@ -323,20 +336,22 @@ impl CancellationTracker {
                 channel_info.channel_state = ChannelState::Closed;
             }
         }
-        self.operations_log.push(OperationEvent::TryReceiveAttempted {
-            channel_id,
-            result: result.to_string(),
-            timestamp: Instant::now(),
-        });
+        self.operations_log
+            .push(OperationEvent::TryReceiveAttempted {
+                channel_id,
+                result: result.to_string(),
+                timestamp: Instant::now(),
+            });
     }
 
     fn record_poll_receive(&mut self, channel_id: u8, result: &str) {
         // Don't count polls as receive attempts
-        self.operations_log.push(OperationEvent::PollReceiveAttempted {
-            channel_id,
-            result: result.to_string(),
-            timestamp: Instant::now(),
-        });
+        self.operations_log
+            .push(OperationEvent::PollReceiveAttempted {
+                channel_id,
+                result: result.to_string(),
+                timestamp: Instant::now(),
+            });
     }
 
     fn record_context_cancelled(&mut self, target_id: u8) {
@@ -455,9 +470,14 @@ fn execute_and_verify_cancellation_correctness(operations: Vec<OneshotOperation>
     let mut tracker = CancellationTracker::new();
 
     // Storage for actual channel objects
-    let mut channels: std::collections::HashMap<u8, (oneshot::Sender<u32>, oneshot::Receiver<u32>)> = std::collections::HashMap::new();
-    let mut permits: std::collections::HashMap<u8, Box<dyn std::any::Any + Send>> = std::collections::HashMap::new();
-    let mut receivers: std::collections::HashMap<u8, oneshot::Receiver<u32>> = std::collections::HashMap::new();
+    let mut channels: std::collections::HashMap<
+        u8,
+        (oneshot::Sender<u32>, oneshot::Receiver<u32>),
+    > = std::collections::HashMap::new();
+    let mut permits: std::collections::HashMap<u8, Box<dyn std::any::Any + Send>> =
+        std::collections::HashMap::new();
+    let mut receivers: std::collections::HashMap<u8, oneshot::Receiver<u32>> =
+        std::collections::HashMap::new();
 
     let start_time = Instant::now();
 
@@ -478,7 +498,10 @@ fn execute_and_verify_cancellation_correctness(operations: Vec<OneshotOperation>
                 }
             }
 
-            OneshotOperation::TryReserve { channel_id, sender_id } => {
+            OneshotOperation::TryReserve {
+                channel_id,
+                sender_id,
+            } => {
                 let channel_key = channel_id % (MAX_CHANNELS as u8);
                 let sender_key = sender_id % (MAX_SENDERS as u8);
 
@@ -492,21 +515,41 @@ fn execute_and_verify_cancellation_correctness(operations: Vec<OneshotOperation>
 
                     match sender.reserve(&cx) {
                         Ok(permit) => {
-                            tracker.record_reserve_attempt(channel_key, sender_key, true, "success".to_string());
+                            tracker.record_reserve_attempt(
+                                channel_key,
+                                sender_key,
+                                true,
+                                "success".to_string(),
+                            );
                             permits.insert(sender_key, Box::new(permit));
                             receivers.insert(channel_key, receiver);
                         }
                         Err(SendError::Cancelled(())) => {
-                            tracker.record_reserve_attempt(channel_key, sender_key, false, "cancelled".to_string());
+                            tracker.record_reserve_attempt(
+                                channel_key,
+                                sender_key,
+                                false,
+                                "cancelled".to_string(),
+                            );
                             receivers.insert(channel_key, receiver);
                         }
                         Err(SendError::Disconnected(())) => {
-                            tracker.record_reserve_attempt(channel_key, sender_key, false, "disconnected".to_string());
+                            tracker.record_reserve_attempt(
+                                channel_key,
+                                sender_key,
+                                false,
+                                "disconnected".to_string(),
+                            );
                             // Receiver was dropped, don't put it back
                         }
                     }
                 } else {
-                    tracker.record_reserve_attempt(channel_key, sender_key, false, "no_sender".to_string());
+                    tracker.record_reserve_attempt(
+                        channel_key,
+                        sender_key,
+                        false,
+                        "no_sender".to_string(),
+                    );
                 }
             }
 
@@ -540,20 +583,40 @@ fn execute_and_verify_cancellation_correctness(operations: Vec<OneshotOperation>
 
                     match sender.send(&cx, value) {
                         Ok(()) => {
-                            tracker.record_convenience_send(channel_key, value, true, "success".to_string());
+                            tracker.record_convenience_send(
+                                channel_key,
+                                value,
+                                true,
+                                "success".to_string(),
+                            );
                             receivers.insert(channel_key, receiver);
                         }
                         Err(SendError::Cancelled(returned_value)) => {
-                            tracker.record_convenience_send(channel_key, returned_value, false, "cancelled".to_string());
+                            tracker.record_convenience_send(
+                                channel_key,
+                                returned_value,
+                                false,
+                                "cancelled".to_string(),
+                            );
                             receivers.insert(channel_key, receiver);
                         }
                         Err(SendError::Disconnected(returned_value)) => {
-                            tracker.record_convenience_send(channel_key, returned_value, false, "disconnected".to_string());
+                            tracker.record_convenience_send(
+                                channel_key,
+                                returned_value,
+                                false,
+                                "disconnected".to_string(),
+                            );
                             // Receiver was dropped
                         }
                     }
                 } else {
-                    tracker.record_convenience_send(channel_key, value, false, "no_channel".to_string());
+                    tracker.record_convenience_send(
+                        channel_key,
+                        value,
+                        false,
+                        "no_channel".to_string(),
+                    );
                 }
             }
 
@@ -591,7 +654,8 @@ fn execute_and_verify_cancellation_correctness(operations: Vec<OneshotOperation>
 
                     match future.as_mut().poll(&mut context) {
                         Poll::Ready(Ok(value)) => {
-                            tracker.record_poll_receive(channel_key, &format!("Ready(Ok({}))", value));
+                            tracker
+                                .record_poll_receive(channel_key, &format!("Ready(Ok({}))", value));
                             // Channel consumed
                         }
                         Poll::Ready(Err(RecvError::Closed)) => {
@@ -603,7 +667,10 @@ fn execute_and_verify_cancellation_correctness(operations: Vec<OneshotOperation>
                             // Channel cancelled
                         }
                         Poll::Ready(Err(RecvError::PolledAfterCompletion)) => {
-                            tracker.record_poll_receive(channel_key, "Ready(Err(PolledAfterCompletion))");
+                            tracker.record_poll_receive(
+                                channel_key,
+                                "Ready(Err(PolledAfterCompletion))",
+                            );
                         }
                         Poll::Pending => {
                             tracker.record_poll_receive(channel_key, "Pending");
@@ -665,7 +732,10 @@ mod tests {
     fn test_simple_send_receive() {
         let operations = vec![
             OneshotOperation::CreateChannel { channel_id: 1 },
-            OneshotOperation::ConvenienceSend { channel_id: 1, value: 42 },
+            OneshotOperation::ConvenienceSend {
+                channel_id: 1,
+                value: 42,
+            },
             OneshotOperation::TryReceive { channel_id: 1 },
         ];
         execute_and_verify_cancellation_correctness(operations);
@@ -675,8 +745,14 @@ mod tests {
     fn test_reserve_then_send() {
         let operations = vec![
             OneshotOperation::CreateChannel { channel_id: 1 },
-            OneshotOperation::TryReserve { channel_id: 1, sender_id: 1 },
-            OneshotOperation::SendValue { sender_id: 1, value: 99 },
+            OneshotOperation::TryReserve {
+                channel_id: 1,
+                sender_id: 1,
+            },
+            OneshotOperation::SendValue {
+                sender_id: 1,
+                value: 99,
+            },
             OneshotOperation::TryReceive { channel_id: 1 },
         ];
         execute_and_verify_cancellation_correctness(operations);
@@ -686,9 +762,15 @@ mod tests {
     fn test_cancellation_timing() {
         let operations = vec![
             OneshotOperation::CreateChannel { channel_id: 1 },
-            OneshotOperation::TryReserve { channel_id: 1, sender_id: 1 },
+            OneshotOperation::TryReserve {
+                channel_id: 1,
+                sender_id: 1,
+            },
             OneshotOperation::CancelContext { target_id: 1 },
-            OneshotOperation::SendValue { sender_id: 1, value: 42 },
+            OneshotOperation::SendValue {
+                sender_id: 1,
+                value: 42,
+            },
             OneshotOperation::PollReceive { channel_id: 1 },
         ];
         execute_and_verify_cancellation_correctness(operations);
@@ -698,7 +780,10 @@ mod tests {
     fn test_drop_scenarios() {
         let operations = vec![
             OneshotOperation::CreateChannel { channel_id: 1 },
-            OneshotOperation::TryReserve { channel_id: 1, sender_id: 1 },
+            OneshotOperation::TryReserve {
+                channel_id: 1,
+                sender_id: 1,
+            },
             OneshotOperation::DropSender { sender_id: 1 },
             OneshotOperation::TryReceive { channel_id: 1 },
         ];
@@ -710,7 +795,10 @@ mod tests {
         let operations = vec![
             OneshotOperation::CreateChannel { channel_id: 1 },
             OneshotOperation::DropReceiver { channel_id: 1 },
-            OneshotOperation::ConvenienceSend { channel_id: 1, value: 42 },
+            OneshotOperation::ConvenienceSend {
+                channel_id: 1,
+                value: 42,
+            },
         ];
         execute_and_verify_cancellation_correctness(operations);
     }

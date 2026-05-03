@@ -22,8 +22,8 @@
 
 use arbitrary::Arbitrary;
 use asupersync::plan::latency_algebra::{
-    horizontal_deviation, min_plus_convolution, min_plus_deconvolution, vertical_deviation,
-    PiecewiseLinearCurve, Segment,
+    PiecewiseLinearCurve, Segment, horizontal_deviation, min_plus_convolution,
+    min_plus_deconvolution, vertical_deviation,
 };
 use libfuzzer_sys::fuzz_target;
 

@@ -11,8 +11,8 @@
 
 #![no_main]
 
-use libfuzzer_sys::fuzz_target;
 use arbitrary::Arbitrary;
+use libfuzzer_sys::fuzz_target;
 
 /// Configuration for gRPC compressed flag mismatch testing
 #[derive(Debug, Arbitrary)]
@@ -72,7 +72,7 @@ impl GrpcCompressedFlagConfig {
             CompressionScenario::FlagInvalidValue => {
                 // Force invalid compressed flag
                 self.compressed_flag = (self.compressed_flag % 254) + 2; // 2-255
-            },
+            }
             _ => {
                 // Normal flag values 0 or 1
                 self.compressed_flag = self.compressed_flag % 2;
@@ -88,24 +88,24 @@ impl GrpcCompressedFlagConfig {
             CompressionScenario::FlagCompressedPayloadRaw => {
                 // Flag=1 but payload is raw uncompressed data
                 self.payload.clone()
-            },
+            }
 
             CompressionScenario::FlagUncompressedPayloadGzip => {
                 // Flag=0 but payload is actually gzip compressed
                 compress_gzip(&self.payload)
-            },
+            }
 
             CompressionScenario::FlagUncompressedPayloadDeflate => {
                 // Flag=0 but payload is actually deflate compressed
                 compress_deflate(&self.payload)
-            },
+            }
 
             CompressionScenario::FlagCompressedPayloadMalformed => {
                 // Flag=1 but payload has invalid compression headers
                 let mut malformed = vec![0x1f, 0x8b]; // Partial gzip header
                 malformed.extend(&self.payload[..self.payload.len().min(10)]);
                 malformed
-            },
+            }
 
             CompressionScenario::FlagCompressedPayloadPartial => {
                 // Flag=1 but payload is only partially compressed
@@ -114,25 +114,25 @@ impl GrpcCompressedFlagConfig {
                 let mut partial = compressed[..split_point].to_vec();
                 partial.extend(&self.payload[split_point.min(self.payload.len())..]);
                 partial
-            },
+            }
 
             CompressionScenario::FlagInvalidValue => {
                 // Invalid flag value with regular payload
                 self.payload.clone()
-            },
+            }
 
             CompressionScenario::FlagUncompressedPayloadMixed => {
                 // Flag=0 but payload contains mixed compression
-                let mut mixed = compress_gzip(&self.payload[..self.payload.len()/2]);
-                mixed.extend(&self.payload[self.payload.len()/2..]);
+                let mut mixed = compress_gzip(&self.payload[..self.payload.len() / 2]);
+                mixed.extend(&self.payload[self.payload.len() / 2..]);
                 mixed
-            },
+            }
 
             CompressionScenario::FlagCompressedPayloadDouble => {
                 // Flag=1 with double-compressed payload
                 let first_compression = compress_gzip(&self.payload);
                 compress_gzip(&first_compression)
-            },
+            }
         }
     }
 
@@ -168,7 +168,8 @@ fn compress_gzip(data: &[u8]) -> Vec<u8> {
 fn compress_deflate(data: &[u8]) -> Vec<u8> {
     use std::io::Write;
 
-    let mut encoder = flate2::write::DeflateEncoder::new(Vec::new(), flate2::Compression::default());
+    let mut encoder =
+        flate2::write::DeflateEncoder::new(Vec::new(), flate2::Compression::default());
     let _ = encoder.write_all(data);
     encoder.finish().unwrap_or_else(|_| data.to_vec())
 }
@@ -215,9 +216,9 @@ fn analyze_grpc_compression(frame: &[u8]) -> Result<DecompressionResults, &'stat
     results.compression_detected = detect_compression(payload);
 
     // Check for flag mismatch
-    let flag_mismatch = (compressed_flag == 1 && !results.compression_detected) ||
-                       (compressed_flag == 0 && results.compression_detected) ||
-                       (compressed_flag > 1);
+    let flag_mismatch = (compressed_flag == 1 && !results.compression_detected)
+        || (compressed_flag == 0 && results.compression_detected)
+        || (compressed_flag > 1);
 
     if flag_mismatch {
         results.error_on_mismatch = true;
@@ -294,10 +295,11 @@ fn try_decompress_deflate(data: &[u8]) -> Result<Vec<u8>, std::io::Error> {
 
 fuzz_target!(|data: &[u8]| {
     // Parse fuzzer input into configuration
-    let mut config = match GrpcCompressedFlagConfig::arbitrary(&mut arbitrary::Unstructured::new(data)) {
-        Ok(config) => config,
-        Err(_) => return, // Invalid input, skip
-    };
+    let mut config =
+        match GrpcCompressedFlagConfig::arbitrary(&mut arbitrary::Unstructured::new(data)) {
+            Ok(config) => config,
+            Err(_) => return, // Invalid input, skip
+        };
     config.normalize();
 
     // Generate gRPC frame with potential compression flag mismatch
@@ -310,8 +312,10 @@ fuzz_target!(|data: &[u8]| {
 
             // Invariant 1: If flag=1, decompression should be attempted
             if results.expected_compressed {
-                assert!(results.decompression_attempted,
-                    "Decompression should be attempted when compressed flag is set");
+                assert!(
+                    results.decompression_attempted,
+                    "Decompression should be attempted when compressed flag is set"
+                );
             }
 
             // Invariant 2: Flag mismatch should be detected and handled
@@ -324,20 +328,26 @@ fuzz_target!(|data: &[u8]| {
 
                 match config.scenario {
                     CompressionScenario::FlagInvalidValue => {
-                        assert!(results.flag_value > 1,
-                            "Invalid flag values should be detected");
-                    },
+                        assert!(
+                            results.flag_value > 1,
+                            "Invalid flag values should be detected"
+                        );
+                    }
                     CompressionScenario::FlagCompressedPayloadRaw => {
                         assert_eq!(results.flag_value, 1);
-                        assert!(!results.compression_detected,
-                            "Raw payload should not appear compressed");
-                    },
-                    CompressionScenario::FlagUncompressedPayloadGzip |
-                    CompressionScenario::FlagUncompressedPayloadDeflate => {
+                        assert!(
+                            !results.compression_detected,
+                            "Raw payload should not appear compressed"
+                        );
+                    }
+                    CompressionScenario::FlagUncompressedPayloadGzip
+                    | CompressionScenario::FlagUncompressedPayloadDeflate => {
                         assert_eq!(results.flag_value, 0);
-                        assert!(results.compression_detected,
-                            "Compressed payload should be detected");
-                    },
+                        assert!(
+                            results.compression_detected,
+                            "Compressed payload should be detected"
+                        );
+                    }
                     _ => {
                         // Other scenarios should still maintain basic invariants
                     }
@@ -346,8 +356,10 @@ fuzz_target!(|data: &[u8]| {
 
             // Invariant 3: Decompression success should be consistent
             if results.decompression_attempted && results.decompression_succeeded {
-                assert!(results.decompressed_size > 0 || results.payload_size == 0,
-                    "Successful decompression should produce output");
+                assert!(
+                    results.decompressed_size > 0 || results.payload_size == 0,
+                    "Successful decompression should produce output"
+                );
             }
 
             // Invariant 4: Flag values should be within expected range for valid processing
@@ -357,7 +369,7 @@ fuzz_target!(|data: &[u8]| {
             }
 
             // Test completed without crashes - compression flag mismatch handling is working
-        },
+        }
         Err(_) => {
             // Frame parsing failed - this is acceptable for malformed input
             // The important thing is that it fails gracefully without crashes

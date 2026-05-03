@@ -100,7 +100,10 @@ fuzz_target!(|data: &[u8]| {
             // Invariant 4: validation determinism — second call yields
             // the same Ok variant.
             let result2 = asupersync::security::key::AuthKey::from_bytes(bytes);
-            assert!(result2.is_ok(), "validator non-deterministic: 2nd call rejected");
+            assert!(
+                result2.is_ok(),
+                "validator non-deterministic: 2nd call rejected"
+            );
         }
         Err(err) => {
             // Validator rejected. Ground truth must match: at least one
@@ -117,7 +120,10 @@ fuzz_target!(|data: &[u8]| {
 
             // Invariant 4: validation determinism.
             let result2 = asupersync::security::key::AuthKey::from_bytes(bytes);
-            assert!(result2.is_err(), "validator non-deterministic: 2nd call accepted");
+            assert!(
+                result2.is_err(),
+                "validator non-deterministic: 2nd call accepted"
+            );
 
             // Invariant 5: error Debug/Display must not panic on any
             // weak-key reason — these strings show up in operator logs.

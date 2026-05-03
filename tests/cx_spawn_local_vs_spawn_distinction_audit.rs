@@ -172,12 +172,7 @@ fn spawn_local_accepts_both_send_and_non_send_via_no_send_bound() {
 
     // No negative bound (which would require nightly +
     // harm legitimate Send users).
-    let suspect_negative_bounds = [
-        "F: !Send",
-        "Fut: !Send",
-        "F: ?Send",
-        "Fut: ?Send",
-    ];
+    let suspect_negative_bounds = ["F: !Send", "Fut: !Send", "F: ?Send", "Fut: ?Send"];
     for pat in &suspect_negative_bounds {
         assert!(
             !where_section.contains(pat),

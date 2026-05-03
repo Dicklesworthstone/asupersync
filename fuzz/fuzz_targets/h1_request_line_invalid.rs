@@ -1,7 +1,7 @@
 #![no_main]
 
-use libfuzzer_sys::fuzz_target;
 use arbitrary::Arbitrary;
+use libfuzzer_sys::fuzz_target;
 use std::collections::HashMap;
 
 /// Fuzz target for HTTP/1.1 request line validation.
@@ -171,9 +171,9 @@ impl MockRequestLineParser {
             parts[1]
         } else {
             // Handle case where target contains spaces (malformed but sometimes seen)
-            &parts[1..parts.len()-1].join(" ")
+            &parts[1..parts.len() - 1].join(" ")
         };
-        let version_str = parts[parts.len()-1];
+        let version_str = parts[parts.len() - 1];
 
         // Validate method
         self.validate_method(method)?;
@@ -220,25 +220,42 @@ impl MockRequestLineParser {
             for c in method.chars() {
                 match c {
                     // Valid token characters
-                    'a'..='z' | 'A'..='Z' | '0'..='9' |
-                    '!' | '#' | '$' | '%' | '&' | '\'' | '*' | '+' |
-                    '-' | '.' | '^' | '_' | '`' | '|' | '~' => {
+                    'a'..='z'
+                    | 'A'..='Z'
+                    | '0'..='9'
+                    | '!'
+                    | '#'
+                    | '$'
+                    | '%'
+                    | '&'
+                    | '\''
+                    | '*'
+                    | '+'
+                    | '-'
+                    | '.'
+                    | '^'
+                    | '_'
+                    | '`'
+                    | '|'
+                    | '~' => {
                         // Valid
                     }
                     // Invalid characters (separators, control chars, whitespace)
                     ' ' | '\t' | '\r' | '\n' => {
-                        return Err(RequestError::InvalidMethod(
-                            format!("Method contains whitespace: '{}'", c)
-                        ));
+                        return Err(RequestError::InvalidMethod(format!(
+                            "Method contains whitespace: '{}'",
+                            c
+                        )));
                     }
                     c if c.is_control() => {
                         self.stats.security_violations += 1;
                         return Err(RequestError::ControlCharacters);
                     }
                     _ => {
-                        return Err(RequestError::InvalidMethod(
-                            format!("Method contains invalid character: '{}'", c)
-                        ));
+                        return Err(RequestError::InvalidMethod(format!(
+                            "Method contains invalid character: '{}'",
+                            c
+                        )));
                     }
                 }
             }
@@ -280,7 +297,7 @@ impl MockRequestLineParser {
         // Expected format: HTTP/1.1, HTTP/1.0, etc.
         if !version_str.starts_with("HTTP/") {
             return Err(RequestError::InvalidVersion(
-                "Version must start with 'HTTP/'".to_string()
+                "Version must start with 'HTTP/'".to_string(),
             ));
         }
 
@@ -290,18 +307,18 @@ impl MockRequestLineParser {
         let parts: Vec<&str> = version_part.split('.').collect();
         if parts.len() != 2 {
             return Err(RequestError::InvalidVersion(
-                "Version must be in format 'major.minor'".to_string()
+                "Version must be in format 'major.minor'".to_string(),
             ));
         }
 
         // Parse major and minor versions
-        let major = parts[0].parse::<u8>().map_err(|_| {
-            RequestError::InvalidVersion("Invalid major version".to_string())
-        })?;
+        let major = parts[0]
+            .parse::<u8>()
+            .map_err(|_| RequestError::InvalidVersion("Invalid major version".to_string()))?;
 
-        let minor = parts[1].parse::<u8>().map_err(|_| {
-            RequestError::InvalidVersion("Invalid minor version".to_string())
-        })?;
+        let minor = parts[1]
+            .parse::<u8>()
+            .map_err(|_| RequestError::InvalidVersion("Invalid minor version".to_string()))?;
 
         let version = HttpVersion { major, minor };
 
@@ -338,22 +355,18 @@ impl MockRequestLineParser {
     fn check_ambiguity(&self, request: &RequestLine) -> Option<String> {
         // Check for ambiguous HTTP versions
         match (request.version.major, request.version.minor) {
-            (1, 10) => {
-                Some("HTTP/1.10 is ambiguous - could be 1.1.0 or 1.10".to_string())
-            }
-            (1, 2..=9) => {
-                Some(format!("HTTP/1.{} is non-standard", request.version.minor))
-            }
-            (2, 0) => {
-                Some("HTTP/2.0 should use HTTP/2 protocol, not HTTP/1.1".to_string())
-            }
+            (1, 10) => Some("HTTP/1.10 is ambiguous - could be 1.1.0 or 1.10".to_string()),
+            (1, 2..=9) => Some(format!("HTTP/1.{} is non-standard", request.version.minor)),
+            (2, 0) => Some("HTTP/2.0 should use HTTP/2 protocol, not HTTP/1.1".to_string()),
             _ => {
                 // Check other ambiguous cases
 
                 // Method case sensitivity
                 if request.method.chars().any(|c| c.is_lowercase()) {
-                    if matches!(request.method.to_uppercase().as_str(),
-                               "GET" | "POST" | "PUT" | "DELETE" | "HEAD" | "OPTIONS" | "PATCH") {
+                    if matches!(
+                        request.method.to_uppercase().as_str(),
+                        "GET" | "POST" | "PUT" | "DELETE" | "HEAD" | "OPTIONS" | "PATCH"
+                    ) {
                         return Some("Method should be uppercase".to_string());
                     }
                 }
@@ -381,95 +394,129 @@ impl MockRequestLineParser {
 fn generate_test_cases() -> Vec<(String, RequestParseResult)> {
     vec![
         // Valid request lines
-        ("GET / HTTP/1.1\r\n".to_string(),
-         RequestParseResult::Valid(RequestLine {
-             method: "GET".to_string(),
-             target: "/".to_string(),
-             version: HttpVersion { major: 1, minor: 1 },
-             raw_line: "GET / HTTP/1.1".to_string(),
-         })),
-
-        ("POST /api/users HTTP/1.0\r\n".to_string(),
-         RequestParseResult::Valid(RequestLine {
-             method: "POST".to_string(),
-             target: "/api/users".to_string(),
-             version: HttpVersion { major: 1, minor: 0 },
-             raw_line: "POST /api/users HTTP/1.0".to_string(),
-         })),
-
+        (
+            "GET / HTTP/1.1\r\n".to_string(),
+            RequestParseResult::Valid(RequestLine {
+                method: "GET".to_string(),
+                target: "/".to_string(),
+                version: HttpVersion { major: 1, minor: 1 },
+                raw_line: "GET / HTTP/1.1".to_string(),
+            }),
+        ),
+        (
+            "POST /api/users HTTP/1.0\r\n".to_string(),
+            RequestParseResult::Valid(RequestLine {
+                method: "POST".to_string(),
+                target: "/api/users".to_string(),
+                version: HttpVersion { major: 1, minor: 0 },
+                raw_line: "POST /api/users HTTP/1.0".to_string(),
+            }),
+        ),
         // Method with whitespace (must reject)
-        ("GET POST / HTTP/1.1\r\n".to_string(),
-         RequestParseResult::Invalid(RequestError::ExtraWhitespace)),
-
-        ("G ET / HTTP/1.1\r\n".to_string(),
-         RequestParseResult::Invalid(RequestError::InvalidMethod("Method contains whitespace: ' '".to_string()))),
-
+        (
+            "GET POST / HTTP/1.1\r\n".to_string(),
+            RequestParseResult::Invalid(RequestError::ExtraWhitespace),
+        ),
+        (
+            "G ET / HTTP/1.1\r\n".to_string(),
+            RequestParseResult::Invalid(RequestError::InvalidMethod(
+                "Method contains whitespace: ' '".to_string(),
+            )),
+        ),
         // Method with control characters (must reject)
-        ("GET\x00 / HTTP/1.1\r\n".to_string(),
-         RequestParseResult::Invalid(RequestError::ControlCharacters)),
-
-        ("GET\r / HTTP/1.1\r\n".to_string(),
-         RequestParseResult::Invalid(RequestError::InvalidMethod("Method contains whitespace: '\r'".to_string()))),
-
+        (
+            "GET\x00 / HTTP/1.1\r\n".to_string(),
+            RequestParseResult::Invalid(RequestError::ControlCharacters),
+        ),
+        (
+            "GET\r / HTTP/1.1\r\n".to_string(),
+            RequestParseResult::Invalid(RequestError::InvalidMethod(
+                "Method contains whitespace: '\r'".to_string(),
+            )),
+        ),
         // Path with control characters (must reject)
-        ("GET /\x00path HTTP/1.1\r\n".to_string(),
-         RequestParseResult::Invalid(RequestError::ControlCharacters)),
-
-        ("GET /\rpath HTTP/1.1\r\n".to_string(),
-         RequestParseResult::Invalid(RequestError::ControlCharacters)),
-
+        (
+            "GET /\x00path HTTP/1.1\r\n".to_string(),
+            RequestParseResult::Invalid(RequestError::ControlCharacters),
+        ),
+        (
+            "GET /\rpath HTTP/1.1\r\n".to_string(),
+            RequestParseResult::Invalid(RequestError::ControlCharacters),
+        ),
         // Ambiguous HTTP version (consistency required)
-        ("GET / HTTP/1.10\r\n".to_string(),
-         RequestParseResult::Ambiguous(
-             RequestLine {
-                 method: "GET".to_string(),
-                 target: "/".to_string(),
-                 version: HttpVersion { major: 1, minor: 10 },
-                 raw_line: "GET / HTTP/1.10".to_string(),
-             },
-             "HTTP/1.10 is ambiguous - could be 1.1.0 or 1.10".to_string()
-         )),
-
+        (
+            "GET / HTTP/1.10\r\n".to_string(),
+            RequestParseResult::Ambiguous(
+                RequestLine {
+                    method: "GET".to_string(),
+                    target: "/".to_string(),
+                    version: HttpVersion {
+                        major: 1,
+                        minor: 10,
+                    },
+                    raw_line: "GET / HTTP/1.10".to_string(),
+                },
+                "HTTP/1.10 is ambiguous - could be 1.1.0 or 1.10".to_string(),
+            ),
+        ),
         // Invalid HTTP version format
-        ("GET / HTTP/1\r\n".to_string(),
-         RequestParseResult::Invalid(RequestError::InvalidVersion("Version must be in format 'major.minor'".to_string()))),
-
-        ("GET / HTTP1.1\r\n".to_string(),
-         RequestParseResult::Invalid(RequestError::InvalidVersion("Version must start with 'HTTP/'".to_string()))),
-
-        ("GET / HTTP/1.1.0\r\n".to_string(),
-         RequestParseResult::Invalid(RequestError::InvalidVersion("Version must be in format 'major.minor'".to_string()))),
-
+        (
+            "GET / HTTP/1\r\n".to_string(),
+            RequestParseResult::Invalid(RequestError::InvalidVersion(
+                "Version must be in format 'major.minor'".to_string(),
+            )),
+        ),
+        (
+            "GET / HTTP1.1\r\n".to_string(),
+            RequestParseResult::Invalid(RequestError::InvalidVersion(
+                "Version must start with 'HTTP/'".to_string(),
+            )),
+        ),
+        (
+            "GET / HTTP/1.1.0\r\n".to_string(),
+            RequestParseResult::Invalid(RequestError::InvalidVersion(
+                "Version must be in format 'major.minor'".to_string(),
+            )),
+        ),
         // Missing components
-        ("GET /\r\n".to_string(),
-         RequestParseResult::Invalid(RequestError::MissingComponents)),
-
-        ("GET\r\n".to_string(),
-         RequestParseResult::Invalid(RequestError::MissingComponents)),
-
+        (
+            "GET /\r\n".to_string(),
+            RequestParseResult::Invalid(RequestError::MissingComponents),
+        ),
+        (
+            "GET\r\n".to_string(),
+            RequestParseResult::Invalid(RequestError::MissingComponents),
+        ),
         // Extra whitespace
-        ("GET  /  HTTP/1.1\r\n".to_string(),
-         RequestParseResult::Invalid(RequestError::ExtraWhitespace)),
-
+        (
+            "GET  /  HTTP/1.1\r\n".to_string(),
+            RequestParseResult::Invalid(RequestError::ExtraWhitespace),
+        ),
         // Empty method
-        (" / HTTP/1.1\r\n".to_string(),
-         RequestParseResult::Invalid(RequestError::InvalidMethod("Empty method".to_string()))),
-
+        (
+            " / HTTP/1.1\r\n".to_string(),
+            RequestParseResult::Invalid(RequestError::InvalidMethod("Empty method".to_string())),
+        ),
         // Lowercase method (ambiguous)
-        ("get / HTTP/1.1\r\n".to_string(),
-         RequestParseResult::Ambiguous(
-             RequestLine {
-                 method: "get".to_string(),
-                 target: "/".to_string(),
-                 version: HttpVersion { major: 1, minor: 1 },
-                 raw_line: "get / HTTP/1.1".to_string(),
-             },
-             "Method should be uppercase".to_string()
-         )),
-
+        (
+            "get / HTTP/1.1\r\n".to_string(),
+            RequestParseResult::Ambiguous(
+                RequestLine {
+                    method: "get".to_string(),
+                    target: "/".to_string(),
+                    version: HttpVersion { major: 1, minor: 1 },
+                    raw_line: "get / HTTP/1.1".to_string(),
+                },
+                "Method should be uppercase".to_string(),
+            ),
+        ),
         // Invalid method characters
-        ("GET() / HTTP/1.1\r\n".to_string(),
-         RequestParseResult::Invalid(RequestError::InvalidMethod("Method contains invalid character: '('".to_string()))),
+        (
+            "GET() / HTTP/1.1\r\n".to_string(),
+            RequestParseResult::Invalid(RequestError::InvalidMethod(
+                "Method contains invalid character: '('".to_string(),
+            )),
+        ),
     ]
 }
 
@@ -518,24 +565,30 @@ fuzz_target!(|data: &[u8]| {
             assert!(request.version.major > 0, "Valid version major must be > 0");
 
             // Method should not contain whitespace or control chars for valid requests
-            assert!(!request.method.chars().any(|c| c.is_whitespace()),
-                "Valid method should not contain whitespace");
-            assert!(!request.method.chars().any(|c| c.is_control()),
-                "Valid method should not contain control characters");
+            assert!(
+                !request.method.chars().any(|c| c.is_whitespace()),
+                "Valid method should not contain whitespace"
+            );
+            assert!(
+                !request.method.chars().any(|c| c.is_control()),
+                "Valid method should not contain control characters"
+            );
         }
 
         Ok(RequestParseResult::Invalid(error)) => {
             // Invalid results should have a clear reason
             match error {
-                RequestError::InvalidMethod(_) |
-                RequestError::InvalidTarget(_) |
-                RequestError::InvalidVersion(_) |
-                RequestError::ControlCharacters => {
+                RequestError::InvalidMethod(_)
+                | RequestError::InvalidTarget(_)
+                | RequestError::InvalidVersion(_)
+                | RequestError::ControlCharacters => {
                     // These are expected rejection reasons
                 }
                 RequestError::LineTooLong => {
-                    assert!(parser.get_stats().security_violations > 0,
-                        "Security violations should be tracked");
+                    assert!(
+                        parser.get_stats().security_violations > 0,
+                        "Security violations should be tracked"
+                    );
                 }
                 _ => {
                     // Other errors are also acceptable
@@ -546,20 +599,28 @@ fuzz_target!(|data: &[u8]| {
         Ok(RequestParseResult::Ambiguous(request, reason)) => {
             // Ambiguous results should still be parseable but flagged
             assert!(!reason.is_empty(), "Ambiguous results must have a reason");
-            assert!(parser.get_stats().ambiguous_lines > 0,
-                "Ambiguous lines should be counted");
+            assert!(
+                parser.get_stats().ambiguous_lines > 0,
+                "Ambiguous lines should be counted"
+            );
 
             // The request should still be structurally valid
-            assert!(!request.method.is_empty(), "Ambiguous method cannot be empty");
-            assert!(!request.target.is_empty(), "Ambiguous target cannot be empty");
+            assert!(
+                !request.method.is_empty(),
+                "Ambiguous method cannot be empty"
+            );
+            assert!(
+                !request.target.is_empty(),
+                "Ambiguous target cannot be empty"
+            );
         }
 
         Err(error) => {
             // Direct parsing errors
             match error {
-                RequestError::MissingComponents |
-                RequestError::ExtraWhitespace |
-                RequestError::MalformedLine => {
+                RequestError::MissingComponents
+                | RequestError::ExtraWhitespace
+                | RequestError::MalformedLine => {
                     // Expected for malformed input
                 }
                 _ => {
@@ -594,12 +655,21 @@ fuzz_target!(|data: &[u8]| {
             RequestParseResult::Valid(ref expected_request) => {
                 match test_result {
                     Ok(RequestParseResult::Valid(actual_request)) => {
-                        assert_eq!(actual_request.method, expected_request.method,
-                            "Method mismatch for line: {}", test_line);
-                        assert_eq!(actual_request.target, expected_request.target,
-                            "Target mismatch for line: {}", test_line);
-                        assert_eq!(actual_request.version, expected_request.version,
-                            "Version mismatch for line: {}", test_line);
+                        assert_eq!(
+                            actual_request.method, expected_request.method,
+                            "Method mismatch for line: {}",
+                            test_line
+                        );
+                        assert_eq!(
+                            actual_request.target, expected_request.target,
+                            "Target mismatch for line: {}",
+                            test_line
+                        );
+                        assert_eq!(
+                            actual_request.version, expected_request.version,
+                            "Version mismatch for line: {}",
+                            test_line
+                        );
                     }
                     _ => {
                         // May fail for other reasons in fuzzing context
@@ -610,8 +680,7 @@ fuzz_target!(|data: &[u8]| {
             RequestParseResult::Invalid(_) => {
                 // Should result in error
                 match test_result {
-                    Ok(RequestParseResult::Invalid(_)) |
-                    Err(_) => {
+                    Ok(RequestParseResult::Invalid(_)) | Err(_) => {
                         // Expected
                     }
                     _ => {
@@ -643,13 +712,19 @@ fuzz_target!(|data: &[u8]| {
     match (&result, &result2) {
         (Ok(r1), Ok(r2)) => {
             // Results should be identical for same input
-            assert_eq!(std::mem::discriminant(r1), std::mem::discriminant(r2),
-                "Consistent parsing should give same result type");
+            assert_eq!(
+                std::mem::discriminant(r1),
+                std::mem::discriminant(r2),
+                "Consistent parsing should give same result type"
+            );
         }
         (Err(e1), Err(e2)) => {
             // Error types should match
-            assert_eq!(std::mem::discriminant(e1), std::mem::discriminant(e2),
-                "Consistent parsing should give same error type");
+            assert_eq!(
+                std::mem::discriminant(e1),
+                std::mem::discriminant(e2),
+                "Consistent parsing should give same error type"
+            );
         }
         _ => {
             // Mixed results indicate inconsistency

@@ -1,7 +1,7 @@
 #![no_main]
 
-use libfuzzer_sys::fuzz_target;
 use arbitrary::Arbitrary;
+use libfuzzer_sys::fuzz_target;
 use std::collections::{HashMap, HashSet};
 
 /// Fuzz target for HTTP/2 PRIORITY frame dependency cycle detection.
@@ -148,7 +148,10 @@ impl MockPriorityManager {
     }
 
     /// Apply a PRIORITY frame with cycle detection
-    fn apply_priority_frame(&mut self, frame: &PriorityFrame) -> Result<PriorityResult, PriorityError> {
+    fn apply_priority_frame(
+        &mut self,
+        frame: &PriorityFrame,
+    ) -> Result<PriorityResult, PriorityError> {
         // Basic validation
         if frame.stream_id == 0 {
             return Err(PriorityError::InvalidStreamId);
@@ -171,30 +174,38 @@ impl MockPriorityManager {
 
         // Create stream if it doesn't exist
         if !self.tree.streams.contains_key(&frame.stream_id) {
-            self.tree.streams.insert(frame.stream_id, StreamNode {
-                id: frame.stream_id,
-                parent: 0,
-                children: Vec::new(),
-                weight: 16, // Default weight
-                exclusive: false,
-            });
+            self.tree.streams.insert(
+                frame.stream_id,
+                StreamNode {
+                    id: frame.stream_id,
+                    parent: 0,
+                    children: Vec::new(),
+                    weight: 16, // Default weight
+                    exclusive: false,
+                },
+            );
         }
 
         // Create dependency stream if it doesn't exist (and not root)
         if frame.dependency != 0 && !self.tree.streams.contains_key(&frame.dependency) {
-            self.tree.streams.insert(frame.dependency, StreamNode {
-                id: frame.dependency,
-                parent: 0,
-                children: Vec::new(),
-                weight: 16,
-                exclusive: false,
-            });
+            self.tree.streams.insert(
+                frame.dependency,
+                StreamNode {
+                    id: frame.dependency,
+                    parent: 0,
+                    children: Vec::new(),
+                    weight: 16,
+                    exclusive: false,
+                },
+            );
         }
 
         // Check for cycles before applying the change
         if let Some(cycle) = self.detect_cycle(frame.stream_id, frame.dependency)? {
             if self.policy.reject_all_cycles {
-                return Ok(PriorityResult::ProtocolError(PriorityError::CyclicDependency(cycle)));
+                return Ok(PriorityResult::ProtocolError(
+                    PriorityError::CyclicDependency(cycle),
+                ));
             } else if self.policy.allow_cycle_resolution {
                 // Attempt to resolve the cycle per RFC 7540 §5.3.3
                 match self.resolve_cycle(frame)? {
@@ -220,7 +231,11 @@ impl MockPriorityManager {
     }
 
     /// Detect if setting stream_id to depend on dependency would create a cycle
-    fn detect_cycle(&self, stream_id: u32, dependency: u32) -> Result<Option<Vec<u32>>, PriorityError> {
+    fn detect_cycle(
+        &self,
+        stream_id: u32,
+        dependency: u32,
+    ) -> Result<Option<Vec<u32>>, PriorityError> {
         if dependency == 0 {
             return Ok(None); // Root dependency cannot create cycle
         }
@@ -296,7 +311,10 @@ impl MockPriorityManager {
         let new_dependency = frame.dependency;
 
         // Get current parent of the stream we're reprioritizing
-        let old_parent = self.tree.streams.get(&stream_id)
+        let old_parent = self
+            .tree
+            .streams
+            .get(&stream_id)
             .map(|s| s.parent)
             .unwrap_or(0);
 
@@ -461,17 +479,14 @@ fn generate_test_cases() -> Vec<(String, Vec<PriorityFrame>, PriorityResult)> {
         // Test case 1: Direct self-dependency (MUST be PROTOCOL_ERROR)
         (
             "Direct self-dependency".to_string(),
-            vec![
-                PriorityFrame {
-                    stream_id: 1,
-                    dependency: 1, // Stream 1 depends on itself
-                    weight: 16,
-                    exclusive: false,
-                }
-            ],
-            PriorityResult::ProtocolError(PriorityError::SelfDependency)
+            vec![PriorityFrame {
+                stream_id: 1,
+                dependency: 1, // Stream 1 depends on itself
+                weight: 16,
+                exclusive: false,
+            }],
+            PriorityResult::ProtocolError(PriorityError::SelfDependency),
         ),
-
         // Test case 2: Simple cycle A→B→A (implementation choice)
         (
             "Simple A→B→A cycle".to_string(),
@@ -487,11 +502,10 @@ fn generate_test_cases() -> Vec<(String, Vec<PriorityFrame>, PriorityResult)> {
                     dependency: 1, // Creates cycle: 1→3→1
                     weight: 16,
                     exclusive: false,
-                }
+                },
             ],
-            PriorityResult::ProtocolError(PriorityError::CyclicDependency(vec![1, 3]))
+            PriorityResult::ProtocolError(PriorityError::CyclicDependency(vec![1, 3])),
         ),
-
         // Test case 3: Complex cycle A→B→C→A
         (
             "Complex A→B→C→A cycle".to_string(),
@@ -513,11 +527,10 @@ fn generate_test_cases() -> Vec<(String, Vec<PriorityFrame>, PriorityResult)> {
                     dependency: 1, // Creates cycle: 1→3→5→1
                     weight: 16,
                     exclusive: false,
-                }
+                },
             ],
-            PriorityResult::ProtocolError(PriorityError::CyclicDependency(vec![1, 3, 5]))
+            PriorityResult::ProtocolError(PriorityError::CyclicDependency(vec![1, 3, 5])),
         ),
-
         // Test case 4: Valid dependency chain (no cycle)
         (
             "Valid chain A→B→C→root".to_string(),
@@ -539,32 +552,41 @@ fn generate_test_cases() -> Vec<(String, Vec<PriorityFrame>, PriorityResult)> {
                     dependency: 0, // Root dependency - no cycle
                     weight: 16,
                     exclusive: false,
-                }
+                },
             ],
             PriorityResult::Success(DependencyTree {
                 streams: {
                     let mut map = HashMap::new();
-                    map.insert(1, StreamNode {
-                        id: 1,
-                        parent: 3,
-                        children: vec![],
-                        weight: 16,
-                        exclusive: false,
-                    });
-                    map.insert(3, StreamNode {
-                        id: 3,
-                        parent: 5,
-                        children: vec![1],
-                        weight: 16,
-                        exclusive: false,
-                    });
-                    map.insert(5, StreamNode {
-                        id: 5,
-                        parent: 0,
-                        children: vec![3],
-                        weight: 16,
-                        exclusive: false,
-                    });
+                    map.insert(
+                        1,
+                        StreamNode {
+                            id: 1,
+                            parent: 3,
+                            children: vec![],
+                            weight: 16,
+                            exclusive: false,
+                        },
+                    );
+                    map.insert(
+                        3,
+                        StreamNode {
+                            id: 3,
+                            parent: 5,
+                            children: vec![1],
+                            weight: 16,
+                            exclusive: false,
+                        },
+                    );
+                    map.insert(
+                        5,
+                        StreamNode {
+                            id: 5,
+                            parent: 0,
+                            children: vec![3],
+                            weight: 16,
+                            exclusive: false,
+                        },
+                    );
                     map
                 },
                 stats: TreeStats {
@@ -573,7 +595,7 @@ fn generate_test_cases() -> Vec<(String, Vec<PriorityFrame>, PriorityResult)> {
                     cycles_resolved: 0,
                     self_deps_rejected: 0,
                 },
-            })
+            }),
         ),
     ]
 }
@@ -613,13 +635,17 @@ fuzz_target!(|data: &[u8]| {
         match result {
             Ok(PriorityResult::Success(_)) => {
                 // Successful application should maintain tree integrity
-                assert!(manager.verify_integrity().is_ok(),
-                    "Tree integrity check failed after successful priority update");
+                assert!(
+                    manager.verify_integrity().is_ok(),
+                    "Tree integrity check failed after successful priority update"
+                );
 
                 // Tree should not contain the problematic stream dependency
                 if let Some(stream) = manager.get_tree().streams.get(&frame.stream_id) {
-                    assert_ne!(stream.parent, frame.stream_id,
-                        "Self-dependency was incorrectly accepted");
+                    assert_ne!(
+                        stream.parent, frame.stream_id,
+                        "Self-dependency was incorrectly accepted"
+                    );
                 }
             }
 
@@ -627,14 +653,20 @@ fuzz_target!(|data: &[u8]| {
                 // Protocol errors should be well-formed
                 match error {
                     PriorityError::SelfDependency => {
-                        assert_eq!(frame.stream_id, frame.dependency,
-                            "SelfDependency error but stream_id != dependency");
+                        assert_eq!(
+                            frame.stream_id, frame.dependency,
+                            "SelfDependency error but stream_id != dependency"
+                        );
                     }
                     PriorityError::CyclicDependency(cycle) => {
-                        assert!(!cycle.is_empty(),
-                            "CyclicDependency error should include cycle path");
-                        assert!(cycle.contains(&frame.stream_id) || cycle.contains(&frame.dependency),
-                            "Cycle path should include relevant streams");
+                        assert!(
+                            !cycle.is_empty(),
+                            "CyclicDependency error should include cycle path"
+                        );
+                        assert!(
+                            cycle.contains(&frame.stream_id) || cycle.contains(&frame.dependency),
+                            "Cycle path should include relevant streams"
+                        );
                     }
                     _ => {
                         // Other protocol errors are acceptable
@@ -644,18 +676,22 @@ fuzz_target!(|data: &[u8]| {
 
             Ok(PriorityResult::Restructured(new_tree, message)) => {
                 // Restructuring should maintain integrity
-                assert!(manager.verify_integrity().is_ok(),
-                    "Tree integrity check failed after restructuring");
-                assert!(!message.is_empty(),
-                    "Restructuring should include explanation");
+                assert!(
+                    manager.verify_integrity().is_ok(),
+                    "Tree integrity check failed after restructuring"
+                );
+                assert!(
+                    !message.is_empty(),
+                    "Restructuring should include explanation"
+                );
             }
 
             Err(error) => {
                 // Direct errors during processing
                 match error {
-                    PriorityError::InvalidStreamId |
-                    PriorityError::InvalidWeight |
-                    PriorityError::TreeCorruption => {
+                    PriorityError::InvalidStreamId
+                    | PriorityError::InvalidWeight
+                    | PriorityError::TreeCorruption => {
                         // Expected for invalid input
                     }
                     _ => {
@@ -695,14 +731,24 @@ fuzz_target!(|data: &[u8]| {
             match (&result, &expected) {
                 (Ok(PriorityResult::Success(_)), PriorityResult::Success(_)) => {
                     // Both successful - verify tree integrity
-                    assert!(test_manager.verify_integrity().is_ok(),
-                        "Test '{}': tree integrity check failed", test_name);
+                    assert!(
+                        test_manager.verify_integrity().is_ok(),
+                        "Test '{}': tree integrity check failed",
+                        test_name
+                    );
                 }
 
-                (Ok(PriorityResult::ProtocolError(actual_error)), PriorityResult::ProtocolError(expected_error)) => {
+                (
+                    Ok(PriorityResult::ProtocolError(actual_error)),
+                    PriorityResult::ProtocolError(expected_error),
+                ) => {
                     // Both protocol errors - verify error type matches
-                    assert_eq!(std::mem::discriminant(actual_error), std::mem::discriminant(expected_error),
-                        "Test '{}': protocol error type mismatch", test_name);
+                    assert_eq!(
+                        std::mem::discriminant(actual_error),
+                        std::mem::discriminant(expected_error),
+                        "Test '{}': protocol error type mismatch",
+                        test_name
+                    );
                 }
 
                 _ => {
@@ -714,6 +760,8 @@ fuzz_target!(|data: &[u8]| {
     }
 
     // Final integrity check
-    assert!(manager.verify_integrity().is_ok(),
-        "Final tree integrity check failed");
+    assert!(
+        manager.verify_integrity().is_ok(),
+        "Final tree integrity check failed"
+    );
 });

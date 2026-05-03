@@ -17,8 +17,8 @@
 
 #![no_main]
 
-use libfuzzer_sys::fuzz_target;
 use arbitrary::Arbitrary;
+use libfuzzer_sys::fuzz_target;
 
 /// Mock HTTP/2 connection for testing HEADERS+CONTINUATION sequencing.
 #[derive(Debug, Clone)]
@@ -89,38 +89,28 @@ pub enum SequenceViolation {
     /// CONTINUATION frame for wrong stream ID
     ContinuationStreamMismatch {
         expected_stream: u32,
-        received_stream: u32
+        received_stream: u32,
     },
     /// CONTINUATION frame without a preceding HEADERS/PUSH_PROMISE
-    UnexpectedContinuation {
-        stream_id: u32
-    },
+    UnexpectedContinuation { stream_id: u32 },
     /// Multiple frames with END_HEADERS=true in same sequence
-    MultipleEndHeaders {
-        stream_id: u32,
-        frame_number: u32
-    },
+    MultipleEndHeaders { stream_id: u32, frame_number: u32 },
     /// Continuation sequence timed out
-    ContinuationTimeout {
-        stream_id: u32,
-        duration_ms: u64
-    },
+    ContinuationTimeout { stream_id: u32, duration_ms: u64 },
     /// Header block size exceeded limit
     HeaderBlockTooLarge {
         stream_id: u32,
         size: usize,
-        limit: usize
+        limit: usize,
     },
     /// Too many continuation frames
     TooManyContinuationFrames {
         stream_id: u32,
         count: u32,
-        limit: u32
+        limit: u32,
     },
     /// END_HEADERS=false on final allowable frame
-    MissingEndHeaders {
-        stream_id: u32
-    },
+    MissingEndHeaders { stream_id: u32 },
 }
 
 /// Mock frame types for testing
@@ -191,10 +181,11 @@ impl MockH2Connection {
         if let Some(ref state) = self.continuation_state {
             let duration = frame.timestamp.saturating_sub(state.started_at);
             if duration > self.config.continuation_timeout_ms {
-                self.violations.push(SequenceViolation::ContinuationTimeout {
-                    stream_id: state.stream_id,
-                    duration_ms: duration,
-                });
+                self.violations
+                    .push(SequenceViolation::ContinuationTimeout {
+                        stream_id: state.stream_id,
+                        duration_ms: duration,
+                    });
                 self.continuation_state = None;
                 return FrameProcessingResult::TimeoutViolation;
             }
@@ -219,23 +210,26 @@ impl MockH2Connection {
             return FrameProcessingResult::SequenceViolation;
         }
 
-        let stream_state = self.streams.entry(frame.stream_id)
-            .or_insert_with(|| StreamHeaderState {
-                headers_complete: false,
-                total_header_size: 0,
-                fragment_count: 0,
-            });
+        let stream_state =
+            self.streams
+                .entry(frame.stream_id)
+                .or_insert_with(|| StreamHeaderState {
+                    headers_complete: false,
+                    total_header_size: 0,
+                    fragment_count: 0,
+                });
 
         stream_state.total_header_size += frame.header_block_size as usize;
         stream_state.fragment_count += 1;
 
         // Check header size limit
         if stream_state.total_header_size > self.config.max_header_size {
-            self.violations.push(SequenceViolation::HeaderBlockTooLarge {
-                stream_id: frame.stream_id,
-                size: stream_state.total_header_size,
-                limit: self.config.max_header_size,
-            });
+            self.violations
+                .push(SequenceViolation::HeaderBlockTooLarge {
+                    stream_id: frame.stream_id,
+                    size: stream_state.total_header_size,
+                    limit: self.config.max_header_size,
+                });
             return FrameProcessingResult::HeaderTooLarge;
         }
 
@@ -260,19 +254,21 @@ impl MockH2Connection {
         let state = match &mut self.continuation_state {
             Some(state) => state,
             None => {
-                self.violations.push(SequenceViolation::UnexpectedContinuation {
-                    stream_id: frame.stream_id,
-                });
+                self.violations
+                    .push(SequenceViolation::UnexpectedContinuation {
+                        stream_id: frame.stream_id,
+                    });
                 return FrameProcessingResult::UnexpectedFrame;
             }
         };
 
         // Verify stream ID matches
         if frame.stream_id != state.stream_id {
-            self.violations.push(SequenceViolation::ContinuationStreamMismatch {
-                expected_stream: state.stream_id,
-                received_stream: frame.stream_id,
-            });
+            self.violations
+                .push(SequenceViolation::ContinuationStreamMismatch {
+                    expected_stream: state.stream_id,
+                    received_stream: frame.stream_id,
+                });
             return FrameProcessingResult::StreamMismatch;
         }
 
@@ -282,11 +278,12 @@ impl MockH2Connection {
 
         // Check frame count limit
         if state.frame_count > self.config.max_continuation_frames {
-            self.violations.push(SequenceViolation::TooManyContinuationFrames {
-                stream_id: frame.stream_id,
-                count: state.frame_count,
-                limit: self.config.max_continuation_frames,
-            });
+            self.violations
+                .push(SequenceViolation::TooManyContinuationFrames {
+                    stream_id: frame.stream_id,
+                    count: state.frame_count,
+                    limit: self.config.max_continuation_frames,
+                });
             return FrameProcessingResult::TooManyFrames;
         }
 
@@ -297,11 +294,12 @@ impl MockH2Connection {
 
         // Check header size limit
         if stream_state.total_header_size > self.config.max_header_size {
-            self.violations.push(SequenceViolation::HeaderBlockTooLarge {
-                stream_id: frame.stream_id,
-                size: stream_state.total_header_size,
-                limit: self.config.max_header_size,
-            });
+            self.violations
+                .push(SequenceViolation::HeaderBlockTooLarge {
+                    stream_id: frame.stream_id,
+                    size: stream_state.total_header_size,
+                    limit: self.config.max_header_size,
+                });
             return FrameProcessingResult::HeaderTooLarge;
         }
 
@@ -478,7 +476,10 @@ fn test_intervening_frame_violation() {
     // Check violation was recorded
     let violations = conn.violations();
     assert_eq!(violations.len(), 1);
-    assert!(matches!(violations[0], SequenceViolation::InterveningFrame { .. }));
+    assert!(matches!(
+        violations[0],
+        SequenceViolation::InterveningFrame { .. }
+    ));
 }
 
 /// Test stream ID mismatch in continuation
@@ -513,7 +514,10 @@ fn test_continuation_stream_mismatch() {
     // Check violation
     let violations = conn.violations();
     assert_eq!(violations.len(), 1);
-    assert!(matches!(violations[0], SequenceViolation::ContinuationStreamMismatch { .. }));
+    assert!(matches!(
+        violations[0],
+        SequenceViolation::ContinuationStreamMismatch { .. }
+    ));
 }
 
 /// Test timeout handling
@@ -551,13 +555,17 @@ fn test_continuation_timeout() {
     // Check timeout violation
     let violations = conn.violations();
     assert_eq!(violations.len(), 1);
-    assert!(matches!(violations[0], SequenceViolation::ContinuationTimeout { .. }));
+    assert!(matches!(
+        violations[0],
+        SequenceViolation::ContinuationTimeout { .. }
+    ));
 }
 
 fuzz_target!(|scenario: HeadersContinuationScenario| {
     // Limit frames to prevent timeouts
     let max_frames = scenario.max_frames.min(100);
-    let limited_frames: Vec<MockFrame> = scenario.frames
+    let limited_frames: Vec<MockFrame> = scenario
+        .frames
         .into_iter()
         .take(max_frames as usize)
         .collect();
@@ -582,9 +590,9 @@ fuzz_target!(|scenario: HeadersContinuationScenario| {
 
         // Early termination on certain violations to prevent cascading effects
         match result {
-            FrameProcessingResult::TimeoutViolation |
-            FrameProcessingResult::HeaderTooLarge |
-            FrameProcessingResult::TooManyFrames => {
+            FrameProcessingResult::TimeoutViolation
+            | FrameProcessingResult::HeaderTooLarge
+            | FrameProcessingResult::TooManyFrames => {
                 break;
             }
             _ => {}
@@ -597,13 +605,20 @@ fuzz_target!(|scenario: HeadersContinuationScenario| {
     // Test invariants
     for violation in violations {
         match violation {
-            SequenceViolation::InterveningFrame { expected_stream, received_stream, .. } => {
+            SequenceViolation::InterveningFrame {
+                expected_stream,
+                received_stream,
+                ..
+            } => {
                 // If expecting continuation on one stream, any other frame is a violation
                 if expected_stream != received_stream {
                     // This is expected - different streams can't interleave continuation sequences
                 }
             }
-            SequenceViolation::ContinuationStreamMismatch { expected_stream, received_stream } => {
+            SequenceViolation::ContinuationStreamMismatch {
+                expected_stream,
+                received_stream,
+            } => {
                 // Stream ID must match in continuation sequence
                 assert_ne!(expected_stream, received_stream);
             }

@@ -1,8 +1,11 @@
 #![no_main]
 
 use arbitrary::Arbitrary;
-use asupersync::cx::{Cx, macaroon::{CaveatPredicate, MacaroonToken, VerificationContext}};
 use asupersync::cx::cap::{All, CapMask};
+use asupersync::cx::{
+    Cx,
+    macaroon::{CaveatPredicate, MacaroonToken, VerificationContext},
+};
 use asupersync::types::{Budget, RegionId, TaskId};
 use asupersync::util::OsEntropy;
 use libfuzzer_sys::fuzz_target;
@@ -42,29 +45,23 @@ struct ScopeNode {
 enum ScopeMutation {
     /// Restrict budget by subtracting time/polls
     RestrictBudget {
-        time_reduction_ms: u32,     // Reduce by this amount
-        poll_reduction: u16,        // Reduce poll quota by this
+        time_reduction_ms: u32, // Reduce by this amount
+        poll_reduction: u16,    // Reduce poll quota by this
     },
     /// Add deadline constraint
     SetDeadline {
-        deadline_offset_ms: u32,    // Deadline relative to current time
+        deadline_offset_ms: u32, // Deadline relative to current time
     },
     /// Narrow capability mask
     RestrictCapabilities {
-        remove_mask: u8,            // Bitmask of capabilities to remove
+        remove_mask: u8, // Bitmask of capabilities to remove
     },
     /// Add macaroon caveat (attenuation)
-    AddCaveat {
-        caveat: ArbitraryCaveat,
-    },
+    AddCaveat { caveat: ArbitraryCaveat },
     /// Scope to specific region
-    ScopeToRegion {
-        region_id: u32,
-    },
+    ScopeToRegion { region_id: u32 },
     /// Scope to specific task
-    ScopeToTask {
-        task_id: u32,
-    },
+    ScopeToTask { task_id: u32 },
     /// Create checkpoint (affects rollback)
     CreateCheckpoint,
     /// Apply rate limit
@@ -92,9 +89,9 @@ struct ArbitraryPattern {
 
 #[derive(Arbitrary, Debug, Clone)]
 enum PatternSegment {
-    Literal(u8),      // ASCII letter/digit
-    Wildcard,         // *
-    Recursive,        // **
+    Literal(u8), // ASCII letter/digit
+    Wildcard,    // *
+    Recursive,   // **
 }
 
 #[derive(Arbitrary, Debug)]
@@ -177,12 +174,7 @@ impl ScopeTracker {
     }
 
     /// Register a new scope with its properties
-    fn register_scope(
-        &mut self,
-        id: u64,
-        parent_id: Option<u64>,
-        properties: ScopeProperties,
-    ) {
+    fn register_scope(&mut self, id: u64, parent_id: Option<u64>, properties: ScopeProperties) {
         if let Some(parent) = parent_id {
             self.relationships.push((parent, id));
             self.verify_parent_child_invariants(parent, &properties);
@@ -192,44 +184,76 @@ impl ScopeTracker {
 
     /// Verify that child is properly restricted relative to parent
     fn verify_parent_child_invariants(&self, parent_id: u64, child: &ScopeProperties) {
-        let parent = self.scopes.get(&parent_id)
+        let parent = self
+            .scopes
+            .get(&parent_id)
             .expect("Parent scope should exist before child");
 
         // Budget monotonicity: child budget ≤ parent budget
-        assert!(child.budget_time_ms <= parent.budget_time_ms,
+        assert!(
+            child.budget_time_ms <= parent.budget_time_ms,
             "Budget monotonicity violation: child time {} > parent time {} (IDs: {}, {})",
-            child.budget_time_ms, parent.budget_time_ms, child.id, parent.id);
+            child.budget_time_ms,
+            parent.budget_time_ms,
+            child.id,
+            parent.id
+        );
 
-        assert!(child.budget_polls <= parent.budget_polls,
+        assert!(
+            child.budget_polls <= parent.budget_polls,
             "Budget monotonicity violation: child polls {} > parent polls {} (IDs: {}, {})",
-            child.budget_polls, parent.budget_polls, child.id, parent.id);
+            child.budget_polls,
+            parent.budget_polls,
+            child.id,
+            parent.id
+        );
 
         // Deadline monotonicity: child deadline ≤ parent deadline (if both exist)
-        if let (Some(child_deadline), Some(parent_deadline)) = (child.deadline_ms, parent.deadline_ms) {
-            assert!(child_deadline <= parent_deadline,
+        if let (Some(child_deadline), Some(parent_deadline)) =
+            (child.deadline_ms, parent.deadline_ms)
+        {
+            assert!(
+                child_deadline <= parent_deadline,
                 "Deadline monotonicity violation: child deadline {} > parent deadline {} (IDs: {}, {})",
-                child_deadline, parent_deadline, child.id, parent.id);
+                child_deadline,
+                parent_deadline,
+                child.id,
+                parent.id
+            );
         }
 
         // Capability narrowing: child capabilities ⊆ parent capabilities
         let child_caps = child.capability_mask;
         let parent_caps = parent.capability_mask;
         let prohibited_caps = child_caps & !parent_caps;
-        assert!(prohibited_caps == 0,
+        assert!(
+            prohibited_caps == 0,
             "Capability escalation detected: child has capabilities {:08b} not in parent {:08b} (IDs: {}, {})",
-            prohibited_caps, parent_caps, child.id, parent.id);
+            prohibited_caps,
+            parent_caps,
+            child.id,
+            parent.id
+        );
 
         // Caveat accumulation: child should have all parent caveats plus possibly more
         for parent_caveat in &parent.caveats {
-            assert!(child.caveats.contains(parent_caveat),
+            assert!(
+                child.caveats.contains(parent_caveat),
                 "Caveat removal detected: child missing parent caveat '{}' (IDs: {}, {})",
-                parent_caveat, child.id, parent.id);
+                parent_caveat,
+                child.id,
+                parent.id
+            );
         }
 
         // Depth progression: child depth = parent depth + 1
-        assert_eq!(child.depth, parent.depth + 1,
+        assert_eq!(
+            child.depth,
+            parent.depth + 1,
             "Depth progression violation: child depth {} != parent depth {} + 1",
-            child.depth, parent.depth);
+            child.depth,
+            parent.depth
+        );
     }
 
     /// Verify global properties across the entire hierarchy
@@ -253,16 +277,22 @@ impl ScopeTracker {
         // Walk up to root, checking each transition
         while let Some(parent_id) = current.parent_id {
             path.push(parent_id);
-            let parent = self.scopes.get(&parent_id)
+            let parent = self
+                .scopes
+                .get(&parent_id)
                 .expect("Parent scope should exist");
 
             // Verify this transition is valid
             let child_caps = current.capability_mask;
             let parent_caps = parent.capability_mask;
             let escalated_caps = child_caps & !parent_caps;
-            assert!(escalated_caps == 0,
+            assert!(
+                escalated_caps == 0,
                 "Capability escalation in path {:?}: child {:016b} > parent {:016b}",
-                path, child_caps, parent_caps);
+                path,
+                child_caps,
+                parent_caps
+            );
 
             current = parent;
         }
@@ -273,16 +303,28 @@ impl ScopeTracker {
         let mut current = scope;
 
         while let Some(parent_id) = current.parent_id {
-            let parent = self.scopes.get(&parent_id)
+            let parent = self
+                .scopes
+                .get(&parent_id)
                 .expect("Parent scope should exist");
 
-            assert!(current.budget_time_ms <= parent.budget_time_ms,
+            assert!(
+                current.budget_time_ms <= parent.budget_time_ms,
                 "Budget time increased from parent {} to child {}: {} > {}",
-                parent_id, scope_id, current.budget_time_ms, parent.budget_time_ms);
+                parent_id,
+                scope_id,
+                current.budget_time_ms,
+                parent.budget_time_ms
+            );
 
-            assert!(current.budget_polls <= parent.budget_polls,
+            assert!(
+                current.budget_polls <= parent.budget_polls,
                 "Budget polls increased from parent {} to child {}: {} > {}",
-                parent_id, scope_id, current.budget_polls, parent.budget_polls);
+                parent_id,
+                scope_id,
+                current.budget_polls,
+                parent.budget_polls
+            );
 
             current = parent;
         }
@@ -312,7 +354,8 @@ fn execute_scope_hierarchy(
         restricted_cx = apply_scope_mutation(restricted_cx, mutation);
 
         // Update properties tracking
-        current_properties = extract_scope_properties(&restricted_cx, current_properties.parent_id, depth);
+        current_properties =
+            extract_scope_properties(&restricted_cx, current_properties.parent_id, depth);
     }
 
     // Register this scope
@@ -336,10 +379,9 @@ fn extract_scope_properties(cx: &Cx<All>, parent_id: Option<u64>, depth: usize) 
     let budget = cx.budget();
     let (budget_time_ms, budget_polls) = match budget {
         Budget::INFINITE => (u64::MAX, u64::MAX),
-        Budget::Finite { time, polls } => (
-            time.as_millis().min(u64::MAX as u128) as u64,
-            polls as u64,
-        ),
+        Budget::Finite { time, polls } => {
+            (time.as_millis().min(u64::MAX as u128) as u64, polls as u64)
+        }
     };
 
     // Simplified property extraction (in practice would need more access)
@@ -348,9 +390,9 @@ fn extract_scope_properties(cx: &Cx<All>, parent_id: Option<u64>, depth: usize) 
         parent_id,
         budget_time_ms,
         budget_polls,
-        deadline_ms: None, // Would need deadline API
+        deadline_ms: None,         // Would need deadline API
         capability_mask: u64::MAX, // Would extract actual mask
-        caveats: Vec::new(), // Would extract actual caveats
+        caveats: Vec::new(),       // Would extract actual caveats
         depth,
     }
 }
@@ -358,7 +400,10 @@ fn extract_scope_properties(cx: &Cx<All>, parent_id: Option<u64>, depth: usize) 
 /// Apply a scope mutation to create a more restricted context
 fn apply_scope_mutation(cx: Cx<All>, mutation: &ScopeMutation) -> Cx<All> {
     match mutation {
-        ScopeMutation::RestrictBudget { time_reduction_ms, poll_reduction } => {
+        ScopeMutation::RestrictBudget {
+            time_reduction_ms,
+            poll_reduction,
+        } => {
             let current_budget = cx.budget();
             let new_budget = match current_budget {
                 Budget::INFINITE => Budget::Finite {
@@ -376,7 +421,9 @@ fn apply_scope_mutation(cx: Cx<All>, mutation: &ScopeMutation) -> Cx<All> {
             cx
         }
 
-        ScopeMutation::SetDeadline { deadline_offset_ms: _ } => {
+        ScopeMutation::SetDeadline {
+            deadline_offset_ms: _,
+        } => {
             // Would create deadline-restricted context
             cx
         }
@@ -407,7 +454,10 @@ fn apply_scope_mutation(cx: Cx<All>, mutation: &ScopeMutation) -> Cx<All> {
             cx
         }
 
-        ScopeMutation::ApplyRateLimit { max_operations: _, window_seconds: _ } => {
+        ScopeMutation::ApplyRateLimit {
+            max_operations: _,
+            window_seconds: _,
+        } => {
             // Would apply rate limiting
             cx
         }
@@ -420,46 +470,44 @@ fn convert_arbitrary_caveat(caveat: &ArbitraryCaveat) -> CaveatPredicate {
         ArbitraryCaveat::TimeBefore { deadline_ms } => {
             CaveatPredicate::TimeBefore(*deadline_ms as u64)
         }
-        ArbitraryCaveat::TimeAfter { start_ms } => {
-            CaveatPredicate::TimeAfter(*start_ms as u64)
-        }
+        ArbitraryCaveat::TimeAfter { start_ms } => CaveatPredicate::TimeAfter(*start_ms as u64),
         ArbitraryCaveat::RegionScope { region_id } => {
             CaveatPredicate::RegionScope(*region_id as u64)
         }
-        ArbitraryCaveat::TaskScope { task_id } => {
-            CaveatPredicate::TaskScope(*task_id as u64)
-        }
-        ArbitraryCaveat::MaxUses { count } => {
-            CaveatPredicate::MaxUses(*count as u32)
-        }
+        ArbitraryCaveat::TaskScope { task_id } => CaveatPredicate::TaskScope(*task_id as u64),
+        ArbitraryCaveat::MaxUses { count } => CaveatPredicate::MaxUses(*count as u32),
         ArbitraryCaveat::ResourceScope { pattern } => {
             let pattern_str = convert_arbitrary_pattern(pattern);
             CaveatPredicate::ResourceScope(pattern_str)
         }
-        ArbitraryCaveat::RateLimit { max_count, window_secs } => {
-            CaveatPredicate::RateLimit {
-                max_count: *max_count as u32,
-                window_secs: *window_secs as u32,
-            }
-        }
+        ArbitraryCaveat::RateLimit {
+            max_count,
+            window_secs,
+        } => CaveatPredicate::RateLimit {
+            max_count: *max_count as u32,
+            window_secs: *window_secs as u32,
+        },
     }
 }
 
 /// Convert arbitrary pattern to string representation
 fn convert_arbitrary_pattern(pattern: &ArbitraryPattern) -> String {
     let limited_segments = pattern.segments.iter().take(MAX_PATTERN_SEGMENTS);
-    limited_segments.map(|segment| match segment {
-        PatternSegment::Literal(byte) => {
-            // Ensure ASCII letter/digit
-            let safe_byte = match *byte {
-                b'a'..=b'z' | b'A'..=b'Z' | b'0'..=b'9' => *byte,
-                _ => b'a', // Default to safe character
-            };
-            char::from(safe_byte).to_string()
-        }
-        PatternSegment::Wildcard => "*".to_string(),
-        PatternSegment::Recursive => "**".to_string(),
-    }).collect::<Vec<_>>().join("")
+    limited_segments
+        .map(|segment| match segment {
+            PatternSegment::Literal(byte) => {
+                // Ensure ASCII letter/digit
+                let safe_byte = match *byte {
+                    b'a'..=b'z' | b'A'..=b'Z' | b'0'..=b'9' => *byte,
+                    _ => b'a', // Default to safe character
+                };
+                char::from(safe_byte).to_string()
+            }
+            PatternSegment::Wildcard => "*".to_string(),
+            PatternSegment::Recursive => "**".to_string(),
+        })
+        .collect::<Vec<_>>()
+        .join("")
 }
 
 /// Create a test context for fuzzing

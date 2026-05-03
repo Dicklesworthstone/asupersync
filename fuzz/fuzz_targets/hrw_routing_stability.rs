@@ -84,8 +84,9 @@ enum HRWFuzzInput {
 fn create_endpoint(config: &HRWEndpointConfig) -> Arc<Endpoint> {
     let mut endpoint = Endpoint::new(
         EndpointId::new(config.id),
-        format!("endpoint-{}", config.id)
-    ).with_weight(config.weight);
+        format!("endpoint-{}", config.id),
+    )
+    .with_weight(config.weight);
 
     if !config.healthy {
         endpoint.set_state(EndpointState::Unhealthy);
@@ -102,50 +103,122 @@ fn can_receive(endpoint: &Arc<Endpoint>) -> bool {
 fuzz_target!(|input: HRWFuzzInput| {
     // Limit input sizes to prevent timeouts
     let limited_input = match input {
-        HRWFuzzInput::RoutingStability { mut endpoints, mut keys, salt } => {
+        HRWFuzzInput::RoutingStability {
+            mut endpoints,
+            mut keys,
+            salt,
+        } => {
             endpoints.truncate(MAX_ENDPOINTS);
             keys.truncate(MAX_KEYS);
-            HRWFuzzInput::RoutingStability { endpoints, keys, salt }
+            HRWFuzzInput::RoutingStability {
+                endpoints,
+                keys,
+                salt,
+            }
         }
-        HRWFuzzInput::NodeAddition { mut initial_endpoints, mut additional_endpoints, mut keys, salt } => {
+        HRWFuzzInput::NodeAddition {
+            mut initial_endpoints,
+            mut additional_endpoints,
+            mut keys,
+            salt,
+        } => {
             initial_endpoints.truncate(MAX_ENDPOINTS / 2);
             additional_endpoints.truncate(MAX_ENDPOINTS / 2);
             keys.truncate(MAX_KEYS);
-            HRWFuzzInput::NodeAddition { initial_endpoints, additional_endpoints, keys, salt }
+            HRWFuzzInput::NodeAddition {
+                initial_endpoints,
+                additional_endpoints,
+                keys,
+                salt,
+            }
         }
-        HRWFuzzInput::NodeRemoval { mut all_endpoints, removal_indices, mut keys, salt } => {
+        HRWFuzzInput::NodeRemoval {
+            mut all_endpoints,
+            removal_indices,
+            mut keys,
+            salt,
+        } => {
             all_endpoints.truncate(MAX_ENDPOINTS);
             keys.truncate(MAX_KEYS);
-            HRWFuzzInput::NodeRemoval { all_endpoints, removal_indices, keys, salt }
+            HRWFuzzInput::NodeRemoval {
+                all_endpoints,
+                removal_indices,
+                keys,
+                salt,
+            }
         }
-        HRWFuzzInput::WeightChanges { mut endpoints, mut new_weights, mut keys, salt } => {
+        HRWFuzzInput::WeightChanges {
+            mut endpoints,
+            mut new_weights,
+            mut keys,
+            salt,
+        } => {
             endpoints.truncate(MAX_ENDPOINTS);
             keys.truncate(MAX_KEYS);
             new_weights.truncate(MAX_ENDPOINTS);
-            HRWFuzzInput::WeightChanges { endpoints, new_weights, keys, salt }
+            HRWFuzzInput::WeightChanges {
+                endpoints,
+                new_weights,
+                keys,
+                salt,
+            }
         }
-        HRWFuzzInput::TopKConsistency { mut endpoints, mut keys, mut k_values, salt } => {
+        HRWFuzzInput::TopKConsistency {
+            mut endpoints,
+            mut keys,
+            mut k_values,
+            salt,
+        } => {
             endpoints.truncate(MAX_ENDPOINTS);
             keys.truncate(MAX_KEYS);
             k_values.truncate(10); // Limit k values
-            HRWFuzzInput::TopKConsistency { endpoints, keys, k_values, salt }
+            HRWFuzzInput::TopKConsistency {
+                endpoints,
+                keys,
+                k_values,
+                salt,
+            }
         }
     };
 
     match limited_input {
-        HRWFuzzInput::RoutingStability { endpoints, keys, salt } => {
+        HRWFuzzInput::RoutingStability {
+            endpoints,
+            keys,
+            salt,
+        } => {
             test_routing_stability(&endpoints, &keys, salt);
         }
-        HRWFuzzInput::NodeAddition { initial_endpoints, additional_endpoints, keys, salt } => {
+        HRWFuzzInput::NodeAddition {
+            initial_endpoints,
+            additional_endpoints,
+            keys,
+            salt,
+        } => {
             test_node_addition_stability(&initial_endpoints, &additional_endpoints, &keys, salt);
         }
-        HRWFuzzInput::NodeRemoval { all_endpoints, removal_indices, keys, salt } => {
+        HRWFuzzInput::NodeRemoval {
+            all_endpoints,
+            removal_indices,
+            keys,
+            salt,
+        } => {
             test_node_removal_stability(&all_endpoints, &removal_indices, &keys, salt);
         }
-        HRWFuzzInput::WeightChanges { endpoints, new_weights, keys, salt } => {
+        HRWFuzzInput::WeightChanges {
+            endpoints,
+            new_weights,
+            keys,
+            salt,
+        } => {
             test_weight_change_effects(&endpoints, &new_weights, &keys, salt);
         }
-        HRWFuzzInput::TopKConsistency { endpoints, keys, k_values, salt } => {
+        HRWFuzzInput::TopKConsistency {
+            endpoints,
+            keys,
+            k_values,
+            salt,
+        } => {
             test_top_k_consistency(&endpoints, &keys, &k_values, salt);
         }
     }
@@ -158,7 +231,8 @@ fn test_routing_stability(endpoints: &[HRWEndpointConfig], keys: &[u64], salt: u
     }
 
     // Filter to only healthy endpoints with positive weight
-    let healthy_endpoints: Vec<Arc<Endpoint>> = endpoints.iter()
+    let healthy_endpoints: Vec<Arc<Endpoint>> = endpoints
+        .iter()
         .filter(|e| e.healthy && e.weight > 0)
         .map(create_endpoint)
         .filter(|e| can_receive(e))
@@ -200,13 +274,14 @@ fn test_node_addition_stability(
     initial_endpoints: &[HRWEndpointConfig],
     additional_endpoints: &[HRWEndpointConfig],
     keys: &[u64],
-    salt: u64
+    salt: u64,
 ) {
     if initial_endpoints.is_empty() || keys.is_empty() {
         return;
     }
 
-    let initial_healthy: Vec<Arc<Endpoint>> = initial_endpoints.iter()
+    let initial_healthy: Vec<Arc<Endpoint>> = initial_endpoints
+        .iter()
         .filter(|e| e.healthy && e.weight > 0)
         .map(create_endpoint)
         .filter(|e| can_receive(e))
@@ -229,10 +304,13 @@ fn test_node_addition_stability(
 
     // Add new endpoints and route again
     let mut all_endpoints = initial_healthy;
-    all_endpoints.extend(additional_endpoints.iter()
-        .filter(|e| e.healthy && e.weight > 0)
-        .map(create_endpoint)
-        .filter(|e| can_receive(e)));
+    all_endpoints.extend(
+        additional_endpoints
+            .iter()
+            .filter(|e| e.healthy && e.weight > 0)
+            .map(create_endpoint)
+            .filter(|e| can_receive(e)),
+    );
 
     if all_endpoints.len() == initial_endpoints.len() {
         return; // No new endpoints were actually added
@@ -264,19 +342,21 @@ fn test_node_removal_stability(
     all_endpoints: &[HRWEndpointConfig],
     removal_indices: &[u8],
     keys: &[u64],
-    salt: u64
+    salt: u64,
 ) {
     if all_endpoints.is_empty() || keys.is_empty() {
         return;
     }
 
-    let healthy_endpoints: Vec<Arc<Endpoint>> = all_endpoints.iter()
+    let healthy_endpoints: Vec<Arc<Endpoint>> = all_endpoints
+        .iter()
         .filter(|e| e.healthy && e.weight > 0)
         .map(create_endpoint)
         .filter(|e| can_receive(e))
         .collect();
 
-    if healthy_endpoints.len() < 2 { // Need at least 2 for meaningful removal test
+    if healthy_endpoints.len() < 2 {
+        // Need at least 2 for meaningful removal test
         return;
     }
 
@@ -292,11 +372,13 @@ fn test_node_removal_stability(
     }
 
     // Remove some endpoints
-    let removal_set: HashSet<usize> = removal_indices.iter()
+    let removal_set: HashSet<usize> = removal_indices
+        .iter()
         .map(|&i| i as usize % healthy_endpoints.len())
         .collect();
 
-    let reduced_endpoints: Vec<_> = healthy_endpoints.into_iter()
+    let reduced_endpoints: Vec<_> = healthy_endpoints
+        .into_iter()
         .enumerate()
         .filter(|(i, _)| !removal_set.contains(i))
         .map(|(_, endpoint)| endpoint)
@@ -306,9 +388,7 @@ fn test_node_removal_stability(
         return;
     }
 
-    let reduced_endpoint_ids: HashSet<_> = reduced_endpoints.iter()
-        .map(|e| e.id)
-        .collect();
+    let reduced_endpoint_ids: HashSet<_> = reduced_endpoints.iter().map(|e| e.id).collect();
 
     let mut unchanged_count = 0;
     let mut keys_that_could_stay = 0;
@@ -321,7 +401,9 @@ fn test_node_removal_stability(
             if reduced_endpoint_ids.contains(&original_endpoint) {
                 keys_that_could_stay += 1;
 
-                if let Some(new_endpoint) = load_balancer.select(&reduced_endpoints, Some(object_id)) {
+                if let Some(new_endpoint) =
+                    load_balancer.select(&reduced_endpoints, Some(object_id))
+                {
                     if new_endpoint.id == original_endpoint {
                         unchanged_count += 1;
                     }
@@ -346,13 +428,14 @@ fn test_weight_change_effects(
     endpoints: &[HRWEndpointConfig],
     new_weights: &[u32],
     keys: &[u64],
-    salt: u64
+    salt: u64,
 ) {
     if endpoints.is_empty() || keys.is_empty() || keys.len() < 10 {
         return;
     }
 
-    let original_endpoints: Vec<Arc<Endpoint>> = endpoints.iter()
+    let original_endpoints: Vec<Arc<Endpoint>> = endpoints
+        .iter()
         .filter(|e| e.healthy && e.weight > 0)
         .map(create_endpoint)
         .filter(|e| can_receive(e))
@@ -374,7 +457,8 @@ fn test_weight_change_effects(
     }
 
     // Create endpoints with modified weights
-    let modified_endpoints: Vec<Arc<Endpoint>> = endpoints.iter()
+    let modified_endpoints: Vec<Arc<Endpoint>> = endpoints
+        .iter()
         .enumerate()
         .filter(|(_, e)| e.healthy)
         .filter_map(|(i, endpoint)| {
@@ -387,8 +471,9 @@ fn test_weight_change_effects(
             if new_weight > 0 {
                 let modified_endpoint = Endpoint::new(
                     EndpointId::new(endpoint.id),
-                    format!("endpoint-{}", endpoint.id)
-                ).with_weight(new_weight);
+                    format!("endpoint-{}", endpoint.id),
+                )
+                .with_weight(new_weight);
 
                 Some(Arc::new(modified_endpoint))
             } else {
@@ -415,20 +500,23 @@ fn test_weight_change_effects(
     let modified_max_count = modified_counts.values().max().cloned().unwrap_or(0);
 
     // If weights changed significantly and we have enough keys, distribution should change
-    let weight_ratio_changed = modified_endpoints.iter()
-        .zip(endpoints.iter())
-        .any(|(modified, original)| {
-            if original.weight > 0 {
-                let ratio = modified.weight as f64 / original.weight as f64;
-                ratio < 0.5 || ratio > 2.0
-            } else {
-                false
-            }
-        });
+    let weight_ratio_changed =
+        modified_endpoints
+            .iter()
+            .zip(endpoints.iter())
+            .any(|(modified, original)| {
+                if original.weight > 0 {
+                    let ratio = modified.weight as f64 / original.weight as f64;
+                    ratio < 0.5 || ratio > 2.0
+                } else {
+                    false
+                }
+            });
 
     if weight_ratio_changed && keys.len() >= 50 {
         // With significant weight changes and enough keys, expect some distribution change
-        let distribution_changed = (original_max_count as i32 - modified_max_count as i32).abs() > 1;
+        let distribution_changed =
+            (original_max_count as i32 - modified_max_count as i32).abs() > 1;
         assert!(
             distribution_changed,
             "Weight changes did not affect routing distribution as expected"
@@ -441,13 +529,14 @@ fn test_top_k_consistency(
     endpoints: &[HRWEndpointConfig],
     keys: &[u64],
     k_values: &[u8],
-    salt: u64
+    salt: u64,
 ) {
     if endpoints.is_empty() || keys.is_empty() {
         return;
     }
 
-    let healthy_endpoints: Vec<Arc<Endpoint>> = endpoints.iter()
+    let healthy_endpoints: Vec<Arc<Endpoint>> = endpoints
+        .iter()
         .filter(|e| e.healthy && e.weight > 0)
         .map(create_endpoint)
         .filter(|e| can_receive(e))
@@ -459,7 +548,8 @@ fn test_top_k_consistency(
 
     let load_balancer = LoadBalancer::with_seed(LoadBalanceStrategy::HashBased, salt);
 
-    for &key in keys.iter().take(10) { // Limit for performance
+    for &key in keys.iter().take(10) {
+        // Limit for performance
         let object_id = ObjectId::from_u128(key as u128);
 
         // Get single selection with select (which uses select_hrw)
@@ -495,7 +585,8 @@ fn test_top_k_consistency(
         // Test higher k values for basic sanity
         for &k in k_values.iter().take(5) {
             if k > 0 && k as usize <= healthy_endpoints.len() {
-                let k_results = load_balancer.select_n(&healthy_endpoints, k as usize, Some(object_id));
+                let k_results =
+                    load_balancer.select_n(&healthy_endpoints, k as usize, Some(object_id));
 
                 // Results should be unique (no duplicates)
                 let mut seen_ids = HashSet::new();
@@ -503,7 +594,8 @@ fn test_top_k_consistency(
                     assert!(
                         seen_ids.insert(endpoint.id),
                         "select_n returned duplicate endpoint for key {} k={}",
-                        key, k
+                        key,
+                        k
                     );
                 }
 
@@ -511,7 +603,8 @@ fn test_top_k_consistency(
                 assert!(
                     k_results.len() <= k as usize,
                     "select_n returned more than k={} results for key {}",
-                    k, key
+                    k,
+                    key
                 );
             }
         }

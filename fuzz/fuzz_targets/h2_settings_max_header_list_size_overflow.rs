@@ -7,7 +7,7 @@ use asupersync::http::h2::error::ErrorCode;
 use asupersync::http::h2::frame::{Frame, HeadersFrame, Setting, SettingsFrame};
 use asupersync::http::h2::settings::Settings;
 use libfuzzer_sys::fuzz_target;
-use std::panic::{catch_unwind, AssertUnwindSafe};
+use std::panic::{AssertUnwindSafe, catch_unwind};
 
 const MAX_HEADER_LIST_SIZE_2_31: u32 = 0x8000_0000;
 const MAX_PARTIAL_VALUE_BYTES: usize = 64;
@@ -100,9 +100,5 @@ fn encode_hpack_integer(dst: &mut BytesMut, value: usize, prefix_bits: u8, prefi
 
 fn odd_client_stream_id(seed: u32) -> u32 {
     let id = seed | 1;
-    if id == u32::MAX {
-        1
-    } else {
-        id & 0x7fff_ffff
-    }
+    if id == u32::MAX { 1 } else { id & 0x7fff_ffff }
 }

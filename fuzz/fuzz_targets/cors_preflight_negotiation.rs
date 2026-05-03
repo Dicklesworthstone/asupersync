@@ -151,7 +151,8 @@ fn sanitize_token(raw: &str, fallback: &str) -> String {
 }
 
 fn toggle_ascii_case(value: &str) -> String {
-    value.chars()
+    value
+        .chars()
         .map(|ch| {
             if ch.is_ascii_lowercase() {
                 ch.to_ascii_uppercase()
@@ -165,7 +166,10 @@ fn toggle_ascii_case(value: &str) -> String {
 }
 
 fn push_unique_case_insensitive(values: &mut Vec<String>, candidate: String) {
-    if !values.iter().any(|existing| existing.eq_ignore_ascii_case(&candidate)) {
+    if !values
+        .iter()
+        .any(|existing| existing.eq_ignore_ascii_case(&candidate))
+    {
         values.push(candidate);
     }
 }

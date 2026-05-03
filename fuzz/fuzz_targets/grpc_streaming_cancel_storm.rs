@@ -40,9 +40,7 @@ use std::thread;
 use std::time::Duration;
 
 use asupersync::grpc::status::{Code, Status};
-use asupersync::grpc::streaming::{
-    ResponseStream, StreamingRequest, Streaming,
-};
+use asupersync::grpc::streaming::{ResponseStream, Streaming, StreamingRequest};
 
 /// Maximum operations per scenario to bound fuzzing runtime.
 const MAX_OPERATIONS: usize = 100;
@@ -155,7 +153,10 @@ enum StreamOperation {
     /// Push a message to the stream
     Push { message: TestMessage },
     /// Push a pre-constructed result
-    PushResult { message: TestMessage, is_error: bool },
+    PushResult {
+        message: TestMessage,
+        is_error: bool,
+    },
     /// Poll the stream for next item
     Poll,
     /// Close the stream gracefully
@@ -297,7 +298,9 @@ fn test_streaming_request_cancel_storm(scenario: &CancelStormScenario) {
         };
         let barrier_clone = barrier.clone();
         let config = scenario.cancel_storm.clone();
-        let cancel_type = scenario.cancel_storm.cancel_types
+        let cancel_type = scenario
+            .cancel_storm
+            .cancel_types
             .get(i % scenario.cancel_storm.cancel_types.len())
             .cloned()
             .unwrap_or(CancelType::ErrorCancel {
@@ -554,7 +557,9 @@ fn test_response_stream_cancel_storm(scenario: &CancelStormScenario) {
         };
         let barrier_clone = barrier.clone();
         let config = scenario.cancel_storm.clone();
-        let cancel_type = scenario.cancel_storm.cancel_types
+        let cancel_type = scenario
+            .cancel_storm
+            .cancel_types
             .get(i % scenario.cancel_storm.cancel_types.len())
             .cloned()
             .unwrap_or(CancelType::ErrorCancel {

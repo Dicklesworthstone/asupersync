@@ -34,9 +34,9 @@ struct TestConfig {
 
 #[derive(Arbitrary, Debug)]
 enum HistogramBuckets {
-    Small,   // [1.0, 5.0, 10.0]
-    Medium,  // [0.1, 0.5, 1.0, 5.0, 10.0, 50.0]
-    Large,   // [0.01, 0.1, 1.0, 10.0, 100.0, 1000.0, 10000.0]
+    Small,  // [1.0, 5.0, 10.0]
+    Medium, // [0.1, 0.5, 1.0, 5.0, 10.0, 50.0]
+    Large,  // [0.01, 0.1, 1.0, 10.0, 100.0, 1000.0, 10000.0]
 }
 
 #[derive(Arbitrary, Debug, Clone)]
@@ -77,9 +77,8 @@ impl HistogramBuckets {
 fuzz_target!(|input: MetricsConcurrentFuzz| {
     // Apply resource limits
     let thread_count = (input.config.thread_count as usize).min(MAX_THREADS).max(1);
-    let startup_delay = Duration::from_millis(
-        (input.config.startup_delay_ms as u64).min(MAX_STARTUP_DELAY_MS)
-    );
+    let startup_delay =
+        Duration::from_millis((input.config.startup_delay_ms as u64).min(MAX_STARTUP_DELAY_MS));
 
     // Limit operations per thread to prevent timeouts
     let operations: Vec<Vec<MetricOperation>> = input
@@ -226,7 +225,9 @@ fuzz_target!(|input: MetricsConcurrentFuzz| {
     assert!(
         sum_diff < epsilon,
         "Histogram sum {} != expected {} (diff: {})",
-        final_histogram_sum, expected_histogram_sum, sum_diff
+        final_histogram_sum,
+        expected_histogram_sum,
+        sum_diff
     );
 
     // For gauge, we can't predict the exact final value due to concurrent interleaving
@@ -236,7 +237,9 @@ fuzz_target!(|input: MetricsConcurrentFuzz| {
     assert!(
         final_gauge >= MIN_GAUGE_VALUE && final_gauge <= MAX_GAUGE_VALUE,
         "Gauge value {} outside expected bounds [{}, {}]",
-        final_gauge, MIN_GAUGE_VALUE, MAX_GAUGE_VALUE
+        final_gauge,
+        MIN_GAUGE_VALUE,
+        MAX_GAUGE_VALUE
     );
 
     // Additional invariant: if there were no operations, values should be at initial state
@@ -244,8 +247,14 @@ fuzz_target!(|input: MetricsConcurrentFuzz| {
         assert_eq!(final_counter, 0, "Counter should be 0 with no operations");
     }
     if expected_histogram_count == 0 {
-        assert_eq!(final_histogram_count, 0, "Histogram count should be 0 with no observations");
-        assert_eq!(final_histogram_sum, 0.0, "Histogram sum should be 0.0 with no observations");
+        assert_eq!(
+            final_histogram_count, 0,
+            "Histogram count should be 0 with no observations"
+        );
+        assert_eq!(
+            final_histogram_sum, 0.0,
+            "Histogram sum should be 0.0 with no observations"
+        );
     }
 });
 

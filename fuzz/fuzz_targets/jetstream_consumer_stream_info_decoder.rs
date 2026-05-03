@@ -4,7 +4,7 @@ use arbitrary::Arbitrary;
 use libfuzzer_sys::fuzz_target;
 use std::fmt::Write as _;
 
-use asupersync::messaging::jetstream::{fuzz_parse_stream_info, fuzz_parse_api_error, JsError};
+use asupersync::messaging::jetstream::{JsError, fuzz_parse_api_error, fuzz_parse_stream_info};
 
 /// Structure-aware fuzz input for JetStream ConsumerInfo/StreamInfo wire decoder testing
 #[derive(Arbitrary, Debug)]
@@ -32,13 +32,9 @@ enum InfoDecodingScenario {
         error_responses: Vec<ApiErrorVariant>,
     },
     /// Mixed response sequences
-    MixedResponses {
-        responses: Vec<ResponseVariant>,
-    },
+    MixedResponses { responses: Vec<ResponseVariant> },
     /// JSON structure edge cases
-    JsonEdgeCases {
-        edge_cases: Vec<JsonEdgeCase>,
-    },
+    JsonEdgeCases { edge_cases: Vec<JsonEdgeCase> },
 }
 
 #[derive(Arbitrary, Debug, Clone)]
@@ -296,17 +292,17 @@ fn test_jetstream_info_decoding_scenarios(input: &JetStreamInfoFuzz) {
 /// Test malformed JSON structure handling
 fn test_malformed_json_structure(input: &JetStreamInfoFuzz) {
     let malformed_cases = [
-        b"",                                    // Empty
-        b"{",                                   // Incomplete object
-        b"}",                                   // Invalid start
-        b"{\"name\":}",                        // Missing value
-        b"{\"name\":\"test\",}",               // Trailing comma
-        b"{\"name\":\"test\"\"other\":true}",  // Missing comma
-        b"{\"name\":\"test\": true false}",    // Invalid syntax
-        b"null",                               // Null instead of object
-        b"[]",                                 // Array instead of object
-        b"\"string\"",                         // String instead of object
-        b"123",                                // Number instead of object
+        b"",                                  // Empty
+        b"{",                                 // Incomplete object
+        b"}",                                 // Invalid start
+        b"{\"name\":}",                       // Missing value
+        b"{\"name\":\"test\",}",              // Trailing comma
+        b"{\"name\":\"test\"\"other\":true}", // Missing comma
+        b"{\"name\":\"test\": true false}",   // Invalid syntax
+        b"null",                              // Null instead of object
+        b"[]",                                // Array instead of object
+        b"\"string\"",                        // String instead of object
+        b"123",                               // Number instead of object
     ];
 
     for &malformed in malformed_cases {
@@ -352,15 +348,12 @@ fn test_error_handling_edge_cases(input: &JetStreamInfoFuzz) {
         // Stream not found variations
         r#"{"error":{"code":404,"err_code":10059,"description":"stream not found"}}"#,
         r#"{"error":{"code":404,"description":"generic not found"}}"#,
-
         // Consumer not found variations
         r#"{"error":{"code":404,"err_code":10014,"description":"consumer not found"}}"#,
-
         // Missing fields
         r#"{"error":{}}"#,
         r#"{"error":{"code":500}}"#,
         r#"{"error":{"description":"no code"}}"#,
-
         // Type confusion
         r#"{"error":{"code":"500","description":123}}"#,
         r#"{"error":{"code":null,"description":"null code"}}"#,
@@ -382,7 +375,9 @@ fn generate_stream_info_json(stream: &StreamInfoVariant, strategy: &FieldStrateg
     if !stream.config.subjects.is_empty() {
         json.push_str(",\"subjects\":[");
         for (i, subj) in stream.config.subjects.iter().enumerate() {
-            if i > 0 { json.push(','); }
+            if i > 0 {
+                json.push(',');
+            }
             write!(&mut json, "\"{}\"", json_escape(subj)).expect("write to String");
         }
         json.push(']');
@@ -406,14 +401,20 @@ fn generate_stream_info_json(stream: &StreamInfoVariant, strategy: &FieldStrateg
     write!(&mut json, ",\"bytes\":{}", stream.state.bytes).expect("write to String");
     write!(&mut json, ",\"first_seq\":{}", stream.state.first_seq).expect("write to String");
     write!(&mut json, ",\"last_seq\":{}", stream.state.last_seq).expect("write to String");
-    write!(&mut json, ",\"consumer_count\":{}", stream.state.consumer_count).expect("write to String");
+    write!(
+        &mut json,
+        ",\"consumer_count\":{}",
+        stream.state.consumer_count
+    )
+    .expect("write to String");
     json.push('}');
 
     // Apply field manipulation strategy
     match strategy {
         FieldStrategy::ExtraFields { extra_count } => {
             for i in 0..*extra_count {
-                write!(&mut json, ",\"extra_field_{}\":\"value_{}\"", i, i).expect("write to String");
+                write!(&mut json, ",\"extra_field_{}\":\"value_{}\"", i, i)
+                    .expect("write to String");
             }
         }
         FieldStrategy::TypeConfusion => {
@@ -432,17 +433,38 @@ fn generate_consumer_info_json(consumer: &ConsumerInfoVariant, strategy: &FieldS
     let mut json = String::from("{");
 
     write!(&mut json, "\"name\":\"{}\"", json_escape(&consumer.name)).expect("write to String");
-    write!(&mut json, ",\"stream_name\":\"{}\"", json_escape(&consumer.stream)).expect("write to String");
+    write!(
+        &mut json,
+        ",\"stream_name\":\"{}\"",
+        json_escape(&consumer.stream)
+    )
+    .expect("write to String");
 
     // Add config section
     write!(&mut json, ",\"config\":{{").expect("write to String");
-    write!(&mut json, "\"deliver_policy\":\"{}\"", consumer.config.deliver_policy).expect("write to String");
-    write!(&mut json, ",\"ack_policy\":\"{}\"", consumer.config.ack_policy).expect("write to String");
+    write!(
+        &mut json,
+        "\"deliver_policy\":\"{}\"",
+        consumer.config.deliver_policy
+    )
+    .expect("write to String");
+    write!(
+        &mut json,
+        ",\"ack_policy\":\"{}\"",
+        consumer.config.ack_policy
+    )
+    .expect("write to String");
     write!(&mut json, ",\"ack_wait\":{}", consumer.config.ack_wait).expect("write to String");
-    write!(&mut json, ",\"max_deliver\":{}", consumer.config.max_deliver).expect("write to String");
+    write!(
+        &mut json,
+        ",\"max_deliver\":{}",
+        consumer.config.max_deliver
+    )
+    .expect("write to String");
 
     if let Some(ref durable) = consumer.config.durable_name {
-        write!(&mut json, ",\"durable_name\":\"{}\"", json_escape(durable)).expect("write to String");
+        write!(&mut json, ",\"durable_name\":\"{}\"", json_escape(durable))
+            .expect("write to String");
     }
 
     json.push('}');
@@ -472,7 +494,12 @@ fn generate_api_error_json(error: &ApiErrorVariant, strategy: &FieldStrategy) ->
         write!(&mut json, ",\"err_code\":{}", err_code).expect("write to String");
     }
 
-    write!(&mut json, ",\"description\":\"{}\"", json_escape(&error.description)).expect("write to String");
+    write!(
+        &mut json,
+        ",\"description\":\"{}\"",
+        json_escape(&error.description)
+    )
+    .expect("write to String");
 
     // Apply error type specific fields
     match error.error_type {
@@ -486,14 +513,12 @@ fn generate_api_error_json(error: &ApiErrorVariant, strategy: &FieldStrategy) ->
                 json.push_str(",\"err_code\":10014");
             }
         }
-        ErrorType::Malformed => {
-            match strategy {
-                FieldStrategy::TypeConfusion => {
-                    json.push_str(",\"code\":\"not_a_number\"");
-                }
-                _ => {}
+        ErrorType::Malformed => match strategy {
+            FieldStrategy::TypeConfusion => {
+                json.push_str(",\"code\":\"not_a_number\"");
             }
-        }
+            _ => {}
+        },
         _ => {}
     }
 
@@ -526,7 +551,9 @@ fn test_json_edge_case(edge_case: &JsonEdgeCase) {
         JsonEdgeType::NumericEdges => {
             let numeric_json = format!(
                 r#"{{"messages":{},"bytes":{},"first_seq":0,"last_seq":{}}}"#,
-                u64::MAX, i64::MIN, u64::MAX
+                u64::MAX,
+                i64::MIN,
+                u64::MAX
             );
             let _ = fuzz_parse_stream_info(numeric_json.as_bytes());
         }
@@ -559,7 +586,11 @@ fn is_valid_stream_response(response: &StreamInfoVariant) -> bool {
         && response.name.len() <= MAX_STRING_LEN
         && response.state.last_seq >= response.state.first_seq
         && response.config.subjects.len() <= MAX_ARRAY_LEN
-        && response.config.subjects.iter().all(|s| s.len() <= MAX_STRING_LEN)
+        && response
+            .config
+            .subjects
+            .iter()
+            .all(|s| s.len() <= MAX_STRING_LEN)
 }
 
 /// Check if consumer response is valid for testing
@@ -576,19 +607,21 @@ fn generate_corrupted_json(strategy: &FieldStrategy) -> String {
         FieldStrategy::TypeConfusion => {
             r#"{"name":123,"state":{"messages":"not_a_number","bytes":null}}"#.to_string()
         }
-        _ => {
-            r#"{"name":"test"invalid:syntax"state":{}"#.to_string()
-        }
+        _ => r#"{"name":"test"invalid:syntax"state":{}"#.to_string(),
     }
 }
 
 /// Generate large JSON for stress testing
 fn generate_large_json() -> String {
-    let mut json = String::from(r#"{"name":"large_stream","state":{"messages":1000,"bytes":50000,"first_seq":1,"last_seq":1000,"consumer_count":5},"config":{"subjects":["#);
+    let mut json = String::from(
+        r#"{"name":"large_stream","state":{"messages":1000,"bytes":50000,"first_seq":1,"last_seq":1000,"consumer_count":5},"config":{"subjects":["#,
+    );
 
     // Add many subjects to create a large JSON
     for i in 0..100 {
-        if i > 0 { json.push(','); }
+        if i > 0 {
+            json.push(',');
+        }
         write!(&mut json, "\"large.subject.{}.>\"", i).expect("write to String");
     }
 

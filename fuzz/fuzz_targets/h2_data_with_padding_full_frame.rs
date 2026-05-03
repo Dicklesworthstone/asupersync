@@ -1,7 +1,7 @@
 #![no_main]
 
-use libfuzzer_sys::fuzz_target;
 use arbitrary::{Arbitrary, Unstructured};
+use libfuzzer_sys::fuzz_target;
 
 /// HTTP/2 frame header length per RFC 7540 §4.1
 const FRAME_HEADER_LEN: usize = 9;
@@ -45,10 +45,10 @@ enum DataFrameParseResult {
 /// HTTP/2 frame header per RFC 7540 §4.1
 #[derive(Debug, Clone)]
 struct FrameHeader {
-    length: u32,      // 24-bit length
-    frame_type: u8,   // 8-bit type
-    flags: u8,        // 8-bit flags
-    stream_id: u32,   // 31-bit stream ID
+    length: u32,    // 24-bit length
+    frame_type: u8, // 8-bit type
+    flags: u8,      // 8-bit flags
+    stream_id: u32, // 31-bit stream ID
 }
 
 impl FrameHeader {
@@ -79,17 +79,15 @@ impl FrameHeader {
             return Err("incomplete header");
         }
 
-        let length = ((buf[0] as u32) << 16) |
-                    ((buf[1] as u32) << 8) |
-                    (buf[2] as u32);
+        let length = ((buf[0] as u32) << 16) | ((buf[1] as u32) << 8) | (buf[2] as u32);
 
         let frame_type = buf[3];
         let flags = buf[4];
 
-        let stream_id = ((buf[5] as u32 & 0x7F) << 24) |
-                       ((buf[6] as u32) << 16) |
-                       ((buf[7] as u32) << 8) |
-                       (buf[8] as u32);
+        let stream_id = ((buf[5] as u32 & 0x7F) << 24)
+            | ((buf[6] as u32) << 16)
+            | ((buf[7] as u32) << 8)
+            | (buf[8] as u32);
 
         Ok(FrameHeader {
             length,
@@ -133,7 +131,8 @@ impl MockH2DataPaddingParser {
         // Must be DATA frame
         if header.frame_type != DATA_FRAME_TYPE {
             return DataFrameParseResult::ProtocolError(format!(
-                "Expected DATA frame (0x0), got 0x{:x}", header.frame_type
+                "Expected DATA frame (0x0), got 0x{:x}",
+                header.frame_type
             ));
         }
 
@@ -161,7 +160,7 @@ impl MockH2DataPaddingParser {
             if payload.is_empty() {
                 // Zero-length frame with PADDED flag - invalid
                 return DataFrameParseResult::ProtocolError(
-                    "PADDED flag set but frame has zero length payload".to_string()
+                    "PADDED flag set but frame has zero length payload".to_string(),
                 );
             }
 
@@ -175,7 +174,9 @@ impl MockH2DataPaddingParser {
             if pad_len_usize > remaining_length {
                 return DataFrameParseResult::ProtocolError(format!(
                     "Pad length {} exceeds remaining frame payload {} (total payload: {})",
-                    pad_len, remaining_length, payload.len()
+                    pad_len,
+                    remaining_length,
+                    payload.len()
                 ));
             }
 
@@ -193,7 +194,7 @@ impl MockH2DataPaddingParser {
         } else {
             // This should not happen with correct padding validation above
             return DataFrameParseResult::ProtocolError(
-                "Invalid padding configuration - data start exceeds data end".to_string()
+                "Invalid padding configuration - data start exceeds data end".to_string(),
             );
         };
 
@@ -209,7 +210,9 @@ impl MockH2DataPaddingParser {
         if padded_flag_set && actual_data_size == 0 {
             eprintln!(
                 "EDGE CASE: Fully-padded DATA frame - pad_length={}, frame_length={}, data_bytes=0",
-                pad_length.unwrap_or(0), header.length, actual_data_size
+                pad_length.unwrap_or(0),
+                header.length,
+                actual_data_size
             );
         }
 
@@ -221,7 +224,8 @@ impl MockH2DataPaddingParser {
             if padding_start + padding_size != padding_end {
                 return DataFrameParseResult::ProtocolError(format!(
                     "Padding size mismatch: declared {} bytes, available {} bytes",
-                    padding_size, padding_end - padding_start
+                    padding_size,
+                    padding_end - padding_start
                 ));
             }
 
@@ -248,7 +252,12 @@ impl MockH2DataPaddingParser {
     }
 
     /// Create a fully-padded DATA frame for testing
-    fn create_fully_padded_frame(&self, stream_id: u32, frame_size: u32, end_stream: bool) -> Vec<u8> {
+    fn create_fully_padded_frame(
+        &self,
+        stream_id: u32,
+        frame_size: u32,
+        end_stream: bool,
+    ) -> Vec<u8> {
         // Frame size must be at least 1 (for pad_length byte)
         let frame_size = frame_size.max(1).min(self.max_frame_size);
 
@@ -332,26 +341,31 @@ enum PaddingTest {
 
 fuzz_target!(|input: FuzzInput| {
     // Clamp max frame size to valid range
-    let max_frame_size = input.max_frame_size
+    let max_frame_size = input
+        .max_frame_size
         .clamp(DEFAULT_MAX_FRAME_SIZE, MAX_FRAME_SIZE_LIMIT);
 
     let parser = MockH2DataPaddingParser::with_max_frame_size(max_frame_size);
 
     // Ensure valid stream ID (non-zero for DATA frames)
-    let stream_id = if input.stream_id == 0 { 1 } else { input.stream_id & 0x7FFF_FFFF };
+    let stream_id = if input.stream_id == 0 {
+        1
+    } else {
+        input.stream_id & 0x7FFF_FFFF
+    };
 
     // Test the core full-padding edge case
     if input.test_full_padding_edge_case {
         // Test various frame sizes with maximum padding
         let test_sizes = [
-            1,                              // Minimum possible (pad_length only)
-            2,                              // pad_length + 1 pad byte
-            16,                             // Small frame
-            256,                            // Medium frame
-            1024,                           // Larger frame
-            max_frame_size / 2,             // Half max
-            max_frame_size - 1,             // Near max
-            max_frame_size,                 // Exactly at max
+            1,                  // Minimum possible (pad_length only)
+            2,                  // pad_length + 1 pad byte
+            16,                 // Small frame
+            256,                // Medium frame
+            1024,               // Larger frame
+            max_frame_size / 2, // Half max
+            max_frame_size - 1, // Near max
+            max_frame_size,     // Exactly at max
         ];
 
         for &size in &test_sizes {
@@ -360,7 +374,8 @@ fuzz_target!(|input: FuzzInput| {
             }
 
             // Create fully-padded frame at this size
-            let fully_padded_frame = parser.create_fully_padded_frame(stream_id, size, input.end_stream);
+            let fully_padded_frame =
+                parser.create_fully_padded_frame(stream_id, size, input.end_stream);
 
             // Parse and validate
             let result = parser.parse_data_frame(&fully_padded_frame);
@@ -382,37 +397,44 @@ fuzz_target!(|input: FuzzInput| {
 
                     // Padding size should be frame_size - 1 (subtract pad_length byte)
                     assert_eq!(
-                        padding_size, (size - 1) as usize,
-                        "Padding size mismatch for fully-padded frame of size {}", size
+                        padding_size,
+                        (size - 1) as usize,
+                        "Padding size mismatch for fully-padded frame of size {}",
+                        size
                     );
 
                     // Total accounting: pad_length_byte (1) + padding_bytes = frame_size
                     assert_eq!(
-                        1 + padding_size, size as usize,
+                        1 + padding_size,
+                        size as usize,
                         "Frame size accounting error: 1 + {} != {} for frame size {}",
-                        padding_size, size, size
+                        padding_size,
+                        size,
+                        size
                     );
 
                     eprintln!(
                         "✓ Fully-padded frame size {} parsed correctly: data={}, padding={}",
                         size, actual_data_size, padding_size
                     );
-                },
+                }
 
                 DataFrameParseResult::ProtocolError(msg) => {
                     panic!(
                         "Fully-padded frame size {} should be valid but got protocol error: {}",
                         size, msg
                     );
-                },
+                }
 
                 DataFrameParseResult::FrameSizeError => {
                     // Only acceptable if size exceeds max_frame_size
                     assert!(
                         size > max_frame_size,
-                        "Frame size error for size {} within limit {}", size, max_frame_size
+                        "Frame size error for size {} within limit {}",
+                        size,
+                        max_frame_size
                     );
-                },
+                }
 
                 _ => {
                     // Other errors might be acceptable depending on implementation
@@ -438,7 +460,7 @@ fuzz_target!(|input: FuzzInput| {
             frame.extend_from_slice(&header.encode());
             frame.extend_from_slice(b"test data!"); // 10 bytes
             frame
-        },
+        }
 
         PaddingConfig::Minimal => {
             // 1 byte of padding
@@ -458,7 +480,7 @@ fuzz_target!(|input: FuzzInput| {
             frame.extend_from_slice(&vec![0x42u8; remaining]);
             frame.push(0); // 1 padding byte
             frame
-        },
+        }
 
         PaddingConfig::Moderate(pad_len) => {
             let pad_len = pad_len.min((target_size - 1) as u8); // Ensure valid
@@ -481,12 +503,12 @@ fuzz_target!(|input: FuzzInput| {
             // Add padding
             frame.extend_from_slice(&vec![0u8; pad_len as usize]);
             frame
-        },
+        }
 
         PaddingConfig::Maximum => {
             // Use the full-padding creator
             parser.create_fully_padded_frame(stream_id, target_size, input.end_stream)
-        },
+        }
 
         PaddingConfig::Invalid(bad_pad_len) => {
             // Create frame with invalid padding that exceeds frame size
@@ -505,7 +527,7 @@ fuzz_target!(|input: FuzzInput| {
             let remaining = (target_size as usize).saturating_sub(1);
             frame.extend_from_slice(&vec![0x42u8; remaining]);
             frame
-        },
+        }
 
         PaddingConfig::ExceedsFrame => {
             // pad_length = frame_size (invalid - should be frame_size - 1 max)
@@ -524,7 +546,7 @@ fuzz_target!(|input: FuzzInput| {
             let remaining = (target_size as usize).saturating_sub(1);
             frame.extend_from_slice(&vec![0u8; remaining]);
             frame
-        },
+        }
     };
 
     // Parse the constructed frame
@@ -532,34 +554,50 @@ fuzz_target!(|input: FuzzInput| {
 
     // Validate behavior based on padding configuration
     match (&input.padding_config, result) {
-        (PaddingConfig::Maximum, DataFrameParseResult::Valid { actual_data_size, .. }) => {
+        (
+            PaddingConfig::Maximum,
+            DataFrameParseResult::Valid {
+                actual_data_size, ..
+            },
+        ) => {
             // Maximum padding should result in 0 data bytes
             assert_eq!(
                 actual_data_size, 0,
                 "Maximum padding should result in 0 data bytes"
             );
-        },
+        }
 
         (PaddingConfig::Invalid(_), DataFrameParseResult::ProtocolError(_)) => {
             // Expected for invalid padding
-        },
+        }
 
         (PaddingConfig::ExceedsFrame, DataFrameParseResult::ProtocolError(_)) => {
             // Expected for pad_length >= frame_size
-        },
+        }
 
-        (PaddingConfig::None, DataFrameParseResult::Valid { pad_length: None, .. }) => {
+        (
+            PaddingConfig::None,
+            DataFrameParseResult::Valid {
+                pad_length: None, ..
+            },
+        ) => {
             // Expected for non-padded frames
-        },
+        }
 
-        (PaddingConfig::Minimal | PaddingConfig::Moderate(_),
-         DataFrameParseResult::Valid { padding_size, actual_data_size, .. }) => {
+        (
+            PaddingConfig::Minimal | PaddingConfig::Moderate(_),
+            DataFrameParseResult::Valid {
+                padding_size,
+                actual_data_size,
+                ..
+            },
+        ) => {
             // Should have some padding and potentially some data
             assert!(
                 padding_size > 0 || actual_data_size > 0,
                 "Frame should have either padding or data"
             );
-        },
+        }
 
         _ => {
             // Other combinations may be valid depending on specific values
@@ -574,13 +612,17 @@ fuzz_target!(|input: FuzzInput| {
                 let test_frame = parser.create_fully_padded_frame(stream_id + 1, size, false);
                 let test_result = parser.parse_data_frame(&test_frame);
 
-                if let DataFrameParseResult::Valid { actual_data_size, .. } = test_result {
+                if let DataFrameParseResult::Valid {
+                    actual_data_size, ..
+                } = test_result
+                {
                     assert_eq!(
                         actual_data_size, 0,
-                        "Full padding test at size {} should have 0 data bytes", size
+                        "Full padding test at size {} should have 0 data bytes",
+                        size
                     );
                 }
-            },
+            }
 
             PaddingTest::EdgeCaseFrameSize => {
                 // Test edge cases around frame size limits
@@ -591,20 +633,23 @@ fuzz_target!(|input: FuzzInput| {
                         continue;
                     }
 
-                    let edge_frame = parser.create_fully_padded_frame(stream_id + 2, edge_size, false);
+                    let edge_frame =
+                        parser.create_fully_padded_frame(stream_id + 2, edge_size, false);
                     let edge_result = parser.parse_data_frame(&edge_frame);
 
                     // All these should be valid fully-padded frames
                     match edge_result {
-                        DataFrameParseResult::Valid { actual_data_size, .. } => {
+                        DataFrameParseResult::Valid {
+                            actual_data_size, ..
+                        } => {
                             assert_eq!(actual_data_size, 0);
-                        },
+                        }
                         _ => {
                             // May fail for very small sizes in some implementations
                         }
                     }
                 }
-            },
+            }
 
             PaddingTest::InvalidPadding => {
                 // Test various invalid padding scenarios
@@ -637,7 +682,7 @@ fuzz_target!(|input: FuzzInput| {
                         "Invalid padding should be rejected"
                     );
                 }
-            },
+            }
 
             PaddingTest::ZeroLengthPadded => {
                 // Test zero-length frame with PADDED flag (should be invalid)
@@ -659,7 +704,7 @@ fuzz_target!(|input: FuzzInput| {
                     matches!(zero_result, DataFrameParseResult::ProtocolError(_)),
                     "Zero-length frame with PADDED flag should be rejected"
                 );
-            },
+            }
         }
     }
 
@@ -667,7 +712,8 @@ fuzz_target!(|input: FuzzInput| {
     // Frame size = 256, pad_length = 255, data bytes = 0
     let canonical_size = 256u32.min(max_frame_size);
     if canonical_size >= 2 {
-        let canonical_frame = parser.create_fully_padded_frame(stream_id + 10, canonical_size, true);
+        let canonical_frame =
+            parser.create_fully_padded_frame(stream_id + 10, canonical_size, true);
         let canonical_result = parser.parse_data_frame(&canonical_frame);
 
         match canonical_result {
@@ -680,18 +726,38 @@ fuzz_target!(|input: FuzzInput| {
                 ..
             } => {
                 // Verify this is the exact edge case we're testing
-                assert_eq!(actual_data_size, 0, "Canonical case should have 0 data bytes");
-                assert_eq!(padding_size, (canonical_size - 1) as usize, "Canonical case padding size");
-                assert_eq!(total_frame_size, canonical_size, "Canonical case frame size");
-                assert_eq!(pad_len, (canonical_size - 1) as u8, "Canonical case pad_length");
-                assert!((flags & PADDED_FLAG) != 0, "Canonical case should have PADDED flag");
-                assert!((flags & END_STREAM_FLAG) != 0, "Canonical case should have END_STREAM flag");
+                assert_eq!(
+                    actual_data_size, 0,
+                    "Canonical case should have 0 data bytes"
+                );
+                assert_eq!(
+                    padding_size,
+                    (canonical_size - 1) as usize,
+                    "Canonical case padding size"
+                );
+                assert_eq!(
+                    total_frame_size, canonical_size,
+                    "Canonical case frame size"
+                );
+                assert_eq!(
+                    pad_len,
+                    (canonical_size - 1) as u8,
+                    "Canonical case pad_length"
+                );
+                assert!(
+                    (flags & PADDED_FLAG) != 0,
+                    "Canonical case should have PADDED flag"
+                );
+                assert!(
+                    (flags & END_STREAM_FLAG) != 0,
+                    "Canonical case should have END_STREAM flag"
+                );
 
                 eprintln!(
                     "✓ CANONICAL EDGE CASE VERIFIED: frame_size={}, pad_length={}, data_bytes={}, padding_bytes={}",
                     canonical_size, pad_len, actual_data_size, padding_size
                 );
-            },
+            }
 
             _ => {
                 panic!(

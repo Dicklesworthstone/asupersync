@@ -159,8 +159,7 @@ fn run_loop_continues_after_execute_returns() {
     let body = &source[start..safe_end];
 
     assert!(
-        body.contains("self.execute(task);")
-            && body.contains("continue;"),
+        body.contains("self.execute(task);") && body.contains("continue;"),
         "REGRESSION: run_loop no longer calls self.execute() \
          followed by continue. A panic in one task could now \
          exit the loop — the worker thread terminates and \

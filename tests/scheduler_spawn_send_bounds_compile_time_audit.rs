@@ -357,10 +357,7 @@ fn no_runtime_send_check_or_panic_on_spawn_path() {
     // patterns — they would be tautologies if the type
     // bound is correct, and footguns if the bound was
     // removed and they were the only line of defense.
-    for rel in &[
-        "src/cx/scope.rs",
-        "src/runtime/scheduler/three_lane.rs",
-    ] {
+    for rel in &["src/cx/scope.rs", "src/runtime/scheduler/three_lane.rs"] {
         let source = read(rel);
         let suspect = [
             "panic!(\"future is not Send\")",

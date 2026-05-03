@@ -16,9 +16,7 @@ use asupersync::bytes::Bytes;
 use asupersync::http::h2::{
     connection::Connection,
     error::{ErrorCode, H2Error},
-    frame::{
-        DataFrame, Frame, HeadersFrame, RstStreamFrame, WindowUpdateFrame
-    },
+    frame::{DataFrame, Frame, HeadersFrame, RstStreamFrame, WindowUpdateFrame},
     settings::Settings,
 };
 use libfuzzer_sys::fuzz_target;
@@ -73,18 +71,11 @@ enum StreamOpType {
     /// Open stream with HEADERS
     OpenStream,
     /// Send DATA frame
-    SendData {
-        size: u32,
-        end_stream: bool,
-    },
+    SendData { size: u32, end_stream: bool },
     /// Send WINDOW_UPDATE for stream
-    WindowUpdate {
-        increment: u32,
-    },
+    WindowUpdate { increment: u32 },
     /// Send RST_STREAM
-    RstStream {
-        error_code: RstErrorCode,
-    },
+    RstStream { error_code: RstErrorCode },
 }
 
 /// Timing for operations
@@ -191,7 +182,8 @@ fuzz_target!(|data: &[u8]| {
     // Limit complexity to prevent timeouts
     if test_case.connection_window_ops.len() > 20
         || test_case.stream_operations.len() > 15
-        || test_case.max_concurrent_streams > 5 {
+        || test_case.max_concurrent_streams > 5
+    {
         return;
     }
 
@@ -222,7 +214,7 @@ fn test_flow_control_window_rst_stream(test_case: &FlowControlTest) {
     // Track expected window state
     let mut window_tracker = WindowTracker::new(
         65535, // Default connection window
-        i32::try_from(test_case.initial_window_size).unwrap_or(65535)
+        i32::try_from(test_case.initial_window_size).unwrap_or(65535),
     );
 
     // Execute stream operations
@@ -230,11 +222,19 @@ fn test_flow_control_window_rst_stream(test_case: &FlowControlTest) {
         let stream_id = normalize_stream_id(stream_op.stream_id);
 
         let operation_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            execute_stream_operation(&mut connection, &mut window_tracker, stream_id, &stream_op.operation)
+            execute_stream_operation(
+                &mut connection,
+                &mut window_tracker,
+                stream_id,
+                &stream_op.operation,
+            )
         }));
 
         // Operation should not panic
-        assert!(operation_result.is_ok(), "Stream operation should not panic");
+        assert!(
+            operation_result.is_ok(),
+            "Stream operation should not panic"
+        );
     }
 
     // Verify final window state consistency
@@ -375,8 +375,10 @@ fn test_window_exhaustion_with_rst(_test_case: &FlowControlTest) {
     let rst_result = send_rst_stream(&mut connection, stream_id, ErrorCode::FlowControlError);
 
     // Should handle RST_STREAM regardless of window state
-    assert!(rst_result.is_ok() || is_acceptable_rst_error(&rst_result),
-        "RST_STREAM should be handled properly even with window exhaustion");
+    assert!(
+        rst_result.is_ok() || is_acceptable_rst_error(&rst_result),
+        "RST_STREAM should be handled properly even with window exhaustion"
+    );
 }
 
 // Helper functions for connection management and frame operations
@@ -415,7 +417,12 @@ fn open_test_stream(connection: &mut Connection, stream_id: u32) -> Result<(), H
 }
 
 /// Send a DATA frame on a stream
-fn send_data_frame(connection: &mut Connection, stream_id: u32, size: u32, end_stream: bool) -> Result<(), H2Error> {
+fn send_data_frame(
+    connection: &mut Connection,
+    stream_id: u32,
+    size: u32,
+    end_stream: bool,
+) -> Result<(), H2Error> {
     let data = Bytes::from(vec![0u8; size as usize]);
     let data_frame = DataFrame::new(stream_id, data, end_stream);
 
@@ -424,7 +431,11 @@ fn send_data_frame(connection: &mut Connection, stream_id: u32, size: u32, end_s
 }
 
 /// Send RST_STREAM frame
-fn send_rst_stream(connection: &mut Connection, stream_id: u32, error_code: ErrorCode) -> Result<(), H2Error> {
+fn send_rst_stream(
+    connection: &mut Connection,
+    stream_id: u32,
+    error_code: ErrorCode,
+) -> Result<(), H2Error> {
     let rst_frame = RstStreamFrame::new(stream_id, error_code);
     let result = connection.process_frame(Frame::RstStream(rst_frame));
     result.map(|_| ())
@@ -435,7 +446,7 @@ fn execute_stream_operation(
     connection: &mut Connection,
     window_tracker: &mut WindowTracker,
     stream_id: u32,
-    operation: &StreamOpType
+    operation: &StreamOpType,
 ) -> Result<(), H2Error> {
     match operation {
         StreamOpType::OpenStream => {
@@ -452,7 +463,9 @@ fn execute_stream_operation(
         }
         StreamOpType::WindowUpdate { increment } => {
             let window_frame = WindowUpdateFrame::new(stream_id, *increment);
-            connection.process_frame(Frame::WindowUpdate(window_frame)).map(|_| ())
+            connection
+                .process_frame(Frame::WindowUpdate(window_frame))
+                .map(|_| ())
         }
         StreamOpType::RstStream { error_code } => {
             // Track window credit return
@@ -485,9 +498,9 @@ fn verify_window_consistency(connection: &Connection, _window_tracker: &WindowTr
 
 /// Check if error is a flow control error
 fn is_flow_control_error(error: &H2Error) -> bool {
-    error.to_string().contains("flow") ||
-    error.to_string().contains("window") ||
-    matches!(error.code, ErrorCode::FlowControlError)
+    error.to_string().contains("flow")
+        || error.to_string().contains("window")
+        || matches!(error.code, ErrorCode::FlowControlError)
 }
 
 /// Check if RST_STREAM error is acceptable
@@ -495,7 +508,10 @@ fn is_acceptable_rst_error(result: &Result<(), H2Error>) -> bool {
     match result {
         Err(error) => {
             // Some errors are acceptable for edge cases
-            matches!(error.code, ErrorCode::StreamClosed | ErrorCode::ProtocolError)
+            matches!(
+                error.code,
+                ErrorCode::StreamClosed | ErrorCode::ProtocolError
+            )
         }
         Ok(()) => true,
     }
@@ -545,15 +561,16 @@ mod tests {
     #[test]
     fn test_rst_error_code_conversion() {
         assert_eq!(RstErrorCode::Cancel.to_error_code(), ErrorCode::Cancel);
-        assert_eq!(RstErrorCode::FlowControlError.to_error_code(), ErrorCode::FlowControlError);
+        assert_eq!(
+            RstErrorCode::FlowControlError.to_error_code(),
+            ErrorCode::FlowControlError
+        );
     }
 
     #[test]
     fn test_mock_connection_operations() {
         // Test that mock connection operations don't panic
-        let connection_result = std::panic::catch_unwind(|| {
-            create_test_connection(65535)
-        });
+        let connection_result = std::panic::catch_unwind(|| create_test_connection(65535));
 
         // Should not panic during creation
         assert!(connection_result.is_ok());

@@ -132,8 +132,8 @@
 //! would all be caught by the structural pins below.
 
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Instant;
 
 fn read(rel: &str) -> String {
@@ -179,15 +179,8 @@ fn checkpoint_fast_path_uses_read_lock_only_no_yield() {
     );
 
     // Forbid forced-yield primitives in the fast path.
-    let suspect_yield = [
-        "yield_now",
-        "scheduler.yield",
-        "self.parker.unpark",
-    ];
-    let fast_path_window = body
-        .split("// ── Slow path ─")
-        .next()
-        .unwrap_or(body);
+    let suspect_yield = ["yield_now", "scheduler.yield", "self.parker.unpark"];
+    let fast_path_window = body.split("// ── Slow path ─").next().unwrap_or(body);
     for pat in &suspect_yield {
         assert!(
             !fast_path_window.contains(pat),
@@ -211,7 +204,9 @@ fn checkpoint_budget_exhaustion_checks_deadline_for_bounded_spinning() {
     let source = read("src/cx/cx.rs");
 
     let fn_marker = "fn checkpoint_budget_exhaustion(";
-    let start = source.find(fn_marker).expect("checkpoint_budget_exhaustion fn");
+    let start = source
+        .find(fn_marker)
+        .expect("checkpoint_budget_exhaustion fn");
     let body_end = source[start..]
         .find("\n    }\n")
         .expect("checkpoint_budget_exhaustion close");
@@ -291,8 +286,7 @@ fn yield_now_is_the_explicit_yield_primitive_separate_from_checkpoint() {
     let source = read("src/runtime/yield_now.rs");
 
     assert!(
-        source.contains("pub fn yield_now")
-            || source.contains("pub struct YieldNow"),
+        source.contains("pub fn yield_now") || source.contains("pub struct YieldNow"),
         "REGRESSION: YieldNow primitive is gone from \
          src/runtime/yield_now.rs. Without an explicit yield \
          primitive, well-behaved tasks have no way to release \
@@ -355,8 +349,7 @@ fn budget_minimal_provides_finite_poll_quota_for_cleanup() {
     let source = read("src/types/budget.rs");
 
     assert!(
-        source.contains("pub const MINIMAL: Self = Self {")
-            && source.contains("poll_quota: 100,"),
+        source.contains("pub const MINIMAL: Self = Self {") && source.contains("poll_quota: 100,"),
         "REGRESSION: Budget::MINIMAL is gone or changed \
          quota. Cleanup phases use this for bounded post-\
          cancel work — a change here affects cancel \

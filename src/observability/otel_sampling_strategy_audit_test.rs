@@ -124,7 +124,10 @@ fn audit_parent_based_always_on_sampling_strategy() {
 
     println!("   Parent decision: sampled=1");
     println!("   ParentBased result: {}", parent_sampled_decision);
-    assert!(parent_sampled_decision, "Should honor parent sampled=1 decision");
+    assert!(
+        parent_sampled_decision,
+        "Should honor parent sampled=1 decision"
+    );
 
     test_spans.push(OtlpSpan::new_with_flags(
         parent_sampled_context.span_id.to_hex(),
@@ -150,7 +153,10 @@ fn audit_parent_based_always_on_sampling_strategy() {
 
     println!("   Parent decision: sampled=0");
     println!("   ParentBased result: {}", parent_unsampled_decision);
-    assert!(!parent_unsampled_decision, "Should honor parent sampled=0 decision");
+    assert!(
+        !parent_unsampled_decision,
+        "Should honor parent sampled=0 decision"
+    );
 
     // Don't add unsampled span to test_spans (it shouldn't be exported)
 
@@ -162,7 +168,10 @@ fn audit_parent_based_always_on_sampling_strategy() {
 
     println!("   No parent present");
     println!("   AlwaysOn fallback result: {}", root_decision);
-    assert!(root_decision, "AlwaysOn fallback should sample all root spans");
+    assert!(
+        root_decision,
+        "AlwaysOn fallback should sample all root spans"
+    );
 
     test_spans.push(OtlpSpan::new_with_flags(
         "root_span_id".to_string(),
@@ -292,11 +301,7 @@ fn audit_current_implementation_vs_otel_standard() {
         println!("   Exported spans: {}", exported_batch.spans.len());
 
         for span in &exported_batch.spans {
-            println!(
-                "     - {} (sampled: {})",
-                span.name,
-                span.is_sampled()
-            );
+            println!("     - {} (sampled: {})", span.name, span.is_sampled());
         }
 
         // Analyze compliance with OpenTelemetry ParentBased + AlwaysOn
@@ -415,34 +420,70 @@ fn audit_otel_sampling_strategies_matrix() {
     // Strategy 1: AlwaysOn
     let always_on = OtelSamplingStrategy::AlwaysOn;
     println!("   AlwaysOn:");
-    println!("     Parent=1: {}", always_on.should_sample(parent_sampled, test_trace_id));
-    println!("     Parent=0: {}", always_on.should_sample(parent_unsampled, test_trace_id));
-    println!("     No parent: {}", always_on.should_sample(no_parent, test_trace_id));
+    println!(
+        "     Parent=1: {}",
+        always_on.should_sample(parent_sampled, test_trace_id)
+    );
+    println!(
+        "     Parent=0: {}",
+        always_on.should_sample(parent_unsampled, test_trace_id)
+    );
+    println!(
+        "     No parent: {}",
+        always_on.should_sample(no_parent, test_trace_id)
+    );
 
     // Strategy 2: AlwaysOff
     let always_off = OtelSamplingStrategy::AlwaysOff;
     println!("   AlwaysOff:");
-    println!("     Parent=1: {}", always_off.should_sample(parent_sampled, test_trace_id));
-    println!("     Parent=0: {}", always_off.should_sample(parent_unsampled, test_trace_id));
-    println!("     No parent: {}", always_off.should_sample(no_parent, test_trace_id));
+    println!(
+        "     Parent=1: {}",
+        always_off.should_sample(parent_sampled, test_trace_id)
+    );
+    println!(
+        "     Parent=0: {}",
+        always_off.should_sample(parent_unsampled, test_trace_id)
+    );
+    println!(
+        "     No parent: {}",
+        always_off.should_sample(no_parent, test_trace_id)
+    );
 
     // Strategy 3: ParentBased + AlwaysOn
     let parent_based_on = OtelSamplingStrategy::ParentBased {
         root_fallback: Box::new(OtelSamplingStrategy::AlwaysOn),
     };
     println!("   ParentBased + AlwaysOn:");
-    println!("     Parent=1: {}", parent_based_on.should_sample(parent_sampled, test_trace_id));
-    println!("     Parent=0: {}", parent_based_on.should_sample(parent_unsampled, test_trace_id));
-    println!("     No parent: {}", parent_based_on.should_sample(no_parent, test_trace_id));
+    println!(
+        "     Parent=1: {}",
+        parent_based_on.should_sample(parent_sampled, test_trace_id)
+    );
+    println!(
+        "     Parent=0: {}",
+        parent_based_on.should_sample(parent_unsampled, test_trace_id)
+    );
+    println!(
+        "     No parent: {}",
+        parent_based_on.should_sample(no_parent, test_trace_id)
+    );
 
     // Strategy 4: ParentBased + AlwaysOff
     let parent_based_off = OtelSamplingStrategy::ParentBased {
         root_fallback: Box::new(OtelSamplingStrategy::AlwaysOff),
     };
     println!("   ParentBased + AlwaysOff:");
-    println!("     Parent=1: {}", parent_based_off.should_sample(parent_sampled, test_trace_id));
-    println!("     Parent=0: {}", parent_based_off.should_sample(parent_unsampled, test_trace_id));
-    println!("     No parent: {}", parent_based_off.should_sample(no_parent, test_trace_id));
+    println!(
+        "     Parent=1: {}",
+        parent_based_off.should_sample(parent_sampled, test_trace_id)
+    );
+    println!(
+        "     Parent=0: {}",
+        parent_based_off.should_sample(parent_unsampled, test_trace_id)
+    );
+    println!(
+        "     No parent: {}",
+        parent_based_off.should_sample(no_parent, test_trace_id)
+    );
 
     // Verify key OpenTelemetry requirements
     println!("📊 OpenTelemetry spec compliance verification:");

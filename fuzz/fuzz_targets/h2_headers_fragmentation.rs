@@ -1,7 +1,7 @@
 #![no_main]
 
-use libfuzzer_sys::fuzz_target;
 use arbitrary::{Arbitrary, Unstructured};
+use libfuzzer_sys::fuzz_target;
 use std::collections::HashMap;
 
 // Mock HTTP/2 frame types and constants for fuzzing
@@ -29,21 +29,13 @@ enum FragmentationScenario {
         actual_length: usize,
     },
     /// HEADERS without END_HEADERS but no CONTINUATION follows
-    MissingContinuation {
-        fragment_size: usize,
-    },
+    MissingContinuation { fragment_size: usize },
     /// HEADERS with END_HEADERS followed by unexpected CONTINUATION
-    UnexpectedContinuation {
-        continuation_count: u8,
-    },
+    UnexpectedContinuation { continuation_count: u8 },
     /// Multiple HEADERS frames on same stream
-    DuplicateHeaders {
-        second_headers_delay: u8,
-    },
+    DuplicateHeaders { second_headers_delay: u8 },
     /// CONTINUATION frame without preceding HEADERS
-    OrphanedContinuation {
-        continuation_flags: u8,
-    },
+    OrphanedContinuation { continuation_flags: u8 },
     /// Interleaved frames from different streams
     InterleavedStreams {
         other_stream_id: u32,
@@ -57,9 +49,7 @@ enum FragmentationScenario {
     /// Empty HEADERS frame with END_HEADERS
     EmptyHeaders,
     /// HEADERS frame exceeding max frame size
-    OversizedHeaders {
-        size_multiplier: u8,
-    },
+    OversizedHeaders { size_multiplier: u8 },
 }
 
 #[derive(Debug, Clone, Arbitrary)]
@@ -135,7 +125,11 @@ fuzz_target!(|data: &[u8]| {
 
 /// Test HEADERS frame with END_HEADERS flag but incomplete header data
 fn test_incomplete_headers_with_end_flag(test_case: &HeadersFragmentationTestCase) {
-    if let FragmentationScenario::IncompleteWithEndHeaders { expected_length, actual_length } = &test_case.fragmentation_scenario {
+    if let FragmentationScenario::IncompleteWithEndHeaders {
+        expected_length,
+        actual_length,
+    } = &test_case.fragmentation_scenario
+    {
         // Create HEADERS frame that claims to be complete but has truncated data
         let mut headers_frame = test_case.headers_frame.clone();
         headers_frame.frame_type = HEADERS_FRAME_TYPE;
@@ -159,13 +153,18 @@ fn test_incomplete_headers_with_end_flag(test_case: &HeadersFragmentationTestCas
             Err(error_msg) if error_msg.contains("PROTOCOL_ERROR") => {
                 // Expected: incomplete headers with END_HEADERS should be rejected
             }
-            Err(error_msg) if error_msg.contains("incomplete") || error_msg.contains("truncated") => {
+            Err(error_msg)
+                if error_msg.contains("incomplete") || error_msg.contains("truncated") =>
+            {
                 // Also acceptable: specific error about incomplete data
             }
             Ok(_) => {
                 // If accepted, verify it doesn't claim to have complete headers
                 // This would be a protocol violation
-                assert!(false, "Incomplete HEADERS with END_HEADERS should be rejected");
+                assert!(
+                    false,
+                    "Incomplete HEADERS with END_HEADERS should be rejected"
+                );
             }
             _ => {
                 // Other errors are acceptable (connection issues, etc.)
@@ -176,7 +175,9 @@ fn test_incomplete_headers_with_end_flag(test_case: &HeadersFragmentationTestCas
 
 /// Test HEADERS frame without END_HEADERS but missing CONTINUATION
 fn test_missing_continuation_frame(test_case: &HeadersFragmentationTestCase) {
-    if let FragmentationScenario::MissingContinuation { fragment_size } = &test_case.fragmentation_scenario {
+    if let FragmentationScenario::MissingContinuation { fragment_size } =
+        &test_case.fragmentation_scenario
+    {
         // Create HEADERS frame without END_HEADERS flag
         let mut headers_frame = test_case.headers_frame.clone();
         headers_frame.frame_type = HEADERS_FRAME_TYPE;
@@ -195,8 +196,14 @@ fn test_missing_continuation_frame(test_case: &HeadersFragmentationTestCase) {
         // Process the frame - it should be pending waiting for CONTINUATION
         match result {
             Ok(response) => {
-                assert!(!response.headers_complete, "Headers should not be complete without END_HEADERS");
-                assert!(response.awaiting_continuation, "Should be awaiting CONTINUATION frame");
+                assert!(
+                    !response.headers_complete,
+                    "Headers should not be complete without END_HEADERS"
+                );
+                assert!(
+                    response.awaiting_continuation,
+                    "Should be awaiting CONTINUATION frame"
+                );
             }
             Err(_) => {
                 // Error is acceptable for malformed frame
@@ -231,7 +238,9 @@ fn test_missing_continuation_frame(test_case: &HeadersFragmentationTestCase) {
 
 /// Test unexpected CONTINUATION after complete HEADERS
 fn test_unexpected_continuation(test_case: &HeadersFragmentationTestCase) {
-    if let FragmentationScenario::UnexpectedContinuation { continuation_count } = &test_case.fragmentation_scenario {
+    if let FragmentationScenario::UnexpectedContinuation { continuation_count } =
+        &test_case.fragmentation_scenario
+    {
         // Create complete HEADERS frame with END_HEADERS flag
         let mut headers_frame = test_case.headers_frame.clone();
         headers_frame.frame_type = HEADERS_FRAME_TYPE;
@@ -248,8 +257,14 @@ fn test_unexpected_continuation(test_case: &HeadersFragmentationTestCase) {
         // First frame should be processed successfully
         match headers_result {
             Ok(response) => {
-                assert!(response.headers_complete, "Headers should be complete with END_HEADERS");
-                assert!(!response.awaiting_continuation, "Should not be awaiting CONTINUATION");
+                assert!(
+                    response.headers_complete,
+                    "Headers should be complete with END_HEADERS"
+                );
+                assert!(
+                    !response.awaiting_continuation,
+                    "Should not be awaiting CONTINUATION"
+                );
             }
             Err(_) => {
                 // If headers frame itself fails, that's not what we're testing
@@ -261,7 +276,11 @@ fn test_unexpected_continuation(test_case: &HeadersFragmentationTestCase) {
         for i in 0..*continuation_count {
             let continuation_frame = FuzzedFrame {
                 frame_type: CONTINUATION_FRAME_TYPE,
-                flags: if i == continuation_count - 1 { END_HEADERS_FLAG } else { 0 },
+                flags: if i == continuation_count - 1 {
+                    END_HEADERS_FLAG
+                } else {
+                    0
+                },
                 stream_id: headers_frame.stream_id,
                 payload: vec![0x40, 0x01, b'x', 0x01, b'y'], // Additional header
             };
@@ -273,7 +292,9 @@ fn test_unexpected_continuation(test_case: &HeadersFragmentationTestCase) {
                 Err(error_msg) if error_msg.contains("PROTOCOL_ERROR") => {
                     // Expected: CONTINUATION after complete headers
                 }
-                Err(error_msg) if error_msg.contains("unexpected") || error_msg.contains("CONTINUATION") => {
+                Err(error_msg)
+                    if error_msg.contains("unexpected") || error_msg.contains("CONTINUATION") =>
+                {
                     // Also acceptable: specific error about unexpected CONTINUATION
                 }
                 Ok(_) => {
@@ -290,7 +311,10 @@ fn test_unexpected_continuation(test_case: &HeadersFragmentationTestCase) {
 
 /// Test duplicate HEADERS frames on same stream
 fn test_duplicate_headers_frames(test_case: &HeadersFragmentationTestCase) {
-    if let FragmentationScenario::DuplicateHeaders { second_headers_delay: _ } = &test_case.fragmentation_scenario {
+    if let FragmentationScenario::DuplicateHeaders {
+        second_headers_delay: _,
+    } = &test_case.fragmentation_scenario
+    {
         let stream_id = ensure_valid_stream_id(test_case.headers_frame.stream_id);
 
         // Create first HEADERS frame
@@ -301,13 +325,18 @@ fn test_duplicate_headers_frames(test_case: &HeadersFragmentationTestCase) {
 
         // Create second HEADERS frame on same stream
         let mut second_headers = first_headers.clone();
-        second_headers.payload = vec![0x40, 0x03, b'n', b'e', b'w', 0x05, b'v', b'a', b'l', b'u', b'e'];
+        second_headers.payload = vec![
+            0x40, 0x03, b'n', b'e', b'w', 0x05, b'v', b'a', b'l', b'u', b'e',
+        ];
 
         let first_result = process_h2_frame(&first_headers);
         let second_result = process_h2_frame(&second_headers);
 
         // First should succeed
-        assert!(first_result.is_ok(), "First HEADERS frame should be processed");
+        assert!(
+            first_result.is_ok(),
+            "First HEADERS frame should be processed"
+        );
 
         // Second HEADERS on same stream might be protocol violation depending on stream state
         match second_result {
@@ -326,13 +355,17 @@ fn test_duplicate_headers_frames(test_case: &HeadersFragmentationTestCase) {
 
 /// Test orphaned CONTINUATION frame without preceding HEADERS
 fn test_orphaned_continuation(test_case: &HeadersFragmentationTestCase) {
-    if let FragmentationScenario::OrphanedContinuation { continuation_flags } = &test_case.fragmentation_scenario {
+    if let FragmentationScenario::OrphanedContinuation { continuation_flags } =
+        &test_case.fragmentation_scenario
+    {
         // Create CONTINUATION frame without any preceding HEADERS frame
         let continuation_frame = FuzzedFrame {
             frame_type: CONTINUATION_FRAME_TYPE,
             flags: *continuation_flags,
             stream_id: ensure_valid_stream_id(test_case.headers_frame.stream_id),
-            payload: vec![0x40, 0x04, b't', b'e', b's', b't', 0x04, b'd', b'a', b't', b'a'],
+            payload: vec![
+                0x40, 0x04, b't', b'e', b's', b't', 0x04, b'd', b'a', b't', b'a',
+            ],
         };
 
         let result = process_h2_frame(&continuation_frame);
@@ -342,7 +375,9 @@ fn test_orphaned_continuation(test_case: &HeadersFragmentationTestCase) {
             Err(error_msg) if error_msg.contains("PROTOCOL_ERROR") => {
                 // Expected: CONTINUATION without HEADERS
             }
-            Err(error_msg) if error_msg.contains("orphaned") || error_msg.contains("unexpected") => {
+            Err(error_msg)
+                if error_msg.contains("orphaned") || error_msg.contains("unexpected") =>
+            {
                 // Also acceptable: specific error about orphaned CONTINUATION
             }
             Ok(_) => {
@@ -358,7 +393,11 @@ fn test_orphaned_continuation(test_case: &HeadersFragmentationTestCase) {
 
 /// Test interleaved frames from different streams during header continuation
 fn test_interleaved_stream_frames(test_case: &HeadersFragmentationTestCase) {
-    if let FragmentationScenario::InterleavedStreams { other_stream_id, interleaving_pattern } = &test_case.fragmentation_scenario {
+    if let FragmentationScenario::InterleavedStreams {
+        other_stream_id,
+        interleaving_pattern,
+    } = &test_case.fragmentation_scenario
+    {
         let main_stream = ensure_valid_stream_id(test_case.headers_frame.stream_id);
         let other_stream = ensure_valid_stream_id(*other_stream_id);
 
@@ -393,7 +432,9 @@ fn test_interleaved_stream_frames(test_case: &HeadersFragmentationTestCase) {
                     frame_type: CONTINUATION_FRAME_TYPE,
                     flags: END_HEADERS_FLAG, // Complete the headers
                     stream_id: main_stream,
-                    payload: vec![0x40, 0x04, b't', b'a', b'i', b'l', 0x04, b'd', b'a', b't', b'a'],
+                    payload: vec![
+                        0x40, 0x04, b't', b'a', b'i', b'l', 0x04, b'd', b'a', b't', b'a',
+                    ],
                 }
             };
 
@@ -430,7 +471,11 @@ fn test_interleaved_stream_frames(test_case: &HeadersFragmentationTestCase) {
 
 /// Test maximum fragmentation stress test
 fn test_maximum_fragmentation(test_case: &HeadersFragmentationTestCase) {
-    if let FragmentationScenario::MaximumFragmentation { fragment_count, fragment_sizes } = &test_case.fragmentation_scenario {
+    if let FragmentationScenario::MaximumFragmentation {
+        fragment_count,
+        fragment_sizes,
+    } = &test_case.fragmentation_scenario
+    {
         let stream_id = ensure_valid_stream_id(test_case.headers_frame.stream_id);
         let max_fragments = 20; // Reasonable limit for testing
 
@@ -468,7 +513,10 @@ fn test_maximum_fragmentation(test_case: &HeadersFragmentationTestCase) {
             match result {
                 Ok(response) => {
                     if is_last {
-                        assert!(response.headers_complete, "Last fragment should complete headers");
+                        assert!(
+                            response.headers_complete,
+                            "Last fragment should complete headers"
+                        );
                     }
                 }
                 Err(error_msg) if error_msg.contains("too many fragments") => {
@@ -500,7 +548,10 @@ fn test_empty_headers_frame(test_case: &HeadersFragmentationTestCase) {
         // Empty headers might be valid (no custom headers) or invalid depending on context
         match result {
             Ok(response) => {
-                assert!(response.headers_complete, "Empty headers with END_HEADERS should be complete");
+                assert!(
+                    response.headers_complete,
+                    "Empty headers with END_HEADERS should be complete"
+                );
                 assert!(response.headers.is_empty(), "Headers should be empty");
             }
             Err(_) => {
@@ -512,7 +563,9 @@ fn test_empty_headers_frame(test_case: &HeadersFragmentationTestCase) {
 
 /// Test oversized HEADERS frame
 fn test_oversized_headers_frame(test_case: &HeadersFragmentationTestCase) {
-    if let FragmentationScenario::OversizedHeaders { size_multiplier } = &test_case.fragmentation_scenario {
+    if let FragmentationScenario::OversizedHeaders { size_multiplier } =
+        &test_case.fragmentation_scenario
+    {
         let oversized_length = MAX_FRAME_SIZE * (*size_multiplier as usize + 1);
         let truncated_length = oversized_length.min(50_000); // Cap for testing
 
@@ -527,7 +580,9 @@ fn test_oversized_headers_frame(test_case: &HeadersFragmentationTestCase) {
 
         // Oversized frame should be rejected
         match result {
-            Err(error_msg) if error_msg.contains("frame size") || error_msg.contains("too large") => {
+            Err(error_msg)
+                if error_msg.contains("frame size") || error_msg.contains("too large") =>
+            {
                 // Expected: frame size limit exceeded
             }
             Err(_) => {
@@ -556,7 +611,7 @@ fn test_malformed_hpack_fragments(test_case: &HeadersFragmentationTestCase) {
         malformed_headers.payload = vec![
             0xFF, 0xFF, 0xFF, // Invalid literal header encoding
             0x80, 0x00, 0x00, // Invalid index reference
-            0x40, 0xFF,       // Invalid name length
+            0x40, 0xFF, // Invalid name length
             b'x', b'y', b'z', // Partial name
             0x7F, 0x80, 0x01, // Invalid value length encoding
         ];
@@ -643,7 +698,9 @@ fn process_h2_frame(frame: &FuzzedFrame) -> Result<MockH2Response, String> {
             // Skip priority fields if present
             if has_priority {
                 if frame.payload.len() < 5 {
-                    return Err("FRAME_SIZE_ERROR: HEADERS with PRIORITY flag too small".to_string());
+                    return Err(
+                        "FRAME_SIZE_ERROR: HEADERS with PRIORITY flag too small".to_string()
+                    );
                 }
                 payload_offset = 5;
             }

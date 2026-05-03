@@ -1,8 +1,8 @@
 #![no_main]
 
-use libfuzzer_sys::fuzz_target;
 use asupersync::bytes::BytesMut;
 use asupersync::http::h1::codec::Http1Codec;
+use libfuzzer_sys::fuzz_target;
 
 // Maximum data size to prevent timeouts on extremely large inputs
 const MAX_DATA_SIZE: usize = 10 * 1024 * 1024; // 10MB

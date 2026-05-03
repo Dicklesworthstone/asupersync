@@ -1,14 +1,14 @@
 #![no_main]
 
-use libfuzzer_sys::fuzz_target;
 use arbitrary::{Arbitrary, Unstructured};
-use std::sync::{Arc, Mutex};
-use std::task::{Context, Poll, RawWaker, RawWakerVTable, Waker};
+use libfuzzer_sys::fuzz_target;
+use std::collections::HashMap;
 use std::future::Future;
 use std::pin::Pin;
+use std::sync::{Arc, Mutex};
+use std::task::{Context, Poll, RawWaker, RawWakerVTable, Waker};
 use std::thread;
 use std::time::Duration;
-use std::collections::HashMap;
 
 use asupersync::sync::Notify;
 
@@ -96,7 +96,10 @@ impl SpuriousWakeTracker {
                         wake.waiter_id, wake.description
                     ));
                 }
-                panic!("Spurious wake violations detected: {} spurious wakes", wakes.len());
+                panic!(
+                    "Spurious wake violations detected: {} spurious wakes",
+                    wakes.len()
+                );
             }
         }
     }
@@ -127,10 +130,7 @@ impl TrackedWaker {
 
     fn create_waker(&self) -> Waker {
         let data = Arc::new(self.clone());
-        let raw = RawWaker::new(
-            Arc::into_raw(data) as *const (),
-            &TRACKED_WAKER_VTABLE,
-        );
+        let raw = RawWaker::new(Arc::into_raw(data) as *const (), &TRACKED_WAKER_VTABLE);
         unsafe { Waker::from_raw(raw) }
     }
 }
@@ -166,7 +166,8 @@ unsafe fn tracked_waker_wake(data: *const ()) {
     if let Ok(mut waked) = arc.waked.lock() {
         *waked = true;
     }
-    arc.tracker.record_operation(&format!("waker_wake_{}", arc.waiter_id));
+    arc.tracker
+        .record_operation(&format!("waker_wake_{}", arc.waiter_id));
 }
 
 unsafe fn tracked_waker_wake_by_ref(data: *const ()) {
@@ -174,7 +175,8 @@ unsafe fn tracked_waker_wake_by_ref(data: *const ()) {
     if let Ok(mut waked) = arc.waked.lock() {
         *waked = true;
     }
-    arc.tracker.record_operation(&format!("waker_wake_by_ref_{}", arc.waiter_id));
+    arc.tracker
+        .record_operation(&format!("waker_wake_by_ref_{}", arc.waiter_id));
     std::mem::forget(arc);
 }
 
@@ -191,12 +193,26 @@ struct SpuriousWakeConfig {
 #[derive(Debug, Clone, Arbitrary)]
 enum SpuriousPattern {
     SimplePollWithoutNotify,
-    RepeatedPolls { poll_count: u8 },
-    MultipleWaitersNoNotify { waiters: u8 },
-    InterleavedPollsNoNotify { interleaving: Vec<Operation> },
-    ConcurrentPollingNoNotify { thread_count: u8, polls_per_thread: u8 },
-    MixedNotifyAndNonNotify { notify_some: bool, notify_count: u8 },
-    PollingAfterOperations { operations: Vec<NonNotifyOperation> },
+    RepeatedPolls {
+        poll_count: u8,
+    },
+    MultipleWaitersNoNotify {
+        waiters: u8,
+    },
+    InterleavedPollsNoNotify {
+        interleaving: Vec<Operation>,
+    },
+    ConcurrentPollingNoNotify {
+        thread_count: u8,
+        polls_per_thread: u8,
+    },
+    MixedNotifyAndNonNotify {
+        notify_some: bool,
+        notify_count: u8,
+    },
+    PollingAfterOperations {
+        operations: Vec<NonNotifyOperation>,
+    },
 }
 
 #[derive(Debug, Clone, Arbitrary)]
@@ -250,14 +266,30 @@ fuzz_target!(|data: &[u8]| {
             test_interleaved_polls_no_notify(&tracker, &notify, config.waiter_count, interleaving);
         }
 
-        SpuriousPattern::ConcurrentPollingNoNotify { thread_count, polls_per_thread } => {
-            test_concurrent_polling_no_notify(&tracker, &notify, config.waiter_count,
-                                             thread_count.min(6), polls_per_thread.min(5));
+        SpuriousPattern::ConcurrentPollingNoNotify {
+            thread_count,
+            polls_per_thread,
+        } => {
+            test_concurrent_polling_no_notify(
+                &tracker,
+                &notify,
+                config.waiter_count,
+                thread_count.min(6),
+                polls_per_thread.min(5),
+            );
         }
 
-        SpuriousPattern::MixedNotifyAndNonNotify { notify_some, notify_count } => {
-            test_mixed_notify_and_non_notify(&tracker, &notify, config.waiter_count,
-                                            notify_some, notify_count.min(5));
+        SpuriousPattern::MixedNotifyAndNonNotify {
+            notify_some,
+            notify_count,
+        } => {
+            test_mixed_notify_and_non_notify(
+                &tracker,
+                &notify,
+                config.waiter_count,
+                notify_some,
+                notify_count.min(5),
+            );
         }
 
         SpuriousPattern::PollingAfterOperations { operations } => {
@@ -269,7 +301,11 @@ fuzz_target!(|data: &[u8]| {
     tracker.validate_no_spurious_wakes();
 });
 
-fn test_simple_poll_without_notify(tracker: &SpuriousWakeTracker, notify: &Notify, waiter_count: u8) {
+fn test_simple_poll_without_notify(
+    tracker: &SpuriousWakeTracker,
+    notify: &Notify,
+    waiter_count: u8,
+) {
     tracker.record_operation("test_simple_poll_without_notify");
 
     let mut waiters = Vec::new();
@@ -304,7 +340,12 @@ fn test_simple_poll_without_notify(tracker: &SpuriousWakeTracker, notify: &Notif
     }
 }
 
-fn test_repeated_polls(tracker: &SpuriousWakeTracker, notify: &Notify, waiter_count: u8, poll_count: u8) {
+fn test_repeated_polls(
+    tracker: &SpuriousWakeTracker,
+    notify: &Notify,
+    waiter_count: u8,
+    poll_count: u8,
+) {
     tracker.record_operation("test_repeated_polls");
 
     let mut waiters = Vec::new();
@@ -341,7 +382,11 @@ fn test_repeated_polls(tracker: &SpuriousWakeTracker, notify: &Notify, waiter_co
     }
 }
 
-fn test_multiple_waiters_no_notify(tracker: &SpuriousWakeTracker, notify: &Notify, waiter_count: u8) {
+fn test_multiple_waiters_no_notify(
+    tracker: &SpuriousWakeTracker,
+    notify: &Notify,
+    waiter_count: u8,
+) {
     tracker.record_operation("test_multiple_waiters_no_notify");
 
     let mut waiters = Vec::new();
@@ -380,7 +425,7 @@ fn test_interleaved_polls_no_notify(
     tracker: &SpuriousWakeTracker,
     notify: &Notify,
     waiter_count: u8,
-    operations: Vec<Operation>
+    operations: Vec<Operation>,
 ) {
     tracker.record_operation("test_interleaved_polls_no_notify");
 
@@ -402,9 +447,10 @@ fn test_interleaved_polls_no_notify(
         match operation {
             Operation::PollWaiter { waiter_id } => {
                 let waiter_idx = (*waiter_id as usize) % waiters.len().max(1);
-                if let (Some(waiter), Some(tracked_waker)) =
-                    (waiters.get_mut(&waiter_idx), tracked_wakers.get(&waiter_idx)) {
-
+                if let (Some(waiter), Some(tracked_waker)) = (
+                    waiters.get_mut(&waiter_idx),
+                    tracked_wakers.get(&waiter_idx),
+                ) {
                     let attempt_num = poll_attempts.get_mut(&waiter_idx).unwrap();
                     *attempt_num += 1;
 
@@ -464,7 +510,7 @@ fn test_concurrent_polling_no_notify(
     notify: &Notify,
     waiter_count: u8,
     thread_count: u8,
-    polls_per_thread: u8
+    polls_per_thread: u8,
 ) {
     tracker.record_operation("test_concurrent_polling_no_notify");
 
@@ -499,7 +545,7 @@ fn test_concurrent_polling_no_notify(
                 let waiter = notify_clone.notified();
                 let tracked_waker = TrackedWaker::new(
                     (thread_id as usize) * 100 + (poll_num as usize),
-                    tracker_clone.clone()
+                    tracker_clone.clone(),
                 );
 
                 // Create and poll the waiter
@@ -537,7 +583,7 @@ fn test_mixed_notify_and_non_notify(
     notify: &Notify,
     waiter_count: u8,
     notify_some: bool,
-    notify_count: u8
+    notify_count: u8,
 ) {
     tracker.record_operation("test_mixed_notify_and_non_notify");
 
@@ -598,7 +644,7 @@ fn test_polling_after_operations(
     tracker: &SpuriousWakeTracker,
     notify: &Notify,
     waiter_count: u8,
-    operations: Vec<NonNotifyOperation>
+    operations: Vec<NonNotifyOperation>,
 ) {
     tracker.record_operation("test_polling_after_operations");
 
@@ -641,9 +687,10 @@ fn test_polling_after_operations(
 
             NonNotifyOperation::MultiPoll { waiter_id, count } => {
                 let waiter_idx = (*waiter_id as usize) % waiters.len().max(1);
-                if let (Some(waiter), Some(tracked_waker)) =
-                    (waiters.get_mut(&waiter_idx), tracked_wakers.get(&waiter_idx)) {
-
+                if let (Some(waiter), Some(tracked_waker)) = (
+                    waiters.get_mut(&waiter_idx),
+                    tracked_wakers.get(&waiter_idx),
+                ) {
                     for poll_attempt in 1..=(*count).min(5) {
                         let waker = tracked_waker.create_waker();
                         let mut context = Context::from_waker(&waker);
@@ -666,7 +713,9 @@ fn test_polling_after_operations(
             }
 
             NonNotifyOperation::CheckStoredNotifications => {
-                let stored = notify.stored_notifications.load(std::sync::atomic::Ordering::Acquire);
+                let stored = notify
+                    .stored_notifications
+                    .load(std::sync::atomic::Ordering::Acquire);
                 tracker.record_operation(&format!("stored_notifications_{}", stored));
             }
         }

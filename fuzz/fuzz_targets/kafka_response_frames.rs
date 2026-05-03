@@ -16,9 +16,8 @@
 
 use arbitrary::{Arbitrary, Unstructured};
 use asupersync::messaging::kafka::{
-    fuzz_parse_kafka_error_response, fuzz_parse_response_metadata,
-    fuzz_validate_response_frame, fuzz_parse_delivery_result,
-    Acks, Compression, KafkaError
+    Acks, Compression, KafkaError, fuzz_parse_delivery_result, fuzz_parse_kafka_error_response,
+    fuzz_parse_response_metadata, fuzz_validate_response_frame,
 };
 use libfuzzer_sys::fuzz_target;
 
@@ -471,7 +470,8 @@ fuzz_target!(|data: &[u8]| {
                 if let Err(e) = frame_validation {
                     panic!(
                         "Well-formed success frame failed validation: {}\nFrame: {:?}",
-                        e, String::from_utf8_lossy(&generated_frame)
+                        e,
+                        String::from_utf8_lossy(&generated_frame)
                     );
                 }
             }
@@ -480,14 +480,14 @@ fuzz_target!(|data: &[u8]| {
                 if let Ok(parsed_error) = error_parsing {
                     // Error parsing succeeded, verify it's a reasonable error
                     match parsed_error {
-                        KafkaError::Protocol(_) |
-                        KafkaError::Broker(_) |
-                        KafkaError::InvalidTopic(_) |
-                        KafkaError::MessageTooLarge { .. } |
-                        KafkaError::Transaction(_) |
-                        KafkaError::QueueFull |
-                        KafkaError::Config(_) |
-                        KafkaError::Cancelled => {
+                        KafkaError::Protocol(_)
+                        | KafkaError::Broker(_)
+                        | KafkaError::InvalidTopic(_)
+                        | KafkaError::MessageTooLarge { .. }
+                        | KafkaError::Transaction(_)
+                        | KafkaError::QueueFull
+                        | KafkaError::Config(_)
+                        | KafkaError::Cancelled => {
                             // Valid error types
                         }
                         _ => {
@@ -504,7 +504,12 @@ fuzz_target!(|data: &[u8]| {
 
         // Test invariants that should always hold
         // No function should panic on any input
-        let _ = (frame_validation, error_parsing, metadata_parsing, delivery_parsing);
+        let _ = (
+            frame_validation,
+            error_parsing,
+            metadata_parsing,
+            delivery_parsing,
+        );
     }
 
     // Test 3: Boundary condition fuzzing

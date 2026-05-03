@@ -1,8 +1,8 @@
 #![no_main]
 
-use libfuzzer_sys::fuzz_target;
 use asupersync::bytes::BytesMut;
 use asupersync::http::h1::codec::Http1Codec;
+use libfuzzer_sys::fuzz_target;
 
 // Maximum data size to prevent timeouts
 const MAX_DATA_SIZE: usize = 1024 * 1024; // 1MB
@@ -28,17 +28,20 @@ fn test_upgrade_parsing(data: &[u8]) {
         Ok(Some(request)) => {
             // Successfully parsed - validate upgrade handling
             validate_upgrade_invariants(&request, &buf);
-        },
+        }
         Ok(None) => {
             // Incomplete request - normal for fuzzing
-        },
+        }
         Err(_) => {
             // Parse error - expected for malformed input
         }
     }
 }
 
-fn validate_upgrade_invariants(request: &asupersync::http::h1::types::Request, remaining_buf: &BytesMut) {
+fn validate_upgrade_invariants(
+    request: &asupersync::http::h1::types::Request,
+    remaining_buf: &BytesMut,
+) {
     let mut is_upgrade_request = false;
     let mut has_connection_upgrade = false;
     let mut upgrade_protocols = Vec::new();
@@ -64,15 +67,24 @@ fn validate_upgrade_invariants(request: &asupersync::http::h1::types::Request, r
         // This is an upgrade request - assert critical invariants
 
         // ASSERTION 1: Connection upgrade must be properly detected
-        assert!(has_connection_upgrade, "Connection: upgrade header must be present for upgrade requests");
-        assert!(!upgrade_protocols.is_empty(), "Upgrade header must specify protocol(s)");
+        assert!(
+            has_connection_upgrade,
+            "Connection: upgrade header must be present for upgrade requests"
+        );
+        assert!(
+            !upgrade_protocols.is_empty(),
+            "Upgrade header must specify protocol(s)"
+        );
 
         // ASSERTION 2: No HTTP body should interfere with upgraded protocol
         // For upgrade requests, any data after headers belongs to the new protocol
         if !request.body.is_empty() {
             // Body data present - ensure it's properly handled
             // The parser should preserve this data for the upgraded protocol
-            assert!(request.body.len() > 0, "Body data must be preserved for upgrade handling");
+            assert!(
+                request.body.len() > 0,
+                "Body data must be preserved for upgrade handling"
+            );
 
             // Body should not be corrupted or truncated
             for &byte in &request.body {
@@ -86,7 +98,10 @@ fn validate_upgrade_invariants(request: &asupersync::http::h1::types::Request, r
         if !remaining_buf.is_empty() {
             // There's unparsed data - this might be upgraded protocol data
             // The key requirement: this data must not be lost or corrupted
-            assert!(remaining_buf.len() > 0, "Remaining buffer must be accessible");
+            assert!(
+                remaining_buf.len() > 0,
+                "Remaining buffer must be accessible"
+            );
         }
 
         // Validate specific upgrade protocols
@@ -120,7 +135,10 @@ fn validate_websocket_upgrade(request: &asupersync::http::h1::types::Request) {
             "sec-websocket-key" => {
                 has_ws_key = true;
                 // Key should be non-empty
-                assert!(!value.trim().is_empty(), "WebSocket key should not be empty");
+                assert!(
+                    !value.trim().is_empty(),
+                    "WebSocket key should not be empty"
+                );
             }
             "sec-websocket-version" => {
                 has_ws_version = true;
@@ -134,7 +152,10 @@ fn validate_websocket_upgrade(request: &asupersync::http::h1::types::Request) {
     // For valid WebSocket upgrades, certain headers are typically required
     if is_get && has_ws_key && has_ws_version {
         // This looks like a proper WebSocket upgrade request
-        assert!(has_ws_key && has_ws_version, "WebSocket upgrade should have required headers");
+        assert!(
+            has_ws_key && has_ws_version,
+            "WebSocket upgrade should have required headers"
+        );
     }
 }
 
@@ -151,20 +172,32 @@ fn validate_h2c_upgrade(request: &asupersync::http::h1::types::Request) {
 
     // h2c upgrades typically include HTTP2-Settings header
     if has_http2_settings {
-        assert!(has_http2_settings, "h2c upgrade should have HTTP2-Settings header");
+        assert!(
+            has_http2_settings,
+            "h2c upgrade should have HTTP2-Settings header"
+        );
     }
 }
 
 fn validate_generic_upgrade(protocol: &str, _request: &asupersync::http::h1::types::Request) {
     // Generic upgrade protocol validation
-    assert!(!protocol.trim().is_empty(), "Upgrade protocol should not be empty");
+    assert!(
+        !protocol.trim().is_empty(),
+        "Upgrade protocol should not be empty"
+    );
 
     // Protocol name should be reasonable length and contain valid characters
-    assert!(protocol.len() < 1000, "Protocol name should be reasonable length");
+    assert!(
+        protocol.len() < 1000,
+        "Protocol name should be reasonable length"
+    );
 
     // Should not contain control characters that could cause issues
     for ch in protocol.chars() {
-        assert!(!ch.is_control() || ch.is_whitespace(), "Protocol name should not contain dangerous control characters");
+        assert!(
+            !ch.is_control() || ch.is_whitespace(),
+            "Protocol name should not contain dangerous control characters"
+        );
     }
 }
 

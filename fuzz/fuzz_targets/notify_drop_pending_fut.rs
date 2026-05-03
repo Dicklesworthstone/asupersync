@@ -12,15 +12,18 @@
 
 #![no_main]
 
-use libfuzzer_sys::fuzz_target;
 use arbitrary::Arbitrary;
 use asupersync::sync::Notify;
-use std::sync::{Arc, Barrier, atomic::{AtomicUsize, AtomicBool, Ordering}};
-use std::thread;
-use std::time::Duration;
+use libfuzzer_sys::fuzz_target;
 use std::future::Future;
 use std::pin::Pin;
+use std::sync::{
+    Arc, Barrier,
+    atomic::{AtomicBool, AtomicUsize, Ordering},
+};
 use std::task::{Context, Poll, Waker};
+use std::thread;
+use std::time::Duration;
 
 /// Configuration for the notify + drop pending future race test
 #[derive(Debug, Arbitrary)]
@@ -70,16 +73,18 @@ impl NotifyDropConfig {
         self.notifier_count = (self.notifier_count % 4).max(1);
 
         // Ensure we have enough patterns
-        self.drop_patterns.resize(self.waiter_count as usize, DropPattern::CompleteWait);
-        self.notify_patterns.resize(self.notifier_count as usize, NotifyPattern::SingleNotify);
+        self.drop_patterns
+            .resize(self.waiter_count as usize, DropPattern::CompleteWait);
+        self.notify_patterns
+            .resize(self.notifier_count as usize, NotifyPattern::SingleNotify);
 
         // Normalize pattern parameters
         for pattern in &mut self.drop_patterns {
             match pattern {
                 DropPattern::PollMultipleThenDrop { polls } => {
                     *polls = (*polls % 10).max(1);
-                },
-                _ => {},
+                }
+                _ => {}
             }
         }
 
@@ -87,8 +92,8 @@ impl NotifyDropConfig {
             match pattern {
                 NotifyPattern::BurstNotify { count } => {
                     *count = (*count % 5).max(1);
-                },
-                _ => {},
+                }
+                _ => {}
             }
         }
     }
@@ -144,7 +149,6 @@ impl ControllableNotified {
     fn drop_future(&mut self) {
         self.future = None;
     }
-
 }
 
 fuzz_target!(|data: &[u8]| {
@@ -157,7 +161,9 @@ fuzz_target!(|data: &[u8]| {
 
     let notify = Arc::new(Notify::new());
     let results = Arc::new(TestResults::default());
-    let barrier = Arc::new(Barrier::new((config.waiter_count + config.notifier_count) as usize));
+    let barrier = Arc::new(Barrier::new(
+        (config.waiter_count + config.notifier_count) as usize,
+    ));
     let mut handles = Vec::new();
 
     // Spawn waiter threads with different drop patterns
@@ -190,20 +196,20 @@ fuzz_target!(|data: &[u8]| {
                                 results.polls_ready.fetch_add(1, Ordering::SeqCst);
                                 results.waiters_completed.fetch_add(1, Ordering::SeqCst);
                                 break;
-                            },
+                            }
                             Poll::Pending => {
                                 results.polls_pending.fetch_add(1, Ordering::SeqCst);
                                 thread::sleep(Duration::from_micros(100));
-                            },
+                            }
                         }
                     }
-                },
+                }
 
                 DropPattern::DropImmediate => {
                     // Drop the future immediately
                     controllable.drop_future();
                     results.waiters_dropped.fetch_add(1, Ordering::SeqCst);
-                },
+                }
 
                 DropPattern::DropDelayed { delay_micros } => {
                     // Wait then drop
@@ -212,7 +218,7 @@ fuzz_target!(|data: &[u8]| {
                     }
                     controllable.drop_future();
                     results.waiters_dropped.fetch_add(1, Ordering::SeqCst);
-                },
+                }
 
                 DropPattern::PollThenDrop => {
                     // Poll once then drop
@@ -221,15 +227,15 @@ fuzz_target!(|data: &[u8]| {
                         Poll::Ready(()) => {
                             results.polls_ready.fetch_add(1, Ordering::SeqCst);
                             results.waiters_completed.fetch_add(1, Ordering::SeqCst);
-                        },
+                        }
                         Poll::Pending => {
                             results.polls_pending.fetch_add(1, Ordering::SeqCst);
                             // Drop after first poll
                             controllable.drop_future();
                             results.waiters_dropped.fetch_add(1, Ordering::SeqCst);
-                        },
+                        }
                     }
-                },
+                }
 
                 DropPattern::PollMultipleThenDrop { polls } => {
                     // Poll multiple times then drop
@@ -242,11 +248,11 @@ fuzz_target!(|data: &[u8]| {
                                 results.waiters_completed.fetch_add(1, Ordering::SeqCst);
                                 completed = true;
                                 break;
-                            },
+                            }
                             Poll::Pending => {
                                 results.polls_pending.fetch_add(1, Ordering::SeqCst);
                                 thread::sleep(Duration::from_micros(50));
-                            },
+                            }
                         }
                     }
 
@@ -255,7 +261,7 @@ fuzz_target!(|data: &[u8]| {
                         controllable.drop_future();
                         results.waiters_dropped.fetch_add(1, Ordering::SeqCst);
                     }
-                },
+                }
             }
         });
 
@@ -280,7 +286,7 @@ fuzz_target!(|data: &[u8]| {
                 NotifyPattern::SingleNotify => {
                     notify.notify_one();
                     results.notifications_sent.fetch_add(1, Ordering::SeqCst);
-                },
+                }
 
                 NotifyPattern::DelayedNotify { delay_micros } => {
                     if delay_micros > 0 {
@@ -288,7 +294,7 @@ fuzz_target!(|data: &[u8]| {
                     }
                     notify.notify_one();
                     results.notifications_sent.fetch_add(1, Ordering::SeqCst);
-                },
+                }
 
                 NotifyPattern::BurstNotify { count } => {
                     for _ in 0..count {
@@ -296,13 +302,13 @@ fuzz_target!(|data: &[u8]| {
                         results.notifications_sent.fetch_add(1, Ordering::SeqCst);
                         thread::sleep(Duration::from_micros(10)); // Small gap between notifications
                     }
-                },
+                }
 
                 NotifyPattern::SynchronizedNotify => {
                     // Immediate notify right after barrier
                     notify.notify_one();
                     results.notifications_sent.fetch_add(1, Ordering::SeqCst);
-                },
+                }
             }
         });
 
@@ -324,39 +330,57 @@ fuzz_target!(|data: &[u8]| {
     let polls_pending = results.polls_pending.load(Ordering::SeqCst);
 
     // Basic accounting checks
-    assert_eq!(waiters_started, config.waiter_count as usize,
-        "All waiters should start");
+    assert_eq!(
+        waiters_started, config.waiter_count as usize,
+        "All waiters should start"
+    );
 
     // Waiters should be either completed or dropped
-    assert_eq!(waiters_completed + waiters_dropped, waiters_started,
-        "All waiters should be either completed or dropped");
+    assert_eq!(
+        waiters_completed + waiters_dropped,
+        waiters_started,
+        "All waiters should be either completed or dropped"
+    );
 
     // Poll accounting
-    assert_eq!(polls_attempted, polls_ready + polls_pending,
-        "Poll accounting should be consistent");
+    assert_eq!(
+        polls_attempted,
+        polls_ready + polls_pending,
+        "Poll accounting should be consistent"
+    );
 
     // Verify we actually sent notifications
-    assert!(notifications_sent > 0,
-        "Should have sent at least one notification");
+    assert!(
+        notifications_sent > 0,
+        "Should have sent at least one notification"
+    );
 
     // Invariant: Number of completed waiters should not exceed number of notifications
     // (Some notifications may be lost due to dropped futures)
-    assert!(waiters_completed <= notifications_sent,
+    assert!(
+        waiters_completed <= notifications_sent,
         "Completed waiters ({}) should not exceed notifications sent ({})",
-        waiters_completed, notifications_sent);
+        waiters_completed,
+        notifications_sent
+    );
 
     // Invariant: If we have more notifications than waiters, all waiters should complete
     // (unless they were intentionally dropped)
     if notifications_sent >= waiters_started {
-        let expected_completions = config.drop_patterns.iter()
+        let expected_completions = config
+            .drop_patterns
+            .iter()
             .filter(|p| matches!(p, DropPattern::CompleteWait))
             .count();
 
         if expected_completions > 0 {
             // At least some waiters were supposed to complete
-            assert!(waiters_completed > 0 || expected_completions == 0,
+            assert!(
+                waiters_completed > 0 || expected_completions == 0,
                 "With {} notifications for {} waiters, expected some completions",
-                notifications_sent, waiters_started);
+                notifications_sent,
+                waiters_started
+            );
         }
     }
 

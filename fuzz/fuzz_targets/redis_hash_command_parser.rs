@@ -55,10 +55,7 @@ impl HashCommandCase {
     }
 }
 
-async fn exercise_binary_pipeline(
-    cx: &asupersync::cx::Cx,
-    case: &HashCommandCase,
-) {
+async fn exercise_binary_pipeline(cx: &asupersync::cx::Cx, case: &HashCommandCase) {
     let key = case.key.clone();
     let field = case.field.clone();
     let value = case.value.clone();
@@ -92,8 +89,13 @@ async fn exercise_binary_pipeline(
 
     assert_eq!(results.len(), 2);
     assert_eq!(results[0], Ok(RespValue::Integer(1)));
-    assert_eq!(results[1], Ok(RespValue::BulkString(Some(case.value.clone()))));
-    server.join().expect("binary pipeline fake redis server join");
+    assert_eq!(
+        results[1],
+        Ok(RespValue::BulkString(Some(case.value.clone())))
+    );
+    server
+        .join()
+        .expect("binary pipeline fake redis server join");
 }
 
 async fn exercise_wrappers(
@@ -213,7 +215,9 @@ async fn exercise_wrappers(
                 .hset(cx, key, field, value)
                 .await
                 .expect_err("malformed HSET reply must fail closed");
-            assert!(matches!(err, RedisError::Protocol(msg) if msg.contains("HSET did not return integer")));
+            assert!(
+                matches!(err, RedisError::Protocol(msg) if msg.contains("HSET did not return integer"))
+            );
         }
         WrapperScenario::HGetWrongType => {
             let inserted = client
@@ -226,7 +230,9 @@ async fn exercise_wrappers(
                 .hget(cx, key, field)
                 .await
                 .expect_err("malformed HGET reply must fail closed");
-            assert!(matches!(err, RedisError::Protocol(msg) if msg.contains("HGET expected bulk string")));
+            assert!(
+                matches!(err, RedisError::Protocol(msg) if msg.contains("HGET expected bulk string"))
+            );
         }
     }
     server.join().expect("wrapper fake redis server join");

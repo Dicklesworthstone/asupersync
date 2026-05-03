@@ -12,9 +12,7 @@
 
 #![cfg(test)]
 
-use crate::observability::diagnostics::DiagnosticInfo;
 use crate::runtime::RuntimeSnapshot;
-use crate::web::debug::DebugServer;
 
 /// **AUDIT TEST**: Verify runtime metrics are exposed via HTTP endpoints.
 ///

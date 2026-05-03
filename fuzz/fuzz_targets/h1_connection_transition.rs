@@ -95,10 +95,10 @@ impl ConnectionDirective {
     /// Determine if this directive requests connection close
     fn requests_close(self) -> bool {
         match self {
-            ConnectionDirective::Close |
-            ConnectionDirective::CloseKeepAlive |
-            ConnectionDirective::KeepAliveClose |
-            ConnectionDirective::TeClose => true,
+            ConnectionDirective::Close
+            | ConnectionDirective::CloseKeepAlive
+            | ConnectionDirective::KeepAliveClose
+            | ConnectionDirective::TeClose => true,
             _ => false,
         }
     }
@@ -106,9 +106,9 @@ impl ConnectionDirective {
     /// Determine if this directive requests keep-alive
     fn requests_keep_alive(self) -> bool {
         match self {
-            ConnectionDirective::KeepAlive |
-            ConnectionDirective::CloseKeepAlive |
-            ConnectionDirective::KeepAliveClose => true,
+            ConnectionDirective::KeepAlive
+            | ConnectionDirective::CloseKeepAlive
+            | ConnectionDirective::KeepAliveClose => true,
             _ => false,
         }
     }
@@ -289,7 +289,10 @@ impl MockConnectionStateMachine {
         Ok(self.state)
     }
 
-    fn determine_connection_state(&self, req: &TransitionRequest) -> Result<ConnectionState, String> {
+    fn determine_connection_state(
+        &self,
+        req: &TransitionRequest,
+    ) -> Result<ConnectionState, String> {
         // Server doesn't support keep-alive at all
         if !self.config.supports_keep_alive {
             return Ok(ConnectionState::MarkedForClose);
@@ -347,7 +350,6 @@ fn generate_edge_case_sequences() -> Vec<Vec<TransitionRequest>> {
                 method: HttpMethod::Get,
             },
         ],
-
         // HTTP/1.0 with explicit keep-alive, then close
         vec![
             TransitionRequest {
@@ -363,17 +365,13 @@ fn generate_edge_case_sequences() -> Vec<Vec<TransitionRequest>> {
                 method: HttpMethod::Get,
             },
         ],
-
         // Conflicting connection directives
-        vec![
-            TransitionRequest {
-                version: HttpVersion::Http11,
-                connection: ConnectionDirective::CloseKeepAlive,
-                has_body: false,
-                method: HttpMethod::Get,
-            },
-        ],
-
+        vec![TransitionRequest {
+            version: HttpVersion::Http11,
+            connection: ConnectionDirective::CloseKeepAlive,
+            has_body: false,
+            method: HttpMethod::Get,
+        }],
         // Version transitions (HTTP/1.0 to 1.1)
         vec![
             TransitionRequest {
@@ -389,7 +387,6 @@ fn generate_edge_case_sequences() -> Vec<Vec<TransitionRequest>> {
                 method: HttpMethod::Get,
             },
         ],
-
         // Multiple requests with different methods
         vec![
             TransitionRequest {
@@ -411,7 +408,6 @@ fn generate_edge_case_sequences() -> Vec<Vec<TransitionRequest>> {
                 method: HttpMethod::Head,
             },
         ],
-
         // Invalid/malformed connection directives
         vec![
             TransitionRequest {
@@ -458,7 +454,7 @@ fuzz_target!(|sequence: ConnectionTransitionSequence| {
 fn test_connection_transition_sequence(
     requests: &[TransitionRequest],
     responses: &[TransitionResponse],
-    config: &ServerConfig
+    config: &ServerConfig,
 ) {
     let mut state_machine = MockConnectionStateMachine::new(config.clone());
     let mut expected_states = Vec::new();
@@ -485,7 +481,7 @@ fn test_connection_transition_sequence(
                                 state_after_response,
                                 request,
                                 response,
-                                config
+                                config,
                             );
 
                             // Finalize connection if marked for close
@@ -494,9 +490,15 @@ fn test_connection_transition_sequence(
                         Err(e) => {
                             // Response processing error should be handled gracefully
                             if config.force_close_on_error {
-                                assert!(state_machine.is_closed() ||
-                                       matches!(state_machine.get_state(), ConnectionState::MarkedForClose),
-                                       "Connection should be closed/marked for close on response error: {}", e);
+                                assert!(
+                                    state_machine.is_closed()
+                                        || matches!(
+                                            state_machine.get_state(),
+                                            ConnectionState::MarkedForClose
+                                        ),
+                                    "Connection should be closed/marked for close on response error: {}",
+                                    e
+                                );
                             }
                         }
                     }
@@ -505,7 +507,7 @@ fn test_connection_transition_sequence(
                 // Check if connection should continue
                 if state_machine.is_closed() {
                     // No more requests should be processable
-                    for remaining_request in &requests[i+1..] {
+                    for remaining_request in &requests[i + 1..] {
                         let result = state_machine.process_request(remaining_request);
                         assert!(result.is_err(), "Requests should fail on closed connection");
                     }
@@ -514,9 +516,12 @@ fn test_connection_transition_sequence(
             }
             Err(e) => {
                 // Request processing error - validate error is appropriate
-                assert!(state_machine.is_closed() ||
-                       matches!(state_machine.get_state(), ConnectionState::Error),
-                       "Connection should be in error/closed state after request processing error: {}", e);
+                assert!(
+                    state_machine.is_closed()
+                        || matches!(state_machine.get_state(), ConnectionState::Error),
+                    "Connection should be in error/closed state after request processing error: {}",
+                    e
+                );
                 break;
             }
         }
@@ -532,16 +537,17 @@ fn validate_state_transition(
     state_after: ConnectionState,
     request: &TransitionRequest,
     response: &TransitionResponse,
-    config: &ServerConfig
+    config: &ServerConfig,
 ) {
     // Keep-alive should not transition to closed without explicit close
-    if matches!(state_before, ConnectionState::KeepAlive) &&
-       matches!(state_after, ConnectionState::Closed) {
+    if matches!(state_before, ConnectionState::KeepAlive)
+        && matches!(state_after, ConnectionState::Closed)
+    {
         assert!(
-            request.connection.requests_close() ||
-            response.connection.requests_close() ||
-            !config.supports_keep_alive ||
-            response.status >= 400,
+            request.connection.requests_close()
+                || response.connection.requests_close()
+                || !config.supports_keep_alive
+                || response.status >= 400,
             "Keep-alive should not transition to closed without explicit directive"
         );
     }
@@ -551,15 +557,19 @@ fn validate_state_transition(
         match request.version {
             HttpVersion::Http10 => {
                 if !request.connection.requests_keep_alive() {
-                    assert!(matches!(state_after, ConnectionState::MarkedForClose),
-                           "HTTP/1.0 without keep-alive should mark for close");
+                    assert!(
+                        matches!(state_after, ConnectionState::MarkedForClose),
+                        "HTTP/1.0 without keep-alive should mark for close"
+                    );
                 }
             }
             HttpVersion::Http11 => {
                 if !request.connection.requests_close() && config.supports_keep_alive {
-                    assert!(matches!(state_after, ConnectionState::KeepAlive) ||
-                           matches!(state_after, ConnectionState::MarkedForClose),
-                           "HTTP/1.1 should default to keep-alive or respect close");
+                    assert!(
+                        matches!(state_after, ConnectionState::KeepAlive)
+                            || matches!(state_after, ConnectionState::MarkedForClose),
+                        "HTTP/1.1 should default to keep-alive or respect close"
+                    );
                 }
             }
         }
@@ -567,14 +577,21 @@ fn validate_state_transition(
 
     // Marked for close should stay marked or become closed
     if matches!(state_before, ConnectionState::MarkedForClose) {
-        assert!(matches!(state_after, ConnectionState::MarkedForClose | ConnectionState::Closed),
-               "Marked for close should not transition back to keep-alive");
+        assert!(
+            matches!(
+                state_after,
+                ConnectionState::MarkedForClose | ConnectionState::Closed
+            ),
+            "Marked for close should not transition back to keep-alive"
+        );
     }
 
     // Error states should be terminal
     if matches!(state_before, ConnectionState::Error) {
-        assert!(matches!(state_after, ConnectionState::Error),
-               "Error state should be terminal");
+        assert!(
+            matches!(state_after, ConnectionState::Error),
+            "Error state should be terminal"
+        );
     }
 }
 
@@ -609,8 +626,10 @@ fn test_conflicting_directives(config: &ServerConfig) {
     match result {
         Ok(state) => {
             // Close should take precedence over keep-alive
-            assert!(matches!(state, ConnectionState::MarkedForClose),
-                   "Conflicting directives should resolve to close");
+            assert!(
+                matches!(state, ConnectionState::MarkedForClose),
+                "Conflicting directives should resolve to close"
+            );
         }
         Err(_) => {
             // Error handling is also acceptable for malformed headers
@@ -643,7 +662,10 @@ fn test_version_transitions(config: &ServerConfig) {
     let result = state_machine.process_request(&http11_request);
 
     // Should handle version transitions gracefully
-    assert!(result.is_ok(), "Version transitions should be handled gracefully");
+    assert!(
+        result.is_ok(),
+        "Version transitions should be handled gracefully"
+    );
 }
 
 /// Test request limit forced transitions
@@ -700,8 +722,10 @@ fn test_response_override_transitions(config: &ServerConfig) {
 
     // Response close should override request keep-alive
     assert!(result.is_ok());
-    assert!(matches!(result.unwrap(), ConnectionState::MarkedForClose),
-           "Response close should override request keep-alive");
+    assert!(
+        matches!(result.unwrap(), ConnectionState::MarkedForClose),
+        "Response close should override request keep-alive"
+    );
 }
 
 /// Validate final connection state is consistent
@@ -709,30 +733,45 @@ fn validate_final_connection_state(
     state_machine: &MockConnectionStateMachine,
     requests: &[TransitionRequest],
     responses: &[TransitionResponse],
-    config: &ServerConfig
+    config: &ServerConfig,
 ) {
     let final_state = state_machine.get_state();
 
     // If any request/response explicitly requested close, connection should be closed/marked for close
-    let any_explicit_close = requests.iter().any(|r| r.connection.requests_close()) ||
-                            responses.iter().any(|r| r.connection.requests_close());
+    let any_explicit_close = requests.iter().any(|r| r.connection.requests_close())
+        || responses.iter().any(|r| r.connection.requests_close());
 
     if any_explicit_close {
-        assert!(matches!(final_state, ConnectionState::MarkedForClose | ConnectionState::Closed),
-               "Connection should be closed when explicit close was requested");
+        assert!(
+            matches!(
+                final_state,
+                ConnectionState::MarkedForClose | ConnectionState::Closed
+            ),
+            "Connection should be closed when explicit close was requested"
+        );
     }
 
     // If server doesn't support keep-alive, should always be marked for close
     if !config.supports_keep_alive && !requests.is_empty() {
-        assert!(matches!(final_state, ConnectionState::MarkedForClose | ConnectionState::Closed),
-               "Connection should be closed when server doesn't support keep-alive");
+        assert!(
+            matches!(
+                final_state,
+                ConnectionState::MarkedForClose | ConnectionState::Closed
+            ),
+            "Connection should be closed when server doesn't support keep-alive"
+        );
     }
 
     // If request limit reached, should be marked for close
     if let Some(max_requests) = config.max_requests {
         if state_machine.requests_processed >= max_requests {
-            assert!(matches!(final_state, ConnectionState::MarkedForClose | ConnectionState::Closed),
-                   "Connection should be closed when request limit reached");
+            assert!(
+                matches!(
+                    final_state,
+                    ConnectionState::MarkedForClose | ConnectionState::Closed
+                ),
+                "Connection should be closed when request limit reached"
+            );
         }
     }
 }

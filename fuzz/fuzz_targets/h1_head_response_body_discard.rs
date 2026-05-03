@@ -26,8 +26,8 @@ fuzz_target!(|input: FuzzBytes| {
 fn test_head_response_encoding(data: &[u8]) {
     use asupersync::bytes::BytesMut;
     use asupersync::codec::Encoder;
-    use asupersync::http::h1::types::{Response, Version};
     use asupersync::http::h1::Http1Codec;
+    use asupersync::http::h1::types::{Response, Version};
 
     // Guard against excessive input
     if data.len() > 50_000 {
@@ -49,10 +49,9 @@ fn test_head_response_encoding(data: &[u8]) {
 
     // Add Content-Length header matching the body size
     if !data.is_empty() {
-        response.headers.push((
-            "Content-Length".to_string(),
-            data.len().to_string(),
-        ));
+        response
+            .headers
+            .push(("Content-Length".to_string(), data.len().to_string()));
     }
 
     let mut codec = Http1Codec::new();
@@ -103,8 +102,14 @@ fn test_head_response_encoding(data: &[u8]) {
             let head_output = String::from_utf8_lossy(&head_buffer);
 
             // HEAD response should contain headers but no body
-            assert!(head_output.contains("HTTP/1.1 200 OK"), "Should contain status line");
-            assert!(head_output.contains("Content-Length:"), "Should contain Content-Length header");
+            assert!(
+                head_output.contains("HTTP/1.1 200 OK"),
+                "Should contain status line"
+            );
+            assert!(
+                head_output.contains("Content-Length:"),
+                "Should contain Content-Length header"
+            );
 
             // Should NOT contain the original body data
             if !data.is_empty() {
@@ -139,8 +144,8 @@ fn test_head_response_encoding(data: &[u8]) {
 fn test_content_length_mismatch(data: &[u8]) {
     use asupersync::bytes::BytesMut;
     use asupersync::codec::Encoder;
-    use asupersync::http::h1::types::{Response, Version};
     use asupersync::http::h1::Http1Codec;
+    use asupersync::http::h1::types::{Response, Version};
 
     // Create response with mismatched Content-Length
     let mismatched_length = data.len() * 2 + 100;

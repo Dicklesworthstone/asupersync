@@ -1,7 +1,7 @@
 #![no_main]
 
-use libfuzzer_sys::fuzz_target;
 use arbitrary::{Arbitrary, Unstructured};
+use libfuzzer_sys::fuzz_target;
 use std::collections::HashMap;
 use std::panic;
 
@@ -196,8 +196,11 @@ impl MockH2Connection {
                     return Err(ErrorCode::ProtocolError);
                 } else {
                     // DATA on unknown stream - could be STREAM_CLOSED if recently closed
-                    self.stream_errors.push((stream_id, ErrorCode::StreamClosed,
-                        "DATA frame on non-existent stream".to_string()));
+                    self.stream_errors.push((
+                        stream_id,
+                        ErrorCode::StreamClosed,
+                        "DATA frame on non-existent stream".to_string(),
+                    ));
                     return Err(ErrorCode::StreamClosed);
                 }
             }
@@ -206,9 +209,12 @@ impl MockH2Connection {
         // Check if stream is closed - this is the main test case
         if stream_info.is_closed() {
             // RFC 9113: DATA frames received on closed streams should generate STREAM_CLOSED error
-            let error_msg = format!("DATA frame on closed stream {} (closed reason: {:?})",
-                stream_id, stream_info.close_reason);
-            self.stream_errors.push((stream_id, ErrorCode::StreamClosed, error_msg));
+            let error_msg = format!(
+                "DATA frame on closed stream {} (closed reason: {:?})",
+                stream_id, stream_info.close_reason
+            );
+            self.stream_errors
+                .push((stream_id, ErrorCode::StreamClosed, error_msg));
             return Err(ErrorCode::StreamClosed);
         }
 
@@ -222,14 +228,20 @@ impl MockH2Connection {
             }
             StreamState::HalfClosedRemote => {
                 // Remote has sent END_STREAM, no more DATA should come
-                self.stream_errors.push((stream_id, ErrorCode::StreamClosed,
-                    "DATA frame after END_STREAM".to_string()));
+                self.stream_errors.push((
+                    stream_id,
+                    ErrorCode::StreamClosed,
+                    "DATA frame after END_STREAM".to_string(),
+                ));
                 return Err(ErrorCode::StreamClosed);
             }
             StreamState::Idle | StreamState::ReservedLocal | StreamState::ReservedRemote => {
                 // DATA not allowed in these states
-                self.stream_errors.push((stream_id, ErrorCode::ProtocolError,
-                    format!("DATA frame in invalid state {:?}", stream_info.state)));
+                self.stream_errors.push((
+                    stream_id,
+                    ErrorCode::ProtocolError,
+                    format!("DATA frame in invalid state {:?}", stream_info.state),
+                ));
                 return Err(ErrorCode::ProtocolError);
             }
             StreamState::Closed => {
@@ -240,8 +252,15 @@ impl MockH2Connection {
 
         // Check flow control
         if frame.data.len() as i32 > stream_info.window_size {
-            self.stream_errors.push((stream_id, ErrorCode::FlowControlError,
-                format!("DATA frame size {} exceeds window {}", frame.data.len(), stream_info.window_size)));
+            self.stream_errors.push((
+                stream_id,
+                ErrorCode::FlowControlError,
+                format!(
+                    "DATA frame size {} exceeds window {}",
+                    frame.data.len(),
+                    stream_info.window_size
+                ),
+            ));
             return Err(ErrorCode::FlowControlError);
         }
 
@@ -327,7 +346,8 @@ fn test_data_on_closed_streams(scenario: ClosedStreamDataScenario) -> Result<(),
 
     // Phase 1: Create streams
     let mut created_streams = Vec::new();
-    for i in 0..scenario.streams_to_create.min(10) { // Limit to prevent timeout
+    for i in 0..scenario.streams_to_create.min(10) {
+        // Limit to prevent timeout
         let is_client = i % 2 == 0;
         let stream_id = connection.create_stream(is_client);
         created_streams.push(stream_id);
@@ -335,15 +355,16 @@ fn test_data_on_closed_streams(scenario: ClosedStreamDataScenario) -> Result<(),
 
     // Phase 2: Close streams using different methods
     for (i, &close_reason) in scenario.closure_methods.iter().enumerate() {
-        if i >= created_streams.len() { break; }
+        if i >= created_streams.len() {
+            break;
+        }
 
         let stream_id = created_streams[i];
 
         match close_reason {
             StreamCloseReason::EndStream => {
                 // Simulate END_STREAM by creating DATA frame with end_stream flag
-                let end_stream_frame = DataFrame::new(stream_id, vec![])
-                    .with_end_stream();
+                let end_stream_frame = DataFrame::new(stream_id, vec![]).with_end_stream();
                 let _ = connection.receive_data_frame(end_stream_frame);
 
                 // Send our own END_STREAM to fully close
@@ -371,7 +392,10 @@ fn test_data_on_closed_streams(scenario: ClosedStreamDataScenario) -> Result<(),
         // Verify stream is closed
         if let Some(state) = connection.get_stream_state(stream_id) {
             if state != StreamState::Closed {
-                return Err(format!("Stream {} not closed after {:?}", stream_id, close_reason));
+                return Err(format!(
+                    "Stream {} not closed after {:?}",
+                    stream_id, close_reason
+                ));
             }
         }
     }
@@ -391,14 +415,17 @@ fn test_data_on_closed_streams(scenario: ClosedStreamDataScenario) -> Result<(),
                     continue;
                 }
                 other => {
-                    return Err(format!("Expected PROTOCOL_ERROR for stream 0 DATA, got {:?}", other));
+                    return Err(format!(
+                        "Expected PROTOCOL_ERROR for stream 0 DATA, got {:?}",
+                        other
+                    ));
                 }
             }
         }
 
         // Check if this stream was one we closed
-        let was_closed = created_streams.contains(&stream_id) &&
-            connection.get_stream_state(stream_id) == Some(StreamState::Closed);
+        let was_closed = created_streams.contains(&stream_id)
+            && connection.get_stream_state(stream_id) == Some(StreamState::Closed);
 
         match connection.receive_data_frame(data_frame.clone()) {
             Err(ErrorCode::StreamClosed) => {
@@ -406,7 +433,10 @@ fn test_data_on_closed_streams(scenario: ClosedStreamDataScenario) -> Result<(),
 
                 // This should happen for streams we know are closed
                 if !was_closed && created_streams.contains(&stream_id) {
-                    return Err(format!("Got STREAM_CLOSED for stream {} that wasn't closed", stream_id));
+                    return Err(format!(
+                        "Got STREAM_CLOSED for stream {} that wasn't closed",
+                        stream_id
+                    ));
                 }
             }
             Err(_other_error) => {
@@ -416,7 +446,10 @@ fn test_data_on_closed_streams(scenario: ClosedStreamDataScenario) -> Result<(),
             Ok(()) => {
                 // Success is only acceptable if stream wasn't closed
                 if was_closed {
-                    return Err(format!("DATA frame accepted on closed stream {}", stream_id));
+                    return Err(format!(
+                        "DATA frame accepted on closed stream {}",
+                        stream_id
+                    ));
                 }
             }
         }
@@ -426,15 +459,19 @@ fn test_data_on_closed_streams(scenario: ClosedStreamDataScenario) -> Result<(),
     let _final_error_count = connection.get_stream_errors().len();
 
     // Should have generated some STREAM_CLOSED errors if we sent DATA to closed streams
-    let closed_stream_targets = scenario.data_frames_after_close.iter()
+    let closed_stream_targets = scenario
+        .data_frames_after_close
+        .iter()
         .filter(|frame| {
-            created_streams.contains(&frame.stream_id) &&
-            connection.get_stream_state(frame.stream_id) == Some(StreamState::Closed)
+            created_streams.contains(&frame.stream_id)
+                && connection.get_stream_state(frame.stream_id) == Some(StreamState::Closed)
         })
         .count();
 
     if closed_stream_targets > 0 && stream_closed_errors == 0 {
-        return Err("Expected STREAM_CLOSED errors for DATA on closed streams, but got none".to_string());
+        return Err(
+            "Expected STREAM_CLOSED errors for DATA on closed streams, but got none".to_string(),
+        );
     }
 
     // Connection should still be active (unless stream 0 was used)
@@ -467,7 +504,8 @@ fn test_basic_data_on_closed_stream() -> Result<(), String> {
 
     // Verify error was recorded
     let errors = connection.get_stream_errors();
-    let stream_closed_errors = errors.iter()
+    let stream_closed_errors = errors
+        .iter()
         .filter(|(id, code, _)| *id == stream_id && *code == ErrorCode::StreamClosed)
         .count();
 
@@ -494,7 +532,10 @@ fn test_data_on_stream_zero() -> Result<(), String> {
             // Expected - DATA frames cannot use stream 0
         }
         other => {
-            return Err(format!("Expected PROTOCOL_ERROR for stream 0, got {:?}", other));
+            return Err(format!(
+                "Expected PROTOCOL_ERROR for stream 0, got {:?}",
+                other
+            ));
         }
     }
 
@@ -554,7 +595,10 @@ fn test_closure_method_variations() -> Result<(), String> {
                 // Expected for all closure methods
             }
             other => {
-                return Err(format!("Expected STREAM_CLOSED for {:?}, got {:?}", close_reason, other));
+                return Err(format!(
+                    "Expected STREAM_CLOSED for {:?}, got {:?}",
+                    close_reason, other
+                ));
             }
         }
     }
@@ -578,7 +622,10 @@ fn test_large_data_on_closed_stream() -> Result<(), String> {
             // Expected - size shouldn't matter for closed streams
         }
         other => {
-            return Err(format!("Expected STREAM_CLOSED for large frame, got {:?}", other));
+            return Err(format!(
+                "Expected STREAM_CLOSED for large frame, got {:?}",
+                other
+            ));
         }
     }
 

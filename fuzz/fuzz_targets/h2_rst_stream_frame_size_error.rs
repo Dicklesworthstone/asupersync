@@ -1,7 +1,7 @@
 #![no_main]
 
-use libfuzzer_sys::fuzz_target;
 use arbitrary::{Arbitrary, Unstructured};
+use libfuzzer_sys::fuzz_target;
 use std::collections::HashMap;
 use std::panic;
 
@@ -140,7 +140,8 @@ impl MockH2Connection {
         if stream_id == 0 {
             return; // Stream 0 is reserved
         }
-        self.streams.insert(stream_id, StreamInfo::new(stream_id, state));
+        self.streams
+            .insert(stream_id, StreamInfo::new(stream_id, state));
     }
 
     /// Process RST_STREAM frame per RFC 9113 §6.4
@@ -153,11 +154,14 @@ impl MockH2Connection {
 
         // RFC 9113 §6.4: RST_STREAM frame MUST have exactly 4 octets of payload
         if !frame.is_valid_size() {
-            let error_msg = format!("RST_STREAM frame has invalid size: {} bytes (expected 4)",
-                frame.payload_size());
+            let error_msg = format!(
+                "RST_STREAM frame has invalid size: {} bytes (expected 4)",
+                frame.payload_size()
+            );
 
             // FRAME_SIZE_ERROR is a connection-level error
-            self.connection_errors.push((ErrorCode::FrameSizeError, error_msg));
+            self.connection_errors
+                .push((ErrorCode::FrameSizeError, error_msg));
             self.frame_size_errors += 1;
             self.is_active = false; // Connection closes on frame size error
 
@@ -167,7 +171,8 @@ impl MockH2Connection {
         // Check stream ID validity
         if stream_id == 0 {
             let error_msg = "RST_STREAM cannot be sent on stream 0".to_string();
-            self.connection_errors.push((ErrorCode::ProtocolError, error_msg));
+            self.connection_errors
+                .push((ErrorCode::ProtocolError, error_msg));
             self.is_active = false;
             return Err(ErrorCode::ProtocolError);
         }
@@ -196,7 +201,10 @@ impl MockH2Connection {
 
     /// Check if stream is reset
     fn is_stream_reset(&self, stream_id: u32) -> bool {
-        self.streams.get(&stream_id).map(|s| s.is_reset()).unwrap_or(false)
+        self.streams
+            .get(&stream_id)
+            .map(|s| s.is_reset())
+            .unwrap_or(false)
     }
 
     /// Get connection errors
@@ -221,7 +229,8 @@ impl MockH2Connection {
 
     /// Count FRAME_SIZE_ERROR occurrences
     fn count_frame_size_errors(&self) -> usize {
-        self.connection_errors.iter()
+        self.connection_errors
+            .iter()
             .filter(|(code, _)| *code == ErrorCode::FrameSizeError)
             .count()
     }
@@ -246,7 +255,8 @@ fn test_rst_frame_size_consistency(scenario: RstStreamSizeErrorScenario) -> Resu
 
     // Phase 1: Create streams in various states
     for (stream_id, state) in scenario.stream_states {
-        if stream_id != 0 && stream_id < 1000 { // Limit range for practical testing
+        if stream_id != 0 && stream_id < 1000 {
+            // Limit range for practical testing
             connection.add_stream(stream_id, state);
         }
     }
@@ -261,7 +271,8 @@ fn test_rst_frame_size_consistency(scenario: RstStreamSizeErrorScenario) -> Resu
         }
 
         // Record the stream state before sending RST_STREAM
-        let stream_state = connection.get_stream_state(rst_frame.stream_id)
+        let stream_state = connection
+            .get_stream_state(rst_frame.stream_id)
             .unwrap_or(StreamState::Idle);
 
         let was_invalid_size = !rst_frame.is_valid_size();
@@ -270,8 +281,10 @@ fn test_rst_frame_size_consistency(scenario: RstStreamSizeErrorScenario) -> Resu
             Err(ErrorCode::FrameSizeError) => {
                 // Expected for invalid frame sizes
                 if !was_invalid_size {
-                    return Err(format!("Got FRAME_SIZE_ERROR for valid-sized RST_STREAM on stream {} in state {:?}",
-                        rst_frame.stream_id, stream_state));
+                    return Err(format!(
+                        "Got FRAME_SIZE_ERROR for valid-sized RST_STREAM on stream {} in state {:?}",
+                        rst_frame.stream_id, stream_state
+                    ));
                 }
 
                 // Count frame size errors by stream state
@@ -293,23 +306,33 @@ fn test_rst_frame_size_consistency(scenario: RstStreamSizeErrorScenario) -> Resu
             Err(ErrorCode::ProtocolError) => {
                 // May occur for stream 0, but not expected for frame size issues
                 if was_invalid_size && rst_frame.stream_id != 0 {
-                    return Err(format!("Expected FRAME_SIZE_ERROR but got PROTOCOL_ERROR for stream {} in state {:?}",
-                        rst_frame.stream_id, stream_state));
+                    return Err(format!(
+                        "Expected FRAME_SIZE_ERROR but got PROTOCOL_ERROR for stream {} in state {:?}",
+                        rst_frame.stream_id, stream_state
+                    ));
                 }
             }
             Err(other_error) => {
-                return Err(format!("Unexpected error for RST_STREAM: {:?}", other_error));
+                return Err(format!(
+                    "Unexpected error for RST_STREAM: {:?}",
+                    other_error
+                ));
             }
             Ok(()) => {
                 // Success is only expected for valid frame sizes
                 if was_invalid_size {
-                    return Err(format!("Invalid-sized RST_STREAM was accepted on stream {} in state {:?}",
-                        rst_frame.stream_id, stream_state));
+                    return Err(format!(
+                        "Invalid-sized RST_STREAM was accepted on stream {} in state {:?}",
+                        rst_frame.stream_id, stream_state
+                    ));
                 }
 
                 // Verify stream was reset
                 if !connection.is_stream_reset(rst_frame.stream_id) {
-                    return Err(format!("Stream {} not marked as reset after valid RST_STREAM", rst_frame.stream_id));
+                    return Err(format!(
+                        "Stream {} not marked as reset after valid RST_STREAM",
+                        rst_frame.stream_id
+                    ));
                 }
             }
         }
@@ -328,7 +351,7 @@ fn test_rst_frame_size_consistency(scenario: RstStreamSizeErrorScenario) -> Resu
             let oversized_frame = RstStreamFrame::with_extra_data(
                 test_stream_id,
                 ErrorCode::Cancel as u32,
-                vec![0x01, 0x02, 0x03, 0x04] // Extra 4 bytes
+                vec![0x01, 0x02, 0x03, 0x04], // Extra 4 bytes
             );
 
             match test_connection.receive_rst_stream_frame(oversized_frame) {
@@ -336,8 +359,10 @@ fn test_rst_frame_size_consistency(scenario: RstStreamSizeErrorScenario) -> Resu
                     // Expected for all states
                 }
                 other => {
-                    return Err(format!("Oversized RST_STREAM should cause FRAME_SIZE_ERROR in state {:?}, got {:?}",
-                        state, other));
+                    return Err(format!(
+                        "Oversized RST_STREAM should cause FRAME_SIZE_ERROR in state {:?}, got {:?}",
+                        state, other
+                    ));
                 }
             }
         }
@@ -345,7 +370,11 @@ fn test_rst_frame_size_consistency(scenario: RstStreamSizeErrorScenario) -> Resu
 
     // Phase 4: Test specific undersized frames if requested
     if scenario.test_undersized_frames {
-        let test_states = [StreamState::Open, StreamState::HalfClosedLocal, StreamState::HalfClosedRemote];
+        let test_states = [
+            StreamState::Open,
+            StreamState::HalfClosedLocal,
+            StreamState::HalfClosedRemote,
+        ];
 
         for &state in &test_states {
             let mut test_connection = MockH2Connection::new();
@@ -353,7 +382,8 @@ fn test_rst_frame_size_consistency(scenario: RstStreamSizeErrorScenario) -> Resu
             test_connection.add_stream(test_stream_id, state);
 
             // Create undersized RST_STREAM frame (missing bytes)
-            let mut undersized_frame = RstStreamFrame::new(test_stream_id, ErrorCode::Cancel as u32);
+            let mut undersized_frame =
+                RstStreamFrame::new(test_stream_id, ErrorCode::Cancel as u32);
             // Simulate truncated frame by removing some of the error code bytes
             // In practice this would be detected at frame parsing level
             undersized_frame.extra_payload = vec![]; // This represents a frame with < 4 bytes total
@@ -361,14 +391,22 @@ fn test_rst_frame_size_consistency(scenario: RstStreamSizeErrorScenario) -> Resu
             // For this test, we'll simulate an undersized frame by checking payload size
             if undersized_frame.payload_size() < 4 {
                 // Manually trigger frame size error
-                let error_msg = format!("RST_STREAM frame too small: {} bytes", undersized_frame.payload_size());
-                test_connection.connection_errors.push((ErrorCode::FrameSizeError, error_msg));
+                let error_msg = format!(
+                    "RST_STREAM frame too small: {} bytes",
+                    undersized_frame.payload_size()
+                );
+                test_connection
+                    .connection_errors
+                    .push((ErrorCode::FrameSizeError, error_msg));
                 test_connection.frame_size_errors += 1;
                 test_connection.is_active = false;
 
                 // Verify consistent error handling regardless of stream state
                 if test_connection.count_frame_size_errors() == 0 {
-                    return Err(format!("Undersized RST_STREAM should cause FRAME_SIZE_ERROR in state {:?}", state));
+                    return Err(format!(
+                        "Undersized RST_STREAM should cause FRAME_SIZE_ERROR in state {:?}",
+                        state
+                    ));
                 }
             }
         }
@@ -382,7 +420,9 @@ fn test_rst_frame_size_consistency(scenario: RstStreamSizeErrorScenario) -> Resu
     if let (Some(&min_errors), Some(&max_errors)) = (error_counts.first(), error_counts.last()) {
         if max_errors > 0 && min_errors == 0 {
             // Some states had errors, others didn't - this suggests inconsistent handling
-            return Err("FRAME_SIZE_ERROR handling is inconsistent across stream states".to_string());
+            return Err(
+                "FRAME_SIZE_ERROR handling is inconsistent across stream states".to_string(),
+            );
         }
     }
 
@@ -396,14 +436,18 @@ fn test_basic_frame_size_error() -> Result<(), String> {
     connection.add_stream(1, StreamState::Open);
 
     // Test oversized RST_STREAM
-    let oversized_frame = RstStreamFrame::with_extra_data(1, ErrorCode::Cancel as u32, vec![0xFF; 10]);
+    let oversized_frame =
+        RstStreamFrame::with_extra_data(1, ErrorCode::Cancel as u32, vec![0xFF; 10]);
 
     match connection.receive_rst_stream_frame(oversized_frame) {
         Err(ErrorCode::FrameSizeError) => {
             // Expected
         }
         other => {
-            return Err(format!("Expected FRAME_SIZE_ERROR for oversized frame, got {:?}", other));
+            return Err(format!(
+                "Expected FRAME_SIZE_ERROR for oversized frame, got {:?}",
+                other
+            ));
         }
     }
 
@@ -437,20 +481,27 @@ fn test_frame_size_error_consistency() -> Result<(), String> {
         connection.add_stream(1, state);
 
         // Send oversized RST_STREAM
-        let oversized_frame = RstStreamFrame::with_extra_data(1, ErrorCode::Cancel as u32, vec![0xAB; 8]);
+        let oversized_frame =
+            RstStreamFrame::with_extra_data(1, ErrorCode::Cancel as u32, vec![0xAB; 8]);
 
         match connection.receive_rst_stream_frame(oversized_frame) {
             Err(ErrorCode::FrameSizeError) => {
                 // Expected for all states
             }
             other => {
-                return Err(format!("FRAME_SIZE_ERROR should occur in state {:?}, got {:?}", state, other));
+                return Err(format!(
+                    "FRAME_SIZE_ERROR should occur in state {:?}, got {:?}",
+                    state, other
+                ));
             }
         }
 
         // Verify connection closed (should be consistent across all states)
         if connection.is_connection_active() {
-            return Err(format!("Connection should close after FRAME_SIZE_ERROR in state {:?}", state));
+            return Err(format!(
+                "Connection should close after FRAME_SIZE_ERROR in state {:?}",
+                state
+            ));
         }
     }
 
@@ -461,7 +512,11 @@ fn test_frame_size_error_consistency() -> Result<(), String> {
 fn test_valid_rst_frames() -> Result<(), String> {
     let mut connection = MockH2Connection::new();
 
-    let test_states = [StreamState::Open, StreamState::HalfClosedLocal, StreamState::Closed];
+    let test_states = [
+        StreamState::Open,
+        StreamState::HalfClosedLocal,
+        StreamState::Closed,
+    ];
 
     for (i, &state) in test_states.iter().enumerate() {
         let stream_id = (i as u32) + 1;
@@ -475,18 +530,27 @@ fn test_valid_rst_frames() -> Result<(), String> {
                 // Expected for valid frames
             }
             other => {
-                return Err(format!("Valid RST_STREAM should succeed in state {:?}, got {:?}", state, other));
+                return Err(format!(
+                    "Valid RST_STREAM should succeed in state {:?}, got {:?}",
+                    state, other
+                ));
             }
         }
 
         // Verify no frame size errors
         if connection.count_frame_size_errors() > 0 {
-            return Err(format!("Valid RST_STREAM caused frame size error in state {:?}", state));
+            return Err(format!(
+                "Valid RST_STREAM caused frame size error in state {:?}",
+                state
+            ));
         }
 
         // Verify stream was reset
         if !connection.is_stream_reset(stream_id) {
-            return Err(format!("Stream {} not reset after valid RST_STREAM in state {:?}", stream_id, state));
+            return Err(format!(
+                "Stream {} not reset after valid RST_STREAM in state {:?}",
+                stream_id, state
+            ));
         }
     }
 
@@ -504,14 +568,18 @@ fn test_extremely_large_frame() -> Result<(), String> {
     connection.add_stream(1, StreamState::Open);
 
     // Create extremely large RST_STREAM frame
-    let huge_frame = RstStreamFrame::with_extra_data(1, ErrorCode::Cancel as u32, vec![0x00; 65536]);
+    let huge_frame =
+        RstStreamFrame::with_extra_data(1, ErrorCode::Cancel as u32, vec![0x00; 65536]);
 
     match connection.receive_rst_stream_frame(huge_frame) {
         Err(ErrorCode::FrameSizeError) => {
             // Expected
         }
         other => {
-            return Err(format!("Extremely large RST_STREAM should cause FRAME_SIZE_ERROR, got {:?}", other));
+            return Err(format!(
+                "Extremely large RST_STREAM should cause FRAME_SIZE_ERROR, got {:?}",
+                other
+            ));
         }
     }
 
@@ -539,7 +607,10 @@ fn test_rst_stream_zero() -> Result<(), String> {
             // Expected - stream 0 violation takes precedence over size
         }
         other => {
-            return Err(format!("RST_STREAM on stream 0 should cause PROTOCOL_ERROR, got {:?}", other));
+            return Err(format!(
+                "RST_STREAM on stream 0 should cause PROTOCOL_ERROR, got {:?}",
+                other
+            ));
         }
     }
 

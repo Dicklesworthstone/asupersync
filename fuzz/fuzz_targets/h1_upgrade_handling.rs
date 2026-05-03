@@ -1,9 +1,9 @@
 #![no_main]
 
-use libfuzzer_sys::fuzz_target;
 use asupersync::bytes::BytesMut;
 use asupersync::http::h1::codec::Http1Codec;
 use asupersync::http::h1::types::{Method, Request};
+use libfuzzer_sys::fuzz_target;
 
 // Maximum data size to prevent timeouts on extremely large inputs
 const MAX_DATA_SIZE: usize = 10 * 1024 * 1024; // 10MB
@@ -23,10 +23,10 @@ fuzz_target!(|data: &[u8]| {
         Ok(Some(request)) => {
             // Successfully parsed a request - now validate upgrade handling
             validate_upgrade_request(&request);
-        },
+        }
         Ok(None) => {
             // Incomplete request - this is fine for fuzzing
-        },
+        }
         Err(_) => {
             // Parse error - this is expected for invalid input and is fine
         }
@@ -97,30 +97,40 @@ fn validate_upgrade_request(request: &Request) {
         validate_websocket_upgrade_request(request, &upgrade_values);
 
         // Assert: Connection upgrade detected properly
-        assert!(has_connection_upgrade && has_upgrade_header,
-               "Connection upgrade must be properly detected");
+        assert!(
+            has_connection_upgrade && has_upgrade_header,
+            "Connection upgrade must be properly detected"
+        );
     }
 }
 
 /// Validate HTTP/1.1 upgrade semantics.
-fn validate_upgrade_semantics(method: &Method, connection_values: &[String], upgrade_values: &[String]) {
+fn validate_upgrade_semantics(
+    method: &Method,
+    connection_values: &[String],
+    upgrade_values: &[String],
+) {
     // Upgrade requests should typically be GET for WebSocket
     let is_get = matches!(method, Method::Get);
 
     // Connection header should contain "upgrade" (case-insensitive)
-    let has_connection_upgrade = connection_values.iter()
-        .any(|v| v.to_ascii_lowercase().split(',')
-            .any(|token| token.trim() == "upgrade"));
+    let has_connection_upgrade = connection_values.iter().any(|v| {
+        v.to_ascii_lowercase()
+            .split(',')
+            .any(|token| token.trim() == "upgrade")
+    });
 
     // Upgrade header should have specific protocols
-    let upgrade_protocols: Vec<&str> = upgrade_values.iter()
+    let upgrade_protocols: Vec<&str> = upgrade_values
+        .iter()
         .flat_map(|v| v.split(','))
         .map(|s| s.trim())
         .collect();
 
     // Common upgrade protocols: websocket, h2c, etc.
     let known_protocols = ["websocket", "h2c", "http/2"];
-    let has_known_protocol = upgrade_protocols.iter()
+    let has_known_protocol = upgrade_protocols
+        .iter()
         .any(|p| known_protocols.contains(&p.to_ascii_lowercase().as_str()));
 
     // Log interesting combinations (for debugging, won't crash)
@@ -131,7 +141,8 @@ fn validate_upgrade_semantics(method: &Method, connection_values: &[String], upg
 
 /// Validate WebSocket-specific upgrade requests.
 fn validate_websocket_upgrade_request(request: &Request, upgrade_values: &[String]) {
-    let is_websocket = upgrade_values.iter()
+    let is_websocket = upgrade_values
+        .iter()
         .any(|v| v.to_ascii_lowercase().contains("websocket"));
 
     if !is_websocket {
@@ -154,7 +165,10 @@ fn validate_websocket_upgrade_request(request: &Request, upgrade_values: &[Strin
     let _has_required_ws_headers = has_sec_websocket_key && has_sec_websocket_version;
 
     // Validate that the request structure is sound for upgrade handling
-    assert!(!request.uri.is_empty(), "URI should not be empty for upgrade requests");
+    assert!(
+        !request.uri.is_empty(),
+        "URI should not be empty for upgrade requests"
+    );
 
     // Body handling for upgrade requests - should typically be empty
     // But having a body shouldn't crash the parser

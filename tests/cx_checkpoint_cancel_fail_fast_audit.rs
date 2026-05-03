@@ -120,8 +120,8 @@
 //! would all be caught by the structural pins below.
 
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 fn read(rel: &str) -> String {
     let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(rel);
@@ -213,10 +213,7 @@ fn checkpoint_slow_path_runs_same_call_when_cancel_observed() {
         .unwrap_or(window_end);
     let body = &source[pos..safe_end];
 
-    let suspect_yield = [
-        ".await;",
-        "return Poll::Pending",
-    ];
+    let suspect_yield = [".await;", "return Poll::Pending"];
     for pat in &suspect_yield {
         assert!(
             !body.contains(pat),

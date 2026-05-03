@@ -300,6 +300,14 @@ impl GlobalInjector {
         self.ready_queue.pop()
     }
 
+    /// Pops up to `max` ready tasks in FIFO order into `out`.
+    ///
+    /// Returns the number of tasks appended to `out`.
+    #[inline]
+    pub(crate) fn pop_ready_batch_into(&self, max: usize, out: &mut Vec<PriorityTask>) -> usize {
+        self.ready_queue.pop_batch_into(max, out)
+    }
+
     /// Returns true if all lanes are empty.
     #[inline]
     #[must_use]

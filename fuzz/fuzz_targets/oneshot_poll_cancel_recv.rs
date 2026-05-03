@@ -12,18 +12,18 @@
 
 #![no_main]
 
-use libfuzzer_sys::fuzz_target;
 use arbitrary::{Arbitrary, Unstructured};
 use asupersync::channel::oneshot;
 use asupersync::cx::Cx;
-use asupersync::util::ArenaIndex;
 use asupersync::types::{RegionId, TaskId};
-use std::sync::atomic::{AtomicUsize, AtomicBool, Ordering};
-use std::sync::Arc;
+use asupersync::util::ArenaIndex;
+use libfuzzer_sys::fuzz_target;
 use std::collections::HashMap;
-use std::task::{Context, Poll, Waker};
-use std::pin::Pin;
 use std::future::Future;
+use std::pin::Pin;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::task::{Context, Poll, Waker};
 
 #[derive(Debug, Clone, Arbitrary)]
 struct OneshotPollCancelConfig {
@@ -126,7 +126,10 @@ impl PollCancelTracker {
 
         // Core invariant: no use-after-free should be detected
         if use_after_free > 0 {
-            return Err(format!("Detected {} use-after-free violations", use_after_free));
+            return Err(format!(
+                "Detected {} use-after-free violations",
+                use_after_free
+            ));
         }
 
         // Sanity checks
@@ -205,7 +208,9 @@ impl TrackedReceiver {
                 Ok(_) => tracker.record_value_received(),
                 Err(oneshot::RecvError::Cancelled) => tracker.record_cancellation_observed(),
                 Err(oneshot::RecvError::Closed) => tracker.record_closed_channel(),
-                Err(oneshot::RecvError::PolledAfterCompletion) => tracker.record_polled_after_completion(),
+                Err(oneshot::RecvError::PolledAfterCompletion) => {
+                    tracker.record_polled_after_completion()
+                }
             }
 
             result
@@ -308,7 +313,9 @@ fn test_poll_cancel_recv_scenario(
 ) -> Result<(), String> {
     let mut receivers: HashMap<u8, TrackedReceiver> = HashMap::new();
 
-    let max_receivers = config.receiver_count.min(OneshotPollCancelConfig::max_receivers());
+    let max_receivers = config
+        .receiver_count
+        .min(OneshotPollCancelConfig::max_receivers());
 
     // Create initial receivers
     for i in 0..max_receivers {
@@ -316,13 +323,17 @@ fn test_poll_cancel_recv_scenario(
         receivers.insert(i, receiver);
     }
 
-    let max_ops = config.max_operations.min(OneshotPollCancelConfig::max_operations()) as usize;
+    let max_ops = config
+        .max_operations
+        .min(OneshotPollCancelConfig::max_operations()) as usize;
 
     for operation in config.operations.iter().take(max_ops) {
         match operation {
             PollCancelOperation::CreateReceiver { receiver_id } => {
                 let id = *receiver_id % 20; // Limit total receivers
-                if !receivers.contains_key(&id) && receivers.len() < OneshotPollCancelConfig::max_receivers() as usize {
+                if !receivers.contains_key(&id)
+                    && receivers.len() < OneshotPollCancelConfig::max_receivers() as usize
+                {
                     let receiver = TrackedReceiver::new(id, Arc::new(PollCancelTracker::new()));
                     receivers.insert(id, receiver);
                 }
@@ -373,9 +384,13 @@ fn test_poll_cancel_recv_scenario(
                 receivers.remove(&id);
             }
 
-            PollCancelOperation::RapidPollCancelPoll { receiver_id, cycles } => {
+            PollCancelOperation::RapidPollCancelPoll {
+                receiver_id,
+                cycles,
+            } => {
                 let id = *receiver_id % 20;
-                let cycle_count = (*cycles).min(OneshotPollCancelConfig::max_rapid_cycles()) as usize;
+                let cycle_count =
+                    (*cycles).min(OneshotPollCancelConfig::max_rapid_cycles()) as usize;
 
                 if let Some(receiver) = receivers.get_mut(&id) {
                     for i in 0..cycle_count {
@@ -422,7 +437,9 @@ fn test_poll_cancel_recv_scenario(
                     if receiver.is_completed() && receiver.poll_count > 0 {
                         // This receiver should return PolledAfterCompletion on next poll
                         // (We can't actually poll it here without mutation, but this validates state)
-                        if receiver.recv_future.is_some() && receiver.completed.load(Ordering::SeqCst) {
+                        if receiver.recv_future.is_some()
+                            && receiver.completed.load(Ordering::SeqCst)
+                        {
                             return Err(format!(
                                 "Receiver {} has inconsistent completion state",
                                 id
@@ -473,9 +490,7 @@ fuzz_target!(|data: &[u8]| {
         let tracker2 = PollCancelTracker::new();
         let config2 = config.clone();
 
-        let handle = thread::spawn(move || {
-            test_poll_cancel_recv_scenario(&config2, &tracker2)
-        });
+        let handle = thread::spawn(move || test_poll_cancel_recv_scenario(&config2, &tracker2));
 
         match handle.join() {
             Ok(Ok(())) => {

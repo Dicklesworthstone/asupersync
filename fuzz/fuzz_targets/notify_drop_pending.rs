@@ -12,16 +12,16 @@
 
 #![no_main]
 
-use libfuzzer_sys::fuzz_target;
 use arbitrary::{Arbitrary, Unstructured};
 use asupersync::sync::Notify;
+use libfuzzer_sys::fuzz_target;
+use std::panic::{AssertUnwindSafe, catch_unwind};
+use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::task::{Context, Poll, Waker};
 use std::thread;
 use std::time::Duration;
-use std::pin::Pin;
-use std::task::{Context, Poll, Waker};
-use std::panic::{catch_unwind, AssertUnwindSafe};
 
 #[derive(Debug, Clone, Arbitrary)]
 struct NotifyConfig {
@@ -144,7 +144,8 @@ impl NotifyTracker {
         if (notify_one + notify_all) > 10 && successful == 0 && dropped < 5 {
             return Err(format!(
                 "Sent {} notifications but none successful (only {} dropped)",
-                notify_one + notify_all, dropped
+                notify_one + notify_all,
+                dropped
             ));
         }
 
@@ -208,7 +209,8 @@ fuzz_target!(|data: &[u8]| {
 
         // Apply delay if specified
         if let Some(&delay) = sequence.config.operation_delays.get(i) {
-            if delay > 0 && delay < 1000 { // Cap delay to prevent test timeout
+            if delay > 0 && delay < 1000 {
+                // Cap delay to prevent test timeout
                 thread::sleep(Duration::from_millis(delay as u64));
             }
         }
@@ -282,7 +284,8 @@ fuzz_target!(|data: &[u8]| {
             }
 
             NotifyOperation::Delay { millis } => {
-                if *millis < 100 { // Cap delay to prevent timeout
+                if *millis < 100 {
+                    // Cap delay to prevent timeout
                     thread::sleep(Duration::from_millis(*millis as u64));
                 }
             }
@@ -385,7 +388,11 @@ fuzz_target!(|data: &[u8]| {
     // Verify no excessive resource usage
     let final_waiters = notify.waiter_count();
     if final_waiters > max_waiters * 2 {
-        panic!("Excessive waiters remain: {} (max expected: {})", final_waiters, max_waiters * 2);
+        panic!(
+            "Excessive waiters remain: {} (max expected: {})",
+            final_waiters,
+            max_waiters * 2
+        );
     }
 
     // Verify that dropping worked correctly
@@ -396,9 +403,12 @@ fuzz_target!(|data: &[u8]| {
     if dropped > 0 || successful > 0 {
         // At least one of the operations should have had some effect
         let total_notify_calls = tracker.notify_one_calls.load(Ordering::SeqCst)
-                                + tracker.notify_all_calls.load(Ordering::SeqCst);
+            + tracker.notify_all_calls.load(Ordering::SeqCst);
         if total_notify_calls > 0 && (dropped + successful) == 0 {
-            panic!("Sent {} notifications but no waiters were affected", total_notify_calls);
+            panic!(
+                "Sent {} notifications but no waiters were affected",
+                total_notify_calls
+            );
         }
     }
 });

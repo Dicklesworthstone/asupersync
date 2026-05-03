@@ -93,11 +93,17 @@ fn fuzz_frame_codec_decode(data: &[u8]) {
                 assert!(
                     bytes_consumed > 0,
                     "Successful frame decode must consume bytes: consumed={}, frame={:?}",
-                    bytes_consumed, frame_summary(&frame)
+                    bytes_consumed,
+                    frame_summary(&frame)
                 );
 
                 // **ASSERTION 2**: Unknown frames should be handled gracefully
-                if let Frame::Unknown { frame_type, stream_id, payload } = &frame {
+                if let Frame::Unknown {
+                    frame_type,
+                    stream_id,
+                    payload,
+                } = &frame
+                {
                     assert!(
                         *frame_type > 9, // Known frame types are 0-9
                         "Unknown frame type {} should be > 9 for proper handling",
@@ -145,7 +151,8 @@ fn fuzz_frame_codec_decode(data: &[u8]) {
     assert!(
         total_consumed <= original_len,
         "Total consumed {} should not exceed input size {}",
-        total_consumed, original_len
+        total_consumed,
+        original_len
     );
 
     // **ASSERTION 6**: Decoder state consistency
@@ -159,17 +166,44 @@ fn fuzz_frame_codec_decode(data: &[u8]) {
 fn frame_summary(frame: &Frame) -> String {
     match frame {
         Frame::Data(f) => format!("DATA(stream={}, len={})", f.stream_id, f.data.len()),
-        Frame::Headers(f) => format!("HEADERS(stream={}, len={})", f.stream_id, f.header_block.len()),
+        Frame::Headers(f) => format!(
+            "HEADERS(stream={}, len={})",
+            f.stream_id,
+            f.header_block.len()
+        ),
         Frame::Priority(f) => format!("PRIORITY(stream={})", f.stream_id),
-        Frame::RstStream(f) => format!("RST_STREAM(stream={}, code={:?})", f.stream_id, f.error_code),
+        Frame::RstStream(f) => format!(
+            "RST_STREAM(stream={}, code={:?})",
+            f.stream_id, f.error_code
+        ),
         Frame::Settings(f) => format!("SETTINGS(ack={}, settings={})", f.ack, f.settings.len()),
-        Frame::PushPromise(f) => format!("PUSH_PROMISE(stream={}, promised={})", f.stream_id, f.promised_stream_id),
-        Frame::Ping(f) => format!("PING(ack={}, data={:02x}{:02x}..)", f.ack, f.opaque_data[0], f.opaque_data[1]),
+        Frame::PushPromise(f) => format!(
+            "PUSH_PROMISE(stream={}, promised={})",
+            f.stream_id, f.promised_stream_id
+        ),
+        Frame::Ping(f) => format!(
+            "PING(ack={}, data={:02x}{:02x}..)",
+            f.ack, f.opaque_data[0], f.opaque_data[1]
+        ),
         Frame::GoAway(f) => format!("GOAWAY(last={}, code={:?})", f.last_stream_id, f.error_code),
-        Frame::WindowUpdate(f) => format!("WINDOW_UPDATE(stream={}, inc={})", f.stream_id, f.increment),
-        Frame::Continuation(f) => format!("CONTINUATION(stream={}, end={})", f.stream_id, f.end_headers),
-        Frame::Unknown { frame_type, stream_id, payload } => {
-            format!("UNKNOWN(type={}, stream={}, len={})", frame_type, stream_id, payload.len())
+        Frame::WindowUpdate(f) => {
+            format!("WINDOW_UPDATE(stream={}, inc={})", f.stream_id, f.increment)
+        }
+        Frame::Continuation(f) => format!(
+            "CONTINUATION(stream={}, end={})",
+            f.stream_id, f.end_headers
+        ),
+        Frame::Unknown {
+            frame_type,
+            stream_id,
+            payload,
+        } => {
+            format!(
+                "UNKNOWN(type={}, stream={}, len={})",
+                frame_type,
+                stream_id,
+                payload.len()
+            )
         }
     }
 }

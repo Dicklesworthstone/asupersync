@@ -12,18 +12,18 @@
 
 #![no_main]
 
-use libfuzzer_sys::fuzz_target;
 use arbitrary::{Arbitrary, Unstructured};
-use asupersync::sync::barrier::{Barrier, BarrierWaitError};
 use asupersync::cx::Cx;
-use asupersync::types::{RegionId, TaskId, Budget};
+use asupersync::sync::barrier::{Barrier, BarrierWaitError};
+use asupersync::types::{Budget, RegionId, TaskId};
 use asupersync::util::ArenaIndex;
-use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, AtomicBool, Ordering};
+use futures::task::noop_waker;
+use libfuzzer_sys::fuzz_target;
 use std::future::Future;
 use std::pin::Pin;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::task::{Context, Poll, Waker};
-use futures::task::noop_waker;
 
 #[derive(Debug, Clone, Arbitrary)]
 struct BarrierCycle {
@@ -82,7 +82,10 @@ impl<'a> BarrierWaitWrapper<'a> {
         }
     }
 
-    fn poll_once(&mut self, ctx: &mut Context<'_>) -> Poll<Result<asupersync::sync::barrier::BarrierWaitResult, BarrierWaitError>> {
+    fn poll_once(
+        &mut self,
+        ctx: &mut Context<'_>,
+    ) -> Poll<Result<asupersync::sync::barrier::BarrierWaitResult, BarrierWaitError>> {
         if self.completed {
             return Poll::Ready(Err(BarrierWaitError::PolledAfterCompletion));
         }
@@ -127,11 +130,15 @@ fuzz_target!(|data: &[u8]| {
 
         // Track per-cycle state
         let mut waiters: Vec<Option<BarrierWaitWrapper>> = vec![None; parties];
-        let mut party_cxs: Vec<Cx> = (0..parties).map(|i| Cx::new(
-            RegionId::from_arena(ArenaIndex::new(cycle_idx as u32, i as u32)),
-            TaskId::from_arena(ArenaIndex::new(cycle_idx as u32, i as u32)),
-            Budget::INFINITE,
-        )).collect();
+        let mut party_cxs: Vec<Cx> = (0..parties)
+            .map(|i| {
+                Cx::new(
+                    RegionId::from_arena(ArenaIndex::new(cycle_idx as u32, i as u32)),
+                    TaskId::from_arena(ArenaIndex::new(cycle_idx as u32, i as u32)),
+                    Budget::INFINITE,
+                )
+            })
+            .collect();
 
         let mut arrived_count = 0;
         let mut completed_count = 0;
@@ -139,13 +146,22 @@ fuzz_target!(|data: &[u8]| {
 
         // Get initial state
         #[cfg(test)]
-        let (initial_arrived, initial_generation, initial_waiters) = barrier.state_snapshot_for_test();
+        let (initial_arrived, initial_generation, initial_waiters) =
+            barrier.state_snapshot_for_test();
         #[cfg(not(test))]
         let (initial_arrived, initial_generation, initial_waiters) = (0, expected_generation, 0);
 
         // Initial state should be clean
-        assert_eq!(initial_arrived, 0, "Cycle {}: barrier should start with 0 arrived", cycle_idx);
-        assert_eq!(initial_waiters, 0, "Cycle {}: barrier should start with 0 waiters", cycle_idx);
+        assert_eq!(
+            initial_arrived, 0,
+            "Cycle {}: barrier should start with 0 arrived",
+            cycle_idx
+        );
+        assert_eq!(
+            initial_waiters, 0,
+            "Cycle {}: barrier should start with 0 waiters",
+            cycle_idx
+        );
 
         for op in operations {
             let waker = noop_waker();
@@ -196,18 +212,31 @@ fuzz_target!(|data: &[u8]| {
 
                 CycleOp::CheckState => {
                     #[cfg(test)]
-                    let (current_arrived, current_generation, current_waiters) = barrier.state_snapshot_for_test();
+                    let (current_arrived, current_generation, current_waiters) =
+                        barrier.state_snapshot_for_test();
                     #[cfg(not(test))]
-                    let (current_arrived, current_generation, current_waiters) = (arrived_count, expected_generation, waiters.iter().filter(|w| w.is_some()).count());
+                    let (current_arrived, current_generation, current_waiters) = (
+                        arrived_count,
+                        expected_generation,
+                        waiters.iter().filter(|w| w.is_some()).count(),
+                    );
 
                     // Validate state consistency
-                    assert!(current_arrived <= parties,
+                    assert!(
+                        current_arrived <= parties,
                         "Cycle {}: arrived count {} cannot exceed parties {}",
-                        cycle_idx, current_arrived, parties);
+                        cycle_idx,
+                        current_arrived,
+                        parties
+                    );
 
-                    assert!(current_waiters <= parties,
+                    assert!(
+                        current_waiters <= parties,
                         "Cycle {}: waiters count {} cannot exceed parties {}",
-                        cycle_idx, current_waiters, parties);
+                        cycle_idx,
+                        current_waiters,
+                        parties
+                    );
 
                     // If all parties have arrived, generation should advance
                     if arrived_count >= parties {
@@ -257,37 +286,48 @@ fuzz_target!(|data: &[u8]| {
         let cycle_leader_count = cycle_leaders.load(Ordering::SeqCst);
         if completed_count >= parties {
             // If cycle completed, exactly one leader
-            assert_eq!(cycle_leader_count, 1,
+            assert_eq!(
+                cycle_leader_count, 1,
                 "Cycle {}: exactly one leader required when cycle completes, got {}",
-                cycle_idx, cycle_leader_count);
+                cycle_idx, cycle_leader_count
+            );
 
             // Generation should have advanced
             expected_generation = expected_generation.wrapping_add(1);
         } else {
             // If cycle didn't complete, no leaders yet
-            assert_eq!(cycle_leader_count, 0,
+            assert_eq!(
+                cycle_leader_count, 0,
                 "Cycle {}: no leaders until cycle completes, got {}",
-                cycle_idx, cycle_leader_count);
+                cycle_idx, cycle_leader_count
+            );
         }
 
         leader_count.fetch_add(cycle_leader_count, Ordering::SeqCst);
     }
 
     // Final invariant: no spurious wakes detected
-    assert!(!spurious_wake_detected.load(Ordering::SeqCst),
-        "Spurious wake detected during barrier reset cycle");
+    assert!(
+        !spurious_wake_detected.load(Ordering::SeqCst),
+        "Spurious wake detected during barrier reset cycle"
+    );
 
     // If we completed any full cycles, validate leader counts
     let total_leaders = leader_count.load(Ordering::SeqCst);
-    let completed_cycles = sequence.cycles.iter()
+    let completed_cycles = sequence
+        .cycles
+        .iter()
         .filter(|c| c.operations.len() >= c.parties as usize)
         .count();
 
     if completed_cycles > 0 {
         // Each completed cycle should have exactly one leader
         // (This is a loose check since we might not complete all cycles in the fuzz run)
-        assert!(total_leaders <= completed_cycles,
+        assert!(
+            total_leaders <= completed_cycles,
             "Total leaders {} should not exceed expected completed cycles {}",
-            total_leaders, completed_cycles);
+            total_leaders,
+            completed_cycles
+        );
     }
 });

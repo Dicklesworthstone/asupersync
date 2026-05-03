@@ -200,7 +200,9 @@ fn try_parse_raw_result_set_start(data: &[u8]) -> Result<u64, MySqlError> {
 
 fn read_lenenc_int(data: &mut &[u8]) -> Result<u64, MySqlError> {
     if data.is_empty() {
-        return Err(MySqlError::Protocol("empty data for lenenc int".to_string()));
+        return Err(MySqlError::Protocol(
+            "empty data for lenenc int".to_string(),
+        ));
     }
 
     let first = data[0];
@@ -229,15 +231,16 @@ fn read_lenenc_int(data: &mut &[u8]) -> Result<u64, MySqlError> {
                 return Err(MySqlError::Protocol("truncated u64 lenenc".to_string()));
             }
             let val = u64::from_le_bytes([
-                data[0], data[1], data[2], data[3],
-                data[4], data[5], data[6], data[7],
+                data[0], data[1], data[2], data[3], data[4], data[5], data[6], data[7],
             ]);
             *data = &data[8..];
             Ok(val)
         }
         0xFB => Err(MySqlError::Protocol("NULL in lenenc int".to_string())),
         0xFF => Err(MySqlError::Protocol("reserved lenenc prefix".to_string())),
-        _ => Err(MySqlError::Protocol(format!("invalid lenenc prefix: {first}"))),
+        _ => Err(MySqlError::Protocol(format!(
+            "invalid lenenc prefix: {first}"
+        ))),
     }
 }
 
@@ -414,7 +417,7 @@ fn encode_lenenc_int(value: u64) -> Vec<u8> {
 
 fn build_eof_packet() -> Vec<u8> {
     vec![
-        0xFE,       // EOF marker
+        0xFE, // EOF marker
         0x00, 0x00, // Warning count (LE)
         0x02, 0x00, // Status flags (LE) - SERVER_STATUS_AUTOCOMMIT
     ]
@@ -478,21 +481,21 @@ fn encode_row_value(value: &RowValueSpec) -> Vec<u8> {
 fn build_terminator_packet(terminator: &TerminatorSpec) -> Vec<u8> {
     match terminator {
         TerminatorSpec::ValidEof => vec![
-            0xFE,       // EOF
+            0xFE, // EOF
             0x00, 0x00, // Warning count
             0x02, 0x00, // Status flags
         ],
         TerminatorSpec::ValidOk => vec![
-            0x00,       // OK
-            0x00,       // Affected rows (lenenc)
-            0x00,       // Insert ID (lenenc)
+            0x00, // OK
+            0x00, // Affected rows (lenenc)
+            0x00, // Insert ID (lenenc)
             0x02, 0x00, // Status flags
             0x00, 0x00, // Warning count
         ],
         TerminatorSpec::Error => vec![
-            0xFF,       // ERR
+            0xFF, // ERR
             0xFF, 0x04, // Error code 1279 (LE)
-            b'#',       // SQL state marker
+            b'#', // SQL state marker
             b'H', b'Y', b'0', b'0', b'0', // SQL state
             b'T', b'e', b's', b't', b' ', b'e', b'r', b'r', b'o', b'r', // Message
         ],
@@ -570,13 +573,25 @@ fn test_column_definition_invariants(packet: &[u8]) {
     // If parsing succeeds, verify basic invariants
     if let Ok(column) = result {
         // Column names should be valid
-        assert!(column.name.len() <= 64, "column name too long: {}", column.name.len());
+        assert!(
+            column.name.len() <= 64,
+            "column name too long: {}",
+            column.name.len()
+        );
 
         // Character sets should be in valid range
-        assert!(column.charset <= 2000, "charset ID too large: {}", column.charset);
+        assert!(
+            column.charset <= 2000,
+            "charset ID too large: {}",
+            column.charset
+        );
 
         // Column type should be valid MySQL type
-        assert!(column.column_type <= 255, "column type out of range: {}", column.column_type);
+        assert!(
+            column.column_type <= 255,
+            "column type out of range: {}",
+            column.column_type
+        );
 
         // Length should be reasonable
         assert!(column.length <= 4_294_967_295, "column length overflow");
@@ -601,7 +616,8 @@ fn test_result_set_sequence(packets: &[Vec<u8>], scenario: &ResultSetScenario) {
                 assert!(
                     actual_packets_available >= expected_column_packets,
                     "not enough packets for declared column count: need {}, have {}",
-                    expected_column_packets, actual_packets_available
+                    expected_column_packets,
+                    actual_packets_available
                 );
             }
         }

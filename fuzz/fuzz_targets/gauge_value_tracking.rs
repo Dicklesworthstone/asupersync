@@ -13,8 +13,8 @@
 
 #![no_main]
 
-use asupersync::observability::metrics::{Gauge, Metrics};
 use arbitrary::{Arbitrary, Unstructured};
+use asupersync::observability::metrics::{Gauge, Metrics};
 use libfuzzer_sys::fuzz_target;
 use std::sync::{Arc, Barrier};
 use std::thread;
@@ -39,9 +39,18 @@ struct GaugeOperationSequence {
 /// Individual gauge operation
 #[derive(Debug, Clone, Arbitrary)]
 enum GaugeOperation {
-    Set(#[arbitrary(with = |u: &mut Unstructured| u.int_in_range(-MAX_ABS_VALUE..=MAX_ABS_VALUE))] i64),
-    Add(#[arbitrary(with = |u: &mut Unstructured| u.int_in_range(-MAX_ABS_VALUE..=MAX_ABS_VALUE))] i64),
-    Sub(#[arbitrary(with = |u: &mut Unstructured| u.int_in_range(-MAX_ABS_VALUE..=MAX_ABS_VALUE))] i64),
+    Set(
+        #[arbitrary(with = |u: &mut Unstructured| u.int_in_range(-MAX_ABS_VALUE..=MAX_ABS_VALUE))]
+        i64,
+    ),
+    Add(
+        #[arbitrary(with = |u: &mut Unstructured| u.int_in_range(-MAX_ABS_VALUE..=MAX_ABS_VALUE))]
+        i64,
+    ),
+    Sub(
+        #[arbitrary(with = |u: &mut Unstructured| u.int_in_range(-MAX_ABS_VALUE..=MAX_ABS_VALUE))]
+        i64,
+    ),
     Increment,
     Decrement,
 }
@@ -166,13 +175,10 @@ fn test_concurrent_operations(seq: &GaugeOperationSequence) {
 /// Test the key metamorphic property: last set operation wins
 fn test_last_set_wins_property(operations: &[GaugeOperation]) {
     // Find the last set operation in the sequence
-    let last_set_value = operations
-        .iter()
-        .rev()
-        .find_map(|op| match op {
-            GaugeOperation::Set(value) => Some(*value),
-            _ => None,
-        });
+    let last_set_value = operations.iter().rev().find_map(|op| match op {
+        GaugeOperation::Set(value) => Some(*value),
+        _ => None,
+    });
 
     if last_set_value.is_none() {
         return; // No set operations to test

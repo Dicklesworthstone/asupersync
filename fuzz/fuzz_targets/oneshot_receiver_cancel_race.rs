@@ -1,19 +1,19 @@
 #![no_main]
 
-use libfuzzer_sys::fuzz_target;
 use arbitrary::{Arbitrary, Unstructured};
+use libfuzzer_sys::fuzz_target;
+use std::future::Future;
+use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::{Arc, Mutex as StdMutex};
 use std::task::{Context, Poll, RawWaker, RawWakerVTable, Waker};
-use std::future::Future;
 use std::thread;
 use std::time::Duration;
-use std::panic::{catch_unwind, AssertUnwindSafe};
 
-use asupersync::{Cx, RegionId, Budget};
 use asupersync::channel::oneshot::{self, RecvError, SendError};
-use asupersync::types::{TaskId, CancelKind};
-use asupersync::util::ArenaIndex;
 use asupersync::cx::cap;
+use asupersync::types::{CancelKind, TaskId};
+use asupersync::util::ArenaIndex;
+use asupersync::{Budget, Cx, RegionId};
 
 #[derive(Debug, Clone)]
 struct CancelRaceTracker {
@@ -98,8 +98,10 @@ impl CancelRaceTracker {
         if let Ok(outcomes) = self.race_outcomes.lock() {
             for outcome in outcomes.iter() {
                 if outcome.invariant_violated {
-                    panic!("Cancel race invariant violated in test {}: {}",
-                        outcome.test_id, outcome.violation_description);
+                    panic!(
+                        "Cancel race invariant violated in test {}: {}",
+                        outcome.test_id, outcome.violation_description
+                    );
                 }
 
                 // If cancel occurred and send occurred, receiver should get exactly one outcome
@@ -119,8 +121,10 @@ impl CancelRaceTracker {
                         }
                         RecvOutcome::StillPending | RecvOutcome::GotPolledAfterCompletion => {
                             // These should not happen in a properly resolved race
-                            panic!("Race test {} left in unresolved state: {:?}",
-                                outcome.test_id, outcome.final_recv_state);
+                            panic!(
+                                "Race test {} left in unresolved state: {:?}",
+                                outcome.test_id, outcome.final_recv_state
+                            );
                         }
                         RecvOutcome::PanicOccurred => {
                             // Panics during cancel races are not acceptable
@@ -145,10 +149,7 @@ impl TrackedWaker {
 
     fn create_waker(&self) -> Waker {
         let data = Arc::new(self.clone());
-        let raw = RawWaker::new(
-            Arc::into_raw(data) as *const (),
-            &TRACKED_WAKER_VTABLE,
-        );
+        let raw = RawWaker::new(Arc::into_raw(data) as *const (), &TRACKED_WAKER_VTABLE);
         unsafe { Waker::from_raw(raw) }
     }
 }
@@ -179,12 +180,14 @@ unsafe fn tracked_waker_clone(data: *const ()) -> RawWaker {
 
 unsafe fn tracked_waker_wake(data: *const ()) {
     let arc = unsafe { Arc::from_raw(data as *const TrackedWaker) };
-    arc.tracker.record_operation(&format!("waker_wake_{}", arc.op_id));
+    arc.tracker
+        .record_operation(&format!("waker_wake_{}", arc.op_id));
 }
 
 unsafe fn tracked_waker_wake_by_ref(data: *const ()) {
     let arc = unsafe { Arc::from_raw(data as *const TrackedWaker) };
-    arc.tracker.record_operation(&format!("waker_wake_by_ref_{}", arc.op_id));
+    arc.tracker
+        .record_operation(&format!("waker_wake_by_ref_{}", arc.op_id));
     std::mem::forget(arc);
 }
 
@@ -205,9 +208,16 @@ enum CancelRacePattern {
     CancelDuringSend,
     CancelBeforeSend,
     CancelAfterSend,
-    RapidCancelSend { iterations: u8 },
-    DelayedOperations { send_delay_us: u16, cancel_delay_us: u16 },
-    ConcurrentMultipleRecv { recv_count: u8 },
+    RapidCancelSend {
+        iterations: u8,
+    },
+    DelayedOperations {
+        send_delay_us: u16,
+        cancel_delay_us: u16,
+    },
+    ConcurrentMultipleRecv {
+        recv_count: u8,
+    },
 }
 
 #[derive(Debug, Clone, Arbitrary)]
@@ -253,8 +263,17 @@ fuzz_target!(|data: &[u8]| {
             test_rapid_cancel_send(&tracker, test_id, config.test_value, iterations.min(8));
         }
 
-        CancelRacePattern::DelayedOperations { send_delay_us, cancel_delay_us } => {
-            test_delayed_operations(&tracker, test_id, config.test_value, send_delay_us, cancel_delay_us);
+        CancelRacePattern::DelayedOperations {
+            send_delay_us,
+            cancel_delay_us,
+        } => {
+            test_delayed_operations(
+                &tracker,
+                test_id,
+                config.test_value,
+                send_delay_us,
+                cancel_delay_us,
+            );
         }
 
         CancelRacePattern::ConcurrentMultipleRecv { recv_count } => {
@@ -266,7 +285,12 @@ fuzz_target!(|data: &[u8]| {
     tracker.validate_cancel_race_invariants();
 });
 
-fn test_simple_cancel(tracker: &CancelRaceTracker, test_id: usize, value: u32, timing: &CancelTiming) {
+fn test_simple_cancel(
+    tracker: &CancelRaceTracker,
+    test_id: usize,
+    value: u32,
+    timing: &CancelTiming,
+) {
     tracker.record_operation("test_simple_cancel");
 
     let cx: Cx<cap::All> = Cx::new(
@@ -324,9 +348,7 @@ fn test_simple_cancel(tracker: &CancelRaceTracker, test_id: usize, value: u32, t
     };
 
     // Attempt to send after starting cancel
-    let send_result = catch_unwind(AssertUnwindSafe(|| {
-        sender.send(&cx, value)
-    }));
+    let send_result = catch_unwind(AssertUnwindSafe(|| sender.send(&cx, value)));
 
     if let Ok(result) = send_result {
         send_occurred = match result {
@@ -359,7 +381,9 @@ fn test_simple_cancel(tracker: &CancelRaceTracker, test_id: usize, value: u32, t
             Poll::Ready(Ok(v)) => RecvOutcome::GotValue(v),
             Poll::Ready(Err(RecvError::Cancelled)) => RecvOutcome::GotCancelled,
             Poll::Ready(Err(RecvError::Closed)) => RecvOutcome::GotClosed,
-            Poll::Ready(Err(RecvError::PolledAfterCompletion)) => RecvOutcome::GotPolledAfterCompletion,
+            Poll::Ready(Err(RecvError::PolledAfterCompletion)) => {
+                RecvOutcome::GotPolledAfterCompletion
+            }
             Poll::Pending => RecvOutcome::StillPending,
         };
     }
@@ -398,7 +422,12 @@ fn test_simple_cancel(tracker: &CancelRaceTracker, test_id: usize, value: u32, t
     });
 }
 
-fn test_cancel_during_send(tracker: &CancelRaceTracker, test_id: usize, value: u32, _timing: &CancelTiming) {
+fn test_cancel_during_send(
+    tracker: &CancelRaceTracker,
+    test_id: usize,
+    value: u32,
+    _timing: &CancelTiming,
+) {
     tracker.record_operation("test_cancel_during_send");
 
     let cx: Cx<cap::All> = Cx::new(
@@ -462,7 +491,9 @@ fn test_cancel_during_send(tracker: &CancelRaceTracker, test_id: usize, value: u
                 Poll::Ready(Ok(v)) => RecvOutcome::GotValue(v),
                 Poll::Ready(Err(RecvError::Cancelled)) => RecvOutcome::GotCancelled,
                 Poll::Ready(Err(RecvError::Closed)) => RecvOutcome::GotClosed,
-                Poll::Ready(Err(RecvError::PolledAfterCompletion)) => RecvOutcome::GotPolledAfterCompletion,
+                Poll::Ready(Err(RecvError::PolledAfterCompletion)) => {
+                    RecvOutcome::GotPolledAfterCompletion
+                }
                 Poll::Pending => RecvOutcome::StillPending,
             }
         }
@@ -479,7 +510,12 @@ fn test_cancel_during_send(tracker: &CancelRaceTracker, test_id: usize, value: u
 }
 
 // Simplified implementations for other test patterns
-fn test_cancel_before_send(tracker: &CancelRaceTracker, test_id: usize, value: u32, _timing: &CancelTiming) {
+fn test_cancel_before_send(
+    tracker: &CancelRaceTracker,
+    test_id: usize,
+    value: u32,
+    _timing: &CancelTiming,
+) {
     tracker.record_operation("test_cancel_before_send");
 
     let cx: Cx<cap::All> = Cx::new(
@@ -510,7 +546,9 @@ fn test_cancel_before_send(tracker: &CancelRaceTracker, test_id: usize, value: u
         Ok(Poll::Ready(Ok(v))) => RecvOutcome::GotValue(v),
         Ok(Poll::Ready(Err(RecvError::Cancelled))) => RecvOutcome::GotCancelled,
         Ok(Poll::Ready(Err(RecvError::Closed))) => RecvOutcome::GotClosed,
-        Ok(Poll::Ready(Err(RecvError::PolledAfterCompletion))) => RecvOutcome::GotPolledAfterCompletion,
+        Ok(Poll::Ready(Err(RecvError::PolledAfterCompletion))) => {
+            RecvOutcome::GotPolledAfterCompletion
+        }
         Ok(Poll::Pending) => RecvOutcome::StillPending,
         Err(_) => RecvOutcome::PanicOccurred,
     };
@@ -525,7 +563,12 @@ fn test_cancel_before_send(tracker: &CancelRaceTracker, test_id: usize, value: u
     });
 }
 
-fn test_cancel_after_send(tracker: &CancelRaceTracker, test_id: usize, value: u32, _timing: &CancelTiming) {
+fn test_cancel_after_send(
+    tracker: &CancelRaceTracker,
+    test_id: usize,
+    value: u32,
+    _timing: &CancelTiming,
+) {
     tracker.record_operation("test_cancel_after_send");
 
     let cx: Cx<cap::All> = Cx::new(
@@ -601,7 +644,13 @@ fn test_rapid_cancel_send(tracker: &CancelRaceTracker, test_id: usize, value: u3
     }
 }
 
-fn test_delayed_operations(tracker: &CancelRaceTracker, test_id: usize, value: u32, send_delay_us: u16, cancel_delay_us: u16) {
+fn test_delayed_operations(
+    tracker: &CancelRaceTracker,
+    test_id: usize,
+    value: u32,
+    send_delay_us: u16,
+    cancel_delay_us: u16,
+) {
     tracker.record_operation("test_delayed_operations");
 
     let cx: Cx<cap::All> = Cx::new(
@@ -643,7 +692,12 @@ fn test_delayed_operations(tracker: &CancelRaceTracker, test_id: usize, value: u
     let _ = pinned_recv.as_mut().poll(&mut recv_context);
 }
 
-fn test_concurrent_multiple_recv(tracker: &CancelRaceTracker, test_id: usize, value: u32, recv_count: u8) {
+fn test_concurrent_multiple_recv(
+    tracker: &CancelRaceTracker,
+    test_id: usize,
+    value: u32,
+    recv_count: u8,
+) {
     tracker.record_operation("test_concurrent_multiple_recv");
 
     // Note: This tests the edge case where multiple recv attempts happen

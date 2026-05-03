@@ -27,7 +27,7 @@ use std::collections::HashMap;
 #[derive(Debug, Clone, Arbitrary)]
 enum SimpleMethod {
     Get,
-    Post,  // Though not in original HTTP/0.9, test edge cases
+    Post, // Though not in original HTTP/0.9, test edge cases
     Head,
     Put,
     Delete,
@@ -208,8 +208,7 @@ impl MockHttp11Codec {
         // Look for end of request line
         let request_line = if let Some(pos) = self.find_line_end() {
             let line = &self.buffer[..pos];
-            std::str::from_utf8(line)
-                .map_err(|_| "Non-UTF8 in request line".to_string())?
+            std::str::from_utf8(line).map_err(|_| "Non-UTF8 in request line".to_string())?
         } else {
             return Err("Incomplete request line".to_string());
         };
@@ -277,8 +276,10 @@ impl MockHttp11Codec {
     }
 
     fn is_valid_method(&self, method: &str) -> bool {
-        matches!(method, "GET" | "POST" | "PUT" | "DELETE" | "HEAD" |
-                        "OPTIONS" | "TRACE" | "CONNECT" | "PATCH")
+        matches!(
+            method,
+            "GET" | "POST" | "PUT" | "DELETE" | "HEAD" | "OPTIONS" | "TRACE" | "CONNECT" | "PATCH"
+        )
     }
 
     fn is_supported_version(&self, version: &str) -> bool {
@@ -287,7 +288,10 @@ impl MockHttp11Codec {
 
     fn record_rejection(&mut self, reason: &str) {
         self.error_count += 1;
-        *self.rejection_reasons.entry(reason.to_string()).or_insert(0) += 1;
+        *self
+            .rejection_reasons
+            .entry(reason.to_string())
+            .or_insert(0) += 1;
     }
 
     fn get_stats(&self) -> (usize, &HashMap<String, usize>) {
@@ -325,7 +329,10 @@ fuzz_target!(|scenario: Http09RejectionScenario| {
 
             // Should fail due to incomplete request
             let result = codec.try_parse_request();
-            assert!(result.is_err(), "Incomplete HTTP/0.9 request should be rejected");
+            assert!(
+                result.is_err(),
+                "Incomplete HTTP/0.9 request should be rejected"
+            );
 
             // Feed the rest
             codec.feed_bytes(&request_bytes[partial_len..]);
@@ -356,21 +363,24 @@ fuzz_target!(|scenario: Http09RejectionScenario| {
                 return;
             }
 
-            panic!("HTTP/0.9 request was incorrectly accepted: {:?}",
-                   String::from_utf8_lossy(&request_bytes));
+            panic!(
+                "HTTP/0.9 request was incorrectly accepted: {:?}",
+                String::from_utf8_lossy(&request_bytes)
+            );
         }
         Err(reason) => {
             // Good - the request was rejected as expected
             // Verify the rejection reason makes sense for HTTP/0.9
             assert!(
-                reason.contains("HTTP/0.9") ||
-                reason.contains("missing version") ||
-                reason.contains("Incomplete") ||
-                reason.contains("Unsupported") ||
-                reason.contains("Malformed") ||
-                reason.contains("Invalid") ||
-                reason.contains("Empty"),
-                "Unexpected rejection reason for HTTP/0.9 request: {}", reason
+                reason.contains("HTTP/0.9")
+                    || reason.contains("missing version")
+                    || reason.contains("Incomplete")
+                    || reason.contains("Unsupported")
+                    || reason.contains("Malformed")
+                    || reason.contains("Invalid")
+                    || reason.contains("Empty"),
+                "Unexpected rejection reason for HTTP/0.9 request: {}",
+                reason
             );
         }
     }
@@ -378,7 +388,10 @@ fuzz_target!(|scenario: Http09RejectionScenario| {
     // Verify error tracking
     let (error_count, rejection_reasons) = codec.get_stats();
     assert!(error_count > 0, "Error count should be incremented");
-    assert!(!rejection_reasons.is_empty(), "Rejection reasons should be recorded");
+    assert!(
+        !rejection_reasons.is_empty(),
+        "Rejection reasons should be recorded"
+    );
 
     // Test that the codec can still parse valid HTTP/1.1 after rejecting HTTP/0.9
     codec.clear();
@@ -386,7 +399,10 @@ fuzz_target!(|scenario: Http09RejectionScenario| {
     codec.feed_bytes(valid_http11);
 
     let result = codec.try_parse_request();
-    assert!(result.is_ok(), "Valid HTTP/1.1 request should be accepted after HTTP/0.9 rejection");
+    assert!(
+        result.is_ok(),
+        "Valid HTTP/1.1 request should be accepted after HTTP/0.9 rejection"
+    );
 
     // Verify specific HTTP/0.9 patterns are consistently rejected
     test_known_http09_patterns(&mut codec);
@@ -412,8 +428,11 @@ fn test_known_http09_patterns(codec: &mut MockHttp11Codec) {
         codec.feed_bytes(pattern);
 
         let result = codec.try_parse_request();
-        assert!(result.is_err(),
-               "HTTP/0.9 pattern {} should be rejected: {}",
-               i, String::from_utf8_lossy(pattern));
+        assert!(
+            result.is_err(),
+            "HTTP/0.9 pattern {} should be rejected: {}",
+            i,
+            String::from_utf8_lossy(pattern)
+        );
     }
 }

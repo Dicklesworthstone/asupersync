@@ -51,7 +51,7 @@ struct StreamFlowControl {
     state: StreamState,
     initial_send_window: i32,
     current_send_window: i32,
-    consumed_bytes: u32,  // How many bytes have been consumed from window
+    consumed_bytes: u32, // How many bytes have been consumed from window
 }
 
 impl StreamFlowControl {
@@ -68,8 +68,8 @@ impl StreamFlowControl {
 
     /// Update initial window size retroactively (mimics Stream::update_initial_window_size)
     fn update_initial_window_size(&mut self, new_size: u32) -> Result<(), String> {
-        let new_size_i32 = i32::try_from(new_size)
-            .map_err(|_| "initial window size too large".to_string())?;
+        let new_size_i32 =
+            i32::try_from(new_size).map_err(|_| "initial window size too large".to_string())?;
 
         let delta = new_size_i32 - self.initial_send_window;
 
@@ -220,24 +220,57 @@ impl MockStreamStore {
 fn generate_edge_case_updates() -> Vec<WindowUpdateConfig> {
     vec![
         // Boundary conditions
-        WindowUpdateConfig { new_window_size: 0, expect_error: false },
-        WindowUpdateConfig { new_window_size: 1, expect_error: false },
-        WindowUpdateConfig { new_window_size: 0x7fff_ffff, expect_error: false }, // i32::MAX
-        WindowUpdateConfig { new_window_size: 0x8000_0000, expect_error: true },  // i32::MAX + 1
-        WindowUpdateConfig { new_window_size: u32::MAX, expect_error: true },     // u32::MAX
-
+        WindowUpdateConfig {
+            new_window_size: 0,
+            expect_error: false,
+        },
+        WindowUpdateConfig {
+            new_window_size: 1,
+            expect_error: false,
+        },
+        WindowUpdateConfig {
+            new_window_size: 0x7fff_ffff,
+            expect_error: false,
+        }, // i32::MAX
+        WindowUpdateConfig {
+            new_window_size: 0x8000_0000,
+            expect_error: true,
+        }, // i32::MAX + 1
+        WindowUpdateConfig {
+            new_window_size: u32::MAX,
+            expect_error: true,
+        }, // u32::MAX
         // Common HTTP/2 window sizes
-        WindowUpdateConfig { new_window_size: 65535, expect_error: false },      // Default
-        WindowUpdateConfig { new_window_size: 1024 * 1024, expect_error: false }, // 1MB
-        WindowUpdateConfig { new_window_size: 16 * 1024 * 1024, expect_error: false }, // 16MB
-
+        WindowUpdateConfig {
+            new_window_size: 65535,
+            expect_error: false,
+        }, // Default
+        WindowUpdateConfig {
+            new_window_size: 1024 * 1024,
+            expect_error: false,
+        }, // 1MB
+        WindowUpdateConfig {
+            new_window_size: 16 * 1024 * 1024,
+            expect_error: false,
+        }, // 16MB
         // Large valid values
-        WindowUpdateConfig { new_window_size: 0x7fff_fffe, expect_error: false }, // i32::MAX - 1
-        WindowUpdateConfig { new_window_size: 0x7000_0000, expect_error: false }, // Large but safe
-
+        WindowUpdateConfig {
+            new_window_size: 0x7fff_fffe,
+            expect_error: false,
+        }, // i32::MAX - 1
+        WindowUpdateConfig {
+            new_window_size: 0x7000_0000,
+            expect_error: false,
+        }, // Large but safe
         // Values that would cause interesting delta calculations
-        WindowUpdateConfig { new_window_size: 32768, expect_error: false },
-        WindowUpdateConfig { new_window_size: 131072, expect_error: false },
+        WindowUpdateConfig {
+            new_window_size: 32768,
+            expect_error: false,
+        },
+        WindowUpdateConfig {
+            new_window_size: 131072,
+            expect_error: false,
+        },
     ]
 }
 
@@ -254,7 +287,9 @@ fuzz_target!(|scenario: WindowSizeScenario| {
     // Set up streams with various configurations
     for stream_config in &scenario.streams {
         let stream_id = (stream_config.stream_id % 50) + 1; // Keep in reasonable range
-        if stream_id == 0 { continue; } // Skip stream 0 (connection-level)
+        if stream_id == 0 {
+            continue;
+        } // Skip stream 0 (connection-level)
 
         let stream = store.create_stream(stream_id);
 
@@ -280,7 +315,8 @@ fuzz_target!(|scenario: WindowSizeScenario| {
     };
 
     // Record initial state for validation
-    let initial_stream_windows: HashMap<u32, i32> = store.streams
+    let initial_stream_windows: HashMap<u32, i32> = store
+        .streams
         .iter()
         .map(|(&id, stream)| (id, stream.current_send_window))
         .collect();
@@ -295,7 +331,10 @@ fuzz_target!(|scenario: WindowSizeScenario| {
         match result {
             Ok(()) => {
                 if update.expect_error {
-                    panic!("Expected error for window size {}, but update succeeded", update.new_window_size);
+                    panic!(
+                        "Expected error for window size {}, but update succeeded",
+                        update.new_window_size
+                    );
                 }
 
                 // Validate retroactive behavior
@@ -319,17 +358,26 @@ fuzz_target!(|scenario: WindowSizeScenario| {
             }
             Err(err) => {
                 if !update.expect_error && update.new_window_size <= 0x7fff_ffff {
-                    panic!("Unexpected error for valid window size {}: {}", update.new_window_size, err);
+                    panic!(
+                        "Unexpected error for valid window size {}: {}",
+                        update.new_window_size, err
+                    );
                 }
 
                 // Verify proper error for oversized values
                 if update.new_window_size > 0x7fff_ffff {
-                    assert!(err.contains("FLOW_CONTROL_ERROR") || err.contains("window size") || err.contains("too large"));
+                    assert!(
+                        err.contains("FLOW_CONTROL_ERROR")
+                            || err.contains("window size")
+                            || err.contains("too large")
+                    );
                 }
 
                 // Verify atomic failure - store state should be unchanged
-                assert_eq!(store.initial_window_size, old_window_size,
-                    "Store window size should not change on failed update");
+                assert_eq!(
+                    store.initial_window_size, old_window_size,
+                    "Store window size should not change on failed update"
+                );
             }
         }
     }
@@ -364,7 +412,10 @@ fn test_retroactive_overflow_protection(store: &mut MockStreamStore) {
         Err(_) => {
             // If it failed, verify original state is preserved
             if let Some(stream) = store.get_stream(100) {
-                assert_eq!(stream.initial_send_window, 65535, "Original initial window should be preserved on overflow");
+                assert_eq!(
+                    stream.initial_send_window, 65535,
+                    "Original initial window should be preserved on overflow"
+                );
             }
         }
     }
@@ -392,17 +443,26 @@ fn test_closed_stream_exclusion(store: &mut MockStreamStore) {
 
     // Update window size - this should succeed despite the closed stream's negative window
     let result = store.set_initial_window_size(100_000);
-    assert!(result.is_ok(), "Window update should succeed despite closed stream with negative window");
+    assert!(
+        result.is_ok(),
+        "Window update should succeed despite closed stream with negative window"
+    );
 
     // Verify closed stream window was unchanged
-    assert_eq!(store.get_stream(201).unwrap().current_send_window, closed_window_before,
-        "Closed stream window should not be modified by retroactive update");
+    assert_eq!(
+        store.get_stream(201).unwrap().current_send_window,
+        closed_window_before,
+        "Closed stream window should not be modified by retroactive update"
+    );
 
     // Verify open stream window was updated
     let open_stream = store.get_stream(200).unwrap();
     let expected_delta = 100_000i32 - initial_store_window as i32;
-    assert_eq!(open_stream.current_send_window, 1000 + expected_delta,
-        "Open stream window should be retroactively updated");
+    assert_eq!(
+        open_stream.current_send_window,
+        1000 + expected_delta,
+        "Open stream window should be retroactively updated"
+    );
 }
 
 /// Test scenarios where streams can have negative windows
@@ -415,15 +475,24 @@ fn test_negative_window_scenarios(store: &mut MockStreamStore) {
     }
 
     let window_before = store.get_stream(300).unwrap().current_send_window;
-    assert!(window_before < 0, "Stream should have negative window after consuming more than available");
+    assert!(
+        window_before < 0,
+        "Stream should have negative window after consuming more than available"
+    );
 
     // Reduce window size further
     let result = store.set_initial_window_size(1000);
-    assert!(result.is_ok(), "Reducing window size should succeed even when streams already negative");
+    assert!(
+        result.is_ok(),
+        "Reducing window size should succeed even when streams already negative"
+    );
 
     // Verify the stream window became even more negative
     let window_after = store.get_stream(300).unwrap().current_send_window;
-    assert!(window_after < window_before, "Stream window should become more negative after retroactive reduction");
+    assert!(
+        window_after < window_before,
+        "Stream window should become more negative after retroactive reduction"
+    );
 }
 
 #[cfg(test)]
@@ -446,12 +515,10 @@ mod tests {
                     target_state: StreamStateConfig::Open,
                 },
             ],
-            window_updates: vec![
-                WindowUpdateConfig {
-                    new_window_size: 131072,  // Double the window
-                    expect_error: false,
-                },
-            ],
+            window_updates: vec![WindowUpdateConfig {
+                new_window_size: 131072, // Double the window
+                expect_error: false,
+            }],
             include_edge_cases: false,
         };
 
@@ -462,19 +529,15 @@ mod tests {
     fn test_invalid_oversized_window() {
         let scenario = WindowSizeScenario {
             initial_window_size: 65535,
-            streams: vec![
-                StreamConfig {
-                    stream_id: 1,
-                    consumed_bytes: 0,
-                    target_state: StreamStateConfig::Open,
-                },
-            ],
-            window_updates: vec![
-                WindowUpdateConfig {
-                    new_window_size: 0x8000_0000,  // > i32::MAX
-                    expect_error: true,
-                },
-            ],
+            streams: vec![StreamConfig {
+                stream_id: 1,
+                consumed_bytes: 0,
+                target_state: StreamStateConfig::Open,
+            }],
+            window_updates: vec![WindowUpdateConfig {
+                new_window_size: 0x8000_0000, // > i32::MAX
+                expect_error: true,
+            }],
             include_edge_cases: false,
         };
 
@@ -485,19 +548,15 @@ mod tests {
     fn test_window_size_decrease_negative_windows() {
         let scenario = WindowSizeScenario {
             initial_window_size: 65535,
-            streams: vec![
-                StreamConfig {
-                    stream_id: 1,
-                    consumed_bytes: 60000,  // Consume most of window
-                    target_state: StreamStateConfig::Open,
-                },
-            ],
-            window_updates: vec![
-                WindowUpdateConfig {
-                    new_window_size: 1000,  // Drastically reduce window
-                    expect_error: false,
-                },
-            ],
+            streams: vec![StreamConfig {
+                stream_id: 1,
+                consumed_bytes: 60000, // Consume most of window
+                target_state: StreamStateConfig::Open,
+            }],
+            window_updates: vec![WindowUpdateConfig {
+                new_window_size: 1000, // Drastically reduce window
+                expect_error: false,
+            }],
             include_edge_cases: false,
         };
 
@@ -520,12 +579,10 @@ mod tests {
                     target_state: StreamStateConfig::Closed,
                 },
             ],
-            window_updates: vec![
-                WindowUpdateConfig {
-                    new_window_size: 0x7fff_ffff,  // Max valid window
-                    expect_error: false,
-                },
-            ],
+            window_updates: vec![WindowUpdateConfig {
+                new_window_size: 0x7fff_ffff, // Max valid window
+                expect_error: false,
+            }],
             include_edge_cases: false,
         };
 

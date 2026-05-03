@@ -9,17 +9,17 @@
 
 #![no_main]
 
-use libfuzzer_sys::fuzz_target;
 use arbitrary::{Arbitrary, Unstructured};
+use libfuzzer_sys::fuzz_target;
 
 use asupersync::bytes::{Bytes, BytesMut};
 use asupersync::codec::Encoder;
 use asupersync::http::h2::connection::FrameCodec;
-use asupersync::http::h2::frame::{
-    Frame, HeadersFrame, SettingsFrame, Setting, PriorityFrame, PrioritySpec,
-    WindowUpdateFrame, PingFrame, FRAME_HEADER_SIZE
-};
 use asupersync::http::h2::error::ErrorCode;
+use asupersync::http::h2::frame::{
+    FRAME_HEADER_SIZE, Frame, HeadersFrame, PingFrame, PriorityFrame, PrioritySpec, Setting,
+    SettingsFrame, WindowUpdateFrame,
+};
 
 /// HTTP/2 SETTINGS_MAX_HEADER_LIST_SIZE test sequence
 #[derive(Debug, Clone, Arbitrary)]
@@ -69,10 +69,22 @@ struct HeadersAttempt {
 /// Frames to interleave for realistic testing
 #[derive(Debug, Clone, Arbitrary)]
 enum InterleavedFrame {
-    Settings { ack: bool },
-    WindowUpdate { stream_id: u32, increment: u32 },
-    Ping { ack: bool },
-    Priority { stream_id: u32, dependency: u32, weight: u8, exclusive: bool },
+    Settings {
+        ack: bool,
+    },
+    WindowUpdate {
+        stream_id: u32,
+        increment: u32,
+    },
+    Ping {
+        ack: bool,
+    },
+    Priority {
+        stream_id: u32,
+        dependency: u32,
+        weight: u8,
+        exclusive: bool,
+    },
 }
 
 /// Connection state tracking for header list size enforcement
@@ -138,15 +150,16 @@ fn test_max_header_list_size_enforcement(test_seq: &MaxHeaderListSizeSequence) {
     let mut state = HeaderListSizeState::new(max_header_size);
 
     // Send initial SETTINGS frame to establish MAX_HEADER_LIST_SIZE
-    let settings_frame = create_settings_frame_with_header_list_size(
-        max_header_size,
-        &test_seq.additional_settings
-    );
+    let settings_frame =
+        create_settings_frame_with_header_list_size(max_header_size, &test_seq.additional_settings);
 
     match codec.encode(settings_frame, &mut buffer) {
         Ok(()) => {
             // Settings frame should encode successfully
-            assert!(buffer.len() >= FRAME_HEADER_SIZE, "SETTINGS frame should produce output");
+            assert!(
+                buffer.len() >= FRAME_HEADER_SIZE,
+                "SETTINGS frame should produce output"
+            );
             state.record_frame_processed();
         }
         Err(_) => {
@@ -169,7 +182,7 @@ fn test_max_header_list_size_enforcement(test_seq: &MaxHeaderListSizeSequence) {
             stream_id,
             &attempt.header_block,
             attempt.end_headers,
-            attempt.end_stream
+            attempt.end_stream,
         );
 
         // Test frame encoding (this should not panic)
@@ -196,8 +209,10 @@ fn test_max_header_list_size_enforcement(test_seq: &MaxHeaderListSizeSequence) {
             Err(_) => {
                 // Panic occurred during encoding - this should not happen
                 state.panic_occurred = true;
-                panic!("Panic occurred during HEADERS frame encoding with header list size {}",
-                    max_header_size);
+                panic!(
+                    "Panic occurred during HEADERS frame encoding with header list size {}",
+                    max_header_size
+                );
             }
         }
 
@@ -205,22 +220,32 @@ fn test_max_header_list_size_enforcement(test_seq: &MaxHeaderListSizeSequence) {
 
         // Interleave other frames for realistic scenarios
         if attempt_index < test_seq.interleaved_frames.len() {
-            test_interleaved_frame(&test_seq.interleaved_frames[attempt_index],
-                                 &mut codec, &mut buffer, &mut state);
+            test_interleaved_frame(
+                &test_seq.interleaved_frames[attempt_index],
+                &mut codec,
+                &mut buffer,
+                &mut state,
+            );
         }
     }
 
     // Verify final invariants
-    assert!(!state.panic_occurred,
-        "No panic should occur during header list size enforcement");
+    assert!(
+        !state.panic_occurred,
+        "No panic should occur during header list size enforcement"
+    );
 
     if !test_seq.headers_attempts.is_empty() {
         // Should have processed frames
-        assert!(state.total_frames_processed > 0,
-            "Should have processed at least SETTINGS frame");
+        assert!(
+            state.total_frames_processed > 0,
+            "Should have processed at least SETTINGS frame"
+        );
 
         // With oversized headers, enforcement should have been triggered
-        let has_oversized = test_seq.headers_attempts.iter()
+        let has_oversized = test_seq
+            .headers_attempts
+            .iter()
             .any(|h| h.header_block.len() > max_header_size as usize);
 
         if has_oversized && max_header_size < 1_000_000 {
@@ -257,15 +282,18 @@ fn test_header_list_size_limit(max_size: u32, headers_attempts: &[HeadersAttempt
     match encode_result {
         Ok(Ok(())) => {
             // Settings encoded successfully - test headers
-            for attempt in headers_attempts.iter().take(3) { // Limit iterations
+            for attempt in headers_attempts.iter().take(3) {
+                // Limit iterations
                 let stream_id = normalize_stream_id(attempt.stream_id);
-                if stream_id == 0 { continue; }
+                if stream_id == 0 {
+                    continue;
+                }
 
                 let headers_frame = create_headers_frame_with_block(
                     stream_id,
                     &attempt.header_block,
                     attempt.end_headers,
-                    attempt.end_stream
+                    attempt.end_stream,
                 );
 
                 // This should not panic regardless of limit
@@ -273,15 +301,21 @@ fn test_header_list_size_limit(max_size: u32, headers_attempts: &[HeadersAttempt
                     codec.encode(headers_frame, &mut buffer)
                 }));
 
-                assert!(headers_result.is_ok(),
-                    "HEADERS encoding should not panic with max_header_list_size = {}", max_size);
+                assert!(
+                    headers_result.is_ok(),
+                    "HEADERS encoding should not panic with max_header_list_size = {}",
+                    max_size
+                );
             }
         }
         Ok(Err(_)) => {
             // Settings encoding failed - acceptable for extreme values
         }
         Err(_) => {
-            panic!("SETTINGS encoding should not panic with max_header_list_size = {}", max_size);
+            panic!(
+                "SETTINGS encoding should not panic with max_header_list_size = {}",
+                max_size
+            );
         }
     }
 }
@@ -291,27 +325,28 @@ fn test_interleaved_frame(
     interleaved: &InterleavedFrame,
     codec: &mut FrameCodec,
     buffer: &mut BytesMut,
-    state: &mut HeaderListSizeState
+    state: &mut HeaderListSizeState,
 ) {
     let frame_result = match interleaved {
         InterleavedFrame::Settings { ack } => {
             let frame = if *ack {
                 Frame::Settings(SettingsFrame::ack())
             } else {
-                Frame::Settings(SettingsFrame::new(vec![
-                    Setting::MaxHeaderListSize(state.max_header_list_size)
-                ]))
+                Frame::Settings(SettingsFrame::new(vec![Setting::MaxHeaderListSize(
+                    state.max_header_list_size,
+                )]))
             };
             codec.encode(frame, buffer)
         }
-        InterleavedFrame::WindowUpdate { stream_id, increment } => {
+        InterleavedFrame::WindowUpdate {
+            stream_id,
+            increment,
+        } => {
             let normalized_increment = if *increment == 0 { 1 } else { *increment };
-            let frame = Frame::WindowUpdate(
-                WindowUpdateFrame::new(
-                    normalize_stream_id(*stream_id),
-                    normalized_increment
-                )
-            );
+            let frame = Frame::WindowUpdate(WindowUpdateFrame::new(
+                normalize_stream_id(*stream_id),
+                normalized_increment,
+            ));
             codec.encode(frame, buffer)
         }
         InterleavedFrame::Ping { ack } => {
@@ -323,10 +358,17 @@ fn test_interleaved_frame(
             let frame = Frame::Ping(ping_frame);
             codec.encode(frame, buffer)
         }
-        InterleavedFrame::Priority { stream_id, dependency, weight, exclusive } => {
+        InterleavedFrame::Priority {
+            stream_id,
+            dependency,
+            weight,
+            exclusive,
+        } => {
             let normalized_stream_id = normalize_stream_id(*stream_id);
             let normalized_dependency = normalize_stream_id(*dependency);
-            if normalized_stream_id == 0 { return; }
+            if normalized_stream_id == 0 {
+                return;
+            }
 
             let frame = Frame::Priority(PriorityFrame {
                 stream_id: normalized_stream_id,
@@ -348,11 +390,9 @@ fn test_interleaved_frame(
 /// Create SETTINGS frame with MAX_HEADER_LIST_SIZE and additional settings
 fn create_settings_frame_with_header_list_size(
     max_header_list_size: u32,
-    additional: &[AdditionalSetting]
+    additional: &[AdditionalSetting],
 ) -> Frame {
-    let mut settings = vec![
-        Setting::MaxHeaderListSize(max_header_list_size)
-    ];
+    let mut settings = vec![Setting::MaxHeaderListSize(max_header_list_size)];
 
     // Add additional settings
     for setting in additional {
@@ -380,7 +420,7 @@ fn create_headers_frame_with_block(
     stream_id: u32,
     header_block: &[u8],
     end_headers: bool,
-    end_stream: bool
+    end_stream: bool,
 ) -> Frame {
     // Create HEADERS frame with raw header block data
     // This allows testing with arbitrary bytes that may not be valid HPACK
@@ -403,11 +443,11 @@ fn create_headers_frame_with_block(
 /// Normalize MAX_HEADER_LIST_SIZE to reasonable range for testing
 fn normalize_max_header_list_size(value: u32) -> u32 {
     match value {
-        0 => 0,  // Test zero case
-        1..=1024 => value,  // Small limits
-        1025..=65536 => value,  // Normal limits
-        65537..=1048576 => value,  // Large limits
-        _ => value % 1048576,  // Very large - wrap to 0-1MB range
+        0 => 0,                   // Test zero case
+        1..=1024 => value,        // Small limits
+        1025..=65536 => value,    // Normal limits
+        65537..=1048576 => value, // Large limits
+        _ => value % 1048576,     // Very large - wrap to 0-1MB range
     }
 }
 

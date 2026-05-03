@@ -1,7 +1,7 @@
 #![no_main]
 
-use libfuzzer_sys::fuzz_target;
 use arbitrary::Arbitrary;
+use libfuzzer_sys::fuzz_target;
 
 /// HTTP/2 SETTINGS_INITIAL_WINDOW_SIZE maximum value fuzz target.
 ///
@@ -133,7 +133,7 @@ impl MockH2FlowControl {
     fn new(config: FlowControlConfig) -> Self {
         Self {
             stream_windows: std::collections::HashMap::new(),
-            connection_window: 65535, // RFC default
+            connection_window: 65535,   // RFC default
             initial_window_size: 65535, // RFC default
             config,
             stats: FlowControlStats::default(),
@@ -146,9 +146,10 @@ impl MockH2FlowControl {
 
         // RFC 7540 §6.5.2: Values above 2^31-1 are a connection error
         if new_size > 2_147_483_647 {
-            return SettingsResult::FlowControlError(
-                format!("INITIAL_WINDOW_SIZE {} exceeds maximum 2^31-1", new_size)
-            );
+            return SettingsResult::FlowControlError(format!(
+                "INITIAL_WINDOW_SIZE {} exceeds maximum 2^31-1",
+                new_size
+            ));
         }
 
         let old_initial_size = self.initial_window_size as i64;
@@ -186,9 +187,7 @@ impl MockH2FlowControl {
         self.initial_window_size = new_size;
 
         if overflow_detected && self.config.strict_rfc_enforcement {
-            SettingsResult::FlowControlError(
-                "Window size calculations would overflow".to_string()
-            )
+            SettingsResult::FlowControlError("Window size calculations would overflow".to_string())
         } else {
             SettingsResult::Applied {
                 old_size: old_initial_size as u32,
@@ -256,7 +255,7 @@ impl MockH2FlowControl {
             // Check for underflow in window calculations
             if *stream_window < data_size_i64 || self.connection_window < data_size_i64 {
                 return DataSendResult::FlowControlError(
-                    "Window underflow detected in send operation".to_string()
+                    "Window underflow detected in send operation".to_string(),
                 );
             }
 
@@ -266,7 +265,7 @@ impl MockH2FlowControl {
 
             if new_stream_window < 0 || new_connection_window < 0 {
                 return DataSendResult::FlowControlError(
-                    "Negative window detected after send".to_string()
+                    "Negative window detected after send".to_string(),
                 );
             }
         }
@@ -290,14 +289,15 @@ impl MockH2FlowControl {
 
         if increment == 0 {
             return WindowUpdateResult::ProtocolError(
-                "WINDOW_UPDATE increment cannot be zero".to_string()
+                "WINDOW_UPDATE increment cannot be zero".to_string(),
             );
         }
 
         if increment > 2_147_483_647 {
-            return WindowUpdateResult::ProtocolError(
-                format!("WINDOW_UPDATE increment {} exceeds maximum", increment)
-            );
+            return WindowUpdateResult::ProtocolError(format!(
+                "WINDOW_UPDATE increment {} exceeds maximum",
+                increment
+            ));
         }
 
         if stream_id == 0 {
@@ -307,7 +307,7 @@ impl MockH2FlowControl {
             // Check for overflow
             if self.config.detect_overflow && new_window > self.config.max_safe_calculation as i64 {
                 return WindowUpdateResult::FlowControlError(
-                    "Connection window update would cause overflow".to_string()
+                    "Connection window update would cause overflow".to_string(),
                 );
             }
 
@@ -331,7 +331,7 @@ impl MockH2FlowControl {
         // Check for overflow
         if self.config.detect_overflow && new_window > self.config.max_safe_calculation as i64 {
             return WindowUpdateResult::FlowControlError(
-                "Stream window update would cause overflow".to_string()
+                "Stream window update would cause overflow".to_string(),
             );
         }
 
@@ -381,10 +381,7 @@ enum SettingsResult {
 
 #[derive(Debug, PartialEq)]
 enum StreamResult {
-    Opened {
-        stream_id: u32,
-        initial_window: i64,
-    },
+    Opened { stream_id: u32, initial_window: i64 },
     AlreadyExists,
 }
 
@@ -410,10 +407,7 @@ enum DataSendResult {
 
 #[derive(Debug, PartialEq)]
 enum WindowUpdateResult {
-    Applied {
-        stream_id: u32,
-        new_window: u32,
-    },
+    Applied { stream_id: u32, new_window: u32 },
     StreamNotFound(u32),
     FlowControlError(String),
     ProtocolError(String),
@@ -436,20 +430,29 @@ fuzz_target!(|input: MaxWindowSizeInput| {
     let settings_result = flow_control.apply_initial_window_size_setting(input.initial_window_size);
 
     match settings_result {
-        SettingsResult::Applied { new_size, overflow_detected, .. } => {
+        SettingsResult::Applied {
+            new_size,
+            overflow_detected,
+            ..
+        } => {
             // Verify maximum value was applied correctly
-            assert_eq!(new_size, max_window_size,
-                      "Maximum window size should be applied correctly");
+            assert_eq!(
+                new_size, max_window_size,
+                "Maximum window size should be applied correctly"
+            );
 
             // Test that flow control state machine handles maximum values
             if flow_control.config.detect_overflow && overflow_detected {
                 // Acceptable - overflow detection is working
             }
-        },
+        }
 
         SettingsResult::FlowControlError(ref msg) => {
             // Should not error for the maximum valid value
-            panic!("Maximum valid window size should not cause flow control error: {}", msg);
+            panic!(
+                "Maximum valid window size should not cause flow control error: {}",
+                msg
+            );
         }
     }
 
@@ -463,10 +466,12 @@ fuzz_target!(|input: MaxWindowSizeInput| {
             match stream_result {
                 StreamResult::Opened { initial_window, .. } => {
                     // Verify new streams get the maximum window size
-                    assert_eq!(initial_window, max_window_size as i64,
-                              "New streams should get maximum initial window size");
+                    assert_eq!(
+                        initial_window, max_window_size as i64,
+                        "New streams should get maximum initial window size"
+                    );
                     streams_opened.insert(operation.stream_id);
-                },
+                }
                 StreamResult::AlreadyExists => {
                     streams_opened.insert(operation.stream_id);
                 }
@@ -478,25 +483,37 @@ fuzz_target!(|input: MaxWindowSizeInput| {
             let send_result = flow_control.send_data(operation.stream_id, operation.data_size);
 
             match send_result {
-                DataSendResult::Success { remaining_stream_window, remaining_connection_window, .. } => {
+                DataSendResult::Success {
+                    remaining_stream_window,
+                    remaining_connection_window,
+                    ..
+                } => {
                     // Verify arithmetic is correct without overflow
-                    assert!(remaining_stream_window <= max_window_size,
-                           "Remaining stream window should not exceed maximum");
-                    assert!(remaining_connection_window <= input.connection_config.connection_window as u32,
-                           "Remaining connection window should be valid");
-                },
+                    assert!(
+                        remaining_stream_window <= max_window_size,
+                        "Remaining stream window should not exceed maximum"
+                    );
+                    assert!(
+                        remaining_connection_window
+                            <= input.connection_config.connection_window as u32,
+                        "Remaining connection window should be valid"
+                    );
+                }
 
-                DataSendResult::StreamWindowExhausted { .. } |
-                DataSendResult::ConnectionWindowExhausted { .. } => {
+                DataSendResult::StreamWindowExhausted { .. }
+                | DataSendResult::ConnectionWindowExhausted { .. } => {
                     // Expected when trying to send more data than available window
-                },
+                }
 
                 DataSendResult::FlowControlError(ref msg) => {
                     // Should only occur for genuine overflow conditions
                     if !flow_control.config.detect_overflow {
-                        panic!("Flow control error should not occur without overflow detection: {}", msg);
+                        panic!(
+                            "Flow control error should not occur without overflow detection: {}",
+                            msg
+                        );
                     }
-                },
+                }
 
                 DataSendResult::StreamNotFound(_) => {
                     // Expected for stream ID 0 or unopened streams
@@ -516,16 +533,22 @@ fuzz_target!(|input: MaxWindowSizeInput| {
         match update_result {
             WindowUpdateResult::Applied { new_window, .. } => {
                 // Verify the arithmetic is correct
-                let expected_window = (current_window + update_increment as i64).min(max_window_size as i64);
-                assert!(new_window <= max_window_size,
-                       "Window update should not exceed maximum window size");
-            },
+                let expected_window =
+                    (current_window + update_increment as i64).min(max_window_size as i64);
+                assert!(
+                    new_window <= max_window_size,
+                    "Window update should not exceed maximum window size"
+                );
+            }
 
             WindowUpdateResult::FlowControlError(ref msg) => {
                 // Should only occur if update would cause overflow
-                assert!(msg.contains("overflow"),
-                       "Flow control error should be due to overflow: {}", msg);
-            },
+                assert!(
+                    msg.contains("overflow"),
+                    "Flow control error should be due to overflow: {}",
+                    msg
+                );
+            }
 
             _ => {
                 // Other results are acceptable
@@ -545,37 +568,47 @@ fuzz_target!(|input: MaxWindowSizeInput| {
         match edge_result {
             WindowUpdateResult::FlowControlError(_) => {
                 // Expected - this would cause overflow
-            },
+            }
             WindowUpdateResult::Applied { new_window, .. } => {
                 // If allowed, verify it's capped appropriately
-                assert!(new_window <= max_window_size,
-                       "Maximum increment should not cause window to exceed limit");
-            },
+                assert!(
+                    new_window <= max_window_size,
+                    "Maximum increment should not cause window to exceed limit"
+                );
+            }
             _ => {}
         }
     }
 
     // Verify statistics consistency
     let stats = flow_control.get_stats();
-    assert!(stats.max_window_seen >= max_window_size as i64,
-           "Should have seen maximum window size value");
+    assert!(
+        stats.max_window_seen >= max_window_size as i64,
+        "Should have seen maximum window size value"
+    );
 
     // Verify no panics occurred during maximum value handling
     // (Implicit - if we reach here without panicking, the test passed)
 
     // Additional consistency checks for maximum value handling
-    assert_eq!(flow_control.initial_window_size, max_window_size,
-              "Initial window size should be set to maximum value");
+    assert_eq!(
+        flow_control.initial_window_size, max_window_size,
+        "Initial window size should be set to maximum value"
+    );
 
     // Test that all arithmetic operations remain within bounds
     for &stream_id in &streams_opened {
         if let Some(window) = flow_control.get_stream_window(stream_id) {
             assert!(window >= 0, "Stream window should never go negative");
-            assert!(window <= max_window_size as i64,
-                   "Stream window should never exceed maximum");
+            assert!(
+                window <= max_window_size as i64,
+                "Stream window should never exceed maximum"
+            );
         }
     }
 
-    assert!(flow_control.connection_window >= 0,
-           "Connection window should never go negative");
+    assert!(
+        flow_control.connection_window >= 0,
+        "Connection window should never go negative"
+    );
 });

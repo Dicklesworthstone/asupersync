@@ -52,8 +52,8 @@
 //! ```
 
 use arbitrary::Arbitrary;
-use asupersync::grpc::{HealthCheckRequest, HealthService, ServingStatus};
 use asupersync::grpc::health::{HealthError, MAX_SERVICE_NAME_LEN};
+use asupersync::grpc::{HealthCheckRequest, HealthService, ServingStatus};
 use libfuzzer_sys::fuzz_target;
 
 /// Bound on the per-iteration name length. Must allow generating
@@ -98,25 +98,25 @@ enum NameShape {
 
 #[derive(Arbitrary, Debug)]
 enum TraversalKind {
-    DotDot,           // `..`
-    DotDotSlash,      // `../`
-    SlashDotDot,      // `/..`
-    DotDotBackslash,  // `..\\`
-    EncodedDotDot,    // `%2E%2E`
+    DotDot,          // `..`
+    DotDotSlash,     // `../`
+    SlashDotDot,     // `/..`
+    DotDotBackslash, // `..\\`
+    EncodedDotDot,   // `%2E%2E`
 }
 
 #[derive(Arbitrary, Debug)]
 enum InjectionKind {
-    Nul,        // \0
-    Crlf,       // \r\n
-    Cr,         // \r
-    Lf,         // \n
-    Tab,        // \t
-    Star,       // *
-    Greater,    // >
-    Colon,      // :
-    Backslash,  // \\
-    NestedNul,  // \0middle\0
+    Nul,       // \0
+    Crlf,      // \r\n
+    Cr,        // \r
+    Lf,        // \n
+    Tab,       // \t
+    Star,      // *
+    Greater,   // >
+    Colon,     // :
+    Backslash, // \\
+    NestedNul, // \0middle\0
 }
 
 fn build_name(shape: &NameShape) -> String {
@@ -133,7 +133,11 @@ fn build_name(shape: &NameShape) -> String {
             };
             String::from_utf8_lossy(trimmed).into_owned()
         }
-        NameShape::PathLike { prefix, traversal, suffix } => {
+        NameShape::PathLike {
+            prefix,
+            traversal,
+            suffix,
+        } => {
             let token = match traversal {
                 TraversalKind::DotDot => "..",
                 TraversalKind::DotDotSlash => "../",
@@ -147,7 +151,11 @@ fn build_name(shape: &NameShape) -> String {
             out.push_str(&truncate_to(suffix, MAX_NAME_BYTES / 4));
             out
         }
-        NameShape::ProtocolInjection { head, injection, tail } => {
+        NameShape::ProtocolInjection {
+            head,
+            injection,
+            tail,
+        } => {
             let mut out = String::new();
             out.push_str(&truncate_to(head, MAX_NAME_BYTES / 4));
             match injection {
@@ -165,7 +173,10 @@ fn build_name(shape: &NameShape) -> String {
             out.push_str(&truncate_to(tail, MAX_NAME_BYTES / 4));
             out
         }
-        NameShape::AtLengthBoundary { offset_from_cap, fill } => {
+        NameShape::AtLengthBoundary {
+            offset_from_cap,
+            fill,
+        } => {
             // i8 in [-128, 127]; clamp tighter so the resulting len
             // stays within MAX_NAME_BYTES.
             let target = MAX_SERVICE_NAME_LEN as isize + (*offset_from_cap as isize);
@@ -212,7 +223,10 @@ fuzz_target!(|shape: NameShape| {
     match (&result, name.len() > MAX_SERVICE_NAME_LEN) {
         (Err(HealthError::ServiceNameTooLong { len, max }), true) => {
             assert_eq!(*len, name.len(), "reported len must match input");
-            assert_eq!(*max, MAX_SERVICE_NAME_LEN, "reported cap must match constant");
+            assert_eq!(
+                *max, MAX_SERVICE_NAME_LEN,
+                "reported cap must match constant"
+            );
         }
         (Ok(()), false) => {} // ✓
         (Err(_), false) => panic!(

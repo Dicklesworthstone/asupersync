@@ -1,13 +1,13 @@
 #![no_main]
 
-use libfuzzer_sys::fuzz_target;
 use arbitrary::Arbitrary;
+use libfuzzer_sys::fuzz_target;
 use std::collections::HashMap;
 
 /// Test input structure for pseudo-header ordering scenarios
 #[derive(Arbitrary, Clone, Debug)]
 struct PseudoHeaderOrderInput {
-    headers: Vec<HeaderEntry>,              // Headers in the order they appear
+    headers: Vec<HeaderEntry>,             // Headers in the order they appear
     stream_id: u32,                        // Stream ID for the request
     end_headers: bool,                     // Whether to set END_HEADERS flag
     end_stream: bool,                      // Whether to set END_STREAM flag
@@ -34,18 +34,42 @@ enum PseudoHeaderType {
 /// Frames that can precede the HEADERS frame
 #[derive(Arbitrary, Clone, Debug)]
 enum PrecedingFrame {
-    Settings { parameters: Vec<(u16, u32)> },
-    WindowUpdate { stream_id: u32, increment: u32 },
-    Priority { stream_id: u32, dependency: u32, weight: u8, exclusive: bool },
+    Settings {
+        parameters: Vec<(u16, u32)>,
+    },
+    WindowUpdate {
+        stream_id: u32,
+        increment: u32,
+    },
+    Priority {
+        stream_id: u32,
+        dependency: u32,
+        weight: u8,
+        exclusive: bool,
+    },
 }
 
 /// Frames that can follow the HEADERS frame
 #[derive(Arbitrary, Clone, Debug)]
 enum FollowUpFrame {
-    Data { stream_id: u32, data: Vec<u8>, end_stream: bool },
-    Headers { stream_id: u32, end_headers: bool, end_stream: bool },
-    RstStream { stream_id: u32, error_code: u32 },
-    WindowUpdate { stream_id: u32, increment: u32 },
+    Data {
+        stream_id: u32,
+        data: Vec<u8>,
+        end_stream: bool,
+    },
+    Headers {
+        stream_id: u32,
+        end_headers: bool,
+        end_stream: bool,
+    },
+    RstStream {
+        stream_id: u32,
+        error_code: u32,
+    },
+    WindowUpdate {
+        stream_id: u32,
+        increment: u32,
+    },
 }
 
 /// Mock connection state to track pseudo-header ordering validation
@@ -68,10 +92,10 @@ struct OrderingViolationInfo {
 
 #[derive(Clone, Debug, PartialEq)]
 enum OrderingViolationType {
-    PseudoAfterRegular,       // Pseudo-header found after regular header
-    DuplicatePseudoHeader,    // Same pseudo-header appears multiple times
-    UnknownPseudoHeader,      // Pseudo-header not in allowed set
-    MissingRequiredPseudo,    // Required pseudo-header missing (:method, :scheme, :path)
+    PseudoAfterRegular,    // Pseudo-header found after regular header
+    DuplicatePseudoHeader, // Same pseudo-header appears multiple times
+    UnknownPseudoHeader,   // Pseudo-header not in allowed set
+    MissingRequiredPseudo, // Required pseudo-header missing (:method, :scheme, :path)
 }
 
 /// Track the state of each stream for header ordering validation
@@ -153,7 +177,8 @@ impl MockPseudoHeaderOrderConnection {
         // HEADERS frames MUST have non-zero stream ID for requests
         if stream_id == 0 {
             self.connection_error = Some(PROTOCOL_ERROR);
-            self.protocol_violations.push("HEADERS frame with stream ID 0".to_string());
+            self.protocol_violations
+                .push("HEADERS frame with stream ID 0".to_string());
             return;
         }
 
@@ -179,13 +204,15 @@ impl MockPseudoHeaderOrderConnection {
         // Parse the headers from the payload and validate ordering
         // In a real implementation, this would involve HPACK decoding
         // For this fuzz target, we'll simulate the parsing
-        let header_validation_result = self.extract_and_validate_header_ordering(stream_id, payload);
+        let header_validation_result =
+            self.extract_and_validate_header_ordering(stream_id, payload);
 
         if let Err(violation_info) = header_validation_result {
             // Invalid header ordering detected
             stream_state.ordering_violation_detected = true;
 
-            self.ordering_violations_detected.push(violation_info.clone());
+            self.ordering_violations_detected
+                .push(violation_info.clone());
 
             // Per RFC 7540 §8.1.2.1, invalid pseudo-header ordering is PROTOCOL_ERROR
             self.connection_error = Some(PROTOCOL_ERROR);
@@ -197,7 +224,11 @@ impl MockPseudoHeaderOrderConnection {
         }
     }
 
-    fn extract_and_validate_header_ordering(&mut self, stream_id: u32, payload: &[u8]) -> Result<(), OrderingViolationInfo> {
+    fn extract_and_validate_header_ordering(
+        &mut self,
+        stream_id: u32,
+        payload: &[u8],
+    ) -> Result<(), OrderingViolationInfo> {
         // In a real implementation, this would be HPACK decoding
         // For fuzz testing, we'll simulate extracting headers from the payload
 
@@ -214,7 +245,8 @@ impl MockPseudoHeaderOrderConnection {
                 // This is a pseudo-header
                 if stream_state.regular_headers_started {
                     // CRITICAL: Pseudo-header found after regular headers - PROTOCOL_ERROR
-                    let last_regular = stream_state.last_regular_header
+                    let last_regular = stream_state
+                        .last_regular_header
                         .clone()
                         .unwrap_or_else(|| "unknown".to_string());
 
@@ -247,7 +279,9 @@ impl MockPseudoHeaderOrderConnection {
                 }
 
                 // Record this pseudo-header
-                stream_state.pseudo_headers_seen.insert(name.clone(), value.clone());
+                stream_state
+                    .pseudo_headers_seen
+                    .insert(name.clone(), value.clone());
             } else {
                 // This is a regular header
                 stream_state.regular_headers_started = true;
@@ -290,13 +324,15 @@ impl MockPseudoHeaderOrderConnection {
     fn process_priority_frame(&mut self, stream_id: u32, payload: &[u8]) {
         if payload.len() != 5 {
             self.connection_error = Some(PROTOCOL_ERROR);
-            self.protocol_violations.push("PRIORITY frame with invalid length".to_string());
+            self.protocol_violations
+                .push("PRIORITY frame with invalid length".to_string());
             return;
         }
 
         if stream_id == 0 {
             self.connection_error = Some(PROTOCOL_ERROR);
-            self.protocol_violations.push("PRIORITY frame with stream ID 0".to_string());
+            self.protocol_violations
+                .push("PRIORITY frame with stream ID 0".to_string());
             return;
         }
 
@@ -306,13 +342,15 @@ impl MockPseudoHeaderOrderConnection {
     fn process_rst_stream_frame(&mut self, stream_id: u32, payload: &[u8]) {
         if payload.len() != 4 {
             self.connection_error = Some(PROTOCOL_ERROR);
-            self.protocol_violations.push("RST_STREAM frame with invalid length".to_string());
+            self.protocol_violations
+                .push("RST_STREAM frame with invalid length".to_string());
             return;
         }
 
         if stream_id == 0 {
             self.connection_error = Some(PROTOCOL_ERROR);
-            self.protocol_violations.push("RST_STREAM frame with stream ID 0".to_string());
+            self.protocol_violations
+                .push("RST_STREAM frame with stream ID 0".to_string());
             return;
         }
 
@@ -325,7 +363,8 @@ impl MockPseudoHeaderOrderConnection {
     fn process_settings_frame(&mut self, payload: &[u8]) {
         if payload.len() % 6 != 0 {
             self.connection_error = Some(PROTOCOL_ERROR);
-            self.protocol_violations.push("SETTINGS frame with invalid length".to_string());
+            self.protocol_violations
+                .push("SETTINGS frame with invalid length".to_string());
             return;
         }
         // SETTINGS frames don't affect pseudo-header ordering
@@ -334,14 +373,16 @@ impl MockPseudoHeaderOrderConnection {
     fn process_window_update_frame(&mut self, _stream_id: u32, payload: &[u8]) {
         if payload.len() != 4 {
             self.connection_error = Some(PROTOCOL_ERROR);
-            self.protocol_violations.push("WINDOW_UPDATE frame with invalid length".to_string());
+            self.protocol_violations
+                .push("WINDOW_UPDATE frame with invalid length".to_string());
             return;
         }
 
         let increment = u32::from_be_bytes([payload[0], payload[1], payload[2], payload[3]]);
         if increment == 0 {
             self.connection_error = Some(PROTOCOL_ERROR);
-            self.protocol_violations.push("WINDOW_UPDATE with zero increment".to_string());
+            self.protocol_violations
+                .push("WINDOW_UPDATE with zero increment".to_string());
         }
 
         // WINDOW_UPDATE doesn't affect pseudo-header ordering
@@ -350,7 +391,8 @@ impl MockPseudoHeaderOrderConnection {
     fn process_data_frame(&mut self, stream_id: u32, _flags: u8, _payload: &[u8]) {
         if stream_id == 0 {
             self.connection_error = Some(PROTOCOL_ERROR);
-            self.protocol_violations.push("DATA frame with stream ID 0".to_string());
+            self.protocol_violations
+                .push("DATA frame with stream ID 0".to_string());
         }
 
         // DATA frames don't affect pseudo-header ordering
@@ -373,19 +415,22 @@ impl MockPseudoHeaderOrderConnection {
     }
 
     fn count_pseudo_after_regular_violations(&self) -> usize {
-        self.ordering_violations_detected.iter()
+        self.ordering_violations_detected
+            .iter()
             .filter(|info| info.violation_type == OrderingViolationType::PseudoAfterRegular)
             .count()
     }
 
     fn count_duplicate_pseudo_violations(&self) -> usize {
-        self.ordering_violations_detected.iter()
+        self.ordering_violations_detected
+            .iter()
             .filter(|info| info.violation_type == OrderingViolationType::DuplicatePseudoHeader)
             .count()
     }
 
     fn count_unknown_pseudo_violations(&self) -> usize {
-        self.ordering_violations_detected.iter()
+        self.ordering_violations_detected
+            .iter()
             .filter(|info| info.violation_type == OrderingViolationType::UnknownPseudoHeader)
             .count()
     }
@@ -427,13 +472,25 @@ fn send_preceding_frame(conn: &mut MockPseudoHeaderOrderConnection, frame: &Prec
             }
             conn.process_frame(FRAME_TYPE_SETTINGS, 0, 0, &payload);
         }
-        PrecedingFrame::WindowUpdate { stream_id, increment } => {
+        PrecedingFrame::WindowUpdate {
+            stream_id,
+            increment,
+        } => {
             let payload = increment.to_be_bytes().to_vec();
             conn.process_frame(FRAME_TYPE_WINDOW_UPDATE, *stream_id, 0, &payload);
         }
-        PrecedingFrame::Priority { stream_id, dependency, weight, exclusive } => {
+        PrecedingFrame::Priority {
+            stream_id,
+            dependency,
+            weight,
+            exclusive,
+        } => {
             let mut payload = Vec::new();
-            let dep_field = if *exclusive { *dependency | 0x80000000 } else { *dependency };
+            let dep_field = if *exclusive {
+                *dependency | 0x80000000
+            } else {
+                *dependency
+            };
             payload.extend_from_slice(&dep_field.to_be_bytes());
             payload.push(*weight);
             conn.process_frame(FRAME_TYPE_PRIORITY, *stream_id, 0, &payload);
@@ -444,21 +501,39 @@ fn send_preceding_frame(conn: &mut MockPseudoHeaderOrderConnection, frame: &Prec
 /// Send a follow-up frame after the HEADERS frame
 fn send_follow_up_frame(conn: &mut MockPseudoHeaderOrderConnection, frame: &FollowUpFrame) {
     match frame {
-        FollowUpFrame::Data { stream_id, data, end_stream } => {
+        FollowUpFrame::Data {
+            stream_id,
+            data,
+            end_stream,
+        } => {
             let flags = if *end_stream { FLAG_END_STREAM } else { 0 };
             conn.process_frame(FRAME_TYPE_DATA, *stream_id, flags, data);
         }
-        FollowUpFrame::Headers { stream_id, end_headers, end_stream } => {
+        FollowUpFrame::Headers {
+            stream_id,
+            end_headers,
+            end_stream,
+        } => {
             let mut flags = 0;
-            if *end_headers { flags |= FLAG_END_HEADERS; }
-            if *end_stream { flags |= FLAG_END_STREAM; }
+            if *end_headers {
+                flags |= FLAG_END_HEADERS;
+            }
+            if *end_stream {
+                flags |= FLAG_END_STREAM;
+            }
             conn.process_frame(FRAME_TYPE_HEADERS, *stream_id, flags, b"headers");
         }
-        FollowUpFrame::RstStream { stream_id, error_code } => {
+        FollowUpFrame::RstStream {
+            stream_id,
+            error_code,
+        } => {
             let payload = error_code.to_be_bytes().to_vec();
             conn.process_frame(FRAME_TYPE_RST_STREAM, *stream_id, 0, &payload);
         }
-        FollowUpFrame::WindowUpdate { stream_id, increment } => {
+        FollowUpFrame::WindowUpdate {
+            stream_id,
+            increment,
+        } => {
             let payload = increment.to_be_bytes().to_vec();
             conn.process_frame(FRAME_TYPE_WINDOW_UPDATE, *stream_id, 0, &payload);
         }
@@ -487,9 +562,10 @@ fn headers_to_payload(headers: &[HeaderEntry]) -> Vec<u8> {
 
 fuzz_target!(|input: PseudoHeaderOrderInput| {
     // Limit input sizes to prevent excessive memory usage
-    if input.headers.len() > 100 ||
-       input.preceding_frames.len() > 50 ||
-       input.follow_up_frames.len() > 50 {
+    if input.headers.len() > 100
+        || input.preceding_frames.len() > 50
+        || input.follow_up_frames.len() > 50
+    {
         return;
     }
 
@@ -518,8 +594,12 @@ fuzz_target!(|input: PseudoHeaderOrderInput| {
     let payload = headers_to_payload(&input.headers);
 
     let mut flags = 0;
-    if input.end_headers { flags |= FLAG_END_HEADERS; }
-    if input.end_stream { flags |= FLAG_END_STREAM; }
+    if input.end_headers {
+        flags |= FLAG_END_HEADERS;
+    }
+    if input.end_stream {
+        flags |= FLAG_END_STREAM;
+    }
 
     // Send the HEADERS frame with potentially invalid pseudo-header ordering
     conn.process_frame(FRAME_TYPE_HEADERS, stream_id, flags, &payload);
@@ -551,7 +631,6 @@ fuzz_target!(|input: PseudoHeaderOrderInput| {
             !conn.get_ordering_violations().is_empty(),
             "Expected ordering violation to be detected and recorded"
         );
-
     } else {
         // Valid ordering should not cause error (unless other validation fails)
         // Note: We might still get errors for other reasons (malformed headers, etc.)
@@ -731,7 +810,8 @@ fn test_pseudo_header_ordering_scenarios(_input: &PseudoHeaderOrderInput) {
 
         assert!(
             !conn.has_protocol_error(),
-            "Valid request headers #{} should not cause PROTOCOL_ERROR", i
+            "Valid request headers #{} should not cause PROTOCOL_ERROR",
+            i
         );
         assert_eq!(conn.count_pseudo_after_regular_violations(), 0);
     }
@@ -749,7 +829,8 @@ fn test_pseudo_header_ordering_scenarios(_input: &PseudoHeaderOrderInput) {
 
         assert!(
             conn.has_protocol_error(),
-            "Invalid request headers #{} must cause PROTOCOL_ERROR", i
+            "Invalid request headers #{} must cause PROTOCOL_ERROR",
+            i
         );
         assert!(conn.count_pseudo_after_regular_violations() >= 1);
     }

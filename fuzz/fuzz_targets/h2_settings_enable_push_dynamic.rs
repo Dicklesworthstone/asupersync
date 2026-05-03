@@ -117,7 +117,7 @@ impl Setting {
             Setting::EnablePush(v) => *v <= 1, // MUST be 0 or 1
             Setting::InitialWindowSize(v) => *v <= 0x7fff_ffff, // MUST be <= 2^31-1
             Setting::MaxFrameSize(v) => *v >= 16384 && *v <= 0x00ff_ffff, // MUST be in range
-            _ => true, // Other settings are generally valid
+            _ => true,                         // Other settings are generally valid
         }
     }
 }
@@ -507,13 +507,11 @@ mod tests {
         let scenario = EnablePushScenario {
             is_client: true,
             initial_settings: Settings::client(), // enable_push = false
-            actions: vec![
-                TestAction::TryPushPromise(PushPromiseFrame {
-                    stream_id: 1,
-                    promised_stream_id: 2,
-                    end_headers: true,
-                }),
-            ],
+            actions: vec![TestAction::TryPushPromise(PushPromiseFrame {
+                stream_id: 1,
+                promised_stream_id: 2,
+                end_headers: true,
+            })],
             server_sends_enable_push: false,
             include_invalid_values: false,
         };
@@ -560,12 +558,10 @@ mod tests {
         let scenario = EnablePushScenario {
             is_client: true,
             initial_settings: Settings::client(),
-            actions: vec![
-                TestAction::SendSettings(SettingsFrame {
-                    settings: vec![Setting::EnablePush(2)], // Invalid
-                    ack: false,
-                }),
-            ],
+            actions: vec![TestAction::SendSettings(SettingsFrame {
+                settings: vec![Setting::EnablePush(2)], // Invalid
+                ack: false,
+            })],
             server_sends_enable_push: false,
             include_invalid_values: true,
         };

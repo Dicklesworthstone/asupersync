@@ -19,25 +19,15 @@ struct PullSubscribeOptsFuzz {
 #[derive(Arbitrary, Debug, Clone)]
 enum PullRequestScenario {
     /// Valid pull request options
-    ValidRequests {
-        requests: Vec<PullRequestVariant>,
-    },
+    ValidRequests { requests: Vec<PullRequestVariant> },
     /// Boundary value testing
-    BoundaryValues {
-        boundary_cases: Vec<BoundaryCase>,
-    },
+    BoundaryValues { boundary_cases: Vec<BoundaryCase> },
     /// Timeout handling edge cases
-    TimeoutEdgeCases {
-        timeout_cases: Vec<TimeoutCase>,
-    },
+    TimeoutEdgeCases { timeout_cases: Vec<TimeoutCase> },
     /// Batch size edge cases
-    BatchSizeEdgeCases {
-        batch_cases: Vec<BatchSizeCase>,
-    },
+    BatchSizeEdgeCases { batch_cases: Vec<BatchSizeCase> },
     /// Mixed valid and invalid combinations
-    MixedRequests {
-        mixed_cases: Vec<MixedRequestCase>,
-    },
+    MixedRequests { mixed_cases: Vec<MixedRequestCase> },
 }
 
 #[derive(Arbitrary, Debug, Clone)]
@@ -233,22 +223,22 @@ fn test_pull_subscribe_opts_scenarios(input: &PullSubscribeOptsFuzz) {
 /// Test JSON parsing edge cases
 fn test_json_parsing_edge_cases(input: &PullSubscribeOptsFuzz) {
     let malformed_cases = [
-        "",                                     // Empty
-        "{}",                                  // Empty object
-        "{",                                   // Incomplete
-        "}",                                   // Invalid start
-        r#"{"batch":}"#,                      // Missing value
-        r#"{"batch":5,"expires":}"#,          // Missing expires value
-        r#"{"batch":5,}"#,                    // Trailing comma
-        r#"{"batch":5"expires":0}"#,          // Missing comma
-        r#"{"batch":"5","expires":"0"}"#,     // String instead of number
-        r#"{"batch":null,"expires":null}"#,   // Null values
-        r#"{"batch":5.5,"expires":0.0}"#,     // Float instead of int
-        r#"{"batch":-1,"expires":-1}"#,       // Negative values
-        "null",                               // Null instead of object
-        "[]",                                 // Array instead of object
-        "\"string\"",                         // String instead of object
-        "123",                                // Number instead of object
+        "",                                 // Empty
+        "{}",                               // Empty object
+        "{",                                // Incomplete
+        "}",                                // Invalid start
+        r#"{"batch":}"#,                    // Missing value
+        r#"{"batch":5,"expires":}"#,        // Missing expires value
+        r#"{"batch":5,}"#,                  // Trailing comma
+        r#"{"batch":5"expires":0}"#,        // Missing comma
+        r#"{"batch":"5","expires":"0"}"#,   // String instead of number
+        r#"{"batch":null,"expires":null}"#, // Null values
+        r#"{"batch":5.5,"expires":0.0}"#,   // Float instead of int
+        r#"{"batch":-1,"expires":-1}"#,     // Negative values
+        "null",                             // Null instead of object
+        "[]",                               // Array instead of object
+        "\"string\"",                       // String instead of object
+        "123",                              // Number instead of object
     ];
 
     for &malformed in malformed_cases {
@@ -272,10 +262,10 @@ fn test_format_manipulation_strategies(input: &PullSubscribeOptsFuzz) {
 fn test_timeout_computation_edge_cases(_input: &PullSubscribeOptsFuzz) {
     let timeout_cases = [
         Duration::ZERO,                        // Zero timeout
-        Duration::from_nanos(1),              // Minimal timeout
-        Duration::from_millis(1),             // Small timeout
-        Duration::from_secs(1),               // Normal timeout
-        Duration::from_secs(3600),            // Large timeout
+        Duration::from_nanos(1),               // Minimal timeout
+        Duration::from_millis(1),              // Small timeout
+        Duration::from_secs(1),                // Normal timeout
+        Duration::from_secs(3600),             // Large timeout
         Duration::from_nanos(i64::MAX as u64), // Near i64::MAX
         Duration::MAX,                         // Maximum duration
     ];
@@ -305,13 +295,22 @@ fn test_pull_request_encoding(request: &PullRequestVariant, strategy: &FormatStr
             format!(r#"{{"expires":{},"batch":{}}}"#, expires, request.batch)
         }
         FormatStrategy::ExtraWhitespace => {
-            format!(r#"{{ "batch" : {} , "expires" : {} }}"#, request.batch, expires)
+            format!(
+                r#"{{ "batch" : {} , "expires" : {} }}"#,
+                request.batch, expires
+            )
         }
         FormatStrategy::Unicode => {
-            format!(r#"{{"batch":{},"expires":{},"测试":"🌟"}}"#, request.batch, expires)
+            format!(
+                r#"{{"batch":{},"expires":{},"测试":"🌟"}}"#,
+                request.batch, expires
+            )
         }
         FormatStrategy::EscapedChars => {
-            format!(r#"{{"batch":{},"expires":{},"test":"with\nnewline"}}"#, request.batch, expires)
+            format!(
+                r#"{{"batch":{},"expires":{},"test":"with\nnewline"}}"#,
+                request.batch, expires
+            )
         }
         FormatStrategy::NumberFormats => {
             format!(r#"{{"batch":{},"expires":{}}}"#, request.batch, expires)
@@ -326,21 +325,17 @@ fn test_pull_request_encoding(request: &PullRequestVariant, strategy: &FormatStr
 fn test_boundary_value_case(case: &BoundaryCase, strategy: &FormatStrategy) {
     let (batch, expires) = match case.boundary_type {
         BoundaryType::Zero => (0, 0),
-        BoundaryType::Maximum => (
-            usize::MAX.min(MAX_BATCH_SIZE),
-            i64::MAX,
-        ),
-        BoundaryType::NearMaximum => (
-            (usize::MAX - 1).min(MAX_BATCH_SIZE),
-            i64::MAX - 1,
-        ),
+        BoundaryType::Maximum => (usize::MAX.min(MAX_BATCH_SIZE), i64::MAX),
+        BoundaryType::NearMaximum => ((usize::MAX - 1).min(MAX_BATCH_SIZE), i64::MAX - 1),
         BoundaryType::Overflow => (
             case.batch.min(MAX_BATCH_SIZE),
             i64::MAX, // Will be clamped during encoding
         ),
         BoundaryType::VeryLarge => (
             case.batch.min(MAX_BATCH_SIZE),
-            case.timeout_nanos.min(MAX_TIMEOUT_NANOS).min(i64::MAX as u128) as i64,
+            case.timeout_nanos
+                .min(MAX_TIMEOUT_NANOS)
+                .min(i64::MAX as u128) as i64,
         ),
     };
 
@@ -410,15 +405,11 @@ fn test_mixed_request_case(case: &MixedRequestCase, strategy: &FormatStrategy) {
         MixedCaseType::ExtraFields => {
             r#"{"batch":5,"expires":0,"extra":"field","unknown":true}"#.to_string()
         }
-        MixedCaseType::MalformedJson => {
-            case.raw_json.clone()
-        }
+        MixedCaseType::MalformedJson => case.raw_json.clone(),
     };
 
     let final_json = match strategy {
-        FormatStrategy::ExtraWhitespace => {
-            json.replace(':', " : ").replace(',', " , ")
-        }
+        FormatStrategy::ExtraWhitespace => json.replace(':', " : ").replace(',', " , "),
         _ => json,
     };
 
@@ -486,8 +477,10 @@ fn test_timeout_computation(timeout: Duration) {
     // Verify that the computation doesn't overflow and produces valid results
     assert!(expires >= 0, "Expires should never be negative");
     if !timeout.is_zero() {
-        assert!(expires > 0 || timeout.as_nanos() > i64::MAX as u128,
-                "Non-zero timeout should produce non-zero expires unless clamped");
+        assert!(
+            expires > 0 || timeout.as_nanos() > i64::MAX as u128,
+            "Non-zero timeout should produce non-zero expires unless clamped"
+        );
     }
 
     // Test JSON encoding with computed expires
@@ -519,8 +512,7 @@ fn test_pull_request_parsing(json: &str) {
 
 /// Check if pull request is valid for testing
 fn is_valid_pull_request(request: &PullRequestVariant) -> bool {
-    request.batch <= MAX_BATCH_SIZE
-        && request.timeout.as_nanos() <= MAX_TIMEOUT_NANOS
+    request.batch <= MAX_BATCH_SIZE && request.timeout.as_nanos() <= MAX_TIMEOUT_NANOS
 }
 
 #[cfg(test)]

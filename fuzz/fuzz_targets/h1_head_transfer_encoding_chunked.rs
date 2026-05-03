@@ -12,9 +12,9 @@
 #![no_main]
 
 use arbitrary::Arbitrary;
-use asupersync::http::h1::{codec::Http1Codec, types::Response};
 use asupersync::bytes::BytesMut;
 use asupersync::codec::Encoder;
+use asupersync::http::h1::{codec::Http1Codec, types::Response};
 use libfuzzer_sys::fuzz_target;
 
 /// HEAD response test with arbitrary chunked body data
@@ -117,7 +117,8 @@ fuzz_target!(|data: &[u8]| {
     // Limit the number of headers and body size for performance
     if test_case.additional_headers.len() > 20
         || test_case.trailers.len() > 10
-        || test_case.body_data.len() > 50_000 {
+        || test_case.body_data.len() > 50_000
+    {
         return;
     }
 
@@ -139,11 +140,13 @@ fn test_head_chunked_encoding(test_case: &HeadChunkedResponse) {
     let mut response = Response::new(
         test_case.status_code.max(100).min(599), // Valid HTTP status range
         "Test Response",
-        test_case.body_data.clone()
+        test_case.body_data.clone(),
     );
 
     // Add Transfer-Encoding: chunked header
-    response.headers.push(("Transfer-Encoding".to_string(), "chunked".to_string()));
+    response
+        .headers
+        .push(("Transfer-Encoding".to_string(), "chunked".to_string()));
 
     // Add additional headers
     for header in &test_case.additional_headers {
@@ -175,15 +178,20 @@ fn test_head_chunked_encoding(test_case: &HeadChunkedResponse) {
         (result, dst)
     }));
 
-    assert!(encoding_result.is_ok(), "HEAD response encoding should not panic");
+    assert!(
+        encoding_result.is_ok(),
+        "HEAD response encoding should not panic"
+    );
 
     if let Ok((Ok(()), dst)) = encoding_result {
         let response_bytes = dst.freeze();
         let response_str = String::from_utf8_lossy(&response_bytes);
 
         // Verify Transfer-Encoding header is present
-        assert!(response_str.contains("Transfer-Encoding: chunked"),
-            "Transfer-Encoding header should be preserved in HEAD response");
+        assert!(
+            response_str.contains("Transfer-Encoding: chunked"),
+            "Transfer-Encoding header should be preserved in HEAD response"
+        );
 
         // Critical assertion: HEAD responses must not have a body
         // Look for the end of headers (CRLFCRLF) and verify no body follows
@@ -191,21 +199,25 @@ fn test_head_chunked_encoding(test_case: &HeadChunkedResponse) {
             let body_section = &response_str[headers_end + 4..];
 
             // RFC 9110 Section 9.3.2: HEAD responses MUST NOT include message body
-            assert!(body_section.is_empty() || body_section.trim().is_empty(),
+            assert!(
+                body_section.is_empty() || body_section.trim().is_empty(),
                 "HEAD response must not include message body, found: {:?}",
-                body_section.chars().take(100).collect::<String>());
+                body_section.chars().take(100).collect::<String>()
+            );
         }
 
         // Verify response starts with valid status line
-        assert!(response_str.starts_with("HTTP/1.1"),
-            "Response should start with HTTP/1.1 status line");
+        assert!(
+            response_str.starts_with("HTTP/1.1"),
+            "Response should start with HTTP/1.1 status line"
+        );
     }
 }
 
 /// Test HEAD responses with various status codes
 fn test_head_status_codes(test_case: &HeadChunkedResponse) {
     let status_codes = [
-        200, 201, 204, 301, 302, 304, 400, 401, 403, 404, 500, 502, 503
+        200, 201, 204, 301, 302, 304, 400, 401, 403, 404, 500, 502, 503,
     ];
 
     for &status in &status_codes {
@@ -219,8 +231,11 @@ fn test_head_status_codes(test_case: &HeadChunkedResponse) {
             (result, dst)
         }));
 
-        assert!(encoding_result.is_ok(),
-            "HEAD response with status {} should encode without panic", status);
+        assert!(
+            encoding_result.is_ok(),
+            "HEAD response with status {} should encode without panic",
+            status
+        );
     }
 }
 
@@ -254,7 +269,10 @@ fn test_malformed_headers(_test_case: &HeadChunkedResponse) {
         // Should either succeed (if header is properly sanitized) or fail gracefully
         if let Err(_) = encoding_result {
             // Panic is not expected - malformed headers should be rejected cleanly
-            panic!("Malformed header should be rejected cleanly, not panic: {}={}", name, value);
+            panic!(
+                "Malformed header should be rejected cleanly, not panic: {}={}",
+                name, value
+            );
         }
     }
 }
@@ -283,8 +301,8 @@ fn test_chunked_body_edge_cases(test_case: &HeadChunkedResponse) {
             continue; // Skip overly large bodies for performance
         }
 
-        let response = Response::new(200, "OK", body_data.clone())
-            .with_header("Transfer-Encoding", "chunked");
+        let response =
+            Response::new(200, "OK", body_data.clone()).with_header("Transfer-Encoding", "chunked");
 
         let encoding_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             let mut codec = Http1Codec::new();
@@ -293,9 +311,11 @@ fn test_chunked_body_edge_cases(test_case: &HeadChunkedResponse) {
             (result, dst)
         }));
 
-        assert!(encoding_result.is_ok(),
+        assert!(
+            encoding_result.is_ok(),
             "HEAD response with edge case body should not panic (body len={})",
-            body_data.len());
+            body_data.len()
+        );
 
         // Verify the body is discarded regardless of content
         if let Ok((Ok(()), dst)) = encoding_result {
@@ -303,8 +323,10 @@ fn test_chunked_body_edge_cases(test_case: &HeadChunkedResponse) {
             let response_str = String::from_utf8_lossy(&response_bytes);
             if let Some(headers_end) = response_str.find("\r\n\r\n") {
                 let body_section = &response_str[headers_end + 4..];
-                assert!(body_section.is_empty() || body_section.trim().is_empty(),
-                    "HEAD response body should be empty regardless of input body content");
+                assert!(
+                    body_section.is_empty() || body_section.trim().is_empty(),
+                    "HEAD response body should be empty regardless of input body content"
+                );
             }
         }
     }
@@ -347,14 +369,19 @@ mod tests {
         let mut response = Response::new(200, "OK", b"body content".to_vec())
             .with_header("Transfer-Encoding", "chunked");
 
-        response.trailers.push(("X-Trailer".to_string(), "trailer-value".to_string()));
+        response
+            .trailers
+            .push(("X-Trailer".to_string(), "trailer-value".to_string()));
 
         let mut codec = Http1Codec::new();
         let mut dst = BytesMut::new();
         let result = codec.encode(response, &mut dst);
 
         // Should succeed - trailers should be handled appropriately for HEAD
-        assert!(result.is_ok(), "HEAD response with trailers should encode successfully");
+        assert!(
+            result.is_ok(),
+            "HEAD response with trailers should encode successfully"
+        );
     }
 }
 
@@ -364,16 +391,13 @@ fn generate_test_scenarios() -> Vec<HeadChunkedResponse> {
         // Basic HEAD response with chunked encoding
         HeadChunkedResponse {
             status_code: 200,
-            additional_headers: vec![
-                AdditionalHeader {
-                    name: HeaderName::ContentType,
-                    value: "text/html".to_string(),
-                }
-            ],
+            additional_headers: vec![AdditionalHeader {
+                name: HeaderName::ContentType,
+                value: "text/html".to_string(),
+            }],
             body_data: b"<html><body>This should be discarded</body></html>".to_vec(),
             trailers: vec![],
         },
-
         // HEAD response with multiple headers
         HeadChunkedResponse {
             status_code: 304,
@@ -390,18 +414,15 @@ fn generate_test_scenarios() -> Vec<HeadChunkedResponse> {
             body_data: vec![0u8; 1000], // Binary data that should be discarded
             trailers: vec![],
         },
-
         // HEAD response with trailers
         HeadChunkedResponse {
             status_code: 200,
             additional_headers: vec![],
             body_data: b"Large response body content that should be discarded".to_vec(),
-            trailers: vec![
-                TrailerHeader {
-                    name: HeaderName::Custom("X-Processing-Time".to_string()),
-                    value: "150ms".to_string(),
-                },
-            ],
+            trailers: vec![TrailerHeader {
+                name: HeaderName::Custom("X-Processing-Time".to_string()),
+                value: "150ms".to_string(),
+            }],
         },
     ]
 }

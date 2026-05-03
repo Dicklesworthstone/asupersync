@@ -15,14 +15,12 @@
 
 use arbitrary::Arbitrary;
 use asupersync::http::h3_native::{
-    H3QpackMode, QpackFieldPlan, QpackContext,
-    qpack_encode_field_section, qpack_encode_field_section_with_context,
-    qpack_decode_field_section, qpack_plan_to_header_fields,
-    qpack_static_plan_for_request, qpack_static_plan_for_response,
+    H3NativeError, H3QpackMode, QpackContext, QpackFieldPlan, qpack_decode_field_section,
     qpack_decode_request_field_section, qpack_decode_response_field_section,
-    H3NativeError
+    qpack_encode_field_section, qpack_encode_field_section_with_context,
+    qpack_plan_to_header_fields, qpack_static_plan_for_request, qpack_static_plan_for_response,
 };
-use asupersync::http::{H3RequestHead, H3ResponseHead, H3PseudoHeaders};
+use asupersync::http::{H3PseudoHeaders, H3RequestHead, H3ResponseHead};
 use libfuzzer_sys::fuzz_target;
 
 /// Maximum number of operations per fuzz iteration
@@ -65,37 +63,24 @@ enum QpackModeChoice {
 #[derive(Arbitrary, Debug)]
 enum QpackOperation {
     /// Encode a field section with given plan
-    EncodeFieldSection {
-        field_plan: Vec<FieldPlanEntry>,
-    },
+    EncodeFieldSection { field_plan: Vec<FieldPlanEntry> },
     /// Decode a previously encoded field section
     DecodeFieldSection {
         /// Reference to a previously encoded section
         encoded_section_ref: u8,
     },
     /// Change dynamic table size (tests size negotiations)
-    ChangeDynamicTableSize {
-        new_capacity: u16,
-    },
+    ChangeDynamicTableSize { new_capacity: u16 },
     /// Insert entries into dynamic table (for testing context changes)
-    InsertDynamicEntry {
-        name: String,
-        value: String,
-    },
+    InsertDynamicEntry { name: String, value: String },
     /// Test encoder/decoder round-trip consistency
-    RoundTripTest {
-        field_plan: Vec<FieldPlanEntry>,
-    },
+    RoundTripTest { field_plan: Vec<FieldPlanEntry> },
     /// Test cross-component state validation
     ValidateState,
     /// Generate and test request header encoding
-    EncodeRequest {
-        request_config: RequestConfig,
-    },
+    EncodeRequest { request_config: RequestConfig },
     /// Generate and test response header encoding
-    EncodeResponse {
-        response_config: ResponseConfig,
-    },
+    EncodeResponse { response_config: ResponseConfig },
 }
 
 #[derive(Arbitrary, Debug)]
@@ -163,8 +148,10 @@ fuzz_target!(|input: QpackIntegrationInput| {
 
 fn normalize_input(input: &mut QpackIntegrationInput) {
     // Clamp table capacity to reasonable range
-    input.context_config.initial_capacity =
-        input.context_config.initial_capacity.clamp(0, MAX_TABLE_CAPACITY as u16);
+    input.context_config.initial_capacity = input
+        .context_config
+        .initial_capacity
+        .clamp(0, MAX_TABLE_CAPACITY as u16);
 
     // Limit operation count
     input.operations.truncate(MAX_OPERATIONS);
@@ -245,7 +232,8 @@ fn normalize_response_config(config: &mut ResponseConfig) {
 
 fn sanitize_header_field(name: &mut String, value: &mut String) {
     // Ensure valid HTTP header characters
-    *name = name.chars()
+    *name = name
+        .chars()
         .filter(|&c| c.is_ascii_lowercase() || c == '-' || c.is_ascii_digit())
         .collect();
     if name.is_empty() {
@@ -253,7 +241,8 @@ fn sanitize_header_field(name: &mut String, value: &mut String) {
     }
 
     // Remove control characters from value
-    *value = value.chars()
+    *value = value
+        .chars()
         .filter(|&c| c.is_ascii() && c != '\0' && c != '\r' && c != '\n')
         .collect();
 }
@@ -281,16 +270,20 @@ fn test_qpack_integration(input: &QpackIntegrationInput) -> Result<(), Box<dyn s
                         encoded_sections.push(encoded);
                     }
 
-                    if let Ok(encoded_with_ctx) = qpack_encode_field_section_with_context(
-                        &qpack_plan, Some(&qpack_context)
-                    ) {
+                    if let Ok(encoded_with_ctx) =
+                        qpack_encode_field_section_with_context(&qpack_plan, Some(&qpack_context))
+                    {
                         encoded_sections.push(encoded_with_ctx);
                     }
                 }
             }
 
-            QpackOperation::DecodeFieldSection { encoded_section_ref } => {
-                if let Some(encoded) = encoded_sections.get(*encoded_section_ref as usize % encoded_sections.len().max(1)) {
+            QpackOperation::DecodeFieldSection {
+                encoded_section_ref,
+            } => {
+                if let Some(encoded) = encoded_sections
+                    .get(*encoded_section_ref as usize % encoded_sections.len().max(1))
+                {
                     // Test decoding in both static-only and dynamic modes
                     let _ = qpack_decode_field_section(encoded, H3QpackMode::StaticOnly);
                     let _ = qpack_decode_field_section(encoded, qpack_mode);
@@ -314,7 +307,8 @@ fn test_qpack_integration(input: &QpackIntegrationInput) -> Result<(), Box<dyn s
                     if let Ok(encoded) = qpack_encode_field_section(&qpack_plan) {
                         if let Ok(decoded_plan) = qpack_decode_field_section(&encoded, qpack_mode) {
                             // Verify round-trip consistency
-                            let _ = qpack_plan_to_header_fields(&decoded_plan, Some(&qpack_context));
+                            let _ =
+                                qpack_plan_to_header_fields(&decoded_plan, Some(&qpack_context));
                         }
                     }
                 }
@@ -355,29 +349,23 @@ fn test_qpack_integration(input: &QpackIntegrationInput) -> Result<(), Box<dyn s
     Ok(())
 }
 
-fn convert_field_plan_to_qpack(field_plan: &[FieldPlanEntry]) -> Result<Vec<QpackFieldPlan>, Box<dyn std::error::Error>> {
+fn convert_field_plan_to_qpack(
+    field_plan: &[FieldPlanEntry],
+) -> Result<Vec<QpackFieldPlan>, Box<dyn std::error::Error>> {
     let mut qpack_plan = Vec::new();
 
     for entry in field_plan {
         let plan_entry = match entry.plan_type {
-            FieldPlanType::StaticIndex => {
-                QpackFieldPlan::StaticIndex(entry.index as u64)
-            }
-            FieldPlanType::DynamicIndex => {
-                QpackFieldPlan::DynamicIndex(entry.index as u64)
-            }
-            FieldPlanType::Literal => {
-                QpackFieldPlan::Literal {
-                    name: entry.name.clone(),
-                    value: entry.value.clone(),
-                }
-            }
-            FieldPlanType::DynamicNameLiteral => {
-                QpackFieldPlan::DynamicNameLiteral {
-                    name_index: entry.index as u64,
-                    value: entry.value.clone(),
-                }
-            }
+            FieldPlanType::StaticIndex => QpackFieldPlan::StaticIndex(entry.index as u64),
+            FieldPlanType::DynamicIndex => QpackFieldPlan::DynamicIndex(entry.index as u64),
+            FieldPlanType::Literal => QpackFieldPlan::Literal {
+                name: entry.name.clone(),
+                value: entry.value.clone(),
+            },
+            FieldPlanType::DynamicNameLiteral => QpackFieldPlan::DynamicNameLiteral {
+                name_index: entry.index as u64,
+                value: entry.value.clone(),
+            },
         };
 
         qpack_plan.push(plan_entry);
@@ -386,7 +374,9 @@ fn convert_field_plan_to_qpack(field_plan: &[FieldPlanEntry]) -> Result<Vec<Qpac
     Ok(qpack_plan)
 }
 
-fn create_request_head(config: &RequestConfig) -> Result<H3RequestHead, Box<dyn std::error::Error>> {
+fn create_request_head(
+    config: &RequestConfig,
+) -> Result<H3RequestHead, Box<dyn std::error::Error>> {
     // Create H3RequestHead with correct field structure
     let pseudo = H3PseudoHeaders {
         method: Some(config.method.clone()),
@@ -403,7 +393,9 @@ fn create_request_head(config: &RequestConfig) -> Result<H3RequestHead, Box<dyn 
     })
 }
 
-fn create_response_head(config: &ResponseConfig) -> Result<H3ResponseHead, Box<dyn std::error::Error>> {
+fn create_response_head(
+    config: &ResponseConfig,
+) -> Result<H3ResponseHead, Box<dyn std::error::Error>> {
     // Create H3ResponseHead with correct field structure
     Ok(H3ResponseHead {
         status: config.status,
@@ -414,9 +406,10 @@ fn create_response_head(config: &ResponseConfig) -> Result<H3ResponseHead, Box<d
 fn test_ordering_scenario(
     scenario: &OrderingScenario,
     _context: &QpackContext,
-    qpack_mode: H3QpackMode
+    qpack_mode: H3QpackMode,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let mut current_blocks: std::collections::HashMap<u8, Vec<(String, String)>> = std::collections::HashMap::new();
+    let mut current_blocks: std::collections::HashMap<u8, Vec<(String, String)>> =
+        std::collections::HashMap::new();
     let mut current_block_id: Option<u8> = None;
 
     for block_op in &scenario.block_operations {
@@ -438,7 +431,8 @@ fn test_ordering_scenario(
                 if let Some(block_id) = current_block_id {
                     if let Some(block) = current_blocks.get(&block_id) {
                         // Convert block to field plan and test encoding/decoding
-                        let field_plan: Vec<QpackFieldPlan> = block.iter()
+                        let field_plan: Vec<QpackFieldPlan> = block
+                            .iter()
                             .map(|(name, value)| QpackFieldPlan::Literal {
                                 name: name.clone(),
                                 value: value.clone(),

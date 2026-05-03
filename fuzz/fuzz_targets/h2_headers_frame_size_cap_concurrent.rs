@@ -266,29 +266,24 @@ pub enum FrameProcessResult {
         total_accumulated: usize,
     },
     /// Size limit exceeded
-    SizeLimitExceeded {
-        attempted_size: usize,
-        limit: usize,
-    },
+    SizeLimitExceeded { attempted_size: usize, limit: usize },
     /// Continuation sequence completed
     ContinuationComplete {
         total_size: usize,
         fragment_count: usize,
     },
     /// Stream reset or error
-    StreamError {
-        error_type: String,
-    },
+    StreamError { error_type: String },
     /// Concurrent operation conflict
-    ConcurrencyViolation {
-        reason: String,
-    },
+    ConcurrencyViolation { reason: String },
 }
 
 impl MockH2HeaderConnection {
     pub fn new(settings: TestConnectionSettings) -> Self {
         let conn_settings = ConnectionSettings {
-            max_header_list_size: settings.max_header_list_size.unwrap_or(DEFAULT_MAX_HEADER_LIST_SIZE),
+            max_header_list_size: settings
+                .max_header_list_size
+                .unwrap_or(DEFAULT_MAX_HEADER_LIST_SIZE),
             max_frame_size: settings.max_frame_size.unwrap_or(MAX_FRAME_SIZE),
             max_concurrent_streams: settings.max_concurrent_streams.unwrap_or(100),
         };
@@ -338,7 +333,11 @@ impl MockH2HeaderConnection {
         }
     }
 
-    fn process_headers(&mut self, stream_id: u32, headers: &HeadersFrameTest) -> FrameProcessResult {
+    fn process_headers(
+        &mut self,
+        stream_id: u32,
+        headers: &HeadersFrameTest,
+    ) -> FrameProcessResult {
         // Compute header size first to avoid borrow checker issues
         let header_size = self.resolve_header_block_size(&headers.header_block_size);
 
@@ -374,7 +373,10 @@ impl MockH2HeaderConnection {
         self.stats.fragments_processed += 1;
         self.stats.total_fragment_bytes += header_size;
         self.stats.max_fragment_size_seen = self.stats.max_fragment_size_seen.max(header_size);
-        self.stats.max_accumulated_size_seen = self.stats.max_accumulated_size_seen.max(stream.total_accumulated);
+        self.stats.max_accumulated_size_seen = self
+            .stats
+            .max_accumulated_size_seen
+            .max(stream.total_accumulated);
 
         if headers.end_headers {
             self.stats.completed_headers += 1;
@@ -390,15 +392,21 @@ impl MockH2HeaderConnection {
         }
     }
 
-    fn process_continuation(&mut self, stream_id: u32, cont: &ContinuationFrameTest) -> FrameProcessResult {
+    fn process_continuation(
+        &mut self,
+        stream_id: u32,
+        cont: &ContinuationFrameTest,
+    ) -> FrameProcessResult {
         // Get max fragment size first to avoid borrow checker issues
         let max_fragment_size = self.max_fragment_size();
 
         let stream = match self.streams.get_mut(&stream_id) {
             Some(s) => s,
-            None => return FrameProcessResult::StreamError {
-                error_type: "Continuation on non-existent stream".to_string(),
-            },
+            None => {
+                return FrameProcessResult::StreamError {
+                    error_type: "Continuation on non-existent stream".to_string(),
+                };
+            }
         };
 
         if !stream.expecting_continuation {
@@ -413,7 +421,8 @@ impl MockH2HeaderConnection {
             FragmentSize::Large(s) => (*s as usize).min(16384),
             FragmentSize::MaxFrame => self.settings.max_frame_size.min(u16::MAX.into()) as usize,
             FragmentSize::ToLimit(offset) => max_fragment_size.saturating_sub(*offset as usize),
-        }.min(max_fragment_size);
+        }
+        .min(max_fragment_size);
 
         // Check size limit
         if stream.total_accumulated.saturating_add(fragment_size) > stream.max_fragment_size {
@@ -432,7 +441,10 @@ impl MockH2HeaderConnection {
         self.stats.fragments_processed += 1;
         self.stats.total_fragment_bytes += fragment_size;
         self.stats.max_fragment_size_seen = self.stats.max_fragment_size_seen.max(fragment_size);
-        self.stats.max_accumulated_size_seen = self.stats.max_accumulated_size_seen.max(stream.total_accumulated);
+        self.stats.max_accumulated_size_seen = self
+            .stats
+            .max_accumulated_size_seen
+            .max(stream.total_accumulated);
 
         if cont.end_headers {
             self.stats.completed_headers += 1;
@@ -448,7 +460,11 @@ impl MockH2HeaderConnection {
         }
     }
 
-    fn process_concurrent_continuations(&mut self, base_stream_id: u32, concurrent: &ConcurrentContinuationsTest) -> FrameProcessResult {
+    fn process_concurrent_continuations(
+        &mut self,
+        base_stream_id: u32,
+        concurrent: &ConcurrentContinuationsTest,
+    ) -> FrameProcessResult {
         let continuation_count = concurrent.continuation_count.min(20); // Prevent excessive operations
         self.stats.concurrent_continuations += 1;
 
@@ -460,7 +476,8 @@ impl MockH2HeaderConnection {
                 base_stream_id
             };
 
-            let fragment_size = self.resolve_fragment_size(&concurrent.fragment_size, self.max_fragment_size());
+            let fragment_size =
+                self.resolve_fragment_size(&concurrent.fragment_size, self.max_fragment_size());
 
             // Simulate concurrent continuation
             let cont = ContinuationFrameTest {
@@ -470,13 +487,21 @@ impl MockH2HeaderConnection {
             };
 
             let result = self.process_continuation(stream_id, &cont);
-            if !matches!(result, FrameProcessResult::Accepted { .. } | FrameProcessResult::ContinuationComplete { .. }) {
+            if !matches!(
+                result,
+                FrameProcessResult::Accepted { .. }
+                    | FrameProcessResult::ContinuationComplete { .. }
+            ) {
                 return result;
             }
         }
 
         FrameProcessResult::ContinuationComplete {
-            total_size: self.streams.get(&base_stream_id).map(|s| s.total_accumulated).unwrap_or(0),
+            total_size: self
+                .streams
+                .get(&base_stream_id)
+                .map(|s| s.total_accumulated)
+                .unwrap_or(0),
             fragment_count: continuation_count as usize,
         }
     }
@@ -559,7 +584,9 @@ impl MockH2HeaderConnection {
             issues.push("Too many concurrent streams".to_string());
         }
 
-        let streams_expecting_continuation: usize = self.streams.values()
+        let streams_expecting_continuation: usize = self
+            .streams
+            .values()
             .filter(|s| s.expecting_continuation)
             .count();
 
@@ -593,7 +620,10 @@ fn test_size_limit_boundaries() {
     };
 
     let result = conn.process_frame_operation(&operation);
-    assert!(matches!(result, FrameProcessResult::ContinuationComplete { .. }));
+    assert!(matches!(
+        result,
+        FrameProcessResult::ContinuationComplete { .. }
+    ));
 
     // Test over limit
     let over_limit_operation = FrameOperation {
@@ -607,7 +637,10 @@ fn test_size_limit_boundaries() {
     };
 
     let over_result = conn.process_frame_operation(&over_limit_operation);
-    assert!(matches!(over_result, FrameProcessResult::SizeLimitExceeded { .. }));
+    assert!(matches!(
+        over_result,
+        FrameProcessResult::SizeLimitExceeded { .. }
+    ));
 }
 
 /// Test concurrent continuation sequences
@@ -646,13 +679,17 @@ fn test_concurrent_continuations() {
     };
 
     let result = conn.process_frame_operation(&concurrent_op);
-    assert!(matches!(result, FrameProcessResult::ContinuationComplete { .. }));
+    assert!(matches!(
+        result,
+        FrameProcessResult::ContinuationComplete { .. }
+    ));
 }
 
 fuzz_target!(|scenario: HeadersSizeConcurrentScenario| {
     // Limit operations to prevent timeouts
     let max_ops = scenario.max_operations.min(200);
-    let limited_ops: Vec<FrameOperation> = scenario.frame_operations
+    let limited_ops: Vec<FrameOperation> = scenario
+        .frame_operations
         .into_iter()
         .take(max_ops as usize)
         .collect();
@@ -669,15 +706,24 @@ fuzz_target!(|scenario: HeadersSizeConcurrentScenario| {
 
         // Validate result consistency
         match result {
-            FrameProcessResult::Accepted { bytes_added, total_accumulated } => {
+            FrameProcessResult::Accepted {
+                bytes_added,
+                total_accumulated,
+            } => {
                 assert!(bytes_added <= MAX_HEADER_FRAGMENT_SIZE);
                 assert!(total_accumulated <= MAX_HEADER_FRAGMENT_SIZE);
             }
-            FrameProcessResult::SizeLimitExceeded { attempted_size, limit } => {
+            FrameProcessResult::SizeLimitExceeded {
+                attempted_size,
+                limit,
+            } => {
                 assert!(attempted_size > limit || attempted_size.saturating_add(1) > limit);
                 assert!(limit <= MAX_HEADER_FRAGMENT_SIZE);
             }
-            FrameProcessResult::ContinuationComplete { total_size, fragment_count } => {
+            FrameProcessResult::ContinuationComplete {
+                total_size,
+                fragment_count,
+            } => {
                 assert!(total_size <= MAX_HEADER_FRAGMENT_SIZE);
                 assert!(fragment_count > 0);
                 assert!(fragment_count <= 1000); // Reasonable upper bound

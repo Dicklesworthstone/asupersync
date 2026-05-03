@@ -1,15 +1,15 @@
 #![no_main]
 
-use libfuzzer_sys::fuzz_target;
 use arbitrary::Arbitrary;
+use libfuzzer_sys::fuzz_target;
 use std::collections::HashMap;
 
 /// Test input structure for zero-length DATA frame scenarios
 #[derive(Arbitrary, Clone, Debug)]
 struct ZeroLengthDataInput {
-    stream_id: u32,           // Stream ID for the DATA frame
-    end_stream: bool,         // Whether to set END_STREAM flag
-    padded: bool,             // Whether to use PADDED flag (with zero padding)
+    stream_id: u32,                        // Stream ID for the DATA frame
+    end_stream: bool,                      // Whether to set END_STREAM flag
+    padded: bool,                          // Whether to use PADDED flag (with zero padding)
     preceding_frames: Vec<PrecedingFrame>, // Setup frames before DATA
     follow_up_frames: Vec<FollowUpFrame>,  // Frames after the zero-length DATA
 }
@@ -17,19 +17,47 @@ struct ZeroLengthDataInput {
 /// Frames that can precede the zero-length DATA frame
 #[derive(Arbitrary, Clone, Debug)]
 enum PrecedingFrame {
-    Headers { stream_id: u32, end_headers: bool, end_stream: bool },
-    Settings { parameters: Vec<(u16, u32)> },
-    WindowUpdate { stream_id: u32, increment: u32 },
-    Priority { stream_id: u32, dependency: u32, weight: u8, exclusive: bool },
+    Headers {
+        stream_id: u32,
+        end_headers: bool,
+        end_stream: bool,
+    },
+    Settings {
+        parameters: Vec<(u16, u32)>,
+    },
+    WindowUpdate {
+        stream_id: u32,
+        increment: u32,
+    },
+    Priority {
+        stream_id: u32,
+        dependency: u32,
+        weight: u8,
+        exclusive: bool,
+    },
 }
 
 /// Frames that can follow the zero-length DATA frame
 #[derive(Arbitrary, Clone, Debug)]
 enum FollowUpFrame {
-    Data { stream_id: u32, data: Vec<u8>, end_stream: bool },
-    Headers { stream_id: u32, end_headers: bool, end_stream: bool },
-    RstStream { stream_id: u32, error_code: u32 },
-    WindowUpdate { stream_id: u32, increment: u32 },
+    Data {
+        stream_id: u32,
+        data: Vec<u8>,
+        end_stream: bool,
+    },
+    Headers {
+        stream_id: u32,
+        end_headers: bool,
+        end_stream: bool,
+    },
+    RstStream {
+        stream_id: u32,
+        error_code: u32,
+    },
+    WindowUpdate {
+        stream_id: u32,
+        increment: u32,
+    },
 }
 
 /// Mock connection state to track DATA frame handling
@@ -135,7 +163,8 @@ impl MockZeroDataConnection {
         // Validate stream ID (must be non-zero for DATA frames)
         if stream_id == 0 {
             self.connection_error = Some(PROTOCOL_ERROR);
-            self.protocol_violations.push("DATA frame with stream ID 0".to_string());
+            self.protocol_violations
+                .push("DATA frame with stream ID 0".to_string());
             return;
         }
 
@@ -168,7 +197,8 @@ impl MockZeroDataConnection {
         let (data_length, flow_control_consumed) = if padded {
             if payload.is_empty() {
                 self.connection_error = Some(PROTOCOL_ERROR);
-                self.protocol_violations.push("PADDED DATA frame with no pad length".to_string());
+                self.protocol_violations
+                    .push("PADDED DATA frame with no pad length".to_string());
                 return;
             }
             let pad_length = payload[0] as usize;
@@ -176,7 +206,8 @@ impl MockZeroDataConnection {
                 self.connection_error = Some(PROTOCOL_ERROR);
                 self.protocol_violations.push(format!(
                     "PADDED DATA frame with pad length {} >= frame length {}",
-                    pad_length, payload.len()
+                    pad_length,
+                    payload.len()
                 ));
                 return;
             }
@@ -212,16 +243,16 @@ impl MockZeroDataConnection {
             // Check connection-level flow control
             if self.connection_window < flow_control_consumed as i32 {
                 self.connection_error = Some(FLOW_CONTROL_ERROR);
-                self.protocol_violations.push("Connection flow control window exceeded".to_string());
+                self.protocol_violations
+                    .push("Connection flow control window exceeded".to_string());
                 return;
             }
 
             // Check stream-level flow control
             if stream_state.flow_control_window < flow_control_consumed as i32 {
                 self.connection_error = Some(FLOW_CONTROL_ERROR);
-                self.protocol_violations.push(format!(
-                    "Stream {} flow control window exceeded", stream_id
-                ));
+                self.protocol_violations
+                    .push(format!("Stream {} flow control window exceeded", stream_id));
                 return;
             }
 
@@ -250,7 +281,8 @@ impl MockZeroDataConnection {
     fn process_headers_frame(&mut self, stream_id: u32, flags: u8, _payload: &[u8]) {
         if stream_id == 0 {
             self.connection_error = Some(PROTOCOL_ERROR);
-            self.protocol_violations.push("HEADERS frame with stream ID 0".to_string());
+            self.protocol_violations
+                .push("HEADERS frame with stream ID 0".to_string());
             return;
         }
 
@@ -282,13 +314,15 @@ impl MockZeroDataConnection {
     fn process_priority_frame(&mut self, stream_id: u32, payload: &[u8]) {
         if payload.len() != 5 {
             self.connection_error = Some(PROTOCOL_ERROR);
-            self.protocol_violations.push("PRIORITY frame with invalid length".to_string());
+            self.protocol_violations
+                .push("PRIORITY frame with invalid length".to_string());
             return;
         }
 
         if stream_id == 0 {
             self.connection_error = Some(PROTOCOL_ERROR);
-            self.protocol_violations.push("PRIORITY frame with stream ID 0".to_string());
+            self.protocol_violations
+                .push("PRIORITY frame with stream ID 0".to_string());
             return;
         }
 
@@ -298,13 +332,15 @@ impl MockZeroDataConnection {
     fn process_rst_stream_frame(&mut self, stream_id: u32, payload: &[u8]) {
         if payload.len() != 4 {
             self.connection_error = Some(PROTOCOL_ERROR);
-            self.protocol_violations.push("RST_STREAM frame with invalid length".to_string());
+            self.protocol_violations
+                .push("RST_STREAM frame with invalid length".to_string());
             return;
         }
 
         if stream_id == 0 {
             self.connection_error = Some(PROTOCOL_ERROR);
-            self.protocol_violations.push("RST_STREAM frame with stream ID 0".to_string());
+            self.protocol_violations
+                .push("RST_STREAM frame with stream ID 0".to_string());
             return;
         }
 
@@ -317,7 +353,8 @@ impl MockZeroDataConnection {
     fn process_settings_frame(&mut self, payload: &[u8]) {
         if payload.len() % 6 != 0 {
             self.connection_error = Some(PROTOCOL_ERROR);
-            self.protocol_violations.push("SETTINGS frame with invalid length".to_string());
+            self.protocol_violations
+                .push("SETTINGS frame with invalid length".to_string());
             return;
         }
         // SETTINGS frames don't affect zero-length DATA testing
@@ -326,7 +363,8 @@ impl MockZeroDataConnection {
     fn process_window_update_frame(&mut self, stream_id: u32, payload: &[u8]) {
         if payload.len() != 4 {
             self.connection_error = Some(PROTOCOL_ERROR);
-            self.protocol_violations.push("WINDOW_UPDATE frame with invalid length".to_string());
+            self.protocol_violations
+                .push("WINDOW_UPDATE frame with invalid length".to_string());
             return;
         }
 
@@ -334,7 +372,8 @@ impl MockZeroDataConnection {
 
         if increment == 0 {
             self.connection_error = Some(PROTOCOL_ERROR);
-            self.protocol_violations.push("WINDOW_UPDATE with zero increment".to_string());
+            self.protocol_violations
+                .push("WINDOW_UPDATE with zero increment".to_string());
             return;
         }
 
@@ -344,8 +383,9 @@ impl MockZeroDataConnection {
         } else {
             // Stream-level window update
             if let Some(stream_state) = self.stream_states.get_mut(&stream_id) {
-                stream_state.flow_control_window =
-                    stream_state.flow_control_window.saturating_add(increment as i32);
+                stream_state.flow_control_window = stream_state
+                    .flow_control_window
+                    .saturating_add(increment as i32);
             }
         }
     }
@@ -367,13 +407,15 @@ impl MockZeroDataConnection {
     }
 
     fn count_zero_data_with_end_stream(&self) -> usize {
-        self.zero_data_frames_received.iter()
+        self.zero_data_frames_received
+            .iter()
             .filter(|f| f.end_stream)
             .count()
     }
 
     fn count_zero_data_without_end_stream(&self) -> usize {
-        self.zero_data_frames_received.iter()
+        self.zero_data_frames_received
+            .iter()
             .filter(|f| !f.end_stream)
             .count()
     }
@@ -382,10 +424,18 @@ impl MockZeroDataConnection {
 /// Send a preceding frame to set up the connection state
 fn send_preceding_frame(conn: &mut MockZeroDataConnection, frame: &PrecedingFrame) {
     match frame {
-        PrecedingFrame::Headers { stream_id, end_headers, end_stream } => {
+        PrecedingFrame::Headers {
+            stream_id,
+            end_headers,
+            end_stream,
+        } => {
             let mut flags = 0;
-            if *end_headers { flags |= FLAG_END_HEADERS; }
-            if *end_stream { flags |= FLAG_END_STREAM; }
+            if *end_headers {
+                flags |= FLAG_END_HEADERS;
+            }
+            if *end_stream {
+                flags |= FLAG_END_STREAM;
+            }
             conn.process_frame(FRAME_TYPE_HEADERS, *stream_id, flags, b"headers");
         }
         PrecedingFrame::Settings { parameters } => {
@@ -396,13 +446,25 @@ fn send_preceding_frame(conn: &mut MockZeroDataConnection, frame: &PrecedingFram
             }
             conn.process_frame(FRAME_TYPE_SETTINGS, 0, 0, &payload);
         }
-        PrecedingFrame::WindowUpdate { stream_id, increment } => {
+        PrecedingFrame::WindowUpdate {
+            stream_id,
+            increment,
+        } => {
             let payload = increment.to_be_bytes().to_vec();
             conn.process_frame(FRAME_TYPE_WINDOW_UPDATE, *stream_id, 0, &payload);
         }
-        PrecedingFrame::Priority { stream_id, dependency, weight, exclusive } => {
+        PrecedingFrame::Priority {
+            stream_id,
+            dependency,
+            weight,
+            exclusive,
+        } => {
             let mut payload = Vec::new();
-            let dep_field = if *exclusive { *dependency | 0x80000000 } else { *dependency };
+            let dep_field = if *exclusive {
+                *dependency | 0x80000000
+            } else {
+                *dependency
+            };
             payload.extend_from_slice(&dep_field.to_be_bytes());
             payload.push(*weight);
             conn.process_frame(FRAME_TYPE_PRIORITY, *stream_id, 0, &payload);
@@ -413,21 +475,39 @@ fn send_preceding_frame(conn: &mut MockZeroDataConnection, frame: &PrecedingFram
 /// Send a follow-up frame after the zero-length DATA
 fn send_follow_up_frame(conn: &mut MockZeroDataConnection, frame: &FollowUpFrame) {
     match frame {
-        FollowUpFrame::Data { stream_id, data, end_stream } => {
+        FollowUpFrame::Data {
+            stream_id,
+            data,
+            end_stream,
+        } => {
             let flags = if *end_stream { FLAG_END_STREAM } else { 0 };
             conn.process_frame(FRAME_TYPE_DATA, *stream_id, flags, data);
         }
-        FollowUpFrame::Headers { stream_id, end_headers, end_stream } => {
+        FollowUpFrame::Headers {
+            stream_id,
+            end_headers,
+            end_stream,
+        } => {
             let mut flags = 0;
-            if *end_headers { flags |= FLAG_END_HEADERS; }
-            if *end_stream { flags |= FLAG_END_STREAM; }
+            if *end_headers {
+                flags |= FLAG_END_HEADERS;
+            }
+            if *end_stream {
+                flags |= FLAG_END_STREAM;
+            }
             conn.process_frame(FRAME_TYPE_HEADERS, *stream_id, flags, b"headers");
         }
-        FollowUpFrame::RstStream { stream_id, error_code } => {
+        FollowUpFrame::RstStream {
+            stream_id,
+            error_code,
+        } => {
             let payload = error_code.to_be_bytes().to_vec();
             conn.process_frame(FRAME_TYPE_RST_STREAM, *stream_id, 0, &payload);
         }
-        FollowUpFrame::WindowUpdate { stream_id, increment } => {
+        FollowUpFrame::WindowUpdate {
+            stream_id,
+            increment,
+        } => {
             let payload = increment.to_be_bytes().to_vec();
             conn.process_frame(FRAME_TYPE_WINDOW_UPDATE, *stream_id, 0, &payload);
         }
@@ -508,10 +588,15 @@ fuzz_target!(|input: ZeroLengthDataInput| {
     // Verify the recorded frame info
     let last_frame = &conn.get_zero_data_frames()[final_zero_frames - 1];
     assert_eq!(last_frame.stream_id, stream_id, "Stream ID mismatch");
-    assert_eq!(last_frame.end_stream, input.end_stream, "END_STREAM flag mismatch");
+    assert_eq!(
+        last_frame.end_stream, input.end_stream,
+        "END_STREAM flag mismatch"
+    );
     assert_eq!(last_frame.padded, input.padded, "PADDED flag mismatch");
-    assert_eq!(last_frame.flow_control_consumed, expected_flow_control,
-        "Flow control consumption mismatch");
+    assert_eq!(
+        last_frame.flow_control_consumed, expected_flow_control,
+        "Flow control consumption mismatch"
+    );
 
     // Send follow-up frames to test continued operation
     for frame in &input.follow_up_frames {
@@ -619,9 +704,19 @@ fn test_zero_length_scenarios(input: &ZeroLengthDataInput, stream_id: u32) {
         conn.process_frame(FRAME_TYPE_HEADERS, stream_id, FLAG_END_HEADERS, b"headers");
 
         // WINDOW_UPDATE → zero-length DATA → WINDOW_UPDATE
-        conn.process_frame(FRAME_TYPE_WINDOW_UPDATE, stream_id, 0, &1000u32.to_be_bytes());
+        conn.process_frame(
+            FRAME_TYPE_WINDOW_UPDATE,
+            stream_id,
+            0,
+            &1000u32.to_be_bytes(),
+        );
         conn.process_frame(FRAME_TYPE_DATA, stream_id, FLAG_END_STREAM, &[]);
-        conn.process_frame(FRAME_TYPE_WINDOW_UPDATE, stream_id, 0, &1000u32.to_be_bytes());
+        conn.process_frame(
+            FRAME_TYPE_WINDOW_UPDATE,
+            stream_id,
+            0,
+            &1000u32.to_be_bytes(),
+        );
 
         assert!(
             !conn.has_protocol_error(),
@@ -630,7 +725,8 @@ fn test_zero_length_scenarios(input: &ZeroLengthDataInput, stream_id: u32) {
     }
 
     // Scenario 7: Zero-length DATA on different stream IDs
-    if stream_id < 0x7FFFFFFD { // Leave room for stream_id + 2
+    if stream_id < 0x7FFFFFFD {
+        // Leave room for stream_id + 2
         let mut conn = MockZeroDataConnection::new();
         let stream2 = stream_id + 2; // Another client-initiated stream
 
@@ -656,8 +752,16 @@ fn test_zero_length_scenarios(input: &ZeroLengthDataInput, stream_id: u32) {
 
         // Zero-length frame still participates in flow control if PADDED
         if input.padded {
-            conn.process_frame(FRAME_TYPE_DATA, stream_id, FLAG_PADDED | FLAG_END_STREAM, &[0]);
-            assert!(!conn.has_protocol_error(), "Zero-length PADDED DATA must respect flow control");
+            conn.process_frame(
+                FRAME_TYPE_DATA,
+                stream_id,
+                FLAG_PADDED | FLAG_END_STREAM,
+                &[0],
+            );
+            assert!(
+                !conn.has_protocol_error(),
+                "Zero-length PADDED DATA must respect flow control"
+            );
         }
     }
 }

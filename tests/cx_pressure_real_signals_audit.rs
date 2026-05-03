@@ -192,7 +192,8 @@ fn collect_memory_usage_reads_real_platform_rss() {
     // constant.
     let source = read("src/runtime/resource_monitor.rs");
 
-    let fn_marker = "fn collect_memory_usage(&self) -> Result<ResourceMeasurement, ResourceMonitorError> {";
+    let fn_marker =
+        "fn collect_memory_usage(&self) -> Result<ResourceMeasurement, ResourceMonitorError> {";
     let start = source.find(fn_marker).expect("collect_memory_usage fn");
     let body_end = source[start..]
         .find("\n    }\n")
@@ -314,7 +315,9 @@ fn composite_degradation_level_takes_max_across_resource_types() {
     let source = read("src/runtime/resource_monitor.rs");
 
     let fn_marker = "pub fn composite_degradation_level(&self) -> DegradationLevel {";
-    let start = source.find(fn_marker).expect("composite_degradation_level fn");
+    let start = source
+        .find(fn_marker)
+        .expect("composite_degradation_level fn");
     let body_end = source[start..]
         .find("\n    }\n")
         .expect("composite_degradation_level close");
@@ -377,8 +380,9 @@ fn system_pressure_set_headroom_writes_via_atomic_store() {
     let body = &source[start..start + body_end];
 
     assert!(
-        body.contains("self.headroom_bits\n            .store(clamped.to_bits(), Ordering::Relaxed);")
-            || body.contains(".store(clamped.to_bits(), Ordering::Relaxed);"),
+        body.contains(
+            "self.headroom_bits\n            .store(clamped.to_bits(), Ordering::Relaxed);"
+        ) || body.contains(".store(clamped.to_bits(), Ordering::Relaxed);"),
         "REGRESSION: set_headroom no longer publishes via \
          atomic store. Either a lock is involved (collector-\
          side contention) or the write is non-atomic (data \
@@ -429,9 +433,7 @@ fn no_constant_or_stub_headroom_returned_from_pressure() {
 
 #[test]
 fn cross_reference_to_prior_audits() {
-    let prior_audits = [
-        "tests/cx_has_capacity_backpressure_query_audit.rs",
-    ];
+    let prior_audits = ["tests/cx_has_capacity_backpressure_query_audit.rs"];
 
     for audit in &prior_audits {
         let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(audit);

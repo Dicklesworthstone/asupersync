@@ -149,13 +149,15 @@ fuzz_target!(|data: &[u8]| {
     // Limit frames and operations for performance
     if test_case.settings_frames.len() > 10
         || test_case.ack_delays.len() > 10
-        || test_case.connection_state.pending_operations.len() > 20 {
+        || test_case.connection_state.pending_operations.len() > 20
+    {
         return;
     }
 
     // Limit timeout values to reasonable ranges
     if test_case.timeout_config.settings_ack_timeout_ms > 60_000
-        || test_case.timeout_config.idle_timeout_ms > 300_000 {
+        || test_case.timeout_config.idle_timeout_ms > 300_000
+    {
         return;
     }
 
@@ -194,8 +196,11 @@ fn test_settings_ack_timeout(test_case: &SettingsAckTimeoutTest) {
             mock_connection.send_settings_frame(settings_frame.clone())
         }));
 
-        assert!(send_result.is_ok(),
-            "Sending SETTINGS frame {} should not panic", i);
+        assert!(
+            send_result.is_ok(),
+            "Sending SETTINGS frame {} should not panic",
+            i
+        );
 
         if let Ok(settings_result) = send_result {
             match settings_result {
@@ -231,13 +236,18 @@ fn test_settings_ack_timeout(test_case: &SettingsAckTimeoutTest) {
                 ConnectionStatus::Open => {
                     // Connection might still be open if implementation is lenient
                     // but GOAWAY should have been sent
-                    assert!(mock_connection.goaway_sent(),
-                        "GOAWAY should be sent after SETTINGS ACK timeout");
+                    assert!(
+                        mock_connection.goaway_sent(),
+                        "GOAWAY should be sent after SETTINGS ACK timeout"
+                    );
                 }
                 ConnectionStatus::GoAway { error_code } => {
                     // Connection terminated due to timeout
-                    assert_eq!(error_code, H2ErrorCode::SettingsTimeout,
-                        "GOAWAY should use SETTINGS_TIMEOUT error code");
+                    assert_eq!(
+                        error_code,
+                        H2ErrorCode::SettingsTimeout,
+                        "GOAWAY should use SETTINGS_TIMEOUT error code"
+                    );
                 }
                 ConnectionStatus::Closed => {
                     // Connection closed after timeout
@@ -252,8 +262,10 @@ fn test_settings_ack_timeout(test_case: &SettingsAckTimeoutTest) {
             };
 
             if !ack_delay.malformed_ack {
-                assert!(matches!(ack_result, AckResult::Accepted),
-                    "Valid SETTINGS ACK should be accepted");
+                assert!(
+                    matches!(ack_result, AckResult::Accepted),
+                    "Valid SETTINGS ACK should be accepted"
+                );
             }
         }
     }
@@ -263,16 +275,21 @@ fn test_settings_ack_timeout(test_case: &SettingsAckTimeoutTest) {
     let goaway_sent = mock_connection.goaway_sent();
 
     // If any SETTINGS ACK timed out, connection should be in error state
-    let has_timeouts = test_case.ack_delays.iter().enumerate()
-        .any(|(i, delay)| {
-            i < pending_settings.len() &&
-            delay.delay_ms > test_case.timeout_config.settings_ack_timeout_ms &&
-            !delay.send_ack
-        });
+    let has_timeouts = test_case.ack_delays.iter().enumerate().any(|(i, delay)| {
+        i < pending_settings.len()
+            && delay.delay_ms > test_case.timeout_config.settings_ack_timeout_ms
+            && !delay.send_ack
+    });
 
     if has_timeouts {
-        assert!(goaway_sent || matches!(final_state, ConnectionStatus::GoAway { .. } | ConnectionStatus::Closed),
-            "Connection should be terminated after SETTINGS ACK timeout");
+        assert!(
+            goaway_sent
+                || matches!(
+                    final_state,
+                    ConnectionStatus::GoAway { .. } | ConnectionStatus::Closed
+                ),
+            "Connection should be terminated after SETTINGS ACK timeout"
+        );
     }
 }
 
@@ -287,7 +304,9 @@ fn test_multiple_pending_settings(test_case: &SettingsAckTimeoutTest) {
     // Send multiple SETTINGS frames quickly
     let mut settings_ids = Vec::new();
     for settings_frame in &test_case.settings_frames {
-        if settings_frame.ack || settings_ids.len() >= test_case.timeout_config.max_pending_settings as usize {
+        if settings_frame.ack
+            || settings_ids.len() >= test_case.timeout_config.max_pending_settings as usize
+        {
             break;
         }
 
@@ -302,8 +321,10 @@ fn test_multiple_pending_settings(test_case: &SettingsAckTimeoutTest) {
         let state = mock_connection.get_connection_state();
         // Implementation may limit pending SETTINGS or close connection
         if !matches!(state, ConnectionStatus::Open) {
-            assert!(mock_connection.goaway_sent(),
-                "Should send GOAWAY if too many pending SETTINGS");
+            assert!(
+                mock_connection.goaway_sent(),
+                "Should send GOAWAY if too many pending SETTINGS"
+            );
         }
     }
 
@@ -345,17 +366,24 @@ fn test_goaway_after_timeout(test_case: &SettingsAckTimeoutTest) {
     mock_connection.advance_time(Duration::from_millis(timeout_ms as u64));
 
     // Check GOAWAY was sent
-    assert!(mock_connection.goaway_sent(),
-        "GOAWAY should be sent after SETTINGS ACK timeout");
+    assert!(
+        mock_connection.goaway_sent(),
+        "GOAWAY should be sent after SETTINGS ACK timeout"
+    );
 
     let goaway_info = mock_connection.get_goaway_info();
     if let Some(goaway) = goaway_info {
-        assert_eq!(goaway.error_code, H2ErrorCode::SettingsTimeout,
-            "GOAWAY should indicate SETTINGS_TIMEOUT");
+        assert_eq!(
+            goaway.error_code,
+            H2ErrorCode::SettingsTimeout,
+            "GOAWAY should indicate SETTINGS_TIMEOUT"
+        );
 
         // Last stream ID should be set appropriately
-        assert!(goaway.last_stream_id <= mock_connection.get_last_stream_id(),
-            "GOAWAY last_stream_id should not exceed actual last stream");
+        assert!(
+            goaway.last_stream_id <= mock_connection.get_last_stream_id(),
+            "GOAWAY last_stream_id should not exceed actual last stream"
+        );
     }
 
     // Connection should reject new streams after GOAWAY
@@ -363,10 +391,15 @@ fn test_goaway_after_timeout(test_case: &SettingsAckTimeoutTest) {
         mock_connection.try_open_stream(999)
     }));
 
-    assert!(new_stream_result.is_ok(), "Opening stream after GOAWAY should not panic");
+    assert!(
+        new_stream_result.is_ok(),
+        "Opening stream after GOAWAY should not panic"
+    );
     if let Ok(stream_result) = new_stream_result {
-        assert!(matches!(stream_result, StreamResult::Rejected { .. }),
-            "New streams should be rejected after GOAWAY");
+        assert!(
+            matches!(stream_result, StreamResult::Rejected { .. }),
+            "New streams should be rejected after GOAWAY"
+        );
     }
 }
 
@@ -414,8 +447,10 @@ fn test_connection_cleanup_after_timeout(test_case: &SettingsAckTimeoutTest) {
     });
 
     if mock_connection.goaway_sent() {
-        assert!(matches!(new_op_result, OperationResult::Rejected { .. }),
-            "New operations should be rejected after GOAWAY");
+        assert!(
+            matches!(new_op_result, OperationResult::Rejected { .. }),
+            "New operations should be rejected after GOAWAY"
+        );
     }
 }
 
@@ -443,10 +478,15 @@ fn test_settings_timeout_edge_cases(test_case: &SettingsAckTimeoutTest) {
         mock_connection.send_settings_ack(999) // Non-existent settings ID
     }));
 
-    assert!(orphan_ack_result.is_ok(), "Orphan SETTINGS ACK should not panic");
+    assert!(
+        orphan_ack_result.is_ok(),
+        "Orphan SETTINGS ACK should not panic"
+    );
     if let Ok(ack_result) = orphan_ack_result {
-        assert!(matches!(ack_result, AckResult::Ignored | AckResult::Rejected { .. }),
-            "Orphan SETTINGS ACK should be ignored or rejected");
+        assert!(
+            matches!(ack_result, AckResult::Ignored | AckResult::Rejected { .. }),
+            "Orphan SETTINGS ACK should be ignored or rejected"
+        );
     }
 
     // Test SETTINGS with invalid values
@@ -481,10 +521,12 @@ fn test_settings_timeout_edge_cases(test_case: &SettingsAckTimeoutTest) {
     }
 
     // Test very large SETTINGS frame
-    let large_settings: Vec<Setting> = (0..100).map(|i| Setting {
-        id: SettingId::Unknown(i),
-        value: i as u32,
-    }).collect();
+    let large_settings: Vec<Setting> = (0..100)
+        .map(|i| Setting {
+            id: SettingId::Unknown(i),
+            value: i as u32,
+        })
+        .collect();
 
     let large_frame = SettingsFrame {
         settings: large_settings,
@@ -496,7 +538,10 @@ fn test_settings_timeout_edge_cases(test_case: &SettingsAckTimeoutTest) {
         mock_connection.send_settings_frame(large_frame)
     }));
 
-    assert!(large_result.is_ok(), "Large SETTINGS frame should not panic");
+    assert!(
+        large_result.is_ok(),
+        "Large SETTINGS frame should not panic"
+    );
 }
 
 impl SettingId {
@@ -515,13 +560,11 @@ impl SettingId {
 
 /// Check if SETTINGS contain invalid values
 fn has_invalid_settings(settings: &[Setting]) -> bool {
-    settings.iter().any(|setting| {
-        match setting.id {
-            SettingId::EnablePush => setting.value > 1,
-            SettingId::InitialWindowSize => setting.value > 0x7FFFFFFF,
-            SettingId::MaxFrameSize => setting.value < 16384 || setting.value > 0xFFFFFF,
-            _ => false,
-        }
+    settings.iter().any(|setting| match setting.id {
+        SettingId::EnablePush => setting.value > 1,
+        SettingId::InitialWindowSize => setting.value > 0x7FFFFFFF,
+        SettingId::MaxFrameSize => setting.value < 16384 || setting.value > 0xFFFFFF,
+        _ => false,
     })
 }
 
@@ -694,7 +737,8 @@ impl MockH2Connection {
     }
 
     fn check_timeouts(&mut self) {
-        let timeout_duration = Duration::from_millis(self.timeout_config.settings_ack_timeout_ms as u64);
+        let timeout_duration =
+            Duration::from_millis(self.timeout_config.settings_ack_timeout_ms as u64);
         let mut timed_out = Vec::new();
 
         for (settings_id, sent_time) in &self.pending_settings {
@@ -779,23 +823,19 @@ fn generate_timeout_scenarios() -> Vec<SettingsAckTimeoutTest> {
     vec![
         // Basic timeout scenario
         SettingsAckTimeoutTest {
-            settings_frames: vec![
-                SettingsFrame {
-                    settings: vec![Setting {
-                        id: SettingId::InitialWindowSize,
-                        value: 32768,
-                    }],
-                    ack: false,
-                    extra_data: vec![],
-                }
-            ],
-            ack_delays: vec![
-                AckDelay {
-                    delay_ms: 6000, // Longer than typical timeout
-                    send_ack: false,
-                    malformed_ack: false,
-                }
-            ],
+            settings_frames: vec![SettingsFrame {
+                settings: vec![Setting {
+                    id: SettingId::InitialWindowSize,
+                    value: 32768,
+                }],
+                ack: false,
+                extra_data: vec![],
+            }],
+            ack_delays: vec![AckDelay {
+                delay_ms: 6000, // Longer than typical timeout
+                send_ack: false,
+                malformed_ack: false,
+            }],
             timeout_config: TimeoutConfig {
                 settings_ack_timeout_ms: 5000,
                 idle_timeout_ms: 30000,
@@ -809,7 +849,6 @@ fn generate_timeout_scenarios() -> Vec<SettingsAckTimeoutTest> {
                 pending_operations: vec![],
             },
         },
-
         // Multiple SETTINGS with mixed ACK behavior
         SettingsAckTimeoutTest {
             settings_frames: vec![
@@ -852,13 +891,11 @@ fn generate_timeout_scenarios() -> Vec<SettingsAckTimeoutTest> {
                 window_size: 32768,
                 max_concurrent_streams: 50,
                 error_state: false,
-                pending_operations: vec![
-                    StreamOperation {
-                        stream_id: 1,
-                        operation: StreamOpType::SendData,
-                        data_size: 1024,
-                    }
-                ],
+                pending_operations: vec![StreamOperation {
+                    stream_id: 1,
+                    operation: StreamOpType::SendData,
+                    data_size: 1024,
+                }],
             },
         },
     ]

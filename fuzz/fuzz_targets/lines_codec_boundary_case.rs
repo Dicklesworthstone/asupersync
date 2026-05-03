@@ -24,10 +24,10 @@ use libfuzzer_sys::fuzz_target;
 /// Line ending types for structure-aware generation
 #[derive(Arbitrary, Debug, Clone, Copy)]
 enum LineEnding {
-    Lf,      // \n
-    Crlf,    // \r\n
-    Cr,      // \r (bare CR, should NOT be treated as line ending)
-    None,    // No line ending
+    Lf,   // \n
+    Crlf, // \r\n
+    Cr,   // \r (bare CR, should NOT be treated as line ending)
+    None, // No line ending
 }
 
 impl LineEnding {
@@ -49,7 +49,7 @@ impl LineEnding {
 #[derive(Arbitrary, Debug, Clone)]
 struct LineSegment {
     /// Content length relative to max_length boundary
-    length_offset: i8,  // -10 to +10 relative to max_length
+    length_offset: i8, // -10 to +10 relative to max_length
     /// Line ending type
     ending: LineEnding,
     /// Content byte (repeated to make the line)
@@ -60,7 +60,7 @@ struct LineSegment {
 #[derive(Arbitrary, Debug)]
 struct BoundaryFuzzInput {
     /// Max length to test (small values for boundary testing)
-    max_length: u8,  // 1-255, will be clamped appropriately
+    max_length: u8, // 1-255, will be clamped appropriately
     /// Multiple line segments to test transitions
     segments: Vec<LineSegment>,
     /// Whether to test chunked delivery
@@ -249,9 +249,30 @@ fn test_state_transitions(_input: &BoundaryFuzzInput, max_length: usize, buffer:
 fn test_mixed_endings(input: &BoundaryFuzzInput, max_length: usize, buffer: &[u8]) {
     // Test with a known mix of line endings to verify consistent behavior
     let test_patterns = [
-        format!("a{}", LineEnding::Lf.bytes().iter().map(|&b| b as char).collect::<String>()),
-        format!("b{}", LineEnding::Crlf.bytes().iter().map(|&b| b as char).collect::<String>()),
-        format!("c{}", LineEnding::Cr.bytes().iter().map(|&b| b as char).collect::<String>()),
+        format!(
+            "a{}",
+            LineEnding::Lf
+                .bytes()
+                .iter()
+                .map(|&b| b as char)
+                .collect::<String>()
+        ),
+        format!(
+            "b{}",
+            LineEnding::Crlf
+                .bytes()
+                .iter()
+                .map(|&b| b as char)
+                .collect::<String>()
+        ),
+        format!(
+            "c{}",
+            LineEnding::Cr
+                .bytes()
+                .iter()
+                .map(|&b| b as char)
+                .collect::<String>()
+        ),
     ];
 
     for pattern in test_patterns {

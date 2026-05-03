@@ -4,7 +4,7 @@ use arbitrary::Arbitrary;
 use libfuzzer_sys::fuzz_target;
 
 use asupersync::http::h3_native::{
-    qpack_encode_field_section, qpack_decode_field_section, QpackFieldPlan, H3QpackMode,
+    H3QpackMode, QpackFieldPlan, qpack_decode_field_section, qpack_encode_field_section,
 };
 
 /// Structure-aware fuzz input for QPACK Huffman literal-name encoding
@@ -36,9 +36,7 @@ enum EncodingScenario {
         boundary_strings: Vec<BoundaryTestString>,
     },
     /// Test edge cases in string encoding
-    EdgeCases {
-        edge_strings: Vec<EdgeCaseString>,
-    },
+    EdgeCases { edge_strings: Vec<EdgeCaseString> },
 }
 
 #[derive(Arbitrary, Debug, Clone)]
@@ -88,7 +86,7 @@ enum FieldPlanVariant {
     /// Literal field with both name and value as literals
     Literal { name: String, value: String },
     /// Static index reference
-    StaticIndex(u8),  // Limited to valid range 0-98
+    StaticIndex(u8), // Limited to valid range 0-98
 }
 
 /// Size limits to prevent OOM during fuzzing
@@ -129,7 +127,10 @@ fn test_huffman_encoding_scenarios(input: &QpackHuffmanLiteralFuzz) {
     match encode_result {
         Ok(encoded) => {
             // Successful encoding - verify it's valid QPACK
-            assert!(!encoded.is_empty(), "Encoded field section should not be empty");
+            assert!(
+                !encoded.is_empty(),
+                "Encoded field section should not be empty"
+            );
 
             // Verify the encoded bytes can be decoded back
             let decode_result = qpack_decode_field_section(&encoded, H3QpackMode::StaticOnly);
@@ -156,7 +157,8 @@ fn test_round_trip_consistency(input: &QpackHuffmanLiteralFuzz) {
     let field_plans = convert_to_field_plans(&input.field_plans, &input.scenario);
 
     // Only test round-trip for valid field plans
-    let valid_plans: Vec<_> = field_plans.into_iter()
+    let valid_plans: Vec<_> = field_plans
+        .into_iter()
         .filter(|plan| is_valid_field_plan(plan))
         .collect();
 
@@ -196,7 +198,7 @@ fn test_string_encoding_edge_cases(input: &QpackHuffmanLiteralFuzz) {
 /// Convert fuzz input to QpackFieldPlan
 fn convert_to_field_plans(
     field_plans: &[FieldPlanVariant],
-    scenario: &EncodingScenario
+    scenario: &EncodingScenario,
 ) -> Vec<QpackFieldPlan> {
     let mut plans = Vec::new();
 
@@ -212,9 +214,13 @@ fn convert_to_field_plans(
                 }
             }
         }
-        EncodingScenario::Mixed { static_indices, literal_pairs } => {
+        EncodingScenario::Mixed {
+            static_indices,
+            literal_pairs,
+        } => {
             for &index in static_indices {
-                if index <= 98 {  // Valid static table range
+                if index <= 98 {
+                    // Valid static table range
                     plans.push(QpackFieldPlan::StaticIndex(index as u64));
                 }
             }
@@ -291,14 +297,25 @@ fn is_valid_field_plan(plan: &QpackFieldPlan) -> bool {
 /// Verify logical consistency between original and decoded field plans
 fn verify_logical_consistency(original: &[QpackFieldPlan], decoded: &[QpackFieldPlan]) {
     // The number of fields should match
-    assert_eq!(original.len(), decoded.len(),
-        "Field count mismatch after round-trip");
+    assert_eq!(
+        original.len(),
+        decoded.len(),
+        "Field count mismatch after round-trip"
+    );
 
     // Each field should be logically equivalent
     for (orig, dec) in original.iter().zip(decoded.iter()) {
         match (orig, dec) {
-            (QpackFieldPlan::Literal { name: n1, value: v1 },
-             QpackFieldPlan::Literal { name: n2, value: v2 }) => {
+            (
+                QpackFieldPlan::Literal {
+                    name: n1,
+                    value: v1,
+                },
+                QpackFieldPlan::Literal {
+                    name: n2,
+                    value: v2,
+                },
+            ) => {
                 assert_eq!(n1, n2, "Literal name mismatch after round-trip");
                 assert_eq!(v1, v2, "Literal value mismatch after round-trip");
             }

@@ -1,7 +1,7 @@
 #![no_main]
 
-use libfuzzer_sys::fuzz_target;
 use arbitrary::Arbitrary;
+use libfuzzer_sys::fuzz_target;
 use std::collections::HashMap;
 
 /// Fuzz target for HTTP/2 HEADERS+CONTINUATION header-block size overflow detection.
@@ -137,7 +137,7 @@ impl Default for HeaderProcessingPolicy {
     fn default() -> Self {
         Self {
             enforce_max_header_list_size: true,
-            max_continuation_frames: 1000, // Prevent DoS
+            max_continuation_frames: 1000,      // Prevent DoS
             max_header_block_size: 1024 * 1024, // 1MB max block size
             allow_empty_fragments: true,
         }
@@ -178,7 +178,7 @@ impl MockHeaderProcessor {
         // Validate stream ID
         if stream_id == 0 {
             return Ok(HeaderProcessResult::ProtocolError(
-                "Stream ID cannot be 0 for HEADERS/CONTINUATION".to_string()
+                "Stream ID cannot be 0 for HEADERS/CONTINUATION".to_string(),
             ));
         }
 
@@ -193,7 +193,7 @@ impl MockHeaderProcessor {
         }
 
         Ok(HeaderProcessResult::ProtocolError(
-            "Unknown frame type".to_string()
+            "Unknown frame type".to_string(),
         ))
     }
 
@@ -207,21 +207,21 @@ impl MockHeaderProcessor {
         // If there's an existing incomplete block, that's a protocol error
         if self.active_streams.contains_key(&stream_id) {
             return Ok(HeaderProcessResult::ProtocolError(
-                "HEADERS frame received while header block incomplete".to_string()
+                "HEADERS frame received while header block incomplete".to_string(),
             ));
         }
 
         // Check if we can handle another stream
         if self.active_streams.len() >= self.settings.max_concurrent_streams as usize {
             return Ok(HeaderProcessResult::ProtocolError(
-                "Too many concurrent streams".to_string()
+                "Too many concurrent streams".to_string(),
             ));
         }
 
         // Check frame size limit
         if frame.header_block_fragment.len() > self.settings.max_frame_size as usize {
             return Ok(HeaderProcessResult::ProtocolError(
-                "Frame size exceeds SETTINGS_MAX_FRAME_SIZE".to_string()
+                "Frame size exceeds SETTINGS_MAX_FRAME_SIZE".to_string(),
             ));
         }
 
@@ -263,14 +263,16 @@ impl MockHeaderProcessor {
         frame: &HeaderFrame,
     ) -> Result<HeaderProcessResult, HeaderOverflowError> {
         // CONTINUATION must follow HEADERS or another CONTINUATION
-        let mut state = self.active_streams.get(&stream_id)
+        let mut state = self
+            .active_streams
+            .get(&stream_id)
             .cloned()
             .ok_or(HeaderOverflowError::InvalidFrameSequence)?;
 
         // Check frame size limit
         if frame.header_block_fragment.len() > self.settings.max_frame_size as usize {
             return Ok(HeaderProcessResult::ProtocolError(
-                "Frame size exceeds SETTINGS_MAX_FRAME_SIZE".to_string()
+                "Frame size exceeds SETTINGS_MAX_FRAME_SIZE".to_string(),
             ));
         }
 
@@ -282,12 +284,14 @@ impl MockHeaderProcessor {
         // Handle empty fragments
         if frame.header_block_fragment.is_empty() && !self.policy.allow_empty_fragments {
             return Ok(HeaderProcessResult::ProtocolError(
-                "Empty header block fragment not allowed".to_string()
+                "Empty header block fragment not allowed".to_string(),
             ));
         }
 
         // Accumulate header block fragment
-        state.accumulated_data.extend_from_slice(&frame.header_block_fragment);
+        state
+            .accumulated_data
+            .extend_from_slice(&frame.header_block_fragment);
         state.current_size += frame.header_block_fragment.len();
         state.frames_processed += 1;
         state.stats.continuation_frames += 1;
@@ -326,7 +330,7 @@ impl MockHeaderProcessor {
                     HeaderOverflowError::ExceedsMaxHeaderListSize {
                         actual: state.current_size,
                         limit: self.settings.max_header_list_size,
-                    }
+                    },
                 )));
             }
         }
@@ -334,7 +338,7 @@ impl MockHeaderProcessor {
         // Check maximum header block size (implementation limit)
         if state.current_size > self.policy.max_header_block_size {
             return Ok(Some(HeaderProcessResult::OverflowError(
-                HeaderOverflowError::HeaderBlockTooLarge
+                HeaderOverflowError::HeaderBlockTooLarge,
             )));
         }
 
@@ -393,13 +397,11 @@ fn generate_test_cases() -> Vec<(String, u32, Vec<HeaderFrame>, HeaderProcessRes
         (
             "Single HEADERS within limit".to_string(),
             8192, // 8KB limit
-            vec![
-                HeaderFrame {
-                    frame_type: FrameType::Headers,
-                    header_block_fragment: vec![0x42; 4096], // 4KB header block
-                    end_headers: true,
-                }
-            ],
+            vec![HeaderFrame {
+                frame_type: FrameType::Headers,
+                header_block_fragment: vec![0x42; 4096], // 4KB header block
+                end_headers: true,
+            }],
             HeaderProcessResult::Success(HeaderBlockState {
                 accumulated_data: vec![0x42; 4096],
                 current_size: 4096,
@@ -412,9 +414,8 @@ fn generate_test_cases() -> Vec<(String, u32, Vec<HeaderFrame>, HeaderProcessRes
                     peak_size: 4096,
                     overflow_checks: 1,
                 },
-            })
+            }),
         ),
-
         // Test case 2: HEADERS + CONTINUATION exceeding limit
         (
             "HEADERS + CONTINUATION exceeding limit".to_string(),
@@ -429,16 +430,13 @@ fn generate_test_cases() -> Vec<(String, u32, Vec<HeaderFrame>, HeaderProcessRes
                     frame_type: FrameType::Continuation,
                     header_block_fragment: vec![0x42; 5000], // 5KB (total 9KB > 8KB limit)
                     end_headers: true,
-                }
+                },
             ],
-            HeaderProcessResult::OverflowError(
-                HeaderOverflowError::ExceedsMaxHeaderListSize {
-                    actual: 9096,
-                    limit: 8192,
-                }
-            )
+            HeaderProcessResult::OverflowError(HeaderOverflowError::ExceedsMaxHeaderListSize {
+                actual: 9096,
+                limit: 8192,
+            }),
         ),
-
         // Test case 3: Multiple CONTINUATION frames within limit
         (
             "Multiple CONTINUATION frames within limit".to_string(),
@@ -458,7 +456,7 @@ fn generate_test_cases() -> Vec<(String, u32, Vec<HeaderFrame>, HeaderProcessRes
                     frame_type: FrameType::Continuation,
                     header_block_fragment: vec![0x43; 4000], // 4KB (total 9KB < 16KB)
                     end_headers: true,
-                }
+                },
             ],
             HeaderProcessResult::Success(HeaderBlockState {
                 accumulated_data: {
@@ -478,9 +476,8 @@ fn generate_test_cases() -> Vec<(String, u32, Vec<HeaderFrame>, HeaderProcessRes
                     peak_size: 9000,
                     overflow_checks: 3,
                 },
-            })
+            }),
         ),
-
         // Test case 4: Gradual accumulation hitting exact limit
         (
             "Gradual accumulation at exact limit".to_string(),
@@ -495,7 +492,7 @@ fn generate_test_cases() -> Vec<(String, u32, Vec<HeaderFrame>, HeaderProcessRes
                     frame_type: FrameType::Continuation,
                     header_block_fragment: vec![0x42; 5000], // 5KB (total exactly 10KB)
                     end_headers: true,
-                }
+                },
             ],
             HeaderProcessResult::Success(HeaderBlockState {
                 accumulated_data: {
@@ -514,7 +511,7 @@ fn generate_test_cases() -> Vec<(String, u32, Vec<HeaderFrame>, HeaderProcessRes
                     peak_size: 10000,
                     overflow_checks: 2,
                 },
-            })
+            }),
         ),
     ]
 }
@@ -569,15 +566,21 @@ fuzz_target!(|data: &[u8]| {
                 // Successful completion
                 assert!(state.complete, "Success result should have complete=true");
                 assert_eq!(state.stream_id, stream_id, "Stream ID should match");
-                assert!(state.current_size <= max_header_list_size as usize || !processor.policy.enforce_max_header_list_size,
-                    "Successful result should respect header list size limit");
+                assert!(
+                    state.current_size <= max_header_list_size as usize
+                        || !processor.policy.enforce_max_header_list_size,
+                    "Successful result should respect header list size limit"
+                );
 
                 // Verify accumulated data integrity
-                let expected_size: usize = frames[..=i].iter()
+                let expected_size: usize = frames[..=i]
+                    .iter()
                     .map(|f| f.header_block_fragment.len())
                     .sum();
-                assert_eq!(state.current_size, expected_size,
-                    "Accumulated size should match sum of fragments");
+                assert_eq!(
+                    state.current_size, expected_size,
+                    "Accumulated size should match sum of fragments"
+                );
 
                 last_result = Some(result);
                 break; // Header block complete
@@ -586,14 +589,18 @@ fuzz_target!(|data: &[u8]| {
             Ok(HeaderProcessResult::Pending(state)) => {
                 // Incomplete header block
                 assert!(!state.complete, "Pending result should have complete=false");
-                assert!(i < frames.len() - 1 || !test.end_headers_on_last,
-                    "Pending should not be last frame with END_HEADERS");
+                assert!(
+                    i < frames.len() - 1 || !test.end_headers_on_last,
+                    "Pending should not be last frame with END_HEADERS"
+                );
 
                 total_accumulated += frame.header_block_fragment.len();
 
                 // Verify size tracking
-                assert_eq!(state.current_size, total_accumulated,
-                    "Pending state size should match accumulated total");
+                assert_eq!(
+                    state.current_size, total_accumulated,
+                    "Pending state size should match accumulated total"
+                );
 
                 last_result = Some(result);
             }
@@ -602,10 +609,14 @@ fuzz_target!(|data: &[u8]| {
                 // Size limit exceeded
                 match error {
                     HeaderOverflowError::ExceedsMaxHeaderListSize { actual, limit } => {
-                        assert!(actual > limit as usize,
-                            "Overflow error should have actual > limit");
-                        assert_eq!(limit, max_header_list_size,
-                            "Limit should match configured setting");
+                        assert!(
+                            actual > limit as usize,
+                            "Overflow error should have actual > limit"
+                        );
+                        assert_eq!(
+                            limit, max_header_list_size,
+                            "Limit should match configured setting"
+                        );
                     }
                     HeaderOverflowError::HeaderBlockTooLarge => {
                         // Implementation-specific limit exceeded
@@ -650,24 +661,35 @@ fuzz_target!(|data: &[u8]| {
         match final_result {
             HeaderProcessResult::Success(_) => {
                 // Should have no active streams after success
-                assert_eq!(processor.get_active_streams_count(), 0,
-                    "No active streams should remain after successful completion");
+                assert_eq!(
+                    processor.get_active_streams_count(),
+                    0,
+                    "No active streams should remain after successful completion"
+                );
             }
 
             HeaderProcessResult::Pending(_) => {
                 // Should have exactly one active stream
-                assert_eq!(processor.get_active_streams_count(), 1,
-                    "One active stream should remain for pending result");
+                assert_eq!(
+                    processor.get_active_streams_count(),
+                    1,
+                    "One active stream should remain for pending result"
+                );
 
                 // Stream state should be available
-                assert!(processor.get_stream_state(stream_id).is_some(),
-                    "Stream state should be available for pending stream");
+                assert!(
+                    processor.get_stream_state(stream_id).is_some(),
+                    "Stream state should be available for pending stream"
+                );
             }
 
             HeaderProcessResult::OverflowError(_) => {
                 // Active stream should be cleaned up after overflow
-                assert_eq!(processor.get_active_streams_count(), 0,
-                    "No active streams should remain after overflow error");
+                assert_eq!(
+                    processor.get_active_streams_count(),
+                    0,
+                    "No active streams should remain after overflow error"
+                );
             }
 
             HeaderProcessResult::ProtocolError(_) => {
@@ -704,10 +726,10 @@ fuzz_target!(|data: &[u8]| {
             test_last_result = Some(frame_result);
 
             match &test_last_result {
-                Some(Ok(HeaderProcessResult::Success(_))) |
-                Some(Ok(HeaderProcessResult::OverflowError(_))) |
-                Some(Ok(HeaderProcessResult::ProtocolError(_))) |
-                Some(Err(_)) => {
+                Some(Ok(HeaderProcessResult::Success(_)))
+                | Some(Ok(HeaderProcessResult::OverflowError(_)))
+                | Some(Ok(HeaderProcessResult::ProtocolError(_)))
+                | Some(Err(_)) => {
                     break; // Processing complete
                 }
                 _ => {
@@ -718,16 +740,32 @@ fuzz_target!(|data: &[u8]| {
 
         if let Some(Ok(actual_result)) = test_last_result {
             match (&actual_result, &expected) {
-                (HeaderProcessResult::Success(actual_state), HeaderProcessResult::Success(expected_state)) => {
-                    assert_eq!(actual_state.current_size, expected_state.current_size,
-                        "Test '{}': size mismatch", test_name);
-                    assert_eq!(actual_state.complete, expected_state.complete,
-                        "Test '{}': completion status mismatch", test_name);
+                (
+                    HeaderProcessResult::Success(actual_state),
+                    HeaderProcessResult::Success(expected_state),
+                ) => {
+                    assert_eq!(
+                        actual_state.current_size, expected_state.current_size,
+                        "Test '{}': size mismatch",
+                        test_name
+                    );
+                    assert_eq!(
+                        actual_state.complete, expected_state.complete,
+                        "Test '{}': completion status mismatch",
+                        test_name
+                    );
                 }
 
-                (HeaderProcessResult::OverflowError(actual_error), HeaderProcessResult::OverflowError(expected_error)) => {
-                    assert_eq!(std::mem::discriminant(actual_error), std::mem::discriminant(expected_error),
-                        "Test '{}': overflow error type mismatch", test_name);
+                (
+                    HeaderProcessResult::OverflowError(actual_error),
+                    HeaderProcessResult::OverflowError(expected_error),
+                ) => {
+                    assert_eq!(
+                        std::mem::discriminant(actual_error),
+                        std::mem::discriminant(expected_error),
+                        "Test '{}': overflow error type mismatch",
+                        test_name
+                    );
                 }
 
                 _ => {

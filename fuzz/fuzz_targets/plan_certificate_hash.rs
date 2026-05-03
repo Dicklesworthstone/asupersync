@@ -23,7 +23,10 @@ fuzz_target!(|data: &[u8]| {
     // Determinism: of(x) twice gives the same hash.
     let h1 = PlanHash::of(data);
     let h2 = PlanHash::of(data);
-    assert_eq!(h1, h2, "PlanHash::of is not deterministic for identical input");
+    assert_eq!(
+        h1, h2,
+        "PlanHash::of is not deterministic for identical input"
+    );
 
     // Length: 32 bytes.
     assert_eq!(

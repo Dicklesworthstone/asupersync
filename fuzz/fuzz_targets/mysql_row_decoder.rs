@@ -16,8 +16,8 @@
 
 use arbitrary::{Arbitrary, Unstructured};
 use asupersync::database::mysql::{
-    MySqlColumn, MySqlValue, MySqlError,
-    fuzz_parse_text_row, fuzz_parse_binary_row, fuzz_parse_data_row_or_terminator
+    MySqlColumn, MySqlError, MySqlValue, fuzz_parse_binary_row, fuzz_parse_data_row_or_terminator,
+    fuzz_parse_text_row,
 };
 use libfuzzer_sys::fuzz_target;
 
@@ -117,8 +117,23 @@ enum BinaryValue {
     Float(f32),
     Double(f64),
     String(Vec<u8>),
-    DateTime { year: u16, month: u8, day: u8, hour: u8, minute: u8, second: u8, microsec: u32 },
-    Time { sign: u8, days: u32, hour: u8, minute: u8, second: u8, microsec: u32 },
+    DateTime {
+        year: u16,
+        month: u8,
+        day: u8,
+        hour: u8,
+        minute: u8,
+        second: u8,
+        microsec: u32,
+    },
+    Time {
+        sign: u8,
+        days: u32,
+        hour: u8,
+        minute: u8,
+        second: u8,
+        microsec: u32,
+    },
 }
 
 /// Parameters for fuzzing edge cases
@@ -165,7 +180,9 @@ impl RowPacketScenario {
         let base_packet = match &self.row_type {
             RowType::Text(data) => self.materialize_text_row(data),
             RowType::Binary(data) => self.materialize_binary_row(data),
-            RowType::DataOrTerminator { .. } => self.materialize_text_row(&TextRowData { values: Vec::new() }),
+            RowType::DataOrTerminator { .. } => {
+                self.materialize_text_row(&TextRowData { values: Vec::new() })
+            }
             RowType::Malformed(malformed) => self.materialize_malformed_row(malformed),
         };
 
@@ -282,8 +299,23 @@ impl RowPacketScenario {
                     self.write_lenenc_int(&mut result, bytes.len() as u64);
                     result.extend_from_slice(bytes);
                 }
-                BinaryValue::DateTime { year, month, day, hour, minute, second, microsec } => {
-                    if *year == 0 && *month == 0 && *day == 0 && *hour == 0 && *minute == 0 && *second == 0 && *microsec == 0 {
+                BinaryValue::DateTime {
+                    year,
+                    month,
+                    day,
+                    hour,
+                    minute,
+                    second,
+                    microsec,
+                } => {
+                    if *year == 0
+                        && *month == 0
+                        && *day == 0
+                        && *hour == 0
+                        && *minute == 0
+                        && *second == 0
+                        && *microsec == 0
+                    {
                         result.push(0); // All-zero datetime has 0-byte encoding
                     } else if *hour == 0 && *minute == 0 && *second == 0 && *microsec == 0 {
                         result.push(4); // Date only
@@ -309,7 +341,14 @@ impl RowPacketScenario {
                         result.extend_from_slice(&microsec.to_le_bytes());
                     }
                 }
-                BinaryValue::Time { sign, days, hour, minute, second, microsec } => {
+                BinaryValue::Time {
+                    sign,
+                    days,
+                    hour,
+                    minute,
+                    second,
+                    microsec,
+                } => {
                     if *days == 0 && *hour == 0 && *minute == 0 && *second == 0 && *microsec == 0 {
                         result.push(0); // Zero time
                     } else if *microsec == 0 {
@@ -386,32 +425,36 @@ impl RowPacketScenario {
 
     /// Convert to MySqlColumn for testing
     fn to_mysql_columns(&self) -> Vec<MySqlColumn> {
-        self.columns.iter().take(MAX_COLUMNS).map(|col| MySqlColumn {
-            catalog: "def".to_string(),
-            schema: "test".to_string(),
-            table: "test_table".to_string(),
-            org_table: "test_table".to_string(),
-            name: col.name.clone(),
-            org_name: col.name.clone(),
-            charset: col.charset,
-            length: col.length,
-            column_type: match col.column_type {
-                MySqlColumnType::Tiny => 1,
-                MySqlColumnType::Short => 2,
-                MySqlColumnType::Long => 3,
-                MySqlColumnType::LongLong => 8,
-                MySqlColumnType::Float => 4,
-                MySqlColumnType::Double => 5,
-                MySqlColumnType::VarChar => 15,
-                MySqlColumnType::Blob => 252,
-                MySqlColumnType::DateTime => 12,
-                MySqlColumnType::Time => 11,
-                MySqlColumnType::Date => 10,
-                MySqlColumnType::Year => 13,
-            },
-            flags: col.flags,
-            decimals: col.decimals,
-        }).collect()
+        self.columns
+            .iter()
+            .take(MAX_COLUMNS)
+            .map(|col| MySqlColumn {
+                catalog: "def".to_string(),
+                schema: "test".to_string(),
+                table: "test_table".to_string(),
+                org_table: "test_table".to_string(),
+                name: col.name.clone(),
+                org_name: col.name.clone(),
+                charset: col.charset,
+                length: col.length,
+                column_type: match col.column_type {
+                    MySqlColumnType::Tiny => 1,
+                    MySqlColumnType::Short => 2,
+                    MySqlColumnType::Long => 3,
+                    MySqlColumnType::LongLong => 8,
+                    MySqlColumnType::Float => 4,
+                    MySqlColumnType::Double => 5,
+                    MySqlColumnType::VarChar => 15,
+                    MySqlColumnType::Blob => 252,
+                    MySqlColumnType::DateTime => 12,
+                    MySqlColumnType::Time => 11,
+                    MySqlColumnType::Date => 10,
+                    MySqlColumnType::Year => 13,
+                },
+                flags: col.flags,
+                decimals: col.decimals,
+            })
+            .collect()
     }
 }
 
@@ -437,7 +480,6 @@ fuzz_target!(|data: &[u8]| {
     // Test 2: Structure-aware fuzzing if we can parse the input
     if let Ok(mut u) = Unstructured::new(data) {
         if let Ok(mut scenario) = RowPacketScenario::arbitrary(&mut u) {
-
             // Limit the number of columns to prevent resource exhaustion
             scenario.columns.truncate(MAX_COLUMNS);
 
@@ -462,15 +504,18 @@ fuzz_target!(|data: &[u8]| {
 
                     // For well-formed text rows, verify basic structure
                     if scenario.params.leading_junk.is_empty()
-                       && scenario.params.trailing_junk.is_empty()
-                       && !scenario.params.corrupt_lenenc
-                       && scenario.params.truncate_at.is_none() {
-
+                        && scenario.params.trailing_junk.is_empty()
+                        && !scenario.params.corrupt_lenenc
+                        && scenario.params.truncate_at.is_none()
+                    {
                         if let Ok(values) = result {
                             // Should have values for each column (or less if truncated data)
-                            assert!(values.len() <= mysql_columns.len(),
-                                   "Text row returned more values than columns: {} > {}",
-                                   values.len(), mysql_columns.len());
+                            assert!(
+                                values.len() <= mysql_columns.len(),
+                                "Text row returned more values than columns: {} > {}",
+                                values.len(),
+                                mysql_columns.len()
+                            );
                         }
                     }
                 }
@@ -479,19 +524,27 @@ fuzz_target!(|data: &[u8]| {
 
                     // For well-formed binary rows, verify basic structure
                     if scenario.params.leading_junk.is_empty()
-                       && scenario.params.trailing_junk.is_empty()
-                       && scenario.params.force_null_pattern.is_none()
-                       && scenario.params.truncate_at.is_none() {
-
+                        && scenario.params.trailing_junk.is_empty()
+                        && scenario.params.force_null_pattern.is_none()
+                        && scenario.params.truncate_at.is_none()
+                    {
                         if let Ok(values) = result {
-                            assert_eq!(values.len(), mysql_columns.len(),
-                                      "Binary row value count mismatch: got {}, expected {}",
-                                      values.len(), mysql_columns.len());
+                            assert_eq!(
+                                values.len(),
+                                mysql_columns.len(),
+                                "Binary row value count mismatch: got {}, expected {}",
+                                values.len(),
+                                mysql_columns.len()
+                            );
                         }
                     }
                 }
                 RowType::DataOrTerminator { deprecate_eof } => {
-                    let _ = fuzz_parse_data_row_or_terminator(&generated_bytes, &mysql_columns, deprecate_eof);
+                    let _ = fuzz_parse_data_row_or_terminator(
+                        &generated_bytes,
+                        &mysql_columns,
+                        deprecate_eof,
+                    );
                 }
                 RowType::Malformed(_) => {
                     // Malformed data should be handled gracefully (not crash)
@@ -519,7 +572,7 @@ fn create_test_columns() -> Vec<MySqlColumn> {
             charset: 33, // utf8_general_ci
             length: 11,
             column_type: 3, // LONG
-            flags: 515, // NOT_NULL | PRI_KEY | AUTO_INCREMENT
+            flags: 515,     // NOT_NULL | PRI_KEY | AUTO_INCREMENT
             decimals: 0,
         },
         MySqlColumn {
@@ -595,11 +648,13 @@ fn fuzz_boundary_conditions(data: &[u8]) {
         let _ = fuzz_parse_binary_row(data, &single_col);
 
         // Many columns
-        let many_cols: Vec<MySqlColumn> = (0..10).map(|i| {
-            let mut col = columns[i % columns.len()].clone();
-            col.name = format!("col_{}", i);
-            col
-        }).collect();
+        let many_cols: Vec<MySqlColumn> = (0..10)
+            .map(|i| {
+                let mut col = columns[i % columns.len()].clone();
+                col.name = format!("col_{}", i);
+                col
+            })
+            .collect();
         let _ = fuzz_parse_text_row(data, &many_cols);
         let _ = fuzz_parse_binary_row(data, &many_cols);
     }

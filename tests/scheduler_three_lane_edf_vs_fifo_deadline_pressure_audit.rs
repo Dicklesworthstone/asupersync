@@ -137,8 +137,7 @@ fn meet_deadlines_phase2_local_pops_timed_before_cancel() {
     // global ordering.
     let source = read("src/runtime/scheduler/three_lane.rs");
 
-    let marker =
-        "if suggestion == SchedulingSuggestion::MeetDeadlines && check_timed {";
+    let marker = "if suggestion == SchedulingSuggestion::MeetDeadlines && check_timed {";
     let mut search_pos = 0;
     let mut found_phase2 = false;
     while let Some(idx) = source[search_pos..].find(marker) {
@@ -178,8 +177,8 @@ fn governor_suggest_returns_meet_deadlines_when_deadline_component_dominates() {
     // The components array must include deadline_component
     // → MeetDeadlines.
     assert!(
-        source.contains("SchedulingSuggestion::MeetDeadlines,") &&
-        source.contains("record.deadline_component,"),
+        source.contains("SchedulingSuggestion::MeetDeadlines,")
+            && source.contains("record.deadline_component,"),
         "REGRESSION: LyapunovGovernor.suggest no longer maps \
          deadline_component → MeetDeadlines. The governor \
          can no longer recommend deadline priority — the \
@@ -189,7 +188,8 @@ fn governor_suggest_returns_meet_deadlines_when_deadline_component_dominates() {
 
     // The selection is by maximum component (max_by partial_cmp).
     assert!(
-        source.contains("max_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal))"),
+        source
+            .contains("max_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal))"),
         "REGRESSION: LyapunovGovernor.suggest no longer picks \
          the dominant component. Without max_by selection, the \
          governor returns the wrong suggestion when one \
@@ -271,7 +271,8 @@ fn timed_fairness_limit_caps_edf_starvation_of_fifo() {
 
     // The fairness check in the dispatch loop.
     assert!(
-        source.contains("let check_timed = self.timed_dispatch_streak < self.timed_fairness_limit;"),
+        source
+            .contains("let check_timed = self.timed_dispatch_streak < self.timed_fairness_limit;"),
         "REGRESSION: dispatch loop no longer enforces the \
          timed_fairness_limit. EDF can monopolize the \
          worker indefinitely under sustained deadline \

@@ -140,8 +140,8 @@
 //! by behavioral verification.
 
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -275,10 +275,7 @@ fn fast_path_keeps_window_minimal_only_relaxed_accounting_after_acquire() {
         "thread::sleep",
         "std::thread::yield_now",
     ];
-    let fast_path_window = body
-        .split("// ── Slow path ─")
-        .next()
-        .unwrap_or(body);
+    let fast_path_window = body.split("// ── Slow path ─").next().unwrap_or(body);
     for pat in &suspect_expensive_in_fast_path {
         assert!(
             !fast_path_window.contains(pat),
@@ -299,7 +296,9 @@ fn cancel_publisher_acquires_inner_write_for_cancel_state_publish() {
     let source = read("src/record/task.rs");
 
     let fn_marker = "pub fn request_cancel_with_budget(";
-    let start = source.find(fn_marker).expect("request_cancel_with_budget fn");
+    let start = source
+        .find(fn_marker)
+        .expect("request_cancel_with_budget fn");
     let window_end = (start + 4000).min(source.len());
     let safe_end = source
         .char_indices()

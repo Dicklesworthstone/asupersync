@@ -201,9 +201,7 @@ fn run_once_dispatches_exactly_one_task_and_returns_bool() {
 
     let fn_marker = "pub fn run_once(&mut self) -> bool {";
     let start = source.find(fn_marker).expect("run_once fn");
-    let body_end = source[start..]
-        .find("\n    }\n")
-        .expect("run_once close");
+    let body_end = source[start..].find("\n    }\n").expect("run_once close");
     let body = &source[start..start + body_end];
 
     assert!(
@@ -217,10 +215,7 @@ fn run_once_dispatches_exactly_one_task_and_returns_bool() {
     );
 
     // Forbid loops in run_once that would dispatch multiple.
-    let suspect_multiple_dispatch = [
-        "while let Some(task) = self.next_task()",
-        "loop {",
-    ];
+    let suspect_multiple_dispatch = ["while let Some(task) = self.next_task()", "loop {"];
     for pat in &suspect_multiple_dispatch {
         assert!(
             !body.contains(pat),
@@ -251,9 +246,7 @@ fn runtime_block_on_drives_specific_future_to_completion() {
     // poll-loop driver), not the unbounded run_loop.
     let fn_marker = "pub fn block_on<F: Future>(&self, future: F) -> F::Output {";
     let start = source.find(fn_marker).expect("block_on fn");
-    let body_end = source[start..]
-        .find("\n    }\n")
-        .expect("block_on close");
+    let body_end = source[start..].find("\n    }\n").expect("block_on close");
     let body = &source[start..start + body_end];
 
     assert!(
@@ -413,11 +406,7 @@ fn worker_run_loop_does_not_call_block_on_internally() {
         .unwrap_or(window_end);
     let body = &source[start..safe_end];
 
-    let suspect_delegation = [
-        "self.block_on(",
-        "Runtime::block_on(",
-        "block_on_with_cx(",
-    ];
+    let suspect_delegation = ["self.block_on(", "Runtime::block_on(", "block_on_with_cx("];
     for pat in &suspect_delegation {
         assert!(
             !body.contains(pat),
@@ -440,16 +429,10 @@ fn block_on_does_not_block_on_run_loop_internally() {
 
     let fn_marker = "pub fn block_on<F: Future>(&self, future: F) -> F::Output {";
     let start = source.find(fn_marker).expect("block_on fn");
-    let body_end = source[start..]
-        .find("\n    }\n")
-        .expect("block_on close");
+    let body_end = source[start..].find("\n    }\n").expect("block_on close");
     let body = &source[start..start + body_end];
 
-    let suspect_run_loop_delegation = [
-        ".run_loop()",
-        "run_loop(",
-        "while !shutdown",
-    ];
+    let suspect_run_loop_delegation = [".run_loop()", "run_loop(", "while !shutdown"];
     for pat in &suspect_run_loop_delegation {
         assert!(
             !body.contains(pat),

@@ -12,14 +12,14 @@
 
 #![no_main]
 
-use libfuzzer_sys::fuzz_target;
 use arbitrary::{Arbitrary, Unstructured};
 use asupersync::channel::oneshot;
 use asupersync::cx::Cx;
+use asupersync::types::{Budget, RegionId, TaskId};
 use asupersync::util::ArenaIndex;
-use asupersync::types::{RegionId, TaskId, Budget};
-use std::sync::atomic::{AtomicUsize, Ordering};
+use libfuzzer_sys::fuzz_target;
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::task::Waker;
 
 #[derive(Debug, Clone, Arbitrary)]
@@ -257,7 +257,10 @@ impl TrackedChannel {
                             }
                             Err(e) => {
                                 tracker.record_incorrect_behavior();
-                                return Err(format!("Unexpected send error on open channel: {:?}", e));
+                                return Err(format!(
+                                    "Unexpected send error on open channel: {:?}",
+                                    e
+                                ));
                             }
                         }
                     }
@@ -355,7 +358,9 @@ fn test_explicit_close_scenario(
 ) -> Result<(), String> {
     let mut channels: HashMap<u8, TrackedChannel> = HashMap::new();
 
-    let max_ops = config.max_operations.min(OneshotCloseConfig::max_operations()) as usize;
+    let max_ops = config
+        .max_operations
+        .min(OneshotCloseConfig::max_operations()) as usize;
 
     for operation in config.operations.iter().take(max_ops) {
         match operation {
@@ -405,7 +410,10 @@ fn test_explicit_close_scenario(
                 }
             }
 
-            CloseOperation::ReserveThenClose { channel_id, close_sender } => {
+            CloseOperation::ReserveThenClose {
+                channel_id,
+                close_sender,
+            } => {
                 let id = *channel_id % OneshotCloseConfig::max_channels();
 
                 if let Some(channel) = channels.get_mut(&id) {
@@ -434,7 +442,10 @@ fn test_explicit_close_scenario(
                 }
             }
 
-            CloseOperation::CloseThenMultiOps { channel_id, operations } => {
+            CloseOperation::CloseThenMultiOps {
+                channel_id,
+                operations,
+            } => {
                 let id = *channel_id % OneshotCloseConfig::max_channels();
                 let max_ops = OneshotCloseConfig::max_multi_ops() as usize;
 
@@ -459,7 +470,9 @@ fn test_explicit_close_scenario(
                                 // Check state
                                 if !channel.is_closed() && channel.sender_closed {
                                     tracker.record_incorrect_behavior();
-                                    return Err("Channel not marked closed after sender close".to_string());
+                                    return Err(
+                                        "Channel not marked closed after sender close".to_string()
+                                    );
                                 }
                             }
                             _ => unreachable!(),
@@ -547,9 +560,7 @@ fuzz_target!(|data: &[u8]| {
         let tracker2 = CloseTracker::new();
         let config2 = config.clone();
 
-        let handle = thread::spawn(move || {
-            test_explicit_close_scenario(&config2, &tracker2)
-        });
+        let handle = thread::spawn(move || test_explicit_close_scenario(&config2, &tracker2));
 
         match handle.join() {
             Ok(Ok(())) => {
@@ -565,10 +576,10 @@ fuzz_target!(|data: &[u8]| {
     }
 
     // Ensure we actually performed some meaningful operations
-    let total_closes = tracker.sender_closes.load(Ordering::SeqCst) +
-                      tracker.receiver_closes.load(Ordering::SeqCst);
-    let total_attempts = tracker.post_close_send_attempts.load(Ordering::SeqCst) +
-                        tracker.post_close_recv_attempts.load(Ordering::SeqCst);
+    let total_closes = tracker.sender_closes.load(Ordering::SeqCst)
+        + tracker.receiver_closes.load(Ordering::SeqCst);
+    let total_attempts = tracker.post_close_send_attempts.load(Ordering::SeqCst)
+        + tracker.post_close_recv_attempts.load(Ordering::SeqCst);
 
     if total_closes == 0 && total_attempts == 0 && !config.operations.is_empty() {
         panic!("No meaningful close operations were performed during the test");

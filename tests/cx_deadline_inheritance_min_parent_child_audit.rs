@@ -465,7 +465,8 @@ fn behavior_parent_10s_child_20s_yields_effective_10s() {
     );
 
     assert_eq!(
-        effective.poll_quota, 1000,
+        effective.poll_quota,
+        1000,
         "REGRESSION: poll_quota meet not MIN. Got {actual}, \
          expected 1000.",
         actual = effective.poll_quota,
@@ -480,7 +481,8 @@ fn behavior_parent_10s_child_20s_yields_effective_10s() {
     );
 
     assert_eq!(
-        effective.priority, 128,
+        effective.priority,
+        128,
         "REGRESSION: priority meet not MAX. Got {actual}, \
          expected 128 (parent's higher priority wins for \
          cleanup).",
@@ -528,7 +530,8 @@ fn behavior_three_level_nesting_compounds_meet() {
     );
 
     assert_eq!(
-        level_c.priority, 110,
+        level_c.priority,
+        110,
         "REGRESSION: 3-level nesting priority not MAX. Got \
          {actual}, expected 110 (the level-B max wins).",
         actual = level_c.priority,

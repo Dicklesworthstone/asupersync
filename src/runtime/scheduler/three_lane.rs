@@ -54,7 +54,7 @@ use crate::obligation::lyapunov::{
 };
 use crate::observability::spectral_health::{SpectralHealthMonitor, SpectralThresholds};
 use crate::runtime::io_driver::IoDriverHandle;
-use crate::runtime::scheduler::global_injector::GlobalInjector;
+use crate::runtime::scheduler::global_injector::{GlobalInjector, PriorityTask};
 use crate::runtime::scheduler::local_queue::{self, LocalQueue};
 use crate::runtime::scheduler::priority::Scheduler as PriorityScheduler;
 use crate::runtime::scheduler::worker::Parker;
@@ -81,6 +81,7 @@ pub type WorkerId = usize;
 const DEFAULT_CANCEL_STREAK_LIMIT: usize = 16;
 const DEFAULT_BROWSER_READY_HANDOFF_LIMIT: usize = 0;
 const DEFAULT_STEAL_BATCH_SIZE: usize = 4;
+const GLOBAL_READY_BATCH_DRAIN_MIN_DEPTH: usize = 8;
 const DEFAULT_ENABLE_PARKING: bool = true;
 const LOCAL_SCHEDULER_BURST_BUDGET: usize = 2048;
 const LOCAL_SCHEDULER_MIN_CAPACITY: usize = 128;
@@ -1182,6 +1183,7 @@ impl ThreeLaneScheduler {
                 local: Arc::clone(&local_schedulers[id]),
                 stealers,
                 fast_queue: fast_queues[id].clone(),
+                global_ready_buffer: Vec::with_capacity(steal_batch_size),
                 fast_stealers,
                 local_ready: Arc::clone(&local_ready[id]),
                 all_local_ready: local_ready.clone(),
@@ -1336,6 +1338,11 @@ impl ThreeLaneScheduler {
                 worker
                     .steal_buffer
                     .reserve(size - worker.steal_buffer.capacity());
+            }
+            if worker.global_ready_buffer.capacity() < size {
+                worker
+                    .global_ready_buffer
+                    .reserve(size - worker.global_ready_buffer.capacity());
             }
         }
     }
@@ -1835,6 +1842,13 @@ pub struct ThreeLaneWorker {
     /// (VecDeque, O(1)) instead of the PriorityScheduler (BinaryHeap,
     /// O(log n)). Stealers use FIFO ordering for cache-friendliness.
     pub fast_queue: LocalQueue,
+    /// Prefetched FIFO slice from the global ready queue.
+    ///
+    /// When the shared ready queue is deep, the worker drains a bounded batch
+    /// into this buffer so subsequent phase-3 ready dispatches stay local and
+    /// avoid repeatedly contending on the injector atomics. The buffer is kept
+    /// in reverse order so `pop()` yields the oldest prefetched task first.
+    global_ready_buffer: Vec<PriorityTask>,
     /// Stealers for other workers' fast queues (O(1) steal).
     fast_stealers: SmallVec<[local_queue::Stealer; 16]>,
     /// Non-stealable queue for local (`!Send`) tasks.
@@ -2037,6 +2051,11 @@ pub struct PreemptionMetrics {
     ///
     /// Some critical tasks (e.g., system tasks) may bypass governor throttling.
     pub governor_bypass_spawns: u64,
+    /// Number of times a worker prefetched a bounded FIFO slice from the
+    /// global ready queue.
+    pub global_ready_batch_drains: u64,
+    /// Total ready tasks drained through the global prefetch path.
+    pub global_ready_batch_tasks: u64,
 }
 
 impl PreemptionMetrics {
@@ -3515,7 +3534,10 @@ impl ThreeLaneWorker {
             return false;
         }
 
-        if !self.fast_queue.is_empty() || self.global.has_ready_work() {
+        if !self.fast_queue.is_empty()
+            || !self.global_ready_buffer.is_empty()
+            || self.global.has_ready_work()
+        {
             return true;
         }
         if self
@@ -3536,6 +3558,32 @@ impl ThreeLaneWorker {
         self.local
             .try_lock()
             .and_then(|mut local| local.peek_ready_task())
+    }
+
+    #[inline]
+    fn take_global_ready_task(&mut self) -> Option<PriorityTask> {
+        if let Some(prefetched) = self.global_ready_buffer.pop() {
+            return Some(prefetched);
+        }
+
+        let batch_size = self.steal_batch_size.max(1);
+        let batch_threshold = batch_size
+            .saturating_mul(2)
+            .max(GLOBAL_READY_BATCH_DRAIN_MIN_DEPTH);
+        if batch_size > 1 && self.global.ready_count() >= batch_threshold {
+            self.global_ready_buffer.clear();
+            let drained = self
+                .global
+                .pop_ready_batch_into(batch_size, &mut self.global_ready_buffer);
+            if drained > 0 {
+                self.global_ready_buffer.reverse();
+                self.preemption_metrics.global_ready_batch_drains += 1;
+                self.preemption_metrics.global_ready_batch_tasks += drained as u64;
+                return self.global_ready_buffer.pop();
+            }
+        }
+
+        self.global.pop_ready()
     }
 
     fn try_phase3_ready_work(&mut self) -> Option<TaskId> {
@@ -3584,7 +3632,7 @@ impl ThreeLaneWorker {
             return Some(self.dispatch_with_adaptive_epoch(task));
         }
 
-        if let Some(pt) = self.global.pop_ready() {
+        if let Some(pt) = self.take_global_ready_task() {
             if let Some(blocked_local_task) = self.peek_blocked_local_ready_for_inversion() {
                 self.record_ready_priority_inversion(
                     Some(blocked_local_task),
@@ -3731,11 +3779,13 @@ impl ThreeLaneWorker {
     #[inline]
     fn ready_queue_depth_signal(&self) -> usize {
         let global_ready = self.global.ready_count();
+        let prefetched_global_ready = self.global_ready_buffer.len();
         let fast_ready = self.fast_queue.len();
         let pinned_local_ready = self.local_ready.lock().len();
         let local_priority_ready = self.local.lock().approx_ready_len();
 
         global_ready
+            .saturating_add(prefetched_global_ready)
             .saturating_add(fast_ready)
             .saturating_add(pinned_local_ready)
             .saturating_add(local_priority_ready)
@@ -4077,8 +4127,9 @@ impl ThreeLaneWorker {
     pub fn ready_count(&self) -> usize {
         let local_ready = self.local_ready.try_lock().map_or(0, |q| q.len());
         let fast = self.fast_queue.len();
+        let prefetched_global = self.global_ready_buffer.len();
         let global = self.global.ready_count();
-        local_ready + fast + global
+        local_ready + fast + prefetched_global + global
     }
 
     /// Bench-only accessor for the worker's fast ready queue.
@@ -4114,7 +4165,7 @@ impl ThreeLaneWorker {
         }
 
         // Global ready
-        if let Some(pt) = self.global.pop_ready() {
+        if let Some(pt) = self.take_global_ready_task() {
             return Some(pt.task);
         }
 
@@ -5360,6 +5411,7 @@ mod tests {
                 "fast_queue": worker.fast_queue.len(),
                 "global_pending": worker.global.len(),
                 "global_ready": worker.global.ready_count(),
+                "prefetched_global_ready": worker.global_ready_buffer.len(),
                 "global_has_cancel": worker.global.has_cancel_work(),
                 "global_has_timed": worker.global.has_timed_work(),
                 "global_has_ready": worker.global.has_ready_work(),
@@ -5411,6 +5463,8 @@ mod tests {
                 "adaptive_current_limit": metrics.adaptive_current_limit,
                 "adaptive_reward_ema": metrics.adaptive_reward_ema,
                 "adaptive_e_value": metrics.adaptive_e_value,
+                "global_ready_batch_drains": metrics.global_ready_batch_drains,
+                "global_ready_batch_tasks": metrics.global_ready_batch_tasks,
             },
             "invariant_stats": {
                 "operations_monitored": invariant_stats.operations_monitored,
@@ -6461,6 +6515,46 @@ mod tests {
         // Third check should be empty
         let third = scheduler.global.pop_cancel();
         assert!(third.is_none());
+    }
+
+    #[test]
+    fn global_ready_batch_drain_preserves_fifo_order() {
+        let (mut scheduler, _state, _task_table) = task_table_scheduler(1, 8);
+        for i in 0..8u32 {
+            scheduler.inject_ready(TaskId::new_for_test(1, i), 50);
+        }
+
+        let worker = &mut scheduler.workers[0];
+        let first = worker.try_ready_work();
+        assert_eq!(first, Some(TaskId::new_for_test(1, 0)));
+        assert_eq!(worker.ready_count(), 7, "prefetched tasks stay visible");
+        assert_eq!(
+            worker.preemption_metrics().global_ready_batch_drains,
+            1,
+            "deep global ready queue should trigger one bounded batch drain"
+        );
+        assert_eq!(
+            worker.preemption_metrics().global_ready_batch_tasks,
+            4,
+            "default steal batch size bounds the prefetched slice"
+        );
+
+        for i in 1..8u32 {
+            assert_eq!(
+                worker.try_ready_work(),
+                Some(TaskId::new_for_test(1, i)),
+                "global ready FIFO order must survive local prefetch"
+            );
+        }
+
+        assert!(
+            worker.try_ready_work().is_none(),
+            "all prefetched work drained"
+        );
+        assert!(
+            worker.global_ready_buffer.is_empty(),
+            "prefetch buffer should be empty after draining"
+        );
     }
 
     #[test]

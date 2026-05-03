@@ -14,10 +14,10 @@
 
 #![no_main]
 
-use libfuzzer_sys::fuzz_target;
-use asupersync::http::h1::{Http1Codec, HttpError};
-use asupersync::bytes::{BytesMut, BufMut};
+use asupersync::bytes::{BufMut, BytesMut};
 use asupersync::codec::Decoder;
+use asupersync::http::h1::{Http1Codec, HttpError};
+use libfuzzer_sys::fuzz_target;
 
 /// Maximum input size to prevent OOM
 const MAX_INPUT_SIZE: usize = 8 * 1024;
@@ -61,9 +61,9 @@ fuzz_target!(|data: &[u8]| {
 
         // Should handle malformed methods gracefully (no panic)
         match result {
-            Ok(_) => {}, // Somehow valid
-            Err(HttpError::BadRequest) => {}, // Expected for malformed input
-            Err(_) => {}, // Other errors are also acceptable
+            Ok(_) => {}                      // Somehow valid
+            Err(HttpError::BadRequest) => {} // Expected for malformed input
+            Err(_) => {}                     // Other errors are also acceptable
         }
     }
 
@@ -74,16 +74,16 @@ fuzz_target!(|data: &[u8]| {
 
         // Create request with malformed URI
         input.put(&b"GET "[..]);
-        input.put(data);  // Fuzzed URI data
+        input.put(data); // Fuzzed URI data
         input.put(&b" HTTP/1.1\r\n\r\n"[..]);
 
         let result = codec.decode(&mut input);
 
         // Should reject invalid URI characters appropriately
         match result {
-            Ok(_) => {}, // Somehow valid URI
-            Err(HttpError::BadRequest) => {}, // Expected for malformed URI
-            Err(_) => {}, // Other errors acceptable
+            Ok(_) => {}                      // Somehow valid URI
+            Err(HttpError::BadRequest) => {} // Expected for malformed URI
+            Err(_) => {}                     // Other errors acceptable
         }
     }
 
@@ -94,16 +94,16 @@ fuzz_target!(|data: &[u8]| {
 
         // Create request with malformed HTTP version
         input.put(&b"GET /path "[..]);
-        input.put(data);  // Fuzzed version data
+        input.put(data); // Fuzzed version data
         input.put(&b"\r\n\r\n"[..]);
 
         let result = codec.decode(&mut input);
 
         // Should handle malformed HTTP version gracefully
         match result {
-            Ok(_) => {}, // Somehow valid version
-            Err(HttpError::BadRequest) => {}, // Expected for malformed version
-            Err(_) => {}, // Other errors acceptable
+            Ok(_) => {}                      // Somehow valid version
+            Err(HttpError::BadRequest) => {} // Expected for malformed version
+            Err(_) => {}                     // Other errors acceptable
         }
     }
 

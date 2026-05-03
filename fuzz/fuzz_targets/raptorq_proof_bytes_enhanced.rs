@@ -132,12 +132,13 @@ fuzz_target!(|spec: ProofCorruptionSpec| {
     };
 
     // Test replay_and_verify on the (potentially corrupted) proof
-    let replay_result = catch_unwind(AssertUnwindSafe(|| {
-        proof.replay_and_verify(&symbols)
-    }));
+    let replay_result = catch_unwind(AssertUnwindSafe(|| proof.replay_and_verify(&symbols)));
 
     // Verify invariants
-    assert!(replay_result.is_ok(), "replay_and_verify panicked on corrupted proof bytes");
+    assert!(
+        replay_result.is_ok(),
+        "replay_and_verify panicked on corrupted proof bytes"
+    );
 
     let verification_result = replay_result.expect("panic already asserted absent");
 
@@ -175,7 +176,10 @@ fn serialize_json(proof: &DecodeProof, symbols: &[ReceivedSymbol]) -> Vec<u8> {
 }
 
 /// Deserialize proof and symbols from bytes.
-fn deserialize_proof(bytes: &[u8], use_binary: bool) -> Result<(DecodeProof, Vec<ReceivedSymbol>), Box<dyn std::error::Error>> {
+fn deserialize_proof(
+    bytes: &[u8],
+    use_binary: bool,
+) -> Result<(DecodeProof, Vec<ReceivedSymbol>), Box<dyn std::error::Error>> {
     if use_binary {
         // Try binary format first, fall back to JSON
         deserialize_json(bytes)
@@ -185,7 +189,9 @@ fn deserialize_proof(bytes: &[u8], use_binary: bool) -> Result<(DecodeProof, Vec
 }
 
 /// Deserialize using JSON format.
-fn deserialize_json(bytes: &[u8]) -> Result<(DecodeProof, Vec<ReceivedSymbol>), Box<dyn std::error::Error>> {
+fn deserialize_json(
+    bytes: &[u8],
+) -> Result<(DecodeProof, Vec<ReceivedSymbol>), Box<dyn std::error::Error>> {
     use serde_json;
 
     let envelope: ProofEnvelopeWire = serde_json::from_slice(bytes)?;
@@ -208,7 +214,10 @@ fn apply_byte_corruption(data: &mut [u8], plan: &CorruptionPlan) {
         }
         CorruptionStrategy::RandomBytes => {
             let start = plan.position % data.len();
-            let len = plan.length.min(MAX_CORRUPTION_BYTES).min(data.len() - start);
+            let len = plan
+                .length
+                .min(MAX_CORRUPTION_BYTES)
+                .min(data.len() - start);
             for (i, &byte) in plan.pattern.iter().enumerate().take(len) {
                 if start + i < data.len() {
                     data[start + i] = byte;
@@ -279,7 +288,8 @@ fn corrupt_hash_fields(data: &mut [u8], pattern: &[u8]) {
             // Count hex characters
             while hex_end < data.len() && hex_len < 64 {
                 let c = data[hex_end];
-                if (c >= b'0' && c <= b'9') || (c >= b'a' && c <= b'f') || (c >= b'A' && c <= b'F') {
+                if (c >= b'0' && c <= b'9') || (c >= b'a' && c <= b'f') || (c >= b'A' && c <= b'F')
+                {
                     hex_len += 1;
                     hex_end += 1;
                 } else if c == b'"' && hex_len >= 16 {
@@ -298,9 +308,19 @@ fn corrupt_hash_fields(data: &mut [u8], pattern: &[u8]) {
 /// Corrupt with integer boundary values.
 fn corrupt_with_boundary_integers(data: &mut [u8], seed: usize) {
     let boundary_values: &[&[u8]] = &[
-        b"0", b"1", b"255", b"256", b"65535", b"65536",
-        b"4294967295", b"4294967296", b"18446744073709551615",
-        b"-1", b"-128", b"-32768", b"-2147483648",
+        b"0",
+        b"1",
+        b"255",
+        b"256",
+        b"65535",
+        b"65536",
+        b"4294967295",
+        b"4294967296",
+        b"18446744073709551615",
+        b"-1",
+        b"-128",
+        b"-32768",
+        b"-2147483648",
     ];
 
     let value = boundary_values[seed % boundary_values.len()];
@@ -364,7 +384,8 @@ fn corrupt_with_bit_patterns(data: &mut [u8], plan: &CorruptionPlan) {
 // Helper functions for pattern matching and corruption
 
 fn find_pattern(data: &[u8], pattern: &[u8]) -> Option<usize> {
-    data.windows(pattern.len()).position(|window| window == pattern)
+    data.windows(pattern.len())
+        .position(|window| window == pattern)
 }
 
 fn find_colon_after_position(data: &[u8], start: usize) -> Option<usize> {
@@ -523,7 +544,10 @@ impl ProofEnvelopeWire {
     fn from_actual(proof: &DecodeProof, symbols: &[ReceivedSymbol]) -> Self {
         Self {
             proof: DecodeProofWire::from_actual(proof),
-            symbols: symbols.iter().map(ReceivedSymbolWire::from_actual).collect(),
+            symbols: symbols
+                .iter()
+                .map(ReceivedSymbolWire::from_actual)
+                .collect(),
         }
     }
 

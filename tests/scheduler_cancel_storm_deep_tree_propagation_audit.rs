@@ -160,9 +160,7 @@ fn subtree_collection_uses_iterative_dfs_with_explicit_stack() {
 
     let fn_marker = "fn collect_region_and_descendants_with_depth(";
     let start = source.find(fn_marker).expect("collect fn");
-    let body_end = source[start..]
-        .find("\n    }\n")
-        .expect("collect close");
+    let body_end = source[start..].find("\n    }\n").expect("collect close");
     let body = &source[start..start + body_end];
 
     assert!(
@@ -194,14 +192,11 @@ fn subtree_collection_reuses_child_buf_across_iterations() {
 
     let fn_marker = "fn collect_region_and_descendants_with_depth(";
     let start = source.find(fn_marker).expect("collect fn");
-    let body_end = source[start..]
-        .find("\n    }\n")
-        .expect("collect close");
+    let body_end = source[start..].find("\n    }\n").expect("collect close");
     let body = &source[start..start + body_end];
 
     assert!(
-        body.contains("let mut child_buf = Vec::new();")
-            && body.contains("child_buf.clear();"),
+        body.contains("let mut child_buf = Vec::new();") && body.contains("child_buf.clear();"),
         "REGRESSION: subtree collection no longer reuses \
          child_buf. A fresh Vec per iteration would create \
          O(N) allocator pressure on deep trees — measurable \
@@ -388,8 +383,7 @@ fn task_id_buf_reused_across_regions_in_second_pass() {
     let body = &source[pos..safe_end];
 
     assert!(
-        body.contains("let mut task_id_buf = Vec::new();")
-            && body.contains("task_id_buf.clear();"),
+        body.contains("let mut task_id_buf = Vec::new();") && body.contains("task_id_buf.clear();"),
         "REGRESSION: second pass no longer reuses task_id_buf \
          across regions. Per-region Vec allocation under deep \
          cancel-storm wastes allocator capacity.",
@@ -408,7 +402,7 @@ struct MockRegion {
     id: u64,
     parent: Option<u64>,
     children: Vec<u64>,
-    state: u8, // 0 = Open, 1 = Closing
+    state: u8,                  // 0 = Open, 1 = Closing
     cancel_reason: Option<u64>, // simplified — just the reason "id"
 }
 

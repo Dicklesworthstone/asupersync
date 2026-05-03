@@ -148,7 +148,8 @@ fuzz_target!(|data: &[u8]| {
     // Limit concurrent streams and operations for performance
     if test_case.concurrent_streams.len() > 20
         || test_case.pending_operations.len() > 10
-        || test_case.stream_resources.buffered_data.len() > 50_000 {
+        || test_case.stream_resources.buffered_data.len() > 50_000
+    {
         return;
     }
 
@@ -175,7 +176,11 @@ fn test_rst_stream_cleanup(test_case: &RstStreamTest) {
 
     // Set up the stream in the specified state
     let setup_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        mock_connection.setup_stream(stream_id, &test_case.stream_state, &test_case.stream_resources);
+        mock_connection.setup_stream(
+            stream_id,
+            &test_case.stream_state,
+            &test_case.stream_resources,
+        );
 
         // Add pending operations
         for operation in &test_case.pending_operations {
@@ -185,8 +190,11 @@ fn test_rst_stream_cleanup(test_case: &RstStreamTest) {
         // Set up concurrent streams
         for concurrent in &test_case.concurrent_streams {
             if concurrent.stream_id != stream_id {
-                mock_connection.setup_stream(concurrent.stream_id, &concurrent.state,
-                    &StreamResources::default());
+                mock_connection.setup_stream(
+                    concurrent.stream_id,
+                    &concurrent.state,
+                    &StreamResources::default(),
+                );
                 if concurrent.depends_on_target {
                     mock_connection.add_stream_dependency(concurrent.stream_id, stream_id);
                 }
@@ -194,42 +202,62 @@ fn test_rst_stream_cleanup(test_case: &RstStreamTest) {
         }
     }));
 
-    assert!(setup_result.is_ok(),
+    assert!(
+        setup_result.is_ok(),
         "Stream setup should not panic for stream_id={}, state={:?}",
-        stream_id, test_case.stream_state);
+        stream_id,
+        test_case.stream_state
+    );
 
     // Send RST_STREAM with INTERNAL_ERROR
     let rst_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         mock_connection.send_rst_stream(stream_id, ErrorCode::InternalError)
     }));
 
-    assert!(rst_result.is_ok(),
+    assert!(
+        rst_result.is_ok(),
         "RST_STREAM should not panic for stream_id={} in state {:?}",
-        stream_id, test_case.stream_state);
+        stream_id,
+        test_case.stream_state
+    );
 
     if let Ok(cleanup_result) = rst_result {
         match cleanup_result {
             CleanupResult::Success { resources_freed } => {
                 // Verify that resources were actually cleaned up
-                assert!(resources_freed.stream_removed,
-                    "Stream {} should be removed after RST_STREAM", stream_id);
+                assert!(
+                    resources_freed.stream_removed,
+                    "Stream {} should be removed after RST_STREAM",
+                    stream_id
+                );
 
                 // Check that all expected resources were freed
                 if !test_case.pending_operations.is_empty() {
-                    assert!(resources_freed.operations_cancelled > 0,
-                        "Pending operations should be cancelled for stream {}", stream_id);
+                    assert!(
+                        resources_freed.operations_cancelled > 0,
+                        "Pending operations should be cancelled for stream {}",
+                        stream_id
+                    );
                 }
 
                 if !test_case.stream_resources.buffered_data.is_empty() {
-                    assert!(resources_freed.buffers_freed,
-                        "Buffered data should be freed for stream {}", stream_id);
+                    assert!(
+                        resources_freed.buffers_freed,
+                        "Buffered data should be freed for stream {}",
+                        stream_id
+                    );
                 }
             }
-            CleanupResult::PartialCleanup { remaining_resources } => {
+            CleanupResult::PartialCleanup {
+                remaining_resources,
+            } => {
                 // Partial cleanup might be acceptable in some implementations
                 // but should be minimized
-                assert!(remaining_resources.len() < test_case.pending_operations.len(),
-                    "Should clean up most resources for stream {}", stream_id);
+                assert!(
+                    remaining_resources.len() < test_case.pending_operations.len(),
+                    "Should clean up most resources for stream {}",
+                    stream_id
+                );
             }
             CleanupResult::Error { reason } => {
                 // Errors during cleanup should only happen for invalid stream IDs
@@ -242,8 +270,11 @@ fn test_rst_stream_cleanup(test_case: &RstStreamTest) {
 
         // Verify stream is no longer accessible
         let post_cleanup_check = mock_connection.check_stream_exists(stream_id);
-        assert!(!post_cleanup_check,
-            "Stream {} should not exist after RST_STREAM cleanup", stream_id);
+        assert!(
+            !post_cleanup_check,
+            "Stream {} should not exist after RST_STREAM cleanup",
+            stream_id
+        );
     }
 }
 
@@ -253,7 +284,11 @@ fn test_resource_cleanup(test_case: &RstStreamTest) {
     let mut mock_connection = MockConnection::new(test_case.connection_settings.clone());
 
     // Set up stream with resources
-    mock_connection.setup_stream(stream_id, &test_case.stream_state, &test_case.stream_resources);
+    mock_connection.setup_stream(
+        stream_id,
+        &test_case.stream_state,
+        &test_case.stream_resources,
+    );
 
     // Track initial resource counts
     let initial_resources = mock_connection.get_resource_counts();
@@ -265,19 +300,30 @@ fn test_resource_cleanup(test_case: &RstStreamTest) {
     let final_resources = mock_connection.get_resource_counts();
 
     // Verify resources were cleaned up
-    assert!(final_resources.stream_count <= initial_resources.stream_count,
-        "Stream count should not increase after RST_STREAM");
+    assert!(
+        final_resources.stream_count <= initial_resources.stream_count,
+        "Stream count should not increase after RST_STREAM"
+    );
 
-    assert!(final_resources.buffer_bytes <= initial_resources.buffer_bytes,
-        "Buffer memory should not increase after RST_STREAM");
+    assert!(
+        final_resources.buffer_bytes <= initial_resources.buffer_bytes,
+        "Buffer memory should not increase after RST_STREAM"
+    );
 
-    assert!(final_resources.pending_operations <= initial_resources.pending_operations,
-        "Pending operations should not increase after RST_STREAM");
+    assert!(
+        final_resources.pending_operations <= initial_resources.pending_operations,
+        "Pending operations should not increase after RST_STREAM"
+    );
 
     // For INTERNAL_ERROR, we expect aggressive cleanup
-    if matches!(test_case.stream_state, StreamState::Open | StreamState::HalfClosedLocal | StreamState::HalfClosedRemote) {
-        assert!(final_resources.stream_count < initial_resources.stream_count,
-            "Stream should be removed for INTERNAL_ERROR in active state");
+    if matches!(
+        test_case.stream_state,
+        StreamState::Open | StreamState::HalfClosedLocal | StreamState::HalfClosedRemote
+    ) {
+        assert!(
+            final_resources.stream_count < initial_resources.stream_count,
+            "Stream should be removed for INTERNAL_ERROR in active state"
+        );
     }
 }
 
@@ -287,14 +333,22 @@ fn test_concurrent_stream_cleanup(test_case: &RstStreamTest) {
     let mut mock_connection = MockConnection::new(test_case.connection_settings.clone());
 
     // Set up target stream
-    mock_connection.setup_stream(target_stream, &test_case.stream_state, &test_case.stream_resources);
+    mock_connection.setup_stream(
+        target_stream,
+        &test_case.stream_state,
+        &test_case.stream_resources,
+    );
 
     // Set up concurrent streams
     let mut dependent_streams = Vec::new();
     for concurrent in &test_case.concurrent_streams {
         let concurrent_id = concurrent.stream_id.max(3) | 1; // Ensure odd and != target
         if concurrent_id != target_stream {
-            mock_connection.setup_stream(concurrent_id, &concurrent.state, &StreamResources::default());
+            mock_connection.setup_stream(
+                concurrent_id,
+                &concurrent.state,
+                &StreamResources::default(),
+            );
             if concurrent.depends_on_target {
                 mock_connection.add_stream_dependency(concurrent_id, target_stream);
                 dependent_streams.push(concurrent_id);
@@ -314,8 +368,12 @@ fn test_concurrent_stream_cleanup(test_case: &RstStreamTest) {
             }
             Some(_) => {
                 // Dependent stream still exists but dependency should be removed
-                assert!(!mock_connection.has_stream_dependency(dependent_id, target_stream),
-                    "Stream {} should not depend on RST stream {}", dependent_id, target_stream);
+                assert!(
+                    !mock_connection.has_stream_dependency(dependent_id, target_stream),
+                    "Stream {} should not depend on RST stream {}",
+                    dependent_id,
+                    target_stream
+                );
             }
             None => {
                 // Dependent stream was also cleaned up - acceptable for INTERNAL_ERROR
@@ -328,9 +386,12 @@ fn test_concurrent_stream_cleanup(test_case: &RstStreamTest) {
         let concurrent_id = concurrent.stream_id.max(3) | 1;
         if concurrent_id != target_stream && !concurrent.depends_on_target {
             let state = mock_connection.get_stream_state(concurrent_id);
-            assert!(state.is_some(),
+            assert!(
+                state.is_some(),
                 "Unrelated stream {} should not be affected by RST_STREAM on {}",
-                concurrent_id, target_stream);
+                concurrent_id,
+                target_stream
+            );
         }
     }
 }
@@ -340,7 +401,11 @@ fn test_stream_state_transitions(test_case: &RstStreamTest) {
     let stream_id = test_case.stream_id.max(1) | 1;
     let mut mock_connection = MockConnection::new(test_case.connection_settings.clone());
 
-    mock_connection.setup_stream(stream_id, &test_case.stream_state, &test_case.stream_resources);
+    mock_connection.setup_stream(
+        stream_id,
+        &test_case.stream_state,
+        &test_case.stream_resources,
+    );
 
     // Record initial state
     let initial_state = mock_connection.get_stream_state(stream_id);
@@ -361,9 +426,12 @@ fn test_stream_state_transitions(test_case: &RstStreamTest) {
         }
         Some(other_state) => {
             // Stream in unexpected state
-            assert!(matches!(initial_state, Some(StreamState::Closed)),
+            assert!(
+                matches!(initial_state, Some(StreamState::Closed)),
                 "Only closed streams might remain in state {:?} after INTERNAL_ERROR, was {:?}",
-                other_state, initial_state);
+                other_state,
+                initial_state
+            );
         }
     }
 }
@@ -377,24 +445,37 @@ fn test_cleanup_edge_cases(test_case: &RstStreamTest) {
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         mock_connection.send_rst_stream(nonexistent_stream, ErrorCode::InternalError)
     }));
-    assert!(result.is_ok(), "RST_STREAM on non-existent stream should not panic");
+    assert!(
+        result.is_ok(),
+        "RST_STREAM on non-existent stream should not panic"
+    );
 
     // Test RST_STREAM on stream ID 0 (connection-level)
     let connection_rst = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         mock_connection.send_rst_stream(0, ErrorCode::InternalError)
     }));
-    assert!(connection_rst.is_ok(), "RST_STREAM on stream 0 should not panic");
+    assert!(
+        connection_rst.is_ok(),
+        "RST_STREAM on stream 0 should not panic"
+    );
 
     // Test RST_STREAM with invalid stream ID (even number for client)
     let invalid_stream = test_case.stream_id.max(2) & !1; // Ensure even
     let invalid_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         mock_connection.send_rst_stream(invalid_stream, ErrorCode::InternalError)
     }));
-    assert!(invalid_result.is_ok(), "RST_STREAM with invalid stream ID should not panic");
+    assert!(
+        invalid_result.is_ok(),
+        "RST_STREAM with invalid stream ID should not panic"
+    );
 
     // Test double RST_STREAM
     let stream_id = test_case.stream_id.max(1) | 1;
-    mock_connection.setup_stream(stream_id, &test_case.stream_state, &test_case.stream_resources);
+    mock_connection.setup_stream(
+        stream_id,
+        &test_case.stream_state,
+        &test_case.stream_resources,
+    );
 
     let first_rst = mock_connection.send_rst_stream(stream_id, ErrorCode::InternalError);
     let second_rst = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -515,14 +596,17 @@ impl MockConnection {
     }
 
     fn add_stream_dependency(&mut self, stream_id: u32, depends_on: u32) {
-        self.dependencies.entry(depends_on).or_insert_with(Vec::new).push(stream_id);
+        self.dependencies
+            .entry(depends_on)
+            .or_insert_with(Vec::new)
+            .push(stream_id);
     }
 
     fn send_rst_stream(&mut self, stream_id: u32, error_code: ErrorCode) -> CleanupResult {
         // Special case: stream ID 0 affects entire connection
         if stream_id == 0 {
             return CleanupResult::Error {
-                reason: "RST_STREAM not valid for connection (stream 0)".to_string()
+                reason: "RST_STREAM not valid for connection (stream 0)".to_string(),
             };
         }
 
@@ -531,7 +615,7 @@ impl MockConnection {
             Some(s) => s.clone(),
             None => {
                 return CleanupResult::Error {
-                    reason: format!("Stream {} not found", stream_id)
+                    reason: format!("Stream {} not found", stream_id),
                 };
             }
         };
@@ -570,13 +654,13 @@ impl MockConnection {
                     buffers_freed,
                     window_credits_returned: window_credits,
                     dependencies_cleared,
-                }
+                },
             };
         }
 
         // For other error codes, cleanup might be different
         CleanupResult::PartialCleanup {
-            remaining_resources: vec!["Stream state retained for non-INTERNAL_ERROR".to_string()]
+            remaining_resources: vec!["Stream state retained for non-INTERNAL_ERROR".to_string()],
         }
     }
 
@@ -597,15 +681,17 @@ impl MockConnection {
 
     fn get_resource_counts(&self) -> ResourceCounts {
         let stream_count = self.streams.len();
-        let buffer_bytes = self.streams.values()
+        let buffer_bytes = self
+            .streams
+            .values()
             .map(|s| s.resources.buffered_data.len())
             .sum();
-        let pending_operations = self.streams.values()
+        let pending_operations = self
+            .streams
+            .values()
             .map(|s| s.pending_operations.len())
             .sum();
-        let dependency_count = self.dependencies.values()
-            .map(|deps| deps.len())
-            .sum();
+        let dependency_count = self.dependencies.values().map(|deps| deps.len()).sum();
 
         ResourceCounts {
             stream_count,
@@ -628,13 +714,11 @@ fn generate_cleanup_scenarios() -> Vec<RstStreamTest> {
         RstStreamTest {
             stream_id: 1,
             stream_state: StreamState::Open,
-            pending_operations: vec![
-                PendingOperation {
-                    operation_type: OperationType::SendData,
-                    data: b"pending data".to_vec(),
-                    priority: 5,
-                }
-            ],
+            pending_operations: vec![PendingOperation {
+                operation_type: OperationType::SendData,
+                data: b"pending data".to_vec(),
+                priority: 5,
+            }],
             stream_resources: StreamResources {
                 buffered_data: b"buffered response".to_vec(),
                 send_window: 32768,
@@ -649,7 +733,6 @@ fn generate_cleanup_scenarios() -> Vec<RstStreamTest> {
                 header_table_size: 4096,
             },
         },
-
         // Half-closed stream with dependencies
         RstStreamTest {
             stream_id: 3,
@@ -680,18 +763,15 @@ fn generate_cleanup_scenarios() -> Vec<RstStreamTest> {
                 header_table_size: 2048,
             },
         },
-
         // Stream in error state
         RstStreamTest {
             stream_id: 9,
             stream_state: StreamState::Error,
-            pending_operations: vec![
-                PendingOperation {
-                    operation_type: OperationType::Close,
-                    data: vec![],
-                    priority: 0,
-                }
-            ],
+            pending_operations: vec![PendingOperation {
+                operation_type: OperationType::Close,
+                data: vec![],
+                priority: 0,
+            }],
             stream_resources: StreamResources {
                 send_window: -1000, // Negative window from flow control error
                 ..Default::default()
@@ -724,11 +804,17 @@ mod tests {
         let mut conn = MockConnection::new(settings);
         conn.setup_stream(1, &StreamState::Open, &StreamResources::default());
 
-        assert!(conn.check_stream_exists(1), "Stream should exist before RST");
+        assert!(
+            conn.check_stream_exists(1),
+            "Stream should exist before RST"
+        );
 
         let result = conn.send_rst_stream(1, ErrorCode::InternalError);
         assert!(matches!(result, CleanupResult::Success { .. }));
-        assert!(!conn.check_stream_exists(1), "Stream should be removed after RST_STREAM INTERNAL_ERROR");
+        assert!(
+            !conn.check_stream_exists(1),
+            "Stream should be removed after RST_STREAM INTERNAL_ERROR"
+        );
     }
 
     #[test]
@@ -741,16 +827,22 @@ mod tests {
         });
 
         conn.setup_stream(3, &StreamState::Open, &StreamResources::default());
-        conn.add_pending_operation(3, PendingOperation {
-            operation_type: OperationType::SendData,
-            data: b"test".to_vec(),
-            priority: 1,
-        });
+        conn.add_pending_operation(
+            3,
+            PendingOperation {
+                operation_type: OperationType::SendData,
+                data: b"test".to_vec(),
+                priority: 1,
+            },
+        );
 
         let result = conn.send_rst_stream(3, ErrorCode::InternalError);
         match result {
             CleanupResult::Success { resources_freed } => {
-                assert!(resources_freed.operations_cancelled > 0, "Should cancel pending operations");
+                assert!(
+                    resources_freed.operations_cancelled > 0,
+                    "Should cancel pending operations"
+                );
             }
             _ => panic!("Expected successful cleanup"),
         }
@@ -775,7 +867,10 @@ mod tests {
 
         // Dependent stream should be in error state
         assert!(matches!(conn.get_stream_state(3), Some(StreamState::Error)));
-        assert!(!conn.has_stream_dependency(3, 1), "Dependency should be removed");
+        assert!(
+            !conn.has_stream_dependency(3, 1),
+            "Dependency should be removed"
+        );
     }
 
     #[test]

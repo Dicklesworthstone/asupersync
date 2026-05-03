@@ -13,15 +13,15 @@
 
 #![no_main]
 
-use libfuzzer_sys::fuzz_target;
 use arbitrary::{Arbitrary, Unstructured};
 use asupersync::sync::Notify;
-use std::sync::atomic::{AtomicUsize, AtomicBool, Ordering};
-use std::sync::Arc;
+use libfuzzer_sys::fuzz_target;
 use std::collections::HashMap;
-use std::task::{Context, Poll, Waker};
-use std::pin::Pin;
 use std::future::Future;
+use std::pin::Pin;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::task::{Context, Poll, Waker};
 
 #[derive(Debug, Clone, Arbitrary)]
 struct NotifyWaitersDropConfig {
@@ -44,7 +44,10 @@ enum NotifyWaitersDropOperation {
     /// Call notify_waiters() to wake all
     NotifyWaiters,
     /// Create multiple waiters then drop some before notify
-    CreateThenDrop { waiter_ids: Vec<u8>, drop_ids: Vec<u8> },
+    CreateThenDrop {
+        waiter_ids: Vec<u8>,
+        drop_ids: Vec<u8>,
+    },
     /// Notify waiters then drop remaining futures
     NotifyThenDrop { drop_ids: Vec<u8> },
     /// Rapid create/drop cycle
@@ -269,7 +272,9 @@ fn test_notify_waiters_drop_scenario(
     let notify = Arc::new(Notify::new());
     let mut waiters: HashMap<u8, TrackedWaiter> = HashMap::new();
 
-    let max_ops = config.max_operations.min(NotifyWaitersDropConfig::max_operations()) as usize;
+    let max_ops = config
+        .max_operations
+        .min(NotifyWaitersDropConfig::max_operations()) as usize;
 
     for operation in config.operations.iter().take(max_ops) {
         match operation {
@@ -330,7 +335,10 @@ fn test_notify_waiters_drop_scenario(
                 }
             }
 
-            NotifyWaitersDropOperation::CreateThenDrop { waiter_ids, drop_ids } => {
+            NotifyWaitersDropOperation::CreateThenDrop {
+                waiter_ids,
+                drop_ids,
+            } => {
                 let max_create = NotifyWaitersDropConfig::max_waiters() as usize;
                 let max_drop = NotifyWaitersDropConfig::max_waiters() as usize;
 
@@ -522,9 +530,7 @@ fuzz_target!(|data: &[u8]| {
         let tracker2 = NotifyWaitersDropTracker::new();
         let config2 = config.clone();
 
-        let handle = thread::spawn(move || {
-            test_notify_waiters_drop_scenario(&config2, &tracker2)
-        });
+        let handle = thread::spawn(move || test_notify_waiters_drop_scenario(&config2, &tracker2));
 
         match handle.join() {
             Ok(Ok(())) => {

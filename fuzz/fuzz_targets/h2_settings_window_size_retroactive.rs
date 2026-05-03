@@ -15,13 +15,16 @@
 
 #![no_main]
 
-use libfuzzer_sys::fuzz_target;
-use asupersync::bytes::{Bytes, BytesMut, BufMut};
-use asupersync::http::h2::{H2Error, Frame};
-use asupersync::http::h2::frame::{SettingsFrame, Setting, DataFrame, HeadersFrame, RstStreamFrame, FrameHeader, data_flags, parse_frame};
+use asupersync::bytes::{BufMut, Bytes, BytesMut};
 use asupersync::http::h2::connection::{Connection, ConnectionState};
-use asupersync::http::h2::settings::Settings;
 use asupersync::http::h2::error::ErrorCode;
+use asupersync::http::h2::frame::{
+    DataFrame, FrameHeader, HeadersFrame, RstStreamFrame, Setting, SettingsFrame, data_flags,
+    parse_frame,
+};
+use asupersync::http::h2::settings::Settings;
+use asupersync::http::h2::{Frame, H2Error};
+use libfuzzer_sys::fuzz_target;
 
 /// Maximum input size to prevent OOM
 const MAX_INPUT_SIZE: usize = 8192;
@@ -41,15 +44,20 @@ fuzz_target!(|data: &[u8]| {
     // Test 1: Basic retroactive update with single stream
     {
         if data.len() >= 8 {
-            let initial_window = u32::from_be_bytes([data[0], data[1], data[2], data[3]]) & MAX_WINDOW_SIZE as u32;
-            let new_window = u32::from_be_bytes([data[4], data[5], data[6], data[7]]) & MAX_WINDOW_SIZE as u32;
+            let initial_window =
+                u32::from_be_bytes([data[0], data[1], data[2], data[3]]) & MAX_WINDOW_SIZE as u32;
+            let new_window =
+                u32::from_be_bytes([data[4], data[5], data[6], data[7]]) & MAX_WINDOW_SIZE as u32;
 
             if initial_window <= MAX_WINDOW_SIZE as u32 && new_window <= MAX_WINDOW_SIZE as u32 {
                 let result = test_single_stream_window_update(initial_window, new_window);
                 match result {
-                    Ok(_) => {}, // Valid window update
-                    Err(H2Error { code: ErrorCode::FlowControlError, .. }) => {}, // Expected overflow
-                    Err(_) => {}, // Other errors acceptable
+                    Ok(_) => {} // Valid window update
+                    Err(H2Error {
+                        code: ErrorCode::FlowControlError,
+                        ..
+                    }) => {} // Expected overflow
+                    Err(_) => {} // Other errors acceptable
                 }
             }
         }
@@ -64,7 +72,10 @@ fuzz_target!(|data: &[u8]| {
         for i in 0..stream_count.min((data.len() - offset) / 4) {
             if offset + 4 <= data.len() {
                 let window = u32::from_be_bytes([
-                    data[offset], data[offset + 1], data[offset + 2], data[offset + 3]
+                    data[offset],
+                    data[offset + 1],
+                    data[offset + 2],
+                    data[offset + 3],
                 ]) & MAX_WINDOW_SIZE as u32;
                 window_updates.push(window);
                 offset += 4;
@@ -85,7 +96,10 @@ fuzz_target!(|data: &[u8]| {
             let offset = 1 + i * 4;
             if offset + 4 <= data.len() {
                 let window = u32::from_be_bytes([
-                    data[offset], data[offset + 1], data[offset + 2], data[offset + 3]
+                    data[offset],
+                    data[offset + 1],
+                    data[offset + 2],
+                    data[offset + 3],
                 ]) & MAX_WINDOW_SIZE as u32;
                 updates.push(window);
             }
@@ -99,9 +113,11 @@ fuzz_target!(|data: &[u8]| {
     // Test 4: Window updates with stream closure timing
     {
         if data.len() >= 12 {
-            let initial = u32::from_be_bytes([data[0], data[1], data[2], data[3]]) & MAX_WINDOW_SIZE as u32;
+            let initial =
+                u32::from_be_bytes([data[0], data[1], data[2], data[3]]) & MAX_WINDOW_SIZE as u32;
             let consume_amount = u32::from_be_bytes([data[4], data[5], data[6], data[7]]);
-            let new_window = u32::from_be_bytes([data[8], data[9], data[10], data[11]]) & MAX_WINDOW_SIZE as u32;
+            let new_window =
+                u32::from_be_bytes([data[8], data[9], data[10], data[11]]) & MAX_WINDOW_SIZE as u32;
 
             let _result = test_window_update_with_closure(initial, consume_amount, new_window);
         }
@@ -110,12 +126,12 @@ fuzz_target!(|data: &[u8]| {
     // Test 5: Boundary testing around overflow conditions
     {
         let test_windows = [
-            0,                          // Minimum
-            1,                          // Minimum valid
-            DEFAULT_INITIAL_WINDOW_SIZE, // Default
+            0,                             // Minimum
+            1,                             // Minimum valid
+            DEFAULT_INITIAL_WINDOW_SIZE,   // Default
             MAX_WINDOW_SIZE as u32 - 1000, // Near maximum
-            MAX_WINDOW_SIZE as u32 - 1, // Just below maximum
-            MAX_WINDOW_SIZE as u32,     // At maximum
+            MAX_WINDOW_SIZE as u32 - 1,    // Just below maximum
+            MAX_WINDOW_SIZE as u32,        // At maximum
         ];
 
         for &initial in &test_windows {
@@ -133,18 +149,22 @@ fuzz_target!(|data: &[u8]| {
         let new_initial = u32::from_be_bytes([data[8], data[9], data[10], data[11]]);
         let old_initial = u32::from_be_bytes([data[12], data[13], data[14], data[15]]);
 
-        let _result = test_window_arithmetic_edge_case(base_window, consumed, old_initial, new_initial);
+        let _result =
+            test_window_arithmetic_edge_case(base_window, consumed, old_initial, new_initial);
     }
 
     // Test 7: Mixed valid and invalid SETTINGS in sequence
     if data.len() >= 20 {
-        let sequence = data.chunks(4).map(|chunk| {
-            if chunk.len() == 4 {
-                u32::from_be_bytes([chunk[0], chunk[1], chunk[2], chunk[3]])
-            } else {
-                DEFAULT_INITIAL_WINDOW_SIZE
-            }
-        }).collect::<Vec<_>>();
+        let sequence = data
+            .chunks(4)
+            .map(|chunk| {
+                if chunk.len() == 4 {
+                    u32::from_be_bytes([chunk[0], chunk[1], chunk[2], chunk[3]])
+                } else {
+                    DEFAULT_INITIAL_WINDOW_SIZE
+                }
+            })
+            .collect::<Vec<_>>();
 
         let _result = test_mixed_valid_invalid_sequence(&sequence);
     }
@@ -152,8 +172,10 @@ fuzz_target!(|data: &[u8]| {
     // Test 8: Connection state during window updates
     {
         if data.len() >= 8 {
-            let old_window = u32::from_be_bytes([data[0], data[1], data[2], data[3]]) % (MAX_WINDOW_SIZE as u32 + 1);
-            let new_window = u32::from_be_bytes([data[4], data[5], data[6], data[7]]) % (MAX_WINDOW_SIZE as u32 + 1);
+            let old_window = u32::from_be_bytes([data[0], data[1], data[2], data[3]])
+                % (MAX_WINDOW_SIZE as u32 + 1);
+            let new_window = u32::from_be_bytes([data[4], data[5], data[6], data[7]])
+                % (MAX_WINDOW_SIZE as u32 + 1);
 
             let _result = test_window_update_connection_states(old_window, new_window);
         }
@@ -164,9 +186,11 @@ fuzz_target!(|data: &[u8]| {
         let pattern_type = data[0] % 4; // 4 different test patterns
         let stream_count = (data[1] % 32) + 1; // 1-32 streams
         let window_delta = i32::from_be_bytes([data[4], data[5], data[6], data[7]]);
-        let base_window = u32::from_be_bytes([data[8], data[9], data[10], data[11]]) % (MAX_WINDOW_SIZE as u32 + 1);
+        let base_window = u32::from_be_bytes([data[8], data[9], data[10], data[11]])
+            % (MAX_WINDOW_SIZE as u32 + 1);
 
-        let _result = test_pattern_based_updates(pattern_type, stream_count, window_delta, base_window);
+        let _result =
+            test_pattern_based_updates(pattern_type, stream_count, window_delta, base_window);
     }
 
     // Test 10: Zero and negative window scenarios
@@ -252,10 +276,16 @@ fn test_rapid_settings_updates(updates: &[u32]) -> Result<(), H2Error> {
 
             // Each update should either succeed or fail with a flow control error
             match result {
-                Ok(()) => {}, // Success
-                Err(H2Error { code: ErrorCode::FlowControlError, .. }) => {}, // Expected overflow
-                Err(H2Error { code: ErrorCode::ProtocolError, .. }) => {}, // Invalid value
-                Err(_) => {}, // Other errors
+                Ok(()) => {} // Success
+                Err(H2Error {
+                    code: ErrorCode::FlowControlError,
+                    ..
+                }) => {} // Expected overflow
+                Err(H2Error {
+                    code: ErrorCode::ProtocolError,
+                    ..
+                }) => {} // Invalid value
+                Err(_) => {} // Other errors
             }
         }
     }
@@ -267,7 +297,7 @@ fn test_rapid_settings_updates(updates: &[u32]) -> Result<(), H2Error> {
 fn test_window_update_with_closure(
     initial_window: u32,
     consume_amount: u32,
-    new_window: u32
+    new_window: u32,
 ) -> Result<(), H2Error> {
     let mut conn = Connection::server(Settings::default());
     conn.state = ConnectionState::Open;
@@ -330,7 +360,7 @@ fn test_window_arithmetic_edge_case(
     _base_window: u32,
     _consumed: u32,
     old_initial: u32,
-    new_initial: u32
+    new_initial: u32,
 ) -> Result<(), H2Error> {
     if old_initial > MAX_WINDOW_SIZE as u32 || new_initial > MAX_WINDOW_SIZE as u32 {
         return Ok(()); // Invalid inputs
@@ -372,7 +402,11 @@ fn test_mixed_valid_invalid_sequence(sequence: &[u32]) -> Result<(), H2Error> {
 
 /// Test window updates in different connection states
 fn test_window_update_connection_states(old_window: u32, new_window: u32) -> Result<(), H2Error> {
-    let states = [ConnectionState::Handshaking, ConnectionState::Open, ConnectionState::Closing];
+    let states = [
+        ConnectionState::Handshaking,
+        ConnectionState::Open,
+        ConnectionState::Closing,
+    ];
 
     for state in &states {
         let mut conn = Connection::server(Settings::default());
@@ -396,7 +430,7 @@ fn test_pattern_based_updates(
     pattern_type: u8,
     stream_count: u8,
     window_delta: i32,
-    base_window: u32
+    base_window: u32,
 ) -> Result<(), H2Error> {
     let mut conn = Connection::server(Settings::default());
     conn.state = ConnectionState::Open;
@@ -419,7 +453,8 @@ fn test_pattern_based_updates(
             }
             1 => {
                 // Descending consumption
-                let consume = ((stream_count - i) as u32 * 1000).min(base_window.saturating_sub(1000));
+                let consume =
+                    ((stream_count - i) as u32 * 1000).min(base_window.saturating_sub(1000));
                 if consume > 0 {
                     let data_frame = create_data_frame(stream_id, consume);
                     let _result = conn.process_frame(data_frame);
@@ -427,7 +462,11 @@ fn test_pattern_based_updates(
             }
             2 => {
                 // Alternating high/low consumption
-                let consume = if i % 2 == 0 { 100 } else { base_window.saturating_sub(100) };
+                let consume = if i % 2 == 0 {
+                    100
+                } else {
+                    base_window.saturating_sub(100)
+                };
                 if consume > 0 && consume < base_window {
                     let data_frame = create_data_frame(stream_id, consume);
                     let _result = conn.process_frame(data_frame);
@@ -449,7 +488,8 @@ fn test_pattern_based_updates(
         base_window.saturating_add(window_delta as u32)
     } else {
         base_window.saturating_sub((-window_delta) as u32)
-    }.min(MAX_WINDOW_SIZE as u32);
+    }
+    .min(MAX_WINDOW_SIZE as u32);
 
     let settings = SettingsFrame::new(vec![Setting::InitialWindowSize(new_window)]);
     let _result = conn.process_frame(Frame::Settings(settings));
@@ -575,7 +615,7 @@ mod tests {
             MAX_WINDOW_SIZE as u32,
             1000,
             65535,
-            MAX_WINDOW_SIZE as u32
+            MAX_WINDOW_SIZE as u32,
         );
         assert!(result.is_ok());
     }

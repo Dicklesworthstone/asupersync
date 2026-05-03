@@ -22,13 +22,13 @@ fuzz_target!(|data: &[u8]| {
 
     // Create a fresh codec for each input
     let mut codec = Http1ClientCodec::new();
-    
+
     // Copy data to BytesMut for decoding
     let mut buf = BytesMut::from(data);
-    
+
     // Try to decode HTTP response - should never panic
     let _ = codec.decode(&mut buf);
-    
+
     // Also test decode_eof for edge cases where connection closes mid-response
     let mut buf2 = BytesMut::from(data);
     let _ = codec.decode_eof(&mut buf2);

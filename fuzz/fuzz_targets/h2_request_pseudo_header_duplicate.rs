@@ -1,7 +1,7 @@
 #![no_main]
 
-use libfuzzer_sys::fuzz_target;
 use arbitrary::{Arbitrary, Unstructured};
+use libfuzzer_sys::fuzz_target;
 use std::collections::{HashMap, HashSet};
 
 /// HTTP/2 request pseudo-header duplicate validation testing.
@@ -119,11 +119,17 @@ impl MockH2RequestParser {
 
         // Validate header name (no uppercase, no colons except for pseudo-headers)
         if name.chars().any(|c| c.is_ascii_uppercase()) {
-            return Err(format!("PROTOCOL_ERROR: header name contains uppercase: {}", name));
+            return Err(format!(
+                "PROTOCOL_ERROR: header name contains uppercase: {}",
+                name
+            ));
         }
 
         if name.contains(':') {
-            return Err(format!("PROTOCOL_ERROR: regular header name contains colon: {}", name));
+            return Err(format!(
+                "PROTOCOL_ERROR: regular header name contains colon: {}",
+                name
+            ));
         }
 
         // Store regular header (multiple values allowed)
@@ -136,26 +142,31 @@ impl MockH2RequestParser {
     }
 
     /// Process pseudo-header with validation
-    fn process_pseudo_header(&mut self, pseudo: PseudoHeader, name: &str, value: &str) -> Result<(), String> {
+    fn process_pseudo_header(
+        &mut self,
+        pseudo: PseudoHeader,
+        name: &str,
+        value: &str,
+    ) -> Result<(), String> {
         // RFC 7540 §8.1.2.1: pseudo-headers must appear before regular headers
         if self.seen_regular_header {
             return Err(format!(
-                "PROTOCOL_ERROR: pseudo-header {} after regular header", name
+                "PROTOCOL_ERROR: pseudo-header {} after regular header",
+                name
             ));
         }
 
         // Check for case sensitivity - pseudo-headers must be lowercase
         if name != name.to_lowercase() {
             return Err(format!(
-                "PROTOCOL_ERROR: pseudo-header not lowercase: {}", name
+                "PROTOCOL_ERROR: pseudo-header not lowercase: {}",
+                name
             ));
         }
 
         // Check for duplicate pseudo-header
         if self.pseudo_headers.contains_key(&pseudo) {
-            return Err(format!(
-                "PROTOCOL_ERROR: duplicate pseudo-header {}", name
-            ));
+            return Err(format!("PROTOCOL_ERROR: duplicate pseudo-header {}", name));
         }
 
         // Validate pseudo-header values
@@ -168,7 +179,11 @@ impl MockH2RequestParser {
     }
 
     /// Validate pseudo-header values
-    fn validate_pseudo_header_value(&mut self, pseudo: &PseudoHeader, value: &str) -> Result<(), String> {
+    fn validate_pseudo_header_value(
+        &mut self,
+        pseudo: &PseudoHeader,
+        value: &str,
+    ) -> Result<(), String> {
         match pseudo {
             PseudoHeader::Method => {
                 // Common HTTP methods
@@ -177,7 +192,8 @@ impl MockH2RequestParser {
                 }
                 // Method should be uppercase, but we don't enforce specific methods
                 if value.chars().any(|c| !c.is_ascii_alphabetic()) {
-                    self.errors.push(format!("Unusual :method value: {}", value));
+                    self.errors
+                        .push(format!("Unusual :method value: {}", value));
                 }
             }
             PseudoHeader::Path => {
@@ -195,7 +211,8 @@ impl MockH2RequestParser {
                 }
                 // Common schemes
                 if !["http", "https"].contains(&value) {
-                    self.errors.push(format!("Uncommon :scheme value: {}", value));
+                    self.errors
+                        .push(format!("Uncommon :scheme value: {}", value));
                 }
             }
             PseudoHeader::Authority => {
@@ -219,7 +236,11 @@ impl MockH2RequestParser {
 
     /// Validate that all required pseudo-headers are present
     fn validate_required_pseudo_headers(&mut self) -> Result<(), String> {
-        let required = [PseudoHeader::Method, PseudoHeader::Path, PseudoHeader::Scheme];
+        let required = [
+            PseudoHeader::Method,
+            PseudoHeader::Path,
+            PseudoHeader::Scheme,
+        ];
 
         for required_header in &required {
             if !self.pseudo_headers.contains_key(required_header) {
@@ -257,7 +278,11 @@ fuzz_target!(|data: &[u8]| {
     }
 
     // Limit header name/value lengths
-    if input.headers.iter().any(|h| h.name.len() > 200 || h.value.len() > 1000) {
+    if input
+        .headers
+        .iter()
+        .any(|h| h.name.len() > 200 || h.value.len() > 1000)
+    {
         return;
     }
 
@@ -280,12 +305,18 @@ fuzz_target!(|data: &[u8]| {
     let has_duplicate_pseudo = pseudo_header_counts.values().any(|&count| count > 1);
 
     if has_duplicate_pseudo {
-        assert!(result.is_err(),
-            "Duplicate pseudo-headers should be rejected");
+        assert!(
+            result.is_err(),
+            "Duplicate pseudo-headers should be rejected"
+        );
 
         if let Err(error_msg) = &result {
-            assert!(error_msg.contains("duplicate pseudo-header") && error_msg.contains("PROTOCOL_ERROR"),
-                "Duplicate pseudo-header error should be clear: {}", error_msg);
+            assert!(
+                error_msg.contains("duplicate pseudo-header")
+                    && error_msg.contains("PROTOCOL_ERROR"),
+                "Duplicate pseudo-header error should be clear: {}",
+                error_msg
+            );
         }
         return; // No further tests for duplicate error case
     }
@@ -306,69 +337,84 @@ fuzz_target!(|data: &[u8]| {
     }
 
     if pseudo_after_regular {
-        assert!(result.is_err(),
-            "Pseudo-headers after regular headers should be rejected");
+        assert!(
+            result.is_err(),
+            "Pseudo-headers after regular headers should be rejected"
+        );
 
         if let Err(error_msg) = &result {
-            assert!(error_msg.contains("pseudo-header") && error_msg.contains("after regular"),
-                "Ordering error should be clear: {}", error_msg);
+            assert!(
+                error_msg.contains("pseudo-header") && error_msg.contains("after regular"),
+                "Ordering error should be clear: {}",
+                error_msg
+            );
         }
         return;
     }
 
     // Test 3: Check for case sensitivity violations
-    let has_uppercase_pseudo = input.headers.iter().any(|h| {
-        h.name.starts_with(':') && h.name != h.name.to_lowercase()
-    });
+    let has_uppercase_pseudo = input
+        .headers
+        .iter()
+        .any(|h| h.name.starts_with(':') && h.name != h.name.to_lowercase());
 
     if has_uppercase_pseudo {
-        assert!(result.is_err(),
-            "Uppercase pseudo-headers should be rejected");
+        assert!(
+            result.is_err(),
+            "Uppercase pseudo-headers should be rejected"
+        );
 
         if let Err(error_msg) = &result {
-            assert!(error_msg.contains("not lowercase"),
-                "Case sensitivity error should mention lowercase: {}", error_msg);
+            assert!(
+                error_msg.contains("not lowercase"),
+                "Case sensitivity error should mention lowercase: {}",
+                error_msg
+            );
         }
         return;
     }
 
     // Test 4: Check for empty header names
     if input.headers.iter().any(|h| h.name.is_empty()) {
-        assert!(result.is_err(),
-            "Empty header names should be rejected");
+        assert!(result.is_err(), "Empty header names should be rejected");
         return;
     }
 
     // Test 5: Check for invalid pseudo-header values
-    let has_invalid_values = input.headers.iter().any(|h| {
-        match h.name.as_str() {
-            ":method" => h.value.is_empty(),
-            ":path" => h.value.is_empty() || (!h.value.starts_with('/') && h.value != "*"),
-            ":scheme" => h.value.is_empty(),
-            ":authority" => h.value.contains(' '),
-            _ => false,
-        }
+    let has_invalid_values = input.headers.iter().any(|h| match h.name.as_str() {
+        ":method" => h.value.is_empty(),
+        ":path" => h.value.is_empty() || (!h.value.starts_with('/') && h.value != "*"),
+        ":scheme" => h.value.is_empty(),
+        ":authority" => h.value.contains(' '),
+        _ => false,
     });
 
     if has_invalid_values {
-        assert!(result.is_err(),
-            "Invalid pseudo-header values should be rejected");
+        assert!(
+            result.is_err(),
+            "Invalid pseudo-header values should be rejected"
+        );
         return;
     }
 
     // Test 6: Check for required pseudo-headers
     let required_headers = [":method", ":path", ":scheme"];
-    let missing_required = required_headers.iter().any(|&required| {
-        !input.headers.iter().any(|h| h.name == required)
-    });
+    let missing_required = required_headers
+        .iter()
+        .any(|&required| !input.headers.iter().any(|h| h.name == required));
 
     if missing_required {
-        assert!(result.is_err(),
-            "Missing required pseudo-headers should be rejected");
+        assert!(
+            result.is_err(),
+            "Missing required pseudo-headers should be rejected"
+        );
 
         if let Err(error_msg) = &result {
-            assert!(error_msg.contains("missing required pseudo-header"),
-                "Missing header error should be clear: {}", error_msg);
+            assert!(
+                error_msg.contains("missing required pseudo-header"),
+                "Missing header error should be clear: {}",
+                error_msg
+            );
         }
         return;
     }
@@ -379,26 +425,38 @@ fuzz_target!(|data: &[u8]| {
         if let Err(error_msg) = &result {
             // Regular header name validation
             if input.headers.iter().any(|h| {
-                !h.name.starts_with(':') && (
-                    h.name.chars().any(|c| c.is_ascii_uppercase()) ||
-                    h.name.contains(':')
-                )
+                !h.name.starts_with(':')
+                    && (h.name.chars().any(|c| c.is_ascii_uppercase()) || h.name.contains(':'))
             }) {
-                assert!(error_msg.contains("header name") || error_msg.contains("uppercase") || error_msg.contains("colon"),
-                    "Regular header validation error: {}", error_msg);
+                assert!(
+                    error_msg.contains("header name")
+                        || error_msg.contains("uppercase")
+                        || error_msg.contains("colon"),
+                    "Regular header validation error: {}",
+                    error_msg
+                );
             } else {
-                panic!("Unexpected parse error for apparently valid headers: {}", error_msg);
+                panic!(
+                    "Unexpected parse error for apparently valid headers: {}",
+                    error_msg
+                );
             }
         }
     } else {
         // Successful parse - verify structure
         let pseudo_headers = parser.get_pseudo_headers();
-        assert!(pseudo_headers.contains_key(&PseudoHeader::Method),
-            "Parsed headers should contain :method");
-        assert!(pseudo_headers.contains_key(&PseudoHeader::Path),
-            "Parsed headers should contain :path");
-        assert!(pseudo_headers.contains_key(&PseudoHeader::Scheme),
-            "Parsed headers should contain :scheme");
+        assert!(
+            pseudo_headers.contains_key(&PseudoHeader::Method),
+            "Parsed headers should contain :method"
+        );
+        assert!(
+            pseudo_headers.contains_key(&PseudoHeader::Path),
+            "Parsed headers should contain :path"
+        );
+        assert!(
+            pseudo_headers.contains_key(&PseudoHeader::Scheme),
+            "Parsed headers should contain :scheme"
+        );
     }
 });
 
@@ -409,43 +467,90 @@ mod tests {
     #[test]
     fn test_duplicate_method_header() {
         let headers = vec![
-            HeaderEntry { name: ":method".to_string(), value: "GET".to_string() },
-            HeaderEntry { name: ":path".to_string(), value: "/".to_string() },
-            HeaderEntry { name: ":scheme".to_string(), value: "https".to_string() },
-            HeaderEntry { name: ":method".to_string(), value: "POST".to_string() }, // Duplicate
+            HeaderEntry {
+                name: ":method".to_string(),
+                value: "GET".to_string(),
+            },
+            HeaderEntry {
+                name: ":path".to_string(),
+                value: "/".to_string(),
+            },
+            HeaderEntry {
+                name: ":scheme".to_string(),
+                value: "https".to_string(),
+            },
+            HeaderEntry {
+                name: ":method".to_string(),
+                value: "POST".to_string(),
+            }, // Duplicate
         ];
 
         let mut parser = MockH2RequestParser::new();
         let result = parser.parse_request_headers(&headers);
 
         assert!(result.is_err());
-        assert!(result.unwrap_err().contains("duplicate pseudo-header :method"));
+        assert!(
+            result
+                .unwrap_err()
+                .contains("duplicate pseudo-header :method")
+        );
     }
 
     #[test]
     fn test_duplicate_path_header() {
         let headers = vec![
-            HeaderEntry { name: ":method".to_string(), value: "GET".to_string() },
-            HeaderEntry { name: ":path".to_string(), value: "/".to_string() },
-            HeaderEntry { name: ":path".to_string(), value: "/other".to_string() }, // Duplicate
-            HeaderEntry { name: ":scheme".to_string(), value: "https".to_string() },
+            HeaderEntry {
+                name: ":method".to_string(),
+                value: "GET".to_string(),
+            },
+            HeaderEntry {
+                name: ":path".to_string(),
+                value: "/".to_string(),
+            },
+            HeaderEntry {
+                name: ":path".to_string(),
+                value: "/other".to_string(),
+            }, // Duplicate
+            HeaderEntry {
+                name: ":scheme".to_string(),
+                value: "https".to_string(),
+            },
         ];
 
         let mut parser = MockH2RequestParser::new();
         let result = parser.parse_request_headers(&headers);
 
         assert!(result.is_err());
-        assert!(result.unwrap_err().contains("duplicate pseudo-header :path"));
+        assert!(
+            result
+                .unwrap_err()
+                .contains("duplicate pseudo-header :path")
+        );
     }
 
     #[test]
     fn test_valid_request_headers() {
         let headers = vec![
-            HeaderEntry { name: ":method".to_string(), value: "GET".to_string() },
-            HeaderEntry { name: ":path".to_string(), value: "/api/v1/test".to_string() },
-            HeaderEntry { name: ":scheme".to_string(), value: "https".to_string() },
-            HeaderEntry { name: ":authority".to_string(), value: "example.com".to_string() },
-            HeaderEntry { name: "user-agent".to_string(), value: "test-client".to_string() },
+            HeaderEntry {
+                name: ":method".to_string(),
+                value: "GET".to_string(),
+            },
+            HeaderEntry {
+                name: ":path".to_string(),
+                value: "/api/v1/test".to_string(),
+            },
+            HeaderEntry {
+                name: ":scheme".to_string(),
+                value: "https".to_string(),
+            },
+            HeaderEntry {
+                name: ":authority".to_string(),
+                value: "example.com".to_string(),
+            },
+            HeaderEntry {
+                name: "user-agent".to_string(),
+                value: "test-client".to_string(),
+            },
         ];
 
         let mut parser = MockH2RequestParser::new();
@@ -457,25 +562,50 @@ mod tests {
     #[test]
     fn test_pseudo_header_after_regular() {
         let headers = vec![
-            HeaderEntry { name: ":method".to_string(), value: "GET".to_string() },
-            HeaderEntry { name: "user-agent".to_string(), value: "test".to_string() }, // Regular header
-            HeaderEntry { name: ":path".to_string(), value: "/".to_string() }, // Pseudo after regular
-            HeaderEntry { name: ":scheme".to_string(), value: "https".to_string() },
+            HeaderEntry {
+                name: ":method".to_string(),
+                value: "GET".to_string(),
+            },
+            HeaderEntry {
+                name: "user-agent".to_string(),
+                value: "test".to_string(),
+            }, // Regular header
+            HeaderEntry {
+                name: ":path".to_string(),
+                value: "/".to_string(),
+            }, // Pseudo after regular
+            HeaderEntry {
+                name: ":scheme".to_string(),
+                value: "https".to_string(),
+            },
         ];
 
         let mut parser = MockH2RequestParser::new();
         let result = parser.parse_request_headers(&headers);
 
         assert!(result.is_err());
-        assert!(result.unwrap_err().contains("pseudo-header :path after regular header"));
+        assert!(
+            result
+                .unwrap_err()
+                .contains("pseudo-header :path after regular header")
+        );
     }
 
     #[test]
     fn test_uppercase_pseudo_header() {
         let headers = vec![
-            HeaderEntry { name: ":METHOD".to_string(), value: "GET".to_string() }, // Uppercase
-            HeaderEntry { name: ":path".to_string(), value: "/".to_string() },
-            HeaderEntry { name: ":scheme".to_string(), value: "https".to_string() },
+            HeaderEntry {
+                name: ":METHOD".to_string(),
+                value: "GET".to_string(),
+            }, // Uppercase
+            HeaderEntry {
+                name: ":path".to_string(),
+                value: "/".to_string(),
+            },
+            HeaderEntry {
+                name: ":scheme".to_string(),
+                value: "https".to_string(),
+            },
         ];
 
         let mut parser = MockH2RequestParser::new();
@@ -488,7 +618,10 @@ mod tests {
     #[test]
     fn test_missing_required_headers() {
         let headers = vec![
-            HeaderEntry { name: ":method".to_string(), value: "GET".to_string() },
+            HeaderEntry {
+                name: ":method".to_string(),
+                value: "GET".to_string(),
+            },
             // Missing :path and :scheme
         ];
 
@@ -496,15 +629,28 @@ mod tests {
         let result = parser.parse_request_headers(&headers);
 
         assert!(result.is_err());
-        assert!(result.unwrap_err().contains("missing required pseudo-header"));
+        assert!(
+            result
+                .unwrap_err()
+                .contains("missing required pseudo-header")
+        );
     }
 
     #[test]
     fn test_empty_pseudo_header_values() {
         let headers = vec![
-            HeaderEntry { name: ":method".to_string(), value: "".to_string() }, // Empty
-            HeaderEntry { name: ":path".to_string(), value: "/".to_string() },
-            HeaderEntry { name: ":scheme".to_string(), value: "https".to_string() },
+            HeaderEntry {
+                name: ":method".to_string(),
+                value: "".to_string(),
+            }, // Empty
+            HeaderEntry {
+                name: ":path".to_string(),
+                value: "/".to_string(),
+            },
+            HeaderEntry {
+                name: ":scheme".to_string(),
+                value: "https".to_string(),
+            },
         ];
 
         let mut parser = MockH2RequestParser::new();
@@ -517,9 +663,18 @@ mod tests {
     #[test]
     fn test_invalid_path_value() {
         let headers = vec![
-            HeaderEntry { name: ":method".to_string(), value: "GET".to_string() },
-            HeaderEntry { name: ":path".to_string(), value: "invalid-path".to_string() }, // No leading /
-            HeaderEntry { name: ":scheme".to_string(), value: "https".to_string() },
+            HeaderEntry {
+                name: ":method".to_string(),
+                value: "GET".to_string(),
+            },
+            HeaderEntry {
+                name: ":path".to_string(),
+                value: "invalid-path".to_string(),
+            }, // No leading /
+            HeaderEntry {
+                name: ":scheme".to_string(),
+                value: "https".to_string(),
+            },
         ];
 
         let mut parser = MockH2RequestParser::new();
@@ -532,9 +687,18 @@ mod tests {
     #[test]
     fn test_options_asterisk_path() {
         let headers = vec![
-            HeaderEntry { name: ":method".to_string(), value: "OPTIONS".to_string() },
-            HeaderEntry { name: ":path".to_string(), value: "*".to_string() }, // Valid for OPTIONS
-            HeaderEntry { name: ":scheme".to_string(), value: "https".to_string() },
+            HeaderEntry {
+                name: ":method".to_string(),
+                value: "OPTIONS".to_string(),
+            },
+            HeaderEntry {
+                name: ":path".to_string(),
+                value: "*".to_string(),
+            }, // Valid for OPTIONS
+            HeaderEntry {
+                name: ":scheme".to_string(),
+                value: "https".to_string(),
+            },
         ];
 
         let mut parser = MockH2RequestParser::new();
@@ -546,10 +710,22 @@ mod tests {
     #[test]
     fn test_unknown_pseudo_header() {
         let headers = vec![
-            HeaderEntry { name: ":method".to_string(), value: "GET".to_string() },
-            HeaderEntry { name: ":path".to_string(), value: "/".to_string() },
-            HeaderEntry { name: ":scheme".to_string(), value: "https".to_string() },
-            HeaderEntry { name: ":unknown".to_string(), value: "value".to_string() }, // Unknown pseudo
+            HeaderEntry {
+                name: ":method".to_string(),
+                value: "GET".to_string(),
+            },
+            HeaderEntry {
+                name: ":path".to_string(),
+                value: "/".to_string(),
+            },
+            HeaderEntry {
+                name: ":scheme".to_string(),
+                value: "https".to_string(),
+            },
+            HeaderEntry {
+                name: ":unknown".to_string(),
+                value: "value".to_string(),
+            }, // Unknown pseudo
         ];
 
         let mut parser = MockH2RequestParser::new();
@@ -557,17 +733,37 @@ mod tests {
 
         // Should succeed but generate warning
         assert!(result.is_ok(), "Unknown pseudo-headers should be ignored");
-        assert!(parser.get_errors().iter().any(|e| e.contains("Unknown pseudo-header")));
+        assert!(
+            parser
+                .get_errors()
+                .iter()
+                .any(|e| e.contains("Unknown pseudo-header"))
+        );
     }
 
     #[test]
     fn test_multiple_duplicates() {
         let headers = vec![
-            HeaderEntry { name: ":method".to_string(), value: "GET".to_string() },
-            HeaderEntry { name: ":method".to_string(), value: "POST".to_string() }, // Duplicate 1
-            HeaderEntry { name: ":path".to_string(), value: "/".to_string() },
-            HeaderEntry { name: ":path".to_string(), value: "/other".to_string() }, // Duplicate 2
-            HeaderEntry { name: ":scheme".to_string(), value: "https".to_string() },
+            HeaderEntry {
+                name: ":method".to_string(),
+                value: "GET".to_string(),
+            },
+            HeaderEntry {
+                name: ":method".to_string(),
+                value: "POST".to_string(),
+            }, // Duplicate 1
+            HeaderEntry {
+                name: ":path".to_string(),
+                value: "/".to_string(),
+            },
+            HeaderEntry {
+                name: ":path".to_string(),
+                value: "/other".to_string(),
+            }, // Duplicate 2
+            HeaderEntry {
+                name: ":scheme".to_string(),
+                value: "https".to_string(),
+            },
         ];
 
         let mut parser = MockH2RequestParser::new();

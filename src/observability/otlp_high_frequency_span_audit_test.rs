@@ -15,12 +15,12 @@
 #![cfg(test)]
 
 use crate::observability::otlp_trace_exporter::{
-    LoadSheddingTraceExporter, MockOtlpHttpExporter, OtlpSpan, SpanBatch, TraceExporter
+    LoadSheddingTraceExporter, MockOtlpHttpExporter, OtlpSpan, SpanBatch, TraceExporter,
 };
-use std::sync::{Arc, Barrier};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::{Duration, Instant};
+use std::sync::{Arc, Barrier};
 use std::thread;
+use std::time::{Duration, Instant};
 
 /// Concurrent span creation benchmark for mutex contention analysis.
 struct HighFrequencySpanBenchmark {
@@ -161,7 +161,10 @@ fn audit_high_frequency_span_processing_lock_analysis() {
     let benchmark_duration = benchmark.run_span_export_benchmark(Arc::clone(&exporter));
     let total_throughput = total_spans as f64 / benchmark_duration.as_secs_f64();
 
-    println!("   Overall: {} spans in {:?}", total_spans, benchmark_duration);
+    println!(
+        "   Overall: {} spans in {:?}",
+        total_spans, benchmark_duration
+    );
     println!("   Throughput: {:.0} spans/sec", total_throughput);
 
     // Analyze queue implementation
@@ -180,16 +183,25 @@ fn audit_high_frequency_span_processing_lock_analysis() {
     let target_throughput = 100_000.0; // 100K spans/sec target
 
     if total_throughput >= target_throughput {
-        println!("✅ THROUGHPUT TARGET: Achieved {:.0} spans/sec (≥ 100K)", total_throughput);
+        println!(
+            "✅ THROUGHPUT TARGET: Achieved {:.0} spans/sec (≥ 100K)",
+            total_throughput
+        );
     } else {
-        println!("⚠️  THROUGHPUT BELOW TARGET: {:.0} spans/sec (< 100K)", total_throughput);
+        println!(
+            "⚠️  THROUGHPUT BELOW TARGET: {:.0} spans/sec (< 100K)",
+            total_throughput
+        );
         println!("💡 POTENTIAL CAUSE: Mutex contention in work-queue");
     }
 
     // Contention analysis based on thread scaling
     let expected_linear_scaling = total_throughput / thread_count as f64;
     println!("📊 Concurrency scaling analysis:");
-    println!("   Expected per-thread (linear): {:.0} spans/sec", expected_linear_scaling);
+    println!(
+        "   Expected per-thread (linear): {:.0} spans/sec",
+        expected_linear_scaling
+    );
 
     if benchmark_duration > Duration::from_secs(2) {
         println!("⚠️  SLOW EXPORT DETECTED: Duration > 2s suggests contention");
@@ -215,7 +227,10 @@ fn audit_high_frequency_span_processing_lock_analysis() {
     // Load shedding stats for context
     let stats = exporter.load_shedding_stats();
     println!("📊 Load shedding impact:");
-    println!("   Queue depth: {}/{}", stats.queue_depth, stats.queue_capacity);
+    println!(
+        "   Queue depth: {}/{}",
+        stats.queue_depth, stats.queue_capacity
+    );
     println!("   Dropped batches: {}", stats.dropped_batches);
 
     assert!(total_spans > 0, "Benchmark should export spans");
@@ -271,20 +286,33 @@ fn audit_mutex_contention_thread_scaling() {
         let expected_linear = baseline_throughput * thread_count as f64;
         let scaling_efficiency = throughput / expected_linear;
 
-        println!("   {} threads: {:.0} spans/sec (efficiency: {:.1}%)",
-                 thread_count, throughput, scaling_efficiency * 100.0);
+        println!(
+            "   {} threads: {:.0} spans/sec (efficiency: {:.1}%)",
+            thread_count,
+            throughput,
+            scaling_efficiency * 100.0
+        );
     }
 
     // **CONTENTION EVIDENCE**
     let final_efficiency = throughputs.last().unwrap() / (baseline_throughput * 8.0);
     if final_efficiency < 0.7 {
-        println!("🚨 SEVERE CONTENTION: 8-thread efficiency {:.1}% (< 70%)", final_efficiency * 100.0);
+        println!(
+            "🚨 SEVERE CONTENTION: 8-thread efficiency {:.1}% (< 70%)",
+            final_efficiency * 100.0
+        );
         println!("💡 EVIDENCE: Mutex serialization prevents linear scaling");
     } else if final_efficiency < 0.9 {
-        println!("⚠️  MODERATE CONTENTION: 8-thread efficiency {:.1}% (< 90%)", final_efficiency * 100.0);
+        println!(
+            "⚠️  MODERATE CONTENTION: 8-thread efficiency {:.1}% (< 90%)",
+            final_efficiency * 100.0
+        );
         println!("💡 LIKELY CAUSE: Occasional mutex contention");
     } else {
-        println!("✅ GOOD SCALING: 8-thread efficiency {:.1}% (≥ 90%)", final_efficiency * 100.0);
+        println!(
+            "✅ GOOD SCALING: 8-thread efficiency {:.1}% (≥ 90%)",
+            final_efficiency * 100.0
+        );
     }
 
     println!("✅ MUTEX CONTENTION SCALING ANALYSIS COMPLETE");
@@ -325,12 +353,16 @@ fn audit_queue_operation_latency_profile() {
     // Profile sequential operations (baseline)
     println!("📊 Sequential operation baseline:");
     let sequential_start = Instant::now();
-    for batch in &batches[..100] { // Sample size
+    for batch in &batches[..100] {
+        // Sample size
         let _ = exporter.export(batch);
     }
     let sequential_duration = sequential_start.elapsed();
     let sequential_avg = sequential_duration / 100;
-    println!("   Average enqueue latency: {:?} (sequential)", sequential_avg);
+    println!(
+        "   Average enqueue latency: {:?} (sequential)",
+        sequential_avg
+    );
 
     // Profile concurrent operations (contention scenario)
     println!("📊 Concurrent operation contention:");
@@ -365,17 +397,24 @@ fn audit_queue_operation_latency_profile() {
     }
     let concurrent_duration = concurrent_start.elapsed();
     let concurrent_avg = concurrent_duration / batch_count as u32;
-    println!("   Average enqueue latency: {:?} (concurrent)", concurrent_avg);
+    println!(
+        "   Average enqueue latency: {:?} (concurrent)",
+        concurrent_avg
+    );
 
     // **MUTEX OVERHEAD ANALYSIS**
     println!("📊 Mutex overhead assessment:");
     if concurrent_avg > sequential_avg * 2 {
-        println!("🚨 HIGH MUTEX OVERHEAD: Concurrent latency {}x sequential",
-                 concurrent_avg.as_nanos() / sequential_avg.as_nanos().max(1));
+        println!(
+            "🚨 HIGH MUTEX OVERHEAD: Concurrent latency {}x sequential",
+            concurrent_avg.as_nanos() / sequential_avg.as_nanos().max(1)
+        );
         println!("💡 EVIDENCE: Mutex contention increases operation latency");
     } else {
-        println!("⚠️  MODERATE OVERHEAD: Concurrent latency {}x sequential",
-                 concurrent_avg.as_nanos() / sequential_avg.as_nanos().max(1));
+        println!(
+            "⚠️  MODERATE OVERHEAD: Concurrent latency {}x sequential",
+            concurrent_avg.as_nanos() / sequential_avg.as_nanos().max(1)
+        );
     }
 
     println!("🔍 Implementation details:");

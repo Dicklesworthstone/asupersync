@@ -21,9 +21,7 @@ struct GrpcLengthPrefixFuzz {
 #[derive(Arbitrary, Debug, Clone)]
 enum FramingScenario {
     /// Valid compression flag + length combinations
-    ValidFrames {
-        messages: Vec<ValidMessage>,
-    },
+    ValidFrames { messages: Vec<ValidMessage> },
     /// Invalid compression flags with various lengths
     InvalidCompression {
         invalid_flags: Vec<u8>,
@@ -35,13 +33,9 @@ enum FramingScenario {
         boundary_cases: Vec<LengthBoundaryCase>,
     },
     /// Malformed frame headers
-    MalformedHeaders {
-        partial_headers: Vec<PartialHeader>,
-    },
+    MalformedHeaders { partial_headers: Vec<PartialHeader> },
     /// Mixed valid and invalid sequences
-    MixedSequence {
-        frames: Vec<FrameVariant>,
-    },
+    MixedSequence { frames: Vec<FrameVariant> },
 }
 
 #[derive(Arbitrary, Debug, Clone)]
@@ -93,8 +87,16 @@ struct PartialHeader {
 #[derive(Arbitrary, Debug, Clone)]
 enum FrameVariant {
     Valid(ValidMessage),
-    InvalidFlag { flag: u8, length: u32, payload: Vec<u8> },
-    LengthMismatch { compressed: bool, declared: u32, payload: Vec<u8> },
+    InvalidFlag {
+        flag: u8,
+        length: u32,
+        payload: Vec<u8>,
+    },
+    LengthMismatch {
+        compressed: bool,
+        declared: u32,
+        payload: Vec<u8>,
+    },
     PartialFrame(PartialHeader),
 }
 
@@ -171,8 +173,13 @@ fn test_grpc_framing_scenarios(input: &GrpcLengthPrefixFuzz) {
             }
         }
 
-        FramingScenario::InvalidCompression { invalid_flags, lengths, payloads } => {
-            for ((flag, length), payload) in invalid_flags.iter()
+        FramingScenario::InvalidCompression {
+            invalid_flags,
+            lengths,
+            payloads,
+        } => {
+            for ((flag, length), payload) in invalid_flags
+                .iter()
                 .zip(lengths.iter())
                 .zip(payloads.iter())
                 .take(MAX_MESSAGES)
@@ -195,7 +202,9 @@ fn test_grpc_framing_scenarios(input: &GrpcLengthPrefixFuzz) {
 
         FramingScenario::LengthBoundary { boundary_cases } => {
             for case in boundary_cases.iter().take(MAX_MESSAGES) {
-                if case.payload.len() > MAX_PAYLOAD_SIZE || case.declared_length > MAX_DECLARED_LENGTH {
+                if case.payload.len() > MAX_PAYLOAD_SIZE
+                    || case.declared_length > MAX_DECLARED_LENGTH
+                {
                     continue;
                 }
 
@@ -205,7 +214,8 @@ fn test_grpc_framing_scenarios(input: &GrpcLengthPrefixFuzz) {
 
         FramingScenario::MalformedHeaders { partial_headers } => {
             for partial in partial_headers.iter().take(MAX_MESSAGES) {
-                if partial.header_bytes.len() > 5 || partial.trailing_data.len() > MAX_PAYLOAD_SIZE {
+                if partial.header_bytes.len() > 5 || partial.trailing_data.len() > MAX_PAYLOAD_SIZE
+                {
                     continue;
                 }
 
@@ -229,7 +239,8 @@ fn test_message_sequence_processing(input: &GrpcLengthPrefixFuzz) {
     // Build a sequence of messages based on scenario
     match &input.scenario {
         FramingScenario::ValidFrames { messages } => {
-            for msg in messages.iter().take(10) { // Limit for sequence test
+            for msg in messages.iter().take(10) {
+                // Limit for sequence test
                 if msg.payload.len() <= MAX_PAYLOAD_SIZE {
                     let frame = encode_message(msg.compressed, &msg.payload);
                     combined_buf.extend_from_slice(&frame);
@@ -268,10 +279,10 @@ fn test_length_prefix_edge_cases(input: &GrpcLengthPrefixFuzz) {
 
     // Test specific edge cases
     let edge_cases = [
-        (false, 0u32, vec![]),           // Zero-length uncompressed
-        (true, 0u32, vec![]),            // Zero-length compressed
-        (false, 1u32, vec![0x42]),       // Single-byte uncompressed
-        (true, 1u32, vec![0x42]),        // Single-byte compressed
+        (false, 0u32, vec![]),     // Zero-length uncompressed
+        (true, 0u32, vec![]),      // Zero-length compressed
+        (false, 1u32, vec![0x42]), // Single-byte uncompressed
+        (true, 1u32, vec![0x42]),  // Single-byte compressed
     ];
 
     for (compressed, length, payload) in edge_cases {
@@ -282,7 +293,11 @@ fn test_length_prefix_edge_cases(input: &GrpcLengthPrefixFuzz) {
 
 /// Encode a message with proper gRPC framing
 fn encode_message(compressed: bool, payload: &[u8]) -> BytesMut {
-    encode_message_raw(if compressed { 1 } else { 0 }, payload.len() as u32, payload)
+    encode_message_raw(
+        if compressed { 1 } else { 0 },
+        payload.len() as u32,
+        payload,
+    )
 }
 
 /// Encode a message with raw flag and length values
@@ -355,13 +370,21 @@ fn test_frame_variant(codec: &mut GrpcCodec, frame: &FrameVariant) {
                 let _ = codec.decode(&mut buf);
             }
         }
-        FrameVariant::InvalidFlag { flag, length, payload } => {
+        FrameVariant::InvalidFlag {
+            flag,
+            length,
+            payload,
+        } => {
             if payload.len() <= MAX_PAYLOAD_SIZE && *length <= MAX_DECLARED_LENGTH {
                 let mut buf = encode_message_raw(*flag, *length, payload);
                 let _ = codec.decode(&mut buf);
             }
         }
-        FrameVariant::LengthMismatch { compressed, declared, payload } => {
+        FrameVariant::LengthMismatch {
+            compressed,
+            declared,
+            payload,
+        } => {
             if payload.len() <= MAX_PAYLOAD_SIZE && *declared <= MAX_DECLARED_LENGTH {
                 let flag = if *compressed { 1 } else { 0 };
                 let mut buf = encode_message_raw(flag, *declared, payload);

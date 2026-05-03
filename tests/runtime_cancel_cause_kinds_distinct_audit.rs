@@ -164,8 +164,7 @@ fn cancel_kind_user_distinct_from_deadline_distinct_from_parent_cancelled() {
     let preceding_attrs = &source[enum_decl_idx.saturating_sub(200)..enum_decl_idx];
 
     assert!(
-        preceding_attrs.contains("PartialEq")
-            && preceding_attrs.contains("Eq"),
+        preceding_attrs.contains("PartialEq") && preceding_attrs.contains("Eq"),
         "REGRESSION: CancelKind no longer derives PartialEq + \
          Eq. Variants can't be compared via == — debugging \
          consumers must downcast or pattern-match for any \
@@ -175,7 +174,8 @@ fn cancel_kind_user_distinct_from_deadline_distinct_from_parent_cancelled() {
 
     // The three target variants must exist in the enum.
     assert!(
-        source.contains("User,") && source.contains("Deadline,")
+        source.contains("User,")
+            && source.contains("Deadline,")
             && source.contains("ParentCancelled,"),
         "REGRESSION: one of User / Deadline / ParentCancelled \
          missing from CancelKind. The operator's three \
@@ -192,9 +192,7 @@ fn cancel_reason_user_constructor_stamps_user_kind() {
 
     let fn_marker = "pub fn user(message: &'static str) -> Self {";
     let start = source.find(fn_marker).expect("user fn");
-    let body_end = source[start..]
-        .find("\n    }\n")
-        .expect("user close");
+    let body_end = source[start..].find("\n    }\n").expect("user close");
     let body = &source[start..start + body_end];
 
     assert!(
@@ -279,7 +277,9 @@ fn checkpoint_budget_exhaustion_stamps_deadline_kind_for_past_deadline() {
     let source = read("src/cx/cx.rs");
 
     let fn_marker = "fn checkpoint_budget_exhaustion(";
-    let start = source.find(fn_marker).expect("checkpoint_budget_exhaustion fn");
+    let start = source
+        .find(fn_marker)
+        .expect("checkpoint_budget_exhaustion fn");
     let body_end = source[start..]
         .find("\n    }\n")
         .expect("checkpoint_budget_exhaustion close");
@@ -350,9 +350,7 @@ fn cancel_reason_root_cause_walks_chain_preserving_original_kind() {
 
     let fn_marker = "pub fn root_cause(&self) -> &Self {";
     let start = source.find(fn_marker).expect("root_cause fn");
-    let body_end = source[start..]
-        .find("\n    }\n")
-        .expect("root_cause close");
+    let body_end = source[start..].find("\n    }\n").expect("root_cause close");
     let body = &source[start..start + body_end];
 
     assert!(
@@ -417,8 +415,7 @@ fn cleanup_budget_varies_by_cancel_kind_for_calibrated_drain() {
 
     // The match arm by kind must still classify into bands.
     assert!(
-        source.contains("CancelKind::User =>")
-            && source.contains("CancelKind::Shutdown =>"),
+        source.contains("CancelKind::User =>") && source.contains("CancelKind::Shutdown =>"),
         "REGRESSION: cleanup_budget no longer dispatches by \
          kind. Cleanup priority/quota becomes uniform — \
          user-cancel and shutdown have the same bound, \
@@ -428,7 +425,9 @@ fn cleanup_budget_varies_by_cancel_kind_for_calibrated_drain() {
 
     // Shutdown gets the highest priority (255).
     assert!(
-        source.contains("CancelKind::Shutdown => Budget::new().with_poll_quota(50).with_priority(255)"),
+        source.contains(
+            "CancelKind::Shutdown => Budget::new().with_poll_quota(50).with_priority(255)"
+        ),
         "REGRESSION: Shutdown cleanup_budget no longer has \
          priority=255. Shutdown loses its scheduler-priority \
          override — runtime teardown becomes preemptible by \

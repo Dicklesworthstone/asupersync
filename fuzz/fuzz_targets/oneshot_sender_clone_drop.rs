@@ -13,13 +13,13 @@
 
 #![no_main]
 
-use libfuzzer_sys::fuzz_target;
 use arbitrary::{Arbitrary, Unstructured};
 use asupersync::channel::oneshot::{self, RecvError, SendError, TryRecvError};
 use asupersync::cx::Cx;
 use asupersync::types::Budget;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use libfuzzer_sys::fuzz_target;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 #[derive(Debug, Clone, Arbitrary)]
@@ -157,10 +157,8 @@ async fn test_clone_drop_scenario(
 
     // Split channels into senders and receivers
     let (senders_vec, receivers_vec): (Vec<_>, Vec<_>) = channels.into_iter().unzip();
-    let mut senders: Vec<Option<oneshot::Sender<u32>>> = senders_vec
-        .into_iter()
-        .map(|tx| Some(tx))
-        .collect();
+    let mut senders: Vec<Option<oneshot::Sender<u32>>> =
+        senders_vec.into_iter().map(|tx| Some(tx)).collect();
 
     let receivers: Vec<oneshot::Receiver<u32>> = receivers_vec;
 
@@ -246,7 +244,10 @@ async fn test_clone_drop_scenario(
                 }
             }
 
-            SenderOperation::DelayedSend { sender_id, delay_ms } => {
+            SenderOperation::DelayedSend {
+                sender_id,
+                delay_ms,
+            } => {
                 let delay = Duration::from_millis((*delay_ms).min(100) as u64);
                 std::thread::sleep(delay);
 
@@ -278,7 +279,10 @@ async fn test_clone_drop_scenario(
                 }
             }
 
-            SenderOperation::DelayedDrop { sender_id, delay_ms } => {
+            SenderOperation::DelayedDrop {
+                sender_id,
+                delay_ms,
+            } => {
                 let delay = Duration::from_millis((*delay_ms).min(100) as u64);
                 std::thread::sleep(delay);
 

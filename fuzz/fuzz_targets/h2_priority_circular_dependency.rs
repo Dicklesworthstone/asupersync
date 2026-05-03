@@ -1,7 +1,7 @@
 #![no_main]
 
-use libfuzzer_sys::fuzz_target;
 use arbitrary::{Arbitrary, Unstructured};
+use libfuzzer_sys::fuzz_target;
 
 /// HTTP/2 frame header length per RFC 7540 §4.1
 const FRAME_HEADER_LEN: usize = 9;
@@ -71,10 +71,10 @@ impl PriorityData {
             return Err("insufficient data");
         }
 
-        let first_word = ((buf[0] as u32) << 24) |
-                        ((buf[1] as u32) << 16) |
-                        ((buf[2] as u32) << 8) |
-                        (buf[3] as u32);
+        let first_word = ((buf[0] as u32) << 24)
+            | ((buf[1] as u32) << 16)
+            | ((buf[2] as u32) << 8)
+            | (buf[3] as u32);
 
         let exclusive = (first_word & 0x8000_0000) != 0;
         let stream_dependency = first_word & 0x7FFF_FFFF;
@@ -125,17 +125,15 @@ impl FrameHeader {
             return Err("incomplete header");
         }
 
-        let length = ((buf[0] as u32) << 16) |
-                    ((buf[1] as u32) << 8) |
-                    (buf[2] as u32);
+        let length = ((buf[0] as u32) << 16) | ((buf[1] as u32) << 8) | (buf[2] as u32);
 
         let frame_type = buf[3];
         let flags = buf[4];
 
-        let stream_id = ((buf[5] as u32 & 0x7F) << 24) |
-                       ((buf[6] as u32) << 16) |
-                       ((buf[7] as u32) << 8) |
-                       (buf[8] as u32);
+        let stream_id = ((buf[5] as u32 & 0x7F) << 24)
+            | ((buf[6] as u32) << 16)
+            | ((buf[7] as u32) << 8)
+            | (buf[8] as u32);
 
         Ok(FrameHeader {
             length,
@@ -205,14 +203,22 @@ impl DependencyTree {
 
     /// Add or update a stream dependency
     /// Returns error if this would create a cycle per RFC 7540 §5.3.1
-    fn set_dependency(&mut self, stream_id: u32, dependency: u32, weight: u8, exclusive: bool) -> Result<(), String> {
+    fn set_dependency(
+        &mut self,
+        stream_id: u32,
+        dependency: u32,
+        weight: u8,
+        exclusive: bool,
+    ) -> Result<(), String> {
         // RFC 7540 §5.3.1: Stream cannot depend on itself
         if stream_id == dependency {
             return Err(format!("Stream {} cannot depend on itself", stream_id));
         }
 
         // Temporarily add the dependency to check for cycles
-        let old_dependency = self.dependencies.insert(stream_id, (dependency, weight, exclusive));
+        let old_dependency = self
+            .dependencies
+            .insert(stream_id, (dependency, weight, exclusive));
 
         // Check for cycles using DFS
         if self.has_cycle_from(dependency) {
@@ -239,7 +245,12 @@ impl DependencyTree {
     }
 
     /// Depth-first search to detect cycles
-    fn dfs_cycle_check(&self, stream_id: u32, visited: &mut std::collections::HashSet<u32>, path: &mut std::collections::HashSet<u32>) -> bool {
+    fn dfs_cycle_check(
+        &self,
+        stream_id: u32,
+        visited: &mut std::collections::HashSet<u32>,
+        path: &mut std::collections::HashSet<u32>,
+    ) -> bool {
         if path.contains(&stream_id) {
             // Found a cycle
             return true;
@@ -280,13 +291,23 @@ impl DependencyTree {
         cycles
     }
 
-    fn find_cycle_from(&self, start_stream: u32, visited: &mut std::collections::HashSet<u32>) -> Option<Vec<u32>> {
+    fn find_cycle_from(
+        &self,
+        start_stream: u32,
+        visited: &mut std::collections::HashSet<u32>,
+    ) -> Option<Vec<u32>> {
         let mut path = Vec::new();
         let mut path_set = std::collections::HashSet::new();
         self.dfs_find_cycle(start_stream, &mut path, &mut path_set, visited)
     }
 
-    fn dfs_find_cycle(&self, stream_id: u32, path: &mut Vec<u32>, path_set: &mut std::collections::HashSet<u32>, visited: &mut std::collections::HashSet<u32>) -> Option<Vec<u32>> {
+    fn dfs_find_cycle(
+        &self,
+        stream_id: u32,
+        path: &mut Vec<u32>,
+        path_set: &mut std::collections::HashSet<u32>,
+        visited: &mut std::collections::HashSet<u32>,
+    ) -> Option<Vec<u32>> {
         if path_set.contains(&stream_id) {
             // Found cycle - extract the cycle portion
             let cycle_start = path.iter().position(|&s| s == stream_id)?;
@@ -363,7 +384,9 @@ impl MockH2PriorityParser {
         let payload = &buf[FRAME_HEADER_LEN..total_len];
         let priority_data = match PriorityData::decode(payload) {
             Ok(data) => data,
-            Err(_) => return PriorityParseResult::ProtocolError("Invalid priority data".to_string()),
+            Err(_) => {
+                return PriorityParseResult::ProtocolError("Invalid priority data".to_string());
+            }
         };
 
         // RFC 7540 §5.3.1: Check for cycle creation
@@ -419,27 +442,36 @@ fuzz_target!(|input: FuzzInput| {
     // Add classic 3-stream cycle test case: A→B→C→A
     if input.include_classic_cycle {
         // Create streams 1→2, 2→3, then try 3→1 (should fail with cycle)
-        operations.insert(0, PriorityOperation {
-            stream_id: 1,
-            dependency: 2,
-            weight: 16,
-            exclusive: false,
-            corrupt_frame: false,
-        });
-        operations.insert(1, PriorityOperation {
-            stream_id: 2,
-            dependency: 3,
-            weight: 16,
-            exclusive: false,
-            corrupt_frame: false,
-        });
-        operations.insert(2, PriorityOperation {
-            stream_id: 3,
-            dependency: 1, // This creates the cycle!
-            weight: 16,
-            exclusive: false,
-            corrupt_frame: false,
-        });
+        operations.insert(
+            0,
+            PriorityOperation {
+                stream_id: 1,
+                dependency: 2,
+                weight: 16,
+                exclusive: false,
+                corrupt_frame: false,
+            },
+        );
+        operations.insert(
+            1,
+            PriorityOperation {
+                stream_id: 2,
+                dependency: 3,
+                weight: 16,
+                exclusive: false,
+                corrupt_frame: false,
+            },
+        );
+        operations.insert(
+            2,
+            PriorityOperation {
+                stream_id: 3,
+                dependency: 1, // This creates the cycle!
+                weight: 16,
+                exclusive: false,
+                corrupt_frame: false,
+            },
+        );
     }
 
     // Add self-dependency test (should always fail)
@@ -461,7 +493,11 @@ fuzz_target!(|input: FuzzInput| {
 
     for (op_index, op) in operations.iter().enumerate() {
         // Ensure valid stream IDs (non-zero)
-        let stream_id = if op.stream_id == 0 { 1 } else { op.stream_id & 0x7FFF_FFFF };
+        let stream_id = if op.stream_id == 0 {
+            1
+        } else {
+            op.stream_id & 0x7FFF_FFFF
+        };
         let dependency = op.dependency & 0x7FFF_FFFF;
 
         let priority_data = PriorityData {
@@ -490,7 +526,7 @@ fuzz_target!(|input: FuzzInput| {
         match result {
             PriorityParseResult::Valid(_) => {
                 // Frame parsed successfully - dependency was valid
-            },
+            }
 
             PriorityParseResult::ProtocolError(msg) => {
                 if msg.contains("cycle") || msg.contains("depend on itself") {
@@ -503,26 +539,28 @@ fuzz_target!(|input: FuzzInput| {
                         assert!(
                             msg.contains("depend on itself"),
                             "Self-dependency should be detected: stream {} -> {}",
-                            stream_id, dependency
+                            stream_id,
+                            dependency
                         );
                     } else {
                         // Multi-hop cycle - verify the detection is valid
                         assert!(
                             msg.contains("cycle"),
                             "Multi-hop cycle should be detected: {} -> {}",
-                            stream_id, dependency
+                            stream_id,
+                            dependency
                         );
                     }
                 }
-            },
+            }
 
             PriorityParseResult::FrameSizeError => {
                 // Expected for corrupted frames
-            },
+            }
 
             PriorityParseResult::IncompleteFrame => {
                 // Expected for truncated data
-            },
+            }
 
             PriorityParseResult::InvalidStreamId => {
                 // Should not happen with our stream ID logic
@@ -597,7 +635,7 @@ fuzz_target!(|input: FuzzInput| {
                     PriorityParseResult::ProtocolError(msg) if msg.contains("cycle") => {
                         long_cycle_detected = true;
                         break;
-                    },
+                    }
                     _ => {}
                 }
             }

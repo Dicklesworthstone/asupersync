@@ -95,14 +95,20 @@ fn assemble(frames: &[FrameSpec]) -> Vec<u8> {
         let declared_len: u32 = if frame.declare_oversize {
             // Land somewhere between max-frame and u32::MAX so the
             // size-cap check fires.
-            (CODEC_MAX_FRAME as u32).saturating_add(1).saturating_add(frame.body.len() as u32)
+            (CODEC_MAX_FRAME as u32)
+                .saturating_add(1)
+                .saturating_add(frame.body.len() as u32)
         } else {
             body.len() as u32
         };
         // Stop if appending would blow the per-iteration cap.
         if out.len()
             + 5
-            + (if frame.declare_oversize { body.len() } else { declared_len as usize })
+            + (if frame.declare_oversize {
+                body.len()
+            } else {
+                declared_len as usize
+            })
             > MAX_BUF_BYTES
         {
             break;
@@ -195,8 +201,7 @@ fuzz_target!(|stream: Stream| {
                 "frame {i}: split-point delivery payload diverged from single-buffer",
             );
             assert_eq!(
-                s.compressed,
-                sg.compressed,
+                s.compressed, sg.compressed,
                 "frame {i}: compressed-flag diverged across split-point delivery",
             );
         }
@@ -226,18 +231,19 @@ fuzz_target!(|stream: Stream| {
     // the encoder/decoder agree. Single small frame sanity-check.
     if let Some(first_frame) = stream.frames.first() {
         if first_frame.flag <= 1 && !first_frame.declare_oversize {
-            let body: Vec<u8> = first_frame.body.iter().copied().take(MAX_FRAME_BODY).collect();
+            let body: Vec<u8> = first_frame
+                .body
+                .iter()
+                .copied()
+                .take(MAX_FRAME_BODY)
+                .collect();
             let mut wire = BytesMut::new();
             let mut enc = GrpcCodec::with_max_size(CODEC_MAX_FRAME);
             let msg = GrpcMessage::new(body.clone().into());
             if enc.encode(msg, &mut wire).is_ok() {
                 let mut dec = GrpcCodec::with_max_size(CODEC_MAX_FRAME);
                 if let Ok(Some(decoded)) = dec.decode(&mut wire) {
-                    assert_eq!(
-                        decoded.data.as_ref(),
-                        &body[..],
-                        "round-trip body mismatch",
-                    );
+                    assert_eq!(decoded.data.as_ref(), &body[..], "round-trip body mismatch",);
                 }
             }
         }

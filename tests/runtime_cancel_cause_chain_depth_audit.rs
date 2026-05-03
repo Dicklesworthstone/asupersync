@@ -208,8 +208,7 @@ fn with_cause_limited_truncates_with_explicit_metadata() {
     let body = &source[start..start + body_end];
 
     assert!(
-        body.contains("self.truncated = true;")
-            && body.contains("self.truncated_at_depth = Some("),
+        body.contains("self.truncated = true;") && body.contains("self.truncated_at_depth = Some("),
         "REGRESSION: with_cause_limited no longer sets \
          truncated/truncated_at_depth on overflow. Operators \
          can't detect that information was lost — silent \
@@ -217,8 +216,7 @@ fn with_cause_limited_truncates_with_explicit_metadata() {
     );
 
     assert!(
-        body.contains("config.max_chain_depth")
-            && body.contains("config.max_chain_memory"),
+        body.contains("config.max_chain_depth") && body.contains("config.max_chain_memory"),
         "REGRESSION: with_cause_limited no longer enforces \
          BOTH max_chain_depth AND max_chain_memory. Removing \
          either bound creates a path where pathological \
@@ -234,9 +232,7 @@ fn cancel_reason_truncation_metadata_fields_present() {
     // the truncation signal.
     let source = read("src/types/cancel.rs");
 
-    let suspect_struct_changes = [
-        "pub struct CancelReason {",
-    ];
+    let suspect_struct_changes = ["pub struct CancelReason {"];
     for marker in &suspect_struct_changes {
         let start = source.find(marker).expect("CancelReason struct");
         let body_end = source[start..]
@@ -253,8 +249,7 @@ fn cancel_reason_truncation_metadata_fields_present() {
         );
 
         assert!(
-            body.contains("pub truncated_at_depth:")
-                || body.contains("truncated_at_depth:"),
+            body.contains("pub truncated_at_depth:") || body.contains("truncated_at_depth:"),
             "REGRESSION: CancelReason no longer has the \
              `truncated_at_depth` field. Even if `truncated` \
              remains, consumers can't tell WHERE truncation \
@@ -354,9 +349,7 @@ fn strengthen_preserves_winning_reasons_chain() {
 
     let fn_marker = "pub fn strengthen(&mut self, other: &Self) -> bool {";
     let start = source.find(fn_marker).expect("strengthen fn");
-    let body_end = source[start..]
-        .find("\n    }\n")
-        .expect("strengthen close");
+    let body_end = source[start..].find("\n    }\n").expect("strengthen close");
     let body = &source[start..start + body_end];
 
     assert!(
@@ -405,9 +398,7 @@ fn cancel_reason_root_cause_method_walks_to_chain_end() {
 
     let fn_marker = "pub fn root_cause(&self) -> &Self {";
     let start = source.find(fn_marker).expect("root_cause fn");
-    let body_end = source[start..]
-        .find("\n    }\n")
-        .expect("root_cause close");
+    let body_end = source[start..].find("\n    }\n").expect("root_cause close");
     let body = &source[start..start + body_end];
 
     assert!(
@@ -492,7 +483,11 @@ impl MockReason {
             Self {
                 cause: None,
                 truncated: reason.cause.is_some(),
-                truncated_at_depth: if reason.cause.is_some() { Some(1) } else { reason.truncated_at_depth },
+                truncated_at_depth: if reason.cause.is_some() {
+                    Some(1)
+                } else {
+                    reason.truncated_at_depth
+                },
                 ..reason
             }
         } else {
@@ -536,7 +531,8 @@ fn four_level_cancel_chain_is_preserved_end_to_end() {
     // root_cause must be D (the original trigger).
     let root = level_a.root_cause();
     assert_eq!(
-        root.kind, 0xD,
+        root.kind,
+        0xD,
         "REGRESSION: root_cause of the 4-level chain is not \
          D (got kind 0x{kind:X}). Chain attribution is \
          broken — operator can't trace back to the original \
@@ -544,7 +540,8 @@ fn four_level_cancel_chain_is_preserved_end_to_end() {
         kind = root.kind,
     );
     assert_eq!(
-        root.region, 4,
+        root.region,
+        4,
         "REGRESSION: root_cause region is {region}, expected \
          4. Region attribution lost across propagation.",
         region = root.region,

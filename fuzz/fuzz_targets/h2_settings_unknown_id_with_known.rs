@@ -1,7 +1,7 @@
 #![no_main]
 
-use libfuzzer_sys::fuzz_target;
 use arbitrary::{Arbitrary, Unstructured};
+use libfuzzer_sys::fuzz_target;
 use std::collections::HashMap;
 
 /// HTTP/2 SETTINGS frame mixing unknown and known setting IDs.
@@ -60,12 +60,12 @@ impl KnownSetting {
 
     fn validate_value(&self, value: u32) -> bool {
         match self {
-            Self::HeaderTableSize => true, // Any value allowed
-            Self::EnablePush => value <= 1, // Only 0 or 1
-            Self::MaxConcurrentStreams => true, // Any value allowed
+            Self::HeaderTableSize => true,                     // Any value allowed
+            Self::EnablePush => value <= 1,                    // Only 0 or 1
+            Self::MaxConcurrentStreams => true,                // Any value allowed
             Self::InitialWindowSize => value <= 2_147_483_647, // 2^31 - 1
             Self::MaxFrameSize => value >= 16384 && value <= 16777215, // 2^14 to 2^24-1
-            Self::MaxHeaderListSize => true, // Any value allowed
+            Self::MaxHeaderListSize => true,                   // Any value allowed
         }
     }
 }
@@ -102,7 +102,8 @@ impl MockH2SettingsParser {
 
         // Calculate frame payload size (6 bytes per setting)
         let payload_size = input.settings.len() * 6;
-        if payload_size > 16777215 { // 2^24 - 1
+        if payload_size > 16777215 {
+            // 2^24 - 1
             return Err("SETTINGS frame payload exceeds maximum frame size".into());
         }
 
@@ -168,47 +169,62 @@ fuzz_target!(|data: &[u8]| {
     match result {
         Ok(_) => {
             // Count known vs unknown settings in input
-            let known_count = input.settings.iter()
+            let known_count = input
+                .settings
+                .iter()
                 .filter(|s| KnownSetting::from_id(s.id).is_some())
                 .count();
             let expected_unknown = input.settings.len() - known_count;
 
             // Unknown count should match expectations
-            assert_eq!(parser.unknown_count, expected_unknown,
+            assert_eq!(
+                parser.unknown_count, expected_unknown,
                 "Unknown setting count mismatch: expected {}, got {}",
-                expected_unknown, parser.unknown_count);
+                expected_unknown, parser.unknown_count
+            );
 
             // Only valid known settings should be applied
             for (&setting, &value) in &parser.applied_settings {
-                assert!(setting.validate_value(value),
-                    "Invalid value {} applied for setting {:?}", value, setting);
+                assert!(
+                    setting.validate_value(value),
+                    "Invalid value {} applied for setting {:?}",
+                    value,
+                    setting
+                );
             }
         }
         Err(e) => {
             // Frame-level errors are acceptable
             assert!(
-                e.contains("flags must be 0") ||
-                e.contains("stream ID must be 0") ||
-                e.contains("exceeds maximum frame size"),
-                "Unexpected error: {}", e
+                e.contains("flags must be 0")
+                    || e.contains("stream ID must be 0")
+                    || e.contains("exceeds maximum frame size"),
+                "Unexpected error: {}",
+                e
             );
             return; // Skip further tests on frame errors
         }
     }
 
     // Test 2: Ordering independence
-    assert!(parser.verify_ordering_independence(&input),
-        "Settings application affected by ordering");
+    assert!(
+        parser.verify_ordering_independence(&input),
+        "Settings application affected by ordering"
+    );
 
     // Test 3: Duplicate settings (last value wins)
     if input.settings.len() >= 2 {
-        let first_known_setting = input.settings.iter()
+        let first_known_setting = input
+            .settings
+            .iter()
             .find(|s| KnownSetting::from_id(s.id).is_some());
 
         if let Some(first_setting) = first_known_setting {
             if let Some(known) = KnownSetting::from_id(first_setting.id) {
                 // Find last occurrence of this setting
-                let last_value = input.settings.iter()
+                let last_value = input
+                    .settings
+                    .iter()
                     .rev()
                     .find(|s| s.id == first_setting.id)
                     .map(|s| s.value);
@@ -216,9 +232,11 @@ fuzz_target!(|data: &[u8]| {
                 if let Some(last_val) = last_value {
                     if known.validate_value(last_val) {
                         if let Some(&applied_value) = parser.applied_settings.get(&known) {
-                            assert_eq!(applied_value, last_val,
+                            assert_eq!(
+                                applied_value, last_val,
                                 "Duplicate setting should use last value: expected {}, got {}",
-                                last_val, applied_value);
+                                last_val, applied_value
+                            );
                         }
                     }
                 }
@@ -238,7 +256,10 @@ mod tests {
                 SettingEntry { id: 3, value: 100 }, // MAX_CONCURRENT_STREAMS (known)
                 SettingEntry { id: 99, value: 42 }, // Unknown setting
                 SettingEntry { id: 2, value: 0 },   // ENABLE_PUSH (known)
-                SettingEntry { id: 255, value: 123 }, // Unknown setting
+                SettingEntry {
+                    id: 255,
+                    value: 123,
+                }, // Unknown setting
             ],
             flags: 0,
             stream_id: 0,
@@ -252,17 +273,31 @@ mod tests {
         assert_eq!(parser.unknown_count, 2);
 
         // Check specific values
-        assert_eq!(parser.applied_settings.get(&KnownSetting::MaxConcurrentStreams), Some(&100));
-        assert_eq!(parser.applied_settings.get(&KnownSetting::EnablePush), Some(&0));
+        assert_eq!(
+            parser
+                .applied_settings
+                .get(&KnownSetting::MaxConcurrentStreams),
+            Some(&100)
+        );
+        assert_eq!(
+            parser.applied_settings.get(&KnownSetting::EnablePush),
+            Some(&0)
+        );
     }
 
     #[test]
     fn test_unknown_settings_only() {
         let input = FuzzInput {
             settings: vec![
-                SettingEntry { id: 7, value: 1000 },  // Unknown
-                SettingEntry { id: 99, value: 2000 }, // Unknown
-                SettingEntry { id: 255, value: 3000 }, // Unknown
+                SettingEntry { id: 7, value: 1000 }, // Unknown
+                SettingEntry {
+                    id: 99,
+                    value: 2000,
+                }, // Unknown
+                SettingEntry {
+                    id: 255,
+                    value: 3000,
+                }, // Unknown
             ],
             flags: 0,
             stream_id: 0,
@@ -292,7 +327,12 @@ mod tests {
         assert!(parser.parse_settings_frame(&input).is_ok());
 
         // Last value should win
-        assert_eq!(parser.applied_settings.get(&KnownSetting::InitialWindowSize), Some(&2000));
+        assert_eq!(
+            parser
+                .applied_settings
+                .get(&KnownSetting::InitialWindowSize),
+            Some(&2000)
+        );
         assert_eq!(parser.unknown_count, 1);
     }
 
@@ -391,12 +431,18 @@ mod tests {
     fn test_all_known_settings() {
         let input = FuzzInput {
             settings: vec![
-                SettingEntry { id: 1, value: 4096 },   // HEADER_TABLE_SIZE
-                SettingEntry { id: 2, value: 1 },      // ENABLE_PUSH
-                SettingEntry { id: 3, value: 1000 },   // MAX_CONCURRENT_STREAMS
-                SettingEntry { id: 4, value: 65536 },  // INITIAL_WINDOW_SIZE
-                SettingEntry { id: 5, value: 32768 },  // MAX_FRAME_SIZE
-                SettingEntry { id: 6, value: 8192 },   // MAX_HEADER_LIST_SIZE
+                SettingEntry { id: 1, value: 4096 }, // HEADER_TABLE_SIZE
+                SettingEntry { id: 2, value: 1 },    // ENABLE_PUSH
+                SettingEntry { id: 3, value: 1000 }, // MAX_CONCURRENT_STREAMS
+                SettingEntry {
+                    id: 4,
+                    value: 65536,
+                }, // INITIAL_WINDOW_SIZE
+                SettingEntry {
+                    id: 5,
+                    value: 32768,
+                }, // MAX_FRAME_SIZE
+                SettingEntry { id: 6, value: 8192 }, // MAX_HEADER_LIST_SIZE
             ],
             flags: 0,
             stream_id: 0,

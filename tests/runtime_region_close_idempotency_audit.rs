@@ -167,9 +167,7 @@ fn region_state_transition_uses_atomic_compare_exchange_with_acqrel() {
 
     let fn_marker = "pub fn transition(&self, from: RegionState, to: RegionState) -> bool {";
     let start = source.find(fn_marker).expect("transition fn");
-    let body_end = source[start..]
-        .find("\n    }\n")
-        .expect("transition close");
+    let body_end = source[start..].find("\n    }\n").expect("transition close");
     let body = &source[start..start + body_end];
 
     assert!(
@@ -352,7 +350,9 @@ fn cancel_request_falls_back_to_strengthen_when_begin_close_returns_false() {
 
     assert!(
         source.contains("if region.begin_close(Some(region_reason.clone())) {")
-            && source.contains("} else if region.state() != crate::record::region::RegionState::Closed {")
+            && source.contains(
+                "} else if region.state() != crate::record::region::RegionState::Closed {"
+            )
             && source.contains("region.strengthen_cancel_reason(region_reason);"),
         "REGRESSION: cancel_request first pass no longer \
          falls back to strengthen_cancel_reason when \
@@ -554,7 +554,9 @@ fn begin_close_on_closed_region_returns_false_no_transition() {
     // state returns false without attempting any transition.
     // This is the closed-state early-return guard.
     let region = MockRegion::new();
-    region.state.store(MockRegionState::Closed as u8, Ordering::Release);
+    region
+        .state
+        .store(MockRegionState::Closed as u8, Ordering::Release);
 
     let result = region.begin_close();
     assert!(

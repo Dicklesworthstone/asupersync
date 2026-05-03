@@ -1,7 +1,7 @@
 #![no_main]
 
-use libfuzzer_sys::fuzz_target;
 use arbitrary::{Arbitrary, Unstructured};
+use libfuzzer_sys::fuzz_target;
 
 /// HTTP/2 HEADERS frame pseudo-header ordering validation testing.
 /// Per RFC 7540 §8.1.2.1, pseudo-headers must appear before regular headers.
@@ -71,7 +71,11 @@ impl HeaderType {
                 _ => PseudoHeaderType::Unknown(name.to_string()),
             };
             Self::Pseudo(pseudo_type)
-        } else if name.is_empty() || name.chars().any(|c| c.is_ascii_uppercase() || c.is_whitespace()) {
+        } else if name.is_empty()
+            || name
+                .chars()
+                .any(|c| c.is_ascii_uppercase() || c.is_whitespace())
+        {
             Self::Invalid(format!("Invalid header name: {}", name))
         } else {
             Self::Regular
@@ -151,7 +155,8 @@ impl MockH2HeadersOrderingParser {
                 self.validate_pseudo_header(&pseudo_type, name, value)?;
 
                 // Store pseudo-header
-                self.pseudo_headers.push((name.to_string(), value.to_string()));
+                self.pseudo_headers
+                    .push((name.to_string(), value.to_string()));
             }
             HeaderType::Regular => {
                 // Mark that we've seen a regular header
@@ -161,7 +166,8 @@ impl MockH2HeadersOrderingParser {
                 self.validate_regular_header(name, value)?;
 
                 // Store regular header
-                self.regular_headers.push((name.to_string(), value.to_string()));
+                self.regular_headers
+                    .push((name.to_string(), value.to_string()));
             }
             HeaderType::Invalid(reason) => {
                 return Err(format!("PROTOCOL_ERROR: {}", reason));
@@ -172,10 +178,18 @@ impl MockH2HeadersOrderingParser {
     }
 
     /// Validate pseudo-header specific rules
-    fn validate_pseudo_header(&mut self, pseudo_type: &PseudoHeaderType, name: &str, value: &str) -> Result<(), String> {
+    fn validate_pseudo_header(
+        &mut self,
+        pseudo_type: &PseudoHeaderType,
+        name: &str,
+        value: &str,
+    ) -> Result<(), String> {
         // Check for case sensitivity (must be lowercase)
         if name != name.to_lowercase() {
-            return Err(format!("PROTOCOL_ERROR: pseudo-header {} not lowercase", name));
+            return Err(format!(
+                "PROTOCOL_ERROR: pseudo-header {} not lowercase",
+                name
+            ));
         }
 
         // Check for duplicates
@@ -190,7 +204,8 @@ impl MockH2HeadersOrderingParser {
                     return Err("PROTOCOL_ERROR: empty :method value".into());
                 }
                 if !value.chars().all(|c| c.is_ascii_alphabetic()) {
-                    self.errors.push(format!("Unusual :method value: {}", value));
+                    self.errors
+                        .push(format!("Unusual :method value: {}", value));
                 }
             }
             PseudoHeaderType::Path => {
@@ -206,7 +221,8 @@ impl MockH2HeadersOrderingParser {
                     return Err("PROTOCOL_ERROR: empty :scheme value".into());
                 }
                 if !["http", "https"].contains(&value) {
-                    self.errors.push(format!("Uncommon :scheme value: {}", value));
+                    self.errors
+                        .push(format!("Uncommon :scheme value: {}", value));
                 }
             }
             PseudoHeaderType::Authority => {
@@ -226,11 +242,17 @@ impl MockH2HeadersOrderingParser {
     fn validate_regular_header(&mut self, name: &str, _value: &str) -> Result<(), String> {
         // Check for invalid characters
         if name.chars().any(|c| c.is_ascii_uppercase()) {
-            return Err(format!("PROTOCOL_ERROR: regular header {} contains uppercase", name));
+            return Err(format!(
+                "PROTOCOL_ERROR: regular header {} contains uppercase",
+                name
+            ));
         }
 
         if name.contains(':') {
-            return Err(format!("PROTOCOL_ERROR: regular header {} contains colon", name));
+            return Err(format!(
+                "PROTOCOL_ERROR: regular header {} contains colon",
+                name
+            ));
         }
 
         if name.is_empty() {
@@ -245,7 +267,11 @@ impl MockH2HeadersOrderingParser {
         let required = [":method", ":path", ":scheme"];
 
         for &required_header in &required {
-            if !self.pseudo_headers.iter().any(|(name, _)| name == required_header) {
+            if !self
+                .pseudo_headers
+                .iter()
+                .any(|(name, _)| name == required_header)
+            {
                 return Err(format!(
                     "PROTOCOL_ERROR: missing required pseudo-header {}",
                     required_header
@@ -301,7 +327,12 @@ fuzz_target!(|data: &[u8]| {
     }
 
     // Limit header name/value lengths
-    if input.headers_request.headers.iter().any(|h| h.name.len() > 100 || h.value.len() > 200) {
+    if input
+        .headers_request
+        .headers
+        .iter()
+        .any(|h| h.name.len() > 100 || h.value.len() > 200)
+    {
         return;
     }
 
@@ -317,15 +348,23 @@ fuzz_target!(|data: &[u8]| {
     let has_violation = parser.has_ordering_violation(&input.headers_request.headers);
 
     if has_violation {
-        assert!(result.is_err(),
-            "Pseudo-header after regular header should be PROTOCOL_ERROR");
+        assert!(
+            result.is_err(),
+            "Pseudo-header after regular header should be PROTOCOL_ERROR"
+        );
 
         if let Err(error_msg) = &result {
-            assert!(error_msg.contains("PROTOCOL_ERROR"),
-                "Error should mention PROTOCOL_ERROR: {}", error_msg);
-            assert!(error_msg.contains("appears after regular header") ||
-                    error_msg.contains("pseudo-header") && error_msg.contains("after"),
-                "Error should indicate ordering violation: {}", error_msg);
+            assert!(
+                error_msg.contains("PROTOCOL_ERROR"),
+                "Error should mention PROTOCOL_ERROR: {}",
+                error_msg
+            );
+            assert!(
+                error_msg.contains("appears after regular header")
+                    || error_msg.contains("pseudo-header") && error_msg.contains("after"),
+                "Error should indicate ordering violation: {}",
+                error_msg
+            );
         }
         return; // No further tests needed for violation case
     }
@@ -337,24 +376,30 @@ fuzz_target!(|data: &[u8]| {
     });
 
     if has_invalid_headers {
-        assert!(result.is_err(),
-            "Invalid headers should be rejected");
+        assert!(result.is_err(), "Invalid headers should be rejected");
         return;
     }
 
     // Test 3: Check for case sensitivity violations
-    let has_case_violations = input.headers_request.headers.iter().any(|h| {
-        h.name.starts_with(':') && h.name != h.name.to_lowercase()
-    });
+    let has_case_violations = input
+        .headers_request
+        .headers
+        .iter()
+        .any(|h| h.name.starts_with(':') && h.name != h.name.to_lowercase());
 
     if has_case_violations {
-        assert!(result.is_err(),
-            "Uppercase pseudo-headers should be rejected");
+        assert!(
+            result.is_err(),
+            "Uppercase pseudo-headers should be rejected"
+        );
         return;
     }
 
     // Test 4: Check for duplicate pseudo-headers
-    let pseudo_names: Vec<_> = input.headers_request.headers.iter()
+    let pseudo_names: Vec<_> = input
+        .headers_request
+        .headers
+        .iter()
         .filter(|h| h.name.starts_with(':'))
         .map(|h| &h.name)
         .collect();
@@ -362,63 +407,87 @@ fuzz_target!(|data: &[u8]| {
     let unique_pseudo_names: std::collections::HashSet<_> = pseudo_names.iter().collect();
 
     if pseudo_names.len() != unique_pseudo_names.len() {
-        assert!(result.is_err(),
-            "Duplicate pseudo-headers should be rejected");
+        assert!(
+            result.is_err(),
+            "Duplicate pseudo-headers should be rejected"
+        );
         return;
     }
 
     // Test 5: Check for empty pseudo-header values
-    let has_empty_pseudo = input.headers_request.headers.iter().any(|h| {
-        matches!(h.name.as_str(), ":method" | ":path" | ":scheme") && h.value.is_empty()
-    });
+    let has_empty_pseudo =
+        input.headers_request.headers.iter().any(|h| {
+            matches!(h.name.as_str(), ":method" | ":path" | ":scheme") && h.value.is_empty()
+        });
 
     if has_empty_pseudo {
-        assert!(result.is_err(),
-            "Empty required pseudo-header values should be rejected");
+        assert!(
+            result.is_err(),
+            "Empty required pseudo-header values should be rejected"
+        );
         return;
     }
 
     // Test 6: Check for invalid :path values
     let has_invalid_path = input.headers_request.headers.iter().any(|h| {
-        h.name == ":path" && !h.value.is_empty() &&
-        !h.value.starts_with('/') && h.value != "*"
+        h.name == ":path" && !h.value.is_empty() && !h.value.starts_with('/') && h.value != "*"
     });
 
     if has_invalid_path {
-        assert!(result.is_err(),
-            "Invalid :path values should be rejected");
+        assert!(result.is_err(), "Invalid :path values should be rejected");
         return;
     }
 
     // Test 7: Check for required pseudo-headers
     let required_pseudo = [":method", ":path", ":scheme"];
     let has_all_required = required_pseudo.iter().all(|&required| {
-        input.headers_request.headers.iter().any(|h| h.name == required)
+        input
+            .headers_request
+            .headers
+            .iter()
+            .any(|h| h.name == required)
     });
 
     if !has_all_required {
-        assert!(result.is_err(),
-            "Missing required pseudo-headers should be rejected");
+        assert!(
+            result.is_err(),
+            "Missing required pseudo-headers should be rejected"
+        );
         return;
     }
 
     // Test 8: Valid requests should succeed
-    assert!(result.is_ok(),
-        "Valid headers request should succeed: {:?}", result);
+    assert!(
+        result.is_ok(),
+        "Valid headers request should succeed: {:?}",
+        result
+    );
 
     // Verify parsed structure
-    let pseudo_count = input.headers_request.headers.iter()
+    let pseudo_count = input
+        .headers_request
+        .headers
+        .iter()
         .filter(|h| h.name.starts_with(':'))
         .count();
 
-    let regular_count = input.headers_request.headers.iter()
+    let regular_count = input
+        .headers_request
+        .headers
+        .iter()
         .filter(|h| !h.name.starts_with(':') && !h.name.is_empty())
         .count();
 
-    assert_eq!(parser.get_pseudo_headers().len(), pseudo_count,
-        "Pseudo-header count should match");
-    assert_eq!(parser.get_regular_headers().len(), regular_count,
-        "Regular header count should match");
+    assert_eq!(
+        parser.get_pseudo_headers().len(),
+        pseudo_count,
+        "Pseudo-header count should match"
+    );
+    assert_eq!(
+        parser.get_regular_headers().len(),
+        regular_count,
+        "Regular header count should match"
+    );
 });
 
 #[cfg(test)]
@@ -431,9 +500,18 @@ mod tests {
             stream_id: 1,
             flags: 0,
             headers: vec![
-                HeaderEntry { name: ":method".to_string(), value: "GET".to_string() },
-                HeaderEntry { name: "content-type".to_string(), value: "text/html".to_string() }, // Regular
-                HeaderEntry { name: ":path".to_string(), value: "/".to_string() }, // Pseudo after regular
+                HeaderEntry {
+                    name: ":method".to_string(),
+                    value: "GET".to_string(),
+                },
+                HeaderEntry {
+                    name: "content-type".to_string(),
+                    value: "text/html".to_string(),
+                }, // Regular
+                HeaderEntry {
+                    name: ":path".to_string(),
+                    value: "/".to_string(),
+                }, // Pseudo after regular
             ],
         };
 
@@ -450,11 +528,26 @@ mod tests {
             stream_id: 1,
             flags: 0,
             headers: vec![
-                HeaderEntry { name: ":method".to_string(), value: "GET".to_string() },
-                HeaderEntry { name: ":path".to_string(), value: "/api".to_string() },
-                HeaderEntry { name: ":scheme".to_string(), value: "https".to_string() },
-                HeaderEntry { name: "content-type".to_string(), value: "application/json".to_string() },
-                HeaderEntry { name: "user-agent".to_string(), value: "test".to_string() },
+                HeaderEntry {
+                    name: ":method".to_string(),
+                    value: "GET".to_string(),
+                },
+                HeaderEntry {
+                    name: ":path".to_string(),
+                    value: "/api".to_string(),
+                },
+                HeaderEntry {
+                    name: ":scheme".to_string(),
+                    value: "https".to_string(),
+                },
+                HeaderEntry {
+                    name: "content-type".to_string(),
+                    value: "application/json".to_string(),
+                },
+                HeaderEntry {
+                    name: "user-agent".to_string(),
+                    value: "test".to_string(),
+                },
             ],
         };
 
@@ -472,10 +565,22 @@ mod tests {
             stream_id: 1,
             flags: 0,
             headers: vec![
-                HeaderEntry { name: ":method".to_string(), value: "POST".to_string() },
-                HeaderEntry { name: "content-type".to_string(), value: "text/plain".to_string() },
-                HeaderEntry { name: ":path".to_string(), value: "/submit".to_string() },
-                HeaderEntry { name: ":scheme".to_string(), value: "http".to_string() },
+                HeaderEntry {
+                    name: ":method".to_string(),
+                    value: "POST".to_string(),
+                },
+                HeaderEntry {
+                    name: "content-type".to_string(),
+                    value: "text/plain".to_string(),
+                },
+                HeaderEntry {
+                    name: ":path".to_string(),
+                    value: "/submit".to_string(),
+                },
+                HeaderEntry {
+                    name: ":scheme".to_string(),
+                    value: "http".to_string(),
+                },
             ],
         };
 
@@ -492,10 +597,22 @@ mod tests {
             stream_id: 1,
             flags: 0,
             headers: vec![
-                HeaderEntry { name: ":method".to_string(), value: "GET".to_string() },
-                HeaderEntry { name: ":method".to_string(), value: "POST".to_string() }, // Duplicate
-                HeaderEntry { name: ":path".to_string(), value: "/".to_string() },
-                HeaderEntry { name: ":scheme".to_string(), value: "https".to_string() },
+                HeaderEntry {
+                    name: ":method".to_string(),
+                    value: "GET".to_string(),
+                },
+                HeaderEntry {
+                    name: ":method".to_string(),
+                    value: "POST".to_string(),
+                }, // Duplicate
+                HeaderEntry {
+                    name: ":path".to_string(),
+                    value: "/".to_string(),
+                },
+                HeaderEntry {
+                    name: ":scheme".to_string(),
+                    value: "https".to_string(),
+                },
             ],
         };
 
@@ -512,9 +629,18 @@ mod tests {
             stream_id: 1,
             flags: 0,
             headers: vec![
-                HeaderEntry { name: ":METHOD".to_string(), value: "GET".to_string() },
-                HeaderEntry { name: ":path".to_string(), value: "/".to_string() },
-                HeaderEntry { name: ":scheme".to_string(), value: "https".to_string() },
+                HeaderEntry {
+                    name: ":METHOD".to_string(),
+                    value: "GET".to_string(),
+                },
+                HeaderEntry {
+                    name: ":path".to_string(),
+                    value: "/".to_string(),
+                },
+                HeaderEntry {
+                    name: ":scheme".to_string(),
+                    value: "https".to_string(),
+                },
             ],
         };
 
@@ -531,9 +657,15 @@ mod tests {
             stream_id: 1,
             flags: 0,
             headers: vec![
-                HeaderEntry { name: ":method".to_string(), value: "GET".to_string() },
+                HeaderEntry {
+                    name: ":method".to_string(),
+                    value: "GET".to_string(),
+                },
                 // Missing :path and :scheme
-                HeaderEntry { name: "host".to_string(), value: "example.com".to_string() },
+                HeaderEntry {
+                    name: "host".to_string(),
+                    value: "example.com".to_string(),
+                },
             ],
         };
 
@@ -541,7 +673,11 @@ mod tests {
         let result = parser.parse_headers_frame(&request);
 
         assert!(result.is_err());
-        assert!(result.unwrap_err().contains("missing required pseudo-header"));
+        assert!(
+            result
+                .unwrap_err()
+                .contains("missing required pseudo-header")
+        );
     }
 
     #[test]
@@ -550,9 +686,18 @@ mod tests {
             stream_id: 1,
             flags: 0,
             headers: vec![
-                HeaderEntry { name: ":method".to_string(), value: "GET".to_string() },
-                HeaderEntry { name: ":path".to_string(), value: "invalid-path".to_string() }, // No leading /
-                HeaderEntry { name: ":scheme".to_string(), value: "https".to_string() },
+                HeaderEntry {
+                    name: ":method".to_string(),
+                    value: "GET".to_string(),
+                },
+                HeaderEntry {
+                    name: ":path".to_string(),
+                    value: "invalid-path".to_string(),
+                }, // No leading /
+                HeaderEntry {
+                    name: ":scheme".to_string(),
+                    value: "https".to_string(),
+                },
             ],
         };
 
@@ -569,10 +714,22 @@ mod tests {
             stream_id: 1,
             flags: 0,
             headers: vec![
-                HeaderEntry { name: ":method".to_string(), value: "GET".to_string() },
-                HeaderEntry { name: ":path".to_string(), value: "/".to_string() },
-                HeaderEntry { name: ":scheme".to_string(), value: "https".to_string() },
-                HeaderEntry { name: "Content-Type".to_string(), value: "text/html".to_string() }, // Uppercase
+                HeaderEntry {
+                    name: ":method".to_string(),
+                    value: "GET".to_string(),
+                },
+                HeaderEntry {
+                    name: ":path".to_string(),
+                    value: "/".to_string(),
+                },
+                HeaderEntry {
+                    name: ":scheme".to_string(),
+                    value: "https".to_string(),
+                },
+                HeaderEntry {
+                    name: "Content-Type".to_string(),
+                    value: "text/html".to_string(),
+                }, // Uppercase
             ],
         };
 
@@ -589,9 +746,18 @@ mod tests {
             stream_id: 1,
             flags: 0,
             headers: vec![
-                HeaderEntry { name: ":method".to_string(), value: "OPTIONS".to_string() },
-                HeaderEntry { name: ":path".to_string(), value: "*".to_string() }, // Valid for OPTIONS
-                HeaderEntry { name: ":scheme".to_string(), value: "https".to_string() },
+                HeaderEntry {
+                    name: ":method".to_string(),
+                    value: "OPTIONS".to_string(),
+                },
+                HeaderEntry {
+                    name: ":path".to_string(),
+                    value: "*".to_string(),
+                }, // Valid for OPTIONS
+                HeaderEntry {
+                    name: ":scheme".to_string(),
+                    value: "https".to_string(),
+                },
             ],
         };
 
@@ -604,18 +770,36 @@ mod tests {
     #[test]
     fn test_ordering_violation_detection() {
         let headers = vec![
-            HeaderEntry { name: ":method".to_string(), value: "GET".to_string() },
-            HeaderEntry { name: "user-agent".to_string(), value: "test".to_string() },
-            HeaderEntry { name: ":path".to_string(), value: "/".to_string() }, // Violation
+            HeaderEntry {
+                name: ":method".to_string(),
+                value: "GET".to_string(),
+            },
+            HeaderEntry {
+                name: "user-agent".to_string(),
+                value: "test".to_string(),
+            },
+            HeaderEntry {
+                name: ":path".to_string(),
+                value: "/".to_string(),
+            }, // Violation
         ];
 
         let parser = MockH2HeadersOrderingParser::new();
         assert!(parser.has_ordering_violation(&headers));
 
         let valid_headers = vec![
-            HeaderEntry { name: ":method".to_string(), value: "GET".to_string() },
-            HeaderEntry { name: ":path".to_string(), value: "/".to_string() },
-            HeaderEntry { name: "user-agent".to_string(), value: "test".to_string() },
+            HeaderEntry {
+                name: ":method".to_string(),
+                value: "GET".to_string(),
+            },
+            HeaderEntry {
+                name: ":path".to_string(),
+                value: "/".to_string(),
+            },
+            HeaderEntry {
+                name: "user-agent".to_string(),
+                value: "test".to_string(),
+            },
         ];
 
         assert!(!parser.has_ordering_violation(&valid_headers));
@@ -627,9 +811,18 @@ mod tests {
             stream_id: 0, // Invalid for HEADERS
             flags: 0,
             headers: vec![
-                HeaderEntry { name: ":method".to_string(), value: "GET".to_string() },
-                HeaderEntry { name: ":path".to_string(), value: "/".to_string() },
-                HeaderEntry { name: ":scheme".to_string(), value: "https".to_string() },
+                HeaderEntry {
+                    name: ":method".to_string(),
+                    value: "GET".to_string(),
+                },
+                HeaderEntry {
+                    name: ":path".to_string(),
+                    value: "/".to_string(),
+                },
+                HeaderEntry {
+                    name: ":scheme".to_string(),
+                    value: "https".to_string(),
+                },
             ],
         };
 

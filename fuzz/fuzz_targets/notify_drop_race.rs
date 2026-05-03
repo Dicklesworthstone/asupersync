@@ -13,15 +13,15 @@
 
 #![no_main]
 
-use libfuzzer_sys::fuzz_target;
 use arbitrary::{Arbitrary, Unstructured};
 use asupersync::sync::Notify;
-use std::sync::atomic::{AtomicUsize, AtomicBool, Ordering};
-use std::sync::Arc;
+use libfuzzer_sys::fuzz_target;
 use std::collections::HashMap;
-use std::task::{Context, Poll, Waker};
-use std::pin::Pin;
 use std::future::Future;
+use std::pin::Pin;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::task::{Context, Poll, Waker};
 
 #[derive(Debug, Clone, Arbitrary)]
 struct NotifyDropConfig {
@@ -261,18 +261,25 @@ fn test_notify_drop_scenario(
 
     // Create initial waiters
     for i in 0..max_waiters {
-        let waiter = TrackedNotifiedFuture::new(notify.clone(), i, Arc::new(NotifyDropTracker::new()));
+        let waiter =
+            TrackedNotifiedFuture::new(notify.clone(), i, Arc::new(NotifyDropTracker::new()));
         waiters.insert(i, waiter);
     }
 
-    let max_ops = config.max_operations.min(NotifyDropConfig::max_operations()) as usize;
+    let max_ops = config
+        .max_operations
+        .min(NotifyDropConfig::max_operations()) as usize;
 
     for operation in config.operations.iter().take(max_ops) {
         match operation {
             NotifyDropOperation::AddWaiter { waiter_id } => {
                 let id = *waiter_id % 20; // Limit total waiters
                 if !waiters.contains_key(&id) {
-                    let waiter = TrackedNotifiedFuture::new(notify.clone(), id, Arc::new(NotifyDropTracker::new()));
+                    let waiter = TrackedNotifiedFuture::new(
+                        notify.clone(),
+                        id,
+                        Arc::new(NotifyDropTracker::new()),
+                    );
                     waiters.insert(id, waiter);
                 }
             }
@@ -338,7 +345,11 @@ fn test_notify_drop_scenario(
                 for i in 0..cycle_count {
                     // Add a waiter
                     let waiter_id = (100 + i) as u8; // Use high IDs to avoid conflicts
-                    let waiter = TrackedNotifiedFuture::new(notify.clone(), waiter_id, Arc::new(NotifyDropTracker::new()));
+                    let waiter = TrackedNotifiedFuture::new(
+                        notify.clone(),
+                        waiter_id,
+                        Arc::new(NotifyDropTracker::new()),
+                    );
                     waiters.insert(waiter_id, waiter);
 
                     // Notify
@@ -359,7 +370,10 @@ fn test_notify_drop_scenario(
 
                 if active_waiters > NotifyDropConfig::max_waiters() as usize * 2 {
                     tracker.record_slot_leak();
-                    return Err(format!("Too many active waiters, possible leak: {}", active_waiters));
+                    return Err(format!(
+                        "Too many active waiters, possible leak: {}",
+                        active_waiters
+                    ));
                 }
 
                 // Check our tracking invariants
@@ -416,9 +430,7 @@ fuzz_target!(|data: &[u8]| {
         let tracker2 = NotifyDropTracker::new();
         let config2 = config.clone();
 
-        let handle = thread::spawn(move || {
-            test_notify_drop_scenario(&config2, &tracker2)
-        });
+        let handle = thread::spawn(move || test_notify_drop_scenario(&config2, &tracker2));
 
         match handle.join() {
             Ok(Ok(())) => {

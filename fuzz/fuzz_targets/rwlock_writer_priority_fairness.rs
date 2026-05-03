@@ -1,11 +1,11 @@
 #![no_main]
 
 use arbitrary::Arbitrary;
-use asupersync::sync::{RwLock, RwLockError, TryReadError, TryWriteError};
 use asupersync::cx::Cx;
+use asupersync::sync::{RwLock, RwLockError, TryReadError, TryWriteError};
+use asupersync::types::Budget;
 use asupersync::util::ArenaIndex;
 use asupersync::{RegionId, TaskId};
-use asupersync::types::Budget;
 use libfuzzer_sys::fuzz_target;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -364,7 +364,9 @@ fn execute_and_verify_writer_priority_fairness(operations: Vec<RwLockOperation>)
                 let guard_key = guard_id % (MAX_GUARDS as u8);
 
                 // Skip if guard already exists
-                if read_guard_states.contains_key(&guard_key) || write_guard_states.contains_key(&guard_key) {
+                if read_guard_states.contains_key(&guard_key)
+                    || write_guard_states.contains_key(&guard_key)
+                {
                     continue;
                 }
 
@@ -393,7 +395,9 @@ fn execute_and_verify_writer_priority_fairness(operations: Vec<RwLockOperation>)
                 let guard_key = guard_id % (MAX_GUARDS as u8);
 
                 // Skip if guard already exists
-                if read_guard_states.contains_key(&guard_key) || write_guard_states.contains_key(&guard_key) {
+                if read_guard_states.contains_key(&guard_key)
+                    || write_guard_states.contains_key(&guard_key)
+                {
                     continue;
                 }
 
@@ -437,7 +441,10 @@ fn execute_and_verify_writer_priority_fairness(operations: Vec<RwLockOperation>)
                 }
             }
 
-            RwLockOperation::WriteValue { guard_id: _, value: _ } => {
+            RwLockOperation::WriteValue {
+                guard_id: _,
+                value: _,
+            } => {
                 // Skip - we handle writes in TryWrite to simplify guard management
             }
 

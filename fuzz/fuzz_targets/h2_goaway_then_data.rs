@@ -18,8 +18,8 @@
 
 #![no_main]
 
-use libfuzzer_sys::fuzz_target;
 use arbitrary::Arbitrary;
+use libfuzzer_sys::fuzz_target;
 use std::collections::HashMap;
 
 /// Mock HTTP/2 connection for testing GOAWAY + DATA frame interactions.
@@ -150,14 +150,9 @@ pub enum GoAwayViolation {
         new_last_stream_id: u32,
     },
     /// New stream opened with ID > last_stream_id after GOAWAY
-    NewStreamBeyondGoAway {
-        stream_id: u32,
-        last_stream_id: u32,
-    },
+    NewStreamBeyondGoAway { stream_id: u32, last_stream_id: u32 },
     /// Connection closed prematurely before processing valid streams
-    PrematureConnectionClose {
-        active_streams: Vec<u32>,
-    },
+    PrematureConnectionClose { active_streams: Vec<u32> },
 }
 
 /// Mock frame types for testing
@@ -288,15 +283,17 @@ impl MockGoAwayConnection {
         // Check for monotonic decrease if we already have GOAWAY
         if let Some(ref existing) = self.goaway_state {
             if frame.last_stream_id > existing.last_stream_id {
-                self.violations.push(GoAwayViolation::NonMonotonicLastStreamId {
-                    previous_last_stream_id: existing.last_stream_id,
-                    new_last_stream_id: frame.last_stream_id,
-                });
+                self.violations
+                    .push(GoAwayViolation::NonMonotonicLastStreamId {
+                        previous_last_stream_id: existing.last_stream_id,
+                        new_last_stream_id: frame.last_stream_id,
+                    });
                 return FrameProcessingResult::ProtocolViolation;
             }
         }
 
-        let goaway_count = self.goaway_state
+        let goaway_count = self
+            .goaway_state
             .as_ref()
             .map(|state| state.goaway_count + 1)
             .unwrap_or(1);
@@ -311,7 +308,8 @@ impl MockGoAwayConnection {
         });
 
         // Mark streams beyond last_stream_id as discarded
-        let streams_to_discard: Vec<u32> = self.streams
+        let streams_to_discard: Vec<u32> = self
+            .streams
             .keys()
             .filter(|&&stream_id| stream_id > frame.last_stream_id)
             .copied()
@@ -342,11 +340,15 @@ impl MockGoAwayConnection {
 
             // Update stream state if END_STREAM
             if frame.end_stream {
-                let current_state = self.streams.get(&frame.stream_id).cloned()
+                let current_state = self
+                    .streams
+                    .get(&frame.stream_id)
+                    .cloned()
                     .unwrap_or(StreamState::Idle);
                 match current_state {
                     StreamState::Open => {
-                        self.streams.insert(frame.stream_id, StreamState::HalfClosedRemote);
+                        self.streams
+                            .insert(frame.stream_id, StreamState::HalfClosedRemote);
                     }
                     StreamState::HalfClosedRemote => {
                         self.streams.insert(frame.stream_id, StreamState::Closed);
@@ -383,17 +385,23 @@ impl MockGoAwayConnection {
             // Check if this should have been processed (violation)
             if let Some(ref goaway) = self.goaway_state {
                 if frame.stream_id <= goaway.last_stream_id {
-                    let stream_state = self.streams.get(&frame.stream_id)
+                    let stream_state = self
+                        .streams
+                        .get(&frame.stream_id)
                         .cloned()
                         .unwrap_or(StreamState::Idle);
 
                     // Should be processed if stream is not closed/reset
-                    if !matches!(stream_state, StreamState::Closed | StreamState::Reset | StreamState::Discarded) {
-                        self.violations.push(GoAwayViolation::DiscardedWithinLastStream {
-                            stream_id: frame.stream_id,
-                            last_stream_id: goaway.last_stream_id,
-                            payload_size: frame.payload_size,
-                        });
+                    if !matches!(
+                        stream_state,
+                        StreamState::Closed | StreamState::Reset | StreamState::Discarded
+                    ) {
+                        self.violations
+                            .push(GoAwayViolation::DiscardedWithinLastStream {
+                                stream_id: frame.stream_id,
+                                last_stream_id: goaway.last_stream_id,
+                                payload_size: frame.payload_size,
+                            });
                     }
                 }
             }
@@ -409,10 +417,11 @@ impl MockGoAwayConnection {
             if event.stream_id > goaway.last_stream_id {
                 match event.event_type {
                     StreamEventType::Open => {
-                        self.violations.push(GoAwayViolation::NewStreamBeyondGoAway {
-                            stream_id: event.stream_id,
-                            last_stream_id: goaway.last_stream_id,
-                        });
+                        self.violations
+                            .push(GoAwayViolation::NewStreamBeyondGoAway {
+                                stream_id: event.stream_id,
+                                last_stream_id: goaway.last_stream_id,
+                            });
                         return FrameProcessingResult::ProtocolViolation;
                     }
                     _ => {
@@ -449,7 +458,9 @@ impl MockGoAwayConnection {
         }
 
         // Check stream state
-        let stream_state = self.streams.get(&stream_id)
+        let stream_state = self
+            .streams
+            .get(&stream_id)
             .cloned()
             .unwrap_or(StreamState::Idle);
 
@@ -458,7 +469,10 @@ impl MockGoAwayConnection {
             StreamState::Closed | StreamState::Reset => false,
             StreamState::Idle => {
                 // Can only open streams <= last_stream_id
-                matches!(frame_type, MockFrameType::Headers | MockFrameType::PushPromise)
+                matches!(
+                    frame_type,
+                    MockFrameType::Headers | MockFrameType::PushPromise
+                )
             }
             StreamState::Open | StreamState::HalfClosedRemote => {
                 // Can process most frame types on active streams
@@ -474,12 +488,14 @@ impl MockGoAwayConnection {
 
     /// Get statistics about processing
     pub fn get_stats(&self) -> GoAwayStats {
-        let active_streams = self.streams
+        let active_streams = self
+            .streams
             .iter()
             .filter(|(_, state)| matches!(state, StreamState::Open | StreamState::HalfClosedRemote))
             .count();
 
-        let discarded_streams = self.streams
+        let discarded_streams = self
+            .streams
             .values()
             .filter(|state| matches!(state, StreamState::Discarded))
             .count();
@@ -505,7 +521,8 @@ impl MockGoAwayConnection {
         };
 
         // Connection can close when all streams <= last_stream_id are closed
-        let active_valid_streams: Vec<u32> = self.streams
+        let active_valid_streams: Vec<u32> = self
+            .streams
             .iter()
             .filter_map(|(&stream_id, state)| {
                 if stream_id <= goaway.last_stream_id {
@@ -640,7 +657,10 @@ fn test_multiple_goaway_frames() {
     // Check violations
     let violations = conn.violations();
     assert_eq!(violations.len(), 1);
-    assert!(matches!(violations[0], GoAwayViolation::NonMonotonicLastStreamId { .. }));
+    assert!(matches!(
+        violations[0],
+        GoAwayViolation::NonMonotonicLastStreamId { .. }
+    ));
 }
 
 /// Test new stream creation after GOAWAY
@@ -669,7 +689,10 @@ fn test_new_stream_after_goaway() {
     // Check violations
     let violations = conn.violations();
     assert_eq!(violations.len(), 1);
-    assert!(matches!(violations[0], GoAwayViolation::NewStreamBeyondGoAway { .. }));
+    assert!(matches!(
+        violations[0],
+        GoAwayViolation::NewStreamBeyondGoAway { .. }
+    ));
 }
 
 /// Test graceful connection close timing
@@ -746,7 +769,10 @@ fuzz_target!(|scenario: GoAwayDataScenario| {
     // Verify GOAWAY was processed (unless it was a protocol violation)
     match goaway_result {
         FrameProcessingResult::Processed => {
-            assert!(conn.goaway_state.is_some(), "GOAWAY state should be set after processing");
+            assert!(
+                conn.goaway_state.is_some(),
+                "GOAWAY state should be set after processing"
+            );
         }
         FrameProcessingResult::ProtocolViolation => {
             // Expected for invalid GOAWAY frames
@@ -786,7 +812,8 @@ fuzz_target!(|scenario: GoAwayDataScenario| {
                 assert!(
                     processed.stream_id <= goaway.last_stream_id,
                     "DATA frame on stream {} processed after GOAWAY last_stream_id={}",
-                    processed.stream_id, goaway.last_stream_id
+                    processed.stream_id,
+                    goaway.last_stream_id
                 );
             }
         }
@@ -798,7 +825,8 @@ fuzz_target!(|scenario: GoAwayDataScenario| {
                     assert!(
                         discarded.stream_id > goaway.last_stream_id,
                         "DATA frame on stream {} discarded with BeyondLastStreamId but <= last_stream_id={}",
-                        discarded.stream_id, goaway.last_stream_id
+                        discarded.stream_id,
+                        goaway.last_stream_id
                     );
                 }
             }
@@ -827,11 +855,16 @@ fuzz_target!(|scenario: GoAwayDataScenario| {
 
     // Verify no protocol violations for basic cases
     if scenario.goaway_frame.error_code == 0 && limited_additional_goaways.is_empty() {
-        let critical_violations: Vec<_> = conn.violations()
+        let critical_violations: Vec<_> = conn
+            .violations()
             .iter()
-            .filter(|v| matches!(v,
-                GoAwayViolation::ProcessedBeyondLastStream { .. } |
-                GoAwayViolation::NonMonotonicLastStreamId { .. }))
+            .filter(|v| {
+                matches!(
+                    v,
+                    GoAwayViolation::ProcessedBeyondLastStream { .. }
+                        | GoAwayViolation::NonMonotonicLastStreamId { .. }
+                )
+            })
             .collect();
         assert!(
             critical_violations.is_empty(),

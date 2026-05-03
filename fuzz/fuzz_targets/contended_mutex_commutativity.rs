@@ -45,7 +45,7 @@ enum MutexOperation {
     },
     /// Brief delay to allow scheduling variations
     Delay {
-        thread_id: u8, // 0-3 for 4 threads max
+        thread_id: u8,    // 0-3 for 4 threads max
         milliseconds: u8, // 0-255ms
     },
 }
@@ -68,7 +68,9 @@ const OPERATION_TIMEOUT: Duration = Duration::from_secs(5);
 
 fuzz_target!(|input: ContendedMutexFuzz| {
     // Apply resource limits
-    let max_ops = (input.config.max_operations as usize).min(MAX_OPERATIONS).max(1);
+    let max_ops = (input.config.max_operations as usize)
+        .min(MAX_OPERATIONS)
+        .max(1);
     let max_threads = (input.config.max_threads as usize).min(MAX_THREADS).max(1);
     let operations: Vec<_> = input.operations.into_iter().take(max_ops).collect();
 
@@ -110,7 +112,10 @@ fn execute_and_verify_properties(
 
     // Spawn worker threads
     for thread_id in 0..max_threads {
-        let ops = operations_by_thread.get(&thread_id).cloned().unwrap_or_default();
+        let ops = operations_by_thread
+            .get(&thread_id)
+            .cloned()
+            .unwrap_or_default();
         if ops.is_empty() {
             continue;
         }
@@ -131,8 +136,11 @@ fn execute_and_verify_properties(
 
         // Use a simple timeout mechanism
         let join_result = thread_join_with_timeout(handle, remaining_time);
-        assert!(join_result.is_ok(),
-            "Thread {} timed out - possible deadlock detected", i);
+        assert!(
+            join_result.is_ok(),
+            "Thread {} timed out - possible deadlock detected",
+            i
+        );
     }
 
     // Verify final state consistency
@@ -142,7 +150,7 @@ fn execute_and_verify_properties(
 /// Simple timeout wrapper for thread join
 fn thread_join_with_timeout(
     handle: thread::JoinHandle<()>,
-    timeout: Duration
+    timeout: Duration,
 ) -> Result<(), &'static str> {
     // For simplicity in fuzzing, we'll use a busy-wait approach
     // In production code, you'd want a more sophisticated timeout mechanism
@@ -189,54 +197,71 @@ fn execute_thread_operations(
                 });
                 let value = *guard;
                 drop(guard);
-                ThreadResult::Read { thread_id, op_index, value }
+                ThreadResult::Read {
+                    thread_id,
+                    op_index,
+                    value,
+                }
             }
 
             MutexOperation::Write { value, .. } => {
-                let mut guard = state.lock().unwrap_or_else(|poison| {
-                    poison.into_inner()
-                });
+                let mut guard = state.lock().unwrap_or_else(|poison| poison.into_inner());
                 let old_value = *guard;
                 *guard = value;
                 drop(guard);
-                ThreadResult::Write { thread_id, op_index, old_value, new_value: value }
+                ThreadResult::Write {
+                    thread_id,
+                    op_index,
+                    old_value,
+                    new_value: value,
+                }
             }
 
             MutexOperation::Modify { delta, .. } => {
-                let mut guard = state.lock().unwrap_or_else(|poison| {
-                    poison.into_inner()
-                });
+                let mut guard = state.lock().unwrap_or_else(|poison| poison.into_inner());
                 let old_value = *guard;
                 let new_value = old_value.wrapping_add(delta as u32);
                 *guard = new_value;
                 drop(guard);
-                ThreadResult::Modify { thread_id, op_index, old_value, new_value, delta }
-            }
-
-            MutexOperation::TryRead { .. } => {
-                match state.try_lock() {
-                    Ok(guard) => {
-                        let value = *guard;
-                        drop(guard);
-                        ThreadResult::TryRead { thread_id, op_index, value: Some(value) }
-                    }
-                    Err(_) => {
-                        ThreadResult::TryRead { thread_id, op_index, value: None }
-                    }
+                ThreadResult::Modify {
+                    thread_id,
+                    op_index,
+                    old_value,
+                    new_value,
+                    delta,
                 }
             }
+
+            MutexOperation::TryRead { .. } => match state.try_lock() {
+                Ok(guard) => {
+                    let value = *guard;
+                    drop(guard);
+                    ThreadResult::TryRead {
+                        thread_id,
+                        op_index,
+                        value: Some(value),
+                    }
+                }
+                Err(_) => ThreadResult::TryRead {
+                    thread_id,
+                    op_index,
+                    value: None,
+                },
+            },
 
             MutexOperation::Delay { milliseconds, .. } => {
                 let delay_ms = (milliseconds as u64).min(MAX_DELAY_MS);
                 thread::sleep(Duration::from_millis(delay_ms));
-                ThreadResult::Delay { thread_id, op_index, milliseconds: delay_ms }
+                ThreadResult::Delay {
+                    thread_id,
+                    op_index,
+                    milliseconds: delay_ms,
+                }
             }
         };
 
         // Record the result
-        let mut results_guard = results.lock().unwrap_or_else(|poison| {
-            poison.into_inner()
-        });
+        let mut results_guard = results.lock().unwrap_or_else(|poison| poison.into_inner());
         results_guard.push(result);
     }
 }
@@ -244,11 +269,34 @@ fn execute_thread_operations(
 /// Result of a single thread operation
 #[derive(Debug, Clone)]
 enum ThreadResult {
-    Read { thread_id: usize, op_index: usize, value: u32 },
-    Write { thread_id: usize, op_index: usize, old_value: u32, new_value: u32 },
-    Modify { thread_id: usize, op_index: usize, old_value: u32, new_value: u32, delta: i32 },
-    TryRead { thread_id: usize, op_index: usize, value: Option<u32> },
-    Delay { thread_id: usize, op_index: usize, milliseconds: u64 },
+    Read {
+        thread_id: usize,
+        op_index: usize,
+        value: u32,
+    },
+    Write {
+        thread_id: usize,
+        op_index: usize,
+        old_value: u32,
+        new_value: u32,
+    },
+    Modify {
+        thread_id: usize,
+        op_index: usize,
+        old_value: u32,
+        new_value: u32,
+        delta: i32,
+    },
+    TryRead {
+        thread_id: usize,
+        op_index: usize,
+        value: Option<u32>,
+    },
+    Delay {
+        thread_id: usize,
+        op_index: usize,
+        milliseconds: u64,
+    },
 }
 
 /// Verify final state consistency and commutativity properties
@@ -257,13 +305,11 @@ fn verify_final_state_consistency(
     results: &ContendedMutex<Vec<ThreadResult>>,
     initial_value: u32,
 ) {
-    let final_value = *shared_state.lock().unwrap_or_else(|poison| {
-        poison.into_inner()
-    });
+    let final_value = *shared_state
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
 
-    let results_guard = results.lock().unwrap_or_else(|poison| {
-        poison.into_inner()
-    });
+    let results_guard = results.lock().unwrap_or_else(|poison| poison.into_inner());
     let all_results = results_guard.clone();
     drop(results_guard);
 
@@ -278,11 +324,7 @@ fn verify_final_state_consistency(
 }
 
 /// Verify that the final value is consistent with the write operations
-fn verify_write_consistency(
-    results: &[ThreadResult],
-    final_value: u32,
-    initial_value: u32,
-) {
+fn verify_write_consistency(results: &[ThreadResult], final_value: u32, initial_value: u32) {
     // Collect all write operations in order
     let mut writes: Vec<u32> = Vec::new();
     let mut current_value = initial_value;
@@ -306,20 +348,21 @@ fn verify_write_consistency(
         // Note: Due to concurrent execution, we can't guarantee exact ordering
         // But we can verify that the final value was written by some operation
         let final_was_written = writes.contains(&final_value) || final_value == initial_value;
-        assert!(final_was_written,
+        assert!(
+            final_was_written,
             "Final value {} was not written by any operation (writes: {:?})",
-            final_value, writes);
+            final_value, writes
+        );
     } else {
-        assert_eq!(final_value, initial_value,
-            "Final value changed without any write operations");
+        assert_eq!(
+            final_value, initial_value,
+            "Final value changed without any write operations"
+        );
     }
 }
 
 /// Verify that read operations see consistent values
-fn verify_read_consistency(
-    results: &[ThreadResult],
-    initial_value: u32,
-) {
+fn verify_read_consistency(results: &[ThreadResult], initial_value: u32) {
     // Collect all values that were ever written
     let mut possible_values = std::collections::HashSet::new();
     possible_values.insert(initial_value);
@@ -339,14 +382,23 @@ fn verify_read_consistency(
     // Verify all reads saw valid values
     for result in results {
         if let ThreadResult::Read { value, .. } = result {
-            assert!(possible_values.contains(value),
+            assert!(
+                possible_values.contains(value),
                 "Read operation saw invalid value {} (possible: {:?})",
-                value, possible_values);
+                value,
+                possible_values
+            );
         }
-        if let ThreadResult::TryRead { value: Some(value), .. } = result {
-            assert!(possible_values.contains(value),
+        if let ThreadResult::TryRead {
+            value: Some(value), ..
+        } = result
+        {
+            assert!(
+                possible_values.contains(value),
                 "TryRead operation saw invalid value {} (possible: {:?})",
-                value, possible_values);
+                value,
+                possible_values
+            );
         }
     }
 }
@@ -354,11 +406,19 @@ fn verify_read_consistency(
 /// Verify that modify operations are atomic (old_value + delta = new_value)
 fn verify_modify_atomicity(results: &[ThreadResult]) {
     for result in results {
-        if let ThreadResult::Modify { old_value, new_value, delta, .. } = result {
+        if let ThreadResult::Modify {
+            old_value,
+            new_value,
+            delta,
+            ..
+        } = result
+        {
             let expected = old_value.wrapping_add(*delta as u32);
-            assert_eq!(*new_value, expected,
+            assert_eq!(
+                *new_value, expected,
                 "Modify operation not atomic: {} + {} ≠ {} (got {})",
-                old_value, delta, expected, new_value);
+                old_value, delta, expected, new_value
+            );
         }
     }
 }

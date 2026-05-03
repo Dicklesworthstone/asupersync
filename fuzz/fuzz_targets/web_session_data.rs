@@ -33,7 +33,10 @@ struct Input {
 
 fuzz_target!(|input: Input| {
     let mut data = SessionData::new();
-    assert!(!data.is_modified(), "fresh SessionData must not be modified");
+    assert!(
+        !data.is_modified(),
+        "fresh SessionData must not be modified"
+    );
     assert!(data.is_empty());
     assert_eq!(data.len(), 0);
 
@@ -65,7 +68,11 @@ fuzz_target!(|input: Input| {
             }
         }
         assert_eq!(data.len(), shadow.len(), "len() inconsistent with shadow");
-        assert_eq!(data.is_empty(), shadow.is_empty(), "is_empty() inconsistent");
+        assert_eq!(
+            data.is_empty(),
+            shadow.is_empty(),
+            "is_empty() inconsistent"
+        );
         assert_eq!(
             data.keys().len(),
             data.len(),

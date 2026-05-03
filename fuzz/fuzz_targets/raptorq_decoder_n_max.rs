@@ -134,9 +134,9 @@ impl OverflowEsi {
             OverflowEsi::MaxMinus1 => u32::MAX - 1,
             OverflowEsi::MaxMinus2 => u32::MAX - 2,
             OverflowEsi::MaxMinus10 => u32::MAX - 10,
-            OverflowEsi::TypicalPaddingOverflow(offset) => {
-                u32::MAX.saturating_sub(u32::from(offset)).saturating_sub(k_prime_padding)
-            }
+            OverflowEsi::TypicalPaddingOverflow(offset) => u32::MAX
+                .saturating_sub(u32::from(offset))
+                .saturating_sub(k_prime_padding),
         }
     }
 }
@@ -188,14 +188,9 @@ enum DecoderOperation {
         data: SymbolData,
     },
     /// Add a repair symbol with boundary ESI
-    AddRepair {
-        esi: RepairEsi,
-        data: SymbolData,
-    },
+    AddRepair { esi: RepairEsi, data: SymbolData },
     /// Request repair equation for boundary ESI
-    GetRepairEquation {
-        esi: RepairEsi,
-    },
+    GetRepairEquation { esi: RepairEsi },
     /// Attempt decode
     Decode,
     /// Inspect decoder state
@@ -293,7 +288,10 @@ fn test_n_max_boundary_decoding(scenario: &NMaxBoundaryScenario) {
         EsiStrategy::OverflowTrigger { base_esi } => {
             vec![base_esi.as_u32(k_prime_padding as u32)]
         }
-        EsiStrategy::Mixed { boundary_esis, normal_repair_count } => {
+        EsiStrategy::Mixed {
+            boundary_esis,
+            normal_repair_count,
+        } => {
             let mut esis: Vec<u32> = boundary_esis.iter().map(|be| be.as_u32()).collect();
             for i in 0..(*normal_repair_count as u32) {
                 esis.push((k as u32) + i);
@@ -324,7 +322,10 @@ fn test_n_max_boundary_decoding(scenario: &NMaxBoundaryScenario) {
                 Ok(())
             }
 
-            DecoderOperation::AddRepair { esi: repair_esi, data } => {
+            DecoderOperation::AddRepair {
+                esi: repair_esi,
+                data,
+            } => {
                 let esi = match repair_esi {
                     RepairEsi::FromStrategy => {
                         if strategy_esi_idx < strategy_esis.len() {
@@ -411,10 +412,10 @@ fn test_overflow_protection(scenario: &NMaxBoundaryScenario) {
 
     // Test specific overflow scenarios
     let overflow_esis = [
-        u32::MAX,     // Maximum u32
-        u32::MAX - 1, // One less than maximum
-        u32::MAX - 10, // Close to maximum
-        RFC6330_N_MAX + 1, // Just above N_max
+        u32::MAX,             // Maximum u32
+        u32::MAX - 1,         // One less than maximum
+        u32::MAX - 10,        // Close to maximum
+        RFC6330_N_MAX + 1,    // Just above N_max
         RFC6330_N_MAX + 1000, // Well above N_max
     ];
 

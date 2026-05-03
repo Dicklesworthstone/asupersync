@@ -1,14 +1,14 @@
 #![no_main]
 
-use libfuzzer_sys::fuzz_target;
 use arbitrary::{Arbitrary, Unstructured};
+use libfuzzer_sys::fuzz_target;
+use std::future::Future;
+use std::panic::{AssertUnwindSafe, catch_unwind};
+use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll, RawWaker, RawWakerVTable, Waker};
-use std::future::Future;
-use std::pin::Pin;
 use std::thread;
 use std::time::Duration;
-use std::panic::{catch_unwind, AssertUnwindSafe};
 
 use asupersync::sync::Notify;
 
@@ -141,7 +141,10 @@ impl NotifyCancelTracker {
                         violation.violation_type, violation.description
                     ));
                 }
-                panic!("Notify cancel race invariant violations detected: {} violations", violations.len());
+                panic!(
+                    "Notify cancel race invariant violations detected: {} violations",
+                    violations.len()
+                );
             }
         }
     }
@@ -174,10 +177,7 @@ impl TrackedWaker {
 
     fn create_waker(&self) -> Waker {
         let data = Arc::new(self.clone());
-        let raw = RawWaker::new(
-            Arc::into_raw(data) as *const (),
-            &TRACKED_WAKER_VTABLE,
-        );
+        let raw = RawWaker::new(Arc::into_raw(data) as *const (), &TRACKED_WAKER_VTABLE);
         unsafe { Waker::from_raw(raw) }
     }
 }
@@ -288,7 +288,12 @@ fuzz_target!(|data: &[u8]| {
         }
 
         CancelPattern::NotifyOneWithBatonPass { cancel_delay_us } => {
-            test_notify_one_with_baton_pass(&tracker, &notify, config.waiter_count, cancel_delay_us);
+            test_notify_one_with_baton_pass(
+                &tracker,
+                &notify,
+                config.waiter_count,
+                cancel_delay_us,
+            );
         }
 
         CancelPattern::BroadcastThenCancel { cancel_waiters } => {
@@ -363,7 +368,7 @@ fn test_notify_one_with_baton_pass(
     tracker: &NotifyCancelTracker,
     notify: &Notify,
     waiter_count: u8,
-    cancel_delay_us: u16
+    cancel_delay_us: u16,
 ) {
     tracker.record_operation("test_notify_one_with_baton_pass");
 
@@ -424,7 +429,7 @@ fn test_broadcast_then_cancel(
     tracker: &NotifyCancelTracker,
     notify: &Notify,
     waiter_count: u8,
-    cancel_waiters: &[u8]
+    cancel_waiters: &[u8],
 ) {
     tracker.record_operation("test_broadcast_then_cancel");
 
@@ -492,7 +497,7 @@ fn test_concurrent_notify_cancel(
     tracker: &NotifyCancelTracker,
     notify: &Notify,
     waiter_count: u8,
-    operations: Vec<Operation>
+    operations: Vec<Operation>,
 ) {
     tracker.record_operation("test_concurrent_notify_cancel");
 
@@ -532,7 +537,10 @@ fn test_concurrent_notify_cancel(
                 notify.notify_waiters();
             }
 
-            Operation::CancelWaiter { waiter_id, delay_us } => {
+            Operation::CancelWaiter {
+                waiter_id,
+                delay_us,
+            } => {
                 if *delay_us > 0 {
                     thread::sleep(Duration::from_micros((*delay_us).min(500) as u64));
                 }
@@ -553,7 +561,8 @@ fn test_concurrent_notify_cancel(
                 let waiter_idx = *waiter_id as usize;
                 if waiters.len() < 8 {
                     let mut waiter = notify.notified();
-                    let tracked_waker = TrackedWaker::new(waiter_idx, operation_counter, tracker.clone());
+                    let tracked_waker =
+                        TrackedWaker::new(waiter_idx, operation_counter, tracker.clone());
                     let waker = tracked_waker.create_waker();
                     let mut context = Context::from_waker(&waker);
 
@@ -564,7 +573,9 @@ fn test_concurrent_notify_cancel(
             }
 
             Operation::CheckStoredCount => {
-                let stored = notify.stored_notifications.load(std::sync::atomic::Ordering::Acquire);
+                let stored = notify
+                    .stored_notifications
+                    .load(std::sync::atomic::Ordering::Acquire);
                 tracker.record_operation(&format!("stored_count_{}", stored));
             }
         }
@@ -590,7 +601,7 @@ fn test_baton_pass_chain(
     tracker: &NotifyCancelTracker,
     notify: &Notify,
     waiter_count: u8,
-    chain_length: u8
+    chain_length: u8,
 ) {
     tracker.record_operation("test_baton_pass_chain");
 
@@ -650,7 +661,7 @@ fn test_stored_notification_cancel(
     tracker: &NotifyCancelTracker,
     notify: &Notify,
     _waiter_count: u8,
-    store_first: bool
+    store_first: bool,
 ) {
     tracker.record_operation("test_stored_notification_cancel");
 
@@ -689,7 +700,6 @@ fn test_stored_notification_cancel(
             operation_id: 6,
             timestamp: std::time::Instant::now(),
         });
-
     } else {
         // Create waiter, then notify and cancel
         let mut waiter = notify.notified();

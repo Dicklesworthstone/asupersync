@@ -106,10 +106,7 @@ fuzz_target!(|input: FuzzInput| {
 
     // Property 5: frame layout — flag byte and BE-u32 length.
     assert!(wire.len() >= 5, "trailer frame must be >= 5 bytes (prefix)");
-    assert_eq!(
-        wire[0], TRAILER_FLAG,
-        "trailer flag byte MUST be 0x80",
-    );
+    assert_eq!(wire[0], TRAILER_FLAG, "trailer flag byte MUST be 0x80",);
     let declared = u32::from_be_bytes([wire[1], wire[2], wire[3], wire[4]]) as usize;
     assert_eq!(
         declared,
@@ -119,8 +116,7 @@ fuzz_target!(|input: FuzzInput| {
 
     // Property 2: grpc-status decimal matches code.as_i32().
     let body = &wire[5..];
-    let body_text = std::str::from_utf8(body)
-        .expect("encoder must emit ASCII-only trailer block");
+    let body_text = std::str::from_utf8(body).expect("encoder must emit ASCII-only trailer block");
     let expected_status_line = format!("grpc-status: {}\r\n", status.code().as_i32());
     assert!(
         body_text.starts_with(&expected_status_line),

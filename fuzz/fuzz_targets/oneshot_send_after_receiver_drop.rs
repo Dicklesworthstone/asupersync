@@ -1,15 +1,15 @@
 #![no_main]
 
-use libfuzzer_sys::fuzz_target;
 use arbitrary::{Arbitrary, Unstructured};
+use libfuzzer_sys::fuzz_target;
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 
-use asupersync::{Cx, RegionId, Budget};
 use asupersync::channel::oneshot::{self, SendError};
 use asupersync::types::TaskId;
 use asupersync::util::ArenaIndex;
+use asupersync::{Budget, Cx, RegionId};
 
 #[derive(Debug, Clone)]
 struct SendDropTracker {
@@ -50,7 +50,10 @@ impl SendDropTracker {
     fn validate_invariants(&self) {
         // Check no panic occurred
         let panic_occurred = self.panic_occurred.lock().unwrap();
-        assert!(!*panic_occurred, "Panic occurred during send after receiver drop");
+        assert!(
+            !*panic_occurred,
+            "Panic occurred during send after receiver drop"
+        );
 
         // Check send result
         let send_result = self.send_result.lock().unwrap();
@@ -63,15 +66,19 @@ impl SendDropTracker {
                 }
                 Err(SendError::Disconnected(value)) => {
                     // Expected: value should be preserved
-                    assert_eq!(*value, self.test_value,
+                    assert_eq!(
+                        *value, self.test_value,
                         "Send error did not preserve original value. Expected: {}, got: {}",
-                        self.test_value, *value);
+                        self.test_value, *value
+                    );
                 }
                 Err(SendError::Cancelled(value)) => {
                     // This could happen if Cx is cancelled, value should still be preserved
-                    assert_eq!(*value, self.test_value,
+                    assert_eq!(
+                        *value, self.test_value,
                         "Send cancelled error did not preserve original value. Expected: {}, got: {}",
-                        self.test_value, *value);
+                        self.test_value, *value
+                    );
                 }
             }
         }
@@ -85,7 +92,10 @@ enum SendDropOperation {
     DropReceiverThenSend,
     SendThenDropReceiver,
     RapidSequence,
-    DelayedOperations { send_delay_us: u16, drop_delay_us: u16 },
+    DelayedOperations {
+        send_delay_us: u16,
+        drop_delay_us: u16,
+    },
 }
 
 fuzz_target!(|data: &[u8]| {
@@ -93,9 +103,9 @@ fuzz_target!(|data: &[u8]| {
 
     // Generate arbitrary test parameters
     let test_value: u32 = u.arbitrary().unwrap_or(42);
-    let operations: Vec<SendDropOperation> = u.arbitrary().unwrap_or_else(|_| {
-        vec![SendDropOperation::DropReceiverThenSend]
-    });
+    let operations: Vec<SendDropOperation> = u
+        .arbitrary()
+        .unwrap_or_else(|_| vec![SendDropOperation::DropReceiverThenSend]);
 
     if operations.is_empty() {
         return;
@@ -130,9 +140,7 @@ fuzz_target!(|data: &[u8]| {
                     tracker_clone.record_panic();
                 }));
 
-                let result = std::panic::catch_unwind(|| {
-                    sender.send(&cx, test_value)
-                });
+                let result = std::panic::catch_unwind(|| sender.send(&cx, test_value));
 
                 std::panic::set_hook(prev_hook);
 
@@ -154,9 +162,7 @@ fuzz_target!(|data: &[u8]| {
                     tracker_clone.record_panic();
                 }));
 
-                let result = std::panic::catch_unwind(|| {
-                    sender.send(&cx, test_value)
-                });
+                let result = std::panic::catch_unwind(|| sender.send(&cx, test_value));
 
                 std::panic::set_hook(prev_hook);
 
@@ -177,9 +183,7 @@ fuzz_target!(|data: &[u8]| {
                     tracker_clone.record_panic();
                 }));
 
-                let result = std::panic::catch_unwind(|| {
-                    sender.send(&cx, test_value)
-                });
+                let result = std::panic::catch_unwind(|| sender.send(&cx, test_value));
 
                 std::panic::set_hook(prev_hook);
 
@@ -207,9 +211,7 @@ fuzz_target!(|data: &[u8]| {
                         tracker1.record_panic();
                     }));
 
-                    let result = std::panic::catch_unwind(|| {
-                        sender.send(&cx, test_value)
-                    });
+                    let result = std::panic::catch_unwind(|| sender.send(&cx, test_value));
 
                     std::panic::set_hook(prev_hook);
 
@@ -229,7 +231,10 @@ fuzz_target!(|data: &[u8]| {
                 break;
             }
 
-            SendDropOperation::DelayedOperations { send_delay_us, drop_delay_us } => {
+            SendDropOperation::DelayedOperations {
+                send_delay_us,
+                drop_delay_us,
+            } => {
                 tracker.record_operation("delayed_operations");
 
                 let tracker1 = tracker.clone();
@@ -246,9 +251,7 @@ fuzz_target!(|data: &[u8]| {
                         tracker1.record_panic();
                     }));
 
-                    let result = std::panic::catch_unwind(|| {
-                        sender.send(&cx, test_value)
-                    });
+                    let result = std::panic::catch_unwind(|| sender.send(&cx, test_value));
 
                     std::panic::set_hook(prev_hook);
 

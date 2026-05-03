@@ -13,15 +13,15 @@
 
 #![no_main]
 
-use libfuzzer_sys::fuzz_target;
 use arbitrary::{Arbitrary, Unstructured};
 use asupersync::sync::Notify;
-use std::sync::atomic::{AtomicUsize, AtomicBool, Ordering};
-use std::sync::Arc;
-use std::task::{Context, Poll, RawWaker, RawWakerVTable, Waker};
-use std::pin::Pin;
+use libfuzzer_sys::fuzz_target;
 use std::collections::HashMap;
 use std::future::Future;
+use std::pin::Pin;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::task::{Context, Poll, RawWaker, RawWakerVTable, Waker};
 
 #[derive(Debug, Clone, Arbitrary)]
 struct SpuriousWakeConfig {
@@ -148,7 +148,11 @@ struct TrackingWaker {
 }
 
 impl TrackingWaker {
-    fn new(waker_id: usize, tracker: Arc<SpuriousWakeTracker>, completed: Arc<AtomicBool>) -> Waker {
+    fn new(
+        waker_id: usize,
+        tracker: Arc<SpuriousWakeTracker>,
+        completed: Arc<AtomicBool>,
+    ) -> Waker {
         let data = Box::into_raw(Box::new(TrackingWaker {
             waker_id,
             tracker,
@@ -170,7 +174,10 @@ static TRACKING_WAKER_VTABLE: RawWakerVTable = RawWakerVTable::new(
             inner: tracking_waker.inner.clone(),
             completed: tracking_waker.completed.clone(),
         });
-        RawWaker::new(Box::into_raw(new_tracking_waker) as *const (), &TRACKING_WAKER_VTABLE)
+        RawWaker::new(
+            Box::into_raw(new_tracking_waker) as *const (),
+            &TRACKING_WAKER_VTABLE,
+        )
     },
     // wake
     |data| unsafe {
@@ -261,7 +268,9 @@ fn test_spurious_wake_scenario(
     let notify = Arc::new(Notify::new());
     let mut waiters: HashMap<u8, TrackedWaiter> = HashMap::new();
 
-    let max_ops = config.max_operations.min(SpuriousWakeConfig::max_operations()) as usize;
+    let max_ops = config
+        .max_operations
+        .min(SpuriousWakeConfig::max_operations()) as usize;
     let max_waiters = config.waiter_count.min(SpuriousWakeConfig::max_waiters());
 
     for operation in config.operations.iter().take(max_ops) {
@@ -269,7 +278,11 @@ fn test_spurious_wake_scenario(
             NotifyOperation::AddWaiter { waiter_id } => {
                 let id = *waiter_id % max_waiters;
                 if !waiters.contains_key(&id) && waiters.len() < max_waiters as usize {
-                    let waiter = TrackedWaiter::new(notify.clone(), id as usize, Arc::new(SpuriousWakeTracker::new()));
+                    let waiter = TrackedWaiter::new(
+                        notify.clone(),
+                        id as usize,
+                        Arc::new(SpuriousWakeTracker::new()),
+                    );
                     waiters.insert(id, waiter);
                 }
             }
@@ -306,7 +319,8 @@ fn test_spurious_wake_scenario(
 
             NotifyOperation::SpuriousWakeStorm { count } => {
                 if config.enable_spurious_wakes {
-                    let storm_count = (*count).min(SpuriousWakeConfig::max_spurious_count()) as usize;
+                    let storm_count =
+                        (*count).min(SpuriousWakeConfig::max_spurious_count()) as usize;
                     for _ in 0..storm_count {
                         for waiter in waiters.values_mut() {
                             waiter.send_spurious_wake(tracker);

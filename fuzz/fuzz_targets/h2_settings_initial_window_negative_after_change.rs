@@ -1,7 +1,7 @@
 #![no_main]
 
-use libfuzzer_sys::fuzz_target;
 use arbitrary::{Arbitrary, Unstructured};
+use libfuzzer_sys::fuzz_target;
 use std::collections::HashMap;
 
 /// HTTP/2 frame header length per RFC 7540 §4.1
@@ -92,17 +92,15 @@ impl FrameHeader {
             return Err("incomplete header");
         }
 
-        let length = ((buf[0] as u32) << 16) |
-                    ((buf[1] as u32) << 8) |
-                    (buf[2] as u32);
+        let length = ((buf[0] as u32) << 16) | ((buf[1] as u32) << 8) | (buf[2] as u32);
 
         let frame_type = buf[3];
         let flags = buf[4];
 
-        let stream_id = ((buf[5] as u32 & 0x7F) << 24) |
-                       ((buf[6] as u32) << 16) |
-                       ((buf[7] as u32) << 8) |
-                       (buf[8] as u32);
+        let stream_id = ((buf[5] as u32 & 0x7F) << 24)
+            | ((buf[6] as u32) << 16)
+            | ((buf[7] as u32) << 8)
+            | (buf[8] as u32);
 
         Ok(FrameHeader {
             length,
@@ -143,10 +141,10 @@ impl SettingsParameter {
         }
 
         let id = ((buf[0] as u16) << 8) | (buf[1] as u16);
-        let value = ((buf[2] as u32) << 24) |
-                   ((buf[3] as u32) << 16) |
-                   ((buf[4] as u32) << 8) |
-                   (buf[5] as u32);
+        let value = ((buf[2] as u32) << 24)
+            | ((buf[3] as u32) << 16)
+            | ((buf[4] as u32) << 8)
+            | (buf[5] as u32);
 
         Ok(SettingsParameter { id, value })
     }
@@ -175,10 +173,10 @@ impl WindowUpdateData {
             return Err("insufficient data");
         }
 
-        let value = ((buf[0] as u32 & 0x7F) << 24) |
-                   ((buf[1] as u32) << 16) |
-                   ((buf[2] as u32) << 8) |
-                   (buf[3] as u32);
+        let value = ((buf[0] as u32 & 0x7F) << 24)
+            | ((buf[1] as u32) << 16)
+            | ((buf[2] as u32) << 8)
+            | (buf[3] as u32);
 
         if value == 0 {
             return Err("window size increment cannot be zero");
@@ -231,7 +229,11 @@ impl StreamFlowState {
     }
 
     /// Apply SETTINGS_INITIAL_WINDOW_SIZE change
-    fn apply_initial_window_size_change(&mut self, old_size: i64, new_size: i64) -> Result<(), String> {
+    fn apply_initial_window_size_change(
+        &mut self,
+        old_size: i64,
+        new_size: i64,
+    ) -> Result<(), String> {
         // RFC 7540 §6.9.2: Existing flow-control windows are updated by the delta
         let delta = new_size.saturating_sub(old_size);
         let new_window = self.window_size.saturating_add(delta);
@@ -244,7 +246,11 @@ impl StreamFlowState {
         // Log the change for debugging
         eprintln!(
             "Stream window change: {} + ({} - {}) = {} (blocked: {})",
-            self.window_size - delta, new_size, old_size, self.window_size, self.blocked
+            self.window_size - delta,
+            new_size,
+            old_size,
+            self.window_size,
+            self.blocked
         );
 
         Ok(())
@@ -296,9 +302,9 @@ impl MockH2FlowControl {
 
     /// Create or get stream with current initial window size
     fn get_or_create_stream(&mut self, stream_id: u32) -> &mut StreamFlowState {
-        self.streams.entry(stream_id).or_insert_with(|| {
-            StreamFlowState::new(self.initial_window_size)
-        })
+        self.streams
+            .entry(stream_id)
+            .or_insert_with(|| StreamFlowState::new(self.initial_window_size))
     }
 
     /// Process SETTINGS frame with INITIAL_WINDOW_SIZE
@@ -318,7 +324,9 @@ impl MockH2FlowControl {
 
                 // Update all existing streams per RFC 7540 §6.9.2
                 for (stream_id, stream) in &mut self.streams {
-                    if let Err(e) = stream.apply_initial_window_size_change(old_window_size, new_window_size) {
+                    if let Err(e) =
+                        stream.apply_initial_window_size_change(old_window_size, new_window_size)
+                    {
                         return Err(format!("Stream {} window update failed: {}", stream_id, e));
                     }
                 }
@@ -327,7 +335,9 @@ impl MockH2FlowControl {
 
                 eprintln!(
                     "Updated SETTINGS_INITIAL_WINDOW_SIZE: {} -> {} (delta: {})",
-                    old_window_size, new_window_size, new_window_size - old_window_size
+                    old_window_size,
+                    new_window_size,
+                    new_window_size - old_window_size
                 );
             }
         }
@@ -385,7 +395,8 @@ impl MockH2FlowControl {
 
     /// Check if stream is flow-control blocked
     fn is_stream_blocked(&self, stream_id: u32) -> bool {
-        self.streams.get(&stream_id)
+        self.streams
+            .get(&stream_id)
             .map(|s| s.blocked)
             .unwrap_or(false)
     }
@@ -434,14 +445,23 @@ fuzz_target!(|input: FuzzInput| {
         // Classic scenario: Start with 10000, use 5000, change to 2000 (delta -8000) → -3000 window
         operations.insert(0, Operation::ChangeInitialWindowSize(10000));
         operations.insert(1, Operation::CreateStream(1));
-        operations.insert(2, Operation::SendData { stream_id: 1, size: 5000 });
+        operations.insert(
+            2,
+            Operation::SendData {
+                stream_id: 1,
+                size: 5000,
+            },
+        );
         operations.insert(3, Operation::ChangeInitialWindowSize(2000));
     }
 
     // Add extreme value tests
     if input.test_extreme_values {
         operations.push(Operation::ChangeInitialWindowSize(MAX_WINDOW_SIZE as u32));
-        operations.push(Operation::WindowUpdate { stream_id: 1, increment: MAX_WINDOW_SIZE as u32 });
+        operations.push(Operation::WindowUpdate {
+            stream_id: 1,
+            increment: MAX_WINDOW_SIZE as u32,
+        });
         operations.push(Operation::ChangeInitialWindowSize(1));
     }
 
@@ -464,16 +484,23 @@ fuzz_target!(|input: FuzzInput| {
                             clamped_size as i64,
                             "Initial window size not updated correctly"
                         );
-                    },
+                    }
                     Err(_) => {
                         // Expected for invalid values
                     }
                 }
-            },
+            }
 
-            Operation::WindowUpdate { stream_id, increment } => {
+            Operation::WindowUpdate {
+                stream_id,
+                increment,
+            } => {
                 // Ensure stream ID is valid (non-zero for stream-level updates)
-                let stream_id = if *stream_id == 0 && op_index % 2 == 0 { 1 } else { *stream_id };
+                let stream_id = if *stream_id == 0 && op_index % 2 == 0 {
+                    1
+                } else {
+                    *stream_id
+                };
                 let increment = (*increment).max(1).min(MAX_WINDOW_SIZE as u32);
 
                 match flow_control.process_window_update(stream_id, increment) {
@@ -484,12 +511,12 @@ fuzz_target!(|input: FuzzInput| {
                             let stream_state = flow_control.get_stream_state(stream_id);
                             // Note: Window might still be negative after update
                         }
-                    },
+                    }
                     Err(_) => {
                         // Expected for overflow cases
                     }
                 }
-            },
+            }
 
             Operation::SendData { stream_id, size } => {
                 let stream_id = if *stream_id == 0 { 1 } else { *stream_id };
@@ -520,15 +547,16 @@ fuzz_target!(|input: FuzzInput| {
                             // Negative windows are allowed per RFC 7540 §6.9.2, but should not underflow
                             assert!(
                                 state.window_size >= -(MAX_WINDOW_SIZE),
-                                "Stream window size underflowed: {}", state.window_size
+                                "Stream window size underflowed: {}",
+                                state.window_size
                             );
                         }
-                    },
+                    }
                     Err(_) => {
                         // Expected for invalid operations
                     }
                 }
-            },
+            }
 
             Operation::CreateStream(stream_id) => {
                 let stream_id = if *stream_id == 0 { 1 } else { *stream_id };
@@ -571,7 +599,8 @@ fuzz_target!(|input: FuzzInput| {
             // Window should not have underflowed beyond reasonable bounds
             assert!(
                 stream_state.window_size > -(MAX_WINDOW_SIZE),
-                "Stream window underflowed: {}", stream_state.window_size
+                "Stream window underflowed: {}",
+                stream_state.window_size
             );
 
             // Try to send more data - should fail due to negative window
@@ -579,10 +608,10 @@ fuzz_target!(|input: FuzzInput| {
             match can_send_when_negative {
                 Ok(false) => {
                     // Expected - should be blocked
-                },
+                }
                 Ok(true) => {
                     panic!("Should not be able to send data when stream has negative window");
-                },
+                }
                 Err(_) => {
                     // Also acceptable - error due to flow control
                 }
@@ -608,7 +637,9 @@ fuzz_target!(|input: FuzzInput| {
         // RFC 7540 §6.9.2: Negative windows are valid, but should not underflow
         assert!(
             state.window_size >= -(MAX_WINDOW_SIZE),
-            "Stream {} window underflowed: {}", stream_id, state.window_size
+            "Stream {} window underflowed: {}",
+            stream_id,
+            state.window_size
         );
 
         // Blocked flag should match window state
@@ -616,34 +647,40 @@ fuzz_target!(|input: FuzzInput| {
             state.blocked,
             state.window_size <= 0,
             "Stream {} blocked flag inconsistent with window size {}",
-            stream_id, state.window_size
+            stream_id,
+            state.window_size
         );
 
         // Data sent should be reasonable
         assert!(
             state.data_sent < u64::MAX / 2,
             "Stream {} data sent counter seems corrupted: {}",
-            stream_id, state.data_sent
+            stream_id,
+            state.data_sent
         );
     }
 
     // Connection window should also be within bounds
     assert!(
         flow_control.connection_window >= -(MAX_WINDOW_SIZE),
-        "Connection window underflowed: {}", flow_control.connection_window
+        "Connection window underflowed: {}",
+        flow_control.connection_window
     );
     assert!(
         flow_control.connection_window <= MAX_WINDOW_SIZE,
-        "Connection window overflowed: {}", flow_control.connection_window
+        "Connection window overflowed: {}",
+        flow_control.connection_window
     );
 
     // Initial window size should be within valid range
     assert!(
         flow_control.get_initial_window_size() <= MAX_WINDOW_SIZE,
-        "Initial window size invalid: {}", flow_control.get_initial_window_size()
+        "Initial window size invalid: {}",
+        flow_control.get_initial_window_size()
     );
     assert!(
         flow_control.get_initial_window_size() >= 0,
-        "Initial window size should not be negative: {}", flow_control.get_initial_window_size()
+        "Initial window size should not be negative: {}",
+        flow_control.get_initial_window_size()
     );
 });

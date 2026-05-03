@@ -92,32 +92,32 @@ enum PivotStressType {
 
 #[derive(Debug, Clone, Arbitrary)]
 enum ConstraintBoundaryType {
-    MinimalConstraints, // Exactly k constraints
+    MinimalConstraints,   // Exactly k constraints
     ExcessiveConstraints, // >> k constraints
-    SparseConstraints,   // Very sparse constraint matrix
-    DenseConstraints,    // Very dense constraint matrix
+    SparseConstraints,    // Very sparse constraint matrix
+    DenseConstraints,     // Very dense constraint matrix
 }
 
 /// Custom arbitrary for k values focusing on boundary conditions
 fn k_boundary_arbitrary(u: &mut Unstructured) -> arbitrary::Result<usize> {
     let choice: u8 = u.arbitrary()?;
     Ok(match choice % 12 {
-        0 => 2,   // Minimal k
-        1 => 3,   // Small k
-        2 => 4,   // Small k
-        3 => 8,   // Power of 2
-        4 => 16,  // Power of 2
-        5 => 32,  // Power of 2
-        6 => 64,  // Larger power of 2
-        7 => 127, // Just under power of 2
-        8 => 128, // Power of 2
-        9 => 255, // Just under limit
+        0 => 2,    // Minimal k
+        1 => 3,    // Small k
+        2 => 4,    // Small k
+        3 => 8,    // Power of 2
+        4 => 16,   // Power of 2
+        5 => 32,   // Power of 2
+        6 => 64,   // Larger power of 2
+        7 => 127,  // Just under power of 2
+        8 => 128,  // Power of 2
+        9 => 255,  // Just under limit
         10 => 256, // Common limit
         11 => {
             // Random in reasonable range
             let base: u16 = u.arbitrary()?;
             (base as usize % 500) + 2
-        },
+        }
     })
 }
 
@@ -125,18 +125,18 @@ fn k_boundary_arbitrary(u: &mut Unstructured) -> arbitrary::Result<usize> {
 fn symbol_size_arbitrary(u: &mut Unstructured) -> arbitrary::Result<usize> {
     let choice: u8 = u.arbitrary()?;
     Ok(match choice % 8 {
-        0 => 1,    // Minimal
-        1 => 4,    // Small
-        2 => 8,    // Small power of 2
-        3 => 16,   // Power of 2
-        4 => 32,   // Power of 2
-        5 => 64,   // Common size
-        6 => 128,  // Larger size
+        0 => 1,   // Minimal
+        1 => 4,   // Small
+        2 => 8,   // Small power of 2
+        3 => 16,  // Power of 2
+        4 => 32,  // Power of 2
+        5 => 64,  // Common size
+        6 => 128, // Larger size
         7 => {
             // Random reasonable size
             let base: u8 = u.arbitrary()?;
             (base as usize % 256) + 1
-        },
+        }
     })
 }
 
@@ -165,7 +165,9 @@ fn pivot_stress_arbitrary(u: &mut Unstructured) -> arbitrary::Result<PivotStress
 }
 
 /// Custom arbitrary for constraint boundary types
-fn constraint_boundary_arbitrary(u: &mut Unstructured) -> arbitrary::Result<ConstraintBoundaryType> {
+fn constraint_boundary_arbitrary(
+    u: &mut Unstructured,
+) -> arbitrary::Result<ConstraintBoundaryType> {
     let choice: u8 = u.arbitrary()?;
     Ok(match choice % 4 {
         0 => ConstraintBoundaryType::MinimalConstraints,
@@ -189,7 +191,9 @@ fn normalize_input(input: &mut GaussElimBoundaryInput) {
 
     // Ensure we have at least one operation
     if input.operations.is_empty() {
-        input.operations.push(EliminationOperation::RankDeficitExact { deficit: 1 });
+        input
+            .operations
+            .push(EliminationOperation::RankDeficitExact { deficit: 1 });
     }
 }
 
@@ -223,17 +227,40 @@ fn fuzz_gauss_elimination_boundaries(mut input: GaussElimBoundaryInput) {
 
         match operation {
             EliminationOperation::RankDeficitExact { deficit } => {
-                create_rank_deficit_matrix(&decoder, &source, &mut symbols, deficit.clamp(1, 3) as usize);
+                create_rank_deficit_matrix(
+                    &decoder,
+                    &source,
+                    &mut symbols,
+                    deficit.clamp(1, 3) as usize,
+                );
             }
 
-            EliminationOperation::ZeroPattern { pattern, target_index } => {
-                create_zero_pattern(&decoder, &source, &mut symbols, pattern, target_index as usize % k);
+            EliminationOperation::ZeroPattern {
+                pattern,
+                target_index,
+            } => {
+                create_zero_pattern(
+                    &decoder,
+                    &source,
+                    &mut symbols,
+                    pattern,
+                    target_index as usize % k,
+                );
             }
 
-            EliminationOperation::SingularSubmatrix { start_row, start_col, size } => {
-                create_singular_submatrix(&decoder, &source, &mut symbols,
-                                        start_row as usize % k, start_col as usize % k,
-                                        size.clamp(2, 4) as usize);
+            EliminationOperation::SingularSubmatrix {
+                start_row,
+                start_col,
+                size,
+            } => {
+                create_singular_submatrix(
+                    &decoder,
+                    &source,
+                    &mut symbols,
+                    start_row as usize % k,
+                    start_col as usize % k,
+                    size.clamp(2, 4) as usize,
+                );
             }
 
             EliminationOperation::PivotStress { stress_type } => {
@@ -241,7 +268,13 @@ fn fuzz_gauss_elimination_boundaries(mut input: GaussElimBoundaryInput) {
             }
 
             EliminationOperation::ConstraintBoundary { boundary_type } => {
-                create_constraint_boundary(&decoder, &encoder, &source, &mut symbols, boundary_type);
+                create_constraint_boundary(
+                    &decoder,
+                    &encoder,
+                    &source,
+                    &mut symbols,
+                    boundary_type,
+                );
             }
         }
 
@@ -305,7 +338,10 @@ fn create_zero_pattern(
     match pattern {
         ZeroPattern::ZeroRow => {
             // Create zero row by making target symbol all zeros
-            symbols.push(ReceivedSymbol::source(target_index as u32, vec![0; symbol_size]));
+            symbols.push(ReceivedSymbol::source(
+                target_index as u32,
+                vec![0; symbol_size],
+            ));
         }
 
         ZeroPattern::ZeroColumn => {
@@ -338,9 +374,15 @@ fn create_zero_pattern(
 
         ZeroPattern::ZeroBlock => {
             // Create block of zeros
-            symbols.push(ReceivedSymbol::source(target_index as u32, vec![0; symbol_size]));
+            symbols.push(ReceivedSymbol::source(
+                target_index as u32,
+                vec![0; symbol_size],
+            ));
             if target_index + 1 < k {
-                symbols.push(ReceivedSymbol::source((target_index + 1) as u32, vec![0; symbol_size]));
+                symbols.push(ReceivedSymbol::source(
+                    (target_index + 1) as u32,
+                    vec![0; symbol_size],
+                ));
             }
         }
     }
@@ -392,7 +434,8 @@ fn create_pivot_stress(
     match stress_type {
         PivotStressType::NoPivot => {
             // Create configuration where potential pivots are zero
-            for i in 0..k.min(5) { // Limit to avoid timeout
+            for i in 0..k.min(5) {
+                // Limit to avoid timeout
                 symbols.push(ReceivedSymbol::source(i as u32, vec![0; symbol_size]));
             }
         }

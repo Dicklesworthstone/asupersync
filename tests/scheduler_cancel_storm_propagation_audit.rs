@@ -122,7 +122,8 @@ fn cancel_request_reuses_task_id_buf_across_regions() {
     // The buffer is declared OUTSIDE the for-each-region
     // loop and .clear()-reused inside.
     assert!(
-        source.contains("// Reuse a single buffer across iterations to avoid per-region allocation.")
+        source
+            .contains("// Reuse a single buffer across iterations to avoid per-region allocation.")
             && source.contains("let mut task_id_buf = Vec::new();")
             && source.contains("task_id_buf.clear();"),
         "REGRESSION: cancel_request no longer reuses \
@@ -192,7 +193,9 @@ fn request_cancel_with_budget_is_constant_time_per_task() {
     let source = read("src/record/task.rs");
 
     let fn_marker = "pub fn request_cancel_with_budget(";
-    let start = source.find(fn_marker).expect("request_cancel_with_budget fn");
+    let start = source
+        .find(fn_marker)
+        .expect("request_cancel_with_budget fn");
     let window_end = (start + 6000).min(source.len());
     let safe_end = source
         .char_indices()
@@ -285,8 +288,7 @@ fn cancel_request_returns_per_task_priority_list_for_o_n_dispatch() {
     let source = read("src/runtime/state.rs");
 
     assert!(
-        source.contains("pub fn cancel_request(")
-            && source.contains("-> Vec<(TaskId, u8)>"),
+        source.contains("pub fn cancel_request(") && source.contains("-> Vec<(TaskId, u8)>"),
         "REGRESSION: cancel_request signature changed. The \
          (TaskId, priority) tuple list lets the scheduler do \
          one O(N) injection pass — without it, each cancel \
@@ -349,9 +351,8 @@ fn cancel_storm_1000_tasks_propagates_under_1_second() {
     const N: usize = 1000;
 
     // Build N tasks.
-    let task_flags: Vec<Arc<AtomicBool>> = (0..N)
-        .map(|_| Arc::new(AtomicBool::new(false)))
-        .collect();
+    let task_flags: Vec<Arc<AtomicBool>> =
+        (0..N).map(|_| Arc::new(AtomicBool::new(false))).collect();
 
     let start = Instant::now();
     for flag in &task_flags {
@@ -391,9 +392,8 @@ fn cancel_storm_observation_visible_cross_thread_via_release_acquire() {
     // production cross-worker observation pattern.
     const N: usize = 1000;
 
-    let task_flags: Vec<Arc<AtomicBool>> = (0..N)
-        .map(|_| Arc::new(AtomicBool::new(false)))
-        .collect();
+    let task_flags: Vec<Arc<AtomicBool>> =
+        (0..N).map(|_| Arc::new(AtomicBool::new(false))).collect();
 
     // Reader thread waits on a barrier, then verifies all
     // flags observable.
@@ -449,11 +449,7 @@ fn cancel_storm_under_concurrent_writers_remains_bounded() {
 
     // M independent groups of N tasks each.
     let groups: Vec<Vec<Arc<AtomicBool>>> = (0..M)
-        .map(|_| {
-            (0..N)
-                .map(|_| Arc::new(AtomicBool::new(false)))
-                .collect()
-        })
+        .map(|_| (0..N).map(|_| Arc::new(AtomicBool::new(false))).collect())
         .collect();
 
     let start = Instant::now();

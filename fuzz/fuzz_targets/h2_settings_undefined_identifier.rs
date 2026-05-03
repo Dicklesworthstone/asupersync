@@ -1,7 +1,7 @@
 #![no_main]
 
-use libfuzzer_sys::fuzz_target;
 use arbitrary::{Arbitrary, Unstructured};
+use libfuzzer_sys::fuzz_target;
 use std::collections::HashMap;
 use std::panic;
 
@@ -288,7 +288,10 @@ fn test_unknown_settings_handling(scenario: UnknownSettingsScenario) -> Result<(
                 // Expected failure due to invalid known setting
                 continue;
             } else {
-                return Err(format!("Unexpected error processing SETTINGS: {:?}", error_code));
+                return Err(format!(
+                    "Unexpected error processing SETTINGS: {:?}",
+                    error_code
+                ));
             }
         }
     }
@@ -303,7 +306,9 @@ fn test_unknown_settings_handling(scenario: UnknownSettingsScenario) -> Result<(
     let _ = connection.receive_settings(mixed_frame);
 
     // Count unknown settings in mixed parameters
-    let unknown_in_mixed = scenario.mixed_parameters.iter()
+    let unknown_in_mixed = scenario
+        .mixed_parameters
+        .iter()
         .filter(|param| !param.identifier.is_known())
         .count();
 
@@ -311,8 +316,11 @@ fn test_unknown_settings_handling(scenario: UnknownSettingsScenario) -> Result<(
     let start = scenario.unknown_id_range.0.max(0x7); // Start after known settings
     let end = scenario.unknown_id_range.1.min(0xFFFF);
 
-    for unknown_id in start..=end.min(start + 10) { // Limit to prevent test timeout
-        if unknown_id <= 0x6 { continue; } // Skip known settings range
+    for unknown_id in start..=end.min(start + 10) {
+        // Limit to prevent test timeout
+        if unknown_id <= 0x6 {
+            continue;
+        } // Skip known settings range
 
         let unknown_param = SettingParameter {
             identifier: SettingIdentifier::Unknown(unknown_id),
@@ -330,17 +338,26 @@ fn test_unknown_settings_handling(scenario: UnknownSettingsScenario) -> Result<(
                 // Should succeed - unknown settings are ignored
                 let post_count = connection.unknown_settings_received();
                 if post_count != pre_count + 1 {
-                    return Err(format!("Unknown setting count not incremented for ID {:#x}", unknown_id));
+                    return Err(format!(
+                        "Unknown setting count not incremented for ID {:#x}",
+                        unknown_id
+                    ));
                 }
             }
             Err(error) => {
-                return Err(format!("Unknown setting ID {:#x} caused error: {:?}", unknown_id, error));
+                return Err(format!(
+                    "Unknown setting ID {:#x} caused error: {:?}",
+                    unknown_id, error
+                ));
             }
         }
 
         // Verify connection is still active
         if !connection.is_active && connection.get_setting_errors().is_empty() {
-            return Err(format!("Connection closed for unknown setting ID {:#x}", unknown_id));
+            return Err(format!(
+                "Connection closed for unknown setting ID {:#x}",
+                unknown_id
+            ));
         }
     }
 
@@ -348,8 +365,13 @@ fn test_unknown_settings_handling(scenario: UnknownSettingsScenario) -> Result<(
 
     // Unknown settings should not cause protocol errors
     let unknown_settings_total = connection.unknown_settings_received() - initial_unknown_count;
-    if unknown_settings_total > 0 && connection.has_protocol_errors() && connection.get_setting_errors().is_empty() {
-        return Err("Unknown settings caused protocol error but should be silently ignored".to_string());
+    if unknown_settings_total > 0
+        && connection.has_protocol_errors()
+        && connection.get_setting_errors().is_empty()
+    {
+        return Err(
+            "Unknown settings caused protocol error but should be silently ignored".to_string(),
+        );
     }
 
     // Known settings with invalid values should cause protocol errors
@@ -357,12 +379,10 @@ fn test_unknown_settings_handling(scenario: UnknownSettingsScenario) -> Result<(
         // Check that we properly validate known settings
         let invalid_known_frame = SettingsFrame {
             ack_flag: false,
-            parameters: vec![
-                SettingParameter {
-                    identifier: SettingIdentifier::EnablePush,
-                    value: 2, // Invalid - must be 0 or 1
-                },
-            ],
+            parameters: vec![SettingParameter {
+                identifier: SettingIdentifier::EnablePush,
+                value: 2, // Invalid - must be 0 or 1
+            }],
         };
 
         let pre_error_count = connection.connection_errors.len();
@@ -395,7 +415,9 @@ fn test_known_vs_unknown_settings() -> Result<(), String> {
         ],
     };
 
-    connection.receive_settings(known_frame).map_err(|e| format!("Known settings failed: {:?}", e))?;
+    connection
+        .receive_settings(known_frame)
+        .map_err(|e| format!("Known settings failed: {:?}", e))?;
 
     // Verify known settings were applied
     if connection.get_remote_setting(SettingIdentifier::HeaderTableSize) != Some(8192) {
@@ -422,7 +444,9 @@ fn test_known_vs_unknown_settings() -> Result<(), String> {
     };
 
     let pre_unknown_count = connection.unknown_settings_received();
-    connection.receive_settings(unknown_frame).map_err(|e| format!("Unknown settings failed: {:?}", e))?;
+    connection
+        .receive_settings(unknown_frame)
+        .map_err(|e| format!("Unknown settings failed: {:?}", e))?;
 
     // Verify unknown settings were ignored (counted but not stored)
     if connection.unknown_settings_received() != pre_unknown_count + 2 {
@@ -430,7 +454,10 @@ fn test_known_vs_unknown_settings() -> Result<(), String> {
     }
 
     // Verify unknown settings don't appear in settings map
-    if connection.get_remote_setting(SettingIdentifier::Unknown(0x1000)).is_some() {
+    if connection
+        .get_remote_setting(SettingIdentifier::Unknown(0x1000))
+        .is_some()
+    {
         return Err("Unknown setting was incorrectly stored".to_string());
     }
 
@@ -449,28 +476,28 @@ fn test_unknown_settings_edge_cases() -> Result<(), String> {
     // Edge case 1: Unknown setting with value 0
     let zero_value_frame = SettingsFrame {
         ack_flag: false,
-        parameters: vec![
-            SettingParameter {
-                identifier: SettingIdentifier::Unknown(0x9999),
-                value: 0,
-            },
-        ],
+        parameters: vec![SettingParameter {
+            identifier: SettingIdentifier::Unknown(0x9999),
+            value: 0,
+        }],
     };
 
-    connection.receive_settings(zero_value_frame).map_err(|e| format!("Zero value unknown setting failed: {:?}", e))?;
+    connection
+        .receive_settings(zero_value_frame)
+        .map_err(|e| format!("Zero value unknown setting failed: {:?}", e))?;
 
     // Edge case 2: Unknown setting with max value
     let max_value_frame = SettingsFrame {
         ack_flag: false,
-        parameters: vec![
-            SettingParameter {
-                identifier: SettingIdentifier::Unknown(0x8888),
-                value: u32::MAX,
-            },
-        ],
+        parameters: vec![SettingParameter {
+            identifier: SettingIdentifier::Unknown(0x8888),
+            value: u32::MAX,
+        }],
     };
 
-    connection.receive_settings(max_value_frame).map_err(|e| format!("Max value unknown setting failed: {:?}", e))?;
+    connection
+        .receive_settings(max_value_frame)
+        .map_err(|e| format!("Max value unknown setting failed: {:?}", e))?;
 
     // Edge case 3: Mix known and unknown in same frame
     let mixed_frame = SettingsFrame {
@@ -491,7 +518,9 @@ fn test_unknown_settings_edge_cases() -> Result<(), String> {
         ],
     };
 
-    connection.receive_settings(mixed_frame).map_err(|e| format!("Mixed frame failed: {:?}", e))?;
+    connection
+        .receive_settings(mixed_frame)
+        .map_err(|e| format!("Mixed frame failed: {:?}", e))?;
 
     // Verify known settings applied
     if connection.get_remote_setting(SettingIdentifier::EnablePush) != Some(0) {
@@ -503,7 +532,10 @@ fn test_unknown_settings_edge_cases() -> Result<(), String> {
     }
 
     // Verify unknown setting ignored
-    if connection.get_remote_setting(SettingIdentifier::Unknown(0x7777)).is_some() {
+    if connection
+        .get_remote_setting(SettingIdentifier::Unknown(0x7777))
+        .is_some()
+    {
         return Err("Unknown setting in mixed frame was stored".to_string());
     }
 
@@ -528,7 +560,9 @@ fn test_settings_ack_handling() -> Result<(), String> {
         parameters: vec![], // ACK frames must have empty parameters
     };
 
-    connection.receive_settings(ack_frame).map_err(|e| format!("SETTINGS ACK failed: {:?}", e))?;
+    connection
+        .receive_settings(ack_frame)
+        .map_err(|e| format!("SETTINGS ACK failed: {:?}", e))?;
 
     // Verify outstanding flag cleared
     if connection.outstanding_settings {

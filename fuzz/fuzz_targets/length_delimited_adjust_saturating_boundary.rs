@@ -111,9 +111,9 @@ impl LargeOffset {
 /// Field length configuration (1-8 bytes valid)
 #[derive(Arbitrary, Debug, Clone, Copy)]
 enum FieldLengthConfig {
-    Valid(u8),    // 1-8
+    Valid(u8), // 1-8
     Boundary(FieldLengthBoundary),
-    Invalid(u8),  // 0, 9+
+    Invalid(u8), // 0, 9+
 }
 
 impl FieldLengthConfig {
@@ -129,10 +129,10 @@ impl FieldLengthConfig {
 /// Field length boundary cases
 #[derive(Arbitrary, Debug, Clone, Copy)]
 enum FieldLengthBoundary {
-    Min,        // 1
-    Max,        // 8
-    JustOver,   // 9
-    Zero,       // 0 (invalid)
+    Min,      // 1
+    Max,      // 8
+    JustOver, // 9
+    Zero,     // 0 (invalid)
 }
 
 impl FieldLengthBoundary {
@@ -194,8 +194,8 @@ impl AdjustmentBoundary {
 enum LargeAdjustment {
     LargePositive(u32),
     LargeNegative(u32),
-    OverflowPositive,  // Designed to overflow when added
-    OverflowNegative,  // Designed to underflow when added
+    OverflowPositive, // Designed to overflow when added
+    OverflowNegative, // Designed to underflow when added
 }
 
 impl LargeAdjustment {
@@ -212,10 +212,10 @@ impl LargeAdjustment {
 /// Skip configuration
 #[derive(Arbitrary, Debug, Clone)]
 enum SkipConfig {
-    None,              // Use default (header length)
-    Small(u8),         // 0-255
+    None,      // Use default (header length)
+    Small(u8), // 0-255
     Boundary(SkipBoundary),
-    Large(u32),        // Large skip values
+    Large(u32), // Large skip values
 }
 
 impl SkipConfig {
@@ -233,7 +233,7 @@ impl SkipConfig {
 #[derive(Arbitrary, Debug, Clone, Copy)]
 enum SkipBoundary {
     Zero,
-    HeaderLength,  // Will be set to header length
+    HeaderLength, // Will be set to header length
     MaxU16,
     Large,
 }
@@ -276,9 +276,9 @@ impl MaxFrameConfig {
 /// Standard frame sizes
 #[derive(Arbitrary, Debug, Clone, Copy)]
 enum StandardFrameSize {
-    Default,   // 8MB
-    Medium,    // 16MB
-    Large,     // 32MB
+    Default, // 8MB
+    Medium,  // 16MB
+    Large,   // 32MB
 }
 
 impl StandardFrameSize {
@@ -294,9 +294,9 @@ impl StandardFrameSize {
 /// Large frame sizes
 #[derive(Arbitrary, Debug, Clone, Copy)]
 enum LargeFrameSize {
-    VeryLarge,    // 64MB
-    Huge,         // 128MB
-    Maximum,      // Near usize::MAX
+    VeryLarge, // 64MB
+    Huge,      // 128MB
+    Maximum,   // Near usize::MAX
 }
 
 impl LargeFrameSize {
@@ -312,9 +312,9 @@ impl LargeFrameSize {
 /// Frame boundary test cases
 #[derive(Arbitrary, Debug, Clone, Copy)]
 enum FrameBoundary {
-    One,           // Minimum frame
-    MaxU32,        // u32::MAX
-    NearUsizeMax,  // Near usize::MAX
+    One,          // Minimum frame
+    MaxU32,       // u32::MAX
+    NearUsizeMax, // Near usize::MAX
 }
 
 impl FrameBoundary {
@@ -455,26 +455,18 @@ enum AdjustmentOperation {
     /// Test codec building with boundary config
     BuildCodec,
     /// Test decoding with crafted frames
-    DecodeFrame {
-        frame_data: FrameData,
-    },
+    DecodeFrame { frame_data: FrameData },
     /// Test encoding with boundary lengths
-    EncodeFrame {
-        payload_size: PayloadSize,
-    },
+    EncodeFrame { payload_size: PayloadSize },
     /// Test direct adjustment calculation
-    DirectAdjustment {
-        raw_length: u64,
-    },
+    DirectAdjustment { raw_length: u64 },
 }
 
 /// Frame data for decoding tests
 #[derive(Arbitrary, Debug, Clone)]
 enum FrameData {
     /// Well-formed frame
-    WellFormed {
-        payload: PayloadPattern,
-    },
+    WellFormed { payload: PayloadPattern },
     /// Frame with crafted length header
     CraftedLength {
         length_bytes: Vec<u8>, // Raw length bytes
@@ -496,17 +488,17 @@ enum FrameData {
 #[derive(Arbitrary, Debug, Clone)]
 enum PayloadPattern {
     Empty,
-    Fixed(u8),        // Repeated byte
-    Random(u32),      // Random with seed
-    Incremental,      // 0, 1, 2, ...
+    Fixed(u8),   // Repeated byte
+    Random(u32), // Random with seed
+    Incremental, // 0, 1, 2, ...
 }
 
 /// Payload size for encoding tests
 #[derive(Arbitrary, Debug, Clone)]
 enum PayloadSize {
-    Small(u16),       // 0-65535
-    Medium(u32),      // Up to 1MB
-    Large(u32),       // Up to 16MB
+    Small(u16),  // 0-65535
+    Medium(u32), // Up to 1MB
+    Large(u32),  // Up to 16MB
     Boundary(PayloadSizeBoundary),
 }
 
@@ -781,14 +773,20 @@ fn generate_frame_data(frame_data: &FrameData) -> Vec<u8> {
             frame.extend_from_slice(&payload_data);
             frame
         }
-        FrameData::CraftedLength { length_bytes, payload } => {
+        FrameData::CraftedLength {
+            length_bytes,
+            payload,
+        } => {
             let mut frame = Vec::new();
             frame.extend_from_slice(length_bytes);
             let payload_data = generate_payload_pattern(payload, 100);
             frame.extend_from_slice(&payload_data);
             frame
         }
-        FrameData::Truncated { declared_length, actual_payload } => {
+        FrameData::Truncated {
+            declared_length,
+            actual_payload,
+        } => {
             let mut frame = Vec::new();
             frame.extend_from_slice(&declared_length.to_be_bytes());
             let payload_size = (*actual_payload as usize).min(*declared_length as usize / 2);
@@ -820,9 +818,7 @@ fn generate_payload_pattern(pattern: &PayloadPattern, size: usize) -> Vec<u8> {
             }
             data
         }
-        PayloadPattern::Incremental => {
-            (0..actual_size).map(|i| (i % 256) as u8).collect()
-        }
+        PayloadPattern::Incremental => (0..actual_size).map(|i| (i % 256) as u8).collect(),
     }
 }
 

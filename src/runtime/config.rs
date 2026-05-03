@@ -8,13 +8,14 @@
 //!
 //! | Field | Default |
 //! |-------|---------|
-//! | `worker_threads` | available CPU parallelism |
+//! | `worker_threads` | 4 (host-independent default) |
 //! | `thread_stack_size` | 2 MiB |
 //! | `thread_name_prefix` | `"asupersync-worker"` |
 //! | `global_queue_limit` | 0 (unbounded) |
 //! | `steal_batch_size` | 16 |
 //! | `enable_parking` | true |
 //! | `poll_budget` | 128 |
+//! | `capacity_hints` | `None` (auto from `worker_threads`) |
 //! | `browser_ready_handoff_limit` | 0 (disabled) |
 //! | `browser_worker_offload` | disabled, min cost 1024, max in-flight 16 |
 //! | `root_region_limits` | `None` |
@@ -47,6 +48,123 @@ impl BlockingPoolConfig {
         if self.max_threads < self.min_threads {
             self.max_threads = self.min_threads;
         }
+    }
+}
+
+/// Initial arena capacities for runtime state tables.
+///
+/// These hints only change initial allocation envelopes; they do not change
+/// scheduler ordering, task lifecycle semantics, or cancellation behavior.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RuntimeCapacityHints {
+    /// Initial task-table arena capacity.
+    pub task_capacity: usize,
+    /// Initial region-table arena capacity.
+    pub region_capacity: usize,
+    /// Initial obligation-table arena capacity.
+    pub obligation_capacity: usize,
+}
+
+impl RuntimeCapacityHints {
+    /// Historical default task-table capacity.
+    pub const DEFAULT_TASK_CAPACITY: usize = 512;
+    /// Historical default region-table capacity.
+    pub const DEFAULT_REGION_CAPACITY: usize = 128;
+    /// Historical default obligation-table capacity.
+    pub const DEFAULT_OBLIGATION_CAPACITY: usize = 256;
+
+    const TASKS_PER_WORKER: usize = 128;
+    const REGIONS_PER_WORKER: usize = 32;
+    const OBLIGATIONS_PER_WORKER: usize = 64;
+
+    /// Creates explicit capacity hints.
+    #[inline]
+    #[must_use]
+    pub const fn new(
+        task_capacity: usize,
+        region_capacity: usize,
+        obligation_capacity: usize,
+    ) -> Self {
+        Self {
+            task_capacity,
+            region_capacity,
+            obligation_capacity,
+        }
+    }
+
+    #[inline]
+    fn scale_ceil(value: usize, numerator: usize, denominator: usize) -> usize {
+        value
+            .saturating_mul(numerator)
+            .saturating_add(denominator.saturating_sub(1))
+            / denominator.max(1)
+    }
+
+    #[inline]
+    fn scaled_per_worker(workers: usize, per_worker: usize, floor: usize) -> usize {
+        workers.saturating_mul(per_worker).max(floor)
+    }
+
+    /// Derives capacity hints from an expected live-task count.
+    ///
+    /// The task arena gets 50% headroom to absorb bursts without immediate
+    /// reallocation. Region and obligation tables scale from the same estimate
+    /// with lower multipliers because they are typically sparser than tasks.
+    #[must_use]
+    pub fn from_expected_concurrent_tasks(expected_tasks: usize) -> Self {
+        let expected_tasks = expected_tasks.max(1);
+        Self {
+            task_capacity: Self::scale_ceil(expected_tasks, 3, 2).max(Self::DEFAULT_TASK_CAPACITY),
+            region_capacity: Self::scale_ceil(expected_tasks, 1, 4)
+                .max(Self::DEFAULT_REGION_CAPACITY),
+            obligation_capacity: Self::scale_ceil(expected_tasks, 1, 2)
+                .max(Self::DEFAULT_OBLIGATION_CAPACITY),
+        }
+    }
+
+    /// Derives auto-scaled capacity hints from the configured worker count.
+    ///
+    /// This preserves the historical 4-worker baseline (512/128/256) while
+    /// scaling linearly for larger runtimes.
+    #[must_use]
+    pub fn for_worker_threads(worker_threads: usize) -> Self {
+        let worker_threads = worker_threads.max(1);
+        Self {
+            task_capacity: Self::scaled_per_worker(
+                worker_threads,
+                Self::TASKS_PER_WORKER,
+                Self::DEFAULT_TASK_CAPACITY,
+            ),
+            region_capacity: Self::scaled_per_worker(
+                worker_threads,
+                Self::REGIONS_PER_WORKER,
+                Self::DEFAULT_REGION_CAPACITY,
+            ),
+            obligation_capacity: Self::scaled_per_worker(
+                worker_threads,
+                Self::OBLIGATIONS_PER_WORKER,
+                Self::DEFAULT_OBLIGATION_CAPACITY,
+            ),
+        }
+    }
+
+    /// Clamps explicit hints to safe minimums.
+    pub fn normalize(&mut self) {
+        self.task_capacity = self.task_capacity.max(Self::DEFAULT_TASK_CAPACITY);
+        self.region_capacity = self.region_capacity.max(Self::DEFAULT_REGION_CAPACITY);
+        self.obligation_capacity = self
+            .obligation_capacity
+            .max(Self::DEFAULT_OBLIGATION_CAPACITY);
+    }
+}
+
+impl Default for RuntimeCapacityHints {
+    fn default() -> Self {
+        Self::new(
+            Self::DEFAULT_TASK_CAPACITY,
+            Self::DEFAULT_REGION_CAPACITY,
+            Self::DEFAULT_OBLIGATION_CAPACITY,
+        )
     }
 }
 
@@ -178,6 +296,11 @@ pub struct RuntimeConfig {
     pub enable_parking: bool,
     /// Time slice for cooperative yielding (polls).
     pub poll_budget: u32,
+    /// Initial arena capacities for the runtime's task, region, and obligation tables.
+    ///
+    /// When `None`, capacities auto-scale from `worker_threads` using the
+    /// historical 4-worker baseline (512 tasks / 128 regions / 256 obligations).
+    pub capacity_hints: Option<RuntimeCapacityHints>,
     /// Browser pump fairness bound for consecutive ready dispatches.
     ///
     /// When non-zero, browser-style single-thread pumps can yield to the host
@@ -259,6 +382,9 @@ impl RuntimeConfig {
         if self.poll_budget == 0 {
             self.poll_budget = 1;
         }
+        if let Some(hints) = self.capacity_hints.as_mut() {
+            hints.normalize();
+        }
         if self.cancel_lane_max_streak == 0 {
             self.cancel_lane_max_streak = 1;
         }
@@ -278,6 +404,16 @@ impl RuntimeConfig {
             self.thread_name_prefix = "asupersync-worker".to_string();
         }
         self.blocking.normalize();
+    }
+
+    /// Resolves the effective runtime-state table capacities.
+    ///
+    /// Explicit hints win. Otherwise, capacities scale from `worker_threads`
+    /// while preserving the historical 4-worker floor.
+    #[must_use]
+    pub fn resolved_capacity_hints(&self) -> RuntimeCapacityHints {
+        self.capacity_hints
+            .unwrap_or_else(|| RuntimeCapacityHints::for_worker_threads(self.worker_threads))
     }
 
     /// Default worker thread count for a `RuntimeConfig::default()`.
@@ -340,6 +476,7 @@ impl Default for RuntimeConfig {
             blocking: BlockingPoolConfig::default(),
             enable_parking: true,
             poll_budget: 128,
+            capacity_hints: None,
             browser_ready_handoff_limit: 0,
             browser_worker_offload: BrowserWorkerOffloadConfig::default(),
             cancel_lane_max_streak: 16,
@@ -487,6 +624,7 @@ mod tests {
             },
             enable_parking: true,
             poll_budget: 0,
+            capacity_hints: Some(RuntimeCapacityHints::new(0, 0, 0)),
             browser_ready_handoff_limit: 0,
             browser_worker_offload: BrowserWorkerOffloadConfig {
                 enabled: true,
@@ -539,6 +677,27 @@ mod tests {
             "poll_budget",
             1,
             config.poll_budget
+        );
+        let capacity_hints = config
+            .capacity_hints
+            .expect("explicit capacity hints should remain configured");
+        crate::assert_with_log!(
+            capacity_hints.task_capacity == RuntimeCapacityHints::DEFAULT_TASK_CAPACITY,
+            "capacity_hints.task_capacity",
+            RuntimeCapacityHints::DEFAULT_TASK_CAPACITY,
+            capacity_hints.task_capacity
+        );
+        crate::assert_with_log!(
+            capacity_hints.region_capacity == RuntimeCapacityHints::DEFAULT_REGION_CAPACITY,
+            "capacity_hints.region_capacity",
+            RuntimeCapacityHints::DEFAULT_REGION_CAPACITY,
+            capacity_hints.region_capacity
+        );
+        crate::assert_with_log!(
+            capacity_hints.obligation_capacity == RuntimeCapacityHints::DEFAULT_OBLIGATION_CAPACITY,
+            "capacity_hints.obligation_capacity",
+            RuntimeCapacityHints::DEFAULT_OBLIGATION_CAPACITY,
+            capacity_hints.obligation_capacity
         );
         crate::assert_with_log!(
             config.browser_ready_handoff_limit == 0,
@@ -697,6 +856,7 @@ mod tests {
             },
             enable_parking: false,
             poll_budget: 32,
+            capacity_hints: Some(RuntimeCapacityHints::new(4096, 1024, 2048)),
             browser_ready_handoff_limit: 64,
             browser_worker_offload: BrowserWorkerOffloadConfig {
                 enabled: true,
@@ -754,6 +914,15 @@ mod tests {
             "poll_budget",
             32,
             config.poll_budget
+        );
+        let capacity_hints = config
+            .capacity_hints
+            .expect("custom capacity hints should remain configured");
+        crate::assert_with_log!(
+            capacity_hints == RuntimeCapacityHints::new(4096, 1024, 2048),
+            "capacity_hints",
+            RuntimeCapacityHints::new(4096, 1024, 2048),
+            capacity_hints
         );
         crate::assert_with_log!(
             config.browser_ready_handoff_limit == 64,
@@ -1046,5 +1215,58 @@ mod tests {
     fn ry2trw_ambient_default_worker_threads_returns_positive() {
         let n = ambient_default_worker_threads();
         assert!(n >= 1, "ambient_default_worker_threads must clamp to >= 1");
+    }
+
+    #[test]
+    fn runtime_capacity_hints_from_expected_tasks_adds_headroom() {
+        init_test("runtime_capacity_hints_from_expected_tasks_adds_headroom");
+
+        let small = RuntimeCapacityHints::from_expected_concurrent_tasks(64);
+        assert_eq!(
+            small,
+            RuntimeCapacityHints::default(),
+            "small explicit hints should clamp to the historical minimums"
+        );
+
+        let large = RuntimeCapacityHints::from_expected_concurrent_tasks(4096);
+        assert_eq!(
+            large,
+            RuntimeCapacityHints::new(6144, 1024, 2048),
+            "explicit task hints should add task headroom and proportionally scale sibling tables"
+        );
+    }
+
+    #[test]
+    fn runtime_capacity_hints_auto_scale_from_worker_threads() {
+        init_test("runtime_capacity_hints_auto_scale_from_worker_threads");
+
+        assert_eq!(
+            RuntimeCapacityHints::for_worker_threads(RuntimeConfig::DEFAULT_WORKER_THREADS),
+            RuntimeCapacityHints::default(),
+            "4-worker baseline should preserve the historical default capacities"
+        );
+        assert_eq!(
+            RuntimeCapacityHints::for_worker_threads(64),
+            RuntimeCapacityHints::new(8192, 2048, 4096),
+            "high-core runtimes should scale their initial table capacities linearly"
+        );
+    }
+
+    #[test]
+    fn resolved_capacity_hints_prefers_explicit_values_over_worker_scaling() {
+        init_test("resolved_capacity_hints_prefers_explicit_values_over_worker_scaling");
+
+        let mut config = RuntimeConfig {
+            worker_threads: 64,
+            capacity_hints: Some(RuntimeCapacityHints::new(900, 200, 600)),
+            ..RuntimeConfig::default()
+        };
+        config.normalize();
+
+        assert_eq!(
+            config.resolved_capacity_hints(),
+            RuntimeCapacityHints::new(900, 200, 600),
+            "explicit capacity hints should win after normalization"
+        );
     }
 }

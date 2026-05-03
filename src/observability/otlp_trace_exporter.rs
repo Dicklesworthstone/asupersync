@@ -12,7 +12,6 @@
 
 use crossbeam_queue::ArrayQueue;
 use parking_lot::Mutex;
-use std::collections::VecDeque;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::time::Duration;

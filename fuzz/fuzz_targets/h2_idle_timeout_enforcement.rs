@@ -18,16 +18,16 @@
 
 #![no_main]
 
-use libfuzzer_sys::fuzz_target;
 use asupersync::bytes::Bytes;
 use asupersync::http::h2::connection::{Connection, ConnectionState};
 use asupersync::http::h2::error::ErrorCode;
 use asupersync::http::h2::frame::{
-    GoAwayFrame, DataFrame, HeadersFrame, PingFrame, Setting, SettingsFrame,
-    WindowUpdateFrame, RstStreamFrame
+    DataFrame, GoAwayFrame, HeadersFrame, PingFrame, RstStreamFrame, Setting, SettingsFrame,
+    WindowUpdateFrame,
 };
 use asupersync::http::h2::settings::Settings;
 use asupersync::http::h2::{Frame, H2Error};
+use libfuzzer_sys::fuzz_target;
 
 /// Maximum input size to prevent OOM
 const MAX_INPUT_SIZE: usize = 4096;
@@ -69,9 +69,7 @@ fuzz_target!(|data: &[u8]| {
     // Test 4: PING frame handling during connection states
     if data.len() >= 16 {
         let ping_count = data[12] % 8; // 0-7 pings
-        let ping_data_base = u64::from_be_bytes([
-            data[13], data[14], data[15], 0, 0, 0, 0, 0
-        ]);
+        let ping_data_base = u64::from_be_bytes([data[13], data[14], data[15], 0, 0, 0, 0, 0]);
 
         let result = test_ping_handling(ping_count, ping_data_base);
         validate_ping_result(result, ping_count);
@@ -135,7 +133,7 @@ fn test_connection_lifecycle_frames(data: &[u8]) -> Result<ConnectionLifecycleRe
             &mut connection,
             FRAME_TYPES[frame_type as usize],
             stream_id,
-            &data[offset + 4..std::cmp::min(data.len(), offset + 4 + frame_data_size)]
+            &data[offset + 4..std::cmp::min(data.len(), offset + 4 + frame_data_size)],
         );
 
         if frame_result.is_err() {
@@ -163,7 +161,7 @@ fn test_connection_lifecycle_frames(data: &[u8]) -> Result<ConnectionLifecycleRe
 fn test_goaway_generation(
     error_code: u8,
     _last_stream_id: u32,
-    debug_data: &[u8]
+    debug_data: &[u8],
 ) -> Result<GoAwayGenerationResult, H2Error> {
     let mut connection = Connection::server(Settings::default());
     initialize_connection(&mut connection)?;
@@ -209,7 +207,7 @@ fn test_goaway_generation(
 /// Test stream operations (create, send data, close)
 fn test_stream_operations(
     stream_count: u8,
-    operation_pattern: &[u8]
+    operation_pattern: &[u8],
 ) -> Result<StreamOperationsResult, H2Error> {
     let mut connection = Connection::server(Settings::default());
     initialize_connection(&mut connection)?;
@@ -259,10 +257,7 @@ fn test_stream_operations(
 }
 
 /// Test PING frame handling
-fn test_ping_handling(
-    ping_count: u8,
-    ping_data_base: u64
-) -> Result<PingHandlingResult, H2Error> {
+fn test_ping_handling(ping_count: u8, ping_data_base: u64) -> Result<PingHandlingResult, H2Error> {
     let mut connection = Connection::server(Settings::default());
     initialize_connection(&mut connection)?;
 
@@ -297,7 +292,7 @@ fn test_ping_handling(
 /// Test window update frames
 fn test_window_updates(
     window_update_count: u8,
-    update_size: u32
+    update_size: u32,
 ) -> Result<WindowUpdateResult, H2Error> {
     let mut connection = Connection::server(Settings::default());
     initialize_connection(&mut connection)?;
@@ -308,7 +303,10 @@ fn test_window_updates(
     // Send connection-level window update
     if update_size > 0 {
         let conn_update = WindowUpdateFrame::new(0, update_size);
-        if connection.process_frame(Frame::WindowUpdate(conn_update)).is_ok() {
+        if connection
+            .process_frame(Frame::WindowUpdate(conn_update))
+            .is_ok()
+        {
             updates_sent += 1;
         } else {
             errors += 1;
@@ -321,7 +319,10 @@ fn test_window_updates(
         if update_size > 0 {
             let stream_update = WindowUpdateFrame::new(stream_id, update_size);
 
-            if connection.process_frame(Frame::WindowUpdate(stream_update)).is_ok() {
+            if connection
+                .process_frame(Frame::WindowUpdate(stream_update))
+                .is_ok()
+            {
                 updates_sent += 1;
             } else {
                 errors += 1;
@@ -339,7 +340,7 @@ fn test_window_updates(
 /// Test settings frame processing
 fn test_settings_processing(
     settings_count: u8,
-    settings_data: &[u8]
+    settings_data: &[u8],
 ) -> Result<SettingsProcessingResult, H2Error> {
     let mut connection = Connection::server(Settings::default());
     initialize_connection(&mut connection)?;
@@ -358,7 +359,7 @@ fn test_settings_processing(
                 settings_data[offset + 1],
                 settings_data[offset + 2],
                 settings_data[offset + 3],
-                settings_data[offset + 4]
+                settings_data[offset + 4],
             ]);
 
             let setting = match setting_id {
@@ -376,7 +377,10 @@ fn test_settings_processing(
 
         if !settings.is_empty() {
             let settings_frame = SettingsFrame::new(settings);
-            if connection.process_frame(Frame::Settings(settings_frame)).is_ok() {
+            if connection
+                .process_frame(Frame::Settings(settings_frame))
+                .is_ok()
+            {
                 settings_frames_sent += 1;
             } else {
                 errors += 1;
@@ -394,7 +398,7 @@ fn test_settings_processing(
 /// Test connection error scenarios
 fn test_connection_errors(
     error_trigger: u8,
-    frame_data: &[u8]
+    frame_data: &[u8],
 ) -> Result<ConnectionErrorResult, H2Error> {
     let mut connection = Connection::server(Settings::default());
     initialize_connection(&mut connection)?;
@@ -421,14 +425,20 @@ fn test_connection_errors(
         2 => {
             // Send duplicate settings ack
             let settings_ack = SettingsFrame::ack();
-            if connection.process_frame(Frame::Settings(settings_ack)).is_err() {
+            if connection
+                .process_frame(Frame::Settings(settings_ack))
+                .is_err()
+            {
                 error_triggered = true;
             }
         }
         3 => {
             // Send window update with zero increment
             let zero_update = WindowUpdateFrame::new(0, 0);
-            if connection.process_frame(Frame::WindowUpdate(zero_update)).is_err() {
+            if connection
+                .process_frame(Frame::WindowUpdate(zero_update))
+                .is_err()
+            {
                 error_triggered = true;
             }
         }
@@ -461,7 +471,7 @@ fn test_interleaved_frames(frame_pattern: &[u8]) -> Result<InterleavedFrameResul
             &mut connection,
             FRAME_TYPES[frame_type as usize],
             stream_id,
-            &[pattern]
+            &[pattern],
         );
 
         if result.is_ok() {
@@ -567,7 +577,8 @@ fn collect_outgoing_frames(_connection: &mut Connection) -> Vec<Frame> {
 }
 
 fn extract_goaway_frames(frames: &[Frame]) -> Vec<GoAwayFrame> {
-    frames.iter()
+    frames
+        .iter()
         .filter_map(|f| match f {
             Frame::GoAway(goaway) => Some(goaway.clone()),
             _ => None,
@@ -578,13 +589,13 @@ fn extract_goaway_frames(frames: &[Frame]) -> Vec<GoAwayFrame> {
 fn send_headers_frame(
     connection: &mut Connection,
     stream_id: u32,
-    end_stream: bool
+    end_stream: bool,
 ) -> Result<(), H2Error> {
     let headers_frame = HeadersFrame::new(
         stream_id,
         Bytes::from("dummy headers"),
         end_stream,
-        true // end_headers
+        true, // end_headers
     );
     let _ = connection.process_frame(Frame::Headers(headers_frame))?;
     Ok(())
@@ -594,17 +605,14 @@ fn send_data_frame(
     connection: &mut Connection,
     stream_id: u32,
     data: &[u8],
-    end_stream: bool
+    end_stream: bool,
 ) -> Result<(), H2Error> {
     let data_frame = DataFrame::new(stream_id, Bytes::copy_from_slice(data), end_stream);
     let _ = connection.process_frame(Frame::Data(data_frame))?;
     Ok(())
 }
 
-fn send_malformed_frame(
-    connection: &mut Connection,
-    _debug_data: &[u8]
-) -> Result<(), H2Error> {
+fn send_malformed_frame(connection: &mut Connection, _debug_data: &[u8]) -> Result<(), H2Error> {
     // Send a frame with invalid stream ID to trigger protocol error
     let malformed_frame = DataFrame::new(0, Bytes::from("invalid"), false); // Stream ID 0 for DATA frame
     let _ = connection.process_frame(Frame::Data(malformed_frame))?;
@@ -615,34 +623,43 @@ fn create_and_send_frame(
     connection: &mut Connection,
     frame_type: u8,
     stream_id: u32,
-    data: &[u8]
+    data: &[u8],
 ) -> Result<(), H2Error> {
     match frame_type {
-        0x0 => { // DATA
+        0x0 => {
+            // DATA
             send_data_frame(connection, stream_id, data, false)
         }
-        0x1 => { // HEADERS
+        0x1 => {
+            // HEADERS
             send_headers_frame(connection, stream_id, false)
         }
-        0x2 => { // PRIORITY (deprecated in HTTP/2 RFC 9113 but may be supported)
+        0x2 => {
+            // PRIORITY (deprecated in HTTP/2 RFC 9113 but may be supported)
             Ok(()) // Skip priority frames for now
         }
-        0x3 => { // RST_STREAM
+        0x3 => {
+            // RST_STREAM
             let rst_frame = RstStreamFrame::new(stream_id, ErrorCode::Cancel);
             let _ = connection.process_frame(Frame::RstStream(rst_frame))?;
             Ok(())
         }
-        0x4 => { // SETTINGS
+        0x4 => {
+            // SETTINGS
             let settings_frame = SettingsFrame::new(vec![Setting::HeaderTableSize(4096)]);
             let _ = connection.process_frame(Frame::Settings(settings_frame))?;
             Ok(())
         }
-        0x5 => { // PUSH_PROMISE
+        0x5 => {
+            // PUSH_PROMISE
             Ok(()) // Skip PUSH_PROMISE for server connections
         }
-        0x6 => { // PING
+        0x6 => {
+            // PING
             let ping_data = if data.len() >= 8 {
-                [data[0], data[1], data[2], data[3], data[4], data[5], data[6], data[7]]
+                [
+                    data[0], data[1], data[2], data[3], data[4], data[5], data[6], data[7],
+                ]
             } else {
                 [0x12, 0x34, 0x56, 0x78, 0x90, 0xab, 0xcd, 0xef]
             };
@@ -650,11 +667,13 @@ fn create_and_send_frame(
             let _ = connection.process_frame(Frame::Ping(ping_frame))?;
             Ok(())
         }
-        0x7 => { // GOAWAY
+        0x7 => {
+            // GOAWAY
             // Don't manually send GOAWAY - let the connection generate it
             Ok(())
         }
-        0x8 => { // WINDOW_UPDATE
+        0x8 => {
+            // WINDOW_UPDATE
             let increment = if data.len() >= 4 {
                 u32::from_be_bytes([data[0], data[1], data[2], data[3]]) & 0x7fff_ffff
             } else {
@@ -677,19 +696,30 @@ fn validate_connection_result(result: Result<ConnectionLifecycleResult, H2Error>
     match result {
         Ok(res) => {
             // Connection should not panic
-            assert!(res.frames_sent >= res.errors_encountered,
-                "More errors than frames sent");
+            assert!(
+                res.frames_sent >= res.errors_encountered,
+                "More errors than frames sent"
+            );
 
             // GOAWAY frames should have valid error codes
             for goaway in &res.goaway_frames {
                 let error_code = goaway.error_code as u32;
-                assert!(error_code <= 13, "Invalid GOAWAY error code: {}", error_code);
+                assert!(
+                    error_code <= 13,
+                    "Invalid GOAWAY error code: {}",
+                    error_code
+                );
             }
 
             // Connection should transition properly
             if !res.goaway_frames.is_empty() {
-                assert!(matches!(res.final_state, ConnectionState::Closing | ConnectionState::Closed),
-                    "Connection should be closing/closed after GOAWAY");
+                assert!(
+                    matches!(
+                        res.final_state,
+                        ConnectionState::Closing | ConnectionState::Closed
+                    ),
+                    "Connection should be closing/closed after GOAWAY"
+                );
             }
         }
         Err(_) => {
@@ -702,13 +732,19 @@ fn validate_goaway_result(result: Result<GoAwayGenerationResult, H2Error>, _erro
     match result {
         Ok(res) => {
             if res.goaway_sent {
-                assert!(!res.goaway_frames.is_empty(), "GOAWAY sent but no frames captured");
+                assert!(
+                    !res.goaway_frames.is_empty(),
+                    "GOAWAY sent but no frames captured"
+                );
 
                 for goaway in &res.goaway_frames {
                     // Verify last_stream_id is properly masked (31 bits)
                     let last_stream_id = goaway.last_stream_id;
-                    assert!(last_stream_id <= 0x7fff_ffff,
-                        "Last stream ID should be 31-bit: {}", last_stream_id);
+                    assert!(
+                        last_stream_id <= 0x7fff_ffff,
+                        "Last stream ID should be 31-bit: {}",
+                        last_stream_id
+                    );
                 }
             }
         }
@@ -720,16 +756,20 @@ fn validate_goaway_result(result: Result<GoAwayGenerationResult, H2Error>, _erro
 
 fn validate_stream_operations_result(
     result: Result<StreamOperationsResult, H2Error>,
-    expected_stream_count: u8
+    expected_stream_count: u8,
 ) {
     match result {
         Ok(res) => {
-            assert!(res.streams_created <= expected_stream_count as u32,
-                "More streams created than requested");
+            assert!(
+                res.streams_created <= expected_stream_count as u32,
+                "More streams created than requested"
+            );
 
             // Data frames should not exceed stream count
-            assert!(res.data_frames_sent <= res.streams_created,
-                "Cannot send more data frames than created streams");
+            assert!(
+                res.data_frames_sent <= res.streams_created,
+                "Cannot send more data frames than created streams"
+            );
         }
         Err(_) => {
             // Stream operation errors are acceptable
@@ -740,12 +780,16 @@ fn validate_stream_operations_result(
 fn validate_ping_result(result: Result<PingHandlingResult, H2Error>, ping_count: u8) {
     match result {
         Ok(res) => {
-            assert!(res.pings_sent <= ping_count as u32,
-                "More PINGs sent than expected");
+            assert!(
+                res.pings_sent <= ping_count as u32,
+                "More PINGs sent than expected"
+            );
 
             // PING responses should not exceed PING requests
-            assert!(res.ping_responses <= res.pings_sent,
-                "More PING responses than requests");
+            assert!(
+                res.ping_responses <= res.pings_sent,
+                "More PING responses than requests"
+            );
         }
         Err(_) => {
             // PING errors are acceptable
@@ -780,8 +824,13 @@ fn validate_error_result(result: Result<ConnectionErrorResult, H2Error>) {
         Ok(res) => {
             if res.error_triggered && res.goaway_sent {
                 // Error should trigger GOAWAY
-                assert!(matches!(res.connection_state, ConnectionState::Closing | ConnectionState::Closed),
-                    "Connection should be closing after error + GOAWAY");
+                assert!(
+                    matches!(
+                        res.connection_state,
+                        ConnectionState::Closing | ConnectionState::Closed
+                    ),
+                    "Connection should be closing after error + GOAWAY"
+                );
             }
         }
         Err(_) => {
@@ -793,8 +842,10 @@ fn validate_error_result(result: Result<ConnectionErrorResult, H2Error>) {
 fn validate_interleaved_result(result: Result<InterleavedFrameResult, H2Error>) {
     match result {
         Ok(res) => {
-            assert!(res.frames_processed >= res.errors,
-                "Processed frame count inconsistent with errors");
+            assert!(
+                res.frames_processed >= res.errors,
+                "Processed frame count inconsistent with errors"
+            );
         }
         Err(_) => {
             // Interleaved frame errors are acceptable
