@@ -111,7 +111,7 @@ fn doc_reproduction_command_uses_rch() {
     let doc = load_doc();
     assert!(
         doc.contains(
-            "rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=/tmp/rch-codex-aa023 cargo test --test decision_plane_validation_contract -- --nocapture"
+            "rch exec -- env CARGO_INCREMENTAL=0 cargo test --test decision_plane_validation_contract -- --nocapture"
         ),
         "doc must route heavy validation through rch"
     );
@@ -539,6 +539,33 @@ fn controller_interference_smoke_scenario_declares_expected_artifacts() {
 }
 
 #[test]
+fn smoke_scenarios_declare_required_log_markers() {
+    let artifact = load_artifact();
+    for scenario in artifact["smoke_scenarios"].as_array().expect("array") {
+        let sid = scenario["scenario_id"].as_str().unwrap();
+        let markers = scenario["required_log_markers"]
+            .as_array()
+            .unwrap_or_else(|| panic!("{sid}: required_log_markers must be array"));
+        assert!(
+            markers.len() >= 3,
+            "{sid}: must require scenario-specific test markers plus rch success markers"
+        );
+        assert!(
+            markers
+                .iter()
+                .any(|marker| marker.as_str() == Some("test result: ok")),
+            "{sid}: must require cargo test success marker"
+        );
+        assert!(
+            markers
+                .iter()
+                .any(|marker| marker.as_str() == Some("Remote command finished: exit=0")),
+            "{sid}: must require rch remote success marker"
+        );
+    }
+}
+
+#[test]
 fn runner_script_exists_and_declares_modes() {
     let root = repo_root();
     let script_path = root.join(RUNNER_SCRIPT_PATH);
@@ -549,6 +576,7 @@ fn runner_script_exists_and_declares_modes() {
         "--scenario",
         "--dry-run",
         "--execute",
+        "--timeout-seconds",
         "decision-plane-validation-smoke-bundle-v1",
         "decision-plane-validation-smoke-run-report-v1",
         "controller_snapshot_ledger_schema_version",
@@ -573,6 +601,11 @@ fn runner_script_exists_and_declares_modes() {
         "ASUPERSYNC_CONTROLLER_INTERFERENCE_REPORT_JSON=",
         "controller_interference_matrix_artifact_path",
         "controller_interference_report_artifact_path",
+        "AA023_MARKER_CHECK",
+        "missing_log_markers",
+        "timeout_observed",
+        "rch_remote_success_observed",
+        "passed_after_rch_retrieval_timeout",
     ] {
         assert!(script.contains(token), "runner missing token: {token}");
     }
