@@ -459,7 +459,7 @@ impl LoadSheddingTraceExporter {
     /// Returns the number of batches successfully processed.
     pub fn process_queue(&self) -> Result<usize, ExportError> {
         let mut processed = 0;
-        let mut _total_spans_processed = 0;
+        let mut total_spans_processed = 0;
 
         while let Some(batch) = self.export_queue.dequeue() {
             // Track aging of batches (warn if spans are getting stale)
@@ -477,7 +477,7 @@ impl LoadSheddingTraceExporter {
             // Export the batch
             self.inner.export(&batch)?;
             processed += 1;
-            _total_spans_processed += batch.spans.len();
+            total_spans_processed += batch.spans.len();
 
             // Apply batch timeout to prevent blocking export thread too long
             if batch.created_at.elapsed() > self.batch_timeout {

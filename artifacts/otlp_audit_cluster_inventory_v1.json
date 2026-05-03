@@ -1,0 +1,298 @@
+{
+  "schema_version": "otlp-audit-cluster-inventory-v1",
+  "bead_id": "asupersync-7h2gyz",
+  "blocker_bead_id": "asupersync-lf1a77",
+  "generated_at": "2026-05-03T18:45:00Z",
+  "purpose": "Explain every preserved untracked OTLP audit-test file without deleting, overwriting, or silently adopting stale-API tests.",
+  "policy": {
+    "no_deletion_confirmation": true,
+    "retention_decision": "preserve_untracked_files_in_place_until_normalized",
+    "module_declaration_policy": "blocked preserved files must not be listed from src/observability/mod.rs until they compile against real production seams",
+    "final_signoff_rule": "fail_closed_when_any_untracked_otlp_audit_file_is_unmapped_missing_or_accidentally_module_declared",
+    "fallback_decision": "keep asupersync-q94ai8 and asupersync-wqsael blocked by asupersync-lf1a77 until the preserved tests are normalized or split into narrower blockers"
+  },
+  "proof_commands": {
+    "production_lib_check": "rch exec -- cargo check -p asupersync --lib --features metrics,tracing-integration",
+    "blocked_full_test_check": "rch exec -- cargo check -p asupersync --lib --tests --features metrics,tracing-integration"
+  },
+  "required_log_fields": [
+    "scenario_id",
+    "schema_version",
+    "source_repo_hash",
+    "git_branch",
+    "git_upstream",
+    "inventory_artifact_path",
+    "run_dir",
+    "rch_queue_snapshot_path",
+    "production_lib_check_command",
+    "blocked_full_test_check_command",
+    "total_otlp_audit_file_count",
+    "tracked_otlp_audit_file_count",
+    "preserved_untracked_file_count",
+    "expected_preserved_file_count",
+    "unexplained_untracked_file_count",
+    "missing_preserved_file_count",
+    "module_declared_blocked_file_count",
+    "owner_beads",
+    "invariant_names",
+    "production_seams",
+    "feature_flags",
+    "sanitized_endpoint_config",
+    "emitted_otlp_counters",
+    "retry_drop_recovery_counters",
+    "cancellation_fallback_state",
+    "deduplication_decisions",
+    "artifact_paths",
+    "final_verdict"
+  ],
+  "feature_flags": ["metrics", "tracing-integration"],
+  "sanitized_endpoint_config": {
+    "collector_endpoint": "redacted-local-or-test-endpoint",
+    "auth_headers": "redacted",
+    "external_collector_required": false
+  },
+  "emitted_otlp_counters": [
+    "otel.exporter.dropped_spans",
+    "otel.exporter.dropped_batches",
+    "otel.exporter.retry_attempts",
+    "otel.exporter.non_retryable_drops",
+    "otel.exporter.circuit_breaker_transitions",
+    "otel.exporter.cancellation_drops"
+  ],
+  "preserved_untracked_files": [
+    {
+      "path": "src/observability/otlp_100_percent_drop_sampler_audit_test.rs",
+      "owner_bead": "asupersync-lf1a77",
+      "invariant": "100-percent sampler/drop behavior and explicit no-export accounting",
+      "production_seam": "head-based sampling plus OTLP exporter drop counters",
+      "deduplication_decision": "merge with existing sampling/drop fixtures without losing zero-export assertions",
+      "status": "blocked_stale_api_preserved"
+    },
+    {
+      "path": "src/observability/otlp_401_unauthorized_audit_test.rs",
+      "owner_bead": "asupersync-lf1a77",
+      "invariant": "401/403 authentication failures are terminal non-retryable drops",
+      "production_seam": "OTLP HTTP status classifier and retry policy",
+      "deduplication_decision": "merge with status-classification table tests",
+      "status": "blocked_stale_http_api_preserved"
+    },
+    {
+      "path": "src/observability/otlp_405_method_not_allowed_audit_test.rs",
+      "owner_bead": "asupersync-lf1a77",
+      "invariant": "405 method-not-allowed responses are deterministic non-retryable client errors",
+      "production_seam": "OTLP HTTP status classifier",
+      "deduplication_decision": "merge with 4xx status-classification table tests",
+      "status": "blocked_stale_api_preserved"
+    },
+    {
+      "path": "src/observability/otlp_408_timeout_retry_audit_test.rs",
+      "owner_bead": "asupersync-lf1a77",
+      "invariant": "408 timeout responses follow the supported retry/fallback policy",
+      "production_seam": "retry scheduler and timeout classifier",
+      "deduplication_decision": "dedupe with retry-after and transport timeout fixtures",
+      "status": "blocked_policy_mapping_required"
+    },
+    {
+      "path": "src/observability/otlp_414_uri_too_long_audit_test.rs",
+      "owner_bead": "asupersync-lf1a77",
+      "invariant": "414 URI-too-long responses are terminal and redact endpoint details",
+      "production_seam": "OTLP HTTP status classifier and endpoint sanitization",
+      "deduplication_decision": "merge with 4xx terminal classifier tests",
+      "status": "blocked_stale_api_preserved"
+    },
+    {
+      "path": "src/observability/otlp_429_retry_after_audit_test.rs",
+      "owner_bead": "asupersync-lf1a77",
+      "invariant": "429 rate limits honor retry-after and bounded retry counters",
+      "production_seam": "retry-after parser and retry budget",
+      "deduplication_decision": "merge with tracked retry-after coverage",
+      "status": "blocked_policy_mapping_required"
+    },
+    {
+      "path": "src/observability/otlp_502_bad_gateway_audit_test.rs",
+      "owner_bead": "asupersync-lf1a77",
+      "invariant": "502 gateway failures are retryable with bounded recovery accounting",
+      "production_seam": "OTLP HTTP status classifier and retry policy",
+      "deduplication_decision": "merge with 5xx retry classifier tests",
+      "status": "blocked_stale_api_preserved"
+    },
+    {
+      "path": "src/observability/otlp_503_retry_after_zero_audit_test.rs",
+      "owner_bead": "asupersync-lf1a77",
+      "invariant": "503 retry-after zero does not spin and remains budget bounded",
+      "production_seam": "retry-after parser, backoff floor, and retry budget",
+      "deduplication_decision": "merge with retry-after edge-case table tests",
+      "status": "blocked_stale_api_preserved"
+    },
+    {
+      "path": "src/observability/otlp_504_gateway_timeout_audit_test.rs",
+      "owner_bead": "asupersync-lf1a77",
+      "invariant": "504 gateway timeout is retryable with deterministic fallback accounting",
+      "production_seam": "OTLP HTTP status classifier and retry policy",
+      "deduplication_decision": "merge with 5xx retry classifier tests",
+      "status": "blocked_policy_mapping_required"
+    },
+    {
+      "path": "src/observability/otlp_511_network_auth_audit_test.rs",
+      "owner_bead": "asupersync-lf1a77",
+      "invariant": "511 network-auth-required is treated as terminal operator action",
+      "production_seam": "OTLP HTTP status classifier and auth redaction",
+      "deduplication_decision": "merge with auth/client-error table tests",
+      "status": "blocked_policy_mapping_required"
+    },
+    {
+      "path": "src/observability/otlp_cancellation_span_loss_audit_test.rs",
+      "owner_bead": "asupersync-lf1a77",
+      "invariant": "cancelled exports account for span loss instead of silently dropping data",
+      "production_seam": "cancellation path, exporter queue drain, and cancellation counters",
+      "deduplication_decision": "merge with load-shedding and graceful-shutdown loss accounting",
+      "status": "blocked_stale_api_preserved"
+    },
+    {
+      "path": "src/observability/otlp_chunked_response_audit_test.rs",
+      "owner_bead": "asupersync-lf1a77",
+      "invariant": "truncated or malformed chunked collector responses are transport failures",
+      "production_seam": "HTTP response body validation and collector response parser",
+      "deduplication_decision": "merge with collector-misbehavior fixtures",
+      "status": "blocked_production_seam_required"
+    },
+    {
+      "path": "src/observability/otlp_circuit_breaker_audit_test.rs",
+      "owner_bead": "asupersync-lf1a77",
+      "invariant": "circuit breaker transitions are deterministic and recoverable",
+      "production_seam": "OTLP exporter circuit breaker and recovery counters",
+      "deduplication_decision": "merge with retry/drop/recovery table fixtures",
+      "status": "blocked_production_seam_required"
+    },
+    {
+      "path": "src/observability/otlp_collector_misbehavior_audit_test.rs",
+      "owner_bead": "asupersync-lf1a77",
+      "invariant": "collector protocol misbehavior is classified without panics or secret leaks",
+      "production_seam": "collector response parser and error taxonomy",
+      "deduplication_decision": "merge with malformed-response fixtures",
+      "status": "blocked_stale_api_preserved"
+    },
+    {
+      "path": "src/observability/otlp_deep_span_hierarchy_audit_test.rs",
+      "owner_bead": "asupersync-lf1a77",
+      "invariant": "deep span hierarchy serialization stays bounded and parent links are preserved",
+      "production_seam": "span semantics serializer and hierarchy projection",
+      "deduplication_decision": "merge with span semantics conformance tests",
+      "status": "blocked_test_harness_debt_preserved"
+    },
+    {
+      "path": "src/observability/otlp_dns_resolution_failure_audit_test.rs",
+      "owner_bead": "asupersync-lf1a77",
+      "invariant": "DNS resolution failures are retryable transport errors with sanitized host logging",
+      "production_seam": "endpoint resolver and transport error classifier",
+      "deduplication_decision": "merge with TLS/transport failure table tests",
+      "status": "blocked_stale_api_preserved"
+    },
+    {
+      "path": "src/observability/otlp_empty_key_attribute_audit_test.rs",
+      "owner_bead": "asupersync-lf1a77",
+      "invariant": "empty attribute keys are dropped before OTLP serialization",
+      "production_seam": "attribute serializer",
+      "deduplication_decision": "merge with existing attribute-size/key validation tests",
+      "status": "blocked_serializer_mapping_required"
+    },
+    {
+      "path": "src/observability/otlp_empty_resource_attributes_audit_test.rs",
+      "owner_bead": "asupersync-lf1a77",
+      "invariant": "empty resource attributes are filtered without dropping valid resource identity",
+      "production_seam": "resource attribute merger and serializer",
+      "deduplication_decision": "merge with resource-attribute precedence and merging tests",
+      "status": "blocked_stale_api_preserved"
+    },
+    {
+      "path": "src/observability/otlp_high_volume_export_latency_audit_test.rs",
+      "owner_bead": "asupersync-lf1a77",
+      "invariant": "high-volume export latency remains bounded and logs p50/p95/p99/drop counters",
+      "production_seam": "LoadSheddingTraceExporter and bounded export queue",
+      "deduplication_decision": "convert to deterministic smoke/bench proof instead of timing-flaky unit test",
+      "status": "blocked_performance_harness_required"
+    },
+    {
+      "path": "src/observability/otlp_parent_sampling_propagation_audit_test.rs",
+      "owner_bead": "asupersync-lf1a77",
+      "invariant": "parent sampling decisions propagate without resurrecting dropped spans",
+      "production_seam": "W3C trace context and head-based sampler",
+      "deduplication_decision": "merge with sampling strategy and propagation tests",
+      "status": "blocked_policy_mapping_required"
+    },
+    {
+      "path": "src/observability/otlp_resource_attribute_precedence_audit_test.rs",
+      "owner_bead": "asupersync-lf1a77",
+      "invariant": "programmatic, environment, and default resource attributes merge in stable precedence order",
+      "production_seam": "resource attribute builder",
+      "deduplication_decision": "merge with tracked resource detection/merging tests",
+      "status": "blocked_serializer_mapping_required"
+    },
+    {
+      "path": "src/observability/otlp_set_status_idempotency_audit_test.rs",
+      "owner_bead": "asupersync-lf1a77",
+      "invariant": "repeated span status updates are idempotent and deterministic under the chosen OTLP status policy",
+      "production_seam": "span semantics status transition logic",
+      "deduplication_decision": "merge with span status conformance tests and last-write/idempotency table fixtures",
+      "status": "blocked_policy_mapping_required"
+    },
+    {
+      "path": "src/observability/otlp_span_attribute_filtering_audit_test.rs",
+      "owner_bead": "asupersync-lf1a77",
+      "invariant": "sensitive span attributes are filtered before serialization",
+      "production_seam": "SpanConfig and span attribute serializer",
+      "deduplication_decision": "merge with privacy-aware ordered_proto_attributes tests",
+      "status": "blocked_serializer_mapping_required"
+    },
+    {
+      "path": "src/observability/otlp_span_attribute_order_audit_test.rs",
+      "owner_bead": "asupersync-lf1a77",
+      "invariant": "span attributes serialize in deterministic key/value order",
+      "production_seam": "ordered OTLP attribute serializer",
+      "deduplication_decision": "merge with golden serializer snapshots",
+      "status": "blocked_serializer_mapping_required"
+    },
+    {
+      "path": "src/observability/otlp_tls_handshake_failure_audit_test.rs",
+      "owner_bead": "asupersync-lf1a77",
+      "invariant": "TLS handshake failures are retryable transport errors with sanitized peer details",
+      "production_seam": "TLS connector and transport error classifier",
+      "deduplication_decision": "merge with DNS/transport failure table tests",
+      "status": "blocked_stale_api_preserved"
+    },
+    {
+      "path": "src/observability/otlp_tokio_compat_span_propagation_audit_test.rs",
+      "owner_bead": "asupersync-lf1a77",
+      "invariant": "tokio-compat boundary preserves span context without pulling tokio into core runtime",
+      "production_seam": "asupersync-tokio-compat boundary and span propagation",
+      "deduplication_decision": "move to compat crate or cross-crate conformance harness",
+      "status": "blocked_wrong_crate_boundary_preserved"
+    },
+    {
+      "path": "src/observability/otlp_trace_state_escaping_audit_test.rs",
+      "owner_bead": "asupersync-lf1a77",
+      "invariant": "trace-state escaping preserves vendor entries and rejects invalid bytes",
+      "production_seam": "W3C trace-state parser/serializer",
+      "deduplication_decision": "merge with trace-state propagation tests",
+      "status": "blocked_parser_mapping_required"
+    },
+    {
+      "path": "src/observability/otlp_utf8_validation_audit_test.rs",
+      "owner_bead": "asupersync-lf1a77",
+      "invariant": "invalid UTF-8-like attribute content is sanitized or rejected deterministically",
+      "production_seam": "attribute serializer and error taxonomy",
+      "deduplication_decision": "merge with attribute serializer table tests",
+      "status": "blocked_serializer_mapping_required"
+    }
+  ],
+  "smoke_scenarios": [
+    {
+      "scenario_id": "AA-OTLP-AUDIT-INVENTORY-PRESERVED-UNTRACKED",
+      "description": "Validate that every preserved untracked OTLP audit file is mapped to a blocker bead and not accidentally compiled as a module.",
+      "expected_preserved_file_count": 28,
+      "expected_blocker_bead": "asupersync-lf1a77",
+      "output_root": "target/otlp-audit-inventory-smoke",
+      "execution_policy": "inventory_proof_only_no_external_collector"
+    }
+  ]
+}
