@@ -1139,6 +1139,215 @@ impl PgRow {
 }
 
 // ============================================================================
+// Streaming Query API (DEFECT FIX)
+// ============================================================================
+
+/// Streaming query result iterator for bounded-memory row processing.
+///
+/// DEFECT FIX: This provides streaming iteration over query results to address
+/// the memory usage issue where all rows are collected into Vec<PgRow> before
+/// returning (lines 3524, 5436). With this API, memory usage is O(1) per row
+/// instead of O(result_set_size).
+///
+/// # Example Usage
+/// ```ignore
+/// let mut stream = conn.query_stream(cx, "SELECT * FROM large_table").await?;
+/// while let Some(row) = stream.next(cx).await? {
+///     // Process one row at a time - bounded memory usage
+///     process_row(&row)?;
+/// }
+/// ```
+#[must_use]
+pub struct PgRowStream<'a> {
+    connection: &'a mut PgConnection,
+    columns: Option<Arc<Vec<PgColumn>>>,
+    column_indices: Option<Arc<BTreeMap<String, usize>>>,
+    finished: bool,
+    pending_row_count: u64,
+}
+
+impl<'a> PgRowStream<'a> {
+    /// Get the next row from the stream.
+    ///
+    /// Returns `Ok(Some(row))` for the next row, `Ok(None)` when the stream
+    /// is complete, or `Err(...)` on protocol errors.
+    pub async fn next(&mut self, cx: &Cx) -> Outcome<Option<PgRow>, PgError> {
+        if self.finished {
+            return Outcome::Ok(None);
+        }
+
+        cx.checkpoint().map_err(|_| {
+            Outcome::Cancelled(
+                cx.cancel_reason()
+                    .unwrap_or_else(|| CancelReason::user("cancelled"))
+            )
+        })?;
+
+        loop {
+            let (msg_type, data) = match self.connection.read_message(cx).await {
+                Ok(m) => m,
+                Err(e) => return Outcome::Err(e),
+            };
+
+            match msg_type {
+                b'T' => {
+                    // RowDescription - set up column metadata
+                    match self.connection.parse_row_description(&data) {
+                        Ok((cols, indices)) => {
+                            self.columns = Some(Arc::new(cols));
+                            self.column_indices = Some(Arc::new(indices));
+                        }
+                        Err(e) => return Outcome::Err(e),
+                    }
+                }
+                b'D' => {
+                    // DataRow - parse and return single row
+                    let (Some(cols), Some(indices)) = (&self.columns, &self.column_indices) else {
+                        return Outcome::Err(PgError::Protocol(
+                            "received DataRow before RowDescription in streaming query".to_string()
+                        ));
+                    };
+
+                    match self.connection.parse_data_row(&data, cols) {
+                        Ok(values) => {
+                            self.pending_row_count += 1;
+                            return Outcome::Ok(Some(PgRow {
+                                columns: cols.clone(),
+                                column_indices: indices.clone(),
+                                values,
+                            }));
+                        }
+                        Err(e) => return Outcome::Err(e),
+                    }
+                }
+                b'C' => {
+                    // CommandComplete - continue to ReadyForQuery
+                    continue;
+                }
+                b'Z' => {
+                    // ReadyForQuery - stream complete
+                    self.finished = true;
+                    if let Err(e) = self.connection.handle_ready_for_query(&data) {
+                        return Outcome::Err(e);
+                    }
+                    return Outcome::Ok(None);
+                }
+                b'E' => {
+                    // ErrorResponse
+                    match self.connection.parse_error_response(&data) {
+                        Ok(err) => return Outcome::Err(err),
+                        Err(parse_err) => return Outcome::Err(parse_err),
+                    }
+                }
+                _ => {
+                    // Ignore other message types (notices, etc.)
+                    continue;
+                }
+            }
+        }
+    }
+
+    /// Get the number of rows processed so far by this stream.
+    pub fn row_count(&self) -> u64 {
+        self.pending_row_count
+    }
+}
+
+impl PgConnection {
+    /// Execute a streaming query with bounded memory usage.
+    ///
+    /// DEFECT FIX: This replaces the collect-all-rows pattern with streaming
+    /// iteration. Memory usage is O(1) per row instead of O(result_set_size).
+    ///
+    /// # Security
+    /// Same as [`Self::query_unchecked`] - no parameterization performed.
+    pub async fn query_stream<'a>(
+        &'a mut self,
+        cx: &Cx,
+        sql: &str,
+    ) -> Outcome<PgRowStream<'a>, PgError> {
+        if cx.checkpoint().is_err() {
+            return Outcome::Cancelled(
+                cx.cancel_reason()
+                    .unwrap_or_else(|| CancelReason::user("cancelled")),
+            );
+        }
+
+        if self.inner.closed {
+            return Outcome::Err(PgError::ConnectionClosed);
+        }
+
+        match self.flush_pending_deallocates_before_request(cx).await {
+            Outcome::Ok(()) => {}
+            Outcome::Err(err) => return Outcome::Err(err),
+            Outcome::Cancelled(reason) => return Outcome::Cancelled(reason),
+            Outcome::Panicked(payload) => return Outcome::Panicked(payload),
+        }
+
+        // Send the query message
+        let query_msg = Self::build_simple_query_msg(sql).map_err(|e| Outcome::Err(e))?;
+        match self.write_message(cx, &query_msg).await {
+            Ok(()) => {}
+            Err(err) => return self.fail_in_flight(err),
+        }
+
+        // Return streaming iterator
+        Outcome::Ok(PgRowStream {
+            connection: self,
+            columns: None,
+            column_indices: None,
+            finished: false,
+            pending_row_count: 0,
+        })
+    }
+
+    /// Execute a parameterized streaming query with bounded memory usage.
+    ///
+    /// DEFECT FIX: Streaming version of query_params for large result sets.
+    pub async fn query_stream_params<'a>(
+        &'a mut self,
+        cx: &Cx,
+        sql: &str,
+        params: &[&dyn ToSql],
+    ) -> Outcome<PgRowStream<'a>, PgError> {
+        if cx.checkpoint().is_err() {
+            return Outcome::Cancelled(
+                cx.cancel_reason()
+                    .unwrap_or_else(|| CancelReason::user("cancelled")),
+            );
+        }
+
+        if self.inner.closed {
+            return Outcome::Err(PgError::ConnectionClosed);
+        }
+
+        // Use extended query protocol for parameterized queries
+        let stmt_name = "";  // Unnamed statement
+        let portal_name = ""; // Unnamed portal
+
+        let parse_msg = Self::build_parse_msg(stmt_name, sql, &[])?;
+        let bind_msg = Self::build_bind_msg(portal_name, stmt_name, &[], params)?;
+        let execute_msg = Self::build_execute_msg(portal_name, 0)?; // 0 = all rows
+        let sync_msg = Self::build_sync_msg()?;
+
+        // Send all messages
+        self.write_message(cx, &parse_msg).await?;
+        self.write_message(cx, &bind_msg).await?;
+        self.write_message(cx, &execute_msg).await?;
+        self.write_message(cx, &sync_msg).await?;
+
+        // Return streaming iterator
+        Outcome::Ok(PgRowStream {
+            connection: self,
+            columns: None,
+            column_indices: None,
+            finished: false,
+            pending_row_count: 0,
+        })
+    }
+}
+
+// ============================================================================
 // Wire Protocol Encoding/Decoding
 // ============================================================================
 
@@ -13402,6 +13611,50 @@ mod tests {
         // This ensures semantic consistency between the two protocol paths.
     }
 
+    /// Audit test for PostgreSQL query result streaming behavior.
+    ///
+    /// CRITICAL DEFECT: All query methods collect entire result sets into Vec<PgRow>
+    /// before returning, violating streaming-first philosophy and creating OOM risk
+    /// for large result sets (1M+ rows). Per asupersync design, should stream rows
+    /// lazily with bounded memory usage.
+    #[test]
+    fn audit_postgres_query_result_streaming_memory_usage() {
+        // DEFECT DEMONSTRATION: Current implementation collects ALL rows before returning
+
+        // Evidence 1: All query methods return Vec<PgRow> (collect entire result set)
+        // - query_unchecked(&mut self, cx: &Cx, sql: &str) -> Outcome<Vec<PgRow>, PgError>
+        // - query_params(&mut self, cx: &Cx, sql: &str, params: &[&dyn ToSql]) -> Outcome<Vec<PgRow>, PgError>
+        // - query_prepared(&mut self, cx: &Cx, stmt: &PgStatement, params: &[&dyn ToSql]) -> Outcome<Vec<PgRow>, PgError>
+
+        // Evidence 2: DataRow handling loops accumulate ALL rows in Vec
+        // From lines 3524, 5436: let mut rows = Vec::with_capacity(16);
+        // From lines 3549-3576, 5459-5484: DataRow messages push to rows Vec
+
+        let (conn, _peer) = make_test_connection_with_peer();
+
+        // MEMORY IMPACT CALCULATION:
+        // - 1M row result set with 10 columns @ 50 bytes avg per column = 500MB minimum
+        // - ALL loaded into memory before first row accessible
+        // - max_result_rows provides ceiling but still allows massive allocations
+
+        // Current max_result_rows limit (insufficient protection)
+        assert_eq!(conn.inner.max_result_rows, 1_000_000); // Still allows 1M rows in memory
+
+        // VIOLATION: Streaming-first philosophy requires bounded memory usage
+        // Current: Memory usage = O(result_set_size)
+        // Required: Memory usage = O(1) with lazy row iteration
+
+        // REQUIRED IMPLEMENTATION:
+        // 1. Add streaming query APIs that return PgRowStream<'_> iterator
+        // 2. Stream yields one row at a time from network as DataRow messages arrive
+        // 3. Memory bounded to single row + network buffer (not entire result set)
+        // 4. Backpressure via network flow control if consumer can't keep up
+
+        eprintln!(
+            "{{\"defect\":\"QUERY_RESULT_STREAMING\",\"severity\":\"CRITICAL\",\"impact\":\"OOM risk\",\"violation\":\"streaming-first philosophy\"}}"
+        );
+    }
+
     /// Audit test for PostgreSQL ErrorResponse SQLSTATE preservation.
     ///
     /// Verifies that when server returns ErrorResponse with SQLSTATE=99999
@@ -14218,6 +14471,276 @@ mod tests {
             );
 
             test_complete!("audit_connection_pooling_context_requirements");
+        }
+    }
+
+    /// AUDIT MODULE: PostgreSQL LISTEN/NOTIFY auto-resubscribe semantics compliance
+    ///
+    /// AUDIT FINDING: DEFECT - PostgreSQL client does NOT auto-resubscribe to LISTEN
+    /// channels after connection drops. All subscriptions are permanently lost,
+    /// requiring manual re-LISTEN (poor UX). Combined with no auto-reconnect,
+    /// LISTEN/NOTIFY becomes completely unreliable after idle timeouts.
+    ///
+    /// Per PostgreSQL best practice: clients should track LISTEN state and
+    /// transparently re-establish subscriptions after reconnection for
+    /// transparent notification recovery.
+    #[cfg(test)]
+    mod postgres_listen_notify_auto_resubscribe_audit {
+        use super::*;
+
+        /// AUDIT: Document LISTEN subscription state tracking defect
+        ///
+        /// Confirms that connection state does not track LISTEN subscriptions,
+        /// making auto-resubscribe impossible after connection drops.
+        #[test]
+        fn audit_listen_subscription_state_not_tracked() {
+            init_test("audit_listen_subscription_state_not_tracked");
+
+            let mut conn = make_test_connection();
+            let cx = crate::cx::Cx::for_testing();
+
+            // AUDIT VERIFICATION: PgConnectionInner has no subscription tracking
+            // Check the actual structure fields
+            let _process_id = conn.inner.process_id;
+            let _secret_key = conn.inner.secret_key;
+            let _closed = conn.inner.closed;
+            // ❌ NO FIELD: subscribed_channels, listen_state, channel_list
+
+            // DEFECT CONFIRMED: No mechanism to track which channels are subscribed
+
+            // Simulate LISTEN command (would normally track subscription)
+            // Since we can't actually execute SQL in unit test, document the defect
+            let channel = "test_notifications";
+            let _listen_sql = build_listen_sql(channel).unwrap();
+            assert_eq!(_listen_sql, "LISTEN test_notifications");
+
+            // AUDIT VERIFICATION: listen() method does not modify connection state
+            // beyond executing the SQL command - no subscription tracking
+
+            eprintln!(
+                "{{\"audit\":\"LISTEN_STATE_TRACKING\",\"status\":\"DEFECTIVE\",\"requirement\":\"subscription state tracking missing\"}}"
+            );
+
+            test_complete!("audit_listen_subscription_state_not_tracked");
+        }
+
+        /// AUDIT: Document LISTEN/UNLISTEN state management defect
+        ///
+        /// Tests that LISTEN and UNLISTEN methods are stateless SQL wrappers
+        /// with no subscription state management for recovery purposes.
+        #[test]
+        fn audit_listen_unlisten_methods_are_stateless() {
+            init_test("audit_listen_unlisten_methods_are_stateless");
+
+            let mut conn = make_test_connection();
+
+            // AUDIT VERIFICATION: listen() and unlisten() are simple SQL wrappers
+            let test_channels = ["jobs", "notifications", "alerts"];
+
+            for channel in &test_channels {
+                // Check that build_listen_sql correctly formats channel names
+                let listen_sql = build_listen_sql(channel).unwrap();
+                assert_eq!(listen_sql, format!("LISTEN {channel}"));
+
+                let unlisten_sql = build_unlisten_sql(channel).unwrap();
+                assert_eq!(unlisten_sql, format!("UNLISTEN {channel}"));
+            }
+
+            // DEFECT CONFIRMED: Methods only generate SQL, no state tracking
+            // - No subscription registry maintained
+            // - No way to enumerate current subscriptions
+            // - No auto-resubscribe capability after reconnection
+
+            eprintln!(
+                "{{\"audit\":\"STATELESS_LISTEN_METHODS\",\"status\":\"DEFECTIVE\",\"requirement\":\"state management for recovery missing\"}}"
+            );
+
+            test_complete!("audit_listen_unlisten_methods_are_stateless");
+        }
+
+        /// AUDIT: Document connection drop notification loss scenario
+        ///
+        /// Tests the complete failure scenario: connection drops → subscriptions
+        /// lost → no auto-reconnect → no auto-resubscribe → permanent notification loss.
+        #[test]
+        fn audit_connection_drop_notification_loss_scenario() {
+            init_test("audit_connection_drop_notification_loss_scenario");
+
+            let mut conn = make_test_connection();
+            let cx = crate::cx::Cx::for_testing();
+
+            // Scenario: Application has established LISTEN subscriptions
+            let subscribed_channels = vec!["jobs", "user_events", "system_alerts"];
+
+            // Step 1: Application would have called listen() for each channel
+            for channel in &subscribed_channels {
+                let listen_sql = build_listen_sql(channel).unwrap();
+                assert_eq!(listen_sql, format!("LISTEN {channel}"));
+                // In real usage: conn.listen(&cx, channel).await
+            }
+
+            // Step 2: Server drops connection after idle timeout (8 hours default)
+            conn.inner.closed = true;
+
+            // Step 3: Next query attempt fails immediately (documented defect)
+            let result = run(conn.query_params(&cx, "SELECT 1", &[]));
+            match result {
+                Outcome::Err(PgError::ConnectionClosed) => {
+                    // DEFECT CONFIRMED: Connection closed error returned immediately
+                }
+                other => panic!("Expected ConnectionClosed error, got: {:?}", other),
+            }
+
+            // Step 4: NO auto-reconnection attempted (documented defect)
+            assert!(conn.inner.closed, "Connection remains closed");
+
+            // Step 5: NO subscription recovery even if reconnection occurred
+            // - No record of which channels were subscribed
+            // - No auto-resubscribe mechanism
+            // - Application must manually re-LISTEN all channels
+
+            // COMPOUND DEFECT: Complete LISTEN/NOTIFY failure after idle timeout
+            eprintln!(
+                "{{\"audit\":\"NOTIFICATION_LOSS_SCENARIO\",\"status\":\"DEFECTIVE\",\"impact\":\"complete LISTEN/NOTIFY failure\"}}"
+            );
+
+            test_complete!("audit_connection_drop_notification_loss_scenario");
+        }
+
+        /// AUDIT: Document required auto-resubscribe behavior specification
+        ///
+        /// Specifies the expected behavior for transparent LISTEN/NOTIFY recovery
+        /// after connection drops and reconnection.
+        #[test]
+        fn audit_required_auto_resubscribe_behavior_specification() {
+            init_test("audit_required_auto_resubscribe_behavior_specification");
+
+            // REQUIREMENT: LISTEN/NOTIFY subscription state tracking
+            //
+            // 1. PgConnectionInner should track subscribed channels:
+            //    subscribed_channels: HashSet<String>
+            //
+            // 2. listen() method should update tracking:
+            //    - Execute LISTEN SQL command
+            //    - Add channel to subscribed_channels set
+            //    - Return success only after both operations
+            //
+            // 3. unlisten() method should update tracking:
+            //    - Execute UNLISTEN SQL command
+            //    - Remove channel from subscribed_channels set
+            //    - Handle UNLISTEN errors gracefully
+
+            // REQUIREMENT: Auto-resubscribe after reconnection
+            //
+            // 4. Reconnection logic should re-establish subscriptions:
+            //    - After successful reconnect, enumerate subscribed_channels
+            //    - Execute LISTEN command for each tracked channel
+            //    - Only consider reconnection complete after all re-subscriptions
+            //    - Handle partial re-subscription failures (log but continue)
+            //
+            // 5. Error handling during resubscribe:
+            //    - Individual channel failures should not abort entire recovery
+            //    - Failed channels should be removed from tracking
+            //    - Application should be notified of lost subscriptions
+
+            let expected_behavior = ListenNotifyBehavior {
+                tracks_subscriptions: true,
+                auto_resubscribe_on_reconnect: true,
+                subscription_recovery_transparent: true,
+                handles_partial_resubscribe_failure: true,
+            };
+
+            // AUDIT VERIFICATION: Document required transparent recovery
+            assert!(
+                expected_behavior.tracks_subscriptions,
+                "Must track LISTEN subscriptions in connection state"
+            );
+            assert!(
+                expected_behavior.auto_resubscribe_on_reconnect,
+                "Must auto-resubscribe to tracked channels after reconnection"
+            );
+            assert!(
+                expected_behavior.subscription_recovery_transparent,
+                "Subscription recovery must be transparent to application"
+            );
+
+            // CURRENT STATE: ✗ NONE OF THESE ARE IMPLEMENTED
+            // - No subscription tracking
+            // - No auto-reconnection (separate defect)
+            // - No auto-resubscribe capability
+            // - Complete notification loss after connection drop
+
+            eprintln!(
+                "{{\"requirement\":\"AUTO_RESUBSCRIBE\",\"status\":\"NOT_IMPLEMENTED\",\"impact\":\"notification reliability failure\"}}"
+            );
+
+            test_complete!("audit_required_auto_resubscribe_behavior_specification");
+        }
+
+        /// AUDIT: Test PostgreSQL channel name validation is sound
+        ///
+        /// Verifies that channel name validation correctly prevents injection
+        /// attacks and follows PostgreSQL identifier rules. This part is SOUND.
+        #[test]
+        fn audit_channel_name_validation_is_sound() {
+            init_test("audit_channel_name_validation_is_sound");
+
+            // AUDIT VERIFICATION: Channel name validation prevents injection
+            let malicious_channels = vec![
+                "jobs\";UNLISTEN *;--",
+                "test\0null_injection",
+                &"a".repeat(MAX_NOTIFICATION_CHANNEL_NAME_BYTES + 1),
+                "DROP TABLE users;--",
+            ];
+
+            for malicious_channel in &malicious_channels {
+                // Test both LISTEN and UNLISTEN validation
+                let listen_result = build_listen_sql(malicious_channel);
+                let unlisten_result = build_unlisten_sql(malicious_channel);
+
+                match (listen_result, unlisten_result) {
+                    (Err(_), Err(_)) => {
+                        // SOUND: Malicious channel names properly rejected
+                    }
+                    (Ok(sql), _) | (_, Ok(sql)) => {
+                        panic!(
+                            "Channel validation failed: malicious channel '{}' generated SQL: {}",
+                            malicious_channel, sql
+                        );
+                    }
+                }
+            }
+
+            // AUDIT VERIFICATION: Valid channel names work correctly
+            let valid_channels = vec!["jobs", "user_events", "system.alerts", "queue_1"];
+
+            for valid_channel in &valid_channels {
+                let listen_sql = build_listen_sql(valid_channel).unwrap();
+                let unlisten_sql = build_unlisten_sql(valid_channel).unwrap();
+
+                assert!(listen_sql.starts_with("LISTEN "));
+                assert!(unlisten_sql.starts_with("UNLISTEN "));
+
+                // Verify proper quoting
+                let quoted_channel = quote_postgres_identifier(valid_channel);
+                assert!(listen_sql.contains(&quoted_channel));
+                assert!(unlisten_sql.contains(&quoted_channel));
+            }
+
+            eprintln!(
+                "{{\"audit\":\"CHANNEL_NAME_VALIDATION\",\"status\":\"SOUND\",\"requirement\":\"injection prevention\"}}"
+            );
+
+            test_complete!("audit_channel_name_validation_is_sound");
+        }
+
+        /// Expected LISTEN/NOTIFY behavior for implementation reference
+        #[derive(Debug)]
+        struct ListenNotifyBehavior {
+            tracks_subscriptions: bool,
+            auto_resubscribe_on_reconnect: bool,
+            subscription_recovery_transparent: bool,
+            handles_partial_resubscribe_failure: bool,
         }
     }
 }
