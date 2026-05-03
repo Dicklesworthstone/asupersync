@@ -271,8 +271,121 @@ pub enum LoadBalanceStrategy {
     /// Hash-based selection (sticky routing based on ObjectId).
     HashBased,
 
+    /// Hash-based selection that skips over-capacity primaries when possible.
+    BoundedLoadHash,
+
     /// Always use first available endpoint.
     FirstAvailable,
+}
+
+/// Capacity policy for [`LoadBalanceStrategy::BoundedLoadHash`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BoundedLoadConfig {
+    /// Extra headroom above the endpoint's weighted capacity, in permille.
+    pub epsilon_milli: u32,
+
+    /// Minimum capacity for every dispatchable endpoint.
+    pub min_capacity: u32,
+
+    /// Active-operation slots represented by each endpoint weight unit.
+    pub capacity_per_weight: u32,
+}
+
+impl Default for BoundedLoadConfig {
+    fn default() -> Self {
+        Self {
+            epsilon_milli: 250,
+            min_capacity: 1,
+            capacity_per_weight: 1,
+        }
+    }
+}
+
+impl BoundedLoadConfig {
+    /// Creates a bounded-load capacity policy.
+    #[must_use]
+    pub const fn new(epsilon_milli: u32, min_capacity: u32, capacity_per_weight: u32) -> Self {
+        Self {
+            epsilon_milli,
+            min_capacity,
+            capacity_per_weight,
+        }
+    }
+
+    /// Computes the current capacity for an endpoint.
+    #[must_use]
+    pub fn capacity_for(&self, endpoint: &Endpoint) -> u32 {
+        let base = endpoint
+            .weight
+            .max(1)
+            .saturating_mul(self.capacity_per_weight.max(1));
+        let scaled =
+            (u64::from(base) * (1_000_u64 + u64::from(self.epsilon_milli))).div_ceil(1_000);
+        let scaled = u32::try_from(scaled).unwrap_or(u32::MAX);
+        scaled.max(self.min_capacity.max(1))
+    }
+
+    #[inline]
+    fn accepts(&self, endpoint: &Endpoint) -> bool {
+        endpoint.connection_count() < self.capacity_for(endpoint)
+    }
+}
+
+/// Why a bounded-load hash decision selected its endpoint.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BoundedLoadRebalanceReason {
+    /// No endpoint could receive traffic.
+    NoHealthyEndpoints,
+
+    /// No object ID was available, so hash placement was not possible.
+    NoObjectIdFallback,
+
+    /// The HRW primary was below its bounded-load capacity.
+    PrimaryWithinCapacity,
+
+    /// The HRW primary was over capacity and traffic moved to the next eligible endpoint.
+    PrimaryOverCapacityRebalanced,
+
+    /// Every endpoint was over capacity, so the HRW primary was retained as a safe fallback.
+    AllEndpointsOverCapacityFallback,
+}
+
+/// Per-endpoint bounded-load telemetry.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BoundedLoadEndpointTelemetry {
+    /// Endpoint being evaluated.
+    pub endpoint_id: EndpointId,
+
+    /// Current active-operation load.
+    pub actual_load: u32,
+
+    /// Capacity after applying weight, epsilon, and minimum-capacity policy.
+    pub capacity: u32,
+
+    /// Whether this endpoint was below capacity at decision time.
+    pub within_capacity: bool,
+
+    /// Whether this endpoint was the original HRW primary.
+    pub is_primary: bool,
+
+    /// Whether this endpoint was selected.
+    pub is_selected: bool,
+}
+
+/// Bounded-load hash routing decision for deterministic operator evidence.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BoundedLoadDecision {
+    /// Endpoint selected by bounded-load routing, if any.
+    pub selected: Option<EndpointId>,
+
+    /// Endpoint selected by plain HRW before applying the capacity gate.
+    pub primary: Option<EndpointId>,
+
+    /// Reason for the selected endpoint.
+    pub reason: BoundedLoadRebalanceReason,
+
+    /// Per-node load/capacity facts sorted by endpoint id.
+    pub endpoints: Vec<BoundedLoadEndpointTelemetry>,
 }
 
 /// State for load balancer.
@@ -300,6 +413,9 @@ pub struct LoadBalancer {
     /// routing remains sticky for the same ObjectId across
     /// dispatches (which is the point of HashBased routing).
     hash_ring_salt: u64,
+
+    /// Capacity policy used by [`LoadBalanceStrategy::BoundedLoadHash`].
+    bounded_load_config: BoundedLoadConfig,
 }
 
 impl LoadBalancer {
@@ -472,7 +588,15 @@ impl LoadBalancer {
             rr_counter: AtomicU64::new(0),
             random_seed: AtomicU64::new(0),
             hash_ring_salt,
+            bounded_load_config: BoundedLoadConfig::default(),
         }
+    }
+
+    /// Sets the bounded-load capacity policy.
+    #[must_use]
+    pub fn with_bounded_load_config(mut self, config: BoundedLoadConfig) -> Self {
+        self.bounded_load_config = config;
+        self
     }
 
     /// Returns the per-router HashRing salt. Exposed for diagnostics
@@ -480,6 +604,180 @@ impl LoadBalancer {
     #[must_use]
     pub fn hash_ring_salt(&self) -> u64 {
         self.hash_ring_salt
+    }
+
+    /// Returns the current bounded-load capacity policy.
+    #[must_use]
+    pub fn bounded_load_config(&self) -> BoundedLoadConfig {
+        self.bounded_load_config
+    }
+
+    /// Returns deterministic bounded-load routing evidence without mutating counters.
+    #[must_use]
+    pub fn bounded_load_decision(
+        &self,
+        endpoints: &[Arc<Endpoint>],
+        object_id: Option<ObjectId>,
+    ) -> BoundedLoadDecision {
+        let mut available = Vec::with_capacity(endpoints.len());
+        for endpoint in endpoints {
+            if endpoint.state().can_receive() {
+                available.push(endpoint);
+            }
+        }
+        if available.is_empty() {
+            return BoundedLoadDecision {
+                selected: None,
+                primary: None,
+                reason: BoundedLoadRebalanceReason::NoHealthyEndpoints,
+                endpoints: Vec::new(),
+            };
+        }
+
+        let Some(object_id) = object_id else {
+            let mut endpoints = self.bounded_load_telemetry(&available, None, None);
+            endpoints.sort_unstable_by_key(|telemetry| telemetry.endpoint_id);
+            return BoundedLoadDecision {
+                selected: None,
+                primary: None,
+                reason: BoundedLoadRebalanceReason::NoObjectIdFallback,
+                endpoints,
+            };
+        };
+
+        let primary = crate::distributed::consistent_hash::select_hrw(
+            available.iter().copied(),
+            &object_id.as_u128(),
+            self.hash_ring_salt,
+            |endpoint| &endpoint.id,
+            |endpoint| endpoint.weight.max(1),
+        )
+        .map(|endpoint| endpoint.id);
+
+        let selected = self
+            .select_bounded_load_hash(&available, object_id)
+            .map(|endpoint| endpoint.id);
+
+        let reason = match (primary, selected) {
+            (None, _) => BoundedLoadRebalanceReason::NoHealthyEndpoints,
+            (Some(primary), Some(selected)) if primary == selected => {
+                if available
+                    .iter()
+                    .find(|endpoint| endpoint.id == primary)
+                    .is_some_and(|endpoint| self.bounded_load_config.accepts(endpoint))
+                {
+                    BoundedLoadRebalanceReason::PrimaryWithinCapacity
+                } else {
+                    BoundedLoadRebalanceReason::AllEndpointsOverCapacityFallback
+                }
+            }
+            (Some(_), Some(_)) => BoundedLoadRebalanceReason::PrimaryOverCapacityRebalanced,
+            (Some(_), None) => BoundedLoadRebalanceReason::NoHealthyEndpoints,
+        };
+
+        let mut endpoints = self.bounded_load_telemetry(&available, primary, selected);
+        endpoints.sort_unstable_by_key(|telemetry| telemetry.endpoint_id);
+        BoundedLoadDecision {
+            selected,
+            primary,
+            reason,
+            endpoints,
+        }
+    }
+
+    fn bounded_load_telemetry(
+        &self,
+        endpoints: &[&Arc<Endpoint>],
+        primary: Option<EndpointId>,
+        selected: Option<EndpointId>,
+    ) -> Vec<BoundedLoadEndpointTelemetry> {
+        endpoints
+            .iter()
+            .map(|endpoint| {
+                let actual_load = endpoint.connection_count();
+                let capacity = self.bounded_load_config.capacity_for(endpoint);
+                BoundedLoadEndpointTelemetry {
+                    endpoint_id: endpoint.id,
+                    actual_load,
+                    capacity,
+                    within_capacity: actual_load < capacity,
+                    is_primary: primary == Some(endpoint.id),
+                    is_selected: selected == Some(endpoint.id),
+                }
+            })
+            .collect()
+    }
+
+    fn select_bounded_load_hash<'a>(
+        &self,
+        available: &[&'a Arc<Endpoint>],
+        object_id: ObjectId,
+    ) -> Option<&'a Arc<Endpoint>> {
+        let key = object_id.as_u128();
+        let primary = crate::distributed::consistent_hash::select_hrw(
+            available.iter().copied(),
+            &key,
+            self.hash_ring_salt,
+            |endpoint| &endpoint.id,
+            |endpoint| endpoint.weight.max(1),
+        );
+        let eligible = crate::distributed::consistent_hash::select_hrw(
+            available
+                .iter()
+                .copied()
+                .filter(|endpoint| self.bounded_load_config.accepts(endpoint)),
+            &key,
+            self.hash_ring_salt,
+            |endpoint| &endpoint.id,
+            |endpoint| endpoint.weight.max(1),
+        );
+        eligible.or(primary)
+    }
+
+    fn select_n_bounded_load_hash<'a>(
+        &self,
+        available: &[&'a Arc<Endpoint>],
+        count: usize,
+        object_id: ObjectId,
+    ) -> Vec<&'a Arc<Endpoint>> {
+        if count == 0 {
+            return Vec::new();
+        }
+
+        let key = object_id.as_u128();
+        let eligible = available
+            .iter()
+            .copied()
+            .filter(|endpoint| self.bounded_load_config.accepts(endpoint));
+        let mut selected = crate::distributed::consistent_hash::select_top_k_hrw(
+            eligible,
+            count,
+            &key,
+            self.hash_ring_salt,
+            |endpoint| &endpoint.id,
+            |endpoint| endpoint.weight.max(1),
+        );
+
+        if selected.len() >= count {
+            return selected;
+        }
+
+        let mut selected_ids = SmallVec::<[EndpointId; 16]>::new();
+        selected_ids.extend(selected.iter().map(|endpoint| endpoint.id));
+        let remaining = count - selected.len();
+        let mut fallback = crate::distributed::consistent_hash::select_top_k_hrw(
+            available
+                .iter()
+                .copied()
+                .filter(|endpoint| !selected_ids.contains(&endpoint.id)),
+            remaining,
+            &key,
+            self.hash_ring_salt,
+            |endpoint| &endpoint.id,
+            |endpoint| endpoint.weight.max(1),
+        );
+        selected.append(&mut fallback);
+        selected
     }
 
     /// Selects an endpoint based on the routing strategy.
@@ -605,6 +903,23 @@ impl LoadBalancer {
                             |endpoint| endpoint.weight.max(1),
                         )
                     },
+                )
+            }
+            LoadBalanceStrategy::BoundedLoadHash => {
+                let healthy: Vec<&Arc<Endpoint>> = endpoints
+                    .iter()
+                    .filter(|e| e.state().can_receive())
+                    .collect();
+                if healthy.is_empty() {
+                    return None;
+                }
+                object_id.map_or_else(
+                    || {
+                        let idx = (self.rr_counter.fetch_add(1, Ordering::Relaxed) as usize)
+                            % healthy.len();
+                        Some(healthy[idx])
+                    },
+                    |oid| self.select_bounded_load_hash(&healthy, oid),
                 )
             }
             LoadBalanceStrategy::FirstAvailable => {
@@ -842,6 +1157,17 @@ impl LoadBalancer {
                     )
                 },
             ),
+            LoadBalanceStrategy::BoundedLoadHash => object_id.map_or_else(
+                || {
+                    let start_idx =
+                        self.rr_counter.fetch_add(count as u64, Ordering::Relaxed) as usize;
+                    let len = available.len();
+                    (0..count)
+                        .map(|i| available[(start_idx + i) % len])
+                        .collect()
+                },
+                |oid| self.select_n_bounded_load_hash(&available, count, oid),
+            ),
             LoadBalanceStrategy::WeightedRoundRobin => {
                 self.select_n_weighted_round_robin(&available, count)
             }
@@ -965,6 +1291,18 @@ impl RoutingEntry {
     #[must_use]
     pub fn with_strategy(mut self, strategy: LoadBalanceStrategy) -> Self {
         self.load_balancer = Arc::new(LoadBalancer::new(strategy));
+        self
+    }
+
+    /// Sets the bounded-load capacity policy for this route.
+    #[must_use]
+    pub fn with_bounded_load_config(mut self, config: BoundedLoadConfig) -> Self {
+        let load_balancer = LoadBalancer::with_seed(
+            self.load_balancer.strategy,
+            self.load_balancer.hash_ring_salt(),
+        )
+        .with_bounded_load_config(config);
+        self.load_balancer = Arc::new(load_balancer);
         self
     }
 
@@ -2217,6 +2555,24 @@ mod tests {
         Endpoint::new(EndpointId(id), format!("node-{id}:8080"))
     }
 
+    fn object_id_for_hash_primary(
+        seed: u64,
+        endpoints: &[Arc<Endpoint>],
+        target: EndpointId,
+    ) -> ObjectId {
+        let lb = LoadBalancer::with_seed(LoadBalanceStrategy::HashBased, seed);
+        for key in 0..10_000 {
+            let object_id = ObjectId::new_for_test(key);
+            if lb
+                .select(endpoints, Some(object_id))
+                .is_some_and(|endpoint| endpoint.id == target)
+            {
+                return object_id;
+            }
+        }
+        panic!("fixture could not find object id for primary {target}");
+    }
+
     fn test_authenticated_symbol(esi: u32) -> AuthenticatedSymbol {
         let id = SymbolId::new_for_test(1, 0, esi);
         let symbol = Symbol::new(id, vec![esi as u8], SymbolKind::Source);
@@ -2622,6 +2978,236 @@ mod tests {
         assert_eq!(unique_original.len(), original_selected.len());
         let unique_churn: HashSet<_> = churn_selected.iter().copied().collect();
         assert_eq!(unique_churn.len(), churn_selected.len());
+    }
+
+    #[test]
+    fn test_bounded_load_hash_keeps_primary_when_within_capacity() {
+        let seed = 0xB011_D1ED_u64;
+        let config = BoundedLoadConfig::new(0, 1, 1);
+        let hash_lb = LoadBalancer::with_seed(LoadBalanceStrategy::HashBased, seed);
+        let bounded_lb = LoadBalancer::with_seed(LoadBalanceStrategy::BoundedLoadHash, seed)
+            .with_bounded_load_config(config);
+        let endpoints: Vec<Arc<Endpoint>> = (1..=4)
+            .map(|id| Arc::new(test_endpoint(id).with_weight(2)))
+            .collect();
+        let object_id = ObjectId::new_for_test(42);
+
+        let primary = hash_lb
+            .select(&endpoints, Some(object_id))
+            .expect("hash primary");
+        let selected = bounded_lb
+            .select(&endpoints, Some(object_id))
+            .expect("bounded-load selection");
+        let decision = bounded_lb.bounded_load_decision(&endpoints, Some(object_id));
+
+        assert_eq!(selected.id, primary.id);
+        assert_eq!(decision.primary, Some(primary.id));
+        assert_eq!(decision.selected, Some(primary.id));
+        assert_eq!(
+            decision.reason,
+            BoundedLoadRebalanceReason::PrimaryWithinCapacity
+        );
+    }
+
+    #[test]
+    fn test_bounded_load_hash_rebalances_over_capacity_primary() {
+        let seed = 0xB011_D1ED_u64;
+        let config = BoundedLoadConfig::new(0, 1, 1);
+        let bounded_lb = LoadBalancer::with_seed(LoadBalanceStrategy::BoundedLoadHash, seed)
+            .with_bounded_load_config(config);
+        let endpoints: Vec<Arc<Endpoint>> = (1..=4)
+            .map(|id| Arc::new(test_endpoint(id).with_weight(1)))
+            .collect();
+        let primary_id = EndpointId::new(1);
+        let object_id = object_id_for_hash_primary(seed, &endpoints, primary_id);
+        endpoints[0].active_connections.store(1, Ordering::Relaxed);
+
+        let selected = bounded_lb
+            .select(&endpoints, Some(object_id))
+            .expect("bounded-load selection");
+        let decision = bounded_lb.bounded_load_decision(&endpoints, Some(object_id));
+        let primary_telemetry = decision
+            .endpoints
+            .iter()
+            .find(|endpoint| endpoint.endpoint_id == primary_id)
+            .expect("primary telemetry");
+
+        assert_ne!(selected.id, primary_id);
+        assert_eq!(decision.primary, Some(primary_id));
+        assert_eq!(decision.selected, Some(selected.id));
+        assert_eq!(
+            decision.reason,
+            BoundedLoadRebalanceReason::PrimaryOverCapacityRebalanced
+        );
+        assert_eq!(primary_telemetry.actual_load, 1);
+        assert_eq!(primary_telemetry.capacity, 1);
+        assert!(!primary_telemetry.within_capacity);
+    }
+
+    #[test]
+    fn test_bounded_load_hash_all_over_capacity_falls_back_to_primary() {
+        let seed = 0xB011_D1ED_u64;
+        let config = BoundedLoadConfig::new(0, 1, 1);
+        let hash_lb = LoadBalancer::with_seed(LoadBalanceStrategy::HashBased, seed);
+        let bounded_lb = LoadBalancer::with_seed(LoadBalanceStrategy::BoundedLoadHash, seed)
+            .with_bounded_load_config(config);
+        let endpoints: Vec<Arc<Endpoint>> = (1..=4)
+            .map(|id| Arc::new(test_endpoint(id).with_weight(1)))
+            .collect();
+        for endpoint in &endpoints {
+            endpoint.active_connections.store(1, Ordering::Relaxed);
+        }
+        let object_id = ObjectId::new_for_test(777);
+
+        let primary = hash_lb
+            .select(&endpoints, Some(object_id))
+            .expect("hash primary");
+        let selected = bounded_lb
+            .select(&endpoints, Some(object_id))
+            .expect("bounded-load selection");
+        let decision = bounded_lb.bounded_load_decision(&endpoints, Some(object_id));
+
+        assert_eq!(selected.id, primary.id);
+        assert_eq!(decision.primary, Some(primary.id));
+        assert_eq!(decision.selected, Some(primary.id));
+        assert_eq!(
+            decision.reason,
+            BoundedLoadRebalanceReason::AllEndpointsOverCapacityFallback
+        );
+        assert!(
+            decision
+                .endpoints
+                .iter()
+                .all(|endpoint| !endpoint.within_capacity)
+        );
+    }
+
+    #[test]
+    fn test_bounded_load_hash_select_n_prefers_under_capacity_unique_endpoints() {
+        let seed = 0xB011_D1ED_u64;
+        let config = BoundedLoadConfig::new(0, 1, 1);
+        let bounded_lb = LoadBalancer::with_seed(LoadBalanceStrategy::BoundedLoadHash, seed)
+            .with_bounded_load_config(config);
+        let endpoints: Vec<Arc<Endpoint>> = (1..=5)
+            .map(|id| Arc::new(test_endpoint(id).with_weight(1)))
+            .collect();
+        endpoints[0].active_connections.store(1, Ordering::Relaxed);
+        endpoints[1].active_connections.store(1, Ordering::Relaxed);
+
+        let selected = bounded_lb.select_n(&endpoints, 3, Some(ObjectId::new_for_test(99)));
+        let unique: HashSet<_> = selected.iter().map(|endpoint| endpoint.id).collect();
+
+        assert_eq!(selected.len(), 3);
+        assert_eq!(unique.len(), selected.len());
+        assert!(
+            selected
+                .iter()
+                .all(|endpoint| endpoint.connection_count() < config.capacity_for(endpoint)),
+            "select_n should fill from under-capacity endpoints when enough are available"
+        );
+    }
+
+    #[test]
+    fn test_bounded_load_hash_preserves_survivors_under_endpoint_removal() {
+        let lb = LoadBalancer::with_seed(LoadBalanceStrategy::BoundedLoadHash, 0x0057_AF1D_u64)
+            .with_bounded_load_config(BoundedLoadConfig::new(250, 1, 1));
+        let endpoints_full: Vec<Arc<Endpoint>> =
+            (1..=16).map(|i| Arc::new(test_endpoint(i))).collect();
+        let initial: Vec<EndpointId> = (0..1024)
+            .map(|key| {
+                lb.select(&endpoints_full, Some(ObjectId::new_for_test(key)))
+                    .expect("initial bounded-load route")
+                    .id
+            })
+            .collect();
+
+        let endpoints_minus1: Vec<Arc<Endpoint>> = endpoints_full[..15].to_vec();
+        let after_remove: Vec<EndpointId> = (0..1024)
+            .map(|key| {
+                lb.select(&endpoints_minus1, Some(ObjectId::new_for_test(key)))
+                    .expect("bounded-load route after removal")
+                    .id
+            })
+            .collect();
+
+        let stickies = initial
+            .iter()
+            .zip(after_remove.iter())
+            .filter(|(before, after)| before == after)
+            .count();
+        let removed_id = endpoints_full[15].id;
+        let mismatches = initial
+            .iter()
+            .zip(after_remove.iter())
+            .filter(|(before, after)| **before != removed_id && before != after)
+            .count();
+
+        assert!(
+            stickies >= 800,
+            "bounded-load HRW should preserve sticky routing for >= 80% of keys after removal; got {stickies}/1024"
+        );
+        assert!(
+            mismatches <= 51,
+            "bounded-load HRW should not churn surviving primaries; got {mismatches}/1024"
+        );
+    }
+
+    #[test]
+    fn test_bounded_load_hash_skew_scenario_logs_operator_artifact() {
+        let seed = 0x51A0_B0A7_u64;
+        let config = BoundedLoadConfig::new(0, 1, 2);
+        let bounded_lb = LoadBalancer::with_seed(LoadBalanceStrategy::BoundedLoadHash, seed)
+            .with_bounded_load_config(config);
+        let endpoints: Vec<Arc<Endpoint>> = (1..=4)
+            .map(|id| Arc::new(test_endpoint(id).with_weight(1)))
+            .collect();
+        let primary_id = EndpointId::new(1);
+        let object_id = object_id_for_hash_primary(seed, &endpoints, primary_id);
+        endpoints[0].active_connections.store(5, Ordering::Relaxed);
+        endpoints[1].active_connections.store(1, Ordering::Relaxed);
+        endpoints[2].active_connections.store(0, Ordering::Relaxed);
+        endpoints[3].active_connections.store(0, Ordering::Relaxed);
+
+        let decision = bounded_lb.bounded_load_decision(&endpoints, Some(object_id));
+        let artifact = json!({
+            "scenario": "bounded_load_hash_hot_primary",
+            "seed": seed,
+            "object_id": format!("{:?}", object_id),
+            "config": {
+                "epsilon_milli": config.epsilon_milli,
+                "min_capacity": config.min_capacity,
+                "capacity_per_weight": config.capacity_per_weight,
+            },
+            "primary": decision.primary.map(|id| id.to_string()),
+            "selected": decision.selected.map(|id| id.to_string()),
+            "reason": format!("{:?}", decision.reason),
+            "endpoints": decision
+                .endpoints
+                .iter()
+                .map(|endpoint| json!({
+                    "endpoint_id": endpoint.endpoint_id.to_string(),
+                    "actual_load": endpoint.actual_load,
+                    "capacity": endpoint.capacity,
+                    "within_capacity": endpoint.within_capacity,
+                    "is_primary": endpoint.is_primary,
+                    "is_selected": endpoint.is_selected,
+                }))
+                .collect::<Vec<_>>(),
+        });
+        println!(
+            "bounded_load_hash_skew_artifact={}",
+            serde_json::to_string_pretty(&artifact).expect("artifact is json")
+        );
+
+        assert_eq!(decision.primary, Some(primary_id));
+        assert_ne!(decision.selected, Some(primary_id));
+        assert_eq!(
+            decision.reason,
+            BoundedLoadRebalanceReason::PrimaryOverCapacityRebalanced
+        );
+        assert!(decision.endpoints.iter().any(|endpoint| {
+            endpoint.is_selected && endpoint.within_capacity && endpoint.endpoint_id != primary_id
+        }));
     }
 
     #[test]

@@ -29,9 +29,10 @@ pub use mock::{
     SimTransportConfig, sim_channel,
 };
 pub use router::{
-    DispatchConfig, DispatchError, DispatchResult, DispatchStrategy, Endpoint, EndpointId,
-    EndpointState, LoadBalanceStrategy, LoadBalancer, RouteKey, RouteResult, RoutingEntry,
-    RoutingError, RoutingTable, SymbolDispatcher, SymbolRouter,
+    BoundedLoadConfig, BoundedLoadDecision, BoundedLoadEndpointTelemetry,
+    BoundedLoadRebalanceReason, DispatchConfig, DispatchError, DispatchResult, DispatchStrategy,
+    Endpoint, EndpointId, EndpointState, LoadBalanceStrategy, LoadBalancer, RouteKey, RouteResult,
+    RoutingEntry, RoutingError, RoutingTable, SymbolDispatcher, SymbolRouter,
 };
 pub use sink::{SymbolSink, SymbolSinkExt};
 pub use stream::{SymbolStream, SymbolStreamExt};
