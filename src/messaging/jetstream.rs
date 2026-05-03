@@ -563,6 +563,13 @@ impl ConsumerConfig {
         self
     }
 
+    /// Set maximum unacknowledged messages the server should allow.
+    #[must_use]
+    pub fn max_ack_pending(mut self, max_ack_pending: i64) -> Self {
+        self.max_ack_pending = max_ack_pending;
+        self
+    }
+
     fn validate(&mut self) -> Result<(), JsError> {
         self.normalize_identity()?;
         if let Some(deliver_subject) = self.deliver_subject.as_deref() {
@@ -4648,8 +4655,7 @@ mod tests {
             // Our client correctly configures ack_wait but does not implement timeout logic -
             // this is server responsibility per JetStream architecture.
 
-            let config = ConsumerConfig::new("timeout_test")
-                .ack_wait(Duration::from_secs(5));  // 5 second timeout
+            let config = ConsumerConfig::new("timeout_test").ack_wait(Duration::from_secs(5)); // 5 second timeout
 
             assert_eq!(config.ack_wait, Duration::from_secs(5));
             // Client configures server-side timeout but does not handle timeout itself
@@ -4664,8 +4670,8 @@ mod tests {
             let msg_original = JsMessage {
                 subject: "orders.process".to_string(),
                 payload: b"{\"order_id\": 12345}".to_vec(),
-                sequence: 100,      // Stream sequence - stable across redeliveries
-                delivered: 1,       // First delivery attempt
+                sequence: 100, // Stream sequence - stable across redeliveries
+                delivered: 1,  // First delivery attempt
                 reply_subject: "$JS.ACK.orders.processor.1.100.15.1234567890.0".to_string(),
                 ack_state: AtomicU8::new(ACK_STATE_PENDING),
                 pending_acks: None,
@@ -4675,8 +4681,8 @@ mod tests {
             let msg_redelivered = JsMessage {
                 subject: "orders.process".to_string(),
                 payload: b"{\"order_id\": 12345}".to_vec(),
-                sequence: 100,      // SAME sequence - logical message identity preserved
-                delivered: 2,       // Incremented delivery count
+                sequence: 100, // SAME sequence - logical message identity preserved
+                delivered: 2,  // Incremented delivery count
                 reply_subject: "$JS.ACK.orders.processor.1.100.15.1234567890.1".to_string(),
                 ack_state: AtomicU8::new(ACK_STATE_PENDING),
                 pending_acks: None,
@@ -4688,11 +4694,13 @@ mod tests {
 
             // Applications should implement: "if I've processed sequence 100, skip this redelivery"
             let application_processed_sequences = std::collections::HashSet::from([100u64]);
-            let should_process_original = !application_processed_sequences.contains(&msg_original.sequence);
-            let should_process_redelivered = !application_processed_sequences.contains(&msg_redelivered.sequence);
+            let should_process_original =
+                !application_processed_sequences.contains(&msg_original.sequence);
+            let should_process_redelivered =
+                !application_processed_sequences.contains(&msg_redelivered.sequence);
 
             assert!(should_process_original);
-            assert!(!should_process_redelivered);  // Idempotent - skip redelivery
+            assert!(!should_process_redelivered); // Idempotent - skip redelivery
         }
 
         #[test]
@@ -4701,7 +4709,7 @@ mod tests {
             // to prevent unbounded redelivery during ack timeout scenarios
 
             let config = ConsumerConfig::new("flow_test")
-                .max_ack_pending(100)   // Limit pending acks
+                .max_ack_pending(100) // Limit pending acks
                 .ack_wait(Duration::from_secs(10));
 
             assert_eq!(config.max_ack_pending, 100);
@@ -4748,10 +4756,13 @@ mod tests {
             };
 
             // Sequence 102 arrives before 101 (due to redelivery timing)
-            fuzz_apply_ordered_consumer_step(&mut state, FuzzOrderedConsumerStep::Observe {
-                sequence: 102,
-                delivered: 1
-            });
+            fuzz_apply_ordered_consumer_step(
+                &mut state,
+                FuzzOrderedConsumerStep::Observe {
+                    sequence: 102,
+                    delivered: 1,
+                },
+            );
 
             // Ordered consumer detects gap and triggers reset
             assert_eq!(state.phase, FuzzOrderedConsumerPhase::ResetPending);
@@ -4769,7 +4780,7 @@ mod tests {
                 subject: "test".to_string(),
                 payload: vec![],
                 sequence: 1,
-                delivered: 2,  // Redelivered message
+                delivered: 2, // Redelivered message
                 reply_subject: "$JS.ACK.test.consumer.1.1.2.1234567890.0".to_string(),
                 ack_state: AtomicU8::new(ACK_STATE_PENDING),
                 pending_acks: None,
@@ -5081,3 +5092,11 @@ mod tests {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "jetstream_dedup_boundary_audit.rs"]
+mod jetstream_dedup_boundary_audit;
+
+#[cfg(test)]
+#[path = "jetstream_flow_control_audit.rs"]
+mod jetstream_flow_control_audit;
