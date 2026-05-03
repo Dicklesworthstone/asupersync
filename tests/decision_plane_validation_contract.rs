@@ -6,11 +6,18 @@
 
 use serde_json::Value;
 use std::collections::BTreeSet;
+use std::fs;
 use std::path::{Path, PathBuf};
 
 const DOC_PATH: &str = "docs/decision_plane_validation_contract.md";
 const ARTIFACT_PATH: &str = "artifacts/decision_plane_validation_v1.json";
 const RUNNER_SCRIPT_PATH: &str = "scripts/run_decision_plane_validation_smoke.sh";
+const CONTROLLER_LEDGER_ARTIFACT_OUT_ENV: &str = "ASUPERSYNC_CONTROLLER_LEDGER_ARTIFACT_OUT";
+const CONTROLLER_LEDGER_PLANNER_ROWS_OUT_ENV: &str =
+    "ASUPERSYNC_CONTROLLER_LEDGER_PLANNER_ROWS_OUT";
+const CONTROLLER_LEDGER_STDOUT_ENV: &str = "ASUPERSYNC_CONTROLLER_LEDGER_STDOUT";
+const CONTROLLER_LEDGER_PLANNER_ROWS_STDOUT_ENV: &str =
+    "ASUPERSYNC_CONTROLLER_LEDGER_PLANNER_ROWS_STDOUT";
 
 fn repo_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -368,6 +375,30 @@ fn smoke_scenarios_are_rch_routed() {
 }
 
 #[test]
+fn controller_ledger_smoke_scenario_declares_expected_artifacts() {
+    let artifact = load_artifact();
+    let scenario = artifact["smoke_scenarios"]
+        .as_array()
+        .expect("smoke_scenarios must be array")
+        .iter()
+        .find(|scenario| scenario["scenario_id"].as_str() == Some("AA023-SMOKE-CONTROLLER-LEDGER"))
+        .expect("controller-ledger smoke scenario must exist");
+    let expected_artifacts: Vec<String> = scenario["expected_artifacts"]
+        .as_array()
+        .expect("expected_artifacts must be array")
+        .iter()
+        .map(|value| value.as_str().unwrap().to_string())
+        .collect();
+    assert_eq!(
+        expected_artifacts,
+        vec![
+            ".decision-plane-validation-smoke-artifacts/run_*/AA023-SMOKE-CONTROLLER-LEDGER/controller_snapshot_ledger.json",
+            ".decision-plane-validation-smoke-artifacts/run_*/AA023-SMOKE-CONTROLLER-LEDGER/controller_snapshot_planner_rows.json",
+        ]
+    );
+}
+
+#[test]
 fn runner_script_exists_and_declares_modes() {
     let root = repo_root();
     let script_path = root.join(RUNNER_SCRIPT_PATH);
@@ -384,6 +415,13 @@ fn runner_script_exists_and_declares_modes() {
         "controller_snapshot_ledger_top_level_fields",
         "controller_snapshot_ledger_controller_fields",
         "controller_snapshot_ledger_planner_render_order",
+        "ASUPERSYNC_CONTROLLER_LEDGER_STDOUT",
+        "ASUPERSYNC_CONTROLLER_LEDGER_PLANNER_ROWS_STDOUT",
+        "ASUPERSYNC_CONTROLLER_LEDGER_JSON=",
+        "ASUPERSYNC_CONTROLLER_LEDGER_PLANNER_ROWS_JSON=",
+        "extract_log_json_artifact",
+        "controller_snapshot_ledger_artifact_path",
+        "controller_snapshot_planner_rows_artifact_path",
     ] {
         assert!(script.contains(token), "runner missing token: {token}");
     }
@@ -480,6 +518,27 @@ fn planner_row(controller_json: &Value, fields: &[String]) -> Vec<String> {
             },
         )
         .collect()
+}
+
+fn maybe_write_json_artifact<T: serde::Serialize>(env_key: &str, value: &T) {
+    let Ok(raw_path) = std::env::var(env_key) else {
+        return;
+    };
+    let path = repo_root().join(raw_path);
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).expect("artifact parent directory must be creatable");
+    }
+    let payload =
+        serde_json::to_string_pretty(value).expect("artifact payload must serialize to JSON");
+    fs::write(&path, payload).expect("artifact payload must be writable");
+}
+
+fn maybe_emit_json_stdout<T: serde::Serialize>(env_key: &str, prefix: &str, value: &T) {
+    if std::env::var(env_key).is_err() {
+        return;
+    }
+    let payload = serde_json::to_string(value).expect("stdout artifact payload must serialize");
+    println!("{prefix}{payload}");
 }
 
 #[test]
@@ -1132,6 +1191,7 @@ fn controller_snapshot_ledger_multi_controller_rendering_is_stable() {
     let render_order = controller_snapshot_planner_render_order();
     let ledger_json = serde_json::to_value(&ledger).expect("ledger must serialize");
     let primary_row = planner_row(&ledger_json["controllers"][0], &render_order);
+    let secondary_row = planner_row(&ledger_json["controllers"][1], &render_order);
     assert_eq!(
         primary_row,
         vec![
@@ -1148,5 +1208,46 @@ fn controller_snapshot_ledger_multi_controller_rendering_is_stable() {
             "0",
             "null",
         ]
+    );
+    assert_eq!(
+        secondary_row,
+        vec![
+            "secondary-ledger",
+            "Hold",
+            "0.0",
+            "0.73",
+            "1",
+            "false",
+            "held",
+            "8",
+            "11",
+            "0",
+            "0",
+            "null",
+        ]
+    );
+
+    maybe_write_json_artifact(CONTROLLER_LEDGER_ARTIFACT_OUT_ENV, &ledger);
+    maybe_write_json_artifact(
+        CONTROLLER_LEDGER_PLANNER_ROWS_OUT_ENV,
+        &serde_json::json!({
+            "scenario_id": "AA023-CONTROLLER-LEDGER-MULTI-CONTROLLER",
+            "planner_render_order": render_order,
+            "rendered_rows": [primary_row, secondary_row],
+        }),
+    );
+    maybe_emit_json_stdout(
+        CONTROLLER_LEDGER_STDOUT_ENV,
+        "ASUPERSYNC_CONTROLLER_LEDGER_JSON=",
+        &ledger,
+    );
+    maybe_emit_json_stdout(
+        CONTROLLER_LEDGER_PLANNER_ROWS_STDOUT_ENV,
+        "ASUPERSYNC_CONTROLLER_LEDGER_PLANNER_ROWS_JSON=",
+        &serde_json::json!({
+            "scenario_id": "AA023-CONTROLLER-LEDGER-MULTI-CONTROLLER",
+            "planner_render_order": render_order,
+            "rendered_rows": [primary_row, secondary_row],
+        }),
     );
 }

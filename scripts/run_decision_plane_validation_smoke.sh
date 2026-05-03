@@ -9,6 +9,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
 CONTRACT_ARTIFACT="${PROJECT_ROOT}/artifacts/decision_plane_validation_v1.json"
 OUTPUT_ROOT="${DECISION_PLANE_SMOKE_OUTPUT_DIR:-${PROJECT_ROOT}/target/decision-plane-validation-smoke}"
+ARTIFACT_MIRROR_ROOT="${DECISION_PLANE_SMOKE_ARTIFACT_ROOT:-${PROJECT_ROOT}/.decision-plane-validation-smoke-artifacts}"
 TIMESTAMP="$(date +%Y%m%d_%H%M%S)"
 RUN_DIR="${OUTPUT_ROOT}/run_${TIMESTAMP}"
 LIST_ONLY=0
@@ -94,6 +95,28 @@ append_result() {
     fi
 }
 
+manifest_path_value() {
+    local path="$1"
+    if [[ "$path" == "${PROJECT_ROOT}/"* ]]; then
+        printf '%s\n' "${path#${PROJECT_ROOT}/}"
+    else
+        printf '%s\n' "$path"
+    fi
+}
+
+extract_log_json_artifact() {
+    local prefix="$1"
+    local log_file="$2"
+    local output_file="$3"
+    local line payload
+    line="$(grep -F "$prefix" "$log_file" | tail -n1 || true)"
+    if [[ -z "$line" ]]; then
+        return 1
+    fi
+    payload="${line#"$prefix"}"
+    printf '%s\n' "$payload" | jq '.' > "$output_file"
+}
+
 run_scenario() {
     local sid="$1"
     local scenario_json
@@ -103,16 +126,21 @@ run_scenario() {
         return 1
     fi
 
-    local description command
+    local description command expected_artifacts
     description="$(jq -r '.description' <<<"$scenario_json")"
     command="$(jq -r '.command' <<<"$scenario_json")"
+    expected_artifacts="$(jq -c '.expected_artifacts // []' <<<"$scenario_json")"
 
     local scenario_dir="${RUN_DIR}/${sid}"
     local log_file="${scenario_dir}/run.log"
     local summary_file="${scenario_dir}/bundle_manifest.json"
+    local artifact_mirror_dir="${ARTIFACT_MIRROR_ROOT}/run_${TIMESTAMP}/${sid}"
+    local controller_ledger_artifact="${artifact_mirror_dir}/controller_snapshot_ledger.json"
+    local planner_rows_artifact="${artifact_mirror_dir}/controller_snapshot_planner_rows.json"
+    local command_for_execution="$command"
     local started_ts ended_ts status rc
 
-    mkdir -p "$scenario_dir"
+    mkdir -p "$scenario_dir" "$artifact_mirror_dir"
     started_ts="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 
     echo ">>> Running scenario ${sid}"
@@ -124,10 +152,27 @@ run_scenario() {
         rc=0
         status="dry_run"
     else
+        if [[ "$sid" == "AA023-SMOKE-CONTROLLER-LEDGER" ]]; then
+            command_for_execution="${command/rch exec -- env /rch exec -- env ASUPERSYNC_CONTROLLER_LEDGER_STDOUT=1 ASUPERSYNC_CONTROLLER_LEDGER_PLANNER_ROWS_STDOUT=1 }"
+        fi
         rc=0
-        eval "$command" > "$log_file" 2>&1 || rc=$?
+        eval "$command_for_execution" > "$log_file" 2>&1 || rc=$?
         if [[ "$rc" -eq 0 ]]; then
-            status="passed"
+            if [[ "$sid" == "AA023-SMOKE-CONTROLLER-LEDGER" ]]; then
+                if ! extract_log_json_artifact "ASUPERSYNC_CONTROLLER_LEDGER_JSON=" "$log_file" "$controller_ledger_artifact"; then
+                    echo "FATAL: controller ledger artifact marker missing from run log" >> "$log_file"
+                    rc=1
+                fi
+                if ! extract_log_json_artifact "ASUPERSYNC_CONTROLLER_LEDGER_PLANNER_ROWS_JSON=" "$log_file" "$planner_rows_artifact"; then
+                    echo "FATAL: planner rows artifact marker missing from run log" >> "$log_file"
+                    rc=1
+                fi
+            fi
+            if [[ "$rc" -eq 0 ]]; then
+                status="passed"
+            else
+                status="failed"
+            fi
         else
             status="failed"
         fi
@@ -146,6 +191,9 @@ run_scenario() {
   "scenario_id": "$(json_escape "$sid")",
   "description": "$(json_escape "$description")",
   "command": "$(json_escape "$command")",
+  "expected_artifacts": ${expected_artifacts},
+  "controller_snapshot_ledger_artifact_path": $( [[ -f "$controller_ledger_artifact" ]] && printf '"%s"' "$(json_escape "$(manifest_path_value "$controller_ledger_artifact")")" || printf 'null' ),
+  "controller_snapshot_planner_rows_artifact_path": $( [[ -f "$planner_rows_artifact" ]] && printf '"%s"' "$(json_escape "$(manifest_path_value "$planner_rows_artifact")")" || printf 'null' ),
   "artifact_path": "$(json_escape "$summary_file")",
   "run_log_path": "$(json_escape "$log_file")",
   "status": "$(json_escape "$status")",
