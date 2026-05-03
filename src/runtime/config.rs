@@ -33,6 +33,7 @@ use crate::record::RegionLimits;
 use crate::runtime::deadline_monitor::{DeadlineWarning, MonitorConfig};
 use crate::trace::distributed::LogicalClockMode;
 use crate::types::CancelAttributionConfig;
+use sha2::{Digest, Sha256};
 use std::fmt;
 use std::str::FromStr;
 use std::sync::Arc;
@@ -2348,6 +2349,967 @@ impl CapacityEnvelopeCertificate {
     pub fn used_safe_fallback(&self) -> bool {
         self.selected_profile == self.fallback_profile && !self.refusal_reasons.is_empty()
     }
+}
+
+/// Integrity mode for operator-facing profile bundles.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SignedProfileBundleIntegrityMode {
+    /// Digest-only integrity; no asymmetric signing primitive is wired yet.
+    DigestOnlySha256,
+}
+
+impl SignedProfileBundleIntegrityMode {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::DigestOnlySha256 => "digest_only_sha256",
+        }
+    }
+}
+
+impl fmt::Display for SignedProfileBundleIntegrityMode {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// Execution posture requested by the bundle runner.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SignedProfileBundleExecutionMode {
+    /// Emit the bundle and receipt only; do not model an apply step.
+    DryRun,
+    /// Verify the emitted bundle for tamper or structural drift.
+    Verify,
+}
+
+impl SignedProfileBundleExecutionMode {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::DryRun => "dry_run",
+            Self::Verify => "verify",
+        }
+    }
+}
+
+impl fmt::Display for SignedProfileBundleExecutionMode {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// One controller-version claim embedded in the bundle manifest.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SignedProfileBundleControllerVersion {
+    /// Controller surface name.
+    pub controller: String,
+    /// Version string emitted by the controller proof surface.
+    pub contract_version: String,
+}
+
+impl SignedProfileBundleControllerVersion {
+    fn validate(&self, label: &str) -> Result<(), String> {
+        validate_slug_like(&self.controller, &format!("{label} controller"))?;
+        if self.contract_version.trim().is_empty() {
+            return Err(format!("{label} contract_version must not be empty"));
+        }
+        Ok(())
+    }
+}
+
+/// Deterministic digest of one child proof surface.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SignedProfileBundleChildEvidenceHash {
+    /// Controller surface name.
+    pub controller: String,
+    /// Referenced artifact path.
+    pub artifact_id: String,
+    /// Stable digest of the child proof reference.
+    pub digest_sha256: String,
+}
+
+impl SignedProfileBundleChildEvidenceHash {
+    fn validate(&self) -> Result<(), String> {
+        validate_slug_like(&self.controller, "child evidence controller")?;
+        validate_artifact_json_path(&self.artifact_id, "child evidence artifact_id")?;
+        if !is_hex_digest(&self.digest_sha256) {
+            return Err(
+                "child evidence digest_sha256 must be a 64-character hexadecimal digest"
+                    .to_string(),
+            );
+        }
+        Ok(())
+    }
+}
+
+/// Capacity certificate reference embedded in the signed bundle.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SignedProfileBundleCapacityCertificateReference {
+    /// Referenced artifact path.
+    pub artifact_id: String,
+    /// Contract version for the certificate runner.
+    pub contract_version: String,
+    /// Scenario identifier inside the certificate contract.
+    pub scenario_id: String,
+}
+
+impl SignedProfileBundleCapacityCertificateReference {
+    fn validate(&self) -> Result<(), String> {
+        validate_artifact_json_path(&self.artifact_id, "capacity certificate artifact_id")?;
+        if self.contract_version.trim().is_empty() {
+            return Err("capacity certificate contract_version must not be empty".to_string());
+        }
+        if self.scenario_id.trim().is_empty() {
+            return Err("capacity certificate scenario_id must not be empty".to_string());
+        }
+        Ok(())
+    }
+}
+
+/// Canonical request for a profile-bundle manifest and rollback receipt.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SignedProfileBundleManifestRequest {
+    /// Automatic recommendation objective.
+    pub objective: HostProfilePlannerObjective,
+    /// Optional explicit profile request.
+    pub requested_profile: Option<HostProfileId>,
+    /// Host resources for the target deployment.
+    pub host_resources: HostProfileHostResources,
+    /// Controller proof surfaces available to the planner.
+    pub controller_evidence: HostProfileEvidenceSet,
+    /// Manual overrides that must win over the profile bundle.
+    pub manual_overrides: HostProfileManualOverrides,
+    /// Requested host fingerprint for the target host.
+    pub host_fingerprint: CapacityEnvelopeHostFingerprint,
+    /// Measured evidence snapshot for the host.
+    pub evidence_snapshot: CapacityEnvelopeEvidenceSnapshot,
+    /// Capacity budget used by the downstream certificate planner.
+    pub capacity_budget: CapacityEnvelopeBudget,
+    /// Candidate worker counts for the capacity sweep.
+    pub candidate_worker_counts: Vec<usize>,
+    /// Candidate agent counts for the capacity sweep.
+    pub candidate_agent_counts: Vec<usize>,
+    /// Stable bundle identifier.
+    pub bundle_id: String,
+    /// Integrity mode exposed to operators.
+    pub integrity_mode: SignedProfileBundleIntegrityMode,
+    /// Classes of proof commands that justified the bundle.
+    pub proof_command_classes: Vec<String>,
+    /// Claimed controller versions for the manifest.
+    pub controller_versions: Vec<SignedProfileBundleControllerVersion>,
+    /// Supported-version allowlist used for verification.
+    pub supported_controller_versions: Vec<SignedProfileBundleControllerVersion>,
+    /// Referenced capacity certificate surface.
+    pub capacity_certificate_reference: SignedProfileBundleCapacityCertificateReference,
+    /// Previous runtime-config digest used for rollback.
+    pub previous_config_digest: String,
+    /// Rollback command template for the operator.
+    pub rollback_command_template: String,
+    /// Optional operator note, scrubbed before reporting.
+    pub operator_note: Option<String>,
+    /// Optional validation command summary, scrubbed before reporting.
+    pub validation_command: Option<String>,
+    /// Whether the operator must explicitly confirm application.
+    pub require_operator_confirmation: bool,
+    /// Requested execution posture.
+    pub execute_mode: SignedProfileBundleExecutionMode,
+    /// Optional field mutation used to prove tamper detection.
+    pub tamper_field: Option<String>,
+}
+
+impl SignedProfileBundleManifestRequest {
+    /// Build the canonical manifest, structural verification result, and rollback receipt.
+    #[must_use]
+    pub fn plan(&self) -> SignedProfileBundleBundle {
+        let host_profile_plan = HostProfilePlannerRequest {
+            objective: self.objective,
+            requested_profile: self.requested_profile,
+            host_resources: self.host_resources,
+            controller_evidence: self.controller_evidence.clone(),
+            manual_overrides: self.manual_overrides.clone(),
+            operator_note: self.operator_note.clone(),
+        }
+        .plan();
+
+        let capacity_certificate = CapacityEnvelopePlannerRequest {
+            objective: self.objective,
+            requested_profile: self.requested_profile,
+            host_resources: self.host_resources,
+            controller_evidence: self.controller_evidence.clone(),
+            manual_overrides: self.manual_overrides.clone(),
+            host_fingerprint: self.host_fingerprint.clone(),
+            evidence_snapshot: self.evidence_snapshot.clone(),
+            candidate_worker_counts: self.candidate_worker_counts.clone(),
+            candidate_agent_counts: self.candidate_agent_counts.clone(),
+            budget: self.capacity_budget,
+            budget_overrides: CapacityEnvelopeBudgetOverrides::default(),
+            environment_note: None,
+            validation_command: None,
+        }
+        .plan();
+
+        let bundle_plan =
+            if capacity_certificate.selected_profile == host_profile_plan.selected_profile {
+                host_profile_plan
+            } else {
+                HostProfilePlannerRequest {
+                    objective: self.objective,
+                    requested_profile: Some(capacity_certificate.selected_profile),
+                    host_resources: self.host_resources,
+                    controller_evidence: self.controller_evidence.clone(),
+                    manual_overrides: self.manual_overrides.clone(),
+                    operator_note: self.operator_note.clone(),
+                }
+                .plan()
+            };
+
+        let child_evidence_hashes =
+            build_signed_profile_bundle_child_evidence_hashes(&self.controller_evidence);
+        let feature_gates = build_signed_profile_bundle_feature_gates(&bundle_plan.final_bundle);
+        let integrity_limitations = vec![
+            "digest-only mode; no asymmetric signature primitive is currently wired for profile bundles"
+                .to_string(),
+        ];
+
+        let mut manifest = SignedProfileBundleManifest {
+            bundle_id: self.bundle_id.clone(),
+            objective: self.objective,
+            requested_profile: self.requested_profile,
+            selected_profile: capacity_certificate.selected_profile,
+            fallback_profile: capacity_certificate.fallback_profile,
+            used_safe_fallback: capacity_certificate.used_safe_fallback(),
+            planning_refusal_reasons: capacity_certificate.refusal_reasons.clone(),
+            requested_host_resources: self.host_resources,
+            host_fingerprint: self.host_fingerprint.clone(),
+            integrity_mode: self.integrity_mode,
+            integrity_limitations,
+            proof_command_classes: self.proof_command_classes.clone(),
+            feature_gates,
+            manual_override_fields: bundle_plan.manual_overrides_applied.clone(),
+            require_operator_confirmation: self.require_operator_confirmation,
+            profile_bundle_digest: runtime_config_digest(&bundle_plan.profile_bundle),
+            final_bundle_digest: runtime_config_digest(&bundle_plan.final_bundle),
+            config_diff_digest: host_profile_config_diff_digest(&bundle_plan.config_diff),
+            previous_config_digest: self.previous_config_digest.clone(),
+            rollback_command_template: self.rollback_command_template.clone(),
+            sanitized_operator_note: self.operator_note.as_deref().map(redact_sensitive_note),
+            sanitized_validation_command: self
+                .validation_command
+                .as_deref()
+                .map(redact_sensitive_note),
+            manifest_digest_sha256: String::new(),
+            capacity_certificate_reference: self.capacity_certificate_reference.clone(),
+            controller_versions: self.controller_versions.clone(),
+            supported_controller_versions: self.supported_controller_versions.clone(),
+            child_evidence_hashes,
+        };
+        manifest.manifest_digest_sha256 = manifest.compute_manifest_digest();
+        if let Some(field) = self.tamper_field.as_deref() {
+            tamper_signed_profile_bundle_manifest(&mut manifest, field);
+        }
+        let verification = manifest.verify(self.execute_mode, self.tamper_field.clone());
+        let rollback_receipt = SignedProfileBundleRollbackReceipt::from_manifest(&manifest);
+        SignedProfileBundleBundle {
+            manifest,
+            verification,
+            rollback_receipt,
+        }
+    }
+}
+
+/// Canonical bundle manifest consumed by operator tooling.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SignedProfileBundleManifest {
+    /// Stable bundle identifier.
+    pub bundle_id: String,
+    /// Automatic recommendation objective.
+    pub objective: HostProfilePlannerObjective,
+    /// Explicit requested profile, when supplied.
+    pub requested_profile: Option<HostProfileId>,
+    /// Selected profile after graceful fallback handling.
+    pub selected_profile: HostProfileId,
+    /// Conservative fallback profile.
+    pub fallback_profile: HostProfileId,
+    /// Whether the planner had to degrade to the fallback profile.
+    pub used_safe_fallback: bool,
+    /// Planning-time reasons for degrading conservatively.
+    pub planning_refusal_reasons: Vec<String>,
+    /// Requested host resources for the target deployment.
+    pub requested_host_resources: HostProfileHostResources,
+    /// Requested host fingerprint.
+    pub host_fingerprint: CapacityEnvelopeHostFingerprint,
+    /// Integrity mode exposed to the operator.
+    pub integrity_mode: SignedProfileBundleIntegrityMode,
+    /// Explicit integrity limitations for the selected mode.
+    pub integrity_limitations: Vec<String>,
+    /// Proof command classes that justified the bundle.
+    pub proof_command_classes: Vec<String>,
+    /// Enabled runtime feature gates captured by the bundle.
+    pub feature_gates: Vec<String>,
+    /// Manual override metadata that changed the final bundle.
+    pub manual_override_fields: Vec<String>,
+    /// Whether operator confirmation is required before apply.
+    pub require_operator_confirmation: bool,
+    /// Digest of the bundle before manual overrides.
+    pub profile_bundle_digest: String,
+    /// Digest of the final bundle after manual overrides.
+    pub final_bundle_digest: String,
+    /// Digest of the dry-run config diff.
+    pub config_diff_digest: String,
+    /// Previous runtime-config digest used for rollback.
+    pub previous_config_digest: String,
+    /// Rollback command template for operators.
+    pub rollback_command_template: String,
+    /// Secret-scrubbed operator note.
+    pub sanitized_operator_note: Option<String>,
+    /// Secret-scrubbed validation command summary.
+    pub sanitized_validation_command: Option<String>,
+    /// Digest over the manifest contents.
+    pub manifest_digest_sha256: String,
+    /// Referenced capacity certificate surface.
+    pub capacity_certificate_reference: SignedProfileBundleCapacityCertificateReference,
+    /// Claimed controller versions for the bundle.
+    pub controller_versions: Vec<SignedProfileBundleControllerVersion>,
+    /// Supported-version allowlist for verification.
+    pub supported_controller_versions: Vec<SignedProfileBundleControllerVersion>,
+    /// Deterministic digests for each child proof reference.
+    pub child_evidence_hashes: Vec<SignedProfileBundleChildEvidenceHash>,
+}
+
+impl SignedProfileBundleManifest {
+    fn compute_manifest_digest(&self) -> String {
+        stable_sha256_hex(&[
+            ("bundle_id", self.bundle_id.clone()),
+            ("objective", self.objective.as_str().to_string()),
+            (
+                "requested_profile",
+                self.requested_profile.map_or_else(
+                    || "none".to_string(),
+                    |profile| profile.as_str().to_string(),
+                ),
+            ),
+            (
+                "selected_profile",
+                self.selected_profile.as_str().to_string(),
+            ),
+            (
+                "fallback_profile",
+                self.fallback_profile.as_str().to_string(),
+            ),
+            ("used_safe_fallback", format_bool(self.used_safe_fallback)),
+            (
+                "planning_refusal_reasons",
+                self.planning_refusal_reasons.join("|"),
+            ),
+            (
+                "requested_host_resources",
+                format!(
+                    "{}x{}",
+                    self.requested_host_resources.cpu_cores,
+                    self.requested_host_resources.memory_gib
+                ),
+            ),
+            (
+                "host_fingerprint",
+                format!(
+                    "{}|{}|{}|{}",
+                    self.host_fingerprint.hostname,
+                    self.host_fingerprint.arch,
+                    self.host_fingerprint.cpu_cores,
+                    self.host_fingerprint.memory_gib
+                ),
+            ),
+            ("integrity_mode", self.integrity_mode.as_str().to_string()),
+            (
+                "integrity_limitations",
+                self.integrity_limitations.join("|"),
+            ),
+            (
+                "proof_command_classes",
+                self.proof_command_classes.join("|"),
+            ),
+            ("feature_gates", self.feature_gates.join("|")),
+            (
+                "manual_override_fields",
+                self.manual_override_fields.join("|"),
+            ),
+            (
+                "require_operator_confirmation",
+                format_bool(self.require_operator_confirmation),
+            ),
+            ("profile_bundle_digest", self.profile_bundle_digest.clone()),
+            ("final_bundle_digest", self.final_bundle_digest.clone()),
+            ("config_diff_digest", self.config_diff_digest.clone()),
+            (
+                "previous_config_digest",
+                self.previous_config_digest.clone(),
+            ),
+            (
+                "rollback_command_template",
+                self.rollback_command_template.clone(),
+            ),
+            (
+                "sanitized_operator_note",
+                self.sanitized_operator_note.clone().unwrap_or_default(),
+            ),
+            (
+                "sanitized_validation_command",
+                self.sanitized_validation_command
+                    .clone()
+                    .unwrap_or_default(),
+            ),
+            (
+                "capacity_certificate_reference",
+                format!(
+                    "{}|{}|{}",
+                    self.capacity_certificate_reference.artifact_id,
+                    self.capacity_certificate_reference.contract_version,
+                    self.capacity_certificate_reference.scenario_id
+                ),
+            ),
+            (
+                "controller_versions",
+                self.controller_versions
+                    .iter()
+                    .map(|entry| format!("{}|{}", entry.controller, entry.contract_version))
+                    .collect::<Vec<_>>()
+                    .join(";"),
+            ),
+            (
+                "supported_controller_versions",
+                self.supported_controller_versions
+                    .iter()
+                    .map(|entry| format!("{}|{}", entry.controller, entry.contract_version))
+                    .collect::<Vec<_>>()
+                    .join(";"),
+            ),
+            (
+                "child_evidence_hashes",
+                self.child_evidence_hashes
+                    .iter()
+                    .map(|entry| {
+                        format!(
+                            "{}|{}|{}",
+                            entry.controller, entry.artifact_id, entry.digest_sha256
+                        )
+                    })
+                    .collect::<Vec<_>>()
+                    .join(";"),
+            ),
+        ])
+    }
+
+    fn verify(
+        &self,
+        execute_mode: SignedProfileBundleExecutionMode,
+        tamper_field: Option<String>,
+    ) -> SignedProfileBundleVerificationResult {
+        let mut refusal_reasons = Vec::new();
+        if self.bundle_id.trim().is_empty() {
+            refusal_reasons.push("bundle_id must not be empty".to_string());
+        }
+        if let Err(reason) = validate_slug_like(&self.bundle_id, "bundle_id") {
+            refusal_reasons.push(reason);
+        }
+        if let Err(reason) = self
+            .host_fingerprint
+            .validate_for_resources(&self.requested_host_resources, "bundle host fingerprint")
+        {
+            refusal_reasons.push(reason);
+        }
+        if self.integrity_limitations.is_empty() {
+            refusal_reasons.push(
+                "integrity_limitations must describe the explicit limitation of digest-only mode"
+                    .to_string(),
+            );
+        }
+        if let Err(reason) =
+            validate_token_list(&self.proof_command_classes, "proof_command_classes", false)
+        {
+            refusal_reasons.push(reason);
+        }
+        if let Err(reason) = validate_token_list(&self.feature_gates, "feature_gates", true) {
+            refusal_reasons.push(reason);
+        }
+        if let Err(reason) =
+            validate_token_list(&self.manual_override_fields, "manual_override_fields", true)
+        {
+            refusal_reasons.push(reason);
+        }
+        if !is_hex_digest(&self.profile_bundle_digest) {
+            refusal_reasons.push(
+                "profile_bundle_digest must be a 64-character hexadecimal digest".to_string(),
+            );
+        }
+        if !is_hex_digest(&self.final_bundle_digest) {
+            refusal_reasons
+                .push("final_bundle_digest must be a 64-character hexadecimal digest".to_string());
+        }
+        if !is_hex_digest(&self.config_diff_digest) {
+            refusal_reasons
+                .push("config_diff_digest must be a 64-character hexadecimal digest".to_string());
+        }
+        if !is_hex_digest(&self.previous_config_digest) {
+            refusal_reasons.push(
+                "previous_config_digest must be a 64-character hexadecimal digest".to_string(),
+            );
+        }
+        if !is_hex_digest(&self.manifest_digest_sha256) {
+            refusal_reasons.push(
+                "manifest_digest_sha256 must be a 64-character hexadecimal digest".to_string(),
+            );
+        }
+        if self.rollback_command_template.trim().is_empty() {
+            refusal_reasons.push("rollback_command_template must not be empty".to_string());
+        }
+        if let Err(reason) = self.capacity_certificate_reference.validate() {
+            refusal_reasons.push(reason);
+        }
+        if self.controller_versions.is_empty() {
+            refusal_reasons.push("controller_versions must not be empty".to_string());
+        }
+        if self.supported_controller_versions.is_empty() {
+            refusal_reasons.push("supported_controller_versions must not be empty".to_string());
+        }
+        if self.child_evidence_hashes.is_empty() {
+            refusal_reasons.push("child_evidence_hashes must not be empty".to_string());
+        }
+        for (index, entry) in self.controller_versions.iter().enumerate() {
+            if let Err(reason) = entry.validate(&format!("controller_versions[{index}]")) {
+                refusal_reasons.push(reason);
+            }
+        }
+        for (index, entry) in self.supported_controller_versions.iter().enumerate() {
+            if let Err(reason) = entry.validate(&format!("supported_controller_versions[{index}]"))
+            {
+                refusal_reasons.push(reason);
+            }
+        }
+        for entry in &self.child_evidence_hashes {
+            if let Err(reason) = entry.validate() {
+                refusal_reasons.push(reason);
+            }
+        }
+        if let Some(duplicate) =
+            duplicate_controller_version(&self.controller_versions, "controller_versions")
+        {
+            refusal_reasons.push(duplicate);
+        }
+        if let Some(duplicate) = duplicate_controller_version(
+            &self.supported_controller_versions,
+            "supported_controller_versions",
+        ) {
+            refusal_reasons.push(duplicate);
+        }
+        if let Some(duplicate) = duplicate_child_evidence_controller(&self.child_evidence_hashes) {
+            refusal_reasons.push(duplicate);
+        }
+        for entry in &self.controller_versions {
+            if !self.supported_controller_versions.iter().any(|supported| {
+                supported.controller == entry.controller
+                    && supported.contract_version == entry.contract_version
+            }) {
+                refusal_reasons.push(format!(
+                    "controller {} version {} is not present in the supported-version allowlist",
+                    entry.controller, entry.contract_version
+                ));
+            }
+            if !self
+                .child_evidence_hashes
+                .iter()
+                .any(|hash| hash.controller == entry.controller)
+            {
+                refusal_reasons.push(format!(
+                    "child evidence hash for controller {} is missing",
+                    entry.controller
+                ));
+            }
+        }
+        let observed_manifest_digest_sha256 = self.compute_manifest_digest();
+        if observed_manifest_digest_sha256 != self.manifest_digest_sha256 {
+            refusal_reasons.push(format!(
+                "manifest_digest_sha256 {} did not match recomputed digest {}",
+                self.manifest_digest_sha256, observed_manifest_digest_sha256
+            ));
+        }
+        SignedProfileBundleVerificationResult {
+            accepted: refusal_reasons.is_empty(),
+            refusal_reasons,
+            tamper_field,
+            execute_mode,
+            expected_manifest_digest_sha256: self.manifest_digest_sha256.clone(),
+            observed_manifest_digest_sha256,
+        }
+    }
+}
+
+/// Structural verification result for a bundle manifest.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SignedProfileBundleVerificationResult {
+    /// Whether the bundle passed structural verification.
+    pub accepted: bool,
+    /// Reasons the bundle was structurally rejected.
+    pub refusal_reasons: Vec<String>,
+    /// Optional tamper field mutated for the scenario.
+    pub tamper_field: Option<String>,
+    /// Requested execution posture.
+    pub execute_mode: SignedProfileBundleExecutionMode,
+    /// Digest embedded in the bundle manifest.
+    pub expected_manifest_digest_sha256: String,
+    /// Recomputed digest over the manifest contents.
+    pub observed_manifest_digest_sha256: String,
+}
+
+/// Rollback receipt for a bundle application or verification.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SignedProfileBundleRollbackReceipt {
+    /// Previous runtime-config digest.
+    pub previous_config_digest: String,
+    /// Applied bundle digest.
+    pub applied_bundle_digest: String,
+    /// Rollback command template.
+    pub rollback_command_template: String,
+    /// Conservative fallback profile.
+    pub fallback_profile: HostProfileId,
+    /// Host fingerprint for the target host.
+    pub host_fingerprint: CapacityEnvelopeHostFingerprint,
+    /// Artifact paths required to explain or replay the rollback decision.
+    pub artifact_paths: Vec<String>,
+    /// Digest over the rollback receipt contents.
+    pub receipt_digest_sha256: String,
+}
+
+impl SignedProfileBundleRollbackReceipt {
+    fn from_manifest(manifest: &SignedProfileBundleManifest) -> Self {
+        let artifact_paths = signed_profile_bundle_artifact_paths(manifest);
+        let receipt_digest_sha256 = stable_sha256_hex(&[
+            (
+                "previous_config_digest",
+                manifest.previous_config_digest.clone(),
+            ),
+            (
+                "applied_bundle_digest",
+                manifest.manifest_digest_sha256.clone(),
+            ),
+            (
+                "rollback_command_template",
+                manifest.rollback_command_template.clone(),
+            ),
+            (
+                "fallback_profile",
+                manifest.fallback_profile.as_str().to_string(),
+            ),
+            (
+                "host_fingerprint",
+                format!(
+                    "{}|{}|{}|{}",
+                    manifest.host_fingerprint.hostname,
+                    manifest.host_fingerprint.arch,
+                    manifest.host_fingerprint.cpu_cores,
+                    manifest.host_fingerprint.memory_gib
+                ),
+            ),
+            ("artifact_paths", artifact_paths.join("|")),
+        ]);
+        Self {
+            previous_config_digest: manifest.previous_config_digest.clone(),
+            applied_bundle_digest: manifest.manifest_digest_sha256.clone(),
+            rollback_command_template: manifest.rollback_command_template.clone(),
+            fallback_profile: manifest.fallback_profile,
+            host_fingerprint: manifest.host_fingerprint.clone(),
+            artifact_paths,
+            receipt_digest_sha256,
+        }
+    }
+}
+
+/// Full signed-bundle artifact pack returned by the request planner.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SignedProfileBundleBundle {
+    /// Canonical manifest.
+    pub manifest: SignedProfileBundleManifest,
+    /// Structural verification result.
+    pub verification: SignedProfileBundleVerificationResult,
+    /// Rollback receipt for the bundle.
+    pub rollback_receipt: SignedProfileBundleRollbackReceipt,
+}
+
+fn build_signed_profile_bundle_child_evidence_hashes(
+    evidence: &HostProfileEvidenceSet,
+) -> Vec<SignedProfileBundleChildEvidenceHash> {
+    let mut hashes = Vec::new();
+    for kind in [
+        HostProfileEvidenceKind::Brownout,
+        HostProfileEvidenceKind::OtlpBrownout,
+        HostProfileEvidenceKind::AdmissionSteering,
+        HostProfileEvidenceKind::AdaptiveBatchSizing,
+        HostProfileEvidenceKind::BlockingPoolAffinity,
+        HostProfileEvidenceKind::TraceStorageProfile,
+    ] {
+        if let Some(artifact) = evidence.for_kind(kind) {
+            let digest_sha256 = stable_sha256_hex(&[
+                ("controller", kind.as_str().to_string()),
+                ("artifact_id", artifact.artifact_id.clone()),
+                ("contract_version", artifact.contract_version.clone()),
+                ("validation_passed", format_bool(artifact.validation_passed)),
+            ]);
+            hashes.push(SignedProfileBundleChildEvidenceHash {
+                controller: kind.as_str().to_string(),
+                artifact_id: artifact.artifact_id.clone(),
+                digest_sha256,
+            });
+        }
+    }
+    hashes
+}
+
+fn build_signed_profile_bundle_feature_gates(config: &RuntimeConfig) -> Vec<String> {
+    let mut gates = Vec::new();
+    if config.enable_governor {
+        gates.push("governor".to_string());
+    }
+    if config.enable_read_biased_region_snapshot {
+        gates.push("read_biased_region_snapshot".to_string());
+    }
+    if config.enable_adaptive_cancel_streak {
+        gates.push("adaptive_cancel_streak".to_string());
+    }
+    if !matches!(
+        config.blocking.affinity_profile,
+        BlockingPoolAffinityProfile::Disabled
+    ) {
+        gates.push("blocking_pool_affinity".to_string());
+    }
+    if config.capacity_hints.is_some() {
+        gates.push("capacity_hints".to_string());
+    }
+    if config.trace_storage_profile != TraceStorageProfile::Default {
+        gates.push(format!("trace_storage_{}", config.trace_storage_profile));
+    }
+    if config.browser_ready_handoff_limit > 0 {
+        gates.push("browser_ready_handoff".to_string());
+    }
+    gates
+}
+
+fn runtime_config_digest(config: &RuntimeConfig) -> String {
+    stable_sha256_hex(&[
+        ("worker_threads", config.worker_threads.to_string()),
+        (
+            "worker_cohort_map",
+            format_worker_cohort_map(config.worker_cohort_map.as_ref()),
+        ),
+        ("global_queue_limit", config.global_queue_limit.to_string()),
+        ("steal_batch_size", config.steal_batch_size.to_string()),
+        (
+            "blocking_affinity_profile",
+            format_blocking_affinity_profile(config.blocking.affinity_profile),
+        ),
+        (
+            "capacity_hints",
+            format_capacity_hints(config.capacity_hints),
+        ),
+        (
+            "trace_storage_profile",
+            config.trace_storage_profile.to_string(),
+        ),
+        (
+            "browser_ready_handoff_limit",
+            config.browser_ready_handoff_limit.to_string(),
+        ),
+        ("enable_governor", format_bool(config.enable_governor)),
+        (
+            "enable_read_biased_region_snapshot",
+            format_bool(config.enable_read_biased_region_snapshot),
+        ),
+        (
+            "enable_adaptive_cancel_streak",
+            format_bool(config.enable_adaptive_cancel_streak),
+        ),
+    ])
+}
+
+fn host_profile_config_diff_digest(entries: &[HostProfileConfigDiffEntry]) -> String {
+    stable_sha256_hex(&[(
+        "config_diff",
+        entries
+            .iter()
+            .map(HostProfileConfigDiffEntry::render)
+            .collect::<Vec<_>>()
+            .join("|"),
+    )])
+}
+
+fn signed_profile_bundle_artifact_paths(manifest: &SignedProfileBundleManifest) -> Vec<String> {
+    let mut paths = vec![
+        "signed_profile_bundle_manifest.json".to_string(),
+        "signed_profile_bundle_report.json".to_string(),
+        "rollback_receipt.json".to_string(),
+        manifest.capacity_certificate_reference.artifact_id.clone(),
+    ];
+    paths.extend(
+        manifest
+            .child_evidence_hashes
+            .iter()
+            .map(|entry| entry.artifact_id.clone()),
+    );
+    dedup_preserving_order(&mut paths);
+    paths
+}
+
+fn tamper_signed_profile_bundle_manifest(manifest: &mut SignedProfileBundleManifest, field: &str) {
+    match field {
+        "config_diff_digest" => {
+            manifest.config_diff_digest = tamper_hex_digest(&manifest.config_diff_digest);
+        }
+        "final_bundle_digest" => {
+            manifest.final_bundle_digest = tamper_hex_digest(&manifest.final_bundle_digest);
+        }
+        "profile_bundle_digest" => {
+            manifest.profile_bundle_digest = tamper_hex_digest(&manifest.profile_bundle_digest);
+        }
+        "manifest_digest_sha256" => {
+            manifest.manifest_digest_sha256 = tamper_hex_digest(&manifest.manifest_digest_sha256);
+        }
+        "capacity_certificate_reference.artifact_id" => {
+            manifest
+                .capacity_certificate_reference
+                .artifact_id
+                .push_str(".tampered");
+        }
+        _ => {
+            manifest.bundle_id.push_str("-tampered");
+        }
+    }
+}
+
+fn stable_sha256_hex(fields: &[(&str, String)]) -> String {
+    let mut hasher = Sha256::new();
+    for (key, value) in fields {
+        hasher.update(key.as_bytes());
+        hasher.update([0]);
+        hasher.update(value.as_bytes());
+        hasher.update([0xff]);
+    }
+    let digest = hasher.finalize();
+    digest
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>()
+}
+
+fn is_hex_digest(value: &str) -> bool {
+    value.len() == 64 && value.chars().all(|c| c.is_ascii_hexdigit())
+}
+
+fn tamper_hex_digest(value: &str) -> String {
+    if !is_hex_digest(value) {
+        return stable_sha256_hex(&[("tampered", value.to_string())]);
+    }
+    let mut chars = value.chars().collect::<Vec<_>>();
+    chars[0] = if chars[0] == '0' { '1' } else { '0' };
+    chars.into_iter().collect()
+}
+
+fn validate_artifact_json_path(value: &str, label: &str) -> Result<(), String> {
+    if value.trim().is_empty() {
+        return Err(format!("{label} must not be empty"));
+    }
+    if !value.ends_with(".json") {
+        return Err(format!("{label} must end with .json"));
+    }
+    if value.contains("..") {
+        return Err(format!(
+            "{label} must not contain parent-directory traversals"
+        ));
+    }
+    if value
+        .chars()
+        .any(|c| !(c.is_ascii_alphanumeric() || matches!(c, '/' | '.' | '_' | '-')))
+    {
+        return Err(format!("{label} contains unsupported characters"));
+    }
+    Ok(())
+}
+
+fn validate_slug_like(value: &str, label: &str) -> Result<(), String> {
+    if value.trim().is_empty() {
+        return Err(format!("{label} must not be empty"));
+    }
+    if value
+        .chars()
+        .any(|c| !(c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-')))
+    {
+        return Err(format!("{label} contains unsupported characters"));
+    }
+    Ok(())
+}
+
+fn validate_token_list(values: &[String], label: &str, allow_empty: bool) -> Result<(), String> {
+    if values.is_empty() && !allow_empty {
+        return Err(format!("{label} must not be empty"));
+    }
+    for value in values {
+        validate_slug_like(value, label)?;
+    }
+    if let Some(duplicate) = duplicate_string(values) {
+        return Err(format!("{label} contains a duplicate entry {duplicate}"));
+    }
+    Ok(())
+}
+
+fn duplicate_string(values: &[String]) -> Option<String> {
+    for (index, value) in values.iter().enumerate() {
+        if values.iter().skip(index + 1).any(|other| other == value) {
+            return Some(value.clone());
+        }
+    }
+    None
+}
+
+fn duplicate_controller_version(
+    values: &[SignedProfileBundleControllerVersion],
+    label: &str,
+) -> Option<String> {
+    for (index, value) in values.iter().enumerate() {
+        if values.iter().skip(index + 1).any(|other| {
+            other.controller == value.controller && other.contract_version == value.contract_version
+        }) {
+            return Some(format!(
+                "{label} contains a duplicate {}@{}",
+                value.controller, value.contract_version
+            ));
+        }
+    }
+    None
+}
+
+fn duplicate_child_evidence_controller(
+    values: &[SignedProfileBundleChildEvidenceHash],
+) -> Option<String> {
+    for (index, value) in values.iter().enumerate() {
+        if values
+            .iter()
+            .skip(index + 1)
+            .any(|other| other.controller == value.controller)
+        {
+            return Some(format!(
+                "child_evidence_hashes contains a duplicate controller {}",
+                value.controller
+            ));
+        }
+    }
+    None
+}
+
+fn dedup_preserving_order(values: &mut Vec<String>) {
+    let mut deduped = Vec::with_capacity(values.len());
+    for value in values.drain(..) {
+        if !deduped.iter().any(|existing| existing == &value) {
+            deduped.push(value);
+        }
+    }
+    *values = deduped;
 }
 
 fn normalize_capacity_sweep(values: &[usize], max_value: usize) -> Vec<usize> {
