@@ -1,7 +1,7 @@
 #![no_main]
 
-use libfuzzer_sys::fuzz_target;
 use arbitrary::Arbitrary;
+use libfuzzer_sys::fuzz_target;
 use std::collections::HashMap;
 
 /// Fuzz target for HTTP/2 :path canonicalization testing.
@@ -29,9 +29,9 @@ struct PathTest {
 
 #[derive(Debug, Clone, PartialEq)]
 enum PathValidationResult {
-    Valid(String),           // Canonicalized path
-    Invalid(PathError),      // Validation error
-    SecurityRisk(String),    // Potential security issue detected
+    Valid(String),        // Canonicalized path
+    Invalid(PathError),   // Validation error
+    SecurityRisk(String), // Potential security issue detected
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -108,7 +108,11 @@ impl MockPathCanonicalizationConnection {
     }
 
     /// Canonicalize and validate a :path pseudo-header per RFC 9112
-    fn canonicalize_path(&mut self, stream_id: u32, path: &str) -> Result<PathValidationResult, H2Error> {
+    fn canonicalize_path(
+        &mut self,
+        stream_id: u32,
+        path: &str,
+    ) -> Result<PathValidationResult, H2Error> {
         // Check if connection is already in error state
         if let Some(ref error) = self.connection_error {
             return Err(error.clone());
@@ -116,12 +120,15 @@ impl MockPathCanonicalizationConnection {
 
         // Ensure stream exists
         if !self.stream_state.contains_key(&stream_id) {
-            self.stream_state.insert(stream_id, StreamState {
-                id: stream_id,
-                canonical_path: None,
-                original_path: Some(path.to_string()),
-                validation_result: None,
-            });
+            self.stream_state.insert(
+                stream_id,
+                StreamState {
+                    id: stream_id,
+                    canonical_path: None,
+                    original_path: Some(path.to_string()),
+                    validation_result: None,
+                },
+            );
         }
 
         let stream = self.stream_state.get_mut(&stream_id).unwrap();
@@ -248,7 +255,9 @@ impl MockPathCanonicalizationConnection {
         // Check for common Unicode normalization attacks
         if path.contains('\u{2044}') || // Fraction slash
            path.contains('\u{2215}') || // Division slash
-           path.contains('\u{29F8}') {  // Big solidus
+           path.contains('\u{29F8}')
+        {
+            // Big solidus
             return Err(PathError::UnicodeNormalizationFailed);
         }
 
@@ -266,7 +275,9 @@ impl MockPathCanonicalizationConnection {
         while !input_buffer.is_empty() {
             iterations += 1;
             if iterations > MAX_ITERATIONS {
-                return Err(PathValidationResult::Invalid(PathError::ExcessiveRedirection));
+                return Err(PathValidationResult::Invalid(
+                    PathError::ExcessiveRedirection,
+                ));
             }
 
             // A. If input starts with "../" or "./", remove it
@@ -297,7 +308,7 @@ impl MockPathCanonicalizationConnection {
                 } else {
                     // Attempting to traverse above root - security risk
                     return Err(PathValidationResult::SecurityRisk(
-                        "Path traversal above root directory".to_string()
+                        "Path traversal above root directory".to_string(),
                     ));
                 }
                 continue;
@@ -307,7 +318,7 @@ impl MockPathCanonicalizationConnection {
                     output_buffer.pop();
                 } else {
                     return Err(PathValidationResult::SecurityRisk(
-                        "Path traversal above root directory".to_string()
+                        "Path traversal above root directory".to_string(),
                     ));
                 }
                 input_buffer = "/";
@@ -366,7 +377,10 @@ impl MockPathCanonicalizationConnection {
     }
 
     fn get_validation_result(&self, stream_id: u32) -> Option<&PathValidationResult> {
-        self.stream_state.get(&stream_id)?.validation_result.as_ref()
+        self.stream_state
+            .get(&stream_id)?
+            .validation_result
+            .as_ref()
     }
 
     fn get_connection_error(&self) -> Option<&H2Error> {
@@ -378,49 +392,115 @@ impl MockPathCanonicalizationConnection {
 fn generate_test_cases() -> Vec<(String, PathValidationResult)> {
     vec![
         // Basic valid paths
-        ("/".to_string(), PathValidationResult::Valid("/".to_string())),
-        ("/index.html".to_string(), PathValidationResult::Valid("/index.html".to_string())),
-        ("/api/v1/users".to_string(), PathValidationResult::Valid("/api/v1/users".to_string())),
-
+        (
+            "/".to_string(),
+            PathValidationResult::Valid("/".to_string()),
+        ),
+        (
+            "/index.html".to_string(),
+            PathValidationResult::Valid("/index.html".to_string()),
+        ),
+        (
+            "/api/v1/users".to_string(),
+            PathValidationResult::Valid("/api/v1/users".to_string()),
+        ),
         // Percent-encoded slashes
-        ("/%2F".to_string(), PathValidationResult::Valid("//".to_string())),
-        ("/api%2Fv1".to_string(), PathValidationResult::Valid("/api/v1".to_string())),
-        ("/%2Fapi%2Fv1%2Fusers".to_string(), PathValidationResult::Valid("//api/v1/users".to_string())),
-
+        (
+            "/%2F".to_string(),
+            PathValidationResult::Valid("//".to_string()),
+        ),
+        (
+            "/api%2Fv1".to_string(),
+            PathValidationResult::Valid("/api/v1".to_string()),
+        ),
+        (
+            "/%2Fapi%2Fv1%2Fusers".to_string(),
+            PathValidationResult::Valid("//api/v1/users".to_string()),
+        ),
         // Dot-segments (should be normalized)
-        ("/.".to_string(), PathValidationResult::Valid("/".to_string())),
-        ("/./index.html".to_string(), PathValidationResult::Valid("/index.html".to_string())),
-        ("/api/./v1".to_string(), PathValidationResult::Valid("/api/v1".to_string())),
-        ("/api/../".to_string(), PathValidationResult::Valid("/".to_string())),
-
+        (
+            "/.".to_string(),
+            PathValidationResult::Valid("/".to_string()),
+        ),
+        (
+            "/./index.html".to_string(),
+            PathValidationResult::Valid("/index.html".to_string()),
+        ),
+        (
+            "/api/./v1".to_string(),
+            PathValidationResult::Valid("/api/v1".to_string()),
+        ),
+        (
+            "/api/../".to_string(),
+            PathValidationResult::Valid("/".to_string()),
+        ),
         // Path traversal attempts (security risks)
-        ("/..".to_string(), PathValidationResult::SecurityRisk("Path traversal above root directory".to_string())),
-        ("/../etc/passwd".to_string(), PathValidationResult::SecurityRisk("Path traversal above root directory".to_string())),
-
+        (
+            "/..".to_string(),
+            PathValidationResult::SecurityRisk("Path traversal above root directory".to_string()),
+        ),
+        (
+            "/../etc/passwd".to_string(),
+            PathValidationResult::SecurityRisk("Path traversal above root directory".to_string()),
+        ),
         // Encoded dot-segments
-        ("/%2E".to_string(), PathValidationResult::Valid("/.".to_string())),
-        ("/%2E%2E".to_string(), PathValidationResult::Valid("/..".to_string())),
-        ("/%2E%2E/".to_string(), PathValidationResult::SecurityRisk("Path traversal above root directory".to_string())),
-        ("/api/%2E%2E/admin".to_string(), PathValidationResult::Valid("/admin".to_string())),
-
+        (
+            "/%2E".to_string(),
+            PathValidationResult::Valid("/.".to_string()),
+        ),
+        (
+            "/%2E%2E".to_string(),
+            PathValidationResult::Valid("/..".to_string()),
+        ),
+        (
+            "/%2E%2E/".to_string(),
+            PathValidationResult::SecurityRisk("Path traversal above root directory".to_string()),
+        ),
+        (
+            "/api/%2E%2E/admin".to_string(),
+            PathValidationResult::Valid("/admin".to_string()),
+        ),
         // Double encoding
-        ("/%252E%252E%252F".to_string(), PathValidationResult::Valid("/%2E%2E%2F".to_string())),
-
+        (
+            "/%252E%252E%252F".to_string(),
+            PathValidationResult::Valid("/%2E%2E%2F".to_string()),
+        ),
         // Invalid percent encoding
-        ("/%ZZ".to_string(), PathValidationResult::Invalid(PathError::InvalidPercent)),
-        ("/%2".to_string(), PathValidationResult::Invalid(PathError::InvalidPercent)),
-        ("/%".to_string(), PathValidationResult::Invalid(PathError::InvalidPercent)),
-
+        (
+            "/%ZZ".to_string(),
+            PathValidationResult::Invalid(PathError::InvalidPercent),
+        ),
+        (
+            "/%2".to_string(),
+            PathValidationResult::Invalid(PathError::InvalidPercent),
+        ),
+        (
+            "/%".to_string(),
+            PathValidationResult::Invalid(PathError::InvalidPercent),
+        ),
         // Relative paths (not allowed)
-        ("api/v1".to_string(), PathValidationResult::Invalid(PathError::RelativePathNotAllowed)),
-        ("../etc".to_string(), PathValidationResult::Invalid(PathError::RelativePathNotAllowed)),
-
+        (
+            "api/v1".to_string(),
+            PathValidationResult::Invalid(PathError::RelativePathNotAllowed),
+        ),
+        (
+            "../etc".to_string(),
+            PathValidationResult::Invalid(PathError::RelativePathNotAllowed),
+        ),
         // Empty path
-        ("".to_string(), PathValidationResult::Invalid(PathError::EmptyPath)),
-
+        (
+            "".to_string(),
+            PathValidationResult::Invalid(PathError::EmptyPath),
+        ),
         // Unicode slash alternatives (security concern)
-        ("/api\u{2044}v1".to_string(), PathValidationResult::Invalid(PathError::UnicodeNormalizationFailed)),
-        ("/test\u{2215}file".to_string(), PathValidationResult::Invalid(PathError::UnicodeNormalizationFailed)),
+        (
+            "/api\u{2044}v1".to_string(),
+            PathValidationResult::Invalid(PathError::UnicodeNormalizationFailed),
+        ),
+        (
+            "/test\u{2215}file".to_string(),
+            PathValidationResult::Invalid(PathError::UnicodeNormalizationFailed),
+        ),
     ]
 }
 
@@ -453,14 +533,23 @@ fuzz_target!(|data: &[u8]| {
     match validation_result {
         Some(PathValidationResult::Valid(canonical)) => {
             // For valid paths, verify some invariants
-            assert!(canonical.starts_with('/'),
-                "Canonical path must start with '/' but got: {}", canonical);
+            assert!(
+                canonical.starts_with('/'),
+                "Canonical path must start with '/' but got: {}",
+                canonical
+            );
 
-            assert!(!canonical.contains("./") && !canonical.contains("../"),
-                "Canonical path must not contain dot-segments: {}", canonical);
+            assert!(
+                !canonical.contains("./") && !canonical.contains("../"),
+                "Canonical path must not contain dot-segments: {}",
+                canonical
+            );
 
-            assert!(!canonical.contains("//"),
-                "Canonical path should not contain double slashes: {}", canonical);
+            assert!(
+                !canonical.contains("//"),
+                "Canonical path should not contain double slashes: {}",
+                canonical
+            );
         }
 
         Some(PathValidationResult::Invalid(error)) => {
@@ -468,8 +557,11 @@ fuzz_target!(|data: &[u8]| {
             match result {
                 Err(H2Error::ProtocolError) => {
                     // Expected for invalid paths
-                    assert!(connection.get_connection_error().is_some(),
-                        "Connection should be in error state for invalid path: {:?}", error);
+                    assert!(
+                        connection.get_connection_error().is_some(),
+                        "Connection should be in error state for invalid path: {:?}",
+                        error
+                    );
                 }
                 _ => {
                     // Unexpected result
@@ -506,8 +598,11 @@ fuzz_target!(|data: &[u8]| {
             PathValidationResult::Valid(expected_canonical) => {
                 match test_result {
                     Ok(PathValidationResult::Valid(actual_canonical)) => {
-                        assert_eq!(actual_canonical, expected_canonical,
-                            "Path '{}' canonicalization mismatch", test_path);
+                        assert_eq!(
+                            actual_canonical, expected_canonical,
+                            "Path '{}' canonicalization mismatch",
+                            test_path
+                        );
                     }
                     _ => {
                         // May fail for other reasons, which is acceptable in fuzzing
@@ -517,8 +612,11 @@ fuzz_target!(|data: &[u8]| {
 
             PathValidationResult::Invalid(_) => {
                 // Should result in error
-                assert!(test_result.is_err(),
-                    "Path '{}' should have been rejected but was accepted", test_path);
+                assert!(
+                    test_result.is_err(),
+                    "Path '{}' should have been rejected but was accepted",
+                    test_path
+                );
             }
 
             PathValidationResult::SecurityRisk(_) => {

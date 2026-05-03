@@ -1101,7 +1101,7 @@ impl NatsClient {
                 ));
 
                 // Wait before retry
-                crate::time::sleep(delay).await;
+                crate::time::sleep(cx.now(), delay).await;
 
                 // Exponential backoff with max cap
                 delay = std::cmp::min(delay * 2, self.config.max_reconnect_delay);
@@ -1114,11 +1114,11 @@ impl NatsClient {
 
             // Attempt TCP reconnection
             let addr = format!("{}:{}", self.config.host, self.config.port);
-            match TcpStream::connect(&addr).await {
+            match TcpStream::connect(addr).await {
                 Ok(new_stream) => {
                     cx.trace(&format!(
-                        "nats: TCP reconnected to {} (attempt {})",
-                        addr, attempt
+                        "nats: TCP reconnected to {}:{} (attempt {})",
+                        self.config.host, self.config.port, attempt
                     ));
 
                     // Replace the stream and reset buffer

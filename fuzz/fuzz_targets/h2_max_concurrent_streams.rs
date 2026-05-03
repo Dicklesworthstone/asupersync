@@ -1,16 +1,13 @@
 #![no_main]
 
-use libfuzzer_sys::fuzz_target;
 use arbitrary::{Arbitrary, Unstructured};
+use libfuzzer_sys::fuzz_target;
 
 use asupersync::bytes::{Bytes, BytesMut};
 use asupersync::codec::Encoder;
 use asupersync::http::h2::connection::FrameCodec;
-use asupersync::http::h2::frame::{
-    Frame, HeadersFrame, SettingsFrame, Setting,
-    FRAME_HEADER_SIZE
-};
 use asupersync::http::h2::error::ErrorCode;
+use asupersync::http::h2::frame::{FRAME_HEADER_SIZE, Frame, HeadersFrame, Setting, SettingsFrame};
 
 /// HTTP/2 MAX_CONCURRENT_STREAMS enforcement test sequence
 #[derive(Debug, Clone, Arbitrary)]
@@ -146,7 +143,10 @@ fn test_max_concurrent_streams_enforcement(test_seq: &MaxConcurrentStreamsSequen
     match codec.encode(settings_frame, &mut buffer) {
         Ok(()) => {
             // Settings frame should encode successfully
-            assert!(buffer.len() >= FRAME_HEADER_SIZE, "SETTINGS frame should produce output");
+            assert!(
+                buffer.len() >= FRAME_HEADER_SIZE,
+                "SETTINGS frame should produce output"
+            );
         }
         Err(_) => {
             // Settings encoding failed - skip this test
@@ -164,8 +164,12 @@ fn test_max_concurrent_streams_enforcement(test_seq: &MaxConcurrentStreamsSequen
         }
 
         // Create HEADERS frame to open stream
-        let headers_frame = create_headers_frame(stream_id, &attempt.headers,
-                                                attempt.end_headers, attempt.end_stream);
+        let headers_frame = create_headers_frame(
+            stream_id,
+            &attempt.headers,
+            attempt.end_headers,
+            attempt.end_stream,
+        );
 
         // Test expected behavior based on current stream count
         let expected_result = state.open_stream(stream_id);
@@ -175,8 +179,11 @@ fn test_max_concurrent_streams_enforcement(test_seq: &MaxConcurrentStreamsSequen
                 match expected_result {
                     Ok(()) => {
                         // Stream should have opened successfully
-                        assert!(state.active_streams.contains(&stream_id),
-                            "Stream {} should be active after successful open", stream_id);
+                        assert!(
+                            state.active_streams.contains(&stream_id),
+                            "Stream {} should be active after successful open",
+                            stream_id
+                        );
 
                         // Send DATA frame if specified
                         if let Some(data_spec) = &attempt.data_frame {
@@ -196,11 +203,16 @@ fn test_max_concurrent_streams_enforcement(test_seq: &MaxConcurrentStreamsSequen
                         // This is where we need to verify REFUSED_STREAM behavior
                         // In practice, the codec should reject this at frame processing,
                         // but for fuzzing we simulate the expected behavior
-                        assert!(state.refused_streams.contains(&stream_id),
-                            "Stream {} should be in refused list when max concurrent exceeded", stream_id);
+                        assert!(
+                            state.refused_streams.contains(&stream_id),
+                            "Stream {} should be in refused list when max concurrent exceeded",
+                            stream_id
+                        );
 
-                        assert!(state.active_streams.len() >= max_streams as usize,
-                            "REFUSED_STREAM should only occur when at max concurrent limit");
+                        assert!(
+                            state.active_streams.len() >= max_streams as usize,
+                            "REFUSED_STREAM should only occur when at max concurrent limit"
+                        );
                     }
                     Err(ErrorCode::ProtocolError) => {
                         // Duplicate stream ID or other protocol violation
@@ -219,14 +231,20 @@ fn test_max_concurrent_streams_enforcement(test_seq: &MaxConcurrentStreamsSequen
 
         // Interleave other frames for realistic scenarios
         if attempt_index < test_seq.interleaved_frames.len() {
-            test_interleaved_frame(&test_seq.interleaved_frames[attempt_index],
-                                 &mut codec, &mut buffer, &mut state);
+            test_interleaved_frame(
+                &test_seq.interleaved_frames[attempt_index],
+                &mut codec,
+                &mut buffer,
+                &mut state,
+            );
         }
     }
 
     // Verify final invariants
-    assert!(state.active_streams.len() <= max_streams as usize,
-        "Active stream count should never exceed MAX_CONCURRENT_STREAMS");
+    assert!(
+        state.active_streams.len() <= max_streams as usize,
+        "Active stream count should never exceed MAX_CONCURRENT_STREAMS"
+    );
 
     if !test_seq.stream_attempts.is_empty() {
         // Should have attempted to enforce the limit
@@ -234,13 +252,17 @@ fn test_max_concurrent_streams_enforcement(test_seq: &MaxConcurrentStreamsSequen
         let successful = state.successful_opens.len();
         let refused = state.refused_streams.len();
 
-        assert!(successful + refused + state.protocol_errors >= total_attempts / 2,
-            "Should have processed a reasonable portion of stream attempts");
+        assert!(
+            successful + refused + state.protocol_errors >= total_attempts / 2,
+            "Should have processed a reasonable portion of stream attempts"
+        );
 
         if max_streams > 0 && total_attempts > max_streams as usize {
             // With more attempts than the limit, should have some refusals
-            assert!(refused > 0 || state.protocol_errors > 0,
-                "Should refuse streams or generate protocol errors when exceeding MAX_CONCURRENT_STREAMS");
+            assert!(
+                refused > 0 || state.protocol_errors > 0,
+                "Should refuse streams or generate protocol errors when exceeding MAX_CONCURRENT_STREAMS"
+            );
         }
     }
 }
@@ -256,7 +278,11 @@ fn test_stream_lifecycle_with_limits(test_seq: &MaxConcurrentStreamsSequence) {
 
         // Open stream
         let result = state.open_stream(stream_id);
-        assert!(result.is_ok(), "Should be able to open stream {} within limit", stream_id);
+        assert!(
+            result.is_ok(),
+            "Should be able to open stream {} within limit",
+            stream_id
+        );
 
         // Immediately close it
         state.close_stream(stream_id);
@@ -264,7 +290,10 @@ fn test_stream_lifecycle_with_limits(test_seq: &MaxConcurrentStreamsSequence) {
         // Should be able to open another stream in the same slot
         let next_stream_id = stream_id + 2;
         let next_result = state.open_stream(next_stream_id);
-        assert!(next_result.is_ok(), "Should be able to reuse stream slot after close");
+        assert!(
+            next_result.is_ok(),
+            "Should be able to reuse stream slot after close"
+        );
 
         state.close_stream(next_stream_id);
     }
@@ -275,52 +304,65 @@ fn test_stream_lifecycle_with_limits(test_seq: &MaxConcurrentStreamsSequence) {
 
         let result = state.open_stream(stream_id);
         if i < max_streams {
-            assert!(result.is_ok(), "Stream {} should open within limit", stream_id);
+            assert!(
+                result.is_ok(),
+                "Stream {} should open within limit",
+                stream_id
+            );
         } else {
-            assert!(matches!(result, Err(ErrorCode::RefusedStream)),
-                "Stream {} should be refused beyond limit", stream_id);
+            assert!(
+                matches!(result, Err(ErrorCode::RefusedStream)),
+                "Stream {} should be refused beyond limit",
+                stream_id
+            );
         }
     }
 }
 
 /// Test interleaved frame processing
-fn test_interleaved_frame(interleaved: &InterleavedFrame,
-                         codec: &mut FrameCodec, buffer: &mut BytesMut,
-                         state: &mut ConcurrentStreamState) {
+fn test_interleaved_frame(
+    interleaved: &InterleavedFrame,
+    codec: &mut FrameCodec,
+    buffer: &mut BytesMut,
+    state: &mut ConcurrentStreamState,
+) {
     match interleaved {
         InterleavedFrame::Settings { settings } => {
             // Create new SETTINGS frame
-            let settings_list = settings.iter().filter_map(|s| {
-                Setting::from_id_value(normalize_setting_id(s.identifier), s.value)
-            }).collect();
+            let settings_list = settings
+                .iter()
+                .filter_map(|s| Setting::from_id_value(normalize_setting_id(s.identifier), s.value))
+                .collect();
 
             let frame = Frame::Settings(SettingsFrame::new(settings_list));
             let _ = codec.encode(frame, buffer);
         }
-        InterleavedFrame::RstStream { stream_id, error_code: _ } => {
+        InterleavedFrame::RstStream {
+            stream_id,
+            error_code: _,
+        } => {
             let normalized_stream_id = normalize_stream_id(*stream_id);
             if normalized_stream_id != 0 {
                 // Close the stream in our state tracking
                 state.close_stream(normalized_stream_id);
 
                 // Create RST_STREAM frame
-                let frame = Frame::RstStream(
-                    asupersync::http::h2::frame::RstStreamFrame::new(
-                        normalized_stream_id,
-                        ErrorCode::Cancel
-                    )
-                );
+                let frame = Frame::RstStream(asupersync::http::h2::frame::RstStreamFrame::new(
+                    normalized_stream_id,
+                    ErrorCode::Cancel,
+                ));
                 let _ = codec.encode(frame, buffer);
             }
         }
-        InterleavedFrame::WindowUpdate { stream_id, increment } => {
+        InterleavedFrame::WindowUpdate {
+            stream_id,
+            increment,
+        } => {
             let normalized_increment = if increment == &0 { 1 } else { *increment };
-            let frame = Frame::WindowUpdate(
-                asupersync::http::h2::frame::WindowUpdateFrame::new(
-                    normalize_stream_id(*stream_id),
-                    normalized_increment
-                )
-            );
+            let frame = Frame::WindowUpdate(asupersync::http::h2::frame::WindowUpdateFrame::new(
+                normalize_stream_id(*stream_id),
+                normalized_increment,
+            ));
             let _ = codec.encode(frame, buffer);
         }
         InterleavedFrame::Ping { ack } => {
@@ -345,8 +387,12 @@ fn create_settings_frame(max_streams: u32) -> Frame {
 }
 
 /// Create HEADERS frame to open a stream
-fn create_headers_frame(stream_id: u32, headers: &[HeaderSpec],
-                       end_headers: bool, end_stream: bool) -> Frame {
+fn create_headers_frame(
+    stream_id: u32,
+    headers: &[HeaderSpec],
+    end_headers: bool,
+    end_stream: bool,
+) -> Frame {
     // Create minimal HTTP/2 headers
     let mut header_block = Vec::new();
 
@@ -389,7 +435,7 @@ fn create_data_frame(stream_id: u32, data_spec: &DataFrameSpec) -> Frame {
 /// Normalize max concurrent streams to reasonable range
 fn normalize_max_streams(value: u32) -> u32 {
     match value {
-        0 => 1,  // At least 1 stream
+        0 => 1, // At least 1 stream
         1..=1000 => value,
         _ => value % 100 + 1, // Map to 1-100 range
     }
@@ -410,7 +456,7 @@ fn normalize_stream_id(stream_id: u32) -> u32 {
 /// Normalize setting identifier to valid range
 fn normalize_setting_id(id: u16) -> u16 {
     match id {
-        1..=6 => id, // Standard settings
+        1..=6 => id,                // Standard settings
         _ => ((id % 6) + 1) as u16, // Map to standard settings
     }
 }

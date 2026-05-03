@@ -226,10 +226,10 @@ pub enum HeaderViolationType {
 /// Violation severity levels
 #[derive(Debug, PartialEq, Clone)]
 pub enum ViolationSeverity {
-    Critical,  // Protocol violation, interop failure
-    High,      // RFC deviation, compatibility risk
-    Medium,    // Edge case, minor deviation
-    Low,       // Style/best practice issue
+    Critical, // Protocol violation, interop failure
+    High,     // RFC deviation, compatibility risk
+    Medium,   // Edge case, minor deviation
+    Low,      // Style/best practice issue
 }
 
 impl MockConnectionManager {
@@ -242,7 +242,10 @@ impl MockConnectionManager {
     }
 
     /// Analyze connection persistence behavior for test case
-    pub fn analyze_connection_persistence(&mut self, test_case: &KeepAliveDefaultTestCase) -> PersistenceAnalysis {
+    pub fn analyze_connection_persistence(
+        &mut self,
+        test_case: &KeepAliveDefaultTestCase,
+    ) -> PersistenceAnalysis {
         let headers = self.build_headers(&test_case.connection_headers);
         let mut header_violations = Vec::new();
 
@@ -253,16 +256,18 @@ impl MockConnectionManager {
         let version_default = self.get_version_default_behavior(&test_case.http_version);
 
         // Check server config overrides
-        let server_override = self.check_server_config_overrides(&test_case.server_config, &test_case.connection_state);
+        let server_override = self
+            .check_server_config_overrides(&test_case.server_config, &test_case.connection_state);
 
         // Determine effective behavior
-        let (should_close, effective_behavior, decision_reason) = self.determine_effective_behavior(
-            &test_case.http_version,
-            &connection_directives,
-            version_default,
-            server_override,
-            &test_case.connection_state
-        );
+        let (should_close, effective_behavior, decision_reason) = self
+            .determine_effective_behavior(
+                &test_case.http_version,
+                &connection_directives,
+                version_default,
+                server_override,
+                &test_case.connection_state,
+            );
 
         // Validate behavior against expectations
         self.validate_behavior(test_case, should_close, &decision_reason);
@@ -300,13 +305,20 @@ impl MockConnectionManager {
     }
 
     /// Parse Connection header values and extract directives
-    fn parse_connection_headers(&self, headers: &HashMap<String, String>, violations: &mut Vec<HeaderViolation>) -> Vec<String> {
+    fn parse_connection_headers(
+        &self,
+        headers: &HashMap<String, String>,
+        violations: &mut Vec<HeaderViolation>,
+    ) -> Vec<String> {
         let mut directives = Vec::new();
 
         for (name, value) in headers {
-            if name.eq_ignore_ascii_case("connection") || name.eq_ignore_ascii_case("proxy-connection") {
+            if name.eq_ignore_ascii_case("connection")
+                || name.eq_ignore_ascii_case("proxy-connection")
+            {
                 // Parse comma-separated tokens
-                let tokens: Vec<String> = value.split(',')
+                let tokens: Vec<String> = value
+                    .split(',')
                     .map(|token| token.trim().to_string())
                     .filter(|token| !token.is_empty())
                     .collect();
@@ -324,7 +336,9 @@ impl MockConnectionManager {
 
                 for token in tokens {
                     // Validate token syntax
-                    if self.precedence_config.validate_header_syntax && !self.is_valid_connection_token(&token) {
+                    if self.precedence_config.validate_header_syntax
+                        && !self.is_valid_connection_token(&token)
+                    {
                         violations.push(HeaderViolation {
                             violation_type: HeaderViolationType::TokenParsing,
                             header_name: name.clone(),
@@ -354,7 +368,11 @@ impl MockConnectionManager {
     }
 
     /// Check server configuration overrides
-    fn check_server_config_overrides(&self, config: &ServerConfig, state: &ConnectionStateConfig) -> Option<bool> {
+    fn check_server_config_overrides(
+        &self,
+        config: &ServerConfig,
+        state: &ConnectionStateConfig,
+    ) -> Option<bool> {
         // If keep-alive is disabled server-wide, always close
         if !config.keep_alive_enabled {
             return Some(true);
@@ -386,47 +404,79 @@ impl MockConnectionManager {
     ) -> (bool, EffectiveBehavior, DecisionReason) {
         // Server override takes precedence
         if let Some(should_close) = server_override {
-            let behavior = if should_close { EffectiveBehavior::Close } else { EffectiveBehavior::KeepAlive };
+            let behavior = if should_close {
+                EffectiveBehavior::Close
+            } else {
+                EffectiveBehavior::KeepAlive
+            };
             return (should_close, behavior, DecisionReason::ServerConfigOverride);
         }
 
         // Check explicit Connection headers
-        let has_close = connection_directives.iter().any(|d| d.eq_ignore_ascii_case("close"));
-        let has_keep_alive = connection_directives.iter().any(|d| d.eq_ignore_ascii_case("keep-alive"));
+        let has_close = connection_directives
+            .iter()
+            .any(|d| d.eq_ignore_ascii_case("close"));
+        let has_keep_alive = connection_directives
+            .iter()
+            .any(|d| d.eq_ignore_ascii_case("keep-alive"));
 
         if has_close && has_keep_alive {
             // Conflicting directives - ambiguous
-            return (true, EffectiveBehavior::Ambiguous, DecisionReason::HeaderSyntaxError);
+            return (
+                true,
+                EffectiveBehavior::Ambiguous,
+                DecisionReason::HeaderSyntaxError,
+            );
         }
 
         if has_close {
-            return (true, EffectiveBehavior::Close, DecisionReason::ExplicitConnectionHeader);
+            return (
+                true,
+                EffectiveBehavior::Close,
+                DecisionReason::ExplicitConnectionHeader,
+            );
         }
 
         if has_keep_alive {
-            return (false, EffectiveBehavior::KeepAlive, DecisionReason::ExplicitConnectionHeader);
+            return (
+                false,
+                EffectiveBehavior::KeepAlive,
+                DecisionReason::ExplicitConnectionHeader,
+            );
         }
 
         // No explicit header - use version default
         let should_close = version_default;
-        let behavior = if should_close { EffectiveBehavior::Close } else { EffectiveBehavior::KeepAlive };
+        let behavior = if should_close {
+            EffectiveBehavior::Close
+        } else {
+            EffectiveBehavior::KeepAlive
+        };
 
         // Special handling for invalid versions
         match version {
-            HttpVersion::Http09 | HttpVersion::Http20 => {
-                (true, EffectiveBehavior::Invalid, DecisionReason::HeaderSyntaxError)
-            },
-            _ => {
-                (should_close, behavior, DecisionReason::HttpVersionDefault)
-            }
+            HttpVersion::Http09 | HttpVersion::Http20 => (
+                true,
+                EffectiveBehavior::Invalid,
+                DecisionReason::HeaderSyntaxError,
+            ),
+            _ => (should_close, behavior, DecisionReason::HttpVersionDefault),
         }
     }
 
     /// Validate behavior against expected patterns
-    fn validate_behavior(&mut self, test_case: &KeepAliveDefaultTestCase, should_close: bool, reason: &DecisionReason) {
+    fn validate_behavior(
+        &mut self,
+        test_case: &KeepAliveDefaultTestCase,
+        should_close: bool,
+        reason: &DecisionReason,
+    ) {
         match &test_case.scenario {
             ConnectionScenario::Http10Default => {
-                if test_case.http_version == HttpVersion::Http10 && !should_close && *reason == DecisionReason::HttpVersionDefault {
+                if test_case.http_version == HttpVersion::Http10
+                    && !should_close
+                    && *reason == DecisionReason::HttpVersionDefault
+                {
                     // HTTP/1.0 should default to close
                     self.violations.push(PersistenceViolation {
                         violation_type: PersistenceViolationType::Http10ShouldDefaultClose,
@@ -437,9 +487,12 @@ impl MockConnectionManager {
                         severity: ViolationSeverity::High,
                     });
                 }
-            },
+            }
             ConnectionScenario::Http11Default => {
-                if test_case.http_version == HttpVersion::Http11 && should_close && *reason == DecisionReason::HttpVersionDefault {
+                if test_case.http_version == HttpVersion::Http11
+                    && should_close
+                    && *reason == DecisionReason::HttpVersionDefault
+                {
                     // HTTP/1.1 should default to keep-alive
                     self.violations.push(PersistenceViolation {
                         violation_type: PersistenceViolationType::Http11ShouldDefaultKeepAlive,
@@ -450,7 +503,7 @@ impl MockConnectionManager {
                         severity: ViolationSeverity::High,
                     });
                 }
-            },
+            }
             ConnectionScenario::ExplicitClose => {
                 if !should_close && *reason != DecisionReason::ServerConfigOverride {
                     // Explicit Connection: close not respected
@@ -463,9 +516,12 @@ impl MockConnectionManager {
                         severity: ViolationSeverity::Critical,
                     });
                 }
-            },
+            }
             ConnectionScenario::ExplicitKeepAlive => {
-                if should_close && *reason != DecisionReason::ServerConfigOverride && *reason != DecisionReason::RequestLimitReached {
+                if should_close
+                    && *reason != DecisionReason::ServerConfigOverride
+                    && *reason != DecisionReason::RequestLimitReached
+                {
                     // Explicit Connection: keep-alive not respected
                     self.violations.push(PersistenceViolation {
                         violation_type: PersistenceViolationType::HeaderNotRespected,
@@ -476,7 +532,7 @@ impl MockConnectionManager {
                         severity: ViolationSeverity::Critical,
                     });
                 }
-            },
+            }
             _ => {
                 // Other scenarios have more complex validation rules
             }
@@ -499,12 +555,16 @@ impl MockConnectionManager {
             return 1.0;
         }
 
-        let penalty = self.violations.iter().map(|v| match v.severity {
-            ViolationSeverity::Critical => 10.0,
-            ViolationSeverity::High => 5.0,
-            ViolationSeverity::Medium => 2.0,
-            ViolationSeverity::Low => 1.0,
-        }).sum::<f32>();
+        let penalty = self
+            .violations
+            .iter()
+            .map(|v| match v.severity {
+                ViolationSeverity::Critical => 10.0,
+                ViolationSeverity::High => 5.0,
+                ViolationSeverity::Medium => 2.0,
+                ViolationSeverity::Low => 1.0,
+            })
+            .sum::<f32>();
 
         let max_score = 100.0;
         (max_score - penalty).max(0.0) / max_score
@@ -522,11 +582,17 @@ impl MockConnectionManager {
             CaseVariant::Lowercase => base_name.to_lowercase(),
             CaseVariant::Uppercase => base_name.to_uppercase(),
             CaseVariant::CamelCase => "Connection".to_string(),
-            CaseVariant::MixedCase => {
-                base_name.chars().enumerate()
-                    .map(|(i, c)| if i % 2 == 0 { c.to_uppercase().to_string() } else { c.to_lowercase().to_string() })
-                    .collect()
-            },
+            CaseVariant::MixedCase => base_name
+                .chars()
+                .enumerate()
+                .map(|(i, c)| {
+                    if i % 2 == 0 {
+                        c.to_uppercase().to_string()
+                    } else {
+                        c.to_lowercase().to_string()
+                    }
+                })
+                .collect(),
         }
     }
 
@@ -572,7 +638,6 @@ fn generate_keep_alive_default_test_cases() -> Vec<KeepAliveDefaultTestCase> {
                 case_sensitive_header_values: false,
             },
         },
-
         // HTTP/1.1 default behavior (should keep-alive)
         KeepAliveDefaultTestCase {
             scenario: ConnectionScenario::Http11Default,
@@ -597,18 +662,15 @@ fn generate_keep_alive_default_test_cases() -> Vec<KeepAliveDefaultTestCase> {
                 case_sensitive_header_values: false,
             },
         },
-
         // HTTP/1.0 with explicit keep-alive (should override default)
         KeepAliveDefaultTestCase {
             scenario: ConnectionScenario::ExplicitKeepAlive,
             http_version: HttpVersion::Http10,
-            connection_headers: vec![
-                ConnectionHeader {
-                    name: HeaderName::Connection,
-                    value: ConnectionValue::KeepAlive,
-                    case_variant: CaseVariant::Lowercase,
-                },
-            ],
+            connection_headers: vec![ConnectionHeader {
+                name: HeaderName::Connection,
+                value: ConnectionValue::KeepAlive,
+                case_variant: CaseVariant::Lowercase,
+            }],
             server_config: ServerConfig {
                 keep_alive_enabled: true,
                 max_requests_per_connection: None,
@@ -628,18 +690,15 @@ fn generate_keep_alive_default_test_cases() -> Vec<KeepAliveDefaultTestCase> {
                 case_sensitive_header_values: false,
             },
         },
-
         // HTTP/1.1 with explicit close (should override default)
         KeepAliveDefaultTestCase {
             scenario: ConnectionScenario::ExplicitClose,
             http_version: HttpVersion::Http11,
-            connection_headers: vec![
-                ConnectionHeader {
-                    name: HeaderName::Connection,
-                    value: ConnectionValue::Close,
-                    case_variant: CaseVariant::Lowercase,
-                },
-            ],
+            connection_headers: vec![ConnectionHeader {
+                name: HeaderName::Connection,
+                value: ConnectionValue::Close,
+                case_variant: CaseVariant::Lowercase,
+            }],
             server_config: ServerConfig {
                 keep_alive_enabled: true,
                 max_requests_per_connection: None,
@@ -674,7 +733,9 @@ fuzz_target!(|data: &[u8]| {
             if predefined_cases.is_empty() {
                 return;
             }
-            let index = unstructured.int_in_range(0..=predefined_cases.len() - 1).unwrap_or(0);
+            let index = unstructured
+                .int_in_range(0..=predefined_cases.len() - 1)
+                .unwrap_or(0);
             predefined_cases[index].clone()
         }
     };
@@ -682,7 +743,7 @@ fuzz_target!(|data: &[u8]| {
     // Create connection manager
     let mut manager = MockConnectionManager::new(
         test_case.server_config.clone(),
-        test_case.precedence_config.clone()
+        test_case.precedence_config.clone(),
     );
 
     // Analyze connection persistence behavior
@@ -699,7 +760,7 @@ fuzz_target!(|data: &[u8]| {
 fn test_http_version_defaults(test_case: &KeepAliveDefaultTestCase) {
     let manager = MockConnectionManager::new(
         test_case.server_config.clone(),
-        test_case.precedence_config.clone()
+        test_case.precedence_config.clone(),
     );
 
     // Test HTTP/1.0 default (should close)
@@ -719,7 +780,7 @@ fn test_connection_header_precedence(test_case: &KeepAliveDefaultTestCase) {
 
     let mut manager = MockConnectionManager::new(
         test_case.server_config.clone(),
-        test_case.precedence_config.clone()
+        test_case.precedence_config.clone(),
     );
 
     let analysis = manager.analyze_connection_persistence(test_case);
@@ -731,7 +792,7 @@ fn test_connection_header_precedence(test_case: &KeepAliveDefaultTestCase) {
         match analysis.effective_behavior {
             EffectiveBehavior::Close | EffectiveBehavior::KeepAlive => {
                 // Valid explicit behavior
-            },
+            }
             EffectiveBehavior::Ambiguous | EffectiveBehavior::Invalid => {
                 // Invalid or conflicting headers
             }
@@ -747,11 +808,18 @@ fn test_server_config_overrides(test_case: &KeepAliveDefaultTestCase) {
         ..test_case.server_config.clone()
     };
 
-    let mut manager = MockConnectionManager::new(disabled_config, test_case.precedence_config.clone());
+    let mut manager =
+        MockConnectionManager::new(disabled_config, test_case.precedence_config.clone());
     let analysis = manager.analyze_connection_persistence(test_case);
 
-    if matches!(analysis.decision_reason, DecisionReason::ServerConfigOverride) {
-        assert!(analysis.should_close, "Server config disable should force close");
+    if matches!(
+        analysis.decision_reason,
+        DecisionReason::ServerConfigOverride
+    ) {
+        assert!(
+            analysis.should_close,
+            "Server config disable should force close"
+        );
     }
 }
 

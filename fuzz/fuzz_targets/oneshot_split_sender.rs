@@ -13,10 +13,10 @@
 
 #![no_main]
 
-use libfuzzer_sys::fuzz_target;
 use arbitrary::Arbitrary;
-use asupersync::channel::oneshot;
 use asupersync::Cx;
+use asupersync::channel::oneshot;
+use libfuzzer_sys::fuzz_target;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::thread;
@@ -57,7 +57,8 @@ impl SplitSenderConfig {
         self.sender_count = (self.sender_count % 8).max(1);
 
         // Ensure we have enough patterns and values
-        self.drop_patterns.resize(self.sender_count as usize, SenderDropPattern::DropImmediate);
+        self.drop_patterns
+            .resize(self.sender_count as usize, SenderDropPattern::DropImmediate);
         self.attempt_sends.resize(self.sender_count as usize, false);
         self.send_values.resize(self.sender_count as usize, 42);
         self.drop_delays.resize(self.sender_count as usize, 0);
@@ -102,7 +103,9 @@ impl SplitSenderTest {
             senders.push(extra_sender);
         }
 
-        results.senders_created.store(count as usize, Ordering::SeqCst);
+        results
+            .senders_created
+            .store(count as usize, Ordering::SeqCst);
 
         Self {
             senders,
@@ -138,14 +141,14 @@ impl SplitSenderTest {
                 // Just drop the sender
                 drop(sender);
                 self.results.senders_dropped.fetch_add(1, Ordering::SeqCst);
-            },
+            }
 
             SenderDropPattern::DropDelayed => {
                 // Small additional delay then drop
                 thread::sleep(Duration::from_micros(100));
                 drop(sender);
                 self.results.senders_dropped.fetch_add(1, Ordering::SeqCst);
-            },
+            }
 
             SenderDropPattern::SendThenDrop => {
                 if attempt_send {
@@ -153,35 +156,35 @@ impl SplitSenderTest {
                     match sender.send(&cx, value) {
                         Ok(()) => {
                             self.results.sends_succeeded.fetch_add(1, Ordering::SeqCst);
-                        },
+                        }
                         Err(_) => {
                             // Send failed, but still drop
-                        },
+                        }
                     }
                 } else {
                     // Just drop without sending
                     drop(sender);
                 }
                 self.results.senders_dropped.fetch_add(1, Ordering::SeqCst);
-            },
+            }
 
             SenderDropPattern::ReserveThenDrop => {
                 match sender.reserve(&cx) {
                     Ok(permit) => {
                         // Drop the permit without sending (abort)
                         drop(permit);
-                    },
+                    }
                     Err(_) => {
                         // Reserve failed, just drop sender
-                    },
+                    }
                 }
                 self.results.senders_dropped.fetch_add(1, Ordering::SeqCst);
-            },
+            }
 
             SenderDropPattern::KeepAlive => {
                 // Put the sender back instead of dropping it
                 self.senders.push(sender);
-            },
+            }
         }
     }
 
@@ -191,18 +194,18 @@ impl SplitSenderTest {
                 self.results.recv_completed.fetch_add(1, Ordering::SeqCst);
                 // Convert success to a "no error" sentinel
                 return oneshot::TryRecvError::Empty; // Misuse of enum but for simplicity
-            },
+            }
             Err(err) => {
                 match err {
                     oneshot::TryRecvError::Closed => {
                         self.results.recv_closed.fetch_add(1, Ordering::SeqCst);
-                    },
+                    }
                     oneshot::TryRecvError::Empty => {
                         // Still waiting
-                    },
+                    }
                 }
                 err
-            },
+            }
         }
     }
 
@@ -230,7 +233,11 @@ fuzz_target!(|data: &[u8]| {
         }
 
         // Adjust index since we're removing senders
-        let actual_idx = if test.remaining_senders() > 0 { 0 } else { break };
+        let actual_idx = if test.remaining_senders() > 0 {
+            0
+        } else {
+            break;
+        };
 
         test.execute_pattern(
             actual_idx,
@@ -256,10 +263,10 @@ fuzz_target!(|data: &[u8]| {
                     // and this was the one connected to our receiver
                     // The test concept is a bit artificial since we can't actually
                     // split a sender, so this assertion is more guidelines
-                },
+                }
                 oneshot::TryRecvError::Empty => {
                     // Expected - still waiting
-                },
+                }
             }
         }
     }
@@ -276,10 +283,10 @@ fuzz_target!(|data: &[u8]| {
             match recv_state {
                 oneshot::TryRecvError::Closed => {
                     // Expected
-                },
+                }
                 oneshot::TryRecvError::Empty => {
                     // May still be in transition, this can be acceptable
-                },
+                }
             }
         }
     }
@@ -291,10 +298,22 @@ fuzz_target!(|data: &[u8]| {
     let sends_succeeded = results.sends_succeeded.load(Ordering::SeqCst);
 
     // Basic sanity checks
-    assert_eq!(senders_created, config.sender_count as usize, "Sender creation count mismatch");
-    assert!(senders_dropped <= senders_created, "Cannot drop more senders than created");
-    assert!(sends_succeeded <= sends_attempted, "Cannot succeed more sends than attempted");
+    assert_eq!(
+        senders_created, config.sender_count as usize,
+        "Sender creation count mismatch"
+    );
+    assert!(
+        senders_dropped <= senders_created,
+        "Cannot drop more senders than created"
+    );
+    assert!(
+        sends_succeeded <= sends_attempted,
+        "Cannot succeed more sends than attempted"
+    );
 
     // Key invariant: At most one send should succeed (oneshot property)
-    assert!(sends_succeeded <= 1, "Oneshot channel should allow at most one successful send");
+    assert!(
+        sends_succeeded <= 1,
+        "Oneshot channel should allow at most one successful send"
+    );
 });

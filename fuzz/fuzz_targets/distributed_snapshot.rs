@@ -753,11 +753,8 @@ fn derive_snapshot_layout(data: &[u8]) -> Option<SnapshotLayout> {
     let polls_presence_offset = advance_optional_u64(data, deadline_presence_offset)?;
     let cost_presence_offset = advance_optional_u32(data, polls_presence_offset)?;
     let cancel_reason_presence_offset = advance_optional_u64(data, cost_presence_offset)?;
-    let (
-        cancel_reason_length_offset,
-        cancel_reason_data_offset,
-        parent_presence_offset,
-    ) = advance_optional_string(data, cancel_reason_presence_offset)?;
+    let (cancel_reason_length_offset, cancel_reason_data_offset, parent_presence_offset) =
+        advance_optional_string(data, cancel_reason_presence_offset)?;
     let metadata_length_offset = advance_optional_parent(data, parent_presence_offset)?;
     if data.len() < metadata_length_offset.checked_add(U32_LEN)? {
         return None;

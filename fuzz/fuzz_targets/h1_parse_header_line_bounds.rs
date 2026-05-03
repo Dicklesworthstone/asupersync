@@ -35,9 +35,7 @@ fuzz_target!(|data: &[u8]| {
 
     if let Ok(Ok((name_end, value_start, value_end))) = r {
         assert!(
-            name_end <= value_start
-                && value_start <= value_end
-                && value_end <= data.len(),
+            name_end <= value_start && value_start <= value_end && value_end <= data.len(),
             "parse_header_line_bounds returned inconsistent indices: \
              name_end={name_end}, value_start={value_start}, value_end={value_end}, len={}",
             data.len()
@@ -51,7 +49,9 @@ fuzz_target!(|data: &[u8]| {
         if combined.len() > MAX_INPUT_LEN {
             continue;
         }
-        let r = catch_unwind(AssertUnwindSafe(|| fuzz_parse_header_line_bounds(&combined)));
+        let r = catch_unwind(AssertUnwindSafe(|| {
+            fuzz_parse_header_line_bounds(&combined)
+        }));
         assert!(r.is_ok());
     }
 });

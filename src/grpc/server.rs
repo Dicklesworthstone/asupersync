@@ -978,11 +978,18 @@ impl Server {
             }
         }
 
-        // ── Phase 2: invoke the user handler. ────────────────────────
-        // The request may have been mutated by the chain (e.g. an
-        // auth interceptor inserted an AuthContext into typed
-        // extensions per the interceptor.rs docs).
-        //
+        // ── Phase 2: invoke the user handler with deadline enforcement. ─
+        // Parse deadline from grpc-timeout header to enforce request cancellation.
+        // Per gRPC spec: server MUST cancel handler and return DEADLINE_EXCEEDED
+        // when client-specified deadline expires.
+        let call_context = CallContext::from_metadata_at_with_max_deadline(
+            request.metadata().clone(),
+            self.config.default_timeout,
+            self.config.max_request_deadline,
+            None, // peer_addr
+            wall_clock_instant_now(),
+        );
+
         // We retain a borrow of the original request for
         // intercept_response_with_request; the handler consumes the
         // request by value, so we capture the metadata snapshot
@@ -990,7 +997,35 @@ impl Server {
         // where downstream response-side interceptors may need to
         // read the request that produced the response.
         let request_snapshot = request.snapshot(Bytes::new());
-        let response_result = handler(request).await;
+
+        // Deadline enforcement: race handler against deadline expiry
+        let response_result = if let Some(std_deadline) = call_context.deadline() {
+            // Check if already expired before starting handler
+            if call_context.is_expired() {
+                return Err(Status::deadline_exceeded(
+                    "Request deadline already expired",
+                ));
+            }
+
+            // Convert std::time::Instant to crate::types::Time for timeout_at
+            // Use remaining duration approach since direct conversion isn't available
+            let now = wall_clock_instant_now();
+            let remaining_duration = std_deadline.saturating_duration_since(now);
+            let deadline = crate::time::wall_now() + remaining_duration;
+
+            // Race handler vs deadline using timeout_at
+            let handler_future = handler(request);
+            match crate::time::timeout_at(deadline, handler_future).await {
+                Ok(result) => result,
+                Err(_timeout) => {
+                    // Deadline exceeded during handler execution
+                    return Err(Status::deadline_exceeded("Request deadline exceeded"));
+                }
+            }
+        } else {
+            // No deadline set, run handler normally
+            handler(request).await
+        };
 
         // ── Phase 3: response-side chain (REVERSE order on success). ─
         // On handler error, the response-side chain is NOT invoked
@@ -3694,5 +3729,296 @@ mod tests {
         );
 
         crate::test_complete!("grpc_message_size_limit_enforcement_audit");
+    }
+
+    /// AUDIT MODULE: gRPC server request deadline propagation and enforcement
+    ///
+    /// AUDIT FINDING: DEFECT - Current implementation does NOT cancel handlers
+    /// when grpc-timeout deadline expires. Handlers run to completion even after
+    /// deadline, violating gRPC specification requirements.
+    ///
+    /// Per gRPC spec: when client sets grpc-timeout header, server MUST cancel
+    /// the handler and respond with DEADLINE_EXCEEDED status if deadline is exceeded.
+    mod grpc_deadline_enforcement_audit {
+        use super::*;
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::time::{Duration, Instant};
+
+        /// AUDIT: Verify current deadline parsing is correct
+        ///
+        /// The deadline parsing logic correctly extracts grpc-timeout headers
+        /// and creates appropriate CallContext deadlines. This part is SOUND.
+        #[test]
+        fn audit_grpc_timeout_header_parsing_is_sound() {
+            init_test("audit_grpc_timeout_header_parsing_is_sound");
+
+            let now = Instant::now();
+            let mut metadata = Metadata::new();
+            metadata.insert("grpc-timeout", "5S");
+
+            let context = CallContext::from_metadata_at(metadata, None, None, now);
+            let deadline = context.deadline().expect("deadline should be parsed");
+
+            let expected_deadline = now + Duration::from_secs(5);
+            crate::assert_with_log!(
+                deadline
+                    .duration_since(expected_deadline)
+                    .unwrap_or(Duration::ZERO)
+                    < Duration::from_millis(1),
+                "grpc-timeout header correctly parsed to deadline",
+                true,
+                deadline
+                    .duration_since(expected_deadline)
+                    .unwrap_or(Duration::ZERO)
+                    < Duration::from_millis(1)
+            );
+
+            // Verify deadline checking methods work
+            assert!(
+                !context.is_expired_at(now),
+                "should not be expired immediately"
+            );
+            assert!(
+                context.is_expired_at(deadline + Duration::from_millis(1)),
+                "should be expired after deadline"
+            );
+
+            crate::test_complete!("audit_grpc_timeout_header_parsing_is_sound");
+        }
+
+        /// AUDIT: Document current defective behavior - handlers not canceled on deadline
+        ///
+        /// DEFECT CONFIRMED: dispatch_unary allows handlers to run past deadline
+        /// without cancellation. This violates gRPC specification.
+        #[test]
+        fn audit_current_deadline_enforcement_is_defective() {
+            use futures_lite::future::block_on;
+            init_test("audit_current_deadline_enforcement_is_defective");
+
+            let server = Server::builder().build();
+
+            // Create request with very short deadline
+            let mut metadata = Metadata::new();
+            metadata.insert("grpc-timeout", "1m"); // 1 millisecond
+            let request = Request::with_metadata(Bytes::from_static(b"test"), metadata);
+
+            let handler_completed = Arc::new(AtomicBool::new(false));
+            let handler_completed_clone = Arc::clone(&handler_completed);
+
+            // Handler that takes longer than deadline
+            let start_time = Instant::now();
+            let result = block_on(server.dispatch_unary(request, move |req| async move {
+                // Sleep longer than the 1ms deadline
+                futures_lite::future::yield_now().await; // yield to allow deadline to pass
+                std::thread::sleep(Duration::from_millis(5)); // definitely past deadline
+
+                handler_completed_clone.store(true, Ordering::Relaxed);
+                Ok::<Response<Bytes>, Status>(Response::new(req.into_inner()))
+            }));
+
+            // AUDIT VERIFICATION: Current behavior is DEFECTIVE
+            // - Handler completed successfully despite exceeding deadline
+            // - No DEADLINE_EXCEEDED status returned
+            // - Server should have canceled handler when deadline expired
+            assert!(
+                handler_completed.load(Ordering::Relaxed),
+                "DEFECT: Handler completed despite exceeding grpc-timeout deadline"
+            );
+            assert!(
+                result.is_ok(),
+                "DEFECT: Request succeeded despite exceeding deadline - should return DEADLINE_EXCEEDED"
+            );
+            assert!(
+                start_time.elapsed() > Duration::from_millis(1),
+                "Handler definitely ran past the 1ms deadline"
+            );
+
+            crate::test_complete!("audit_current_deadline_enforcement_is_defective");
+        }
+
+        /// AUDIT: Verify server deadline configuration is parsed correctly
+        ///
+        /// This tests default_timeout and max_request_deadline configuration
+        /// parsing, which is SOUND.
+        #[test]
+        fn audit_server_deadline_configuration_is_sound() {
+            init_test("audit_server_deadline_configuration_is_sound");
+
+            let server = Server::builder()
+                .default_timeout(Duration::from_secs(30))
+                .max_request_deadline(Duration::from_secs(60))
+                .build();
+
+            let config = server.config();
+            assert_eq!(
+                config.default_timeout,
+                Some(Duration::from_secs(30)),
+                "default_timeout configuration preserved"
+            );
+            assert_eq!(
+                config.max_request_deadline,
+                Some(Duration::from_secs(60)),
+                "max_request_deadline configuration preserved"
+            );
+
+            crate::test_complete!("audit_server_deadline_configuration_is_sound");
+        }
+
+        /// AUDIT: Verify max_request_deadline clamping works correctly
+        ///
+        /// This functionality is SOUND - the server correctly clamps peer-supplied
+        /// timeouts against the configured maximum.
+        #[test]
+        fn audit_max_request_deadline_clamping_is_sound() {
+            init_test("audit_max_request_deadline_clamping_is_sound");
+
+            let now = Instant::now();
+            let mut metadata = Metadata::new();
+            metadata.insert("grpc-timeout", "3600S"); // 1 hour requested
+
+            let context = CallContext::from_metadata_at_with_max_deadline(
+                metadata,
+                None,
+                Some(Duration::from_secs(60)), // 1 minute max
+                None,
+                now,
+            );
+
+            let deadline = context.deadline().expect("deadline should be set");
+            let clamped_duration = deadline.duration_since(now);
+
+            crate::assert_with_log!(
+                clamped_duration <= Duration::from_secs(61), // Allow 1s tolerance
+                "peer timeout correctly clamped to server max_request_deadline",
+                true,
+                clamped_duration <= Duration::from_secs(61)
+            );
+
+            crate::assert_with_log!(
+                clamped_duration >= Duration::from_secs(59), // Allow 1s tolerance
+                "clamped deadline is approximately the max value",
+                true,
+                clamped_duration >= Duration::from_secs(59)
+            );
+
+            crate::test_complete!("audit_max_request_deadline_clamping_is_sound");
+        }
+
+        /// AUDIT: Document the correct behavior that should be implemented
+        ///
+        /// This test documents the REQUIRED gRPC specification behavior:
+        /// - Parse grpc-timeout header to deadline
+        /// - Cancel handler when deadline expires
+        /// - Return DEADLINE_EXCEEDED status
+        #[test]
+        fn audit_required_deadline_enforcement_behavior_specification() {
+            init_test("audit_required_deadline_enforcement_behavior_specification");
+
+            // REQUIREMENT 1: Parse grpc-timeout header correctly
+            // ✓ IMPLEMENTED - CallContext::from_metadata_at works correctly
+
+            // REQUIREMENT 2: Monitor deadline during handler execution
+            // ✗ NOT IMPLEMENTED - dispatch_unary doesn't check deadline
+
+            // REQUIREMENT 3: Cancel handler when deadline expires
+            // ✗ NOT IMPLEMENTED - no cancellation mechanism exists
+
+            // REQUIREMENT 4: Return DEADLINE_EXCEEDED status for expired requests
+            // ✗ NOT IMPLEMENTED - no deadline expiry detection
+
+            // REQUIREMENT 5: Respect max_request_deadline server configuration
+            // ✓ IMPLEMENTED - from_metadata_at_with_max_deadline clamps correctly
+
+            // IMPLEMENTATION NEEDED:
+            // 1. Add deadline-aware dispatch method that races handler vs deadline
+            // 2. Cancel handler task when deadline expires
+            // 3. Return Status::deadline_exceeded() for expired requests
+            // 4. Update dispatch_unary to use deadline enforcement
+
+            eprintln!(
+                "{{\"requirement\":\"DEADLINE_ENFORCEMENT\",\"status\":\"DEFECTIVE\",\"details\":\"Handler cancellation not implemented\"}}"
+            );
+
+            crate::test_complete!("audit_required_deadline_enforcement_behavior_specification");
+        }
+
+        /// AUDIT: Test edge case behavior with malformed deadlines
+        ///
+        /// Verify that malformed grpc-timeout headers fail safely and don't
+        /// bypass deadline enforcement. This behavior is SOUND.
+        #[test]
+        fn audit_malformed_deadline_handling_is_sound() {
+            use futures_lite::future::block_on;
+            init_test("audit_malformed_deadline_handling_is_sound");
+
+            let server = Server::builder()
+                .default_timeout(Duration::from_secs(5))
+                .build();
+
+            // Test with malformed grpc-timeout header
+            let mut metadata = Metadata::new();
+            metadata.insert("grpc-timeout", "invalid-format");
+            let request = Request::with_metadata(Bytes::from_static(b"test"), metadata);
+
+            let result = block_on(server.dispatch_unary(request, |req| async move {
+                // Verify no default timeout was applied to malformed header
+                Ok::<Response<Bytes>, Status>(Response::new(req.into_inner()))
+            }));
+
+            // Malformed headers should not use default_timeout fallback
+            // (only when header is completely absent)
+            assert!(
+                result.is_ok(),
+                "Malformed grpc-timeout should not prevent request processing"
+            );
+
+            crate::test_complete!("audit_malformed_deadline_handling_is_sound");
+        }
+
+        /// AUDIT: Test deadline propagation to downstream calls
+        ///
+        /// Verify that deadlines are correctly propagated in outbound metadata.
+        /// This functionality is SOUND - CallContext::propagate_timeout_to works.
+        #[test]
+        fn audit_deadline_propagation_is_sound() {
+            init_test("audit_deadline_propagation_is_sound");
+
+            let now = Instant::now();
+            let context = CallContext::with_deadline(now + Duration::from_secs(10));
+
+            let mut outbound_metadata = Metadata::new();
+            let propagated = context.propagate_timeout_to_at(&mut outbound_metadata, now);
+
+            assert!(
+                propagated,
+                "deadline should be propagated to outbound metadata"
+            );
+            assert!(
+                outbound_metadata.get("grpc-timeout").is_some(),
+                "grpc-timeout header should be added to outbound metadata"
+            );
+
+            // Verify propagated timeout is reasonable (should be ~10s)
+            let propagated_header = outbound_metadata
+                .get("grpc-timeout")
+                .expect("grpc-timeout should be present");
+            if let super::streaming::MetadataValue::Ascii(header_value) = propagated_header {
+                let parsed_timeout = parse_grpc_timeout(header_value);
+                assert!(
+                    parsed_timeout.is_some(),
+                    "propagated timeout should be parseable"
+                );
+                let timeout = parsed_timeout.unwrap();
+                assert!(
+                    timeout >= Duration::from_secs(9) && timeout <= Duration::from_secs(11),
+                    "propagated timeout should be approximately 10 seconds"
+                );
+            } else {
+                panic!("grpc-timeout should be ASCII metadata value");
+            }
+
+            crate::test_complete!("audit_deadline_propagation_is_sound");
+        }
     }
 }

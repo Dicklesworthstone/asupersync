@@ -1,28 +1,50 @@
 #![no_main]
 
-use libfuzzer_sys::fuzz_target;
 use arbitrary::Arbitrary;
+use libfuzzer_sys::fuzz_target;
 use std::collections::HashMap;
 
 /// Test input structure for CONTINUATION without HEADERS fuzz scenarios
 #[derive(Arbitrary, Clone, Debug)]
 struct ContinuationWithoutHeadersInput {
-    stream_id: u32,                    // Stream ID for the CONTINUATION frame
-    frame_flags: u8,                   // CONTINUATION frame flags (END_HEADERS bit 0x4)
-    header_block_fragment: Vec<u8>,    // Header block fragment data
-    preceding_frames: Vec<PrecedingFrame>,  // Frames sent before CONTINUATION
+    stream_id: u32,                        // Stream ID for the CONTINUATION frame
+    frame_flags: u8,                       // CONTINUATION frame flags (END_HEADERS bit 0x4)
+    header_block_fragment: Vec<u8>,        // Header block fragment data
+    preceding_frames: Vec<PrecedingFrame>, // Frames sent before CONTINUATION
 }
 
 /// Frames that can precede a CONTINUATION (but shouldn't for this test)
 #[derive(Arbitrary, Clone, Debug)]
 enum PrecedingFrame {
-    Data { stream_id: u32, data: Vec<u8> },
-    Settings { parameters: Vec<(u16, u32)> },
-    Priority { stream_id: u32, dependency: u32, weight: u8, exclusive: bool },
-    RstStream { stream_id: u32, error_code: u32 },
-    Ping { data: [u8; 8] },
-    GoAway { last_stream_id: u32, error_code: u32, debug_data: Vec<u8> },
-    WindowUpdate { stream_id: u32, increment: u32 },
+    Data {
+        stream_id: u32,
+        data: Vec<u8>,
+    },
+    Settings {
+        parameters: Vec<(u16, u32)>,
+    },
+    Priority {
+        stream_id: u32,
+        dependency: u32,
+        weight: u8,
+        exclusive: bool,
+    },
+    RstStream {
+        stream_id: u32,
+        error_code: u32,
+    },
+    Ping {
+        data: [u8; 8],
+    },
+    GoAway {
+        last_stream_id: u32,
+        error_code: u32,
+        debug_data: Vec<u8>,
+    },
+    WindowUpdate {
+        stream_id: u32,
+        increment: u32,
+    },
 }
 
 /// Mock connection state to track frame sequencing
@@ -221,7 +243,8 @@ impl MockContinuationConnection {
         // But if we're expecting CONTINUATION, this is an error
         if self.expecting_continuation.is_some() {
             self.connection_error = Some(PROTOCOL_ERROR);
-            self.protocol_violations.push("DATA frame while expecting CONTINUATION".to_string());
+            self.protocol_violations
+                .push("DATA frame while expecting CONTINUATION".to_string());
         }
     }
 
@@ -230,7 +253,8 @@ impl MockContinuationConnection {
         // But if we're expecting CONTINUATION, this is an error
         if self.expecting_continuation.is_some() {
             self.connection_error = Some(PROTOCOL_ERROR);
-            self.protocol_violations.push("PRIORITY frame while expecting CONTINUATION".to_string());
+            self.protocol_violations
+                .push("PRIORITY frame while expecting CONTINUATION".to_string());
         }
     }
 
@@ -243,7 +267,8 @@ impl MockContinuationConnection {
             } else {
                 // RST_STREAM for different stream while expecting CONTINUATION is error
                 self.connection_error = Some(PROTOCOL_ERROR);
-                self.protocol_violations.push("RST_STREAM frame while expecting CONTINUATION".to_string());
+                self.protocol_violations
+                    .push("RST_STREAM frame while expecting CONTINUATION".to_string());
             }
         }
         self.stream_states.remove(&stream_id);
@@ -254,7 +279,8 @@ impl MockContinuationConnection {
         // But if we're expecting CONTINUATION, this is an error
         if self.expecting_continuation.is_some() {
             self.connection_error = Some(PROTOCOL_ERROR);
-            self.protocol_violations.push("SETTINGS frame while expecting CONTINUATION".to_string());
+            self.protocol_violations
+                .push("SETTINGS frame while expecting CONTINUATION".to_string());
         }
     }
 
@@ -263,7 +289,8 @@ impl MockContinuationConnection {
         // But if we're expecting CONTINUATION, this is an error
         if self.expecting_continuation.is_some() {
             self.connection_error = Some(PROTOCOL_ERROR);
-            self.protocol_violations.push("PING frame while expecting CONTINUATION".to_string());
+            self.protocol_violations
+                .push("PING frame while expecting CONTINUATION".to_string());
         }
     }
 
@@ -272,7 +299,8 @@ impl MockContinuationConnection {
         // But if we're expecting CONTINUATION, this is an error
         if self.expecting_continuation.is_some() {
             self.connection_error = Some(PROTOCOL_ERROR);
-            self.protocol_violations.push("GOAWAY frame while expecting CONTINUATION".to_string());
+            self.protocol_violations
+                .push("GOAWAY frame while expecting CONTINUATION".to_string());
         }
     }
 
@@ -281,7 +309,8 @@ impl MockContinuationConnection {
         // But if we're expecting CONTINUATION, this is an error
         if self.expecting_continuation.is_some() {
             self.connection_error = Some(PROTOCOL_ERROR);
-            self.protocol_violations.push("WINDOW_UPDATE frame while expecting CONTINUATION".to_string());
+            self.protocol_violations
+                .push("WINDOW_UPDATE frame while expecting CONTINUATION".to_string());
         }
     }
 
@@ -312,28 +341,47 @@ fn send_preceding_frame(conn: &mut MockContinuationConnection, frame: &Preceding
             }
             conn.process_frame(FRAME_TYPE_SETTINGS, 0, 0, &payload);
         }
-        PrecedingFrame::Priority { stream_id, dependency, weight, exclusive } => {
+        PrecedingFrame::Priority {
+            stream_id,
+            dependency,
+            weight,
+            exclusive,
+        } => {
             let mut payload = Vec::new();
-            let dep_field = if *exclusive { *dependency | 0x80000000 } else { *dependency };
+            let dep_field = if *exclusive {
+                *dependency | 0x80000000
+            } else {
+                *dependency
+            };
             payload.extend_from_slice(&dep_field.to_be_bytes());
             payload.push(*weight);
             conn.process_frame(FRAME_TYPE_PRIORITY, *stream_id, 0, &payload);
         }
-        PrecedingFrame::RstStream { stream_id, error_code } => {
+        PrecedingFrame::RstStream {
+            stream_id,
+            error_code,
+        } => {
             let payload = error_code.to_be_bytes().to_vec();
             conn.process_frame(FRAME_TYPE_RST_STREAM, *stream_id, 0, &payload);
         }
         PrecedingFrame::Ping { data } => {
             conn.process_frame(FRAME_TYPE_PING, 0, 0, data);
         }
-        PrecedingFrame::GoAway { last_stream_id, error_code, debug_data } => {
+        PrecedingFrame::GoAway {
+            last_stream_id,
+            error_code,
+            debug_data,
+        } => {
             let mut payload = Vec::new();
             payload.extend_from_slice(&last_stream_id.to_be_bytes());
             payload.extend_from_slice(&error_code.to_be_bytes());
             payload.extend(debug_data);
             conn.process_frame(FRAME_TYPE_GOAWAY, 0, 0, &payload);
         }
-        PrecedingFrame::WindowUpdate { stream_id, increment } => {
+        PrecedingFrame::WindowUpdate {
+            stream_id,
+            increment,
+        } => {
             let payload = increment.to_be_bytes().to_vec();
             conn.process_frame(FRAME_TYPE_WINDOW_UPDATE, *stream_id, 0, &payload);
         }

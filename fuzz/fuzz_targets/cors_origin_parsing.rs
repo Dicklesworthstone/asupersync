@@ -3,7 +3,7 @@
 use arbitrary::Arbitrary;
 use libfuzzer_sys::fuzz_target;
 
-use asupersync::web::{extract::Request, middleware::CorsMiddleware, Handler, Response};
+use asupersync::web::{Handler, Response, extract::Request, middleware::CorsMiddleware};
 
 /// Fuzz input for CORS Origin parsing under multi-Origin headers (RFC 6454)
 #[derive(Arbitrary, Debug)]
@@ -58,7 +58,12 @@ enum OriginHeaderScenario {
     /// Empty Origin header value
     EmptyOrigin,
     /// Origin with path (should be stripped per spec)
-    OriginWithPath { scheme: String, host: String, port: Option<u16>, path: String },
+    OriginWithPath {
+        scheme: String,
+        host: String,
+        port: Option<u16>,
+        path: String,
+    },
     /// Origin with fragments/queries (invalid per RFC 6454)
     OriginWithExtras { base_origin: String, extras: String },
     /// Case variations (origins should be case-insensitive for host part)
@@ -114,14 +119,22 @@ fn request_with_origin_scenario(input: &CorsOriginFuzzInput) -> Request {
         OriginHeaderScenario::EmptyOrigin => {
             req = req.with_header("Origin", "");
         }
-        OriginHeaderScenario::OriginWithPath { scheme, host, port, path } => {
+        OriginHeaderScenario::OriginWithPath {
+            scheme,
+            host,
+            port,
+            path,
+        } => {
             let origin = match port {
                 Some(p) => format!("{}://{}:{}{}", scheme, host, p, path),
                 None => format!("{}://{}{}", scheme, host, path),
             };
             req = req.with_header("Origin", &origin);
         }
-        OriginHeaderScenario::OriginWithExtras { base_origin, extras } => {
+        OriginHeaderScenario::OriginWithExtras {
+            base_origin,
+            extras,
+        } => {
             let origin = format!("{}{}", base_origin, extras);
             req = req.with_header("Origin", &origin);
         }
@@ -158,11 +171,15 @@ fn test_multi_origin_rfc6454_compliance(input: &CorsOriginFuzzInput) {
     let response = middleware.call(req);
 
     // Basic invariants that should always hold
-    assert!(matches!(response.status,
-        asupersync::web::StatusCode::OK |
-        asupersync::web::StatusCode::NO_CONTENT |
-        asupersync::web::StatusCode::FORBIDDEN
-    ), "Response status should be valid HTTP status");
+    assert!(
+        matches!(
+            response.status,
+            asupersync::web::StatusCode::OK
+                | asupersync::web::StatusCode::NO_CONTENT
+                | asupersync::web::StatusCode::FORBIDDEN
+        ),
+        "Response status should be valid HTTP status"
+    );
 
     if let OriginHeaderScenario::MultipleOrigins { .. } = &input.origin_scenario {
         assert!(
@@ -185,10 +202,8 @@ fn test_cors_policy_consistency(input: &CorsOriginFuzzInput) {
         let cors_policy = build_cors_policy(&input.cors_policy_type);
         let middleware = CorsMiddleware::new(TestHandler, cors_policy);
 
-        let req1 = Request::new(input.method.as_str(), &input.path)
-            .with_header("Origin", origin);
-        let req2 = Request::new(input.method.as_str(), &input.path)
-            .with_header("Origin", origin);
+        let req1 = Request::new(input.method.as_str(), &input.path).with_header("Origin", origin);
+        let req2 = Request::new(input.method.as_str(), &input.path).with_header("Origin", origin);
 
         let resp1 = middleware.call(req1);
         let resp2 = middleware.call(req2);
@@ -208,12 +223,12 @@ fn test_header_case_insensitivity(input: &CorsOriginFuzzInput) {
         let cors_policy = build_cors_policy(&input.cors_policy_type);
         let middleware = CorsMiddleware::new(TestHandler, cors_policy);
 
-        let req_lower = Request::new(input.method.as_str(), &input.path)
-            .with_header("origin", origin);
-        let req_upper = Request::new(input.method.as_str(), &input.path)
-            .with_header("ORIGIN", origin);
-        let req_mixed = Request::new(input.method.as_str(), &input.path)
-            .with_header("OrIgIn", origin);
+        let req_lower =
+            Request::new(input.method.as_str(), &input.path).with_header("origin", origin);
+        let req_upper =
+            Request::new(input.method.as_str(), &input.path).with_header("ORIGIN", origin);
+        let req_mixed =
+            Request::new(input.method.as_str(), &input.path).with_header("OrIgIn", origin);
 
         let resp_lower = middleware.call(req_lower);
         let resp_upper = middleware.call(req_upper);
@@ -234,19 +249,15 @@ fn test_header_case_insensitivity(input: &CorsOriginFuzzInput) {
 }
 
 fn build_cors_policy(policy_type: &CorsPolicyType) -> asupersync::web::middleware::CorsPolicy {
-    use asupersync::web::middleware::{CorsPolicy, CorsAllowOrigin};
+    use asupersync::web::middleware::{CorsAllowOrigin, CorsPolicy};
 
     match policy_type {
         CorsPolicyType::AllowAny => CorsPolicy::default(),
-        CorsPolicyType::ExactOrigins { allowed } => {
-            CorsPolicy::with_exact_origins(allowed.clone())
-        }
-        CorsPolicyType::AllowWithCredentials { allowed } => {
-            CorsPolicy {
-                allow_origin: CorsAllowOrigin::Exact(allowed.clone()),
-                allow_credentials: true,
-                ..Default::default()
-            }
-        }
+        CorsPolicyType::ExactOrigins { allowed } => CorsPolicy::with_exact_origins(allowed.clone()),
+        CorsPolicyType::AllowWithCredentials { allowed } => CorsPolicy {
+            allow_origin: CorsAllowOrigin::Exact(allowed.clone()),
+            allow_credentials: true,
+            ..Default::default()
+        },
     }
 }

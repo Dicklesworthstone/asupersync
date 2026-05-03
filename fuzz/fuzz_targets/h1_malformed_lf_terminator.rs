@@ -1,7 +1,7 @@
 #![no_main]
 
-use libfuzzer_sys::fuzz_target;
 use arbitrary::{Arbitrary, Unstructured};
+use libfuzzer_sys::fuzz_target;
 
 /// HTTP/1.1 malformed LF/lone-LF terminator fuzzing.
 ///
@@ -81,14 +81,14 @@ pub enum TerminationConfig {
 
 #[derive(Arbitrary, Debug, Clone)]
 pub enum TerminatorType {
-    Crlf,      // \r\n
-    Lf,        // \n
-    Cr,        // \r
-    Null,      // \0
-    Tab,       // \t
-    Space,     // ' '
-    FormFeed,  // \f
-    VTab,      // \v
+    Crlf,     // \r\n
+    Lf,       // \n
+    Cr,       // \r
+    Null,     // \0
+    Tab,      // \t
+    Space,    // ' '
+    FormFeed, // \f
+    VTab,     // \v
     Custom(u8),
 }
 
@@ -310,10 +310,12 @@ impl MockLfTerminatorParser {
         let headers_end = self.find_headers_boundary(&raw_message, &mut violations)?;
 
         // Parse first line
-        let (first_line, first_line_end) = self.parse_first_line(&raw_message[..headers_end], &mut violations)?;
+        let (first_line, first_line_end) =
+            self.parse_first_line(&raw_message[..headers_end], &mut violations)?;
 
         // Parse headers
-        let headers = self.parse_headers(&raw_message[first_line_end..headers_end], &mut violations)?;
+        let headers =
+            self.parse_headers(&raw_message[first_line_end..headers_end], &mut violations)?;
 
         // Extract body (if any)
         let body = if headers_end < raw_message.len() {
@@ -347,17 +349,32 @@ impl MockLfTerminatorParser {
         message.extend_from_slice(first_line.as_bytes());
 
         // Add first line terminator
-        self.add_terminator(&mut message, &test_case.termination, &test_case.placement, 0);
+        self.add_terminator(
+            &mut message,
+            &test_case.termination,
+            &test_case.placement,
+            0,
+        );
 
         // Build headers
         let headers_data = self.build_headers(test_case)?;
         for (i, (header_line, _)) in headers_data.iter().enumerate() {
             message.extend_from_slice(header_line.as_bytes());
-            self.add_terminator(&mut message, &test_case.termination, &test_case.placement, i + 1);
+            self.add_terminator(
+                &mut message,
+                &test_case.termination,
+                &test_case.placement,
+                i + 1,
+            );
         }
 
         // Add headers end marker
-        self.add_terminator(&mut message, &test_case.termination, &test_case.placement, usize::MAX);
+        self.add_terminator(
+            &mut message,
+            &test_case.termination,
+            &test_case.placement,
+            usize::MAX,
+        );
 
         // Build body if present
         if let Some(ref body) = test_case.structure.body {
@@ -370,31 +387,63 @@ impl MockLfTerminatorParser {
 
     fn build_first_line(&self, test_case: &MalformedLfTestCase) -> Result<String, String> {
         match &test_case.message_type {
-            MessageType::Request(_) | MessageType::ChunkedRequest => {
-                Ok(format!("{} {} {}",
-                    test_case.structure.first_line.parts.get(0).unwrap_or(&"GET".to_string()),
-                    test_case.structure.first_line.parts.get(1).unwrap_or(&"/".to_string()),
-                    test_case.structure.first_line.parts.get(2).unwrap_or(&"HTTP/1.1".to_string())
-                ))
-            },
-            MessageType::Response(_) | MessageType::ChunkedResponse => {
-                Ok(format!("{} {} {}",
-                    test_case.structure.first_line.parts.get(0).unwrap_or(&"HTTP/1.1".to_string()),
-                    test_case.structure.first_line.parts.get(1).unwrap_or(&"200".to_string()),
-                    test_case.structure.first_line.parts.get(2).unwrap_or(&"OK".to_string())
-                ))
-            },
-            MessageType::PipelinedRequests => {
-                Ok(format!("GET / HTTP/1.1"))
-            },
+            MessageType::Request(_) | MessageType::ChunkedRequest => Ok(format!(
+                "{} {} {}",
+                test_case
+                    .structure
+                    .first_line
+                    .parts
+                    .get(0)
+                    .unwrap_or(&"GET".to_string()),
+                test_case
+                    .structure
+                    .first_line
+                    .parts
+                    .get(1)
+                    .unwrap_or(&"/".to_string()),
+                test_case
+                    .structure
+                    .first_line
+                    .parts
+                    .get(2)
+                    .unwrap_or(&"HTTP/1.1".to_string())
+            )),
+            MessageType::Response(_) | MessageType::ChunkedResponse => Ok(format!(
+                "{} {} {}",
+                test_case
+                    .structure
+                    .first_line
+                    .parts
+                    .get(0)
+                    .unwrap_or(&"HTTP/1.1".to_string()),
+                test_case
+                    .structure
+                    .first_line
+                    .parts
+                    .get(1)
+                    .unwrap_or(&"200".to_string()),
+                test_case
+                    .structure
+                    .first_line
+                    .parts
+                    .get(2)
+                    .unwrap_or(&"OK".to_string())
+            )),
+            MessageType::PipelinedRequests => Ok(format!("GET / HTTP/1.1")),
         }
     }
 
-    fn build_headers(&self, test_case: &MalformedLfTestCase) -> Result<Vec<(String, String)>, String> {
+    fn build_headers(
+        &self,
+        test_case: &MalformedLfTestCase,
+    ) -> Result<Vec<(String, String)>, String> {
         let mut headers = Vec::new();
 
         // Add required headers
-        if matches!(test_case.message_type, MessageType::Request(_) | MessageType::ChunkedRequest | MessageType::PipelinedRequests) {
+        if matches!(
+            test_case.message_type,
+            MessageType::Request(_) | MessageType::ChunkedRequest | MessageType::PipelinedRequests
+        ) {
             headers.push(("Host: example.com".to_string(), "host".to_string()));
         }
 
@@ -423,9 +472,15 @@ impl MockLfTerminatorParser {
             HeaderFormatting::EmptyValue => format!("{}:", header.name),
             HeaderFormatting::VeryLong => {
                 let long_value = header.value.repeat(100);
-                format!("{}: {}", header.name, &long_value[..long_value.len().min(4000)])
-            },
-            HeaderFormatting::WithBinaryCRLF => format!("{}: {}\r\nInjected: header", header.name, header.value),
+                format!(
+                    "{}: {}",
+                    header.name,
+                    &long_value[..long_value.len().min(4000)]
+                )
+            }
+            HeaderFormatting::WithBinaryCRLF => {
+                format!("{}: {}\r\nInjected: header", header.name, header.value)
+            }
         }
     }
 
@@ -438,15 +493,19 @@ impl MockLfTerminatorParser {
             SpecialHeader::MalformedName(bytes) => {
                 let name = String::from_utf8_lossy(bytes);
                 format!("{}: value", name)
-            },
+            }
             SpecialHeader::MalformedValue(bytes) => {
                 let value = String::from_utf8_lossy(bytes);
                 format!("Header: {}", value)
-            },
+            }
         }
     }
 
-    fn build_body(&self, body: &BodyContent, test_case: &MalformedLfTestCase) -> Result<Vec<u8>, String> {
+    fn build_body(
+        &self,
+        body: &BodyContent,
+        test_case: &MalformedLfTestCase,
+    ) -> Result<Vec<u8>, String> {
         match body {
             BodyContent::Empty => Ok(Vec::new()),
             BodyContent::Text(text) => Ok(text.as_bytes().to_vec()),
@@ -471,19 +530,25 @@ impl MockLfTerminatorParser {
                 self.add_specific_terminator(&mut body_data, &test_case.termination);
                 self.add_specific_terminator(&mut body_data, &test_case.termination);
                 Ok(body_data)
-            },
-            BodyContent::MalformedChunked(malformed) => {
-                match malformed {
-                    MalformedChunk::BadSizeLine(data) => Ok(data.clone()),
-                    MalformedChunk::MissingCrlf(data) => Ok(data.clone()),
-                    MalformedChunk::InvalidSize(size) => Ok(format!("{}\r\ndata\r\n", size).into_bytes()),
-                    MalformedChunk::TruncatedData(data) => Ok(data.clone()),
+            }
+            BodyContent::MalformedChunked(malformed) => match malformed {
+                MalformedChunk::BadSizeLine(data) => Ok(data.clone()),
+                MalformedChunk::MissingCrlf(data) => Ok(data.clone()),
+                MalformedChunk::InvalidSize(size) => {
+                    Ok(format!("{}\r\ndata\r\n", size).into_bytes())
                 }
+                MalformedChunk::TruncatedData(data) => Ok(data.clone()),
             },
         }
     }
 
-    fn add_terminator(&self, message: &mut Vec<u8>, config: &TerminationConfig, placement: &TerminatorPlacement, line_index: usize) {
+    fn add_terminator(
+        &self,
+        message: &mut Vec<u8>,
+        config: &TerminationConfig,
+        placement: &TerminatorPlacement,
+        line_index: usize,
+    ) {
         // Check if this line should get a terminator based on placement
         let should_add = match placement {
             TerminatorPlacement::ReplaceAll => true,
@@ -510,23 +575,21 @@ impl MockLfTerminatorParser {
                 for term_type in types {
                     self.add_terminator_type(message, term_type);
                 }
-            },
-            TerminationConfig::None => {}, // No terminator
+            }
+            TerminationConfig::None => {} // No terminator
             TerminationConfig::Custom(bytes) => message.extend_from_slice(bytes),
-            TerminationConfig::Control(control) => {
-                match control {
-                    ControlTerminator::MultipleNulls(count) => {
-                        message.extend(vec![0u8; *count % 10]);
-                    },
-                    ControlTerminator::HighBitSet(byte) => {
-                        message.push(*byte | 0x80);
-                    },
-                    ControlTerminator::UnicodeSequence(text) => {
-                        message.extend_from_slice(text.as_bytes());
-                    },
-                    ControlTerminator::BinaryData(data) => {
-                        message.extend_from_slice(data);
-                    },
+            TerminationConfig::Control(control) => match control {
+                ControlTerminator::MultipleNulls(count) => {
+                    message.extend(vec![0u8; *count % 10]);
+                }
+                ControlTerminator::HighBitSet(byte) => {
+                    message.push(*byte | 0x80);
+                }
+                ControlTerminator::UnicodeSequence(text) => {
+                    message.extend_from_slice(text.as_bytes());
+                }
+                ControlTerminator::BinaryData(data) => {
+                    message.extend_from_slice(data);
                 }
             },
         }
@@ -559,7 +622,7 @@ impl MockLfTerminatorParser {
                             context: self.extract_context(data, i),
                         });
                     }
-                },
+                }
                 b'\r' => {
                     // Check if this is a bare CR (not followed by \n)
                     if i + 1 >= data.len() || data[i + 1] != b'\n' {
@@ -569,7 +632,7 @@ impl MockLfTerminatorParser {
                             context: self.extract_context(data, i),
                         });
                     }
-                },
+                }
                 b'\0'..=b'\x08' | b'\x0B'..=b'\x0C' | b'\x0E'..=b'\x1F' | b'\x7F' => {
                     // Control characters (except \t, \n, \r)
                     violations.push(TerminationViolation {
@@ -577,8 +640,8 @@ impl MockLfTerminatorParser {
                         violation_type: ViolationType::InvalidControl,
                         context: self.extract_context(data, i),
                     });
-                },
-                _ => {},
+                }
+                _ => {}
             }
             i += 1;
         }
@@ -590,12 +653,23 @@ impl MockLfTerminatorParser {
         let context_bytes = &data[start..end];
 
         // Convert to string for display, replacing non-printable chars
-        context_bytes.iter()
-            .map(|&b| if b.is_ascii_graphic() || b == b' ' { b as char } else { '.' })
+        context_bytes
+            .iter()
+            .map(|&b| {
+                if b.is_ascii_graphic() || b == b' ' {
+                    b as char
+                } else {
+                    '.'
+                }
+            })
             .collect()
     }
 
-    fn find_headers_boundary(&self, data: &[u8], violations: &mut Vec<TerminationViolation>) -> Result<usize, String> {
+    fn find_headers_boundary(
+        &self,
+        data: &[u8],
+        violations: &mut Vec<TerminationViolation>,
+    ) -> Result<usize, String> {
         // Look for \r\n\r\n sequence
         if let Some(pos) = self.find_pattern(data, b"\r\n\r\n") {
             return Ok(pos + 4);
@@ -616,10 +690,15 @@ impl MockLfTerminatorParser {
     }
 
     fn find_pattern(&self, data: &[u8], pattern: &[u8]) -> Option<usize> {
-        data.windows(pattern.len()).position(|window| window == pattern)
+        data.windows(pattern.len())
+            .position(|window| window == pattern)
     }
 
-    fn parse_first_line(&self, headers_section: &[u8], violations: &mut Vec<TerminationViolation>) -> Result<(String, usize), String> {
+    fn parse_first_line(
+        &self,
+        headers_section: &[u8],
+        violations: &mut Vec<TerminationViolation>,
+    ) -> Result<(String, usize), String> {
         if let Some(line_end) = self.find_pattern(headers_section, b"\r\n") {
             let line = &headers_section[..line_end];
             let line_str = String::from_utf8_lossy(line).to_string();
@@ -638,24 +717,29 @@ impl MockLfTerminatorParser {
         }
     }
 
-    fn parse_headers(&self, headers_data: &[u8], violations: &mut Vec<TerminationViolation>) -> Result<Vec<(String, String)>, String> {
+    fn parse_headers(
+        &self,
+        headers_data: &[u8],
+        violations: &mut Vec<TerminationViolation>,
+    ) -> Result<Vec<(String, String)>, String> {
         let mut headers = Vec::new();
         let mut offset = 0;
 
         while offset < headers_data.len() {
             // Find next line
-            let line_end = if let Some(crlf_pos) = self.find_pattern(&headers_data[offset..], b"\r\n") {
-                offset + crlf_pos
-            } else if let Some(lf_pos) = self.find_pattern(&headers_data[offset..], b"\n") {
-                violations.push(TerminationViolation {
-                    position: offset + lf_pos,
-                    violation_type: ViolationType::LoneLf,
-                    context: "Header line".to_string(),
-                });
-                offset + lf_pos
-            } else {
-                break;
-            };
+            let line_end =
+                if let Some(crlf_pos) = self.find_pattern(&headers_data[offset..], b"\r\n") {
+                    offset + crlf_pos
+                } else if let Some(lf_pos) = self.find_pattern(&headers_data[offset..], b"\n") {
+                    violations.push(TerminationViolation {
+                        position: offset + lf_pos,
+                        violation_type: ViolationType::LoneLf,
+                        context: "Header line".to_string(),
+                    });
+                    offset + lf_pos
+                } else {
+                    break;
+                };
 
             let line = &headers_data[offset..line_end];
             if line.is_empty() {
@@ -671,26 +755,39 @@ impl MockLfTerminatorParser {
             }
 
             // Move past this line
-            offset = line_end + if headers_data.get(line_end..line_end + 2) == Some(b"\r\n") { 2 } else { 1 };
+            offset = line_end
+                + if headers_data.get(line_end..line_end + 2) == Some(b"\r\n") {
+                    2
+                } else {
+                    1
+                };
         }
 
         Ok(headers)
     }
 
     fn is_chunked_encoding(&self, headers: &[(String, String)]) -> bool {
-        headers.iter().any(|(name, value)|
-            name.eq_ignore_ascii_case("transfer-encoding") &&
-            value.to_ascii_lowercase().contains("chunked")
-        )
+        headers.iter().any(|(name, value)| {
+            name.eq_ignore_ascii_case("transfer-encoding")
+                && value.to_ascii_lowercase().contains("chunked")
+        })
     }
 
-    fn validate_chunked_terminators(&self, body: &[u8], violations: &mut Vec<TerminationViolation>) -> Result<(), String> {
+    fn validate_chunked_terminators(
+        &self,
+        body: &[u8],
+        violations: &mut Vec<TerminationViolation>,
+    ) -> Result<(), String> {
         // Simplified chunked validation - just scan for termination issues
         self.scan_termination_violations(body, violations);
         Ok(())
     }
 
-    fn determine_parsing_result(&self, violations: &[TerminationViolation], _test_case: &MalformedLfTestCase) -> ParsingResult {
+    fn determine_parsing_result(
+        &self,
+        violations: &[TerminationViolation],
+        _test_case: &MalformedLfTestCase,
+    ) -> ParsingResult {
         if violations.is_empty() {
             return ParsingResult::Success;
         }
@@ -703,11 +800,13 @@ impl MockLfTerminatorParser {
                     } else if violation.context.contains("Header") {
                         return ParsingResult::BadHeader;
                     }
-                },
+                }
                 ViolationType::InvalidControl => {
-                    return ParsingResult::ProtocolViolation("Control characters in headers".to_string());
-                },
-                _ => {},
+                    return ParsingResult::ProtocolViolation(
+                        "Control characters in headers".to_string(),
+                    );
+                }
+                _ => {}
             }
         }
 
@@ -732,34 +831,42 @@ fuzz_target!(|data: &[u8]| {
                 match parsed.parsing_result {
                     ParsingResult::Success => {
                         // Success should only occur with valid CRLF or acceptable edge cases
-                        let serious_violations = parsed.termination_violations.iter()
-                            .any(|v| matches!(v.violation_type, ViolationType::LoneLf | ViolationType::BareCr));
+                        let serious_violations = parsed.termination_violations.iter().any(|v| {
+                            matches!(
+                                v.violation_type,
+                                ViolationType::LoneLf | ViolationType::BareCr
+                            )
+                        });
 
                         if serious_violations && parser.strict_crlf {
                             // This might be acceptable depending on the scenario
                             // Allow some flexibility for valid edge cases
                         }
-                    },
+                    }
 
                     ParsingResult::BadRequestLine => {
                         // Should have violations in the first line
-                        let has_first_line_violation = parsed.termination_violations.iter()
+                        let has_first_line_violation = parsed
+                            .termination_violations
+                            .iter()
                             .any(|v| v.context.contains("First line"));
                         assert!(
                             has_first_line_violation,
                             "BadRequestLine result should have first line violations"
                         );
-                    },
+                    }
 
                     ParsingResult::BadHeader => {
                         // Should have violations in headers
-                        let has_header_violation = parsed.termination_violations.iter()
+                        let has_header_violation = parsed
+                            .termination_violations
+                            .iter()
                             .any(|v| v.context.contains("Header"));
                         assert!(
                             has_header_violation,
                             "BadHeader result should have header violations"
                         );
-                    },
+                    }
 
                     _ => {
                         // Other results are acceptable for malformed input
@@ -769,9 +876,15 @@ fuzz_target!(|data: &[u8]| {
                 // Validate violation detection consistency
                 for violation in &parsed.termination_violations {
                     assert!(
-                        violation.position < parsed.first_line.len() +
-                        parsed.headers.iter().map(|(n, v)| n.len() + v.len() + 4).sum::<usize>() +
-                        parsed.body.len() + 100, // Allow some buffer for terminators
+                        violation.position
+                            < parsed.first_line.len()
+                                + parsed
+                                    .headers
+                                    .iter()
+                                    .map(|(n, v)| n.len() + v.len() + 4)
+                                    .sum::<usize>()
+                                + parsed.body.len()
+                                + 100, // Allow some buffer for terminators
                         "Violation position {} should be within message bounds",
                         violation.position
                     );
@@ -799,9 +912,14 @@ fn test_lone_lf_detection(parser: &MockLfTerminatorParser, test_case: &Malformed
 
     if let Ok(parsed) = parser.parse_message(&lone_lf_case) {
         if parser.strict_crlf {
-            let has_lone_lf = parsed.termination_violations.iter()
+            let has_lone_lf = parsed
+                .termination_violations
+                .iter()
                 .any(|v| matches!(v.violation_type, ViolationType::LoneLf));
-            assert!(has_lone_lf, "Should detect lone LF violations in strict mode");
+            assert!(
+                has_lone_lf,
+                "Should detect lone LF violations in strict mode"
+            );
         }
     }
 }
@@ -813,9 +931,14 @@ fn test_bare_cr_detection(parser: &MockLfTerminatorParser, test_case: &Malformed
 
     if let Ok(parsed) = parser.parse_message(&bare_cr_case) {
         if parser.strict_crlf {
-            let has_bare_cr = parsed.termination_violations.iter()
+            let has_bare_cr = parsed
+                .termination_violations
+                .iter()
                 .any(|v| matches!(v.violation_type, ViolationType::BareCr));
-            assert!(has_bare_cr, "Should detect bare CR violations in strict mode");
+            assert!(
+                has_bare_cr,
+                "Should detect bare CR violations in strict mode"
+            );
         }
     }
 }
@@ -831,7 +954,9 @@ fn test_mixed_terminators(parser: &MockLfTerminatorParser, test_case: &Malformed
 
     if let Ok(parsed) = parser.parse_message(&mixed_case) {
         // Should detect multiple violation types
-        let violation_types: std::collections::HashSet<_> = parsed.termination_violations.iter()
+        let violation_types: std::collections::HashSet<_> = parsed
+            .termination_violations
+            .iter()
             .map(|v| &v.violation_type)
             .collect();
 
@@ -856,11 +981,8 @@ fn test_boundary_conditions(parser: &MockLfTerminatorParser, test_case: &Malform
 
     // Test very long line
     let mut long_case = test_case.clone();
-    long_case.structure.first_line.parts = vec![
-        "GET".to_string(),
-        "/".repeat(10000),
-        "HTTP/1.1".to_string(),
-    ];
+    long_case.structure.first_line.parts =
+        vec!["GET".to_string(), "/".repeat(10000), "HTTP/1.1".to_string()];
 
     let _ = parser.parse_message(&long_case);
     // Should handle long lines gracefully

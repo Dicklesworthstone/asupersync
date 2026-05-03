@@ -12,16 +12,16 @@
 
 #![no_main]
 
-use libfuzzer_sys::fuzz_target;
 use arbitrary::{Arbitrary, Unstructured};
-use asupersync::sync::{Barrier, BarrierWaitError};
 use asupersync::cx::Cx;
-use std::sync::atomic::{AtomicUsize, AtomicBool, Ordering};
-use std::sync::Arc;
+use asupersync::sync::{Barrier, BarrierWaitError};
+use libfuzzer_sys::fuzz_target;
 use std::collections::HashMap;
-use std::task::{Context, Poll, Waker};
-use std::pin::Pin;
 use std::future::Future;
+use std::pin::Pin;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::task::{Context, Poll, Waker};
 
 #[derive(Debug, Clone, Arbitrary)]
 struct BarrierResetConfig {
@@ -125,7 +125,10 @@ impl BarrierResetTracker {
 
         // No state inconsistencies should be detected
         if inconsistencies > 0 {
-            return Err(format!("Detected {} state inconsistencies", inconsistencies));
+            return Err(format!(
+                "Detected {} state inconsistencies",
+                inconsistencies
+            ));
         }
 
         // Sanity checks
@@ -234,14 +237,17 @@ fn test_barrier_reset_scenario(
     let barrier = Arc::new(Barrier::new(parties));
     let mut waiters: HashMap<u8, TrackedWaiter> = HashMap::new();
 
-    let max_ops = config.max_operations.min(BarrierResetConfig::max_operations()) as usize;
+    let max_ops = config
+        .max_operations
+        .min(BarrierResetConfig::max_operations()) as usize;
 
     for operation in config.operations.iter().take(max_ops) {
         match operation {
             BarrierOperation::AddWaiter { waiter_id } => {
                 let id = *waiter_id % 20; // Limit to reasonable number
                 if !waiters.contains_key(&id) {
-                    let waiter = TrackedWaiter::new(barrier.clone(), Arc::new(BarrierResetTracker::new()));
+                    let waiter =
+                        TrackedWaiter::new(barrier.clone(), Arc::new(BarrierResetTracker::new()));
                     waiters.insert(id, waiter);
                 }
             }
@@ -296,7 +302,10 @@ fn test_barrier_reset_scenario(
                 for i in 0..gen_count {
                     let id = start_id + i as u8;
                     if !waiters.contains_key(&id) {
-                        let waiter = TrackedWaiter::new(barrier.clone(), Arc::new(BarrierResetTracker::new()));
+                        let waiter = TrackedWaiter::new(
+                            barrier.clone(),
+                            Arc::new(BarrierResetTracker::new()),
+                        );
                         waiters.insert(id, waiter);
                     }
                 }
@@ -323,7 +332,10 @@ fn test_barrier_reset_scenario(
                 // Check our local state consistency
                 if waiters.len() > parties * 2 {
                     tracker.record_inconsistency();
-                    return Err(format!("Local waiter tracking inconsistent: {}", waiters.len()));
+                    return Err(format!(
+                        "Local waiter tracking inconsistent: {}",
+                        waiters.len()
+                    ));
                 }
             }
         }
@@ -375,9 +387,7 @@ fuzz_target!(|data: &[u8]| {
         let tracker2 = BarrierResetTracker::new();
         let config2 = config.clone();
 
-        let handle = thread::spawn(move || {
-            test_barrier_reset_scenario(&config2, &tracker2)
-        });
+        let handle = thread::spawn(move || test_barrier_reset_scenario(&config2, &tracker2));
 
         match handle.join() {
             Ok(Ok(())) => {
@@ -397,7 +407,11 @@ fuzz_target!(|data: &[u8]| {
     let total_cancellations = tracker.cancelled_waiters.load(Ordering::SeqCst);
     let total_resets = tracker.reset_cycles.load(Ordering::SeqCst);
 
-    if total_trips == 0 && total_cancellations == 0 && total_resets == 0 && !config.operations.is_empty() {
+    if total_trips == 0
+        && total_cancellations == 0
+        && total_resets == 0
+        && !config.operations.is_empty()
+    {
         panic!("No meaningful operations were performed during the test");
     }
 });

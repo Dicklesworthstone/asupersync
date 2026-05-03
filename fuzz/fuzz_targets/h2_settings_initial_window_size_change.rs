@@ -1,7 +1,7 @@
 #![no_main]
 
-use libfuzzer_sys::fuzz_target;
 use arbitrary::Arbitrary;
+use libfuzzer_sys::fuzz_target;
 use std::collections::HashMap;
 
 /// Fuzz target for HTTP/2 SETTINGS_INITIAL_WINDOW_SIZE changes during active connections.
@@ -140,7 +140,10 @@ impl MockH2Connection {
 
     /// Simulate data being sent on a stream (reduces window)
     fn send_data(&mut self, stream_id: u32, size: u32) -> Result<(), WindowError> {
-        let window = self.state.stream_windows.get_mut(&stream_id)
+        let window = self
+            .state
+            .stream_windows
+            .get_mut(&stream_id)
             .ok_or(WindowError::StreamNotFound)?;
 
         let new_window = *window - size as i64;
@@ -152,7 +155,10 @@ impl MockH2Connection {
 
     /// Simulate WINDOW_UPDATE received (increases window)
     fn receive_window_update(&mut self, stream_id: u32, increment: u32) -> Result<(), WindowError> {
-        let window = self.state.stream_windows.get_mut(&stream_id)
+        let window = self
+            .state
+            .stream_windows
+            .get_mut(&stream_id)
             .ok_or(WindowError::StreamNotFound)?;
 
         let new_window = *window + increment as i64;
@@ -167,7 +173,10 @@ impl MockH2Connection {
     }
 
     /// Apply SETTINGS_INITIAL_WINDOW_SIZE change per RFC 7540 §6.5.2
-    fn apply_initial_window_size_change(&mut self, new_window_size: u32) -> Result<WindowUpdateResult, WindowError> {
+    fn apply_initial_window_size_change(
+        &mut self,
+        new_window_size: u32,
+    ) -> Result<WindowUpdateResult, WindowError> {
         // Validate new window size
         if new_window_size > self.policy.max_initial_window_size {
             return Err(WindowError::InvalidWindowSize);
@@ -263,17 +272,17 @@ fn generate_test_cases() -> Vec<(String, u32, u32, Vec<(u32, i32)>, WindowUpdate
             1024 * 1024,      // 1MB initial
             16 * 1024 * 1024, // 16MB new
             vec![
-                (1, 0),           // Stream 1: no data sent yet
-                (3, -512 * 1024), // Stream 3: 512KB sent (window reduced)
+                (1, 0),            // Stream 1: no data sent yet
+                (3, -512 * 1024),  // Stream 3: 512KB sent (window reduced)
                 (5, -1024 * 1024), // Stream 5: 1MB sent (window at 0)
             ],
             WindowUpdateResult::Success(WindowState {
                 connection_window: 65535,
                 stream_windows: {
                     let mut map = HashMap::new();
-                    map.insert(1, 16 * 1024 * 1024);           // 1MB + 15MB = 16MB
+                    map.insert(1, 16 * 1024 * 1024); // 1MB + 15MB = 16MB
                     map.insert(3, 16 * 1024 * 1024 - 512 * 1024); // (1MB - 512KB) + 15MB = 15.5MB
-                    map.insert(5, 15 * 1024 * 1024);           // (1MB - 1MB) + 15MB = 15MB
+                    map.insert(5, 15 * 1024 * 1024); // (1MB - 1MB) + 15MB = 15MB
                     map
                 },
                 current_initial_window_size: 16 * 1024 * 1024,
@@ -283,17 +292,16 @@ fn generate_test_cases() -> Vec<(String, u32, u32, Vec<(u32, i32)>, WindowUpdate
                     windows_floored: 0,
                     overflow_prevented: 0,
                 },
-            })
+            }),
         ),
-
         // Test case 2: Decrease from 16MB to 1MB (delta = -15MB)
         (
             "16MB to 1MB decrease".to_string(),
             16 * 1024 * 1024, // 16MB initial
             1024 * 1024,      // 1MB new
             vec![
-                (1, 0),           // Stream 1: no data sent yet
-                (3, -512 * 1024), // Stream 3: 512KB sent
+                (1, 0),                 // Stream 1: no data sent yet
+                (3, -512 * 1024),       // Stream 3: 512KB sent
                 (5, -16 * 1024 * 1024), // Stream 5: 16MB sent (window at 0)
             ],
             WindowUpdateResult::Warning(
@@ -301,9 +309,9 @@ fn generate_test_cases() -> Vec<(String, u32, u32, Vec<(u32, i32)>, WindowUpdate
                     connection_window: 65535,
                     stream_windows: {
                         let mut map = HashMap::new();
-                        map.insert(1, 1024 * 1024);           // 16MB - 15MB = 1MB
+                        map.insert(1, 1024 * 1024); // 16MB - 15MB = 1MB
                         map.insert(3, 1024 * 1024 - 512 * 1024); // (16MB - 512KB) - 15MB = 0.5MB
-                        map.insert(5, 0);                     // (16MB - 16MB) - 15MB = 0 (floored)
+                        map.insert(5, 0); // (16MB - 16MB) - 15MB = 0 (floored)
                         map
                     },
                     current_initial_window_size: 1024 * 1024,
@@ -314,10 +322,9 @@ fn generate_test_cases() -> Vec<(String, u32, u32, Vec<(u32, i32)>, WindowUpdate
                         overflow_prevented: 0,
                     },
                 },
-                "Stream 5 window floored to 0".to_string()
-            )
+                "Stream 5 window floored to 0".to_string(),
+            ),
         ),
-
         // Test case 3: Small increase
         (
             "64KB to 128KB increase".to_string(),
@@ -340,9 +347,8 @@ fn generate_test_cases() -> Vec<(String, u32, u32, Vec<(u32, i32)>, WindowUpdate
                     windows_floored: 0,
                     overflow_prevented: 0,
                 },
-            })
+            }),
         ),
-
         // Test case 4: Decrease to zero (extreme case)
         (
             "64KB to 0 decrease".to_string(),
@@ -369,8 +375,8 @@ fn generate_test_cases() -> Vec<(String, u32, u32, Vec<(u32, i32)>, WindowUpdate
                         overflow_prevented: 0,
                     },
                 },
-                "Stream 1 window floored to 0".to_string()
-            )
+                "Stream 1 window floored to 0".to_string(),
+            ),
         ),
     ]
 }
@@ -422,8 +428,10 @@ fuzz_target!(|data: &[u8]| {
     }
 
     // Verify initial integrity
-    assert!(connection.verify_integrity().is_ok(),
-        "Connection integrity check failed after setup");
+    assert!(
+        connection.verify_integrity().is_ok(),
+        "Connection integrity check failed after setup"
+    );
 
     // Store initial state for comparison
     let initial_state = connection.get_state().clone();
@@ -435,16 +443,23 @@ fuzz_target!(|data: &[u8]| {
     match result {
         Ok(WindowUpdateResult::Success(new_state)) => {
             // Successful update should maintain integrity
-            assert!(connection.verify_integrity().is_ok(),
-                "Connection integrity check failed after successful update");
+            assert!(
+                connection.verify_integrity().is_ok(),
+                "Connection integrity check failed after successful update"
+            );
 
             // Window size setting should be updated
-            assert_eq!(new_state.current_initial_window_size, new_window_size,
-                "Initial window size setting not updated correctly");
+            assert_eq!(
+                new_state.current_initial_window_size, new_window_size,
+                "Initial window size setting not updated correctly"
+            );
 
             // All streams should be accounted for
-            assert_eq!(new_state.stream_windows.len(), initial_state.stream_windows.len(),
-                "Stream count changed during window size update");
+            assert_eq!(
+                new_state.stream_windows.len(),
+                initial_state.stream_windows.len(),
+                "Stream count changed during window size update"
+            );
 
             // Verify delta calculation
             let expected_delta = new_window_size as i64 - initial_window_size as i64;
@@ -455,34 +470,48 @@ fuzz_target!(|data: &[u8]| {
 
                 if expected_new_window < 0 {
                     // Should be floored to 0
-                    assert_eq!(new_window, 0,
+                    assert_eq!(
+                        new_window, 0,
                         "Stream {} window not floored correctly: expected 0, got {}",
-                        stream_id, new_window);
+                        stream_id, new_window
+                    );
                 } else if expected_new_window > (1i64 << 31) - 1 {
                     // Should be capped
-                    assert_eq!(new_window, (1i64 << 31) - 1,
-                        "Stream {} window not capped correctly", stream_id);
+                    assert_eq!(
+                        new_window,
+                        (1i64 << 31) - 1,
+                        "Stream {} window not capped correctly",
+                        stream_id
+                    );
                 } else {
                     // Should match calculation
-                    assert_eq!(new_window, expected_new_window,
+                    assert_eq!(
+                        new_window, expected_new_window,
                         "Stream {} window delta incorrect: expected {}, got {}",
-                        stream_id, expected_new_window, new_window);
+                        stream_id, expected_new_window, new_window
+                    );
                 }
             }
         }
 
         Ok(WindowUpdateResult::Warning(new_state, warning)) => {
             // Warning should still maintain integrity
-            assert!(connection.verify_integrity().is_ok(),
-                "Connection integrity check failed after warning update");
+            assert!(
+                connection.verify_integrity().is_ok(),
+                "Connection integrity check failed after warning update"
+            );
 
             // Warning should be non-empty
-            assert!(!warning.is_empty(),
-                "Warning result should have non-empty warning message");
+            assert!(
+                !warning.is_empty(),
+                "Warning result should have non-empty warning message"
+            );
 
             // Should have recorded flooring or overflow events
-            assert!(new_state.stats.windows_floored > 0 || new_state.stats.overflow_prevented > 0,
-                "Warning result should have flooring or overflow statistics");
+            assert!(
+                new_state.stats.windows_floored > 0 || new_state.stats.overflow_prevented > 0,
+                "Warning result should have flooring or overflow statistics"
+            );
         }
 
         Ok(WindowUpdateResult::Error(error)) => {
@@ -490,8 +519,11 @@ fuzz_target!(|data: &[u8]| {
             match error {
                 WindowError::InvalidWindowSize => {
                     // Should happen for out-of-range window sizes
-                    assert!(new_window_size > (1u32 << 31) - 1,
-                        "InvalidWindowSize error for valid size: {}", new_window_size);
+                    assert!(
+                        new_window_size > (1u32 << 31) - 1,
+                        "InvalidWindowSize error for valid size: {}",
+                        new_window_size
+                    );
                 }
                 WindowError::WindowOverflow => {
                     // Should happen for window calculations that would overflow
@@ -518,13 +550,14 @@ fuzz_target!(|data: &[u8]| {
     // Test with permissive policy
     let permissive_policy = FlowControlPolicy {
         max_window_size: i64::MAX >> 1, // Very large but safe
-        min_window_size: -1000000, // Allow negative windows
+        min_window_size: -1000000,      // Allow negative windows
         max_initial_window_size: u32::MAX >> 1,
         allow_negative_windows: true,
         max_tracked_streams: 10000,
     };
 
-    let mut permissive_connection = MockH2Connection::with_policy(initial_window_size, permissive_policy);
+    let mut permissive_connection =
+        MockH2Connection::with_policy(initial_window_size, permissive_policy);
 
     // Create streams for permissive test
     for i in 0..num_streams.min(10) {
@@ -532,7 +565,8 @@ fuzz_target!(|data: &[u8]| {
         let _ = permissive_connection.create_stream(stream_id);
     }
 
-    let _permissive_result = permissive_connection.apply_initial_window_size_change(new_window_size);
+    let _permissive_result =
+        permissive_connection.apply_initial_window_size_change(new_window_size);
     // Permissive policy should allow more edge cases
 
     // Run predefined test cases to ensure correctness
@@ -553,14 +587,26 @@ fuzz_target!(|data: &[u8]| {
         let test_result = test_connection.apply_initial_window_size_change(new_size);
 
         match (test_result, expected) {
-            (Ok(WindowUpdateResult::Success(actual_state)), WindowUpdateResult::Success(expected_state)) => {
-                assert_eq!(actual_state.current_initial_window_size, expected_state.current_initial_window_size,
-                    "Test '{}': initial window size mismatch", test_name);
+            (
+                Ok(WindowUpdateResult::Success(actual_state)),
+                WindowUpdateResult::Success(expected_state),
+            ) => {
+                assert_eq!(
+                    actual_state.current_initial_window_size,
+                    expected_state.current_initial_window_size,
+                    "Test '{}': initial window size mismatch",
+                    test_name
+                );
 
                 for (stream_id, &expected_window) in &expected_state.stream_windows {
                     let actual_window = actual_state.stream_windows.get(stream_id);
-                    assert_eq!(actual_window, Some(&expected_window),
-                        "Test '{}': stream {} window mismatch", test_name, stream_id);
+                    assert_eq!(
+                        actual_window,
+                        Some(&expected_window),
+                        "Test '{}': stream {} window mismatch",
+                        test_name,
+                        stream_id
+                    );
                 }
             }
 

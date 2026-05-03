@@ -1,7 +1,7 @@
 #![no_main]
 
-use libfuzzer_sys::fuzz_target;
 use arbitrary::{Arbitrary, Unstructured};
+use libfuzzer_sys::fuzz_target;
 use std::collections::HashMap;
 use std::panic;
 
@@ -151,7 +151,8 @@ impl MockH2Connection {
 
     /// Get protocol errors that occurred
     fn get_protocol_errors(&self) -> Vec<ErrorCode> {
-        self.connection_errors.iter()
+        self.connection_errors
+            .iter()
             .filter(|&&err| err == ErrorCode::ProtocolError)
             .cloned()
             .collect()
@@ -159,7 +160,8 @@ impl MockH2Connection {
 
     /// Check if connection sent GOAWAY due to protocol error
     fn sent_protocol_error_goaway(&self) -> bool {
-        self.goaway_frames.iter()
+        self.goaway_frames
+            .iter()
             .any(|goaway| goaway.error_code == ErrorCode::ProtocolError)
     }
 
@@ -256,7 +258,9 @@ fn test_ping_ack_mismatch(scenario: PingAckMismatchScenario) -> Result<(), Strin
     // Assertions per RFC 9113 §6.7
 
     // If we sent mismatched ACKs, should detect protocol errors
-    let expected_mismatches = scenario.ack_responses.iter()
+    let expected_mismatches = scenario
+        .ack_responses
+        .iter()
         .enumerate()
         .filter(|(i, ack_payload)| {
             let mut test_payload = (*ack_payload).clone();
@@ -275,7 +279,9 @@ fn test_ping_ack_mismatch(scenario: PingAckMismatchScenario) -> Result<(), Strin
     if total_expected_errors > 0 || protocol_errors_detected > 0 {
         // Should have detected protocol errors
         if connection.get_protocol_errors().is_empty() {
-            return Err("Expected PROTOCOL_ERROR for mismatched PING ACK, but none detected".to_string());
+            return Err(
+                "Expected PROTOCOL_ERROR for mismatched PING ACK, but none detected".to_string(),
+            );
         }
 
         // Should have sent GOAWAY with PROTOCOL_ERROR

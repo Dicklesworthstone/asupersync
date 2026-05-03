@@ -144,9 +144,7 @@ fuzz_target!(|scenario: Scenario| {
                                 );
                             }
                             Some(TerminalKind::Close) => {
-                                panic!(
-                                    "graceful close yielded Err(_) instead of None: {status:?}",
-                                );
+                                panic!("graceful close yielded Err(_) instead of None: {status:?}",);
                             }
                             None => {
                                 panic!(
@@ -196,8 +194,7 @@ fuzz_target!(|scenario: Scenario| {
                 if terminal_kind.is_none() {
                     terminal_kind = Some(TerminalKind::Finish);
                 }
-                stream
-                    .finish_with_metadata(Status::cancelled("fuzz finish"), Default::default());
+                stream.finish_with_metadata(Status::cancelled("fuzz finish"), Default::default());
             }
             Op::Close => {
                 if terminal_kind.is_none() {

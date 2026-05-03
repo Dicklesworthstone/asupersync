@@ -12,11 +12,11 @@
 
 #![no_main]
 
-use libfuzzer_sys::fuzz_target;
 use arbitrary::{Arbitrary, Unstructured};
 use asupersync::channel::oneshot::{self, SendError, TryRecvError};
 use asupersync::cx::Cx;
-use asupersync::types::{CancelKind, Budget};
+use asupersync::types::{Budget, CancelKind};
+use libfuzzer_sys::fuzz_target;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::thread;
 use std::time::Duration;
@@ -173,7 +173,10 @@ fn test_send_scenario(
                     }
                 }
                 Err(err) => {
-                    return Err(format!("Unexpected send error in normal scenario: {:?}", err));
+                    return Err(format!(
+                        "Unexpected send error in normal scenario: {:?}",
+                        err
+                    ));
                 }
             }
         }
@@ -298,7 +301,10 @@ fn test_send_scenario(
                                 }
                             }
                             Err(err) => {
-                                return Err(format!("Rapid sequence #{}: receiver error: {:?}", err, i));
+                                return Err(format!(
+                                    "Rapid sequence #{}: receiver error: {:?}",
+                                    err, i
+                                ));
                             }
                         }
                     }
@@ -344,10 +350,7 @@ fn execute_send(
 
 /// Create test context
 fn create_test_cx() -> Cx {
-    Cx::new(
-        "oneshot_send_twice_fuzz",
-        Budget::INFINITE,
-    )
+    Cx::new("oneshot_send_twice_fuzz", Budget::INFINITE)
 }
 
 fuzz_target!(|data: &[u8]| {
@@ -376,7 +379,8 @@ fuzz_target!(|data: &[u8]| {
 
     // Test concurrent scenarios if requested
     if config.test_concurrency && config.scenarios.len() > 1 {
-        let concurrent_handles: Vec<_> = config.scenarios
+        let concurrent_handles: Vec<_> = config
+            .scenarios
             .iter()
             .take(3) // Limit concurrent threads
             .enumerate()
@@ -395,7 +399,9 @@ fuzz_target!(|data: &[u8]| {
 
         // Wait for all concurrent tests to complete
         for handle in concurrent_handles {
-            handle.join().expect("Concurrent test thread should complete");
+            handle
+                .join()
+                .expect("Concurrent test thread should complete");
         }
     }
 

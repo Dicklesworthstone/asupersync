@@ -173,11 +173,10 @@ fuzz_target!(|input: FuzzInput| {
     // pre-call metadata MUST be (a) a header the interceptor chain
     // legitimately injected (Bearer / x-request-id / x-logged), or
     // (b) absent from EVERY OTHER call's pre-call metadata.
-    let interceptor_injected: HashSet<&str> =
-        ["authorization", "x-request-id", "x-logged"]
-            .iter()
-            .copied()
-            .collect();
+    let interceptor_injected: HashSet<&str> = ["authorization", "x-request-id", "x-logged"]
+        .iter()
+        .copied()
+        .collect();
 
     for (i, post) in post_call_requests.iter().enumerate() {
         let pre_i = &pre_call_metadata[i];

@@ -1,13 +1,16 @@
 #![no_main]
 
-use libfuzzer_sys::fuzz_target;
 use arbitrary::{Arbitrary, Unstructured};
-use std::sync::{Arc, Mutex as StdMutex, atomic::{AtomicUsize, Ordering}};
-use std::thread;
-use std::time::Duration;
-use std::task::{Context, Poll, RawWaker, RawWakerVTable, Waker};
+use libfuzzer_sys::fuzz_target;
 use std::future::Future;
 use std::pin::Pin;
+use std::sync::{
+    Arc, Mutex as StdMutex,
+    atomic::{AtomicUsize, Ordering},
+};
+use std::task::{Context, Poll, RawWaker, RawWakerVTable, Waker};
+use std::thread;
+use std::time::Duration;
 
 use asupersync::sync::Notify;
 
@@ -21,7 +24,11 @@ struct TrackedWaker {
 
 impl TrackedWaker {
     fn new(waiter_id: usize, storm_id: usize, tracker: ContentionStormTracker) -> Self {
-        Self { waiter_id, storm_id, tracker }
+        Self {
+            waiter_id,
+            storm_id,
+            tracker,
+        }
     }
 
     fn create_waker(&self) -> Waker {
@@ -133,7 +140,9 @@ impl ContentionStormTracker {
 
             // Invariant: We should have some activity if notify_one was called
             if stats.total_notify_one_calls > 0 {
-                let total_activity = stats.total_waiters_awoken + stats.total_notifications_stored + stats.total_waiters_cancelled;
+                let total_activity = stats.total_waiters_awoken
+                    + stats.total_notifications_stored
+                    + stats.total_waiters_cancelled;
                 if total_activity == 0 {
                     self.record_violation(InvariantViolation {
                         violation_type: "no_activity_despite_notifications".to_string(),
@@ -169,7 +178,10 @@ impl ContentionStormTracker {
                         violation.violation_type, violation.description
                     ));
                 }
-                panic!("notify_one contention storm invariant violations detected: {} violations", violations.len());
+                panic!(
+                    "notify_one contention storm invariant violations detected: {} violations",
+                    violations.len()
+                );
             }
         }
     }
@@ -185,13 +197,28 @@ struct ContentionStormConfig {
 
 #[derive(Debug, Clone, Arbitrary)]
 enum StormPattern {
-    HighFrequencyNotify { frequency_us: u16 },
-    BurstyNotify { burst_size: u8, burst_interval_ms: u16 },
-    MixedWaitersNotifiers { waiter_ratio: f32 },
-    CancelHeavy { cancel_probability: f32 },
-    StorageContention { store_then_consume_cycles: u8 },
-    RapidTurnover { create_destroy_cycles: u8 },
-    LoadBalance { notify_spread_us: u16 },
+    HighFrequencyNotify {
+        frequency_us: u16,
+    },
+    BurstyNotify {
+        burst_size: u8,
+        burst_interval_ms: u16,
+    },
+    MixedWaitersNotifiers {
+        waiter_ratio: f32,
+    },
+    CancelHeavy {
+        cancel_probability: f32,
+    },
+    StorageContention {
+        store_then_consume_cycles: u8,
+    },
+    RapidTurnover {
+        create_destroy_cycles: u8,
+    },
+    LoadBalance {
+        notify_spread_us: u16,
+    },
 }
 
 fuzz_target!(|data: &[u8]| {
@@ -223,7 +250,10 @@ fuzz_target!(|data: &[u8]| {
             test_high_frequency_notify_storm(&tracker, &config, frequency_us);
         }
 
-        StormPattern::BurstyNotify { burst_size, burst_interval_ms } => {
+        StormPattern::BurstyNotify {
+            burst_size,
+            burst_interval_ms,
+        } => {
             test_bursty_notify_storm(&tracker, &config, burst_size, burst_interval_ms);
         }
 
@@ -235,11 +265,15 @@ fuzz_target!(|data: &[u8]| {
             test_cancel_heavy_storm(&tracker, &config, cancel_probability);
         }
 
-        StormPattern::StorageContention { store_then_consume_cycles } => {
+        StormPattern::StorageContention {
+            store_then_consume_cycles,
+        } => {
             test_storage_contention_storm(&tracker, &config, store_then_consume_cycles);
         }
 
-        StormPattern::RapidTurnover { create_destroy_cycles } => {
+        StormPattern::RapidTurnover {
+            create_destroy_cycles,
+        } => {
             test_rapid_turnover_storm(&tracker, &config, create_destroy_cycles);
         }
 
@@ -255,7 +289,7 @@ fuzz_target!(|data: &[u8]| {
 fn test_high_frequency_notify_storm(
     tracker: &ContentionStormTracker,
     config: &ContentionStormConfig,
-    frequency_us: u16
+    frequency_us: u16,
 ) {
     let duration_ms = config.duration_ms;
     let waiter_threads = config.waiter_threads;
@@ -281,7 +315,8 @@ fn test_high_frequency_notify_storm(
                 let active_before = notify_clone.waiter_count();
 
                 let mut waiter = notify_clone.notified();
-                let tracked_waker = TrackedWaker::new(waiter_id as usize, waiter_count, tracker_clone.clone());
+                let tracked_waker =
+                    TrackedWaker::new(waiter_id as usize, waiter_count, tracker_clone.clone());
                 let waker = tracked_waker.create_waker();
                 let mut context = Context::from_waker(&waker);
 
@@ -374,7 +409,8 @@ fn test_high_frequency_notify_storm(
                     }
                 }
 
-                tracker_clone.record_operation(&format!("notifier_{}_notify_{}", notifier_id, notify_count));
+                tracker_clone
+                    .record_operation(&format!("notifier_{}_notify_{}", notifier_id, notify_count));
 
                 // High frequency notifications
                 if frequency_us > 0 {
@@ -404,7 +440,7 @@ fn test_bursty_notify_storm(
     tracker: &ContentionStormTracker,
     config: &ContentionStormConfig,
     burst_size: u8,
-    burst_interval_ms: u16
+    burst_interval_ms: u16,
 ) {
     tracker.record_operation("test_bursty_notify_storm");
 
@@ -440,7 +476,9 @@ fn test_bursty_notify_storm(
                     event_type: WakeupType::WaiterAwoken,
                     timestamp: std::time::Instant::now(),
                     stored_notifications_before: 0,
-                    stored_notifications_after: notify_clone.stored_notifications.load(Ordering::Acquire),
+                    stored_notifications_after: notify_clone
+                        .stored_notifications
+                        .load(Ordering::Acquire),
                     active_waiters_before: 0,
                     active_waiters_after: notify_clone.waiter_count(),
                 });
@@ -483,7 +521,7 @@ fn test_bursty_notify_storm(
 fn test_mixed_waiters_notifiers_storm(
     tracker: &ContentionStormTracker,
     config: &ContentionStormConfig,
-    _waiter_ratio: f32
+    _waiter_ratio: f32,
 ) {
     tracker.record_operation("test_mixed_waiters_notifiers_storm");
 
@@ -552,7 +590,7 @@ fn test_mixed_waiters_notifiers_storm(
 fn test_cancel_heavy_storm(
     tracker: &ContentionStormTracker,
     config: &ContentionStormConfig,
-    cancel_probability: f32
+    cancel_probability: f32,
 ) {
     tracker.record_operation("test_cancel_heavy_storm");
 
@@ -638,7 +676,7 @@ fn test_cancel_heavy_storm(
 fn test_storage_contention_storm(
     tracker: &ContentionStormTracker,
     _config: &ContentionStormConfig,
-    store_then_consume_cycles: u8
+    store_then_consume_cycles: u8,
 ) {
     tracker.record_operation("test_storage_contention_storm");
 
@@ -703,7 +741,7 @@ fn test_storage_contention_storm(
 fn test_rapid_turnover_storm(
     tracker: &ContentionStormTracker,
     config: &ContentionStormConfig,
-    create_destroy_cycles: u8
+    create_destroy_cycles: u8,
 ) {
     tracker.record_operation("test_rapid_turnover_storm");
 
@@ -720,7 +758,8 @@ fn test_rapid_turnover_storm(
 
             let handle = thread::spawn(move || {
                 let mut waiter = notify_clone.notified();
-                let tracked_waker = TrackedWaker::new(i as usize, cycle as usize, tracker_clone.clone());
+                let tracked_waker =
+                    TrackedWaker::new(i as usize, cycle as usize, tracker_clone.clone());
                 let waker = tracked_waker.create_waker();
                 let mut context = Context::from_waker(&waker);
 
@@ -762,7 +801,7 @@ fn test_rapid_turnover_storm(
 fn test_load_balance_storm(
     tracker: &ContentionStormTracker,
     config: &ContentionStormConfig,
-    notify_spread_us: u16
+    notify_spread_us: u16,
 ) {
     tracker.record_operation("test_load_balance_storm");
 

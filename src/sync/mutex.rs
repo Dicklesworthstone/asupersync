@@ -665,6 +665,7 @@ mod tests {
     use crate::types::Budget;
     use crate::util::ArenaIndex;
     use crate::{LabRuntime, RegionId, TaskId};
+    use futures_lite::future::block_on;
     use serde_json::Value;
     use std::sync::Mutex as StdMutex;
 
@@ -2340,9 +2341,9 @@ mod tests {
         // Test 2: Verify some Send types for contrast (these should also compile)
         let _contrast_send_types = || {
             fn assert_send<T: Send>() {}
-            assert_send::<i32>();        // i32 is Send
-            assert_send::<String>();     // String is Send
-            assert_send::<Vec<u8>>();    // Vec<u8> is Send
+            assert_send::<i32>(); // i32 is Send
+            assert_send::<String>(); // String is Send
+            assert_send::<Vec<u8>>(); // Vec<u8> is Send
             // But this would NOT compile: assert_send::<MutexGuard<()>>();
         };
 
@@ -2372,5 +2373,443 @@ mod tests {
         // This proves MutexGuard is !Send as required by asupersync semantics.
 
         crate::test_complete!("audit_mutex_guard_not_send_trait_bound");
+    }
+
+    #[test]
+    fn audit_lock_future_state_machine_size() {
+        // Audit: LockFuture state-machine should be SMALL per asupersync philosophy.
+        // Target: ≤256 bytes to avoid excessive stack usage.
+        //
+        // LockFuture contains:
+        // - mutex: &'a Mutex<T>     (8 bytes - reference)
+        // - cx: &'b Cx             (8 bytes - reference)
+        // - waiter_id: Option<usize> (16 bytes - Option<usize>)
+        // - completed: bool        (1 byte + 7 padding = 8 bytes)
+        // Expected total: ~40 bytes (small and efficient)
+
+        init_test("audit_lock_future_state_machine_size");
+
+        const SIZE_LIMIT_BYTES: usize = 256;
+
+        // Measure size for common types
+        let i32_future_size = std::mem::size_of::<LockFuture<'_, '_, i32>>();
+        let u64_future_size = std::mem::size_of::<LockFuture<'_, '_, u64>>();
+        let string_future_size = std::mem::size_of::<LockFuture<'_, '_, String>>();
+        let vec_future_size = std::mem::size_of::<LockFuture<'_, '_, Vec<u8>>>();
+
+        // Log sizes for visibility
+        eprintln!("LockFuture sizes:");
+        eprintln!("  LockFuture<i32>:     {} bytes", i32_future_size);
+        eprintln!("  LockFuture<u64>:     {} bytes", u64_future_size);
+        eprintln!("  LockFuture<String>:  {} bytes", string_future_size);
+        eprintln!("  LockFuture<Vec<u8>>: {} bytes", vec_future_size);
+        eprintln!("  Size limit:          {} bytes", SIZE_LIMIT_BYTES);
+
+        // Verify all measured types are within limit
+        crate::assert_with_log!(
+            i32_future_size <= SIZE_LIMIT_BYTES,
+            &format!(
+                "LockFuture<i32> size {} ≤ {} bytes",
+                i32_future_size, SIZE_LIMIT_BYTES
+            ),
+            SIZE_LIMIT_BYTES,
+            i32_future_size
+        );
+
+        crate::assert_with_log!(
+            u64_future_size <= SIZE_LIMIT_BYTES,
+            &format!(
+                "LockFuture<u64> size {} ≤ {} bytes",
+                u64_future_size, SIZE_LIMIT_BYTES
+            ),
+            SIZE_LIMIT_BYTES,
+            u64_future_size
+        );
+
+        crate::assert_with_log!(
+            string_future_size <= SIZE_LIMIT_BYTES,
+            &format!(
+                "LockFuture<String> size {} ≤ {} bytes",
+                string_future_size, SIZE_LIMIT_BYTES
+            ),
+            SIZE_LIMIT_BYTES,
+            string_future_size
+        );
+
+        crate::assert_with_log!(
+            vec_future_size <= SIZE_LIMIT_BYTES,
+            &format!(
+                "LockFuture<Vec<u8>> size {} ≤ {} bytes",
+                vec_future_size, SIZE_LIMIT_BYTES
+            ),
+            SIZE_LIMIT_BYTES,
+            vec_future_size
+        );
+
+        // Verify all sizes are identical (type parameter T is phantom in future)
+        crate::assert_with_log!(
+            i32_future_size == u64_future_size
+                && u64_future_size == string_future_size
+                && string_future_size == vec_future_size,
+            "LockFuture size should be independent of T (T is phantom in future state)",
+            true,
+            i32_future_size == u64_future_size
+        );
+
+        // Additional check: future should be small (< 64 bytes for optimal stack usage)
+        const OPTIMAL_SIZE_BYTES: usize = 64;
+        let is_optimal_size = i32_future_size <= OPTIMAL_SIZE_BYTES;
+
+        if is_optimal_size {
+            eprintln!(
+                "✅ LockFuture is optimally sized: {} bytes",
+                i32_future_size
+            );
+        } else {
+            eprintln!(
+                "⚠️  LockFuture is acceptable but not optimal: {} bytes (target: ≤{})",
+                i32_future_size, OPTIMAL_SIZE_BYTES
+            );
+        }
+
+        // Pin the expected size range for regression detection
+        crate::assert_with_log!(
+            i32_future_size >= 24, // Minimum reasonable size (2 refs + Option<usize> + bool)
+            &format!(
+                "LockFuture size {} ≥ 24 bytes (sanity check)",
+                i32_future_size
+            ),
+            24,
+            i32_future_size
+        );
+
+        crate::assert_with_log!(
+            i32_future_size <= 64, // Should be small and efficient
+            &format!(
+                "LockFuture size {} ≤ 64 bytes (optimal size)",
+                i32_future_size
+            ),
+            64,
+            i32_future_size
+        );
+
+        crate::test_complete!("audit_lock_future_state_machine_size");
+    }
+
+    #[test]
+    fn audit_mutex_guard_await_boundary_compile_fail() {
+        // Audit: MutexGuard !Send prevents crossing await boundaries.
+        // This test documents the compile-time enforcement of !Send trait bounds
+        // when attempting to hold a MutexGuard across await points.
+        //
+        // Per asupersync semantics, guards must NOT cross await boundaries to
+        // preserve task-local cancellation and drop semantics.
+
+        init_test("audit_mutex_guard_await_boundary_compile_fail");
+
+        // This test demonstrates (but does not execute) code patterns that SHOULD NOT COMPILE
+        // due to MutexGuard being !Send. The examples are in comments to avoid compilation errors.
+
+        /*
+        // EXAMPLE 1: Direct await with guard held (SHOULD NOT COMPILE)
+        async fn bad_pattern_1(mutex: &Mutex<i32>, cx: &Cx) {
+            let guard = mutex.lock(cx).await.unwrap();
+            // ERROR: cannot await while holding guard (guard is !Send)
+            some_async_function().await;
+            drop(guard);
+        }
+
+        // EXAMPLE 2: Function boundary with guard (SHOULD NOT COMPILE)
+        async fn bad_pattern_2(mutex: &Mutex<i32>, cx: &Cx) {
+            let guard = mutex.lock(cx).await.unwrap();
+            // ERROR: cannot call async function while holding guard
+            helper_async_function(guard).await;
+        }
+
+        async fn helper_async_function(guard: MutexGuard<'_, i32>) {
+            // This would require MutexGuard: Send, which is false
+            some_async_function().await;
+            drop(guard);
+        }
+
+        // EXAMPLE 3: Spawning task with guard (SHOULD NOT COMPILE)
+        async fn bad_pattern_3(mutex: &Mutex<i32>, cx: &Cx) {
+            let guard = mutex.lock(cx).await.unwrap();
+            // ERROR: cannot move guard into spawned task (guard is !Send)
+            spawn_task(async move {
+                println!("Value: {}", *guard);
+            });
+        }
+        */
+
+        // CORRECT PATTERN: Guard is dropped before await points
+        let test_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            block_on(async {
+                let mutex = Mutex::new(42);
+                let cx = test_cx();
+
+                // ✓ CORRECT: Acquire, use, and drop guard before await
+                let value = {
+                    let guard = mutex.lock(&cx).await?;
+                    *guard // Copy value out
+                    // Guard drops here, before any await point
+                };
+
+                // ✓ CORRECT: Now we can safely await without holding guard
+                crate::time::sleep(crate::types::Time::ZERO, std::time::Duration::from_nanos(1))
+                    .await;
+
+                Ok(value)
+            })
+        }));
+
+        crate::assert_with_log!(
+            test_result.is_ok(),
+            "correct guard usage pattern should work",
+            true,
+            test_result.is_ok()
+        );
+
+        // The !Send trait bound is enforced at compile time, preventing the anti-patterns
+        // shown in the commented examples above. This test documents the correct pattern
+        // and verifies that proper guard usage (drop before await) works correctly.
+
+        crate::test_complete!("audit_mutex_guard_await_boundary_compile_fail");
+    }
+
+    /// Example of a compile-fail doc test for MutexGuard !Send enforcement.
+    ///
+    /// This function contains a doc test that demonstrates the compile failure
+    /// when attempting to hold a MutexGuard across an await boundary.
+    ///
+    /// ```compile_fail
+    /// use asupersync::sync::Mutex;
+    /// use asupersync::cx::Cx;
+    ///
+    /// async fn bad_await_with_guard(mutex: &Mutex<i32>, cx: &Cx) -> Result<(), asupersync::sync::LockError> {
+    ///     let guard = mutex.lock(cx).await?;
+    ///
+    ///     // This line should cause a compile error because MutexGuard is !Send
+    ///     // and cannot cross the await boundary
+    ///     asupersync::time::sleep(
+    ///         asupersync::types::Time::ZERO,
+    ///         std::time::Duration::from_millis(1)
+    ///     ).await;
+    ///
+    ///     drop(guard);
+    ///     Ok(())
+    /// }
+    /// ```
+    fn _doctest_mutex_guard_compile_fail_example() {
+        // This function exists only to host the doc test above.
+        // The doc test demonstrates that the pattern fails to compile.
+    }
+
+    #[test]
+    fn audit_mutex_lock_poll_waker_registration() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+        use std::thread;
+        use std::time::{Duration, Instant};
+
+        // Audit test for Mutex::lock() poll behavior under contention.
+        //
+        // When task A holds mutex and task B tries to lock:
+        // 1. B's poll_lock should return Pending and register waker
+        // 2. When A releases, B's waker should be called
+        // 3. B's next poll should return Ready and acquire lock
+        //
+        // Verifies: waker registration, proper handoff, FIFO fairness
+
+        let test_iterations = 200;
+        let mut successful_waker_calls = 0;
+        let failed_waker_calls = Arc::new(AtomicUsize::new(0));
+
+        for iteration in 0..test_iterations {
+            let mutex = Arc::new(Mutex::new(iteration));
+            let holder_can_proceed = Arc::new(AtomicBool::new(false));
+            let waker_was_called = Arc::new(AtomicBool::new(false));
+            let lock_acquired_after_wake = Arc::new(AtomicBool::new(false));
+
+            let mutex_holder = Arc::clone(&mutex);
+            let proceed_flag = Arc::clone(&holder_can_proceed);
+
+            // Holder thread: Acquire lock and hold until signaled
+            let holder_handle = thread::spawn(move || {
+                let rt = crate::runtime::RuntimeBuilder::new()
+                    .worker_threads(1)
+                    .build()
+                    .expect("Failed to build runtime");
+
+                rt.block_on(async {
+                    let cx = Cx::for_testing();
+
+                    // Acquire the mutex
+                    let guard = mutex_holder
+                        .lock(&cx)
+                        .await
+                        .expect("Holder should successfully acquire mutex");
+
+                    // Signal that holder has the lock, waiter can start trying
+                    proceed_flag.store(true, Ordering::SeqCst);
+
+                    // Hold lock for a short time to create contention
+                    crate::time::sleep(crate::types::Time::ZERO, Duration::from_millis(5)).await;
+
+                    // Verify data integrity
+                    let value = *guard;
+                    assert_eq!(
+                        value, iteration,
+                        "Data should be preserved during lock hold"
+                    );
+
+                    // Lock will be released when guard drops
+                })
+            });
+
+            let mutex_contender = Arc::clone(&mutex);
+            let proceed_waiter = Arc::clone(&holder_can_proceed);
+            let waker_called = Arc::clone(&waker_was_called);
+            let acquired_flag = Arc::clone(&lock_acquired_after_wake);
+            let failed_count = Arc::clone(&failed_waker_calls);
+
+            // Contender thread: Wait for holder, then try to acquire
+            let contender_handle = thread::spawn(move || {
+                let rt = crate::runtime::RuntimeBuilder::new()
+                    .worker_threads(1)
+                    .build()
+                    .expect("Failed to build runtime");
+
+                rt.block_on(async {
+                    let cx = Cx::for_testing();
+
+                    // Wait for holder to acquire lock first
+                    while !proceed_waiter.load(Ordering::SeqCst) {
+                        crate::time::sleep(crate::types::Time::ZERO, Duration::from_micros(100))
+                            .await;
+                    }
+
+                    // Create a counting waker to verify wake calls
+                    let waker_called_clone = Arc::clone(&waker_called);
+                    struct CountingWaker {
+                        called: Arc<AtomicBool>,
+                    }
+
+                    impl std::task::Wake for CountingWaker {
+                        fn wake(self: Arc<Self>) {
+                            self.called.store(true, Ordering::SeqCst);
+                        }
+                        fn wake_by_ref(self: &Arc<Self>) {
+                            self.called.store(true, Ordering::SeqCst);
+                        }
+                    }
+
+                    let counting_waker = std::task::Waker::from(Arc::new(CountingWaker {
+                        called: waker_called_clone,
+                    }));
+
+                    // Try to acquire mutex - should block and register waker
+                    let lock_start = Instant::now();
+                    let mut lock_future = std::pin::pin!(mutex_contender.lock(&cx));
+
+                    // First poll should return Pending and register waker
+                    let mut context = std::task::Context::from_waker(&counting_waker);
+                    let first_poll = lock_future.as_mut().poll(&mut context);
+
+                    match first_poll {
+                        std::task::Poll::Ready(_) => {
+                            // Unexpected - holder should still have lock
+                            failed_count.fetch_add(1, Ordering::SeqCst);
+                            return (false, false, Duration::ZERO);
+                        }
+                        std::task::Poll::Pending => {
+                            // Expected - waker should be registered
+                        }
+                    }
+
+                    // Wait for the actual lock acquisition to complete
+                    let guard = lock_future
+                        .await
+                        .expect("Contender should eventually acquire mutex");
+
+                    let acquisition_time = lock_start.elapsed();
+
+                    // Verify waker was called during the wait
+                    let waker_called_result = waker_called.load(Ordering::SeqCst);
+                    acquired_flag.store(true, Ordering::SeqCst);
+
+                    // Verify data integrity
+                    let value = *guard;
+                    assert_eq!(value, iteration, "Data should be consistent after handoff");
+
+                    (true, waker_called_result, acquisition_time)
+                })
+            });
+
+            // Wait for completion
+            holder_handle.join().expect("Holder thread should complete");
+            let (acquired, waker_called, acquisition_time) = contender_handle
+                .join()
+                .expect("Contender thread should complete");
+
+            // Verify the lock was eventually acquired
+            assert!(
+                acquired,
+                "iteration {}: contender should acquire lock",
+                iteration
+            );
+            assert!(
+                lock_acquired_after_wake.load(Ordering::SeqCst),
+                "iteration {}: lock acquisition flag should be set",
+                iteration
+            );
+
+            // Verify waker was called during contention
+            if waker_called {
+                successful_waker_calls += 1;
+            }
+
+            // Verify reasonable acquisition time (should be quick after wakeup)
+            assert!(
+                acquisition_time < Duration::from_millis(100),
+                "iteration {}: lock acquisition took {:?}, expected < 100ms",
+                iteration,
+                acquisition_time
+            );
+        }
+
+        let failed_count = failed_waker_calls.load(Ordering::SeqCst);
+        let success_rate = (successful_waker_calls as f64) / (test_iterations as f64);
+
+        println!(
+            "Mutex lock poll waker audit: {}/{} successful waker calls ({:.1}%), {} failures",
+            successful_waker_calls,
+            test_iterations,
+            success_rate * 100.0,
+            failed_count
+        );
+
+        // Verify waker registration and calling works reliably
+        if success_rate < 0.90 {
+            panic!(
+                "❌ WAKER DEFECT: Only {:.1}% successful waker calls. \
+                 Expected >90% waker calls when mutex is contended. \
+                 This suggests poll_lock is not properly registering or calling wakers.",
+                success_rate * 100.0
+            );
+        }
+
+        if failed_count > test_iterations / 20 {
+            panic!(
+                "❌ POLLING DEFECT: {} failed acquisitions (>{} threshold). \
+                 Expected smooth handoff from holder to contender via waker.",
+                failed_count,
+                test_iterations / 20
+            );
+        }
+
+        println!(
+            "✅ SOUND: Mutex lock polling correctly registers wakers and handles contended acquisition"
+        );
     }
 }

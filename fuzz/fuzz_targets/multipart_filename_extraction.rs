@@ -110,7 +110,11 @@ enum WindowsAttack {
     /// Drive letter injection: C:\path\file
     DriveLetterAbsolute { drive: char, path: String },
     /// UNC path injection: \\server\share\file
-    UncPath { server: String, share: String, file: String },
+    UncPath {
+        server: String,
+        share: String,
+        file: String,
+    },
     /// Alternate data streams: file.txt:stream:$DATA
     AlternateDataStream { base: String, stream: String },
     /// Windows reserved device names.
@@ -121,9 +125,28 @@ enum WindowsAttack {
 
 #[derive(Arbitrary, Debug, Clone)]
 enum WindowsReserved {
-    Con, Prn, Aux, Nul,
-    Com1, Com2, Com3, Com4, Com5, Com6, Com7, Com8, Com9,
-    Lpt1, Lpt2, Lpt3, Lpt4, Lpt5, Lpt6, Lpt7, Lpt8, Lpt9,
+    Con,
+    Prn,
+    Aux,
+    Nul,
+    Com1,
+    Com2,
+    Com3,
+    Com4,
+    Com5,
+    Com6,
+    Com7,
+    Com8,
+    Com9,
+    Lpt1,
+    Lpt2,
+    Lpt3,
+    Lpt4,
+    Lpt5,
+    Lpt6,
+    Lpt7,
+    Lpt8,
+    Lpt9,
 }
 
 #[derive(Arbitrary, Debug, Clone)]
@@ -225,7 +248,10 @@ impl ContentDisposition {
 
         // Add name parameter if present
         if let Some(ref name) = self.name {
-            params.push(("name", self.format_param_value(name, &FilenameEncoding::Quoted)));
+            params.push((
+                "name",
+                self.format_param_value(name, &FilenameEncoding::Quoted),
+            ));
         }
 
         // Add filename parameter if present
@@ -240,7 +266,10 @@ impl ContentDisposition {
 
         // Add extra parameters
         for (key, value) in &self.extra_params {
-            params.push((key, self.format_param_value(value, &FilenameEncoding::Quoted)));
+            params.push((
+                key,
+                self.format_param_value(value, &FilenameEncoding::Quoted),
+            ));
         }
 
         // Apply parameter ordering and formatting
@@ -255,7 +284,8 @@ impl ContentDisposition {
             FilenameEncoding::Quoted => format!("\"{}\"", content.replace('"', r#"\""#)),
             FilenameEncoding::Rfc8187 { ref charset } => {
                 // RFC 8187: charset'lang'value
-                let encoded = content.chars()
+                let encoded = content
+                    .chars()
                     .map(|c| {
                         if c.is_ascii_alphanumeric() || "!#$&+-.^_".contains(c) {
                             c.to_string()
@@ -264,7 +294,7 @@ impl ContentDisposition {
                         }
                     })
                     .collect::<String>();
-                format!("{}''{}",  charset, encoded)
+                format!("{}''{}", charset, encoded)
             }
             FilenameEncoding::MalformedQuoting(ref mal) => {
                 self.format_malformed_quoting(&content, mal)
@@ -272,14 +302,18 @@ impl ContentDisposition {
         }
     }
 
-    fn format_malformed_quoting(&self, content: &str, malformation: &QuotingMalformation) -> String {
+    fn format_malformed_quoting(
+        &self,
+        content: &str,
+        malformation: &QuotingMalformation,
+    ) -> String {
         match malformation {
-            QuotingMalformation::Unterminated => format!("\"{}",  content),
+            QuotingMalformation::Unterminated => format!("\"{}", content),
             QuotingMalformation::TrailingGarbage(garbage) => {
-                format!("\"{}\"{}",  content, garbage)
+                format!("\"{}\"{}", content, garbage)
             }
             QuotingMalformation::UnescapedQuotes => {
-                format!("\"{}\"", content.replace('"', "\""))  // Don't escape
+                format!("\"{}\"", content.replace('"', "\"")) // Don't escape
             }
             QuotingMalformation::InvalidEscapes(escapes) => {
                 format!("\"{}{}\"", content, escapes)
@@ -302,32 +336,40 @@ impl ContentDisposition {
             let name_formatted = match self.formatting.param_case {
                 ParamCase::Lower => name.to_lowercase(),
                 ParamCase::Upper => name.to_uppercase(),
-                ParamCase::Mixed => {
-                    name.chars()
-                        .enumerate()
-                        .map(|(i, c)| if i % 2 == 0 { c.to_uppercase().to_string() } else { c.to_lowercase().to_string() })
-                        .collect::<String>()
-                }
-                ParamCase::Random(ref pattern) => {
-                    name.chars()
-                        .enumerate()
-                        .map(|(i, c)| {
-                            if *pattern.get(i % pattern.len()).unwrap_or(&false) {
-                                c.to_uppercase().to_string()
-                            } else {
-                                c.to_lowercase().to_string()
-                            }
-                        })
-                        .collect::<String>()
-                }
+                ParamCase::Mixed => name
+                    .chars()
+                    .enumerate()
+                    .map(|(i, c)| {
+                        if i % 2 == 0 {
+                            c.to_uppercase().to_string()
+                        } else {
+                            c.to_lowercase().to_string()
+                        }
+                    })
+                    .collect::<String>(),
+                ParamCase::Random(ref pattern) => name
+                    .chars()
+                    .enumerate()
+                    .map(|(i, c)| {
+                        if *pattern.get(i % pattern.len()).unwrap_or(&false) {
+                            c.to_uppercase().to_string()
+                        } else {
+                            c.to_lowercase().to_string()
+                        }
+                    })
+                    .collect::<String>(),
             };
 
             match self.formatting.equals_spacing {
                 EqualsSpacing::None => result.push_str(&format!(" {}={}", name_formatted, value)),
-                EqualsSpacing::Before => result.push_str(&format!(" {} ={}", name_formatted, value)),
+                EqualsSpacing::Before => {
+                    result.push_str(&format!(" {} ={}", name_formatted, value))
+                }
                 EqualsSpacing::After => result.push_str(&format!(" {}= {}", name_formatted, value)),
                 EqualsSpacing::Both => result.push_str(&format!(" {} = {}", name_formatted, value)),
-                EqualsSpacing::Excessive => result.push_str(&format!("  {}  =  {}", name_formatted, value)),
+                EqualsSpacing::Excessive => {
+                    result.push_str(&format!("  {}  =  {}", name_formatted, value))
+                }
             }
         }
     }
@@ -377,7 +419,9 @@ impl TraversalVector {
             }
             TraversalVector::UrlEncoded(path) => {
                 // URL-encode path separators and dots
-                path.replace(".", "%2E").replace("/", "%2F").replace("\\", "%5C")
+                path.replace(".", "%2E")
+                    .replace("/", "%2F")
+                    .replace("\\", "%5C")
             }
             TraversalVector::DoubleEncoded(path) => {
                 // Double URL-encode
@@ -397,7 +441,11 @@ impl WindowsAttack {
             WindowsAttack::DriveLetterAbsolute { drive, path } => {
                 format!("{}:{}", drive, path)
             }
-            WindowsAttack::UncPath { server, share, file } => {
+            WindowsAttack::UncPath {
+                server,
+                share,
+                file,
+            } => {
                 format!("\\\\{}\\{}\\{}", server, share, file)
             }
             WindowsAttack::AlternateDataStream { base, stream } => {
@@ -434,7 +482,8 @@ impl WindowsReserved {
             WindowsReserved::Lpt7 => "LPT7",
             WindowsReserved::Lpt8 => "LPT8",
             WindowsReserved::Lpt9 => "LPT9",
-        }.to_string()
+        }
+        .to_string()
     }
 }
 
@@ -443,7 +492,7 @@ impl UnicodeAttack {
         match self {
             UnicodeAttack::NormalizationEquivalent(s) => {
                 // Use combining characters that normalize to directory separators
-                format!("{}/../{}",  s, s)
+                format!("{}/../{}", s, s)
             }
             UnicodeAttack::BidiOverride(s) => {
                 // Right-to-left override to disguise filenames
@@ -452,17 +501,15 @@ impl UnicodeAttack {
             UnicodeAttack::ZeroWidth(s) => {
                 // Insert zero-width characters
                 s.chars()
-                    .map(|c| format!("{}\u{200B}", c))  // Zero-width space
+                    .map(|c| format!("{}\u{200B}", c)) // Zero-width space
                     .collect()
             }
             UnicodeAttack::UnicodePathSeps(s) => {
                 // Use fullwidth and other Unicode "path separators"
-                s.replace("/", "\u{FF0F}")  // Fullwidth solidus
-                    .replace("\\", "\u{FF3C}")  // Fullwidth reverse solidus
+                s.replace("/", "\u{FF0F}") // Fullwidth solidus
+                    .replace("\\", "\u{FF3C}") // Fullwidth reverse solidus
             }
-            UnicodeAttack::InvalidUtf8(bytes) => {
-                String::from_utf8_lossy(bytes).into_owned()
-            }
+            UnicodeAttack::InvalidUtf8(bytes) => String::from_utf8_lossy(bytes).into_owned(),
         }
     }
 }
@@ -529,9 +576,8 @@ impl SecurityOracles {
     fn check_filename_properties(&mut self, sanitized: &str, original: &str) {
         // Must not be empty (should fallback to "file")
         if sanitized.is_empty() {
-            self.property_violations.push(format!(
-                "Empty sanitized filename from '{}'", original
-            ));
+            self.property_violations
+                .push(format!("Empty sanitized filename from '{}'", original));
         }
 
         // Must not contain control characters
@@ -545,9 +591,8 @@ impl SecurityOracles {
         // Must not be a Windows reserved name
         let upper_sanitized = sanitized.to_uppercase();
         let reserved_names = [
-            "CON", "PRN", "AUX", "NUL",
-            "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8", "COM9",
-            "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9",
+            "CON", "PRN", "AUX", "NUL", "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7",
+            "COM8", "COM9", "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9",
         ];
         if reserved_names.contains(&upper_sanitized.as_str()) {
             self.property_violations.push(format!(
@@ -569,7 +614,8 @@ impl SecurityOracles {
         if sanitized.len() > 255 {
             self.property_violations.push(format!(
                 "Excessively long sanitized filename ({} chars): '{}'",
-                sanitized.len(), sanitized
+                sanitized.len(),
+                sanitized
             ));
         }
     }
@@ -602,9 +648,9 @@ impl SecurityOracles {
 /// Test filename extraction through the multipart parser.
 fn test_filename_extraction(disposition_header: &str) -> Result<Option<String>, String> {
     use asupersync::bytes::Bytes;
+    use asupersync::web::FromRequest;
     use asupersync::web::extract::Request;
     use asupersync::web::multipart::Multipart;
-    use asupersync::web::FromRequest;
 
     // Create a minimal multipart body with the given Content-Disposition header
     let boundary = "FUZZ_BOUNDARY";
@@ -647,7 +693,7 @@ fuzz_target!(|data: &[u8]| {
     // Generate a Content-Disposition header with malicious filename
     let disposition = match ContentDisposition::arbitrary(&mut u) {
         Ok(d) => d,
-        Err(_) => return,  // Not enough data
+        Err(_) => return, // Not enough data
     };
 
     let header = format!("Content-Disposition: {}", disposition.to_header_value());
@@ -659,7 +705,8 @@ fuzz_target!(|data: &[u8]| {
     match result_clone {
         Ok(Some(sanitized_filename)) => {
             // We got a filename - run security oracles
-            let original_filename = disposition.filename
+            let original_filename = disposition
+                .filename
                 .as_ref()
                 .map(|f| f.content.render())
                 .unwrap_or_default();
@@ -693,5 +740,9 @@ fuzz_target!(|data: &[u8]| {
     // Property: Filename extraction should be deterministic
     // Run the same input twice and ensure we get the same result
     let result2 = test_filename_extraction(&header);
-    assert_eq!(result, result2, "Non-deterministic filename extraction for header: {}", header);
+    assert_eq!(
+        result, result2,
+        "Non-deterministic filename extraction for header: {}",
+        header
+    );
 });

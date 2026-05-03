@@ -1,7 +1,7 @@
 #![no_main]
 
-use libfuzzer_sys::fuzz_target;
 use arbitrary::{Arbitrary, Unstructured};
+use libfuzzer_sys::fuzz_target;
 
 /// HTTP/2 frame header length per RFC 9113
 const FRAME_HEADER_LEN: usize = 9;
@@ -108,7 +108,10 @@ impl HeaderField {
         // RFC 9113 §8.3.1: :path MUST start with '/' for http/https schemes
         // Note: asterisk-form (*) is allowed for OPTIONS requests to entire server
         if !path.starts_with('/') && path != "*" {
-            return Err(format!("Invalid :path '{}' - must start with '/' or be '*'", path));
+            return Err(format!(
+                "Invalid :path '{}' - must start with '/' or be '*'",
+                path
+            ));
         }
 
         // RFC 9113: Control characters are forbidden in header field values
@@ -123,8 +126,11 @@ impl HeaderField {
         }
 
         // RFC 9113: CRLF sequences are specifically forbidden
-        if path.contains("\r\n") || path.contains("\n\r") ||
-           path.contains("\r") || path.contains("\n") {
+        if path.contains("\r\n")
+            || path.contains("\n\r")
+            || path.contains("\r")
+            || path.contains("\n")
+        {
             return Err(format!("CRLF or line break characters in :path '{}'", path));
         }
 
@@ -136,7 +142,10 @@ impl HeaderField {
         // Check for other problematic characters that could cause parsing issues
         // Space characters that aren't properly encoded
         if path.contains(' ') {
-            return Err(format!("Unencoded space character in :path '{}' - should be %20", path));
+            return Err(format!(
+                "Unencoded space character in :path '{}' - should be %20",
+                path
+            ));
         }
 
         // Tab character
@@ -148,7 +157,10 @@ impl HeaderField {
         if path.contains("%25") {
             // This could be %25xx which would decode to %xx
             // May indicate double-encoding evasion attempt
-            return Err(format!("Potentially double-encoded sequence in :path '{}'", path));
+            return Err(format!(
+                "Potentially double-encoded sequence in :path '{}'",
+                path
+            ));
         }
 
         Ok(())
@@ -192,17 +204,15 @@ impl FrameHeader {
             return Err("incomplete header");
         }
 
-        let length = ((buf[0] as u32) << 16) |
-                    ((buf[1] as u32) << 8) |
-                    (buf[2] as u32);
+        let length = ((buf[0] as u32) << 16) | ((buf[1] as u32) << 8) | (buf[2] as u32);
 
         let frame_type = buf[3];
         let flags = buf[4];
 
-        let stream_id = ((buf[5] as u32 & 0x7F) << 24) |
-                       ((buf[6] as u32) << 16) |
-                       ((buf[7] as u32) << 8) |
-                       (buf[8] as u32);
+        let stream_id = ((buf[5] as u32 & 0x7F) << 24)
+            | ((buf[6] as u32) << 16)
+            | ((buf[7] as u32) << 8)
+            | (buf[8] as u32);
 
         Ok(FrameHeader {
             length,
@@ -370,7 +380,7 @@ impl MockH2HeadersParser {
                 // RFC 9113 §8.3: All pseudo-headers must appear before regular headers
                 if pseudo_header_done {
                     return HeadersParseResult::ProtocolError(
-                        "Pseudo-header after regular header".to_string()
+                        "Pseudo-header after regular header".to_string(),
                     );
                 }
 
@@ -378,15 +388,15 @@ impl MockH2HeadersParser {
                     ":method" => {
                         if has_method {
                             return HeadersParseResult::ProtocolError(
-                                "Duplicate :method pseudo-header".to_string()
+                                "Duplicate :method pseudo-header".to_string(),
                             );
                         }
                         has_method = true;
-                    },
+                    }
                     ":path" => {
                         if has_path {
                             return HeadersParseResult::ProtocolError(
-                                "Duplicate :path pseudo-header".to_string()
+                                "Duplicate :path pseudo-header".to_string(),
                             );
                         }
                         has_path = true;
@@ -394,24 +404,26 @@ impl MockH2HeadersParser {
                         // CRITICAL: Validate :path header per RFC 9113
                         if let Err(validation_error) = header.validate_path_header() {
                             return HeadersParseResult::ProtocolError(format!(
-                                "Invalid :path pseudo-header: {}", validation_error
+                                "Invalid :path pseudo-header: {}",
+                                validation_error
                             ));
                         }
-                    },
+                    }
                     ":scheme" => {
                         if has_scheme {
                             return HeadersParseResult::ProtocolError(
-                                "Duplicate :scheme pseudo-header".to_string()
+                                "Duplicate :scheme pseudo-header".to_string(),
                             );
                         }
                         has_scheme = true;
-                    },
+                    }
                     ":authority" => {
                         // Optional, can be omitted
-                    },
+                    }
                     _ => {
                         return HeadersParseResult::ProtocolError(format!(
-                            "Unknown pseudo-header: {}", header.name
+                            "Unknown pseudo-header: {}",
+                            header.name
                         ));
                     }
                 }
@@ -422,7 +434,8 @@ impl MockH2HeadersParser {
                 // RFC 9113: Regular headers must not start with ':'
                 if header.name.starts_with(':') {
                     return HeadersParseResult::ProtocolError(format!(
-                        "Invalid header name starts with colon: {}", header.name
+                        "Invalid header name starts with colon: {}",
+                        header.name
                     ));
                 }
             }
@@ -431,19 +444,19 @@ impl MockH2HeadersParser {
         // RFC 9113 §8.3.1: Required pseudo-headers for requests
         if !has_method {
             return HeadersParseResult::ProtocolError(
-                "Missing required :method pseudo-header".to_string()
+                "Missing required :method pseudo-header".to_string(),
             );
         }
 
         if !has_path {
             return HeadersParseResult::ProtocolError(
-                "Missing required :path pseudo-header".to_string()
+                "Missing required :path pseudo-header".to_string(),
             );
         }
 
         if !has_scheme {
             return HeadersParseResult::ProtocolError(
-                "Missing required :scheme pseudo-header".to_string()
+                "Missing required :scheme pseudo-header".to_string(),
             );
         }
 
@@ -497,10 +510,10 @@ enum PathVariant {
 
 #[derive(Arbitrary, Debug, Clone)]
 enum ValidPath {
-    Root,           // "/"
-    Simple(String), // "/simple/path"
+    Root,                      // "/"
+    Simple(String),            // "/simple/path"
     WithQuery(String, String), // "/path?query=value"
-    Asterisk,       // "*" (for OPTIONS)
+    Asterisk,                  // "*" (for OPTIONS)
 }
 
 impl PathVariant {
@@ -515,11 +528,11 @@ impl PathVariant {
             PathVariant::WithControlChars(base) => {
                 // Inject control characters
                 format!("/{}\x00\x01\x02{}", base, base)
-            },
+            }
             PathVariant::WithCrlf(base) => {
                 // Inject CRLF sequences
                 format!("/path\r\n{}\n\rmore", base)
-            },
+            }
             PathVariant::Custom(path) => path.clone(),
         }
     }
@@ -529,7 +542,9 @@ fuzz_target!(|input: FuzzInput| {
     let mut parser = MockH2HeadersParser::new();
 
     // Ensure valid stream ID (non-zero, odd for client-initiated)
-    let stream_id = if input.stream_id == 0 { 1 } else {
+    let stream_id = if input.stream_id == 0 {
+        1
+    } else {
         (input.stream_id & 0x7FFF_FFFF) | 1 // Force odd
     };
 
@@ -609,7 +624,10 @@ fuzz_target!(|input: FuzzInput| {
 
     // Validate behavior based on :path content
     match result {
-        HeadersParseResult::Valid { headers: parsed_headers, .. } => {
+        HeadersParseResult::Valid {
+            headers: parsed_headers,
+            ..
+        } => {
             // Frame parsed successfully - validate this is expected
 
             // Should only be valid if:
@@ -621,14 +639,16 @@ fuzz_target!(|input: FuzzInput| {
             if input.include_forbidden_chars {
                 panic!(
                     "CRITICAL RFC VIOLATION: :path with control characters parsed as valid! \
-                     Path: {:?}", path_value
+                     Path: {:?}",
+                    path_value
                 );
             }
 
             if input.include_crlf {
                 panic!(
                     "CRITICAL RFC VIOLATION: :path with CRLF characters parsed as valid! \
-                     This enables header injection attacks. Path: {:?}", path_value
+                     This enables header injection attacks. Path: {:?}",
+                    path_value
                 );
             }
 
@@ -647,14 +667,15 @@ fuzz_target!(|input: FuzzInput| {
             }
 
             // Verify :path value was preserved correctly
-            let path_header = parsed_headers.iter()
+            let path_header = parsed_headers
+                .iter()
                 .find(|h| h.name == ":path")
                 .expect("Parsed headers should contain :path");
 
             if input.include_forbidden_chars || input.include_crlf {
                 panic!("Forbidden characters should have been rejected");
             }
-        },
+        }
 
         HeadersParseResult::ProtocolError(msg) => {
             // Expected for problematic :path values
@@ -662,44 +683,50 @@ fuzz_target!(|input: FuzzInput| {
             if input.include_forbidden_chars {
                 assert!(
                     msg.contains("Control character") || msg.contains("Invalid :path"),
-                    "Expected control character error for forbidden chars, got: {}", msg
+                    "Expected control character error for forbidden chars, got: {}",
+                    msg
                 );
             }
 
             if input.include_crlf {
                 assert!(
-                    msg.contains("CRLF") || msg.contains("line break") || msg.contains("Invalid :path"),
-                    "Expected CRLF error for line breaks, got: {}", msg
+                    msg.contains("CRLF")
+                        || msg.contains("line break")
+                        || msg.contains("Invalid :path"),
+                    "Expected CRLF error for line breaks, got: {}",
+                    msg
                 );
             }
 
             if input.make_path_empty {
                 assert!(
                     msg.contains("Empty :path") || msg.contains("Missing required :path"),
-                    "Expected empty path error, got: {}", msg
+                    "Expected empty path error, got: {}",
+                    msg
                 );
             }
 
             if input.duplicate_pseudo_headers {
                 assert!(
                     msg.contains("Duplicate") || msg.contains("pseudo-header"),
-                    "Expected duplicate pseudo-header error, got: {}", msg
+                    "Expected duplicate pseudo-header error, got: {}",
+                    msg
                 );
             }
-        },
+        }
 
         HeadersParseResult::FrameSizeError => {
             // Expected for oversized frames
-        },
+        }
 
         HeadersParseResult::IncompleteFrame => {
             // Expected for truncated data
-        },
+        }
 
         HeadersParseResult::InvalidStreamId => {
             // Should not happen with our stream ID logic
             panic!("Unexpected InvalidStreamId with stream_id: {}", stream_id);
-        },
+        }
 
         HeadersParseResult::CompressionError => {
             // Expected for malformed HPACK data
@@ -711,15 +738,17 @@ fuzz_target!(|input: FuzzInput| {
         match result {
             HeadersParseResult::ProtocolError(_) => {
                 // Expected - good!
-            },
+            }
             HeadersParseResult::Valid { .. } => {
                 panic!(
                     "CRITICAL RFC 9113 VIOLATION: Invalid :path parsed as valid! \
                      forbidden_chars={}, crlf={}, empty={}, path={:?}",
-                    input.include_forbidden_chars, input.include_crlf,
-                    input.make_path_empty, path_value
+                    input.include_forbidden_chars,
+                    input.include_crlf,
+                    input.make_path_empty,
+                    path_value
                 );
-            },
+            }
             _ => {
                 // Other errors (frame size, incomplete, compression) are acceptable
                 // as long as it doesn't parse as valid
@@ -729,12 +758,12 @@ fuzz_target!(|input: FuzzInput| {
 
     // Test specific attack patterns
     let attack_patterns = [
-        "/\x00admin",           // Null byte injection
-        "/\r\nHost: evil.com",  // CRLF injection
-        "/\x01\x02\x03",       // Multiple control chars
-        "",                     // Empty path
-        "/\x7F",               // DEL character
-        "/\x09admin",          // Tab injection
+        "/\x00admin",                // Null byte injection
+        "/\r\nHost: evil.com",       // CRLF injection
+        "/\x01\x02\x03",             // Multiple control chars
+        "",                          // Empty path
+        "/\x7F",                     // DEL character
+        "/\x09admin",                // Tab injection
         "/path\nSet-Cookie: evil=1", // Newline injection
     ];
 
@@ -765,10 +794,10 @@ fuzz_target!(|input: FuzzInput| {
                     "CRITICAL SECURITY ISSUE: Attack pattern in :path parsed as valid: {:?}",
                     attack_pattern
                 );
-            },
+            }
             HeadersParseResult::ProtocolError(_) => {
                 // Expected - attack pattern correctly rejected
-            },
+            }
             _ => {
                 // Other errors are acceptable (frame corruption, etc.)
             }

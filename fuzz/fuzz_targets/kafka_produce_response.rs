@@ -15,8 +15,8 @@ use arbitrary::Arbitrary;
 use libfuzzer_sys::fuzz_target;
 
 use asupersync::messaging::kafka::{
-    fuzz_parse_delivery_result, fuzz_parse_kafka_error_response,
-    fuzz_parse_response_metadata, fuzz_validate_response_frame, KafkaError, RecordMetadata,
+    KafkaError, RecordMetadata, fuzz_parse_delivery_result, fuzz_parse_kafka_error_response,
+    fuzz_parse_response_metadata, fuzz_validate_response_frame,
 };
 
 /// Maximum response size for fuzzer performance
@@ -157,7 +157,7 @@ impl InvalidLength {
         match self {
             InvalidLength::Negative => -1000,
             InvalidLength::Huge => 100 * 1024 * 1024, // Exceeds 50MB limit
-            InvalidLength::Mismatch => 12345, // Won't match actual payload
+            InvalidLength::Mismatch => 12345,         // Won't match actual payload
         }
     }
 }
@@ -179,13 +179,9 @@ enum FrameConsistency {
 #[derive(Arbitrary, Debug, Clone)]
 enum ResponsePayload {
     /// Success response with RecordMetadata
-    Success {
-        metadata: ResponseMetadata,
-    },
+    Success { metadata: ResponseMetadata },
     /// Error response
-    Error {
-        error: ErrorResponse,
-    },
+    Error { error: ErrorResponse },
     /// Mixed response (success + partial error)
     Mixed {
         success_count: u8, // 1-10
@@ -194,9 +190,7 @@ enum ResponsePayload {
     /// Empty response
     Empty,
     /// Malformed response
-    Malformed {
-        malformed_type: MalformedType,
-    },
+    Malformed { malformed_type: MalformedType },
 }
 
 /// RecordMetadata fields for response
@@ -294,9 +288,9 @@ impl InvalidTopicName {
 /// Partition number patterns
 #[derive(Arbitrary, Debug, Clone, Copy)]
 enum PartitionNumber {
-    Valid(u16),        // 0-65535
-    Negative,          // -1
-    Large(u32),        // Large positive
+    Valid(u16), // 0-65535
+    Negative,   // -1
+    Large(u32), // Large positive
 }
 
 impl PartitionNumber {
@@ -312,10 +306,10 @@ impl PartitionNumber {
 /// Offset value patterns
 #[derive(Arbitrary, Debug, Clone, Copy)]
 enum OffsetValue {
-    Valid(u32),        // Normal offset
-    Zero,              // Start offset
-    MaxValue,          // Large offset
-    Negative,          // Invalid
+    Valid(u32), // Normal offset
+    Zero,       // Start offset
+    MaxValue,   // Large offset
+    Negative,   // Invalid
 }
 
 impl OffsetValue {
@@ -332,11 +326,11 @@ impl OffsetValue {
 /// Timestamp value patterns
 #[derive(Arbitrary, Debug, Clone, Copy)]
 enum TimestampValue {
-    None,              // No timestamp
-    Valid(u32),        // Unix timestamp
-    Future,            // Far future timestamp
-    Past,              // Far past timestamp
-    Invalid,           // Negative timestamp
+    None,       // No timestamp
+    Valid(u32), // Unix timestamp
+    Future,     // Far future timestamp
+    Past,       // Far past timestamp
+    Invalid,    // Negative timestamp
 }
 
 impl TimestampValue {
@@ -344,8 +338,8 @@ impl TimestampValue {
         match self {
             TimestampValue::None => None,
             TimestampValue::Valid(ts) => Some((ts as i64) * 1000), // Convert to millis
-            TimestampValue::Future => Some(4_000_000_000_000), // Year 2096
-            TimestampValue::Past => Some(946_684_800_000), // Year 2000
+            TimestampValue::Future => Some(4_000_000_000_000),     // Year 2096
+            TimestampValue::Past => Some(946_684_800_000),         // Year 2000
             TimestampValue::Invalid => Some(-1),
         }
     }
@@ -370,16 +364,16 @@ struct ErrorResponse {
 /// Error code patterns
 #[derive(Arbitrary, Debug, Clone, Copy)]
 enum ErrorCode {
-    NoError,           // 0
-    GenericError,      // 1
-    BrokerError(u8),   // 2-10
-    TopicError(u8),    // 11-20
-    SizeError(u8),     // 21-30
+    NoError,              // 0
+    GenericError,         // 1
+    BrokerError(u8),      // 2-10
+    TopicError(u8),       // 11-20
+    SizeError(u8),        // 21-30
     TransactionError(u8), // 31-40
-    QueueError(u8),    // 41-50
-    ConfigError(u8),   // 51-60
-    CancelError(u8),   // 61-70
-    Unknown(u8),       // 71+
+    QueueError(u8),       // 41-50
+    ConfigError(u8),      // 51-60
+    CancelError(u8),      // 61-70
+    Unknown(u8),          // 71+
 }
 
 impl ErrorCode {
@@ -403,10 +397,10 @@ impl ErrorCode {
 #[derive(Arbitrary, Debug, Clone)]
 enum ErrorMessage {
     Empty,
-    Short(u8),    // Simple message
-    Long,         // Long descriptive message
-    Binary,       // Non-UTF8 message
-    Truncated,    // Message shorter than declared length
+    Short(u8), // Simple message
+    Long,      // Long descriptive message
+    Binary,    // Non-UTF8 message
+    Truncated, // Message shorter than declared length
 }
 
 impl ErrorMessage {
@@ -594,8 +588,15 @@ fn generate_response_frame(scenario: &ProduceResponseScenario) -> Vec<u8> {
         FrameConsistency::Truncated => actual_payload_len as i32, // Length will be right but payload truncated
     };
 
-    let final_length = scenario.frame_config.response_length.as_i32(actual_payload_len);
-    let length_to_use = if final_length != 0 { final_length } else { declared_length };
+    let final_length = scenario
+        .frame_config
+        .response_length
+        .as_i32(actual_payload_len);
+    let length_to_use = if final_length != 0 {
+        final_length
+    } else {
+        declared_length
+    };
 
     frame.extend_from_slice(&length_to_use.to_be_bytes());
 
@@ -616,13 +617,12 @@ fn generate_response_frame(scenario: &ProduceResponseScenario) -> Vec<u8> {
 
 fn generate_payload(payload_type: &ResponsePayload) -> Vec<u8> {
     match payload_type {
-        ResponsePayload::Success { metadata } => {
-            generate_success_payload(metadata)
-        }
-        ResponsePayload::Error { error } => {
-            generate_error_payload(error)
-        }
-        ResponsePayload::Mixed { success_count, error_count } => {
+        ResponsePayload::Success { metadata } => generate_success_payload(metadata),
+        ResponsePayload::Error { error } => generate_error_payload(error),
+        ResponsePayload::Mixed {
+            success_count,
+            error_count,
+        } => {
             let mut payload = Vec::new();
             // Generate multiple success/error records
             for _ in 0..(*success_count).min(5) {
@@ -642,14 +642,12 @@ fn generate_payload(payload_type: &ResponsePayload) -> Vec<u8> {
         ResponsePayload::Empty => {
             vec![]
         }
-        ResponsePayload::Malformed { malformed_type } => {
-            match malformed_type {
-                MalformedType::IncompleteHeader => vec![0x01],
-                MalformedType::CorruptedPayload => vec![0x00, 0xFF, 0xFE, 0xFD, 0xFC],
-                MalformedType::WrongApiVersion => vec![0xFF, 0x00, 0x00, 0x00],
-                MalformedType::InvalidStructure => vec![0x42; 20],
-            }
-        }
+        ResponsePayload::Malformed { malformed_type } => match malformed_type {
+            MalformedType::IncompleteHeader => vec![0x01],
+            MalformedType::CorruptedPayload => vec![0x00, 0xFF, 0xFE, 0xFD, 0xFC],
+            MalformedType::WrongApiVersion => vec![0xFF, 0x00, 0x00, 0x00],
+            MalformedType::InvalidStructure => vec![0x42; 20],
+        },
     }
 }
 

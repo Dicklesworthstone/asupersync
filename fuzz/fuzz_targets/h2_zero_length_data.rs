@@ -1,17 +1,16 @@
 #![no_main]
 
-use libfuzzer_sys::fuzz_target;
 use arbitrary::{Arbitrary, Unstructured};
+use libfuzzer_sys::fuzz_target;
 
 use asupersync::bytes::{Bytes, BytesMut};
 use asupersync::codec::Encoder;
 use asupersync::http::h2::connection::FrameCodec;
-use asupersync::http::h2::frame::{
-    Frame, DataFrame, SettingsFrame, HeadersFrame,
-    WindowUpdateFrame, PingFrame, RstStreamFrame,
-    FRAME_HEADER_SIZE
-};
 use asupersync::http::h2::error::ErrorCode;
+use asupersync::http::h2::frame::{
+    DataFrame, FRAME_HEADER_SIZE, Frame, HeadersFrame, PingFrame, RstStreamFrame, SettingsFrame,
+    WindowUpdateFrame,
+};
 
 /// HTTP/2 zero-length DATA frame test sequence
 #[derive(Debug, Clone, Arbitrary)]
@@ -120,7 +119,10 @@ fn test_zero_length_data_processing(test_seq: &ZeroLengthDataSequence) {
         }
 
         if state.check_infinite_loop() {
-            panic!("Infinite loop detected during setup phase after {} frames", state.frames_processed);
+            panic!(
+                "Infinite loop detected during setup phase after {} frames",
+                state.frames_processed
+            );
         }
     }
 
@@ -131,25 +133,29 @@ fn test_zero_length_data_processing(test_seq: &ZeroLengthDataSequence) {
         match codec.encode(frame, &mut buffer) {
             Ok(_) => {
                 // Frame should be processed correctly
-                assert!(buffer.len() >= FRAME_HEADER_SIZE,
-                    "Zero-length DATA frame should produce at least frame header");
+                assert!(
+                    buffer.len() >= FRAME_HEADER_SIZE,
+                    "Zero-length DATA frame should produce at least frame header"
+                );
 
                 // For zero-length frames, check the payload length in the frame header
                 if buffer.len() >= FRAME_HEADER_SIZE {
-                    let payload_length = u32::from_be_bytes([
-                        0,
-                        buffer[0],
-                        buffer[1],
-                        buffer[2]
-                    ]) >> 8;
+                    let payload_length =
+                        u32::from_be_bytes([0, buffer[0], buffer[1], buffer[2]]) >> 8;
 
                     if !data_frame.padded {
-                        assert_eq!(payload_length, 0,
-                            "Non-padded zero-length DATA frame should have payload length 0, got {}", payload_length);
+                        assert_eq!(
+                            payload_length, 0,
+                            "Non-padded zero-length DATA frame should have payload length 0, got {}",
+                            payload_length
+                        );
                     } else {
                         // Padded frame has at least 1 byte (padding length field)
-                        assert!(payload_length >= 1,
-                            "Padded zero-length DATA frame should have payload length >= 1, got {}", payload_length);
+                        assert!(
+                            payload_length >= 1,
+                            "Padded zero-length DATA frame should have payload length >= 1, got {}",
+                            payload_length
+                        );
                     }
                 }
             }
@@ -160,13 +166,19 @@ fn test_zero_length_data_processing(test_seq: &ZeroLengthDataSequence) {
         }
 
         if state.check_infinite_loop() {
-            panic!("Infinite loop detected during zero-length DATA frame processing after {} frames", state.frames_processed);
+            panic!(
+                "Infinite loop detected during zero-length DATA frame processing after {} frames",
+                state.frames_processed
+            );
         }
     }
 
     // Verify we didn't get stuck in processing
-    assert!(state.frames_processed < state.max_iterations,
-        "Processing took too many iterations: {}", state.frames_processed);
+    assert!(
+        state.frames_processed < state.max_iterations,
+        "Processing took too many iterations: {}",
+        state.frames_processed
+    );
 }
 
 /// Test zero-length DATA frames interleaved with other frame types
@@ -176,7 +188,10 @@ fn test_interleaved_zero_length_data(test_seq: &ZeroLengthDataSequence) {
     let mut state = ProcessingState::new();
 
     // Interleave DATA frames with other frames
-    let max_frames = test_seq.data_frames.len().max(test_seq.interleaved_frames.len());
+    let max_frames = test_seq
+        .data_frames
+        .len()
+        .max(test_seq.interleaved_frames.len());
 
     for i in 0..max_frames {
         // Send an interleaved frame if available
@@ -193,22 +208,28 @@ fn test_interleaved_zero_length_data(test_seq: &ZeroLengthDataSequence) {
         }
 
         if state.check_infinite_loop() {
-            panic!("Infinite loop detected during interleaved processing after {} frames", state.frames_processed);
+            panic!(
+                "Infinite loop detected during interleaved processing after {} frames",
+                state.frames_processed
+            );
         }
     }
 
     // Verify final buffer state
-    assert!(buffer.len() % FRAME_HEADER_SIZE == 0 || buffer.len() == 0,
-        "Buffer should contain complete frames or be empty");
+    assert!(
+        buffer.len() % FRAME_HEADER_SIZE == 0 || buffer.len() == 0,
+        "Buffer should contain complete frames or be empty"
+    );
 }
 
 /// Create setup frames for stream establishment
 fn create_setup_frame(setup: &SetupFrame) -> Result<Frame, Box<dyn std::error::Error>> {
     match setup {
-        SetupFrame::Settings => {
-            Ok(Frame::Settings(SettingsFrame::new(Vec::new())))
-        }
-        SetupFrame::Headers { stream_id, end_headers } => {
+        SetupFrame::Settings => Ok(Frame::Settings(SettingsFrame::new(Vec::new()))),
+        SetupFrame::Headers {
+            stream_id,
+            end_headers,
+        } => {
             let normalized_stream_id = normalize_stream_id(*stream_id);
             let header_block = Bytes::from_static(b"\x00\x00\x00\x00"); // Minimal HPACK block
 
@@ -220,7 +241,10 @@ fn create_setup_frame(setup: &SetupFrame) -> Result<Frame, Box<dyn std::error::E
                 priority: None,
             }))
         }
-        SetupFrame::WindowUpdate { stream_id, increment } => {
+        SetupFrame::WindowUpdate {
+            stream_id,
+            increment,
+        } => {
             let normalized_increment = if *increment == 0 { 1 } else { *increment };
             Ok(Frame::WindowUpdate(WindowUpdateFrame::new(
                 normalize_stream_id(*stream_id),
@@ -256,7 +280,9 @@ fn create_zero_length_data_frame(data_config: &ZeroLengthDataFrame) -> Frame {
 }
 
 /// Create interleaved frames
-fn create_interleaved_frame(interleaved: &InterleavedFrame) -> Result<Frame, Box<dyn std::error::Error>> {
+fn create_interleaved_frame(
+    interleaved: &InterleavedFrame,
+) -> Result<Frame, Box<dyn std::error::Error>> {
     match interleaved {
         InterleavedFrame::Ping { ack } => {
             let ping_data = [0u8; 8];
@@ -266,7 +292,10 @@ fn create_interleaved_frame(interleaved: &InterleavedFrame) -> Result<Frame, Box
                 Ok(Frame::Ping(PingFrame::new(ping_data)))
             }
         }
-        InterleavedFrame::WindowUpdate { stream_id, increment } => {
+        InterleavedFrame::WindowUpdate {
+            stream_id,
+            increment,
+        } => {
             let normalized_increment = if *increment == 0 { 1 } else { *increment };
             Ok(Frame::WindowUpdate(WindowUpdateFrame::new(
                 normalize_stream_id(*stream_id),
@@ -280,7 +309,10 @@ fn create_interleaved_frame(interleaved: &InterleavedFrame) -> Result<Frame, Box
                 Ok(Frame::Settings(SettingsFrame::new(Vec::new())))
             }
         }
-        InterleavedFrame::RstStream { stream_id, error_code } => {
+        InterleavedFrame::RstStream {
+            stream_id,
+            error_code,
+        } => {
             let normalized_stream_id = normalize_stream_id(*stream_id);
             if normalized_stream_id == 0 {
                 return Err("RST_STREAM on stream 0".into());

@@ -40,17 +40,27 @@ impl FuzzFrame {
 
         // First byte: FIN + RSV + Opcode
         let mut first_byte = 0u8;
-        if self.fin { first_byte |= 0x80; }
-        if self.rsv1 { first_byte |= 0x40; }
-        if self.rsv2 { first_byte |= 0x20; }
-        if self.rsv3 { first_byte |= 0x10; }
+        if self.fin {
+            first_byte |= 0x80;
+        }
+        if self.rsv1 {
+            first_byte |= 0x40;
+        }
+        if self.rsv2 {
+            first_byte |= 0x20;
+        }
+        if self.rsv3 {
+            first_byte |= 0x10;
+        }
         first_byte |= self.opcode as u8;
         buf.push(first_byte);
 
         // Second byte: MASK + payload length (7 bits)
         let payload_len = self.payload.len();
         let mut second_byte = 0u8;
-        if self.masked { second_byte |= 0x80; }
+        if self.masked {
+            second_byte |= 0x80;
+        }
 
         if payload_len < 126 {
             second_byte |= payload_len as u8;
@@ -155,11 +165,14 @@ fn test_frame_sequence_violations(frames: &[FuzzFrame]) {
     test_with_role(frames, Role::Server);
 
     // Test as client (expects unmasked server frames)
-    let unmasked_frames: Vec<_> = frames.iter().map(|f| {
-        let mut frame = f.clone();
-        frame.masked = false; // Client expects unmasked server frames
-        frame
-    }).collect();
+    let unmasked_frames: Vec<_> = frames
+        .iter()
+        .map(|f| {
+            let mut frame = f.clone();
+            frame.masked = false; // Client expects unmasked server frames
+            frame
+        })
+        .collect();
     test_with_role(&unmasked_frames, Role::Client);
 }
 
@@ -176,7 +189,8 @@ fn test_with_role(frames: &[FuzzFrame], role: Role) {
 
     // Decode frames one by one
     let mut decoded_count = 0;
-    while !src.is_empty() && decoded_count < 20 { // Limit iterations
+    while !src.is_empty() && decoded_count < 20 {
+        // Limit iterations
         match codec.decode(&mut src) {
             Ok(Some(_frame)) => {
                 decoded_count += 1;

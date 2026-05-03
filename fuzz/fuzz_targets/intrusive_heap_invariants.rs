@@ -72,7 +72,10 @@ fuzz_target!(|input: HeapInvariantsFuzz| {
     // Execute operations and verify invariants after each
     for (op_index, operation) in operations.iter().enumerate() {
         match operation {
-            HeapOperation::Push { task_index, priority } => {
+            HeapOperation::Push {
+                task_index,
+                priority,
+            } => {
                 let task_index = (*task_index as usize) % num_tasks;
                 let task_id = task_id_from_index(task_index);
 
@@ -96,7 +99,8 @@ fuzz_target!(|input: HeapInvariantsFuzz| {
                         assert!(
                             record.sched_priority <= last_pop_priority,
                             "Priority ordering violation: popped priority {} > last priority {}",
-                            record.sched_priority, last_pop_priority
+                            record.sched_priority,
+                            last_pop_priority
                         );
                         last_pop_priority = record.sched_priority;
                     }
@@ -144,15 +148,18 @@ fuzz_target!(|input: HeapInvariantsFuzz| {
                     if let Some(record) = arena.get(task_id.arena_index()) {
                         assert_eq!(
                             record.heap_index, None,
-                            "Task {} still has heap_index after clear", i
+                            "Task {} still has heap_index after clear",
+                            i
                         );
                         assert_eq!(
                             record.sched_priority, 0,
-                            "Task {} still has priority after clear", i
+                            "Task {} still has priority after clear",
+                            i
                         );
                         assert_eq!(
                             record.sched_generation, 0,
-                            "Task {} still has generation after clear", i
+                            "Task {} still has generation after clear",
+                            i
                         );
                     }
                 }
@@ -179,15 +186,9 @@ fuzz_target!(|input: HeapInvariantsFuzz| {
             HeapOperation::Peek => {
                 let peeked = heap.peek();
                 if heap.is_empty() {
-                    assert!(
-                        peeked.is_none(),
-                        "Peek returned value on empty heap"
-                    );
+                    assert!(peeked.is_none(), "Peek returned value on empty heap");
                 } else {
-                    assert!(
-                        peeked.is_some(),
-                        "Peek returned None on non-empty heap"
-                    );
+                    assert!(peeked.is_some(), "Peek returned None on non-empty heap");
 
                     // Verify peeked task is actually in heap
                     if let Some(task) = peeked {
@@ -203,7 +204,8 @@ fuzz_target!(|input: HeapInvariantsFuzz| {
                                     assert!(
                                         peek_record.sched_priority >= other_record.sched_priority,
                                         "Peeked task priority {} < heap task priority {}",
-                                        peek_record.sched_priority, other_record.sched_priority
+                                        peek_record.sched_priority,
+                                        other_record.sched_priority
                                     );
                                 }
                             }
@@ -249,7 +251,9 @@ fn verify_heap_property(
         assert!(
             heap.contains(top_task, arena),
             "Heap property violation at op {} {}: peek returned task {:?} not in heap",
-            op_index, context, top_task
+            op_index,
+            context,
+            top_task
         );
 
         // Check that the top task has proper scheduling metadata
@@ -257,7 +261,8 @@ fn verify_heap_property(
             assert!(
                 record.heap_index.is_some(),
                 "Heap property violation at op {} {}: top task has no heap_index",
-                op_index, context
+                op_index,
+                context
             );
         }
     }
@@ -284,7 +289,10 @@ fn verify_index_consistency(
                 heap.contains(task_id, arena),
                 "Index consistency violation at op {} {}: \
                  task {:?} claims heap_index {} but contains() returns false",
-                op_index, context, task_id, heap_index
+                op_index,
+                context,
+                task_id,
+                heap_index
             );
 
             // Heap index should be within bounds
@@ -292,7 +300,11 @@ fn verify_index_consistency(
                 (heap_index as usize) < heap.len(),
                 "Index consistency violation at op {} {}: \
                  task {:?} heap_index {} >= heap.len() {}",
-                op_index, context, task_id, heap_index, heap.len()
+                op_index,
+                context,
+                task_id,
+                heap_index,
+                heap.len()
             );
         }
     }
@@ -312,16 +324,22 @@ fn verify_expected_membership(
             heap.contains(expected_task, arena),
             "Expected membership violation at op {} {}: \
              task {:?} expected in heap but not found",
-            op_index, context, expected_task
+            op_index,
+            context,
+            expected_task
         );
     }
 
     // Check heap size matches expected size
     assert_eq!(
-        heap.len(), expected_in_heap.len(),
+        heap.len(),
+        expected_in_heap.len(),
         "Membership size mismatch at op {} {}: \
          heap len {} != expected len {}",
-        op_index, context, heap.len(), expected_in_heap.len()
+        op_index,
+        context,
+        heap.len(),
+        expected_in_heap.len()
     );
 }
 
@@ -343,7 +361,10 @@ fn verify_no_double_tracking(
                 used_indices.insert(heap_index),
                 "Double tracking violation at op {} {}: \
                  multiple tasks claim heap_index {}, including task {:?}",
-                op_index, context, heap_index, task_id
+                op_index,
+                context,
+                heap_index,
+                task_id
             );
         }
     }
@@ -368,4 +389,3 @@ fn setup_arena(num_tasks: usize) -> Arena<TaskRecord> {
 
     arena
 }
-

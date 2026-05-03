@@ -1043,4 +1043,342 @@ mod tests {
         assert!(strip_prefix("/api//users", "/api").is_none());
         assert!(strip_prefix("/api//users", "/api/").is_none());
     }
+
+    /// AUDIT MODULE: Route precedence verification
+    ///
+    /// AUDIT FINDING: SOUND - Router correctly prioritizes literal segments over
+    /// parameter segments. Specificity ordering ensures "/users/me" wins over
+    /// "/users/:id" regardless of registration order, preventing parameter capture
+    /// of literal paths.
+    mod route_precedence_audit {
+        use super::*;
+        use crate::web::handler::FnHandler;
+
+        fn literal_handler() -> StatusCode {
+            StatusCode::OK
+        }
+
+        fn param_handler() -> StatusCode {
+            StatusCode::ACCEPTED
+        }
+
+        fn wildcard_handler() -> StatusCode {
+            StatusCode::CREATED
+        }
+
+        /// AUDIT: Verify literal route "/users/me" wins over parameter route "/users/:id"
+        ///
+        /// This is the core requirement - literal segments must take precedence
+        /// over parameter segments to prevent unintended parameter capture.
+        #[test]
+        fn audit_literal_beats_parameter_core_requirement() {
+            use crate::web::extract::Path;
+            use crate::web::handler::FnHandler1;
+
+            fn param_route_handler(Path(_id): Path<String>) -> StatusCode {
+                StatusCode::ACCEPTED
+            }
+
+            // Test case 1: Literal route registered first
+            let router1 = Router::new()
+                .route("/users/me", get(FnHandler::new(literal_handler)))
+                .route(
+                    "/users/:id",
+                    get(FnHandler1::<_, Path<String>>::new(param_route_handler)),
+                );
+
+            let resp1 = router1.handle(Request::new("GET", "/users/me"));
+            assert_eq!(
+                resp1.status,
+                StatusCode::OK,
+                "Literal route '/users/me' must win over '/users/:id' when registered first"
+            );
+
+            // Test case 2: Parameter route registered first
+            let router2 = Router::new()
+                .route(
+                    "/users/:id",
+                    get(FnHandler1::<_, Path<String>>::new(param_route_handler)),
+                )
+                .route("/users/me", get(FnHandler::new(literal_handler)));
+
+            let resp2 = router2.handle(Request::new("GET", "/users/me"));
+            assert_eq!(
+                resp2.status,
+                StatusCode::OK,
+                "Literal route '/users/me' must win over '/users/:id' regardless of registration order"
+            );
+
+            // AUDIT VERIFICATION: Registration order does not affect precedence
+            // Literal segments always beat parameter segments due to specificity
+        }
+
+        /// AUDIT: Verify multiple literal segments beat mixed patterns
+        ///
+        /// Routes with more literal segments should win over those with fewer,
+        /// even when the total segment count is the same.
+        #[test]
+        fn audit_multiple_literal_segments_precedence() {
+            use crate::web::extract::Path;
+            use crate::web::handler::FnHandler1;
+
+            fn param_handler(Path(_params): Path<HashMap<String, String>>) -> StatusCode {
+                StatusCode::ACCEPTED
+            }
+
+            let router = Router::new()
+                .route(
+                    "/api/:version/users",
+                    get(FnHandler1::<_, Path<HashMap<String, String>>>::new(
+                        param_handler,
+                    )),
+                )
+                .route("/api/v1/users", get(FnHandler::new(literal_handler)))
+                .route(
+                    "/api/:version/:resource",
+                    get(FnHandler1::<_, Path<HashMap<String, String>>>::new(
+                        param_handler,
+                    )),
+                );
+
+            // Should match the most specific route (most literal segments)
+            let resp = router.handle(Request::new("GET", "/api/v1/users"));
+            assert_eq!(
+                resp.status,
+                StatusCode::OK,
+                "Route with more literal segments '/api/v1/users' must win over '/api/:version/users'"
+            );
+        }
+
+        /// AUDIT: Verify specificity calculation correctness
+        ///
+        /// Test the underlying specificity calculation to ensure proper ordering.
+        #[test]
+        fn audit_route_specificity_calculation() {
+            let literal_route = RoutePattern::parse("/users/me/profile");
+            let mixed_route = RoutePattern::parse("/users/:id/profile");
+            let param_route = RoutePattern::parse("/users/:id/:section");
+            let wildcard_route = RoutePattern::parse("/users/*");
+
+            let literal_spec = literal_route.specificity();
+            let mixed_spec = mixed_route.specificity();
+            let param_spec = param_route.specificity();
+            let wildcard_spec = wildcard_route.specificity();
+
+            // Verify literal segments count
+            assert_eq!(
+                literal_spec.literal_segments, 3,
+                "Literal route should have 3 literal segments"
+            );
+            assert_eq!(
+                mixed_spec.literal_segments, 2,
+                "Mixed route should have 2 literal segments"
+            );
+            assert_eq!(
+                param_spec.literal_segments, 1,
+                "Param route should have 1 literal segment"
+            );
+            assert_eq!(
+                wildcard_spec.literal_segments, 1,
+                "Wildcard route should have 1 literal segment"
+            );
+
+            // Verify parameter segments count
+            assert_eq!(
+                literal_spec.param_segments, 0,
+                "Literal route should have 0 parameter segments"
+            );
+            assert_eq!(
+                mixed_spec.param_segments, 1,
+                "Mixed route should have 1 parameter segment"
+            );
+            assert_eq!(
+                param_spec.param_segments, 2,
+                "Param route should have 2 parameter segments"
+            );
+            assert_eq!(
+                wildcard_spec.param_segments, 0,
+                "Wildcard route should have 0 parameter segments (wildcard is separate)"
+            );
+
+            // Verify precedence ordering
+            assert!(
+                literal_spec > mixed_spec,
+                "Literal route must be more specific than mixed route"
+            );
+            assert!(
+                mixed_spec > param_spec,
+                "Mixed route must be more specific than parameter route"
+            );
+            assert!(
+                param_spec > wildcard_spec,
+                "Parameter route must be more specific than wildcard route"
+            );
+        }
+
+        /// AUDIT: Verify complex precedence scenarios
+        ///
+        /// Test edge cases with multiple competing routes to ensure consistent behavior.
+        #[test]
+        fn audit_complex_precedence_scenarios() {
+            use crate::web::extract::Path;
+            use crate::web::handler::FnHandler1;
+
+            fn route_a() -> &'static str {
+                "route_a"
+            }
+            fn route_b() -> &'static str {
+                "route_b"
+            }
+            fn route_c() -> &'static str {
+                "route_c"
+            }
+
+            fn param_handler(Path(_): Path<HashMap<String, String>>) -> &'static str {
+                "param_handler"
+            }
+
+            let router = Router::new()
+                // Exact match should win
+                .route("/api/v1/users/me", get(FnHandler::new(route_a)))
+                // Less specific - one parameter
+                .route(
+                    "/api/v1/users/:id",
+                    get(FnHandler1::<_, Path<HashMap<String, String>>>::new(
+                        param_handler,
+                    )),
+                )
+                // Even less specific - two parameters
+                .route(
+                    "/api/:version/users/:id",
+                    get(FnHandler1::<_, Path<HashMap<String, String>>>::new(
+                        param_handler,
+                    )),
+                )
+                // Wildcard should be least specific
+                .route(
+                    "/api/*",
+                    get(FnHandler1::<_, Path<HashMap<String, String>>>::new(
+                        param_handler,
+                    )),
+                );
+
+            let resp = router.handle(Request::new("GET", "/api/v1/users/me"));
+            assert_eq!(resp.status, StatusCode::OK);
+            let body = String::from_utf8(resp.body).unwrap();
+            assert_eq!(body, "route_a", "Most specific literal route should win");
+
+            // Test that parameter route still works for other values
+            let resp2 = router.handle(Request::new("GET", "/api/v1/users/123"));
+            assert_eq!(resp2.status, StatusCode::OK);
+            let body2 = String::from_utf8(resp2.body).unwrap();
+            assert_eq!(
+                body2, "param_handler",
+                "Parameter route should handle non-literal values"
+            );
+        }
+
+        /// AUDIT: Verify edge case with similar literal paths
+        ///
+        /// Ensure the router correctly distinguishes between similar literal paths.
+        #[test]
+        fn audit_similar_literal_paths_distinction() {
+            let router = Router::new()
+                .route("/users/me", get(FnHandler::new(|| "me")))
+                .route("/users/menu", get(FnHandler::new(|| "menu")))
+                .route("/users/metrics", get(FnHandler::new(|| "metrics")));
+
+            // Each literal path should match only itself
+            let resp_me = router.handle(Request::new("GET", "/users/me"));
+            assert_eq!(String::from_utf8(resp_me.body).unwrap(), "me");
+
+            let resp_menu = router.handle(Request::new("GET", "/users/menu"));
+            assert_eq!(String::from_utf8(resp_menu.body).unwrap(), "menu");
+
+            let resp_metrics = router.handle(Request::new("GET", "/users/metrics"));
+            assert_eq!(String::from_utf8(resp_metrics.body).unwrap(), "metrics");
+        }
+
+        /// AUDIT: Verify precedence with mixed HTTP methods
+        ///
+        /// Route precedence should work consistently across different HTTP methods.
+        #[test]
+        fn audit_precedence_across_http_methods() {
+            use crate::web::extract::Path;
+            use crate::web::handler::FnHandler1;
+
+            fn literal_get() -> &'static str {
+                "literal_get"
+            }
+            fn literal_post() -> &'static str {
+                "literal_post"
+            }
+            fn param_get(Path(_): Path<String>) -> &'static str {
+                "param_get"
+            }
+            fn param_post(Path(_): Path<String>) -> &'static str {
+                "param_post"
+            }
+
+            let router = Router::new()
+                .route(
+                    "/users/:id",
+                    get(FnHandler1::<_, Path<String>>::new(param_get)).post(FnHandler1::<
+                        _,
+                        Path<String>,
+                    >::new(
+                        param_post
+                    )),
+                )
+                .route(
+                    "/users/me",
+                    get(FnHandler::new(literal_get)).post(FnHandler::new(literal_post)),
+                );
+
+            // GET method should prefer literal route
+            let resp_get = router.handle(Request::new("GET", "/users/me"));
+            assert_eq!(String::from_utf8(resp_get.body).unwrap(), "literal_get");
+
+            // POST method should prefer literal route
+            let resp_post = router.handle(Request::new("POST", "/users/me"));
+            assert_eq!(String::from_utf8(resp_post.body).unwrap(), "literal_post");
+        }
+
+        /// AUDIT: Verify that parameter routes still capture when appropriate
+        ///
+        /// Ensure parameter routes work correctly when no literal match exists.
+        #[test]
+        fn audit_parameter_routes_capture_when_appropriate() {
+            use crate::web::extract::Path;
+            use crate::web::handler::FnHandler1;
+
+            fn param_handler(Path(id): Path<String>) -> String {
+                format!("captured:{}", id)
+            }
+
+            let router = Router::new()
+                .route(
+                    "/users/me",
+                    get(FnHandler::new(|| "literal:me".to_string())),
+                )
+                .route(
+                    "/users/:id",
+                    get(FnHandler1::<_, Path<String>>::new(param_handler)),
+                );
+
+            // Literal should win for exact match
+            let resp_me = router.handle(Request::new("GET", "/users/me"));
+            assert_eq!(String::from_utf8(resp_me.body).unwrap(), "literal:me");
+
+            // Parameter should capture other values
+            let resp_123 = router.handle(Request::new("GET", "/users/123"));
+            assert_eq!(String::from_utf8(resp_123.body).unwrap(), "captured:123");
+
+            let resp_admin = router.handle(Request::new("GET", "/users/admin"));
+            assert_eq!(
+                String::from_utf8(resp_admin.body).unwrap(),
+                "captured:admin"
+            );
+        }
+    }
 }

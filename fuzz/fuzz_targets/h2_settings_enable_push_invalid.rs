@@ -264,11 +264,7 @@ impl Arbitrary<'_> for SettingEntry {
                 // SETTINGS_ENABLE_PUSH - focus on invalid values like 2, 3, etc.
                 if u.ratio(1, 3)? {
                     // Valid values
-                    if u.arbitrary()? {
-                        1
-                    } else {
-                        0
-                    }
+                    if u.arbitrary()? { 1 } else { 0 }
                 } else {
                     // Invalid values (the vulnerability case)
                     u.int_in_range(2..=u32::MAX)?
@@ -343,9 +339,11 @@ fn test_enable_push_validation() {
         let loose_result = validator_loose.validate_settings_frame(&scenario);
         match loose_result {
             ValidationResult::Success { settings, .. } => {
-                assert!(settings
-                    .iter()
-                    .any(|s| matches!(s, ParsedSetting::EnablePush(true))));
+                assert!(
+                    settings
+                        .iter()
+                        .any(|s| matches!(s, ParsedSetting::EnablePush(true)))
+                );
             }
             _ => panic!(
                 "Loose validator unexpectedly rejected SETTINGS_ENABLE_PUSH={}",
@@ -369,9 +367,11 @@ fn test_server_enable_push_forbidden() {
     let result = validator.validate_settings_frame(&scenario);
     match result {
         ValidationResult::ProtocolError { violations, .. } => {
-            assert!(violations
-                .iter()
-                .any(|v| matches!(v, SettingsViolation::ServerSentEnablePush)));
+            assert!(
+                violations
+                    .iter()
+                    .any(|v| matches!(v, SettingsViolation::ServerSentEnablePush))
+            );
         }
         _ => panic!("Should reject server sending SETTINGS_ENABLE_PUSH"),
     }
@@ -413,17 +413,23 @@ fn test_comprehensive_edge_cases() {
     match result {
         ValidationResult::FlowControlError { violations, .. } => {
             // Should have flow control error for window size, protocol errors for others
-            assert!(violations
-                .iter()
-                .any(|v| matches!(v, SettingsViolation::InvalidInitialWindowSize { .. })));
+            assert!(
+                violations
+                    .iter()
+                    .any(|v| matches!(v, SettingsViolation::InvalidInitialWindowSize { .. }))
+            );
         }
         ValidationResult::ProtocolError { violations, .. } => {
-            assert!(violations
-                .iter()
-                .any(|v| matches!(v, SettingsViolation::InvalidEnablePushValue { .. })));
-            assert!(violations
-                .iter()
-                .any(|v| matches!(v, SettingsViolation::InvalidMaxFrameSize { .. })));
+            assert!(
+                violations
+                    .iter()
+                    .any(|v| matches!(v, SettingsViolation::InvalidEnablePushValue { .. }))
+            );
+            assert!(
+                violations
+                    .iter()
+                    .any(|v| matches!(v, SettingsViolation::InvalidMaxFrameSize { .. }))
+            );
         }
         _ => {
             // May succeed in loose mode
@@ -502,9 +508,11 @@ fuzz_target!(|scenario: SettingsScenario| {
                 // Both validators should reject this
                 match &strict_result {
                     ValidationResult::ProtocolError { violations, .. } => {
-                        assert!(violations
-                            .iter()
-                            .any(|v| matches!(v, SettingsViolation::ServerSentEnablePush)));
+                        assert!(
+                            violations
+                                .iter()
+                                .any(|v| matches!(v, SettingsViolation::ServerSentEnablePush))
+                        );
                     }
                     _ => panic!("Should reject server sending SETTINGS_ENABLE_PUSH"),
                 }

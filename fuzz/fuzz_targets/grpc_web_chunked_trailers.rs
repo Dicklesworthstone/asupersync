@@ -25,9 +25,7 @@ use libfuzzer_sys::fuzz_target;
 use asupersync::bytes::{Bytes, BytesMut};
 use asupersync::grpc::status::{Code, Status};
 use asupersync::grpc::streaming::Metadata;
-use asupersync::grpc::web::{
-    Base64StreamDecoder, WebFrameCodec, base64_encode, encode_trailers,
-};
+use asupersync::grpc::web::{Base64StreamDecoder, WebFrameCodec, base64_encode, encode_trailers};
 
 const MAX_CHUNKS: usize = 32;
 const MAX_METADATA_ITEMS: usize = 8;
@@ -113,7 +111,8 @@ fn fuzz_chunked_trailers(input: ChunkedTrailerInput) {
 
 fn build_trailer_content(spec: &TrailerSpec) -> (Status, Metadata) {
     // Sanitize status message to prevent invalid UTF-8
-    let message = spec.status_message
+    let message = spec
+        .status_message
         .chars()
         .filter(|c| c.is_ascii())
         .take(MAX_MESSAGE_LEN)
@@ -278,7 +277,6 @@ fn exercise_chunked_decoding(chunks: Vec<String>, edge_cases: &EdgeCases) {
 
     // Feed chunks to decoder
     for (i, chunk) in chunks.iter().enumerate().take(MAX_CHUNKS) {
-
         // Insert empty chunks if edge case is enabled
         if edge_cases.empty_chunks && i > 0 {
             let _ = decoder.push(b"");

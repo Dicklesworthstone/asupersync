@@ -1,7 +1,7 @@
 #![no_main]
 
-use libfuzzer_sys::fuzz_target;
 use arbitrary::{Arbitrary, Unstructured};
+use libfuzzer_sys::fuzz_target;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::panic;
 
@@ -76,7 +76,7 @@ impl StreamPriority {
     fn new(stream_id: u32) -> Self {
         Self {
             stream_id,
-            parent: 0, // Default to root
+            parent: 0,  // Default to root
             weight: 16, // Default weight
             exclusive: false,
             children: Vec::new(),
@@ -117,7 +117,8 @@ impl PriorityTree {
         }
 
         if !self.streams.contains_key(&stream_id) {
-            self.streams.insert(stream_id, StreamPriority::new(stream_id));
+            self.streams
+                .insert(stream_id, StreamPriority::new(stream_id));
         }
     }
 
@@ -146,14 +147,22 @@ impl PriorityTree {
 
         // Check for circular dependency BEFORE making the change
         if self.would_create_cycle(stream_id, dependency) {
-            let error = format!("PRIORITY frame would create circular dependency: {} -> {}", stream_id, dependency);
+            let error = format!(
+                "PRIORITY frame would create circular dependency: {} -> {}",
+                stream_id, dependency
+            );
             self.protocol_errors.push(error);
             self.is_active = false;
             return Err(ErrorCode::ProtocolError);
         }
 
         // Apply the priority change
-        self.update_stream_dependency(stream_id, dependency, frame.actual_weight(), frame.exclusive);
+        self.update_stream_dependency(
+            stream_id,
+            dependency,
+            frame.actual_weight(),
+            frame.exclusive,
+        );
 
         Ok(())
     }
@@ -199,7 +208,13 @@ impl PriorityTree {
     }
 
     /// Update stream dependency, handling exclusive flag and tree restructuring
-    fn update_stream_dependency(&mut self, stream_id: u32, new_parent: u32, weight: u16, exclusive: bool) {
+    fn update_stream_dependency(
+        &mut self,
+        stream_id: u32,
+        new_parent: u32,
+        weight: u16,
+        exclusive: bool,
+    ) {
         // Remove stream from its current parent's children
         let current_parent = self.streams.get(&stream_id).map(|s| s.parent).unwrap_or(0);
         if current_parent != 0 {
@@ -255,7 +270,10 @@ impl PriorityTree {
 
     /// Get stream children
     fn get_stream_children(&self, stream_id: u32) -> Vec<u32> {
-        self.streams.get(&stream_id).map(|s| s.children.clone()).unwrap_or_default()
+        self.streams
+            .get(&stream_id)
+            .map(|s| s.children.clone())
+            .unwrap_or_default()
     }
 
     /// Check if tree is acyclic (should always be true after valid operations)
@@ -323,7 +341,8 @@ fn test_circular_dependency_detection(scenario: CircularDependencyScenario) -> R
 
     // Phase 1: Create initial streams
     for &stream_id in &scenario.initial_streams {
-        if stream_id != 0 && stream_id < 1000 { // Limit range for practical testing
+        if stream_id != 0 && stream_id < 1000 {
+            // Limit range for practical testing
             tree.add_stream(stream_id);
         }
     }
@@ -361,7 +380,10 @@ fn test_circular_dependency_detection(scenario: CircularDependencyScenario) -> R
                         // Expected - self-cycles should be rejected
                     }
                     Ok(()) => {
-                        return Err(format!("Self-cycle for stream {} was incorrectly accepted", stream_id));
+                        return Err(format!(
+                            "Self-cycle for stream {} was incorrectly accepted",
+                            stream_id
+                        ));
                     }
                     Err(other) => {
                         return Err(format!("Unexpected error for self-cycle: {:?}", other));
@@ -389,8 +411,10 @@ fn test_circular_dependency_detection(scenario: CircularDependencyScenario) -> R
     let initial_error_count = tree.get_protocol_errors().len();
 
     for frame in &scenario.potentially_circular_frames {
-        if frame.stream_id == 0 || frame.stream_id >= 1000 ||
-           (frame.stream_dependency != 0 && frame.stream_dependency >= 1000) {
+        if frame.stream_id == 0
+            || frame.stream_id >= 1000
+            || (frame.stream_dependency != 0 && frame.stream_dependency >= 1000)
+        {
             continue; // Skip invalid stream IDs
         }
 
@@ -402,15 +426,19 @@ fn test_circular_dependency_detection(scenario: CircularDependencyScenario) -> R
 
                 // If we detected this would be circular, this is expected
                 if !would_be_circular && frame.stream_id != frame.stream_dependency {
-                    return Err(format!("PRIORITY frame rejected but shouldn't create cycle: {} -> {}",
-                        frame.stream_id, frame.stream_dependency));
+                    return Err(format!(
+                        "PRIORITY frame rejected but shouldn't create cycle: {} -> {}",
+                        frame.stream_id, frame.stream_dependency
+                    ));
                 }
             }
             Ok(()) => {
                 // Success is only acceptable if it wouldn't create a cycle
                 if would_be_circular || frame.stream_id == frame.stream_dependency {
-                    return Err(format!("Circular dependency was incorrectly accepted: {} -> {}",
-                        frame.stream_id, frame.stream_dependency));
+                    return Err(format!(
+                        "Circular dependency was incorrectly accepted: {} -> {}",
+                        frame.stream_id, frame.stream_dependency
+                    ));
                 }
             }
             Err(other) => {
@@ -450,7 +478,10 @@ fn test_basic_self_cycle() -> Result<(), String> {
             // Expected
         }
         other => {
-            return Err(format!("Expected PROTOCOL_ERROR for self-cycle, got {:?}", other));
+            return Err(format!(
+                "Expected PROTOCOL_ERROR for self-cycle, got {:?}",
+                other
+            ));
         }
     }
 
@@ -495,7 +526,10 @@ fn test_indirect_cycle() -> Result<(), String> {
             // Expected - should detect that 5 is a descendant of 1
         }
         other => {
-            return Err(format!("Expected PROTOCOL_ERROR for indirect cycle, got {:?}", other));
+            return Err(format!(
+                "Expected PROTOCOL_ERROR for indirect cycle, got {:?}",
+                other
+            ));
         }
     }
 
@@ -530,7 +564,10 @@ fn test_exclusive_circular() -> Result<(), String> {
             // Expected - 3 is already a child of 1
         }
         other => {
-            return Err(format!("Expected PROTOCOL_ERROR for exclusive cycle, got {:?}", other));
+            return Err(format!(
+                "Expected PROTOCOL_ERROR for exclusive cycle, got {:?}",
+                other
+            ));
         }
     }
 
@@ -561,10 +598,10 @@ fn test_complex_dependency_chain() -> Result<(), String> {
 
     // Test various cycle attempts
     let cycle_attempts = vec![
-        (1, 7), // Direct ancestor -> descendant
+        (1, 7),  // Direct ancestor -> descendant
         (3, 11), // Ancestor -> descendant
-        (5, 1), // Deep cycle
-        (7, 3), // Skip-level cycle
+        (5, 1),  // Deep cycle
+        (7, 3),  // Skip-level cycle
     ];
 
     for (stream, dependency) in cycle_attempts {
@@ -590,8 +627,10 @@ fn test_complex_dependency_chain() -> Result<(), String> {
                     .map_err(|e| format!("Failed to rebuild tree 11->5: {:?}", e))?;
             }
             other => {
-                return Err(format!("Expected PROTOCOL_ERROR for cycle {} -> {}, got {:?}",
-                    stream, dependency, other));
+                return Err(format!(
+                    "Expected PROTOCOL_ERROR for cycle {} -> {}, got {:?}",
+                    stream, dependency, other
+                ));
             }
         }
     }
@@ -614,7 +653,10 @@ fn test_dependency_on_nonexistent() -> Result<(), String> {
             assert_eq!(tree.get_stream_parent(1), Some(999));
         }
         other => {
-            return Err(format!("Dependency on non-existent stream should be allowed, got {:?}", other));
+            return Err(format!(
+                "Dependency on non-existent stream should be allowed, got {:?}",
+                other
+            ));
         }
     }
 

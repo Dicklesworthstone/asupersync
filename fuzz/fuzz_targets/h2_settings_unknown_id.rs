@@ -1,7 +1,7 @@
 #![no_main]
 
-use libfuzzer_sys::fuzz_target;
 use arbitrary::Arbitrary;
+use libfuzzer_sys::fuzz_target;
 
 /// Tests RFC 7540 §6.5 forward compatibility for unknown SETTINGS parameters.
 ///
@@ -11,10 +11,10 @@ use arbitrary::Arbitrary;
 
 #[derive(Arbitrary, Debug, Clone)]
 struct UnknownSettingsInput {
-    unknown_id: u16,           // Unknown setting ID to test
-    unknown_value: u32,        // Value for unknown setting
-    known_settings: Vec<(u8, u32)>,  // Known settings to mix in
-    test_variant: u8,          // Controls test scenario
+    unknown_id: u16,                // Unknown setting ID to test
+    unknown_value: u32,             // Value for unknown setting
+    known_settings: Vec<(u8, u32)>, // Known settings to mix in
+    test_variant: u8,               // Controls test scenario
 }
 
 /// Known SETTINGS parameter identifiers per RFC 7540 §6.5.2
@@ -64,7 +64,11 @@ impl SettingsParameter {
 
     fn new_unknown(id: u16, value: u32) -> Self {
         // Ensure ID is truly unknown
-        debug_assert!(!KnownSettingsId::is_known(id), "ID {} should be unknown", id);
+        debug_assert!(
+            !KnownSettingsId::is_known(id),
+            "ID {} should be unknown",
+            id
+        );
         Self { id, value }
     }
 }
@@ -107,10 +111,7 @@ impl SettingsFrame {
     }
 
     fn find_parameter(&self, id: u16) -> Option<u32> {
-        self.parameters
-            .iter()
-            .find(|p| p.id == id)
-            .map(|p| p.value)
+        self.parameters.iter().find(|p| p.id == id).map(|p| p.value)
     }
 
     fn count_known_parameters(&self) -> usize {
@@ -155,7 +156,7 @@ struct MockUnknownSettingsConnection {
     protocol_errors: Vec<String>,
 
     // Logging for unknown settings
-    unknown_settings_log: Vec<(u16, u32)>,  // (id, value) pairs that were ignored
+    unknown_settings_log: Vec<(u16, u32)>, // (id, value) pairs that were ignored
 }
 
 impl MockUnknownSettingsConnection {
@@ -183,7 +184,8 @@ impl MockUnknownSettingsConnection {
         if frame.is_ack() {
             // ACK frames must have empty payload
             if !frame.parameters.is_empty() {
-                self.protocol_errors.push("SETTINGS ACK with non-empty payload".to_string());
+                self.protocol_errors
+                    .push("SETTINGS ACK with non-empty payload".to_string());
                 return false;
             }
             self.accepted_frames += 1;
@@ -220,7 +222,8 @@ impl MockUnknownSettingsConnection {
             }
             Some(KnownSettingsId::EnablePush) => {
                 if value != 0 && value != 1 {
-                    self.protocol_errors.push(format!("Invalid ENABLE_PUSH value: {}", value));
+                    self.protocol_errors
+                        .push(format!("Invalid ENABLE_PUSH value: {}", value));
                     false
                 } else {
                     self.enable_push = value != 0;
@@ -232,8 +235,10 @@ impl MockUnknownSettingsConnection {
                 true
             }
             Some(KnownSettingsId::InitialWindowSize) => {
-                if value > 2147483647 {  // 2^31-1
-                    self.protocol_errors.push(format!("Invalid INITIAL_WINDOW_SIZE: {}", value));
+                if value > 2147483647 {
+                    // 2^31-1
+                    self.protocol_errors
+                        .push(format!("Invalid INITIAL_WINDOW_SIZE: {}", value));
                     false
                 } else {
                     self.initial_window_size = value;
@@ -241,8 +246,10 @@ impl MockUnknownSettingsConnection {
                 }
             }
             Some(KnownSettingsId::MaxFrameSize) => {
-                if value < 16384 || value > 16777215 {  // 2^14 to 2^24-1
-                    self.protocol_errors.push(format!("Invalid MAX_FRAME_SIZE: {}", value));
+                if value < 16384 || value > 16777215 {
+                    // 2^14 to 2^24-1
+                    self.protocol_errors
+                        .push(format!("Invalid MAX_FRAME_SIZE: {}", value));
                     false
                 } else {
                     self.max_frame_size = value;
@@ -286,16 +293,22 @@ impl MockUnknownSettingsConnection {
     }
 
     // Getters for current settings (to verify known settings were processed)
-    fn current_max_frame_size(&self) -> u32 { self.max_frame_size }
-    fn current_enable_push(&self) -> bool { self.enable_push }
-    fn current_initial_window_size(&self) -> u32 { self.initial_window_size }
+    fn current_max_frame_size(&self) -> u32 {
+        self.max_frame_size
+    }
+    fn current_enable_push(&self) -> bool {
+        self.enable_push
+    }
+    fn current_initial_window_size(&self) -> u32 {
+        self.initial_window_size
+    }
 }
 
 fuzz_target!(|input: UnknownSettingsInput| {
     // Ensure we test truly unknown setting IDs
     let unknown_id = if KnownSettingsId::is_known(input.unknown_id) {
         // Force to known-unknown range
-        0x8000 | (input.unknown_id & 0x7FFF)  // High bit set = definitely unknown
+        0x8000 | (input.unknown_id & 0x7FFF) // High bit set = definitely unknown
     } else {
         input.unknown_id
     };
@@ -309,34 +322,63 @@ fuzz_target!(|input: UnknownSettingsInput| {
             let frame = SettingsFrame::new_unknown_only(unknown_id, input.unknown_value);
             let accepted = conn.process_settings_frame(&frame);
 
-            assert!(accepted, "Frame with only unknown setting should be accepted");
-            assert!(!conn.has_protocol_errors(), "Unknown setting should not cause PROTOCOL_ERROR");
-            assert_eq!(conn.unknown_ignored_count(), 1, "Should have ignored exactly 1 unknown setting");
-            assert!(conn.was_unknown_logged(unknown_id, input.unknown_value), "Unknown setting should be logged");
+            assert!(
+                accepted,
+                "Frame with only unknown setting should be accepted"
+            );
+            assert!(
+                !conn.has_protocol_errors(),
+                "Unknown setting should not cause PROTOCOL_ERROR"
+            );
+            assert_eq!(
+                conn.unknown_ignored_count(),
+                1,
+                "Should have ignored exactly 1 unknown setting"
+            );
+            assert!(
+                conn.was_unknown_logged(unknown_id, input.unknown_value),
+                "Unknown setting should be logged"
+            );
 
             // Connection state should remain unchanged
-            assert_eq!(conn.current_max_frame_size(), initial_max_frame_size,
-                "Unknown setting should not affect connection state");
+            assert_eq!(
+                conn.current_max_frame_size(),
+                initial_max_frame_size,
+                "Unknown setting should not affect connection state"
+            );
         }
         1 => {
             // Test case 2: Multiple unknown settings
             let unknown_ids = [
                 unknown_id,
-                0xFF00 | (input.unknown_value as u16 & 0xFF),  // Another unknown ID
-                0x7777,  // Fixed unknown ID
+                0xFF00 | (input.unknown_value as u16 & 0xFF), // Another unknown ID
+                0x7777,                                       // Fixed unknown ID
             ];
 
             let mut params = Vec::new();
             for (i, &id) in unknown_ids.iter().enumerate() {
-                params.push(SettingsParameter::new_unknown(id, input.unknown_value + i as u32));
+                params.push(SettingsParameter::new_unknown(
+                    id,
+                    input.unknown_value + i as u32,
+                ));
             }
 
             let frame = SettingsFrame::new(false, params);
             let accepted = conn.process_settings_frame(&frame);
 
-            assert!(accepted, "Frame with multiple unknown settings should be accepted");
-            assert!(!conn.has_protocol_errors(), "Multiple unknown settings should not cause errors");
-            assert_eq!(conn.unknown_ignored_count(), 3, "Should have ignored 3 unknown settings");
+            assert!(
+                accepted,
+                "Frame with multiple unknown settings should be accepted"
+            );
+            assert!(
+                !conn.has_protocol_errors(),
+                "Multiple unknown settings should not cause errors"
+            );
+            assert_eq!(
+                conn.unknown_ignored_count(),
+                3,
+                "Should have ignored 3 unknown settings"
+            );
         }
         2 => {
             // Test case 3: Mixed known and unknown settings
@@ -344,21 +386,32 @@ fuzz_target!(|input: UnknownSettingsInput| {
                 (KnownSettingsId::MaxFrameSize, 32768),
                 (KnownSettingsId::EnablePush, 0),
             ];
-            let unknown_settings = vec![
-                (unknown_id, input.unknown_value),
-                (0xDEAD, 0xBEEF),
-            ];
+            let unknown_settings = vec![(unknown_id, input.unknown_value), (0xDEAD, 0xBEEF)];
 
             let frame = SettingsFrame::new_mixed(known_settings, unknown_settings);
             let accepted = conn.process_settings_frame(&frame);
 
             assert!(accepted, "Mixed known/unknown frame should be accepted");
-            assert!(!conn.has_protocol_errors(), "Mixed frame should not cause errors");
-            assert_eq!(conn.unknown_ignored_count(), 2, "Should ignore unknown settings");
+            assert!(
+                !conn.has_protocol_errors(),
+                "Mixed frame should not cause errors"
+            );
+            assert_eq!(
+                conn.unknown_ignored_count(),
+                2,
+                "Should ignore unknown settings"
+            );
 
             // Known settings should be applied
-            assert_eq!(conn.current_max_frame_size(), 32768, "Known MAX_FRAME_SIZE should be applied");
-            assert!(!conn.current_enable_push(), "Known ENABLE_PUSH should be applied");
+            assert_eq!(
+                conn.current_max_frame_size(),
+                32768,
+                "Known MAX_FRAME_SIZE should be applied"
+            );
+            assert!(
+                !conn.current_enable_push(),
+                "Known ENABLE_PUSH should be applied"
+            );
         }
         3 => {
             // Test case 4: Unknown setting with reserved/special values
@@ -370,37 +423,60 @@ fuzz_target!(|input: UnknownSettingsInput| {
                 let frame = SettingsFrame::new_unknown_only(test_id, value);
 
                 let accepted = test_conn.process_settings_frame(&frame);
-                assert!(accepted, "Unknown setting with special value {} should be accepted", value);
-                assert!(!test_conn.has_protocol_errors(), "Special value {} should not cause errors", value);
-                assert!(test_conn.was_unknown_logged(test_id, value), "Special value should be logged");
+                assert!(
+                    accepted,
+                    "Unknown setting with special value {} should be accepted",
+                    value
+                );
+                assert!(
+                    !test_conn.has_protocol_errors(),
+                    "Special value {} should not cause errors",
+                    value
+                );
+                assert!(
+                    test_conn.was_unknown_logged(test_id, value),
+                    "Special value should be logged"
+                );
             }
         }
         4 => {
             // Test case 5: Unknown setting followed by known setting that might fail
             let frame = SettingsFrame::new_mixed(
-                vec![(KnownSettingsId::EnablePush, 42)],  // Invalid ENABLE_PUSH value
-                vec![(unknown_id, input.unknown_value)]
+                vec![(KnownSettingsId::EnablePush, 42)], // Invalid ENABLE_PUSH value
+                vec![(unknown_id, input.unknown_value)],
             );
 
             let accepted = conn.process_settings_frame(&frame);
 
             // Frame should be rejected due to invalid ENABLE_PUSH, but unknown setting
             // should still be processed (ignored) before the error
-            assert!(!accepted, "Frame with invalid known setting should be rejected");
-            assert!(conn.has_protocol_errors(), "Invalid ENABLE_PUSH should cause error");
+            assert!(
+                !accepted,
+                "Frame with invalid known setting should be rejected"
+            );
+            assert!(
+                conn.has_protocol_errors(),
+                "Invalid ENABLE_PUSH should cause error"
+            );
 
             // However, the unknown setting processing should have happened
             // (Implementation detail: depends on parameter processing order)
         }
         5 => {
             // Test case 6: Unknown settings in SETTINGS ACK (should still be error)
-            let params = vec![SettingsParameter::new_unknown(unknown_id, input.unknown_value)];
-            let ack_frame = SettingsFrame::new(true, params);  // ACK=true with payload
+            let params = vec![SettingsParameter::new_unknown(
+                unknown_id,
+                input.unknown_value,
+            )];
+            let ack_frame = SettingsFrame::new(true, params); // ACK=true with payload
 
             let accepted = conn.process_settings_frame(&ack_frame);
 
             assert!(!accepted, "SETTINGS ACK with payload should be rejected");
-            assert!(conn.has_protocol_errors(), "ACK with payload should cause PROTOCOL_ERROR");
+            assert!(
+                conn.has_protocol_errors(),
+                "ACK with payload should cause PROTOCOL_ERROR"
+            );
             // Unknown settings don't make ACK valid
         }
         6 => {
@@ -411,8 +487,15 @@ fuzz_target!(|input: UnknownSettingsInput| {
             let accepted = conn.process_settings_frame(&frame);
 
             assert!(accepted, "Unknown setting with large ID should be accepted");
-            assert!(!conn.has_protocol_errors(), "Large unknown ID should not cause errors");
-            assert_eq!(conn.unknown_ignored_count(), 1, "Large unknown ID should be ignored");
+            assert!(
+                !conn.has_protocol_errors(),
+                "Large unknown ID should not cause errors"
+            );
+            assert_eq!(
+                conn.unknown_ignored_count(),
+                1,
+                "Large unknown ID should be ignored"
+            );
         }
         7 => {
             // Test case 8: Sequence of frames with unknown settings
@@ -420,9 +503,9 @@ fuzz_target!(|input: UnknownSettingsInput| {
                 SettingsFrame::new_unknown_only(unknown_id, input.unknown_value),
                 SettingsFrame::new_mixed(
                     vec![(KnownSettingsId::InitialWindowSize, 32768)],
-                    vec![(unknown_id.wrapping_add(1), input.unknown_value + 1)]
+                    vec![(unknown_id.wrapping_add(1), input.unknown_value + 1)],
                 ),
-                SettingsFrame::new(true, vec![]),  // ACK
+                SettingsFrame::new(true, vec![]), // ACK
             ];
 
             let mut all_accepted = true;
@@ -433,10 +516,24 @@ fuzz_target!(|input: UnknownSettingsInput| {
                 }
             }
 
-            assert!(all_accepted, "Sequence with unknown settings should be accepted");
-            assert!(!conn.has_protocol_errors(), "Sequence should not cause errors");
-            assert_eq!(conn.unknown_ignored_count(), 2, "Should ignore 2 unknown settings");
-            assert_eq!(conn.current_initial_window_size(), 32768, "Known setting should be applied");
+            assert!(
+                all_accepted,
+                "Sequence with unknown settings should be accepted"
+            );
+            assert!(
+                !conn.has_protocol_errors(),
+                "Sequence should not cause errors"
+            );
+            assert_eq!(
+                conn.unknown_ignored_count(),
+                2,
+                "Should ignore 2 unknown settings"
+            );
+            assert_eq!(
+                conn.current_initial_window_size(),
+                32768,
+                "Known setting should be applied"
+            );
         }
         _ => unreachable!(),
     }
@@ -454,7 +551,8 @@ fuzz_target!(|input: UnknownSettingsInput| {
         for error in &conn.protocol_errors {
             assert!(
                 !error.contains("unknown") && !error.contains("unsupported"),
-                "Protocol errors should not mention unknown settings: {}", error
+                "Protocol errors should not mention unknown settings: {}",
+                error
             );
         }
     }
@@ -480,7 +578,7 @@ mod tests {
         let mut conn = MockUnknownSettingsConnection::new();
         let frame = SettingsFrame::new_mixed(
             vec![(KnownSettingsId::MaxFrameSize, 32768)],
-            vec![(0x9999, 0xABCD)]
+            vec![(0x9999, 0xABCD)],
         );
 
         assert!(conn.process_settings_frame(&frame));
@@ -508,8 +606,8 @@ mod tests {
     fn test_known_settings_still_validated() {
         let mut conn = MockUnknownSettingsConnection::new();
         let frame = SettingsFrame::new_mixed(
-            vec![(KnownSettingsId::EnablePush, 42)],  // Invalid value
-            vec![(0xDDDD, 0x1234)]  // Unknown setting
+            vec![(KnownSettingsId::EnablePush, 42)], // Invalid value
+            vec![(0xDDDD, 0x1234)],                  // Unknown setting
         );
 
         assert!(!conn.process_settings_frame(&frame));
@@ -522,7 +620,7 @@ mod tests {
     fn test_settings_ack_with_unknown_still_error() {
         let mut conn = MockUnknownSettingsConnection::new();
         let params = vec![SettingsParameter::new_unknown(0xEEEE, 0x5678)];
-        let frame = SettingsFrame::new(true, params);  // ACK with payload
+        let frame = SettingsFrame::new(true, params); // ACK with payload
 
         assert!(!conn.process_settings_frame(&frame));
         assert!(conn.has_protocol_errors());
@@ -533,11 +631,11 @@ mod tests {
     #[test]
     fn test_unknown_id_detection() {
         // Test that our known ID detection is correct
-        assert!(KnownSettingsId::is_known(1));  // HEADER_TABLE_SIZE
-        assert!(KnownSettingsId::is_known(6));  // MAX_HEADER_LIST_SIZE
-        assert!(!KnownSettingsId::is_known(7));  // Unknown
-        assert!(!KnownSettingsId::is_known(0x8000));  // Unknown
-        assert!(!KnownSettingsId::is_known(u16::MAX));  // Unknown
+        assert!(KnownSettingsId::is_known(1)); // HEADER_TABLE_SIZE
+        assert!(KnownSettingsId::is_known(6)); // MAX_HEADER_LIST_SIZE
+        assert!(!KnownSettingsId::is_known(7)); // Unknown
+        assert!(!KnownSettingsId::is_known(0x8000)); // Unknown
+        assert!(!KnownSettingsId::is_known(u16::MAX)); // Unknown
     }
 
     #[test]
@@ -547,19 +645,24 @@ mod tests {
 
         // Simulate future HTTP/2 extension settings
         let future_settings = [
-            (0x0007, 1),  // Hypothetical future setting
-            (0x0008, 2),  // Another future setting
-            (0xFF00, u32::MAX),  // Vendor-specific setting
+            (0x0007, 1),        // Hypothetical future setting
+            (0x0008, 2),        // Another future setting
+            (0xFF00, u32::MAX), // Vendor-specific setting
         ];
 
         for (id, value) in future_settings {
             let frame = SettingsFrame::new_unknown_only(id, value);
-            assert!(conn.process_settings_frame(&frame),
-                "Future setting {} should be forward-compatible", id);
+            assert!(
+                conn.process_settings_frame(&frame),
+                "Future setting {} should be forward-compatible",
+                id
+            );
         }
 
-        assert!(!conn.has_protocol_errors(),
-            "Forward compatibility should not break existing connections");
+        assert!(
+            !conn.has_protocol_errors(),
+            "Forward compatibility should not break existing connections"
+        );
         assert_eq!(conn.unknown_ignored_count(), 3);
     }
 }

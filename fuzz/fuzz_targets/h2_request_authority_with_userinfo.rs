@@ -1,7 +1,7 @@
 #![no_main]
 
-use libfuzzer_sys::fuzz_target;
 use arbitrary::Arbitrary;
+use libfuzzer_sys::fuzz_target;
 
 /// HTTP/2 :authority pseudo-header user-info rejection fuzz target.
 ///
@@ -33,10 +33,7 @@ struct AuthorityUserInfoInput {
 #[derive(Arbitrary, Debug, Clone)]
 enum UserInfoPattern {
     /// Simple user@host format
-    SimpleUser {
-        username: String,
-        hostname: String,
-    },
+    SimpleUser { username: String, hostname: String },
 
     /// User with password user:pass@host
     UserPassword {
@@ -47,9 +44,7 @@ enum UserInfoPattern {
     },
 
     /// Empty user info @host
-    EmptyUser {
-        hostname: String,
-    },
+    EmptyUser { hostname: String },
 
     /// Complex user info with special characters
     ComplexUser {
@@ -60,9 +55,7 @@ enum UserInfoPattern {
     },
 
     /// Multiple @ symbols (malformed)
-    MultipleAt {
-        parts: Vec<String>,
-    },
+    MultipleAt { parts: Vec<String> },
 
     /// Edge cases that might be confused with user-info
     EdgeCase {
@@ -150,13 +143,15 @@ impl MockAuthorityParser {
     }
 
     /// Parse :authority pseudo-header and validate per RFC 7540 §8.1.2.3
-    fn parse_authority(&mut self, authority: &str, context: &RequestContext) -> AuthorityParseResult {
+    fn parse_authority(
+        &mut self,
+        authority: &str,
+        context: &RequestContext,
+    ) -> AuthorityParseResult {
         self.rejection_stats.total_parses += 1;
 
         if authority.is_empty() {
-            return AuthorityParseResult::Invalid(
-                "Empty authority header".to_string()
-            );
+            return AuthorityParseResult::Invalid("Empty authority header".to_string());
         }
 
         // RFC 7540 §8.1.2.3: Check for user-info
@@ -216,8 +211,26 @@ impl MockAuthorityParser {
         // Check if potential_userinfo contains user-info characters
         // RFC 3986: userinfo = *( unreserved / pct-encoded / sub-delims / ":" )
         for ch in potential_userinfo.chars() {
-            if ch.is_ascii_alphanumeric() ||
-               matches!(ch, '-' | '.' | '_' | '~' | ':' | '!' | '$' | '&' | '\'' | '(' | ')' | '*' | '+' | ',' | ';' | '=') {
+            if ch.is_ascii_alphanumeric()
+                || matches!(
+                    ch,
+                    '-' | '.'
+                        | '_'
+                        | '~'
+                        | ':'
+                        | '!'
+                        | '$'
+                        | '&'
+                        | '\''
+                        | '('
+                        | ')'
+                        | '*'
+                        | '+'
+                        | ','
+                        | ';'
+                        | '='
+                )
+            {
                 // Valid userinfo character
                 continue;
             } else if ch == '%' {
@@ -247,8 +260,10 @@ impl MockAuthorityParser {
         let host_without_port = host_part.split(':').next().unwrap_or(host_part);
 
         // Basic hostname validation
-        !host_without_port.is_empty() &&
-        host_without_port.chars().all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-')
+        !host_without_port.is_empty()
+            && host_without_port
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-')
     }
 
     fn classify_userinfo_violation(&self, userinfo: &str) -> UserInfoViolationType {
@@ -276,7 +291,8 @@ impl MockAuthorityParser {
         }
 
         // Check for other encoded forms
-        if authority.contains("%3A") { // Encoded :
+        if authority.contains("%3A") {
+            // Encoded :
             // Might be encoded user:pass format
             if authority.contains("@") || authority.contains("%40") {
                 return Some(UserInfoViolation {
@@ -289,7 +305,11 @@ impl MockAuthorityParser {
         None
     }
 
-    fn parse_authority_components(&mut self, authority: &str, context: &RequestContext) -> AuthorityParseResult {
+    fn parse_authority_components(
+        &mut self,
+        authority: &str,
+        context: &RequestContext,
+    ) -> AuthorityParseResult {
         // Parse without user-info (already validated absent)
         let (host, port) = if let Some(colon_pos) = authority.rfind(':') {
             let host_part = &authority[..colon_pos];
@@ -383,11 +403,11 @@ impl MockAuthorityParser {
             "http" => {
                 // HTTP default port is 80
                 Ok(())
-            },
+            }
             "https" => {
                 // HTTPS default port is 443
                 Ok(())
-            },
+            }
             _ => {
                 // Other schemes
                 Ok(())
@@ -400,11 +420,11 @@ impl MockAuthorityParser {
             "https" => {
                 // HTTPS should use secure port or default 443
                 port.map_or(true, |p| p == 443 || p >= 1024)
-            },
+            }
             "http" => {
                 // HTTP typically uses port 80 or high ports
                 port.map_or(true, |p| p == 80 || p >= 1024)
-            },
+            }
             _ => true, // Unknown schemes are compatible
         }
     }
@@ -429,11 +449,11 @@ struct UserInfoViolation {
 
 #[derive(Debug, PartialEq)]
 enum UserInfoViolationType {
-    SimpleUser,     // user@host
-    UserPassword,   // user:pass@host
-    EmptyUser,      // @host
-    EncodedAt,      // user%40host
-    EncodedChars,   // user%3Apass@host
+    SimpleUser,   // user@host
+    UserPassword, // user:pass@host
+    EmptyUser,    // @host
+    EncodedAt,    // user%40host
+    EncodedChars, // user%3Apass@host
 }
 
 #[derive(Debug, PartialEq)]
@@ -470,29 +490,42 @@ fuzz_target!(|input: AuthorityUserInfoInput| {
 
     // Validate basic result
     match basic_result {
-        AuthorityParseResult::UserInfoViolation { ref violation_type, ref detected_userinfo, .. } => {
+        AuthorityParseResult::UserInfoViolation {
+            ref violation_type,
+            ref detected_userinfo,
+            ..
+        } => {
             // Verify user-info was properly detected
-            assert!(!detected_userinfo.is_empty() || violation_type == &UserInfoViolationType::EmptyUser,
-                   "User-info violation should have detected userinfo or be empty user type");
+            assert!(
+                !detected_userinfo.is_empty()
+                    || violation_type == &UserInfoViolationType::EmptyUser,
+                "User-info violation should have detected userinfo or be empty user type"
+            );
 
             match violation_type {
                 UserInfoViolationType::SimpleUser => {
-                    assert!(!detected_userinfo.contains(':'),
-                           "Simple user should not contain password separator");
-                },
+                    assert!(
+                        !detected_userinfo.contains(':'),
+                        "Simple user should not contain password separator"
+                    );
+                }
                 UserInfoViolationType::UserPassword => {
-                    assert!(detected_userinfo.contains(':'),
-                           "User password type should contain password separator");
-                },
+                    assert!(
+                        detected_userinfo.contains(':'),
+                        "User password type should contain password separator"
+                    );
+                }
                 UserInfoViolationType::EmptyUser => {
-                    assert!(detected_userinfo.is_empty(),
-                           "Empty user type should have empty userinfo");
-                },
+                    assert!(
+                        detected_userinfo.is_empty(),
+                        "Empty user type should have empty userinfo"
+                    );
+                }
                 _ => {
                     // Other types are acceptable
                 }
             }
-        },
+        }
 
         AuthorityParseResult::Valid { ref host, port, .. } => {
             // Valid authority should not contain @ symbols in problematic positions
@@ -500,16 +533,22 @@ fuzz_target!(|input: AuthorityUserInfoInput| {
                 // If @ is present but result is valid, verify it's not user-info pattern
                 // (e.g., might be IPv6 or other edge case)
                 if parser.config.strict_rfc_compliance {
-                    panic!("Authority with @ should be rejected under strict RFC compliance: {}", input.authority);
+                    panic!(
+                        "Authority with @ should be rejected under strict RFC compliance: {}",
+                        input.authority
+                    );
                 }
             }
 
-            assert!(!host.is_empty(), "Valid authority should have non-empty host");
+            assert!(
+                !host.is_empty(),
+                "Valid authority should have non-empty host"
+            );
 
             if let Some(p) = port {
                 assert!(p > 0, "Valid port should be non-zero");
             }
-        },
+        }
 
         AuthorityParseResult::Invalid(_) => {
             // Invalid results are acceptable for malformed input
@@ -527,34 +566,34 @@ fuzz_target!(|input: AuthorityUserInfoInput| {
                 match (pattern, violation_type) {
                     (UserInfoPattern::SimpleUser { .. }, UserInfoViolationType::SimpleUser) => {
                         // Correct detection
-                    },
+                    }
                     (UserInfoPattern::UserPassword { .. }, UserInfoViolationType::UserPassword) => {
                         // Correct detection
-                    },
+                    }
                     (UserInfoPattern::EmptyUser { .. }, UserInfoViolationType::EmptyUser) => {
                         // Correct detection
-                    },
+                    }
                     _ => {
                         // Other combinations might be acceptable depending on detection logic
                     }
                 }
-            },
+            }
 
             AuthorityParseResult::Valid { .. } => {
                 // Should not be valid for obvious user-info patterns
                 match pattern {
-                    UserInfoPattern::SimpleUser { .. } |
-                    UserInfoPattern::UserPassword { .. } |
-                    UserInfoPattern::EmptyUser { .. } => {
+                    UserInfoPattern::SimpleUser { .. }
+                    | UserInfoPattern::UserPassword { .. }
+                    | UserInfoPattern::EmptyUser { .. } => {
                         if parser.config.strict_rfc_compliance {
                             panic!("User-info pattern should be rejected: {:?}", pattern);
                         }
-                    },
+                    }
                     _ => {
                         // Edge cases might be valid
                     }
                 }
-            },
+            }
 
             AuthorityParseResult::Invalid(_) => {
                 // Invalid results are acceptable
@@ -564,10 +603,10 @@ fuzz_target!(|input: AuthorityUserInfoInput| {
 
     // Test edge cases that should NOT be rejected as user-info
     let valid_authorities = vec![
-        "[2001:db8::1]:8080".to_string(),    // IPv6 with port
-        "example.com:443".to_string(),        // Simple host:port
-        "sub.domain.com".to_string(),         // Subdomain
-        "192.168.1.1:8080".to_string(),      // IPv4 with port
+        "[2001:db8::1]:8080".to_string(), // IPv6 with port
+        "example.com:443".to_string(),    // Simple host:port
+        "sub.domain.com".to_string(),     // Subdomain
+        "192.168.1.1:8080".to_string(),   // IPv4 with port
     ];
 
     for valid_auth in valid_authorities {
@@ -575,10 +614,13 @@ fuzz_target!(|input: AuthorityUserInfoInput| {
         match valid_result {
             AuthorityParseResult::Valid { .. } => {
                 // Expected for valid authorities
-            },
+            }
             AuthorityParseResult::UserInfoViolation { .. } => {
-                panic!("Valid authority should not be rejected as user-info: {}", valid_auth);
-            },
+                panic!(
+                    "Valid authority should not be rejected as user-info: {}",
+                    valid_auth
+                );
+            }
             AuthorityParseResult::Invalid(_) => {
                 // Acceptable if validation is strict
             }
@@ -598,12 +640,15 @@ fuzz_target!(|input: AuthorityUserInfoInput| {
         match violation_result {
             AuthorityParseResult::UserInfoViolation { .. } => {
                 // Expected for obvious violations
-            },
+            }
             AuthorityParseResult::Valid { .. } => {
                 if parser.config.strict_rfc_compliance {
-                    panic!("Obvious user-info violation should be rejected: {}", violation_auth);
+                    panic!(
+                        "Obvious user-info violation should be rejected: {}",
+                        violation_auth
+                    );
                 }
-            },
+            }
             AuthorityParseResult::Invalid(_) => {
                 // Acceptable alternative rejection
             }
@@ -622,40 +667,46 @@ fn build_authority_from_pattern(pattern: &UserInfoPattern) -> String {
     match pattern {
         UserInfoPattern::SimpleUser { username, hostname } => {
             format!("{}@{}", username, hostname)
-        },
+        }
 
-        UserInfoPattern::UserPassword { username, password, hostname, port } => {
+        UserInfoPattern::UserPassword {
+            username,
+            password,
+            hostname,
+            port,
+        } => {
             let auth = format!("{}:{}@{}", username, password, hostname);
             if let Some(p) = port {
                 format!("{}:{}", auth, p)
             } else {
                 auth
             }
-        },
+        }
 
         UserInfoPattern::EmptyUser { hostname } => {
             format!("@{}", hostname)
-        },
+        }
 
-        UserInfoPattern::ComplexUser { username, password, hostname, encoded_chars } => {
+        UserInfoPattern::ComplexUser {
+            username,
+            password,
+            hostname,
+            encoded_chars,
+        } => {
             if *encoded_chars {
                 format!("{}%3A{}%40{}", username, password, hostname)
             } else {
                 format!("{}:{}@{}", username, password, hostname)
             }
-        },
-
-        UserInfoPattern::MultipleAt { parts } => {
-            parts.join("@")
-        },
-
-        UserInfoPattern::EdgeCase { edge_type, value } => {
-            match edge_type {
-                EdgeCaseType::IPv6WithAt => format!("[{}]", value),
-                EdgeCaseType::DomainWithAt => value.clone(),
-                EdgeCaseType::EncodedAt => value.replace("@", "%40"),
-                EdgeCaseType::AtPosition => value.clone(),
-            }
         }
+
+        UserInfoPattern::MultipleAt { parts } => parts.join("@"),
+
+        UserInfoPattern::EdgeCase { edge_type, value } => match edge_type {
+            EdgeCaseType::IPv6WithAt => format!("[{}]", value),
+            EdgeCaseType::DomainWithAt => value.clone(),
+            EdgeCaseType::EncodedAt => value.replace("@", "%40"),
+            EdgeCaseType::AtPosition => value.clone(),
+        },
     }
 }

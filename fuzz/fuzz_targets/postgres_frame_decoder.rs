@@ -22,24 +22,24 @@ use arbitrary::{Arbitrary, Result, Unstructured};
 use libfuzzer_sys::fuzz_target;
 
 use asupersync::cx::Cx;
-use asupersync::database::postgres::{PgConnection, PgConnectOptions, PgError};
+use asupersync::database::postgres::{PgConnectOptions, PgConnection, PgError};
 use asupersync::test_utils::run_test_with_cx;
 
 /// PostgreSQL backend message types (subset for fuzzing)
 #[derive(Debug, Clone, Copy, Arbitrary)]
 enum MessageType {
-    Authentication = 0x52,      // b'R'
-    BackendKeyData = 0x4b,      // b'K'
-    BindComplete = 0x32,        // b'2'
-    CommandComplete = 0x43,     // b'C'
-    DataRow = 0x44,             // b'D'
-    ErrorResponse = 0x45,       // b'E'
-    NoticeResponse = 0x4e,      // b'N'
-    ParameterStatus = 0x53,     // b'S'
-    ParseComplete = 0x31,       // b'1'
-    RowDescription = 0x54,      // b'T'
-    ReadyForQuery = 0x5a,       // b'Z'
-    Invalid = 0x00,             // Invalid type for error testing
+    Authentication = 0x52,  // b'R'
+    BackendKeyData = 0x4b,  // b'K'
+    BindComplete = 0x32,    // b'2'
+    CommandComplete = 0x43, // b'C'
+    DataRow = 0x44,         // b'D'
+    ErrorResponse = 0x45,   // b'E'
+    NoticeResponse = 0x4e,  // b'N'
+    ParameterStatus = 0x53, // b'S'
+    ParseComplete = 0x31,   // b'1'
+    RowDescription = 0x54,  // b'T'
+    ReadyForQuery = 0x5a,   // b'Z'
+    Invalid = 0x00,         // Invalid type for error testing
 }
 
 impl MessageType {
@@ -99,9 +99,9 @@ impl<'a> Arbitrary<'a> for PgFrame {
 
         // Generate body data of varying sizes
         let body_size = match u.int_in_range(0..=3)? {
-            0 => 0,                    // Empty body
-            1 => u.int_in_range(1..=64)?,     // Small body
-            2 => u.int_in_range(65..=1024)?,  // Medium body
+            0 => 0,                            // Empty body
+            1 => u.int_in_range(1..=64)?,      // Small body
+            2 => u.int_in_range(65..=1024)?,   // Medium body
             _ => u.int_in_range(1025..=8192)?, // Large body
         };
 
@@ -415,13 +415,16 @@ async fn test_postgres_frame_decoder(input: &FuzzInput, cx: &Cx) {
 
             // Test message-specific parsing based on type
             match msg_type {
-                0x54 => { // RowDescription
+                0x54 => {
+                    // RowDescription
                     let _ = test_parse_row_description(&body);
                 }
-                0x44 => { // DataRow
+                0x44 => {
+                    // DataRow
                     let _ = test_parse_data_row(&body);
                 }
-                0x45 | 0x4e => { // Error/Notice Response
+                0x45 | 0x4e => {
+                    // Error/Notice Response
                     let _ = test_parse_error_notice(&body);
                 }
                 _ => {
@@ -499,9 +502,8 @@ fn test_parse_data_row(data: &[u8]) -> Result<(), Box<dyn std::error::Error>> {
             return Ok(()); // Truncated
         }
 
-        let field_len = i32::from_be_bytes([
-            data[pos], data[pos + 1], data[pos + 2], data[pos + 3]
-        ]);
+        let field_len =
+            i32::from_be_bytes([data[pos], data[pos + 1], data[pos + 2], data[pos + 3]]);
         pos += 4;
 
         if field_len == -1 {

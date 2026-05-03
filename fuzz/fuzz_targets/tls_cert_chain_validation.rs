@@ -14,9 +14,7 @@
 #![no_main]
 
 use arbitrary::Arbitrary;
-use asupersync::tls::{
-    Certificate, CertificateChain, TlsConnectorBuilder, TlsError
-};
+use asupersync::tls::{Certificate, CertificateChain, TlsConnectorBuilder, TlsError};
 use libfuzzer_sys::fuzz_target;
 
 /// Maximum number of certificates in a chain
@@ -65,25 +63,17 @@ enum ChainConfiguration {
         algorithms: Vec<SignatureAlgorithm>,
     },
     /// Chain missing intermediate certificates
-    MissingIntermediate {
-        missing_positions: Vec<u8>,
-    },
+    MissingIntermediate { missing_positions: Vec<u8> },
     /// Chain with incorrect ordering
-    IncorrectOrdering {
-        shuffle_pattern: Vec<u8>,
-    },
+    IncorrectOrdering { shuffle_pattern: Vec<u8> },
     /// Chain with self-signed certificates in wrong places
-    SelfSignedIssues {
-        self_signed_positions: Vec<u8>,
-    },
+    SelfSignedIssues { self_signed_positions: Vec<u8> },
     /// Malformed DER encoding
     MalformedDer {
         corruption_positions: Vec<CertCorruption>,
     },
     /// Chain with duplicate certificates
-    DuplicateCerts {
-        duplicate_positions: Vec<(u8, u8)>,
-    },
+    DuplicateCerts { duplicate_positions: Vec<(u8, u8)> },
     /// Mixed certificate formats (DER/PEM corruption)
     MixedFormats {
         format_corruptions: Vec<FormatCorruption>,
@@ -220,10 +210,7 @@ struct CertificateName {
 
 #[derive(Arbitrary, Debug)]
 enum CertificateExtension {
-    BasicConstraints {
-        is_ca: bool,
-        path_len: Option<u8>,
-    },
+    BasicConstraints { is_ca: bool, path_len: Option<u8> },
     KeyUsage(Vec<KeyUsageFlag>),
     SubjectAltName(Vec<String>),
     AuthorityKeyIdentifier(Vec<u8>),
@@ -267,15 +254,24 @@ fn normalize_chain_configuration(chain: &mut ChainConfiguration) {
         ChainConfiguration::Valid { chain_length, .. } => {
             *chain_length = (*chain_length).clamp(1, MAX_CHAIN_LENGTH as u8);
         }
-        ChainConfiguration::Expired { expired_positions, days_expired } => {
+        ChainConfiguration::Expired {
+            expired_positions,
+            days_expired,
+        } => {
             expired_positions.truncate(MAX_CHAIN_LENGTH);
             *days_expired = (*days_expired).clamp(1, 3650); // Max 10 years
         }
-        ChainConfiguration::NotYetValid { future_positions, days_future } => {
+        ChainConfiguration::NotYetValid {
+            future_positions,
+            days_future,
+        } => {
             future_positions.truncate(MAX_CHAIN_LENGTH);
             *days_future = (*days_future).clamp(1, 3650);
         }
-        ChainConfiguration::SignatureMismatch { mismatch_positions, algorithms } => {
+        ChainConfiguration::SignatureMismatch {
+            mismatch_positions,
+            algorithms,
+        } => {
             mismatch_positions.truncate(MAX_CHAIN_LENGTH);
             algorithms.truncate(MAX_CHAIN_LENGTH);
         }
@@ -285,10 +281,14 @@ fn normalize_chain_configuration(chain: &mut ChainConfiguration) {
         ChainConfiguration::IncorrectOrdering { shuffle_pattern } => {
             shuffle_pattern.truncate(MAX_CHAIN_LENGTH);
         }
-        ChainConfiguration::SelfSignedIssues { self_signed_positions } => {
+        ChainConfiguration::SelfSignedIssues {
+            self_signed_positions,
+        } => {
             self_signed_positions.truncate(MAX_CHAIN_LENGTH);
         }
-        ChainConfiguration::MalformedDer { corruption_positions } => {
+        ChainConfiguration::MalformedDer {
+            corruption_positions,
+        } => {
             corruption_positions.truncate(MAX_CHAIN_LENGTH);
             for corruption in corruption_positions {
                 corruption.position = corruption.position.clamp(0, MAX_CHAIN_LENGTH as u8 - 1);
@@ -299,7 +299,9 @@ fn normalize_chain_configuration(chain: &mut ChainConfiguration) {
                 }
             }
         }
-        ChainConfiguration::DuplicateCerts { duplicate_positions } => {
+        ChainConfiguration::DuplicateCerts {
+            duplicate_positions,
+        } => {
             duplicate_positions.truncate(MAX_CHAIN_LENGTH / 2);
         }
         ChainConfiguration::MixedFormats { format_corruptions } => {
@@ -329,7 +331,11 @@ fn normalize_certificate_source(source: &mut CertificateSource) {
         CertificateSource::SelfSigned { validity_days, .. } => {
             *validity_days = (*validity_days).clamp(1, 3650);
         }
-        CertificateSource::WithProperties { validity_duration_days, validity_start_offset_days, .. } => {
+        CertificateSource::WithProperties {
+            validity_duration_days,
+            validity_start_offset_days,
+            ..
+        } => {
             *validity_duration_days = (*validity_duration_days).clamp(1, 3650);
             *validity_start_offset_days = (*validity_start_offset_days).clamp(-365, 365);
         }
@@ -344,7 +350,7 @@ fn normalize_certificate_source(source: &mut CertificateSource) {
 
 fn test_certificate_chain_scenario(
     scenario: &CertChainScenario,
-    context: &ValidationContext
+    context: &ValidationContext,
 ) -> Result<(), Box<dyn std::error::Error>> {
     // Generate certificate chain based on scenario
     let certificate_chain = generate_certificate_chain(&scenario.chain)?;
@@ -371,42 +377,32 @@ fn test_certificate_chain_scenario(
     Ok(())
 }
 
-fn generate_certificate_chain(config: &ChainConfiguration) -> Result<CertificateChain, Box<dyn std::error::Error>> {
+fn generate_certificate_chain(
+    config: &ChainConfiguration,
+) -> Result<CertificateChain, Box<dyn std::error::Error>> {
     match config {
-        ChainConfiguration::Valid { chain_length, include_root } => {
-            generate_valid_chain(*chain_length, *include_root)
-        }
-        ChainConfiguration::Expired { .. } => {
-            generate_expired_chain()
-        }
-        ChainConfiguration::NotYetValid { .. } => {
-            generate_future_valid_chain()
-        }
-        ChainConfiguration::SignatureMismatch { .. } => {
-            generate_signature_mismatch_chain()
-        }
-        ChainConfiguration::MissingIntermediate { .. } => {
-            generate_missing_intermediate_chain()
-        }
-        ChainConfiguration::IncorrectOrdering { .. } => {
-            generate_misordered_chain()
-        }
-        ChainConfiguration::SelfSignedIssues { .. } => {
-            generate_self_signed_issues_chain()
-        }
-        ChainConfiguration::MalformedDer { corruption_positions } => {
-            generate_malformed_der_chain(corruption_positions)
-        }
-        ChainConfiguration::DuplicateCerts { .. } => {
-            generate_duplicate_certs_chain()
-        }
-        ChainConfiguration::MixedFormats { .. } => {
-            generate_mixed_formats_chain()
-        }
+        ChainConfiguration::Valid {
+            chain_length,
+            include_root,
+        } => generate_valid_chain(*chain_length, *include_root),
+        ChainConfiguration::Expired { .. } => generate_expired_chain(),
+        ChainConfiguration::NotYetValid { .. } => generate_future_valid_chain(),
+        ChainConfiguration::SignatureMismatch { .. } => generate_signature_mismatch_chain(),
+        ChainConfiguration::MissingIntermediate { .. } => generate_missing_intermediate_chain(),
+        ChainConfiguration::IncorrectOrdering { .. } => generate_misordered_chain(),
+        ChainConfiguration::SelfSignedIssues { .. } => generate_self_signed_issues_chain(),
+        ChainConfiguration::MalformedDer {
+            corruption_positions,
+        } => generate_malformed_der_chain(corruption_positions),
+        ChainConfiguration::DuplicateCerts { .. } => generate_duplicate_certs_chain(),
+        ChainConfiguration::MixedFormats { .. } => generate_mixed_formats_chain(),
     }
 }
 
-fn generate_valid_chain(length: u8, _include_root: bool) -> Result<CertificateChain, Box<dyn std::error::Error>> {
+fn generate_valid_chain(
+    length: u8,
+    _include_root: bool,
+) -> Result<CertificateChain, Box<dyn std::error::Error>> {
     // Generate a basic certificate chain
     // This is a simplified implementation - in practice we'd need proper certificate generation
     let mut chain = CertificateChain::new();
@@ -479,7 +475,9 @@ fn generate_self_signed_issues_chain() -> Result<CertificateChain, Box<dyn std::
     Ok(chain)
 }
 
-fn generate_malformed_der_chain(corruptions: &[CertCorruption]) -> Result<CertificateChain, Box<dyn std::error::Error>> {
+fn generate_malformed_der_chain(
+    corruptions: &[CertCorruption],
+) -> Result<CertificateChain, Box<dyn std::error::Error>> {
     // Generate chain with malformed DER encoding
     let mut chain = CertificateChain::new();
     let mut cert_der = generate_minimal_cert_der(0)?;
@@ -563,7 +561,7 @@ fn generate_minimal_cert_der(variant: u8) -> Result<Vec<u8>, Box<dyn std::error:
 
 fn validate_certificate_chain(
     chain: &CertificateChain,
-    context: &ValidationContext
+    context: &ValidationContext,
 ) -> Result<(), TlsError> {
     // Set up a TLS connector builder for validation
     let mut builder = TlsConnectorBuilder::new();
@@ -608,7 +606,7 @@ fn validate_certificate_chain(
 }
 
 fn generate_certificate_from_source(
-    source: &CertificateSource
+    source: &CertificateSource,
 ) -> Result<Vec<Certificate>, Box<dyn std::error::Error>> {
     match source {
         CertificateSource::SelfSigned { .. } => {
@@ -619,9 +617,7 @@ fn generate_certificate_from_source(
             let cert_der = generate_minimal_cert_der(1)?;
             Ok(vec![Certificate::from_der(cert_der)])
         }
-        CertificateSource::RawDer(bytes) => {
-            Ok(vec![Certificate::from_der(bytes.clone())])
-        }
+        CertificateSource::RawDer(bytes) => Ok(vec![Certificate::from_der(bytes.clone())]),
         CertificateSource::RawPem(bytes) => {
             // Try to parse as PEM, fall back to treating as DER
             match Certificate::from_pem(bytes) {

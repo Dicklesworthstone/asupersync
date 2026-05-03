@@ -1,7 +1,7 @@
 #![no_main]
 
-use libfuzzer_sys::fuzz_target;
 use arbitrary::Arbitrary;
+use libfuzzer_sys::fuzz_target;
 use std::collections::HashMap;
 
 /// Fuzz target for HTTP/1.1 chunked encoding chunk extensions.
@@ -162,7 +162,7 @@ impl MockChunkedDecoder {
             if line.contains('\r') || line.contains('\n') {
                 self.stats.security_violations += 1;
                 return Ok(ChunkParseResult::SecurityRisk(
-                    "CRLF injection detected in chunk line".to_string()
+                    "CRLF injection detected in chunk line".to_string(),
                 ));
             }
         }
@@ -215,7 +215,10 @@ impl MockChunkedDecoder {
     }
 
     /// Parse chunk extensions per RFC 9112 §7.1.1
-    fn parse_extensions(&mut self, extension_str: &str) -> Result<Vec<(String, Option<String>)>, ChunkError> {
+    fn parse_extensions(
+        &mut self,
+        extension_str: &str,
+    ) -> Result<Vec<(String, Option<String>)>, ChunkError> {
         let mut extensions = Vec::new();
 
         // Check total length
@@ -278,9 +281,24 @@ impl MockChunkedDecoder {
         for c in name.chars() {
             match c {
                 // Valid token characters
-                'a'..='z' | 'A'..='Z' | '0'..='9' |
-                '!' | '#' | '$' | '%' | '&' | '\'' | '*' | '+' |
-                '-' | '.' | '^' | '_' | '`' | '|' | '~' => {
+                'a'..='z'
+                | 'A'..='Z'
+                | '0'..='9'
+                | '!'
+                | '#'
+                | '$'
+                | '%'
+                | '&'
+                | '\''
+                | '*'
+                | '+'
+                | '-'
+                | '.'
+                | '^'
+                | '_'
+                | '`'
+                | '|'
+                | '~' => {
                     // Valid
                 }
                 // Unicode characters
@@ -354,9 +372,24 @@ impl MockChunkedDecoder {
             for c in value.chars() {
                 match c {
                     // Valid token characters (same as extension name)
-                    'a'..='z' | 'A'..='Z' | '0'..='9' |
-                    '!' | '#' | '$' | '%' | '&' | '\'' | '*' | '+' |
-                    '-' | '.' | '^' | '_' | '`' | '|' | '~' => {
+                    'a'..='z'
+                    | 'A'..='Z'
+                    | '0'..='9'
+                    | '!'
+                    | '#'
+                    | '$'
+                    | '%'
+                    | '&'
+                    | '\''
+                    | '*'
+                    | '+'
+                    | '-'
+                    | '.'
+                    | '^'
+                    | '_'
+                    | '`'
+                    | '|'
+                    | '~' => {
                         // Valid
                     }
                     // Unicode characters
@@ -389,79 +422,93 @@ impl MockChunkedDecoder {
 fn generate_test_cases() -> Vec<(String, ChunkParseResult)> {
     vec![
         // Basic valid cases
-        ("1F\r\n".to_string(),
-         ChunkParseResult::Valid(ChunkInfo {
-             size: 31,
-             extensions: vec![],
-             raw_line: "1F".to_string(),
-         })),
-
+        (
+            "1F\r\n".to_string(),
+            ChunkParseResult::Valid(ChunkInfo {
+                size: 31,
+                extensions: vec![],
+                raw_line: "1F".to_string(),
+            }),
+        ),
         // Simple extension
-        ("1F;name=value\r\n".to_string(),
-         ChunkParseResult::Valid(ChunkInfo {
-             size: 31,
-             extensions: vec![("name".to_string(), Some("value".to_string()))],
-             raw_line: "1F;name=value".to_string(),
-         })),
-
+        (
+            "1F;name=value\r\n".to_string(),
+            ChunkParseResult::Valid(ChunkInfo {
+                size: 31,
+                extensions: vec![("name".to_string(), Some("value".to_string()))],
+                raw_line: "1F;name=value".to_string(),
+            }),
+        ),
         // Extension without value
-        ("A;flag\r\n".to_string(),
-         ChunkParseResult::Valid(ChunkInfo {
-             size: 10,
-             extensions: vec![("flag".to_string(), None)],
-             raw_line: "A;flag".to_string(),
-         })),
-
+        (
+            "A;flag\r\n".to_string(),
+            ChunkParseResult::Valid(ChunkInfo {
+                size: 10,
+                extensions: vec![("flag".to_string(), None)],
+                raw_line: "A;flag".to_string(),
+            }),
+        ),
         // Multiple extensions
-        ("FF;name1=value1;name2=value2\r\n".to_string(),
-         ChunkParseResult::Valid(ChunkInfo {
-             size: 255,
-             extensions: vec![
-                 ("name1".to_string(), Some("value1".to_string())),
-                 ("name2".to_string(), Some("value2".to_string())),
-             ],
-             raw_line: "FF;name1=value1;name2=value2".to_string(),
-         })),
-
+        (
+            "FF;name1=value1;name2=value2\r\n".to_string(),
+            ChunkParseResult::Valid(ChunkInfo {
+                size: 255,
+                extensions: vec![
+                    ("name1".to_string(), Some("value1".to_string())),
+                    ("name2".to_string(), Some("value2".to_string())),
+                ],
+                raw_line: "FF;name1=value1;name2=value2".to_string(),
+            }),
+        ),
         // Quoted value
-        ("20;name=\"quoted value\"\r\n".to_string(),
-         ChunkParseResult::Valid(ChunkInfo {
-             size: 32,
-             extensions: vec![("name".to_string(), Some("\"quoted value\"".to_string()))],
-             raw_line: "20;name=\"quoted value\"".to_string(),
-         })),
-
+        (
+            "20;name=\"quoted value\"\r\n".to_string(),
+            ChunkParseResult::Valid(ChunkInfo {
+                size: 32,
+                extensions: vec![("name".to_string(), Some("\"quoted value\"".to_string()))],
+                raw_line: "20;name=\"quoted value\"".to_string(),
+            }),
+        ),
         // Invalid hex size
-        ("GG;ext=val\r\n".to_string(),
-         ChunkParseResult::Invalid(ChunkError::InvalidSize)),
-
+        (
+            "GG;ext=val\r\n".to_string(),
+            ChunkParseResult::Invalid(ChunkError::InvalidSize),
+        ),
         // CRLF injection in extension value
-        ("10;bad=value\r\nX-Injected: header\r\n".to_string(),
-         ChunkParseResult::SecurityRisk("CRLF injection detected in chunk line".to_string())),
-
+        (
+            "10;bad=value\r\nX-Injected: header\r\n".to_string(),
+            ChunkParseResult::SecurityRisk("CRLF injection detected in chunk line".to_string()),
+        ),
         // Very long extension name (should be rejected)
-        (format!("10;{}=value\r\n", "x".repeat(1000)),
-         ChunkParseResult::Invalid(ChunkError::ExtensionTooLong)),
-
+        (
+            format!("10;{}=value\r\n", "x".repeat(1000)),
+            ChunkParseResult::Invalid(ChunkError::ExtensionTooLong),
+        ),
         // Very long extension value (should be rejected)
-        (format!("10;name={}\r\n", "x".repeat(1000)),
-         ChunkParseResult::Invalid(ChunkError::ExtensionTooLong)),
-
+        (
+            format!("10;name={}\r\n", "x".repeat(1000)),
+            ChunkParseResult::Invalid(ChunkError::ExtensionTooLong),
+        ),
         // Invalid extension character
-        ("10;na me=value\r\n".to_string(),
-         ChunkParseResult::Invalid(ChunkError::InvalidCharacter(' '))),
-
+        (
+            "10;na me=value\r\n".to_string(),
+            ChunkParseResult::Invalid(ChunkError::InvalidCharacter(' ')),
+        ),
         // Unicode in extension (depends on policy)
-        ("10;café=value\r\n".to_string(),
-         ChunkParseResult::Invalid(ChunkError::UnicodeSecurityRisk)),
-
+        (
+            "10;café=value\r\n".to_string(),
+            ChunkParseResult::Invalid(ChunkError::UnicodeSecurityRisk),
+        ),
         // Empty extension name
-        ("10;=value\r\n".to_string(),
-         ChunkParseResult::Invalid(ChunkError::InvalidExtensionFormat)),
-
+        (
+            "10;=value\r\n".to_string(),
+            ChunkParseResult::Invalid(ChunkError::InvalidExtensionFormat),
+        ),
         // Malformed quoted value
-        ("10;name=\"unterminated\r\n".to_string(),
-         ChunkParseResult::SecurityRisk("CRLF injection detected in chunk line".to_string())),
+        (
+            "10;name=\"unterminated\r\n".to_string(),
+            ChunkParseResult::SecurityRisk("CRLF injection detected in chunk line".to_string()),
+        ),
     ]
 }
 
@@ -503,25 +550,34 @@ fuzz_target!(|data: &[u8]| {
     match result {
         Ok(ChunkParseResult::Valid(chunk_info)) => {
             // Valid chunks should have reasonable properties
-            assert_eq!(chunk_info.extensions.len(), test.extensions.len(),
-                "Extension count mismatch for valid chunk");
+            assert_eq!(
+                chunk_info.extensions.len(),
+                test.extensions.len(),
+                "Extension count mismatch for valid chunk"
+            );
 
             // Extensions should be ignored per RFC 9112
-            assert_eq!(decoder.get_stats().extensions_ignored, chunk_info.extensions.len(),
-                "Extensions should be ignored per RFC 9112");
+            assert_eq!(
+                decoder.get_stats().extensions_ignored,
+                chunk_info.extensions.len(),
+                "Extensions should be ignored per RFC 9112"
+            );
 
             // Chunk size should be parseable
-            assert!(chunk_info.size <= 0xFFFFFFFF,
-                "Chunk size should be within reasonable bounds");
+            assert!(
+                chunk_info.size <= 0xFFFFFFFF,
+                "Chunk size should be within reasonable bounds"
+            );
         }
 
         Ok(ChunkParseResult::Invalid(error)) => {
             // Invalid results should have recorded the error
             match error {
-                ChunkError::ExtensionTooLong |
-                ChunkError::ExcessiveExtensions => {
-                    assert!(decoder.get_stats().security_violations > 0,
-                        "Security violations should be recorded");
+                ChunkError::ExtensionTooLong | ChunkError::ExcessiveExtensions => {
+                    assert!(
+                        decoder.get_stats().security_violations > 0,
+                        "Security violations should be recorded"
+                    );
                 }
                 _ => {
                     // Other errors don't necessarily increment security counter
@@ -531,8 +587,10 @@ fuzz_target!(|data: &[u8]| {
 
         Ok(ChunkParseResult::SecurityRisk(_)) => {
             // Security risks should be tracked
-            assert!(decoder.get_stats().security_violations > 0,
-                "Security risks should increment violation counter");
+            assert!(
+                decoder.get_stats().security_violations > 0,
+                "Security risks should increment violation counter"
+            );
         }
 
         Err(error) => {
@@ -576,10 +634,17 @@ fuzz_target!(|data: &[u8]| {
             ChunkParseResult::Valid(ref expected_chunk) => {
                 match test_result {
                     Ok(ChunkParseResult::Valid(actual_chunk)) => {
-                        assert_eq!(actual_chunk.size, expected_chunk.size,
-                            "Chunk size mismatch for line: {}", test_line);
-                        assert_eq!(actual_chunk.extensions.len(), expected_chunk.extensions.len(),
-                            "Extension count mismatch for line: {}", test_line);
+                        assert_eq!(
+                            actual_chunk.size, expected_chunk.size,
+                            "Chunk size mismatch for line: {}",
+                            test_line
+                        );
+                        assert_eq!(
+                            actual_chunk.extensions.len(),
+                            expected_chunk.extensions.len(),
+                            "Extension count mismatch for line: {}",
+                            test_line
+                        );
                     }
                     _ => {
                         // May fail for other reasons in fuzzing context
@@ -590,8 +655,7 @@ fuzz_target!(|data: &[u8]| {
             ChunkParseResult::Invalid(_) => {
                 // Should result in error
                 match test_result {
-                    Ok(ChunkParseResult::Invalid(_)) |
-                    Err(_) => {
+                    Ok(ChunkParseResult::Invalid(_)) | Err(_) => {
                         // Expected
                     }
                     Ok(ChunkParseResult::SecurityRisk(_)) => {
@@ -606,9 +670,9 @@ fuzz_target!(|data: &[u8]| {
             ChunkParseResult::SecurityRisk(_) => {
                 // Should be flagged as security risk or rejected
                 match test_result {
-                    Ok(ChunkParseResult::SecurityRisk(_)) |
-                    Ok(ChunkParseResult::Invalid(_)) |
-                    Err(_) => {
+                    Ok(ChunkParseResult::SecurityRisk(_))
+                    | Ok(ChunkParseResult::Invalid(_))
+                    | Err(_) => {
                         // Expected - security risks should be caught
                     }
                     _ => {

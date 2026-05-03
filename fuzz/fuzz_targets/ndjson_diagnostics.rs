@@ -1,10 +1,10 @@
 #![no_main]
 
-use libfuzzer_sys::fuzz_target;
 use arbitrary::{Arbitrary, Unstructured};
 use asupersync::observability::diagnostics::*;
-use asupersync::types::{CancelKind, ObligationId, RegionId, TaskId, Time};
 use asupersync::record::{ObligationState, region::RegionState, task::TaskState};
+use asupersync::types::{CancelKind, ObligationId, RegionId, TaskId, Time};
+use libfuzzer_sys::fuzz_target;
 use serde_json::Value;
 use std::collections::BTreeMap;
 
@@ -27,14 +27,14 @@ struct FuzzDiagnosticData {
 
 #[derive(Arbitrary, Debug)]
 struct FuzzDirectionalDeadlockReport {
-    severity: u8,  // Will be mapped to DeadlockSeverity
+    severity: u8, // Will be mapped to DeadlockSeverity
     risk_score: f64,
     cycles: Vec<FuzzDeadlockCycle>,
 }
 
 #[derive(Arbitrary, Debug)]
 struct FuzzDeadlockCycle {
-    tasks: Vec<u64>,  // Will be mapped to TaskId
+    tasks: Vec<u64>, // Will be mapped to TaskId
     ingress_edges: u32,
     egress_edges: u32,
     trapped: bool,
@@ -42,28 +42,28 @@ struct FuzzDeadlockCycle {
 
 #[derive(Arbitrary, Debug)]
 struct FuzzRegionOpenExplanation {
-    region_id: u64,  // Will be mapped to RegionId
+    region_id: u64, // Will be mapped to RegionId
     has_state: bool,
-    state_variant: u8,  // Will be mapped to RegionState variants
+    state_variant: u8, // Will be mapped to RegionState variants
     reasons: Vec<String>,
     recommendations: Vec<String>,
 }
 
 #[derive(Arbitrary, Debug)]
 struct FuzzTaskBlockedExplanation {
-    task_id: u64,  // Will be mapped to TaskId
-    block_reason: u8,  // Will be mapped to BlockReason variants
+    task_id: u64,     // Will be mapped to TaskId
+    block_reason: u8, // Will be mapped to BlockReason variants
     details: Vec<String>,
     recommendations: Vec<String>,
 }
 
 #[derive(Arbitrary, Debug)]
 struct FuzzObligationLeak {
-    obligation_id: u64,  // Will be mapped to ObligationId
+    obligation_id: u64, // Will be mapped to ObligationId
     obligation_type: String,
     has_holder_task: bool,
-    holder_task: u64,  // Will be mapped to TaskId if has_holder_task
-    region_id: u64,  // Will be mapped to RegionId
+    holder_task: u64, // Will be mapped to TaskId if has_holder_task
+    region_id: u64,   // Will be mapped to RegionId
     age_millis: u64,
 }
 
@@ -93,7 +93,9 @@ impl FuzzDirectionalDeadlockReport {
             _ => DeadlockSeverity::Critical,
         };
 
-        let cycles = self.cycles.iter()
+        let cycles = self
+            .cycles
+            .iter()
             .take(MAX_CYCLES)
             .map(|c| c.to_real())
             .collect();
@@ -108,7 +110,9 @@ impl FuzzDirectionalDeadlockReport {
 
 impl FuzzDeadlockCycle {
     fn to_real(&self) -> DeadlockCycle {
-        let tasks = self.tasks.iter()
+        let tasks = self
+            .tasks
+            .iter()
             .take(MAX_TASKS_PER_CYCLE)
             .map(|&id| TaskId::new_for_test(id as u32, (id >> 32) as u32))
             .collect();
@@ -135,12 +139,16 @@ impl FuzzRegionOpenExplanation {
             None
         };
 
-        let reasons = self.reasons.iter()
+        let reasons = self
+            .reasons
+            .iter()
             .take(MAX_REASONS)
             .map(|s| Reason::RegionNotFound) // Use a simple variant for fuzzing
             .collect();
 
-        let recommendations = self.recommendations.iter()
+        let recommendations = self
+            .recommendations
+            .iter()
             .take(MAX_RECOMMENDATIONS)
             .map(|s| s.chars().take(MAX_STRING_LEN).collect())
             .collect();
@@ -178,12 +186,16 @@ impl FuzzTaskBlockedExplanation {
             },
         };
 
-        let details = self.details.iter()
+        let details = self
+            .details
+            .iter()
             .take(MAX_DETAILS)
             .map(|s| s.chars().take(MAX_STRING_LEN).collect())
             .collect();
 
-        let recommendations = self.recommendations.iter()
+        let recommendations = self
+            .recommendations
+            .iter()
             .take(MAX_RECOMMENDATIONS)
             .map(|s| s.chars().take(MAX_STRING_LEN).collect())
             .collect();
@@ -200,17 +212,21 @@ impl FuzzTaskBlockedExplanation {
 impl FuzzObligationLeak {
     fn to_real(&self) -> ObligationLeak {
         let holder_task = if self.has_holder_task {
-            Some(TaskId::new_for_test(self.holder_task as u32, (self.holder_task >> 32) as u32))
+            Some(TaskId::new_for_test(
+                self.holder_task as u32,
+                (self.holder_task >> 32) as u32,
+            ))
         } else {
             None
         };
 
-        let obligation_type = self.obligation_type.chars()
-            .take(MAX_STRING_LEN)
-            .collect();
+        let obligation_type = self.obligation_type.chars().take(MAX_STRING_LEN).collect();
 
         ObligationLeak {
-            obligation_id: ObligationId::new_for_test(self.obligation_id as u32, (self.obligation_id >> 32) as u32),
+            obligation_id: ObligationId::new_for_test(
+                self.obligation_id as u32,
+                (self.obligation_id >> 32) as u32,
+            ),
             obligation_type,
             holder_task,
             region_id: RegionId::new_for_test(self.region_id as u32, (self.region_id >> 32) as u32),
@@ -234,11 +250,17 @@ fn validate_ndjson(ndjson_str: &str) -> Result<(), String> {
 
         // Check for embedded unescaped newlines within the JSON content
         if line.contains('\n') {
-            return Err(format!("Line {}: Contains unescaped newline character", i + 1));
+            return Err(format!(
+                "Line {}: Contains unescaped newline character",
+                i + 1
+            ));
         }
 
         if line.contains('\r') {
-            return Err(format!("Line {}: Contains unescaped carriage return character", i + 1));
+            return Err(format!(
+                "Line {}: Contains unescaped carriage return character",
+                i + 1
+            ));
         }
     }
 
@@ -294,24 +316,36 @@ fuzz_target!(|data: &[u8]| {
     if !deadlock_ndjson.is_empty() {
         let first_line = deadlock_ndjson.lines().next().unwrap();
         let json: Value = serde_json::from_str(first_line).unwrap();
-        assert!(json.get("type").is_some(), "Missing type field in deadlock report");
+        assert!(
+            json.get("type").is_some(),
+            "Missing type field in deadlock report"
+        );
     }
 
     if !region_ndjson.is_empty() {
         let first_line = region_ndjson.lines().next().unwrap();
         let json: Value = serde_json::from_str(first_line).unwrap();
-        assert!(json.get("type").is_some(), "Missing type field in region explanation");
+        assert!(
+            json.get("type").is_some(),
+            "Missing type field in region explanation"
+        );
     }
 
     if !task_ndjson.is_empty() {
         let first_line = task_ndjson.lines().next().unwrap();
         let json: Value = serde_json::from_str(first_line).unwrap();
-        assert!(json.get("type").is_some(), "Missing type field in task explanation");
+        assert!(
+            json.get("type").is_some(),
+            "Missing type field in task explanation"
+        );
     }
 
     if !obligation_ndjson.is_empty() {
         let json: Value = serde_json::from_str(&obligation_ndjson.trim()).unwrap();
-        assert!(json.get("type").is_some(), "Missing type field in obligation leak");
+        assert!(
+            json.get("type").is_some(),
+            "Missing type field in obligation leak"
+        );
     }
 
     // Test round-trip: parse the NDJSON and ensure we can reconstruct meaningful data
@@ -323,10 +357,18 @@ fuzz_target!(|data: &[u8]| {
     }
 
     // Verify no control character injection
-    for ndjson in [&deadlock_ndjson, &region_ndjson, &task_ndjson, &obligation_ndjson] {
+    for ndjson in [
+        &deadlock_ndjson,
+        &region_ndjson,
+        &task_ndjson,
+        &obligation_ndjson,
+    ] {
         for ch in ndjson.chars() {
             if ch.is_control() && ch != '\n' && ch != '\t' {
-                panic!("Control character found in NDJSON output: {:?} (U+{:04X})", ch, ch as u32);
+                panic!(
+                    "Control character found in NDJSON output: {:?} (U+{:04X})",
+                    ch, ch as u32
+                );
             }
         }
     }

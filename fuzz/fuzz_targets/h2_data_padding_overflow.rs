@@ -1,7 +1,7 @@
 #![no_main]
 
-use libfuzzer_sys::fuzz_target;
 use arbitrary::Arbitrary;
+use libfuzzer_sys::fuzz_target;
 
 /// HTTP/2 DATA frame padding validation fuzz target.
 ///
@@ -75,10 +75,10 @@ impl MockDataProcessor {
 
         // Check frame size limits
         if input.frame_payload_length as u32 > self.policy.max_frame_size {
-            return DataFrameResult::Invalid(
-                format!("Frame size {} exceeds maximum {}",
-                       input.frame_payload_length, self.policy.max_frame_size)
-            );
+            return DataFrameResult::Invalid(format!(
+                "Frame size {} exceeds maximum {}",
+                input.frame_payload_length, self.policy.max_frame_size
+            ));
         }
 
         if !input.padded_flag {
@@ -104,10 +104,10 @@ impl MockDataProcessor {
         let available_for_padding = total_payload.saturating_sub(pad_length_field_size);
 
         if pad_length > available_for_padding {
-            return DataFrameResult::ProtocolError(
-                format!("Pad length {} exceeds available space {} (total payload {} - pad length field {})",
-                       pad_length, available_for_padding, total_payload, pad_length_field_size)
-            );
+            return DataFrameResult::ProtocolError(format!(
+                "Pad length {} exceeds available space {} (total payload {} - pad length field {})",
+                pad_length, available_for_padding, total_payload, pad_length_field_size
+            ));
         }
 
         // Calculate actual data length
@@ -115,7 +115,7 @@ impl MockDataProcessor {
 
         if data_length == 0 && !self.policy.allow_zero_data && self.policy.strict_padding {
             return DataFrameResult::Invalid(
-                "Zero-length data with maximum padding not allowed".to_string()
+                "Zero-length data with maximum padding not allowed".to_string(),
             );
         }
 
@@ -123,48 +123,52 @@ impl MockDataProcessor {
         self.validate_padding_scenarios(input, data_length)
     }
 
-    fn validate_padding_scenarios(&self, input: &DataPaddingInput, data_length: u16) -> DataFrameResult {
+    fn validate_padding_scenarios(
+        &self,
+        input: &DataPaddingInput,
+        data_length: u16,
+    ) -> DataFrameResult {
         let pad_length = input.pad_length as u16;
         let total_payload = input.frame_payload_length;
 
         // Scenario 1: Maximum padding (255) with minimal frame size
         if pad_length == 255 && total_payload == 256 {
             return DataFrameResult::ProtocolError(
-                "Critical case: pad-length=255 with frame-payload=256 leaves no data space".to_string()
+                "Critical case: pad-length=255 with frame-payload=256 leaves no data space"
+                    .to_string(),
             );
         }
 
         // Scenario 2: Padding equals total payload (impossible case)
         if pad_length + 1 == total_payload {
             return DataFrameResult::ProtocolError(
-                "Padding plus pad-length field equals total payload".to_string()
+                "Padding plus pad-length field equals total payload".to_string(),
             );
         }
 
         // Scenario 3: Padding exceeds total payload
         if pad_length + 1 > total_payload {
             return DataFrameResult::ProtocolError(
-                "Padding plus pad-length field exceeds total payload".to_string()
+                "Padding plus pad-length field exceeds total payload".to_string(),
             );
         }
 
         // Scenario 4: Valid padding with END_STREAM flag
         if input.end_stream_flag && data_length == 0 && pad_length > 0 {
             return DataFrameResult::Valid(
-                "Valid END_STREAM DATA frame with padding only".to_string()
+                "Valid END_STREAM DATA frame with padding only".to_string(),
             );
         }
 
         // Scenario 5: Suspicious maximum padding
         if pad_length == 255 && self.policy.strict_padding {
-            return DataFrameResult::Suspicious(
-                "Maximum padding length 255 detected".to_string()
-            );
+            return DataFrameResult::Suspicious("Maximum padding length 255 detected".to_string());
         }
 
-        DataFrameResult::Valid(
-            format!("Valid DATA frame: {} bytes data, {} bytes padding", data_length, pad_length)
-        )
+        DataFrameResult::Valid(format!(
+            "Valid DATA frame: {} bytes data, {} bytes padding",
+            data_length, pad_length
+        ))
     }
 }
 
@@ -200,26 +204,34 @@ fuzz_target!(|input: DataPaddingInput| {
             let total_payload = input.frame_payload_length;
 
             if pad_length + 1 >= total_payload {
-                assert!(msg.contains("exceeds") || msg.contains("equals"),
-                       "Protocol error should mention padding overflow: {}", msg);
+                assert!(
+                    msg.contains("exceeds") || msg.contains("equals"),
+                    "Protocol error should mention padding overflow: {}",
+                    msg
+                );
             }
 
             // Critical test case from the specification
             if pad_length == 255 && total_payload == 256 {
-                assert!(msg.contains("leaves no data space") || msg.contains("exceeds"),
-                       "Critical padding overflow case not properly detected: {}", msg);
+                assert!(
+                    msg.contains("leaves no data space") || msg.contains("exceeds"),
+                    "Critical padding overflow case not properly detected: {}",
+                    msg
+                );
             }
-        },
+        }
 
         DataFrameResult::Valid(_) => {
             // Verify that valid frames actually have proper padding
             if input.padded_flag {
                 let pad_length = input.pad_length as u16;
                 let available = input.frame_payload_length.saturating_sub(1);
-                assert!(pad_length <= available,
-                       "Valid frame should not have padding overflow");
+                assert!(
+                    pad_length <= available,
+                    "Valid frame should not have padding overflow"
+                );
             }
-        },
+        }
 
         DataFrameResult::Invalid(_) | DataFrameResult::Suspicious(_) => {
             // These are acceptable outcomes for edge cases
@@ -231,12 +243,14 @@ fuzz_target!(|input: DataPaddingInput| {
         match result {
             DataFrameResult::ProtocolError(_) | DataFrameResult::Suspicious(_) => {
                 // Expected for maximum padding
-            },
+            }
             DataFrameResult::Valid(_) => {
                 // Only valid if frame is large enough
-                assert!(input.frame_payload_length > 256,
-                       "Maximum padding should only be valid with large frames");
-            },
+                assert!(
+                    input.frame_payload_length > 256,
+                    "Maximum padding should only be valid with large frames"
+                );
+            }
             _ => {}
         }
     }

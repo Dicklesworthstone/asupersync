@@ -246,15 +246,22 @@ fn is_forbidden_trailer(name: &str) -> bool {
         "transfer-encoding",
     ];
 
-    FORBIDDEN.iter().any(|&forbidden| name.eq_ignore_ascii_case(forbidden))
+    FORBIDDEN
+        .iter()
+        .any(|&forbidden| name.eq_ignore_ascii_case(forbidden))
 }
 
 /// Generate forbidden header names for testing
 fn generate_forbidden_header_name(use_forbidden: bool, base_name: &str) -> String {
     if use_forbidden {
         let forbidden_names = [
-            "content-length", "transfer-encoding", "authorization",
-            "host", "cache-control", "content-type", "trailer"
+            "content-length",
+            "transfer-encoding",
+            "authorization",
+            "host",
+            "cache-control",
+            "content-type",
+            "trailer",
         ];
         forbidden_names[base_name.len() % forbidden_names.len()].to_string()
     } else {
@@ -339,10 +346,8 @@ fuzz_target!(|scenario: ChunkedTrailerScenario| {
     // Process final trailers if we reached the trailer phase
     if decoder.can_receive_trailers() {
         for trailer in &scenario.final_trailers {
-            let header_name = generate_forbidden_header_name(
-                trailer.use_forbidden_name,
-                &trailer.name
-            );
+            let header_name =
+                generate_forbidden_header_name(trailer.use_forbidden_name, &trailer.name);
 
             let trailer_line = if trailer.malformed_syntax {
                 // Invalid syntax (no colon, control chars, etc.)
@@ -385,7 +390,8 @@ fuzz_target!(|scenario: ChunkedTrailerScenario| {
                     "Malformed final chunk should have failed"
                 );
 
-                let has_forbidden = scenario.final_trailers
+                let has_forbidden = scenario
+                    .final_trailers
                     .iter()
                     .any(|t| t.use_forbidden_name && !t.malformed_syntax);
                 assert!(
@@ -398,7 +404,8 @@ fuzz_target!(|scenario: ChunkedTrailerScenario| {
             assert!(
                 body.len() <= max_body_size,
                 "Body size {} exceeds limit {}",
-                body.len(), max_body_size
+                body.len(),
+                max_body_size
             );
 
             // Validate no forbidden trailers in result
@@ -411,14 +418,16 @@ fuzz_target!(|scenario: ChunkedTrailerScenario| {
             }
 
             // Validate trailer count matches expected
-            let expected_trailer_count = scenario.final_trailers
+            let expected_trailer_count = scenario
+                .final_trailers
                 .iter()
                 .filter(|t| !t.use_forbidden_name && !t.malformed_syntax)
                 .count();
 
             if scenario.include_final_empty_line && errors.is_empty() {
                 assert_eq!(
-                    trailers.len(), expected_trailer_count,
+                    trailers.len(),
+                    expected_trailer_count,
                     "Unexpected trailer count"
                 );
             }
@@ -427,8 +436,7 @@ fuzz_target!(|scenario: ChunkedTrailerScenario| {
             // Failed to parse - validate that failure was expected
             if !expected_to_fail && !errors.is_empty() {
                 // Unexpected failure - check if it was due to size limits
-                let has_size_error = error_list.iter()
-                    .any(|e| e.contains("too large"));
+                let has_size_error = error_list.iter().any(|e| e.contains("too large"));
 
                 if !has_size_error {
                     // Non-size-related unexpected failure might indicate a bug
@@ -446,22 +454,18 @@ mod tests {
     #[test]
     fn test_valid_chunked_with_trailers() {
         let scenario = ChunkedTrailerScenario {
-            chunks: vec![
-                Chunk {
-                    size: 5,
-                    data: b"hello".to_vec(),
-                    illegal_trailers_before_final: false,
-                    trailers: vec![],
-                }
-            ],
-            final_trailers: vec![
-                TrailerHeader {
-                    name: "x-trace".to_string(),
-                    value: "abc123".to_string(),
-                    use_forbidden_name: false,
-                    malformed_syntax: false,
-                }
-            ],
+            chunks: vec![Chunk {
+                size: 5,
+                data: b"hello".to_vec(),
+                illegal_trailers_before_final: false,
+                trailers: vec![],
+            }],
+            final_trailers: vec![TrailerHeader {
+                name: "x-trace".to_string(),
+                value: "abc123".to_string(),
+                use_forbidden_name: false,
+                malformed_syntax: false,
+            }],
             include_final_empty_line: true,
             malformed_final_chunk: false,
             max_body_size: 1000,
@@ -475,14 +479,12 @@ mod tests {
     fn test_forbidden_trailer_rejection() {
         let scenario = ChunkedTrailerScenario {
             chunks: vec![],
-            final_trailers: vec![
-                TrailerHeader {
-                    name: "content-length".to_string(),
-                    value: "100".to_string(),
-                    use_forbidden_name: true,
-                    malformed_syntax: false,
-                }
-            ],
+            final_trailers: vec![TrailerHeader {
+                name: "content-length".to_string(),
+                value: "100".to_string(),
+                use_forbidden_name: true,
+                malformed_syntax: false,
+            }],
             include_final_empty_line: true,
             malformed_final_chunk: false,
             max_body_size: 1000,

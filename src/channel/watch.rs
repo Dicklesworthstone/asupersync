@@ -3310,4 +3310,116 @@ mod tests {
 
         crate::test_complete!("audit_watch_no_buffering_latest_only");
     }
+
+    /// Audit test: Sender::send_modify() panic safety semantics.
+    ///
+    /// Per asupersync spec, there should be no Mutex-style poisoning.
+    /// When the modifier closure panics, the Sender must remain usable
+    /// and the channel state must be unchanged (panic-safe).
+    #[test]
+    fn audit_send_modify_panic_safe_semantics() {
+        init_test("audit_send_modify_panic_safe_semantics");
+
+        let (tx, mut rx) = channel(42);
+
+        // Phase 1: Verify initial state
+        crate::assert_with_log!(*rx.borrow() == 42, "initial value is 42", 42, *rx.borrow());
+
+        // Phase 2: Test successful modify (baseline)
+        let modify_result = tx.send_modify(|x| *x += 1);
+        crate::assert_with_log!(
+            modify_result.is_ok(),
+            "successful modify returns Ok",
+            true,
+            modify_result.is_ok()
+        );
+
+        crate::assert_with_log!(
+            *rx.borrow() == 43,
+            "value updated to 43 after successful modify",
+            43,
+            *rx.borrow()
+        );
+
+        // Phase 3: Test panic during modify (critical test)
+        let panic_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            tx.send_modify(|x| {
+                *x = 999; // This change should NOT be committed due to panic
+                panic!("intentional panic during modify");
+            })
+        }));
+
+        // Verify the panic was caught
+        crate::assert_with_log!(
+            panic_result.is_err(),
+            "modify closure panic was caught",
+            true,
+            panic_result.is_err()
+        );
+
+        // CRITICAL: Verify panic-safe behavior
+        crate::assert_with_log!(
+            *rx.borrow() == 43,
+            "value unchanged after panic (panic-safe)",
+            43,
+            *rx.borrow()
+        );
+
+        // Phase 4: Test Sender usability after panic (critical test)
+        let post_panic_result = tx.send_modify(|x| *x += 10);
+        crate::assert_with_log!(
+            post_panic_result.is_ok(),
+            "Sender remains usable after panic (no poisoning)",
+            true,
+            post_panic_result.is_ok()
+        );
+
+        crate::assert_with_log!(
+            *rx.borrow() == 53,
+            "value updated to 53 after post-panic modify",
+            53,
+            *rx.borrow()
+        );
+
+        // Phase 5: Test multiple panic recovery cycles
+        for i in 1..=3 {
+            // Panic
+            let _panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                tx.send_modify(|_x| panic!("panic cycle {}", i))
+            }));
+
+            // Verify still works
+            let recovery_result = tx.send_modify(|x| *x += 1);
+            crate::assert_with_log!(
+                recovery_result.is_ok(),
+                &format!("Sender recovers after panic cycle {}", i),
+                true,
+                recovery_result.is_ok()
+            );
+        }
+
+        let final_value = *rx.borrow();
+        crate::assert_with_log!(
+            final_value == 56, // 53 + 3 increments
+            "final value correct after multiple panic cycles",
+            56,
+            final_value
+        );
+
+        // Phase 6: Test receiver still works normally
+        let changed_future = rx.changed();
+        tx.send_modify(|x| *x = 100)
+            .expect("final modify should work");
+
+        // Verify change notification works
+        poll_ready(&mut Box::pin(changed_future));
+        crate::assert_with_log!(
+            *rx.borrow() == 100,
+            "receiver notifications work after panic recovery",
+            100,
+            *rx.borrow()
+        );
+
+        crate::test_complete!("audit_send_modify_panic_safe_semantics");
+    }
 }

@@ -272,32 +272,35 @@ struct HeaderData {
 fn generate_edge_case_operations() -> Vec<TableOperation> {
     vec![
         // Boundary sizes
-        TableOperation::UpdateTableSize(0),                    // Disable dynamic table
-        TableOperation::UpdateTableSize(1),                    // Minimum size
-        TableOperation::UpdateTableSize(4096),                 // Default size
-        TableOperation::UpdateTableSize(1024 * 1024),          // 1 MiB cap
-        TableOperation::UpdateTableSize(1024 * 1024 + 1),      // Over cap (should be capped)
-        TableOperation::UpdateTableSize(u32::MAX),             // Maximum value
-
+        TableOperation::UpdateTableSize(0), // Disable dynamic table
+        TableOperation::UpdateTableSize(1), // Minimum size
+        TableOperation::UpdateTableSize(4096), // Default size
+        TableOperation::UpdateTableSize(1024 * 1024), // 1 MiB cap
+        TableOperation::UpdateTableSize(1024 * 1024 + 1), // Over cap (should be capped)
+        TableOperation::UpdateTableSize(u32::MAX), // Maximum value
         // Shrink-then-grow scenarios (RFC 7541 §4.2)
-        TableOperation::UpdateTableSize(8192),                 // Start large
-        TableOperation::UpdateTableSize(1024),                 // Shrink
-        TableOperation::UpdateTableSize(4096),                 // Grow (should emit min first)
-
+        TableOperation::UpdateTableSize(8192), // Start large
+        TableOperation::UpdateTableSize(1024), // Shrink
+        TableOperation::UpdateTableSize(4096), // Grow (should emit min first)
         // Zero-size scenarios
-        TableOperation::UpdateTableSize(0),                    // Disable
-        TableOperation::EncodeHeaders(vec![
-            HeaderData { name: "x-test".to_string(), value: "value1".to_string() },
-        ]),
-        TableOperation::UpdateTableSize(4096),                 // Re-enable
-
+        TableOperation::UpdateTableSize(0), // Disable
+        TableOperation::EncodeHeaders(vec![HeaderData {
+            name: "x-test".to_string(),
+            value: "value1".to_string(),
+        }]),
+        TableOperation::UpdateTableSize(4096), // Re-enable
         // Large header scenarios
-        TableOperation::UpdateTableSize(1024),                 // Small table
+        TableOperation::UpdateTableSize(1024), // Small table
         TableOperation::EncodeHeaders(vec![
-            HeaderData { name: "x-large".to_string(), value: "x".repeat(500) }, // Large value
-            HeaderData { name: "x-another".to_string(), value: "y".repeat(500) },
+            HeaderData {
+                name: "x-large".to_string(),
+                value: "x".repeat(500),
+            }, // Large value
+            HeaderData {
+                name: "x-another".to_string(),
+                value: "y".repeat(500),
+            },
         ]),
-
         // Rapid size changes
         TableOperation::UpdateTableSize(2048),
         TableOperation::UpdateTableSize(1024),
@@ -341,37 +344,53 @@ fuzz_target!(|scenario: HeaderTableSizeScenario| {
                 encoder.set_max_table_size(new_size_usize);
 
                 // Verify the size was properly capped
-                assert!(encoder.dynamic_table_max_size() <= 1024 * 1024,
-                    "Table size {} exceeds 1 MiB cap", encoder.dynamic_table_max_size());
+                assert!(
+                    encoder.dynamic_table_max_size() <= 1024 * 1024,
+                    "Table size {} exceeds 1 MiB cap",
+                    encoder.dynamic_table_max_size()
+                );
 
                 // Verify size update is pending
-                assert!(encoder.has_pending_size_update(),
-                    "Size update should be pending after set_max_table_size");
+                assert!(
+                    encoder.has_pending_size_update(),
+                    "Size update should be pending after set_max_table_size"
+                );
 
                 size_update_count += 1;
                 previous_table_size = new_size_usize;
             }
             TableOperation::EncodeHeaders(header_data) => {
                 // Convert to Header objects, limiting size to prevent timeouts
-                let headers: Vec<Header> = header_data.iter().take(10).map(|h| Header {
-                    name: h.name.chars().take(50).collect(), // Limit name length
-                    value: h.value.chars().take(200).collect(), // Limit value length
-                }).collect();
+                let headers: Vec<Header> = header_data
+                    .iter()
+                    .take(10)
+                    .map(|h| Header {
+                        name: h.name.chars().take(50).collect(), // Limit name length
+                        value: h.value.chars().take(200).collect(), // Limit value length
+                    })
+                    .collect();
 
                 let encoded = encoder.encode(&headers);
 
                 // Verify encoding produces output
-                assert!(!encoded.is_empty() || headers.is_empty(),
-                    "Encoding headers should produce output");
+                assert!(
+                    !encoded.is_empty() || headers.is_empty(),
+                    "Encoding headers should produce output"
+                );
 
                 // Verify no pending size update after encoding
-                assert!(!encoder.has_pending_size_update(),
-                    "Size update should be consumed during encoding");
+                assert!(
+                    !encoder.has_pending_size_update(),
+                    "Size update should be consumed during encoding"
+                );
 
                 // Check for valid table state
-                assert!(encoder.dynamic_table_size() <= encoder.dynamic_table_max_size(),
+                assert!(
+                    encoder.dynamic_table_size() <= encoder.dynamic_table_max_size(),
                     "Dynamic table size {} exceeds max size {}",
-                    encoder.dynamic_table_size(), encoder.dynamic_table_max_size());
+                    encoder.dynamic_table_size(),
+                    encoder.dynamic_table_max_size()
+                );
 
                 encoded_blocks += 1;
             }
@@ -387,16 +406,16 @@ fuzz_target!(|scenario: HeaderTableSizeScenario| {
 /// Test that sizes are properly capped to 1 MiB
 fn test_size_capping_behavior(encoder: &mut MockHpackEncoder) {
     // Test oversized values
-    let oversized_values = [
-        1024 * 1024 + 1,
-        2 * 1024 * 1024,
-        u32::MAX as usize,
-    ];
+    let oversized_values = [1024 * 1024 + 1, 2 * 1024 * 1024, u32::MAX as usize];
 
     for &size in &oversized_values {
         encoder.set_max_table_size(size);
-        assert_eq!(encoder.dynamic_table_max_size(), 1024 * 1024,
-            "Size {} should be capped to 1 MiB", size);
+        assert_eq!(
+            encoder.dynamic_table_max_size(),
+            1024 * 1024,
+            "Size {} should be capped to 1 MiB",
+            size
+        );
     }
 }
 
@@ -418,13 +437,19 @@ fn test_zero_table_size_behavior(encoder: &mut MockHpackEncoder) {
     encoder.set_max_table_size(0);
     assert_eq!(encoder.dynamic_table_max_size(), 0);
     assert_eq!(encoder.dynamic_table_size(), 0);
-    assert_eq!(encoder.dynamic_table_entry_count(), 0,
-        "Zero table size should clear all entries");
+    assert_eq!(
+        encoder.dynamic_table_entry_count(),
+        0,
+        "Zero table size should clear all entries"
+    );
 
     // Encode more headers - should not add to table
     encoder.encode(&headers);
-    assert_eq!(encoder.dynamic_table_entry_count(), 0,
-        "Headers should not be added to disabled table");
+    assert_eq!(
+        encoder.dynamic_table_entry_count(),
+        0,
+        "Headers should not be added to disabled table"
+    );
 }
 
 /// Test shrink-then-grow scenario per RFC 7541 §4.2
@@ -459,13 +484,15 @@ mod tests {
             initial_table_size: 4096,
             operations: vec![
                 TableOperation::UpdateTableSize(8192),
-                TableOperation::EncodeHeaders(vec![
-                    HeaderData { name: "x-test".to_string(), value: "value1".to_string() },
-                ]),
+                TableOperation::EncodeHeaders(vec![HeaderData {
+                    name: "x-test".to_string(),
+                    value: "value1".to_string(),
+                }]),
                 TableOperation::UpdateTableSize(2048),
-                TableOperation::EncodeHeaders(vec![
-                    HeaderData { name: "x-another".to_string(), value: "value2".to_string() },
-                ]),
+                TableOperation::EncodeHeaders(vec![HeaderData {
+                    name: "x-another".to_string(),
+                    value: "value2".to_string(),
+                }]),
             ],
             include_edge_cases: false,
         };
@@ -479,13 +506,15 @@ mod tests {
             initial_table_size: 4096,
             operations: vec![
                 TableOperation::UpdateTableSize(2 * 1024 * 1024), // 2 MiB - should be capped
-                TableOperation::EncodeHeaders(vec![
-                    HeaderData { name: "x-large".to_string(), value: "test".to_string() },
-                ]),
+                TableOperation::EncodeHeaders(vec![HeaderData {
+                    name: "x-large".to_string(),
+                    value: "test".to_string(),
+                }]),
                 TableOperation::UpdateTableSize(u32::MAX), // Maximum - should be capped
-                TableOperation::EncodeHeaders(vec![
-                    HeaderData { name: "x-max".to_string(), value: "test".to_string() },
-                ]),
+                TableOperation::EncodeHeaders(vec![HeaderData {
+                    name: "x-max".to_string(),
+                    value: "test".to_string(),
+                }]),
             ],
             include_edge_cases: false,
         };
@@ -498,17 +527,20 @@ mod tests {
         let scenario = HeaderTableSizeScenario {
             initial_table_size: 4096,
             operations: vec![
-                TableOperation::EncodeHeaders(vec![
-                    HeaderData { name: "x-before".to_string(), value: "value1".to_string() },
-                ]),
+                TableOperation::EncodeHeaders(vec![HeaderData {
+                    name: "x-before".to_string(),
+                    value: "value1".to_string(),
+                }]),
                 TableOperation::UpdateTableSize(0), // Disable dynamic table
-                TableOperation::EncodeHeaders(vec![
-                    HeaderData { name: "x-disabled".to_string(), value: "value2".to_string() },
-                ]),
+                TableOperation::EncodeHeaders(vec![HeaderData {
+                    name: "x-disabled".to_string(),
+                    value: "value2".to_string(),
+                }]),
                 TableOperation::UpdateTableSize(4096), // Re-enable
-                TableOperation::EncodeHeaders(vec![
-                    HeaderData { name: "x-after".to_string(), value: "value3".to_string() },
-                ]),
+                TableOperation::EncodeHeaders(vec![HeaderData {
+                    name: "x-after".to_string(),
+                    value: "value3".to_string(),
+                }]),
             ],
             include_edge_cases: false,
         };
@@ -525,9 +557,10 @@ mod tests {
                 TableOperation::UpdateTableSize(2048),
                 TableOperation::UpdateTableSize(1024),
                 TableOperation::UpdateTableSize(4096),
-                TableOperation::EncodeHeaders(vec![
-                    HeaderData { name: "x-final".to_string(), value: "value".to_string() },
-                ]),
+                TableOperation::EncodeHeaders(vec![HeaderData {
+                    name: "x-final".to_string(),
+                    value: "value".to_string(),
+                }]),
             ],
             include_edge_cases: false,
         };

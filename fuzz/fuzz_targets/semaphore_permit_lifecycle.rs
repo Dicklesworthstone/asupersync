@@ -231,17 +231,27 @@ impl PermitTracker {
         let total_accounted = final_available + held_permits + self.permits_forgotten;
 
         assert_eq!(
-            total_accounted, self.initial_permits,
+            total_accounted,
+            self.initial_permits,
             "Permit conservation violated: initial={}, available={}, held={}, forgotten={}, total_accounted={}",
-            self.initial_permits, final_available, held_permits, self.permits_forgotten, total_accounted
+            self.initial_permits,
+            final_available,
+            held_permits,
+            self.permits_forgotten,
+            total_accounted
         );
 
         // Law 2: Acquired permits = released + forgotten + currently held
         let total_disposed = self.permits_released + self.permits_forgotten + held_permits;
         assert_eq!(
-            self.permits_acquired, total_disposed,
+            self.permits_acquired,
+            total_disposed,
             "Permit accounting violated: acquired={}, released={}, forgotten={}, held={}, total_disposed={}",
-            self.permits_acquired, self.permits_released, self.permits_forgotten, held_permits, total_disposed
+            self.permits_acquired,
+            self.permits_released,
+            self.permits_forgotten,
+            held_permits,
+            total_disposed
         );
 
         // Law 3: Available + held + forgotten = initial (basic conservation)

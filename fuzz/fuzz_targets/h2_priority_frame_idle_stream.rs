@@ -121,7 +121,8 @@ fuzz_target!(|data: &[u8]| {
     // Limit concurrent streams and headers for performance
     if test_case.concurrent_streams.len() > 15
         || test_case.headers_data.headers.len() > 20
-        || test_case.priority_frame.extra_data.len() > 1000 {
+        || test_case.priority_frame.extra_data.len() > 1000
+    {
         return;
     }
 
@@ -165,35 +166,49 @@ fn test_priority_on_idle_stream(test_case: &PriorityIdleTest) {
         )
     }));
 
-    assert!(priority_result.is_ok(),
-        "PRIORITY frame on idle stream {} should not panic", stream_id);
+    assert!(
+        priority_result.is_ok(),
+        "PRIORITY frame on idle stream {} should not panic",
+        stream_id
+    );
 
     if let Ok(result) = priority_result {
         match result {
             PriorityResult::Accepted { recorded_priority } => {
                 // Verify priority was recorded for idle stream
-                assert_eq!(recorded_priority.weight, test_case.priority_frame.weight,
-                    "Priority weight should be recorded correctly");
+                assert_eq!(
+                    recorded_priority.weight, test_case.priority_frame.weight,
+                    "Priority weight should be recorded correctly"
+                );
 
-                assert_eq!(recorded_priority.stream_dependency,
-                    test_case.priority_frame.stream_dependency,
-                    "Stream dependency should be recorded correctly");
+                assert_eq!(
+                    recorded_priority.stream_dependency, test_case.priority_frame.stream_dependency,
+                    "Stream dependency should be recorded correctly"
+                );
 
-                assert_eq!(recorded_priority.exclusive, test_case.priority_frame.exclusive,
-                    "Exclusive flag should be recorded correctly");
+                assert_eq!(
+                    recorded_priority.exclusive, test_case.priority_frame.exclusive,
+                    "Exclusive flag should be recorded correctly"
+                );
 
                 // Verify stream is still idle but has priority info
                 let stream_state = mock_connection.get_stream_state(stream_id);
-                assert!(matches!(stream_state, Some(StreamState::IdleWithPriority)),
-                    "Stream should be in IdleWithPriority state after PRIORITY frame");
+                assert!(
+                    matches!(stream_state, Some(StreamState::IdleWithPriority)),
+                    "Stream should be in IdleWithPriority state after PRIORITY frame"
+                );
             }
             PriorityResult::Rejected { reason } => {
                 // Check if rejection is for a valid reason
-                if is_valid_stream_dependency(test_case.priority_frame.stream_dependency, stream_id) {
+                if is_valid_stream_dependency(test_case.priority_frame.stream_dependency, stream_id)
+                {
                     // Should only reject for implementation limits or malformed data
-                    assert!(!test_case.priority_frame.extra_data.is_empty() ||
-                            test_case.priority_frame.weight == 0, // Invalid weight
-                        "Valid PRIORITY should not be rejected: {}", reason);
+                    assert!(
+                        !test_case.priority_frame.extra_data.is_empty()
+                            || test_case.priority_frame.weight == 0, // Invalid weight
+                        "Valid PRIORITY should not be rejected: {}",
+                        reason
+                    );
                 }
             }
         }
@@ -201,8 +216,10 @@ fn test_priority_on_idle_stream(test_case: &PriorityIdleTest) {
         // Verify priority is queryable
         let priority_info = mock_connection.get_stream_priority(stream_id);
         if matches!(result, PriorityResult::Accepted { .. }) {
-            assert!(priority_info.is_some(),
-                "Priority info should be available after accepted PRIORITY frame");
+            assert!(
+                priority_info.is_some(),
+                "Priority info should be available after accepted PRIORITY frame"
+            );
         }
     }
 }
@@ -239,41 +256,58 @@ fn test_priority_application_on_open(test_case: &PriorityIdleTest) {
         )
     }));
 
-    assert!(headers_result.is_ok(),
-        "HEADERS frame should not panic on stream {} with prior PRIORITY", stream_id);
+    assert!(
+        headers_result.is_ok(),
+        "HEADERS frame should not panic on stream {} with prior PRIORITY",
+        stream_id
+    );
 
     if let Ok(headers_outcome) = headers_result {
         match headers_outcome {
             HeadersResult::StreamOpened { applied_priority } => {
                 // Verify priority from PRIORITY frame was applied
-                assert_eq!(applied_priority.weight, test_case.priority_frame.weight,
-                    "Priority weight should be applied when stream opens");
+                assert_eq!(
+                    applied_priority.weight, test_case.priority_frame.weight,
+                    "Priority weight should be applied when stream opens"
+                );
 
-                assert_eq!(applied_priority.stream_dependency,
-                    test_case.priority_frame.stream_dependency,
-                    "Stream dependency should be applied when stream opens");
+                assert_eq!(
+                    applied_priority.stream_dependency, test_case.priority_frame.stream_dependency,
+                    "Stream dependency should be applied when stream opens"
+                );
 
-                assert_eq!(applied_priority.exclusive, test_case.priority_frame.exclusive,
-                    "Exclusive flag should be applied when stream opens");
+                assert_eq!(
+                    applied_priority.exclusive, test_case.priority_frame.exclusive,
+                    "Exclusive flag should be applied when stream opens"
+                );
 
                 // Verify stream is now open with correct priority
                 let stream_state = mock_connection.get_stream_state(stream_id);
-                assert!(matches!(stream_state, Some(StreamState::Open)),
-                    "Stream should be open after HEADERS frame");
+                assert!(
+                    matches!(stream_state, Some(StreamState::Open)),
+                    "Stream should be open after HEADERS frame"
+                );
 
                 let current_priority = mock_connection.get_stream_priority(stream_id);
-                assert!(current_priority.is_some(),
-                    "Stream should have priority after opening");
+                assert!(
+                    current_priority.is_some(),
+                    "Stream should have priority after opening"
+                );
 
                 if let Some(priority) = current_priority {
-                    assert_eq!(priority, applied_priority,
-                        "Current stream priority should match applied priority");
+                    assert_eq!(
+                        priority, applied_priority,
+                        "Current stream priority should match applied priority"
+                    );
                 }
             }
             HeadersResult::Rejected { reason } => {
                 // Headers rejection might be due to malformed headers, not priority
                 if has_valid_headers(&test_case.headers_data.headers) {
-                    panic!("Valid HEADERS should not be rejected after valid PRIORITY: {}", reason);
+                    panic!(
+                        "Valid HEADERS should not be rejected after valid PRIORITY: {}",
+                        reason
+                    );
                 }
             }
         }
@@ -315,21 +349,27 @@ fn test_stream_dependency_handling(test_case: &PriorityIdleTest) {
         PriorityResult::Accepted { recorded_priority } => {
             if dependency_exists {
                 // Dependency should be valid
-                assert_eq!(recorded_priority.stream_dependency, dependency_id,
-                    "Dependency should be recorded when parent stream exists");
+                assert_eq!(
+                    recorded_priority.stream_dependency, dependency_id,
+                    "Dependency should be recorded when parent stream exists"
+                );
 
                 // Check dependency tree
                 let dependency_tree = mock_connection.get_dependency_tree();
-                assert!(dependency_tree.has_dependency(stream_id, dependency_id),
-                    "Dependency tree should reflect the PRIORITY frame");
+                assert!(
+                    dependency_tree.has_dependency(stream_id, dependency_id),
+                    "Dependency tree should reflect the PRIORITY frame"
+                );
 
                 if test_case.priority_frame.exclusive {
                     // Exclusive dependency should reorganize tree
                     let siblings = dependency_tree.get_children(dependency_id);
                     for sibling in siblings {
                         if sibling != stream_id {
-                            assert!(dependency_tree.has_dependency(sibling, stream_id),
-                                "Exclusive dependency should make siblings depend on new stream");
+                            assert!(
+                                dependency_tree.has_dependency(sibling, stream_id),
+                                "Exclusive dependency should make siblings depend on new stream"
+                            );
                         }
                     }
                 }
@@ -367,7 +407,9 @@ fn test_exclusive_dependency(test_case: &PriorityIdleTest) {
     mock_connection.open_stream(child2, 12, dependency_id);
 
     // Record initial children
-    let initial_children = mock_connection.get_dependency_tree().get_children(dependency_id);
+    let initial_children = mock_connection
+        .get_dependency_tree()
+        .get_children(dependency_id);
 
     // Send exclusive PRIORITY frame
     let priority_result = mock_connection.send_priority_frame(
@@ -382,21 +424,28 @@ fn test_exclusive_dependency(test_case: &PriorityIdleTest) {
         let dependency_tree = mock_connection.get_dependency_tree();
 
         // New stream should depend on the parent
-        assert!(dependency_tree.has_dependency(stream_id, dependency_id),
-            "Exclusive stream should depend on parent");
+        assert!(
+            dependency_tree.has_dependency(stream_id, dependency_id),
+            "Exclusive stream should depend on parent"
+        );
 
         // Previous children should now depend on the new stream
         for child in initial_children {
             if mock_connection.get_stream_state(child).is_some() {
-                assert!(dependency_tree.has_dependency(child, stream_id),
-                    "Previous children should depend on exclusive stream {}", child);
+                assert!(
+                    dependency_tree.has_dependency(child, stream_id),
+                    "Previous children should depend on exclusive stream {}",
+                    child
+                );
             }
         }
 
         // Parent should have only the new stream as direct child
         let new_children = dependency_tree.get_children(dependency_id);
-        assert!(new_children.len() <= 1 || new_children.contains(&stream_id),
-            "Parent should have new stream as child after exclusive dependency");
+        assert!(
+            new_children.len() <= 1 || new_children.contains(&stream_id),
+            "Parent should have new stream as child after exclusive dependency"
+        );
     }
 }
 
@@ -410,8 +459,10 @@ fn test_priority_idle_edge_cases(test_case: &PriorityIdleTest) {
     }));
     assert!(self_dep_result.is_ok(), "Self-dependency should not panic");
     if let Ok(result) = self_dep_result {
-        assert!(matches!(result, PriorityResult::Rejected { .. }),
-            "Self-dependency should be rejected");
+        assert!(
+            matches!(result, PriorityResult::Rejected { .. }),
+            "Self-dependency should be rejected"
+        );
     }
 
     // Test zero weight (implementation defined)
@@ -427,7 +478,10 @@ fn test_priority_idle_edge_cases(test_case: &PriorityIdleTest) {
     let large_data_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         mock_connection.send_priority_frame(11, 0, false, 64, &large_data)
     }));
-    assert!(large_data_result.is_ok(), "Large extra data should not panic");
+    assert!(
+        large_data_result.is_ok(),
+        "Large extra data should not panic"
+    );
 
     // Test maximum stream ID
     let max_stream_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -439,7 +493,10 @@ fn test_priority_idle_edge_cases(test_case: &PriorityIdleTest) {
     let even_stream_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         mock_connection.send_priority_frame(2, 0, false, 16, &[])
     }));
-    assert!(even_stream_result.is_ok(), "Even stream ID should not panic");
+    assert!(
+        even_stream_result.is_ok(),
+        "Even stream ID should not panic"
+    );
 }
 
 impl HeaderName {
@@ -523,7 +580,7 @@ enum HeadersResult {
 /// Mock dependency tree
 #[derive(Debug)]
 struct DependencyTree {
-    dependencies: HashMap<u32, u32>, // child -> parent
+    dependencies: HashMap<u32, u32>,  // child -> parent
     children: HashMap<u32, Vec<u32>>, // parent -> [children]
 }
 
@@ -547,7 +604,10 @@ impl DependencyTree {
         }
 
         self.dependencies.insert(child, parent);
-        self.children.entry(parent).or_insert_with(Vec::new).push(child);
+        self.children
+            .entry(parent)
+            .or_insert_with(Vec::new)
+            .push(child);
     }
 
     fn has_dependency(&self, child: u32, parent: u32) -> bool {
@@ -593,7 +653,8 @@ impl MockH2Connection {
         extra_data: &[u8],
     ) -> PriorityResult {
         // Validate frame size
-        if extra_data.len() > 5 { // PRIORITY frame should be exactly 5 bytes
+        if extra_data.len() > 5 {
+            // PRIORITY frame should be exactly 5 bytes
             return PriorityResult::Rejected {
                 reason: "PRIORITY frame too large".to_string(),
             };
@@ -630,10 +691,12 @@ impl MockH2Connection {
         if let Some(stream_info) = self.streams.get_mut(&stream_id) {
             // Update existing stream priority
             stream_info.priority = priority_info.clone();
-            self.dependency_tree.add_dependency(stream_id, stream_dependency, exclusive);
+            self.dependency_tree
+                .add_dependency(stream_id, stream_dependency, exclusive);
         } else {
             // Record priority for idle stream
-            self.idle_priorities.insert(stream_id, priority_info.clone());
+            self.idle_priorities
+                .insert(stream_id, priority_info.clone());
         }
 
         PriorityResult::Accepted {
@@ -655,11 +718,14 @@ impl MockH2Connection {
         }
 
         // Get priority from idle priorities or use default
-        let priority = self.idle_priorities.remove(&stream_id).unwrap_or(PriorityInfo {
-            weight: 16,
-            stream_dependency: 0,
-            exclusive: false,
-        });
+        let priority = self
+            .idle_priorities
+            .remove(&stream_id)
+            .unwrap_or(PriorityInfo {
+                weight: 16,
+                stream_dependency: 0,
+                exclusive: false,
+            });
 
         // Create stream
         let stream_info = MockStreamInfo {
@@ -700,7 +766,8 @@ impl MockH2Connection {
         self.streams.insert(stream_id, stream_info);
 
         if depends_on != 0 {
-            self.dependency_tree.add_dependency(stream_id, depends_on, false);
+            self.dependency_tree
+                .add_dependency(stream_id, depends_on, false);
         }
     }
 
@@ -761,7 +828,6 @@ fn generate_idle_priority_scenarios() -> Vec<PriorityIdleTest> {
                 enable_push: false,
             },
         },
-
         // Exclusive dependency scenario
         PriorityIdleTest {
             stream_id: 5,
@@ -786,14 +852,12 @@ fn generate_idle_priority_scenarios() -> Vec<PriorityIdleTest> {
                 ],
                 padding: Some(5),
             },
-            concurrent_streams: vec![
-                ConcurrentStream {
-                    stream_id: 3,
-                    is_open: true,
-                    weight: 16,
-                    depends_on: 0,
-                },
-            ],
+            concurrent_streams: vec![ConcurrentStream {
+                stream_id: 3,
+                is_open: true,
+                weight: 16,
+                depends_on: 0,
+            }],
             connection_settings: ConnectionSettings {
                 initial_window_size: 32768,
                 max_concurrent_streams: 50,
@@ -840,8 +904,14 @@ mod tests {
 
         // Send HEADERS to open stream
         let headers = vec![
-            HeaderPair { name: HeaderName::Method, value: "GET".to_string() },
-            HeaderPair { name: HeaderName::Path, value: "/".to_string() },
+            HeaderPair {
+                name: HeaderName::Method,
+                value: "GET".to_string(),
+            },
+            HeaderPair {
+                name: HeaderName::Path,
+                value: "/".to_string(),
+            },
         ];
 
         let result = conn.send_headers_frame(1, &headers, false, None);

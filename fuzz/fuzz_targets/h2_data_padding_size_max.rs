@@ -1,7 +1,7 @@
 #![no_main]
 
-use libfuzzer_sys::fuzz_target;
 use arbitrary::{Arbitrary, Unstructured};
+use libfuzzer_sys::fuzz_target;
 
 /// HTTP/2 DATA frame maximum padding size validation testing.
 /// Per RFC 7540 §6.1, when PADDED flag is set, first byte indicates pad length.
@@ -100,13 +100,19 @@ impl MockH2DataPaddingParser {
     }
 
     /// Parse DATA frame with PADDED flag
-    fn parse_padded_data_frame(&mut self, frame: &DataFrameWithPadding, end_stream: bool) -> Result<(), String> {
+    fn parse_padded_data_frame(
+        &mut self,
+        frame: &DataFrameWithPadding,
+        end_stream: bool,
+    ) -> Result<(), String> {
         // Build raw frame payload
         let raw_payload = self.build_padded_payload(frame)?;
 
         // Validate minimum frame size for padded frame (at least pad-length byte)
         if raw_payload.is_empty() {
-            return Err("FRAME_SIZE_ERROR: PADDED DATA frame must have at least pad-length byte".into());
+            return Err(
+                "FRAME_SIZE_ERROR: PADDED DATA frame must have at least pad-length byte".into(),
+            );
         }
 
         // Extract pad-length from first byte
@@ -143,7 +149,8 @@ impl MockH2DataPaddingParser {
         if padding_bytes.len() != pad_length as usize {
             return Err(format!(
                 "PROTOCOL_ERROR: expected {} padding bytes, got {}",
-                pad_length, padding_bytes.len()
+                pad_length,
+                padding_bytes.len()
             ));
         }
 
@@ -165,7 +172,11 @@ impl MockH2DataPaddingParser {
     }
 
     /// Parse DATA frame without PADDED flag
-    fn parse_unpadded_data_frame(&mut self, frame: &DataFrameWithPadding, end_stream: bool) -> Result<(), String> {
+    fn parse_unpadded_data_frame(
+        &mut self,
+        frame: &DataFrameWithPadding,
+        end_stream: bool,
+    ) -> Result<(), String> {
         // For unpadded frames, all payload is data
         let data = frame.data_content.clone();
 
@@ -209,7 +220,8 @@ impl MockH2DataPaddingParser {
         if payload.len() != frame.total_payload_size as usize {
             return Err(format!(
                 "Payload size mismatch: expected {}, got {}",
-                frame.total_payload_size, payload.len()
+                frame.total_payload_size,
+                payload.len()
             ));
         }
 
@@ -272,8 +284,7 @@ fuzz_target!(|data: &[u8]| {
     };
 
     // Limit sizes to prevent timeouts
-    if input.data_frame.total_payload_size > 1000 ||
-       input.data_frame.data_content.len() > 1000 {
+    if input.data_frame.total_payload_size > 1000 || input.data_frame.data_content.len() > 1000 {
         return;
     }
 
@@ -290,79 +301,111 @@ fuzz_target!(|data: &[u8]| {
 
     // Test 1: Stream ID validation
     if frame.stream_id == 0 {
-        assert!(result.is_err(),
-            "DATA frame with stream ID 0 should be rejected");
+        assert!(
+            result.is_err(),
+            "DATA frame with stream ID 0 should be rejected"
+        );
         return;
     }
 
     // Test 2: Padded frame validation
     if is_padded {
         // Calculate expected data size
-        if let Some(expected_data_size) = parser.calculate_data_size(frame.total_payload_size, frame.pad_length) {
+        if let Some(expected_data_size) =
+            parser.calculate_data_size(frame.total_payload_size, frame.pad_length)
+        {
             if expected_data_size <= frame.data_content.len() {
-                assert!(result.is_ok(),
+                assert!(
+                    result.is_ok(),
                     "Valid padded frame should succeed: payload={}, pad_length={}, expected_data={}",
-                    frame.total_payload_size, frame.pad_length, expected_data_size);
+                    frame.total_payload_size,
+                    frame.pad_length,
+                    expected_data_size
+                );
 
                 if let Some(parsed_frame) = parser.get_latest_frame() {
                     // Test 3: Pad-length extraction verification
-                    assert!(parser.validate_padding_extraction(0, frame.pad_length),
-                        "Pad-length should be correctly extracted: expected {}", frame.pad_length);
+                    assert!(
+                        parser.validate_padding_extraction(0, frame.pad_length),
+                        "Pad-length should be correctly extracted: expected {}",
+                        frame.pad_length
+                    );
 
                     // Test 4: Data size verification
-                    assert_eq!(parsed_frame.data.len(), expected_data_size,
+                    assert_eq!(
+                        parsed_frame.data.len(),
+                        expected_data_size,
                         "Actual data size {} should match expected {}",
-                        parsed_frame.data.len(), expected_data_size);
+                        parsed_frame.data.len(),
+                        expected_data_size
+                    );
 
                     // Test 5: Padding info verification
                     if let Some(padding_info) = &parsed_frame.padding_info {
-                        assert_eq!(padding_info.pad_length, frame.pad_length,
-                            "Stored pad-length should match frame pad-length");
+                        assert_eq!(
+                            padding_info.pad_length, frame.pad_length,
+                            "Stored pad-length should match frame pad-length"
+                        );
 
-                        assert_eq!(padding_info.padding_bytes.len(), frame.pad_length as usize,
-                            "Padding bytes length should match pad-length");
+                        assert_eq!(
+                            padding_info.padding_bytes.len(),
+                            frame.pad_length as usize,
+                            "Padding bytes length should match pad-length"
+                        );
                     }
 
                     // Test 6: Maximum pad-length (255) handling
                     if frame.pad_length == 255 {
-                        assert_eq!(parsed_frame.data.len(),
-                                 (frame.total_payload_size as usize).saturating_sub(256),
-                                 "Max padding (255) should leave minimal data");
+                        assert_eq!(
+                            parsed_frame.data.len(),
+                            (frame.total_payload_size as usize).saturating_sub(256),
+                            "Max padding (255) should leave minimal data"
+                        );
                     }
 
                     // Test 7: End-stream flag preservation
                     let expected_end_stream = (frame.flags & DATA_FLAG_END_STREAM) != 0;
-                    assert_eq!(parsed_frame.end_stream, expected_end_stream,
-                        "End-stream flag should be preserved");
+                    assert_eq!(
+                        parsed_frame.end_stream, expected_end_stream,
+                        "End-stream flag should be preserved"
+                    );
                 }
             } else {
                 // Insufficient data for frame size
-                assert!(result.is_err(),
-                    "Insufficient data should cause error");
+                assert!(result.is_err(), "Insufficient data should cause error");
             }
         } else {
             // Invalid pad-length (exceeds payload)
-            assert!(result.is_err(),
+            assert!(
+                result.is_err(),
                 "Invalid pad-length {} for payload {} should cause error",
-                frame.pad_length, frame.total_payload_size);
+                frame.pad_length,
+                frame.total_payload_size
+            );
 
             if let Err(error_msg) = &result {
-                assert!(error_msg.contains("pad length") && error_msg.contains("exceeds"),
-                    "Error should mention pad length exceeding payload: {}", error_msg);
+                assert!(
+                    error_msg.contains("pad length") && error_msg.contains("exceeds"),
+                    "Error should mention pad length exceeding payload: {}",
+                    error_msg
+                );
             }
         }
     } else {
         // Test 8: Unpadded frame handling
         if frame.data_content.len() <= frame.total_payload_size as usize {
-            assert!(result.is_ok(),
-                "Valid unpadded frame should succeed");
+            assert!(result.is_ok(), "Valid unpadded frame should succeed");
 
             if let Some(parsed_frame) = parser.get_latest_frame() {
-                assert!(parsed_frame.padding_info.is_none(),
-                    "Unpadded frame should have no padding info");
+                assert!(
+                    parsed_frame.padding_info.is_none(),
+                    "Unpadded frame should have no padding info"
+                );
 
-                assert_eq!(parsed_frame.data, frame.data_content,
-                    "Unpadded frame data should match original");
+                assert_eq!(
+                    parsed_frame.data, frame.data_content,
+                    "Unpadded frame data should match original"
+                );
             }
         }
     }
@@ -377,10 +420,16 @@ fuzz_target!(|data: &[u8]| {
             if result.is_ok() {
                 // But if it succeeded, verify the parser handled it correctly
                 if let Some(parsed_frame) = parser.get_latest_frame() {
-                    let actual_total = 1 + parsed_frame.data.len() +
-                        parsed_frame.padding_info.as_ref().map_or(0, |p| p.pad_length as usize);
-                    assert_eq!(actual_total, frame.total_payload_size as usize,
-                        "Parsed frame should match declared total size");
+                    let actual_total = 1
+                        + parsed_frame.data.len()
+                        + parsed_frame
+                            .padding_info
+                            .as_ref()
+                            .map_or(0, |p| p.pad_length as usize);
+                    assert_eq!(
+                        actual_total, frame.total_payload_size as usize,
+                        "Parsed frame should match declared total size"
+                    );
                 }
             }
         }
@@ -397,7 +446,7 @@ mod tests {
             stream_id: 1,
             flags: DATA_FLAG_PADDED,
             total_payload_size: 300, // 1 (pad-length) + 44 (data) + 255 (padding)
-            pad_length: 255, // Max padding
+            pad_length: 255,         // Max padding
             data_content: vec![b'A'; 44], // Data portion
         };
 
@@ -434,7 +483,7 @@ mod tests {
             stream_id: 1,
             flags: DATA_FLAG_PADDED,
             total_payload_size: 11, // 1 (pad-length) + 10 (data) + 0 (padding)
-            pad_length: 0, // No padding
+            pad_length: 0,          // No padding
             data_content: vec![b'B'; 10],
         };
 
@@ -495,7 +544,7 @@ mod tests {
             stream_id: 1,
             flags: DATA_FLAG_PADDED,
             total_payload_size: 1, // Only pad-length byte
-            pad_length: 0, // No padding, no data
+            pad_length: 0,         // No padding, no data
             data_content: vec![],
         };
 
@@ -549,7 +598,7 @@ mod tests {
             stream_id: 1,
             flags: DATA_FLAG_PADDED,
             total_payload_size: 256, // 1 (pad-length) + 0 (data) + 255 (padding)
-            pad_length: 255, // Max padding, no data
+            pad_length: 255,         // Max padding, no data
             data_content: vec![],
         };
 
@@ -561,6 +610,9 @@ mod tests {
         let parsed = parser.get_latest_frame().unwrap();
         assert_eq!(parsed.data.len(), 0);
         assert_eq!(parsed.padding_info.as_ref().unwrap().pad_length, 255);
-        assert_eq!(parsed.padding_info.as_ref().unwrap().padding_bytes.len(), 255);
+        assert_eq!(
+            parsed.padding_info.as_ref().unwrap().padding_bytes.len(),
+            255
+        );
     }
 }

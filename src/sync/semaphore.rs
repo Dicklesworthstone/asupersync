@@ -3781,7 +3781,7 @@ mod tests {
     fn audit_semaphore_permit_counter_never_negative() {
         init_test("audit_semaphore_permit_counter_never_negative");
 
-        let cx = test_cx();
+        let _cx = test_cx();
         let sem = Arc::new(Semaphore::new(3)); // Start with 3 permits
 
         // Test 1: Rapid acquire/release cycles cannot cause underflow
@@ -4084,5 +4084,127 @@ mod tests {
         );
 
         crate::test_complete!("audit_semaphore_close_cancel_aware_semantics");
+    }
+
+    /// Audit test: acquire() permit-set atomicity (no partial acquisitions).
+    ///
+    /// When requesting N permits with only M < N available, the semaphore must
+    /// wait atomically for the full permit set rather than partially acquiring M.
+    /// This prevents deadlock scenarios where tasks hold partial permits.
+    #[test]
+    fn audit_acquire_permit_set_atomicity() {
+        init_test("audit_acquire_permit_set_atomicity");
+
+        // Test with semaphore having fewer permits than requested
+        let sem = Semaphore::new(5);
+        let cx = test_cx();
+
+        // Phase 1: Verify try_acquire respects atomicity
+        let partial_try = sem.try_acquire(10); // Request 10, only 5 available
+        crate::assert_with_log!(
+            partial_try.is_err(),
+            "try_acquire(10) fails when only 5 permits available (no partial)",
+            true,
+            partial_try.is_err()
+        );
+
+        // Verify no permits were consumed by failed attempt
+        let available_after_try = sem.available_permits();
+        crate::assert_with_log!(
+            available_after_try == 5,
+            "available permits unchanged after failed try_acquire",
+            5,
+            available_after_try
+        );
+
+        // Phase 2: Test async acquire atomicity with contention
+        let sem_clone = std::sync::Arc::new(Semaphore::new(3));
+
+        // Task 1: Request 5 permits (more than available)
+        let sem1 = sem_clone.clone();
+        let handle1 = std::thread::spawn(move || {
+            let cx1 = test_cx();
+            let start_time = std::time::Instant::now();
+
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                block_on(async { sem1.acquire(&cx1, 5).await })
+            }));
+
+            (result, start_time.elapsed())
+        });
+
+        // Give task 1 time to register as waiter
+        std::thread::sleep(std::time::Duration::from_millis(10));
+
+        // Task 2: Request 2 permits (should succeed immediately)
+        let sem2 = sem_clone.clone();
+        let handle2 = std::thread::spawn(move || {
+            let cx2 = test_cx();
+            block_on(async { sem2.acquire(&cx2, 2).await })
+        });
+
+        // Task 2 should complete quickly with 2 permits
+        let result2 = handle2.join().expect("task 2 should not panic");
+        crate::assert_with_log!(
+            result2.is_ok(),
+            "acquire(2) succeeds when 3 permits available",
+            true,
+            result2.is_ok()
+        );
+
+        // Verify task 2 consumed exactly 2 permits
+        let remaining_permits = sem_clone.available_permits();
+        crate::assert_with_log!(
+            remaining_permits == 1,
+            "exactly 2 permits consumed, 1 remains",
+            1,
+            remaining_permits
+        );
+
+        // Task 1 should still be waiting (no partial acquire of 1 permit)
+
+        // Add permits to allow task 1 to complete
+        sem_clone.add_permits(4); // Now 5 permits available
+
+        // Task 1 should now complete successfully
+        let (result1, duration1) = handle1.join().expect("task 1 should not panic");
+        let task1_result = result1.expect("task 1 should not have panicked");
+
+        crate::assert_with_log!(
+            task1_result.is_ok(),
+            "acquire(5) succeeds after sufficient permits added",
+            true,
+            task1_result.is_ok()
+        );
+
+        crate::assert_with_log!(
+            duration1 >= std::time::Duration::from_millis(10),
+            "task 1 waited for full permit set (no partial acquire)",
+            true,
+            duration1 >= std::time::Duration::from_millis(10)
+        );
+
+        // Phase 3: Verify final state
+        let final_permits = sem_clone.available_permits();
+        crate::assert_with_log!(
+            final_permits == 0,
+            "all permits properly accounted for",
+            0,
+            final_permits
+        );
+
+        // Clean up permits
+        drop(result2.unwrap()); // Release 2 permits
+        drop(task1_result.unwrap()); // Release 5 permits
+
+        let cleaned_permits = sem_clone.available_permits();
+        crate::assert_with_log!(
+            cleaned_permits == 7,
+            "permits properly released on drop",
+            7,
+            cleaned_permits
+        );
+
+        crate::test_complete!("audit_acquire_permit_set_atomicity");
     }
 }

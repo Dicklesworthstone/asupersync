@@ -1,7 +1,7 @@
 #![no_main]
 
-use libfuzzer_sys::fuzz_target;
 use arbitrary::Arbitrary;
+use libfuzzer_sys::fuzz_target;
 
 /// HTTP/2 SETTINGS_MAX_FRAME_SIZE mid-connection change fuzz target.
 ///
@@ -213,25 +213,28 @@ impl MockH2FrameSizeConnection {
         // Validate new frame size per RFC 7540 §6.5.2
         if self.config.validate_rfc_limits {
             if change.new_max_frame_size < 16384 {
-                return SettingsChangeResult::Error(
-                    format!("MAX_FRAME_SIZE {} below minimum 16384", change.new_max_frame_size)
-                );
+                return SettingsChangeResult::Error(format!(
+                    "MAX_FRAME_SIZE {} below minimum 16384",
+                    change.new_max_frame_size
+                ));
             }
 
-            if change.new_max_frame_size > 16777215 { // 2^24-1
-                return SettingsChangeResult::Error(
-                    format!("MAX_FRAME_SIZE {} exceeds maximum 16777215", change.new_max_frame_size)
-                );
+            if change.new_max_frame_size > 16777215 {
+                // 2^24-1
+                return SettingsChangeResult::Error(format!(
+                    "MAX_FRAME_SIZE {} exceeds maximum 16777215",
+                    change.new_max_frame_size
+                ));
             }
         }
 
         // Check increase factor limit
         let increase_factor = change.new_max_frame_size / self.current_max_frame_size;
         if increase_factor > self.config.max_size_increase_factor as u32 {
-            return SettingsChangeResult::Error(
-                format!("Frame size increase factor {} exceeds limit {}",
-                       increase_factor, self.config.max_size_increase_factor)
-            );
+            return SettingsChangeResult::Error(format!(
+                "Frame size increase factor {} exceeds limit {}",
+                increase_factor, self.config.max_size_increase_factor
+            ));
         }
 
         let old_size = self.current_max_frame_size;
@@ -245,7 +248,7 @@ impl MockH2FrameSizeConnection {
                     new_size: change.new_max_frame_size,
                     timing: "immediate".to_string(),
                 }
-            },
+            }
 
             ChangeTiming::AfterAck => {
                 // RFC 7540 §6.5.3: Changes take effect after ACK
@@ -255,7 +258,7 @@ impl MockH2FrameSizeConnection {
                     current_size: old_size,
                     pending_size: change.new_max_frame_size,
                 }
-            },
+            }
 
             ChangeTiming::Delayed => {
                 // Simulate processing delay
@@ -292,7 +295,7 @@ impl MockH2FrameSizeConnection {
             ConnectionState::AwaitingSettingsAck => {
                 // RFC 7540 §6.5.2: In-progress frames use old limit
                 self.current_max_frame_size
-            },
+            }
             ConnectionState::Closed => {
                 return FrameProcessResult::ConnectionClosed;
             }
@@ -336,7 +339,7 @@ impl MockH2FrameSizeConnection {
                     size: frame.payload_size,
                     limit_used: limit,
                 }
-            },
+            }
 
             FrameType::Headers => {
                 // HEADERS frames can be up to max size
@@ -345,13 +348,13 @@ impl MockH2FrameSizeConnection {
                     size: frame.payload_size,
                     limit_used: limit,
                 }
-            },
+            }
 
             FrameType::Settings => {
                 // SETTINGS frames have fixed 6-byte entries
                 if frame.payload_size % 6 != 0 {
                     return FrameProcessResult::ProtocolError(
-                        "SETTINGS frame payload must be multiple of 6 bytes".to_string()
+                        "SETTINGS frame payload must be multiple of 6 bytes".to_string(),
                     );
                 }
                 FrameProcessResult::Accepted {
@@ -359,13 +362,13 @@ impl MockH2FrameSizeConnection {
                     size: frame.payload_size,
                     limit_used: limit,
                 }
-            },
+            }
 
             FrameType::WindowUpdate => {
                 // WINDOW_UPDATE frames must be exactly 4 bytes
                 if frame.payload_size != 4 {
                     return FrameProcessResult::ProtocolError(
-                        "WINDOW_UPDATE frame must be 4 bytes".to_string()
+                        "WINDOW_UPDATE frame must be 4 bytes".to_string(),
                     );
                 }
                 FrameProcessResult::Accepted {
@@ -373,13 +376,13 @@ impl MockH2FrameSizeConnection {
                     size: frame.payload_size,
                     limit_used: limit,
                 }
-            },
+            }
 
             FrameType::Ping => {
                 // PING frames must be exactly 8 bytes
                 if frame.payload_size != 8 {
                     return FrameProcessResult::ProtocolError(
-                        "PING frame must be 8 bytes".to_string()
+                        "PING frame must be 8 bytes".to_string(),
                     );
                 }
                 FrameProcessResult::Accepted {
@@ -387,7 +390,7 @@ impl MockH2FrameSizeConnection {
                     size: frame.payload_size,
                     limit_used: limit,
                 }
-            },
+            }
 
             _ => {
                 // Other frame types
@@ -437,10 +440,7 @@ enum SettingsChangeResult {
 
 #[derive(Debug, PartialEq)]
 enum AckResult {
-    Applied {
-        old_size: u32,
-        new_size: u32,
-    },
+    Applied { old_size: u32, new_size: u32 },
     NoChange,
 }
 
@@ -487,7 +487,7 @@ fuzz_target!(|input: FrameSizeChangeInput| {
 
     let mut connection = MockH2FrameSizeConnection::new(
         input.initial_setup.clone(),
-        input.connection_config.clone()
+        input.connection_config.clone(),
     );
 
     let initial_status = connection.get_current_state();
@@ -501,15 +501,23 @@ fuzz_target!(|input: FrameSizeChangeInput| {
         // Verify frames are validated against current limit
         match result {
             FrameProcessResult::Accepted { limit_used, .. } => {
-                assert_eq!(limit_used, initial_status.current_max_frame_size,
-                          "Pre-change frames should use initial frame size limit");
-            },
-            FrameProcessResult::FrameSizeError { frame_size, limit, .. } => {
-                assert_eq!(limit, initial_status.current_max_frame_size,
-                          "Frame size errors should reference current limit");
-                assert!(frame_size > limit,
-                       "Frame size error should only occur when frame exceeds limit");
-            },
+                assert_eq!(
+                    limit_used, initial_status.current_max_frame_size,
+                    "Pre-change frames should use initial frame size limit"
+                );
+            }
+            FrameProcessResult::FrameSizeError {
+                frame_size, limit, ..
+            } => {
+                assert_eq!(
+                    limit, initial_status.current_max_frame_size,
+                    "Frame size errors should reference current limit"
+                );
+                assert!(
+                    frame_size > limit,
+                    "Frame size error should only occur when frame exceeds limit"
+                );
+            }
             _ => {}
         }
     }
@@ -518,23 +526,38 @@ fuzz_target!(|input: FrameSizeChangeInput| {
     let settings_result = connection.process_settings_change(&input.settings_change);
 
     match settings_result {
-        SettingsChangeResult::Applied { old_size, new_size, .. } => {
-            assert_eq!(old_size, initial_status.current_max_frame_size,
-                      "Old size should match initial setting");
-            assert_eq!(new_size, input.settings_change.new_max_frame_size,
-                      "New size should match requested change");
+        SettingsChangeResult::Applied {
+            old_size, new_size, ..
+        } => {
+            assert_eq!(
+                old_size, initial_status.current_max_frame_size,
+                "Old size should match initial setting"
+            );
+            assert_eq!(
+                new_size, input.settings_change.new_max_frame_size,
+                "New size should match requested change"
+            );
 
             // Verify change took effect immediately
             let current_status = connection.get_current_state();
-            assert_eq!(current_status.current_max_frame_size, new_size,
-                      "Current frame size should reflect immediate change");
-        },
+            assert_eq!(
+                current_status.current_max_frame_size, new_size,
+                "Current frame size should reflect immediate change"
+            );
+        }
 
-        SettingsChangeResult::Pending { current_size, pending_size } => {
-            assert_eq!(current_size, initial_status.current_max_frame_size,
-                      "Current size should remain unchanged while pending");
-            assert_eq!(pending_size, input.settings_change.new_max_frame_size,
-                      "Pending size should match requested change");
+        SettingsChangeResult::Pending {
+            current_size,
+            pending_size,
+        } => {
+            assert_eq!(
+                current_size, initial_status.current_max_frame_size,
+                "Current size should remain unchanged while pending"
+            );
+            assert_eq!(
+                pending_size, input.settings_change.new_max_frame_size,
+                "Pending size should match requested change"
+            );
 
             // Process ACK to complete change
             let ack_result = connection.process_settings_ack();
@@ -542,26 +565,32 @@ fuzz_target!(|input: FrameSizeChangeInput| {
                 AckResult::Applied { old_size, new_size } => {
                     assert_eq!(old_size, current_size);
                     assert_eq!(new_size, pending_size);
-                },
+                }
                 AckResult::NoChange => {
                     panic!("ACK should apply pending settings change");
                 }
             }
-        },
+        }
 
         SettingsChangeResult::Delayed { .. } => {
             // Delayed changes are implementation-specific
-        },
+        }
 
         SettingsChangeResult::Error(ref msg) => {
             // Verify error is for valid reasons
             if input.connection_config.validate_rfc_limits {
                 if input.settings_change.new_max_frame_size < 16384 {
-                    assert!(msg.contains("below minimum"),
-                           "Should explain minimum size violation: {}", msg);
+                    assert!(
+                        msg.contains("below minimum"),
+                        "Should explain minimum size violation: {}",
+                        msg
+                    );
                 } else if input.settings_change.new_max_frame_size > 16777215 {
-                    assert!(msg.contains("exceeds maximum"),
-                           "Should explain maximum size violation: {}", msg);
+                    assert!(
+                        msg.contains("exceeds maximum"),
+                        "Should explain maximum size violation: {}",
+                        msg
+                    );
                 }
             }
         }
@@ -578,13 +607,17 @@ fuzz_target!(|input: FrameSizeChangeInput| {
         // Verify frames are validated against new limit
         match result {
             FrameProcessResult::Accepted { limit_used, .. } => {
-                assert_eq!(limit_used, post_settings_status.current_max_frame_size,
-                          "Post-change frames should use new frame size limit");
-            },
+                assert_eq!(
+                    limit_used, post_settings_status.current_max_frame_size,
+                    "Post-change frames should use new frame size limit"
+                );
+            }
             FrameProcessResult::FrameSizeError { limit, .. } => {
-                assert_eq!(limit, post_settings_status.current_max_frame_size,
-                          "Post-change frame size errors should reference new limit");
-            },
+                assert_eq!(
+                    limit, post_settings_status.current_max_frame_size,
+                    "Post-change frame size errors should reference new limit"
+                );
+            }
             _ => {}
         }
     }
@@ -603,11 +636,13 @@ fuzz_target!(|input: FrameSizeChangeInput| {
                     match result {
                         FrameProcessResult::Accepted { .. } => {
                             // Expected - frame valid under new limit
-                        },
+                        }
                         FrameProcessResult::FrameSizeError { .. } => {
-                            panic!("Frame {} should be valid under new limit {}",
-                                   frame.payload_size, new_limit);
-                        },
+                            panic!(
+                                "Frame {} should be valid under new limit {}",
+                                frame.payload_size, new_limit
+                            );
+                        }
                         _ => {} // Protocol errors are separate from size limits
                     }
                 }
@@ -620,8 +655,8 @@ fuzz_target!(|input: FrameSizeChangeInput| {
         let final_stats = &post_settings_status.stats;
         assert_eq!(
             final_stats.frames_processed_old_limit + final_stats.frames_processed_new_limit,
-            (input.pre_change_frames.len() + input.post_change_frames.len()) as u32 -
-            final_stats.size_violations_detected,
+            (input.pre_change_frames.len() + input.post_change_frames.len()) as u32
+                - final_stats.size_violations_detected,
             "Processed frame count should match input minus violations"
         );
     }
@@ -639,10 +674,13 @@ fuzz_target!(|input: FrameSizeChangeInput| {
     match boundary_result {
         FrameProcessResult::Accepted { .. } => {
             // Expected - frame at exact limit should be accepted
-        },
+        }
         FrameProcessResult::FrameSizeError { .. } => {
-            panic!("Frame at exact limit {} should be accepted", boundary_frame.payload_size);
-        },
+            panic!(
+                "Frame at exact limit {} should be accepted",
+                boundary_frame.payload_size
+            );
+        }
         _ => {} // Other errors are acceptable
     }
 

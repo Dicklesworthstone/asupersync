@@ -12,15 +12,15 @@
 
 #![no_main]
 
-use libfuzzer_sys::fuzz_target;
 use arbitrary::{Arbitrary, Unstructured};
 use asupersync::sync::Notify;
-use std::sync::atomic::{AtomicUsize, AtomicBool, Ordering};
-use std::sync::Arc;
+use libfuzzer_sys::fuzz_target;
 use std::collections::HashMap;
-use std::task::{Context, Poll, Waker};
-use std::pin::Pin;
 use std::future::Future;
+use std::pin::Pin;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::task::{Context, Poll, Waker};
 
 #[derive(Debug, Clone, Arbitrary)]
 struct NotifyWaitersEmptyConfig {
@@ -90,7 +90,8 @@ impl EmptyNotifyTracker {
     }
 
     fn record_empty_notify_waiters(&self) {
-        self.empty_notify_waiters_calls.fetch_add(1, Ordering::SeqCst);
+        self.empty_notify_waiters_calls
+            .fetch_add(1, Ordering::SeqCst);
     }
 
     fn record_empty_notify_one(&self) {
@@ -98,7 +99,8 @@ impl EmptyNotifyTracker {
     }
 
     fn record_stored_notification_created(&self) {
-        self.stored_notifications_created.fetch_add(1, Ordering::SeqCst);
+        self.stored_notifications_created
+            .fetch_add(1, Ordering::SeqCst);
     }
 
     fn record_generation_advance(&self) {
@@ -137,7 +139,10 @@ impl EmptyNotifyTracker {
 
         // Sanity checks
         if empty_waiters_calls > 1000 {
-            return Err(format!("Excessive notify_waiters calls: {}", empty_waiters_calls));
+            return Err(format!(
+                "Excessive notify_waiters calls: {}",
+                empty_waiters_calls
+            ));
         }
 
         if empty_one_calls > 1000 {
@@ -225,7 +230,9 @@ fn test_empty_notify_waiters_scenario(
     let notify = Arc::new(Notify::new());
     let mut waiters: HashMap<u8, TrackedWaiter> = HashMap::new();
 
-    let max_ops = config.max_operations.min(NotifyWaitersEmptyConfig::max_operations()) as usize;
+    let max_ops = config
+        .max_operations
+        .min(NotifyWaitersEmptyConfig::max_operations()) as usize;
 
     for operation in config.operations.iter().take(max_ops) {
         match operation {
@@ -292,7 +299,8 @@ fn test_empty_notify_waiters_scenario(
                 let id = *waiter_id % 10;
 
                 // Create a waiter briefly then drop it immediately
-                let waiter = TrackedWaiter::new(notify.clone(), id, Arc::new(EmptyNotifyTracker::new()));
+                let waiter =
+                    TrackedWaiter::new(notify.clone(), id, Arc::new(EmptyNotifyTracker::new()));
 
                 // Poll once to register it
                 let mut temp_waiter = waiter;
@@ -312,7 +320,8 @@ fn test_empty_notify_waiters_scenario(
             }
 
             EmptyNotifyOperation::RepeatedNotifyWaiters { count } => {
-                let repeat_count = (*count).min(NotifyWaitersEmptyConfig::max_repeated_notifications()) as usize;
+                let repeat_count =
+                    (*count).min(NotifyWaitersEmptyConfig::max_repeated_notifications()) as usize;
 
                 for i in 0..repeat_count {
                     // Verify no waiters each time
@@ -384,7 +393,8 @@ fn test_empty_notify_waiters_scenario(
 
                 // Create waiter after empty notifications
                 if !waiters.contains_key(&id) {
-                    let waiter = TrackedWaiter::new(notify.clone(), id, Arc::new(EmptyNotifyTracker::new()));
+                    let waiter =
+                        TrackedWaiter::new(notify.clone(), id, Arc::new(EmptyNotifyTracker::new()));
                     waiters.insert(id, waiter);
                 }
 
@@ -465,9 +475,7 @@ fuzz_target!(|data: &[u8]| {
         let tracker2 = EmptyNotifyTracker::new();
         let config2 = config.clone();
 
-        let handle = thread::spawn(move || {
-            test_empty_notify_waiters_scenario(&config2, &tracker2)
-        });
+        let handle = thread::spawn(move || test_empty_notify_waiters_scenario(&config2, &tracker2));
 
         match handle.join() {
             Ok(Ok(())) => {

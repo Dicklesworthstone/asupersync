@@ -1,14 +1,14 @@
 #![no_main]
 
-use libfuzzer_sys::fuzz_target;
 use arbitrary::{Arbitrary, Unstructured};
+use libfuzzer_sys::fuzz_target;
+use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
-use std::panic::{catch_unwind, AssertUnwindSafe};
 
 use asupersync::channel::oneshot;
-use asupersync::channel::oneshot::{SendError, RecvError};
+use asupersync::channel::oneshot::{RecvError, SendError};
 use asupersync::cx::Cx;
 use asupersync::types::cap;
 
@@ -38,7 +38,7 @@ enum SendOutcome {
 
 #[derive(Debug, Clone, PartialEq)]
 enum SenderType {
-    Direct,       // sender.send()
+    Direct,        // sender.send()
     ReserveCommit, // sender.reserve() + permit.send()
 }
 
@@ -150,7 +150,10 @@ impl DetachedSendTracker {
                         violation.violation_type, violation.description
                     ));
                 }
-                panic!("Oneshot detached send invariant violations detected: {} violations", violations.len());
+                panic!(
+                    "Oneshot detached send invariant violations detected: {} violations",
+                    violations.len()
+                );
             }
         }
     }
@@ -265,13 +268,13 @@ fn test_simple_detach_then_send(tracker: &DetachedSendTracker, value_range: u8) 
 
     // Attempt to send - should return Disconnected error
     let value = (value_range / 2) as u32;
-    let result = catch_unwind(AssertUnwindSafe(|| {
-        sender.send(&cx, value)
-    }));
+    let result = catch_unwind(AssertUnwindSafe(|| sender.send(&cx, value)));
 
     let outcome = match result {
         Ok(Ok(())) => SendOutcome::Success,
-        Ok(Err(SendError::Disconnected(returned_value))) => SendOutcome::Disconnected(returned_value),
+        Ok(Err(SendError::Disconnected(returned_value))) => {
+            SendOutcome::Disconnected(returned_value)
+        }
         Ok(Err(SendError::Cancelled(returned_value))) => SendOutcome::Cancelled(returned_value),
         Err(_) => SendOutcome::Panicked,
     };
@@ -293,13 +296,13 @@ fn test_send_then_detach(tracker: &DetachedSendTracker, value_range: u8) {
 
     // Send first - should succeed
     let value = (value_range / 2) as u32;
-    let result = catch_unwind(AssertUnwindSafe(|| {
-        sender.send(&cx, value)
-    }));
+    let result = catch_unwind(AssertUnwindSafe(|| sender.send(&cx, value)));
 
     let outcome = match result {
         Ok(Ok(())) => SendOutcome::Success,
-        Ok(Err(SendError::Disconnected(returned_value))) => SendOutcome::Disconnected(returned_value),
+        Ok(Err(SendError::Disconnected(returned_value))) => {
+            SendOutcome::Disconnected(returned_value)
+        }
         Ok(Err(SendError::Cancelled(returned_value))) => SendOutcome::Cancelled(returned_value),
         Err(_) => SendOutcome::Panicked,
     };
@@ -336,13 +339,13 @@ fn test_concurrent_detach_send(tracker: &DetachedSendTracker, value_range: u8, d
     });
 
     // Attempt send on main thread
-    let result = catch_unwind(AssertUnwindSafe(|| {
-        sender.send(&cx, value)
-    }));
+    let result = catch_unwind(AssertUnwindSafe(|| sender.send(&cx, value)));
 
     let outcome = match result {
         Ok(Ok(())) => SendOutcome::Success,
-        Ok(Err(SendError::Disconnected(returned_value))) => SendOutcome::Disconnected(returned_value),
+        Ok(Err(SendError::Disconnected(returned_value))) => {
+            SendOutcome::Disconnected(returned_value)
+        }
         Ok(Err(SendError::Cancelled(returned_value))) => SendOutcome::Cancelled(returned_value),
         Err(_) => SendOutcome::Panicked,
     };
@@ -359,7 +362,11 @@ fn test_concurrent_detach_send(tracker: &DetachedSendTracker, value_range: u8, d
     });
 }
 
-fn test_multiple_detach_send(tracker: &DetachedSendTracker, attempts: &[SendAttempt], value_range: u8) {
+fn test_multiple_detach_send(
+    tracker: &DetachedSendTracker,
+    attempts: &[SendAttempt],
+    value_range: u8,
+) {
     tracker.record_operation("test_multiple_detach_send");
 
     if attempts.is_empty() {
@@ -383,19 +390,17 @@ fn test_multiple_detach_send(tracker: &DetachedSendTracker, attempts: &[SendAtte
 
     let (outcome, sender_type) = if attempt.use_reserve {
         // Use reserve/commit pattern
-        let reserve_result = catch_unwind(AssertUnwindSafe(|| {
-            sender.reserve(&cx)
-        }));
+        let reserve_result = catch_unwind(AssertUnwindSafe(|| sender.reserve(&cx)));
 
         match reserve_result {
             Ok(Ok(permit)) => {
-                let send_result = catch_unwind(AssertUnwindSafe(|| {
-                    permit.send(value)
-                }));
+                let send_result = catch_unwind(AssertUnwindSafe(|| permit.send(value)));
 
                 let outcome = match send_result {
                     Ok(Ok(())) => SendOutcome::Success,
-                    Ok(Err(SendError::Disconnected(returned_value))) => SendOutcome::Disconnected(returned_value),
+                    Ok(Err(SendError::Disconnected(returned_value))) => {
+                        SendOutcome::Disconnected(returned_value)
+                    }
                     Err(_) => SendOutcome::Panicked,
                 };
 
@@ -411,13 +416,13 @@ fn test_multiple_detach_send(tracker: &DetachedSendTracker, attempts: &[SendAtte
         }
     } else {
         // Use direct send
-        let result = catch_unwind(AssertUnwindSafe(|| {
-            sender.send(&cx, value)
-        }));
+        let result = catch_unwind(AssertUnwindSafe(|| sender.send(&cx, value)));
 
         let outcome = match result {
             Ok(Ok(())) => SendOutcome::Success,
-            Ok(Err(SendError::Disconnected(returned_value))) => SendOutcome::Disconnected(returned_value),
+            Ok(Err(SendError::Disconnected(returned_value))) => {
+                SendOutcome::Disconnected(returned_value)
+            }
             Ok(Err(SendError::Cancelled(returned_value))) => SendOutcome::Cancelled(returned_value),
             Err(_) => SendOutcome::Panicked,
         };
@@ -434,7 +439,11 @@ fn test_multiple_detach_send(tracker: &DetachedSendTracker, attempts: &[SendAtte
     });
 }
 
-fn test_interleaved_operations(tracker: &DetachedSendTracker, operations: Vec<Operation>, value_range: u8) {
+fn test_interleaved_operations(
+    tracker: &DetachedSendTracker,
+    operations: Vec<Operation>,
+    value_range: u8,
+) {
     tracker.record_operation("test_interleaved_operations");
 
     let cx = Cx::<cap::All>::new();
@@ -443,7 +452,8 @@ fn test_interleaved_operations(tracker: &DetachedSendTracker, operations: Vec<Op
     let mut receiver_detached = false;
     let mut operation_id = 0;
 
-    for operation in operations.iter().take(20) { // Limit operations
+    for operation in operations.iter().take(20) {
+        // Limit operations
         operation_id += 1;
 
         match operation {
@@ -468,14 +478,16 @@ fn test_interleaved_operations(tracker: &DetachedSendTracker, operations: Vec<Op
             Operation::DirectSend { value } => {
                 if let Some(tx) = sender.take() {
                     let val = (*value % value_range.max(1)) as u32;
-                    let result = catch_unwind(AssertUnwindSafe(|| {
-                        tx.send(&cx, val)
-                    }));
+                    let result = catch_unwind(AssertUnwindSafe(|| tx.send(&cx, val)));
 
                     let outcome = match result {
                         Ok(Ok(())) => SendOutcome::Success,
-                        Ok(Err(SendError::Disconnected(returned_value))) => SendOutcome::Disconnected(returned_value),
-                        Ok(Err(SendError::Cancelled(returned_value))) => SendOutcome::Cancelled(returned_value),
+                        Ok(Err(SendError::Disconnected(returned_value))) => {
+                            SendOutcome::Disconnected(returned_value)
+                        }
+                        Ok(Err(SendError::Cancelled(returned_value))) => {
+                            SendOutcome::Cancelled(returned_value)
+                        }
                         Err(_) => SendOutcome::Panicked,
                     };
 
@@ -492,18 +504,22 @@ fn test_interleaved_operations(tracker: &DetachedSendTracker, operations: Vec<Op
             Operation::ReserveSend { value } => {
                 if let Some(tx) = sender.take() {
                     let val = (*value % value_range.max(1)) as u32;
-                    let result = catch_unwind(AssertUnwindSafe(|| {
-                        match tx.reserve(&cx) {
-                            Ok(permit) => permit.send(val),
-                            Err(oneshot::SendError::Cancelled(())) => Err(SendError::Cancelled(val)),
-                            Err(oneshot::SendError::Disconnected(())) => Err(SendError::Disconnected(val)),
+                    let result = catch_unwind(AssertUnwindSafe(|| match tx.reserve(&cx) {
+                        Ok(permit) => permit.send(val),
+                        Err(oneshot::SendError::Cancelled(())) => Err(SendError::Cancelled(val)),
+                        Err(oneshot::SendError::Disconnected(())) => {
+                            Err(SendError::Disconnected(val))
                         }
                     }));
 
                     let outcome = match result {
                         Ok(Ok(())) => SendOutcome::Success,
-                        Ok(Err(SendError::Disconnected(returned_value))) => SendOutcome::Disconnected(returned_value),
-                        Ok(Err(SendError::Cancelled(returned_value))) => SendOutcome::Cancelled(returned_value),
+                        Ok(Err(SendError::Disconnected(returned_value))) => {
+                            SendOutcome::Disconnected(returned_value)
+                        }
+                        Ok(Err(SendError::Cancelled(returned_value))) => {
+                            SendOutcome::Cancelled(returned_value)
+                        }
                         Err(_) => SendOutcome::Panicked,
                     };
 
@@ -533,7 +549,11 @@ fn test_interleaved_operations(tracker: &DetachedSendTracker, operations: Vec<Op
     }
 }
 
-fn test_reserve_detach_send(tracker: &DetachedSendTracker, value_range: u8, detach_timing: DetachTiming) {
+fn test_reserve_detach_send(
+    tracker: &DetachedSendTracker,
+    value_range: u8,
+    detach_timing: DetachTiming,
+) {
     tracker.record_operation("test_reserve_detach_send");
 
     let cx = Cx::<cap::All>::new();
@@ -546,18 +566,20 @@ fn test_reserve_detach_send(tracker: &DetachedSendTracker, value_range: u8, deta
             drop(receiver);
             tracker.record_operation("receiver_detached_before_reserve");
 
-            let result = catch_unwind(AssertUnwindSafe(|| {
-                match sender.reserve(&cx) {
-                    Ok(permit) => permit.send(value),
-                    Err(oneshot::SendError::Cancelled(())) => Err(SendError::Cancelled(value)),
-                    Err(oneshot::SendError::Disconnected(())) => Err(SendError::Disconnected(value)),
-                }
+            let result = catch_unwind(AssertUnwindSafe(|| match sender.reserve(&cx) {
+                Ok(permit) => permit.send(value),
+                Err(oneshot::SendError::Cancelled(())) => Err(SendError::Cancelled(value)),
+                Err(oneshot::SendError::Disconnected(())) => Err(SendError::Disconnected(value)),
             }));
 
             let outcome = match result {
                 Ok(Ok(())) => SendOutcome::Success,
-                Ok(Err(SendError::Disconnected(returned_value))) => SendOutcome::Disconnected(returned_value),
-                Ok(Err(SendError::Cancelled(returned_value))) => SendOutcome::Cancelled(returned_value),
+                Ok(Err(SendError::Disconnected(returned_value))) => {
+                    SendOutcome::Disconnected(returned_value)
+                }
+                Ok(Err(SendError::Cancelled(returned_value))) => {
+                    SendOutcome::Cancelled(returned_value)
+                }
                 Err(_) => SendOutcome::Panicked,
             };
 
@@ -572,9 +594,7 @@ fn test_reserve_detach_send(tracker: &DetachedSendTracker, value_range: u8, deta
 
         DetachTiming::AfterReserve => {
             // Reserve first
-            let permit_result = catch_unwind(AssertUnwindSafe(|| {
-                sender.reserve(&cx)
-            }));
+            let permit_result = catch_unwind(AssertUnwindSafe(|| sender.reserve(&cx)));
 
             match permit_result {
                 Ok(Ok(permit)) => {
@@ -582,13 +602,13 @@ fn test_reserve_detach_send(tracker: &DetachedSendTracker, value_range: u8, deta
                     drop(receiver);
                     tracker.record_operation("receiver_detached_after_reserve");
 
-                    let result = catch_unwind(AssertUnwindSafe(|| {
-                        permit.send(value)
-                    }));
+                    let result = catch_unwind(AssertUnwindSafe(|| permit.send(value)));
 
                     let outcome = match result {
                         Ok(Ok(())) => SendOutcome::Success,
-                        Ok(Err(SendError::Disconnected(returned_value))) => SendOutcome::Disconnected(returned_value),
+                        Ok(Err(SendError::Disconnected(returned_value))) => {
+                            SendOutcome::Disconnected(returned_value)
+                        }
                         Err(_) => SendOutcome::Panicked,
                     };
 
@@ -637,20 +657,22 @@ fn test_reserve_detach_send(tracker: &DetachedSendTracker, value_range: u8, deta
                 tracker_clone.record_operation("receiver_detached_during_reserve");
             });
 
-            let result = catch_unwind(AssertUnwindSafe(|| {
-                match sender.reserve(&cx) {
-                    Ok(permit) => permit.send(value),
-                    Err(oneshot::SendError::Cancelled(())) => Err(SendError::Cancelled(value)),
-                    Err(oneshot::SendError::Disconnected(())) => Err(SendError::Disconnected(value)),
-                }
+            let result = catch_unwind(AssertUnwindSafe(|| match sender.reserve(&cx) {
+                Ok(permit) => permit.send(value),
+                Err(oneshot::SendError::Cancelled(())) => Err(SendError::Cancelled(value)),
+                Err(oneshot::SendError::Disconnected(())) => Err(SendError::Disconnected(value)),
             }));
 
             let _ = detach_handle.join();
 
             let outcome = match result {
                 Ok(Ok(())) => SendOutcome::Success,
-                Ok(Err(SendError::Disconnected(returned_value))) => SendOutcome::Disconnected(returned_value),
-                Ok(Err(SendError::Cancelled(returned_value))) => SendOutcome::Cancelled(returned_value),
+                Ok(Err(SendError::Disconnected(returned_value))) => {
+                    SendOutcome::Disconnected(returned_value)
+                }
+                Ok(Err(SendError::Cancelled(returned_value))) => {
+                    SendOutcome::Cancelled(returned_value)
+                }
                 Err(_) => SendOutcome::Panicked,
             };
 
@@ -684,14 +706,16 @@ fn test_rapid_sequence(tracker: &DetachedSendTracker, sequence: Vec<RapidOp>, va
                     // Drop receiver if still present
                     drop(receiver);
 
-                    let result = catch_unwind(AssertUnwindSafe(|| {
-                        sender.send(&cx, val)
-                    }));
+                    let result = catch_unwind(AssertUnwindSafe(|| sender.send(&cx, val)));
 
                     let outcome = match result {
                         Ok(Ok(())) => SendOutcome::Success,
-                        Ok(Err(SendError::Disconnected(returned_value))) => SendOutcome::Disconnected(returned_value),
-                        Ok(Err(SendError::Cancelled(returned_value))) => SendOutcome::Cancelled(returned_value),
+                        Ok(Err(SendError::Disconnected(returned_value))) => {
+                            SendOutcome::Disconnected(returned_value)
+                        }
+                        Ok(Err(SendError::Cancelled(returned_value))) => {
+                            SendOutcome::Cancelled(returned_value)
+                        }
                         Err(_) => SendOutcome::Panicked,
                     };
 

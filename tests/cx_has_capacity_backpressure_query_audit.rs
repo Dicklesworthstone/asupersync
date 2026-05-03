@@ -176,9 +176,7 @@ fn cx_pressure_method_returns_optional_system_pressure_handle() {
     // there).
     let fn_marker = "pub fn pressure(&self) -> Option<&SystemPressure> {";
     let start = source.find(fn_marker).expect("pressure fn");
-    let body_end = source[start..]
-        .find("\n    }\n")
-        .expect("pressure close");
+    let body_end = source[start..].find("\n    }\n").expect("pressure close");
     let body = &source[start..start + body_end];
     assert!(
         body.contains("self.handles.pressure.as_deref()"),
@@ -206,9 +204,7 @@ fn system_pressure_headroom_returns_f32_via_atomic_load() {
 
     let fn_marker = "pub fn headroom(&self) -> f32 {";
     let start = source.find(fn_marker).expect("headroom fn");
-    let body_end = source[start..]
-        .find("\n    }\n")
-        .expect("headroom close");
+    let body_end = source[start..].find("\n    }\n").expect("headroom close");
     let body = &source[start..start + body_end];
 
     assert!(
@@ -257,8 +253,10 @@ fn system_pressure_degradation_level_returns_five_band_u8() {
     // SystemPressure-as-public-pressure-signal contract.
     let source_str = read("src/types/pressure.rs");
     assert!(
-        source_str.contains("> 0.875") && source_str.contains("> 0.625")
-            && source_str.contains("> 0.375") && source_str.contains("> 0.125"),
+        source_str.contains("> 0.875")
+            && source_str.contains("> 0.625")
+            && source_str.contains("> 0.375")
+            && source_str.contains("> 0.125"),
         "REGRESSION: degradation_level thresholds (0.875 / \
          0.625 / 0.375 / 0.125) changed. These cuts must \
          match runtime::resource_monitor::DegradationLevel \

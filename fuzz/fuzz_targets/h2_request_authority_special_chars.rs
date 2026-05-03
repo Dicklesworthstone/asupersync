@@ -1,7 +1,7 @@
 #![no_main]
 
-use libfuzzer_sys::fuzz_target;
 use arbitrary::{Arbitrary, Unstructured};
+use libfuzzer_sys::fuzz_target;
 
 /// HTTP/2 frame header length per RFC 7540 §4.1
 const FRAME_HEADER_LEN: usize = 9;
@@ -97,7 +97,7 @@ impl HeaderField {
         // RFC 7540 §8.3.1: :authority MUST NOT include userinfo
         if authority.contains('@') {
             return AuthorityParseResult::ProtocolError(
-                "Authority contains forbidden userinfo component".to_string()
+                "Authority contains forbidden userinfo component".to_string(),
             );
         }
 
@@ -116,12 +116,12 @@ impl HeaderField {
                     (ipv6_part, Some(&remaining[1..]))
                 } else {
                     return AuthorityParseResult::InvalidIpv6(
-                        "Invalid characters after IPv6 literal".to_string()
+                        "Invalid characters after IPv6 literal".to_string(),
                     );
                 }
             } else {
                 return AuthorityParseResult::InvalidIpv6(
-                    "IPv6 literal missing closing bracket".to_string()
+                    "IPv6 literal missing closing bracket".to_string(),
                 );
             }
         } else {
@@ -151,25 +151,30 @@ impl HeaderField {
             }
 
             // Check for valid IPv6 characters: hexdigit, colon, dot (for IPv4-embedded)
-            if !ipv6_content.chars().all(|c| c.is_ascii_hexdigit() || c == ':' || c == '.') {
+            if !ipv6_content
+                .chars()
+                .all(|c| c.is_ascii_hexdigit() || c == ':' || c == '.')
+            {
                 return AuthorityParseResult::InvalidIpv6(format!(
-                    "Invalid characters in IPv6 literal: {}", ipv6_content
+                    "Invalid characters in IPv6 literal: {}",
+                    ipv6_content
                 ));
             }
 
             // Check for too many consecutive colons (more than 2 is invalid)
             if ipv6_content.contains(":::") {
                 return AuthorityParseResult::InvalidIpv6(
-                    "Too many consecutive colons in IPv6".to_string()
+                    "Too many consecutive colons in IPv6".to_string(),
                 );
             }
 
             // Basic structural validation - should not start or end with single colon
             // unless it's part of :: compression
-            if (ipv6_content.starts_with(':') && !ipv6_content.starts_with("::")) ||
-               (ipv6_content.ends_with(':') && !ipv6_content.ends_with("::")) {
+            if (ipv6_content.starts_with(':') && !ipv6_content.starts_with("::"))
+                || (ipv6_content.ends_with(':') && !ipv6_content.ends_with("::"))
+            {
                 return AuthorityParseResult::InvalidIpv6(
-                    "IPv6 address cannot start/end with single colon".to_string()
+                    "IPv6 address cannot start/end with single colon".to_string(),
                 );
             }
         }
@@ -185,23 +190,27 @@ impl HeaderField {
                     let punycode_part = &label[4..]; // Remove "xn--" prefix
 
                     // Punycode should contain only ASCII letters, digits, and hyphens
-                    if !punycode_part.chars().all(|c| c.is_ascii_alphanumeric() || c == '-') {
+                    if !punycode_part
+                        .chars()
+                        .all(|c| c.is_ascii_alphanumeric() || c == '-')
+                    {
                         return AuthorityParseResult::InvalidIdn(format!(
-                            "Invalid punycode format in label: {}", label
+                            "Invalid punycode format in label: {}",
+                            label
                         ));
                     }
 
                     // Punycode cannot be empty after xn-- prefix
                     if punycode_part.is_empty() {
                         return AuthorityParseResult::InvalidIdn(
-                            "Empty punycode after xn-- prefix".to_string()
+                            "Empty punycode after xn-- prefix".to_string(),
                         );
                     }
 
                     // Punycode cannot start or end with hyphen
                     if punycode_part.starts_with('-') || punycode_part.ends_with('-') {
                         return AuthorityParseResult::InvalidIdn(
-                            "Punycode cannot start or end with hyphen".to_string()
+                            "Punycode cannot start or end with hyphen".to_string(),
                         );
                     }
                 }
@@ -211,32 +220,34 @@ impl HeaderField {
         // Validate regular hostname format if not IPv6
         if !is_ipv6_literal {
             // Check for valid hostname characters per RFC 3986
-            if !host_part.chars().all(|c| {
-                c.is_ascii_alphanumeric() || c == '.' || c == '-' || c == '_'
-            }) {
+            if !host_part
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-' || c == '_')
+            {
                 return AuthorityParseResult::ProtocolError(format!(
-                    "Invalid characters in hostname: {}", host_part
+                    "Invalid characters in hostname: {}",
+                    host_part
                 ));
             }
 
             // Hostname cannot start or end with hyphen
             if host_part.starts_with('-') || host_part.ends_with('-') {
                 return AuthorityParseResult::ProtocolError(
-                    "Hostname cannot start or end with hyphen".to_string()
+                    "Hostname cannot start or end with hyphen".to_string(),
                 );
             }
 
             // Check for consecutive dots
             if host_part.contains("..") {
                 return AuthorityParseResult::ProtocolError(
-                    "Hostname cannot contain consecutive dots".to_string()
+                    "Hostname cannot contain consecutive dots".to_string(),
                 );
             }
 
             // Hostname cannot start or end with dot
             if host_part.starts_with('.') || host_part.ends_with('.') {
                 return AuthorityParseResult::ProtocolError(
-                    "Hostname cannot start or end with dot".to_string()
+                    "Hostname cannot start or end with dot".to_string(),
                 );
             }
         }
@@ -250,7 +261,7 @@ impl HeaderField {
             // Check for leading zeros (not allowed except for "0")
             if port_str.len() > 1 && port_str.starts_with('0') {
                 return AuthorityParseResult::InvalidPort(
-                    "Port number cannot have leading zeros".to_string()
+                    "Port number cannot have leading zeros".to_string(),
                 );
             }
 
@@ -258,14 +269,16 @@ impl HeaderField {
                 Ok(port_num) => {
                     if port_num > MAX_PORT_NUMBER {
                         return AuthorityParseResult::InvalidPort(format!(
-                            "Port number {} exceeds maximum {}", port_num, MAX_PORT_NUMBER
+                            "Port number {} exceeds maximum {}",
+                            port_num, MAX_PORT_NUMBER
                         ));
                     }
                     Some(port_num as u16)
-                },
+                }
                 Err(_) => {
                     return AuthorityParseResult::InvalidPort(format!(
-                        "Invalid port number: {}", port_str
+                        "Invalid port number: {}",
+                        port_str
                     ));
                 }
             }
@@ -516,7 +529,9 @@ fuzz_target!(|input: FuzzInput| {
     let parser = MockH2AuthorityParser::new();
 
     // Ensure valid stream ID (non-zero, odd for client-initiated)
-    let stream_id = if input.stream_id == 0 { 1 } else {
+    let stream_id = if input.stream_id == 0 {
+        1
+    } else {
         (input.stream_id & 0x7FFF_FFFF) | 1
     };
 
@@ -535,18 +550,18 @@ fuzz_target!(|input: FuzzInput| {
     if input.test_ipv6_edge_cases {
         // Test various IPv6 edge cases
         let ipv6_test_cases = [
-            "[::1]",                    // Loopback
-            "[::1]:8080",               // Loopback with port
-            "[2001:db8::1]",           // Documentation prefix
-            "[2001:db8::1]:443",       // With port
-            "[::ffff:192.0.2.1]",      // IPv4-mapped IPv6
-            "[::ffff:192.0.2.1]:80",   // IPv4-mapped with port
-            "[",                        // Invalid - no closing bracket
-            "[::1",                     // Invalid - no closing bracket
-            "[::1]extra",               // Invalid - extra chars after bracket
-            "[:::1]",                   // Invalid - too many colons
-            "[:1]",                     // Invalid - incomplete address
-            "[::1]:99999",             // Invalid - port too large
+            "[::1]",                 // Loopback
+            "[::1]:8080",            // Loopback with port
+            "[2001:db8::1]",         // Documentation prefix
+            "[2001:db8::1]:443",     // With port
+            "[::ffff:192.0.2.1]",    // IPv4-mapped IPv6
+            "[::ffff:192.0.2.1]:80", // IPv4-mapped with port
+            "[",                     // Invalid - no closing bracket
+            "[::1",                  // Invalid - no closing bracket
+            "[::1]extra",            // Invalid - extra chars after bracket
+            "[:::1]",                // Invalid - too many colons
+            "[:1]",                  // Invalid - incomplete address
+            "[::1]:99999",           // Invalid - port too large
         ];
 
         authority_value = ipv6_test_cases[stream_id as usize % ipv6_test_cases.len()].to_string();
@@ -555,16 +570,16 @@ fuzz_target!(|input: FuzzInput| {
     if input.test_idn_edge_cases {
         // Test IDN punycode edge cases
         let idn_test_cases = [
-            "xn--nxasmq6b.com",           // Valid punycode (Chinese domain)
-            "xn--fsq.com",                // Valid short punycode
-            "sub.xn--nxasmq6b.com",       // Valid subdomain with punycode
-            "xn--nxasmq6b.com:443",       // Valid punycode with port
-            "xn--.com",                   // Invalid - empty punycode
-            "xn---.com",                  // Invalid - starts with hyphen
-            "xn--abc-.com",               // Invalid - ends with hyphen
-            "xn--ab@c.com",               // Invalid - invalid chars
-            "xn--123:8080",               // Valid punycode with port
-            "normal.xn--example.org",     // Mixed normal/punycode
+            "xn--nxasmq6b.com",       // Valid punycode (Chinese domain)
+            "xn--fsq.com",            // Valid short punycode
+            "sub.xn--nxasmq6b.com",   // Valid subdomain with punycode
+            "xn--nxasmq6b.com:443",   // Valid punycode with port
+            "xn--.com",               // Invalid - empty punycode
+            "xn---.com",              // Invalid - starts with hyphen
+            "xn--abc-.com",           // Invalid - ends with hyphen
+            "xn--ab@c.com",           // Invalid - invalid chars
+            "xn--123:8080",           // Valid punycode with port
+            "normal.xn--example.org", // Mixed normal/punycode
         ];
 
         authority_value = idn_test_cases[stream_id as usize % idn_test_cases.len()].to_string();
@@ -573,18 +588,18 @@ fuzz_target!(|input: FuzzInput| {
     if input.test_port_edge_cases {
         // Test port number edge cases
         let port_test_cases = [
-            "example.com:80",          // Valid standard port
-            "example.com:443",         // Valid HTTPS port
-            "example.com:8080",        // Valid high port
-            "example.com:65535",       // Valid maximum port
-            "example.com:65536",       // Invalid - port too large
-            "example.com:99999",       // Invalid - port too large
-            "example.com:0",           // Edge case - port 0
-            "example.com:00080",       // Invalid - leading zeros
-            "example.com:",            // Invalid - empty port
-            "example.com:abc",         // Invalid - non-numeric port
-            "[::1]:65535",             // Valid IPv6 with max port
-            "[::1]:65536",             // Invalid IPv6 with too-large port
+            "example.com:80",    // Valid standard port
+            "example.com:443",   // Valid HTTPS port
+            "example.com:8080",  // Valid high port
+            "example.com:65535", // Valid maximum port
+            "example.com:65536", // Invalid - port too large
+            "example.com:99999", // Invalid - port too large
+            "example.com:0",     // Edge case - port 0
+            "example.com:00080", // Invalid - leading zeros
+            "example.com:",      // Invalid - empty port
+            "example.com:abc",   // Invalid - non-numeric port
+            "[::1]:65535",       // Valid IPv6 with max port
+            "[::1]:65536",       // Invalid IPv6 with too-large port
         ];
 
         authority_value = port_test_cases[stream_id as usize % port_test_cases.len()].to_string();
@@ -617,9 +632,17 @@ fuzz_target!(|input: FuzzInput| {
 
     // Validate behavior based on authority format
     match result {
-        HeadersParseResult::Valid { authority_result: Some(auth_result), .. } => {
+        HeadersParseResult::Valid {
+            authority_result: Some(auth_result),
+            ..
+        } => {
             match auth_result {
-                AuthorityParseResult::Valid { host, port, is_ipv6_literal, is_idn_punycode } => {
+                AuthorityParseResult::Valid {
+                    host,
+                    port,
+                    is_ipv6_literal,
+                    is_idn_punycode,
+                } => {
                     // Authority parsed successfully - validate expectations
 
                     if input.test_port_edge_cases && authority_value.contains(":65536") {
@@ -639,22 +662,28 @@ fuzz_target!(|input: FuzzInput| {
                     if input.test_ipv6_edge_cases && authority_value.contains("[:::") {
                         panic!(
                             "CRITICAL RFC VIOLATION: Invalid IPv6 with triple colon parsed as valid! \
-                             Authority: {}", authority_value
+                             Authority: {}",
+                            authority_value
                         );
                     }
 
-                    if input.test_ipv6_edge_cases &&
-                       (authority_value == "[" || authority_value == "[::1" || authority_value.contains("]extra")) {
+                    if input.test_ipv6_edge_cases
+                        && (authority_value == "["
+                            || authority_value == "[::1"
+                            || authority_value.contains("]extra"))
+                    {
                         panic!(
                             "CRITICAL RFC VIOLATION: Malformed IPv6 literal parsed as valid! \
-                             Authority: {}", authority_value
+                             Authority: {}",
+                            authority_value
                         );
                     }
 
                     if input.test_idn_edge_cases && authority_value.contains("xn--.") {
                         panic!(
                             "CRITICAL RFC VIOLATION: Invalid punycode (empty after xn--) parsed as valid! \
-                             Authority: {}", authority_value
+                             Authority: {}",
+                            authority_value
                         );
                     }
 
@@ -662,34 +691,39 @@ fuzz_target!(|input: FuzzInput| {
                     if is_ipv6_literal {
                         assert!(
                             authority_value.starts_with('[') && authority_value.contains(']'),
-                            "IPv6 literal flag set but authority format doesn't match: {}", authority_value
+                            "IPv6 literal flag set but authority format doesn't match: {}",
+                            authority_value
                         );
                     }
 
                     if is_idn_punycode {
                         assert!(
                             authority_value.to_lowercase().contains("xn--"),
-                            "IDN punycode flag set but authority doesn't contain xn--: {}", authority_value
+                            "IDN punycode flag set but authority doesn't contain xn--: {}",
+                            authority_value
                         );
                     }
 
                     if let Some(parsed_port) = port {
                         assert!(
                             authority_value.contains(&format!(":{}", parsed_port)),
-                            "Parsed port {} doesn't match authority format: {}", parsed_port, authority_value
+                            "Parsed port {} doesn't match authority format: {}",
+                            parsed_port,
+                            authority_value
                         );
                     }
-                },
+                }
 
                 AuthorityParseResult::Empty => {
                     // Empty authority is valid for CONNECT requests
                     assert!(
                         authority_value.is_empty(),
-                        "Empty authority result but value is not empty: {}", authority_value
+                        "Empty authority result but value is not empty: {}",
+                        authority_value
                     );
                 }
             }
-        },
+        }
 
         HeadersParseResult::ProtocolError(msg) => {
             // Expected for invalid authority formats
@@ -697,48 +731,61 @@ fuzz_target!(|input: FuzzInput| {
             // Verify specific error cases are caught
             if authority_value.contains("@") {
                 assert!(
-                    msg.to_lowercase().contains("userinfo") || msg.to_lowercase().contains("forbidden"),
-                    "Expected userinfo error for authority with @, got: {}", msg
+                    msg.to_lowercase().contains("userinfo")
+                        || msg.to_lowercase().contains("forbidden"),
+                    "Expected userinfo error for authority with @, got: {}",
+                    msg
                 );
             }
 
             if authority_value.contains(":65536") || authority_value.contains(":99999") {
                 assert!(
-                    msg.to_lowercase().contains("port") &&
-                    (msg.contains("65535") || msg.contains("maximum") || msg.contains("exceeds")),
-                    "Expected port range error for large port, got: {}", msg
+                    msg.to_lowercase().contains("port")
+                        && (msg.contains("65535")
+                            || msg.contains("maximum")
+                            || msg.contains("exceeds")),
+                    "Expected port range error for large port, got: {}",
+                    msg
                 );
             }
 
             if authority_value.starts_with('[') && !authority_value.contains(']') {
                 assert!(
                     msg.to_lowercase().contains("ipv6") || msg.to_lowercase().contains("bracket"),
-                    "Expected IPv6 bracket error, got: {}", msg
+                    "Expected IPv6 bracket error, got: {}",
+                    msg
                 );
             }
 
             if authority_value.contains(":::") {
                 assert!(
                     msg.to_lowercase().contains("ipv6") || msg.to_lowercase().contains("colon"),
-                    "Expected IPv6 colon error for triple colon, got: {}", msg
+                    "Expected IPv6 colon error for triple colon, got: {}",
+                    msg
                 );
             }
 
             if authority_value.contains("xn--.") || authority_value.contains("xn---.") {
                 assert!(
-                    msg.to_lowercase().contains("idn") || msg.to_lowercase().contains("punycode") || msg.to_lowercase().contains("hyphen"),
-                    "Expected IDN/punycode error for malformed punycode, got: {}", msg
+                    msg.to_lowercase().contains("idn")
+                        || msg.to_lowercase().contains("punycode")
+                        || msg.to_lowercase().contains("hyphen"),
+                    "Expected IDN/punycode error for malformed punycode, got: {}",
+                    msg
                 );
             }
-        },
+        }
 
-        HeadersParseResult::Valid { authority_result: None, .. } => {
+        HeadersParseResult::Valid {
+            authority_result: None,
+            ..
+        } => {
             // No :authority header present - acceptable for some request types
-        },
+        }
 
         HeadersParseResult::IncompleteFrame => {
             // Expected for malformed frames
-        },
+        }
 
         HeadersParseResult::InvalidStreamId => {
             // Should not happen with our stream ID logic
@@ -748,20 +795,20 @@ fuzz_target!(|input: FuzzInput| {
 
     // Test specific known invalid patterns
     let invalid_patterns = [
-        "user:pass@example.com",       // Userinfo forbidden
-        "example.com:65536",           // Port too large
-        "example.com:999999",          // Port way too large
-        "[::1",                        // Missing closing bracket
-        "[::1]extra",                  // Extra chars after IPv6
-        "[:::1]",                      // Too many colons
-        "xn--.com",                    // Empty punycode
-        "xn---.com",                   // Punycode starts with hyphen
-        "example..com",                // Double dots
-        ".example.com",                // Starts with dot
-        "example.com.",                // Ends with dot
-        "example.com:00080",           // Leading zero in port
-        "example.com:",                // Empty port
-        "example.com:abc",             // Non-numeric port
+        "user:pass@example.com", // Userinfo forbidden
+        "example.com:65536",     // Port too large
+        "example.com:999999",    // Port way too large
+        "[::1",                  // Missing closing bracket
+        "[::1]extra",            // Extra chars after IPv6
+        "[:::1]",                // Too many colons
+        "xn--.com",              // Empty punycode
+        "xn---.com",             // Punycode starts with hyphen
+        "example..com",          // Double dots
+        ".example.com",          // Starts with dot
+        "example.com.",          // Ends with dot
+        "example.com:00080",     // Leading zero in port
+        "example.com:",          // Empty port
+        "example.com:abc",       // Non-numeric port
     ];
 
     for &invalid_pattern in &invalid_patterns {
@@ -787,15 +834,18 @@ fuzz_target!(|input: FuzzInput| {
         let test_result = parser.parse_headers_frame(&test_frame);
 
         match test_result {
-            HeadersParseResult::Valid { authority_result: Some(AuthorityParseResult::Valid { .. }), .. } => {
+            HeadersParseResult::Valid {
+                authority_result: Some(AuthorityParseResult::Valid { .. }),
+                ..
+            } => {
                 panic!(
                     "CRITICAL SECURITY ISSUE: Invalid authority pattern parsed as valid: '{}'",
                     invalid_pattern
                 );
-            },
+            }
             HeadersParseResult::ProtocolError(_) => {
                 // Expected - invalid pattern correctly rejected
-            },
+            }
             _ => {
                 // Other results (incomplete, etc.) are acceptable
             }
@@ -845,14 +895,14 @@ fuzz_target!(|input: FuzzInput| {
         match test_result {
             HeadersParseResult::Valid { .. } => {
                 // Expected - valid pattern correctly accepted
-            },
+            }
             HeadersParseResult::ProtocolError(msg) => {
                 // Should not happen for valid patterns
                 eprintln!(
                     "WARNING: Valid authority pattern '{}' was rejected: {}",
                     valid_pattern, msg
                 );
-            },
+            }
             _ => {
                 // Other results are acceptable (frame issues, etc.)
             }

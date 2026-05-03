@@ -1,19 +1,19 @@
 #![no_main]
 
-use libfuzzer_sys::fuzz_target;
 use arbitrary::{Arbitrary, Unstructured};
-use std::sync::{Arc, Mutex as StdMutex};
-use std::task::{Context, Poll, RawWaker, RawWakerVTable, Waker};
+use libfuzzer_sys::fuzz_target;
+use std::collections::HashMap;
 use std::future::Future;
 use std::pin::Pin;
+use std::sync::{Arc, Mutex as StdMutex};
+use std::task::{Context, Poll, RawWaker, RawWakerVTable, Waker};
 use std::thread;
 use std::time::Duration;
-use std::collections::HashMap;
 
-use asupersync::{Cx, RegionId, Budget};
-use asupersync::sync::{Mutex, OwnedMutexGuard, LockError};
+use asupersync::sync::{LockError, Mutex, OwnedMutexGuard};
 use asupersync::types::TaskId;
 use asupersync::util::ArenaIndex;
+use asupersync::{Budget, Cx, RegionId};
 
 #[derive(Debug, Clone)]
 struct CancelTracker {
@@ -71,17 +71,21 @@ impl CancelTracker {
                 match &result.result {
                     Err(LockError::Cancelled) => {
                         // After cancellation, lock should be available to others
-                        assert!(result.lock_available_after,
+                        assert!(
+                            result.lock_available_after,
                             "Lock not available after cancellation for operation {}",
-                            result.operation_id);
+                            result.operation_id
+                        );
                     }
                     Err(LockError::Poisoned) => {
                         // Poisoned state is valid but should be consistent
                     }
                     Err(LockError::PolledAfterCompletion) => {
                         // This should not happen in normal cancellation flow
-                        panic!("Unexpected PolledAfterCompletion in operation {}",
-                            result.operation_id);
+                        panic!(
+                            "Unexpected PolledAfterCompletion in operation {}",
+                            result.operation_id
+                        );
                     }
                     Ok(()) => {
                         // Successful acquisition is fine
@@ -92,16 +96,21 @@ impl CancelTracker {
 
         // Check that lock states are consistent
         if let Ok(states) = self.lock_states.lock() {
-            let cancelled_count = states.values()
+            let cancelled_count = states
+                .values()
                 .filter(|state| matches!(state, LockState::Cancelled))
                 .count();
-            let acquired_count = states.values()
+            let acquired_count = states
+                .values()
                 .filter(|state| matches!(state, LockState::LockAcquired))
                 .count();
 
             // Fundamental invariant: mutex can't be held by multiple operations
-            assert!(acquired_count <= 1,
-                "Multiple operations hold lock: {} acquired", acquired_count);
+            assert!(
+                acquired_count <= 1,
+                "Multiple operations hold lock: {} acquired",
+                acquired_count
+            );
         }
     }
 }
@@ -123,15 +132,15 @@ impl TrackedWaker {
 
     fn create_waker(&self) -> Waker {
         let data = Arc::new(self.clone());
-        let raw = RawWaker::new(
-            Arc::into_raw(data) as *const (),
-            &TRACKED_WAKER_VTABLE,
-        );
+        let raw = RawWaker::new(Arc::into_raw(data) as *const (), &TRACKED_WAKER_VTABLE);
         unsafe { Waker::from_raw(raw) }
     }
 
     fn was_waked(&self) -> bool {
-        self.waked.lock().unwrap_or_else(|_| panic!("Lock poisoned")).clone()
+        self.waked
+            .lock()
+            .unwrap_or_else(|_| panic!("Lock poisoned"))
+            .clone()
     }
 }
 
@@ -173,7 +182,8 @@ unsafe fn tracked_waker_wake_by_ref(data: *const ()) {
     if let Ok(mut waked) = arc.waked.lock() {
         *waked = true;
     }
-    arc.tracker.record_operation(&format!("wake_by_ref_{}", arc.op_id));
+    arc.tracker
+        .record_operation(&format!("wake_by_ref_{}", arc.op_id));
     std::mem::forget(arc);
 }
 
@@ -367,7 +377,11 @@ fuzz_target!(|data: &[u8]| {
                 let lock_available = !matches!(first_poll, Poll::Ready(Ok(_)));
                 tracker.record_cancel_result(CancelResult {
                     operation_id: 0,
-                    result: if lock_available { Err(LockError::Cancelled) } else { Ok(()) },
+                    result: if lock_available {
+                        Err(LockError::Cancelled)
+                    } else {
+                        Ok(())
+                    },
                     lock_available_after: lock_available,
                 });
             }
@@ -381,7 +395,8 @@ fuzz_target!(|data: &[u8]| {
                     break;
                 }
 
-                let lock_future = OwnedMutexGuard::lock(Arc::clone(&mutex), &contexts[iter % contexts.len()]);
+                let lock_future =
+                    OwnedMutexGuard::lock(Arc::clone(&mutex), &contexts[iter % contexts.len()]);
                 let mut pinned = Box::pin(lock_future);
                 let waker = tracked_wakers[iter % tracked_wakers.len()].create_waker();
                 let mut context = Context::from_waker(&waker);
@@ -395,7 +410,11 @@ fuzz_target!(|data: &[u8]| {
                 let lock_available = !matches!(poll_result, Poll::Ready(Ok(_)));
                 tracker.record_cancel_result(CancelResult {
                     operation_id: iter,
-                    result: if lock_available { Err(LockError::Cancelled) } else { Ok(()) },
+                    result: if lock_available {
+                        Err(LockError::Cancelled)
+                    } else {
+                        Ok(())
+                    },
                     lock_available_after: lock_available,
                 });
             }
@@ -459,7 +478,8 @@ fuzz_target!(|data: &[u8]| {
 
                 if is_lock {
                     if op_idx < contexts.len() {
-                        let lock_future = OwnedMutexGuard::lock(Arc::clone(&mutex), &contexts[op_idx]);
+                        let lock_future =
+                            OwnedMutexGuard::lock(Arc::clone(&mutex), &contexts[op_idx]);
                         let mut pinned = Box::pin(lock_future);
                         let waker = tracked_wakers[op_idx].create_waker();
                         let mut context = Context::from_waker(&waker);
@@ -472,7 +492,10 @@ fuzz_target!(|data: &[u8]| {
                                 tracker.record_lock_state(op_idx, LockState::LockAcquired);
                             }
                             Poll::Ready(Err(e)) => {
-                                tracker.record_lock_state(op_idx, LockState::Failed(format!("{:?}", e)));
+                                tracker.record_lock_state(
+                                    op_idx,
+                                    LockState::Failed(format!("{:?}", e)),
+                                );
                             }
                             Poll::Pending => {
                                 tracker.record_lock_state(op_idx, LockState::WaitingForLock);
@@ -516,8 +539,10 @@ fuzz_target!(|data: &[u8]| {
     match final_pinned.as_mut().poll(&mut final_context) {
         Poll::Ready(Ok(guard)) => {
             // Verify the mutex still holds the correct value
-            assert_eq!(*guard, config.test_value,
-                "Mutex value corrupted after cancel operations");
+            assert_eq!(
+                *guard, config.test_value,
+                "Mutex value corrupted after cancel operations"
+            );
             tracker.record_operation("final_validation_success");
         }
         Poll::Ready(Err(e)) => {

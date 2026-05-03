@@ -18,7 +18,7 @@
 use crate::observability::otlp_trace_exporter::{
     LoadSheddingTraceExporter, MockOtlpHttpExporter, OtlpSpan, SpanBatch, TraceExporter,
 };
-use crate::observability::w3c_trace_context::{W3CTraceContext, TraceFlags, extract_from_http};
+use crate::observability::w3c_trace_context::{TraceFlags, W3CTraceContext, extract_from_http};
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
@@ -113,7 +113,11 @@ fn audit_upstream_sampling_decision_honored() {
         0x01 // Sampled (honor upstream)
     } else {
         // Apply local sampler only if upstream is not sampled
-        if local_sampler.sample_child(false) { 0x01 } else { 0x00 }
+        if local_sampler.sample_child(false) {
+            0x01
+        } else {
+            0x00
+        }
     };
 
     // Create span that honors upstream decision
@@ -213,7 +217,10 @@ fn audit_local_sampling_applies_to_root_spans_only() {
         root_flags, // Apply local sampler decision
     );
 
-    println!("   Local sampler decision: {}", if root_decision { "sample" } else { "drop" });
+    println!(
+        "   Local sampler decision: {}",
+        if root_decision { "sample" } else { "drop" }
+    );
     println!("   Root span sampled: {}", root_span.is_sampled());
 
     // Test Case 2: CHILD span (honors parent/upstream)
@@ -241,8 +248,14 @@ fn audit_local_sampling_applies_to_root_spans_only() {
     println!("   Child span sampled: {}", child_span.is_sampled());
 
     // Verify behavior
-    assert!(!root_span.is_sampled(), "Root span should follow local sampler (drop)");
-    assert!(child_span.is_sampled(), "Child span should honor parent decision (W3C)");
+    assert!(
+        !root_span.is_sampled(),
+        "Root span should follow local sampler (drop)"
+    );
+    assert!(
+        child_span.is_sampled(),
+        "Child span should honor parent decision (W3C)"
+    );
 
     // Export and verify only sampled spans are exported
     let batch = SpanBatch {
@@ -268,8 +281,7 @@ fn audit_local_sampling_applies_to_root_spans_only() {
             "Only sampled child span should be exported"
         );
         assert_eq!(
-            exported_batch.spans[0].name,
-            "child_operation",
+            exported_batch.spans[0].name, "child_operation",
             "Child span (W3C compliant) should be exported"
         );
     }

@@ -94,7 +94,7 @@ pub struct CharacterInjection {
 /// Types of character injection
 #[derive(Arbitrary, Debug, Clone, PartialEq)]
 pub enum InjectionType {
-    ControlCharacters,  // \x00-\x1F, \x7F-\xFF
+    ControlCharacters,    // \x00-\x1F, \x7F-\xFF
     WhitespaceCharacters, // space, tab, CR, LF
     UnicodeCharacters,
     InvalidTokenCharacters, // Characters not allowed in HTTP tokens
@@ -208,7 +208,15 @@ pub enum ParsedMethod {
 /// Standard HTTP methods
 #[derive(Debug, PartialEq, Clone)]
 pub enum StandardMethod {
-    Get, Head, Post, Put, Delete, Connect, Options, Trace, Patch,
+    Get,
+    Head,
+    Post,
+    Put,
+    Delete,
+    Connect,
+    Options,
+    Trace,
+    Patch,
 }
 
 /// Method parsing errors
@@ -261,10 +269,10 @@ pub struct CaseViolation {
 /// Violation severity levels
 #[derive(Debug, PartialEq, Clone)]
 pub enum ViolationSeverity {
-    Critical,  // Protocol violation, security risk
-    High,      // RFC deviation, compatibility issue
-    Medium,    // Edge case handling problem
-    Low,       // Minor parsing inconsistency
+    Critical, // Protocol violation, security risk
+    High,     // RFC deviation, compatibility issue
+    Medium,   // Edge case handling problem
+    Low,      // Minor parsing inconsistency
 }
 
 impl MockMethodParser {
@@ -277,7 +285,10 @@ impl MockMethodParser {
     }
 
     /// Parse HTTP method with case sensitivity testing
-    pub fn parse_method(&mut self, test_case: &MethodCaseSensitivityTestCase) -> MethodParsingResult {
+    pub fn parse_method(
+        &mut self,
+        test_case: &MethodCaseSensitivityTestCase,
+    ) -> MethodParsingResult {
         let mut case_violations = Vec::new();
         let mut all_results = Vec::new();
 
@@ -295,7 +306,9 @@ impl MockMethodParser {
         let rfc_compliance_score = self.calculate_rfc_compliance();
 
         // Return the first result for the primary analysis
-        let primary_result = all_results.into_iter().next()
+        let primary_result = all_results
+            .into_iter()
+            .next()
             .map(|(_, result)| result)
             .unwrap_or(MethodParsingResult {
                 parsed_method: None,
@@ -315,8 +328,10 @@ impl MockMethodParser {
     /// Build method bytes from variant specification
     fn build_method_bytes(&self, variant: &MethodVariant) -> Vec<u8> {
         let base_bytes = self.get_base_method_bytes(&variant.base_method);
-        let case_transformed = self.apply_case_transformation(&base_bytes, &variant.case_transformation);
-        let with_injection = self.apply_character_injection(&case_transformed, &variant.character_injection);
+        let case_transformed =
+            self.apply_case_transformation(&base_bytes, &variant.case_transformation);
+        let with_injection =
+            self.apply_character_injection(&case_transformed, &variant.character_injection);
         self.apply_length_modification(&with_injection, &variant.length_modification)
     }
 
@@ -338,11 +353,19 @@ impl MockMethodParser {
     }
 
     /// Apply case transformation
-    fn apply_case_transformation(&self, bytes: &[u8], transformation: &CaseTransformation) -> Vec<u8> {
+    fn apply_case_transformation(
+        &self,
+        bytes: &[u8],
+        transformation: &CaseTransformation,
+    ) -> Vec<u8> {
         match transformation {
             CaseTransformation::Unchanged => bytes.to_vec(),
-            CaseTransformation::Lowercase => bytes.iter().map(|&b| b.to_ascii_lowercase()).collect(),
-            CaseTransformation::Uppercase => bytes.iter().map(|&b| b.to_ascii_uppercase()).collect(),
+            CaseTransformation::Lowercase => {
+                bytes.iter().map(|&b| b.to_ascii_lowercase()).collect()
+            }
+            CaseTransformation::Uppercase => {
+                bytes.iter().map(|&b| b.to_ascii_uppercase()).collect()
+            }
             CaseTransformation::TitleCase => {
                 let mut result = bytes.to_vec();
                 if !result.is_empty() {
@@ -352,18 +375,21 @@ impl MockMethodParser {
                     }
                 }
                 result
-            },
-            CaseTransformation::MixedCase(pattern) => {
-                bytes.iter().enumerate().map(|(i, &b)| {
+            }
+            CaseTransformation::MixedCase(pattern) => bytes
+                .iter()
+                .enumerate()
+                .map(|(i, &b)| {
                     if *pattern.get(i % pattern.len()).unwrap_or(&false) {
                         b.to_ascii_uppercase()
                     } else {
                         b.to_ascii_lowercase()
                     }
-                }).collect()
-            },
-            CaseTransformation::InvertCase => {
-                bytes.iter().map(|&b| {
+                })
+                .collect(),
+            CaseTransformation::InvertCase => bytes
+                .iter()
+                .map(|&b| {
                     if b.is_ascii_uppercase() {
                         b.to_ascii_lowercase()
                     } else if b.is_ascii_lowercase() {
@@ -371,23 +397,30 @@ impl MockMethodParser {
                     } else {
                         b
                     }
-                }).collect()
-            },
+                })
+                .collect(),
             CaseTransformation::RandomCase => {
                 // Simple deterministic "random" based on byte value
-                bytes.iter().map(|&b| {
-                    if b % 2 == 0 {
-                        b.to_ascii_uppercase()
-                    } else {
-                        b.to_ascii_lowercase()
-                    }
-                }).collect()
-            },
+                bytes
+                    .iter()
+                    .map(|&b| {
+                        if b % 2 == 0 {
+                            b.to_ascii_uppercase()
+                        } else {
+                            b.to_ascii_lowercase()
+                        }
+                    })
+                    .collect()
+            }
         }
     }
 
     /// Apply character injection
-    fn apply_character_injection(&self, bytes: &[u8], injection: &Option<CharacterInjection>) -> Vec<u8> {
+    fn apply_character_injection(
+        &self,
+        bytes: &[u8],
+        injection: &Option<CharacterInjection>,
+    ) -> Vec<u8> {
         let Some(inj) = injection else {
             return bytes.to_vec();
         };
@@ -398,45 +431,49 @@ impl MockMethodParser {
         match &inj.position {
             InjectionPosition::Beginning => {
                 result.splice(0..0, injection_chars.iter().cloned());
-            },
+            }
             InjectionPosition::End => {
                 result.extend_from_slice(injection_chars);
-            },
+            }
             InjectionPosition::Middle => {
                 let pos = result.len() / 2;
                 result.splice(pos..pos, injection_chars.iter().cloned());
-            },
+            }
             InjectionPosition::Random => {
-                let pos = if result.is_empty() { 0 } else { result[0] as usize % (result.len() + 1) };
+                let pos = if result.is_empty() {
+                    0
+                } else {
+                    result[0] as usize % (result.len() + 1)
+                };
                 result.splice(pos..pos, injection_chars.iter().cloned());
-            },
+            }
             InjectionPosition::Multiple(positions) => {
                 // Insert in reverse order to maintain positions
                 for &pos in positions.iter().rev() {
                     let actual_pos = pos.min(result.len());
                     result.splice(actual_pos..actual_pos, injection_chars.iter().cloned());
                 }
-            },
+            }
         }
 
         result
     }
 
     /// Apply length modification
-    fn apply_length_modification(&self, bytes: &[u8], modification: &LengthModification) -> Vec<u8> {
+    fn apply_length_modification(
+        &self,
+        bytes: &[u8],
+        modification: &LengthModification,
+    ) -> Vec<u8> {
         match modification {
             LengthModification::None => bytes.to_vec(),
-            LengthModification::Truncate(len) => {
-                bytes.iter().take(*len).copied().collect()
-            },
+            LengthModification::Truncate(len) => bytes.iter().take(*len).copied().collect(),
             LengthModification::Extend(suffix) => {
                 let mut result = bytes.to_vec();
                 result.extend_from_slice(suffix.as_bytes());
                 result
-            },
-            LengthModification::Repeat(times) => {
-                bytes.repeat(*times)
-            },
+            }
+            LengthModification::Repeat(times) => bytes.repeat(*times),
             LengthModification::Empty => Vec::new(),
             LengthModification::VeryLong(target_len) => {
                 if bytes.is_empty() {
@@ -449,12 +486,16 @@ impl MockMethodParser {
                     result.truncate(*target_len);
                     result
                 }
-            },
+            }
         }
     }
 
     /// Parse method bytes and detect violations
-    fn parse_method_bytes(&self, method_bytes: &[u8], violations: &mut Vec<CaseViolation>) -> MethodParsingResult {
+    fn parse_method_bytes(
+        &self,
+        method_bytes: &[u8],
+        violations: &mut Vec<CaseViolation>,
+    ) -> MethodParsingResult {
         // Simulate the actual Method::from_bytes logic
         let parsed_method = self.mock_method_from_bytes(method_bytes);
         let parsing_error = self.validate_method_bytes(method_bytes);
@@ -464,7 +505,11 @@ impl MockMethodParser {
             self.check_case_sensitivity_violations(method_bytes, method, violations);
         }
 
-        let rfc_compliance_score = if violations.is_empty() && parsing_error.is_none() { 1.0 } else { 0.0 };
+        let rfc_compliance_score = if violations.is_empty() && parsing_error.is_none() {
+            1.0
+        } else {
+            0.0
+        };
 
         MethodParsingResult {
             parsed_method,
@@ -506,7 +551,9 @@ impl MockMethodParser {
             return Some(MethodError::Empty);
         }
 
-        if self.validation_config.max_method_length > 0 && bytes.len() > self.validation_config.max_method_length {
+        if self.validation_config.max_method_length > 0
+            && bytes.len() > self.validation_config.max_method_length
+        {
             return Some(MethodError::TooLong(bytes.len()));
         }
 
@@ -514,7 +561,8 @@ impl MockMethodParser {
             return Some(MethodError::NonAscii);
         }
 
-        let invalid_chars: Vec<u8> = bytes.iter()
+        let invalid_chars: Vec<u8> = bytes
+            .iter()
             .copied()
             .filter(|&b| !self.is_valid_method_char(b))
             .collect();
@@ -527,10 +575,17 @@ impl MockMethodParser {
     }
 
     /// Check for case sensitivity violations
-    fn check_case_sensitivity_violations(&self, method_bytes: &[u8], parsed_method: &ParsedMethod, violations: &mut Vec<CaseViolation>) {
+    fn check_case_sensitivity_violations(
+        &self,
+        method_bytes: &[u8],
+        parsed_method: &ParsedMethod,
+        violations: &mut Vec<CaseViolation>,
+    ) {
         // Check if a case-variant of a standard method was parsed as extension
         if let ParsedMethod::Extension(ext_name) = parsed_method {
-            let standard_methods = ["GET", "HEAD", "POST", "PUT", "DELETE", "CONNECT", "OPTIONS", "TRACE", "PATCH"];
+            let standard_methods = [
+                "GET", "HEAD", "POST", "PUT", "DELETE", "CONNECT", "OPTIONS", "TRACE", "PATCH",
+            ];
 
             for &std_method in &standard_methods {
                 if ext_name.eq_ignore_ascii_case(std_method) && ext_name != std_method {
@@ -547,7 +602,9 @@ impl MockMethodParser {
         // Check if mixed-case standard method was incorrectly accepted
         if let ParsedMethod::Standard(_) = parsed_method {
             let method_str = String::from_utf8_lossy(method_bytes);
-            let standard_methods = ["GET", "HEAD", "POST", "PUT", "DELETE", "CONNECT", "OPTIONS", "TRACE", "PATCH"];
+            let standard_methods = [
+                "GET", "HEAD", "POST", "PUT", "DELETE", "CONNECT", "OPTIONS", "TRACE", "PATCH",
+            ];
 
             for &std_method in &standard_methods {
                 if method_str == std_method {
@@ -567,14 +624,21 @@ impl MockMethodParser {
     }
 
     /// Validate case sensitivity behavior
-    fn validate_case_sensitivity_behavior(&mut self, test_case: &MethodCaseSensitivityTestCase, results: &[(Vec<u8>, MethodParsingResult)], _violations: &mut Vec<CaseViolation>) {
+    fn validate_case_sensitivity_behavior(
+        &mut self,
+        test_case: &MethodCaseSensitivityTestCase,
+        results: &[(Vec<u8>, MethodParsingResult)],
+        _violations: &mut Vec<CaseViolation>,
+    ) {
         match &test_case.scenario {
             MethodScenario::StandardMethodCases => {
                 for (method_bytes, result) in results {
                     let method_str = String::from_utf8_lossy(method_bytes);
 
                     // Standard methods with wrong case should not be recognized as standard
-                    if method_str.to_uppercase() != method_str && matches!(result.parsed_method, Some(ParsedMethod::Standard(_))) {
+                    if method_str.to_uppercase() != method_str
+                        && matches!(result.parsed_method, Some(ParsedMethod::Standard(_)))
+                    {
                         self.violations.push(CaseSensitivityViolation {
                             violation_type: CaseViolationType::StandardMethodCaseAccepted,
                             method_bytes: method_bytes.clone(),
@@ -584,7 +648,7 @@ impl MockMethodParser {
                         });
                     }
                 }
-            },
+            }
             MethodScenario::ExtensionMethodCases => {
                 for (method_bytes, result) in results {
                     if let Some(ParsedMethod::Extension(ext_name)) = &result.parsed_method {
@@ -600,7 +664,7 @@ impl MockMethodParser {
                         }
                     }
                 }
-            },
+            }
             _ => {
                 // Other scenarios have different validation logic
             }
@@ -636,12 +700,16 @@ impl MockMethodParser {
             return 1.0;
         }
 
-        let penalty = self.violations.iter().map(|v| match v.severity {
-            ViolationSeverity::Critical => 10.0,
-            ViolationSeverity::High => 5.0,
-            ViolationSeverity::Medium => 2.0,
-            ViolationSeverity::Low => 1.0,
-        }).sum::<f32>();
+        let penalty = self
+            .violations
+            .iter()
+            .map(|v| match v.severity {
+                ViolationSeverity::Critical => 10.0,
+                ViolationSeverity::High => 5.0,
+                ViolationSeverity::Medium => 2.0,
+                ViolationSeverity::Low => 1.0,
+            })
+            .sum::<f32>();
 
         let max_score = 100.0;
         (max_score - penalty).max(0.0) / max_score
@@ -694,7 +762,6 @@ fn generate_method_case_sensitivity_test_cases() -> Vec<MethodCaseSensitivityTes
                 reject_non_ascii: true,
             },
         },
-
         // Extension method case preservation test
         MethodCaseSensitivityTestCase {
             scenario: MethodScenario::ExtensionMethodCases,
@@ -753,7 +820,9 @@ fuzz_target!(|data: &[u8]| {
             if predefined_cases.is_empty() {
                 return;
             }
-            let index = unstructured.int_in_range(0..=predefined_cases.len() - 1).unwrap_or(0);
+            let index = unstructured
+                .int_in_range(0..=predefined_cases.len() - 1)
+                .unwrap_or(0);
             predefined_cases[index].clone()
         }
     };
@@ -761,7 +830,7 @@ fuzz_target!(|data: &[u8]| {
     // Create method parser
     let mut parser = MockMethodParser::new(
         test_case.case_config.clone(),
-        test_case.validation_config.clone()
+        test_case.validation_config.clone(),
     );
 
     // Parse methods and check case sensitivity
@@ -778,7 +847,7 @@ fuzz_target!(|data: &[u8]| {
 fn test_standard_method_case_sensitivity(test_case: &MethodCaseSensitivityTestCase) {
     let parser = MockMethodParser::new(
         test_case.case_config.clone(),
-        test_case.validation_config.clone()
+        test_case.validation_config.clone(),
     );
 
     // Test that "GET" is recognized but "get" is not
@@ -788,10 +857,10 @@ fn test_standard_method_case_sensitivity(test_case: &MethodCaseSensitivityTestCa
     match (get_upper, get_lower) {
         (Some(ParsedMethod::Standard(StandardMethod::Get)), Some(ParsedMethod::Extension(_))) => {
             // Correct behavior - case sensitive
-        },
+        }
         (Some(ParsedMethod::Standard(StandardMethod::Get)), None) => {
             // Also correct - lowercase rejected entirely
-        },
+        }
         _ => {
             // Unexpected behavior - might be case insensitive
         }
@@ -806,14 +875,16 @@ fn test_extension_method_case_preservation(test_case: &MethodCaseSensitivityTest
 
     let parser = MockMethodParser::new(
         test_case.case_config.clone(),
-        test_case.validation_config.clone()
+        test_case.validation_config.clone(),
     );
 
     // Test that extension methods preserve their exact case
     let test_methods = ["CUSTOM", "Custom", "custom", "cUsToM"];
 
     for method in test_methods {
-        if let Some(ParsedMethod::Extension(parsed)) = parser.mock_method_from_bytes(method.as_bytes()) {
+        if let Some(ParsedMethod::Extension(parsed)) =
+            parser.mock_method_from_bytes(method.as_bytes())
+        {
             assert_eq!(parsed, method, "Extension method case not preserved");
         }
     }
@@ -823,18 +894,18 @@ fn test_extension_method_case_preservation(test_case: &MethodCaseSensitivityTest
 fn test_method_smuggling_prevention(test_case: &MethodCaseSensitivityTestCase) {
     let parser = MockMethodParser::new(
         test_case.case_config.clone(),
-        test_case.validation_config.clone()
+        test_case.validation_config.clone(),
     );
 
     // Ensure that case variants of standard methods don't get special treatment
     let smuggling_attempts = [
-        ("get", "GET"),      // lowercase
-        ("Get", "GET"),      // title case
-        ("gET", "GET"),      // mixed case
+        ("get", "GET"), // lowercase
+        ("Get", "GET"), // title case
+        ("gET", "GET"), // mixed case
         ("post", "POST"),
         ("Post", "POST"),
-        ("PUT", "PUT"),      // correct case (should work)
-        ("put", "PUT"),      // wrong case (should not work as standard)
+        ("PUT", "PUT"), // correct case (should work)
+        ("put", "PUT"), // wrong case (should not work as standard)
     ];
 
     for (attempt, expected) in smuggling_attempts {
@@ -845,7 +916,7 @@ fn test_method_smuggling_prevention(test_case: &MethodCaseSensitivityTestCase) {
             match result {
                 Some(ParsedMethod::Standard(_)) => {
                     // Correct behavior
-                },
+                }
                 _ => {
                     // Unexpected - standard method not recognized
                 }
@@ -855,7 +926,7 @@ fn test_method_smuggling_prevention(test_case: &MethodCaseSensitivityTestCase) {
             match result {
                 Some(ParsedMethod::Standard(_)) => {
                     // Violation - case insensitive matching
-                },
+                }
                 Some(ParsedMethod::Extension(_)) | Some(ParsedMethod::Invalid) | None => {
                     // Correct behavior - case sensitivity enforced
                 }
@@ -872,19 +943,19 @@ fn test_invalid_character_rejection(test_case: &MethodCaseSensitivityTestCase) {
 
     let parser = MockMethodParser::new(
         test_case.case_config.clone(),
-        test_case.validation_config.clone()
+        test_case.validation_config.clone(),
     );
 
     // Test various invalid characters
     let invalid_methods = [
-        b"GET\x00".as_slice(),  // null byte
-        b"GET\r".as_slice(),    // CR
-        b"GET\n".as_slice(),    // LF
-        b"GET ".as_slice(),     // space
-        b"GET\t".as_slice(),    // tab
-        b"GET(".as_slice(),     // invalid token char
-        b"GET)".as_slice(),     // invalid token char
-        b"G\xFFT".as_slice(),   // high bit set
+        b"GET\x00".as_slice(), // null byte
+        b"GET\r".as_slice(),   // CR
+        b"GET\n".as_slice(),   // LF
+        b"GET ".as_slice(),    // space
+        b"GET\t".as_slice(),   // tab
+        b"GET(".as_slice(),    // invalid token char
+        b"GET)".as_slice(),    // invalid token char
+        b"G\xFFT".as_slice(),  // high bit set
     ];
 
     for invalid_method in invalid_methods {
@@ -894,7 +965,7 @@ fn test_invalid_character_rejection(test_case: &MethodCaseSensitivityTestCase) {
         match result {
             None => {
                 // Correct - invalid method rejected
-            },
+            }
             Some(_) => {
                 // Violation - invalid method accepted
             }

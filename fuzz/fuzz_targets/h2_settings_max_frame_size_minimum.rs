@@ -65,25 +65,13 @@ pub struct ValidationStats {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ValidationResult {
     /// Value accepted and applied
-    Accepted {
-        old_value: u32,
-        new_value: u32,
-    },
+    Accepted { old_value: u32, new_value: u32 },
     /// Value rejected due to being below minimum
-    RejectedBelowMinimum {
-        value: u32,
-        minimum: u32,
-    },
+    RejectedBelowMinimum { value: u32, minimum: u32 },
     /// Value rejected due to being above maximum
-    RejectedAboveMaximum {
-        value: u32,
-        maximum: u32,
-    },
+    RejectedAboveMaximum { value: u32, maximum: u32 },
     /// Value rejected for other reasons (zero, etc.)
-    RejectedInvalid {
-        value: u32,
-        reason: String,
-    },
+    RejectedInvalid { value: u32, reason: String },
 }
 
 /// Test scenario for SETTINGS_MAX_FRAME_SIZE validation
@@ -126,24 +114,24 @@ pub enum FrameSizeValue {
 /// RFC-defined frame size values
 #[derive(Debug, Clone, Arbitrary)]
 pub enum RfcFrameSize {
-    Minimum,                    // 16384
-    Maximum,                    // 16777215
-    Default,                    // 16384
-    AboveMaximum(u32),         // > 16777215
-    BelowMinimum(u32),         // < 16384
+    Minimum,           // 16384
+    Maximum,           // 16777215
+    Default,           // 16384
+    AboveMaximum(u32), // > 16777215
+    BelowMinimum(u32), // < 16384
 }
 
 /// Boundary values for edge case testing
 #[derive(Debug, Clone, Arbitrary)]
 pub enum BoundaryFrameSize {
-    Zero,                       // 0
-    One,                        // 1
-    MinimumMinus1,             // 16383
-    MinimumPlus1,              // 16385
-    MaximumMinus1,             // 16777214
-    MaximumPlus1,              // 16777216
-    PowerOfTwo(u8),            // 2^n where n < 14 or n > 24
-    AlmostMinimum(u16),        // 16384 - offset where offset in [1, 1000]
+    Zero,               // 0
+    One,                // 1
+    MinimumMinus1,      // 16383
+    MinimumPlus1,       // 16385
+    MaximumMinus1,      // 16777214
+    MaximumPlus1,       // 16777216
+    PowerOfTwo(u8),     // 2^n where n < 14 or n > 24
+    AlmostMinimum(u16), // 16384 - offset where offset in [1, 1000]
 }
 
 /// Computed frame size values
@@ -345,13 +333,13 @@ fn test_rfc_minimum_violations() {
 
     // Test values below RFC minimum
     let test_values = [
-        0,      // Zero
-        1,      // Minimal
-        1023,   // Small
-        8192,   // Half minimum
-        16383,  // Just below minimum
-        16384,  // Exactly minimum (should accept)
-        16385,  // Just above minimum (should accept)
+        0,     // Zero
+        1,     // Minimal
+        1023,  // Small
+        8192,  // Half minimum
+        16383, // Just below minimum
+        16384, // Exactly minimum (should accept)
+        16385, // Just above minimum (should accept)
     ];
 
     for &value in &test_values {
@@ -360,17 +348,20 @@ fn test_rfc_minimum_violations() {
 
         // Values below minimum should be rejected in strict mode
         if value < RFC_MIN_FRAME_SIZE {
-            assert!(matches!(
-                strict_result,
-                ValidationResult::RejectedBelowMinimum { .. }
-            ), "Strict mode should reject value {} (below minimum {})", value, RFC_MIN_FRAME_SIZE);
+            assert!(
+                matches!(strict_result, ValidationResult::RejectedBelowMinimum { .. }),
+                "Strict mode should reject value {} (below minimum {})",
+                value,
+                RFC_MIN_FRAME_SIZE
+            );
 
             // Loose mode demonstrates the vulnerability by accepting invalid values
             if value > 0 {
-                assert!(matches!(
-                    loose_result,
-                    ValidationResult::Accepted { .. }
-                ), "Loose mode incorrectly accepts value {} (below minimum)", value);
+                assert!(
+                    matches!(loose_result, ValidationResult::Accepted { .. }),
+                    "Loose mode incorrectly accepts value {} (below minimum)",
+                    value
+                );
             }
         }
     }
@@ -382,10 +373,10 @@ fn test_minimum_boundary_conditions() {
 
     // Test boundary conditions
     let boundaries = [
-        (RFC_MIN_FRAME_SIZE - 1000, false),  // Well below
-        (RFC_MIN_FRAME_SIZE - 1, false),     // Just below
-        (RFC_MIN_FRAME_SIZE, true),          // Exactly minimum
-        (RFC_MIN_FRAME_SIZE + 1, true),      // Just above
+        (RFC_MIN_FRAME_SIZE - 1000, false), // Well below
+        (RFC_MIN_FRAME_SIZE - 1, false),    // Just below
+        (RFC_MIN_FRAME_SIZE, true),         // Exactly minimum
+        (RFC_MIN_FRAME_SIZE + 1, true),     // Just above
     ];
 
     for (value, should_accept) in boundaries {
@@ -393,11 +384,17 @@ fn test_minimum_boundary_conditions() {
         let result = validator.validate_max_frame_size(value);
 
         if should_accept {
-            assert!(matches!(result, ValidationResult::Accepted { .. }),
-                "Should accept valid frame size {}", value);
+            assert!(
+                matches!(result, ValidationResult::Accepted { .. }),
+                "Should accept valid frame size {}",
+                value
+            );
         } else {
-            assert!(matches!(result, ValidationResult::RejectedBelowMinimum { .. }),
-                "Should reject frame size {} (below minimum)", value);
+            assert!(
+                matches!(result, ValidationResult::RejectedBelowMinimum { .. }),
+                "Should reject frame size {} (below minimum)",
+                value
+            );
         }
     }
 }
@@ -411,7 +408,7 @@ fn test_underflow_scenarios() {
         0,                      // Zero
         1,                      // Minimal positive
         RFC_MIN_FRAME_SIZE / 2, // Half the minimum
-        u32::MAX,              // Maximum possible (overflow risk)
+        u32::MAX,               // Maximum possible (overflow risk)
     ];
 
     for &value in &underflow_candidates {
@@ -421,16 +418,22 @@ fn test_underflow_scenarios() {
         // Ensure no panic or undefined behavior
         match result {
             ValidationResult::Accepted { .. } => {
-                assert!(value >= RFC_MIN_FRAME_SIZE && value <= RFC_MAX_FRAME_SIZE,
-                    "Should only accept values in valid range");
+                assert!(
+                    value >= RFC_MIN_FRAME_SIZE && value <= RFC_MAX_FRAME_SIZE,
+                    "Should only accept values in valid range"
+                );
             }
             ValidationResult::RejectedBelowMinimum { .. } => {
-                assert!(value < RFC_MIN_FRAME_SIZE,
-                    "Should only reject values below minimum");
+                assert!(
+                    value < RFC_MIN_FRAME_SIZE,
+                    "Should only reject values below minimum"
+                );
             }
             ValidationResult::RejectedAboveMaximum { .. } => {
-                assert!(value > RFC_MAX_FRAME_SIZE,
-                    "Should only reject values above maximum");
+                assert!(
+                    value > RFC_MAX_FRAME_SIZE,
+                    "Should only reject values above maximum"
+                );
             }
             ValidationResult::RejectedInvalid { .. } => {
                 // Other rejection reasons are valid
@@ -442,7 +445,8 @@ fn test_underflow_scenarios() {
 fuzz_target!(|scenario: MaxFrameSizeScenario| {
     // Limit operations to prevent timeouts
     let max_ops = scenario.max_operations.min(500);
-    let limited_sequence: Vec<FrameSizeTestCase> = scenario.frame_size_sequence
+    let limited_sequence: Vec<FrameSizeTestCase> = scenario
+        .frame_size_sequence
         .into_iter()
         .take(max_ops as usize)
         .collect();
@@ -457,7 +461,8 @@ fuzz_target!(|scenario: MaxFrameSizeScenario| {
 
     // Set initial frame size if provided and valid
     let initial_size = if scenario.initial_frame_size >= RFC_MIN_FRAME_SIZE
-        && scenario.initial_frame_size <= RFC_MAX_FRAME_SIZE {
+        && scenario.initial_frame_size <= RFC_MAX_FRAME_SIZE
+    {
         scenario.initial_frame_size
     } else {
         RFC_DEFAULT_FRAME_SIZE
@@ -476,12 +481,18 @@ fuzz_target!(|scenario: MaxFrameSizeScenario| {
         // Verify strict validator follows RFC 9113 rules
         match strict_result {
             ValidationResult::Accepted { new_value, .. } => {
-                assert!(new_value >= RFC_MIN_FRAME_SIZE,
+                assert!(
+                    new_value >= RFC_MIN_FRAME_SIZE,
                     "Strict validator accepted frame size {} below minimum {}",
-                    new_value, RFC_MIN_FRAME_SIZE);
-                assert!(new_value <= RFC_MAX_FRAME_SIZE,
+                    new_value,
+                    RFC_MIN_FRAME_SIZE
+                );
+                assert!(
+                    new_value <= RFC_MAX_FRAME_SIZE,
                     "Strict validator accepted frame size {} above maximum {}",
-                    new_value, RFC_MAX_FRAME_SIZE);
+                    new_value,
+                    RFC_MAX_FRAME_SIZE
+                );
             }
             ValidationResult::RejectedBelowMinimum { value, minimum } => {
                 assert!(value < minimum);
@@ -501,8 +512,10 @@ fuzz_target!(|scenario: MaxFrameSizeScenario| {
             match loose_result {
                 ValidationResult::Accepted { .. } => {
                     // This demonstrates the vulnerability - accepting values below RFC minimum
-                    eprintln!("VULNERABILITY: Loose validator accepted frame size {} below minimum {}",
-                        frame_size, RFC_MIN_FRAME_SIZE);
+                    eprintln!(
+                        "VULNERABILITY: Loose validator accepted frame size {} below minimum {}",
+                        frame_size, RFC_MIN_FRAME_SIZE
+                    );
                 }
                 _ => {
                     // Some values might still be rejected for other reasons
@@ -516,13 +529,17 @@ fuzz_target!(|scenario: MaxFrameSizeScenario| {
     let loose_stats = loose_validator.stats();
 
     // Strict validator should never accept values below minimum
-    assert_eq!(strict_stats.below_minimum_accepted, 0,
-        "Strict validator should never accept values below minimum");
+    assert_eq!(
+        strict_stats.below_minimum_accepted, 0,
+        "Strict validator should never accept values below minimum"
+    );
 
     // Loose validator demonstrates vulnerability by accepting some invalid values
     if loose_stats.below_minimum_accepted > 0 {
-        eprintln!("VULNERABILITY CONFIRMED: Loose validator accepted {} values below RFC minimum",
-            loose_stats.below_minimum_accepted);
+        eprintln!(
+            "VULNERABILITY CONFIRMED: Loose validator accepted {} values below RFC minimum",
+            loose_stats.below_minimum_accepted
+        );
     }
 
     // Run targeted tests periodically

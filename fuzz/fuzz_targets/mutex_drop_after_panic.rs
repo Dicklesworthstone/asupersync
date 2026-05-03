@@ -13,13 +13,16 @@
 
 #![no_main]
 
-use libfuzzer_sys::fuzz_target;
 use arbitrary::Arbitrary;
 use asupersync::sync::Mutex;
-use std::sync::{Arc, Barrier, atomic::{AtomicUsize, AtomicBool, Ordering}};
+use libfuzzer_sys::fuzz_target;
+use std::panic::{AssertUnwindSafe, catch_unwind};
+use std::sync::{
+    Arc, Barrier,
+    atomic::{AtomicBool, AtomicUsize, Ordering},
+};
 use std::thread;
 use std::time::Duration;
-use std::panic::{catch_unwind, AssertUnwindSafe};
 
 /// Configuration for mutex drop after panic test
 #[derive(Debug, Arbitrary)]
@@ -71,8 +74,14 @@ impl MutexDropPanicConfig {
         self.accessor_thread_count = (self.accessor_thread_count % 16).max(1);
 
         // Ensure we have enough patterns
-        self.panic_patterns.resize(self.panic_thread_count as usize, PanicPattern::PanicAfterLock);
-        self.access_patterns.resize(self.accessor_thread_count as usize, AccessPattern::TryLockPoisoned);
+        self.panic_patterns.resize(
+            self.panic_thread_count as usize,
+            PanicPattern::PanicAfterLock,
+        );
+        self.access_patterns.resize(
+            self.accessor_thread_count as usize,
+            AccessPattern::TryLockPoisoned,
+        );
 
         // Normalize delays
         self.drop_delay = self.drop_delay % 1000; // Max 1ms
@@ -82,11 +91,11 @@ impl MutexDropPanicConfig {
             match pattern {
                 PanicPattern::PanicDuringWork { work_delay } => {
                     *work_delay = *work_delay % 200; // Max 0.2ms
-                },
+                }
                 PanicPattern::WorkThenPanic { work_items } => {
                     *work_items = (*work_items % 10).max(1);
-                },
-                _ => {},
+                }
+                _ => {}
             }
         }
 
@@ -94,11 +103,11 @@ impl MutexDropPanicConfig {
             match pattern {
                 AccessPattern::TryLockWithTimeout { timeout_micros } => {
                     *timeout_micros = *timeout_micros % 500; // Max 0.5ms
-                },
+                }
                 AccessPattern::RapidLockAttempts { attempts } => {
                     *attempts = (*attempts % 20).max(1);
-                },
-                _ => {},
+                }
+                _ => {}
             }
         }
     }
@@ -121,7 +130,8 @@ struct TestResults {
 
 fuzz_target!(|data: &[u8]| {
     // Parse fuzzer input into config
-    let mut config = match MutexDropPanicConfig::arbitrary(&mut arbitrary::Unstructured::new(data)) {
+    let mut config = match MutexDropPanicConfig::arbitrary(&mut arbitrary::Unstructured::new(data))
+    {
         Ok(config) => config,
         Err(_) => return, // Invalid input, skip
     };
@@ -158,35 +168,39 @@ fuzz_target!(|data: &[u8]| {
                 let cx = asupersync::Cx::for_testing();
                 match pattern {
                     PanicPattern::PanicAfterLock => {
-                        let _guard = futures::executor::block_on(mutex.lock(&cx)).expect("Lock should succeed");
+                        let _guard = futures::executor::block_on(mutex.lock(&cx))
+                            .expect("Lock should succeed");
                         panic!("Intentional panic after acquiring lock");
-                    },
+                    }
 
                     PanicPattern::PanicDuringWork { work_delay } => {
-                        let mut guard = futures::executor::block_on(mutex.lock(&cx)).expect("Lock should succeed");
+                        let mut guard = futures::executor::block_on(mutex.lock(&cx))
+                            .expect("Lock should succeed");
                         if work_delay > 0 {
                             thread::sleep(Duration::from_micros(work_delay as u64));
                         }
                         *guard += 1; // Do some work
                         panic!("Intentional panic during work");
-                    },
+                    }
 
                     PanicPattern::PanicDuringAcquisition => {
                         // This is tricky - we'll panic during a custom operation
                         // that involves lock acquisition
-                        let _guard = futures::executor::block_on(mutex.lock(&cx)).expect("Lock should succeed");
+                        let _guard = futures::executor::block_on(mutex.lock(&cx))
+                            .expect("Lock should succeed");
                         // Simulate some complex operation that panics
                         panic!("Intentional panic during acquisition");
-                    },
+                    }
 
                     PanicPattern::WorkThenPanic { work_items } => {
-                        let mut guard = futures::executor::block_on(mutex.lock(&cx)).expect("Lock should succeed");
+                        let mut guard = futures::executor::block_on(mutex.lock(&cx))
+                            .expect("Lock should succeed");
                         for _ in 0..work_items {
                             *guard = guard.wrapping_add(1);
                             thread::sleep(Duration::from_micros(10));
                         }
                         panic!("Intentional panic after work");
-                    },
+                    }
                 }
             }));
 
@@ -194,10 +208,10 @@ fuzz_target!(|data: &[u8]| {
                 Err(_) => {
                     // Panic occurred as expected
                     results.panics_occurred.fetch_add(1, Ordering::SeqCst);
-                },
+                }
                 Ok(_) => {
                     // Should not happen for our patterns, but handle gracefully
-                },
+                }
             }
         });
 
@@ -212,7 +226,9 @@ fuzz_target!(|data: &[u8]| {
         let pattern = config.access_patterns[i as usize].clone();
 
         let handle = thread::spawn(move || {
-            results.accessor_threads_started.fetch_add(1, Ordering::SeqCst);
+            results
+                .accessor_threads_started
+                .fetch_add(1, Ordering::SeqCst);
 
             // Synchronize start if requested
             if let Some(barrier) = barrier {
@@ -229,16 +245,16 @@ fuzz_target!(|data: &[u8]| {
                     match mutex.try_lock() {
                         Ok(_guard) => {
                             results.lock_successes.fetch_add(1, Ordering::SeqCst);
-                        },
+                        }
                         Err(asupersync::sync::TryLockError::Poisoned) => {
                             results.lock_poison_errors.fetch_add(1, Ordering::SeqCst);
                             results.poison_detected.fetch_add(1, Ordering::SeqCst);
-                        },
+                        }
                         Err(asupersync::sync::TryLockError::Locked) => {
                             // Mutex is currently locked by another thread
-                        },
+                        }
                     }
-                },
+                }
 
                 AccessPattern::BlockOnPoisoned => {
                     results.lock_attempts.fetch_add(1, Ordering::SeqCst);
@@ -250,22 +266,20 @@ fuzz_target!(|data: &[u8]| {
                     }));
 
                     match lock_result {
-                        Ok(guard_result) => {
-                            match guard_result {
-                                Ok(_guard) => {
-                                    results.lock_successes.fetch_add(1, Ordering::SeqCst);
-                                },
-                                Err(_poison_error) => {
-                                    results.lock_poison_errors.fetch_add(1, Ordering::SeqCst);
-                                    results.poison_detected.fetch_add(1, Ordering::SeqCst);
-                                },
+                        Ok(guard_result) => match guard_result {
+                            Ok(_guard) => {
+                                results.lock_successes.fetch_add(1, Ordering::SeqCst);
+                            }
+                            Err(_poison_error) => {
+                                results.lock_poison_errors.fetch_add(1, Ordering::SeqCst);
+                                results.poison_detected.fetch_add(1, Ordering::SeqCst);
                             }
                         },
                         Err(_) => {
                             // Panic occurred during lock attempt
-                        },
+                        }
                     }
-                },
+                }
 
                 AccessPattern::TryLockWithTimeout { timeout_micros } => {
                     results.lock_attempts.fetch_add(1, Ordering::SeqCst);
@@ -279,12 +293,12 @@ fuzz_target!(|data: &[u8]| {
                             Ok(_guard) => {
                                 results.lock_successes.fetch_add(1, Ordering::SeqCst);
                                 break;
-                            },
+                            }
                             Err(asupersync::sync::TryLockError::Poisoned) => {
                                 results.lock_poison_errors.fetch_add(1, Ordering::SeqCst);
                                 results.poison_detected.fetch_add(1, Ordering::SeqCst);
                                 break;
-                            },
+                            }
                             Err(asupersync::sync::TryLockError::Locked) => {
                                 attempts += 1;
                                 if attempts >= max_attempts {
@@ -292,10 +306,10 @@ fuzz_target!(|data: &[u8]| {
                                     break;
                                 }
                                 thread::sleep(Duration::from_micros(10));
-                            },
+                            }
                         }
                     }
-                },
+                }
 
                 AccessPattern::RapidLockAttempts { attempts } => {
                     for _ in 0..attempts {
@@ -304,33 +318,33 @@ fuzz_target!(|data: &[u8]| {
                         match mutex.try_lock() {
                             Ok(_guard) => {
                                 results.lock_successes.fetch_add(1, Ordering::SeqCst);
-                            },
+                            }
                             Err(asupersync::sync::TryLockError::Poisoned) => {
                                 results.lock_poison_errors.fetch_add(1, Ordering::SeqCst);
                                 results.poison_detected.fetch_add(1, Ordering::SeqCst);
                                 break; // Stop on poison
-                            },
+                            }
                             Err(asupersync::sync::TryLockError::Locked) => {
                                 // Continue trying
-                            },
+                            }
                         }
                     }
-                },
+                }
 
                 AccessPattern::CheckPoisoned => {
                     // Try to determine if mutex is poisoned without locking
                     match mutex.try_lock() {
                         Ok(_guard) => {
                             // Not poisoned (or was recovered)
-                        },
+                        }
                         Err(asupersync::sync::TryLockError::Poisoned) => {
                             results.poison_detected.fetch_add(1, Ordering::SeqCst);
-                        },
+                        }
                         Err(asupersync::sync::TryLockError::Locked) => {
                             // Can't determine poison state while locked
-                        },
+                        }
                     }
-                },
+                }
             }
         });
 
@@ -369,14 +383,21 @@ fuzz_target!(|data: &[u8]| {
     let drop_completed = results.drop_completed.load(Ordering::SeqCst);
 
     // Basic accounting checks
-    assert_eq!(panic_threads_started, config.panic_thread_count as usize,
-        "All panic threads should start");
-    assert_eq!(accessor_threads_started, config.accessor_thread_count as usize,
-        "All accessor threads should start");
+    assert_eq!(
+        panic_threads_started, config.panic_thread_count as usize,
+        "All panic threads should start"
+    );
+    assert_eq!(
+        accessor_threads_started, config.accessor_thread_count as usize,
+        "All accessor threads should start"
+    );
 
     // Lock attempt accounting
-    assert_eq!(lock_attempts, lock_successes + lock_poison_errors + lock_timeouts,
-        "Lock attempt accounting should be consistent");
+    assert_eq!(
+        lock_attempts,
+        lock_successes + lock_poison_errors + lock_timeouts,
+        "Lock attempt accounting should be consistent"
+    );
 
     // Drop completion
     assert!(mutex_dropped, "Mutex should be marked as dropped");
@@ -390,13 +411,17 @@ fuzz_target!(|data: &[u8]| {
 
     // Invariant: If we detected poison, there must have been panics
     if poison_detected > 0 {
-        assert!(panics_occurred > 0,
-            "Cannot detect poison without panics occurring");
+        assert!(
+            panics_occurred > 0,
+            "Cannot detect poison without panics occurring"
+        );
     }
 
     // Poison error consistency
-    assert_eq!(poison_detected, lock_poison_errors,
-        "Poison detection should match poison errors");
+    assert_eq!(
+        poison_detected, lock_poison_errors,
+        "Poison detection should match poison errors"
+    );
 
     // Success + poison should not exceed total meaningful attempts
     // (timeouts are separate and don't conflict with success/poison)

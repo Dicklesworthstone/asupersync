@@ -13,13 +13,13 @@
 use arbitrary::Arbitrary;
 use libfuzzer_sys::fuzz_target;
 use std::collections::HashMap;
+use std::future::Future;
 use std::pin::Pin;
 use std::task::{Context, Poll, Waker};
-use std::future::Future;
 
-use asupersync::grpc::health::{HealthService, ServingStatus, HealthError, MAX_SERVICE_NAME_LEN};
-use asupersync::grpc::streaming::{Request, Response, Streaming, Metadata, MetadataValue};
+use asupersync::grpc::health::{HealthError, HealthService, MAX_SERVICE_NAME_LEN, ServingStatus};
 use asupersync::grpc::status::Status;
+use asupersync::grpc::streaming::{Metadata, MetadataValue, Request, Response, Streaming};
 
 /// Maximum services and transitions for fuzzer performance
 const MAX_SERVICES: usize = 20;
@@ -146,15 +146,11 @@ enum StateTransition {
         status: ServingStatus,
     },
     /// Set server-wide status
-    SetServerStatus {
-        status: ServingStatus,
-    },
+    SetServerStatus { status: ServingStatus },
     /// Clear all statuses
     ClearAll,
     /// Batch status updates
-    BatchUpdate {
-        updates: Vec<BatchStatusUpdate>,
-    },
+    BatchUpdate { updates: Vec<BatchStatusUpdate> },
     /// Transient status (set then immediately change)
     Transient {
         service: ServiceName,
@@ -228,15 +224,11 @@ enum InvalidAuthToken {
 impl InvalidAuthToken {
     fn as_metadata_value(&self) -> MetadataValue {
         match self {
-            InvalidAuthToken::Empty => {
-                MetadataValue::Ascii("".try_into().unwrap())
-            }
+            InvalidAuthToken::Empty => MetadataValue::Ascii("".try_into().unwrap()),
             InvalidAuthToken::WrongFormat => {
                 MetadataValue::Ascii("InvalidFormat".try_into().unwrap())
             }
-            InvalidAuthToken::Binary => {
-                MetadataValue::Binary(vec![0x00, 0x01, 0x02])
-            }
+            InvalidAuthToken::Binary => MetadataValue::Binary(vec![0x00, 0x01, 0x02]),
         }
     }
 }
@@ -338,16 +330,10 @@ impl TestWaker {
 
         unsafe fn drop_waker(_data: *const ()) {}
 
-        static VTABLE: RawWakerVTable = RawWakerVTable::new(
-            clone_waker,
-            wake_waker,
-            wake_by_ref_waker,
-            drop_waker,
-        );
+        static VTABLE: RawWakerVTable =
+            RawWakerVTable::new(clone_waker, wake_waker, wake_by_ref_waker, drop_waker);
 
-        unsafe {
-            Waker::from_raw(RawWaker::new(std::ptr::null(), &VTABLE))
-        }
+        unsafe { Waker::from_raw(RawWaker::new(std::ptr::null(), &VTABLE)) }
     }
 
     fn was_woken(&self) -> bool {
@@ -404,7 +390,10 @@ fn test_watch_transitions(scenario: &HealthWatchScenario) {
 
 fn apply_state_transition(service: &HealthService, transition: &StateTransition) {
     match transition {
-        StateTransition::SetSingleStatus { service: svc_name, status } => {
+        StateTransition::SetSingleStatus {
+            service: svc_name,
+            status,
+        } => {
             let name = svc_name.as_string();
             let _ = service.try_set_status(&name, *status);
         }
@@ -429,7 +418,11 @@ fn apply_state_transition(service: &HealthService, transition: &StateTransition)
             }
         }
 
-        StateTransition::Transient { service: svc_name, intermediate_status, final_status } => {
+        StateTransition::Transient {
+            service: svc_name,
+            intermediate_status,
+            final_status,
+        } => {
             let name = svc_name.as_string();
             // Set intermediate status then immediately change to final
             let _ = service.try_set_status(&name, *intermediate_status);
@@ -578,14 +571,20 @@ fn test_auth_enforcement(scenario: &HealthWatchScenario) {
 
 fn apply_concurrent_operation(service: &HealthService, op: &ConcurrentOperation) {
     match op {
-        ConcurrentOperation::ConcurrentUpdates { service: svc_name, updates } => {
+        ConcurrentOperation::ConcurrentUpdates {
+            service: svc_name,
+            updates,
+        } => {
             let name = svc_name.as_string();
             for &status in updates {
                 let _ = service.try_set_status(&name, status);
             }
         }
 
-        ConcurrentOperation::MultipleWatchers { service: svc_name, count } => {
+        ConcurrentOperation::MultipleWatchers {
+            service: svc_name,
+            count,
+        } => {
             let name = svc_name.as_string();
             let mut watchers = Vec::new();
 
@@ -602,7 +601,10 @@ fn apply_concurrent_operation(service: &HealthService, op: &ConcurrentOperation)
             }
         }
 
-        ConcurrentOperation::WatcherChurn { service: svc_name, cycles } => {
+        ConcurrentOperation::WatcherChurn {
+            service: svc_name,
+            cycles,
+        } => {
             let name = svc_name.as_string();
 
             // Rapidly create and drop watchers
@@ -613,7 +615,10 @@ fn apply_concurrent_operation(service: &HealthService, op: &ConcurrentOperation)
             }
         }
 
-        ConcurrentOperation::StatusThrashing { service: svc_name, duration } => {
+        ConcurrentOperation::StatusThrashing {
+            service: svc_name,
+            duration,
+        } => {
             let name = svc_name.as_string();
             let statuses = [
                 ServingStatus::Unknown,
@@ -657,7 +662,10 @@ fn create_mock_request(service: String, metadata: Metadata) -> Request<MockHealt
 // Mock implementations needed for compilation
 impl HealthService {
     // These would need to be actual methods in the real implementation
-    async fn check_async(&self, _request: &Request<MockHealthCheckRequest>) -> Result<MockHealthCheckResponse, Status> {
+    async fn check_async(
+        &self,
+        _request: &Request<MockHealthCheckRequest>,
+    ) -> Result<MockHealthCheckResponse, Status> {
         // Mock implementation
         Ok(MockHealthCheckResponse::new(ServingStatus::Serving))
     }

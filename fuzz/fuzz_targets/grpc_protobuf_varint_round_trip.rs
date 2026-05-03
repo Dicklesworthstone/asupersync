@@ -123,10 +123,19 @@ fuzz_target!(|input: FuzzInput| {
     // ONE lane (e.g. zigzag) doesn't masquerade as a generic struct
     // diff.
     assert_eq!(decoded.u_value, msg.u_value, "u64 varint drift");
-    assert_eq!(decoded.i_value, msg.i_value, "i64 two's-complement varint drift");
+    assert_eq!(
+        decoded.i_value, msg.i_value,
+        "i64 two's-complement varint drift"
+    );
     assert_eq!(decoded.u32_value, msg.u32_value, "u32 varint drift");
-    assert_eq!(decoded.i32_value, msg.i32_value, "i32 two's-complement varint drift");
+    assert_eq!(
+        decoded.i32_value, msg.i32_value,
+        "i32 two's-complement varint drift"
+    );
     assert_eq!(decoded.zz64_value, msg.zz64_value, "sint64 zigzag drift");
     assert_eq!(decoded.zz32_value, msg.zz32_value, "sint32 zigzag drift");
-    assert_eq!(decoded.u_seq, msg.u_seq, "repeated uint64 (packed varint) drift");
+    assert_eq!(
+        decoded.u_seq, msg.u_seq,
+        "repeated uint64 (packed varint) drift"
+    );
 });

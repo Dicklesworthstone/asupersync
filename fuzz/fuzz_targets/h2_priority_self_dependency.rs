@@ -1,7 +1,7 @@
 #![no_main]
 
-use libfuzzer_sys::fuzz_target;
 use arbitrary::{Arbitrary, Unstructured};
+use libfuzzer_sys::fuzz_target;
 
 /// HTTP/2 PRIORITY frame self-dependency validation testing.
 /// Per RFC 7540 §5.3.1, a stream MUST NOT depend on itself.
@@ -149,8 +149,9 @@ fuzz_target!(|data: &[u8]| {
     };
 
     // Bound stream IDs to reasonable range
-    if input.priority_frame.stream_id > 1_000_000 ||
-       input.priority_frame.stream_dependency > 1_000_000 {
+    if input.priority_frame.stream_id > 1_000_000
+        || input.priority_frame.stream_dependency > 1_000_000
+    {
         return;
     }
 
@@ -162,65 +163,95 @@ fuzz_target!(|data: &[u8]| {
 
     // Test 1: Self-dependency must be PROTOCOL_ERROR
     if dependency == frame.stream_id && frame.stream_id != 0 {
-        assert!(result.is_err(),
-            "Stream {} depending on itself should be PROTOCOL_ERROR", frame.stream_id);
+        assert!(
+            result.is_err(),
+            "Stream {} depending on itself should be PROTOCOL_ERROR",
+            frame.stream_id
+        );
 
         if let Err(error_msg) = &result {
-            assert!(error_msg.contains("PROTOCOL_ERROR"),
-                "Self-dependency error should mention PROTOCOL_ERROR: {}", error_msg);
-            assert!(error_msg.contains("depend on itself"),
-                "Self-dependency error should be clear: {}", error_msg);
+            assert!(
+                error_msg.contains("PROTOCOL_ERROR"),
+                "Self-dependency error should mention PROTOCOL_ERROR: {}",
+                error_msg
+            );
+            assert!(
+                error_msg.contains("depend on itself"),
+                "Self-dependency error should be clear: {}",
+                error_msg
+            );
         }
         return; // No further tests needed for this error case
     }
 
     // Test 2: Stream ID 0 validation
     if frame.stream_id == 0 {
-        assert!(result.is_err(),
-            "PRIORITY frame with stream ID 0 should be rejected");
+        assert!(
+            result.is_err(),
+            "PRIORITY frame with stream ID 0 should be rejected"
+        );
 
         if let Err(error_msg) = &result {
-            assert!(error_msg.contains("stream ID must not be 0"),
-                "Stream ID 0 error should be clear: {}", error_msg);
+            assert!(
+                error_msg.contains("stream ID must not be 0"),
+                "Stream ID 0 error should be clear: {}",
+                error_msg
+            );
         }
         return;
     }
 
     // Test 3: Invalid flags validation
     if frame.flags != 0 {
-        assert!(result.is_err(),
-            "PRIORITY frame with non-zero flags should be rejected");
+        assert!(
+            result.is_err(),
+            "PRIORITY frame with non-zero flags should be rejected"
+        );
 
         if let Err(error_msg) = &result {
-            assert!(error_msg.contains("flags must be 0"),
-                "Flags validation error should be clear: {}", error_msg);
+            assert!(
+                error_msg.contains("flags must be 0"),
+                "Flags validation error should be clear: {}",
+                error_msg
+            );
         }
         return;
     }
 
     // Test 4: Valid PRIORITY frames should succeed
     if frame.stream_id > 0 && frame.flags == 0 && dependency != frame.stream_id {
-        assert!(result.is_ok(),
+        assert!(
+            result.is_ok(),
             "Valid PRIORITY frame should succeed: stream {} depends on {}",
-            frame.stream_id, dependency);
+            frame.stream_id,
+            dependency
+        );
 
         // Verify dependency was stored correctly
         let stored_deps = parser.get_dependencies();
-        assert_eq!(stored_deps.get(&frame.stream_id), Some(&dependency),
-            "Dependency should be stored correctly");
+        assert_eq!(
+            stored_deps.get(&frame.stream_id),
+            Some(&dependency),
+            "Dependency should be stored correctly"
+        );
     }
 
     // Test 5: Weight validation (implicit - weight is u8 so always valid range)
     let actual_weight = frame.weight as u32 + 1;
     if result.is_ok() {
-        assert!(actual_weight >= 1 && actual_weight <= 256,
-            "Weight should be in valid range 1-256, got {}", actual_weight);
+        assert!(
+            actual_weight >= 1 && actual_weight <= 256,
+            "Weight should be in valid range 1-256, got {}",
+            actual_weight
+        );
     }
 
     // Test 6: Dependency on stream 0 (connection) should be valid
     if dependency == 0 && frame.stream_id > 0 && frame.flags == 0 {
-        assert!(result.is_ok(),
-            "Depending on stream 0 (connection) should be valid");
+        assert!(
+            result.is_ok(),
+            "Depending on stream 0 (connection) should be valid"
+        );
     }
 });
 
@@ -242,7 +273,11 @@ mod tests {
         let result = parser.parse_priority_frame(&frame);
 
         assert!(result.is_err(), "Self-dependency should be rejected");
-        assert!(result.unwrap_err().contains("stream 5 cannot depend on itself"));
+        assert!(
+            result
+                .unwrap_err()
+                .contains("stream 5 cannot depend on itself")
+        );
     }
 
     #[test]
@@ -258,8 +293,15 @@ mod tests {
         let mut parser = MockH2PriorityParser::new();
         let result = parser.parse_priority_frame(&frame);
 
-        assert!(result.is_err(), "Self-dependency with exclusive flag should be rejected");
-        assert!(result.unwrap_err().contains("stream 3 cannot depend on itself"));
+        assert!(
+            result.is_err(),
+            "Self-dependency with exclusive flag should be rejected"
+        );
+        assert!(
+            result
+                .unwrap_err()
+                .contains("stream 3 cannot depend on itself")
+        );
     }
 
     #[test]
@@ -343,7 +385,10 @@ mod tests {
         let mut parser = MockH2PriorityParser::new();
         let result = parser.parse_priority_frame(&frame);
 
-        assert!(result.is_ok(), "Exclusive dependency on different stream should work");
+        assert!(
+            result.is_ok(),
+            "Exclusive dependency on different stream should work"
+        );
         assert_eq!(parser.get_dependencies().get(&9), Some(&1)); // Bit 31 cleared
     }
 
@@ -397,7 +442,10 @@ mod tests {
         };
 
         let result = parser.parse_priority_frame(&frame2);
-        assert!(result.is_ok(), "Cycle detection is warning-only in this implementation");
+        assert!(
+            result.is_ok(),
+            "Cycle detection is warning-only in this implementation"
+        );
 
         // Should generate warning about potential cycle
         let errors = parser.get_errors();

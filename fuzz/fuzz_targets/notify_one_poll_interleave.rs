@@ -12,15 +12,15 @@
 
 #![no_main]
 
-use libfuzzer_sys::fuzz_target;
 use arbitrary::{Arbitrary, Unstructured};
 use asupersync::sync::Notify;
-use std::sync::atomic::{AtomicUsize, AtomicBool, Ordering};
-use std::sync::Arc;
+use libfuzzer_sys::fuzz_target;
 use std::collections::HashMap;
-use std::task::{Context, Poll, Waker};
-use std::pin::Pin;
 use std::future::Future;
+use std::pin::Pin;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::task::{Context, Poll, Waker};
 
 #[derive(Debug, Clone, Arbitrary)]
 struct NotifyOnePollConfig {
@@ -122,7 +122,8 @@ impl NotifyPollTracker {
     }
 
     fn record_spurious_readiness(&self) {
-        self.spurious_readiness_detected.fetch_add(1, Ordering::SeqCst);
+        self.spurious_readiness_detected
+            .fetch_add(1, Ordering::SeqCst);
     }
 
     fn check_invariants(&self) -> Result<(), String> {
@@ -147,7 +148,8 @@ impl NotifyPollTracker {
 
         // Ready polls should not exceed notifications (with some tolerance for stored notifications)
         // Note: This is tricky because notify_one can create stored notifications
-        if polls_ready > notifications + 10 { // Allow some tolerance for stored notifications
+        if polls_ready > notifications + 10 {
+            // Allow some tolerance for stored notifications
             return Err(format!(
                 "More ready polls ({}) than notifications sent ({})",
                 polls_ready, notifications
@@ -281,7 +283,9 @@ fn test_notify_poll_interleave_scenario(
     let notify = Arc::new(Notify::new());
     let mut waiters: HashMap<u8, TrackedWaiter> = HashMap::new();
 
-    let max_waiters = config.initial_waiters.min(NotifyOnePollConfig::max_waiters());
+    let max_waiters = config
+        .initial_waiters
+        .min(NotifyOnePollConfig::max_waiters());
 
     // Create initial waiters
     for i in 0..max_waiters {
@@ -289,14 +293,19 @@ fn test_notify_poll_interleave_scenario(
         waiters.insert(i, waiter);
     }
 
-    let max_ops = config.max_operations.min(NotifyOnePollConfig::max_operations()) as usize;
+    let max_ops = config
+        .max_operations
+        .min(NotifyOnePollConfig::max_operations()) as usize;
 
     for operation in config.operations.iter().take(max_ops) {
         match operation {
             NotifyPollOperation::CreateWaiter { waiter_id } => {
                 let id = *waiter_id % 20; // Limit total waiters
-                if !waiters.contains_key(&id) && waiters.len() < NotifyOnePollConfig::max_waiters() as usize {
-                    let waiter = TrackedWaiter::new(notify.clone(), id, Arc::new(NotifyPollTracker::new()));
+                if !waiters.contains_key(&id)
+                    && waiters.len() < NotifyOnePollConfig::max_waiters() as usize
+                {
+                    let waiter =
+                        TrackedWaiter::new(notify.clone(), id, Arc::new(NotifyPollTracker::new()));
                     waiters.insert(id, waiter);
                 }
             }
@@ -309,7 +318,8 @@ fn test_notify_poll_interleave_scenario(
 
                     // Check for spurious readiness
                     if poll_result.is_ready() {
-                        let ready_polls_before_this = tracker.polls_ready.load(Ordering::SeqCst) - 1;
+                        let ready_polls_before_this =
+                            tracker.polls_ready.load(Ordering::SeqCst) - 1;
                         let notifications_sent = tracker.notifications_sent.load(Ordering::SeqCst);
 
                         // Simple spurious check: if this is the first ready poll but no notifications
@@ -358,7 +368,8 @@ fn test_notify_poll_interleave_scenario(
                     let initial_ready_count = waiter.ready_count;
 
                     for i in 0..poll_count {
-                        let notifications_before = tracker.notifications_sent.load(Ordering::SeqCst);
+                        let notifications_before =
+                            tracker.notifications_sent.load(Ordering::SeqCst);
                         let poll_result = waiter.poll(tracker, notifications_before);
 
                         if poll_result.is_ready() {
@@ -372,7 +383,8 @@ fn test_notify_poll_interleave_scenario(
                         if poll_result.is_ready() && ready_count == 1 && initial_ready_count == 0 {
                             // This is the first time this waiter becomes ready
                             // Check if there were sufficient notifications
-                            let notifications_sent = tracker.notifications_sent.load(Ordering::SeqCst);
+                            let notifications_sent =
+                                tracker.notifications_sent.load(Ordering::SeqCst);
                             let total_ready_polls = tracker.polls_ready.load(Ordering::SeqCst);
 
                             // Basic spurious check
@@ -393,7 +405,10 @@ fn test_notify_poll_interleave_scenario(
                 }
             }
 
-            NotifyPollOperation::NotifyPollSequence { waiter_id, sequence } => {
+            NotifyPollOperation::NotifyPollSequence {
+                waiter_id,
+                sequence,
+            } => {
                 let id = *waiter_id % 20;
                 let max_seq = NotifyOnePollConfig::max_sequence_length() as usize;
 
@@ -405,14 +420,17 @@ fn test_notify_poll_interleave_scenario(
                     } else {
                         // poll waiter
                         if let Some(waiter) = waiters.get_mut(&id) {
-                            let notifications_before = tracker.notifications_sent.load(Ordering::SeqCst);
+                            let notifications_before =
+                                tracker.notifications_sent.load(Ordering::SeqCst);
                             let poll_result = waiter.poll(tracker, notifications_before);
 
                             // Validate poll behavior in sequence
                             if i > 0 && poll_result.is_ready() {
                                 // Check if there was a preceding notify in the sequence
-                                let preceding_notifies = sequence[..=i].iter().filter(|&&x| x % 2 == 0).count();
-                                let preceding_polls = sequence[..i].iter().filter(|&&x| x % 2 == 1).count();
+                                let preceding_notifies =
+                                    sequence[..=i].iter().filter(|&&x| x % 2 == 0).count();
+                                let preceding_polls =
+                                    sequence[..i].iter().filter(|&&x| x % 2 == 1).count();
 
                                 // This is a simplified check - in reality, the relationship is complex
                                 // due to stored notifications and timing
@@ -434,13 +452,15 @@ fn test_notify_poll_interleave_scenario(
                 let mut initial_states = Vec::new();
                 for &id in &ids {
                     if let Some(waiter) = waiters.get_mut(&id) {
-                        let notifications_before = tracker.notifications_sent.load(Ordering::SeqCst);
+                        let notifications_before =
+                            tracker.notifications_sent.load(Ordering::SeqCst);
                         let poll_result = waiter.poll(tracker, notifications_before);
                         initial_states.push((id, poll_result));
 
                         if poll_result.is_ready() {
                             // Check for spurious readiness
-                            let notifications_sent = tracker.notifications_sent.load(Ordering::SeqCst);
+                            let notifications_sent =
+                                tracker.notifications_sent.load(Ordering::SeqCst);
 
                             if notifications_sent == 0 {
                                 tracker.record_spurious_readiness();
@@ -462,12 +482,14 @@ fn test_notify_poll_interleave_scenario(
                 let mut newly_ready = 0;
                 for &id in &ids {
                     if let Some(waiter) = waiters.get_mut(&id) {
-                        let notifications_before = tracker.notifications_sent.load(Ordering::SeqCst);
+                        let notifications_before =
+                            tracker.notifications_sent.load(Ordering::SeqCst);
                         let poll_result = waiter.poll(tracker, notifications_before);
 
                         if poll_result.is_ready() {
                             // Check if this waiter was pending before
-                            let was_pending = initial_states.iter()
+                            let was_pending = initial_states
+                                .iter()
                                 .find(|(prev_id, _)| *prev_id == id)
                                 .map(|(_, result)| result.is_pending())
                                 .unwrap_or(false);
@@ -557,9 +579,8 @@ fuzz_target!(|data: &[u8]| {
         let tracker2 = NotifyPollTracker::new();
         let config2 = config.clone();
 
-        let handle = thread::spawn(move || {
-            test_notify_poll_interleave_scenario(&config2, &tracker2)
-        });
+        let handle =
+            thread::spawn(move || test_notify_poll_interleave_scenario(&config2, &tracker2));
 
         match handle.join() {
             Ok(Ok(())) => {

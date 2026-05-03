@@ -354,8 +354,7 @@ fn no_unsafe_code_in_runtime_scheduler_tree() {
     // #[allow(unsafe_code)] declarations. SCHED_FIFO would
     // require one — ensuring the carve-out is absent is
     // the clearest signal that the design intent holds.
-    let scheduler_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("src/runtime/scheduler");
+    let scheduler_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/runtime/scheduler");
     let mut files = Vec::new();
     collect_rs_files(&scheduler_dir, &mut files);
 
@@ -366,9 +365,7 @@ fn no_unsafe_code_in_runtime_scheduler_tree() {
             continue;
         };
         // Look for #[allow(unsafe_code)] OR #![allow(unsafe_code)].
-        if content.contains("#[allow(unsafe_code)]")
-            || content.contains("#![allow(unsafe_code)]")
-        {
+        if content.contains("#[allow(unsafe_code)]") || content.contains("#![allow(unsafe_code)]") {
             findings.push(path_str);
         }
     }
@@ -390,14 +387,22 @@ fn deadline_aware_mechanisms_are_cooperative_not_os_rt() {
     // actually carry the deadline-aware contract — not OS
     // RT scheduling.
     let cooperative_audits = [
-        ("tests/scheduler_three_lane_edf_vs_fifo_deadline_pressure_audit.rs",
-         "Lyapunov governor + MeetDeadlines + EDF lane priority"),
-        ("tests/runtime_budget_carry_forward_across_yields_audit.rs",
-         "cooperative budget carry-forward"),
-        ("tests/scheduler_edf_concurrent_insert_heap_invariant_audit.rs",
-         "EDF heap correctness"),
-        ("tests/scheduler_cooperative_budget_yield_audit.rs",
-         "cooperative budget yield contract"),
+        (
+            "tests/scheduler_three_lane_edf_vs_fifo_deadline_pressure_audit.rs",
+            "Lyapunov governor + MeetDeadlines + EDF lane priority",
+        ),
+        (
+            "tests/runtime_budget_carry_forward_across_yields_audit.rs",
+            "cooperative budget carry-forward",
+        ),
+        (
+            "tests/scheduler_edf_concurrent_insert_heap_invariant_audit.rs",
+            "EDF heap correctness",
+        ),
+        (
+            "tests/scheduler_cooperative_budget_yield_audit.rs",
+            "cooperative budget yield contract",
+        ),
     ];
 
     for (audit, mechanism) in &cooperative_audits {

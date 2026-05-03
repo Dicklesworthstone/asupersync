@@ -136,9 +136,9 @@
 use std::future::Future;
 use std::path::PathBuf;
 use std::pin::Pin;
-use std::task::{Context, Poll, RawWaker, RawWakerVTable, Waker};
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::task::{Context, Poll, RawWaker, RawWakerVTable, Waker};
 
 fn read(rel: &str) -> String {
     let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(rel);
@@ -183,7 +183,8 @@ fn yield_now_poll_returns_pending_on_first_call_with_self_wake() {
     // needing external wake.
     let source = read("src/runtime/yield_now.rs");
 
-    let fn_marker = "fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {";
+    let fn_marker =
+        "fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {";
     let start = source.find(fn_marker).expect("YieldNow::poll fn");
     let body_end = source[start..]
         .find("\n    }\n")
@@ -328,11 +329,7 @@ fn yield_now_does_not_use_timer_driver_at_all() {
     // scheduler primitive, NOT a timer-routed sleep.
     let source = read("src/runtime/yield_now.rs");
 
-    let suspect_timer_refs = [
-        "TimerDriver",
-        "TimerHandle",
-        "timer_driver",
-    ];
+    let suspect_timer_refs = ["TimerDriver", "TimerHandle", "timer_driver"];
     for pat in &suspect_timer_refs {
         assert!(
             !source.contains(pat),

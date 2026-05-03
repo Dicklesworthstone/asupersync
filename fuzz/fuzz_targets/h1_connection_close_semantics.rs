@@ -169,19 +169,25 @@ impl MockConnectionAnalyzer {
 
     /// Determine if response overrides request connection decision
     fn response_overrides_close(&self, resp: &TestResponse) -> Option<bool> {
-        let (resp_has_close, resp_has_keep_alive) = self.parse_connection_tokens(&resp.connection_headers);
+        let (resp_has_close, resp_has_keep_alive) =
+            self.parse_connection_tokens(&resp.connection_headers);
 
         if resp_has_close {
-            Some(true)  // Response requests close
+            Some(true) // Response requests close
         } else if resp_has_keep_alive {
             Some(false) // Response requests keep-alive
         } else {
-            None        // Response doesn't override
+            None // Response doesn't override
         }
     }
 
     /// Add appropriate Connection header to response
-    fn finalize_response_headers(&self, req: &TestRequest, resp: &mut TestResponse, should_close: bool) {
+    fn finalize_response_headers(
+        &self,
+        req: &TestRequest,
+        resp: &mut TestResponse,
+        should_close: bool,
+    ) {
         // Remove existing Connection headers
         resp.connection_headers.clear();
 
@@ -214,7 +220,6 @@ fn generate_edge_cases() -> Vec<TestRequest> {
             connection_headers: vec!["keep-alive".to_string()],
             has_other_headers: false,
         },
-
         // Case sensitivity tests
         TestRequest {
             version: HttpVersion::Http11,
@@ -231,7 +236,6 @@ fn generate_edge_cases() -> Vec<TestRequest> {
             connection_headers: vec!["keep-ALIVE".to_string()],
             has_other_headers: false,
         },
-
         // Whitespace handling
         TestRequest {
             version: HttpVersion::Http11,
@@ -243,7 +247,6 @@ fn generate_edge_cases() -> Vec<TestRequest> {
             connection_headers: vec!["\t keep-alive \r".to_string()],
             has_other_headers: false,
         },
-
         // Comma-separated tokens
         TestRequest {
             version: HttpVersion::Http11,
@@ -260,7 +263,6 @@ fn generate_edge_cases() -> Vec<TestRequest> {
             connection_headers: vec!["keep-alive, upgrade".to_string()],
             has_other_headers: false,
         },
-
         // Multiple Connection headers
         TestRequest {
             version: HttpVersion::Http11,
@@ -272,7 +274,6 @@ fn generate_edge_cases() -> Vec<TestRequest> {
             connection_headers: vec!["upgrade".to_string(), "close".to_string()],
             has_other_headers: false,
         },
-
         // Malformed values
         TestRequest {
             version: HttpVersion::Http11,
@@ -299,7 +300,6 @@ fn generate_edge_cases() -> Vec<TestRequest> {
             connection_headers: vec!["close,,keep-alive".to_string()],
             has_other_headers: false,
         },
-
         // Version defaults
         TestRequest {
             version: HttpVersion::Http10,
@@ -311,7 +311,6 @@ fn generate_edge_cases() -> Vec<TestRequest> {
             connection_headers: vec![],
             has_other_headers: false,
         },
-
         // Complex cases
         TestRequest {
             version: HttpVersion::Http11,
@@ -323,8 +322,9 @@ fn generate_edge_cases() -> Vec<TestRequest> {
 
 fuzz_target!(|scenario: ConnectionSemanticsScenario| {
     // Limit complexity to prevent timeouts
-    if scenario.request.connection_headers.len() > 10 ||
-       scenario.response.connection_headers.len() > 10 {
+    if scenario.request.connection_headers.len() > 10
+        || scenario.response.connection_headers.len() > 10
+    {
         return;
     }
 
@@ -360,15 +360,27 @@ fn test_connection_semantics(req: &TestRequest, resp: &TestResponse, config: &Se
     let final_close_decision = response_override.unwrap_or(should_close_request);
 
     // Validate connection token parsing
-    let (req_has_close, req_has_keep_alive) = analyzer.parse_connection_tokens(&req.connection_headers);
-    let (resp_has_close, resp_has_keep_alive) = analyzer.parse_connection_tokens(&resp.connection_headers);
+    let (req_has_close, req_has_keep_alive) =
+        analyzer.parse_connection_tokens(&req.connection_headers);
+    let (resp_has_close, resp_has_keep_alive) =
+        analyzer.parse_connection_tokens(&resp.connection_headers);
 
     // Test consistency of parsing
     validate_token_parsing_consistency(&req.connection_headers, req_has_close, req_has_keep_alive);
-    validate_token_parsing_consistency(&resp.connection_headers, resp_has_close, resp_has_keep_alive);
+    validate_token_parsing_consistency(
+        &resp.connection_headers,
+        resp_has_close,
+        resp_has_keep_alive,
+    );
 
     // Test semantic rules
-    validate_semantic_rules(req, config, should_close_request, req_has_close, req_has_keep_alive);
+    validate_semantic_rules(
+        req,
+        config,
+        should_close_request,
+        req_has_close,
+        req_has_keep_alive,
+    );
 
     // Test response finalization
     let mut finalized_response = resp.clone();
@@ -377,7 +389,11 @@ fn test_connection_semantics(req: &TestRequest, resp: &TestResponse, config: &Se
 }
 
 /// Validate that token parsing is consistent and correct
-fn validate_token_parsing_consistency(headers: &[String], parsed_close: bool, parsed_keep_alive: bool) {
+fn validate_token_parsing_consistency(
+    headers: &[String],
+    parsed_close: bool,
+    parsed_keep_alive: bool,
+) {
     let mut manual_close = false;
     let mut manual_keep_alive = false;
 
@@ -392,10 +408,16 @@ fn validate_token_parsing_consistency(headers: &[String], parsed_close: bool, pa
         }
     }
 
-    assert_eq!(parsed_close, manual_close,
-        "Connection: close token parsing inconsistent for headers: {:?}", headers);
-    assert_eq!(parsed_keep_alive, manual_keep_alive,
-        "Connection: keep-alive token parsing inconsistent for headers: {:?}", headers);
+    assert_eq!(
+        parsed_close, manual_close,
+        "Connection: close token parsing inconsistent for headers: {:?}",
+        headers
+    );
+    assert_eq!(
+        parsed_keep_alive, manual_keep_alive,
+        "Connection: keep-alive token parsing inconsistent for headers: {:?}",
+        headers
+    );
 }
 
 /// Validate that semantic rules are applied correctly
@@ -404,39 +426,55 @@ fn validate_semantic_rules(
     config: &ServerConfig,
     decision: bool,
     has_close: bool,
-    has_keep_alive: bool
+    has_keep_alive: bool,
 ) {
     // Rule 1: Server keep-alive disabled always closes
     if !config.keep_alive_enabled {
-        assert!(decision, "Connection should close when server keep-alive disabled");
+        assert!(
+            decision,
+            "Connection should close when server keep-alive disabled"
+        );
     }
 
     // Rule 2: Request limit forces close
     if let Some(max_requests) = config.max_requests_per_connection {
         if config.requests_served + 1 >= max_requests {
-            assert!(decision, "Connection should close when request limit reached");
+            assert!(
+                decision,
+                "Connection should close when request limit reached"
+            );
         }
     }
 
     // Rule 3: Explicit close always wins
     if has_close {
-        assert!(decision, "Connection should close when explicit 'close' token present");
+        assert!(
+            decision,
+            "Connection should close when explicit 'close' token present"
+        );
     }
 
     // Rule 4: When server allows and no explicit close, explicit keep-alive overrides version default
     if config.keep_alive_enabled && !has_close && has_keep_alive {
-        assert!(!decision, "Connection should not close with explicit keep-alive");
+        assert!(
+            !decision,
+            "Connection should not close with explicit keep-alive"
+        );
     }
 
     // Rule 5: HTTP version defaults when no explicit tokens and server allows
     if config.keep_alive_enabled && !has_close && !has_keep_alive {
-        let request_limit_reached = config.max_requests_per_connection
+        let request_limit_reached = config
+            .max_requests_per_connection
             .map(|max| config.requests_served + 1 >= max)
             .unwrap_or(false);
 
         if !request_limit_reached {
-            assert_eq!(decision, req.version.default_closes(),
-                "Connection decision should match HTTP version default when no explicit tokens");
+            assert_eq!(
+                decision,
+                req.version.default_closes(),
+                "Connection decision should match HTTP version default when no explicit tokens"
+            );
         }
     }
 }
@@ -446,13 +484,17 @@ fn validate_response_finalization(resp: &TestResponse, req: &TestRequest, should
     if should_close {
         // Should have Connection: close
         assert!(
-            resp.connection_headers.iter().any(|h| h.trim().eq_ignore_ascii_case("close")),
+            resp.connection_headers
+                .iter()
+                .any(|h| h.trim().eq_ignore_ascii_case("close")),
             "Response should have Connection: close when connection will close"
         );
     } else if req.version == HttpVersion::Http10 {
         // HTTP/1.0 keep-alive needs explicit header
         assert!(
-            resp.connection_headers.iter().any(|h| h.trim().eq_ignore_ascii_case("keep-alive")),
+            resp.connection_headers
+                .iter()
+                .any(|h| h.trim().eq_ignore_ascii_case("keep-alive")),
             "HTTP/1.0 keep-alive response should have explicit Connection: keep-alive"
         );
     }
@@ -476,7 +518,10 @@ fn test_server_config_semantics(scenario: &ConnectionSemanticsScenario) {
 
     let analyzer_at_limit = MockConnectionAnalyzer::new(config_at_limit);
     let should_close_at_limit = analyzer_at_limit.should_close_after_request(&scenario.request);
-    assert!(should_close_at_limit, "Should close when request limit would be reached");
+    assert!(
+        should_close_at_limit,
+        "Should close when request limit would be reached"
+    );
 
     // Test unlimited requests
     let mut config_unlimited = scenario.config.clone();
@@ -489,11 +534,14 @@ fn test_server_config_semantics(scenario: &ConnectionSemanticsScenario) {
     let should_close_unlimited = analyzer_unlimited.should_close_after_request(&scenario.request);
 
     // Only close if explicit close token or version default (not due to limit)
-    let (has_close, _) = analyzer_unlimited.parse_connection_tokens(&scenario.request.connection_headers);
-    let expected_close = has_close ||
-        (!config_unlimited.keep_alive_enabled) ||
-        (scenario.request.version.default_closes() &&
-         !analyzer_unlimited.parse_connection_tokens(&scenario.request.connection_headers).1);
+    let (has_close, _) =
+        analyzer_unlimited.parse_connection_tokens(&scenario.request.connection_headers);
+    let expected_close = has_close
+        || (!config_unlimited.keep_alive_enabled)
+        || (scenario.request.version.default_closes()
+            && !analyzer_unlimited
+                .parse_connection_tokens(&scenario.request.connection_headers)
+                .1);
 
     // This is a complex assertion, so let's be more lenient for fuzzing
     // Just ensure unlimited doesn't force close
@@ -607,8 +655,11 @@ mod tests {
                 has_other_headers: false,
             };
 
-            assert!(analyzer.should_close_after_request(&req),
-                "Failed for variation: {}", variation);
+            assert!(
+                analyzer.should_close_after_request(&req),
+                "Failed for variation: {}",
+                variation
+            );
         }
     }
 

@@ -213,9 +213,18 @@ fn audit_trace_id_generation_high_load_performance() {
 
     // Performance analysis
     println!("📊 Performance comparison:");
-    println!("   Context SpanId: {:.0} IDs/sec (AtomicU64)", context_ids_per_sec);
-    println!("   W3C SpanId: {:.0} IDs/sec (getrandom)", w3c_span_ids_per_sec);
-    println!("   TraceId: {:.0} IDs/sec (getrandom)", trace_id_ids_per_sec);
+    println!(
+        "   Context SpanId: {:.0} IDs/sec (AtomicU64)",
+        context_ids_per_sec
+    );
+    println!(
+        "   W3C SpanId: {:.0} IDs/sec (getrandom)",
+        w3c_span_ids_per_sec
+    );
+    println!(
+        "   TraceId: {:.0} IDs/sec (getrandom)",
+        trace_id_ids_per_sec
+    );
 
     let atomic_advantage = context_ids_per_sec / w3c_span_ids_per_sec;
     println!("   Atomic advantage: {:.1}x faster", atomic_advantage);
@@ -224,12 +233,30 @@ fn audit_trace_id_generation_high_load_performance() {
     let min_required_throughput = 1_000_000.0; // 1M IDs/sec requirement
 
     println!("📊 High load sustainability (1M+ IDs/sec requirement):");
-    println!("   Context SpanId: {} (AtomicU64)",
-        if context_ids_per_sec >= min_required_throughput { "✅ MEETS" } else { "❌ FAILS" });
-    println!("   W3C SpanId: {} (getrandom)",
-        if w3c_span_ids_per_sec >= min_required_throughput { "✅ MEETS" } else { "❌ FAILS" });
-    println!("   TraceId: {} (getrandom)",
-        if trace_id_ids_per_sec >= min_required_throughput { "✅ MEETS" } else { "❌ FAILS" });
+    println!(
+        "   Context SpanId: {} (AtomicU64)",
+        if context_ids_per_sec >= min_required_throughput {
+            "✅ MEETS"
+        } else {
+            "❌ FAILS"
+        }
+    );
+    println!(
+        "   W3C SpanId: {} (getrandom)",
+        if w3c_span_ids_per_sec >= min_required_throughput {
+            "✅ MEETS"
+        } else {
+            "❌ FAILS"
+        }
+    );
+    println!(
+        "   TraceId: {} (getrandom)",
+        if trace_id_ids_per_sec >= min_required_throughput {
+            "✅ MEETS"
+        } else {
+            "❌ FAILS"
+        }
+    );
 
     // Contention analysis
     if atomic_advantage > 2.0 {
@@ -270,13 +297,17 @@ fn audit_thread_local_id_generation_optimization() {
             let mut pool = pool.borrow_mut();
             if pool.is_empty() {
                 // Refill pool with batch of random IDs
-                let mut batch = vec![0u64; 1000]; // 1000 IDs per batch
-                getrandom::fill(unsafe {
-                    std::slice::from_raw_parts_mut(
-                        batch.as_mut_ptr() as *mut u8,
-                        batch.len() * std::mem::size_of::<u64>(),
-                    )
-                }).expect("getrandom failed");
+                let mut random_bytes = vec![0u8; 1000 * std::mem::size_of::<u64>()];
+                getrandom::fill(&mut random_bytes).expect("getrandom failed");
+                let batch = random_bytes
+                    .chunks_exact(std::mem::size_of::<u64>())
+                    .map(|chunk| {
+                        u64::from_ne_bytes([
+                            chunk[0], chunk[1], chunk[2], chunk[3], chunk[4], chunk[5], chunk[6],
+                            chunk[7],
+                        ])
+                    })
+                    .collect::<Vec<_>>();
                 pool.extend(batch);
             }
             pool.pop().unwrap_or(0)
@@ -319,9 +350,18 @@ fn audit_thread_local_id_generation_optimization() {
     let speedup = direct_duration.as_secs_f64() / optimized_duration.as_secs_f64();
 
     println!("📊 Thread-local optimization results:");
-    println!("   Direct getrandom: {:?} for {} IDs", direct_duration, iterations);
-    println!("   Thread-local pool: {:?} for {} IDs", optimized_duration, iterations);
-    println!("   Speedup: {:.1}x faster with thread-local pooling", speedup);
+    println!(
+        "   Direct getrandom: {:?} for {} IDs",
+        direct_duration, iterations
+    );
+    println!(
+        "   Thread-local pool: {:?} for {} IDs",
+        optimized_duration, iterations
+    );
+    println!(
+        "   Speedup: {:.1}x faster with thread-local pooling",
+        speedup
+    );
 
     if speedup > 2.0 {
         println!("✅ THREAD-LOCAL OPTIMIZATION: Significant performance improvement");

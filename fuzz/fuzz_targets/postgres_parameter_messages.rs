@@ -281,7 +281,10 @@ enum EncodingCorruption {
     /// Invalid UTF-8 sequences
     InvalidUtf8(Vec<u8>),
     /// Mixed valid/invalid encoding
-    Mixed { valid_prefix: String, invalid_suffix: Vec<u8> },
+    Mixed {
+        valid_prefix: String,
+        invalid_suffix: Vec<u8>,
+    },
 }
 
 impl ParameterMessage {
@@ -484,7 +487,9 @@ impl StandardParameter {
             StandardParameter::ApplicationName => "application_name".to_string(),
             StandardParameter::ClientEncoding => "client_encoding".to_string(),
             StandardParameter::DateStyle => "DateStyle".to_string(),
-            StandardParameter::DefaultTransactionIsolation => "default_transaction_isolation".to_string(),
+            StandardParameter::DefaultTransactionIsolation => {
+                "default_transaction_isolation".to_string()
+            }
             StandardParameter::InHotStandby => "in_hot_standby".to_string(),
             StandardParameter::IntegerDatetimes => "integer_datetimes".to_string(),
             StandardParameter::IntervalStyle => "IntervalStyle".to_string(),
@@ -492,7 +497,9 @@ impl StandardParameter {
             StandardParameter::ServerEncoding => "server_encoding".to_string(),
             StandardParameter::ServerVersion => "server_version".to_string(),
             StandardParameter::SessionAuthorization => "session_authorization".to_string(),
-            StandardParameter::StandardConformingStrings => "standard_conforming_strings".to_string(),
+            StandardParameter::StandardConformingStrings => {
+                "standard_conforming_strings".to_string()
+            }
             StandardParameter::TimeZone => "TimeZone".to_string(),
         }
     }
@@ -501,7 +508,13 @@ impl StandardParameter {
 impl ParameterValue {
     fn to_string(&self) -> String {
         match self {
-            ParameterValue::Boolean(b) => if *b { "on".to_string() } else { "off".to_string() },
+            ParameterValue::Boolean(b) => {
+                if *b {
+                    "on".to_string()
+                } else {
+                    "off".to_string()
+                }
+            }
             ParameterValue::Numeric(n) => n.to_string(),
             ParameterValue::String(s) => s.clone(),
             ParameterValue::EdgeCase(edge) => edge.to_string(),
@@ -542,9 +555,7 @@ impl UnicodeEdgeCase {
         match self {
             UnicodeEdgeCase::HighCodepoints(s) => s.clone(),
             UnicodeEdgeCase::MixedScripts(s) => s.clone(),
-            UnicodeEdgeCase::ControlChars(data) => {
-                String::from_utf8_lossy(data).to_string()
-            }
+            UnicodeEdgeCase::ControlChars(data) => String::from_utf8_lossy(data).to_string(),
             UnicodeEdgeCase::Normalization(s) => s.clone(),
         }
     }
@@ -621,7 +632,10 @@ impl EncodingCorruption {
         match self {
             EncodingCorruption::Valid => bytes,
             EncodingCorruption::InvalidUtf8(invalid_bytes) => invalid_bytes.clone(),
-            EncodingCorruption::Mixed { valid_prefix, invalid_suffix } => {
+            EncodingCorruption::Mixed {
+                valid_prefix,
+                invalid_suffix,
+            } => {
                 let mut result = valid_prefix.as_bytes().to_vec();
                 result.extend_from_slice(invalid_suffix);
                 result
@@ -693,7 +707,10 @@ fn test_parameter_type_binding_case(case: &ParameterTypeBindingCase) {
             ParameterTypeBindingCase::sanitized_cstring(&case.portal_name)
         );
         assert_eq!(bind.param_format_codes, case.truncated_param_format_codes());
-        assert_eq!(bind.result_format_codes, case.truncated_result_format_codes());
+        assert_eq!(
+            bind.result_format_codes,
+            case.truncated_result_format_codes()
+        );
         assert_eq!(bind.parameter_values, case.truncated_parameter_values());
     }
 }

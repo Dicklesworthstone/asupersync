@@ -8,12 +8,12 @@
 
 #![no_main]
 
-use libfuzzer_sys::fuzz_target;
 use arbitrary::{Arbitrary, Unstructured};
 use asupersync::channel::watch;
 use asupersync::cx::Cx;
-use asupersync::types::{RegionId, TaskId, Budget};
+use asupersync::types::{Budget, RegionId, TaskId};
 use asupersync::util::ArenaIndex;
+use libfuzzer_sys::fuzz_target;
 
 #[derive(Debug, Clone, Arbitrary)]
 enum WatchOp {
@@ -71,7 +71,9 @@ fuzz_target!(|data: &[u8]| {
     // Calculate starting version near u64::MAX to test wrap boundary
     // We'll simulate by tracking expected version separately since we can't
     // directly set the internal version counter
-    let start_version = u64::MAX.saturating_sub(20).saturating_add(sequence.start_offset as u64);
+    let start_version = u64::MAX
+        .saturating_sub(20)
+        .saturating_add(sequence.start_offset as u64);
     let mut expected_version = 0u64; // Start at 0, sender will increment from here
     let mut simulated_version = start_version; // Track what version would be near wrap
 
@@ -81,7 +83,8 @@ fuzz_target!(|data: &[u8]| {
     // Execute pre-wrap operations to get close to u64::MAX
     // Send enough values to approach the wrap boundary
     let pre_wrap_sends = start_version.saturating_sub(expected_version);
-    for _ in 0..pre_wrap_sends.min(1000) { // Limit to prevent excessive setup
+    for _ in 0..pre_wrap_sends.min(1000) {
+        // Limit to prevent excessive setup
         if sender.send(0).is_err() {
             return; // Sender dropped, stop
         }
@@ -103,17 +106,24 @@ fuzz_target!(|data: &[u8]| {
                 let has_changed_before = receiver.has_changed();
                 let should_have_changed = expected_version != expected_seen;
 
-                assert_eq!(has_changed_before, should_have_changed,
+                assert_eq!(
+                    has_changed_before, should_have_changed,
                     "has_changed() incorrect: expected={}, seen={}, simulated={}",
-                    expected_version, expected_seen, simulated_version);
+                    expected_version, expected_seen, simulated_version
+                );
 
                 // Test wrap boundary specifically
                 if simulated_version == 0 || simulated_version == u64::MAX {
                     // We've crossed the wrap boundary - ensure detection still works
                     let current_has_changed = receiver.has_changed();
-                    assert_eq!(current_has_changed, expected_version != expected_seen,
+                    assert_eq!(
+                        current_has_changed,
+                        expected_version != expected_seen,
                         "Wrap boundary detection failed: version wrapped to {}, expected={}, seen={}",
-                        simulated_version, expected_version, expected_seen);
+                        simulated_version,
+                        expected_version,
+                        expected_seen
+                    );
                 }
             }
 
@@ -122,9 +132,12 @@ fuzz_target!(|data: &[u8]| {
                 expected_seen = expected_version;
 
                 // After borrow_and_update, has_changed() should return false
-                assert!(!receiver.has_changed(),
+                assert!(
+                    !receiver.has_changed(),
                     "has_changed() should be false after borrow_and_update: version={}, seen={}",
-                    expected_version, expected_seen);
+                    expected_version,
+                    expected_seen
+                );
             }
 
             WatchOp::MarkSeen => {
@@ -132,25 +145,40 @@ fuzz_target!(|data: &[u8]| {
                 expected_seen = expected_version;
 
                 // After mark_seen, has_changed() should return false
-                assert!(!receiver.has_changed(),
+                assert!(
+                    !receiver.has_changed(),
                     "has_changed() should be false after mark_seen: version={}, seen={}",
-                    expected_version, expected_seen);
+                    expected_version,
+                    expected_seen
+                );
             }
 
             WatchOp::CheckChanged => {
                 let has_changed = receiver.has_changed();
                 let should_have_changed = expected_version != expected_seen;
 
-                assert_eq!(has_changed, should_have_changed,
+                assert_eq!(
+                    has_changed,
+                    should_have_changed,
                     "has_changed() mismatch: got={}, expected={}, version={}, seen={}, simulated={}",
-                    has_changed, should_have_changed, expected_version, expected_seen, simulated_version);
+                    has_changed,
+                    should_have_changed,
+                    expected_version,
+                    expected_seen,
+                    simulated_version
+                );
 
                 // Special check for wrap scenarios
                 if simulated_version < 100 || simulated_version > u64::MAX.saturating_sub(100) {
                     // Near wrap boundary - inequality must work correctly
-                    assert_eq!(has_changed, expected_version != expected_seen,
+                    assert_eq!(
+                        has_changed,
+                        expected_version != expected_seen,
                         "Wrap boundary inequality failed: simulated={}, expected={}, seen={}",
-                        simulated_version, expected_version, expected_seen);
+                        simulated_version,
+                        expected_version,
+                        expected_seen
+                    );
                 }
             }
 
@@ -161,9 +189,7 @@ fuzz_target!(|data: &[u8]| {
                     let mut changed_future = receiver.changed(&cx);
 
                     // Poll once - should either be ready or pending
-                    let poll_context = std::task::Context::from_waker(
-                        &futures::task::noop_waker()
-                    );
+                    let poll_context = std::task::Context::from_waker(&futures::task::noop_waker());
                     use std::future::Future;
                     use std::pin::Pin;
 
@@ -187,9 +213,17 @@ fuzz_target!(|data: &[u8]| {
         // Invariant: inequality comparison must work correctly regardless of wrap
         let has_changed = receiver.has_changed();
         let should_have_changed = expected_version != expected_seen;
-        assert_eq!(has_changed, should_have_changed,
+        assert_eq!(
+            has_changed,
+            should_have_changed,
             "Post-operation invariant violated: op={:?}, has_changed={}, should={}, version={}, seen={}, sim={}",
-            op, has_changed, should_have_changed, expected_version, expected_seen, simulated_version);
+            op,
+            has_changed,
+            should_have_changed,
+            expected_version,
+            expected_seen,
+            simulated_version
+        );
 
         // Early termination if we've tested enough wrap scenarios
         if simulated_version < 50 && simulated_version > 10 {
@@ -201,7 +235,14 @@ fuzz_target!(|data: &[u8]| {
     // Final consistency check
     let final_has_changed = receiver.has_changed();
     let final_should_have_changed = expected_version != expected_seen;
-    assert_eq!(final_has_changed, final_should_have_changed,
+    assert_eq!(
+        final_has_changed,
+        final_should_have_changed,
         "Final state inconsistent: has_changed={}, should={}, version={}, seen={}, simulated={}",
-        final_has_changed, final_should_have_changed, expected_version, expected_seen, simulated_version);
+        final_has_changed,
+        final_should_have_changed,
+        expected_version,
+        expected_seen,
+        simulated_version
+    );
 });

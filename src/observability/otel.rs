@@ -54,12 +54,12 @@ use crate::types::{CancelKind, RegionId, TaskId};
 use opentelemetry::KeyValue;
 use opentelemetry::metrics::{Counter, Histogram, Meter, ObservableGauge};
 use parking_lot::{Mutex, RwLock};
+use std::collections::HashMap;
 use std::collections::{HashMap, HashSet};
 use std::io::Write;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
-use std::collections::HashMap;
 
 // =============================================================================
 // Cardinality Management
@@ -976,8 +976,32 @@ impl OtlpHttpExporter {
                     // Sleep before retry
                     crate::time::sleep(cx.now(), delay).await;
                 }
+                Err(OtlpError::CompressionFallback { status_code }) => {
+                    // 415 Unsupported Media Type - retry without compression
+                    if self.compression {
+                        // Attempt fallback to uncompressed request
+                        match self
+                            .send_request_with_compression(cx, &request_body, false)
+                            .await
+                        {
+                            Ok(()) => return Ok(()),
+                            Err(fallback_error) => {
+                                return Err(ExportError::new(format!(
+                                    "OTLP compression fallback failed: {} after {}",
+                                    fallback_error, status_code
+                                )));
+                            }
+                        }
+                    } else {
+                        // Already using no compression, can't fallback further
+                        return Err(ExportError::new(format!(
+                            "OTLP compression fallback not applicable: {}",
+                            status_code
+                        )));
+                    }
+                }
                 Err(e) => {
-                    // Non-retryable error (e.g., 4xx, other 5xx, network)
+                    // Non-retryable error (e.g., other 4xx, other 5xx, network)
                     return Err(e.into());
                 }
             }
@@ -985,6 +1009,16 @@ impl OtlpHttpExporter {
     }
 
     async fn send_request_once(&self, cx: &crate::cx::Cx, body: &[u8]) -> Result<(), OtlpError> {
+        self.send_request_with_compression(cx, body, self.compression)
+            .await
+    }
+
+    async fn send_request_with_compression(
+        &self,
+        cx: &crate::cx::Cx,
+        body: &[u8],
+        use_compression: bool,
+    ) -> Result<(), OtlpError> {
         use crate::http::h1::http_client::HttpClient;
         use crate::http::h1::types::Method;
 
@@ -998,7 +1032,7 @@ impl OtlpHttpExporter {
             let client = HttpClient::new();
 
             // Apply compression if enabled
-            let (compressed_body, content_encoding) = if self.compression {
+            let (compressed_body, content_encoding) = if use_compression {
                 #[cfg(feature = "compression")]
                 {
                     use flate2::{Compression, write::GzEncoder};
@@ -1059,8 +1093,12 @@ impl OtlpHttpExporter {
                     // Retryable server errors per OTLP spec
                     Err(OtlpError::retryable(response.status, None))
                 }
+                415 => {
+                    // Unsupported Media Type - special case for compression fallback
+                    Err(OtlpError::compression_fallback(response.status))
+                }
                 400..=499 => {
-                    // Client errors - not retryable
+                    // Other client errors - not retryable
                     Err(OtlpError::non_retryable(format!(
                         "OTLP client error: {} - batch dropped",
                         response.status
@@ -1110,6 +1148,11 @@ pub enum OtlpError {
         /// Optional delay parsed from a Retry-After response header.
         retry_after: Option<Duration>,
     },
+    /// Compression fallback required (415 Unsupported Media Type).
+    CompressionFallback {
+        /// HTTP status code (typically 415).
+        status_code: u16,
+    },
 }
 
 impl OtlpError {
@@ -1128,6 +1171,12 @@ impl OtlpError {
             status_code,
             retry_after,
         }
+    }
+
+    /// Create a compression fallback OTLP error.
+    #[must_use]
+    pub fn compression_fallback(status_code: u16) -> Self {
+        Self::CompressionFallback { status_code }
     }
 }
 
@@ -1148,6 +1197,9 @@ impl std::fmt::Display for OtlpError {
                 } else {
                     write!(f, "retryable OTLP error: {}", status_code)
                 }
+            }
+            Self::CompressionFallback { status_code } => {
+                write!(f, "OTLP compression fallback required: {}", status_code)
             }
         }
     }
@@ -1442,7 +1494,10 @@ impl OtlpResourceBuilder {
         let mut default_attrs = HashMap::new();
         default_attrs.insert("telemetry.sdk.name".to_string(), "asupersync".to_string());
         default_attrs.insert("service.name".to_string(), "unknown_service".to_string());
-        default_attrs.insert("telemetry.sdk.version".to_string(), env!("CARGO_PKG_VERSION").to_string());
+        default_attrs.insert(
+            "telemetry.sdk.version".to_string(),
+            env!("CARGO_PKG_VERSION").to_string(),
+        );
 
         Self {
             programmatic_attrs: HashMap::new(),
@@ -2990,27 +3045,18 @@ pub mod span_semantics {
     static NEXT_TEST_TIME_TICK: AtomicU64 = AtomicU64::new(1);
 
     fn next_test_trace_id() -> TraceId {
-        let seed = NEXT_TEST_SPAN_SEED.fetch_add(1, Ordering::Relaxed);
-        let hi = splitmix64(seed);
-        let lo = splitmix64(seed ^ 0x9e37_79b9_7f4a_7c15);
-        let trace_id = TraceId::from_bytes([
-            (hi >> 56) as u8,
-            (hi >> 48) as u8,
-            (hi >> 40) as u8,
-            (hi >> 32) as u8,
-            (hi >> 24) as u8,
-            (hi >> 16) as u8,
-            (hi >> 8) as u8,
-            hi as u8,
-            (lo >> 56) as u8,
-            (lo >> 48) as u8,
-            (lo >> 40) as u8,
-            (lo >> 32) as u8,
-            (lo >> 24) as u8,
-            (lo >> 16) as u8,
-            (lo >> 8) as u8,
-            lo as u8,
-        ]);
+        // **W3C TRACE CONTEXT COMPLIANCE FIX**:
+        // Generate 16 truly random bytes instead of two related 64-bit PRNG outputs.
+        // This fixes the statistical bias and generator state leakage identified in
+        // w3c_trace_id_randomness_audit_test.rs
+
+        let mut bytes = [0u8; 16];
+        for byte in &mut bytes {
+            *byte = fastrand::u8(..);
+        }
+
+        // Ensure not INVALID (all zeros) per W3C specification
+        let trace_id = TraceId::from_bytes(bytes);
         if trace_id == TraceId::INVALID {
             TraceId::from_bytes([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1])
         } else {
@@ -4279,7 +4325,7 @@ pub mod span_semantics {
                 "parent_span_id": span.parent_context.as_ref().map(|_| "[ID]"),
                 "is_remote": span.context.is_remote(),
                 "sampled": span.context.trace_flags().is_sampled(),
-                "trace_state_vendor": span.context.trace_state().get("vendor"),
+                "trace_state": span.context.trace_state().to_string(),
                 "start_time": "[TIMESTAMP]",
                 "end_time": span.end_time.map(|_| "[TIMESTAMP]"),
                 "status": span_status_snapshot(&span.status),
@@ -4352,7 +4398,7 @@ pub mod span_semantics {
                 "attributes": otlp_attributes_snapshot(&span.attributes),
                 "events": span.events.iter().map(otlp_event_wire_snapshot).collect::<Vec<_>>(),
                 "status": otlp_status_snapshot(&span.status),
-                "trace_state_vendor": span.context.trace_state().get("vendor"),
+                "trace_state": span.context.trace_state().to_string(),
                 "sampled": span.context.trace_flags().is_sampled(),
             })
         }
@@ -5785,6 +5831,8 @@ pub mod otlp_request_builder {
         });
         ordered
             .into_iter()
+            // **OTLP §2.3.1 COMPLIANCE FIX**: Drop empty string values per specification
+            .filter(|(_key, value)| !value.is_empty())
             .map(|(key, value)| key_value(key.clone(), value.clone()))
             .collect()
     }
@@ -6073,6 +6121,8 @@ mod otlp_wire_format_tests {
         });
         ordered
             .into_iter()
+            // **OTLP §2.3.1 COMPLIANCE FIX**: Drop empty string values per specification
+            .filter(|(_key, value)| !value.is_empty())
             .map(|(key, value)| key_value(key.clone(), value.clone()))
             .collect()
     }

@@ -117,8 +117,8 @@
 //! would all be caught by the structural pins below.
 
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 fn read(rel: &str) -> String {
     let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(rel);
@@ -133,7 +133,9 @@ fn checkpoint_budget_exhaustion_checks_all_three_bounds() {
     let source = read("src/cx/cx.rs");
 
     let fn_marker = "fn checkpoint_budget_exhaustion(";
-    let start = source.find(fn_marker).expect("checkpoint_budget_exhaustion fn");
+    let start = source
+        .find(fn_marker)
+        .expect("checkpoint_budget_exhaustion fn");
     let body_end = source[start..]
         .find("\n    }\n")
         .expect("checkpoint_budget_exhaustion close");
@@ -171,7 +173,9 @@ fn checkpoint_budget_exhaustion_emits_correct_cancel_kinds() {
     let source = read("src/cx/cx.rs");
 
     let fn_marker = "fn checkpoint_budget_exhaustion(";
-    let start = source.find(fn_marker).expect("checkpoint_budget_exhaustion fn");
+    let start = source
+        .find(fn_marker)
+        .expect("checkpoint_budget_exhaustion fn");
     let body_end = source[start..]
         .find("\n    }\n")
         .expect("checkpoint_budget_exhaustion close");
@@ -320,8 +324,7 @@ fn check_cancel_from_values_returns_err_when_cancel_observed_at_mask_depth_zero(
     let body = &source[start..start + body_end];
 
     assert!(
-        body.contains("if cancel_requested {")
-            && body.contains("if mask_depth == 0 {"),
+        body.contains("if cancel_requested {") && body.contains("if mask_depth == 0 {"),
         "REGRESSION: check_cancel_from_values no longer \
          distinguishes mask_depth. Either masked code gets \
          cancelled (breaks mask contract) or unmasked code \

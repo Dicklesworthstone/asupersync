@@ -106,8 +106,8 @@
 //! the behavioral deep-nesting test.
 
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU32, Ordering};
 
 fn read(rel: &str) -> String {
     let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(rel);
@@ -125,9 +125,7 @@ fn scope_struct_holds_only_arena_handle_not_embedded_record() {
 
     let struct_marker = "pub struct Scope<'r, P: Policy = crate::types::policy::FailFast> {";
     let start = source.find(struct_marker).expect("Scope struct");
-    let body_end = source[start..]
-        .find("\n}\n")
-        .expect("Scope struct close");
+    let body_end = source[start..].find("\n}\n").expect("Scope struct close");
     let body = &source[start..start + body_end];
 
     // The three expected fields.
@@ -296,9 +294,7 @@ fn no_recursive_scope_construction_in_scope_new() {
 
     let fn_marker = "pub(crate) fn new(region: RegionId, budget: Budget) -> Self {";
     let start = source.find(fn_marker).expect("Scope::new fn");
-    let body_end = source[start..]
-        .find("\n    }\n")
-        .expect("Scope::new close");
+    let body_end = source[start..].find("\n    }\n").expect("Scope::new close");
     let body = &source[start..start + body_end];
 
     // Forbid recursion (Scope::new calling itself).
@@ -312,9 +308,7 @@ fn no_recursive_scope_construction_in_scope_new() {
 
     // The constructor should be a simple struct literal.
     assert!(
-        body.contains("Self {")
-            && body.contains("region,")
-            && body.contains("budget,"),
+        body.contains("Self {") && body.contains("region,") && body.contains("budget,"),
         "REGRESSION: Scope::new no longer just packages the \
          three fields. Any added work (e.g., walking parent \
          scopes) inflates per-scope construction cost.",
@@ -472,8 +466,10 @@ fn deep_nesting_200_scopes_uses_bounded_stack_via_arena() {
             break;
         }
         if walk_depth > 1000 {
-            panic!("REGRESSION: parent-walk exceeded 1000 steps \
-                    — indicates a cycle or arena corruption");
+            panic!(
+                "REGRESSION: parent-walk exceeded 1000 steps \
+                    — indicates a cycle or arena corruption"
+            );
         }
     }
     assert_eq!(

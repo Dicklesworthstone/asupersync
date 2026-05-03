@@ -209,33 +209,31 @@ fn drive_poll<S: Streaming<Message = u32>>(
         Poll::Ready(Some(Ok(item))) => {
             side.polled_ok.push(item);
         }
-        Poll::Ready(Some(Err(status))) => {
-            match side.terminal {
-                Some(Terminal::Cancel) => {
-                    assert_eq!(
-                        status.code(),
-                        Code::Cancelled,
-                        "post-cancel poll must yield Code::Cancelled, got {:?}",
-                        status.code(),
-                    );
-                }
-                Some(Terminal::Close) => {
-                    panic!("graceful close yielded Err: {status:?}");
-                }
-                None => {
-                    panic!(
-                        "stream returned Err without prior terminal op: status={status:?}, \
-                         polled_ok={:?}",
-                        side.polled_ok,
-                    );
-                }
+        Poll::Ready(Some(Err(status))) => match side.terminal {
+            Some(Terminal::Cancel) => {
+                assert_eq!(
+                    status.code(),
+                    Code::Cancelled,
+                    "post-cancel poll must yield Code::Cancelled, got {:?}",
+                    status.code(),
+                );
             }
-        }
+            Some(Terminal::Close) => {
+                panic!("graceful close yielded Err: {status:?}");
+            }
+            None => {
+                panic!(
+                    "stream returned Err without prior terminal op: status={status:?}, \
+                         polled_ok={:?}",
+                    side.polled_ok,
+                );
+            }
+        },
         Poll::Ready(None) => match side.terminal {
             Some(Terminal::Close) => {} // ✓
-            Some(Terminal::Cancel) => panic!(
-                "post-cancel poll yielded None instead of CANCELLED Err",
-            ),
+            Some(Terminal::Cancel) => {
+                panic!("post-cancel poll yielded None instead of CANCELLED Err",)
+            }
             None => panic!(
                 "open stream yielded None without terminal op: polled={:?}",
                 side.polled_ok,
@@ -290,7 +288,12 @@ fn assert_polled_prefix(side: &Side, label: &str) {
         side.polled_ok.len(),
         side.pushed_open.len(),
     );
-    for (i, (got, sent)) in side.polled_ok.iter().zip(side.pushed_open.iter()).enumerate() {
+    for (i, (got, sent)) in side
+        .polled_ok
+        .iter()
+        .zip(side.pushed_open.iter())
+        .enumerate()
+    {
         assert_eq!(
             got, sent,
             "{label}: polled index {i} ({got}) != pushed_open[{i}] ({sent}) \

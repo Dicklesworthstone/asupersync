@@ -1,7 +1,7 @@
 #![no_main]
 
-use libfuzzer_sys::fuzz_target;
 use arbitrary::{Arbitrary, Unstructured};
+use libfuzzer_sys::fuzz_target;
 
 /// Expect: 100-continue fuzzing for HTTP/1.1 protocol edge cases.
 ///
@@ -161,7 +161,7 @@ pub struct ChunkData {
 #[derive(Arbitrary, Debug, Clone)]
 pub enum ConnectionState {
     Fresh,
-    KeepAlive(u32), // request count
+    KeepAlive(u32),       // request count
     PipelinePending(u32), // pending requests
     Closing,
 }
@@ -235,10 +235,17 @@ impl MockExpectHandler {
         }
     }
 
-    pub fn process_request(&mut self, test_case: &ExpectContinueTestCase) -> Result<ExpectationResult, String> {
+    pub fn process_request(
+        &mut self,
+        test_case: &ExpectContinueTestCase,
+    ) -> Result<ExpectationResult, String> {
         // Reset state for new request
         self.state = ExpectState::AwaitingHeaders;
-        self.version = if test_case.http_version { HttpVersion::Http11 } else { HttpVersion::Http10 };
+        self.version = if test_case.http_version {
+            HttpVersion::Http11
+        } else {
+            HttpVersion::Http10
+        };
 
         // Parse request line
         self.validate_request_line(&test_case.method, &test_case.uri)?;
@@ -253,10 +260,12 @@ impl MockExpectHandler {
         self.check_protocol_compatibility(&expectation_action)?;
 
         // Determine if body is expected
-        let expects_body = self.request_expects_body(&test_case.body_headers, &test_case.body_config);
+        let expects_body =
+            self.request_expects_body(&test_case.body_headers, &test_case.body_config);
 
         // Generate expectation response
-        let result = self.handle_expectation(expectation_action, expects_body, &test_case.timing)?;
+        let result =
+            self.handle_expectation(expectation_action, expects_body, &test_case.timing)?;
 
         // Process body if needed
         if result.action == ExpectationAction::Continue {
@@ -266,43 +275,52 @@ impl MockExpectHandler {
         Ok(result)
     }
 
-    fn validate_request_line(&mut self, method: &RequestMethod, uri: &UriPath) -> Result<(), String> {
+    fn validate_request_line(
+        &mut self,
+        method: &RequestMethod,
+        uri: &UriPath,
+    ) -> Result<(), String> {
         // Validate method
         match method {
-            RequestMethod::Custom(custom) => {
-                match &custom.name {
-                    MethodName::Normal(name) => {
-                        if name.is_empty() {
-                            return Err("Empty method name".to_string());
-                        }
-                        if name.len() > 32 {
-                            return Err("Method name too long".to_string());
-                        }
-                        if !name.chars().all(|c| c.is_ascii_alphabetic()) {
-                            return Err("Invalid method characters".to_string());
-                        }
-                    },
-                    MethodName::WithWhitespace(_) => return Err("Method contains whitespace".to_string()),
-                    MethodName::WithControl(_) => return Err("Method contains control characters".to_string()),
-                    MethodName::Empty => return Err("Empty method".to_string()),
-                    MethodName::VeryLong(name) => {
-                        if name.len() > 1024 {
-                            return Err("Method too long".to_string());
-                        }
-                    },
+            RequestMethod::Custom(custom) => match &custom.name {
+                MethodName::Normal(name) => {
+                    if name.is_empty() {
+                        return Err("Empty method name".to_string());
+                    }
+                    if name.len() > 32 {
+                        return Err("Method name too long".to_string());
+                    }
+                    if !name.chars().all(|c| c.is_ascii_alphabetic()) {
+                        return Err("Invalid method characters".to_string());
+                    }
+                }
+                MethodName::WithWhitespace(_) => {
+                    return Err("Method contains whitespace".to_string());
+                }
+                MethodName::WithControl(_) => {
+                    return Err("Method contains control characters".to_string());
+                }
+                MethodName::Empty => return Err("Empty method".to_string()),
+                MethodName::VeryLong(name) => {
+                    if name.len() > 1024 {
+                        return Err("Method too long".to_string());
+                    }
                 }
             },
-            _ => {}, // Standard methods are always valid
+            _ => {} // Standard methods are always valid
         }
 
         // Validate URI
         match uri {
-            UriPath::Root | UriPath::Simple(_) | UriPath::WithQuery(_, _) | UriPath::WithFragment(_, _) => {},
+            UriPath::Root
+            | UriPath::Simple(_)
+            | UriPath::WithQuery(_, _)
+            | UriPath::WithFragment(_, _) => {}
             UriPath::Asterisk => {
                 if !matches!(method, RequestMethod::Options) {
                     return Err("Asterisk URI only allowed for OPTIONS".to_string());
                 }
-            },
+            }
             UriPath::Authority(host, _) => {
                 if !matches!(method, RequestMethod::Connect) {
                     return Err("Authority URI only allowed for CONNECT".to_string());
@@ -310,15 +328,18 @@ impl MockExpectHandler {
                 if host.is_empty() {
                     return Err("Empty authority host".to_string());
                 }
-            },
+            }
             UriPath::Malformed(_) => return Err("Malformed URI".to_string()),
-            _ => {},
+            _ => {}
         }
 
         Ok(())
     }
 
-    fn classify_expectation(&mut self, expect_header: &Option<ExpectHeaderType>) -> Result<ExpectationAction, String> {
+    fn classify_expectation(
+        &mut self,
+        expect_header: &Option<ExpectHeaderType>,
+    ) -> Result<ExpectationAction, String> {
         self.state = ExpectState::ProcessingExpectation;
 
         let Some(ref expect) = expect_header else {
@@ -326,46 +347,43 @@ impl MockExpectHandler {
         };
 
         match expect {
-            ExpectHeaderType::Continue |
-            ExpectHeaderType::ContinueUppercase |
-            ExpectHeaderType::ContinueMixedCase => {
+            ExpectHeaderType::Continue
+            | ExpectHeaderType::ContinueUppercase
+            | ExpectHeaderType::ContinueMixedCase => {
                 // Standard 100-continue
                 Ok(ExpectationAction::Continue)
-            },
+            }
 
-            ExpectHeaderType::ContinueWithSpaces |
-            ExpectHeaderType::ContinueWithTabs => {
+            ExpectHeaderType::ContinueWithSpaces | ExpectHeaderType::ContinueWithTabs => {
                 // Whitespace handling - should normalize to continue
                 Ok(ExpectationAction::Continue)
-            },
+            }
 
-            ExpectHeaderType::ContinueWithExtra(_) |
-            ExpectHeaderType::MultipleContinue |
-            ExpectHeaderType::UnsupportedSingle(_) |
-            ExpectHeaderType::UnsupportedMultiple(_) => {
+            ExpectHeaderType::ContinueWithExtra(_)
+            | ExpectHeaderType::MultipleContinue
+            | ExpectHeaderType::UnsupportedSingle(_)
+            | ExpectHeaderType::UnsupportedMultiple(_) => {
                 // RFC 7231: Multiple tokens or unsupported = reject
                 Ok(ExpectationAction::Reject)
-            },
+            }
 
-            ExpectHeaderType::MalformedTokens(_) |
-            ExpectHeaderType::WithControlChars(_) => {
+            ExpectHeaderType::MalformedTokens(_) | ExpectHeaderType::WithControlChars(_) => {
                 return Err("Malformed Expect header".to_string());
-            },
+            }
 
-            ExpectHeaderType::EmptyValue |
-            ExpectHeaderType::OnlyWhitespace => {
+            ExpectHeaderType::EmptyValue | ExpectHeaderType::OnlyWhitespace => {
                 // Empty Expect header = unsupported expectation
                 Ok(ExpectationAction::Reject)
-            },
+            }
 
             ExpectHeaderType::HttpVersionMismatch => {
                 // Force version mismatch scenario
                 Ok(ExpectationAction::Reject)
-            },
+            }
 
             ExpectHeaderType::Duplicate(_, _) => {
                 return Err("Duplicate Expect header forbidden".to_string());
-            },
+            }
         }
     }
 
@@ -373,36 +391,40 @@ impl MockExpectHandler {
         match body_headers {
             BodyHeaderType::Both(_, _) => {
                 // RFC 7230 3.3.3: Both Content-Length and Transfer-Encoding = potential smuggling
-                return Err("Ambiguous body length (both Content-Length and Transfer-Encoding)".to_string());
+                return Err(
+                    "Ambiguous body length (both Content-Length and Transfer-Encoding)".to_string(),
+                );
+            }
+
+            BodyHeaderType::ContentLength(cl) => match cl {
+                ContentLengthType::Invalid(_) => return Err("Invalid Content-Length".to_string()),
+                ContentLengthType::Negative(_) => return Err("Negative Content-Length".to_string()),
+                ContentLengthType::Multiple(_) => {
+                    return Err("Multiple Content-Length headers".to_string());
+                }
+                ContentLengthType::VeryLarge(size) => {
+                    if *size > self.max_body_size as u64 {
+                        return Err("Content-Length exceeds limit".to_string());
+                    }
+                }
+                _ => {}
             },
 
-            BodyHeaderType::ContentLength(cl) => {
-                match cl {
-                    ContentLengthType::Invalid(_) => return Err("Invalid Content-Length".to_string()),
-                    ContentLengthType::Negative(_) => return Err("Negative Content-Length".to_string()),
-                    ContentLengthType::Multiple(_) => return Err("Multiple Content-Length headers".to_string()),
-                    ContentLengthType::VeryLarge(size) => {
-                        if *size > self.max_body_size as u64 {
-                            return Err("Content-Length exceeds limit".to_string());
-                        }
-                    },
-                    _ => {},
+            BodyHeaderType::TransferEncoding(te) => match te {
+                TransferEncodingType::Unsupported(_) => {
+                    return Err("Unsupported Transfer-Encoding".to_string());
                 }
-            },
-
-            BodyHeaderType::TransferEncoding(te) => {
-                match te {
-                    TransferEncodingType::Unsupported(_) => return Err("Unsupported Transfer-Encoding".to_string()),
-                    TransferEncodingType::Malformed(_) => return Err("Malformed Transfer-Encoding".to_string()),
-                    _ => {},
+                TransferEncodingType::Malformed(_) => {
+                    return Err("Malformed Transfer-Encoding".to_string());
                 }
+                _ => {}
             },
 
             BodyHeaderType::Malformed(_, _) => {
                 return Err("Malformed body header".to_string());
-            },
+            }
 
-            BodyHeaderType::None => {},
+            BodyHeaderType::None => {}
         }
 
         Ok(())
@@ -417,7 +439,11 @@ impl MockExpectHandler {
         Ok(())
     }
 
-    fn request_expects_body(&self, body_headers: &BodyHeaderType, body_config: &BodyConfig) -> bool {
+    fn request_expects_body(
+        &self,
+        body_headers: &BodyHeaderType,
+        body_config: &BodyConfig,
+    ) -> bool {
         // Check headers
         let has_body_headers = match body_headers {
             BodyHeaderType::None => false,
@@ -440,7 +466,12 @@ impl MockExpectHandler {
         has_body_headers || has_body_data
     }
 
-    fn handle_expectation(&mut self, action: ExpectationAction, expects_body: bool, timing: &TimingScenario) -> Result<ExpectationResult, String> {
+    fn handle_expectation(
+        &mut self,
+        action: ExpectationAction,
+        expects_body: bool,
+        timing: &TimingScenario,
+    ) -> Result<ExpectationResult, String> {
         match action {
             ExpectationAction::None => {
                 self.state = ExpectState::BodyProcessing;
@@ -450,7 +481,7 @@ impl MockExpectHandler {
                     response_headers: vec![],
                     error: None,
                 })
-            },
+            }
 
             ExpectationAction::Continue => {
                 // Check HTTP version
@@ -480,7 +511,7 @@ impl MockExpectHandler {
                     TimingScenario::EagerBody => {
                         // Body already arrived - still send continue but note timing
                         self.state = ExpectState::ContinueSent;
-                    },
+                    }
                     _ => {
                         self.state = ExpectState::ContinueSent;
                     }
@@ -492,7 +523,7 @@ impl MockExpectHandler {
                     response_headers: vec![],
                     error: None,
                 })
-            },
+            }
 
             ExpectationAction::Reject => {
                 self.state = ExpectState::ExpectationRejected;
@@ -502,11 +533,15 @@ impl MockExpectHandler {
                     response_headers: vec![("Connection".to_string(), "close".to_string())],
                     error: Some("Expectation failed".to_string()),
                 })
-            },
+            }
         }
     }
 
-    fn process_body(&mut self, body_config: &BodyConfig, timing: &TimingScenario) -> Result<(), String> {
+    fn process_body(
+        &mut self,
+        body_config: &BodyConfig,
+        timing: &TimingScenario,
+    ) -> Result<(), String> {
         if self.state != ExpectState::ContinueSent && self.state != ExpectState::BodyProcessing {
             return Err("Invalid state for body processing".to_string());
         }
@@ -514,54 +549,50 @@ impl MockExpectHandler {
         match body_config {
             BodyConfig::Empty => {
                 self.state = ExpectState::RequestComplete;
-            },
+            }
 
-            BodyConfig::Present(presence) => {
-                match presence {
-                    BodyPresence::Immediate(data) => {
-                        if data.len() > self.max_body_size {
-                            return Err("Body too large".to_string());
-                        }
-                        self.state = ExpectState::RequestComplete;
-                    },
+            BodyConfig::Present(presence) => match presence {
+                BodyPresence::Immediate(data) => {
+                    if data.len() > self.max_body_size {
+                        return Err("Body too large".to_string());
+                    }
+                    self.state = ExpectState::RequestComplete;
+                }
 
-                    BodyPresence::Chunked(chunks) => {
-                        let total_size: usize = chunks.iter().map(|c| c.data.len()).sum();
-                        if total_size > self.max_body_size {
-                            return Err("Chunked body too large".to_string());
-                        }
-                        self.validate_chunks(chunks)?;
-                        self.state = ExpectState::RequestComplete;
-                    },
+                BodyPresence::Chunked(chunks) => {
+                    let total_size: usize = chunks.iter().map(|c| c.data.len()).sum();
+                    if total_size > self.max_body_size {
+                        return Err("Chunked body too large".to_string());
+                    }
+                    self.validate_chunks(chunks)?;
+                    self.state = ExpectState::RequestComplete;
+                }
 
-                    BodyPresence::WithTrailers(data, trailers) => {
-                        if data.len() > self.max_body_size {
-                            return Err("Body too large".to_string());
-                        }
-                        self.validate_trailers(trailers)?;
-                        self.state = ExpectState::RequestComplete;
-                    },
+                BodyPresence::WithTrailers(data, trailers) => {
+                    if data.len() > self.max_body_size {
+                        return Err("Body too large".to_string());
+                    }
+                    self.validate_trailers(trailers)?;
+                    self.state = ExpectState::RequestComplete;
                 }
             },
 
-            BodyConfig::Delayed => {
-                match timing {
-                    TimingScenario::PartialTimeout => {
-                        return Err("Body timeout".to_string());
-                    },
-                    _ => {
-                        self.state = ExpectState::RequestComplete;
-                    }
+            BodyConfig::Delayed => match timing {
+                TimingScenario::PartialTimeout => {
+                    return Err("Body timeout".to_string());
+                }
+                _ => {
+                    self.state = ExpectState::RequestComplete;
                 }
             },
 
             BodyConfig::Partial => {
                 return Err("Incomplete body".to_string());
-            },
+            }
 
             BodyConfig::Malformed(_) => {
                 return Err("Malformed body".to_string());
-            },
+            }
         }
 
         self.requests_processed += 1;
@@ -584,14 +615,33 @@ impl MockExpectHandler {
 
     fn validate_trailers(&self, trailers: &[(String, String)]) -> Result<(), String> {
         const FORBIDDEN_TRAILERS: &[&str] = &[
-            "authorization", "cache-control", "content-encoding", "content-length",
-            "content-range", "content-type", "cookie", "date", "expect", "expires",
-            "host", "max-forwards", "pragma", "proxy-authenticate", "proxy-authorization",
-            "range", "te", "trailer", "transfer-encoding", "upgrade"
+            "authorization",
+            "cache-control",
+            "content-encoding",
+            "content-length",
+            "content-range",
+            "content-type",
+            "cookie",
+            "date",
+            "expect",
+            "expires",
+            "host",
+            "max-forwards",
+            "pragma",
+            "proxy-authenticate",
+            "proxy-authorization",
+            "range",
+            "te",
+            "trailer",
+            "transfer-encoding",
+            "upgrade",
         ];
 
         for (name, _) in trailers {
-            if FORBIDDEN_TRAILERS.iter().any(|&forbidden| name.eq_ignore_ascii_case(forbidden)) {
+            if FORBIDDEN_TRAILERS
+                .iter()
+                .any(|&forbidden| name.eq_ignore_ascii_case(forbidden))
+            {
                 return Err(format!("Forbidden trailer: {}", name));
             }
         }
@@ -621,22 +671,36 @@ fuzz_target!(|data: &[u8]| {
                 match expectation_result.response_code {
                     0 => {
                         // No interim response - action should be None
-                        assert_eq!(expectation_result.action, ExpectationAction::None,
-                                 "No response code but action is not None");
-                    },
+                        assert_eq!(
+                            expectation_result.action,
+                            ExpectationAction::None,
+                            "No response code but action is not None"
+                        );
+                    }
                     100 => {
                         // Continue response
-                        assert_eq!(expectation_result.action, ExpectationAction::Continue,
-                                 "100 response but action is not Continue");
-                        assert!(expectation_result.error.is_none(),
-                               "100 response should not have error");
-                    },
+                        assert_eq!(
+                            expectation_result.action,
+                            ExpectationAction::Continue,
+                            "100 response but action is not Continue"
+                        );
+                        assert!(
+                            expectation_result.error.is_none(),
+                            "100 response should not have error"
+                        );
+                    }
                     417 => {
                         // Expectation failed
-                        assert_eq!(expectation_result.action, ExpectationAction::Reject,
-                                 "417 response but action is not Reject");
-                    },
-                    _ => panic!("Invalid response code: {}", expectation_result.response_code),
+                        assert_eq!(
+                            expectation_result.action,
+                            ExpectationAction::Reject,
+                            "417 response but action is not Reject"
+                        );
+                    }
+                    _ => panic!(
+                        "Invalid response code: {}",
+                        expectation_result.response_code
+                    ),
                 }
 
                 // Validate state consistency
@@ -646,15 +710,18 @@ fuzz_target!(|data: &[u8]| {
                         if expectation_result.action == ExpectationAction::Reject {
                             panic!("Request completed but expectation was rejected");
                         }
-                    },
+                    }
                     ExpectState::ExpectationRejected => {
-                        assert_eq!(expectation_result.action, ExpectationAction::Reject,
-                                 "State rejected but action is not Reject");
-                    },
+                        assert_eq!(
+                            expectation_result.action,
+                            ExpectationAction::Reject,
+                            "State rejected but action is not Reject"
+                        );
+                    }
                     ExpectState::Error(_) => {
                         panic!("Handler ended in error state without returning error");
-                    },
-                    _ => {}, // Other states are valid intermediate states
+                    }
+                    _ => {} // Other states are valid intermediate states
                 }
 
                 // Validate HTTP/1.0 compatibility
@@ -663,14 +730,16 @@ fuzz_target!(|data: &[u8]| {
                         panic!("100-continue sent for HTTP/1.0 request");
                     }
                 }
-            },
+            }
 
             Err(_error) => {
                 // Error is acceptable - validate it doesn't crash or leak
-                assert!(handler.state != ExpectState::AwaitingHeaders ||
-                       handler.state == ExpectState::Error(_error.clone()),
-                       "Handler state inconsistent with error");
-            },
+                assert!(
+                    handler.state != ExpectState::AwaitingHeaders
+                        || handler.state == ExpectState::Error(_error.clone()),
+                    "Handler state inconsistent with error"
+                );
+            }
         }
 
         // Test edge case: multiple rapid requests on same handler
@@ -684,7 +753,10 @@ fuzz_target!(|data: &[u8]| {
         drop(fresh_handler);
 
         let mut second_handler = MockExpectHandler::new();
-        assert_eq!(second_handler.state, initial_state, "Handler state not properly reset");
+        assert_eq!(
+            second_handler.state, initial_state,
+            "Handler state not properly reset"
+        );
 
         // Verify processing doesn't corrupt future requests
         let _ = second_handler.process_request(&test_case);

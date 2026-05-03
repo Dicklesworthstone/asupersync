@@ -74,10 +74,7 @@ enum FuzzInput {
     /// chopped off — that's the gzip trailer's CRC32 + ISIZE
     /// region. flate2 must surface a typed error rather than
     /// returning Ok with the partial payload.
-    TruncatedTrailer {
-        payload: Vec<u8>,
-        chop_bytes: u8,
-    },
+    TruncatedTrailer { payload: Vec<u8>, chop_bytes: u8 },
 
     /// Header tweaks: flip the magic bytes (1F 8B at offsets 0..2)
     /// or the compression-method byte (0x08 at offset 2). The
@@ -129,7 +126,10 @@ fuzz_target!(|input: FuzzInput| {
                 "round-trip identity broken: gzip(payload) → decompressed != payload",
             );
         }
-        FuzzInput::TruncatedTrailer { payload, chop_bytes } => {
+        FuzzInput::TruncatedTrailer {
+            payload,
+            chop_bytes,
+        } => {
             let payload = truncated(&payload, DECOMPRESS_MAX / 2);
             let compressed = match gzip_frame_compress(Bytes::from(payload.clone())) {
                 Ok(c) => c,
@@ -152,7 +152,11 @@ fuzz_target!(|input: FuzzInput| {
                  message and have the peer see a shortened payload",
             );
         }
-        FuzzInput::CorruptHeader { payload, offset, xor } => {
+        FuzzInput::CorruptHeader {
+            payload,
+            offset,
+            xor,
+        } => {
             let payload = truncated(&payload, DECOMPRESS_MAX / 2);
             let compressed = match gzip_frame_compress(Bytes::from(payload)) {
                 Ok(c) => c,

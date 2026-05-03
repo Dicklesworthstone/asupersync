@@ -1,19 +1,19 @@
 #![no_main]
 
-use libfuzzer_sys::fuzz_target;
 use arbitrary::{Arbitrary, Unstructured};
+use libfuzzer_sys::fuzz_target;
+use std::future::Future;
+use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::{Arc, Mutex as StdMutex};
 use std::task::{Context, Poll, RawWaker, RawWakerVTable, Waker};
-use std::future::Future;
 use std::thread;
 use std::time::Duration;
-use std::panic::{catch_unwind, AssertUnwindSafe};
 
-use asupersync::{Cx, RegionId, Budget};
 use asupersync::cx::cap;
 use asupersync::sync::{RwLock, RwLockError, TryReadError, TryWriteError};
 use asupersync::types::TaskId;
 use asupersync::util::ArenaIndex;
+use asupersync::{Budget, Cx, RegionId};
 
 #[derive(Debug, Clone)]
 struct PoisonTracker {
@@ -87,18 +87,25 @@ impl PoisonTracker {
         // Check poison event consistency
         if let Ok(events) = self.poison_events.lock() {
             let poison_events_occurred = !events.is_empty();
-            assert_eq!(lock_is_poisoned, poison_events_occurred,
+            assert_eq!(
+                lock_is_poisoned, poison_events_occurred,
                 "Lock poison state ({}) inconsistent with poison events ({})",
-                lock_is_poisoned, poison_events_occurred);
+                lock_is_poisoned, poison_events_occurred
+            );
         }
 
         // Validate that all acquisitions after poisoning return Poisoned errors
         if let Ok(results) = self.acquisition_results.lock() {
             for result in results.iter() {
                 if result.lock_was_poisoned {
-                    assert_eq!(result.result, AcquisitionOutcome::Poisoned,
+                    assert_eq!(
+                        result.result,
+                        AcquisitionOutcome::Poisoned,
                         "Acquisition {:?} type {:?} should return Poisoned when lock was poisoned, got {:?}",
-                        result.operation_id, result.operation_type, result.result);
+                        result.operation_id,
+                        result.operation_type,
+                        result.result
+                    );
                 }
             }
         }
@@ -107,9 +114,11 @@ impl PoisonTracker {
         if let Ok(results) = self.acquisition_results.lock() {
             for result in results.iter() {
                 if result.result == AcquisitionOutcome::Success {
-                    assert!(!result.lock_was_poisoned,
+                    assert!(
+                        !result.lock_was_poisoned,
                         "Acquisition {:?} type {:?} succeeded but lock was poisoned",
-                        result.operation_id, result.operation_type);
+                        result.operation_id, result.operation_type
+                    );
                 }
             }
         }
@@ -128,10 +137,7 @@ impl TrackedWaker {
 
     fn create_waker(&self) -> Waker {
         let data = Arc::new(self.clone());
-        let raw = RawWaker::new(
-            Arc::into_raw(data) as *const (),
-            &TRACKED_WAKER_VTABLE,
-        );
+        let raw = RawWaker::new(Arc::into_raw(data) as *const (), &TRACKED_WAKER_VTABLE);
         unsafe { Waker::from_raw(raw) }
     }
 }
@@ -167,7 +173,8 @@ unsafe fn tracked_waker_wake(data: *const ()) {
 
 unsafe fn tracked_waker_wake_by_ref(data: *const ()) {
     let arc = unsafe { Arc::from_raw(data as *const TrackedWaker) };
-    arc.tracker.record_operation(&format!("wake_by_ref_{}", arc.op_id));
+    arc.tracker
+        .record_operation(&format!("wake_by_ref_{}", arc.op_id));
     std::mem::forget(arc);
 }
 
@@ -261,12 +268,14 @@ fuzz_target!(|data: &[u8]| {
                     let write_guard = lock_clone.try_write();
                     match write_guard {
                         Ok(_guard) => {
-                            tracker_clone.record_operation(&format!("writer_{}_acquired", writer_idx));
+                            tracker_clone
+                                .record_operation(&format!("writer_{}_acquired", writer_idx));
                             panic!("Multi-writer panic {}", i);
                         }
                         Err(_) => {
                             // Lock already held or poisoned
-                            tracker_clone.record_operation(&format!("writer_{}_blocked", writer_idx));
+                            tracker_clone
+                                .record_operation(&format!("writer_{}_blocked", writer_idx));
                         }
                     }
                 }));
@@ -284,14 +293,17 @@ fuzz_target!(|data: &[u8]| {
             }
         }
 
-        PoisonPattern::PanicDuringWrite { delay_before_panic_ms } => {
+        PoisonPattern::PanicDuringWrite {
+            delay_before_panic_ms,
+        } => {
             if !contexts.is_empty() {
                 let lock_clone = Arc::clone(&rwlock);
                 let tracker_clone = tracker.clone();
                 let delay = Duration::from_millis(delay_before_panic_ms.min(100) as u64);
 
                 let panic_result = catch_unwind(AssertUnwindSafe(|| {
-                    let mut write_guard = lock_clone.try_write().expect("Should acquire write lock");
+                    let mut write_guard =
+                        lock_clone.try_write().expect("Should acquire write lock");
                     tracker_clone.record_operation("acquired_for_delayed_panic");
 
                     // Simulate some work before panic
@@ -534,7 +546,9 @@ fn test_post_poison_acquisitions(rwlock: &RwLock<u32>, tracker: &PoisonTracker, 
         Poll::Ready(Ok(_)) => AcquisitionOutcome::Success,
         Poll::Ready(Err(RwLockError::Cancelled)) => AcquisitionOutcome::Cancelled,
         Poll::Ready(Err(RwLockError::Poisoned)) => AcquisitionOutcome::Poisoned,
-        Poll::Ready(Err(RwLockError::PolledAfterCompletion)) => AcquisitionOutcome::Other("PolledAfterCompletion".to_string()),
+        Poll::Ready(Err(RwLockError::PolledAfterCompletion)) => {
+            AcquisitionOutcome::Other("PolledAfterCompletion".to_string())
+        }
         Poll::Pending => AcquisitionOutcome::Other("Pending".to_string()),
     };
 
@@ -555,7 +569,9 @@ fn test_post_poison_acquisitions(rwlock: &RwLock<u32>, tracker: &PoisonTracker, 
         Poll::Ready(Ok(_)) => AcquisitionOutcome::Success,
         Poll::Ready(Err(RwLockError::Cancelled)) => AcquisitionOutcome::Cancelled,
         Poll::Ready(Err(RwLockError::Poisoned)) => AcquisitionOutcome::Poisoned,
-        Poll::Ready(Err(RwLockError::PolledAfterCompletion)) => AcquisitionOutcome::Other("PolledAfterCompletion".to_string()),
+        Poll::Ready(Err(RwLockError::PolledAfterCompletion)) => {
+            AcquisitionOutcome::Other("PolledAfterCompletion".to_string())
+        }
         Poll::Pending => AcquisitionOutcome::Other("Pending".to_string()),
     };
 

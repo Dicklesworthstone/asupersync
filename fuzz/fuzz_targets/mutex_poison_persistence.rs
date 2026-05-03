@@ -12,18 +12,18 @@
 
 #![no_main]
 
-use libfuzzer_sys::fuzz_target;
 use arbitrary::{Arbitrary, Unstructured};
-use asupersync::sync::{Mutex, LockError, TryLockError};
 use asupersync::cx::Cx;
-use asupersync::types::{RegionId, TaskId, Budget};
+use asupersync::sync::{LockError, Mutex, TryLockError};
+use asupersync::types::{Budget, RegionId, TaskId};
 use asupersync::util::ArenaIndex;
+use futures::executor::block_on;
+use libfuzzer_sys::fuzz_target;
+use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::thread;
 use std::time::Duration;
-use std::panic::{catch_unwind, AssertUnwindSafe};
-use futures::executor::block_on;
 
 #[derive(Debug, Clone, Arbitrary)]
 struct PoisonConfig {
@@ -118,10 +118,13 @@ fn execute_operation(
     mutex: &Mutex<u32>,
     op: &MutexOperation,
     tracker: &PoisonTracker,
-    is_poisoned: bool
+    is_poisoned: bool,
 ) -> Result<(), String> {
     match op {
-        MutexOperation::Lock { new_value, work_millis } => {
+        MutexOperation::Lock {
+            new_value,
+            work_millis,
+        } => {
             tracker.poison_attempts.fetch_add(1, Ordering::SeqCst);
 
             let cx = Cx::new(
@@ -147,7 +150,8 @@ fn execute_operation(
                             tracker.poison_errors_seen.fetch_add(1, Ordering::SeqCst);
                             Ok(()) // Expected error
                         } else {
-                            Err("Lock returned Poisoned but mutex should not be poisoned".to_string())
+                            Err("Lock returned Poisoned but mutex should not be poisoned"
+                                .to_string())
                         }
                     }
                     Err(LockError::Cancelled) => {
@@ -178,7 +182,10 @@ fn execute_operation(
                         tracker.poison_errors_seen.fetch_add(1, Ordering::SeqCst);
                         // Expected error
                     } else {
-                        return Err("try_lock returned Poisoned but mutex should not be poisoned".to_string());
+                        return Err(
+                            "try_lock returned Poisoned but mutex should not be poisoned"
+                                .to_string(),
+                        );
                     }
                 }
                 Err(TryLockError::Locked) => {
@@ -248,14 +255,22 @@ fuzz_target!(|data: &[u8]| {
         return;
     }
 
-    let max_ops = sequence.max_operations.min(PoisonSequence::max_operations()) as usize;
+    let max_ops = sequence
+        .max_operations
+        .min(PoisonSequence::max_operations()) as usize;
 
     // Create mutex and tracking context
     let mutex = Arc::new(Mutex::new(sequence.config.initial_value));
     let tracker = Arc::new(PoisonTracker::new());
 
     // Phase 1: Pre-poison operations
-    for (i, op) in sequence.config.pre_poison_ops.iter().take(max_ops).enumerate() {
+    for (i, op) in sequence
+        .config
+        .pre_poison_ops
+        .iter()
+        .take(max_ops)
+        .enumerate()
+    {
         // Check invariants before each operation (not poisoned yet)
         if let Err(msg) = tracker.check_invariants(&mutex, false) {
             panic!("Pre-poison invariant violation at op {}: {}", i, msg);
@@ -284,19 +299,31 @@ fuzz_target!(|data: &[u8]| {
         );
 
         block_on(async {
-            let _guard = mutex.lock(&cx).await.expect("Lock should succeed before poison");
+            let _guard = mutex
+                .lock(&cx)
+                .await
+                .expect("Lock should succeed before poison");
             panic!("Deliberate panic to poison mutex");
         });
     }));
 
     // Panic should have occurred
-    assert!(poison_result.is_err(), "Poison operation should have panicked");
+    assert!(
+        poison_result.is_err(),
+        "Poison operation should have panicked"
+    );
 
     // Verify mutex is now poisoned
     assert!(mutex.is_poisoned(), "Mutex should be poisoned after panic");
 
     // Phase 3: Post-poison operations - all should handle poison correctly
-    for (i, op) in sequence.config.post_poison_ops.iter().take(max_ops).enumerate() {
+    for (i, op) in sequence
+        .config
+        .post_poison_ops
+        .iter()
+        .take(max_ops)
+        .enumerate()
+    {
         // Check invariants before each operation (should be poisoned)
         if let Err(msg) = tracker.check_invariants(&mutex, true) {
             panic!("Post-poison invariant violation at op {}: {}", i, msg);
@@ -338,14 +365,14 @@ fuzz_target!(|data: &[u8]| {
                         tracker.poison_attempts.fetch_add(1, Ordering::SeqCst);
 
                         // Try to lock poisoned mutex
-                        let result = block_on(async {
-                            mutex.lock(&cx).await
-                        });
+                        let result = block_on(async { mutex.lock(&cx).await });
 
                         match result {
                             Ok(_) => {
-                                panic!("Lock should fail on poisoned mutex (thread {} attempt {})",
-                                    thread_id, attempt);
+                                panic!(
+                                    "Lock should fail on poisoned mutex (thread {} attempt {})",
+                                    thread_id, attempt
+                                );
                             }
                             Err(LockError::Poisoned) => {
                                 tracker.poison_errors_seen.fetch_add(1, Ordering::SeqCst);
@@ -355,8 +382,10 @@ fuzz_target!(|data: &[u8]| {
                                 // Cancellation can occur
                             }
                             Err(LockError::PolledAfterCompletion) => {
-                                panic!("Unexpected PolledAfterCompletion in thread {} attempt {}",
-                                    thread_id, attempt);
+                                panic!(
+                                    "Unexpected PolledAfterCompletion in thread {} attempt {}",
+                                    thread_id, attempt
+                                );
                             }
                         }
 

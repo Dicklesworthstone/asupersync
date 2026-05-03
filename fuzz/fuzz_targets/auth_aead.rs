@@ -258,14 +258,14 @@ fn test_aad_tamper_detection(input: &AeadFuzzInput) {
     } = &input.tag_scenario
     {
         // br-asupersync-ombirt: post-q3terg AuthKey::from_bytes returns
-    // Result; reject low-entropy inputs (libfuzzer's mutator is biased
-    // enough that valid-entropy keys appear in ~all uniform-random 32B
-    // buffers — the Err branch only catches the all-zero / all-one /
-    // single-pattern outliers).
-    let key = match AuthKey::from_bytes(input.key_bytes) {
-        Ok(k) => k,
-        Err(_) => return,
-    };
+        // Result; reject low-entropy inputs (libfuzzer's mutator is biased
+        // enough that valid-entropy keys appear in ~all uniform-random 32B
+        // buffers — the Err branch only catches the all-zero / all-one /
+        // single-pattern outliers).
+        let key = match AuthKey::from_bytes(input.key_bytes) {
+            Ok(k) => k,
+            Err(_) => return,
+        };
 
         let original_id =
             SymbolId::new_for_test(input.object_id.wrapping_add(1), input.sbn, input.esi);

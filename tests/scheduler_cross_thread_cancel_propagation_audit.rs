@@ -162,8 +162,9 @@ fn request_cancel_with_budget_publishes_fast_cancel_with_release() {
     let source = read("src/record/task.rs");
 
     assert!(
-        source.contains("fast_cancel\n                .store(true, std::sync::atomic::Ordering::Release);")
-            || source.contains(".store(true, std::sync::atomic::Ordering::Release);"),
+        source.contains(
+            "fast_cancel\n                .store(true, std::sync::atomic::Ordering::Release);"
+        ) || source.contains(".store(true, std::sync::atomic::Ordering::Release);"),
         "REGRESSION: task.rs request_cancel_with_budget no \
          longer publishes fast_cancel with Release ordering. \
          Without it, a task on worker-A may never observe a \
@@ -310,8 +311,7 @@ fn cancel_lane_waker_guards_against_spurious_wakes() {
     let body = &source[start..next_impl];
 
     assert!(
-        body.contains("if !cancel_requested {")
-            && body.contains("return;"),
+        body.contains("if !cancel_requested {") && body.contains("return;"),
         "REGRESSION: CancelLaneWaker.schedule no longer \
          short-circuits when cancel_requested is false. A \
          spurious wake would promote a non-cancelled task to \
@@ -331,9 +331,7 @@ fn worker_coordinator_wake_one_unparks_via_round_robin_cursor() {
 
     let fn_marker = "pub(crate) fn wake_one(&self) {";
     let start = source.find(fn_marker).expect("wake_one fn");
-    let body_end = source[start..]
-        .find("\n    }\n")
-        .expect("wake_one close");
+    let body_end = source[start..].find("\n    }\n").expect("wake_one close");
     let body = &source[start..start + body_end];
 
     assert!(
@@ -416,8 +414,7 @@ fn cancel_request_returns_per_task_priorities_for_lane_routing() {
     let source = read("src/runtime/state.rs");
 
     assert!(
-        source.contains("pub fn cancel_request(")
-            && source.contains("-> Vec<(TaskId, u8)>"),
+        source.contains("pub fn cancel_request(") && source.contains("-> Vec<(TaskId, u8)>"),
         "REGRESSION: cancel_request signature changed. The \
          scheduler depends on the (TaskId, priority) tuple list \
          to drive per-task inject_cancel — without this list, \

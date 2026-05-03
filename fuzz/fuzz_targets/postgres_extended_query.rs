@@ -412,7 +412,10 @@ fn fuzz_parse_round_trip(parse: &ParseScenario) {
             sql: parse.sql.clone(),
             param_oids: parse.param_oids.clone(),
         };
-        assert_eq!(result.expect("canonical Parse frame should decode"), expected);
+        assert_eq!(
+            result.expect("canonical Parse frame should decode"),
+            expected
+        );
     } else {
         let result_again = fuzz_parse_parse_message(&frame);
         assert_eq!(format!("{result:?}"), format!("{result_again:?}"));
@@ -420,7 +423,11 @@ fn fuzz_parse_round_trip(parse: &ParseScenario) {
 }
 
 fn fuzz_bind_round_trip(bind: &BindScenario) {
-    let owners: Vec<FuzzParam<'_>> = bind.params.iter().map(|param| FuzzParam { inner: param }).collect();
+    let owners: Vec<FuzzParam<'_>> = bind
+        .params
+        .iter()
+        .map(|param| FuzzParam { inner: param })
+        .collect();
     let params: Vec<&dyn ToSql> = owners.iter().map(|param| param as &dyn ToSql).collect();
 
     match build_bind_msg(
@@ -436,7 +443,8 @@ fn fuzz_bind_round_trip(bind: &BindScenario) {
                     .all(|param| !matches!(param.value, ParamValue::Error(_))),
                 "bind builder succeeded despite injected parameter serialization error"
             );
-            let parsed = fuzz_parse_bind_message(&frame).expect("canonical Bind frame should decode");
+            let parsed =
+                fuzz_parse_bind_message(&frame).expect("canonical Bind frame should decode");
             let expected = FuzzBindMessage {
                 portal: bind.portal.clone(),
                 statement_name: bind.statement.clone(),
@@ -453,7 +461,10 @@ fn fuzz_bind_round_trip(bind: &BindScenario) {
                     .any(|param| matches!(param.value, ParamValue::Error(_))),
                 "unexpected bind protocol error: {message}"
             );
-            assert!(message.contains("fuzz bind type mismatch"), "got: {message}");
+            assert!(
+                message.contains("fuzz bind type mismatch"),
+                "got: {message}"
+            );
         }
         Err(other) => panic!("unexpected bind builder error: {other:?}"),
     }
@@ -471,7 +482,11 @@ fn fuzz_manual_bind_parser(bind: &BindScenario) {
         let expected = FuzzBindMessage {
             portal: bind.portal.clone(),
             statement_name: bind.statement.clone(),
-            param_format_codes: bind.param_format_codes.iter().map(FormatCodeSpec::to_i16).collect(),
+            param_format_codes: bind
+                .param_format_codes
+                .iter()
+                .map(FormatCodeSpec::to_i16)
+                .collect(),
             parameter_values: expected_values(&bind.params),
             result_format_codes: bind
                 .result_format_codes

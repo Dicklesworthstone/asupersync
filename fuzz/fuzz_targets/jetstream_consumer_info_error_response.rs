@@ -3,7 +3,7 @@
 use arbitrary::Arbitrary;
 use libfuzzer_sys::fuzz_target;
 
-use asupersync::messaging::jetstream::{fuzz_parse_api_error, JsError};
+use asupersync::messaging::jetstream::{JsError, fuzz_parse_api_error};
 
 /// Structure-aware fuzz input for JetStream ConsumerInfo API error-response parsing
 #[derive(Arbitrary, Debug)]
@@ -24,29 +24,17 @@ enum ConsumerInfoErrorScenario {
         stream_names: Vec<String>,
     },
     /// Stream not found errors (10059) when accessing consumer
-    StreamNotFoundForConsumer {
-        stream_names: Vec<String>,
-    },
+    StreamNotFoundForConsumer { stream_names: Vec<String> },
     /// Invalid consumer configuration errors (10012)
-    InvalidConsumerConfig {
-        config_errors: Vec<String>,
-    },
+    InvalidConsumerConfig { config_errors: Vec<String> },
     /// Consumer name already in use errors (10013)
-    ConsumerNameInUse {
-        existing_names: Vec<String>,
-    },
+    ConsumerNameInUse { existing_names: Vec<String> },
     /// Bad request errors for ConsumerInfo operations (10003)
-    BadRequest {
-        request_errors: Vec<String>,
-    },
+    BadRequest { request_errors: Vec<String> },
     /// Authentication/authorization errors (10040)
-    AuthErrors {
-        auth_messages: Vec<String>,
-    },
+    AuthErrors { auth_messages: Vec<String> },
     /// Mixed error scenarios with multiple error types
-    MixedErrorTypes {
-        errors: Vec<SpecificError>,
-    },
+    MixedErrorTypes { errors: Vec<SpecificError> },
     /// Malformed error responses
     MalformedErrors {
         malformed_variants: Vec<MalformedErrorVariant>,
@@ -74,9 +62,7 @@ enum MalformedErrorVariant {
         include_description: bool,
     },
     /// Invalid JSON structure
-    InvalidJson {
-        corruption_type: JsonCorruption,
-    },
+    InvalidJson { corruption_type: JsonCorruption },
     /// Type confusion in error fields
     TypeConfusion {
         code_as_string: bool,
@@ -156,7 +142,10 @@ fuzz_target!(|input: ConsumerInfoErrorFuzz| {
 
     // Validate input sizes
     match &input.scenario {
-        ConsumerInfoErrorScenario::ConsumerNotFound { consumer_names, stream_names } => {
+        ConsumerInfoErrorScenario::ConsumerNotFound {
+            consumer_names,
+            stream_names,
+        } => {
             if consumer_names.len() > MAX_NAMES || stream_names.len() > MAX_NAMES {
                 return;
             }
@@ -193,7 +182,10 @@ fuzz_target!(|input: ConsumerInfoErrorFuzz| {
 
 fn test_consumer_info_error_scenarios(input: &ConsumerInfoErrorFuzz) {
     match &input.scenario {
-        ConsumerInfoErrorScenario::ConsumerNotFound { consumer_names, stream_names } => {
+        ConsumerInfoErrorScenario::ConsumerNotFound {
+            consumer_names,
+            stream_names,
+        } => {
             for consumer in consumer_names.iter().take(10) {
                 for stream in stream_names.iter().take(10) {
                     let json = build_consumer_not_found_error(consumer, stream);
@@ -261,15 +253,24 @@ fn test_error_parsing_invariants(json: &str) {
     match result {
         JsError::Api { code, description } => {
             // Valid API error - check basic invariants
-            assert!(!description.is_empty() || code > 0, "Error should have code or description");
+            assert!(
+                !description.is_empty() || code > 0,
+                "Error should have code or description"
+            );
         }
         JsError::StreamNotFound(_) => {
             // Should only be returned for err_code 10059
-            assert!(json.contains("10059"), "StreamNotFound should only occur for err_code 10059");
+            assert!(
+                json.contains("10059"),
+                "StreamNotFound should only occur for err_code 10059"
+            );
         }
         JsError::ConsumerNotFound { stream, consumer } => {
             // Check that consumer not found errors have proper structure
-            assert!(!stream.is_empty() || !consumer.is_empty(), "ConsumerNotFound should have stream or consumer info");
+            assert!(
+                !stream.is_empty() || !consumer.is_empty(),
+                "ConsumerNotFound should have stream or consumer info"
+            );
         }
         _ => {
             // Other error types are also valid
@@ -284,7 +285,11 @@ fn test_api_error_parsing_robustness(json: &str) {
 
 fn test_error_classification_consistency(input: &ConsumerInfoErrorFuzz) {
     // Test that the same error JSON produces consistent results
-    if let ConsumerInfoErrorScenario::ConsumerNotFound { consumer_names, stream_names } = &input.scenario {
+    if let ConsumerInfoErrorScenario::ConsumerNotFound {
+        consumer_names,
+        stream_names,
+    } = &input.scenario
+    {
         if let (Some(consumer), Some(stream)) = (consumer_names.first(), stream_names.first()) {
             let json = build_consumer_not_found_error(consumer, stream);
 
@@ -304,13 +309,13 @@ fn test_error_classification_consistency(input: &ConsumerInfoErrorFuzz) {
 fn test_malformed_error_handling(input: &ConsumerInfoErrorFuzz) {
     // Test with various malformed JSON structures
     let malformed_jsons = vec![
-        r#"{"error":{"#,  // Truncated
-        r#"{"error":{"code":"not_a_number","description":"test"}}"#,  // Type error
-        r#"{"error":null}"#,  // Null error
-        r#"{"error":[]}"#,  // Array instead of object
-        r#"{}"#,  // Missing error field
-        "",  // Empty string
-        r#"not json at all"#,  // Invalid JSON
+        r#"{"error":{"#,                                             // Truncated
+        r#"{"error":{"code":"not_a_number","description":"test"}}"#, // Type error
+        r#"{"error":null}"#,                                         // Null error
+        r#"{"error":[]}"#,                                           // Array instead of object
+        r#"{}"#,                                                     // Missing error field
+        "",                                                          // Empty string
+        r#"not json at all"#,                                        // Invalid JSON
     ];
 
     for malformed in malformed_jsons {
@@ -377,7 +382,11 @@ fn build_custom_error(error: &SpecificError) -> String {
 
 fn build_malformed_error(variant: &MalformedErrorVariant, _strategy: &StructureStrategy) -> String {
     match variant {
-        MalformedErrorVariant::MissingFields { include_code, include_err_code, include_description } => {
+        MalformedErrorVariant::MissingFields {
+            include_code,
+            include_err_code,
+            include_description,
+        } => {
             let mut parts = vec![];
             if *include_code {
                 parts.push(r#""code":404"#);
@@ -391,14 +400,35 @@ fn build_malformed_error(variant: &MalformedErrorVariant, _strategy: &StructureS
             format!(r#"{{"error":{{{}}}}}"#, parts.join(","))
         }
 
-        MalformedErrorVariant::TypeConfusion { code_as_string, err_code_as_string, description_as_number } => {
-            let code = if *code_as_string { r#""code":"404""# } else { r#""code":404"# };
-            let err_code = if *err_code_as_string { r#""err_code":"10014""# } else { r#""err_code":10014"# };
-            let description = if *description_as_number { r#""description":12345"# } else { r#""description":"test""# };
+        MalformedErrorVariant::TypeConfusion {
+            code_as_string,
+            err_code_as_string,
+            description_as_number,
+        } => {
+            let code = if *code_as_string {
+                r#""code":"404""#
+            } else {
+                r#""code":404"#
+            };
+            let err_code = if *err_code_as_string {
+                r#""err_code":"10014""#
+            } else {
+                r#""err_code":10014"#
+            };
+            let description = if *description_as_number {
+                r#""description":12345"#
+            } else {
+                r#""description":"test""#
+            };
             format!(r#"{{"error":{{{},{},{}}}}}"#, code, err_code, description)
         }
 
-        MalformedErrorVariant::EdgeCaseValues { use_negative_codes, use_zero_codes, use_max_values, use_empty_description } => {
+        MalformedErrorVariant::EdgeCaseValues {
+            use_negative_codes,
+            use_zero_codes,
+            use_max_values,
+            use_empty_description,
+        } => {
             let code = if *use_negative_codes {
                 -404
             } else if *use_zero_codes {
@@ -411,29 +441,33 @@ fn build_malformed_error(variant: &MalformedErrorVariant, _strategy: &StructureS
 
             let description = if *use_empty_description { "" } else { "test" };
 
-            format!(r#"{{"error":{{"code":{},"description":"{}"}}}}"#, code, description)
+            format!(
+                r#"{{"error":{{"code":{},"description":"{}"}}}}"#,
+                code, description
+            )
         }
 
-        MalformedErrorVariant::InvalidJson { corruption_type } => {
-            match corruption_type {
-                JsonCorruption::Truncated { at_position } => {
-                    let full = r#"{"error":{"code":404,"description":"test"}}"#;
-                    let pos = (*at_position).min(full.len());
-                    full[..pos].to_string()
-                }
-                JsonCorruption::InvalidEscapes => {
-                    r#"{"error":{"code":404,"description":"test\invalid"}}"#.to_string()
-                }
-                JsonCorruption::NestedCorruption => {
-                    r#"{"error":{"code":404,"nested":{"invalid"}}}"#.to_string()
-                }
-                JsonCorruption::UnicodeCorruption => {
-                    r#"{"error":{"code":404,"description":"test\uXXXX"}}"#.to_string()
-                }
-                JsonCorruption::OversizedValues => {
-                    format!(r#"{{"error":{{"code":404,"description":"{}"}}}}"#, "x".repeat(10000))
-                }
+        MalformedErrorVariant::InvalidJson { corruption_type } => match corruption_type {
+            JsonCorruption::Truncated { at_position } => {
+                let full = r#"{"error":{"code":404,"description":"test"}}"#;
+                let pos = (*at_position).min(full.len());
+                full[..pos].to_string()
             }
-        }
+            JsonCorruption::InvalidEscapes => {
+                r#"{"error":{"code":404,"description":"test\invalid"}}"#.to_string()
+            }
+            JsonCorruption::NestedCorruption => {
+                r#"{"error":{"code":404,"nested":{"invalid"}}}"#.to_string()
+            }
+            JsonCorruption::UnicodeCorruption => {
+                r#"{"error":{"code":404,"description":"test\uXXXX"}}"#.to_string()
+            }
+            JsonCorruption::OversizedValues => {
+                format!(
+                    r#"{{"error":{{"code":404,"description":"{}"}}}}"#,
+                    "x".repeat(10000)
+                )
+            }
+        },
     }
 }

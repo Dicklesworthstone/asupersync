@@ -75,21 +75,49 @@ impl Header {
         // List based on RFC 9110 §6.5.1 and RFC 9113 §8.1
         const FORBIDDEN: &[&str] = &[
             // Pseudo-headers (always forbidden in trailers)
-            ":status", ":method", ":path", ":scheme", ":authority",
+            ":status",
+            ":method",
+            ":path",
+            ":scheme",
+            ":authority",
             // Message framing
-            "content-length", "transfer-encoding", "trailer",
+            "content-length",
+            "transfer-encoding",
+            "trailer",
             // Connection-specific
-            "connection", "keep-alive", "proxy-connection", "upgrade",
+            "connection",
+            "keep-alive",
+            "proxy-connection",
+            "upgrade",
             // Request modifiers
-            "authorization", "proxy-authorization",
-            "cache-control", "expect", "host", "max-forwards", "pragma", "range", "te",
+            "authorization",
+            "proxy-authorization",
+            "cache-control",
+            "expect",
+            "host",
+            "max-forwards",
+            "pragma",
+            "range",
+            "te",
             // Response control
-            "age", "expires", "date", "etag", "last-modified", "location", "retry-after",
-            "server", "vary", "www-authenticate", "proxy-authenticate",
+            "age",
+            "expires",
+            "date",
+            "etag",
+            "last-modified",
+            "location",
+            "retry-after",
+            "server",
+            "vary",
+            "www-authenticate",
+            "proxy-authenticate",
             // Content metadata
-            "content-encoding", "content-range", "content-type",
+            "content-encoding",
+            "content-range",
+            "content-type",
             // Cookies and state
-            "cookie", "set-cookie",
+            "cookie",
+            "set-cookie",
         ];
 
         let name_lower = self.name.to_lowercase();
@@ -105,22 +133,55 @@ impl Header {
 
     fn generate_pseudo_header(pseudo_type: PseudoHeaderType) -> Self {
         match pseudo_type {
-            PseudoHeaderType::Status => Self { name: ":status".to_string(), value: "200".to_string() },
-            PseudoHeaderType::Method => Self { name: ":method".to_string(), value: "GET".to_string() },
-            PseudoHeaderType::Path => Self { name: ":path".to_string(), value: "/".to_string() },
-            PseudoHeaderType::Scheme => Self { name: ":scheme".to_string(), value: "https".to_string() },
-            PseudoHeaderType::Authority => Self { name: ":authority".to_string(), value: "example.com".to_string() },
+            PseudoHeaderType::Status => Self {
+                name: ":status".to_string(),
+                value: "200".to_string(),
+            },
+            PseudoHeaderType::Method => Self {
+                name: ":method".to_string(),
+                value: "GET".to_string(),
+            },
+            PseudoHeaderType::Path => Self {
+                name: ":path".to_string(),
+                value: "/".to_string(),
+            },
+            PseudoHeaderType::Scheme => Self {
+                name: ":scheme".to_string(),
+                value: "https".to_string(),
+            },
+            PseudoHeaderType::Authority => Self {
+                name: ":authority".to_string(),
+                value: "example.com".to_string(),
+            },
         }
     }
 
     fn generate_forbidden_header(forbidden_type: ForbiddenHeaderType) -> Self {
         match forbidden_type {
-            ForbiddenHeaderType::ContentLength => Self { name: "Content-Length".to_string(), value: "123".to_string() },
-            ForbiddenHeaderType::TransferEncoding => Self { name: "Transfer-Encoding".to_string(), value: "chunked".to_string() },
-            ForbiddenHeaderType::Authorization => Self { name: "Authorization".to_string(), value: "Bearer token".to_string() },
-            ForbiddenHeaderType::ContentType => Self { name: "Content-Type".to_string(), value: "text/plain".to_string() },
-            ForbiddenHeaderType::Host => Self { name: "Host".to_string(), value: "example.com".to_string() },
-            ForbiddenHeaderType::CacheControl => Self { name: "Cache-Control".to_string(), value: "no-cache".to_string() },
+            ForbiddenHeaderType::ContentLength => Self {
+                name: "Content-Length".to_string(),
+                value: "123".to_string(),
+            },
+            ForbiddenHeaderType::TransferEncoding => Self {
+                name: "Transfer-Encoding".to_string(),
+                value: "chunked".to_string(),
+            },
+            ForbiddenHeaderType::Authorization => Self {
+                name: "Authorization".to_string(),
+                value: "Bearer token".to_string(),
+            },
+            ForbiddenHeaderType::ContentType => Self {
+                name: "Content-Type".to_string(),
+                value: "text/plain".to_string(),
+            },
+            ForbiddenHeaderType::Host => Self {
+                name: "Host".to_string(),
+                value: "example.com".to_string(),
+            },
+            ForbiddenHeaderType::CacheControl => Self {
+                name: "Cache-Control".to_string(),
+                value: "no-cache".to_string(),
+            },
         }
     }
 }
@@ -335,27 +396,49 @@ impl MockConnection {
         }
 
         let state = if self.is_client {
-            if stream_id % 2 == 0 { StreamState::ReservedLocal } else { StreamState::Open }
+            if stream_id % 2 == 0 {
+                StreamState::ReservedLocal
+            } else {
+                StreamState::Open
+            }
         } else {
-            if stream_id % 2 == 1 { StreamState::ReservedLocal } else { StreamState::Open }
+            if stream_id % 2 == 1 {
+                StreamState::ReservedLocal
+            } else {
+                StreamState::Open
+            }
         };
 
-        self.streams.insert(stream_id, MockStream::new(stream_id, state));
+        self.streams
+            .insert(stream_id, MockStream::new(stream_id, state));
         Ok(())
     }
 
-    fn process_initial_headers(&mut self, stream_id: u32, end_stream: bool) -> Result<(), ErrorCode> {
-        let stream = self.streams.get_mut(&stream_id).ok_or(ErrorCode::InternalError)?;
+    fn process_initial_headers(
+        &mut self,
+        stream_id: u32,
+        end_stream: bool,
+    ) -> Result<(), ErrorCode> {
+        let stream = self
+            .streams
+            .get_mut(&stream_id)
+            .ok_or(ErrorCode::InternalError)?;
         stream.receive_initial_headers(end_stream)
     }
 
     fn process_data(&mut self, stream_id: u32, end_stream: bool) -> Result<(), ErrorCode> {
-        let stream = self.streams.get_mut(&stream_id).ok_or(ErrorCode::InternalError)?;
+        let stream = self
+            .streams
+            .get_mut(&stream_id)
+            .ok_or(ErrorCode::InternalError)?;
         stream.receive_data(end_stream)
     }
 
     fn process_trailers(&mut self, frame: &TrailersFrame) -> Result<(), ErrorCode> {
-        let stream = self.streams.get_mut(&frame.stream_id).ok_or(ErrorCode::InternalError)?;
+        let stream = self
+            .streams
+            .get_mut(&frame.stream_id)
+            .ok_or(ErrorCode::InternalError)?;
         let headers = frame.generate_headers();
         stream.receive_trailers(&headers, frame.end_stream)
     }
@@ -397,10 +480,8 @@ fuzz_target!(|scenario: TrailersScenario| {
 
         // Send initial headers if requested
         if scenario.send_initial_headers {
-            let result = connection.process_initial_headers(
-                stream_id,
-                scenario.initial_headers_end_stream
-            );
+            let result =
+                connection.process_initial_headers(stream_id, scenario.initial_headers_end_stream);
             if result.is_err() {
                 continue; // Skip if initial headers fail
             }
@@ -432,16 +513,24 @@ fuzz_target!(|scenario: TrailersScenario| {
         match result {
             Ok(()) => {
                 // Trailers were accepted - validate this was expected
-                assert!(!trailers_frame.should_be_rejected(),
-                       "Trailers should have been rejected but were accepted");
+                assert!(
+                    !trailers_frame.should_be_rejected(),
+                    "Trailers should have been rejected but were accepted"
+                );
 
                 // Additional checks for valid trailers
-                assert!(scenario.send_initial_headers, "Valid trailers require initial headers");
+                assert!(
+                    scenario.send_initial_headers,
+                    "Valid trailers require initial headers"
+                );
                 assert!(
                     scenario.initial_headers_end_stream || scenario.data_frames_end_stream,
                     "Valid trailers require END_STREAM data"
                 );
-                assert!(trailers_frame.end_stream, "Valid trailers must have END_STREAM");
+                assert!(
+                    trailers_frame.end_stream,
+                    "Valid trailers must have END_STREAM"
+                );
             }
             Err(error_code) => {
                 // Trailers were rejected - validate the error
@@ -449,10 +538,11 @@ fuzz_target!(|scenario: TrailersScenario| {
                     ErrorCode::ProtocolError => {
                         // This is the expected error for most trailer violations
                         assert!(
-                            trailers_frame.should_be_rejected() ||
-                            !scenario.send_initial_headers ||
-                            (!scenario.initial_headers_end_stream && !scenario.data_frames_end_stream) ||
-                            !trailers_frame.end_stream,
+                            trailers_frame.should_be_rejected()
+                                || !scenario.send_initial_headers
+                                || (!scenario.initial_headers_end_stream
+                                    && !scenario.data_frames_end_stream)
+                                || !trailers_frame.end_stream,
                             "PROTOCOL_ERROR but trailers seem valid"
                         );
                     }
@@ -463,8 +553,8 @@ fuzz_target!(|scenario: TrailersScenario| {
                     ErrorCode::StreamClosed => {
                         // Stream in wrong state for trailers
                         assert!(
-                            scenario.initial_stream_state.is_closed() ||
-                            !scenario.initial_stream_state.can_receive_headers(),
+                            scenario.initial_stream_state.is_closed()
+                                || !scenario.initial_stream_state.can_receive_headers(),
                             "STREAM_CLOSED but stream state seems valid"
                         );
                     }
@@ -521,7 +611,11 @@ fn test_trailer_boundary_conditions() {
     };
 
     let result = connection2.process_trailers(&pseudo_trailers);
-    assert_eq!(result, Err(ErrorCode::ProtocolError), "Pseudo-headers in trailers should fail");
+    assert_eq!(
+        result,
+        Err(ErrorCode::ProtocolError),
+        "Pseudo-headers in trailers should fail"
+    );
 
     // Test 3: Trailers with forbidden headers (should fail)
     let mut connection3 = MockConnection::new(false);
@@ -541,7 +635,11 @@ fn test_trailer_boundary_conditions() {
     };
 
     let result = connection3.process_trailers(&forbidden_trailers);
-    assert_eq!(result, Err(ErrorCode::ProtocolError), "Forbidden headers in trailers should fail");
+    assert_eq!(
+        result,
+        Err(ErrorCode::ProtocolError),
+        "Forbidden headers in trailers should fail"
+    );
 
     // Test 4: Trailers before END_STREAM (should fail)
     let mut connection4 = MockConnection::new(false);
@@ -561,5 +659,9 @@ fn test_trailer_boundary_conditions() {
     };
 
     let result = connection4.process_trailers(&premature_trailers);
-    assert_eq!(result, Err(ErrorCode::ProtocolError), "Trailers before END_STREAM should fail");
+    assert_eq!(
+        result,
+        Err(ErrorCode::ProtocolError),
+        "Trailers before END_STREAM should fail"
+    );
 }

@@ -1,7 +1,7 @@
 #![no_main]
 
-use libfuzzer_sys::fuzz_target;
 use arbitrary::{Arbitrary, Unstructured};
+use libfuzzer_sys::fuzz_target;
 
 /// HTTP/1.1 response status-line parser fuzzing.
 ///
@@ -62,17 +62,17 @@ pub enum VersionComponent {
 pub enum StatusComponent {
     /// Standard status codes by category
     Informational(u16), // 100-199
-    Success(u16),       // 200-299
-    Redirection(u16),   // 300-399
-    ClientError(u16),   // 400-499
-    ServerError(u16),   // 500-599
+    Success(u16),     // 200-299
+    Redirection(u16), // 300-399
+    ClientError(u16), // 400-499
+    ServerError(u16), // 500-599
     /// Edge case status codes
-    MinValid(u16),      // 100
-    MaxValid(u16),      // 999
+    MinValid(u16), // 100
+    MaxValid(u16),    // 999
     /// Invalid status codes
-    TooLow(u16),        // 0-99
-    TooHigh(u16),       // 1000+
-    Overflow(u64),      // > u16::MAX
+    TooLow(u16), // 0-99
+    TooHigh(u16),     // 1000+
+    Overflow(u64),    // > u16::MAX
     /// Non-numeric status codes
     Empty,
     NonNumeric(String),
@@ -322,7 +322,8 @@ impl MockStatusLineParser {
         }
 
         // Parse as u16
-        let status: u16 = status_str.parse()
+        let status: u16 = status_str
+            .parse()
             .map_err(|_| "Non-numeric status code".to_string())?;
 
         // RFC 9110 §15: status codes are 3-digit integers (100-999)
@@ -340,8 +341,13 @@ impl MockStatusLineParser {
             let code = c as u32;
             if !(0x21..=0x7E).contains(&code) &&  // VCHAR
                c != ' ' && c != '\t' &&           // WSP
-               !(0x80..=0xFF).contains(&code) {   // obs-text
-                return Err(format!("Invalid character in reason phrase: U+{:04X}", code));
+               !(0x80..=0xFF).contains(&code)
+            {
+                // obs-text
+                return Err(format!(
+                    "Invalid character in reason phrase: U+{:04X}",
+                    code
+                ));
             }
         }
 
@@ -354,7 +360,10 @@ impl MockStatusLineParser {
     }
 
     /// Parse a complete status line from test case
-    pub fn parse_from_test_case(&self, test_case: &StatusLineTestCase) -> Result<ParsedStatusLine, String> {
+    pub fn parse_from_test_case(
+        &self,
+        test_case: &StatusLineTestCase,
+    ) -> Result<ParsedStatusLine, String> {
         let line = self.build_status_line(test_case)?;
         self.parse_status_line(&line)
     }
@@ -366,11 +375,20 @@ impl MockStatusLineParser {
         let delims = self.build_delimiters(&test_case.delimiters);
 
         let line = match (&test_case.delimiters, reason_str.is_empty()) {
-            (DelimiterConfig::NoFirstSpace, _) => format!("{}{}{}{}", version_str, delims.0, status_str, reason_str),
-            (DelimiterConfig::NoSecondSpace, false) => format!("{}{}{}{}", version_str, delims.0, status_str, reason_str),
-            (DelimiterConfig::NoSpaces, _) => format!("{}{}{}", version_str, status_str, reason_str),
+            (DelimiterConfig::NoFirstSpace, _) => {
+                format!("{}{}{}{}", version_str, delims.0, status_str, reason_str)
+            }
+            (DelimiterConfig::NoSecondSpace, false) => {
+                format!("{}{}{}{}", version_str, delims.0, status_str, reason_str)
+            }
+            (DelimiterConfig::NoSpaces, _) => {
+                format!("{}{}{}", version_str, status_str, reason_str)
+            }
             (_, true) => format!("{}{}{}", version_str, delims.0, status_str),
-            (_, false) => format!("{}{}{}{}{}", version_str, delims.0, status_str, delims.1, reason_str),
+            (_, false) => format!(
+                "{}{}{}{}{}",
+                version_str, delims.0, status_str, delims.1, reason_str
+            ),
         };
 
         let formatted = self.apply_formatting(line, &test_case.formatting)?;
@@ -399,8 +417,11 @@ impl MockStatusLineParser {
             VersionComponent::WithControl(s) => Ok(format!("HTTP/1.1{}", s)),
             VersionComponent::VeryLong(s) => {
                 let long_version = s.repeat(100);
-                Ok(format!("HTTP/1.1{}", &long_version[..long_version.len().min(1000)]))
-            },
+                Ok(format!(
+                    "HTTP/1.1{}",
+                    &long_version[..long_version.len().min(1000)]
+                ))
+            }
         }
     }
 
@@ -426,30 +447,32 @@ impl MockStatusLineParser {
             StatusComponent::Binary(s) => Ok(format!("0b11001000{}", s)),
             StatusComponent::VeryLong(s) => {
                 let long_status = s.repeat(100);
-                Ok(format!("200{}", &long_status[..long_status.len().min(1000)]))
-            },
+                Ok(format!(
+                    "200{}",
+                    &long_status[..long_status.len().min(1000)]
+                ))
+            }
         }
     }
 
     fn build_reason(&self, reason: &ReasonComponent) -> Result<String, String> {
         match reason {
-            ReasonComponent::Standard(std_reason) => {
-                Ok(match std_reason {
-                    StandardReason::Continue => "Continue",
-                    StandardReason::Ok => "OK",
-                    StandardReason::Created => "Created",
-                    StandardReason::NoContent => "No Content",
-                    StandardReason::MovedPermanently => "Moved Permanently",
-                    StandardReason::Found => "Found",
-                    StandardReason::BadRequest => "Bad Request",
-                    StandardReason::Unauthorized => "Unauthorized",
-                    StandardReason::Forbidden => "Forbidden",
-                    StandardReason::NotFound => "Not Found",
-                    StandardReason::InternalServerError => "Internal Server Error",
-                    StandardReason::BadGateway => "Bad Gateway",
-                    StandardReason::ServiceUnavailable => "Service Unavailable",
-                }.to_string())
-            },
+            ReasonComponent::Standard(std_reason) => Ok(match std_reason {
+                StandardReason::Continue => "Continue",
+                StandardReason::Ok => "OK",
+                StandardReason::Created => "Created",
+                StandardReason::NoContent => "No Content",
+                StandardReason::MovedPermanently => "Moved Permanently",
+                StandardReason::Found => "Found",
+                StandardReason::BadRequest => "Bad Request",
+                StandardReason::Unauthorized => "Unauthorized",
+                StandardReason::Forbidden => "Forbidden",
+                StandardReason::NotFound => "Not Found",
+                StandardReason::InternalServerError => "Internal Server Error",
+                StandardReason::BadGateway => "Bad Gateway",
+                StandardReason::ServiceUnavailable => "Service Unavailable",
+            }
+            .to_string()),
             ReasonComponent::Empty => Ok("".to_string()),
             ReasonComponent::SingleWord(s) => Ok(s.clone()),
             ReasonComponent::MultiWord(s) => Ok(format!("Custom {}", s)),
@@ -463,7 +486,7 @@ impl MockStatusLineParser {
             ReasonComponent::VeryLong(s) => {
                 let long_reason = s.repeat(200);
                 Ok(long_reason[..long_reason.len().min(2048)].to_string())
-            },
+            }
             ReasonComponent::JustSpaces(count) => Ok(" ".repeat(*count % 100)),
             ReasonComponent::HttpInjection(s) => Ok(format!("OK\r\nSet-Cookie: {}", s)),
             ReasonComponent::HeaderLike(name, value) => Ok(format!("OK\r\n{}: {}", name, value)),
@@ -477,7 +500,7 @@ impl MockStatusLineParser {
             DelimiterConfig::ExtraSpaces(count) => {
                 let spaces = " ".repeat(1 + (count % 10));
                 (spaces.clone(), spaces)
-            },
+            }
             DelimiterConfig::NoFirstSpace => ("".to_string(), " ".to_string()),
             DelimiterConfig::NoSecondSpace => (" ".to_string(), "".to_string()),
             DelimiterConfig::NoSpaces => ("".to_string(), "".to_string()),
@@ -489,33 +512,47 @@ impl MockStatusLineParser {
         }
     }
 
-    fn apply_formatting(&self, line: String, formatting: &FormattingCase) -> Result<String, String> {
+    fn apply_formatting(
+        &self,
+        line: String,
+        formatting: &FormattingCase,
+    ) -> Result<String, String> {
         match formatting {
             FormattingCase::Normal => Ok(line),
             FormattingCase::LeadingWhitespace => Ok(format!("   {}", line)),
             FormattingCase::TrailingWhitespace => Ok(format!("{}   ", line)),
             FormattingCase::BothWhitespace => Ok(format!("   {}   ", line)),
-            FormattingCase::RandomCase => Ok(line.chars().enumerate().map(|(i, c)| {
-                if i % 2 == 0 { c.to_ascii_uppercase() } else { c.to_ascii_lowercase() }
-            }).collect()),
+            FormattingCase::RandomCase => Ok(line
+                .chars()
+                .enumerate()
+                .map(|(i, c)| {
+                    if i % 2 == 0 {
+                        c.to_ascii_uppercase()
+                    } else {
+                        c.to_ascii_lowercase()
+                    }
+                })
+                .collect()),
             FormattingCase::MinimalLine => Ok("HTTP/1.1 200".to_string()),
             FormattingCase::MaximalLine => {
                 let long_reason = "Very Long Reason Phrase ".repeat(50);
                 Ok(format!("HTTP/1.1 200 {}", long_reason))
-            },
+            }
             FormattingCase::HttpsPrefix => Ok(format!("https://{}", line)),
             FormattingCase::UrlLike(domain) => Ok(format!("http://{}/{}", domain, line)),
             FormattingCase::SqlInjection(payload) => Ok(format!("{} OR 1=1; {}", line, payload)),
-            FormattingCase::XssAttempt(payload) => Ok(format!("{}<script>{}</script>", line, payload)),
+            FormattingCase::XssAttempt(payload) => {
+                Ok(format!("{}<script>{}</script>", line, payload))
+            }
             FormattingCase::PathTraversal => Ok(format!("{}/../../../etc/passwd", line)),
             FormattingCase::NullBytes(count) => {
                 let nulls = "\0".repeat(*count % 10);
                 Ok(format!("{}{}", line, nulls))
-            },
+            }
             FormattingCase::HighBitSet(suffix) => {
                 let high_bits: String = (128u8..=255u8).map(|b| b as char).collect();
                 Ok(format!("{}{}{}", line, high_bits, suffix))
-            },
+            }
             FormattingCase::BomPrefix => Ok(format!("\u{FEFF}{}", line)),
             FormattingCase::UnicodeNormalization(suffix) => Ok(format!("{}é{}", line, suffix)),
         }
@@ -573,9 +610,11 @@ fuzz_target!(|data: &[u8]| {
                 }
 
                 // Test round-trip consistency where applicable
-                if matches!(parsed.version, HttpVersion::Http10 | HttpVersion::Http11) &&
-                   (100..=999).contains(&parsed.status) {
-                    let rebuilt = format!("{} {} {}",
+                if matches!(parsed.version, HttpVersion::Http10 | HttpVersion::Http11)
+                    && (100..=999).contains(&parsed.status)
+                {
+                    let rebuilt = format!(
+                        "{} {} {}",
                         match parsed.version {
                             HttpVersion::Http10 => "HTTP/1.0",
                             HttpVersion::Http11 => "HTTP/1.1",
@@ -587,7 +626,11 @@ fuzz_target!(|data: &[u8]| {
 
                     // Re-parsing should succeed
                     let reparsed = parser.parse_status_line(&rebuilt);
-                    assert!(reparsed.is_ok(), "Round-trip parsing failed for: {}", rebuilt);
+                    assert!(
+                        reparsed.is_ok(),
+                        "Round-trip parsing failed for: {}",
+                        rebuilt
+                    );
                 }
             }
 
@@ -602,7 +645,13 @@ fuzz_target!(|data: &[u8]| {
                     assert!(
                         retry_result.is_err(),
                         "Non-deterministic parsing error for line: {}",
-                        line.chars().map(|c| if c.is_control() { format!("\\x{:02x}", c as u8) } else { c.to_string() }).collect::<String>()
+                        line.chars()
+                            .map(|c| if c.is_control() {
+                                format!("\\x{:02x}", c as u8)
+                            } else {
+                                c.to_string()
+                            })
+                            .collect::<String>()
                     );
                 }
             }

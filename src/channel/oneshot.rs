@@ -291,6 +291,32 @@ impl<T> Sender<T> {
     pub fn is_closed(&self) -> bool {
         self.inner.lock().receiver_dropped
     }
+
+    /// Polls for notification that the receiver has been dropped.
+    ///
+    /// This method returns:
+    /// - `Poll::Ready(())` if the receiver has already been dropped
+    /// - `Poll::Pending` if the receiver is still alive
+    ///
+    /// When `Pending` is returned, the current task's waker is stored
+    /// and will be notified when the receiver is dropped.
+    ///
+    /// This provides async notification of receiver dropout without attempting
+    /// to send a value. Useful for detecting receiver cancellation.
+    #[inline]
+    #[must_use]
+    pub fn poll_closed(&mut self, cx: &mut std::task::Context<'_>) -> std::task::Poll<()> {
+        let mut inner = self.inner.lock();
+
+        if inner.receiver_dropped {
+            // Receiver already dropped, return Ready immediately
+            return std::task::Poll::Ready(());
+        }
+
+        // Receiver still alive, register waker for notification when it drops
+        inner.waker = Some(cx.waker().clone());
+        std::task::Poll::Pending
+    }
 }
 
 impl<T> Drop for Sender<T> {
@@ -723,6 +749,25 @@ impl<T> Receiver<T> {
     #[must_use]
     pub fn is_closed(&self) -> bool {
         self.inner.lock().is_closed()
+    }
+
+    /// Returns a future that resolves when the sender is dropped.
+    ///
+    /// This provides async notification of channel closure without attempting
+    /// to receive a value. Useful for detecting sender dropout.
+    #[inline]
+    #[must_use]
+    pub fn poll_closed(&mut self, cx: &mut std::task::Context<'_>) -> std::task::Poll<()> {
+        let mut inner = self.inner.lock();
+
+        if inner.is_closed() {
+            // Already closed, return Ready immediately
+            return std::task::Poll::Ready(());
+        }
+
+        // Not closed yet, register waker for notification when sender drops
+        inner.waker = Some(cx.waker().clone());
+        std::task::Poll::Pending
     }
 }
 
@@ -2446,7 +2491,7 @@ mod tests {
         init_test("audit_receiver_poll_after_send_immediate_ready");
 
         let (tx, rx) = channel::<u32>();
-        let cx = crate::cx::Cx::root(crate::cx::CxId::new());
+        let cx = test_cx();
 
         // Phase 1: Send value first (sender completes transmission)
         tx.send(&cx, 42).expect("send should succeed");
@@ -2483,24 +2528,1162 @@ mod tests {
         crate::test_complete!("audit_receiver_poll_after_send_immediate_ready");
     }
 
-    /// Helper function to create a no-op waker for testing.
-    fn noop_waker() -> Waker {
-        use std::task::{RawWaker, RawWakerVTable};
+    /// Audit test: is_closed() and poll_closed() consistency when sender drops.
+    ///
+    /// When the sender drops, both synchronous and asynchronous closure detection
+    /// methods must be consistent:
+    /// - is_closed() should return true synchronously
+    /// - poll_closed() should return Ready(()) immediately
+    #[test]
+    fn audit_is_closed_poll_closed_consistency() {
+        init_test("audit_is_closed_poll_closed_consistency");
 
-        fn noop_clone(_: *const ()) -> RawWaker {
-            RawWaker::new(std::ptr::null(), &NOOP_VTABLE)
+        let (tx, mut rx) = channel::<u32>();
+
+        // Phase 1: Verify initial state (sender alive, channel open)
+        crate::assert_with_log!(
+            !rx.is_closed(),
+            "is_closed() returns false when sender alive",
+            false,
+            rx.is_closed()
+        );
+
+        let mut context = Context::from_waker(&noop_waker());
+        let initial_poll = rx.poll_closed(&mut context);
+        crate::assert_with_log!(
+            matches!(initial_poll, std::task::Poll::Pending),
+            "poll_closed() returns Pending when sender alive",
+            "Pending",
+            format!("{:?}", initial_poll)
+        );
+
+        // Phase 2: Drop the sender (critical transition)
+        drop(tx);
+
+        // Phase 3: Verify consistency after sender drop
+        // CRITICAL: Both methods must agree that channel is closed
+
+        // Test synchronous detection
+        let is_closed_result = rx.is_closed();
+        crate::assert_with_log!(
+            is_closed_result,
+            "is_closed() returns true after sender drop",
+            true,
+            is_closed_result
+        );
+
+        // Test asynchronous detection
+        let poll_closed_result = rx.poll_closed(&mut context);
+        crate::assert_with_log!(
+            matches!(poll_closed_result, std::task::Poll::Ready(())),
+            "poll_closed() returns Ready(()) after sender drop",
+            "Ready(())",
+            format!("{:?}", poll_closed_result)
+        );
+
+        // Phase 4: Verify consistency is maintained on repeat calls
+
+        // Multiple is_closed() calls should remain consistent
+        for i in 1..=3 {
+            let repeat_is_closed = rx.is_closed();
+            crate::assert_with_log!(
+                repeat_is_closed,
+                &format!("is_closed() remains true on call {}", i),
+                true,
+                repeat_is_closed
+            );
         }
 
-        fn noop_wake(_: *const ()) {}
+        // Multiple poll_closed() calls should remain Ready
+        for i in 1..=3 {
+            let repeat_poll_closed = rx.poll_closed(&mut context);
+            crate::assert_with_log!(
+                matches!(repeat_poll_closed, std::task::Poll::Ready(())),
+                &format!("poll_closed() remains Ready(()) on call {}", i),
+                "Ready(())",
+                format!("{:?}", repeat_poll_closed)
+            );
+        }
 
-        fn noop_wake_by_ref(_: *const ()) {}
+        // Phase 5: Verify recv() behavior is also consistent
+        let cx = test_cx();
+        let mut recv_fut = rx.recv(&cx);
+        let recv_poll = Pin::new(&mut recv_fut).poll(&mut context);
 
-        fn noop_drop(_: *const ()) {}
+        crate::assert_with_log!(
+            matches!(recv_poll, std::task::Poll::Ready(Err(RecvError::Closed))),
+            "recv() also returns Closed error after sender drop",
+            "Ready(Err(Closed))",
+            format!("{:?}", recv_poll)
+        );
 
-        const NOOP_VTABLE: RawWakerVTable =
-            RawWakerVTable::new(noop_clone, noop_wake, noop_wake_by_ref, noop_drop);
+        crate::test_complete!("audit_is_closed_poll_closed_consistency");
+    }
 
-        let raw_waker = RawWaker::new(std::ptr::null(), &NOOP_VTABLE);
-        unsafe { Waker::from_raw(raw_waker) }
+    #[test]
+    fn audit_sender_poll_closed_receiver_alive() {
+        // Audit: Sender::poll_closed returns Pending when receiver is alive,
+        // NOT Ready(()). Verify with race test where receiver lives longer
+        // than several poll_closed calls.
+
+        init_test("audit_sender_poll_closed_receiver_alive");
+
+        let (mut tx, rx) = channel::<i32>();
+
+        // Create a custom context for polling
+        let waker = Waker::noop();
+        let mut context = std::task::Context::from_waker(&waker);
+
+        // Phase 1: Receiver is alive - poll_closed should return Pending
+        for i in 1..=5 {
+            let poll_result = tx.poll_closed(&mut context);
+            crate::assert_with_log!(
+                matches!(poll_result, std::task::Poll::Pending),
+                &format!("poll_closed call {} returns Pending when receiver alive", i),
+                std::task::Poll::Pending,
+                poll_result
+            );
+
+            // Verify is_closed() also returns false for consistency
+            crate::assert_with_log!(
+                !tx.is_closed(),
+                &format!(
+                    "is_closed() returns false on call {} when receiver alive",
+                    i
+                ),
+                false,
+                tx.is_closed()
+            );
+        }
+
+        // Phase 2: Drop receiver and verify poll_closed immediately returns Ready
+        drop(rx);
+
+        let poll_after_drop = tx.poll_closed(&mut context);
+        crate::assert_with_log!(
+            matches!(poll_after_drop, std::task::Poll::Ready(())),
+            "poll_closed returns Ready(()) immediately after receiver drop",
+            std::task::Poll::Ready(()),
+            poll_after_drop
+        );
+
+        // Phase 3: Multiple poll_closed calls after drop should remain Ready
+        for i in 1..=3 {
+            let repeat_poll = tx.poll_closed(&mut context);
+            crate::assert_with_log!(
+                matches!(repeat_poll, std::task::Poll::Ready(())),
+                &format!(
+                    "poll_closed call {} remains Ready(()) after receiver drop",
+                    i
+                ),
+                std::task::Poll::Ready(()),
+                repeat_poll
+            );
+        }
+
+        // Verify is_closed() consistency
+        crate::assert_with_log!(
+            tx.is_closed(),
+            "is_closed() returns true after receiver drop",
+            true,
+            tx.is_closed()
+        );
+
+        crate::test_complete!("audit_sender_poll_closed_receiver_alive");
+    }
+
+    #[test]
+    fn audit_sender_is_closed_acquire_release_ordering() {
+        // Audit: Sender::is_closed() memory ordering semantics.
+        // When sender thread sees is_closed()=true via Acquire load,
+        // all writes done by receiver thread before drop must be visible.
+        //
+        // This tests the happens-before relationship:
+        // Receiver writes -> Receiver Drop (Release) ---> Sender is_closed() (Acquire) -> Sender sees writes
+
+        init_test("audit_sender_is_closed_acquire_release_ordering");
+
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicU32, Ordering};
+
+        const NUM_ITERATIONS: usize = 1000;
+
+        for iteration in 0..NUM_ITERATIONS {
+            // Shared memory location that receiver will write to before dropping
+            let shared_data = Arc::new(AtomicU32::new(0));
+            let (tx, rx) = channel::<i32>();
+
+            let tx = Arc::new(std::sync::Mutex::new(Some(tx)));
+            let shared_reader = shared_data.clone();
+            let shared_writer = shared_data.clone();
+            let tx_reader = tx.clone();
+
+            // Receiver thread: writes to shared memory then drops
+            let receiver_handle = std::thread::spawn(move || {
+                // Simulate receiver doing some work and writing to shared memory
+                let unique_value = (iteration as u32) * 1000 + 42;
+                shared_writer.store(unique_value, Ordering::Release);
+
+                // Small delay to increase chance of race condition
+                std::thread::yield_now();
+
+                // Drop receiver - this should trigger receiver_dropped = true with proper Release ordering
+                drop(rx);
+            });
+
+            // Sender thread: polls is_closed() and reads shared memory
+            let sender_handle = std::thread::spawn(move || {
+                let mut observed_closed = false;
+                let mut final_shared_value = 0;
+
+                // Poll until we see the receiver as closed
+                while !observed_closed {
+                    if let Some(sender) = tx_reader.lock().unwrap().as_ref() {
+                        if sender.is_closed() {
+                            observed_closed = true;
+                            // CRITICAL: If is_closed() uses proper Acquire ordering,
+                            // we MUST see the receiver's Release write to shared_data
+                            final_shared_value = shared_reader.load(Ordering::Acquire);
+                        }
+                    }
+                    std::thread::yield_now();
+                }
+
+                final_shared_value
+            });
+
+            receiver_handle
+                .join()
+                .expect("receiver thread should not panic");
+            let observed_value = sender_handle
+                .join()
+                .expect("sender thread should not panic");
+
+            // MEMORY ORDERING PROPERTY:
+            // When sender observes is_closed()=true, it MUST see all receiver writes
+            let expected_value = (iteration as u32) * 1000 + 42;
+
+            crate::assert_with_log!(
+                observed_value == expected_value,
+                &format!(
+                    "iteration {}: sender must see receiver writes when is_closed()=true (expected: {}, observed: {})",
+                    iteration, expected_value, observed_value
+                ),
+                expected_value,
+                observed_value
+            );
+        }
+
+        crate::test_complete!("audit_sender_is_closed_acquire_release_ordering");
+    }
+
+    #[test]
+    fn audit_receiver_drop_release_semantics() {
+        // Audit: Receiver Drop should use Release semantics so that
+        // all receiver writes are visible to sender when is_closed() observes true.
+
+        init_test("audit_receiver_drop_release_semantics");
+
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicU32, Ordering};
+
+        const NUM_THREADS: usize = 8;
+        const WRITES_PER_THREAD: usize = 100;
+
+        let barrier = Arc::new(std::sync::Barrier::new(NUM_THREADS + 1));
+        let shared_counters = Arc::new(
+            (0..NUM_THREADS)
+                .map(|_| AtomicU32::new(0))
+                .collect::<Vec<_>>(),
+        );
+
+        let mut handles = Vec::new();
+
+        // Spawn receiver threads that write then drop
+        for thread_id in 0..NUM_THREADS {
+            let (tx, rx) = channel::<i32>();
+            let barrier = barrier.clone();
+            let counter = shared_counters.clone();
+
+            let handle = std::thread::spawn(move || {
+                barrier.wait(); // Synchronize start
+
+                // Receiver does writes
+                for i in 0..WRITES_PER_THREAD {
+                    let value = (thread_id * WRITES_PER_THREAD + i) as u32;
+                    counter[thread_id].store(value, Ordering::Relaxed);
+                }
+
+                // Ensure all writes complete before drop
+                std::sync::atomic::fence(Ordering::AcqRel);
+
+                // Drop receiver - this should publish all writes
+                drop(rx);
+
+                // Return sender for checking
+                tx
+            });
+
+            handles.push(handle);
+        }
+
+        // Start all threads
+        barrier.wait();
+
+        // Collect senders and verify state
+        for (thread_id, handle) in handles.into_iter().enumerate() {
+            let sender = handle.join().expect("thread should not panic");
+
+            // Sender should see receiver as closed
+            crate::assert_with_log!(
+                sender.is_closed(),
+                &format!("thread {}: sender should see receiver as closed", thread_id),
+                true,
+                sender.is_closed()
+            );
+
+            // And should see all writes made by that receiver
+            let final_value = shared_counters[thread_id].load(Ordering::Acquire);
+            let expected_final = (thread_id * WRITES_PER_THREAD + WRITES_PER_THREAD - 1) as u32;
+
+            crate::assert_with_log!(
+                final_value == expected_final,
+                &format!(
+                    "thread {}: should see final write value {} (actual: {})",
+                    thread_id, expected_final, final_value
+                ),
+                expected_final,
+                final_value
+            );
+        }
+
+        crate::test_complete!("audit_receiver_drop_release_semantics");
+    }
+
+    #[test]
+    fn audit_sender_send_value_recovery_on_error() {
+        // Audit: Sender::send() value recovery when send fails.
+        // When send fails (receiver dropped), Err must contain the original value
+        // so caller can recover it. Error type must be Err(T), not Err(()).
+
+        init_test("audit_sender_send_value_recovery_on_error");
+
+        let (tx, rx) = channel::<String>();
+        let cx = test_cx();
+
+        // Test value to send
+        let test_value = String::from("recoverable_test_value");
+        let value_clone = test_value.clone();
+
+        // Drop receiver first to cause send failure
+        drop(rx);
+
+        // Attempt to send - should fail with value recovery
+        let send_result = tx.send(&cx, test_value);
+
+        // CRITICAL: Error must contain the original value for recovery
+        crate::assert_with_log!(
+            send_result.is_err(),
+            "send should fail when receiver is dropped",
+            true,
+            send_result.is_err()
+        );
+
+        match send_result {
+            Err(SendError::Disconnected(recovered_value)) => {
+                crate::assert_with_log!(
+                    recovered_value == value_clone,
+                    "recovered value should match original sent value",
+                    value_clone.clone(),
+                    recovered_value.clone()
+                );
+
+                // Verify caller can use recovered value
+                let reused_value = format!("reused: {}", recovered_value);
+                crate::assert_with_log!(
+                    reused_value == "reused: recoverable_test_value",
+                    "caller should be able to reuse recovered value",
+                    "reused: recoverable_test_value",
+                    reused_value
+                );
+            }
+            Err(SendError::Cancelled(_)) => {
+                panic!("Expected Disconnected error, got Cancelled");
+            }
+            Ok(()) => {
+                panic!("Expected send to fail, but it succeeded");
+            }
+        }
+
+        crate::test_complete!("audit_sender_send_value_recovery_on_error");
+    }
+
+    #[test]
+    fn audit_send_permit_value_recovery_on_error() {
+        // Audit: SendPermit::send() value recovery when receiver dropped.
+        // Tests the permit-based send path for value recovery.
+
+        init_test("audit_send_permit_value_recovery_on_error");
+
+        let (tx, rx) = channel::<Vec<u8>>();
+        let cx = test_cx();
+
+        // Reserve first (this should succeed)
+        let permit = tx
+            .reserve(&cx)
+            .expect("reserve should succeed when receiver alive");
+
+        // Test value to send
+        let test_data = vec![1, 2, 3, 4, 5];
+        let data_clone = test_data.clone();
+
+        // Drop receiver after reserve but before send
+        drop(rx);
+
+        // Attempt to send via permit - should fail with value recovery
+        let send_result = permit.send(test_data);
+
+        // CRITICAL: Error must contain the original value
+        crate::assert_with_log!(
+            send_result.is_err(),
+            "permit send should fail when receiver dropped",
+            true,
+            send_result.is_err()
+        );
+
+        match send_result {
+            Err(SendError::Disconnected(recovered_data)) => {
+                crate::assert_with_log!(
+                    recovered_data == data_clone,
+                    "recovered data should match original",
+                    data_clone.clone(),
+                    recovered_data.clone()
+                );
+
+                // Verify data is fully usable
+                let sum: u8 = recovered_data.iter().sum();
+                crate::assert_with_log!(
+                    sum == 15, // 1+2+3+4+5 = 15
+                    "recovered data should be fully functional",
+                    15,
+                    sum
+                );
+            }
+            Err(SendError::Cancelled(_)) => {
+                panic!("Expected Disconnected error, got Cancelled");
+            }
+            Ok(()) => {
+                panic!("Expected send to fail, but it succeeded");
+            }
+        }
+
+        crate::test_complete!("audit_send_permit_value_recovery_on_error");
+    }
+
+    #[test]
+    fn audit_send_error_cancelled_value_recovery() {
+        // Audit: SendError::Cancelled also returns value for recovery.
+        // When send fails due to cancellation, value should still be recoverable.
+
+        init_test("audit_send_error_cancelled_value_recovery");
+
+        let (tx, _rx) = channel::<i32>();
+        let cx = test_cx();
+
+        // Cancel the context before sending
+        cx.cancel();
+
+        let test_value = 42;
+
+        // Attempt to send with cancelled context - should fail with value recovery
+        let send_result = tx.send(&cx, test_value);
+
+        // CRITICAL: Cancellation error must also contain the value
+        crate::assert_with_log!(
+            send_result.is_err(),
+            "send should fail when context is cancelled",
+            true,
+            send_result.is_err()
+        );
+
+        match send_result {
+            Err(SendError::Cancelled(recovered_value)) => {
+                crate::assert_with_log!(
+                    recovered_value == test_value,
+                    "cancelled send should return original value",
+                    test_value,
+                    recovered_value
+                );
+
+                // Verify value can be reused
+                let doubled = recovered_value * 2;
+                crate::assert_with_log!(
+                    doubled == 84,
+                    "recovered value should be usable",
+                    84,
+                    doubled
+                );
+            }
+            Err(SendError::Disconnected(_)) => {
+                panic!("Expected Cancelled error, got Disconnected");
+            }
+            Ok(()) => {
+                panic!("Expected send to fail, but it succeeded");
+            }
+        }
+
+        crate::test_complete!("audit_send_error_cancelled_value_recovery");
+    }
+
+    #[test]
+    fn audit_send_error_type_signature() {
+        // Audit: Compile-time verification of SendError<T> type signature.
+        // Ensures error type contains T, not () for proper value recovery.
+
+        init_test("audit_send_error_type_signature");
+
+        // Compile-time type assertions
+        fn assert_send_error_contains_value<T>() {
+            // This function verifies that SendError<T> contains T, not ()
+            let _check_disconnected = |value: T| -> SendError<T> { SendError::Disconnected(value) };
+
+            let _check_cancelled = |value: T| -> SendError<T> { SendError::Cancelled(value) };
+
+            // Verify Result type signature
+            fn check_send_result<T>() -> Result<(), SendError<T>> {
+                // This enforces that send methods return Result<(), SendError<T>>
+                // where SendError<T> contains the value T, not ()
+                unimplemented!("This is just a type check")
+            }
+
+            let _: fn() -> Result<(), SendError<T>> = check_send_result;
+        }
+
+        // Test with various types
+        assert_send_error_contains_value::<String>();
+        assert_send_error_contains_value::<Vec<u8>>();
+        assert_send_error_contains_value::<i32>();
+
+        // Runtime verification with actual error creation
+        let test_string = String::from("test");
+        let disconnected_error = SendError::Disconnected(test_string.clone());
+
+        match disconnected_error {
+            SendError::Disconnected(recovered) => {
+                crate::assert_with_log!(
+                    recovered == test_string,
+                    "SendError::Disconnected should contain original value",
+                    test_string,
+                    recovered
+                );
+            }
+            _ => panic!("Unexpected error variant"),
+        }
+
+        crate::test_complete!("audit_send_error_type_signature");
+    }
+
+    /// Helper function to create a no-op waker for testing.
+    fn noop_waker() -> Waker {
+        Waker::noop().clone()
+    }
+
+    #[test]
+    fn audit_send_after_receiver_poll_race() {
+        init_test("audit_send_after_receiver_poll_race");
+
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+        use std::task::{Context, Poll, Waker};
+
+        // Test the race between sender.send(v) and receiver having registered waker
+        // Must verify: send atomically delivers value AND wakes receiver immediately
+
+        let test_iterations = 1000; // Test many iterations to catch race conditions
+        let mut successful_immediate_wakeups = 0;
+
+        for _iteration in 0..test_iterations {
+            let (tx, mut rx) = channel::<i32>();
+
+            // Step 1: Receiver polls and registers waker
+            let waker_called = Arc::new(AtomicBool::new(false));
+            let waker_call_count = Arc::new(AtomicUsize::new(0));
+
+            let counting_waker = {
+                let waker_called = Arc::clone(&waker_called);
+                let waker_call_count = Arc::clone(&waker_call_count);
+
+                struct CountingWaker {
+                    called: Arc<AtomicBool>,
+                    call_count: Arc<AtomicUsize>,
+                }
+
+                impl std::task::Wake for CountingWaker {
+                    fn wake(self: Arc<Self>) {
+                        self.called.store(true, Ordering::SeqCst);
+                        self.call_count.fetch_add(1, Ordering::SeqCst);
+                    }
+
+                    fn wake_by_ref(self: &Arc<Self>) {
+                        self.called.store(true, Ordering::SeqCst);
+                        self.call_count.fetch_add(1, Ordering::SeqCst);
+                    }
+                }
+
+                let counting = Arc::new(CountingWaker {
+                    called: waker_called,
+                    call_count: waker_call_count,
+                });
+
+                Waker::from(counting)
+            };
+
+            // Step 2: Receiver polls, registers waker, returns Pending
+            let mut recv_fut = rx.recv_uninterruptible();
+            let mut cx = Context::from_waker(&counting_waker);
+
+            let poll_result = Pin::new(&mut recv_fut).poll(&mut cx);
+            assert_eq!(
+                poll_result,
+                Poll::Pending,
+                "First poll should return Pending"
+            );
+
+            // Step 3: Sender sends value (should wake the registered receiver)
+            let test_value = 42;
+            let permit = tx
+                .reserve(&Cx::for_testing())
+                .expect("Reserve should succeed");
+            let send_result = permit.send(test_value);
+            assert!(send_result.is_ok(), "Send should succeed");
+
+            // Step 4: Verify waker was called immediately by sender
+            // The sender should have taken the registered waker and called wake() on it
+            let waker_was_called = waker_called.load(Ordering::SeqCst);
+
+            if waker_was_called {
+                successful_immediate_wakeups += 1;
+
+                // Step 5: Verify receiver gets the value on next poll
+                let poll_result2 = Pin::new(&mut recv_fut).poll(&mut cx);
+                match poll_result2 {
+                    Poll::Ready(Ok(received_value)) => {
+                        assert_eq!(
+                            received_value, test_value,
+                            "Received value should match sent value"
+                        );
+                    }
+                    Poll::Ready(Err(e)) => {
+                        panic!("Unexpected recv error: {:?}", e);
+                    }
+                    Poll::Pending => {
+                        panic!("Second poll should return Ready after wakeup, got Pending");
+                    }
+                }
+            }
+
+            // Verify exactly one wakeup (no spurious wakeups)
+            let call_count = waker_call_count.load(Ordering::SeqCst);
+            assert!(
+                call_count <= 1,
+                "Should have at most 1 wakeup call, got {}",
+                call_count
+            );
+        }
+
+        // Verify that the wakeup mechanism works reliably
+        // We expect nearly 100% immediate wakeups in this test since there's no actual concurrency
+        let success_rate = (successful_immediate_wakeups as f64) / (test_iterations as f64);
+        assert!(
+            success_rate > 0.95,
+            "Expected >95% immediate wakeups, got {}/{} ({:.1}%). \
+                This suggests send() is not properly waking registered receivers.",
+            successful_immediate_wakeups,
+            test_iterations,
+            success_rate * 100.0
+        );
+
+        println!(
+            "✅ send-after-receiver-poll race audit: {}/{} successful immediate wakeups ({:.1}%)",
+            successful_immediate_wakeups,
+            test_iterations,
+            success_rate * 100.0
+        );
+    }
+
+    #[test]
+    fn audit_sender_poll_closed_behavior() {
+        init_test("audit_sender_poll_closed_behavior");
+        use std::task::{Context, Waker};
+
+        // Test 1: poll_closed returns Pending when receiver is alive
+        let (mut tx, rx) = channel::<i32>();
+        let noop_waker = Waker::noop();
+        let mut ctx = Context::from_waker(&noop_waker);
+
+        // Receiver is alive, poll_closed should return Pending
+        let poll_result = tx.poll_closed(&mut ctx);
+        if !matches!(poll_result, Poll::Pending) {
+            panic!(
+                "❌ DEFECT: poll_closed() returned {:?} when receiver is alive, expected Poll::Pending",
+                poll_result
+            );
+        }
+
+        // Verify waker was registered in the inner state
+        let inner_has_waker = tx.inner.lock().waker.is_some();
+        if !inner_has_waker {
+            panic!("❌ DEFECT: poll_closed() returned Pending but failed to register waker");
+        }
+
+        // Test 2: poll_closed returns Ready when receiver is dropped
+        drop(rx); // Drop the receiver
+
+        let poll_result_after_drop = tx.poll_closed(&mut ctx);
+        if !matches!(poll_result_after_drop, Poll::Ready(())) {
+            panic!(
+                "❌ DEFECT: poll_closed() returned {:?} when receiver is dropped, expected Poll::Ready(())",
+                poll_result_after_drop
+            );
+        }
+
+        // Test 3: poll_closed returns Ready immediately if receiver was already dropped
+        let (mut tx2, rx2) = channel::<i32>();
+        drop(rx2); // Drop receiver immediately
+
+        let immediate_poll = tx2.poll_closed(&mut ctx);
+        if !matches!(immediate_poll, Poll::Ready(())) {
+            panic!(
+                "❌ DEFECT: poll_closed() returned {:?} for already-dropped receiver, expected Poll::Ready(())",
+                immediate_poll
+            );
+        }
+
+        // Test 4: Stress test - waker notification on receiver drop
+        let iterations = 100;
+        let mut successful_wakeups = 0;
+
+        for iteration in 0..iterations {
+            let (mut tx, rx) = channel::<i32>();
+
+            // Create a custom waker to track wake calls
+            use std::sync::atomic::{AtomicBool, Ordering};
+            let wake_called = Arc::new(AtomicBool::new(false));
+            let wake_called_clone = wake_called.clone();
+
+            struct FlagWaker(Arc<AtomicBool>);
+
+            impl std::task::Wake for FlagWaker {
+                fn wake(self: Arc<Self>) {
+                    self.0.store(true, Ordering::Release);
+                }
+
+                fn wake_by_ref(self: &Arc<Self>) {
+                    self.0.store(true, Ordering::Release);
+                }
+            }
+
+            let custom_waker = Waker::from(Arc::new(FlagWaker(wake_called_clone)));
+
+            let mut custom_ctx = Context::from_waker(&custom_waker);
+
+            // Poll for closure - should return Pending and register waker
+            let first_poll = tx.poll_closed(&mut custom_ctx);
+            if !matches!(first_poll, Poll::Pending) {
+                panic!(
+                    "❌ DEFECT: Iteration {}: First poll_closed() returned {:?}, expected Pending",
+                    iteration, first_poll
+                );
+            }
+
+            // Drop receiver to trigger waker
+            drop(rx);
+
+            // Give a tiny bit of time for the waker to be called
+            std::thread::yield_now();
+
+            // Check if waker was called
+            let wake_was_called = wake_called.load(Ordering::Acquire);
+            if wake_was_called {
+                successful_wakeups += 1;
+            }
+
+            // Verify subsequent poll returns Ready
+            let second_poll = tx.poll_closed(&mut custom_ctx);
+            if !matches!(second_poll, Poll::Ready(())) {
+                panic!(
+                    "❌ DEFECT: Iteration {}: Second poll_closed() after receiver drop returned {:?}, expected Ready(())",
+                    iteration, second_poll
+                );
+            }
+        }
+
+        // Verify waker notification reliability
+        let success_rate = (successful_wakeups as f64) / (iterations as f64);
+        if success_rate < 0.95 {
+            panic!(
+                "❌ DEFECT: Only {}/{} iterations ({:.1}%) had waker called when receiver dropped. \
+                Expected >95% waker notification rate.",
+                successful_wakeups,
+                iterations,
+                success_rate * 100.0
+            );
+        }
+
+        println!("✅ SOUND: Sender::poll_closed() behavior verified:");
+        println!("  - Returns Pending when receiver alive and registers waker ✓");
+        println!("  - Returns Ready(()) when receiver dropped ✓");
+        println!(
+            "  - Waker notification on receiver drop: {}/{} ({:.1}%) ✓",
+            successful_wakeups,
+            iterations,
+            success_rate * 100.0
+        );
+
+        crate::test_complete!("audit_sender_poll_closed_behavior");
+    }
+
+    #[test]
+    fn audit_receiver_sender_drop_immediate_error() {
+        init_test("audit_receiver_sender_drop_immediate_error");
+        use std::task::{Context, Waker};
+
+        // This test verifies that when Sender is dropped without sending,
+        // receiver.await returns Err(RecvError::Closed) immediately on next poll
+
+        let (tx, mut rx) = channel::<i32>();
+
+        // Create a receiver future and poll it once to register waker
+        let cx = test_cx();
+        let mut recv_fut = Box::pin(rx.recv(&cx));
+
+        let noop_waker = Waker::noop();
+        let mut task_ctx = Context::from_waker(&noop_waker);
+
+        // First poll should return Pending (no value sent yet)
+        let first_poll = {
+            use std::future::Future;
+            use std::pin::Pin;
+
+            Pin::as_mut(&mut recv_fut).poll(&mut task_ctx)
+        };
+
+        if !matches!(first_poll, Poll::Pending) {
+            panic!(
+                "❌ DEFECT: First poll returned {:?}, expected Pending when no value sent",
+                first_poll
+            );
+        }
+
+        // Verify receiver correctly reports not closed yet
+        if rx.is_closed() {
+            panic!("❌ DEFECT: Receiver reports closed before sender is dropped");
+        }
+
+        // NOW drop the sender without sending
+        drop(tx);
+
+        // Receiver should now report closed
+        if !rx.is_closed() {
+            panic!("❌ DEFECT: Receiver does not report closed after sender drop");
+        }
+
+        // Next poll should immediately return Err(RecvError::Closed)
+        let second_poll = {
+            use std::future::Future;
+            use std::pin::Pin;
+
+            Pin::as_mut(&mut recv_fut).poll(&mut task_ctx)
+        };
+
+        match second_poll {
+            Poll::Ready(Err(RecvError::Closed)) => {
+                // ✅ Correct behavior
+            }
+            other => {
+                panic!(
+                    "❌ DEFECT: After sender drop, receiver.poll() returned {:?}, expected Ready(Err(RecvError::Closed))",
+                    other
+                );
+            }
+        }
+
+        // Test 2: Stress test with timing variations
+        let iterations = 100;
+        let mut successful_immediate_errors = 0;
+
+        for iteration in 0..iterations {
+            let (tx, mut rx) = channel::<i32>();
+            let cx = test_cx();
+
+            // Spawn receiver in separate thread to test cross-thread notification
+            let receiver_handle = std::thread::spawn(move || {
+                let rt = crate::lab::LabRuntime::new();
+                rt.block_on(async {
+                    // Create receiver future
+                    let recv_result = rx.recv(&cx).await;
+                    recv_result
+                })
+            });
+
+            // Give receiver time to register waker
+            std::thread::sleep(std::time::Duration::from_micros(100));
+
+            // Drop sender
+            drop(tx);
+
+            // Receiver should get Err(RecvError::Closed)
+            let recv_result = receiver_handle
+                .join()
+                .expect("Receiver thread should complete");
+
+            match recv_result {
+                Err(RecvError::Closed) => {
+                    successful_immediate_errors += 1;
+                }
+                other => {
+                    panic!(
+                        "❌ DEFECT: Iteration {}: Receiver got {:?} instead of Err(RecvError::Closed) after sender drop",
+                        iteration, other
+                    );
+                }
+            }
+        }
+
+        // Verify high success rate for immediate error notification
+        let success_rate = (successful_immediate_errors as f64) / (iterations as f64);
+        if success_rate < 0.95 {
+            panic!(
+                "❌ DEFECT: Only {}/{} iterations ({:.1}%) had immediate Err(RecvError::Closed) after sender drop. \
+                Expected >95% immediate error notification.",
+                successful_immediate_errors,
+                iterations,
+                success_rate * 100.0
+            );
+        }
+
+        // Test 3: try_recv() should also return Closed after sender drop
+        let (tx3, mut rx3) = channel::<i32>();
+
+        // Before drop: try_recv should return Empty
+        match rx3.try_recv() {
+            Err(TryRecvError::Empty) => {
+                // Expected
+            }
+            other => {
+                panic!(
+                    "❌ DEFECT: try_recv() before sender drop returned {:?}, expected Err(TryRecvError::Empty)",
+                    other
+                );
+            }
+        }
+
+        // Drop sender
+        drop(tx3);
+
+        // After drop: try_recv should return Closed
+        match rx3.try_recv() {
+            Err(TryRecvError::Closed) => {
+                // ✅ Correct
+            }
+            other => {
+                panic!(
+                    "❌ DEFECT: try_recv() after sender drop returned {:?}, expected Err(TryRecvError::Closed)",
+                    other
+                );
+            }
+        }
+
+        println!("✅ SOUND: Receiver sender drop behavior verified:");
+        println!("  - recv().await returns Err(RecvError::Closed) immediately after sender drop ✓");
+        println!(
+            "  - Cross-thread notification: {}/{} ({:.1}%) immediate errors ✓",
+            successful_immediate_errors,
+            iterations,
+            success_rate * 100.0
+        );
+        println!("  - is_closed() correctly reports channel state ✓");
+        println!("  - try_recv() returns Err(TryRecvError::Closed) after sender drop ✓");
+
+        crate::test_complete!("audit_receiver_sender_drop_immediate_error");
+    }
+
+    #[test]
+    fn audit_send_when_receiver_dropped_returns_value() {
+        init_test("audit_send_when_receiver_dropped_returns_value");
+
+        // This test verifies that when Sender::send(value) is called after
+        // Receiver was already dropped, send() returns Err(SendError::Disconnected(value))
+        // so the caller can recover the value (not lose it).
+
+        let cx = test_cx();
+
+        // Test 1: Basic case - drop receiver then send
+        let (tx, rx) = channel::<i32>();
+
+        let permit = tx.reserve(&cx).expect("cx not cancelled");
+
+        // Receiver is not dropped yet
+        if permit.is_closed() {
+            panic!("❌ DEFECT: Permit reports closed before receiver drop");
+        }
+
+        // Drop receiver
+        drop(rx);
+
+        // Now permit should detect closure
+        if !permit.is_closed() {
+            panic!("❌ DEFECT: Permit does not report closed after receiver drop");
+        }
+
+        // Send should return the value
+        let send_result = permit.send(42);
+
+        match send_result {
+            Err(SendError::Disconnected(recovered_value)) => {
+                if recovered_value != 42 {
+                    panic!(
+                        "❌ DEFECT: send() returned wrong value {} instead of 42",
+                        recovered_value
+                    );
+                }
+                // ✅ Correct - value recovered
+            }
+            Ok(()) => {
+                panic!(
+                    "❌ DEFECT: send() returned Ok(()) when receiver was already dropped. \
+                     Value was silently lost instead of being returned to caller."
+                );
+            }
+            Err(SendError::Cancelled(_)) => {
+                panic!(
+                    "❌ DEFECT: send() returned Cancelled error when receiver was dropped. \
+                     Expected Disconnected error."
+                );
+            }
+        }
+
+        // Test 2: Race condition stress test
+        let iterations = 100;
+        let mut successful_recoveries = 0;
+        let mut lost_values = 0;
+
+        for iteration in 0..iterations {
+            let (tx, rx) = channel::<i32>();
+            let test_value = iteration + 1000;
+
+            let permit = tx.reserve(&cx).expect("cx not cancelled");
+
+            // Race: drop receiver in separate thread
+            let drop_handle = std::thread::spawn(move || {
+                std::thread::sleep(std::time::Duration::from_micros(1));
+                drop(rx);
+            });
+
+            // Slight delay to increase chance of race
+            std::thread::sleep(std::time::Duration::from_micros(1));
+
+            // Try to send
+            let send_result = permit.send(test_value);
+
+            drop_handle.join().expect("Drop thread should complete");
+
+            match send_result {
+                Err(SendError::Disconnected(recovered_value)) => {
+                    if recovered_value == test_value {
+                        successful_recoveries += 1;
+                    } else {
+                        panic!(
+                            "❌ DEFECT: Iteration {}: Recovered wrong value {} instead of {}",
+                            iteration, recovered_value, test_value
+                        );
+                    }
+                }
+                Ok(()) => {
+                    // This could happen if send() completed before receiver drop
+                    // but we expect most to fail due to timing
+                    lost_values += 1;
+                }
+                Err(SendError::Cancelled(_)) => {
+                    panic!(
+                        "❌ DEFECT: Iteration {}: Unexpected Cancelled error",
+                        iteration
+                    );
+                }
+            }
+        }
+
+        // We expect most sends to detect the dropped receiver and return the value
+        // Some might succeed if timing works out differently
+        if lost_values > iterations / 2 {
+            println!(
+                "⚠️  Note: {}/{} sends succeeded despite receiver drop race (timing dependent)",
+                lost_values, iterations
+            );
+        }
+
+        // Test 3: Convenience send() method behavior
+        let (tx3, rx3) = channel::<i32>();
+
+        drop(rx3);
+
+        let convenience_result = tx3.send(&cx, 999);
+
+        match convenience_result {
+            Err(SendError::Disconnected(recovered_value)) => {
+                if recovered_value != 999 {
+                    panic!(
+                        "❌ DEFECT: Convenience send() returned wrong value {} instead of 999",
+                        recovered_value
+                    );
+                }
+            }
+            Ok(()) => {
+                panic!("❌ DEFECT: Convenience send() returned Ok(()) when receiver was dropped");
+            }
+            Err(SendError::Cancelled(_)) => {
+                panic!(
+                    "❌ DEFECT: Convenience send() returned Cancelled when receiver was dropped"
+                );
+            }
+        }
+
+        // Test 4: Check that value is not lost in the channel state
+        let (tx4, rx4) = channel::<String>();
+        let permit4 = tx4.reserve(&cx).expect("cx not cancelled");
+
+        drop(rx4);
+
+        let expensive_value = "expensive_to_create_string".to_string();
+        let expensive_value_clone = expensive_value.clone();
+
+        let send_result4 = permit4.send(expensive_value);
+
+        match send_result4 {
+            Err(SendError::Disconnected(recovered)) => {
+                if recovered != expensive_value_clone {
+                    panic!(
+                        "❌ DEFECT: String value was corrupted during recovery. \
+                         Expected '{}', got '{}'",
+                        expensive_value_clone, recovered
+                    );
+                }
+            }
+            _ => {
+                panic!("❌ DEFECT: send() did not return Disconnected error for dropped receiver");
+            }
+        }
+
+        println!("✅ SOUND: Send when receiver dropped behavior verified:");
+        println!("  - send() returns Err(SendError::Disconnected(value)) when receiver dropped ✓");
+        println!("  - Caller can recover value instead of losing it ✓");
+        println!(
+            "  - Race condition handling: {}/{} value recoveries ✓",
+            successful_recoveries, iterations
+        );
+        println!("  - Convenience send() method has same behavior ✓");
+        println!("  - Value integrity preserved during recovery ✓");
+
+        crate::test_complete!("audit_send_when_receiver_dropped_returns_value");
     }
 }

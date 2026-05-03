@@ -14,11 +14,11 @@
 
 #![no_main]
 
-use libfuzzer_sys::fuzz_target;
-use asupersync::bytes::{Bytes, BytesMut, BufMut};
-use asupersync::http::h2::{H2Error, Frame, FrameType};
-use asupersync::http::h2::frame::{WindowUpdateFrame, FrameHeader, parse_frame};
+use asupersync::bytes::{BufMut, Bytes, BytesMut};
 use asupersync::http::h2::error::ErrorCode;
+use asupersync::http::h2::frame::{FrameHeader, WindowUpdateFrame, parse_frame};
+use asupersync::http::h2::{Frame, FrameType, H2Error};
+use libfuzzer_sys::fuzz_target;
 
 /// Maximum input size to prevent OOM
 const MAX_INPUT_SIZE: usize = 1024;
@@ -50,10 +50,16 @@ fuzz_target!(|data: &[u8]| {
             // - current + delta > 2^31-1 → FLOW_CONTROL_ERROR
             // - otherwise OK
             match result {
-                Ok(_) => {}, // Valid window update
-                Err(H2Error { code: ErrorCode::ProtocolError, .. }) => {}, // Zero delta
-                Err(H2Error { code: ErrorCode::FlowControlError, .. }) => {}, // Overflow
-                Err(_) => {}, // Other errors acceptable
+                Ok(_) => {} // Valid window update
+                Err(H2Error {
+                    code: ErrorCode::ProtocolError,
+                    ..
+                }) => {} // Zero delta
+                Err(H2Error {
+                    code: ErrorCode::FlowControlError,
+                    ..
+                }) => {} // Overflow
+                Err(_) => {} // Other errors acceptable
             }
         }
     }
@@ -68,10 +74,16 @@ fuzz_target!(|data: &[u8]| {
 
         // Should apply same validation rules for stream-level updates
         match result {
-            Ok(_) => {},
-            Err(H2Error { code: ErrorCode::ProtocolError, .. }) => {},
-            Err(H2Error { code: ErrorCode::FlowControlError, .. }) => {},
-            Err(_) => {},
+            Ok(_) => {}
+            Err(H2Error {
+                code: ErrorCode::ProtocolError,
+                ..
+            }) => {}
+            Err(H2Error {
+                code: ErrorCode::FlowControlError,
+                ..
+            }) => {}
+            Err(_) => {}
         }
     }
 
@@ -105,11 +117,11 @@ fuzz_target!(|data: &[u8]| {
     // Test 4: Boundary testing around i32::MAX
     {
         let boundary_deltas = [
-            i32::MAX as u32,           // Exactly max
-            (i32::MAX as u32) + 1,     // Just over max
-            u32::MAX,                  // Maximum u32
-            0,                         // Zero (invalid)
-            1,                         // Minimum valid
+            i32::MAX as u32,       // Exactly max
+            (i32::MAX as u32) + 1, // Just over max
+            u32::MAX,              // Maximum u32
+            0,                     // Zero (invalid)
+            1,                     // Minimum valid
         ];
 
         for &delta in &boundary_deltas {
@@ -125,9 +137,9 @@ fuzz_target!(|data: &[u8]| {
 
         // Test with window already near maximum
         let large_windows = [
-            MAX_WINDOW_SIZE - 1000,    // Near max
-            MAX_WINDOW_SIZE - 1,       // One below max
-            MAX_WINDOW_SIZE,           // At max (any delta should overflow)
+            MAX_WINDOW_SIZE - 1000, // Near max
+            MAX_WINDOW_SIZE - 1,    // One below max
+            MAX_WINDOW_SIZE,        // At max (any delta should overflow)
         ];
 
         for current_window in &large_windows {
@@ -136,10 +148,16 @@ fuzz_target!(|data: &[u8]| {
 
             // Most deltas should cause overflow when window is near max
             match result {
-                Ok(_) => {}, // Somehow didn't overflow
-                Err(H2Error { code: ErrorCode::FlowControlError, .. }) => {}, // Expected overflow
-                Err(H2Error { code: ErrorCode::ProtocolError, .. }) => {}, // Zero delta
-                Err(_) => {}, // Other errors
+                Ok(_) => {} // Somehow didn't overflow
+                Err(H2Error {
+                    code: ErrorCode::FlowControlError,
+                    ..
+                }) => {} // Expected overflow
+                Err(H2Error {
+                    code: ErrorCode::ProtocolError,
+                    ..
+                }) => {} // Zero delta
+                Err(_) => {} // Other errors
             }
         }
     }
@@ -157,7 +175,7 @@ fuzz_target!(|data: &[u8]| {
             Err(_) => {
                 // Parse error is acceptable for malformed input
             }
-            _ => {}, // Other frame types from parsing
+            _ => {} // Other frame types from parsing
         }
     }
 
@@ -188,9 +206,12 @@ fuzz_target!(|data: &[u8]| {
 
         // Both connection and stream windows should have same overflow behavior
         match result {
-            Ok(_) => {},
-            Err(H2Error { code: ErrorCode::FlowControlError, .. }) => {},
-            Err(_) => {},
+            Ok(_) => {}
+            Err(H2Error {
+                code: ErrorCode::FlowControlError,
+                ..
+            }) => {}
+            Err(_) => {}
         }
     }
 
@@ -243,7 +264,9 @@ fn validate_window_update(frame: &Frame, current_window: i32) -> Result<i32, H2E
 
             // RFC 9113: WINDOW_UPDATE with increment of 0 is PROTOCOL_ERROR
             if delta == 0 {
-                return Err(H2Error::protocol("WINDOW_UPDATE increment must not be zero"));
+                return Err(H2Error::protocol(
+                    "WINDOW_UPDATE increment must not be zero",
+                ));
             }
 
             // Check for overflow: current + delta > 2^31 - 1
@@ -261,7 +284,9 @@ fn validate_window_update(frame: &Frame, current_window: i32) -> Result<i32, H2E
 /// Validate delta value according to RFC 9113
 fn validate_delta_value(delta: u32) -> Result<(), H2Error> {
     if delta == 0 {
-        return Err(H2Error::protocol("WINDOW_UPDATE increment must not be zero"));
+        return Err(H2Error::protocol(
+            "WINDOW_UPDATE increment must not be zero",
+        ));
     }
 
     // RFC 9113: WINDOW_UPDATE increment must be positive and fit in 31 bits
@@ -279,7 +304,7 @@ fn parse_window_update_from_raw(data: &[u8]) -> Result<Frame, H2Error> {
     let header = FrameHeader {
         length: std::cmp::min(data.len() as u32, 4), // WINDOW_UPDATE payload is exactly 4 bytes
         frame_type: WINDOW_UPDATE_FRAME_TYPE,
-        flags: 0, // WINDOW_UPDATE has no flags
+        flags: 0,     // WINDOW_UPDATE has no flags
         stream_id: 1, // Default to stream 1, actual stream ID doesn't affect parsing
     };
 

@@ -27,7 +27,11 @@ use asupersync::types::symbol::Symbol;
 
 #[derive(Debug, Arbitrary)]
 enum Op {
-    Send { object_id: u32, esi: u32, payload: Vec<u8> },
+    Send {
+        object_id: u32,
+        esi: u32,
+        payload: Vec<u8>,
+    },
     Flush,
     Close,
 }
@@ -57,10 +61,7 @@ fuzz_target!(|ops: Vec<Op>| {
                     sink.send_one(&cx, auth_sym).await
                 });
                 if !closed {
-                    assert!(
-                        result.is_ok(),
-                        "send to open sink failed: {result:?}"
-                    );
+                    assert!(result.is_ok(), "send to open sink failed: {result:?}");
                     expected_count += 1;
                 } else {
                     assert!(result.is_err(), "send to closed sink succeeded");

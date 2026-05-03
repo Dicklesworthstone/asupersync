@@ -51,7 +51,7 @@ enum TimingTestScenario {
     },
     /// Test timing for prefix-matching vs completely different MACs
     PrefixMatching {
-        prefix_lengths: Vec<u8>, // 0-32
+        prefix_lengths: Vec<u8>,  // 0-32
         suffix_patterns: Vec<u8>, // Different byte patterns for non-matching suffix
     },
     /// Test timing between valid MAC vs zero/random invalid MACs
@@ -98,13 +98,25 @@ fuzz_target!(|input: ConstantTimeTestInput| {
     let valid_tag = AuthenticationTag::compute(&key, &symbol);
 
     // Test each timing scenario
-    for scenario in input.test_scenarios.iter().take(4) { // Limit scenarios to prevent timeout
+    for scenario in input.test_scenarios.iter().take(4) {
+        // Limit scenarios to prevent timeout
         match scenario {
-            TimingTestScenario::FirstMismatchPosition { mismatch_byte_positions } => {
+            TimingTestScenario::FirstMismatchPosition {
+                mismatch_byte_positions,
+            } => {
                 test_first_mismatch_timing(&key, &symbol, &valid_tag, mismatch_byte_positions);
             }
-            TimingTestScenario::PrefixMatching { prefix_lengths, suffix_patterns } => {
-                test_prefix_matching_timing(&key, &symbol, &valid_tag, prefix_lengths, suffix_patterns);
+            TimingTestScenario::PrefixMatching {
+                prefix_lengths,
+                suffix_patterns,
+            } => {
+                test_prefix_matching_timing(
+                    &key,
+                    &symbol,
+                    &valid_tag,
+                    prefix_lengths,
+                    suffix_patterns,
+                );
             }
             TimingTestScenario::ValidVsInvalid { invalid_patterns } => {
                 test_valid_vs_invalid_timing(&key, &symbol, &valid_tag, invalid_patterns);
@@ -247,11 +259,18 @@ fn test_partial_eq_timing(
         // - The bit patterns of the differing bytes
 
         // For single fuzz run, just assert it doesn't panic and completes reasonably fast
-        assert!(timing.as_micros() < 1000, "PartialEq timing should be under 1ms");
+        assert!(
+            timing.as_micros() < 1000,
+            "PartialEq timing should be under 1ms"
+        );
     }
 }
 
-fn measure_verification_timing(key: &AuthKey, symbol: &Symbol, tag: &AuthenticationTag) -> Duration {
+fn measure_verification_timing(
+    key: &AuthKey,
+    symbol: &Symbol,
+    tag: &AuthenticationTag,
+) -> Duration {
     // Warmup to stabilize timing
     for _ in 0..TIMING_WARMUP {
         let _ = tag.verify(key, symbol);
@@ -324,7 +343,8 @@ fn assert_timing_consistency(timings: &[(u8, Duration)], test_name: &str) {
     // For constant-time operations, CV should be low regardless of input patterns
     let durations: Vec<_> = timings.iter().map(|(_, d)| d.as_nanos() as f64).collect();
     let mean = durations.iter().sum::<f64>() / durations.len() as f64;
-    let variance = durations.iter().map(|&x| (x - mean).powi(2)).sum::<f64>() / durations.len() as f64;
+    let variance =
+        durations.iter().map(|&x| (x - mean).powi(2)).sum::<f64>() / durations.len() as f64;
     let std_dev = variance.sqrt();
     let cv = if mean > 0.0 { std_dev / mean } else { 0.0 };
 
@@ -334,7 +354,10 @@ fn assert_timing_consistency(timings: &[(u8, Duration)], test_name: &str) {
     assert!(
         cv < 2.0, // Allow for some timing noise but flag excessive variance
         "{} timing CV too high: {:.3} (mean: {:.1}ns, std_dev: {:.1}ns)",
-        test_name, cv, mean, std_dev
+        test_name,
+        cv,
+        mean,
+        std_dev
     );
 }
 
@@ -346,14 +369,16 @@ fn assert_uniform_timing_distribution(timings: &[Duration], test_name: &str) {
     // Similar statistical check for uniform timing across different inputs
     let durations: Vec<_> = timings.iter().map(|d| d.as_nanos() as f64).collect();
     let mean = durations.iter().sum::<f64>() / durations.len() as f64;
-    let variance = durations.iter().map(|&x| (x - mean).powi(2)).sum::<f64>() / durations.len() as f64;
+    let variance =
+        durations.iter().map(|&x| (x - mean).powi(2)).sum::<f64>() / durations.len() as f64;
     let std_dev = variance.sqrt();
     let cv = if mean > 0.0 { std_dev / mean } else { 0.0 };
 
     assert!(
         cv < 2.0,
         "{} timing distribution too variable: CV = {:.3}",
-        test_name, cv
+        test_name,
+        cv
     );
 
     // Also assert no individual timing is too far from median (outlier detection)
@@ -366,7 +391,10 @@ fn assert_uniform_timing_distribution(timings: &[Duration], test_name: &str) {
         assert!(
             ratio >= 0.1 && ratio <= 10.0, // No timing should be >10x faster/slower than median
             "{} timing outlier detected: {:.1}ns vs median {:.1}ns (ratio: {:.2})",
-            test_name, timing, median, ratio
+            test_name,
+            timing,
+            median,
+            ratio
         );
     }
 }

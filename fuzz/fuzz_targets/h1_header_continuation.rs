@@ -1,7 +1,7 @@
 #![no_main]
 
-use libfuzzer_sys::fuzz_target;
 use arbitrary::Arbitrary;
+use libfuzzer_sys::fuzz_target;
 
 /// HTTP/1.1 header continuation (line-folding) fuzz target.
 ///
@@ -144,9 +144,10 @@ impl MockH1HeaderParser {
         // Check for line-folding patterns
         if let Some(violation) = self.detect_line_folding(&raw_request) {
             if self.policy.strict_rfc9112 && !self.policy.allow_line_folding {
-                return HeaderParseResult::BadRequest(
-                    format!("RFC 9112 §5.2 violation: {}", violation)
-                );
+                return HeaderParseResult::BadRequest(format!(
+                    "RFC 9112 §5.2 violation: {}",
+                    violation
+                ));
             }
         }
 
@@ -155,17 +156,16 @@ impl MockH1HeaderParser {
     }
 
     fn build_raw_request(&self, input: &HeaderContinuationInput) -> String {
-        let mut request = format!("{} {} {}\r\n",
-            input.request_line.method,
-            input.request_line.path,
-            input.request_line.version
+        let mut request = format!(
+            "{} {} {}\r\n",
+            input.request_line.method, input.request_line.path, input.request_line.version
         );
 
         // Add main header with continuation
         let header_with_continuation = self.build_continuation_header(
             &input.header_name,
             &input.header_value,
-            &input.continuation
+            &input.continuation,
         );
         request.push_str(&header_with_continuation);
 
@@ -178,10 +178,16 @@ impl MockH1HeaderParser {
         request
     }
 
-    fn build_continuation_header(&self, name: &str, value: &str, pattern: &ContinuationPattern) -> String {
+    fn build_continuation_header(
+        &self,
+        name: &str,
+        value: &str,
+        pattern: &ContinuationPattern,
+    ) -> String {
         let mut header = format!("{}: {}", name, value);
 
-        for i in 0..pattern.continuation_count.min(5) { // Limit for performance
+        for i in 0..pattern.continuation_count.min(5) {
+            // Limit for performance
             let whitespace = match pattern.whitespace_type {
                 WhitespaceType::Space => " ".to_string(),
                 WhitespaceType::Tab => "\t".to_string(),
@@ -206,7 +212,8 @@ impl MockH1HeaderParser {
     fn detect_line_folding(&self, request: &str) -> Option<String> {
         let lines: Vec<&str> = request.split("\r\n").collect();
 
-        for (i, line) in lines.iter().enumerate().skip(1) { // Skip request line
+        for (i, line) in lines.iter().enumerate().skip(1) {
+            // Skip request line
             if line.is_empty() {
                 break; // End of headers
             }
@@ -215,7 +222,8 @@ impl MockH1HeaderParser {
             if line.starts_with(' ') || line.starts_with('\t') {
                 return Some(format!(
                     "Line {} starts with whitespace (obs-fold): {:?}",
-                    i + 1, line.chars().take(10).collect::<String>()
+                    i + 1,
+                    line.chars().take(10).collect::<String>()
                 ));
             }
 
@@ -223,7 +231,8 @@ impl MockH1HeaderParser {
             if line.starts_with("  ") || line.starts_with("\t\t") {
                 return Some(format!(
                     "Line {} starts with multiple whitespace characters: {:?}",
-                    i + 1, line.chars().take(10).collect::<String>()
+                    i + 1,
+                    line.chars().take(10).collect::<String>()
                 ));
             }
         }
@@ -236,16 +245,18 @@ impl MockH1HeaderParser {
         let mut headers = Vec::new();
         let mut current_header: Option<(String, String)> = None;
 
-        for (line_num, line) in lines.iter().enumerate().skip(1) { // Skip request line
+        for (line_num, line) in lines.iter().enumerate().skip(1) {
+            // Skip request line
             if line.is_empty() {
                 break; // End of headers
             }
 
             // Check header line length
             if line.len() > self.policy.max_header_length {
-                return HeaderParseResult::BadRequest(
-                    format!("Header line {} exceeds maximum length", line_num + 1)
-                );
+                return HeaderParseResult::BadRequest(format!(
+                    "Header line {} exceeds maximum length",
+                    line_num + 1
+                ));
             }
 
             // Detect continuation (forbidden)
@@ -270,9 +281,10 @@ impl MockH1HeaderParser {
 
                 current_header = Some((name, value));
             } else {
-                return HeaderParseResult::BadRequest(
-                    format!("Malformed header line {}: missing colon", line_num + 1)
-                );
+                return HeaderParseResult::BadRequest(format!(
+                    "Malformed header line {}: missing colon",
+                    line_num + 1
+                ));
             }
         }
 
@@ -285,13 +297,19 @@ impl MockH1HeaderParser {
         self.validate_security_headers(&headers)
     }
 
-    fn handle_continuation_line(&self, line: &str, line_num: usize, current_header: &Option<(String, String)>) -> HeaderParseResult {
+    fn handle_continuation_line(
+        &self,
+        line: &str,
+        line_num: usize,
+        current_header: &Option<(String, String)>,
+    ) -> HeaderParseResult {
         if self.policy.strict_rfc9112 {
             // RFC 9112 §5.2: MUST reject with 400 Bad Request
-            return HeaderParseResult::BadRequest(
-                format!("RFC 9112 §5.2: Obsolete line folding at line {}: {:?}",
-                       line_num, line.chars().take(20).collect::<String>())
-            );
+            return HeaderParseResult::BadRequest(format!(
+                "RFC 9112 §5.2: Obsolete line folding at line {}: {:?}",
+                line_num,
+                line.chars().take(20).collect::<String>()
+            ));
         }
 
         if self.policy.allow_line_folding {
@@ -303,9 +321,7 @@ impl MockH1HeaderParser {
             }
         }
 
-        HeaderParseResult::BadRequest(
-            format!("Unexpected continuation line {}", line_num)
-        )
+        HeaderParseResult::BadRequest(format!("Unexpected continuation line {}", line_num))
     }
 
     fn validate_header_name(&self, name: &str) -> Result<(), String> {
@@ -318,7 +334,25 @@ impl MockH1HeaderParser {
             if !ch.is_ascii() || ch.is_control() || ch.is_whitespace() {
                 return Err(format!("Invalid character in header name: {:?}", ch));
             }
-            if matches!(ch, '(' | ')' | '<' | '>' | '@' | ',' | ';' | ':' | '\\' | '"' | '/' | '[' | ']' | '?' | '=' | '{' | '}') {
+            if matches!(
+                ch,
+                '(' | ')'
+                    | '<'
+                    | '>'
+                    | '@'
+                    | ','
+                    | ';'
+                    | ':'
+                    | '\\'
+                    | '"'
+                    | '/'
+                    | '['
+                    | ']'
+                    | '?'
+                    | '='
+                    | '{'
+                    | '}'
+            ) {
                 return Err(format!("Forbidden character in header name: {:?}", ch));
             }
         }
@@ -333,24 +367,34 @@ impl MockH1HeaderParser {
             let name_lower = name.to_lowercase();
 
             // Check for security-critical headers that could be smuggled
-            if matches!(name_lower.as_str(),
-                "authorization" | "host" | "content-length" | "transfer-encoding" |
-                "x-forwarded-for" | "x-real-ip" | "x-forwarded-host" |
-                "proxy-authorization" | "cookie" | "set-cookie"
+            if matches!(
+                name_lower.as_str(),
+                "authorization"
+                    | "host"
+                    | "content-length"
+                    | "transfer-encoding"
+                    | "x-forwarded-for"
+                    | "x-real-ip"
+                    | "x-forwarded-host"
+                    | "proxy-authorization"
+                    | "cookie"
+                    | "set-cookie"
             ) {
                 security_critical.push((name.clone(), value.clone()));
 
                 // Additional validation for critical headers
                 if name_lower == "content-length" && value.contains(' ') {
                     return HeaderParseResult::SecurityViolation(
-                        "Content-Length header contains whitespace (potential smuggling)".to_string()
+                        "Content-Length header contains whitespace (potential smuggling)"
+                            .to_string(),
                     );
                 }
 
                 if name_lower == "transfer-encoding" && value.to_lowercase().contains("chunked") {
                     if !value.trim().to_lowercase().ends_with("chunked") {
                         return HeaderParseResult::SecurityViolation(
-                            "Transfer-Encoding chunked not at end (potential smuggling)".to_string()
+                            "Transfer-Encoding chunked not at end (potential smuggling)"
+                                .to_string(),
                         );
                     }
                 }
@@ -408,35 +452,48 @@ fuzz_target!(|input: HeaderContinuationInput| {
             // Line-folding should be rejected with specific RFC violation
             if input.continuation.continuation_count > 0 {
                 assert!(
-                    msg.contains("RFC 9112") || msg.contains("obs-fold") ||
-                    msg.contains("obsolete") || msg.contains("line folding"),
-                    "Line-folding rejection should mention RFC 9112: {}", msg
+                    msg.contains("RFC 9112")
+                        || msg.contains("obs-fold")
+                        || msg.contains("obsolete")
+                        || msg.contains("line folding"),
+                    "Line-folding rejection should mention RFC 9112: {}",
+                    msg
                 );
             }
 
             // Whitespace continuation should be flagged
-            if matches!(input.continuation.whitespace_type,
-                       WhitespaceType::Space | WhitespaceType::Tab | WhitespaceType::Multiple) {
+            if matches!(
+                input.continuation.whitespace_type,
+                WhitespaceType::Space | WhitespaceType::Tab | WhitespaceType::Multiple
+            ) {
                 assert!(
-                    msg.contains("whitespace") || msg.contains("continuation") ||
-                    msg.contains("starts with"),
-                    "Whitespace continuation not properly flagged: {}", msg
+                    msg.contains("whitespace")
+                        || msg.contains("continuation")
+                        || msg.contains("starts with"),
+                    "Whitespace continuation not properly flagged: {}",
+                    msg
                 );
             }
-        },
+        }
 
         HeaderParseResult::SecurityViolation(ref msg) => {
             // Security violations should mention smuggling or specific attack vector
             assert!(
-                msg.contains("smuggling") || msg.contains("potential") ||
-                msg.contains("Transfer-Encoding") || msg.contains("Content-Length"),
-                "Security violation should explain attack vector: {}", msg
+                msg.contains("smuggling")
+                    || msg.contains("potential")
+                    || msg.contains("Transfer-Encoding")
+                    || msg.contains("Content-Length"),
+                "Security violation should explain attack vector: {}",
+                msg
             );
-        },
+        }
 
         HeaderParseResult::Valid(_) | HeaderParseResult::ValidWithSecurityHeaders { .. } => {
             // Valid parsing should only occur when line-folding is allowed or not present
-            if input.continuation.continuation_count > 0 && input.policy.strict_rfc9112 && !input.policy.allow_line_folding {
+            if input.continuation.continuation_count > 0
+                && input.policy.strict_rfc9112
+                && !input.policy.allow_line_folding
+            {
                 panic!("Line-folding should be rejected under strict RFC 9112 policy");
             }
         }
@@ -444,17 +501,23 @@ fuzz_target!(|input: HeaderContinuationInput| {
 
     // Additional security checks for critical headers
     if input.continuation.security_critical {
-        let security_header_names = ["authorization", "host", "content-length", "transfer-encoding"];
-        if security_header_names.iter().any(|&name|
-            input.header_name.to_lowercase().contains(name)) {
-
+        let security_header_names = [
+            "authorization",
+            "host",
+            "content-length",
+            "transfer-encoding",
+        ];
+        if security_header_names
+            .iter()
+            .any(|&name| input.header_name.to_lowercase().contains(name))
+        {
             match result {
                 HeaderParseResult::BadRequest(_) | HeaderParseResult::SecurityViolation(_) => {
                     // Expected for security-critical headers with line-folding
-                },
+                }
                 HeaderParseResult::ValidWithSecurityHeaders { .. } => {
                     // Acceptable if properly flagged
-                },
+                }
                 HeaderParseResult::Valid(_) => {
                     if input.continuation.continuation_count > 0 {
                         panic!("Security-critical headers with line-folding should be flagged");
@@ -469,7 +532,7 @@ fuzz_target!(|input: HeaderContinuationInput| {
         match result {
             HeaderParseResult::BadRequest(_) => {
                 // Expected under fail-fast policy
-            },
+            }
             _ => {
                 if input.policy.strict_rfc9112 && !input.policy.allow_line_folding {
                     panic!("Fail-fast policy should reject line-folding immediately");
@@ -480,16 +543,18 @@ fuzz_target!(|input: HeaderContinuationInput| {
 
     // Whitespace type validation
     match input.continuation.whitespace_type {
-        WhitespaceType::Space | WhitespaceType::Tab if input.continuation.continuation_count > 0 => {
+        WhitespaceType::Space | WhitespaceType::Tab
+            if input.continuation.continuation_count > 0 =>
+        {
             if input.policy.strict_rfc9112 && !input.policy.allow_line_folding {
                 match result {
                     HeaderParseResult::BadRequest(_) => {
                         // Expected - RFC compliant rejection
-                    },
+                    }
                     _ => panic!("Space/tab continuation should be rejected under RFC 9112"),
                 }
             }
-        },
+        }
         _ => {}
     }
 });

@@ -12,13 +12,13 @@
 
 #![no_main]
 
-use libfuzzer_sys::fuzz_target;
 use arbitrary::{Arbitrary, Unstructured};
 use asupersync::sync::OnceCell;
-use std::sync::atomic::{AtomicUsize, AtomicBool, Ordering};
-use std::sync::Arc;
+use libfuzzer_sys::fuzz_target;
 use std::collections::HashMap;
-use std::panic::{catch_unwind, AssertUnwindSafe};
+use std::panic::{AssertUnwindSafe, catch_unwind};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 #[derive(Debug, Clone, Arbitrary)]
 struct OnceCellPanicConfig {
@@ -39,7 +39,11 @@ enum PanicOperation {
     /// Check if cell is initialized
     CheckInitialized { cell_id: u8 },
     /// Try multiple panic attempts then succeed
-    PanicRetrySequence { cell_id: u8, panic_count: u8, final_value: i32 },
+    PanicRetrySequence {
+        cell_id: u8,
+        panic_count: u8,
+        final_value: i32,
+    },
     /// Concurrent panic initialization attempts
     ConcurrentPanicInit { cell_id: u8, thread_count: u8 },
     /// Mixed panic/success sequence
@@ -112,7 +116,8 @@ impl PanicTracker {
     }
 
     fn record_state_corruption(&self) {
-        self.state_corruption_detected.fetch_add(1, Ordering::SeqCst);
+        self.state_corruption_detected
+            .fetch_add(1, Ordering::SeqCst);
     }
 
     fn record_stuck_in_initializing(&self) {
@@ -138,7 +143,10 @@ impl PanicTracker {
         }
 
         if stuck > 0 {
-            return Err(format!("Detected {} cells stuck in INITIALIZING state", stuck));
+            return Err(format!(
+                "Detected {} cells stuck in INITIALIZING state",
+                stuck
+            ));
         }
 
         if deadlocks > 0 {
@@ -196,15 +204,19 @@ fn test_once_cell_panic_scenario(
 ) -> Result<(), String> {
     let mut cells: HashMap<u8, Arc<OnceCell<i32>>> = HashMap::new();
 
-    let max_ops = config.max_operations.min(OnceCellPanicConfig::max_operations()) as usize;
+    let max_ops = config
+        .max_operations
+        .min(OnceCellPanicConfig::max_operations()) as usize;
 
     for operation in config.operations.iter().take(max_ops) {
         match operation {
-            PanicOperation::InitWithPanic { cell_id, panic_at_step } => {
+            PanicOperation::InitWithPanic {
+                cell_id,
+                panic_at_step,
+            } => {
                 let id = *cell_id % OnceCellPanicConfig::max_cells();
 
-                let cell = cells.entry(id)
-                    .or_insert_with(|| Arc::new(OnceCell::new()));
+                let cell = cells.entry(id).or_insert_with(|| Arc::new(OnceCell::new()));
 
                 if !cell.is_initialized() {
                     tracker.record_init_attempt();
@@ -243,8 +255,7 @@ fn test_once_cell_panic_scenario(
             PanicOperation::InitSuccessfully { cell_id, value } => {
                 let id = *cell_id % OnceCellPanicConfig::max_cells();
 
-                let cell = cells.entry(id)
-                    .or_insert_with(|| Arc::new(OnceCell::new()));
+                let cell = cells.entry(id).or_insert_with(|| Arc::new(OnceCell::new()));
 
                 if !cell.is_initialized() {
                     tracker.record_init_attempt();
@@ -280,12 +291,16 @@ fn test_once_cell_panic_scenario(
                 }
             }
 
-            PanicOperation::PanicRetrySequence { cell_id, panic_count, final_value } => {
+            PanicOperation::PanicRetrySequence {
+                cell_id,
+                panic_count,
+                final_value,
+            } => {
                 let id = *cell_id % OnceCellPanicConfig::max_cells();
-                let retry_count = (*panic_count).min(OnceCellPanicConfig::max_panic_retries()) as usize;
+                let retry_count =
+                    (*panic_count).min(OnceCellPanicConfig::max_panic_retries()) as usize;
 
-                let cell = cells.entry(id)
-                    .or_insert_with(|| Arc::new(OnceCell::new()));
+                let cell = cells.entry(id).or_insert_with(|| Arc::new(OnceCell::new()));
 
                 if cell.is_initialized() {
                     continue; // Already initialized, skip
@@ -344,12 +359,16 @@ fn test_once_cell_panic_scenario(
                 }
             }
 
-            PanicOperation::ConcurrentPanicInit { cell_id, thread_count } => {
+            PanicOperation::ConcurrentPanicInit {
+                cell_id,
+                thread_count,
+            } => {
                 let id = *cell_id % OnceCellPanicConfig::max_cells();
-                let num_threads = (*thread_count).min(OnceCellPanicConfig::max_concurrent_threads()).max(1) as usize;
+                let num_threads = (*thread_count)
+                    .min(OnceCellPanicConfig::max_concurrent_threads())
+                    .max(1) as usize;
 
-                let cell = cells.entry(id)
-                    .or_insert_with(|| Arc::new(OnceCell::new()));
+                let cell = cells.entry(id).or_insert_with(|| Arc::new(OnceCell::new()));
 
                 if cell.is_initialized() {
                     continue; // Already initialized, skip
@@ -399,7 +418,10 @@ fn test_once_cell_panic_scenario(
                         }
                         Err(_) => {
                             tracker.record_deadlock();
-                            return Err(format!("Thread panicked in concurrent test for cell {}", id));
+                            return Err(format!(
+                                "Thread panicked in concurrent test for cell {}",
+                                id
+                            ));
                         }
                     }
                 }
@@ -420,18 +442,25 @@ fn test_once_cell_panic_scenario(
                 let concurrent_successes = tracker_arc.successful_inits.load(Ordering::SeqCst);
                 let concurrent_recoveries = tracker_arc.panic_recovery_count.load(Ordering::SeqCst);
 
-                tracker.init_attempts.fetch_add(concurrent_attempts, Ordering::SeqCst);
-                tracker.panic_count.fetch_add(concurrent_panics, Ordering::SeqCst);
-                tracker.successful_inits.fetch_add(concurrent_successes, Ordering::SeqCst);
-                tracker.panic_recovery_count.fetch_add(concurrent_recoveries, Ordering::SeqCst);
+                tracker
+                    .init_attempts
+                    .fetch_add(concurrent_attempts, Ordering::SeqCst);
+                tracker
+                    .panic_count
+                    .fetch_add(concurrent_panics, Ordering::SeqCst);
+                tracker
+                    .successful_inits
+                    .fetch_add(concurrent_successes, Ordering::SeqCst);
+                tracker
+                    .panic_recovery_count
+                    .fetch_add(concurrent_recoveries, Ordering::SeqCst);
             }
 
             PanicOperation::MixedSequence { cell_id, sequence } => {
                 let id = *cell_id % OnceCellPanicConfig::max_cells();
                 let max_seq = OnceCellPanicConfig::max_sequence() as usize;
 
-                let cell = cells.entry(id)
-                    .or_insert_with(|| Arc::new(OnceCell::new()));
+                let cell = cells.entry(id).or_insert_with(|| Arc::new(OnceCell::new()));
 
                 for (i, &op) in sequence.iter().take(max_seq).enumerate() {
                     if cell.is_initialized() {
@@ -545,9 +574,7 @@ fuzz_target!(|data: &[u8]| {
         let tracker2 = PanicTracker::new();
         let config2 = config.clone();
 
-        let handle = std::thread::spawn(move || {
-            test_once_cell_panic_scenario(&config2, &tracker2)
-        });
+        let handle = std::thread::spawn(move || test_once_cell_panic_scenario(&config2, &tracker2));
 
         match handle.join() {
             Ok(Ok(())) => {

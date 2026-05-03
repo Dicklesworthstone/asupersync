@@ -1,7 +1,7 @@
 #![no_main]
 
-use libfuzzer_sys::fuzz_target;
 use arbitrary::{Arbitrary, Unstructured};
+use libfuzzer_sys::fuzz_target;
 
 /// HTTP/2 SETTINGS frame ACK flag validation testing.
 /// Per RFC 7540 §6.5, SETTINGS frame with ACK flag MUST have empty payload.
@@ -49,9 +49,7 @@ struct MockH2SettingsParser {
 
 impl MockH2SettingsParser {
     fn new() -> Self {
-        Self {
-            errors: Vec::new(),
-        }
+        Self { errors: Vec::new() }
     }
 
     /// Parse SETTINGS frame with ACK flag validation
@@ -81,8 +79,11 @@ impl MockH2SettingsParser {
         }
 
         // Non-ACK SETTINGS frame - validate payload
-        if payload_length > 16777215 { // 2^24 - 1
-            return Err("FRAME_SIZE_ERROR: SETTINGS frame payload exceeds maximum frame size".into());
+        if payload_length > 16777215 {
+            // 2^24 - 1
+            return Err(
+                "FRAME_SIZE_ERROR: SETTINGS frame payload exceeds maximum frame size".into(),
+            );
         }
 
         // Validate individual settings (basic validation)
@@ -94,7 +95,8 @@ impl MockH2SettingsParser {
                     // ENABLE_PUSH - only 0 or 1 allowed
                     if setting.value > 1 {
                         self.errors.push(format!(
-                            "Invalid ENABLE_PUSH value: {} (must be 0 or 1)", setting.value
+                            "Invalid ENABLE_PUSH value: {} (must be 0 or 1)",
+                            setting.value
                         ));
                     }
                 }
@@ -103,7 +105,8 @@ impl MockH2SettingsParser {
                     // INITIAL_WINDOW_SIZE - max 2^31-1
                     if setting.value > 2_147_483_647 {
                         self.errors.push(format!(
-                            "Invalid INITIAL_WINDOW_SIZE value: {} (exceeds 2^31-1)", setting.value
+                            "Invalid INITIAL_WINDOW_SIZE value: {} (exceeds 2^31-1)",
+                            setting.value
                         ));
                     }
                 }
@@ -111,14 +114,16 @@ impl MockH2SettingsParser {
                     // MAX_FRAME_SIZE - must be 2^14 to 2^24-1
                     if setting.value < 16384 || setting.value > 16777215 {
                         self.errors.push(format!(
-                            "Invalid MAX_FRAME_SIZE value: {} (must be 16384-16777215)", setting.value
+                            "Invalid MAX_FRAME_SIZE value: {} (must be 16384-16777215)",
+                            setting.value
                         ));
                     }
                 }
                 6 => { /* MAX_HEADER_LIST_SIZE - any value allowed */ }
                 _ => {
                     // Unknown setting - should be ignored per RFC 7540 §6.5
-                    self.errors.push(format!("Unknown setting ID: {} (ignored)", setting.id));
+                    self.errors
+                        .push(format!("Unknown setting ID: {} (ignored)", setting.id));
                 }
             }
         }
@@ -152,22 +157,32 @@ fuzz_target!(|data: &[u8]| {
 
     // Test 1: ACK flag with non-empty payload must be FRAME_SIZE_ERROR
     if ack_flag_set && has_payload {
-        assert!(result.is_err(),
-            "SETTINGS frame with ACK flag and payload should be rejected");
+        assert!(
+            result.is_err(),
+            "SETTINGS frame with ACK flag and payload should be rejected"
+        );
 
         if let Err(error_msg) = &result {
-            assert!(error_msg.contains("FRAME_SIZE_ERROR"),
-                "ACK with payload should generate FRAME_SIZE_ERROR: {}", error_msg);
-            assert!(error_msg.contains("empty payload"),
-                "Error should mention empty payload requirement: {}", error_msg);
+            assert!(
+                error_msg.contains("FRAME_SIZE_ERROR"),
+                "ACK with payload should generate FRAME_SIZE_ERROR: {}",
+                error_msg
+            );
+            assert!(
+                error_msg.contains("empty payload"),
+                "Error should mention empty payload requirement: {}",
+                error_msg
+            );
         }
         return; // No further tests needed for this error case
     }
 
     // Test 2: ACK flag with empty payload should succeed
     if ack_flag_set && !has_payload {
-        assert!(result.is_ok(),
-            "SETTINGS frame with ACK flag and empty payload should succeed");
+        assert!(
+            result.is_ok(),
+            "SETTINGS frame with ACK flag and empty payload should succeed"
+        );
         return; // ACK frames don't need further validation
     }
 
@@ -176,11 +191,16 @@ fuzz_target!(|data: &[u8]| {
     if !ack_flag_set {
         // Check stream ID validation
         if input.settings_frame.stream_id != 0 {
-            assert!(result.is_err(),
-                "SETTINGS frame with non-zero stream ID should be rejected");
+            assert!(
+                result.is_err(),
+                "SETTINGS frame with non-zero stream ID should be rejected"
+            );
             if let Err(error_msg) = &result {
-                assert!(error_msg.contains("stream ID must be 0"),
-                    "Non-zero stream ID error should be clear: {}", error_msg);
+                assert!(
+                    error_msg.contains("stream ID must be 0"),
+                    "Non-zero stream ID error should be clear: {}",
+                    error_msg
+                );
             }
             return;
         }
@@ -188,41 +208,67 @@ fuzz_target!(|data: &[u8]| {
         // Check frame size limit
         let payload_length = input.settings_frame.settings.len() * 6;
         if payload_length > 16777215 {
-            assert!(result.is_err(),
-                "SETTINGS frame exceeding max frame size should be rejected");
+            assert!(
+                result.is_err(),
+                "SETTINGS frame exceeding max frame size should be rejected"
+            );
             if let Err(error_msg) = &result {
-                assert!(error_msg.contains("exceeds maximum frame size"),
-                    "Frame size error should be clear: {}", error_msg);
+                assert!(
+                    error_msg.contains("exceeds maximum frame size"),
+                    "Frame size error should be clear: {}",
+                    error_msg
+                );
             }
             return;
         }
 
         // For valid non-ACK frames, parsing should succeed
         // (individual setting validation errors are warnings, not parse failures)
-        assert!(result.is_ok(),
-            "Valid SETTINGS frame without ACK should succeed: {:?}", result);
+        assert!(
+            result.is_ok(),
+            "Valid SETTINGS frame without ACK should succeed: {:?}",
+            result
+        );
     }
 
     // Test 4: Verify setting-specific validation (for non-ACK frames)
     if !ack_flag_set && result.is_ok() {
         for setting in &input.settings_frame.settings {
             match setting.id {
-                2 => { // ENABLE_PUSH
+                2 => {
+                    // ENABLE_PUSH
                     if setting.value > 1 {
-                        assert!(parser.get_errors().iter().any(|e| e.contains("ENABLE_PUSH")),
-                            "Invalid ENABLE_PUSH value should generate warning");
+                        assert!(
+                            parser
+                                .get_errors()
+                                .iter()
+                                .any(|e| e.contains("ENABLE_PUSH")),
+                            "Invalid ENABLE_PUSH value should generate warning"
+                        );
                     }
                 }
-                4 => { // INITIAL_WINDOW_SIZE
+                4 => {
+                    // INITIAL_WINDOW_SIZE
                     if setting.value > 2_147_483_647 {
-                        assert!(parser.get_errors().iter().any(|e| e.contains("INITIAL_WINDOW_SIZE")),
-                            "Invalid INITIAL_WINDOW_SIZE value should generate warning");
+                        assert!(
+                            parser
+                                .get_errors()
+                                .iter()
+                                .any(|e| e.contains("INITIAL_WINDOW_SIZE")),
+                            "Invalid INITIAL_WINDOW_SIZE value should generate warning"
+                        );
                     }
                 }
-                5 => { // MAX_FRAME_SIZE
+                5 => {
+                    // MAX_FRAME_SIZE
                     if setting.value < 16384 || setting.value > 16777215 {
-                        assert!(parser.get_errors().iter().any(|e| e.contains("MAX_FRAME_SIZE")),
-                            "Invalid MAX_FRAME_SIZE value should generate warning");
+                        assert!(
+                            parser
+                                .get_errors()
+                                .iter()
+                                .any(|e| e.contains("MAX_FRAME_SIZE")),
+                            "Invalid MAX_FRAME_SIZE value should generate warning"
+                        );
                     }
                 }
                 _ => {}
@@ -282,7 +328,10 @@ mod tests {
         let mut parser = MockH2SettingsParser::new();
         let result = parser.parse_settings_frame(&frame);
 
-        assert!(result.is_err(), "ACK with multiple settings should be invalid");
+        assert!(
+            result.is_err(),
+            "ACK with multiple settings should be invalid"
+        );
         assert!(result.unwrap_err().contains("FRAME_SIZE_ERROR"));
         assert!(result.unwrap_err().contains("18 bytes")); // 3 * 6 bytes
     }
@@ -330,7 +379,10 @@ mod tests {
         let mut parser = MockH2SettingsParser::new();
         let result = parser.parse_settings_frame(&frame);
 
-        assert!(result.is_err(), "SETTINGS with non-zero stream ID should fail");
+        assert!(
+            result.is_err(),
+            "SETTINGS with non-zero stream ID should fail"
+        );
         assert!(result.unwrap_err().contains("stream ID must be 0"));
     }
 
@@ -347,7 +399,10 @@ mod tests {
         let mut parser = MockH2SettingsParser::new();
         let result = parser.parse_settings_frame(&frame);
 
-        assert!(result.is_err(), "ACK flag with payload should fail regardless of other flags");
+        assert!(
+            result.is_err(),
+            "ACK flag with payload should fail regardless of other flags"
+        );
         assert!(result.unwrap_err().contains("FRAME_SIZE_ERROR"));
     }
 
@@ -357,10 +412,13 @@ mod tests {
             flags: 0,
             stream_id: 0,
             settings: vec![
-                SettingEntry { id: 2, value: 5 },    // Invalid ENABLE_PUSH
-                SettingEntry { id: 4, value: u32::MAX }, // Invalid INITIAL_WINDOW_SIZE
-                SettingEntry { id: 5, value: 1000 },     // Invalid MAX_FRAME_SIZE
-                SettingEntry { id: 99, value: 42 },      // Unknown setting
+                SettingEntry { id: 2, value: 5 }, // Invalid ENABLE_PUSH
+                SettingEntry {
+                    id: 4,
+                    value: u32::MAX,
+                }, // Invalid INITIAL_WINDOW_SIZE
+                SettingEntry { id: 5, value: 1000 }, // Invalid MAX_FRAME_SIZE
+                SettingEntry { id: 99, value: 42 }, // Unknown setting
             ],
         };
 
@@ -368,7 +426,10 @@ mod tests {
         let result = parser.parse_settings_frame(&frame);
 
         // Should still parse successfully but generate warnings
-        assert!(result.is_ok(), "Invalid setting values should generate warnings, not errors");
+        assert!(
+            result.is_ok(),
+            "Invalid setting values should generate warnings, not errors"
+        );
 
         let errors = parser.get_errors();
         assert!(errors.iter().any(|e| e.contains("ENABLE_PUSH")));
@@ -383,7 +444,10 @@ mod tests {
         let settings_count = (16777215 / 6) + 1; // Just over the limit
         let mut settings = Vec::new();
         for i in 0..settings_count {
-            settings.push(SettingEntry { id: (i % 6 + 1) as u16, value: 1000 });
+            settings.push(SettingEntry {
+                id: (i % 6 + 1) as u16,
+                value: 1000,
+            });
         }
 
         let frame = SettingsFrame {
@@ -395,7 +459,10 @@ mod tests {
         let mut parser = MockH2SettingsParser::new();
         let result = parser.parse_settings_frame(&frame);
 
-        assert!(result.is_err(), "Frame exceeding max size should be rejected");
+        assert!(
+            result.is_err(),
+            "Frame exceeding max size should be rejected"
+        );
         assert!(result.unwrap_err().contains("exceeds maximum frame size"));
     }
 
@@ -417,6 +484,9 @@ mod tests {
         let mut parser = MockH2SettingsParser::new();
         let result = parser.parse_settings_frame(&frame);
 
-        assert!(result.is_ok(), "Frame exactly at max size should be accepted");
+        assert!(
+            result.is_ok(),
+            "Frame exactly at max size should be accepted"
+        );
     }
 }

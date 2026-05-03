@@ -42,7 +42,7 @@ enum FrameType {
 struct Header {
     name: String,
     value: String,
-    is_pseudo: bool,  // Whether this is a pseudo-header (starts with :)
+    is_pseudo: bool, // Whether this is a pseudo-header (starts with :)
 }
 
 /// HTTP/2 HEADERS frame
@@ -123,13 +123,14 @@ impl MockH2Connection {
         let is_request = !self.is_client;
 
         // Check for :status pseudo-header to determine if this is informational/final response
-        let observed_status = frame.headers
+        let observed_status = frame
+            .headers
             .iter()
             .find(|h| h.name == ":status")
             .and_then(|h| h.value.parse::<u16>().ok());
 
-        let is_informational_response = !is_request &&
-            observed_status.is_some_and(|s| (100..200).contains(&s));
+        let is_informational_response =
+            !is_request && observed_status.is_some_and(|s| (100..200).contains(&s));
 
         // RFC 9113 §8.1 trailers detection logic (from connection.rs)
         let is_trailers = if is_request {
@@ -157,7 +158,12 @@ impl MockH2Connection {
     }
 
     /// Validate headers according to RFC 9113 (mirroring validate_h2_pseudo_headers)
-    fn validate_headers(&mut self, headers: &[Header], is_request: bool, is_trailers: bool) -> Result<(), String> {
+    fn validate_headers(
+        &mut self,
+        headers: &[Header],
+        is_request: bool,
+        is_trailers: bool,
+    ) -> Result<(), String> {
         // RFC 9113 §8.1: "Trailer fields MUST NOT include pseudo-header fields"
         if is_trailers {
             for h in headers {
@@ -165,14 +171,18 @@ impl MockH2Connection {
                     return Err("empty header name".into());
                 }
                 if h.name.starts_with(':') || h.is_pseudo {
-                    return Err("trailers section MUST NOT contain pseudo-header fields (RFC 9113 §8.1)".into());
+                    return Err(
+                        "trailers section MUST NOT contain pseudo-header fields (RFC 9113 §8.1)"
+                            .into(),
+                    );
                 }
                 if h.name.chars().any(|c| c.is_ascii_uppercase()) {
                     return Err("regular header field name in trailers contains uppercase ASCII (RFC 9113 §8.2.1 violation)".into());
                 }
                 // Connection-specific headers forbidden
                 match h.name.as_str() {
-                    "connection" | "keep-alive" | "proxy-connection" | "transfer-encoding" | "upgrade" => {
+                    "connection" | "keep-alive" | "proxy-connection" | "transfer-encoding"
+                    | "upgrade" => {
                         return Err("connection-specific header field forbidden in HTTP/2 trailers (RFC 9113 §8.2.2)".into());
                     }
                     "te" if h.value != "trailers" => {
@@ -196,7 +206,10 @@ impl MockH2Connection {
             if h.name.starts_with(':') || h.is_pseudo {
                 // Pseudo-header
                 if seen_regular {
-                    return Err("pseudo-header field appears after a regular header field (RFC 9113 §8.3)".into());
+                    return Err(
+                        "pseudo-header field appears after a regular header field (RFC 9113 §8.3)"
+                            .into(),
+                    );
                 }
                 if seen_pseudo_headers.contains_key(&h.name) {
                     return Err(format!("duplicate {} pseudo-header", h.name));
@@ -216,7 +229,8 @@ impl MockH2Connection {
                 }
                 // Connection-specific headers forbidden
                 match h.name.as_str() {
-                    "connection" | "keep-alive" | "proxy-connection" | "transfer-encoding" | "upgrade" => {
+                    "connection" | "keep-alive" | "proxy-connection" | "transfer-encoding"
+                    | "upgrade" => {
                         return Err("connection-specific header field forbidden in HTTP/2 (RFC 9113 §8.2.2)".into());
                     }
                     "te" if h.value != "trailers" => {
@@ -332,7 +346,9 @@ fuzz_target!(|scenario: TrailersScenario| {
             let is_subsequent = stream.map_or(false, |s| s.initial_headers_received);
             let is_request = !connection.is_client;
 
-            let observed_status = frame.headers.iter()
+            let observed_status = frame
+                .headers
+                .iter()
                 .find(|h| h.name == ":status")
                 .and_then(|h| h.value.parse::<u16>().ok());
 
@@ -365,12 +381,25 @@ fuzz_target!(|scenario: TrailersScenario| {
         // Test specific edge cases for trailers context detection
 
         // Edge case 1: 1xx informational response with END_STREAM (not trailers)
-        if frame.headers.iter().any(|h| h.name == ":status" && h.value.starts_with('1')) && frame.end_stream {
+        if frame
+            .headers
+            .iter()
+            .any(|h| h.name == ":status" && h.value.starts_with('1'))
+            && frame.end_stream
+        {
             // This should NOT be treated as trailers even with END_STREAM
             let has_pseudo = frame.headers.iter().any(|h| h.name.starts_with(':'));
-            if has_pseudo && result.is_err() && result.as_ref().unwrap_err().contains("trailers section MUST NOT contain pseudo-header") {
+            if has_pseudo
+                && result.is_err()
+                && result
+                    .as_ref()
+                    .unwrap_err()
+                    .contains("trailers section MUST NOT contain pseudo-header")
+            {
                 // This is incorrect - 1xx with END_STREAM should not be trailers
-                panic!("1xx informational response with END_STREAM incorrectly treated as trailers");
+                panic!(
+                    "1xx informational response with END_STREAM incorrectly treated as trailers"
+                );
             }
         }
 
@@ -378,7 +407,13 @@ fuzz_target!(|scenario: TrailersScenario| {
         if let Some(stream) = connection.streams.get(&frame.stream_id) {
             if stream.initial_headers_received && frame.end_stream {
                 let has_status = frame.headers.iter().any(|h| h.name == ":status");
-                if has_status && result.is_err() && result.as_ref().unwrap_err().contains("trailers section MUST NOT contain pseudo-header") {
+                if has_status
+                    && result.is_err()
+                    && result
+                        .as_ref()
+                        .unwrap_err()
+                        .contains("trailers section MUST NOT contain pseudo-header")
+                {
                     // This might be a bodyless final response incorrectly treated as trailers
                 }
             }
@@ -393,13 +428,16 @@ fuzz_target!(|scenario: TrailersScenario| {
 
                 let is_request = !connection.is_client;
                 let would_be_trailers = if is_request {
-                    true  // Server side: subsequent headers are trailers
+                    true // Server side: subsequent headers are trailers
                 } else {
-                    !has_status  // Client side: subsequent headers without :status are trailers
+                    !has_status // Client side: subsequent headers without :status are trailers
                 };
 
                 if would_be_trailers && has_pseudo && result.is_ok() {
-                    panic!("Trailers with pseudo-headers incorrectly accepted: {:?}", frame.headers);
+                    panic!(
+                        "Trailers with pseudo-headers incorrectly accepted: {:?}",
+                        frame.headers
+                    );
                 }
             }
         }
@@ -411,14 +449,17 @@ fuzz_target!(|scenario: TrailersScenario| {
     }
 
     // Test that valid trailers are accepted
-    let mut valid_connection = MockH2Connection::new(false);  // Server side
+    let mut valid_connection = MockH2Connection::new(false); // Server side
 
     // Set up a stream with initial headers
-    valid_connection.streams.insert(3, StreamInfo {
-        state: StreamState::Open,
-        initial_headers_received: true,
-        is_client_initiated: true,
-    });
+    valid_connection.streams.insert(
+        3,
+        StreamInfo {
+            state: StreamState::Open,
+            initial_headers_received: true,
+            is_client_initiated: true,
+        },
+    );
 
     // Valid trailers (no pseudo-headers, END_STREAM)
     let valid_trailers = HeadersFrame {
@@ -441,7 +482,11 @@ fuzz_target!(|scenario: TrailersScenario| {
     };
 
     let valid_result = valid_connection.process_headers(&valid_trailers);
-    assert!(valid_result.is_ok(), "Valid trailers should be accepted: {:?}", valid_result);
+    assert!(
+        valid_result.is_ok(),
+        "Valid trailers should be accepted: {:?}",
+        valid_result
+    );
 
     // Invalid trailers (contains pseudo-headers)
     let invalid_trailers = HeadersFrame {
@@ -464,11 +509,14 @@ fuzz_target!(|scenario: TrailersScenario| {
     };
 
     // Reset stream state for invalid test
-    valid_connection.streams.insert(5, StreamInfo {
-        state: StreamState::Open,
-        initial_headers_received: true,
-        is_client_initiated: true,
-    });
+    valid_connection.streams.insert(
+        5,
+        StreamInfo {
+            state: StreamState::Open,
+            initial_headers_received: true,
+            is_client_initiated: true,
+        },
+    );
 
     let invalid_trailers_frame = HeadersFrame {
         stream_id: 5,
@@ -476,9 +524,14 @@ fuzz_target!(|scenario: TrailersScenario| {
     };
 
     let invalid_result = valid_connection.process_headers(&invalid_trailers_frame);
-    assert!(invalid_result.is_err(), "Trailers with pseudo-headers should be rejected");
     assert!(
-        invalid_result.unwrap_err().contains("trailers section MUST NOT contain pseudo-header fields"),
+        invalid_result.is_err(),
+        "Trailers with pseudo-headers should be rejected"
+    );
+    assert!(
+        invalid_result
+            .unwrap_err()
+            .contains("trailers section MUST NOT contain pseudo-header fields"),
         "Should reject trailers with specific pseudo-header error"
     );
 });
@@ -495,11 +548,31 @@ mod tests {
                 HeadersFrame {
                     stream_id: 1,
                     headers: vec![
-                        Header { name: ":method".to_string(), value: "POST".to_string(), is_pseudo: true },
-                        Header { name: ":path".to_string(), value: "/test".to_string(), is_pseudo: true },
-                        Header { name: ":scheme".to_string(), value: "https".to_string(), is_pseudo: true },
-                        Header { name: ":authority".to_string(), value: "example.com".to_string(), is_pseudo: true },
-                        Header { name: "content-type".to_string(), value: "application/json".to_string(), is_pseudo: false },
+                        Header {
+                            name: ":method".to_string(),
+                            value: "POST".to_string(),
+                            is_pseudo: true,
+                        },
+                        Header {
+                            name: ":path".to_string(),
+                            value: "/test".to_string(),
+                            is_pseudo: true,
+                        },
+                        Header {
+                            name: ":scheme".to_string(),
+                            value: "https".to_string(),
+                            is_pseudo: true,
+                        },
+                        Header {
+                            name: ":authority".to_string(),
+                            value: "example.com".to_string(),
+                            is_pseudo: true,
+                        },
+                        Header {
+                            name: "content-type".to_string(),
+                            value: "application/json".to_string(),
+                            is_pseudo: false,
+                        },
                     ],
                     end_stream: false,
                     end_headers: true,
@@ -508,10 +581,18 @@ mod tests {
                 HeadersFrame {
                     stream_id: 1,
                     headers: vec![
-                        Header { name: "x-trace-id".to_string(), value: "abc123".to_string(), is_pseudo: false },
-                        Header { name: "server-timing".to_string(), value: "db;dur=50".to_string(), is_pseudo: false },
+                        Header {
+                            name: "x-trace-id".to_string(),
+                            value: "abc123".to_string(),
+                            is_pseudo: false,
+                        },
+                        Header {
+                            name: "server-timing".to_string(),
+                            value: "db;dur=50".to_string(),
+                            is_pseudo: false,
+                        },
                     ],
-                    end_stream: true,  // This makes it trailers
+                    end_stream: true, // This makes it trailers
                     end_headers: true,
                     priority: None,
                 },
@@ -531,10 +612,26 @@ mod tests {
                 HeadersFrame {
                     stream_id: 1,
                     headers: vec![
-                        Header { name: ":method".to_string(), value: "GET".to_string(), is_pseudo: true },
-                        Header { name: ":path".to_string(), value: "/".to_string(), is_pseudo: true },
-                        Header { name: ":scheme".to_string(), value: "https".to_string(), is_pseudo: true },
-                        Header { name: ":authority".to_string(), value: "example.com".to_string(), is_pseudo: true },
+                        Header {
+                            name: ":method".to_string(),
+                            value: "GET".to_string(),
+                            is_pseudo: true,
+                        },
+                        Header {
+                            name: ":path".to_string(),
+                            value: "/".to_string(),
+                            is_pseudo: true,
+                        },
+                        Header {
+                            name: ":scheme".to_string(),
+                            value: "https".to_string(),
+                            is_pseudo: true,
+                        },
+                        Header {
+                            name: ":authority".to_string(),
+                            value: "example.com".to_string(),
+                            is_pseudo: true,
+                        },
                     ],
                     end_stream: false,
                     end_headers: true,
@@ -543,10 +640,18 @@ mod tests {
                 HeadersFrame {
                     stream_id: 1,
                     headers: vec![
-                        Header { name: ":status".to_string(), value: "200".to_string(), is_pseudo: true }, // Invalid in trailers
-                        Header { name: "x-custom".to_string(), value: "value".to_string(), is_pseudo: false },
+                        Header {
+                            name: ":status".to_string(),
+                            value: "200".to_string(),
+                            is_pseudo: true,
+                        }, // Invalid in trailers
+                        Header {
+                            name: "x-custom".to_string(),
+                            value: "value".to_string(),
+                            is_pseudo: false,
+                        },
                     ],
-                    end_stream: true,  // Makes it trailers context
+                    end_stream: true, // Makes it trailers context
                     end_headers: true,
                     priority: None,
                 },
@@ -562,17 +667,19 @@ mod tests {
     fn test_informational_response_with_end_stream() {
         let scenario = TrailersScenario {
             connection_side: ConnectionSide::Client,
-            frames: vec![
-                HeadersFrame {
-                    stream_id: 2,
-                    headers: vec![
-                        Header { name: ":status".to_string(), value: "100".to_string(), is_pseudo: true }, // 1xx informational
-                    ],
-                    end_stream: true,  // Not trailers despite END_STREAM
-                    end_headers: true,
-                    priority: None,
-                },
-            ],
+            frames: vec![HeadersFrame {
+                stream_id: 2,
+                headers: vec![
+                    Header {
+                        name: ":status".to_string(),
+                        value: "100".to_string(),
+                        is_pseudo: true,
+                    }, // 1xx informational
+                ],
+                end_stream: true, // Not trailers despite END_STREAM
+                end_headers: true,
+                priority: None,
+            }],
             max_streams: 10,
             include_edge_cases: false,
         };

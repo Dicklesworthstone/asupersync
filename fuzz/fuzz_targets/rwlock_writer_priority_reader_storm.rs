@@ -12,20 +12,20 @@
 
 #![no_main]
 
-use libfuzzer_sys::fuzz_target;
 use arbitrary::{Arbitrary, Unstructured};
-use asupersync::sync::rwlock::RwLock;
 use asupersync::cx::Cx;
-use asupersync::types::{RegionId, TaskId, Budget};
+use asupersync::sync::rwlock::RwLock;
+use asupersync::types::{Budget, RegionId, TaskId};
 use asupersync::util::ArenaIndex;
-use std::sync::{Arc, Barrier};
-use std::sync::atomic::{AtomicUsize, AtomicBool, Ordering};
-use std::thread;
-use std::time::{Duration, Instant};
-use futures::task::{noop_waker, Context};
+use futures::task::{Context, noop_waker};
+use libfuzzer_sys::fuzz_target;
 use std::future::Future;
 use std::pin::Pin;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::{Arc, Barrier};
 use std::task::Poll;
+use std::thread;
+use std::time::{Duration, Instant};
 
 #[derive(Debug, Clone, Arbitrary)]
 struct RwLockConfig {
@@ -97,13 +97,16 @@ impl TestStats {
 
         // If writers attempted to acquire, they should not be completely starved
         if writer_acqs == 0 && !self.writer_wait_times_ms.lock().is_empty() {
-            return Err("Writer starvation detected: writers waited but none succeeded".to_string());
+            return Err(
+                "Writer starvation detected: writers waited but none succeeded".to_string(),
+            );
         }
 
         // Check writer wait times for excessive delays
         let wait_times = self.writer_wait_times_ms.lock();
         if let Some(&max_wait) = wait_times.iter().max() {
-            if max_wait > 2000 { // 2 second maximum wait time
+            if max_wait > 2000 {
+                // 2 second maximum wait time
                 return Err(format!("Excessive writer wait time: {} ms", max_wait));
             }
         }
@@ -128,14 +131,17 @@ fuzz_target!(|data: &[u8]| {
     if sequence.config.reader_count == 0
         || sequence.config.writer_count == 0
         || sequence.config.reader_count > WriterPrioritySequence::max_readers()
-        || sequence.config.writer_count > WriterPrioritySequence::max_writers() {
+        || sequence.config.writer_count > WriterPrioritySequence::max_writers()
+    {
         return;
     }
 
     let reader_count = sequence.config.reader_count as usize;
     let writer_count = sequence.config.writer_count as usize;
     let test_duration = Duration::from_millis(
-        sequence.test_duration_ms.min(WriterPrioritySequence::max_test_duration_ms()) as u64
+        sequence
+            .test_duration_ms
+            .min(WriterPrioritySequence::max_test_duration_ms()) as u64,
     );
 
     // Create shared RwLock and test infrastructure
@@ -150,11 +156,15 @@ fuzz_target!(|data: &[u8]| {
         let rwlock = Arc::clone(&rwlock);
         let stats = Arc::clone(&stats);
         let start_barrier = Arc::clone(&start_barrier);
-        let hold_duration = sequence.config.read_hold_durations
+        let hold_duration = sequence
+            .config
+            .read_hold_durations
             .get(reader_id)
             .copied()
             .unwrap_or(100); // Default 100ms hold
-        let arrival_delay = sequence.config.reader_delays
+        let arrival_delay = sequence
+            .config
+            .reader_delays
             .get(reader_id)
             .copied()
             .unwrap_or(0);
@@ -190,7 +200,9 @@ fuzz_target!(|data: &[u8]| {
                         Poll::Pending => {
                             // Check if blocked due to waiting writer
                             if start_wait.elapsed() > Duration::from_millis(10) {
-                                stats.reader_blocks_due_to_writer.fetch_add(1, Ordering::SeqCst);
+                                stats
+                                    .reader_blocks_due_to_writer
+                                    .fetch_add(1, Ordering::SeqCst);
                             }
 
                             // Small yield to avoid busy spinning
@@ -231,11 +243,15 @@ fuzz_target!(|data: &[u8]| {
         let rwlock = Arc::clone(&rwlock);
         let stats = Arc::clone(&stats);
         let start_barrier = Arc::clone(&start_barrier);
-        let hold_duration = sequence.config.write_hold_durations
+        let hold_duration = sequence
+            .config
+            .write_hold_durations
             .get(writer_id)
             .copied()
             .unwrap_or(50); // Default 50ms hold (shorter than reads)
-        let arrival_delay = sequence.config.writer_delays
+        let arrival_delay = sequence
+            .config
+            .writer_delays
             .get(writer_id)
             .copied()
             .unwrap_or(0);
@@ -325,25 +341,35 @@ fuzz_target!(|data: &[u8]| {
     let total_reader_acqs = stats.reader_acquisitions.load(Ordering::SeqCst);
     let total_writer_acqs = stats.writer_acquisitions.load(Ordering::SeqCst);
 
-    assert!(total_reader_acqs > 0 || total_writer_acqs > 0,
-        "No lock acquisitions occurred during test");
+    assert!(
+        total_reader_acqs > 0 || total_writer_acqs > 0,
+        "No lock acquisitions occurred during test"
+    );
 
     // In reader storm mode with writers present, writers should eventually succeed
     if sequence.reader_storm_mode && writer_count > 0 && total_reader_acqs > 0 {
-        assert!(total_writer_acqs > 0,
+        assert!(
+            total_writer_acqs > 0,
             "Writer starvation in reader storm: {} reader acquisitions but 0 writer acquisitions",
-            total_reader_acqs);
+            total_reader_acqs
+        );
     }
 
     // Verify the final value makes sense (should equal total writer acquisitions)
     let final_value = *rwlock.try_read().expect("Should be able to read at end");
-    assert_eq!(final_value, total_writer_acqs as u32,
+    assert_eq!(
+        final_value, total_writer_acqs as u32,
         "Final value {} should equal writer acquisitions {}",
-        final_value, total_writer_acqs);
+        final_value, total_writer_acqs
+    );
 
     // Log statistics for analysis
     let elapsed = stats.test_start_time.elapsed().as_millis();
-    println!("Test completed in {}ms: {} readers, {} writers, {} reader blocks",
-        elapsed, total_reader_acqs, total_writer_acqs,
-        stats.reader_blocks_due_to_writer.load(Ordering::SeqCst));
+    println!(
+        "Test completed in {}ms: {} readers, {} writers, {} reader blocks",
+        elapsed,
+        total_reader_acqs,
+        total_writer_acqs,
+        stats.reader_blocks_due_to_writer.load(Ordering::SeqCst)
+    );
 });

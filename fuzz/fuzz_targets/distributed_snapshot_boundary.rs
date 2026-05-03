@@ -14,7 +14,7 @@
 #![no_main]
 
 use arbitrary::Arbitrary;
-use asupersync::distributed::snapshot::{RegionSnapshot, SnapshotError, MAX_METADATA_LEN};
+use asupersync::distributed::snapshot::{MAX_METADATA_LEN, RegionSnapshot, SnapshotError};
 use asupersync::record::region::RegionState;
 use libfuzzer_sys::fuzz_target;
 
@@ -122,7 +122,12 @@ fn arbitrary_magic_bytes(u: &mut arbitrary::Unstructured) -> arbitrary::Result<[
         0..=7 => *b"SNAP", // Valid magic most of the time
         8 => *b"SNAX",     // Corrupted magic
         9 => *b"XNAP",     // Byte-swapped
-        10 => [u.arbitrary()?, u.arbitrary()?, u.arbitrary()?, u.arbitrary()?], // Random
+        10 => [
+            u.arbitrary()?,
+            u.arbitrary()?,
+            u.arbitrary()?,
+            u.arbitrary()?,
+        ], // Random
         _ => *b"SNAP",
     })
 }
@@ -141,10 +146,10 @@ fn arbitrary_task_id(u: &mut arbitrary::Unstructured) -> arbitrary::Result<(u32,
 fn arbitrary_state_byte(u: &mut arbitrary::Unstructured) -> arbitrary::Result<u8> {
     let choice = u.int_in_range(0..=10)?;
     Ok(match choice {
-        0..=5 => u.int_in_range(0..=4)?, // Valid RegionState values (0-4)
+        0..=5 => u.int_in_range(0..=4)?,  // Valid RegionState values (0-4)
         6..=8 => u.int_in_range(5..=10)?, // Invalid but close
-        9 => 255,                          // Maximum value
-        10 => u.arbitrary()?,              // Random
+        9 => 255,                         // Maximum value
+        10 => u.arbitrary()?,             // Random
         _ => 0,
     })
 }
@@ -153,16 +158,18 @@ fn arbitrary_state_byte(u: &mut arbitrary::Unstructured) -> arbitrary::Result<u8
 fn arbitrary_task_state_byte(u: &mut arbitrary::Unstructured) -> arbitrary::Result<u8> {
     let choice = u.int_in_range(0..=10)?;
     Ok(match choice {
-        0..=5 => u.int_in_range(0..=4)?, // Valid TaskState values (0-4)
+        0..=5 => u.int_in_range(0..=4)?,  // Valid TaskState values (0-4)
         6..=8 => u.int_in_range(5..=10)?, // Invalid but close
-        9 => 255,                          // Maximum value
-        10 => u.arbitrary()?,              // Random
+        9 => 255,                         // Maximum value
+        10 => u.arbitrary()?,             // Random
         _ => 0,
     })
 }
 
 /// Generate bounded task list
-fn arbitrary_task_list(u: &mut arbitrary::Unstructured) -> arbitrary::Result<Vec<FuzzTaskSnapshot>> {
+fn arbitrary_task_list(
+    u: &mut arbitrary::Unstructured,
+) -> arbitrary::Result<Vec<FuzzTaskSnapshot>> {
     let count = u.int_in_range(0..=MAX_TASK_COUNT)?;
     let mut tasks = Vec::with_capacity(count);
     for _ in 0..count {

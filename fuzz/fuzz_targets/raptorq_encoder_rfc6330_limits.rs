@@ -15,8 +15,8 @@
 
 use arbitrary::{Arbitrary, Unstructured};
 use asupersync::codec::raptorq::{EncodingConfig, EncodingPipeline};
-use asupersync::types::resource::{PoolConfig, SymbolPool};
 use asupersync::types::ObjectId;
+use asupersync::types::resource::{PoolConfig, SymbolPool};
 use libfuzzer_sys::fuzz_target;
 
 /// RFC 6330 boundary testing parameters
@@ -60,13 +60,13 @@ enum DataPattern {
 fn k_boundary_generator(u: &mut Unstructured) -> arbitrary::Result<usize> {
     let choice: u8 = u.arbitrary()?;
     match choice % 8 {
-        0 => Ok(0),                    // Invalid: K=0
-        1 => Ok(1),                    // Minimum valid K
-        2 => Ok(56_402),               // Just under limit
-        3 => Ok(56_403),               // At limit (should work)
-        4 => Ok(56_404),               // Just over limit (should fail)
-        5 => Ok(56_500),               // Well over limit
-        6 => Ok(u32::MAX as usize),    // Extreme overflow
+        0 => Ok(0),                       // Invalid: K=0
+        1 => Ok(1),                       // Minimum valid K
+        2 => Ok(56_402),                  // Just under limit
+        3 => Ok(56_403),                  // At limit (should work)
+        4 => Ok(56_404),                  // Just over limit (should fail)
+        5 => Ok(56_500),                  // Well over limit
+        6 => Ok(u32::MAX as usize),       // Extreme overflow
         _ => u.int_in_range(1..=57_000)?, // Random around boundary
     }
 }
@@ -75,11 +75,11 @@ fn k_boundary_generator(u: &mut Unstructured) -> arbitrary::Result<usize> {
 fn symbol_size_generator(u: &mut Unstructured) -> arbitrary::Result<u16> {
     let choice: u8 = u.arbitrary()?;
     match choice % 6 {
-        0 => Ok(0),      // Invalid
-        1 => Ok(1),      // Minimum (creates large K)
-        2 => Ok(8),      // Small (common test size)
-        3 => Ok(64),     // Medium
-        4 => Ok(1024),   // Large (creates small K)
+        0 => Ok(0),                     // Invalid
+        1 => Ok(1),                     // Minimum (creates large K)
+        2 => Ok(8),                     // Small (common test size)
+        3 => Ok(64),                    // Medium
+        4 => Ok(1024),                  // Large (creates small K)
         _ => u.int_in_range(1..=1500)?, // Random valid range
     }
 }
@@ -91,10 +91,10 @@ fn repair_overhead_generator(u: &mut Unstructured) -> arbitrary::Result<f64> {
         0 => Ok(f64::NAN),
         1 => Ok(f64::INFINITY),
         2 => Ok(f64::NEG_INFINITY),
-        3 => Ok(0.0),               // Invalid: < 1.0
-        4 => Ok(0.5),               // Invalid: < 1.0
-        5 => Ok(1.0),               // Minimum valid
-        6 => Ok(1.5),               // Common value
+        3 => Ok(0.0), // Invalid: < 1.0
+        4 => Ok(0.5), // Invalid: < 1.0
+        5 => Ok(1.0), // Minimum valid
+        6 => Ok(1.5), // Common value
         _ => u.arbitrary::<f32>().map(|f| f.into())?,
     }
 }
@@ -103,11 +103,11 @@ fn repair_overhead_generator(u: &mut Unstructured) -> arbitrary::Result<f64> {
 fn block_size_generator(u: &mut Unstructured) -> arbitrary::Result<usize> {
     let choice: u8 = u.arbitrary()?;
     match choice % 6 {
-        0 => Ok(0),           // Invalid
-        1 => Ok(1),           // Minimum
-        2 => Ok(64),          // Small
-        3 => Ok(8192),        // Medium
-        4 => Ok(1_000_000),   // Large
+        0 => Ok(0),         // Invalid
+        1 => Ok(1),         // Minimum
+        2 => Ok(64),        // Small
+        3 => Ok(8192),      // Medium
+        4 => Ok(1_000_000), // Large
         _ => u.int_in_range(1..=2_000_000)?,
     }
 }
@@ -128,7 +128,7 @@ impl Rfc6330TestParams {
                 let target_bytes = self.k_target.saturating_mul(self.symbol_size as usize);
                 let clamped = target_bytes.min(10_000_000); // Prevent extreme allocation
                 vec![0xDD; clamped]
-            },
+            }
             DataPattern::NearMaxObject => {
                 let max_obj_size = self.max_block_size.saturating_mul(256); // MAX_SOURCE_BLOCKS
                 let near_max = max_obj_size.saturating_sub(1000).min(5_000_000);
@@ -157,15 +157,13 @@ fuzz_target!(|params: Rfc6330TestParams| {
     let object_id = ObjectId::new_for_test(42);
 
     // Test encoding - should handle all errors gracefully
-    let encoding_result: Result<Vec<_>, _> = pipeline
-        .encode(object_id, &data)
-        .collect();
+    let encoding_result: Result<Vec<_>, _> = pipeline.encode(object_id, &data).collect();
 
     match encoding_result {
         Ok(symbols) => {
             // If encoding succeeded, verify basic properties
             assert_symbols_valid(&symbols, &params);
-        },
+        }
         Err(err) => {
             // If encoding failed, verify error is appropriate
             assert_error_appropriate(&err, &params);
@@ -174,9 +172,8 @@ fuzz_target!(|params: Rfc6330TestParams| {
 
     // Test with explicit repair count override
     let mut pipeline2 = EncodingPipeline::new(config, SymbolPool::new(PoolConfig::default()));
-    let repair_result: Result<Vec<_>, _> = pipeline2
-        .encode_with_repair(object_id, &data, 10)
-        .collect();
+    let repair_result: Result<Vec<_>, _> =
+        pipeline2.encode_with_repair(object_id, &data, 10).collect();
 
     // Same validations for repair override
     match repair_result {
@@ -186,7 +183,13 @@ fuzz_target!(|params: Rfc6330TestParams| {
 });
 
 /// Verify that successfully encoded symbols have valid properties
-fn assert_symbols_valid(symbols: &[Result<asupersync::codec::raptorq::EncodedSymbol, asupersync::codec::raptorq::EncodingError>], params: &Rfc6330TestParams) {
+fn assert_symbols_valid(
+    symbols: &[Result<
+        asupersync::codec::raptorq::EncodedSymbol,
+        asupersync::codec::raptorq::EncodingError,
+    >],
+    params: &Rfc6330TestParams,
+) {
     for (idx, symbol_result) in symbols.iter().enumerate() {
         if let Ok(symbol) = symbol_result {
             // Symbol data length should match symbol_size
@@ -206,7 +209,10 @@ fn assert_symbols_valid(symbols: &[Result<asupersync::codec::raptorq::EncodedSym
 }
 
 /// Verify that encoding errors are appropriate for the given parameters
-fn assert_error_appropriate(err: &asupersync::codec::raptorq::EncodingError, params: &Rfc6330TestParams) {
+fn assert_error_appropriate(
+    err: &asupersync::codec::raptorq::EncodingError,
+    params: &Rfc6330TestParams,
+) {
     let err_str = err.to_string();
 
     // Check that error types match expected parameter violations
@@ -228,7 +234,8 @@ fn assert_error_appropriate(err: &asupersync::codec::raptorq::EncodingError, par
     } else if params.k_target > 56_403 {
         // Check for unsupported K error
         assert!(
-            err_str.contains("unsupported source block K=") || err_str.contains("UnsupportedSourceBlockSize"),
+            err_str.contains("unsupported source block K=")
+                || err_str.contains("UnsupportedSourceBlockSize"),
             "Expected unsupported K error for K={}, got: {err_str}",
             params.k_target
         );
@@ -242,11 +249,12 @@ fn assert_error_appropriate(err: &asupersync::codec::raptorq::EncodingError, par
 
     // All errors should be typed appropriately (no generic panics)
     assert!(
-        matches!(err,
-            asupersync::codec::raptorq::EncodingError::DataTooLarge { .. } |
-            asupersync::codec::raptorq::EncodingError::InvalidConfig { .. } |
-            asupersync::codec::raptorq::EncodingError::PoolExhausted |
-            asupersync::codec::raptorq::EncodingError::ComputationFailed { .. }
+        matches!(
+            err,
+            asupersync::codec::raptorq::EncodingError::DataTooLarge { .. }
+                | asupersync::codec::raptorq::EncodingError::InvalidConfig { .. }
+                | asupersync::codec::raptorq::EncodingError::PoolExhausted
+                | asupersync::codec::raptorq::EncodingError::ComputationFailed { .. }
         ),
         "Error has unexpected variant: {err:?}"
     );

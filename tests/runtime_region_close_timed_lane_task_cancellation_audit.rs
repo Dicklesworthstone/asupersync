@@ -232,9 +232,7 @@ fn worker_execute_polls_future_inside_catch_unwind_no_preemption() {
     let source = read("src/runtime/scheduler/three_lane.rs");
 
     assert!(
-        source.contains(
-            "std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {"
-        ),
+        source.contains("std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {"),
         "REGRESSION: worker execute() no longer wraps the poll \
          in catch_unwind. The single bound on a poll's effect is \
          this catch_unwind — without it, a panicking task takes \
@@ -344,8 +342,7 @@ fn region_state_after_begin_close_is_closing_not_open() {
     // The Closing variant must still exist on RegionState.
     assert!(
         source.contains("Closing")
-            && (source.contains("pub enum RegionState")
-                || source.contains("enum RegionState")),
+            && (source.contains("pub enum RegionState") || source.contains("enum RegionState")),
         "REGRESSION: RegionState::Closing variant is gone. The \
          close protocol depends on this state transition.",
     );
@@ -362,7 +359,8 @@ fn cancel_request_returns_tasks_to_cancel_for_lane_routing() {
 
     assert!(
         source.contains("pub fn cancel_request(")
-            && (source.contains("-> Vec<(TaskId, u8)>") || source.contains("-> Vec<(TaskId, u8)> {")),
+            && (source.contains("-> Vec<(TaskId, u8)>")
+                || source.contains("-> Vec<(TaskId, u8)> {")),
         "REGRESSION: cancel_request signature no longer returns \
          Vec<(TaskId, u8)>. The scheduler needs this list to \
          promote each task to the cancel lane via \
@@ -378,8 +376,7 @@ fn no_drain_timed_lane_to_completion_path_on_close() {
     // before honoring the cancel. EDF work can be unbounded;
     // running it to completion would violate close-quiescence
     // by stalling indefinitely.
-    let runtime_dir =
-        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/runtime/scheduler");
+    let runtime_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/runtime/scheduler");
     let mut findings = Vec::new();
 
     let suspect_drain_patterns = [

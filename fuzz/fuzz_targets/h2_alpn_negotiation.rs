@@ -116,8 +116,11 @@ fn test_alpn_negotiation(test_seq: &AlpnNegotiationSequence) {
             simulate_alpn_negotiation(known_protocol, test_seq.h2_only_server)
         }));
 
-        assert!(alpn_result.is_ok(), "Known protocol should not panic: {:?}",
-            String::from_utf8_lossy(known_protocol));
+        assert!(
+            alpn_result.is_ok(),
+            "Known protocol should not panic: {:?}",
+            String::from_utf8_lossy(known_protocol)
+        );
 
         if let Ok(negotiation_result) = alpn_result {
             // Validate h2-only server behavior
@@ -132,8 +135,10 @@ fn test_alpn_negotiation(test_seq: &AlpnNegotiationSequence) {
                         }
                     }
                 } else if known_protocol == b"http/1.1" {
-                    assert!(matches!(negotiation_result, AlpnResult::Rejected),
-                        "http/1.1 must be rejected on h2-only server");
+                    assert!(
+                        matches!(negotiation_result, AlpnResult::Rejected),
+                        "http/1.1 must be rejected on h2-only server"
+                    );
                 }
             }
         }
@@ -145,8 +150,11 @@ fn test_alpn_negotiation(test_seq: &AlpnNegotiationSequence) {
             simulate_alpn_negotiation(&protocol.data, test_seq.h2_only_server)
         }));
 
-        assert!(alpn_result.is_ok(), "Arbitrary protocol should not panic: {:?}",
-            protocol.data);
+        assert!(
+            alpn_result.is_ok(),
+            "Arbitrary protocol should not panic: {:?}",
+            protocol.data
+        );
     }
 }
 
@@ -170,22 +178,28 @@ fn test_h2_only_enforcement(test_seq: &AlpnNegotiationSequence) {
             simulate_alpn_negotiation(forbidden_protocol, true)
         }));
 
-        assert!(negotiation_result.is_ok(),
+        assert!(
+            negotiation_result.is_ok(),
             "h2-only server should not panic on forbidden protocol: {:?}",
-            String::from_utf8_lossy(forbidden_protocol));
+            String::from_utf8_lossy(forbidden_protocol)
+        );
 
         if let Ok(result) = negotiation_result {
-            assert!(matches!(result, AlpnResult::Rejected | AlpnResult::NoMatch),
+            assert!(
+                matches!(result, AlpnResult::Rejected | AlpnResult::NoMatch),
                 "h2-only server must reject protocol: {:?}",
-                String::from_utf8_lossy(forbidden_protocol));
+                String::from_utf8_lossy(forbidden_protocol)
+            );
         }
     }
 
     // Test that h2 is still accepted
     let h2_result = simulate_alpn_negotiation(b"h2", true);
     // h2 should be accepted (or at least not rejected for protocol reasons)
-    assert!(!matches!(h2_result, AlpnResult::Rejected),
-        "h2-only server should not reject h2 protocol");
+    assert!(
+        !matches!(h2_result, AlpnResult::Rejected),
+        "h2-only server should not reject h2 protocol"
+    );
 }
 
 /// Test handling of malformed and edge-case protocols
@@ -194,26 +208,20 @@ fn test_malformed_protocols(test_seq: &AlpnNegotiationSequence) {
         // Oversized protocol names
         vec![b'x'; 256],
         vec![b'a'; 1024],
-
         // Binary data
         (0u8..=255u8).collect::<Vec<u8>>(),
-
         // Control characters
         vec![0x00, 0x01, 0x02, 0x1f, 0x7f],
-
         // Unicode/UTF-8 sequences
         "🚀protocol".as_bytes().to_vec(),
         "protocolé".as_bytes().to_vec(),
-
         // Protocol-like but malformed
         b"h2\x00".to_vec(),
         b"http/1.1\xff".to_vec(),
         b"h2\r\n".to_vec(),
-
         // Very long valid-looking protocols
         format!("http/{}", "1".repeat(100)).into_bytes(),
         format!("custom-protocol-{}", "x".repeat(200)).into_bytes(),
-
         // Empty and single chars
         vec![],
         vec![b'x'],
@@ -225,9 +233,12 @@ fn test_malformed_protocols(test_seq: &AlpnNegotiationSequence) {
             simulate_alpn_negotiation(malformed, test_seq.h2_only_server)
         }));
 
-        assert!(malformed_result.is_ok(),
+        assert!(
+            malformed_result.is_ok(),
             "Malformed protocol should not panic: {:?} (len={})",
-            String::from_utf8_lossy(malformed), malformed.len());
+            String::from_utf8_lossy(malformed),
+            malformed.len()
+        );
 
         if let Ok(result) = malformed_result {
             // Malformed protocols should generally be rejected or ignored
@@ -253,9 +264,12 @@ fn test_malformed_protocols(test_seq: &AlpnNegotiationSequence) {
             simulate_alpn_negotiation(&protocol.data, test_seq.h2_only_server)
         }));
 
-        assert!(fuzz_result.is_ok(),
+        assert!(
+            fuzz_result.is_ok(),
             "Fuzz protocol should not panic: {:?} (len={})",
-            protocol.data, protocol.data.len());
+            protocol.data,
+            protocol.data.len()
+        );
     }
 }
 
@@ -287,7 +301,8 @@ fn simulate_alpn_negotiation(protocol: &[u8], h2_only: bool) -> AlpnResult {
     }
 
     // Check for control characters that are invalid in ALPN
-    if protocol.iter().any(|&b| b < 0x20 && b != 0x09) { // Allow tab but not other control chars
+    if protocol.iter().any(|&b| b < 0x20 && b != 0x09) {
+        // Allow tab but not other control chars
         return AlpnResult::Rejected;
     }
 
@@ -308,7 +323,7 @@ fn simulate_alpn_negotiation(protocol: &[u8], h2_only: bool) -> AlpnResult {
         match protocol_str {
             "h2" | "http/1.1" => AlpnResult::Accepted,
             "http/1.0" | "spdy/3.1" => AlpnResult::Rejected, // Deprecated/unsupported
-            "h2c" => AlpnResult::Rejected, // Cleartext not allowed on TLS
+            "h2c" => AlpnResult::Rejected,                   // Cleartext not allowed on TLS
             _ => AlpnResult::NoMatch,
         }
     }
@@ -320,18 +335,14 @@ fn generate_multi_protocol_scenarios() -> Vec<Vec<Vec<u8>>> {
         // Standard client preferences
         vec![b"h2".to_vec(), b"http/1.1".to_vec()],
         vec![b"http/1.1".to_vec(), b"h2".to_vec()], // Reverse order
-
         // With deprecated protocols
         vec![b"h2".to_vec(), b"spdy/3.1".to_vec(), b"http/1.1".to_vec()],
-
         // Edge cases
         vec![b"h2c".to_vec(), b"h2".to_vec()], // Cleartext first
         vec![b"unknown".to_vec(), b"h2".to_vec()],
         vec![b"".to_vec(), b"h2".to_vec()], // Empty protocol
-
         // Only unsupported protocols
         vec![b"spdy/2".to_vec(), b"custom".to_vec()],
-
         // Single protocol offers
         vec![b"h2".to_vec()],
         vec![b"http/1.1".to_vec()],
@@ -357,20 +368,38 @@ mod tests {
 
     #[test]
     fn test_multi_protocol_server_accepts_both() {
-        assert_eq!(simulate_alpn_negotiation(b"h2", false), AlpnResult::Accepted);
-        assert_eq!(simulate_alpn_negotiation(b"http/1.1", false), AlpnResult::Accepted);
+        assert_eq!(
+            simulate_alpn_negotiation(b"h2", false),
+            AlpnResult::Accepted
+        );
+        assert_eq!(
+            simulate_alpn_negotiation(b"http/1.1", false),
+            AlpnResult::Accepted
+        );
     }
 
     #[test]
     fn test_malformed_protocols_rejected() {
         assert_eq!(simulate_alpn_negotiation(b"", true), AlpnResult::Rejected);
-        assert_eq!(simulate_alpn_negotiation(&[0x00], true), AlpnResult::Rejected);
-        assert_eq!(simulate_alpn_negotiation(&vec![b'x'; 300], true), AlpnResult::Rejected);
+        assert_eq!(
+            simulate_alpn_negotiation(&[0x00], true),
+            AlpnResult::Rejected
+        );
+        assert_eq!(
+            simulate_alpn_negotiation(&vec![b'x'; 300], true),
+            AlpnResult::Rejected
+        );
     }
 
     #[test]
     fn test_cleartext_h2_rejected() {
-        assert_eq!(simulate_alpn_negotiation(b"h2c", true), AlpnResult::Rejected);
-        assert_eq!(simulate_alpn_negotiation(b"h2c", false), AlpnResult::Rejected);
+        assert_eq!(
+            simulate_alpn_negotiation(b"h2c", true),
+            AlpnResult::Rejected
+        );
+        assert_eq!(
+            simulate_alpn_negotiation(b"h2c", false),
+            AlpnResult::Rejected
+        );
     }
 }

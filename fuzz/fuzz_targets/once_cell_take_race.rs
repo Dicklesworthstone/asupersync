@@ -12,12 +12,12 @@
 
 #![no_main]
 
-use libfuzzer_sys::fuzz_target;
 use arbitrary::{Arbitrary, Unstructured};
 use asupersync::sync::OnceCell;
-use std::sync::atomic::{AtomicUsize, AtomicBool, Ordering};
-use std::sync::Arc;
+use libfuzzer_sys::fuzz_target;
 use std::collections::HashMap;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::thread;
 use std::time::Duration;
 
@@ -46,7 +46,11 @@ enum TakeRaceOperation {
     /// Take followed immediately by set
     TakeThenSet { taker_id: u8, value: i32 },
     /// Set followed immediately by take
-    SetThenTake { setter_id: u8, taker_id: u8, value: i32 },
+    SetThenTake {
+        setter_id: u8,
+        taker_id: u8,
+        value: i32,
+    },
     /// Rapid take-set-get cycle
     RapidCycle { actor_id: u8, cycles: u8 },
     /// Check state consistency
@@ -198,7 +202,9 @@ fn test_take_race_scenario(
         None => OnceCell::new(),
     };
 
-    let max_ops = config.max_operations.min(OnceCellTakeConfig::max_operations()) as usize;
+    let max_ops = config
+        .max_operations
+        .min(OnceCellTakeConfig::max_operations()) as usize;
 
     for operation in config.operations.iter().take(max_ops) {
         match operation {
@@ -216,7 +222,10 @@ fn test_take_race_scenario(
                 }
             }
 
-            TakeRaceOperation::Set { setter_id: _, value } => {
+            TakeRaceOperation::Set {
+                setter_id: _,
+                value,
+            } => {
                 tracker.record_set_attempted();
 
                 let result = cell.set(*value);
@@ -252,7 +261,10 @@ fn test_take_race_scenario(
                 }
 
                 // Prepare shared cell
-                let cell_arc = Arc::new(std::sync::Mutex::new(std::mem::replace(&mut cell, OnceCell::new())));
+                let cell_arc = Arc::new(std::sync::Mutex::new(std::mem::replace(
+                    &mut cell,
+                    OnceCell::new(),
+                )));
                 let results = Arc::new(std::sync::Mutex::new(Vec::new()));
                 let mut handles = Vec::new();
 
@@ -296,7 +308,8 @@ fn test_take_race_scenario(
                     tracker.record_invariant_violation();
                     return Err(format!(
                         "Multiple concurrent takes succeeded: {} out of {} attempts",
-                        successful_takes.len(), concurrent_count
+                        successful_takes.len(),
+                        concurrent_count
                     ));
                 }
 
@@ -343,13 +356,20 @@ fn test_take_race_scenario(
                         // If take succeeded, set should succeed (cell should be uninitialized)
                         if take_result.is_some() {
                             tracker.record_invariant_violation();
-                            return Err("Set failed after successful take - cell should be uninitialized".to_string());
+                            return Err(
+                                "Set failed after successful take - cell should be uninitialized"
+                                    .to_string(),
+                            );
                         }
                     }
                 }
             }
 
-            TakeRaceOperation::SetThenTake { setter_id: _, taker_id: _, value } => {
+            TakeRaceOperation::SetThenTake {
+                setter_id: _,
+                taker_id: _,
+                value,
+            } => {
                 tracker.record_set_attempted();
                 let set_result = cell.set(*value);
 
@@ -395,7 +415,10 @@ fn test_take_race_scenario(
                 }
             }
 
-            TakeRaceOperation::RapidCycle { actor_id: _, cycles } => {
+            TakeRaceOperation::RapidCycle {
+                actor_id: _,
+                cycles,
+            } => {
                 let cycle_count = (*cycles).min(OnceCellTakeConfig::max_rapid_cycles()) as usize;
 
                 for i in 0..cycle_count {
@@ -444,14 +467,20 @@ fn test_take_race_scenario(
                         None => {
                             tracker.record_take_failed();
                             tracker.record_invariant_violation();
-                            return Err(format!("Rapid cycle {}: take failed after successful set", i));
+                            return Err(format!(
+                                "Rapid cycle {}: take failed after successful set",
+                                i
+                            ));
                         }
                     }
 
                     // Verify cell is uninitialized after take
                     if cell.is_initialized() {
                         tracker.record_invariant_violation();
-                        return Err(format!("Rapid cycle {}: cell still initialized after take", i));
+                        return Err(format!(
+                            "Rapid cycle {}: cell still initialized after take",
+                            i
+                        ));
                     }
                 }
             }
@@ -509,9 +538,7 @@ fuzz_target!(|data: &[u8]| {
         let tracker2 = TakeRaceTracker::new();
         let config2 = config.clone();
 
-        let handle = thread::spawn(move || {
-            test_take_race_scenario(&config2, &tracker2)
-        });
+        let handle = thread::spawn(move || test_take_race_scenario(&config2, &tracker2));
 
         match handle.join() {
             Ok(Ok(())) => {

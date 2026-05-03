@@ -1,7 +1,7 @@
 #![no_main]
 
-use libfuzzer_sys::fuzz_target;
 use arbitrary::{Arbitrary, Unstructured};
+use libfuzzer_sys::fuzz_target;
 use std::collections::HashMap;
 
 // Maximum bounds to prevent OOM during fuzzing
@@ -107,7 +107,8 @@ impl NormalizedResource {
 /// Sanitize a string for use as an attribute key or value.
 fn sanitize_string(input: &str, max_length: usize) -> String {
     // Remove control characters and limit length
-    let sanitized: String = input.chars()
+    let sanitized: String = input
+        .chars()
         .filter(|c| !c.is_control() && *c != '\0')
         .take(max_length)
         .collect();
@@ -174,7 +175,9 @@ fn test_last_wins_conflict_resolution(resources: &[NormalizedResource]) -> Resul
                     return Err(format!(
                         "Last-wins violation for key '{}': expected '{}', got '{}'\n\
                          Resources: {:?}",
-                        key, expected_value, merged_value,
+                        key,
+                        expected_value,
+                        merged_value,
                         resources.iter().map(|r| &r.attributes).collect::<Vec<_>>()
                     ));
                 }
@@ -183,7 +186,8 @@ fn test_last_wins_conflict_resolution(resources: &[NormalizedResource]) -> Resul
                 return Err(format!(
                     "Merged result contains key '{}' = '{}' but no source resource has it\n\
                      Resources: {:?}",
-                    key, merged_value,
+                    key,
+                    merged_value,
                     resources.iter().map(|r| &r.attributes).collect::<Vec<_>>()
                 ));
             }
@@ -277,7 +281,8 @@ fuzz_target!(|data: &[u8]| {
     };
 
     // Limit the number of resources and attributes to prevent OOM
-    let limited_resources: Vec<_> = fuzz_input.resources
+    let limited_resources: Vec<_> = fuzz_input
+        .resources
         .into_iter()
         .take(MAX_RESOURCES_TO_MERGE)
         .map(|mut resource| {

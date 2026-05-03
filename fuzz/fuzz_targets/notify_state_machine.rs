@@ -1,8 +1,8 @@
 #![no_main]
 
 use arbitrary::Arbitrary;
-use asupersync::sync::Notify;
 use asupersync::Cx;
+use asupersync::sync::Notify;
 use libfuzzer_sys::fuzz_target;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -33,9 +33,7 @@ enum NotifyOperation {
         waiter_id: u8, // Bounded to prevent excessive resource usage
     },
     /// Cancel a specific waiter
-    CancelWaiter {
-        waiter_id: u8,
-    },
+    CancelWaiter { waiter_id: u8 },
     /// Notify one waiter
     NotifyOne,
     /// Notify all waiters
@@ -63,7 +61,9 @@ const MAX_DELAY_MS: u64 = 50;
 
 fuzz_target!(|input: NotifyStateMachineFuzz| {
     // Apply resource limits
-    let max_ops = (input.config.max_operations as usize).min(MAX_OPERATIONS).max(1);
+    let max_ops = (input.config.max_operations as usize)
+        .min(MAX_OPERATIONS)
+        .max(1);
     let max_waiters = (input.config.max_waiters as usize).min(MAX_WAITERS).max(1);
     let operations: Vec<_> = input.operations.into_iter().take(max_ops).collect();
 
@@ -90,7 +90,9 @@ fuzz_target!(|input: NotifyStateMachineFuzz| {
                 let bounded_id = (*waiter_id as usize) % max_waiters;
 
                 // Only start if not already active
-                if !active_waiters.contains_key(&bounded_id) && !cancelled_waiters.contains(&bounded_id) {
+                if !active_waiters.contains_key(&bounded_id)
+                    && !cancelled_waiters.contains(&bounded_id)
+                {
                     let waiter_sequence_id = next_waiter_id;
                     next_waiter_id += 1;
 
@@ -111,7 +113,7 @@ fuzz_target!(|input: NotifyStateMachineFuzz| {
                     &active_waiters,
                     &cancelled_waiters,
                     op_index,
-                    "after start_waiter"
+                    "after start_waiter",
                 );
             }
 
@@ -130,7 +132,7 @@ fuzz_target!(|input: NotifyStateMachineFuzz| {
                     &active_waiters,
                     &cancelled_waiters,
                     op_index,
-                    "after cancel_waiter"
+                    "after cancel_waiter",
                 );
             }
 
@@ -149,7 +151,8 @@ fuzz_target!(|input: NotifyStateMachineFuzz| {
                     assert!(
                         waiters_after <= waiters_before,
                         "notify_one should not increase waiter count: before={}, after={}",
-                        waiters_before, waiters_after
+                        waiters_before,
+                        waiters_after
                     );
 
                     let woken_count = waiters_before - waiters_after;
@@ -165,7 +168,7 @@ fuzz_target!(|input: NotifyStateMachineFuzz| {
                     &active_waiters,
                     &cancelled_waiters,
                     op_index,
-                    "after notify_one"
+                    "after notify_one",
                 );
             }
 
@@ -183,7 +186,8 @@ fuzz_target!(|input: NotifyStateMachineFuzz| {
                 assert!(
                     waiters_after <= waiters_before,
                     "notify_waiters should not increase waiter count: before={}, after={}",
-                    waiters_before, waiters_after
+                    waiters_before,
+                    waiters_after
                 );
 
                 verify_notify_invariants(
@@ -191,7 +195,7 @@ fuzz_target!(|input: NotifyStateMachineFuzz| {
                     &active_waiters,
                     &cancelled_waiters,
                     op_index,
-                    "after notify_waiters"
+                    "after notify_waiters",
                 );
             }
 
@@ -202,7 +206,8 @@ fuzz_target!(|input: NotifyStateMachineFuzz| {
                 assert!(
                     actual_count <= max_waiters,
                     "Waiter count {} exceeds maximum {}",
-                    actual_count, max_waiters
+                    actual_count,
+                    max_waiters
                 );
 
                 verify_notify_invariants(
@@ -210,7 +215,7 @@ fuzz_target!(|input: NotifyStateMachineFuzz| {
                     &active_waiters,
                     &cancelled_waiters,
                     op_index,
-                    "during check_waiter_count"
+                    "during check_waiter_count",
                 );
             }
 
@@ -266,7 +271,10 @@ fn start_waiter_background(
 
         // Record that this waiter completed (simplified)
         let notification_order = notification_counter.fetch_add(1, Ordering::SeqCst);
-        wake_order.lock().unwrap().push((waiter_id, waiter_sequence_id, notification_order));
+        wake_order
+            .lock()
+            .unwrap()
+            .push((waiter_id, waiter_sequence_id, notification_order));
     });
 }
 
@@ -284,7 +292,10 @@ fn verify_notify_invariants(
     assert!(
         waiter_count <= MAX_WAITERS,
         "Op {} {}: waiter count {} exceeds maximum {}",
-        op_index, context, waiter_count, MAX_WAITERS
+        op_index,
+        context,
+        waiter_count,
+        MAX_WAITERS
     );
 
     // Note: We can't easily verify the exact relationship between active_waiters
@@ -319,8 +330,12 @@ fn verify_final_state(
 
     // Log summary for debugging
     if !wake_events.is_empty() {
-        eprintln!("Wake summary: {} events, {} notify_one, {} notify_waiters",
-                  wake_events.len(), notify_one_count, notify_waiters_count);
+        eprintln!(
+            "Wake summary: {} events, {} notify_one, {} notify_waiters",
+            wake_events.len(),
+            notify_one_count,
+            notify_waiters_count
+        );
     }
 }
 
@@ -357,7 +372,9 @@ fn verify_no_waiter_starvation(wake_events: &[(usize, u64, u64)]) {
         assert!(
             (inversions as f64 / total_events as f64) < 0.5,
             "Waiter {} has too many sequence inversions: {}/{} (may indicate starvation)",
-            waiter_id, inversions, total_events
+            waiter_id,
+            inversions,
+            total_events
         );
     }
 }
@@ -366,7 +383,7 @@ fn verify_no_waiter_starvation(wake_events: &[(usize, u64, u64)]) {
 fn count_sequence_inversions(sequences: &[(u64, u64)]) -> usize {
     let mut inversions = 0;
     for i in 0..sequences.len() {
-        for j in i+1..sequences.len() {
+        for j in i + 1..sequences.len() {
             let (seq_i, _) = sequences[i];
             let (seq_j, _) = sequences[j];
             if seq_i > seq_j {
@@ -398,6 +415,7 @@ fn verify_no_double_wake(wake_events: &[(usize, u64, u64)], notify_one_count: u6
     assert!(
         wake_events.len() <= notify_one_count as usize + 100, // Allow some slack for notify_waiters
         "Too many wake events: {} events from {} notify_one calls",
-        wake_events.len(), notify_one_count
+        wake_events.len(),
+        notify_one_count
     );
 }

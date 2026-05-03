@@ -1,7 +1,7 @@
 #![no_main]
 
-use libfuzzer_sys::fuzz_target;
 use arbitrary::{Arbitrary, Unstructured};
+use libfuzzer_sys::fuzz_target;
 use std::collections::HashMap;
 
 // Mock HTTP/2 frame types for fuzzing
@@ -62,10 +62,10 @@ const PROBLEMATIC_HEADERS: &[(&str, &str)] = &[
     (":method", "GET"),
     (":scheme", "https"),
     (":authority", "example.com"),
-    ("connection", "close"), // Forbidden in HTTP/2
-    ("upgrade", "websocket"), // Forbidden in HTTP/2
+    ("connection", "close"),            // Forbidden in HTTP/2
+    ("upgrade", "websocket"),           // Forbidden in HTTP/2
     ("proxy-connection", "keep-alive"), // Forbidden in HTTP/2
-    ("transfer-encoding", "chunked"), // Forbidden in HTTP/2
+    ("transfer-encoding", "chunked"),   // Forbidden in HTTP/2
     ("x-custom-trailer", "valid-trailer-value"),
     ("content-length", "0"), // Should not be in trailers
 ];
@@ -126,9 +126,18 @@ fn test_valid_trailers_only_response(test_case: &TrailersOnlyTestCase) {
 
     // Should succeed for valid trailers
     if is_valid_trailers_only(&test_case.headers) {
-        assert!(result.is_ok(), "Valid trailers-only response should be accepted");
-        assert!(result.unwrap().body_empty, "Trailers-only response should have empty body");
-        assert!(result.unwrap().has_end_stream, "Trailers-only response should have END_STREAM");
+        assert!(
+            result.is_ok(),
+            "Valid trailers-only response should be accepted"
+        );
+        assert!(
+            result.unwrap().body_empty,
+            "Trailers-only response should have empty body"
+        );
+        assert!(
+            result.unwrap().has_end_stream,
+            "Trailers-only response should have END_STREAM"
+        );
     }
 }
 
@@ -154,7 +163,10 @@ fn test_malformed_trailer_headers(test_case: &TrailersOnlyTestCase) {
 
     // Malformed headers should be rejected appropriately
     if contains_forbidden_headers(&malformed_headers) {
-        assert!(result.is_err(), "Forbidden headers in trailers should be rejected");
+        assert!(
+            result.is_err(),
+            "Forbidden headers in trailers should be rejected"
+        );
     }
 }
 
@@ -183,7 +195,10 @@ fn test_body_with_end_stream(test_case: &TrailersOnlyTestCase) {
     // The presence of body data makes this a regular response with trailers
     assert!(data_result.is_ok(), "DATA frame itself should be valid");
     if let Ok(response) = headers_result {
-        assert!(!response.is_trailers_only(), "Response with body data cannot be trailers-only");
+        assert!(
+            !response.is_trailers_only(),
+            "Response with body data cannot be trailers-only"
+        );
     }
 }
 
@@ -201,7 +216,10 @@ fn test_missing_end_stream(test_case: &TrailersOnlyTestCase) {
 
     // Missing END_STREAM should either be rejected or not treated as trailers-only
     if let Ok(response) = result {
-        assert!(!response.is_trailers_only(), "Headers without END_STREAM cannot be trailers-only");
+        assert!(
+            !response.is_trailers_only(),
+            "Headers without END_STREAM cannot be trailers-only"
+        );
     }
 }
 
@@ -212,7 +230,8 @@ fn test_duplicate_end_stream(test_case: &TrailersOnlyTestCase) {
     }
 
     // Create first frame with END_STREAM
-    let mut first_frame = create_headers_frame(&test_case.headers[..test_case.headers.len().min(1)]);
+    let mut first_frame =
+        create_headers_frame(&test_case.headers[..test_case.headers.len().min(1)]);
     first_frame.flags |= END_STREAM_FLAG | END_HEADERS_FLAG;
 
     // Create second frame also with END_STREAM (protocol violation)
@@ -224,8 +243,14 @@ fn test_duplicate_end_stream(test_case: &TrailersOnlyTestCase) {
     let second_result = process_h2_frame(&second_frame);
 
     // Second END_STREAM should be rejected
-    assert!(first_result.is_ok() || first_result.is_err(), "First frame processed");
-    assert!(second_result.is_err(), "Duplicate END_STREAM should be rejected");
+    assert!(
+        first_result.is_ok() || first_result.is_err(),
+        "First frame processed"
+    );
+    assert!(
+        second_result.is_err(),
+        "Duplicate END_STREAM should be rejected"
+    );
 }
 
 /// Test forbidden pseudo-headers in trailers
@@ -237,17 +262,32 @@ fn test_forbidden_pseudo_headers(test_case: &TrailersOnlyTestCase) {
     // Add pseudo-headers which are forbidden in trailers
     let mut trailer_headers = test_case.headers.clone();
     trailer_headers.extend([
-        FuzzedHeader { name: ":path".to_string(), value: "/forbidden".to_string() },
-        FuzzedHeader { name: ":method".to_string(), value: "GET".to_string() },
-        FuzzedHeader { name: ":scheme".to_string(), value: "https".to_string() },
-        FuzzedHeader { name: ":status".to_string(), value: "200".to_string() },
+        FuzzedHeader {
+            name: ":path".to_string(),
+            value: "/forbidden".to_string(),
+        },
+        FuzzedHeader {
+            name: ":method".to_string(),
+            value: "GET".to_string(),
+        },
+        FuzzedHeader {
+            name: ":scheme".to_string(),
+            value: "https".to_string(),
+        },
+        FuzzedHeader {
+            name: ":status".to_string(),
+            value: "200".to_string(),
+        },
     ]);
 
     let headers_frame = create_headers_frame(&trailer_headers);
     let result = process_h2_frame(&headers_frame);
 
     // Pseudo-headers in trailers should be rejected
-    assert!(result.is_err(), "Pseudo-headers in trailers should be rejected");
+    assert!(
+        result.is_err(),
+        "Pseudo-headers in trailers should be rejected"
+    );
 }
 
 /// Test oversized trailer headers
@@ -258,12 +298,10 @@ fn test_oversized_trailers(test_case: &TrailersOnlyTestCase) {
 
     // Create extremely large headers
     let large_value = "x".repeat(100_000); // 100KB header value
-    let oversized_headers = vec![
-        FuzzedHeader {
-            name: "x-large-header".to_string(),
-            value: large_value,
-        }
-    ];
+    let oversized_headers = vec![FuzzedHeader {
+        name: "x-large-header".to_string(),
+        value: large_value,
+    }];
 
     let headers_frame = create_headers_frame(&oversized_headers);
     let result = process_h2_frame(&headers_frame);
@@ -273,7 +311,10 @@ fn test_oversized_trailers(test_case: &TrailersOnlyTestCase) {
     match result {
         Ok(response) => {
             // If accepted, should still maintain protocol compliance
-            assert!(response.headers.len() <= 1000, "Should limit number of headers");
+            assert!(
+                response.headers.len() <= 1000,
+                "Should limit number of headers"
+            );
         }
         Err(_) => {
             // Rejection is acceptable for oversized headers
@@ -287,12 +328,10 @@ fn test_empty_header_names(test_case: &TrailersOnlyTestCase) {
         return;
     }
 
-    let headers_with_empty_name = vec![
-        FuzzedHeader {
-            name: "".to_string(), // Empty header name
-            value: "some-value".to_string(),
-        }
-    ];
+    let headers_with_empty_name = vec![FuzzedHeader {
+        name: "".to_string(), // Empty header name
+        value: "some-value".to_string(),
+    }];
 
     let headers_frame = create_headers_frame(&headers_with_empty_name);
     let result = process_h2_frame(&headers_frame);
@@ -327,8 +366,8 @@ fn test_invalid_header_characters(test_case: &TrailersOnlyTestCase) {
         // Lenient implementations might accept them
         // Either is acceptable as long as it's consistent
         match result {
-            Ok(_) => {}, // Lenient handling
-            Err(_) => {}, // Strict rejection
+            Ok(_) => {}  // Lenient handling
+            Err(_) => {} // Strict rejection
         }
     }
 }
@@ -372,14 +411,20 @@ fn test_continuation_trailers(test_case: &TrailersOnlyTestCase) {
         if i == results.len() - 1 {
             // Last frame should complete the headers
             match result {
-                Ok(response) => assert!(response.headers_complete, "Final frame should complete headers"),
-                Err(_) => {}, // Error is acceptable if headers are malformed
+                Ok(response) => assert!(
+                    response.headers_complete,
+                    "Final frame should complete headers"
+                ),
+                Err(_) => {} // Error is acceptable if headers are malformed
             }
         } else {
             // Intermediate frames should be pending or error
             match result {
-                Ok(response) => assert!(!response.headers_complete, "Intermediate frame should not complete headers"),
-                Err(_) => {}, // Error is acceptable
+                Ok(response) => assert!(
+                    !response.headers_complete,
+                    "Intermediate frame should not complete headers"
+                ),
+                Err(_) => {} // Error is acceptable
             }
         }
     }
@@ -424,8 +469,8 @@ fn is_valid_trailers_only(headers: &[FuzzedHeader]) -> bool {
 
         // Certain headers forbidden in trailers
         match header.name.to_lowercase().as_str() {
-            "content-length" | "transfer-encoding" | "connection" |
-            "upgrade" | "proxy-connection" => return false,
+            "content-length" | "transfer-encoding" | "connection" | "upgrade"
+            | "proxy-connection" => return false,
             _ => {}
         }
     }
@@ -440,8 +485,8 @@ fn contains_forbidden_headers(headers: &[FuzzedHeader]) -> bool {
 
         // Check for connection-specific headers forbidden in HTTP/2
         match header.name.to_lowercase().as_str() {
-            "connection" | "upgrade" | "proxy-connection" |
-            "transfer-encoding" | "content-length" => return true,
+            "connection" | "upgrade" | "proxy-connection" | "transfer-encoding"
+            | "content-length" => return true,
             _ => {}
         }
     }
@@ -483,11 +528,13 @@ impl MockH2Response {
 // Mock frame processing function
 fn process_h2_frame(frame: &FuzzedFrame) -> Result<MockH2Response, String> {
     // Simulate basic frame validation
-    if frame.stream_id == 0 && frame.frame_type != 0x4 { // Not SETTINGS frame
+    if frame.stream_id == 0 && frame.frame_type != 0x4 {
+        // Not SETTINGS frame
         return Err("Stream ID 0 forbidden for non-connection frames".to_string());
     }
 
-    if frame.payload.len() > 16_384 { // HTTP/2 default max frame size
+    if frame.payload.len() > 16_384 {
+        // HTTP/2 default max frame size
         return Err("Frame size exceeds maximum".to_string());
     }
 
@@ -519,14 +566,12 @@ fn process_h2_frame(frame: &FuzzedFrame) -> Result<MockH2Response, String> {
                 headers_complete: frame.flags & END_HEADERS_FLAG != 0,
             })
         }
-        DATA_FRAME_TYPE => {
-            Ok(MockH2Response {
-                headers: HashMap::new(),
-                body_empty: frame.payload.is_empty(),
-                has_end_stream: frame.flags & END_STREAM_FLAG != 0,
-                headers_complete: true,
-            })
-        }
+        DATA_FRAME_TYPE => Ok(MockH2Response {
+            headers: HashMap::new(),
+            body_empty: frame.payload.is_empty(),
+            has_end_stream: frame.flags & END_STREAM_FLAG != 0,
+            headers_complete: true,
+        }),
         CONTINUATION_FRAME_TYPE => {
             let headers = decode_mock_headers(&frame.payload)?;
 

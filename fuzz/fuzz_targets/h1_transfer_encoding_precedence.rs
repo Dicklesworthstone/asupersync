@@ -189,10 +189,10 @@ pub enum PrecedenceViolationType {
 /// Violation severity levels
 #[derive(Debug, PartialEq, Clone)]
 pub enum ViolationSeverity {
-    Critical,  // Security issue, request smuggling risk
-    High,      // RFC violation, interop failure risk
-    Medium,    // Compatibility issue
-    Low,       // Style/best practice issue
+    Critical, // Security issue, request smuggling risk
+    High,     // RFC violation, interop failure risk
+    Medium,   // Compatibility issue
+    Low,      // Style/best practice issue
 }
 
 /// Header conflict information
@@ -217,7 +217,10 @@ impl MockTransferEncodingAnalyzer {
     }
 
     /// Analyze Transfer-Encoding precedence in HTTP message
-    pub fn analyze_precedence(&self, test_case: &TransferEncodingPrecedenceTestCase) -> Result<PrecedenceAnalysis, String> {
+    pub fn analyze_precedence(
+        &self,
+        test_case: &TransferEncodingPrecedenceTestCase,
+    ) -> Result<PrecedenceAnalysis, String> {
         let headers = self.build_headers(test_case)?;
         let _raw_headers = self.build_raw_headers(&headers)?;
 
@@ -227,7 +230,8 @@ impl MockTransferEncodingAnalyzer {
         let mut conflicts = Vec::new();
 
         // Analyze Transfer-Encoding headers
-        let te_analysis = self.analyze_transfer_encoding(&te_headers, &test_case.http_version, &mut violations);
+        let te_analysis =
+            self.analyze_transfer_encoding(&te_headers, &test_case.http_version, &mut violations);
 
         // Analyze Content-Length headers
         let cl_analysis = self.analyze_content_length(&cl_headers, &mut violations);
@@ -238,7 +242,7 @@ impl MockTransferEncodingAnalyzer {
             &cl_analysis,
             &test_case.precedence_config,
             &mut violations,
-            &mut conflicts
+            &mut conflicts,
         )?;
 
         // Calculate RFC compliance score
@@ -255,7 +259,10 @@ impl MockTransferEncodingAnalyzer {
     }
 
     /// Build headers map from test case
-    fn build_headers(&self, test_case: &TransferEncodingPrecedenceTestCase) -> Result<HashMap<String, String>, String> {
+    fn build_headers(
+        &self,
+        test_case: &TransferEncodingPrecedenceTestCase,
+    ) -> Result<HashMap<String, String>, String> {
         let mut headers = HashMap::new();
 
         for header in &test_case.headers {
@@ -265,7 +272,9 @@ impl MockTransferEncodingAnalyzer {
             if headers.contains_key(&name) {
                 // Handle duplicate headers - some are allowed, some aren't
                 match &header.name {
-                    HeaderName::TransferEncoding => return Err("Duplicate Transfer-Encoding".to_string()),
+                    HeaderName::TransferEncoding => {
+                        return Err("Duplicate Transfer-Encoding".to_string());
+                    }
                     HeaderName::ContentLength => return Err("Duplicate Content-Length".to_string()),
                     _ => {
                         // Other headers can have multiple values
@@ -294,7 +303,10 @@ impl MockTransferEncodingAnalyzer {
     }
 
     /// Extract Transfer-Encoding and Content-Length headers
-    fn extract_body_headers(&self, headers: &HashMap<String, String>) -> (Vec<String>, Vec<String>) {
+    fn extract_body_headers(
+        &self,
+        headers: &HashMap<String, String>,
+    ) -> (Vec<String>, Vec<String>) {
         let mut te_headers = Vec::new();
         let mut cl_headers = Vec::new();
 
@@ -314,7 +326,7 @@ impl MockTransferEncodingAnalyzer {
         &self,
         te_headers: &[String],
         http_version: &HttpVersion,
-        violations: &mut Vec<PrecedenceViolation>
+        violations: &mut Vec<PrecedenceViolation>,
     ) -> Option<TransferEncodingAnalysisResult> {
         if te_headers.is_empty() {
             return None;
@@ -363,7 +375,7 @@ impl MockTransferEncodingAnalyzer {
     fn analyze_content_length(
         &self,
         cl_headers: &[String],
-        violations: &mut Vec<PrecedenceViolation>
+        violations: &mut Vec<PrecedenceViolation>,
     ) -> Option<ContentLengthAnalysisResult> {
         if cl_headers.is_empty() {
             return None;
@@ -392,7 +404,10 @@ impl MockTransferEncodingAnalyzer {
             return None;
         }
 
-        let length = cl_str.parse::<u64>().map_err(|_| "Invalid Content-Length").ok()?;
+        let length = cl_str
+            .parse::<u64>()
+            .map_err(|_| "Invalid Content-Length")
+            .ok()?;
 
         Some(ContentLengthAnalysisResult {
             length,
@@ -407,7 +422,7 @@ impl MockTransferEncodingAnalyzer {
         cl_analysis: &Option<ContentLengthAnalysisResult>,
         config: &PrecedenceConfig,
         violations: &mut Vec<PrecedenceViolation>,
-        conflicts: &mut Vec<HeaderConflict>
+        conflicts: &mut Vec<HeaderConflict>,
     ) -> Result<EffectiveBodyType, String> {
         match (te_analysis, cl_analysis) {
             // Transfer-Encoding takes precedence (RFC 9112 §6.1)
@@ -415,7 +430,10 @@ impl MockTransferEncodingAnalyzer {
                 if !config.allow_ambiguous_length {
                     violations.push(PrecedenceViolation {
                         violation_type: PrecedenceViolationType::AmbiguousBodyLength,
-                        affected_headers: vec!["Transfer-Encoding".to_string(), "Content-Length".to_string()],
+                        affected_headers: vec![
+                            "Transfer-Encoding".to_string(),
+                            "Content-Length".to_string(),
+                        ],
                         severity: ViolationSeverity::Critical,
                     });
                 }
@@ -440,20 +458,16 @@ impl MockTransferEncodingAnalyzer {
                 } else {
                     Ok(EffectiveBodyType::Chunked)
                 }
-            },
+            }
             (Some(te), None) => {
                 if te.is_chunked {
                     Ok(EffectiveBodyType::Chunked)
                 } else {
                     Ok(EffectiveBodyType::Invalid)
                 }
-            },
-            (None, Some(cl)) => {
-                Ok(EffectiveBodyType::ContentLength(cl.length))
-            },
-            (None, None) => {
-                Ok(EffectiveBodyType::NoBody)
-            },
+            }
+            (None, Some(cl)) => Ok(EffectiveBodyType::ContentLength(cl.length)),
+            (None, None) => Ok(EffectiveBodyType::NoBody),
         }
     }
 
@@ -463,19 +477,28 @@ impl MockTransferEncodingAnalyzer {
             return 1.0;
         }
 
-        let total_weight = violations.iter().map(|v| match v.severity {
-            ViolationSeverity::Critical => 10.0,
-            ViolationSeverity::High => 5.0,
-            ViolationSeverity::Medium => 2.0,
-            ViolationSeverity::Low => 1.0,
-        }).sum::<f32>();
+        let total_weight = violations
+            .iter()
+            .map(|v| match v.severity {
+                ViolationSeverity::Critical => 10.0,
+                ViolationSeverity::High => 5.0,
+                ViolationSeverity::Medium => 2.0,
+                ViolationSeverity::Low => 1.0,
+            })
+            .sum::<f32>();
 
         // Penalize more severely for precedence violations
-        let precedence_penalty = violations.iter()
-            .filter(|v| matches!(v.violation_type,
-                PrecedenceViolationType::AmbiguousBodyLength |
-                PrecedenceViolationType::ContentLengthNotIgnored))
-            .count() as f32 * 2.0;
+        let precedence_penalty = violations
+            .iter()
+            .filter(|v| {
+                matches!(
+                    v.violation_type,
+                    PrecedenceViolationType::AmbiguousBodyLength
+                        | PrecedenceViolationType::ContentLengthNotIgnored
+                )
+            })
+            .count() as f32
+            * 2.0;
 
         let max_score = 10.0;
         let penalty = total_weight + precedence_penalty;
@@ -493,8 +516,10 @@ impl MockTransferEncodingAnalyzer {
         // Basic validation - should be token(s)
         let tokens: Vec<&str> = trimmed.split(',').map(|s| s.trim()).collect();
         tokens.iter().all(|token| {
-            !token.is_empty() &&
-            token.chars().all(|c| c.is_ascii_alphanumeric() || "-_".contains(c))
+            !token.is_empty()
+                && token
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || "-_".contains(c))
         })
     }
 
@@ -511,51 +536,55 @@ impl MockTransferEncodingAnalyzer {
         match case_variant {
             CaseVariant::Lowercase => base_name.to_lowercase(),
             CaseVariant::Uppercase => base_name.to_uppercase(),
-            CaseVariant::Camelcase => {
-                base_name.split('-')
-                    .map(|part| {
-                        let mut chars = part.chars();
-                        match chars.next() {
-                            None => String::new(),
-                            Some(first) => first.to_uppercase().collect::<String>() + &chars.as_str().to_lowercase(),
+            CaseVariant::Camelcase => base_name
+                .split('-')
+                .map(|part| {
+                    let mut chars = part.chars();
+                    match chars.next() {
+                        None => String::new(),
+                        Some(first) => {
+                            first.to_uppercase().collect::<String>()
+                                + &chars.as_str().to_lowercase()
                         }
-                    })
-                    .collect::<Vec<_>>()
-                    .join("-")
-            },
-            CaseVariant::MixedCase => {
-                base_name.chars().enumerate()
-                    .map(|(i, c)| if i % 2 == 0 { c.to_uppercase().to_string() } else { c.to_lowercase().to_string() })
-                    .collect()
-            },
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join("-"),
+            CaseVariant::MixedCase => base_name
+                .chars()
+                .enumerate()
+                .map(|(i, c)| {
+                    if i % 2 == 0 {
+                        c.to_uppercase().to_string()
+                    } else {
+                        c.to_lowercase().to_string()
+                    }
+                })
+                .collect(),
         }
     }
 
     /// Format header value
     fn format_header_value(&self, value: &HeaderValue) -> Result<String, String> {
         match value {
-            HeaderValue::TransferEncodingValue(te_type) => {
-                match te_type {
-                    TransferEncodingType::Chunked => Ok("chunked".to_string()),
-                    TransferEncodingType::Gzip => Ok("gzip".to_string()),
-                    TransferEncodingType::Deflate => Ok("deflate".to_string()),
-                    TransferEncodingType::ChunkedGzip => Ok("chunked, gzip".to_string()),
-                    TransferEncodingType::Invalid(s) => Ok(s.clone()),
-                    TransferEncodingType::Empty => Ok("".to_string()),
-                    TransferEncodingType::MultipleTokens(tokens) => Ok(tokens.join(", ")),
-                }
+            HeaderValue::TransferEncodingValue(te_type) => match te_type {
+                TransferEncodingType::Chunked => Ok("chunked".to_string()),
+                TransferEncodingType::Gzip => Ok("gzip".to_string()),
+                TransferEncodingType::Deflate => Ok("deflate".to_string()),
+                TransferEncodingType::ChunkedGzip => Ok("chunked, gzip".to_string()),
+                TransferEncodingType::Invalid(s) => Ok(s.clone()),
+                TransferEncodingType::Empty => Ok("".to_string()),
+                TransferEncodingType::MultipleTokens(tokens) => Ok(tokens.join(", ")),
             },
-            HeaderValue::ContentLengthValue(cl_type) => {
-                match cl_type {
-                    ContentLengthType::Valid(n) => Ok(n.to_string()),
-                    ContentLengthType::Zero => Ok("0".to_string()),
-                    ContentLengthType::Negative(s) => Ok(s.clone()),
-                    ContentLengthType::NonDigit(s) => Ok(s.clone()),
-                    ContentLengthType::LeadingSign(s) => Ok(s.clone()),
-                    ContentLengthType::Overflow(s) => Ok(s.clone()),
-                    ContentLengthType::Multiple(values) => Ok(values.join(", ")),
-                    ContentLengthType::Empty => Ok("".to_string()),
-                }
+            HeaderValue::ContentLengthValue(cl_type) => match cl_type {
+                ContentLengthType::Valid(n) => Ok(n.to_string()),
+                ContentLengthType::Zero => Ok("0".to_string()),
+                ContentLengthType::Negative(s) => Ok(s.clone()),
+                ContentLengthType::NonDigit(s) => Ok(s.clone()),
+                ContentLengthType::LeadingSign(s) => Ok(s.clone()),
+                ContentLengthType::Overflow(s) => Ok(s.clone()),
+                ContentLengthType::Multiple(values) => Ok(values.join(", ")),
+                ContentLengthType::Empty => Ok("".to_string()),
             },
             HeaderValue::GenericValue(s) => Ok(s.clone()),
         }
@@ -595,7 +624,10 @@ fn generate_precedence_test_cases() -> Vec<TransferEncodingPrecedenceTestCase> {
                 },
             ],
             http_version: HttpVersion::Http11,
-            message_type: MessageType::Request { method: "POST".to_string(), uri: "/test".to_string() },
+            message_type: MessageType::Request {
+                method: "POST".to_string(),
+                uri: "/test".to_string(),
+            },
             precedence_config: PrecedenceConfig {
                 strict_rfc_compliance: true,
                 allow_ambiguous_length: false,
@@ -603,19 +635,19 @@ fn generate_precedence_test_cases() -> Vec<TransferEncodingPrecedenceTestCase> {
                 validate_transfer_encoding_syntax: true,
             },
         },
-
         // Transfer-Encoding in HTTP/1.0 (should be rejected)
         TransferEncodingPrecedenceTestCase {
             scenario: PrecedenceScenario::TransferEncodingOnly,
-            headers: vec![
-                TestHeader {
-                    name: HeaderName::TransferEncoding,
-                    value: HeaderValue::TransferEncodingValue(TransferEncodingType::Chunked),
-                    case_variant: CaseVariant::Lowercase,
-                },
-            ],
+            headers: vec![TestHeader {
+                name: HeaderName::TransferEncoding,
+                value: HeaderValue::TransferEncodingValue(TransferEncodingType::Chunked),
+                case_variant: CaseVariant::Lowercase,
+            }],
             http_version: HttpVersion::Http10,
-            message_type: MessageType::Request { method: "POST".to_string(), uri: "/test".to_string() },
+            message_type: MessageType::Request {
+                method: "POST".to_string(),
+                uri: "/test".to_string(),
+            },
             precedence_config: PrecedenceConfig {
                 strict_rfc_compliance: true,
                 allow_ambiguous_length: false,
@@ -638,7 +670,9 @@ fuzz_target!(|data: &[u8]| {
             if predefined_cases.is_empty() {
                 return;
             }
-            let index = unstructured.int_in_range(0..=predefined_cases.len() - 1).unwrap_or(0);
+            let index = unstructured
+                .int_in_range(0..=predefined_cases.len() - 1)
+                .unwrap_or(0);
             predefined_cases[index].clone()
         }
     };
@@ -695,10 +729,10 @@ fn test_transfer_encoding_precedence_edge_cases(test_case: &TransferEncodingPrec
         match analysis.effective_body_type {
             EffectiveBodyType::Chunked => {
                 // Correct precedence behavior
-            },
+            }
             EffectiveBodyType::Ambiguous => {
                 // Implementation doesn't follow RFC precedence rules
-            },
+            }
             _ => {
                 // Unexpected behavior
             }
@@ -769,13 +803,11 @@ fn test_rfc_compliance_scoring(test_case: &TransferEncodingPrecedenceTestCase) {
     // Test perfect compliance case
     let perfect_case = TransferEncodingPrecedenceTestCase {
         scenario: PrecedenceScenario::TransferEncodingOnly,
-        headers: vec![
-            TestHeader {
-                name: HeaderName::TransferEncoding,
-                value: HeaderValue::TransferEncodingValue(TransferEncodingType::Chunked),
-                case_variant: CaseVariant::Lowercase,
-            },
-        ],
+        headers: vec![TestHeader {
+            name: HeaderName::TransferEncoding,
+            value: HeaderValue::TransferEncodingValue(TransferEncodingType::Chunked),
+            case_variant: CaseVariant::Lowercase,
+        }],
         http_version: HttpVersion::Http11,
         message_type: test_case.message_type.clone(),
         precedence_config: test_case.precedence_config.clone(),

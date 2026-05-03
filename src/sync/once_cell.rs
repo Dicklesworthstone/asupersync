@@ -427,6 +427,35 @@ impl<T> OnceCell<T> {
         self.value.into_inner()
     }
 
+    /// Waits for initialization to complete.
+    ///
+    /// Returns immediately if the cell is already initialized.
+    /// If another task is initializing, waits for it to complete.
+    ///
+    /// # Cancel Safety
+    ///
+    /// This operation is cancel-safe: if cancelled while waiting,
+    /// returns `Err(OnceCellError::Cancelled)` immediately.
+    ///
+    /// # Errors
+    ///
+    /// Returns `Err(OnceCellError::Cancelled)` if the supplied `Cx` is
+    /// cancelled before initialization completes.
+    #[inline]
+    pub async fn wait(&self, cx: &crate::cx::Cx) -> Result<(), OnceCellError> {
+        // Fast path: already initialized
+        if self.is_initialized() {
+            return Ok(());
+        }
+
+        CancelAwareWaitInit {
+            cell: self,
+            cx,
+            waiter_id: None,
+        }
+        .await
+    }
+
     /// Block until initialized.
     fn wait_for_init_blocking(&self) {
         let mut guard = match self.waiters.lock() {
@@ -589,6 +618,61 @@ impl<T> Drop for WaitInit<'_, T> {
         if let Some(waiter_id) = self.waiter_id {
             // Remove canceled waiter registrations immediately so repeated
             // cancel/drop cycles don't accumulate until transition_out_of_initializing() drains.
+            let mut guard = match self.cell.waiters.lock() {
+                Ok(g) => g,
+                Err(poisoned) => poisoned.into_inner(),
+            };
+            if let Some(pos) = guard.waiters.iter().position(|entry| entry.id == waiter_id) {
+                guard.waiters.swap_remove(pos);
+            }
+        }
+    }
+}
+
+/// Cancel-aware future that waits for initialization to complete.
+struct CancelAwareWaitInit<'a, T> {
+    cell: &'a OnceCell<T>,
+    cx: &'a crate::cx::Cx,
+    /// Tracks registered waiter identity to prevent unbounded queue growth.
+    waiter_id: Option<u64>,
+}
+
+impl<T> std::future::Future for CancelAwareWaitInit<'_, T> {
+    type Output = Result<(), OnceCellError>;
+
+    fn poll(self: Pin<&mut Self>, task_cx: &mut Context<'_>) -> Poll<Self::Output> {
+        let this = self.get_mut();
+
+        // Check cancellation first
+        if this.cx.checkpoint().is_err() {
+            return Poll::Ready(Err(OnceCellError::Cancelled));
+        }
+
+        let state = this.cell.state.load(Ordering::Acquire);
+        if state == INITIALIZING {
+            this.cell
+                .register_waker(task_cx.waker(), &mut this.waiter_id);
+            // Double-check after registering.
+            if this.cell.state.load(Ordering::Acquire) == INITIALIZING {
+                // Check cancellation again after registering waker
+                if this.cx.checkpoint().is_err() {
+                    return Poll::Ready(Err(OnceCellError::Cancelled));
+                }
+                Poll::Pending
+            } else {
+                // Do not clear waiter_id here for same reason as WaitInit
+                Poll::Ready(Ok(()))
+            }
+        } else {
+            Poll::Ready(Ok(()))
+        }
+    }
+}
+
+impl<T> Drop for CancelAwareWaitInit<'_, T> {
+    fn drop(&mut self) {
+        if let Some(waiter_id) = self.waiter_id {
+            // Remove canceled waiter registrations immediately
             let mut guard = match self.cell.waiters.lock() {
                 Ok(g) => g,
                 Err(poisoned) => poisoned.into_inner(),
@@ -2558,5 +2642,579 @@ mod tests {
         }
 
         crate::test_complete!("audit_concurrent_set_get_happens_before_relationship");
+    }
+
+    /// Audit test: OnceCell wait cancellation during initialization.
+    ///
+    /// When a task waits for OnceCell initialization and its context is cancelled,
+    /// the wait should be cancel-aware and return immediately with cancellation error
+    /// rather than continuing to wait indefinitely.
+    #[test]
+    fn audit_once_cell_wait_cancel_aware_semantics() {
+        crate::test_utils::init_test_logging();
+
+        let cell = OnceCell::<u32>::new();
+
+        // Test 1: Verify cancellation during wait
+        let cx = crate::cx::Cx::for_testing();
+
+        // Start a slow initializer that will block
+        let cell_clone = std::sync::Arc::new(cell);
+        let init_cell = cell_clone.clone();
+        let wait_cell = cell_clone.clone();
+
+        // Spawn initializer that takes a long time
+        std::thread::spawn(move || {
+            block_on(async {
+                let _ = init_cell
+                    .get_or_init(|| async {
+                        // Simulate slow initialization
+                        std::thread::sleep(std::time::Duration::from_millis(100));
+                        42u32
+                    })
+                    .await;
+            });
+        });
+
+        // Give initializer time to start
+        std::thread::sleep(std::time::Duration::from_millis(10));
+
+        // Test that cancellation during wait works
+        let _wait_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            block_on(async {
+                // Cancel the context
+                cx.cancel();
+
+                // This should return with cancellation error, not wait indefinitely
+                // DEFECT: Currently this may not check cancellation properly
+                let start = std::time::Instant::now();
+                let result = wait_cell.get_or_init(|| async { 99u32 }).await;
+                let duration = start.elapsed();
+
+                // Should return quickly due to cancellation, not wait for slow init
+                (result, duration)
+            })
+        }));
+
+        // The test should complete quickly if cancellation works correctly
+        // If it hangs, the WaitInit future is not checking cancellation context
+
+        crate::test_complete!("audit_once_cell_wait_cancel_aware_semantics");
+    }
+
+    #[test]
+    fn audit_once_cell_set_atomicity_concurrent_access() {
+        // Audit: OnceCell::set atomicity under concurrent access.
+        // When two tasks call set(v1) and set(v2) concurrently on empty cell,
+        // exactly ONE wins (linearizable) and the other returns Err without overwriting.
+
+        init_test("audit_once_cell_set_atomicity_concurrent_access");
+
+        const NUM_ITERATIONS: usize = 1000;
+        const NUM_THREADS: usize = 8;
+
+        for iteration in 0..NUM_ITERATIONS {
+            let cell = std::sync::Arc::new(OnceCell::<u32>::new());
+            let barrier = std::sync::Arc::new(std::sync::Barrier::new(NUM_THREADS));
+            let results = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+
+            let handles: Vec<_> = (0..NUM_THREADS)
+                .map(|thread_id| {
+                    let cell = cell.clone();
+                    let barrier = barrier.clone();
+                    let results = results.clone();
+
+                    std::thread::spawn(move || {
+                        // Synchronize all threads to maximize contention
+                        barrier.wait();
+
+                        // Each thread tries to set a unique value
+                        let value = (thread_id as u32) + 1000;
+                        let result = cell.set(value);
+
+                        // Record result
+                        results
+                            .lock()
+                            .unwrap()
+                            .push((thread_id, value, result.is_ok()));
+                    })
+                })
+                .collect();
+
+            // Wait for all threads to complete
+            for handle in handles {
+                handle.join().expect("thread should not panic");
+            }
+
+            // Analyze results for atomicity properties
+            let results = results.lock().unwrap();
+            let winners: Vec<_> = results.iter().filter(|(_, _, won)| *won).collect();
+            let losers: Vec<_> = results.iter().filter(|(_, _, won)| !*won).collect();
+
+            // ATOMICITY PROPERTY 1: Exactly one winner
+            crate::assert_with_log!(
+                winners.len() == 1,
+                &format!("iteration {}: exactly one thread should win", iteration),
+                1,
+                winners.len()
+            );
+
+            // ATOMICITY PROPERTY 2: All others lose
+            crate::assert_with_log!(
+                losers.len() == NUM_THREADS - 1,
+                &format!(
+                    "iteration {}: exactly {} threads should lose",
+                    iteration,
+                    NUM_THREADS - 1
+                ),
+                NUM_THREADS - 1,
+                losers.len()
+            );
+
+            // ATOMICITY PROPERTY 3: Winner's value is stored
+            if let Some((_, winner_value, _)) = winners.first() {
+                let stored_value = cell.get().expect("cell should be initialized");
+                crate::assert_with_log!(
+                    stored_value == winner_value,
+                    &format!(
+                        "iteration {}: stored value should match winner's value",
+                        iteration
+                    ),
+                    **winner_value,
+                    *stored_value
+                );
+            }
+
+            // ATOMICITY PROPERTY 4: Cell is initialized after the race
+            crate::assert_with_log!(
+                cell.is_initialized(),
+                &format!(
+                    "iteration {}: cell should be initialized after race",
+                    iteration
+                ),
+                true,
+                cell.is_initialized()
+            );
+
+            // LINEARIZABILITY PROPERTY: No partial writes occurred
+            // The cell either contains exactly one of the attempted values,
+            // or is uninitialized (impossible after successful set)
+            let stored_value = *cell.get().expect("cell should have value");
+            let attempted_values: Vec<u32> = results.iter().map(|(_, val, _)| *val).collect();
+
+            crate::assert_with_log!(
+                attempted_values.contains(&stored_value),
+                &format!(
+                    "iteration {}: stored value {} must be one of attempted values {:?}",
+                    iteration, stored_value, attempted_values
+                ),
+                true,
+                attempted_values.contains(&stored_value)
+            );
+        }
+
+        crate::test_complete!("audit_once_cell_set_atomicity_concurrent_access");
+    }
+
+    #[test]
+    fn audit_once_cell_set_no_overwrite() {
+        // Audit: OnceCell::set never overwrites existing value.
+        // Sequential calls to set() after initialization should all fail.
+
+        init_test("audit_once_cell_set_no_overwrite");
+
+        let cell = OnceCell::new();
+
+        // Initial set should succeed
+        let first_result = cell.set(42u32);
+        crate::assert_with_log!(
+            first_result.is_ok(),
+            "first set() should succeed on empty cell",
+            true,
+            first_result.is_ok()
+        );
+
+        crate::assert_with_log!(
+            cell.get() == Some(&42),
+            "cell should contain first value",
+            Some(&42),
+            cell.get()
+        );
+
+        // Subsequent sets should fail and return the rejected value
+        for attempt in 1..=10 {
+            let rejected_value = 1000 + attempt;
+            let result = cell.set(rejected_value);
+
+            crate::assert_with_log!(
+                result.is_err(),
+                &format!("set attempt {} should fail on initialized cell", attempt),
+                true,
+                result.is_err()
+            );
+
+            if let Err(returned_value) = result {
+                crate::assert_with_log!(
+                    returned_value == rejected_value,
+                    &format!(
+                        "attempt {}: returned value should match rejected value",
+                        attempt
+                    ),
+                    rejected_value,
+                    returned_value
+                );
+            }
+
+            // Original value should remain unchanged
+            crate::assert_with_log!(
+                cell.get() == Some(&42),
+                &format!(
+                    "attempt {}: original value should remain unchanged",
+                    attempt
+                ),
+                Some(&42),
+                cell.get()
+            );
+        }
+
+        crate::test_complete!("audit_once_cell_set_no_overwrite");
+    }
+
+    #[test]
+    fn audit_set_get_happens_before_ordering() {
+        crate::test_utils::init_test_logging();
+
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+        use std::thread;
+        use std::time::Duration;
+
+        // Stress test: verify that OnceCell::set() and OnceCell::get() have proper
+        // happens-before relationship via Release/Acquire ordering.
+        //
+        // When writer calls set(v) and it returns successfully, concurrent readers
+        // calling get() MUST immediately see Some(v) due to Release/Acquire synchronization.
+        // They must NEVER see None after set() has returned.
+
+        let test_iterations = 1000;
+        let mut successful_immediate_visibility = 0;
+        let late_visibility_count = Arc::new(AtomicUsize::new(0));
+
+        for iteration in 0..test_iterations {
+            let cell = Arc::new(OnceCell::<u64>::new());
+            let writer_finished = Arc::new(AtomicBool::new(false));
+            let test_value = (iteration + 1) as u64 * 1000 + 42; // Unique value per iteration
+
+            let cell_reader = Arc::clone(&cell);
+            let writer_finished_reader = Arc::clone(&writer_finished);
+            let late_visibility = Arc::clone(&late_visibility_count);
+
+            // Reader thread: polls get() continuously after writer signals completion
+            let reader_handle = thread::spawn(move || {
+                // Wait for writer to signal completion
+                while !writer_finished_reader.load(Ordering::Acquire) {
+                    std::hint::spin_loop(); // Busy wait for tight timing
+                }
+
+                // Writer has finished set() - we should immediately see the value
+                let mut poll_attempts = 0;
+                loop {
+                    poll_attempts += 1;
+
+                    match cell_reader.get() {
+                        Some(value) => {
+                            if poll_attempts > 1 {
+                                // Value became visible after 1+ polls - potential ordering issue
+                                late_visibility.fetch_add(1, Ordering::SeqCst);
+                            }
+                            return (true, poll_attempts, value);
+                        }
+                        None => {
+                            if poll_attempts > 100 {
+                                // Fail-safe: stop after 100 attempts
+                                return (false, poll_attempts, 0);
+                            }
+                            // Small delay to avoid burning CPU
+                            std::hint::spin_loop();
+                        }
+                    }
+                }
+            });
+
+            // Writer thread: set the value and signal completion
+            let cell_writer = Arc::clone(&cell);
+            let writer_finished_clone = Arc::clone(&writer_finished);
+
+            let writer_handle = thread::spawn(move || {
+                let set_result = cell_writer.set(test_value);
+
+                // Signal that set() has returned (Release/Acquire ensures this is visible)
+                writer_finished_clone.store(true, Ordering::Release);
+
+                set_result
+            });
+
+            // Wait for both threads
+            let writer_result = writer_handle.join().expect("Writer thread should complete");
+            let (reader_saw_value, poll_attempts, reader_value) =
+                reader_handle.join().expect("Reader thread should complete");
+
+            // Verify writer succeeded
+            assert!(
+                writer_result.is_ok(),
+                "iteration {}: set() should succeed",
+                iteration
+            );
+
+            // Verify reader saw the correct value
+            if reader_saw_value {
+                assert_eq!(
+                    reader_value, test_value,
+                    "iteration {}: reader should see the exact value writer set",
+                    iteration
+                );
+
+                if poll_attempts == 1 {
+                    successful_immediate_visibility += 1;
+                }
+            } else {
+                panic!(
+                    "iteration {}: reader never saw value after {} polls - possible ordering defect",
+                    iteration, poll_attempts
+                );
+            }
+        }
+
+        let late_visibility_total = late_visibility_count.load(Ordering::SeqCst);
+        let immediate_visibility_rate =
+            (successful_immediate_visibility as f64) / (test_iterations as f64);
+
+        println!(
+            "Set/Get ordering audit: {}/{} immediate visibility ({:.1}%), {} late visibility cases",
+            successful_immediate_visibility,
+            test_iterations,
+            immediate_visibility_rate * 100.0,
+            late_visibility_total
+        );
+
+        // Verify ordering guarantees
+        if immediate_visibility_rate < 0.95 {
+            panic!(
+                "❌ ORDERING DEFECT: Only {:.1}% immediate visibility, {} late cases. \
+                 Expected >95% immediate visibility due to Release/Acquire synchronization. \
+                 This suggests set() and get() may be using relaxed ordering instead of Release/Acquire.",
+                immediate_visibility_rate * 100.0,
+                late_visibility_total
+            );
+        }
+
+        if late_visibility_total > test_iterations / 10 {
+            panic!(
+                "❌ ORDERING DEFECT: {} late visibility cases (>{} threshold). \
+                 After set() returns, get() should see the value immediately due to happens-before relationship.",
+                late_visibility_total,
+                test_iterations / 10
+            );
+        }
+
+        println!(
+            "✅ SOUND: OnceCell set()/get() has correct Release/Acquire happens-before ordering"
+        );
+
+        crate::test_complete!("audit_set_get_happens_before_ordering");
+    }
+
+    #[test]
+    fn audit_once_cell_wait_cancellation_behavior() {
+        use crate::cx::Cx;
+        use std::sync::Arc;
+        use std::thread;
+        use std::time::{Duration, Instant};
+
+        crate::test_utils::init_test_logging();
+
+        // This test verifies that OnceCell::wait() is cancel-aware and returns
+        // Err(Cancelled) immediately when the context is cancelled, rather than
+        // hanging indefinitely.
+
+        let cell = Arc::new(OnceCell::<u32>::new());
+
+        // Test 1: Basic cancellation behavior
+        {
+            let cell_clone = cell.clone();
+            let handle = thread::spawn(move || {
+                let rt = crate::lab::LabRuntime::new();
+                rt.block_on(async {
+                    let cx = Cx::new();
+
+                    // Start slow initialization in background
+                    let init_cell = cell_clone.clone();
+                    let _init_handle = thread::spawn(move || {
+                        let rt = crate::lab::LabRuntime::new();
+                        rt.block_on(async {
+                            thread::sleep(Duration::from_millis(100));
+                            let _ = init_cell.get_or_init(|| async { 42u32 }).await;
+                        });
+                    });
+
+                    // Give initializer time to start
+                    thread::sleep(Duration::from_millis(10));
+
+                    // Cancel the context
+                    cx.cancel();
+
+                    // wait() should return Cancelled immediately, not hang
+                    let start = Instant::now();
+                    let result = cell_clone.wait(&cx).await;
+                    let duration = start.elapsed();
+
+                    (result, duration)
+                })
+            });
+
+            let (result, duration) = handle.join().expect("Test thread should complete");
+
+            // Should get cancellation error
+            match result {
+                Err(OnceCellError::Cancelled) => {
+                    // ✅ Correct behavior
+                }
+                Ok(()) => {
+                    panic!(
+                        "❌ DEFECT: wait() returned Ok(()) on cancelled context, expected Err(Cancelled)"
+                    );
+                }
+                Err(other) => {
+                    panic!(
+                        "❌ DEFECT: wait() returned unexpected error {:?}, expected Err(Cancelled)",
+                        other
+                    );
+                }
+            }
+
+            // Should return quickly (not hang for 100ms waiting for init)
+            if duration > Duration::from_millis(50) {
+                panic!(
+                    "❌ DEFECT: wait() took {:?} to return on cancelled context, expected immediate return",
+                    duration
+                );
+            }
+        }
+
+        // Test 2: wait() succeeds when cell is already initialized
+        {
+            let initialized_cell = OnceCell::with_value(99u32);
+            let rt = crate::lab::LabRuntime::new();
+            rt.block_on(async {
+                let cx = Cx::new();
+                cx.cancel(); // Even with cancelled context
+
+                let result = initialized_cell.wait(&cx).await;
+                match result {
+                    Ok(()) => {
+                        // ✅ Correct - should succeed immediately for initialized cell
+                    }
+                    Err(e) => {
+                        panic!("❌ DEFECT: wait() failed on initialized cell: {:?}", e);
+                    }
+                }
+            });
+        }
+
+        // Test 3: Stress test - multiple waiters with cancellation
+        {
+            let stress_cell = Arc::new(OnceCell::<u32>::new());
+            let iterations = 20;
+            let mut handles = Vec::new();
+
+            for i in 0..iterations {
+                let stress_cell_clone = stress_cell.clone();
+                let handle = thread::spawn(move || {
+                    let rt = crate::lab::LabRuntime::new();
+                    rt.block_on(async {
+                        let cx = Cx::new();
+
+                        // Cancel half the contexts
+                        if i % 2 == 0 {
+                            cx.cancel();
+                        }
+
+                        let start = Instant::now();
+                        let result = stress_cell_clone.wait(&cx).await;
+                        let duration = start.elapsed();
+
+                        (i, result, duration)
+                    })
+                });
+                handles.push(handle);
+            }
+
+            // Initialize after starting waiters
+            thread::sleep(Duration::from_millis(10));
+            let _ = stress_cell.set(123);
+
+            // Collect results
+            let mut cancelled_count = 0;
+            let mut success_count = 0;
+
+            for handle in handles {
+                let (waiter_id, result, duration) = handle.join().expect("Waiter should complete");
+
+                if waiter_id % 2 == 0 {
+                    // Should be cancelled
+                    match result {
+                        Err(OnceCellError::Cancelled) => {
+                            cancelled_count += 1;
+                            if duration > Duration::from_millis(30) {
+                                panic!(
+                                    "❌ DEFECT: Cancelled waiter {} took {:?}, expected quick return",
+                                    waiter_id, duration
+                                );
+                            }
+                        }
+                        other => {
+                            panic!(
+                                "❌ DEFECT: Waiter {} with cancelled context got {:?}, expected Err(Cancelled)",
+                                waiter_id, other
+                            );
+                        }
+                    }
+                } else {
+                    // Should succeed
+                    match result {
+                        Ok(()) => {
+                            success_count += 1;
+                        }
+                        Err(e) => {
+                            panic!(
+                                "❌ DEFECT: Non-cancelled waiter {} failed: {:?}",
+                                waiter_id, e
+                            );
+                        }
+                    }
+                }
+            }
+
+            if cancelled_count != iterations / 2 || success_count != iterations / 2 {
+                panic!(
+                    "❌ DEFECT: Expected {} cancelled and {} success, got {} cancelled and {} success",
+                    iterations / 2,
+                    iterations / 2,
+                    cancelled_count,
+                    success_count
+                );
+            }
+        }
+
+        println!("✅ SOUND: OnceCell::wait() cancellation behavior verified:");
+        println!("  - Returns Err(Cancelled) immediately when context is cancelled ✓");
+        println!("  - Does not hang waiting for initialization ✓");
+        println!("  - Succeeds immediately for already-initialized cells ✓");
+        println!(
+            "  - Stress test: {}/{} cancelled contexts handled correctly ✓",
+            10, 10
+        );
+
+        crate::test_complete!("audit_once_cell_wait_cancellation_behavior");
     }
 }

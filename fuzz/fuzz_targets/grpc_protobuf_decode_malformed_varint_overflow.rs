@@ -83,10 +83,7 @@ enum MalformedShape {
     /// followed by `cont_count` continuation bytes (`0xFF`) and a
     /// terminator. `cont_count > 10` is malformed; the decoder MUST
     /// reject it.
-    OverlongVarint {
-        cont_count: u8,
-        terminator: u8,
-    },
+    OverlongVarint { cont_count: u8, terminator: u8 },
     /// Build a length-delimited field-2 (payload) with a declared
     /// length near `u32::MAX`, but supply only a short tail. The
     /// decoder MUST reject before allocating `declared_len` bytes.
@@ -100,16 +97,10 @@ enum MalformedShape {
     /// Same overflow shape but on the embedded-message field (tag 3,
     /// wire type 2 → recursive prost decode). This stresses the
     /// nested-decode path independently of the outer payload bytes.
-    NestedLengthOverflow {
-        bump: u32,
-        actual_tail: Vec<u8>,
-    },
+    NestedLengthOverflow { bump: u32, actual_tail: Vec<u8> },
     /// Sanity: a well-formed message with a u64 counter and a small
     /// payload. Used to verify the harness itself can produce Ok(_).
-    WellFormed {
-        counter: u64,
-        payload: Vec<u8>,
-    },
+    WellFormed { counter: u64, payload: Vec<u8> },
 }
 
 fn encode_varint(mut value: u64, out: &mut Vec<u8>) {
@@ -188,10 +179,7 @@ fuzz_target!(|shape: MalformedShape| {
             encode_key(1, 0, &mut wire);
             encode_varint(counter, &mut wire);
             // Field 2 (payload), length-prefixed correctly.
-            let payload = payload
-                .into_iter()
-                .take(MAX_BUF / 2)
-                .collect::<Vec<_>>();
+            let payload = payload.into_iter().take(MAX_BUF / 2).collect::<Vec<_>>();
             encode_key(2, 2, &mut wire);
             encode_varint(payload.len() as u64, &mut wire);
             wire.extend_from_slice(&payload);

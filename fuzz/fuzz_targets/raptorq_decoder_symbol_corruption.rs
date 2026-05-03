@@ -46,9 +46,9 @@ struct SourceConfig {
 /// Source block size options
 #[derive(Arbitrary, Debug, Clone, Copy)]
 enum SourceBlockK {
-    Small(u8),   // 1-20 (high corruption impact)
-    Medium(u8),  // 21-50 (balanced)
-    Large(u8),   // 51-100 (distributed corruption)
+    Small(u8),  // 1-20 (high corruption impact)
+    Medium(u8), // 21-50 (balanced)
+    Large(u8),  // 51-100 (distributed corruption)
 }
 
 impl SourceBlockK {
@@ -64,10 +64,10 @@ impl SourceBlockK {
 /// Symbol size options
 #[derive(Arbitrary, Debug, Clone, Copy)]
 enum SymbolSize {
-    Tiny,    // 16 bytes
-    Small,   // 64 bytes
-    Medium,  // 256 bytes
-    Large,   // 512 bytes
+    Tiny,   // 16 bytes
+    Small,  // 64 bytes
+    Medium, // 256 bytes
+    Large,  // 512 bytes
 }
 
 impl SymbolSize {
@@ -133,9 +133,7 @@ enum CorruptionType {
         column_pattern: ColumnCorruptionPattern,
     },
     /// Mixed corruption (multiple corruption types)
-    Mixed {
-        corruptions: Vec<SingleCorruption>,
-    },
+    Mixed { corruptions: Vec<SingleCorruption> },
 }
 
 /// Single corruption operation for mixed scenarios
@@ -167,22 +165,17 @@ enum DataCorruptionPattern {
         seed: u32,
     },
     /// Zero out data
-    ZeroOut {
-        start_offset: u16,
-        length: u16,
-    },
+    ZeroOut { start_offset: u16, length: u16 },
     /// Systematic pattern corruption
-    PatternCorruption {
-        pattern: CorruptionPattern,
-    },
+    PatternCorruption { pattern: CorruptionPattern },
 }
 
 /// Corruption rate for random corruption
 #[derive(Arbitrary, Debug, Clone, Copy)]
 enum CorruptionRate {
-    Low,     // ~5% of bytes
-    Medium,  // ~25% of bytes
-    High,    // ~75% of bytes
+    Low,      // ~5% of bytes
+    Medium,   // ~25% of bytes
+    High,     // ~75% of bytes
     Complete, // 100% of bytes
 }
 
@@ -200,32 +193,25 @@ impl CorruptionRate {
 /// Systematic corruption patterns
 #[derive(Arbitrary, Debug, Clone, Copy)]
 enum CorruptionPattern {
-    Alternating,    // 0xAA pattern
-    AllOnes,        // 0xFF pattern
-    Incremental,    // 0x00, 0x01, 0x02, ...
-    Xor(u8),       // XOR with constant
+    Alternating, // 0xAA pattern
+    AllOnes,     // 0xFF pattern
+    Incremental, // 0x00, 0x01, 0x02, ...
+    Xor(u8),     // XOR with constant
 }
 
 /// Coefficient corruption patterns
 #[derive(Arbitrary, Debug, Clone)]
 enum CoefficientCorruptionPattern {
     /// Corrupt single coefficient
-    Single {
-        index: u8,
-        new_value: u8,
-    },
+    Single { index: u8, new_value: u8 },
     /// Corrupt multiple coefficients
     Multiple {
         corruptions: Vec<CoefficientCorruption>,
     },
     /// Set all coefficients to same value
-    Uniform {
-        value: u8,
-    },
+    Uniform { value: u8 },
     /// Apply systematic pattern to coefficients
-    Pattern {
-        pattern: CorruptionPattern,
-    },
+    Pattern { pattern: CorruptionPattern },
 }
 
 /// Single coefficient corruption
@@ -239,22 +225,15 @@ struct CoefficientCorruption {
 #[derive(Arbitrary, Debug, Clone)]
 enum ColumnCorruptionPattern {
     /// Corrupt single column index
-    Single {
-        index: u8,
-        new_value: u32,
-    },
+    Single { index: u8, new_value: u32 },
     /// Corrupt multiple column indices
-    Multiple {
-        corruptions: Vec<ColumnCorruption>,
-    },
+    Multiple { corruptions: Vec<ColumnCorruption> },
     /// Out-of-range column indices
     OutOfRange {
         base_value: u32, // Large base value
     },
     /// Duplicate column indices
-    Duplicate {
-        target_index: u32,
-    },
+    Duplicate { target_index: u32 },
 }
 
 /// Single column corruption
@@ -287,9 +266,9 @@ enum CorruptionTiming {
 /// Severity of corruption
 #[derive(Arbitrary, Debug, Clone, Copy)]
 enum CorruptionSeverity {
-    Minimal,   // Single bit/byte errors
-    Moderate,  // Small burst errors
-    Severe,    // Large corruption blocks
+    Minimal,      // Single bit/byte errors
+    Moderate,     // Small burst errors
+    Severe,       // Large corruption blocks
     Catastrophic, // Complete data destruction
 }
 
@@ -434,7 +413,11 @@ fn test_error_propagation(scenario: &SymbolCorruptionScenario) {
     }
 }
 
-fn generate_clean_symbols(k: usize, symbol_size: usize, decoder: &InactivationDecoder) -> Vec<ReceivedSymbol> {
+fn generate_clean_symbols(
+    k: usize,
+    symbol_size: usize,
+    decoder: &InactivationDecoder,
+) -> Vec<ReceivedSymbol> {
     let mut symbols = Vec::new();
 
     // Generate source symbols
@@ -505,20 +488,20 @@ fn apply_single_corruption(
 ) {
     // Find target symbol
     let symbol_index = match &target.target {
-        SymbolTarget::Source { esi } => {
-            symbols.iter().position(|s| s.is_source && s.esi == *esi)
-        }
-        SymbolTarget::Repair { esi } => {
-            symbols.iter().position(|s| !s.is_source && s.esi == *esi)
-        }
+        SymbolTarget::Source { esi } => symbols.iter().position(|s| s.is_source && s.esi == *esi),
+        SymbolTarget::Repair { esi } => symbols.iter().position(|s| !s.is_source && s.esi == *esi),
         SymbolTarget::Systematic { index } => {
             let target_esi = (*index as usize) % k;
-            symbols.iter().position(|s| s.is_source && s.esi == target_esi as u32)
+            symbols
+                .iter()
+                .position(|s| s.is_source && s.esi == target_esi as u32)
         }
         SymbolTarget::Constraint { constraint_index } => {
             // Find constraint symbol (heuristic: non-source symbols beyond k+20)
             let min_constraint_esi = (k as u32) + 20;
-            symbols.iter().position(|s| !s.is_source && s.esi >= min_constraint_esi)
+            symbols
+                .iter()
+                .position(|s| !s.is_source && s.esi >= min_constraint_esi)
                 .map(|i| i + (*constraint_index as usize) % 5) // Approximate constraint selection
         }
     };
@@ -535,7 +518,9 @@ fn apply_corruption_type(symbol: &mut ReceivedSymbol, corruption_type: &Corrupti
         CorruptionType::DataCorruption { corruption_pattern } => {
             apply_data_corruption(&mut symbol.data, corruption_pattern);
         }
-        CorruptionType::CoefficientCorruption { coefficient_pattern } => {
+        CorruptionType::CoefficientCorruption {
+            coefficient_pattern,
+        } => {
             apply_coefficient_corruption(&mut symbol.coefficients, coefficient_pattern);
         }
         CorruptionType::ColumnCorruption { column_pattern } => {
@@ -551,19 +536,28 @@ fn apply_corruption_type(symbol: &mut ReceivedSymbol, corruption_type: &Corrupti
 
 fn apply_data_corruption(data: &mut [u8], pattern: &DataCorruptionPattern) {
     match pattern {
-        DataCorruptionPattern::BitFlip { byte_offset, bit_position } => {
+        DataCorruptionPattern::BitFlip {
+            byte_offset,
+            bit_position,
+        } => {
             let idx = (*byte_offset as usize) % data.len();
             let bit = (*bit_position) % 8;
             data[idx] ^= 1 << bit;
         }
-        DataCorruptionPattern::BurstError { start_offset, length } => {
+        DataCorruptionPattern::BurstError {
+            start_offset,
+            length,
+        } => {
             let start = (*start_offset as usize) % data.len();
             let len = (*length as usize).min(data.len() - start);
             for i in start..start + len {
                 data[i] ^= 0xFF; // Flip all bits in burst
             }
         }
-        DataCorruptionPattern::RandomCorruption { corruption_rate, seed } => {
+        DataCorruptionPattern::RandomCorruption {
+            corruption_rate,
+            seed,
+        } => {
             let rate = corruption_rate.as_f32();
             let mut state = *seed;
             for byte in data.iter_mut() {
@@ -573,7 +567,10 @@ fn apply_data_corruption(data: &mut [u8], pattern: &DataCorruptionPattern) {
                 }
             }
         }
-        DataCorruptionPattern::ZeroOut { start_offset, length } => {
+        DataCorruptionPattern::ZeroOut {
+            start_offset,
+            length,
+        } => {
             let start = (*start_offset as usize) % data.len();
             let len = (*length as usize).min(data.len() - start);
             for i in start..start + len {
@@ -586,7 +583,10 @@ fn apply_data_corruption(data: &mut [u8], pattern: &DataCorruptionPattern) {
     }
 }
 
-fn apply_coefficient_corruption(coefficients: &mut [Gf256], pattern: &CoefficientCorruptionPattern) {
+fn apply_coefficient_corruption(
+    coefficients: &mut [Gf256],
+    pattern: &CoefficientCorruptionPattern,
+) {
     match pattern {
         CoefficientCorruptionPattern::Single { index, new_value } => {
             let idx = (*index as usize) % coefficients.len();
@@ -659,7 +659,10 @@ fn apply_corruption_pattern_to_data(data: &mut [u8], pattern: CorruptionPattern)
     }
 }
 
-fn apply_corruption_pattern_to_coefficients(coefficients: &mut [Gf256], pattern: CorruptionPattern) {
+fn apply_corruption_pattern_to_coefficients(
+    coefficients: &mut [Gf256],
+    pattern: CorruptionPattern,
+) {
     match pattern {
         CorruptionPattern::Alternating => {
             for (i, coeff) in coefficients.iter_mut().enumerate() {
@@ -687,7 +690,10 @@ fn apply_corruption_pattern_to_coefficients(coefficients: &mut [Gf256], pattern:
 
 fn apply_single_corruption_op(symbol: &mut ReceivedSymbol, corruption: &SingleCorruption) {
     match corruption {
-        SingleCorruption::FlipBit { byte_index, bit_index } => {
+        SingleCorruption::FlipBit {
+            byte_index,
+            bit_index,
+        } => {
             let idx = (*byte_index as usize) % symbol.data.len();
             let bit = (*bit_index) % 8;
             symbol.data[idx] ^= 1 << bit;
@@ -708,13 +714,19 @@ fn apply_single_corruption_op(symbol: &mut ReceivedSymbol, corruption: &SingleCo
                 symbol.data[i] = (state >> 24) as u8;
             }
         }
-        SingleCorruption::CorruptCoefficient { coeff_index, new_value } => {
+        SingleCorruption::CorruptCoefficient {
+            coeff_index,
+            new_value,
+        } => {
             if !symbol.coefficients.is_empty() {
                 let idx = (*coeff_index as usize) % symbol.coefficients.len();
                 symbol.coefficients[idx] = Gf256::from(*new_value);
             }
         }
-        SingleCorruption::CorruptColumn { column_index, new_value } => {
+        SingleCorruption::CorruptColumn {
+            column_index,
+            new_value,
+        } => {
             if !symbol.columns.is_empty() {
                 let idx = (*column_index as usize) % symbol.columns.len();
                 symbol.columns[idx] = *new_value as usize;

@@ -548,6 +548,20 @@ fn etag_matches(client: &str, server: &str) -> bool {
     false
 }
 
+// ─── Test Helper Functions ─────────────────────────────────────────────────
+
+/// Test access function to expose generate_etag for audit tests.
+#[cfg(test)]
+pub fn generate_etag_test_access(body: &[u8]) -> String {
+    generate_etag(body)
+}
+
+/// Test access function to expose etag_matches for audit tests.
+#[cfg(test)]
+pub fn etag_matches_test_access(client: &str, server: &str) -> bool {
+    etag_matches(client, server)
+}
+
 // ─── MIME Detection ─────────────────────────────────────────────────────────
 
 /// Guess the MIME type from a file extension.

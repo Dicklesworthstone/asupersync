@@ -1,7 +1,7 @@
 #![no_main]
 
-use libfuzzer_sys::fuzz_target;
 use arbitrary::Arbitrary;
+use libfuzzer_sys::fuzz_target;
 use std::collections::HashMap;
 
 /// HTTP/2 SETTINGS_MAX_HEADER_LIST_SIZE=0 fuzz target.
@@ -187,20 +187,16 @@ impl MockH2SettingsConnection {
 
     fn handle_zero_header_size(&mut self, old_size: u32) -> SettingsResult {
         match self.policy.zero_size_handling {
-            ZeroSizeHandling::RejectAllHeaders => {
-                SettingsResult::ZeroSizePolicy {
-                    policy: "Reject all HEADERS frames".to_string(),
-                    pseudo_headers_allowed: false,
-                    connection_usable: false,
-                }
+            ZeroSizeHandling::RejectAllHeaders => SettingsResult::ZeroSizePolicy {
+                policy: "Reject all HEADERS frames".to_string(),
+                pseudo_headers_allowed: false,
+                connection_usable: false,
             },
 
-            ZeroSizeHandling::AllowMinimalPseudo => {
-                SettingsResult::ZeroSizePolicy {
-                    policy: "Allow minimal pseudo-headers only".to_string(),
-                    pseudo_headers_allowed: true,
-                    connection_usable: true,
-                }
+            ZeroSizeHandling::AllowMinimalPseudo => SettingsResult::ZeroSizePolicy {
+                policy: "Allow minimal pseudo-headers only".to_string(),
+                pseudo_headers_allowed: true,
+                connection_usable: true,
             },
 
             ZeroSizeHandling::UseDefault => {
@@ -211,12 +207,12 @@ impl MockH2SettingsConnection {
                     new_size: self.policy.fallback_max_size,
                     impact: "Used fallback size due to zero setting".to_string(),
                 }
-            },
+            }
 
             ZeroSizeHandling::ConnectionError => {
                 self.connection_active = false;
                 SettingsResult::ConnectionError(
-                    "SETTINGS_MAX_HEADER_LIST_SIZE=0 treated as connection error".to_string()
+                    "SETTINGS_MAX_HEADER_LIST_SIZE=0 treated as connection error".to_string(),
                 )
             }
         }
@@ -226,7 +222,7 @@ impl MockH2SettingsConnection {
     fn send_headers(&self, scenario: &RequestScenario) -> HeadersSendResult {
         if !self.connection_active {
             return HeadersSendResult::ConnectionClosed(
-                "Connection closed due to settings".to_string()
+                "Connection closed due to settings".to_string(),
             );
         }
 
@@ -237,9 +233,10 @@ impl MockH2SettingsConnection {
         }
 
         if header_size > self.max_header_list_size as usize {
-            return HeadersSendResult::Rejected(
-                format!("Headers size {} exceeds limit {}", header_size, self.max_header_list_size)
-            );
+            return HeadersSendResult::Rejected(format!(
+                "Headers size {} exceeds limit {}",
+                header_size, self.max_header_list_size
+            ));
         }
 
         HeadersSendResult::Sent {
@@ -249,17 +246,21 @@ impl MockH2SettingsConnection {
         }
     }
 
-    fn handle_zero_size_headers(&self, scenario: &RequestScenario, header_size: usize) -> HeadersSendResult {
+    fn handle_zero_size_headers(
+        &self,
+        scenario: &RequestScenario,
+        header_size: usize,
+    ) -> HeadersSendResult {
         match self.policy.zero_size_handling {
-            ZeroSizeHandling::RejectAllHeaders => {
-                HeadersSendResult::Rejected(
-                    "All headers rejected due to SETTINGS_MAX_HEADER_LIST_SIZE=0".to_string()
-                )
-            },
+            ZeroSizeHandling::RejectAllHeaders => HeadersSendResult::Rejected(
+                "All headers rejected due to SETTINGS_MAX_HEADER_LIST_SIZE=0".to_string(),
+            ),
 
             ZeroSizeHandling::AllowMinimalPseudo if self.policy.allow_minimal_pseudoheaders => {
                 // Only allow essential pseudo-headers
-                if scenario.regular_headers.is_empty() && self.is_minimal_pseudo_headers(&scenario.pseudo_headers) {
+                if scenario.regular_headers.is_empty()
+                    && self.is_minimal_pseudo_headers(&scenario.pseudo_headers)
+                {
                     HeadersSendResult::Sent {
                         header_count: 4, // :method, :path, :scheme, :authority
                         total_size: self.calculate_pseudo_header_size(&scenario.pseudo_headers),
@@ -267,17 +268,18 @@ impl MockH2SettingsConnection {
                     }
                 } else {
                     HeadersSendResult::Rejected(
-                        "Only minimal pseudo-headers allowed with zero limit".to_string()
+                        "Only minimal pseudo-headers allowed with zero limit".to_string(),
                     )
                 }
-            },
+            }
 
             ZeroSizeHandling::UseDefault => {
                 // Use fallback limit
                 if header_size > self.policy.fallback_max_size as usize {
-                    HeadersSendResult::Rejected(
-                        format!("Headers exceed fallback limit {}", self.policy.fallback_max_size)
-                    )
+                    HeadersSendResult::Rejected(format!(
+                        "Headers exceed fallback limit {}",
+                        self.policy.fallback_max_size
+                    ))
                 } else {
                     HeadersSendResult::Sent {
                         header_count: self.count_headers(scenario),
@@ -285,11 +287,11 @@ impl MockH2SettingsConnection {
                         within_limit: true,
                     }
                 }
-            },
+            }
 
-            _ => HeadersSendResult::Rejected(
-                "Headers rejected due to zero size policy".to_string()
-            )
+            _ => {
+                HeadersSendResult::Rejected("Headers rejected due to zero size policy".to_string())
+            }
         }
     }
 
@@ -310,7 +312,7 @@ impl MockH2SettingsConnection {
     fn calculate_pseudo_header_size(&self, pseudo: &PseudoHeaders) -> usize {
         let mut size = 0;
         size += 7 + pseudo.method.len(); // ":method" + value
-        size += 5 + pseudo.path.len();   // ":path" + value
+        size += 5 + pseudo.path.len(); // ":path" + value
         size += 7 + pseudo.scheme.len(); // ":scheme" + value
         if let Some(ref authority) = pseudo.authority {
             size += 10 + authority.len(); // ":authority" + value
@@ -329,10 +331,10 @@ impl MockH2SettingsConnection {
 
     fn is_minimal_pseudo_headers(&self, pseudo: &PseudoHeaders) -> bool {
         // Check if these are truly minimal required headers
-        pseudo.method == "GET" &&
-        pseudo.path == "/" &&
-        (pseudo.scheme == "http" || pseudo.scheme == "https") &&
-        pseudo.authority.is_some()
+        pseudo.method == "GET"
+            && pseudo.path == "/"
+            && (pseudo.scheme == "http" || pseudo.scheme == "https")
+            && pseudo.authority.is_some()
     }
 }
 
@@ -379,53 +381,72 @@ fuzz_target!(|input: SettingsZeroHeaderInput| {
         input.new_max_header_size = 0; // Focus on zero case
     }
 
-    let mut connection = MockH2SettingsConnection::new(
-        input.connection_config.clone(),
-        input.policy.clone()
-    );
+    let mut connection =
+        MockH2SettingsConnection::new(input.connection_config.clone(), input.policy.clone());
 
     // Process initial settings update
     let settings_result = connection.process_settings(input.new_max_header_size);
 
     // Test settings processing doesn't panic
     match settings_result {
-        SettingsResult::ZeroSizePolicy { connection_usable, pseudo_headers_allowed, .. } => {
+        SettingsResult::ZeroSizePolicy {
+            connection_usable,
+            pseudo_headers_allowed,
+            ..
+        } => {
             // Verify zero size handling is reasonable
             if input.new_max_header_size == 0 {
                 match input.policy.zero_size_handling {
                     ZeroSizeHandling::RejectAllHeaders => {
-                        assert!(!connection_usable, "Connection should be unusable with reject-all policy");
-                        assert!(!pseudo_headers_allowed, "Pseudo headers should not be allowed");
-                    },
+                        assert!(
+                            !connection_usable,
+                            "Connection should be unusable with reject-all policy"
+                        );
+                        assert!(
+                            !pseudo_headers_allowed,
+                            "Pseudo headers should not be allowed"
+                        );
+                    }
                     ZeroSizeHandling::AllowMinimalPseudo => {
-                        assert!(connection_usable || pseudo_headers_allowed,
-                               "Should allow some functionality with minimal pseudo policy");
-                    },
+                        assert!(
+                            connection_usable || pseudo_headers_allowed,
+                            "Should allow some functionality with minimal pseudo policy"
+                        );
+                    }
                     ZeroSizeHandling::ConnectionError => {
                         // Connection error is acceptable response to zero setting
-                    },
+                    }
                     _ => {}
                 }
             }
-        },
+        }
 
         SettingsResult::Updated { new_size, .. } => {
-            assert_eq!(new_size, connection.max_header_list_size,
-                      "Connection should reflect new header size");
-        },
+            assert_eq!(
+                new_size, connection.max_header_list_size,
+                "Connection should reflect new header size"
+            );
+        }
 
         SettingsResult::ConnectionError(_) => {
-            assert!(!connection.connection_active,
-                   "Connection should be inactive after connection error");
+            assert!(
+                !connection.connection_active,
+                "Connection should be inactive after connection error"
+            );
         }
     }
 
     // Test header sending scenarios
-    for scenario in input.request_scenarios.iter().take(3) { // Limit for performance
+    for scenario in input.request_scenarios.iter().take(3) {
+        // Limit for performance
         let headers_result = connection.send_headers(scenario);
 
         match headers_result {
-            HeadersSendResult::Sent { header_count, total_size, within_limit } => {
+            HeadersSendResult::Sent {
+                header_count,
+                total_size,
+                within_limit,
+            } => {
                 // Verify sent headers are reasonable
                 assert!(header_count > 0, "Should have at least some headers");
 
@@ -434,30 +455,44 @@ fuzz_target!(|input: SettingsZeroHeaderInput| {
                     match input.policy.zero_size_handling {
                         ZeroSizeHandling::AllowMinimalPseudo | ZeroSizeHandling::UseDefault => {
                             // Acceptable
-                        },
+                        }
                         _ => {
-                            panic!("Headers should not be within zero limit unless policy allows it");
+                            panic!(
+                                "Headers should not be within zero limit unless policy allows it"
+                            );
                         }
                     }
                 }
 
-                if input.new_max_header_size > 0 && total_size > input.new_max_header_size as usize {
-                    panic!("Headers {} should not exceed limit {}", total_size, input.new_max_header_size);
+                if input.new_max_header_size > 0 && total_size > input.new_max_header_size as usize
+                {
+                    panic!(
+                        "Headers {} should not exceed limit {}",
+                        total_size, input.new_max_header_size
+                    );
                 }
-            },
+            }
 
             HeadersSendResult::Rejected(ref reason) => {
                 // Verify rejection is reasonable
                 if input.new_max_header_size == 0 {
-                    assert!(reason.contains("zero") || reason.contains("rejected") || reason.contains("limit"),
-                           "Zero size rejection should mention the limit: {}", reason);
+                    assert!(
+                        reason.contains("zero")
+                            || reason.contains("rejected")
+                            || reason.contains("limit"),
+                        "Zero size rejection should mention the limit: {}",
+                        reason
+                    );
                 }
-            },
+            }
 
             HeadersSendResult::ConnectionClosed(ref reason) => {
                 // Connection closure should be explainable
-                assert!(reason.contains("closed") || reason.contains("settings"),
-                       "Connection closure should explain reason: {}", reason);
+                assert!(
+                    reason.contains("closed") || reason.contains("settings"),
+                    "Connection closure should explain reason: {}",
+                    reason
+                );
             }
         }
     }
@@ -476,13 +511,17 @@ fuzz_target!(|input: SettingsZeroHeaderInput| {
         match minimal_result {
             HeadersSendResult::Sent { .. } => {
                 // Only acceptable with permissive policies
-                assert!(matches!(input.policy.zero_size_handling,
-                               ZeroSizeHandling::AllowMinimalPseudo | ZeroSizeHandling::UseDefault),
-                       "Minimal headers should only be sent with permissive policies");
-            },
+                assert!(
+                    matches!(
+                        input.policy.zero_size_handling,
+                        ZeroSizeHandling::AllowMinimalPseudo | ZeroSizeHandling::UseDefault
+                    ),
+                    "Minimal headers should only be sent with permissive policies"
+                );
+            }
             HeadersSendResult::Rejected(_) => {
                 // Acceptable - zero means zero
-            },
+            }
             HeadersSendResult::ConnectionClosed(_) => {
                 // Acceptable - connection became unusable
             }

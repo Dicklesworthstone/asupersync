@@ -1,7 +1,7 @@
 #![no_main]
 
-use libfuzzer_sys::fuzz_target;
 use arbitrary::{Arbitrary, Unstructured};
+use libfuzzer_sys::fuzz_target;
 use std::collections::HashMap;
 
 /// HTTP/2 flow control state machine zero window handling testing.
@@ -88,7 +88,10 @@ impl FlowWindow {
         }
 
         if amount as i64 > self.size {
-            return Err(format!("Cannot send {} bytes: only {} window available", amount, self.size));
+            return Err(format!(
+                "Cannot send {} bytes: only {} window available",
+                amount, self.size
+            ));
         }
 
         self.size -= amount as i64;
@@ -169,7 +172,12 @@ impl MockH2FlowController {
     }
 
     /// Send DATA frame on stream
-    fn send_data(&mut self, stream_id: u32, data_size: u32, _end_stream: bool) -> Result<(), String> {
+    fn send_data(
+        &mut self,
+        stream_id: u32,
+        data_size: u32,
+        _end_stream: bool,
+    ) -> Result<(), String> {
         if stream_id == 0 {
             return Err("PROTOCOL_ERROR: DATA frame stream ID must not be 0".into());
         }
@@ -229,25 +237,29 @@ impl MockH2FlowController {
         }
 
         if let Some(stream_window) = self.stream_windows.get(&stream_id) {
-            !stream_window.is_paused() &&
-            stream_window.current_size() >= data_size as i64 &&
-            self.connection_window.current_size() >= data_size as i64
+            !stream_window.is_paused()
+                && stream_window.current_size() >= data_size as i64
+                && self.connection_window.current_size() >= data_size as i64
         } else {
             // New stream would use initial window size
-            self.initial_window_size >= data_size &&
-            self.connection_window.current_size() >= data_size as i64
+            self.initial_window_size >= data_size
+                && self.connection_window.current_size() >= data_size as i64
         }
     }
 
     /// Get stream window state
     fn get_stream_window_state(&self, stream_id: u32) -> Option<(i64, bool)> {
-        self.stream_windows.get(&stream_id)
+        self.stream_windows
+            .get(&stream_id)
             .map(|w| (w.current_size(), w.is_paused()))
     }
 
     /// Get connection window state
     fn get_connection_window_state(&self) -> (i64, bool) {
-        (self.connection_window.current_size(), self.connection_window.is_paused())
+        (
+            self.connection_window.current_size(),
+            self.connection_window.is_paused(),
+        )
     }
 
     /// Get current initial window size setting
@@ -257,7 +269,10 @@ impl MockH2FlowController {
 
     /// Count paused streams
     fn count_paused_streams(&self) -> usize {
-        self.stream_windows.values().filter(|w| w.is_paused()).count()
+        self.stream_windows
+            .values()
+            .filter(|w| w.is_paused())
+            .count()
     }
 
     /// Get processing errors
@@ -288,24 +303,39 @@ fuzz_target!(|data: &[u8]| {
     for operation in &input.scenario.stream_operations {
         match operation {
             StreamOperation::SendData(send_op) => {
-                if send_op.stream_id > 0 && send_op.stream_id <= 1_000_000 && send_op.data_size <= 100_000 {
-                    let result = controller.send_data(send_op.stream_id, send_op.data_size, send_op.end_stream);
+                if send_op.stream_id > 0
+                    && send_op.stream_id <= 1_000_000
+                    && send_op.data_size <= 100_000
+                {
+                    let result = controller.send_data(
+                        send_op.stream_id,
+                        send_op.data_size,
+                        send_op.end_stream,
+                    );
 
                     // Check if send should succeed based on current window state
-                    let should_succeed = controller.can_send_data(send_op.stream_id, send_op.data_size);
+                    let should_succeed =
+                        controller.can_send_data(send_op.stream_id, send_op.data_size);
 
                     if should_succeed {
-                        assert!(result.is_ok(),
+                        assert!(
+                            result.is_ok(),
                             "Send should succeed when window available: stream={}, size={}, result={:?}",
-                            send_op.stream_id, send_op.data_size, result);
+                            send_op.stream_id,
+                            send_op.data_size,
+                            result
+                        );
                     }
                 }
             }
             StreamOperation::ReceiveWindowUpdate(window_update) => {
-                if window_update.stream_id <= 1_000_000 && window_update.increment > 0 && window_update.increment <= 100_000 {
-                    let result = controller.process_window_update(window_update.stream_id, window_update.increment);
-                    assert!(result.is_ok(),
-                        "Valid WINDOW_UPDATE should succeed");
+                if window_update.stream_id <= 1_000_000
+                    && window_update.increment > 0
+                    && window_update.increment <= 100_000
+                {
+                    let result = controller
+                        .process_window_update(window_update.stream_id, window_update.increment);
+                    assert!(result.is_ok(), "Valid WINDOW_UPDATE should succeed");
                 }
             }
         }
@@ -315,12 +345,17 @@ fuzz_target!(|data: &[u8]| {
     let settings_result = controller.process_settings_initial_window_size(window_update);
 
     if window_update <= 2_147_483_647 {
-        assert!(settings_result.is_ok(),
-            "Valid INITIAL_WINDOW_SIZE change should succeed");
+        assert!(
+            settings_result.is_ok(),
+            "Valid INITIAL_WINDOW_SIZE change should succeed"
+        );
 
         // Test 3: Verify window size was updated
-        assert_eq!(controller.get_initial_window_size(), window_update,
-            "Initial window size should be updated");
+        assert_eq!(
+            controller.get_initial_window_size(),
+            window_update,
+            "Initial window size should be updated"
+        );
 
         // Test 4: Check stream pausing behavior when window_update = 0
         if window_update == 0 {
@@ -329,10 +364,15 @@ fuzz_target!(|data: &[u8]| {
             // Streams that had consumed their window should now be paused
             // (This depends on the specific operations, but we can check consistency)
             for (stream_id, _) in controller.stream_windows.iter() {
-                if let Some((window_size, is_paused)) = controller.get_stream_window_state(*stream_id) {
+                if let Some((window_size, is_paused)) =
+                    controller.get_stream_window_state(*stream_id)
+                {
                     if window_size <= 0 {
-                        assert!(is_paused,
-                            "Stream {} with window size {} should be paused", stream_id, window_size);
+                        assert!(
+                            is_paused,
+                            "Stream {} with window size {} should be paused",
+                            stream_id, window_size
+                        );
                     }
                 }
             }
@@ -340,35 +380,44 @@ fuzz_target!(|data: &[u8]| {
             // Test 5: Verify new sends are blocked when window is 0
             if controller.get_initial_window_size() == 0 {
                 let blocked_result = controller.send_data(999, 1, false);
-                assert!(blocked_result.is_err(),
-                    "Should not be able to send data when INITIAL_WINDOW_SIZE is 0");
+                assert!(
+                    blocked_result.is_err(),
+                    "Should not be able to send data when INITIAL_WINDOW_SIZE is 0"
+                );
             }
         }
     } else {
-        assert!(settings_result.is_err(),
-            "Excessive INITIAL_WINDOW_SIZE should be rejected");
+        assert!(
+            settings_result.is_err(),
+            "Excessive INITIAL_WINDOW_SIZE should be rejected"
+        );
     }
 
     // Test 6: Process WINDOW_UPDATE frames after settings change
     for window_update in &input.scenario.window_updates {
-        if window_update.stream_id <= 1_000_000 &&
-           window_update.increment > 0 &&
-           window_update.increment <= 100_000 {
+        if window_update.stream_id <= 1_000_000
+            && window_update.increment > 0
+            && window_update.increment <= 100_000
+        {
             let before_paused = controller.count_paused_streams();
 
-            let result = controller.process_window_update(window_update.stream_id, window_update.increment);
-            assert!(result.is_ok(),
-                "Valid WINDOW_UPDATE should succeed");
+            let result =
+                controller.process_window_update(window_update.stream_id, window_update.increment);
+            assert!(result.is_ok(), "Valid WINDOW_UPDATE should succeed");
 
             // Check if WINDOW_UPDATE resumed paused streams
             let after_paused = controller.count_paused_streams();
 
             if window_update.stream_id > 0 {
-                if let Some((window_size, is_paused)) = controller.get_stream_window_state(window_update.stream_id) {
+                if let Some((window_size, is_paused)) =
+                    controller.get_stream_window_state(window_update.stream_id)
+                {
                     if window_size > 0 {
-                        assert!(!is_paused,
+                        assert!(
+                            !is_paused,
                             "Stream {} with positive window {} should not be paused",
-                            window_update.stream_id, window_size);
+                            window_update.stream_id, window_size
+                        );
                     }
                 }
             }
@@ -382,8 +431,10 @@ fuzz_target!(|data: &[u8]| {
         // If connection is paused, no stream should be able to send
         for stream_id in 1..=5 {
             let can_send = controller.can_send_data(stream_id, 1);
-            assert!(!can_send,
-                "No stream should send when connection window is paused");
+            assert!(
+                !can_send,
+                "No stream should send when connection window is paused"
+            );
         }
     }
 });
@@ -463,7 +514,11 @@ mod tests {
         assert!(controller.send_data(1, 300, false).is_ok());
 
         // Increase window size
-        assert!(controller.process_settings_initial_window_size(2000).is_ok());
+        assert!(
+            controller
+                .process_settings_initial_window_size(2000)
+                .is_ok()
+        );
 
         // Window should be adjusted: 700 + (2000 - 1000) = 1700
         let (window_size, is_paused) = controller.get_stream_window_state(1).unwrap();
@@ -494,7 +549,11 @@ mod tests {
 
         let result = controller.process_window_update(1, 0);
         assert!(result.is_err());
-        assert!(result.unwrap_err().contains("WINDOW_UPDATE increment must not be zero"));
+        assert!(
+            result
+                .unwrap_err()
+                .contains("WINDOW_UPDATE increment must not be zero")
+        );
     }
 
     #[test]

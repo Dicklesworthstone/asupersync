@@ -12,9 +12,9 @@
 
 #![no_main]
 
-use libfuzzer_sys::fuzz_target;
 use arbitrary::{Arbitrary, Unstructured};
 use asupersync::sync::Semaphore;
+use libfuzzer_sys::fuzz_target;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 #[derive(Debug, Clone, Arbitrary)]
@@ -111,7 +111,9 @@ impl PermitTracker {
         }
 
         // Forgotten permits should never return to available pool
-        let expected_available = self.initial_permits.saturating_sub(currently_held + forgotten);
+        let expected_available = self
+            .initial_permits
+            .saturating_sub(currently_held + forgotten);
         if available != expected_available {
             return Err(format!(
                 "Available permits mismatch: expected {} (initial - held - forgotten), got {}",
@@ -145,7 +147,9 @@ fn test_forget_reacquire_scenario(
 ) -> Result<(), String> {
     use std::collections::VecDeque;
 
-    let initial_permits = config.initial_permits.min(ForgetReacquireConfig::max_initial_permits()) as usize;
+    let initial_permits = config
+        .initial_permits
+        .min(ForgetReacquireConfig::max_initial_permits()) as usize;
     if initial_permits == 0 {
         return Ok(()); // No permits to test
     }
@@ -153,7 +157,9 @@ fn test_forget_reacquire_scenario(
     let semaphore = Semaphore::new(initial_permits);
     let mut held_permits = VecDeque::new();
 
-    let max_ops = config.max_operations.min(ForgetReacquireConfig::max_operations()) as usize;
+    let max_ops = config
+        .max_operations
+        .min(ForgetReacquireConfig::max_operations()) as usize;
 
     for operation in config.operations.iter().take(max_ops) {
         match operation {
@@ -262,7 +268,9 @@ fuzz_target!(|data: &[u8]| {
         return;
     }
 
-    let initial_permits = config.initial_permits.min(ForgetReacquireConfig::max_initial_permits()) as usize;
+    let initial_permits = config
+        .initial_permits
+        .min(ForgetReacquireConfig::max_initial_permits()) as usize;
     let tracker = PermitTracker::new(initial_permits);
 
     // Test the forget+reacquire scenario
@@ -278,9 +286,7 @@ fuzz_target!(|data: &[u8]| {
         let config2 = config.clone();
 
         // Run a concurrent test
-        let handle = thread::spawn(move || {
-            test_forget_reacquire_scenario(&config2, &tracker2)
-        });
+        let handle = thread::spawn(move || test_forget_reacquire_scenario(&config2, &tracker2));
 
         match handle.join() {
             Ok(Ok(())) => {

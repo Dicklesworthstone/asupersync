@@ -18,15 +18,13 @@
 
 #![no_main]
 
-use libfuzzer_sys::fuzz_target;
 use asupersync::bytes::Bytes;
 use asupersync::http::h2::connection::{Connection, ConnectionState};
 use asupersync::http::h2::error::ErrorCode;
-use asupersync::http::h2::frame::{
-    HeadersFrame, PriorityFrame, Setting, SettingsFrame
-};
+use asupersync::http::h2::frame::{HeadersFrame, PriorityFrame, Setting, SettingsFrame};
 use asupersync::http::h2::settings::Settings;
 use asupersync::http::h2::{Frame, H2Error};
+use libfuzzer_sys::fuzz_target;
 
 /// Maximum input size to prevent OOM
 const MAX_INPUT_SIZE: usize = 2048;
@@ -60,7 +58,12 @@ fuzz_target!(|data: &[u8]| {
 
         if stream_a != stream_b {
             let result = test_simple_cycle_detection(
-                stream_a, stream_b, weight_a, weight_b, exclusive_a, exclusive_b
+                stream_a,
+                stream_b,
+                weight_a,
+                weight_b,
+                exclusive_a,
+                exclusive_b,
             );
             validate_cycle_result(result, 2);
         }
@@ -157,10 +160,18 @@ fn test_self_dependency_detection(data: &[u8]) -> Result<SelfDependencyResult, H
         let _ = send_headers_frame(&mut connection, stream_id, false);
 
         // Attempt self-dependency via PRIORITY frame
-        if let Some(_priority_frame) = create_priority_frame(stream_id, stream_id, weight, exclusive) {
+        if let Some(_priority_frame) =
+            create_priority_frame(stream_id, stream_id, weight, exclusive)
+        {
             // In HTTP/2 RFC 9113, PRIORITY frames are deprecated but may still be supported
             // Instead, test via HEADERS with priority
-            let result = send_headers_with_priority(&mut connection, stream_id, stream_id, weight, exclusive);
+            let result = send_headers_with_priority(
+                &mut connection,
+                stream_id,
+                stream_id,
+                weight,
+                exclusive,
+            );
             self_dependency_attempts += 1;
 
             if result.is_err() {
@@ -183,7 +194,7 @@ fn test_simple_cycle_detection(
     weight_a: u8,
     weight_b: u8,
     exclusive_a: bool,
-    exclusive_b: bool
+    exclusive_b: bool,
 ) -> Result<CycleDetectionResult, H2Error> {
     let mut connection = Connection::server(Settings::default());
     initialize_connection(&mut connection)?;
@@ -196,14 +207,20 @@ fn test_simple_cycle_detection(
     let mut cycle_rejections = 0;
 
     // Step 1: A depends on B (should succeed)
-    let result1 = send_headers_with_priority(&mut connection, stream_a, stream_b, weight_a, exclusive_a);
+    let result1 =
+        send_headers_with_priority(&mut connection, stream_a, stream_b, weight_a, exclusive_a);
     cycle_attempts += 1;
-    if result1.is_err() { cycle_rejections += 1; }
+    if result1.is_err() {
+        cycle_rejections += 1;
+    }
 
     // Step 2: B depends on A (should create cycle and be rejected)
-    let result2 = send_headers_with_priority(&mut connection, stream_b, stream_a, weight_b, exclusive_b);
+    let result2 =
+        send_headers_with_priority(&mut connection, stream_b, stream_a, weight_b, exclusive_b);
     cycle_attempts += 1;
-    if result2.is_err() { cycle_rejections += 1; }
+    if result2.is_err() {
+        cycle_rejections += 1;
+    }
 
     Ok(CycleDetectionResult {
         cycle_length: 2,
@@ -239,7 +256,13 @@ fn test_long_chain_cycle(chain_length: u8, data: &[u8]) -> Result<CycleDetection
         let weight = if i < data.len() { data[i] } else { 16 };
         let exclusive = i % 2 == 0; // Alternate exclusive flag
 
-        let result = send_headers_with_priority(&mut connection, source_stream, target_stream, weight, exclusive);
+        let result = send_headers_with_priority(
+            &mut connection,
+            source_stream,
+            target_stream,
+            weight,
+            exclusive,
+        );
         cycle_attempts += 1;
         if result.is_err() {
             cycle_rejections += 1;
@@ -253,10 +276,20 @@ fn test_long_chain_cycle(chain_length: u8, data: &[u8]) -> Result<CycleDetection
     if streams.len() >= 2 {
         let last_stream = streams[streams.len() - 1];
         let first_stream = streams[0];
-        let weight = if data.len() > chain_length as usize { data[chain_length as usize] } else { 16 };
+        let weight = if data.len() > chain_length as usize {
+            data[chain_length as usize]
+        } else {
+            16
+        };
         let exclusive = chain_length % 2 == 0;
 
-        let result = send_headers_with_priority(&mut connection, last_stream, first_stream, weight, exclusive);
+        let result = send_headers_with_priority(
+            &mut connection,
+            last_stream,
+            first_stream,
+            weight,
+            exclusive,
+        );
         cycle_attempts += 1;
         if result.is_err() {
             cycle_rejections += 1;
@@ -274,7 +307,10 @@ fn test_long_chain_cycle(chain_length: u8, data: &[u8]) -> Result<CycleDetection
 }
 
 /// Test complex dependency graph with multiple potential cycles
-fn test_complex_dependency_graph(graph_size: u8, data: &[u8]) -> Result<ComplexGraphResult, H2Error> {
+fn test_complex_dependency_graph(
+    graph_size: u8,
+    data: &[u8],
+) -> Result<ComplexGraphResult, H2Error> {
     let mut connection = Connection::server(Settings::default());
     initialize_connection(&mut connection)?;
 
@@ -302,9 +338,17 @@ fn test_complex_dependency_graph(graph_size: u8, data: &[u8]) -> Result<ComplexG
             let source_stream = streams[source_idx];
             let target_stream = streams[target_idx];
 
-            let result = send_headers_with_priority(&mut connection, source_stream, target_stream, weight, exclusive);
+            let result = send_headers_with_priority(
+                &mut connection,
+                source_stream,
+                target_stream,
+                weight,
+                exclusive,
+            );
             dependency_attempts += 1;
-            if result.is_err() { dependency_rejections += 1; }
+            if result.is_err() {
+                dependency_rejections += 1;
+            }
         }
 
         dependency_count += 1;
@@ -320,7 +364,10 @@ fn test_complex_dependency_graph(graph_size: u8, data: &[u8]) -> Result<ComplexG
 }
 
 /// Test priority updates that might create cycles
-fn test_priority_updates_cycles(update_count: u8, data: &[u8]) -> Result<PriorityUpdateResult, H2Error> {
+fn test_priority_updates_cycles(
+    update_count: u8,
+    data: &[u8],
+) -> Result<PriorityUpdateResult, H2Error> {
     let mut connection = Connection::server(Settings::default());
     initialize_connection(&mut connection)?;
 
@@ -349,9 +396,17 @@ fn test_priority_updates_cycles(update_count: u8, data: &[u8]) -> Result<Priorit
             let exclusive = data[i * 4 + 3] & 0x01 != 0;
 
             if source_idx != target_idx {
-                let result = send_headers_with_priority(&mut connection, streams[source_idx], streams[target_idx], weight, exclusive);
+                let result = send_headers_with_priority(
+                    &mut connection,
+                    streams[source_idx],
+                    streams[target_idx],
+                    weight,
+                    exclusive,
+                );
                 update_attempts += 1;
-                if result.is_err() { update_rejections += 1; }
+                if result.is_err() {
+                    update_rejections += 1;
+                }
             }
         }
     }
@@ -364,7 +419,10 @@ fn test_priority_updates_cycles(update_count: u8, data: &[u8]) -> Result<Priorit
 }
 
 /// Test exclusive dependency flag with cycle creation
-fn test_exclusive_dependency_cycles(exclusive_pattern: u8, data: &[u8]) -> Result<ExclusiveDependencyResult, H2Error> {
+fn test_exclusive_dependency_cycles(
+    exclusive_pattern: u8,
+    data: &[u8],
+) -> Result<ExclusiveDependencyResult, H2Error> {
     let mut connection = Connection::server(Settings::default());
     initialize_connection(&mut connection)?;
 
@@ -388,9 +446,17 @@ fn test_exclusive_dependency_cycles(exclusive_pattern: u8, data: &[u8]) -> Resul
         let weight = data[i * 2];
         let exclusive = (exclusive_pattern & (1 << (i % 8))) != 0;
 
-        let result = send_headers_with_priority(&mut connection, source_stream, target_stream, weight, exclusive);
+        let result = send_headers_with_priority(
+            &mut connection,
+            source_stream,
+            target_stream,
+            weight,
+            exclusive,
+        );
         exclusive_attempts += 1;
-        if result.is_err() { exclusive_rejections += 1; }
+        if result.is_err() {
+            exclusive_rejections += 1;
+        }
     }
 
     // Attempt to create cycle with exclusive dependency
@@ -399,9 +465,12 @@ fn test_exclusive_dependency_cycles(exclusive_pattern: u8, data: &[u8]) -> Resul
         let first_stream = streams[0];
         let exclusive = exclusive_pattern & 0x80 != 0;
 
-        let result = send_headers_with_priority(&mut connection, last_stream, first_stream, 32, exclusive);
+        let result =
+            send_headers_with_priority(&mut connection, last_stream, first_stream, 32, exclusive);
         exclusive_attempts += 1;
-        if result.is_err() { exclusive_rejections += 1; }
+        if result.is_err() {
+            exclusive_rejections += 1;
+        }
     }
 
     Ok(ExclusiveDependencyResult {
@@ -436,9 +505,17 @@ fn test_deep_dependency_chain(depth: u32, data: &[u8]) -> Result<DeepChainResult
         let weight = if i < data.len() { data[i] } else { 16 };
         let exclusive = i % 2 == 0;
 
-        let result = send_headers_with_priority(&mut connection, source_stream, target_stream, weight, exclusive);
+        let result = send_headers_with_priority(
+            &mut connection,
+            source_stream,
+            target_stream,
+            weight,
+            exclusive,
+        );
         chain_attempts += 1;
-        if result.is_ok() { chain_successes += 1; }
+        if result.is_ok() {
+            chain_successes += 1;
+        }
     }
 
     Ok(DeepChainResult {
@@ -450,7 +527,10 @@ fn test_deep_dependency_chain(depth: u32, data: &[u8]) -> Result<DeepChainResult
 }
 
 /// Test concurrent cycle creation attempts
-fn test_concurrent_cycle_attempts(concurrent_count: u8, data: &[u8]) -> Result<ConcurrentResult, H2Error> {
+fn test_concurrent_cycle_attempts(
+    concurrent_count: u8,
+    data: &[u8],
+) -> Result<ConcurrentResult, H2Error> {
     let mut connection = Connection::server(Settings::default());
     initialize_connection(&mut connection)?;
 
@@ -475,14 +555,20 @@ fn test_concurrent_cycle_attempts(concurrent_count: u8, data: &[u8]) -> Result<C
             let weight = data[i];
 
             // A → B
-            let result1 = send_headers_with_priority(&mut connection, stream_a, stream_b, weight, false);
+            let result1 =
+                send_headers_with_priority(&mut connection, stream_a, stream_b, weight, false);
             concurrent_attempts += 1;
-            if result1.is_err() { concurrent_rejections += 1; }
+            if result1.is_err() {
+                concurrent_rejections += 1;
+            }
 
             // B → A (creates cycle)
-            let result2 = send_headers_with_priority(&mut connection, stream_b, stream_a, weight, false);
+            let result2 =
+                send_headers_with_priority(&mut connection, stream_b, stream_a, weight, false);
             concurrent_attempts += 1;
-            if result2.is_err() { concurrent_rejections += 1; }
+            if result2.is_err() {
+                concurrent_rejections += 1;
+            }
         }
     }
 
@@ -494,7 +580,10 @@ fn test_concurrent_cycle_attempts(concurrent_count: u8, data: &[u8]) -> Result<C
 }
 
 /// Test parent-child relationship inversions
-fn test_parent_child_inversions(inversion_count: u8, data: &[u8]) -> Result<InversionResult, H2Error> {
+fn test_parent_child_inversions(
+    inversion_count: u8,
+    data: &[u8],
+) -> Result<InversionResult, H2Error> {
     let mut connection = Connection::server(Settings::default());
     initialize_connection(&mut connection)?;
 
@@ -524,9 +613,17 @@ fn test_parent_child_inversions(inversion_count: u8, data: &[u8]) -> Result<Inve
             let weight = data[i];
 
             // Try to make parent depend on child (inversion)
-            let result = send_headers_with_priority(&mut connection, parent_stream, child_stream, weight, false);
+            let result = send_headers_with_priority(
+                &mut connection,
+                parent_stream,
+                child_stream,
+                weight,
+                false,
+            );
             inversion_attempts += 1;
-            if result.is_err() { inversion_rejections += 1; }
+            if result.is_err() {
+                inversion_rejections += 1;
+            }
         }
     }
 
@@ -554,7 +651,9 @@ fn test_edge_cases(edge_case_type: u8, data: &[u8]) -> Result<EdgeCaseResult, H2
 
                 let result = send_headers_with_priority(&mut connection, stream_id, 0, 16, false);
                 edge_case_attempts += 1;
-                if result.is_err() { edge_case_rejections += 1; }
+                if result.is_err() {
+                    edge_case_rejections += 1;
+                }
             }
         }
         1 => {
@@ -567,9 +666,17 @@ fn test_edge_cases(edge_case_type: u8, data: &[u8]) -> Result<EdgeCaseResult, H2
                 let _ = send_headers_frame(&mut connection, max_stream_id, false);
                 let _ = send_headers_frame(&mut connection, target_stream, false);
 
-                let result = send_headers_with_priority(&mut connection, max_stream_id, target_stream, data[1], false);
+                let result = send_headers_with_priority(
+                    &mut connection,
+                    max_stream_id,
+                    target_stream,
+                    data[1],
+                    false,
+                );
                 edge_case_attempts += 1;
-                if result.is_err() { edge_case_rejections += 1; }
+                if result.is_err() {
+                    edge_case_rejections += 1;
+                }
             }
         }
         2 => {
@@ -582,14 +689,20 @@ fn test_edge_cases(edge_case_type: u8, data: &[u8]) -> Result<EdgeCaseResult, H2
                 let _ = send_headers_frame(&mut connection, stream_b, false);
 
                 // Test weight 0
-                let result1 = send_headers_with_priority(&mut connection, stream_a, stream_b, 0, false);
+                let result1 =
+                    send_headers_with_priority(&mut connection, stream_a, stream_b, 0, false);
                 edge_case_attempts += 1;
-                if result1.is_err() { edge_case_rejections += 1; }
+                if result1.is_err() {
+                    edge_case_rejections += 1;
+                }
 
                 // Test weight 255
-                let result2 = send_headers_with_priority(&mut connection, stream_a, stream_b, 255, false);
+                let result2 =
+                    send_headers_with_priority(&mut connection, stream_a, stream_b, 255, false);
                 edge_case_attempts += 1;
-                if result2.is_err() { edge_case_rejections += 1; }
+                if result2.is_err() {
+                    edge_case_rejections += 1;
+                }
             }
         }
         3 => {
@@ -601,9 +714,17 @@ fn test_edge_cases(edge_case_type: u8, data: &[u8]) -> Result<EdgeCaseResult, H2
                 let _ = send_headers_frame(&mut connection, stream_id, false);
                 // Don't create the target stream
 
-                let result = send_headers_with_priority(&mut connection, stream_id, nonexistent_target, 16, false);
+                let result = send_headers_with_priority(
+                    &mut connection,
+                    stream_id,
+                    nonexistent_target,
+                    16,
+                    false,
+                );
                 edge_case_attempts += 1;
-                if result.is_err() { edge_case_rejections += 1; }
+                if result.is_err() {
+                    edge_case_rejections += 1;
+                }
             }
         }
         _ => {}
@@ -702,13 +823,13 @@ fn initialize_connection(connection: &mut Connection) -> Result<(), H2Error> {
 fn send_headers_frame(
     connection: &mut Connection,
     stream_id: u32,
-    end_stream: bool
+    end_stream: bool,
 ) -> Result<(), H2Error> {
     let headers_frame = HeadersFrame::new(
         stream_id,
         Bytes::from("dummy headers"),
         end_stream,
-        true // end_headers
+        true, // end_headers
     );
     let _ = connection.process_frame(Frame::Headers(headers_frame))?;
     Ok(())
@@ -719,14 +840,14 @@ fn send_headers_with_priority(
     stream_id: u32,
     dependency: u32,
     weight: u8,
-    exclusive: bool
+    exclusive: bool,
 ) -> Result<(), H2Error> {
     // Create HEADERS frame with priority information
     let mut headers_frame = HeadersFrame::new(
         stream_id,
         Bytes::from("priority headers"),
         false,
-        true // end_headers
+        true, // end_headers
     );
 
     // Set priority spec
@@ -744,7 +865,7 @@ fn create_priority_frame(
     stream_id: u32,
     dependency: u32,
     weight: u8,
-    exclusive: bool
+    exclusive: bool,
 ) -> Option<PriorityFrame> {
     // PRIORITY frames are deprecated in HTTP/2 RFC 9113
     // Return None to indicate they're not used
@@ -758,13 +879,18 @@ fn validate_self_dependency_result(result: Result<SelfDependencyResult, H2Error>
     match result {
         Ok(res) => {
             // Self-dependencies should always be rejected
-            assert!(res.rejections > 0 || res.attempts == 0,
+            assert!(
+                res.rejections > 0 || res.attempts == 0,
                 "Self-dependencies should be rejected: {} rejections out of {} attempts",
-                res.rejections, res.attempts);
+                res.rejections,
+                res.attempts
+            );
 
             // Connection should remain in valid state
-            assert!(!matches!(res.connection_state, ConnectionState::Closed),
-                "Connection should not be closed after self-dependency attempts");
+            assert!(
+                !matches!(res.connection_state, ConnectionState::Closed),
+                "Connection should not be closed after self-dependency attempts"
+            );
         }
         Err(_) => {
             // Connection errors are acceptable during self-dependency tests
@@ -775,23 +901,29 @@ fn validate_self_dependency_result(result: Result<SelfDependencyResult, H2Error>
 fn validate_cycle_result(result: Result<CycleDetectionResult, H2Error>, expected_length: u8) {
     match result {
         Ok(res) => {
-            assert_eq!(res.cycle_length, expected_length,
-                "Cycle length mismatch");
+            assert_eq!(res.cycle_length, expected_length, "Cycle length mismatch");
 
             // For cycles of length > 1, the final dependency should be rejected
             if expected_length > 1 {
-                assert!(res.final_error.is_some(),
-                    "Cycle creation should result in error");
+                assert!(
+                    res.final_error.is_some(),
+                    "Cycle creation should result in error"
+                );
 
                 if let Some(error) = &res.final_error {
-                    assert_eq!(error.code, ErrorCode::ProtocolError,
-                        "Cycle should result in PROTOCOL_ERROR");
+                    assert_eq!(
+                        error.code,
+                        ErrorCode::ProtocolError,
+                        "Cycle should result in PROTOCOL_ERROR"
+                    );
                 }
             }
 
             // Some attempts should be rejected for cycle detection
-            assert!(res.rejections > 0 || res.attempts <= 1,
-                "Cycles should be detected and rejected");
+            assert!(
+                res.rejections > 0 || res.attempts <= 1,
+                "Cycles should be detected and rejected"
+            );
         }
         Err(_) => {
             // Errors during cycle tests are acceptable
@@ -803,12 +935,16 @@ fn validate_complex_graph_result(result: Result<ComplexGraphResult, H2Error>, _e
     match result {
         Ok(res) => {
             // Complex graphs should have some dependency attempts
-            assert!(res.dependency_attempts > 0 || res.graph_size <= 1,
-                "Complex graph should attempt dependencies");
+            assert!(
+                res.dependency_attempts > 0 || res.graph_size <= 1,
+                "Complex graph should attempt dependencies"
+            );
 
             // Connection should handle complex graphs without crashing
-            assert!(!matches!(res.connection_state, ConnectionState::Closed),
-                "Connection should survive complex graph operations");
+            assert!(
+                !matches!(res.connection_state, ConnectionState::Closed),
+                "Connection should survive complex graph operations"
+            );
         }
         Err(_) => {
             // Errors in complex graph tests are acceptable
@@ -816,16 +952,23 @@ fn validate_complex_graph_result(result: Result<ComplexGraphResult, H2Error>, _e
     }
 }
 
-fn validate_priority_update_result(result: Result<PriorityUpdateResult, H2Error>, _update_count: u8) {
+fn validate_priority_update_result(
+    result: Result<PriorityUpdateResult, H2Error>,
+    _update_count: u8,
+) {
     match result {
         Ok(res) => {
             // Priority updates should be attempted
-            assert!(res.update_attempts > 0,
-                "Priority updates should be attempted");
+            assert!(
+                res.update_attempts > 0,
+                "Priority updates should be attempted"
+            );
 
             // Some updates may be rejected due to cycle detection
-            assert!(res.update_rejections <= res.update_attempts,
-                "Rejections should not exceed attempts");
+            assert!(
+                res.update_rejections <= res.update_attempts,
+                "Rejections should not exceed attempts"
+            );
         }
         Err(_) => {
             // Errors during priority updates are acceptable
@@ -837,8 +980,10 @@ fn validate_exclusive_result(result: Result<ExclusiveDependencyResult, H2Error>)
     match result {
         Ok(res) => {
             // Exclusive dependency operations should be attempted
-            assert!(res.exclusive_attempts > 0,
-                "Exclusive dependency operations should be attempted");
+            assert!(
+                res.exclusive_attempts > 0,
+                "Exclusive dependency operations should be attempted"
+            );
         }
         Err(_) => {
             // Errors during exclusive dependency tests are acceptable
@@ -854,9 +999,12 @@ fn validate_deep_chain_result(result: Result<DeepChainResult, H2Error>, depth: u
             // Linear chains without cycles should mostly succeed
             if depth > 1 {
                 assert!(res.chain_attempts > 0, "Chain attempts should be made");
-                assert!(res.chain_successes >= res.chain_attempts / 2,
+                assert!(
+                    res.chain_successes >= res.chain_attempts / 2,
                     "Most linear dependencies should succeed: {} successes out of {} attempts",
-                    res.chain_successes, res.chain_attempts);
+                    res.chain_successes,
+                    res.chain_attempts
+                );
             }
         }
         Err(_) => {
@@ -869,12 +1017,16 @@ fn validate_concurrent_result(result: Result<ConcurrentResult, H2Error>) {
     match result {
         Ok(res) => {
             // Concurrent operations should be attempted
-            assert!(res.concurrent_attempts > 0,
-                "Concurrent operations should be attempted");
+            assert!(
+                res.concurrent_attempts > 0,
+                "Concurrent operations should be attempted"
+            );
 
             // Some concurrent cycle attempts should be rejected
-            assert!(res.concurrent_rejections > 0 || res.concurrent_attempts <= 2,
-                "Concurrent cycle attempts should be rejected");
+            assert!(
+                res.concurrent_rejections > 0 || res.concurrent_attempts <= 2,
+                "Concurrent cycle attempts should be rejected"
+            );
         }
         Err(_) => {
             // Errors during concurrent tests are acceptable
@@ -887,8 +1039,10 @@ fn validate_inversion_result(result: Result<InversionResult, H2Error>) {
         Ok(res) => {
             if res.inversion_attempts > 0 {
                 // Most parent-child inversions should be rejected (they create cycles)
-                assert!(res.inversion_rejections > 0,
-                    "Parent-child inversions should be rejected");
+                assert!(
+                    res.inversion_rejections > 0,
+                    "Parent-child inversions should be rejected"
+                );
             }
         }
         Err(_) => {
@@ -957,7 +1111,10 @@ mod tests {
         assert_eq!(res.depth, 4);
         // Linear dependencies should mostly succeed
         if res.chain_attempts > 0 {
-            assert!(res.chain_successes > 0, "Linear dependencies should succeed");
+            assert!(
+                res.chain_successes > 0,
+                "Linear dependencies should succeed"
+            );
         }
     }
 

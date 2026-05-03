@@ -1,7 +1,7 @@
 #![no_main]
 
-use libfuzzer_sys::fuzz_target;
 use arbitrary::Arbitrary;
+use libfuzzer_sys::fuzz_target;
 use std::collections::HashMap;
 
 /// HTTP/2 SETTINGS duplicate ID fuzz target.
@@ -191,17 +191,21 @@ impl MockSettingsParser {
     }
 
     /// Parse SETTINGS frame and handle duplicates per RFC 7540 §6.5.2
-    fn parse_settings_frame(&mut self, frame: &SettingsFrame, state: &mut ConnectionState) -> SettingsParseResult {
+    fn parse_settings_frame(
+        &mut self,
+        frame: &SettingsFrame,
+        state: &mut ConnectionState,
+    ) -> SettingsParseResult {
         // Validate basic frame structure
         if frame.stream_id != 0 {
             return SettingsParseResult::ProtocolError(
-                "SETTINGS frame must be on stream 0".to_string()
+                "SETTINGS frame must be on stream 0".to_string(),
             );
         }
 
         if frame.ack_flag && !frame.settings.is_empty() {
             return SettingsParseResult::ProtocolError(
-                "SETTINGS ACK frame must be empty".to_string()
+                "SETTINGS ACK frame must be empty".to_string(),
             );
         }
 
@@ -211,16 +215,22 @@ impl MockSettingsParser {
 
         // Check frame size limits
         if frame.settings.len() > self.config.max_settings_count {
-            return SettingsParseResult::ProtocolError(
-                format!("Too many settings: {} > {}", frame.settings.len(), self.config.max_settings_count)
-            );
+            return SettingsParseResult::ProtocolError(format!(
+                "Too many settings: {} > {}",
+                frame.settings.len(),
+                self.config.max_settings_count
+            ));
         }
 
         // Process settings with duplicate handling
         self.process_settings_with_duplicates(&frame.settings, state)
     }
 
-    fn process_settings_with_duplicates(&mut self, settings: &[SettingEntry], state: &mut ConnectionState) -> SettingsParseResult {
+    fn process_settings_with_duplicates(
+        &mut self,
+        settings: &[SettingEntry],
+        state: &mut ConnectionState,
+    ) -> SettingsParseResult {
         let mut processed_settings = HashMap::new();
         let mut duplicate_tracking = HashMap::new();
         let mut processing_order = Vec::new();
@@ -229,12 +239,16 @@ impl MockSettingsParser {
         for (index, setting) in settings.iter().enumerate() {
             // Track duplicates if enabled
             if self.config.track_duplicates {
-                let count = duplicate_tracking.entry(setting.setting_id.clone()).or_insert(0);
+                let count = duplicate_tracking
+                    .entry(setting.setting_id.clone())
+                    .or_insert(0);
                 *count += 1;
 
                 if *count > 1 {
                     self.duplicate_stats.total_duplicates += 1;
-                    self.duplicate_stats.duplicate_settings.entry(setting.setting_id.clone())
+                    self.duplicate_stats
+                        .duplicate_settings
+                        .entry(setting.setting_id.clone())
                         .or_insert(Vec::new())
                         .push(setting.value);
                 }
@@ -266,7 +280,7 @@ impl MockSettingsParser {
                         new_value: *new_value,
                         duplicate_count: duplicate_tracking.get(setting_id).copied().unwrap_or(1),
                     });
-                },
+                }
                 Err(msg) => {
                     return SettingsParseResult::ProtocolError(msg);
                 }
@@ -286,32 +300,34 @@ impl MockSettingsParser {
                 if value > 1 {
                     return Err(format!("ENABLE_PUSH must be 0 or 1, got {}", value));
                 }
-            },
+            }
 
             SettingId::InitialWindowSize => {
-                if value > 2_147_483_647 { // 2^31-1
+                if value > 2_147_483_647 {
+                    // 2^31-1
                     return Err(format!("INITIAL_WINDOW_SIZE {} exceeds maximum", value));
                 }
-            },
+            }
 
             SettingId::MaxFrameSize => {
-                if value < 16384 || value > 16777215 { // 2^14 to 2^24-1
+                if value < 16384 || value > 16777215 {
+                    // 2^14 to 2^24-1
                     return Err(format!("MAX_FRAME_SIZE {} out of valid range", value));
                 }
-            },
+            }
 
             SettingId::HeaderTableSize => {
                 // No explicit limit in RFC, but validate against peer capabilities
                 // Implementation-specific validation can go here
-            },
+            }
 
             SettingId::MaxConcurrentStreams => {
                 // Any value is valid (u32::MAX means unlimited)
-            },
+            }
 
             SettingId::MaxHeaderListSize => {
                 // Any value is valid
-            },
+            }
 
             SettingId::Unknown(_) => {
                 // Unknown settings should be ignored per RFC 7540 §6.5.2
@@ -321,7 +337,12 @@ impl MockSettingsParser {
         Ok(())
     }
 
-    fn apply_setting(&self, setting_id: &SettingId, value: u32, state: &mut ConnectionState) -> Result<(), String> {
+    fn apply_setting(
+        &self,
+        setting_id: &SettingId,
+        value: u32,
+        state: &mut ConnectionState,
+    ) -> Result<(), String> {
         // Apply setting-specific logic
         match setting_id {
             SettingId::EnablePush => {
@@ -329,18 +350,20 @@ impl MockSettingsParser {
                     // Disabling push when it was enabled
                     state.peer_capabilities.supports_push = false;
                 }
-            },
+            }
 
             SettingId::HeaderTableSize => {
                 if value > state.peer_capabilities.max_header_table_size {
-                    return Err(format!("Header table size {} exceeds peer limit {}",
-                                     value, state.peer_capabilities.max_header_table_size));
+                    return Err(format!(
+                        "Header table size {} exceeds peer limit {}",
+                        value, state.peer_capabilities.max_header_table_size
+                    ));
                 }
-            },
+            }
 
             SettingId::MaxFrameSize => {
                 state.peer_capabilities.max_frame_size = value;
-            },
+            }
 
             _ => {
                 // Other settings don't require special validation
@@ -394,7 +417,8 @@ fuzz_target!(|input: SettingsDuplicateInput| {
     let mut state = input.connection_state.clone();
 
     // Test basic duplicate patterns from input
-    for pattern in input.duplicate_patterns.iter().take(5) { // Limit patterns
+    for pattern in input.duplicate_patterns.iter().take(5) {
+        // Limit patterns
         let mut test_frame = SettingsFrame {
             settings: Vec::new(),
             ack_flag: false,
@@ -412,59 +436,85 @@ fuzz_target!(|input: SettingsDuplicateInput| {
         let parse_result = parser.parse_settings_frame(&test_frame, &mut state);
 
         match parse_result {
-            SettingsParseResult::Success { updates, duplicate_stats, processing_order } => {
+            SettingsParseResult::Success {
+                updates,
+                duplicate_stats,
+                processing_order,
+            } => {
                 // Verify last value wins
                 if pattern.values.len() > 1 {
-                    let final_update = updates.iter()
-                        .find(|u| u.setting_id == pattern.setting_id);
+                    let final_update = updates.iter().find(|u| u.setting_id == pattern.setting_id);
 
                     if let Some(update) = final_update {
-                        assert_eq!(update.new_value, *pattern.values.last().unwrap(),
-                                  "Last value should win for setting {:?}: expected {}, got {}",
-                                  pattern.setting_id, pattern.values.last().unwrap(), update.new_value);
+                        assert_eq!(
+                            update.new_value,
+                            *pattern.values.last().unwrap(),
+                            "Last value should win for setting {:?}: expected {}, got {}",
+                            pattern.setting_id,
+                            pattern.values.last().unwrap(),
+                            update.new_value
+                        );
 
-                        assert!(update.duplicate_count > 1,
-                               "Duplicate count should be > 1 for duplicated setting");
+                        assert!(
+                            update.duplicate_count > 1,
+                            "Duplicate count should be > 1 for duplicated setting"
+                        );
                     }
 
                     // Verify duplicate statistics
                     if parser.config.track_duplicates {
-                        assert!(duplicate_stats.total_duplicates > 0,
-                               "Should track duplicates when enabled");
+                        assert!(
+                            duplicate_stats.total_duplicates > 0,
+                            "Should track duplicates when enabled"
+                        );
 
-                        if let Some(tracked_values) = duplicate_stats.duplicate_settings.get(&pattern.setting_id) {
-                            assert!(tracked_values.len() >= pattern.values.len() - 1,
-                                   "Should track all but first occurrence as duplicates");
+                        if let Some(tracked_values) =
+                            duplicate_stats.duplicate_settings.get(&pattern.setting_id)
+                        {
+                            assert!(
+                                tracked_values.len() >= pattern.values.len() - 1,
+                                "Should track all but first occurrence as duplicates"
+                            );
                         }
                     }
                 }
 
                 // Verify processing order integrity
-                for (i, (setting_id, value, original_index)) in processing_order.iter().enumerate() {
-                    assert_eq!(*original_index, i,
-                              "Processing order should preserve original sequence");
+                for (i, (setting_id, value, original_index)) in processing_order.iter().enumerate()
+                {
+                    assert_eq!(
+                        *original_index, i,
+                        "Processing order should preserve original sequence"
+                    );
                 }
-            },
+            }
 
             SettingsParseResult::ProtocolError(ref msg) => {
                 // Check if error is due to invalid values (which is acceptable)
                 if parser.config.validate_ranges {
                     for value in &pattern.values {
-                        if let Err(validation_error) = parser.validate_setting_value(&pattern.setting_id, *value) {
-                            assert!(msg.contains(&validation_error) ||
-                                   msg.contains("out of valid range") ||
-                                   msg.contains("exceeds maximum"),
-                                   "Protocol error should explain validation failure: {}", msg);
+                        if let Err(validation_error) =
+                            parser.validate_setting_value(&pattern.setting_id, *value)
+                        {
+                            assert!(
+                                msg.contains(&validation_error)
+                                    || msg.contains("out of valid range")
+                                    || msg.contains("exceeds maximum"),
+                                "Protocol error should explain validation failure: {}",
+                                msg
+                            );
                             break;
                         }
                     }
                 }
-            },
+            }
 
             SettingsParseResult::Ack => {
                 // ACK frames should only occur with ack_flag=true and empty settings
-                assert!(test_frame.ack_flag && test_frame.settings.is_empty(),
-                       "ACK result should only occur for ACK frames");
+                assert!(
+                    test_frame.ack_flag && test_frame.settings.is_empty(),
+                    "ACK result should only occur for ACK frames"
+                );
             }
         }
     }
@@ -473,45 +523,64 @@ fuzz_target!(|input: SettingsDuplicateInput| {
     let main_result = parser.parse_settings_frame(&input.settings_frame, &mut state);
 
     match main_result {
-        SettingsParseResult::Success { updates, duplicate_stats, .. } => {
+        SettingsParseResult::Success {
+            updates,
+            duplicate_stats,
+            ..
+        } => {
             // Verify state consistency
             for update in &updates {
                 let current_value = state.current_settings.get(&update.setting_id);
-                assert_eq!(current_value, Some(&update.new_value),
-                          "State should reflect final setting value");
+                assert_eq!(
+                    current_value,
+                    Some(&update.new_value),
+                    "State should reflect final setting value"
+                );
             }
 
             // Verify duplicate handling
             let mut setting_counts = HashMap::new();
             for setting in &input.settings_frame.settings {
-                *setting_counts.entry(setting.setting_id.clone()).or_insert(0) += 1;
+                *setting_counts
+                    .entry(setting.setting_id.clone())
+                    .or_insert(0) += 1;
             }
 
             for (setting_id, count) in setting_counts {
                 if count > 1 {
                     // Should have tracked this as duplicate
                     if parser.config.track_duplicates {
-                        assert!(duplicate_stats.duplicate_settings.contains_key(&setting_id) ||
-                               duplicate_stats.total_duplicates > 0,
-                               "Should track duplicates for setting {:?}", setting_id);
+                        assert!(
+                            duplicate_stats.duplicate_settings.contains_key(&setting_id)
+                                || duplicate_stats.total_duplicates > 0,
+                            "Should track duplicates for setting {:?}",
+                            setting_id
+                        );
                     }
 
                     // Final value should be from last occurrence
-                    let last_occurrence = input.settings_frame.settings.iter()
+                    let last_occurrence = input
+                        .settings_frame
+                        .settings
+                        .iter()
                         .filter(|s| s.setting_id == setting_id)
                         .last();
 
                     if let Some(last_setting) = last_occurrence {
-                        assert_eq!(state.current_settings.get(&setting_id), Some(&last_setting.value),
-                                  "State should have last occurrence value for {:?}", setting_id);
+                        assert_eq!(
+                            state.current_settings.get(&setting_id),
+                            Some(&last_setting.value),
+                            "State should have last occurrence value for {:?}",
+                            setting_id
+                        );
                     }
                 }
             }
-        },
+        }
 
         SettingsParseResult::ProtocolError(_) => {
             // Protocol errors are acceptable for malformed frames
-        },
+        }
 
         SettingsParseResult::Ack => {
             // ACK is acceptable for ACK frames
@@ -524,11 +593,26 @@ fuzz_target!(|input: SettingsDuplicateInput| {
     // Additional edge case: alternating values for same setting
     let mut alternating_frame = SettingsFrame {
         settings: vec![
-            SettingEntry { setting_id: SettingId::MaxConcurrentStreams, value: 100 },
-            SettingEntry { setting_id: SettingId::InitialWindowSize, value: 32768 },
-            SettingEntry { setting_id: SettingId::MaxConcurrentStreams, value: 200 },
-            SettingEntry { setting_id: SettingId::InitialWindowSize, value: 65536 },
-            SettingEntry { setting_id: SettingId::MaxConcurrentStreams, value: 300 },
+            SettingEntry {
+                setting_id: SettingId::MaxConcurrentStreams,
+                value: 100,
+            },
+            SettingEntry {
+                setting_id: SettingId::InitialWindowSize,
+                value: 32768,
+            },
+            SettingEntry {
+                setting_id: SettingId::MaxConcurrentStreams,
+                value: 200,
+            },
+            SettingEntry {
+                setting_id: SettingId::InitialWindowSize,
+                value: 65536,
+            },
+            SettingEntry {
+                setting_id: SettingId::MaxConcurrentStreams,
+                value: 300,
+            },
         ],
         ack_flag: false,
         stream_id: 0,
@@ -537,7 +621,13 @@ fuzz_target!(|input: SettingsDuplicateInput| {
     let alternating_result = parser.parse_settings_frame(&alternating_frame, &mut state);
     if let SettingsParseResult::Success { .. } = alternating_result {
         // Verify last values won
-        assert_eq!(state.current_settings.get(&SettingId::MaxConcurrentStreams), Some(&300));
-        assert_eq!(state.current_settings.get(&SettingId::InitialWindowSize), Some(&65536));
+        assert_eq!(
+            state.current_settings.get(&SettingId::MaxConcurrentStreams),
+            Some(&300)
+        );
+        assert_eq!(
+            state.current_settings.get(&SettingId::InitialWindowSize),
+            Some(&65536)
+        );
     }
 });

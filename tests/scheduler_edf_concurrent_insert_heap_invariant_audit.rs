@@ -169,7 +169,9 @@ fn timed_task_ord_impl_reverses_deadline_for_min_heap() {
     // Multi-line: the reverse `other.deadline.cmp(&self.deadline)`
     // pattern — may be split across lines.
     let has_reverse = body.contains("other.deadline.cmp(&self.deadline)")
-        || (body.contains("other") && body.contains(".deadline") && body.contains(".cmp(&self.deadline)"));
+        || (body.contains("other")
+            && body.contains(".deadline")
+            && body.contains(".cmp(&self.deadline)"));
     assert!(
         has_reverse,
         "REGRESSION: TimedTask Ord impl no longer reverses \
@@ -180,9 +182,7 @@ fn timed_task_ord_impl_reverses_deadline_for_min_heap() {
     );
 
     // Forbid the forward (broken) form.
-    let forward_forms = [
-        "self.deadline.cmp(&other.deadline)",
-    ];
+    let forward_forms = ["self.deadline.cmp(&other.deadline)"];
     for pat in &forward_forms {
         assert!(
             !body.contains(pat),
@@ -316,7 +316,9 @@ fn per_worker_timed_lane_uses_same_reverse_ord_pattern() {
     let body = &source[start..next_impl_offset];
 
     let has_reverse = body.contains("other.deadline.cmp(&self.deadline)")
-        || (body.contains("other") && body.contains(".deadline") && body.contains(".cmp(&self.deadline)"));
+        || (body.contains("other")
+            && body.contains(".deadline")
+            && body.contains(".cmp(&self.deadline)"));
     assert!(
         has_reverse,
         "REGRESSION: PriorityScheduler.TimedEntry Ord impl no \
@@ -343,9 +345,7 @@ fn pop_timed_decrements_count_and_updates_cache_under_lock() {
 
     let fn_marker = "pub fn pop_timed(&self) -> Option<TimedTask> {";
     let start = source.find(fn_marker).expect("pop_timed fn");
-    let body_end = source[start..]
-        .find("\n    }\n")
-        .expect("pop_timed close");
+    let body_end = source[start..].find("\n    }\n").expect("pop_timed close");
     let body = &source[start..start + body_end];
 
     assert!(
@@ -358,8 +358,9 @@ fn pop_timed_decrements_count_and_updates_cache_under_lock() {
     );
 
     assert!(
-        body.contains("self.cached_earliest_deadline\n            .store(earliest, Ordering::Relaxed);")
-            || body.contains(".cached_earliest_deadline\n            .store("),
+        body.contains(
+            "self.cached_earliest_deadline\n            .store(earliest, Ordering::Relaxed);"
+        ) || body.contains(".cached_earliest_deadline\n            .store("),
         "REGRESSION: pop_timed no longer updates \
          cached_earliest_deadline. The cache would diverge \
          from the actual heap root — readers would see stale \
@@ -488,7 +489,8 @@ fn concurrent_inserts_preserve_heap_invariant_root_is_earliest_deadline() {
         .min()
         .expect("non-empty heap has min");
     assert_eq!(
-        root.deadline_ns, min_deadline,
+        root.deadline_ns,
+        min_deadline,
         "REGRESSION: heap root does NOT hold the minimum \
          deadline after concurrent inserts. root.deadline_ns \
          = {root_d}, min(all) = {min_d}. The reverse-Ord \

@@ -11,9 +11,9 @@
 
 #![no_main]
 
-use libfuzzer_sys::fuzz_target;
 use arbitrary::{Arbitrary, Unstructured};
 use asupersync::sync::semaphore::{Semaphore, TryAcquireError};
+use libfuzzer_sys::fuzz_target;
 use std::collections::VecDeque;
 
 #[derive(Debug, Clone, Arbitrary)]
@@ -149,12 +149,15 @@ fuzz_target!(|data: &[u8]| {
     // Validate and limit parameters
     if sequence.config.operations.is_empty()
         || sequence.config.initial_permits == 0
-        || sequence.config.initial_permits > PermitSequence::max_permits() {
+        || sequence.config.initial_permits > PermitSequence::max_permits()
+    {
         return;
     }
 
     let initial_permits = sequence.config.initial_permits as usize;
-    let max_ops = sequence.max_operations.min(PermitSequence::max_operations()) as usize;
+    let max_ops = sequence
+        .max_operations
+        .min(PermitSequence::max_operations()) as usize;
 
     // Create semaphore and tracking state
     let semaphore = Semaphore::new(initial_permits);
@@ -170,7 +173,9 @@ fuzz_target!(|data: &[u8]| {
         match op {
             SemaphoreOp::AddPermits { count } => {
                 let count = (*count as usize).min(PermitSequence::max_permits() as usize);
-                if count == 0 { continue; }
+                if count == 0 {
+                    continue;
+                }
 
                 semaphore.add_permits(count);
                 tracker.add_permits(count);
@@ -182,14 +187,17 @@ fuzz_target!(|data: &[u8]| {
                     .max(1); // acquire requires count > 0
 
                 // Check if acquisition should be allowed by our tracker
-                let should_succeed = tracker.total_acquired.saturating_add(count) <= tracker.total_added;
+                let should_succeed =
+                    tracker.total_acquired.saturating_add(count) <= tracker.total_added;
 
                 match semaphore.try_acquire(count) {
                     Ok(permit) => {
-                        assert!(should_succeed,
+                        assert!(
+                            should_succeed,
                             "Semaphore allowed acquisition that would exceed total added: \
                              acquired {} + {} > added {} at operation {}",
-                            tracker.total_acquired, count, tracker.total_added, i);
+                            tracker.total_acquired, count, tracker.total_added, i
+                        );
 
                         assert_eq!(permit.count(), count);
                         assert!(tracker.acquire_permits(count));
@@ -212,14 +220,19 @@ fuzz_target!(|data: &[u8]| {
                 held_permits.clear();
 
                 // Verify counts match
-                assert_eq!(expected_released,
+                assert_eq!(
+                    expected_released,
                     held_permits.iter().map(|p| p.count()).sum::<usize>(),
-                    "Release count mismatch at operation {}", i);
+                    "Release count mismatch at operation {}",
+                    i
+                );
             }
 
             SemaphoreOp::ReleaseCount { count } => {
                 let count = (*count as usize).min(held_permits.len());
-                if count == 0 { continue; }
+                if count == 0 {
+                    continue;
+                }
 
                 let permits_to_release: Vec<_> = held_permits.drain(..count).collect();
                 let released_count: usize = permits_to_release.iter().map(|p| p.count()).sum();
@@ -236,8 +249,10 @@ fuzz_target!(|data: &[u8]| {
                 // Note: available_permits() is advisory and may be stale due to Relaxed ordering
                 // We can't assert exact equality, but can check it's reasonable
                 if available > tracker.total_added {
-                    panic!("Available permits {} exceeds total added {} at operation {}",
-                        available, tracker.total_added, i);
+                    panic!(
+                        "Available permits {} exceeds total added {} at operation {}",
+                        available, tracker.total_added, i
+                    );
                 }
             }
         }
@@ -248,9 +263,13 @@ fuzz_target!(|data: &[u8]| {
         }
 
         // Core assertion: total acquired never exceeds total added
-        assert!(tracker.total_acquired <= tracker.total_added,
+        assert!(
+            tracker.total_acquired <= tracker.total_added,
             "CRITICAL: Over-allocation detected at operation {}: acquired {} > added {}",
-            i, tracker.total_acquired, tracker.total_added);
+            i,
+            tracker.total_acquired,
+            tracker.total_added
+        );
     }
 
     // Final invariant check
@@ -268,8 +287,10 @@ fuzz_target!(|data: &[u8]| {
         // This might be OK due to advisory nature of available_permits()
         // Log but don't panic unless it's clearly wrong
         if final_available > tracker.total_added {
-            panic!("Final available {} > total added {} - permits were created from nowhere",
-                final_available, tracker.total_added);
+            panic!(
+                "Final available {} > total added {} - permits were created from nowhere",
+                final_available, tracker.total_added
+            );
         }
     }
 });

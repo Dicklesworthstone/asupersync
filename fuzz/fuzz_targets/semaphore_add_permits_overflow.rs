@@ -13,9 +13,9 @@
 
 #![no_main]
 
-use libfuzzer_sys::fuzz_target;
 use arbitrary::{Arbitrary, Unstructured};
 use asupersync::sync::Semaphore;
+use libfuzzer_sys::fuzz_target;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 #[derive(Debug, Clone, Arbitrary)]
@@ -113,7 +113,8 @@ impl OverflowTracker {
         self.operations_performed.fetch_add(1, Ordering::SeqCst);
 
         // Update max observed permits
-        self.max_observed_permits.fetch_max(available_after, Ordering::SeqCst);
+        self.max_observed_permits
+            .fetch_max(available_after, Ordering::SeqCst);
 
         // Track potential overflow attempts
         if permits_added >= usize::MAX / 2 {
@@ -147,7 +148,10 @@ impl OverflowTracker {
 }
 
 /// Validates semaphore behavior remains consistent across add_permits operations
-fn validate_semaphore_consistency(semaphore: &Semaphore, expected_minimum: usize) -> Result<(), String> {
+fn validate_semaphore_consistency(
+    semaphore: &Semaphore,
+    expected_minimum: usize,
+) -> Result<(), String> {
     let available = semaphore.available_permits();
 
     // Available permits should never be less than what we expect based on saturating addition
@@ -208,7 +212,9 @@ fuzz_target!(|data: &[u8]| {
                     tracker.record_operation(add_value, after_permits);
 
                     // Validate consistency after each addition
-                    if let Err(msg) = validate_semaphore_consistency(&semaphore, expected_permits.min(usize::MAX)) {
+                    if let Err(msg) =
+                        validate_semaphore_consistency(&semaphore, expected_permits.min(usize::MAX))
+                    {
                         panic!("Semaphore consistency violation in sequence: {}", msg);
                     }
 
@@ -234,7 +240,9 @@ fuzz_target!(|data: &[u8]| {
                 tracker.record_operation(add_value, after_permits);
 
                 // Validate consistency
-                if let Err(msg) = validate_semaphore_consistency(&semaphore, expected_permits.min(usize::MAX)) {
+                if let Err(msg) =
+                    validate_semaphore_consistency(&semaphore, expected_permits.min(usize::MAX))
+                {
                     panic!("Semaphore consistency violation: {}", msg);
                 }
 

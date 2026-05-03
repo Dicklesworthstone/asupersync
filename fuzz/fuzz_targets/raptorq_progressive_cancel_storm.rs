@@ -113,11 +113,11 @@ enum ArrivalStrategy {
 /// Small batch size (1-5 symbols per batch)
 #[derive(Arbitrary, Debug, Clone, Copy)]
 enum SmallBatchSize {
-    Single,      // 1 symbol per batch
-    Pair,        // 2 symbols per batch
-    Triple,      // 3 symbols per batch
-    Quad,        // 4 symbols per batch
-    Penta,       // 5 symbols per batch
+    Single, // 1 symbol per batch
+    Pair,   // 2 symbols per batch
+    Triple, // 3 symbols per batch
+    Quad,   // 4 symbols per batch
+    Penta,  // 5 symbols per batch
 }
 
 impl SmallBatchSize {
@@ -135,9 +135,9 @@ impl SmallBatchSize {
 /// Medium batch size (6-20 symbols per batch)
 #[derive(Arbitrary, Debug, Clone, Copy)]
 enum MediumBatchSize {
-    Small(u8),   // 6-10
-    Medium(u8),  // 11-15
-    Large(u8),   // 16-20
+    Small(u8),  // 6-10
+    Medium(u8), // 11-15
+    Large(u8),  // 16-20
 }
 
 impl MediumBatchSize {
@@ -153,8 +153,8 @@ impl MediumBatchSize {
 /// Large batch size (21+ symbols)
 #[derive(Arbitrary, Debug, Clone, Copy)]
 enum LargeBatchSize {
-    Standard(u8),  // 21-50
-    Huge(u8),      // 51-100
+    Standard(u8), // 21-50
+    Huge(u8),     // 51-100
 }
 
 impl LargeBatchSize {
@@ -288,7 +288,7 @@ enum StormDuration {
     /// Brief storm (few symbols)
     Short(u8), // 5-15 symbols
     /// Extended storm (many symbols)
-    Long(u8),  // 20-50 symbols
+    Long(u8), // 20-50 symbols
     /// Storm for entire decode
     Full,
 }
@@ -307,13 +307,9 @@ impl StormDuration {
 #[derive(Arbitrary, Debug, Clone)]
 enum ProgressiveOperation {
     /// Decode with standard batch processing
-    DecodeBatched {
-        batch_size: BatchSize,
-    },
+    DecodeBatched { batch_size: BatchSize },
     /// Use wavefront decoding with specific batch size
-    DecodeWavefront {
-        batch_size: BatchSize,
-    },
+    DecodeWavefront { batch_size: BatchSize },
     /// Attempt decode at intermediate point (should fail gracefully)
     TryIntermediateDecode {
         /// After how many symbols to attempt decode
@@ -363,9 +359,9 @@ impl SymbolData {
                 }
                 data
             }
-            SymbolData::Alternating => {
-                (0..size).map(|i| if i % 2 == 0 { 0xAA } else { 0x55 }).collect()
-            }
+            SymbolData::Alternating => (0..size)
+                .map(|i| if i % 2 == 0 { 0xAA } else { 0x55 })
+                .collect(),
         }
     }
 }
@@ -403,25 +399,29 @@ fn test_progressive_cancel_scenario(scenario: &ProgressiveCancelScenario) {
     // Test progressive arrival with cancellation
     for operation in &scenario.operations {
         let result = match operation {
-            ProgressiveOperation::DecodeBatched { batch_size } => {
-                test_batched_decode_with_cancel(&decoder, &symbols, batch_size.as_usize(), &scenario.cancel_pattern)
-            }
+            ProgressiveOperation::DecodeBatched { batch_size } => test_batched_decode_with_cancel(
+                &decoder,
+                &symbols,
+                batch_size.as_usize(),
+                &scenario.cancel_pattern,
+            ),
 
             ProgressiveOperation::DecodeWavefront { batch_size } => {
-                test_wavefront_decode_with_cancel(&decoder, &symbols, batch_size.as_usize(), &scenario.cancel_pattern)
+                test_wavefront_decode_with_cancel(
+                    &decoder,
+                    &symbols,
+                    batch_size.as_usize(),
+                    &scenario.cancel_pattern,
+                )
             }
 
             ProgressiveOperation::TryIntermediateDecode { after_symbols } => {
                 test_intermediate_decode(&decoder, &symbols, *after_symbols as usize)
             }
 
-            ProgressiveOperation::MemoryPressure => {
-                test_memory_pressure_decode(&decoder, &symbols)
-            }
+            ProgressiveOperation::MemoryPressure => test_memory_pressure_decode(&decoder, &symbols),
 
-            ProgressiveOperation::ValidateState => {
-                test_state_validation(&decoder, &symbols)
-            }
+            ProgressiveOperation::ValidateState => test_state_validation(&decoder, &symbols),
         };
 
         // Don't fail on expected errors - we're testing error handling under cancellation
@@ -443,7 +443,7 @@ fn test_cancel_invariants(scenario: &ProgressiveCancelScenario) {
     let symbols = generate_test_symbols(k, symbol_size, &scenario.arrival_strategy);
 
     // Test that partial decode attempts don't corrupt subsequent attempts
-    let partial_result = decoder.decode(&symbols[..symbols.len().min(k/2)]);
+    let partial_result = decoder.decode(&symbols[..symbols.len().min(k / 2)]);
 
     // Should fail due to insufficient symbols, but not crash
     if let Err(DecodeError::InsufficientSymbols { .. }) = partial_result {
@@ -506,7 +506,11 @@ fn test_wavefront_cancel_robustness(scenario: &ProgressiveCancelScenario) {
     }
 }
 
-fn generate_test_symbols(k: usize, symbol_size: usize, strategy: &ArrivalStrategy) -> Vec<ReceivedSymbol> {
+fn generate_test_symbols(
+    k: usize,
+    symbol_size: usize,
+    strategy: &ArrivalStrategy,
+) -> Vec<ReceivedSymbol> {
     let mut symbols = Vec::new();
 
     // Generate source symbols
@@ -548,7 +552,7 @@ fn test_batched_decode_with_cancel(
     decoder: &InactivationDecoder,
     symbols: &[ReceivedSymbol],
     batch_size: usize,
-    cancel_pattern: &CancelPattern
+    cancel_pattern: &CancelPattern,
 ) -> Result<(), DecodeError> {
     // Simulate batched processing with potential cancellation
 
@@ -583,18 +587,18 @@ fn test_wavefront_decode_with_cancel(
     decoder: &InactivationDecoder,
     symbols: &[ReceivedSymbol],
     batch_size: usize,
-    cancel_pattern: &CancelPattern
+    cancel_pattern: &CancelPattern,
 ) -> Result<(), DecodeError> {
     // Test wavefront decoding under cancellation pressure
 
     match cancel_pattern {
-        CancelPattern::None => {
-            decoder.decode_wavefront(symbols, batch_size).map(|_| ())
-        }
+        CancelPattern::None => decoder.decode_wavefront(symbols, batch_size).map(|_| ()),
         _ => {
             // Test partial wavefront decode
             let partial_len = symbols.len() / 2;
-            decoder.decode_wavefront(&symbols[..partial_len], batch_size).map(|_| ())
+            decoder
+                .decode_wavefront(&symbols[..partial_len], batch_size)
+                .map(|_| ())
         }
     }
 }
@@ -602,7 +606,7 @@ fn test_wavefront_decode_with_cancel(
 fn test_intermediate_decode(
     decoder: &InactivationDecoder,
     symbols: &[ReceivedSymbol],
-    after_symbols: usize
+    after_symbols: usize,
 ) -> Result<(), DecodeError> {
     let attempt_len = after_symbols.min(symbols.len());
     decoder.decode(&symbols[..attempt_len]).map(|_| ())
@@ -610,7 +614,7 @@ fn test_intermediate_decode(
 
 fn test_memory_pressure_decode(
     decoder: &InactivationDecoder,
-    symbols: &[ReceivedSymbol]
+    symbols: &[ReceivedSymbol],
 ) -> Result<(), DecodeError> {
     // Simulate decode under memory pressure (simplified)
     decoder.decode(symbols).map(|_| ())
@@ -618,7 +622,7 @@ fn test_memory_pressure_decode(
 
 fn test_state_validation(
     decoder: &InactivationDecoder,
-    symbols: &[ReceivedSymbol]
+    symbols: &[ReceivedSymbol],
 ) -> Result<(), DecodeError> {
     // Test that decoder state validation works correctly
     decoder.decode(symbols).map(|_| ())

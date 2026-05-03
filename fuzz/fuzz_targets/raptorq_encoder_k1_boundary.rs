@@ -21,9 +21,9 @@ use arbitrary::Arbitrary;
 use libfuzzer_sys::fuzz_target;
 
 use asupersync::config::EncodingConfig;
-use asupersync::encoding::{EncodingPipeline, EncodingError};
-use asupersync::types::resource::{PoolConfig, SymbolPool};
+use asupersync::encoding::{EncodingError, EncodingPipeline};
 use asupersync::types::ObjectId;
+use asupersync::types::resource::{PoolConfig, SymbolPool};
 
 const MAX_SYMBOL_SIZE: u16 = 1024;
 const MAX_BLOCK_SIZE: usize = 8192;
@@ -323,7 +323,9 @@ fn generate_data(spec: &DataSpec, symbol_size: u16) -> Vec<u8> {
             match pattern {
                 DataPattern::Zeros => vec![0u8; actual_size],
                 DataPattern::Ones => vec![0xFFu8; actual_size],
-                DataPattern::Alternating => (0..actual_size).map(|i| if i % 2 == 0 { 0xAA } else { 0x55 }).collect(),
+                DataPattern::Alternating => (0..actual_size)
+                    .map(|i| if i % 2 == 0 { 0xAA } else { 0x55 })
+                    .collect(),
                 DataPattern::Random(seed) => {
                     // Simple deterministic PRNG for reproducibility
                     let mut data = Vec::with_capacity(actual_size);
@@ -340,7 +342,12 @@ fn generate_data(spec: &DataSpec, symbol_size: u16) -> Vec<u8> {
     }
 }
 
-fn exercise_k1_encoding(config: EncodingConfig, pool: SymbolPool, data: &[u8], edge_cases: &K1EdgeCases) {
+fn exercise_k1_encoding(
+    config: EncodingConfig,
+    pool: SymbolPool,
+    data: &[u8],
+    edge_cases: &K1EdgeCases,
+) {
     let mut pipeline = EncodingPipeline::new(config, pool);
     let object_id = ObjectId::new_for_test(0xDEADBEEF);
 
@@ -360,8 +367,8 @@ fn exercise_k1_encoding(config: EncodingConfig, pool: SymbolPool, data: &[u8], e
 
                 // Invariant: symbol data length must match config symbol_size
                 assert!(
-                    symbol.symbol().data().len() == config.symbol_size as usize ||
-                    (idx == 0 && data.len() < config.symbol_size as usize), // Last symbol can be partial
+                    symbol.symbol().data().len() == config.symbol_size as usize
+                        || (idx == 0 && data.len() < config.symbol_size as usize), // Last symbol can be partial
                     "K=1 encoding produced symbol with wrong size: expected {}, got {}",
                     config.symbol_size,
                     symbol.symbol().data().len()
@@ -409,7 +416,9 @@ fn exercise_k1_encoding(config: EncodingConfig, pool: SymbolPool, data: &[u8], e
                 assert!(
                     stats.source_symbols >= expected_k.min(symbol_count),
                     "K=1 boundary: source symbol count inconsistent. Expected K={}, got source_symbols={}, total_symbols={}",
-                    expected_k, stats.source_symbols, symbol_count
+                    expected_k,
+                    stats.source_symbols,
+                    symbol_count
                 );
             }
         }

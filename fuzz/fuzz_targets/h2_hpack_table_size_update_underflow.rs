@@ -17,8 +17,8 @@
 
 #![no_main]
 
-use libfuzzer_sys::fuzz_target;
 use arbitrary::Arbitrary;
+use libfuzzer_sys::fuzz_target;
 use std::collections::VecDeque;
 
 /// Test scenarios for HPACK table size underflow
@@ -82,7 +82,10 @@ pub enum TableOperation {
     /// Lookup entry by index
     Lookup { index: u8 },
     /// Find entry by name+value
-    Find { name: HeaderString, value: HeaderString },
+    Find {
+        name: HeaderString,
+        value: HeaderString,
+    },
     /// Get current table stats
     GetStats,
 }
@@ -288,15 +291,14 @@ impl MockHpackDynamicTable {
 
     /// Find entry by exact name+value match
     pub fn find(&self, name: &str, value: &str) -> Option<&MockTableEntry> {
-        self.entries.iter()
+        self.entries
+            .iter()
             .find(|entry| entry.name == name && entry.value == value)
     }
 
     /// Verify size counter matches actual entry sizes
     fn verify_size_consistency(&mut self) {
-        let calculated_size: usize = self.entries.iter()
-            .map(|entry| entry.size)
-            .sum();
+        let calculated_size: usize = self.entries.iter().map(|entry| entry.size).sum();
 
         if calculated_size != self.size {
             self.violations.push(TableViolation::SizeInconsistency {
@@ -334,10 +336,12 @@ impl MockHpackDynamicTable {
 
     /// Check if any critical violations occurred
     pub fn has_critical_violations(&self) -> bool {
-        self.violations.iter().any(|v| matches!(v,
-            TableViolation::SizeUnderflow { .. } |
-            TableViolation::ExceedsMaxSize { .. }
-        ))
+        self.violations.iter().any(|v| {
+            matches!(
+                v,
+                TableViolation::SizeUnderflow { .. } | TableViolation::ExceedsMaxSize { .. }
+            )
+        })
     }
 }
 
@@ -372,26 +376,41 @@ fuzz_target!(|input: HpackTableSizeUpdateInput| {
 
         // Verify eviction behavior
         if new_size < old_size && size_update.expect_eviction {
-            assert!(new_stats.total_size <= new_size,
+            assert!(
+                new_stats.total_size <= new_size,
                 "Table size {} exceeds new max {}",
-                new_stats.total_size, new_size);
+                new_stats.total_size,
+                new_size
+            );
 
             // Should have evicted some entries if they didn't fit
             if old_size > new_size {
-                assert!(new_stats.evicted_entries > 0 || new_stats.entry_count == 0,
+                assert!(
+                    new_stats.evicted_entries > 0 || new_stats.entry_count == 0,
                     "Expected eviction when reducing from {} to {}",
-                    old_size, new_size);
+                    old_size,
+                    new_size
+                );
             }
         }
 
         // Critical: no size underflow should ever occur
-        assert!(!table.violations().iter().any(|v| matches!(v, TableViolation::SizeUnderflow { .. })),
-            "Size underflow detected during table size update to {}", new_size);
+        assert!(
+            !table
+                .violations()
+                .iter()
+                .any(|v| matches!(v, TableViolation::SizeUnderflow { .. })),
+            "Size underflow detected during table size update to {}",
+            new_size
+        );
 
         // Table should always fit within max size
-        assert!(new_stats.total_size <= new_stats.max_size,
+        assert!(
+            new_stats.total_size <= new_stats.max_size,
             "Table size {} exceeds max size {} after update",
-            new_stats.total_size, new_stats.max_size);
+            new_stats.total_size,
+            new_stats.max_size
+        );
     }
 
     // Perform additional operations to test table consistency
@@ -412,38 +431,58 @@ fuzz_target!(|input: HpackTableSizeUpdateInput| {
         }
 
         // Verify consistency after each operation
-        assert!(!table.has_critical_violations(),
-            "Critical violations detected after table operation");
+        assert!(
+            !table.has_critical_violations(),
+            "Critical violations detected after table operation"
+        );
     }
 
     // Final invariant checks
     let final_stats = table.stats();
 
     // Size should never exceed maximum
-    assert!(final_stats.total_size <= final_stats.max_size,
+    assert!(
+        final_stats.total_size <= final_stats.max_size,
         "Final table size {} exceeds max {}",
-        final_stats.total_size, final_stats.max_size);
+        final_stats.total_size,
+        final_stats.max_size
+    );
 
     // Should not have any size underflow violations
-    let size_underflows: Vec<_> = table.violations().iter()
+    let size_underflows: Vec<_> = table
+        .violations()
+        .iter()
         .filter(|v| matches!(v, TableViolation::SizeUnderflow { .. }))
         .collect();
-    assert!(size_underflows.is_empty(),
-        "Size underflow violations detected: {:?}", size_underflows);
+    assert!(
+        size_underflows.is_empty(),
+        "Size underflow violations detected: {:?}",
+        size_underflows
+    );
 
     // Should not exceed max size
-    let size_exceedances: Vec<_> = table.violations().iter()
+    let size_exceedances: Vec<_> = table
+        .violations()
+        .iter()
         .filter(|v| matches!(v, TableViolation::ExceedsMaxSize { .. }))
         .collect();
-    assert!(size_exceedances.is_empty(),
-        "Size exceedance violations detected: {:?}", size_exceedances);
+    assert!(
+        size_exceedances.is_empty(),
+        "Size exceedance violations detected: {:?}",
+        size_exceedances
+    );
 
     // Eviction should follow FIFO order
-    let wrong_evictions: Vec<_> = table.violations().iter()
+    let wrong_evictions: Vec<_> = table
+        .violations()
+        .iter()
         .filter(|v| matches!(v, TableViolation::WrongEvictionOrder { .. }))
         .collect();
-    assert!(wrong_evictions.is_empty(),
-        "Wrong eviction order violations: {:?}", wrong_evictions);
+    assert!(
+        wrong_evictions.is_empty(),
+        "Wrong eviction order violations: {:?}",
+        wrong_evictions
+    );
 });
 
 #[cfg(test)]
@@ -469,7 +508,7 @@ mod tests {
 
         // Insert entries that fit in 100 bytes
         table.insert("name".to_string(), "value".to_string()); // 4 + 5 + 32 = 41 bytes
-        table.insert("x".to_string(), "y".to_string());         // 1 + 1 + 32 = 34 bytes
+        table.insert("x".to_string(), "y".to_string()); // 1 + 1 + 32 = 34 bytes
         // Total: 75 bytes
 
         let stats = table.stats();
@@ -481,7 +520,7 @@ mod tests {
 
         let new_stats = table.stats();
         assert_eq!(new_stats.entry_count, 1); // Only newest entry remains
-        assert_eq!(new_stats.total_size, 34);  // Only x=y remains
+        assert_eq!(new_stats.total_size, 34); // Only x=y remains
         assert!(new_stats.evicted_entries > 0);
     }
 
@@ -500,7 +539,12 @@ mod tests {
         table.evict_oldest();
 
         // Should have detected underflow violation
-        assert!(table.violations().iter().any(|v| matches!(v, TableViolation::SizeUnderflow { .. })));
+        assert!(
+            table
+                .violations()
+                .iter()
+                .any(|v| matches!(v, TableViolation::SizeUnderflow { .. }))
+        );
         assert_eq!(table.size, 0); // Should be 0 from saturating_sub, not underflowed
     }
 
@@ -509,15 +553,20 @@ mod tests {
         let mut table = MockHpackDynamicTable::with_max_size(200);
 
         // Insert multiple entries
-        table.insert("first".to_string(), "entry".to_string());  // generation 0
+        table.insert("first".to_string(), "entry".to_string()); // generation 0
         table.insert("second".to_string(), "entry".to_string()); // generation 1
-        table.insert("third".to_string(), "entry".to_string());  // generation 2
+        table.insert("third".to_string(), "entry".to_string()); // generation 2
 
         // Force eviction by reducing size significantly
         table.set_max_size(50); // Should evict in FIFO order (oldest first)
 
         // Should not have wrong eviction order violations
-        assert!(!table.violations().iter().any(|v| matches!(v, TableViolation::WrongEvictionOrder { .. })));
+        assert!(
+            !table
+                .violations()
+                .iter()
+                .any(|v| matches!(v, TableViolation::WrongEvictionOrder { .. }))
+        );
     }
 
     #[test]

@@ -77,10 +77,11 @@ impl LWSPattern {
             LWSPattern::Single { component, count } => {
                 vec![component.as_byte(); *count as usize]
             }
-            LWSPattern::Mixed { components } => {
-                components.iter().map(|c| c.as_byte()).collect()
-            }
-            LWSPattern::LineFolding { before_fold, after_fold } => {
+            LWSPattern::Mixed { components } => components.iter().map(|c| c.as_byte()).collect(),
+            LWSPattern::LineFolding {
+                before_fold,
+                after_fold,
+            } => {
                 let mut result = Vec::new();
                 result.extend(before_fold.iter().map(|c| c.as_byte()));
                 result.push(b'\r');
@@ -88,7 +89,11 @@ impl LWSPattern {
                 result.extend(after_fold.iter().map(|c| c.as_byte()));
                 result
             }
-            LWSPattern::Complex { prefix, middle, suffix } => {
+            LWSPattern::Complex {
+                prefix,
+                middle,
+                suffix,
+            } => {
                 let mut result = Vec::new();
                 result.extend(prefix.iter().map(|c| c.as_byte()));
                 result.extend(middle.iter().map(|c| c.as_byte()));
@@ -183,7 +188,8 @@ impl LWSHeader {
             return "X-Test".to_string();
         }
 
-        self.name.chars()
+        self.name
+            .chars()
             .filter(|c| c.is_ascii() && is_tchar(*c as u8))
             .take(50) // Reasonable limit
             .collect::<String>()
@@ -225,10 +231,13 @@ impl LWSHeader {
 
     fn should_be_rejected(&self) -> bool {
         // Check for patterns that should be rejected
-        self.leading_lws.contains_line_folding() ||
-        self.trailing_lws.contains_line_folding() ||
-        self.internal_lws.as_ref().map_or(false, |lws| lws.contains_line_folding()) ||
-        self.contains_invalid_control_chars()
+        self.leading_lws.contains_line_folding()
+            || self.trailing_lws.contains_line_folding()
+            || self
+                .internal_lws
+                .as_ref()
+                .map_or(false, |lws| lws.contains_line_folding())
+            || self.contains_invalid_control_chars()
     }
 
     fn contains_invalid_control_chars(&self) -> bool {
@@ -272,7 +281,9 @@ impl MockHeaderParser {
     /// Mirrors the logic from src/http/h1/codec.rs:parse_header_line_bounds
     fn parse_header_line(&mut self, line: &[u8]) -> Result<(String, String), String> {
         // Find colon
-        let colon_pos = line.iter().position(|&b| b == b':')
+        let colon_pos = line
+            .iter()
+            .position(|&b| b == b':')
             .ok_or_else(|| "No colon found".to_string())?;
 
         if colon_pos == 0 {
@@ -291,12 +302,15 @@ impl MockHeaderParser {
 
         // Find value bounds (trim leading/trailing LWS)
         let mut value_start = colon_pos + 1;
-        while value_start < line.len() && (line[value_start] == b' ' || line[value_start] == b'\t') {
+        while value_start < line.len() && (line[value_start] == b' ' || line[value_start] == b'\t')
+        {
             value_start += 1;
         }
 
         let mut value_end = line.len();
-        while value_end > value_start && (line[value_end - 1] == b' ' || line[value_end - 1] == b'\t') {
+        while value_end > value_start
+            && (line[value_end - 1] == b' ' || line[value_end - 1] == b'\t')
+        {
             value_end -= 1;
         }
 
@@ -355,9 +369,11 @@ fuzz_target!(|scenario: LWSHeaderScenario| {
                 match result {
                     Ok((name, value)) => {
                         // Header was successfully parsed
-                        assert!(!header.should_be_rejected() || (!strict && legacy_compat),
-                               "Header should have been rejected but was accepted: {:?}",
-                               String::from_utf8_lossy(&line));
+                        assert!(
+                            !header.should_be_rejected() || (!strict && legacy_compat),
+                            "Header should have been rejected but was accepted: {:?}",
+                            String::from_utf8_lossy(&line)
+                        );
 
                         // Validate the parsed value matches expected trimming
                         if let Some(expected) = header.expected_value() {
@@ -367,8 +383,9 @@ fuzz_target!(|scenario: LWSHeaderScenario| {
 
                             if !normalized_expected.is_empty() {
                                 assert!(
-                                    normalized_value == normalized_expected ||
-                                    (normalized_value.len() <= normalized_expected.len() + 10), // Allow some variance
+                                    normalized_value == normalized_expected
+                                        || (normalized_value.len()
+                                            <= normalized_expected.len() + 10), // Allow some variance
                                     "Parsed value doesn't match expected after LWS trimming\n\
                                      Input: {:?}\n\
                                      Expected: {:?}\n\
@@ -382,13 +399,15 @@ fuzz_target!(|scenario: LWSHeaderScenario| {
                     }
                     Err(_error) => {
                         // Header was rejected - validate this was expected
-                        if !header.should_be_rejected() && !header.generate_header_line().is_empty() {
+                        if !header.should_be_rejected() && !header.generate_header_line().is_empty()
+                        {
                             // In legacy compatibility mode, some rejections might be acceptable
                             if strict || !legacy_compat {
                                 // Only assert for clearly invalid cases in strict mode
-                                if header.contains_invalid_control_chars() ||
-                                   header.leading_lws.contains_line_folding() ||
-                                   header.trailing_lws.contains_line_folding() {
+                                if header.contains_invalid_control_chars()
+                                    || header.leading_lws.contains_line_folding()
+                                    || header.trailing_lws.contains_line_folding()
+                                {
                                     continue; // Expected rejection
                                 }
                             }
@@ -410,27 +429,37 @@ fn test_lws_boundary_conditions() {
     // Test cases with specific LWS patterns
     let test_cases = [
         // Basic trimming
-        (b"Content-Type: text/html", Some(("content-type", "text/html"))),
-        (b"Content-Type:  text/html  ", Some(("content-type", "text/html"))),
-        (b"Content-Type:\ttext/html\t", Some(("content-type", "text/html"))),
-
+        (
+            b"Content-Type: text/html",
+            Some(("content-type", "text/html")),
+        ),
+        (
+            b"Content-Type:  text/html  ",
+            Some(("content-type", "text/html")),
+        ),
+        (
+            b"Content-Type:\ttext/html\t",
+            Some(("content-type", "text/html")),
+        ),
         // Mixed whitespace
-        (b"Content-Type: \t text/html \t ", Some(("content-type", "text/html"))),
-
+        (
+            b"Content-Type: \t text/html \t ",
+            Some(("content-type", "text/html")),
+        ),
         // Empty value after trimming
         (b"X-Empty:   ", Some(("x-empty", ""))),
         (b"X-Empty:\t\t", Some(("x-empty", ""))),
-
         // Invalid control characters (should be rejected)
         (b"X-Invalid:\x01test", None),
         (b"X-Invalid:test\x00", None),
         (b"X-Invalid:test\x7F", None),
-
         // Line folding (should be rejected in strict mode)
         (b"X-Folded:test\r\n value", None),
-
         // Valid characters including obs-text
-        (b"X-Valid:\x80\x81\x82", Some(("x-valid", "\u{80}\u{81}\u{82}"))),
+        (
+            b"X-Valid:\x80\x81\x82",
+            Some(("x-valid", "\u{80}\u{81}\u{82}")),
+        ),
     ];
 
     for (input, expected) in test_cases {
@@ -439,9 +468,11 @@ fn test_lws_boundary_conditions() {
 
         match expected {
             Some((exp_name, exp_value)) => {
-                assert!(result.is_ok(),
-                       "Expected success for input: {:?}",
-                       String::from_utf8_lossy(input));
+                assert!(
+                    result.is_ok(),
+                    "Expected success for input: {:?}",
+                    String::from_utf8_lossy(input)
+                );
 
                 if let Ok((name, value)) = result {
                     assert_eq!(name, exp_name, "Header name mismatch");
@@ -449,9 +480,11 @@ fn test_lws_boundary_conditions() {
                 }
             }
             None => {
-                assert!(result.is_err(),
-                       "Expected rejection for input: {:?}",
-                       String::from_utf8_lossy(input));
+                assert!(
+                    result.is_err(),
+                    "Expected rejection for input: {:?}",
+                    String::from_utf8_lossy(input)
+                );
             }
         }
     }
@@ -461,8 +494,8 @@ fn test_lws_boundary_conditions() {
 fn is_tchar(b: u8) -> bool {
     match b {
         b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' => true,
-        b'!' | b'#' | b'$' | b'%' | b'&' | b'\'' | b'*' | b'+' | b'-' | b'.' |
-        b'^' | b'_' | b'`' | b'|' | b'~' => true,
+        b'!' | b'#' | b'$' | b'%' | b'&' | b'\'' | b'*' | b'+' | b'-' | b'.' | b'^' | b'_'
+        | b'`' | b'|' | b'~' => true,
         _ => false,
     }
 }

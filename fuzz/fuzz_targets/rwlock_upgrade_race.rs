@@ -13,16 +13,16 @@
 
 #![no_main]
 
-use libfuzzer_sys::fuzz_target;
 use arbitrary::{Arbitrary, Unstructured};
-use asupersync::sync::RwLock;
 use asupersync::cx::Cx;
-use std::sync::atomic::{AtomicUsize, AtomicBool, Ordering};
-use std::sync::Arc;
+use asupersync::sync::RwLock;
+use libfuzzer_sys::fuzz_target;
 use std::collections::HashMap;
-use std::task::{Context, Poll, Waker};
-use std::pin::Pin;
 use std::future::Future;
+use std::pin::Pin;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::task::{Context, Poll, Waker};
 
 #[derive(Debug, Clone, Arbitrary)]
 struct RwLockUpgradeConfig {
@@ -121,7 +121,10 @@ impl UpgradeTracker {
 
         // Core invariant: no deadlocks should be detected
         if deadlocks > 0 {
-            return Err(format!("Detected {} deadlocks during upgrade operations", deadlocks));
+            return Err(format!(
+                "Detected {} deadlocks during upgrade operations",
+                deadlocks
+            ));
         }
 
         // All attempts should be accounted for
@@ -143,7 +146,8 @@ impl UpgradeTracker {
         if successes + failures > attempts {
             return Err(format!(
                 "Recorded outcomes ({}) exceed total attempts ({})",
-                successes + failures, attempts
+                successes + failures,
+                attempts
             ));
         }
 
@@ -178,7 +182,10 @@ impl TrackedReader {
                 }
                 Err(e) => {
                     completed_clone.store(true, Ordering::SeqCst);
-                    Err(format!("Failed to acquire read lock for reader {}: {:?}", reader_id, e))
+                    Err(format!(
+                        "Failed to acquire read lock for reader {}: {:?}",
+                        reader_id, e
+                    ))
                 }
             }
         });
@@ -191,7 +198,12 @@ impl TrackedReader {
         }
     }
 
-    fn attempt_upgrade(&mut self, rwlock: Arc<RwLock<i32>>, reader_id: u8, tracker: Arc<UpgradeTracker>) {
+    fn attempt_upgrade(
+        &mut self,
+        rwlock: Arc<RwLock<i32>>,
+        reader_id: u8,
+        tracker: Arc<UpgradeTracker>,
+    ) {
         if self.attempting_upgrade {
             return; // Already attempting
         }
@@ -219,7 +231,10 @@ impl TrackedReader {
                 Err(e) => {
                     tracker.record_failed_upgrade();
                     completed.store(true, Ordering::SeqCst);
-                    Err(format!("Failed to upgrade reader {} to writer: {:?}", reader_id, e))
+                    Err(format!(
+                        "Failed to upgrade reader {} to writer: {:?}",
+                        reader_id, e
+                    ))
                 }
             }
         });
@@ -274,7 +289,9 @@ fn test_upgrade_race_scenario(
     let mut readers: HashMap<u8, TrackedReader> = HashMap::new();
     let mut current_writer: Option<u8> = None;
 
-    let max_readers = config.initial_readers.min(RwLockUpgradeConfig::max_readers());
+    let max_readers = config
+        .initial_readers
+        .min(RwLockUpgradeConfig::max_readers());
 
     // Create initial readers
     for i in 0..max_readers {
@@ -282,14 +299,19 @@ fn test_upgrade_race_scenario(
         readers.insert(i, reader);
     }
 
-    let max_ops = config.max_operations.min(RwLockUpgradeConfig::max_operations()) as usize;
+    let max_ops = config
+        .max_operations
+        .min(RwLockUpgradeConfig::max_operations()) as usize;
 
     for operation in config.operations.iter().take(max_ops) {
         match operation {
             UpgradeOperation::AddReader { reader_id } => {
                 let id = *reader_id % 20; // Limit total readers
-                if !readers.contains_key(&id) && readers.len() < RwLockUpgradeConfig::max_readers() as usize {
-                    let reader = TrackedReader::new(rwlock.clone(), id, Arc::new(UpgradeTracker::new()));
+                if !readers.contains_key(&id)
+                    && readers.len() < RwLockUpgradeConfig::max_readers() as usize
+                {
+                    let reader =
+                        TrackedReader::new(rwlock.clone(), id, Arc::new(UpgradeTracker::new()));
                     readers.insert(id, reader);
                 }
             }
@@ -323,13 +345,18 @@ fn test_upgrade_race_scenario(
                     for &reader_id in reader_ids.iter().take(concurrent_count) {
                         let id = reader_id % 20;
                         if let Some(reader) = readers.get_mut(&id) {
-                            reader.attempt_upgrade(rwlock.clone(), id, Arc::new(UpgradeTracker::new()));
+                            reader.attempt_upgrade(
+                                rwlock.clone(),
+                                id,
+                                Arc::new(UpgradeTracker::new()),
+                            );
                             upgrade_attempts += 1;
                         }
                     }
 
                     // Poll all readers to see results
-                    for _ in 0..10 { // Give some iterations for completion
+                    for _ in 0..10 {
+                        // Give some iterations for completion
                         for reader in readers.values_mut() {
                             let _ = reader.poll();
                             if reader.upgrade_succeeded() {
@@ -360,8 +387,12 @@ fn test_upgrade_race_scenario(
 
             UpgradeOperation::CheckState => {
                 // Check for consistency
-                let active_readers = readers.iter().filter(|(_, r)| !r.attempting_upgrade).count();
-                let attempting_upgrades = readers.iter().filter(|(_, r)| r.attempting_upgrade).count();
+                let active_readers = readers
+                    .iter()
+                    .filter(|(_, r)| !r.attempting_upgrade)
+                    .count();
+                let attempting_upgrades =
+                    readers.iter().filter(|(_, r)| r.attempting_upgrade).count();
 
                 if current_writer.is_some() && active_readers > 0 {
                     return Err(format!(
@@ -372,7 +403,10 @@ fn test_upgrade_race_scenario(
 
                 if attempting_upgrades > RwLockUpgradeConfig::max_readers() as usize {
                     tracker.record_deadlock();
-                    return Err(format!("Too many concurrent upgrade attempts: {}", attempting_upgrades));
+                    return Err(format!(
+                        "Too many concurrent upgrade attempts: {}",
+                        attempting_upgrades
+                    ));
                 }
 
                 // Check our tracking invariants
@@ -429,9 +463,7 @@ fuzz_target!(|data: &[u8]| {
         let tracker2 = UpgradeTracker::new();
         let config2 = config.clone();
 
-        let handle = thread::spawn(move || {
-            test_upgrade_race_scenario(&config2, &tracker2)
-        });
+        let handle = thread::spawn(move || test_upgrade_race_scenario(&config2, &tracker2));
 
         match handle.join() {
             Ok(Ok(())) => {

@@ -3,7 +3,7 @@
 //! **PURPOSE**: Verify 10x+ performance improvement after converting
 //! Mutex<VecDeque<T>> to lock-free ArrayQueue<T>.
 
-use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
+use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
@@ -160,7 +160,7 @@ fn bench_queue_contention(c: &mut Criterion) {
                                 for i in 0..operations_per_thread {
                                     let batch = BenchSpanBatch::new(
                                         (thread_id * operations_per_thread + i) as u64,
-                                        64
+                                        64,
                                     );
                                     queue.enqueue(batch);
 
@@ -194,7 +194,7 @@ fn bench_queue_contention(c: &mut Criterion) {
                                 for i in 0..operations_per_thread {
                                     let batch = BenchSpanBatch::new(
                                         (thread_id * operations_per_thread + i) as u64,
-                                        64
+                                        64,
                                     );
                                     queue.enqueue(batch);
 

@@ -12,10 +12,10 @@
 
 #![no_main]
 
-use libfuzzer_sys::fuzz_target;
-use asupersync::http::h1::{Http1Codec, HttpError};
-use asupersync::bytes::{Bytes, BytesMut, BufMut};
+use asupersync::bytes::{BufMut, Bytes, BytesMut};
 use asupersync::codec::Decoder;
+use asupersync::http::h1::{Http1Codec, HttpError};
+use libfuzzer_sys::fuzz_target;
 
 /// Maximum input size to prevent OOM
 const MAX_INPUT_SIZE: usize = 64 * 1024;
@@ -30,7 +30,7 @@ fuzz_target!(|data: &[u8]| {
     let mut input = BytesMut::new();
 
     // Write minimal chunked body ending in trailers state
-    input.put(&b"5\r\nHello\r\n0\r\n"[..]);  // Chunk + final chunk
+    input.put(&b"5\r\nHello\r\n0\r\n"[..]); // Chunk + final chunk
 
     // Add fuzzed trailer data
     input.put(data);
@@ -94,9 +94,9 @@ fuzz_target!(|data: &[u8]| {
 
         // Create minimal chunked request
         request.put(&b"POST /test HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n"[..]);
-        request.put(&b"0\r\n"[..]);  // Just final chunk marker
-        request.put(data);           // Fuzzed trailer data
-        request.put(&b"\r\n"[..]);   // Ensure termination
+        request.put(&b"0\r\n"[..]); // Just final chunk marker
+        request.put(data); // Fuzzed trailer data
+        request.put(&b"\r\n"[..]); // Ensure termination
 
         let _result = codec.decode(&mut request);
     }
@@ -157,7 +157,7 @@ fuzz_target!(|data: &[u8]| {
         request.put(&b"0\r\n"[..]);
         request.put(*pattern);
         request.put(&b" value\r\n"[..]);
-        request.put(data);  // Add fuzzed data after forbidden header
+        request.put(data); // Add fuzzed data after forbidden header
         request.put(&b"\r\n"[..]);
 
         let _result = codec.decode(&mut request);

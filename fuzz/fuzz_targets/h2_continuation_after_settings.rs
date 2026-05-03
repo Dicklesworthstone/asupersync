@@ -1,7 +1,7 @@
 #![no_main]
 
-use libfuzzer_sys::fuzz_target;
 use arbitrary::{Arbitrary, Unstructured};
+use libfuzzer_sys::fuzz_target;
 
 /// HTTP/2 HEADERS/CONTINUATION frame ordering violation testing.
 /// Per RFC 7540 §6.10, when HEADERS has END_HEADERS=0, only CONTINUATION
@@ -197,36 +197,30 @@ impl MockH2FrameParser {
                     // SETTINGS frame forbidden during CONTINUATION sequence
                     Err("PROTOCOL_ERROR: SETTINGS frame not allowed between HEADERS and CONTINUATION".into())
                 }
-                FrameType::Data(data_frame) => {
-                    Err(format!(
-                        "PROTOCOL_ERROR: DATA frame not allowed between HEADERS and CONTINUATION (stream {})",
-                        data_frame.stream_id
-                    ))
-                }
-                FrameType::WindowUpdate(wu_frame) => {
-                    Err(format!(
-                        "PROTOCOL_ERROR: WINDOW_UPDATE frame not allowed between HEADERS and CONTINUATION (stream {})",
-                        wu_frame.stream_id
-                    ))
-                }
-                FrameType::Ping(_) => {
-                    Err("PROTOCOL_ERROR: PING frame not allowed between HEADERS and CONTINUATION".into())
-                }
-                FrameType::GoAway(_) => {
-                    Err("PROTOCOL_ERROR: GOAWAY frame not allowed between HEADERS and CONTINUATION".into())
-                }
-                FrameType::RstStream(rst_frame) => {
-                    Err(format!(
-                        "PROTOCOL_ERROR: RST_STREAM frame not allowed between HEADERS and CONTINUATION (stream {})",
-                        rst_frame.stream_id
-                    ))
-                }
-                FrameType::PushPromise(pp_frame) => {
-                    Err(format!(
-                        "PROTOCOL_ERROR: PUSH_PROMISE frame not allowed between HEADERS and CONTINUATION (stream {})",
-                        pp_frame.stream_id
-                    ))
-                }
+                FrameType::Data(data_frame) => Err(format!(
+                    "PROTOCOL_ERROR: DATA frame not allowed between HEADERS and CONTINUATION (stream {})",
+                    data_frame.stream_id
+                )),
+                FrameType::WindowUpdate(wu_frame) => Err(format!(
+                    "PROTOCOL_ERROR: WINDOW_UPDATE frame not allowed between HEADERS and CONTINUATION (stream {})",
+                    wu_frame.stream_id
+                )),
+                FrameType::Ping(_) => Err(
+                    "PROTOCOL_ERROR: PING frame not allowed between HEADERS and CONTINUATION"
+                        .into(),
+                ),
+                FrameType::GoAway(_) => Err(
+                    "PROTOCOL_ERROR: GOAWAY frame not allowed between HEADERS and CONTINUATION"
+                        .into(),
+                ),
+                FrameType::RstStream(rst_frame) => Err(format!(
+                    "PROTOCOL_ERROR: RST_STREAM frame not allowed between HEADERS and CONTINUATION (stream {})",
+                    rst_frame.stream_id
+                )),
+                FrameType::PushPromise(pp_frame) => Err(format!(
+                    "PROTOCOL_ERROR: PUSH_PROMISE frame not allowed between HEADERS and CONTINUATION (stream {})",
+                    pp_frame.stream_id
+                )),
             }
         } else {
             // Not in CONTINUATION state - frame is allowed
@@ -237,12 +231,10 @@ impl MockH2FrameParser {
     /// Process frame when not waiting for CONTINUATION
     fn process_regular_frame(&mut self, frame: &FrameType) -> Result<(), String> {
         match frame {
-            FrameType::Continuation(cont_frame) => {
-                Err(format!(
-                    "PROTOCOL_ERROR: CONTINUATION frame without preceding HEADERS (stream {})",
-                    cont_frame.stream_id
-                ))
-            }
+            FrameType::Continuation(cont_frame) => Err(format!(
+                "PROTOCOL_ERROR: CONTINUATION frame without preceding HEADERS (stream {})",
+                cont_frame.stream_id
+            )),
             _ => Ok(()), // Other frames are generally allowed when not in CONTINUATION state
         }
     }
@@ -307,23 +299,34 @@ fuzz_target!(|data: &[u8]| {
     let result = parser.process_sequence(&input);
 
     // Test 1: SETTINGS frame should cause PROTOCOL_ERROR
-    let has_settings_frame = input.following_frames.iter().any(|frame| {
-        matches!(frame, FrameType::Settings(_))
-    });
+    let has_settings_frame = input
+        .following_frames
+        .iter()
+        .any(|frame| matches!(frame, FrameType::Settings(_)));
 
     if has_settings_frame {
-        assert!(result.is_err(),
-            "SETTINGS frame during CONTINUATION sequence should be rejected");
+        assert!(
+            result.is_err(),
+            "SETTINGS frame during CONTINUATION sequence should be rejected"
+        );
 
         if let Err(error_msg) = &result {
-            assert!(error_msg.contains("PROTOCOL_ERROR") || error_msg.contains("not allowed"),
-                "SETTINGS interleaving should generate PROTOCOL_ERROR: {}", error_msg);
+            assert!(
+                error_msg.contains("PROTOCOL_ERROR") || error_msg.contains("not allowed"),
+                "SETTINGS interleaving should generate PROTOCOL_ERROR: {}",
+                error_msg
+            );
         }
     }
 
     // Test 2: Other forbidden frames should also cause PROTOCOL_ERROR
     let forbidden_frame_types = [
-        "Data", "WindowUpdate", "Ping", "GoAway", "RstStream", "PushPromise"
+        "Data",
+        "WindowUpdate",
+        "Ping",
+        "GoAway",
+        "RstStream",
+        "PushPromise",
     ];
 
     for frame in &input.following_frames {
@@ -338,28 +341,40 @@ fuzz_target!(|data: &[u8]| {
         };
 
         if forbidden_frame_types.contains(&frame_name) {
-            assert!(result.is_err(),
-                "{} frame during CONTINUATION sequence should be rejected", frame_name);
+            assert!(
+                result.is_err(),
+                "{} frame during CONTINUATION sequence should be rejected",
+                frame_name
+            );
 
             if let Err(error_msg) = &result {
-                assert!(error_msg.contains("PROTOCOL_ERROR") || error_msg.contains("not allowed"),
-                    "{} interleaving should generate PROTOCOL_ERROR: {}", frame_name, error_msg);
+                assert!(
+                    error_msg.contains("PROTOCOL_ERROR") || error_msg.contains("not allowed"),
+                    "{} interleaving should generate PROTOCOL_ERROR: {}",
+                    frame_name,
+                    error_msg
+                );
             }
         }
     }
 
     // Test 3: Valid CONTINUATION sequences should work
-    let only_continuation_and_priority = input.following_frames.iter().all(|frame| {
-        matches!(frame, FrameType::Continuation(_) | FrameType::Priority(_))
-    });
+    let only_continuation_and_priority = input
+        .following_frames
+        .iter()
+        .all(|frame| matches!(frame, FrameType::Continuation(_) | FrameType::Priority(_)));
 
-    let has_proper_end = input.final_continuation.as_ref()
+    let has_proper_end = input
+        .final_continuation
+        .as_ref()
         .map(|cont| (cont.flags & 0x04) != 0) // END_HEADERS set
         .unwrap_or(false);
 
     if only_continuation_and_priority && has_proper_end {
         // Check if all CONTINUATION frames have matching stream ID
-        let all_matching_stream_id = input.following_frames.iter()
+        let all_matching_stream_id = input
+            .following_frames
+            .iter()
             .filter_map(|frame| {
                 if let FrameType::Continuation(cont) = frame {
                     Some(cont.stream_id == input.headers_frame.stream_id)
@@ -369,7 +384,9 @@ fuzz_target!(|data: &[u8]| {
             })
             .all(|matches| matches);
 
-        let final_matches = input.final_continuation.as_ref()
+        let final_matches = input
+            .final_continuation
+            .as_ref()
             .map(|cont| cont.stream_id == input.headers_frame.stream_id)
             .unwrap_or(true);
 
@@ -378,10 +395,11 @@ fuzz_target!(|data: &[u8]| {
                 // Valid sequence failed - check if it's due to stream ID mismatch or other valid reason
                 if let Err(error_msg) = &result {
                     assert!(
-                        error_msg.contains("stream ID") ||
-                        error_msg.contains("incomplete") ||
-                        error_msg.contains("PRIORITY frame during CONTINUATION sequence"),
-                        "Valid CONTINUATION sequence failed unexpectedly: {}", error_msg
+                        error_msg.contains("stream ID")
+                            || error_msg.contains("incomplete")
+                            || error_msg.contains("PRIORITY frame during CONTINUATION sequence"),
+                        "Valid CONTINUATION sequence failed unexpectedly: {}",
+                        error_msg
                     );
                 }
             }
@@ -392,12 +410,17 @@ fuzz_target!(|data: &[u8]| {
     for frame in &input.following_frames {
         if let FrameType::Continuation(cont) = frame {
             if cont.stream_id != input.headers_frame.stream_id {
-                assert!(result.is_err(),
-                    "CONTINUATION with mismatched stream ID should be rejected");
+                assert!(
+                    result.is_err(),
+                    "CONTINUATION with mismatched stream ID should be rejected"
+                );
 
                 if let Err(error_msg) = &result {
-                    assert!(error_msg.contains("stream ID") && error_msg.contains("PROTOCOL_ERROR"),
-                        "Stream ID mismatch should generate specific error: {}", error_msg);
+                    assert!(
+                        error_msg.contains("stream ID") && error_msg.contains("PROTOCOL_ERROR"),
+                        "Stream ID mismatch should generate specific error: {}",
+                        error_msg
+                    );
                 }
             }
         }
@@ -416,12 +439,10 @@ mod tests {
                 flags: 0, // END_HEADERS=0
                 header_block_fragment: b"mock-headers".to_vec(),
             },
-            following_frames: vec![
-                FrameType::Settings(SettingsFrame {
-                    flags: 0,
-                    settings: vec![(1, 4096)], // HEADER_TABLE_SIZE
-                }),
-            ],
+            following_frames: vec![FrameType::Settings(SettingsFrame {
+                flags: 0,
+                settings: vec![(1, 4096)], // HEADER_TABLE_SIZE
+            })],
             final_continuation: Some(ContinuationFrame {
                 stream_id: 1,
                 flags: 0x04, // END_HEADERS=1
@@ -444,13 +465,11 @@ mod tests {
                 flags: 0, // END_HEADERS=0
                 header_block_fragment: b"mock-headers".to_vec(),
             },
-            following_frames: vec![
-                FrameType::Continuation(ContinuationFrame {
-                    stream_id: 1,
-                    flags: 0, // END_HEADERS=0
-                    header_block_fragment: b"mock-cont1".to_vec(),
-                }),
-            ],
+            following_frames: vec![FrameType::Continuation(ContinuationFrame {
+                stream_id: 1,
+                flags: 0, // END_HEADERS=0
+                header_block_fragment: b"mock-cont1".to_vec(),
+            })],
             final_continuation: Some(ContinuationFrame {
                 stream_id: 1,
                 flags: 0x04, // END_HEADERS=1
@@ -473,14 +492,12 @@ mod tests {
                 flags: 0, // END_HEADERS=0
                 header_block_fragment: b"mock-headers".to_vec(),
             },
-            following_frames: vec![
-                FrameType::Priority(PriorityFrame {
-                    stream_id: 1,
-                    exclusive: false,
-                    dependency: 0,
-                    weight: 15,
-                }),
-            ],
+            following_frames: vec![FrameType::Priority(PriorityFrame {
+                stream_id: 1,
+                exclusive: false,
+                dependency: 0,
+                weight: 15,
+            })],
             final_continuation: Some(ContinuationFrame {
                 stream_id: 1,
                 flags: 0x04, // END_HEADERS=1
@@ -505,13 +522,11 @@ mod tests {
                 flags: 0, // END_HEADERS=0
                 header_block_fragment: b"mock-headers".to_vec(),
             },
-            following_frames: vec![
-                FrameType::Continuation(ContinuationFrame {
-                    stream_id: 3, // Wrong stream ID
-                    flags: 0x04, // END_HEADERS=1
-                    header_block_fragment: b"mock-cont".to_vec(),
-                }),
-            ],
+            following_frames: vec![FrameType::Continuation(ContinuationFrame {
+                stream_id: 3, // Wrong stream ID
+                flags: 0x04,  // END_HEADERS=1
+                header_block_fragment: b"mock-cont".to_vec(),
+            })],
             final_continuation: None,
         };
 
@@ -530,13 +545,11 @@ mod tests {
                 flags: 0, // END_HEADERS=0
                 header_block_fragment: b"mock-headers".to_vec(),
             },
-            following_frames: vec![
-                FrameType::Data(DataFrame {
-                    stream_id: 1,
-                    flags: 0,
-                    data: b"some data".to_vec(),
-                }),
-            ],
+            following_frames: vec![FrameType::Data(DataFrame {
+                stream_id: 1,
+                flags: 0,
+                data: b"some data".to_vec(),
+            })],
             final_continuation: None,
         };
 

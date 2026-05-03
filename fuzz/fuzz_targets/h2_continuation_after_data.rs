@@ -1,7 +1,7 @@
 #![no_main]
 
-use libfuzzer_sys::fuzz_target;
 use arbitrary::{Arbitrary, Unstructured};
+use libfuzzer_sys::fuzz_target;
 
 /// HTTP/2 HEADERS/CONTINUATION sequence interruption testing.
 /// Per RFC 7540 §6.10, CONTINUATION frames must IMMEDIATELY follow
@@ -163,7 +163,11 @@ impl MockH2StrictParser {
     }
 
     /// Process CONTINUATION frame when expected
-    fn process_continuation(&mut self, frame: &ContinuationFrame, expected_stream_id: u32) -> Result<(), String> {
+    fn process_continuation(
+        &mut self,
+        frame: &ContinuationFrame,
+        expected_stream_id: u32,
+    ) -> Result<(), String> {
         // Validate stream ID matches
         if frame.stream_id != expected_stream_id {
             return Err(format!(
@@ -185,18 +189,12 @@ impl MockH2StrictParser {
     /// Process frame when not in CONTINUATION state
     fn process_regular_frame(&mut self, frame: &FrameType) -> Result<(), String> {
         match frame {
-            FrameType::Headers(headers_frame) => {
-                self.process_headers(headers_frame)
-            }
-            FrameType::PushPromise(pp_frame) => {
-                self.process_push_promise(pp_frame)
-            }
-            FrameType::Continuation(cont_frame) => {
-                Err(format!(
-                    "PROTOCOL_ERROR: CONTINUATION frame on stream {} without preceding HEADERS",
-                    cont_frame.stream_id
-                ))
-            }
+            FrameType::Headers(headers_frame) => self.process_headers(headers_frame),
+            FrameType::PushPromise(pp_frame) => self.process_push_promise(pp_frame),
+            FrameType::Continuation(cont_frame) => Err(format!(
+                "PROTOCOL_ERROR: CONTINUATION frame on stream {} without preceding HEADERS",
+                cont_frame.stream_id
+            )),
             _ => {
                 // Other frames are generally allowed when not in CONTINUATION state
                 self.validate_frame(frame)
@@ -375,48 +373,66 @@ fuzz_target!(|data: &[u8]| {
 
     // Test 1: ANY non-CONTINUATION frame should cause PROTOCOL_ERROR
     if !input.interrupting_frames.is_empty() {
-        let has_non_continuation = input.interrupting_frames.iter().any(|frame| {
-            !matches!(frame, FrameType::Continuation(_))
-        });
+        let has_non_continuation = input
+            .interrupting_frames
+            .iter()
+            .any(|frame| !matches!(frame, FrameType::Continuation(_)));
 
         if has_non_continuation {
-            assert!(result.is_err(),
-                "Non-CONTINUATION frame interrupting HEADERS/CONTINUATION should be PROTOCOL_ERROR");
+            assert!(
+                result.is_err(),
+                "Non-CONTINUATION frame interrupting HEADERS/CONTINUATION should be PROTOCOL_ERROR"
+            );
 
             if let Err(error_msg) = &result {
-                assert!(error_msg.contains("PROTOCOL_ERROR"),
-                    "Interruption error should mention PROTOCOL_ERROR: {}", error_msg);
-                assert!(error_msg.contains("interrupts"),
-                    "Interruption error should mention interruption: {}", error_msg);
+                assert!(
+                    error_msg.contains("PROTOCOL_ERROR"),
+                    "Interruption error should mention PROTOCOL_ERROR: {}",
+                    error_msg
+                );
+                assert!(
+                    error_msg.contains("interrupts"),
+                    "Interruption error should mention interruption: {}",
+                    error_msg
+                );
             }
             return; // No further tests for interruption case
         }
     }
 
     // Test 2: DATA frame on different stream should be caught
-    let has_data_frame = input.interrupting_frames.iter().any(|frame| {
-        matches!(frame, FrameType::Data(_))
-    });
+    let has_data_frame = input
+        .interrupting_frames
+        .iter()
+        .any(|frame| matches!(frame, FrameType::Data(_)));
 
     if has_data_frame {
-        assert!(result.is_err(),
-            "DATA frame interrupting HEADERS/CONTINUATION should be PROTOCOL_ERROR");
+        assert!(
+            result.is_err(),
+            "DATA frame interrupting HEADERS/CONTINUATION should be PROTOCOL_ERROR"
+        );
 
         if let Err(error_msg) = &result {
-            assert!(error_msg.contains("DATA frame") && error_msg.contains("interrupts"),
-                "DATA interruption error should be specific: {}", error_msg);
+            assert!(
+                error_msg.contains("DATA frame") && error_msg.contains("interrupts"),
+                "DATA interruption error should be specific: {}",
+                error_msg
+            );
         }
         return;
     }
 
     // Test 3: Valid CONTINUATION-only sequences should work
-    let only_continuations = input.interrupting_frames.iter().all(|frame| {
-        matches!(frame, FrameType::Continuation(_))
-    });
+    let only_continuations = input
+        .interrupting_frames
+        .iter()
+        .all(|frame| matches!(frame, FrameType::Continuation(_)));
 
     if only_continuations {
         // Check if all CONTINUATIONs have matching stream ID
-        let all_matching_stream_id = input.interrupting_frames.iter()
+        let all_matching_stream_id = input
+            .interrupting_frames
+            .iter()
             .filter_map(|frame| {
                 if let FrameType::Continuation(cont) = frame {
                     Some(cont.stream_id == input.headers_frame.stream_id)
@@ -427,25 +443,36 @@ fuzz_target!(|data: &[u8]| {
             .all(|matches| matches);
 
         // Check if final CONTINUATION has matching stream ID and END_HEADERS
-        let final_valid = input.final_continuation.as_ref()
+        let final_valid = input
+            .final_continuation
+            .as_ref()
             .map(|cont| {
-                cont.stream_id == input.headers_frame.stream_id &&
-                (cont.flags & 0x04) != 0 // END_HEADERS set
+                cont.stream_id == input.headers_frame.stream_id && (cont.flags & 0x04) != 0 // END_HEADERS set
             })
             .unwrap_or(false);
 
         if all_matching_stream_id && final_valid {
-            assert!(result.is_ok(),
-                "Valid CONTINUATION-only sequence should succeed");
-            assert_eq!(parser.get_state(), &ParserState::Idle,
-                "Parser should return to idle state after complete sequence");
+            assert!(
+                result.is_ok(),
+                "Valid CONTINUATION-only sequence should succeed"
+            );
+            assert_eq!(
+                parser.get_state(),
+                &ParserState::Idle,
+                "Parser should return to idle state after complete sequence"
+            );
         } else if !final_valid {
-            assert!(result.is_err(),
-                "Incomplete CONTINUATION sequence should fail");
+            assert!(
+                result.is_err(),
+                "Incomplete CONTINUATION sequence should fail"
+            );
             if let Err(error_msg) = &result {
-                assert!(error_msg.contains("incomplete header block") ||
-                        error_msg.contains("stream ID"),
-                    "Incomplete sequence error should be clear: {}", error_msg);
+                assert!(
+                    error_msg.contains("incomplete header block")
+                        || error_msg.contains("stream ID"),
+                    "Incomplete sequence error should be clear: {}",
+                    error_msg
+                );
             }
         }
     }
@@ -454,12 +481,17 @@ fuzz_target!(|data: &[u8]| {
     for frame in &input.interrupting_frames {
         if let FrameType::Continuation(cont) = frame {
             if cont.stream_id != input.headers_frame.stream_id {
-                assert!(result.is_err(),
-                    "CONTINUATION with wrong stream ID should be rejected");
+                assert!(
+                    result.is_err(),
+                    "CONTINUATION with wrong stream ID should be rejected"
+                );
 
                 if let Err(error_msg) = &result {
-                    assert!(error_msg.contains("stream ID") && error_msg.contains("does not match"),
-                        "Stream ID mismatch error should be clear: {}", error_msg);
+                    assert!(
+                        error_msg.contains("stream ID") && error_msg.contains("does not match"),
+                        "Stream ID mismatch error should be clear: {}",
+                        error_msg
+                    );
                 }
                 return;
             }
@@ -479,13 +511,11 @@ mod tests {
                 flags: 0, // END_HEADERS=0 (forced)
                 header_block_fragment: b"mock-headers".to_vec(),
             },
-            interrupting_frames: vec![
-                FrameType::Data(DataFrame {
-                    stream_id: 3, // Different stream
-                    flags: 0,
-                    data: b"some data".to_vec(),
-                }),
-            ],
+            interrupting_frames: vec![FrameType::Data(DataFrame {
+                stream_id: 3, // Different stream
+                flags: 0,
+                data: b"some data".to_vec(),
+            })],
             final_continuation: Some(ContinuationFrame {
                 stream_id: 1,
                 flags: 0x04, // END_HEADERS=1
@@ -509,12 +539,10 @@ mod tests {
                 flags: 0,
                 header_block_fragment: b"mock-headers".to_vec(),
             },
-            interrupting_frames: vec![
-                FrameType::Settings(SettingsFrame {
-                    flags: 0,
-                    settings: vec![(1, 4096)],
-                }),
-            ],
+            interrupting_frames: vec![FrameType::Settings(SettingsFrame {
+                flags: 0,
+                settings: vec![(1, 4096)],
+            })],
             final_continuation: None,
         };
 
@@ -534,13 +562,11 @@ mod tests {
                 flags: 0,
                 header_block_fragment: b"mock-headers".to_vec(),
             },
-            interrupting_frames: vec![
-                FrameType::Continuation(ContinuationFrame {
-                    stream_id: 1,
-                    flags: 0, // END_HEADERS=0
-                    header_block_fragment: b"mock-cont1".to_vec(),
-                }),
-            ],
+            interrupting_frames: vec![FrameType::Continuation(ContinuationFrame {
+                stream_id: 1,
+                flags: 0, // END_HEADERS=0
+                header_block_fragment: b"mock-cont1".to_vec(),
+            })],
             final_continuation: Some(ContinuationFrame {
                 stream_id: 1,
                 flags: 0x04, // END_HEADERS=1
@@ -563,14 +589,12 @@ mod tests {
                 flags: 0,
                 header_block_fragment: b"mock-headers".to_vec(),
             },
-            interrupting_frames: vec![
-                FrameType::Priority(PriorityFrame {
-                    stream_id: 5, // Same stream as HEADERS
-                    exclusive: false,
-                    dependency: 0,
-                    weight: 15,
-                }),
-            ],
+            interrupting_frames: vec![FrameType::Priority(PriorityFrame {
+                stream_id: 5, // Same stream as HEADERS
+                exclusive: false,
+                dependency: 0,
+                weight: 15,
+            })],
             final_continuation: None,
         };
 
@@ -590,13 +614,11 @@ mod tests {
                 flags: 0,
                 header_block_fragment: b"mock-headers".to_vec(),
             },
-            interrupting_frames: vec![
-                FrameType::Continuation(ContinuationFrame {
-                    stream_id: 3, // Wrong stream ID
-                    flags: 0x04,
-                    header_block_fragment: b"mock-cont".to_vec(),
-                }),
-            ],
+            interrupting_frames: vec![FrameType::Continuation(ContinuationFrame {
+                stream_id: 3, // Wrong stream ID
+                flags: 0x04,
+                header_block_fragment: b"mock-cont".to_vec(),
+            })],
             final_continuation: None,
         };
 
@@ -646,7 +668,7 @@ mod tests {
                 header_block_fragment: b"mock-headers".to_vec(),
             },
             interrupting_frames: vec![], // No interrupting frames
-            final_continuation: None, // No final CONTINUATION
+            final_continuation: None,    // No final CONTINUATION
         };
 
         let mut parser = MockH2StrictParser::new();
@@ -664,12 +686,10 @@ mod tests {
                 flags: 0,
                 header_block_fragment: b"mock-headers".to_vec(),
             },
-            interrupting_frames: vec![
-                FrameType::RstStream(RstStreamFrame {
-                    stream_id: 1, // Same stream
-                    error_code: 8, // CANCEL
-                }),
-            ],
+            interrupting_frames: vec![FrameType::RstStream(RstStreamFrame {
+                stream_id: 1,  // Same stream
+                error_code: 8, // CANCEL
+            })],
             final_continuation: None,
         };
 

@@ -37,12 +37,12 @@ impl SettingId {
     /// Get the valid range for this setting parameter
     fn valid_range(self) -> Option<(u32, u32)> {
         match self {
-            SettingId::HeaderTableSize => None, // No explicit bounds
-            SettingId::EnablePush => Some((0, 1)), // MUST be 0 or 1
+            SettingId::HeaderTableSize => None,      // No explicit bounds
+            SettingId::EnablePush => Some((0, 1)),   // MUST be 0 or 1
             SettingId::MaxConcurrentStreams => None, // No explicit bounds
             SettingId::InitialWindowSize => Some((0, 0x7fff_ffff)), // MUST be <= 2^31-1
             SettingId::MaxFrameSize => Some((16_384, 16_777_215)), // MUST be within these bounds
-            SettingId::MaxHeaderListSize => None, // No explicit bounds
+            SettingId::MaxHeaderListSize => None,    // No explicit bounds
         }
     }
 
@@ -77,7 +77,10 @@ impl ValueStrategy {
     fn generate_value(&self, setting: SettingId) -> u32 {
         match self {
             ValueStrategy::Exact(value) => *value,
-            ValueStrategy::BoundaryTest { setting: test_setting, offset } => {
+            ValueStrategy::BoundaryTest {
+                setting: test_setting,
+                offset,
+            } => {
                 if *test_setting != setting {
                     return 42; // Default value for non-matching settings
                 }
@@ -92,10 +95,10 @@ impl ValueStrategy {
                 }
             }
             ValueStrategy::MaxValues => match setting {
-                SettingId::EnablePush => u32::MAX, // Should fail validation
+                SettingId::EnablePush => u32::MAX,        // Should fail validation
                 SettingId::InitialWindowSize => u32::MAX, // Should fail validation
-                SettingId::MaxFrameSize => u32::MAX, // Should fail validation
-                _ => u32::MAX, // Test extremely large values
+                SettingId::MaxFrameSize => u32::MAX,      // Should fail validation
+                _ => u32::MAX,                            // Test extremely large values
             },
             ValueStrategy::Zero => 0,
             ValueStrategy::PowerOfTwo(exponent) => {
@@ -119,7 +122,10 @@ struct TestSetting {
 
 impl TestSetting {
     fn generate(&self) -> (u16, u32) {
-        (self.id.as_u16(), self.value_strategy.generate_value(self.id))
+        (
+            self.id.as_u16(),
+            self.value_strategy.generate_value(self.id),
+        )
     }
 }
 
@@ -162,7 +168,11 @@ impl MockSettingsProcessor {
 
     /// Process a SETTINGS frame
     /// Returns Ok(()) if accepted, Err(error_msg) if rejected
-    fn process_settings_frame(&mut self, settings: Vec<(u16, u32)>, is_ack: bool) -> Result<(), String> {
+    fn process_settings_frame(
+        &mut self,
+        settings: Vec<(u16, u32)>,
+        is_ack: bool,
+    ) -> Result<(), String> {
         // RFC 9113 §6.5.3: SETTINGS ACK frames MUST be empty
         if is_ack && !settings.is_empty() {
             self.protocol_errors += 1;
@@ -215,19 +225,26 @@ impl MockSettingsProcessor {
         if !setting.is_value_valid(value) {
             self.out_of_range_count.wrapping_add(1); // Track for stats
             match setting {
-                SettingId::EnablePush => {
-                    Err(format!("PROTOCOL_ERROR: SETTINGS_ENABLE_PUSH must be 0 or 1, got {}", value))
-                }
+                SettingId::EnablePush => Err(format!(
+                    "PROTOCOL_ERROR: SETTINGS_ENABLE_PUSH must be 0 or 1, got {}",
+                    value
+                )),
                 SettingId::InitialWindowSize => {
                     if value > 0x7fff_ffff {
-                        Err(format!("FLOW_CONTROL_ERROR: SETTINGS_INITIAL_WINDOW_SIZE ({}) exceeds maximum (2^31-1)", value))
+                        Err(format!(
+                            "FLOW_CONTROL_ERROR: SETTINGS_INITIAL_WINDOW_SIZE ({}) exceeds maximum (2^31-1)",
+                            value
+                        ))
                     } else {
                         Ok(())
                     }
                 }
                 SettingId::MaxFrameSize => {
                     if value < 16_384 || value > 16_777_215 {
-                        Err(format!("PROTOCOL_ERROR: SETTINGS_MAX_FRAME_SIZE ({}) out of bounds [16384, 16777215]", value))
+                        Err(format!(
+                            "PROTOCOL_ERROR: SETTINGS_MAX_FRAME_SIZE ({}) out of bounds [16384, 16777215]",
+                            value
+                        ))
                     } else {
                         Ok(())
                     }
@@ -247,7 +264,11 @@ impl MockSettingsProcessor {
     }
 
     fn get_stats(&self) -> (usize, usize, usize) {
-        (self.protocol_errors, self.out_of_range_count, self.current_settings.len())
+        (
+            self.protocol_errors,
+            self.out_of_range_count,
+            self.current_settings.len(),
+        )
     }
 }
 
@@ -267,7 +288,7 @@ fuzz_target!(|scenario: SettingsValueRangeScenario| {
         if scenario.include_unknown_settings {
             // Use setting ID > 0x6 to ensure it's unknown
             let unknown_id = if scenario.unknown_setting_id <= 0x6 {
-                0x100 + scenario.unknown_setting_id  // Make it definitely unknown
+                0x100 + scenario.unknown_setting_id // Make it definitely unknown
             } else {
                 scenario.unknown_setting_id
             };
@@ -282,10 +303,11 @@ fuzz_target!(|scenario: SettingsValueRangeScenario| {
             (true, Err(error_msg)) => {
                 // Strict mode errors are expected for out-of-bounds values
                 assert!(
-                    error_msg.contains("PROTOCOL_ERROR") ||
-                    error_msg.contains("FLOW_CONTROL_ERROR") ||
-                    error_msg.contains("must be empty"),
-                    "Unexpected error message in strict mode: {}", error_msg
+                    error_msg.contains("PROTOCOL_ERROR")
+                        || error_msg.contains("FLOW_CONTROL_ERROR")
+                        || error_msg.contains("must be empty"),
+                    "Unexpected error message in strict mode: {}",
+                    error_msg
                 );
             }
             (false, Ok(())) => {
@@ -294,14 +316,18 @@ fuzz_target!(|scenario: SettingsValueRangeScenario| {
                 let (protocol_errors, out_of_range_count, settings_count) = processor.get_stats();
 
                 if !scenario.is_ack && !scenario.settings.is_empty() {
-                    assert!(settings_count > 0, "Lenient mode should have processed some settings");
+                    assert!(
+                        settings_count > 0,
+                        "Lenient mode should have processed some settings"
+                    );
                 }
             }
             (false, Err(error_msg)) => {
                 // Lenient mode should only error for structural issues (like non-empty ACK)
                 assert!(
                     error_msg.contains("must be empty"),
-                    "Lenient mode should only error for structural issues, got: {}", error_msg
+                    "Lenient mode should only error for structural issues, got: {}",
+                    error_msg
                 );
             }
             (true, Ok(())) => {
@@ -320,7 +346,8 @@ fuzz_target!(|scenario: SettingsValueRangeScenario| {
                             assert!(
                                 setting.is_value_valid(*value),
                                 "Strict mode accepted out-of-bounds value {} for setting {:?}",
-                                value, setting
+                                value,
+                                setting
                             );
                         }
                     }
@@ -341,28 +368,92 @@ fn test_boundary_conditions() {
     let mut processor = MockSettingsProcessor::new(true);
 
     // Test SETTINGS_ENABLE_PUSH boundary
-    assert!(processor.process_settings_frame(vec![(0x2, 0)], false).is_ok());
-    assert!(processor.process_settings_frame(vec![(0x2, 1)], false).is_ok());
-    assert!(processor.process_settings_frame(vec![(0x2, 2)], false).is_err());
-    assert!(processor.process_settings_frame(vec![(0x2, u32::MAX)], false).is_err());
+    assert!(
+        processor
+            .process_settings_frame(vec![(0x2, 0)], false)
+            .is_ok()
+    );
+    assert!(
+        processor
+            .process_settings_frame(vec![(0x2, 1)], false)
+            .is_ok()
+    );
+    assert!(
+        processor
+            .process_settings_frame(vec![(0x2, 2)], false)
+            .is_err()
+    );
+    assert!(
+        processor
+            .process_settings_frame(vec![(0x2, u32::MAX)], false)
+            .is_err()
+    );
 
     // Test SETTINGS_INITIAL_WINDOW_SIZE boundary
-    assert!(processor.process_settings_frame(vec![(0x4, 0)], false).is_ok());
-    assert!(processor.process_settings_frame(vec![(0x4, 0x7fff_ffff)], false).is_ok());
-    assert!(processor.process_settings_frame(vec![(0x4, 0x8000_0000)], false).is_err());
-    assert!(processor.process_settings_frame(vec![(0x4, u32::MAX)], false).is_err());
+    assert!(
+        processor
+            .process_settings_frame(vec![(0x4, 0)], false)
+            .is_ok()
+    );
+    assert!(
+        processor
+            .process_settings_frame(vec![(0x4, 0x7fff_ffff)], false)
+            .is_ok()
+    );
+    assert!(
+        processor
+            .process_settings_frame(vec![(0x4, 0x8000_0000)], false)
+            .is_err()
+    );
+    assert!(
+        processor
+            .process_settings_frame(vec![(0x4, u32::MAX)], false)
+            .is_err()
+    );
 
     // Test SETTINGS_MAX_FRAME_SIZE boundary
-    assert!(processor.process_settings_frame(vec![(0x5, 16_383)], false).is_err());
-    assert!(processor.process_settings_frame(vec![(0x5, 16_384)], false).is_ok());
-    assert!(processor.process_settings_frame(vec![(0x5, 16_777_215)], false).is_ok());
-    assert!(processor.process_settings_frame(vec![(0x5, 16_777_216)], false).is_err());
-    assert!(processor.process_settings_frame(vec![(0x5, u32::MAX)], false).is_err());
+    assert!(
+        processor
+            .process_settings_frame(vec![(0x5, 16_383)], false)
+            .is_err()
+    );
+    assert!(
+        processor
+            .process_settings_frame(vec![(0x5, 16_384)], false)
+            .is_ok()
+    );
+    assert!(
+        processor
+            .process_settings_frame(vec![(0x5, 16_777_215)], false)
+            .is_ok()
+    );
+    assert!(
+        processor
+            .process_settings_frame(vec![(0x5, 16_777_216)], false)
+            .is_err()
+    );
+    assert!(
+        processor
+            .process_settings_frame(vec![(0x5, u32::MAX)], false)
+            .is_err()
+    );
 
     // Test settings with no explicit bounds (should accept any value)
-    assert!(processor.process_settings_frame(vec![(0x1, u32::MAX)], false).is_ok());
-    assert!(processor.process_settings_frame(vec![(0x3, u32::MAX)], false).is_ok());
-    assert!(processor.process_settings_frame(vec![(0x6, u32::MAX)], false).is_ok());
+    assert!(
+        processor
+            .process_settings_frame(vec![(0x1, u32::MAX)], false)
+            .is_ok()
+    );
+    assert!(
+        processor
+            .process_settings_frame(vec![(0x3, u32::MAX)], false)
+            .is_ok()
+    );
+    assert!(
+        processor
+            .process_settings_frame(vec![(0x6, u32::MAX)], false)
+            .is_ok()
+    );
 }
 
 /// Test that unknown settings are ignored per RFC 9113 §6.5.2
@@ -378,6 +469,10 @@ fn test_unknown_settings_ignored() {
 
     for (id, value) in unknown_settings {
         let result = processor.process_settings_frame(vec![(id, value)], false);
-        assert!(result.is_ok(), "Unknown setting ID {} should be ignored, not cause error", id);
+        assert!(
+            result.is_ok(),
+            "Unknown setting ID {} should be ignored, not cause error",
+            id
+        );
     }
 }

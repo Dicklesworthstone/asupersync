@@ -1,36 +1,60 @@
 #![no_main]
 
-use libfuzzer_sys::fuzz_target;
 use arbitrary::Arbitrary;
+use libfuzzer_sys::fuzz_target;
 use std::collections::HashMap;
 
 /// Test input structure for invalid :method pseudo-header scenarios
 #[derive(Arbitrary, Clone, Debug)]
 struct InvalidMethodInput {
-    method: String,                          // The :method value to test
-    other_headers: Vec<(String, String)>,    // Other headers to include
-    stream_id: u32,                         // Stream ID for the request
-    end_headers: bool,                      // Whether to set END_HEADERS flag
-    end_stream: bool,                       // Whether to set END_STREAM flag
-    preceding_frames: Vec<PrecedingFrame>,  // Frames before HEADERS
-    follow_up_frames: Vec<FollowUpFrame>,   // Frames after HEADERS
+    method: String,                        // The :method value to test
+    other_headers: Vec<(String, String)>,  // Other headers to include
+    stream_id: u32,                        // Stream ID for the request
+    end_headers: bool,                     // Whether to set END_HEADERS flag
+    end_stream: bool,                      // Whether to set END_STREAM flag
+    preceding_frames: Vec<PrecedingFrame>, // Frames before HEADERS
+    follow_up_frames: Vec<FollowUpFrame>,  // Frames after HEADERS
 }
 
 /// Frames that can precede the HEADERS frame
 #[derive(Arbitrary, Clone, Debug)]
 enum PrecedingFrame {
-    Settings { parameters: Vec<(u16, u32)> },
-    WindowUpdate { stream_id: u32, increment: u32 },
-    Priority { stream_id: u32, dependency: u32, weight: u8, exclusive: bool },
+    Settings {
+        parameters: Vec<(u16, u32)>,
+    },
+    WindowUpdate {
+        stream_id: u32,
+        increment: u32,
+    },
+    Priority {
+        stream_id: u32,
+        dependency: u32,
+        weight: u8,
+        exclusive: bool,
+    },
 }
 
 /// Frames that can follow the HEADERS frame
 #[derive(Arbitrary, Clone, Debug)]
 enum FollowUpFrame {
-    Data { stream_id: u32, data: Vec<u8>, end_stream: bool },
-    Headers { stream_id: u32, end_headers: bool, end_stream: bool },
-    RstStream { stream_id: u32, error_code: u32 },
-    WindowUpdate { stream_id: u32, increment: u32 },
+    Data {
+        stream_id: u32,
+        data: Vec<u8>,
+        end_stream: bool,
+    },
+    Headers {
+        stream_id: u32,
+        end_headers: bool,
+        end_stream: bool,
+    },
+    RstStream {
+        stream_id: u32,
+        error_code: u32,
+    },
+    WindowUpdate {
+        stream_id: u32,
+        increment: u32,
+    },
 }
 
 /// Mock connection state to track :method validation
@@ -52,9 +76,9 @@ struct InvalidMethodInfo {
 
 #[derive(Clone, Debug, PartialEq)]
 enum MethodViolationType {
-    Empty,              // Empty method string
-    ControlCharacters,  // Contains control characters (0x00-0x1F, 0x7F)
-    InvalidCharacters,  // Contains invalid characters per HTTP method rules
+    Empty,             // Empty method string
+    ControlCharacters, // Contains control characters (0x00-0x1F, 0x7F)
+    InvalidCharacters, // Contains invalid characters per HTTP method rules
     WhitespaceOrCRLF,  // Contains whitespace, CR, or LF
 }
 
@@ -125,7 +149,8 @@ impl MockInvalidMethodConnection {
         // HEADERS frames MUST have non-zero stream ID for requests
         if stream_id == 0 {
             self.connection_error = Some(PROTOCOL_ERROR);
-            self.protocol_violations.push("HEADERS frame with stream ID 0".to_string());
+            self.protocol_violations
+                .push("HEADERS frame with stream ID 0".to_string());
             return;
         }
 
@@ -170,8 +195,8 @@ impl MockInvalidMethodConnection {
                 // Per RFC 7540 §8.1.2, invalid :method should result in stream error
                 // or connection error depending on severity
                 match violation_type {
-                    MethodViolationType::ControlCharacters |
-                    MethodViolationType::WhitespaceOrCRLF => {
+                    MethodViolationType::ControlCharacters
+                    | MethodViolationType::WhitespaceOrCRLF => {
                         // These are serious protocol violations - connection error
                         self.connection_error = Some(PROTOCOL_ERROR);
                         self.protocol_violations.push(format!(
@@ -179,8 +204,7 @@ impl MockInvalidMethodConnection {
                             stream_id, method
                         ));
                     }
-                    MethodViolationType::Empty |
-                    MethodViolationType::InvalidCharacters => {
+                    MethodViolationType::Empty | MethodViolationType::InvalidCharacters => {
                         // These might be stream-level errors depending on implementation
                         self.last_stream_error = Some(PROTOCOL_ERROR);
                         self.protocol_violations.push(format!(
@@ -196,7 +220,10 @@ impl MockInvalidMethodConnection {
         }
     }
 
-    fn extract_and_validate_method(&self, payload: &[u8]) -> Result<String, (String, MethodViolationType)> {
+    fn extract_and_validate_method(
+        &self,
+        payload: &[u8],
+    ) -> Result<String, (String, MethodViolationType)> {
         // In a real implementation, this would be HPACK decoding
         // For fuzz testing, we'll simulate extracting the :method pseudo-header
 
@@ -237,8 +264,11 @@ impl MockInvalidMethodConnection {
 
         // Rule 3: Method MUST NOT contain whitespace, CR, or LF
         // These are particularly problematic for HTTP parsing
-        if method.contains(' ') || method.contains('\t') ||
-           method.contains('\r') || method.contains('\n') {
+        if method.contains(' ')
+            || method.contains('\t')
+            || method.contains('\r')
+            || method.contains('\n')
+        {
             return Err((method.to_string(), MethodViolationType::WhitespaceOrCRLF));
         }
 
@@ -259,13 +289,15 @@ impl MockInvalidMethodConnection {
     fn process_priority_frame(&mut self, stream_id: u32, payload: &[u8]) {
         if payload.len() != 5 {
             self.connection_error = Some(PROTOCOL_ERROR);
-            self.protocol_violations.push("PRIORITY frame with invalid length".to_string());
+            self.protocol_violations
+                .push("PRIORITY frame with invalid length".to_string());
             return;
         }
 
         if stream_id == 0 {
             self.connection_error = Some(PROTOCOL_ERROR);
-            self.protocol_violations.push("PRIORITY frame with stream ID 0".to_string());
+            self.protocol_violations
+                .push("PRIORITY frame with stream ID 0".to_string());
             return;
         }
 
@@ -275,13 +307,15 @@ impl MockInvalidMethodConnection {
     fn process_rst_stream_frame(&mut self, stream_id: u32, payload: &[u8]) {
         if payload.len() != 4 {
             self.connection_error = Some(PROTOCOL_ERROR);
-            self.protocol_violations.push("RST_STREAM frame with invalid length".to_string());
+            self.protocol_violations
+                .push("RST_STREAM frame with invalid length".to_string());
             return;
         }
 
         if stream_id == 0 {
             self.connection_error = Some(PROTOCOL_ERROR);
-            self.protocol_violations.push("RST_STREAM frame with stream ID 0".to_string());
+            self.protocol_violations
+                .push("RST_STREAM frame with stream ID 0".to_string());
             return;
         }
 
@@ -294,7 +328,8 @@ impl MockInvalidMethodConnection {
     fn process_settings_frame(&mut self, payload: &[u8]) {
         if payload.len() % 6 != 0 {
             self.connection_error = Some(PROTOCOL_ERROR);
-            self.protocol_violations.push("SETTINGS frame with invalid length".to_string());
+            self.protocol_violations
+                .push("SETTINGS frame with invalid length".to_string());
             return;
         }
         // SETTINGS frames don't affect :method validation
@@ -303,14 +338,16 @@ impl MockInvalidMethodConnection {
     fn process_window_update_frame(&mut self, _stream_id: u32, payload: &[u8]) {
         if payload.len() != 4 {
             self.connection_error = Some(PROTOCOL_ERROR);
-            self.protocol_violations.push("WINDOW_UPDATE frame with invalid length".to_string());
+            self.protocol_violations
+                .push("WINDOW_UPDATE frame with invalid length".to_string());
             return;
         }
 
         let increment = u32::from_be_bytes([payload[0], payload[1], payload[2], payload[3]]);
         if increment == 0 {
             self.connection_error = Some(PROTOCOL_ERROR);
-            self.protocol_violations.push("WINDOW_UPDATE with zero increment".to_string());
+            self.protocol_violations
+                .push("WINDOW_UPDATE with zero increment".to_string());
         }
 
         // WINDOW_UPDATE doesn't affect :method validation
@@ -319,7 +356,8 @@ impl MockInvalidMethodConnection {
     fn process_data_frame(&mut self, stream_id: u32, _flags: u8, _payload: &[u8]) {
         if stream_id == 0 {
             self.connection_error = Some(PROTOCOL_ERROR);
-            self.protocol_violations.push("DATA frame with stream ID 0".to_string());
+            self.protocol_violations
+                .push("DATA frame with stream ID 0".to_string());
         }
 
         // DATA frames don't affect :method validation
@@ -342,25 +380,29 @@ impl MockInvalidMethodConnection {
     }
 
     fn count_empty_methods(&self) -> usize {
-        self.invalid_methods_detected.iter()
+        self.invalid_methods_detected
+            .iter()
             .filter(|info| info.violation_type == MethodViolationType::Empty)
             .count()
     }
 
     fn count_control_char_methods(&self) -> usize {
-        self.invalid_methods_detected.iter()
+        self.invalid_methods_detected
+            .iter()
             .filter(|info| info.violation_type == MethodViolationType::ControlCharacters)
             .count()
     }
 
     fn count_whitespace_methods(&self) -> usize {
-        self.invalid_methods_detected.iter()
+        self.invalid_methods_detected
+            .iter()
             .filter(|info| info.violation_type == MethodViolationType::WhitespaceOrCRLF)
             .count()
     }
 
     fn count_invalid_char_methods(&self) -> usize {
-        self.invalid_methods_detected.iter()
+        self.invalid_methods_detected
+            .iter()
             .filter(|info| info.violation_type == MethodViolationType::InvalidCharacters)
             .count()
     }
@@ -374,8 +416,8 @@ fn is_valid_token_char(ch: char) -> bool {
         // DIGIT
         '0'..='9' => true,
         // Special characters allowed in tokens
-        '!' | '#' | '$' | '%' | '&' | '\'' | '*' | '+' | '-' | '.' |
-        '^' | '_' | '`' | '|' | '~' => true,
+        '!' | '#' | '$' | '%' | '&' | '\'' | '*' | '+' | '-' | '.' | '^' | '_' | '`' | '|'
+        | '~' => true,
         // Everything else is invalid
         _ => false,
     }
@@ -392,13 +434,25 @@ fn send_preceding_frame(conn: &mut MockInvalidMethodConnection, frame: &Precedin
             }
             conn.process_frame(FRAME_TYPE_SETTINGS, 0, 0, &payload);
         }
-        PrecedingFrame::WindowUpdate { stream_id, increment } => {
+        PrecedingFrame::WindowUpdate {
+            stream_id,
+            increment,
+        } => {
             let payload = increment.to_be_bytes().to_vec();
             conn.process_frame(FRAME_TYPE_WINDOW_UPDATE, *stream_id, 0, &payload);
         }
-        PrecedingFrame::Priority { stream_id, dependency, weight, exclusive } => {
+        PrecedingFrame::Priority {
+            stream_id,
+            dependency,
+            weight,
+            exclusive,
+        } => {
             let mut payload = Vec::new();
-            let dep_field = if *exclusive { *dependency | 0x80000000 } else { *dependency };
+            let dep_field = if *exclusive {
+                *dependency | 0x80000000
+            } else {
+                *dependency
+            };
             payload.extend_from_slice(&dep_field.to_be_bytes());
             payload.push(*weight);
             conn.process_frame(FRAME_TYPE_PRIORITY, *stream_id, 0, &payload);
@@ -409,21 +463,39 @@ fn send_preceding_frame(conn: &mut MockInvalidMethodConnection, frame: &Precedin
 /// Send a follow-up frame after the HEADERS frame
 fn send_follow_up_frame(conn: &mut MockInvalidMethodConnection, frame: &FollowUpFrame) {
     match frame {
-        FollowUpFrame::Data { stream_id, data, end_stream } => {
+        FollowUpFrame::Data {
+            stream_id,
+            data,
+            end_stream,
+        } => {
             let flags = if *end_stream { FLAG_END_STREAM } else { 0 };
             conn.process_frame(FRAME_TYPE_DATA, *stream_id, flags, data);
         }
-        FollowUpFrame::Headers { stream_id, end_headers, end_stream } => {
+        FollowUpFrame::Headers {
+            stream_id,
+            end_headers,
+            end_stream,
+        } => {
             let mut flags = 0;
-            if *end_headers { flags |= FLAG_END_HEADERS; }
-            if *end_stream { flags |= FLAG_END_STREAM; }
+            if *end_headers {
+                flags |= FLAG_END_HEADERS;
+            }
+            if *end_stream {
+                flags |= FLAG_END_STREAM;
+            }
             conn.process_frame(FRAME_TYPE_HEADERS, *stream_id, flags, b"headers");
         }
-        FollowUpFrame::RstStream { stream_id, error_code } => {
+        FollowUpFrame::RstStream {
+            stream_id,
+            error_code,
+        } => {
             let payload = error_code.to_be_bytes().to_vec();
             conn.process_frame(FRAME_TYPE_RST_STREAM, *stream_id, 0, &payload);
         }
-        FollowUpFrame::WindowUpdate { stream_id, increment } => {
+        FollowUpFrame::WindowUpdate {
+            stream_id,
+            increment,
+        } => {
             let payload = increment.to_be_bytes().to_vec();
             conn.process_frame(FRAME_TYPE_WINDOW_UPDATE, *stream_id, 0, &payload);
         }
@@ -432,10 +504,11 @@ fn send_follow_up_frame(conn: &mut MockInvalidMethodConnection, frame: &FollowUp
 
 fuzz_target!(|input: InvalidMethodInput| {
     // Limit input sizes to prevent excessive memory usage
-    if input.method.len() > 1000 ||
-       input.other_headers.len() > 100 ||
-       input.preceding_frames.len() > 50 ||
-       input.follow_up_frames.len() > 50 {
+    if input.method.len() > 1000
+        || input.other_headers.len() > 100
+        || input.preceding_frames.len() > 50
+        || input.follow_up_frames.len() > 50
+    {
         return;
     }
 
@@ -465,8 +538,12 @@ fuzz_target!(|input: InvalidMethodInput| {
     let payload = input.method.as_bytes().to_vec();
 
     let mut flags = 0;
-    if input.end_headers { flags |= FLAG_END_HEADERS; }
-    if input.end_stream { flags |= FLAG_END_STREAM; }
+    if input.end_headers {
+        flags |= FLAG_END_HEADERS;
+    }
+    if input.end_stream {
+        flags |= FLAG_END_STREAM;
+    }
 
     // Send the HEADERS frame with potentially invalid :method
     conn.process_frame(FRAME_TYPE_HEADERS, stream_id, flags, &payload);
@@ -498,7 +575,6 @@ fuzz_target!(|input: InvalidMethodInput| {
             !conn.get_invalid_methods().is_empty(),
             "Expected invalid method to be detected and recorded"
         );
-
     } else {
         // Valid method should not cause error
         assert!(
@@ -540,8 +616,11 @@ fn is_method_invalid(method: &str) -> bool {
     }
 
     // Whitespace or CRLF
-    if method.contains(' ') || method.contains('\t') ||
-       method.contains('\r') || method.contains('\n') {
+    if method.contains(' ')
+        || method.contains('\t')
+        || method.contains('\r')
+        || method.contains('\n')
+    {
         return true;
     }
 
@@ -590,11 +669,17 @@ fn test_invalid_method_scenarios(_input: &InvalidMethodInput) {
             let mut method_with_control = b"GET".to_vec();
             method_with_control.push(control_char);
 
-            conn.process_frame(FRAME_TYPE_HEADERS, 1, FLAG_END_HEADERS, &method_with_control);
+            conn.process_frame(
+                FRAME_TYPE_HEADERS,
+                1,
+                FLAG_END_HEADERS,
+                &method_with_control,
+            );
 
             assert!(
                 conn.has_protocol_error(),
-                ":method with control character 0x{:02X} must be rejected", control_char
+                ":method with control character 0x{:02X} must be rejected",
+                control_char
             );
         }
     }
@@ -624,14 +709,17 @@ fn test_invalid_method_scenarios(_input: &InvalidMethodInput) {
     }
 
     // Scenario 6: Valid methods should be accepted
-    let valid_methods = ["GET", "POST", "PUT", "DELETE", "HEAD", "OPTIONS", "PATCH", "CONNECT"];
+    let valid_methods = [
+        "GET", "POST", "PUT", "DELETE", "HEAD", "OPTIONS", "PATCH", "CONNECT",
+    ];
     for method in &valid_methods {
         let mut conn = MockInvalidMethodConnection::new();
         conn.process_frame(FRAME_TYPE_HEADERS, 1, FLAG_END_HEADERS, method.as_bytes());
 
         assert!(
             !conn.has_protocol_error(),
-            "Valid method '{}' should be accepted", method
+            "Valid method '{}' should be accepted",
+            method
         );
     }
 
@@ -643,22 +731,31 @@ fn test_invalid_method_scenarios(_input: &InvalidMethodInput) {
 
         assert!(
             !conn.has_protocol_error(),
-            "Custom valid method '{}' should be accepted", method
+            "Custom valid method '{}' should be accepted",
+            method
         );
     }
 
     // Scenario 8: Invalid characters in method
-    let invalid_chars = ['(', ')', '<', '>', '@', ',', ';', ':', '\\', '"', '/', '[', ']', '?', '=', '{', '}'];
+    let invalid_chars = [
+        '(', ')', '<', '>', '@', ',', ';', ':', '\\', '"', '/', '[', ']', '?', '=', '{', '}',
+    ];
     for &invalid_char in &invalid_chars {
         let mut conn = MockInvalidMethodConnection::new();
         let mut method_with_invalid = b"GET".to_vec();
         method_with_invalid.push(invalid_char as u8);
 
-        conn.process_frame(FRAME_TYPE_HEADERS, 1, FLAG_END_HEADERS, &method_with_invalid);
+        conn.process_frame(
+            FRAME_TYPE_HEADERS,
+            1,
+            FLAG_END_HEADERS,
+            &method_with_invalid,
+        );
 
         assert!(
             conn.has_protocol_error(),
-            ":method with invalid character '{}' must be rejected", invalid_char
+            ":method with invalid character '{}' must be rejected",
+            invalid_char
         );
     }
 
@@ -676,7 +773,12 @@ fn test_invalid_method_scenarios(_input: &InvalidMethodInput) {
     {
         let mut conn = MockInvalidMethodConnection::new();
         let long_method = "A".repeat(1000);
-        conn.process_frame(FRAME_TYPE_HEADERS, 1, FLAG_END_HEADERS, long_method.as_bytes());
+        conn.process_frame(
+            FRAME_TYPE_HEADERS,
+            1,
+            FLAG_END_HEADERS,
+            long_method.as_bytes(),
+        );
 
         // Should not crash, regardless of whether it's accepted or rejected
         // The test is that we handle it gracefully

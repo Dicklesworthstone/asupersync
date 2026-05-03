@@ -2,7 +2,7 @@
 
 use arbitrary::Arbitrary;
 use asupersync::net::websocket::{
-    ClientHandshake, ServerHandshake, HttpRequest, HttpResponse, WsUrl, HandshakeError,
+    ClientHandshake, HandshakeError, HttpRequest, HttpResponse, ServerHandshake, WsUrl,
     compute_accept_key,
 };
 use asupersync::util::DetEntropy;
@@ -27,9 +27,9 @@ enum HandshakeParseOperation {
     /// Test Sec-WebSocket-Key validation edge cases
     WebSocketKeyTest {
         key_data: Vec<u8>,
-        force_padding: Option<u8>,  // 0-4 padding chars
+        force_padding: Option<u8>, // 0-4 padding chars
         inject_invalid_chars: bool,
-        mutate_length: Option<u8>,  // Target length deviation
+        mutate_length: Option<u8>, // Target length deviation
     },
     /// Test Connection/Upgrade header parsing and injection attempts
     ConnectionUpgradeTest {
@@ -43,7 +43,7 @@ enum HandshakeParseOperation {
     ProtocolNegotiationTest {
         protocols: Vec<String>,
         extensions: Vec<String>,
-        oversized_count: u8,         // Generate 0-255 protocol entries
+        oversized_count: u8, // Generate 0-255 protocol entries
         inject_control_chars: bool,
         duplicate_protocols: bool,
     },
@@ -54,7 +54,7 @@ enum HandshakeParseOperation {
         headers: Vec<(String, String)>,
         malformed_headers: bool,
         missing_terminator: bool,
-        oversized_headers: u8,      // 0-255 header count
+        oversized_headers: u8, // 0-255 header count
         inject_null_bytes: bool,
     },
     /// Test HTTP response parsing for client validation
@@ -253,8 +253,7 @@ fn fuzz_websocket_key_validation(
     );
 
     // Should not panic - may accept or reject based on validation rules
-    let _ = HttpRequest::parse(request_data.as_bytes())
-        .map(|req| server.accept(&req));
+    let _ = HttpRequest::parse(request_data.as_bytes()).map(|req| server.accept(&req));
 
     // Test edge case: extremely long keys
     if encoded_key.len() < 10000 {
@@ -268,8 +267,7 @@ fn fuzz_websocket_key_validation(
              Sec-WebSocket-Version: 13\r\n\r\n",
             oversized_key
         );
-        let _ = HttpRequest::parse(oversized_request.as_bytes())
-            .map(|req| server.accept(&req));
+        let _ = HttpRequest::parse(oversized_request.as_bytes()).map(|req| server.accept(&req));
     }
 }
 
@@ -314,8 +312,7 @@ fn fuzz_connection_upgrade_headers(
     );
 
     // Should not panic - may accept or reject based on header validation
-    let _ = HttpRequest::parse(request_data.as_bytes())
-        .map(|req| server.accept(&req));
+    let _ = HttpRequest::parse(request_data.as_bytes()).map(|req| server.accept(&req));
 }
 
 /// Fuzz protocol and extension negotiation with malicious payloads
@@ -381,8 +378,7 @@ fn fuzz_protocol_negotiation(
     );
 
     // Should not panic - negotiation may succeed or fail gracefully
-    let _ = HttpRequest::parse(request_data.as_bytes())
-        .map(|req| server.accept(&req));
+    let _ = HttpRequest::parse(request_data.as_bytes()).map(|req| server.accept(&req));
 }
 
 /// Fuzz HTTP request parsing boundary conditions

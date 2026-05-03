@@ -189,8 +189,7 @@ fuzz_target!(|input: FuzzInput| {
             // failure (out-of-memory or similar) which is not a fuzz
             // finding. Either way: no panic was the requirement.
             assert!(
-                encoded_len_estimate > CODEC_MAX_SIZE
-                    || encoded_len_estimate > MAX_INPUT_LEN,
+                encoded_len_estimate > CODEC_MAX_SIZE || encoded_len_estimate > MAX_INPUT_LEN,
                 "encode returned Err for a message that fits the cap: \
                  encoded_len_estimate={encoded_len_estimate}, cap={CODEC_MAX_SIZE}",
             );

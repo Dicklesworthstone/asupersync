@@ -1,7 +1,7 @@
 #![no_main]
 
-use libfuzzer_sys::fuzz_target;
 use arbitrary::{Arbitrary, Unstructured};
+use libfuzzer_sys::fuzz_target;
 use std::collections::HashMap;
 
 /// HTTP/2 PRIORITY frame weight encoding validation testing.
@@ -153,14 +153,17 @@ impl MockH2PriorityWeightParser {
         }
 
         // Calculate total weight
-        let total_weight: u32 = self.priorities.values()
+        let total_weight: u32 = self
+            .priorities
+            .values()
             .map(|p| p.effective_weight as u32)
             .sum();
 
         // Allocate bandwidth proportionally
         for (stream_id, priority) in &self.priorities {
             let allocation = (available_bandwidth as f64
-                * (priority.effective_weight as f64 / total_weight as f64)) as u64;
+                * (priority.effective_weight as f64 / total_weight as f64))
+                as u64;
             allocations.insert(*stream_id, allocation);
         }
 
@@ -176,8 +179,9 @@ fuzz_target!(|data: &[u8]| {
     };
 
     // Bound stream IDs to reasonable range
-    if input.priority_frame.stream_id > 1_000_000 ||
-       input.priority_frame.stream_dependency > 1_000_000 {
+    if input.priority_frame.stream_id > 1_000_000
+        || input.priority_frame.stream_dependency > 1_000_000
+    {
         return;
     }
 
@@ -188,23 +192,26 @@ fuzz_target!(|data: &[u8]| {
 
     // Test 1: Stream ID validation
     if frame.stream_id == 0 {
-        assert!(result.is_err(),
-            "PRIORITY frame with stream ID 0 should be rejected");
+        assert!(
+            result.is_err(),
+            "PRIORITY frame with stream ID 0 should be rejected"
+        );
         return;
     }
 
     // Test 2: Frame flags validation
     if frame.flags != 0 {
-        assert!(result.is_err(),
-            "PRIORITY frame with non-zero flags should be rejected");
+        assert!(
+            result.is_err(),
+            "PRIORITY frame with non-zero flags should be rejected"
+        );
         return;
     }
 
     // Test 3: Self-dependency validation
     let dependency = frame.stream_dependency & 0x7FFFFFFF;
     if dependency == frame.stream_id {
-        assert!(result.is_err(),
-            "Self-dependency should be rejected");
+        assert!(result.is_err(), "Self-dependency should be rejected");
         return;
     }
 
@@ -213,36 +220,52 @@ fuzz_target!(|data: &[u8]| {
         // Test 4: Weight encoding validation (+1 offset)
         let expected_effective_weight = (frame.weight_wire as u16) + 1;
 
-        assert!(parser.validate_weight_encoding(frame.weight_wire, expected_effective_weight),
+        assert!(
+            parser.validate_weight_encoding(frame.weight_wire, expected_effective_weight),
             "Weight encoding validation failed: {} + 1 != {}",
-            frame.weight_wire, expected_effective_weight);
+            frame.weight_wire,
+            expected_effective_weight
+        );
 
         // Test 5: Stored weight verification
         if let Some(stored_weight) = parser.get_effective_weight(frame.stream_id) {
-            assert_eq!(stored_weight, expected_effective_weight,
+            assert_eq!(
+                stored_weight, expected_effective_weight,
                 "Stored effective weight {} doesn't match expected {}",
-                stored_weight, expected_effective_weight);
+                stored_weight, expected_effective_weight
+            );
         }
 
         // Test 6: Weight bounds verification (1-256)
         let effective_weight = parser.get_effective_weight(frame.stream_id).unwrap();
-        assert!(effective_weight >= 1 && effective_weight <= 256,
-            "Effective weight {} out of valid range 1-256", effective_weight);
+        assert!(
+            effective_weight >= 1 && effective_weight <= 256,
+            "Effective weight {} out of valid range 1-256",
+            effective_weight
+        );
 
         // Test 7: Specific weight values
         match frame.weight_wire {
             0 => {
-                assert_eq!(effective_weight, 1,
-                    "Wire weight 0 should result in effective weight 1");
+                assert_eq!(
+                    effective_weight, 1,
+                    "Wire weight 0 should result in effective weight 1"
+                );
             }
             255 => {
-                assert_eq!(effective_weight, 256,
-                    "Wire weight 255 should result in effective weight 256");
+                assert_eq!(
+                    effective_weight, 256,
+                    "Wire weight 255 should result in effective weight 256"
+                );
             }
             _ => {
-                assert_eq!(effective_weight, (frame.weight_wire as u16) + 1,
+                assert_eq!(
+                    effective_weight,
+                    (frame.weight_wire as u16) + 1,
                     "Wire weight {} should result in effective weight {}",
-                    frame.weight_wire, (frame.weight_wire as u16) + 1);
+                    frame.weight_wire,
+                    (frame.weight_wire as u16) + 1
+                );
             }
         }
 
@@ -259,8 +282,11 @@ fuzz_target!(|data: &[u8]| {
         if let Some(&allocated) = bandwidth_allocation.get(&frame.stream_id) {
             // Should allocate some bandwidth proportional to weight
             if effective_weight > 0 {
-                assert!(allocated > 0,
-                    "Stream with weight {} should get some bandwidth allocation", effective_weight);
+                assert!(
+                    allocated > 0,
+                    "Stream with weight {} should get some bandwidth allocation",
+                    effective_weight
+                );
             }
         }
     }
@@ -472,18 +498,27 @@ mod tests {
             let mut parser = MockH2PriorityWeightParser::new();
             let result = parser.parse_priority_frame(&frame);
 
-            assert!(result.is_ok(), "Wire weight {} should be valid", wire_weight);
+            assert!(
+                result.is_ok(),
+                "Wire weight {} should be valid",
+                wire_weight
+            );
 
             let effective_weight = parser.get_effective_weight(wire_weight as u32 + 1).unwrap();
             let expected = (wire_weight as u16) + 1;
 
-            assert_eq!(effective_weight, expected,
+            assert_eq!(
+                effective_weight, expected,
                 "Wire weight {} should give effective weight {}, got {}",
-                wire_weight, expected, effective_weight);
+                wire_weight, expected, effective_weight
+            );
 
-            assert!(effective_weight >= 1 && effective_weight <= 256,
+            assert!(
+                effective_weight >= 1 && effective_weight <= 256,
                 "Effective weight {} out of range for wire weight {}",
-                effective_weight, wire_weight);
+                effective_weight,
+                wire_weight
+            );
         }
     }
 
@@ -494,7 +529,7 @@ mod tests {
             flags: 0,
             exclusive: true,
             stream_dependency: 0x80000001, // Stream 1 with exclusive bit set
-            weight_wire: 63, // Effective weight 64
+            weight_wire: 63,               // Effective weight 64
         };
 
         let mut parser = MockH2PriorityWeightParser::new();

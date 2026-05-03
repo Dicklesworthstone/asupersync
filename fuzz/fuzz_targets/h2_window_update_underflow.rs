@@ -1,7 +1,7 @@
 #![no_main]
 
-use libfuzzer_sys::fuzz_target;
 use arbitrary::{Arbitrary, Unstructured};
+use libfuzzer_sys::fuzz_target;
 use std::collections::HashMap;
 
 // Mock HTTP/2 flow control and WINDOW_UPDATE frames for fuzzing
@@ -135,11 +135,13 @@ fn test_basic_window_underflow(test_case: &WindowUpdateTestCase) {
                     );
                 } else {
                     // Stream window
-                    if let Some(stream_window) = window_state.stream_windows.get(&update.stream_id) {
+                    if let Some(stream_window) = window_state.stream_windows.get(&update.stream_id)
+                    {
                         assert!(
                             *stream_window >= 0,
                             "Stream {} window should never be negative: {}",
-                            update.stream_id, stream_window
+                            update.stream_id,
+                            stream_window
                         );
                     }
                 }
@@ -148,22 +150,27 @@ fn test_basic_window_underflow(test_case: &WindowUpdateTestCase) {
                 let window_value = if update.stream_id == 0 {
                     window_state.connection_window
                 } else {
-                    window_state.stream_windows.get(&update.stream_id).copied().unwrap_or(0)
+                    window_state
+                        .stream_windows
+                        .get(&update.stream_id)
+                        .copied()
+                        .unwrap_or(0)
                 };
 
                 assert!(
                     window_value <= MAX_WINDOW_SIZE,
                     "Window value {} exceeds maximum {}",
-                    window_value, MAX_WINDOW_SIZE
+                    window_value,
+                    MAX_WINDOW_SIZE
                 );
             }
             Err(error_msg) => {
                 // Check for proper FLOW_CONTROL_ERROR when underflow would occur
                 if would_cause_underflow(&flow_control, update) {
                     assert!(
-                        error_msg.contains("FLOW_CONTROL_ERROR") ||
-                        error_msg.contains("window underflow") ||
-                        error_msg.contains("negative window"),
+                        error_msg.contains("FLOW_CONTROL_ERROR")
+                            || error_msg.contains("window underflow")
+                            || error_msg.contains("negative window"),
                         "Underflow should cause FLOW_CONTROL_ERROR, got: {}",
                         error_msg
                     );
@@ -172,8 +179,8 @@ fn test_basic_window_underflow(test_case: &WindowUpdateTestCase) {
                 // Check for proper error on invalid increments
                 if update.window_size_increment == 0 {
                     assert!(
-                        error_msg.contains("zero increment") ||
-                        error_msg.contains("PROTOCOL_ERROR"),
+                        error_msg.contains("zero increment")
+                            || error_msg.contains("PROTOCOL_ERROR"),
                         "Zero increment should cause PROTOCOL_ERROR, got: {}",
                         error_msg
                     );
@@ -202,22 +209,23 @@ fn test_connection_window_underflow(test_case: &WindowUpdateTestCase) {
     };
 
     let consumption_result = flow_control.consume_window(&large_consumption);
-    assert!(consumption_result.is_ok(), "Initial consumption should succeed");
+    assert!(
+        consumption_result.is_ok(),
+        "Initial consumption should succeed"
+    );
 
     // Now try window updates that would cause underflow
-    let underflow_updates = vec![
-        WindowUpdateFrame {
-            stream_id: 0, // Connection level
-            window_size_increment: 2000, // This should work
-            timing: UpdateTiming::AfterDataConsumption,
-            malformed_patterns: WindowUpdateMalformed {
-                zero_increment: false,
-                max_u32_increment: false,
-                reserved_bit_set: false,
-                invalid_stream_id: false,
-            },
+    let underflow_updates = vec![WindowUpdateFrame {
+        stream_id: 0,                // Connection level
+        window_size_increment: 2000, // This should work
+        timing: UpdateTiming::AfterDataConsumption,
+        malformed_patterns: WindowUpdateMalformed {
+            zero_increment: false,
+            max_u32_increment: false,
+            reserved_bit_set: false,
+            invalid_stream_id: false,
         },
-    ];
+    }];
 
     for update in &underflow_updates {
         let result = flow_control.process_window_update(update);
@@ -274,16 +282,22 @@ fn test_stream_window_underflow(test_case: &WindowUpdateTestCase) {
         let _ = flow_control.consume_window(&consumption);
 
         // Try window updates on this stream
-        for update in test_case.window_updates.iter().filter(|u| u.stream_id == stream_id) {
+        for update in test_case
+            .window_updates
+            .iter()
+            .filter(|u| u.stream_id == stream_id)
+        {
             let result = flow_control.process_window_update(update);
 
             match result {
                 Ok(window_state) => {
-                    if let Some(&stream_window_value) = window_state.stream_windows.get(&stream_id) {
+                    if let Some(&stream_window_value) = window_state.stream_windows.get(&stream_id)
+                    {
                         assert!(
                             stream_window_value >= 0,
                             "Stream {} window underflow: {}",
-                            stream_id, stream_window_value
+                            stream_id,
+                            stream_window_value
                         );
                     }
                 }
@@ -307,10 +321,8 @@ fn test_multiple_decremental_updates(test_case: &WindowUpdateTestCase) {
         return;
     }
 
-    let mut flow_control = create_flow_control_context(
-        INITIAL_WINDOW_SIZE,
-        &test_case.initial_stream_windows,
-    );
+    let mut flow_control =
+        create_flow_control_context(INITIAL_WINDOW_SIZE, &test_case.initial_stream_windows);
 
     // Create sequence of data consumptions without window updates
     let decremental_operations = vec![
@@ -345,8 +357,8 @@ fn test_multiple_decremental_updates(test_case: &WindowUpdateTestCase) {
             Err(error_msg) => {
                 // Should fail gracefully when attempting to consume more than available
                 assert!(
-                    error_msg.contains("insufficient window") ||
-                    error_msg.contains("FLOW_CONTROL_ERROR"),
+                    error_msg.contains("insufficient window")
+                        || error_msg.contains("FLOW_CONTROL_ERROR"),
                     "Overconsumption should be properly rejected: {}",
                     error_msg
                 );
@@ -358,14 +370,15 @@ fn test_multiple_decremental_updates(test_case: &WindowUpdateTestCase) {
 
 /// Test large increment followed by excessive consumption
 fn test_large_increment_consumption(test_case: &WindowUpdateTestCase) {
-    if !test_case.underflow_scenarios.large_increment_then_consumption {
+    if !test_case
+        .underflow_scenarios
+        .large_increment_then_consumption
+    {
         return;
     }
 
-    let mut flow_control = create_flow_control_context(
-        INITIAL_WINDOW_SIZE,
-        &test_case.initial_stream_windows,
-    );
+    let mut flow_control =
+        create_flow_control_context(INITIAL_WINDOW_SIZE, &test_case.initial_stream_windows);
 
     // Apply large window increment
     let large_increment = WindowUpdateFrame {
@@ -406,8 +419,7 @@ fn test_large_increment_consumption(test_case: &WindowUpdateTestCase) {
             Err(error_msg) => {
                 // Should properly reject excessive consumption
                 assert!(
-                    error_msg.contains("insufficient") ||
-                    error_msg.contains("FLOW_CONTROL_ERROR"),
+                    error_msg.contains("insufficient") || error_msg.contains("FLOW_CONTROL_ERROR"),
                     "Excessive consumption should be rejected: {}",
                     error_msg
                 );
@@ -449,8 +461,7 @@ fn test_zero_increment_updates(test_case: &WindowUpdateTestCase) {
         Err(error_msg) => {
             // RFC 9113 requires rejecting zero increments
             assert!(
-                error_msg.contains("PROTOCOL_ERROR") ||
-                error_msg.contains("zero increment"),
+                error_msg.contains("PROTOCOL_ERROR") || error_msg.contains("zero increment"),
                 "Zero increment should cause PROTOCOL_ERROR: {}",
                 error_msg
             );
@@ -479,8 +490,7 @@ fn test_zero_increment_updates(test_case: &WindowUpdateTestCase) {
             }
             Err(error_msg) => {
                 assert!(
-                    error_msg.contains("PROTOCOL_ERROR") ||
-                    error_msg.contains("zero increment"),
+                    error_msg.contains("PROTOCOL_ERROR") || error_msg.contains("zero increment"),
                     "Zero stream increment should cause PROTOCOL_ERROR: {}",
                     error_msg
                 );
@@ -495,10 +505,8 @@ fn test_overflow_underflow_sequence(test_case: &WindowUpdateTestCase) {
         return;
     }
 
-    let mut flow_control = create_flow_control_context(
-        INITIAL_WINDOW_SIZE,
-        &test_case.initial_stream_windows,
-    );
+    let mut flow_control =
+        create_flow_control_context(INITIAL_WINDOW_SIZE, &test_case.initial_stream_windows);
 
     // First, try to cause overflow with large increment
     let overflow_update = WindowUpdateFrame {
@@ -545,8 +553,8 @@ fn test_overflow_underflow_sequence(test_case: &WindowUpdateTestCase) {
                 Err(error_msg) => {
                     // Should properly reject underflow-causing consumption
                     assert!(
-                        error_msg.contains("FLOW_CONTROL_ERROR") ||
-                        error_msg.contains("insufficient"),
+                        error_msg.contains("FLOW_CONTROL_ERROR")
+                            || error_msg.contains("insufficient"),
                         "Underflow should be rejected: {}",
                         error_msg
                     );
@@ -556,8 +564,7 @@ fn test_overflow_underflow_sequence(test_case: &WindowUpdateTestCase) {
         Err(error_msg) => {
             // Overflow should be rejected
             assert!(
-                error_msg.contains("FLOW_CONTROL_ERROR") ||
-                error_msg.contains("overflow"),
+                error_msg.contains("FLOW_CONTROL_ERROR") || error_msg.contains("overflow"),
                 "Overflow should be properly rejected: {}",
                 error_msg
             );
@@ -581,16 +588,21 @@ fn test_rapid_window_updates(test_case: &WindowUpdateTestCase) {
                 // Verify consistency after each update
                 if update.stream_id == 0 {
                     assert!(
-                        window_state.connection_window >= 0 &&
-                        window_state.connection_window <= MAX_WINDOW_SIZE,
+                        window_state.connection_window >= 0
+                            && window_state.connection_window <= MAX_WINDOW_SIZE,
                         "Connection window out of bounds after update {}: {}",
-                        i, window_state.connection_window
+                        i,
+                        window_state.connection_window
                     );
-                } else if let Some(&stream_window) = window_state.stream_windows.get(&update.stream_id) {
+                } else if let Some(&stream_window) =
+                    window_state.stream_windows.get(&update.stream_id)
+                {
                     assert!(
                         stream_window >= 0 && stream_window <= MAX_WINDOW_SIZE,
                         "Stream {} window out of bounds after update {}: {}",
-                        update.stream_id, i, stream_window
+                        update.stream_id,
+                        i,
+                        stream_window
                     );
                 }
             }
@@ -605,9 +617,9 @@ fn test_rapid_window_updates(test_case: &WindowUpdateTestCase) {
                 } else {
                     // Other errors should be flow control related
                     assert!(
-                        error_msg.contains("FLOW_CONTROL_ERROR") ||
-                        error_msg.contains("window") ||
-                        error_msg.contains("overflow"),
+                        error_msg.contains("FLOW_CONTROL_ERROR")
+                            || error_msg.contains("window")
+                            || error_msg.contains("overflow"),
                         "Unexpected error type: {}",
                         error_msg
                     );
@@ -647,9 +659,9 @@ fn test_invalid_stream_window_updates(test_case: &WindowUpdateTestCase) {
         Err(error_msg) => {
             // Should reject updates on invalid streams
             assert!(
-                error_msg.contains("invalid stream") ||
-                error_msg.contains("unknown stream") ||
-                error_msg.contains("PROTOCOL_ERROR"),
+                error_msg.contains("invalid stream")
+                    || error_msg.contains("unknown stream")
+                    || error_msg.contains("PROTOCOL_ERROR"),
                 "Invalid stream should be rejected: {}",
                 error_msg
             );
@@ -675,8 +687,7 @@ fn test_window_state_consistency(test_case: &WindowUpdateTestCase) {
             // Verify consumption decreased windows appropriately
             if data_frame.consume_connection_window {
                 assert!(
-                    state_after_consumption.connection_window <=
-                    initial_state.connection_window,
+                    state_after_consumption.connection_window <= initial_state.connection_window,
                     "Connection window should decrease after consumption"
                 );
             }
@@ -714,7 +725,8 @@ fn test_window_state_consistency(test_case: &WindowUpdateTestCase) {
         assert!(
             window_value >= 0,
             "Final stream {} window should be non-negative: {}",
-            stream_id, window_value
+            stream_id,
+            window_value
         );
     }
 }
@@ -741,7 +753,8 @@ fn create_flow_control_context(
     let mut stream_windows = HashMap::new();
 
     for stream in initial_streams {
-        if stream.stream_id != 0 { // Skip connection-level
+        if stream.stream_id != 0 {
+            // Skip connection-level
             stream_windows.insert(
                 stream.stream_id,
                 stream.initial_window.min(MAX_WINDOW_SIZE).max(0),
@@ -784,7 +797,11 @@ impl FlowControlContext {
             self.connection_window = new_window;
         } else {
             // Stream-level window update
-            let current_window = self.stream_windows.get(&update.stream_id).copied().unwrap_or(INITIAL_WINDOW_SIZE);
+            let current_window = self
+                .stream_windows
+                .get(&update.stream_id)
+                .copied()
+                .unwrap_or(INITIAL_WINDOW_SIZE);
             let new_window = current_window.saturating_add(increment);
 
             if new_window > self.max_window_size {
@@ -792,7 +809,10 @@ impl FlowControlContext {
             }
 
             if new_window < 0 {
-                return Err(format!("FLOW_CONTROL_ERROR: Stream {} window underflow", update.stream_id));
+                return Err(format!(
+                    "FLOW_CONTROL_ERROR: Stream {} window underflow",
+                    update.stream_id
+                ));
             }
 
             self.stream_windows.insert(update.stream_id, new_window);
@@ -801,12 +821,16 @@ impl FlowControlContext {
         Ok(self.get_window_state())
     }
 
-    fn consume_window(&mut self, consumption: &DataFrameConsumption) -> Result<WindowState, String> {
+    fn consume_window(
+        &mut self,
+        consumption: &DataFrameConsumption,
+    ) -> Result<WindowState, String> {
         let bytes = consumption.bytes_consumed as i64;
 
         // Check and update stream window
         if consumption.stream_id != 0 {
-            let current_stream_window = self.stream_windows
+            let current_stream_window = self
+                .stream_windows
                 .get(&consumption.stream_id)
                 .copied()
                 .unwrap_or(INITIAL_WINDOW_SIZE);
@@ -820,10 +844,14 @@ impl FlowControlContext {
 
             let new_stream_window = current_stream_window - bytes;
             if new_stream_window < 0 {
-                return Err(format!("FLOW_CONTROL_ERROR: Stream {} window would underflow", consumption.stream_id));
+                return Err(format!(
+                    "FLOW_CONTROL_ERROR: Stream {} window would underflow",
+                    consumption.stream_id
+                ));
             }
 
-            self.stream_windows.insert(consumption.stream_id, new_stream_window);
+            self.stream_windows
+                .insert(consumption.stream_id, new_stream_window);
         }
 
         // Check and update connection window
@@ -861,7 +889,8 @@ fn would_cause_underflow(flow_control: &FlowControlContext, update: &WindowUpdat
     if update.stream_id == 0 {
         flow_control.connection_window + increment < 0
     } else {
-        let current_window = flow_control.stream_windows
+        let current_window = flow_control
+            .stream_windows
             .get(&update.stream_id)
             .copied()
             .unwrap_or(INITIAL_WINDOW_SIZE);
@@ -869,10 +898,16 @@ fn would_cause_underflow(flow_control: &FlowControlContext, update: &WindowUpdat
     }
 }
 
-fn would_cause_connection_underflow(flow_control: &FlowControlContext, update: &WindowUpdateFrame) -> bool {
+fn would_cause_connection_underflow(
+    flow_control: &FlowControlContext,
+    update: &WindowUpdateFrame,
+) -> bool {
     update.stream_id == 0 && would_cause_underflow(flow_control, update)
 }
 
-fn would_cause_stream_underflow(flow_control: &FlowControlContext, update: &WindowUpdateFrame) -> bool {
+fn would_cause_stream_underflow(
+    flow_control: &FlowControlContext,
+    update: &WindowUpdateFrame,
+) -> bool {
     update.stream_id != 0 && would_cause_underflow(flow_control, update)
 }

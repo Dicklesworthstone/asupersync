@@ -1,15 +1,15 @@
 #![no_main]
 
-use libfuzzer_sys::fuzz_target;
 use arbitrary::Arbitrary;
+use libfuzzer_sys::fuzz_target;
 
 /// Test input structure for invalid SETTINGS value scenarios
 #[derive(Arbitrary, Clone, Debug)]
 struct InvalidSettingsInput {
-    settings_parameters: Vec<SettingsParameter>,  // SETTINGS parameters to send
-    ack_flag: bool,                               // Whether to set ACK flag
-    preceding_frames: Vec<PrecedingFrame>,        // Frames before SETTINGS
-    follow_up_frames: Vec<FollowUpFrame>,         // Frames after SETTINGS
+    settings_parameters: Vec<SettingsParameter>, // SETTINGS parameters to send
+    ack_flag: bool,                              // Whether to set ACK flag
+    preceding_frames: Vec<PrecedingFrame>,       // Frames before SETTINGS
+    follow_up_frames: Vec<FollowUpFrame>,        // Frames after SETTINGS
 }
 
 /// A single SETTINGS parameter with potential invalid values
@@ -66,9 +66,9 @@ struct InvalidSettingInfo {
 
 #[derive(Clone, Debug, PartialEq)]
 enum ViolationType {
-    EnablePushInvalid,        // SETTINGS_ENABLE_PUSH not 0 or 1
-    InitialWindowSizeTooBig,  // SETTINGS_INITIAL_WINDOW_SIZE > 2^31-1
-    MaxFrameSizeInvalid,      // SETTINGS_MAX_FRAME_SIZE out of valid range
+    EnablePushInvalid,       // SETTINGS_ENABLE_PUSH not 0 or 1
+    InitialWindowSizeTooBig, // SETTINGS_INITIAL_WINDOW_SIZE > 2^31-1
+    MaxFrameSizeInvalid,     // SETTINGS_MAX_FRAME_SIZE out of valid range
 }
 
 /// HTTP/2 frame types
@@ -94,8 +94,8 @@ const PROTOCOL_ERROR: u32 = 0x1;
 
 /// Value limits per RFC 7540 §6.5.2
 const MAX_INITIAL_WINDOW_SIZE: u32 = 0x7FFFFFFF; // 2^31-1 = 2147483647
-const MIN_MAX_FRAME_SIZE: u32 = 0x4000;          // 2^14 = 16384
-const MAX_MAX_FRAME_SIZE: u32 = 0xFFFFFF;        // 2^24-1 = 16777215
+const MIN_MAX_FRAME_SIZE: u32 = 0x4000; // 2^14 = 16384
+const MAX_MAX_FRAME_SIZE: u32 = 0xFFFFFF; // 2^24-1 = 16777215
 
 impl SettingsParameterType {
     fn to_id(&self) -> u16 {
@@ -147,7 +147,8 @@ impl MockInvalidSettingsConnection {
         // SETTINGS frames MUST have stream ID 0
         if stream_id != 0 {
             self.connection_error = Some(PROTOCOL_ERROR);
-            self.protocol_violations.push("SETTINGS frame with non-zero stream ID".to_string());
+            self.protocol_violations
+                .push("SETTINGS frame with non-zero stream ID".to_string());
             return;
         }
 
@@ -157,7 +158,8 @@ impl MockInvalidSettingsConnection {
             // ACK frames must have empty payload
             if !payload.is_empty() {
                 self.connection_error = Some(PROTOCOL_ERROR);
-                self.protocol_violations.push("SETTINGS ACK frame with non-empty payload".to_string());
+                self.protocol_violations
+                    .push("SETTINGS ACK frame with non-empty payload".to_string());
                 return;
             }
             // Process ACK (no further validation needed)
@@ -167,7 +169,8 @@ impl MockInvalidSettingsConnection {
         // Payload length must be multiple of 6 (each parameter is 6 bytes)
         if payload.len() % 6 != 0 {
             self.connection_error = Some(PROTOCOL_ERROR);
-            self.protocol_violations.push("SETTINGS frame payload length not multiple of 6".to_string());
+            self.protocol_violations
+                .push("SETTINGS frame payload length not multiple of 6".to_string());
             return;
         }
 
@@ -251,14 +254,16 @@ impl MockInvalidSettingsConnection {
     fn process_window_update_frame(&mut self, _stream_id: u32, payload: &[u8]) {
         if payload.len() != 4 {
             self.connection_error = Some(PROTOCOL_ERROR);
-            self.protocol_violations.push("WINDOW_UPDATE frame with invalid length".to_string());
+            self.protocol_violations
+                .push("WINDOW_UPDATE frame with invalid length".to_string());
             return;
         }
 
         let increment = u32::from_be_bytes([payload[0], payload[1], payload[2], payload[3]]);
         if increment == 0 {
             self.connection_error = Some(PROTOCOL_ERROR);
-            self.protocol_violations.push("WINDOW_UPDATE with zero increment".to_string());
+            self.protocol_violations
+                .push("WINDOW_UPDATE with zero increment".to_string());
         }
 
         // WINDOW_UPDATE doesn't affect SETTINGS validation
@@ -267,13 +272,15 @@ impl MockInvalidSettingsConnection {
     fn process_ping_frame(&mut self, stream_id: u32, payload: &[u8]) {
         if stream_id != 0 {
             self.connection_error = Some(PROTOCOL_ERROR);
-            self.protocol_violations.push("PING frame with non-zero stream ID".to_string());
+            self.protocol_violations
+                .push("PING frame with non-zero stream ID".to_string());
             return;
         }
 
         if payload.len() != 8 {
             self.connection_error = Some(PROTOCOL_ERROR);
-            self.protocol_violations.push("PING frame with invalid length".to_string());
+            self.protocol_violations
+                .push("PING frame with invalid length".to_string());
         }
 
         // PING doesn't affect SETTINGS validation
@@ -282,7 +289,8 @@ impl MockInvalidSettingsConnection {
     fn process_headers_frame(&mut self, stream_id: u32, _flags: u8, _payload: &[u8]) {
         if stream_id == 0 {
             self.connection_error = Some(PROTOCOL_ERROR);
-            self.protocol_violations.push("HEADERS frame with stream ID 0".to_string());
+            self.protocol_violations
+                .push("HEADERS frame with stream ID 0".to_string());
         }
 
         // HEADERS doesn't affect SETTINGS validation
@@ -309,19 +317,22 @@ impl MockInvalidSettingsConnection {
     }
 
     fn count_invalid_enable_push(&self) -> usize {
-        self.invalid_settings_detected.iter()
+        self.invalid_settings_detected
+            .iter()
             .filter(|info| info.violation_type == ViolationType::EnablePushInvalid)
             .count()
     }
 
     fn count_invalid_window_size(&self) -> usize {
-        self.invalid_settings_detected.iter()
+        self.invalid_settings_detected
+            .iter()
             .filter(|info| info.violation_type == ViolationType::InitialWindowSizeTooBig)
             .count()
     }
 
     fn count_invalid_frame_size(&self) -> usize {
-        self.invalid_settings_detected.iter()
+        self.invalid_settings_detected
+            .iter()
             .filter(|info| info.violation_type == ViolationType::MaxFrameSizeInvalid)
             .count()
     }
@@ -338,7 +349,10 @@ fn send_preceding_frame(conn: &mut MockInvalidSettingsConnection, frame: &Preced
             }
             conn.process_frame(FRAME_TYPE_SETTINGS, 0, 0, &payload);
         }
-        PrecedingFrame::WindowUpdate { stream_id, increment } => {
+        PrecedingFrame::WindowUpdate {
+            stream_id,
+            increment,
+        } => {
             let payload = increment.to_be_bytes().to_vec();
             conn.process_frame(FRAME_TYPE_WINDOW_UPDATE, *stream_id, 0, &payload);
         }
@@ -354,11 +368,17 @@ fn send_follow_up_frame(conn: &mut MockInvalidSettingsConnection, frame: &Follow
         FollowUpFrame::SettingsAck => {
             conn.process_frame(FRAME_TYPE_SETTINGS, 0, FLAG_ACK, &[]);
         }
-        FollowUpFrame::WindowUpdate { stream_id, increment } => {
+        FollowUpFrame::WindowUpdate {
+            stream_id,
+            increment,
+        } => {
             let payload = increment.to_be_bytes().to_vec();
             conn.process_frame(FRAME_TYPE_WINDOW_UPDATE, *stream_id, 0, &payload);
         }
-        FollowUpFrame::Headers { stream_id, end_headers } => {
+        FollowUpFrame::Headers {
+            stream_id,
+            end_headers,
+        } => {
             let flags = if *end_headers { FLAG_END_HEADERS } else { 0 };
             conn.process_frame(FRAME_TYPE_HEADERS, *stream_id, flags, b"headers");
         }
@@ -367,9 +387,10 @@ fn send_follow_up_frame(conn: &mut MockInvalidSettingsConnection, frame: &Follow
 
 fuzz_target!(|input: InvalidSettingsInput| {
     // Limit input sizes to prevent excessive memory usage
-    if input.settings_parameters.len() > 100 ||
-       input.preceding_frames.len() > 50 ||
-       input.follow_up_frames.len() > 50 {
+    if input.settings_parameters.len() > 100
+        || input.preceding_frames.len() > 50
+        || input.follow_up_frames.len() > 50
+    {
         return;
     }
 
@@ -447,7 +468,6 @@ fuzz_target!(|input: InvalidSettingsInput| {
             !conn.get_invalid_settings().is_empty(),
             "Expected invalid settings to be detected and recorded"
         );
-
     } else if !input.ack_flag && !payload.is_empty() {
         // All parameters valid, should not cause error (unless ACK with payload)
         assert!(
@@ -564,23 +584,25 @@ fn test_invalid_settings_scenarios(input: &InvalidSettingsInput) {
         if value == 0 || value == 1 {
             assert!(
                 !conn.has_protocol_error(),
-                "SETTINGS_ENABLE_PUSH={} must be valid", value
+                "SETTINGS_ENABLE_PUSH={} must be valid",
+                value
             );
         } else {
             assert!(
                 conn.has_protocol_error(),
-                "SETTINGS_ENABLE_PUSH={} must be PROTOCOL_ERROR (only 0/1 valid)", value
+                "SETTINGS_ENABLE_PUSH={} must be PROTOCOL_ERROR (only 0/1 valid)",
+                value
             );
         }
     }
 
     // Scenario 6: SETTINGS_INITIAL_WINDOW_SIZE boundary values
     let test_values = [
-        (MAX_INITIAL_WINDOW_SIZE - 1, true),     // Valid
-        (MAX_INITIAL_WINDOW_SIZE, true),         // Valid (exactly at limit)
-        (MAX_INITIAL_WINDOW_SIZE + 1, false),    // Invalid
-        (0x80000000u32, false),                  // Invalid (2^31)
-        (0xFFFFFFFFu32, false),                  // Invalid (2^32-1)
+        (MAX_INITIAL_WINDOW_SIZE - 1, true),  // Valid
+        (MAX_INITIAL_WINDOW_SIZE, true),      // Valid (exactly at limit)
+        (MAX_INITIAL_WINDOW_SIZE + 1, false), // Invalid
+        (0x80000000u32, false),               // Invalid (2^31)
+        (0xFFFFFFFFu32, false),               // Invalid (2^32-1)
     ];
 
     for (value, should_be_valid) in test_values {
@@ -594,23 +616,25 @@ fn test_invalid_settings_scenarios(input: &InvalidSettingsInput) {
         if should_be_valid {
             assert!(
                 !conn.has_protocol_error(),
-                "SETTINGS_INITIAL_WINDOW_SIZE={} must be valid", value
+                "SETTINGS_INITIAL_WINDOW_SIZE={} must be valid",
+                value
             );
         } else {
             assert!(
                 conn.has_protocol_error(),
-                "SETTINGS_INITIAL_WINDOW_SIZE={} must be PROTOCOL_ERROR (> 2^31-1)", value
+                "SETTINGS_INITIAL_WINDOW_SIZE={} must be PROTOCOL_ERROR (> 2^31-1)",
+                value
             );
         }
     }
 
     // Scenario 7: SETTINGS_MAX_FRAME_SIZE boundary values
     let frame_size_tests = [
-        (MIN_MAX_FRAME_SIZE - 1, false),  // Too small
-        (MIN_MAX_FRAME_SIZE, true),       // Valid minimum
-        (65536, true),                    // Valid middle
-        (MAX_MAX_FRAME_SIZE, true),       // Valid maximum
-        (MAX_MAX_FRAME_SIZE + 1, false),  // Too big
+        (MIN_MAX_FRAME_SIZE - 1, false), // Too small
+        (MIN_MAX_FRAME_SIZE, true),      // Valid minimum
+        (65536, true),                   // Valid middle
+        (MAX_MAX_FRAME_SIZE, true),      // Valid maximum
+        (MAX_MAX_FRAME_SIZE + 1, false), // Too big
     ];
 
     for (value, should_be_valid) in frame_size_tests {
@@ -624,27 +648,31 @@ fn test_invalid_settings_scenarios(input: &InvalidSettingsInput) {
         if should_be_valid {
             assert!(
                 !conn.has_protocol_error(),
-                "SETTINGS_MAX_FRAME_SIZE={} must be valid", value
+                "SETTINGS_MAX_FRAME_SIZE={} must be valid",
+                value
             );
         } else {
             assert!(
                 conn.has_protocol_error(),
-                "SETTINGS_MAX_FRAME_SIZE={} must be PROTOCOL_ERROR (out of range)", value
+                "SETTINGS_MAX_FRAME_SIZE={} must be PROTOCOL_ERROR (out of range)",
+                value
             );
         }
     }
 
     // Scenario 8: Valid settings should not cause errors
-    if !input.ack_flag && input.settings_parameters.iter().all(|p| {
-        match p.parameter_type {
-            SettingsParameterType::EnablePush => p.value == 0 || p.value == 1,
-            SettingsParameterType::InitialWindowSize => p.value <= MAX_INITIAL_WINDOW_SIZE,
-            SettingsParameterType::MaxFrameSize => {
-                p.value >= MIN_MAX_FRAME_SIZE && p.value <= MAX_MAX_FRAME_SIZE
+    if !input.ack_flag
+        && input.settings_parameters.iter().all(|p| {
+            match p.parameter_type {
+                SettingsParameterType::EnablePush => p.value == 0 || p.value == 1,
+                SettingsParameterType::InitialWindowSize => p.value <= MAX_INITIAL_WINDOW_SIZE,
+                SettingsParameterType::MaxFrameSize => {
+                    p.value >= MIN_MAX_FRAME_SIZE && p.value <= MAX_MAX_FRAME_SIZE
+                }
+                _ => true, // Other parameters don't have validation constraints
             }
-            _ => true, // Other parameters don't have validation constraints
-        }
-    }) {
+        })
+    {
         let mut conn = MockInvalidSettingsConnection::new();
         let mut payload = Vec::new();
 

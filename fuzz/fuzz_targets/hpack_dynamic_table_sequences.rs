@@ -39,21 +39,13 @@ enum DynamicTableOp {
         use_huffman: bool,
     },
     /// Change dynamic table size
-    ResizeTable {
-        new_size: u16,
-    },
+    ResizeTable { new_size: u16 },
     /// Reference a header by index (should trigger eviction if index becomes invalid)
-    ReferenceIndex {
-        index: u8,
-    },
+    ReferenceIndex { index: u8 },
     /// Insert multiple headers rapidly to force eviction
-    BurstInsert {
-        headers: Vec<(String, String)>,
-    },
+    BurstInsert { headers: Vec<(String, String)> },
     /// Simulate encoder/decoder round-trip to test consistency
-    RoundTrip {
-        headers: Vec<(String, String)>,
-    },
+    RoundTrip { headers: Vec<(String, String)> },
 }
 
 fuzz_target!(|input: DynamicTableSequence| {
@@ -76,7 +68,8 @@ fn normalize_sequence(sequence: &mut DynamicTableSequence) {
             DynamicTableOp::InsertHeader { name, value, .. } => {
                 name.truncate(64);
                 // Ensure valid HTTP header name characters
-                *name = name.chars()
+                *name = name
+                    .chars()
                     .filter(|&c| c.is_ascii_lowercase() || c == '-' || c.is_ascii_digit())
                     .collect();
                 if name.is_empty() {
@@ -84,14 +77,16 @@ fn normalize_sequence(sequence: &mut DynamicTableSequence) {
                 }
                 value.truncate(256);
                 // Remove control characters from value
-                *value = value.chars()
+                *value = value
+                    .chars()
                     .filter(|&c| c.is_ascii() && c != '\0' && c != '\r' && c != '\n')
                     .collect();
             }
             DynamicTableOp::InsertWithIndexedName { value, .. } => {
                 value.truncate(256);
                 // Remove control characters from value
-                *value = value.chars()
+                *value = value
+                    .chars()
                     .filter(|&c| c.is_ascii() && c != '\0' && c != '\r' && c != '\n')
                     .collect();
             }
@@ -107,13 +102,15 @@ fn normalize_sequence(sequence: &mut DynamicTableSequence) {
                 for (name, value) in headers {
                     name.truncate(32);
                     value.truncate(128);
-                    *name = name.chars()
+                    *name = name
+                        .chars()
                         .filter(|&c| c.is_ascii_lowercase() || c == '-' || c.is_ascii_digit())
                         .collect();
                     if name.is_empty() {
                         *name = "x-burst".to_string();
                     }
-                    *value = value.chars()
+                    *value = value
+                        .chars()
                         .filter(|&c| c.is_ascii() && c != '\0' && c != '\r' && c != '\n')
                         .collect();
                 }
@@ -123,13 +120,15 @@ fn normalize_sequence(sequence: &mut DynamicTableSequence) {
                 for (name, value) in headers {
                     name.truncate(32);
                     value.truncate(128);
-                    *name = name.chars()
+                    *name = name
+                        .chars()
                         .filter(|&c| c.is_ascii_lowercase() || c == '-' || c.is_ascii_digit())
                         .collect();
                     if name.is_empty() {
                         *name = "x-round".to_string();
                     }
-                    *value = value.chars()
+                    *value = value
+                        .chars()
                         .filter(|&c| c.is_ascii() && c != '\0' && c != '\r' && c != '\n')
                         .collect();
                 }
@@ -153,11 +152,18 @@ fn test_dynamic_table_consistency(sequence: &DynamicTableSequence) -> Result<(),
 
     for (op_idx, op) in sequence.operations.iter().enumerate() {
         match op {
-            DynamicTableOp::InsertHeader { name, value, use_huffman } => {
+            DynamicTableOp::InsertHeader {
+                name,
+                value,
+                use_huffman,
+            } => {
                 encoder.set_use_huffman(*use_huffman);
 
                 // Encode the header
-                let header = Header { name: name.clone(), value: value.clone() };
+                let header = Header {
+                    name: name.clone(),
+                    value: value.clone(),
+                };
                 let mut encoded_buf = BytesMut::new();
                 encoder.encode(&[header.clone()], &mut encoded_buf);
 
@@ -168,18 +174,28 @@ fn test_dynamic_table_consistency(sequence: &DynamicTableSequence) -> Result<(),
                     if !decoded_headers.is_empty() {
                         let decoded = &decoded_headers[0];
                         if decoded.name != *name || decoded.value != *value {
-                            panic!("Header mismatch at op {}: sent ({}, {}), got ({}, {})",
-                                   op_idx, name, value, decoded.name, decoded.value);
+                            panic!(
+                                "Header mismatch at op {}: sent ({}, {}), got ({}, {})",
+                                op_idx, name, value, decoded.name, decoded.value
+                            );
                         }
                     }
 
                     // Add to expected dynamic table (will be evicted if table is full)
-                    simulate_dynamic_table_insertion(&mut expected_dynamic_entries,
-                                                   name.clone(), value.clone(), current_table_size);
+                    simulate_dynamic_table_insertion(
+                        &mut expected_dynamic_entries,
+                        name.clone(),
+                        value.clone(),
+                        current_table_size,
+                    );
                 }
             }
 
-            DynamicTableOp::InsertWithIndexedName { name_index, value, use_huffman } => {
+            DynamicTableOp::InsertWithIndexedName {
+                name_index,
+                value,
+                use_huffman,
+            } => {
                 encoder.set_use_huffman(*use_huffman);
 
                 // Try to construct a header using the indexed name
@@ -193,15 +209,22 @@ fn test_dynamic_table_consistency(sequence: &DynamicTableSequence) -> Result<(),
                     _ => "x-indexed",
                 };
 
-                let header = Header { name: name.to_string(), value: value.clone() };
+                let header = Header {
+                    name: name.to_string(),
+                    value: value.clone(),
+                };
                 let mut encoded_buf = BytesMut::new();
                 encoder.encode(&[header.clone()], &mut encoded_buf);
 
                 let mut encoded_bytes = encoded_buf.freeze();
                 if let Ok(decoded_headers) = decoder.decode(&mut encoded_bytes) {
                     if !decoded_headers.is_empty() {
-                        simulate_dynamic_table_insertion(&mut expected_dynamic_entries,
-                                                       name.to_string(), value.clone(), current_table_size);
+                        simulate_dynamic_table_insertion(
+                            &mut expected_dynamic_entries,
+                            name.to_string(),
+                            value.clone(),
+                            current_table_size,
+                        );
                     }
                 }
             }
@@ -237,14 +260,21 @@ fn test_dynamic_table_consistency(sequence: &DynamicTableSequence) -> Result<(),
             DynamicTableOp::BurstInsert { headers } => {
                 // Insert multiple headers rapidly to test eviction behavior
                 for (name, value) in headers {
-                    let header = Header { name: name.clone(), value: value.clone() };
+                    let header = Header {
+                        name: name.clone(),
+                        value: value.clone(),
+                    };
                     let mut encoded_buf = BytesMut::new();
                     encoder.encode(&[header], &mut encoded_buf);
                     {
                         let mut encoded_bytes = encoded_buf.freeze();
                         if let Ok(_) = decoder.decode(&mut encoded_bytes) {
-                            simulate_dynamic_table_insertion(&mut expected_dynamic_entries,
-                                                           name.clone(), value.clone(), current_table_size);
+                            simulate_dynamic_table_insertion(
+                                &mut expected_dynamic_entries,
+                                name.clone(),
+                                value.clone(),
+                                current_table_size,
+                            );
                         }
                     }
                 }
@@ -252,7 +282,8 @@ fn test_dynamic_table_consistency(sequence: &DynamicTableSequence) -> Result<(),
 
             DynamicTableOp::RoundTrip { headers } => {
                 // Test full encoder -> decoder round trip
-                let header_list: Vec<Header> = headers.iter()
+                let header_list: Vec<Header> = headers
+                    .iter()
                     .map(|(name, value)| Header::new(name.clone(), value.clone()))
                     .collect();
 
@@ -263,21 +294,33 @@ fn test_dynamic_table_consistency(sequence: &DynamicTableSequence) -> Result<(),
                     if let Ok(decoded_headers) = decoder.decode(&mut encoded_bytes) {
                         // Verify all headers round-tripped correctly
                         if decoded_headers.len() != header_list.len() {
-                            panic!("Round-trip header count mismatch at op {}: sent {}, got {}",
-                                   op_idx, header_list.len(), decoded_headers.len());
+                            panic!(
+                                "Round-trip header count mismatch at op {}: sent {}, got {}",
+                                op_idx,
+                                header_list.len(),
+                                decoded_headers.len()
+                            );
                         }
 
-                        for (i, (sent, received)) in header_list.iter().zip(decoded_headers.iter()).enumerate() {
+                        for (i, (sent, received)) in
+                            header_list.iter().zip(decoded_headers.iter()).enumerate()
+                        {
                             if sent.name != received.name || sent.value != received.value {
-                                panic!("Round-trip header mismatch at op {} header {}: sent ({}, {}), got ({}, {})",
-                                       op_idx, i, sent.name, sent.value, received.name, received.value);
+                                panic!(
+                                    "Round-trip header mismatch at op {} header {}: sent ({}, {}), got ({}, {})",
+                                    op_idx, i, sent.name, sent.value, received.name, received.value
+                                );
                             }
                         }
 
                         // Update expected dynamic table
                         for (name, value) in headers {
-                            simulate_dynamic_table_insertion(&mut expected_dynamic_entries,
-                                                           name.clone(), value.clone(), current_table_size);
+                            simulate_dynamic_table_insertion(
+                                &mut expected_dynamic_entries,
+                                name.clone(),
+                                value.clone(),
+                                current_table_size,
+                            );
                         }
                     }
                 }
@@ -293,7 +336,7 @@ fn simulate_dynamic_table_insertion(
     table: &mut Vec<(String, String)>,
     name: String,
     value: String,
-    max_size: usize
+    max_size: usize,
 ) {
     if max_size == 0 {
         return; // No dynamic table
@@ -303,9 +346,7 @@ fn simulate_dynamic_table_insertion(
 
     // Evict old entries if necessary
     while !table.is_empty() {
-        let current_size: usize = table.iter()
-            .map(|(n, v)| n.len() + v.len() + 32)
-            .sum();
+        let current_size: usize = table.iter().map(|(n, v)| n.len() + v.len() + 32).sum();
 
         if current_size + entry_size <= max_size {
             break;
@@ -323,9 +364,7 @@ fn simulate_dynamic_table_insertion(
 /// Simulate table eviction due to size reduction
 fn simulate_table_eviction(table: &mut Vec<(String, String)>, max_size: usize) {
     while !table.is_empty() {
-        let current_size: usize = table.iter()
-            .map(|(n, v)| n.len() + v.len() + 32)
-            .sum();
+        let current_size: usize = table.iter().map(|(n, v)| n.len() + v.len() + 32).sum();
 
         if current_size <= max_size {
             break;

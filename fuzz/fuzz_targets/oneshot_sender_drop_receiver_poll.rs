@@ -13,11 +13,14 @@
 
 #![no_main]
 
-use libfuzzer_sys::fuzz_target;
 use arbitrary::Arbitrary;
-use asupersync::channel::oneshot;
 use asupersync::Cx;
-use std::sync::{Arc, Barrier, atomic::{AtomicUsize, AtomicBool, Ordering}};
+use asupersync::channel::oneshot;
+use libfuzzer_sys::fuzz_target;
+use std::sync::{
+    Arc, Barrier,
+    atomic::{AtomicBool, AtomicUsize, Ordering},
+};
 use std::thread;
 use std::time::Duration;
 
@@ -75,18 +78,18 @@ impl SenderDropReceiverPollConfig {
 
         // Normalize pattern parameters
         match &mut self.receiver_pattern {
-            ReceiverPattern::RapidTryRecv { attempts } |
-            ReceiverPattern::DelayedTryRecv { attempts, .. } => {
+            ReceiverPattern::RapidTryRecv { attempts }
+            | ReceiverPattern::DelayedTryRecv { attempts, .. } => {
                 *attempts = (*attempts % 20).max(1);
-            },
-            _ => {},
+            }
+            _ => {}
         }
 
         match &mut self.sender_action {
             SenderAction::DelayedSendThenDrop { send_delay } => {
                 *send_delay = *send_delay % 500; // Max 0.5ms send delay
-            },
-            _ => {},
+            }
+            _ => {}
         }
     }
 }
@@ -109,10 +112,11 @@ struct TestResults {
 
 fuzz_target!(|data: &[u8]| {
     // Parse fuzzer input into config
-    let mut config = match SenderDropReceiverPollConfig::arbitrary(&mut arbitrary::Unstructured::new(data)) {
-        Ok(config) => config,
-        Err(_) => return, // Invalid input, skip
-    };
+    let mut config =
+        match SenderDropReceiverPollConfig::arbitrary(&mut arbitrary::Unstructured::new(data)) {
+            Ok(config) => config,
+            Err(_) => return, // Invalid input, skip
+        };
     config.normalize();
 
     let (sender, receiver) = oneshot::channel::<u32>();
@@ -158,14 +162,14 @@ fuzz_target!(|data: &[u8]| {
                         match sender.send(&cx, send_value) {
                             Ok(()) => {
                                 results.sender_sent.store(true, Ordering::SeqCst);
-                            },
+                            }
                             Err(_) => {
                                 // Send failed (receiver dropped?)
-                            },
+                            }
                         }
                         results.sender_dropped.store(true, Ordering::SeqCst);
                     }
-                },
+                }
 
                 SenderAction::DropWithoutSend => {
                     // Just drop the sender
@@ -173,7 +177,7 @@ fuzz_target!(|data: &[u8]| {
                         // Drop happens automatically
                         results.sender_dropped.store(true, Ordering::SeqCst);
                     }
-                },
+                }
 
                 SenderAction::DelayedSendThenDrop { send_delay } => {
                     if send_delay > 0 {
@@ -184,19 +188,19 @@ fuzz_target!(|data: &[u8]| {
                         match sender.send(&cx, send_value) {
                             Ok(()) => {
                                 results.sender_sent.store(true, Ordering::SeqCst);
-                            },
+                            }
                             Err(_) => {
                                 // Send failed
-                            },
+                            }
                         }
                         results.sender_dropped.store(true, Ordering::SeqCst);
                     }
-                },
+                }
 
                 SenderAction::KeepAlive => {
                     // Don't drop the sender
                     thread::sleep(Duration::from_millis(10)); // Keep thread alive briefly
-                },
+                }
 
                 SenderAction::ReserveThenDrop => {
                     if let Some(sender) = sender.lock().take() {
@@ -204,14 +208,14 @@ fuzz_target!(|data: &[u8]| {
                             Ok(permit) => {
                                 // Drop the permit without sending (abort)
                                 drop(permit);
-                            },
+                            }
                             Err(_) => {
                                 // Reserve failed
-                            },
+                            }
                         }
                         results.sender_dropped.store(true, Ordering::SeqCst);
                     }
-                },
+                }
 
                 SenderAction::ReserveThenSendThenDrop => {
                     if let Some(sender) = sender.lock().take() {
@@ -220,19 +224,19 @@ fuzz_target!(|data: &[u8]| {
                                 match permit.send(send_value) {
                                     Ok(()) => {
                                         results.sender_sent.store(true, Ordering::SeqCst);
-                                    },
+                                    }
                                     Err(_) => {
                                         // Send failed
-                                    },
+                                    }
                                 }
-                            },
+                            }
                             Err(_) => {
                                 // Reserve failed
-                            },
+                            }
                         }
                         results.sender_dropped.store(true, Ordering::SeqCst);
                     }
-                },
+                }
             }
         });
 
@@ -271,18 +275,18 @@ fuzz_target!(|data: &[u8]| {
                             Ok(value) => {
                                 results.try_recv_success.fetch_add(1, Ordering::SeqCst);
                                 assert_eq!(value, expected_value, "Received wrong value");
-                            },
+                            }
                             Err(oneshot::TryRecvError::Empty) => {
                                 results.try_recv_empty.fetch_add(1, Ordering::SeqCst);
                                 // Put receiver back for potential future attempts
                                 *receiver.lock() = Some(recv);
-                            },
+                            }
                             Err(oneshot::TryRecvError::Closed) => {
                                 results.try_recv_closed.fetch_add(1, Ordering::SeqCst);
-                            },
+                            }
                         }
                     }
-                },
+                }
 
                 ReceiverPattern::RapidTryRecv { attempts } => {
                     for _ in 0..attempts {
@@ -295,22 +299,22 @@ fuzz_target!(|data: &[u8]| {
                                     results.try_recv_success.fetch_add(1, Ordering::SeqCst);
                                     assert_eq!(value, expected_value, "Received wrong value");
                                     break; // Stop after successful receive
-                                },
+                                }
                                 Err(oneshot::TryRecvError::Empty) => {
                                     results.try_recv_empty.fetch_add(1, Ordering::SeqCst);
                                     // Put receiver back for next attempt
                                     *receiver.lock() = Some(recv);
-                                },
+                                }
                                 Err(oneshot::TryRecvError::Closed) => {
                                     results.try_recv_closed.fetch_add(1, Ordering::SeqCst);
                                     break; // Stop on closed
-                                },
+                                }
                             }
                         } else {
                             break; // No receiver available
                         }
                     }
-                },
+                }
 
                 ReceiverPattern::DelayedTryRecv { attempts, delay } => {
                     for _ in 0..attempts {
@@ -323,16 +327,16 @@ fuzz_target!(|data: &[u8]| {
                                     results.try_recv_success.fetch_add(1, Ordering::SeqCst);
                                     assert_eq!(value, expected_value, "Received wrong value");
                                     break;
-                                },
+                                }
                                 Err(oneshot::TryRecvError::Empty) => {
                                     results.try_recv_empty.fetch_add(1, Ordering::SeqCst);
                                     // Put receiver back for next attempt
                                     *receiver.lock() = Some(recv);
-                                },
+                                }
                                 Err(oneshot::TryRecvError::Closed) => {
                                     results.try_recv_closed.fetch_add(1, Ordering::SeqCst);
                                     break;
-                                },
+                                }
                             }
 
                             if delay > 0 {
@@ -342,25 +346,27 @@ fuzz_target!(|data: &[u8]| {
                             break; // No receiver available
                         }
                     }
-                },
+                }
 
                 ReceiverPattern::BlockingRecv => {
                     let receiver_opt = receiver.lock().take();
                     if let Some(mut receiver) = receiver_opt {
-                        results.blocking_recv_attempts.fetch_add(1, Ordering::SeqCst);
+                        results
+                            .blocking_recv_attempts
+                            .fetch_add(1, Ordering::SeqCst);
 
                         let cx = Cx::for_testing();
                         match futures::executor::block_on(receiver.recv(&cx)) {
                             Ok(value) => {
                                 results.blocking_recv_success.fetch_add(1, Ordering::SeqCst);
                                 assert_eq!(value, expected_value, "Received wrong value");
-                            },
+                            }
                             Err(_) => {
                                 results.blocking_recv_error.fetch_add(1, Ordering::SeqCst);
-                            },
+                            }
                         }
                     }
-                },
+                }
 
                 ReceiverPattern::MixedRecv => {
                     // First try_recv
@@ -374,16 +380,16 @@ fuzz_target!(|data: &[u8]| {
                                 results.try_recv_success.fetch_add(1, Ordering::SeqCst);
                                 assert_eq!(value, expected_value, "Received wrong value");
                                 got_value = true;
-                            },
+                            }
                             Err(oneshot::TryRecvError::Empty) => {
                                 results.try_recv_empty.fetch_add(1, Ordering::SeqCst);
                                 // Put receiver back for blocking recv
                                 *receiver.lock() = Some(recv);
-                            },
+                            }
                             Err(oneshot::TryRecvError::Closed) => {
                                 results.try_recv_closed.fetch_add(1, Ordering::SeqCst);
                                 got_value = true; // Don't try blocking recv
-                            },
+                            }
                         }
                     }
 
@@ -391,21 +397,23 @@ fuzz_target!(|data: &[u8]| {
                     if !got_value {
                         let receiver_opt = receiver.lock().take();
                         if let Some(mut receiver) = receiver_opt {
-                            results.blocking_recv_attempts.fetch_add(1, Ordering::SeqCst);
+                            results
+                                .blocking_recv_attempts
+                                .fetch_add(1, Ordering::SeqCst);
 
                             let cx = Cx::for_testing();
                             match futures::executor::block_on(receiver.recv(&cx)) {
                                 Ok(value) => {
                                     results.blocking_recv_success.fetch_add(1, Ordering::SeqCst);
                                     assert_eq!(value, expected_value, "Received wrong value");
-                                },
+                                }
                                 Err(_) => {
                                     results.blocking_recv_error.fetch_add(1, Ordering::SeqCst);
-                                },
+                                }
                             }
                         }
                     }
-                },
+                }
             }
         });
 
@@ -429,45 +437,65 @@ fuzz_target!(|data: &[u8]| {
     let blocking_recv_error = results.blocking_recv_error.load(Ordering::SeqCst);
 
     // Basic accounting
-    assert_eq!(try_recv_attempts, try_recv_success + try_recv_empty + try_recv_closed,
-        "try_recv accounting should be consistent");
+    assert_eq!(
+        try_recv_attempts,
+        try_recv_success + try_recv_empty + try_recv_closed,
+        "try_recv accounting should be consistent"
+    );
 
-    assert_eq!(blocking_recv_attempts, blocking_recv_success + blocking_recv_error,
-        "blocking recv accounting should be consistent");
+    assert_eq!(
+        blocking_recv_attempts,
+        blocking_recv_success + blocking_recv_error,
+        "blocking recv accounting should be consistent"
+    );
 
     // Invariant: At most one successful receive across all attempts
-    assert!(try_recv_success + blocking_recv_success <= 1,
-        "Should have at most one successful receive");
+    assert!(
+        try_recv_success + blocking_recv_success <= 1,
+        "Should have at most one successful receive"
+    );
 
     // Invariant: If sender sent a value, exactly one receive should succeed
     if sender_sent {
-        assert_eq!(try_recv_success + blocking_recv_success, 1,
-            "Exactly one receive should succeed when sender sent value");
+        assert_eq!(
+            try_recv_success + blocking_recv_success,
+            1,
+            "Exactly one receive should succeed when sender sent value"
+        );
     }
 
     // Invariant: If sender dropped without sending, no receive should succeed
     if sender_dropped && !sender_sent {
-        assert_eq!(try_recv_success + blocking_recv_success, 0,
-            "No receive should succeed when sender dropped without sending");
+        assert_eq!(
+            try_recv_success + blocking_recv_success,
+            0,
+            "No receive should succeed when sender dropped without sending"
+        );
 
         // And if receiver tried, it should see Closed (eventually)
         if try_recv_attempts > 0 || blocking_recv_attempts > 0 {
-            assert!(try_recv_closed > 0 || blocking_recv_error > 0,
-                "Receiver should detect disconnection when sender dropped without sending");
+            assert!(
+                try_recv_closed > 0 || blocking_recv_error > 0,
+                "Receiver should detect disconnection when sender dropped without sending"
+            );
         }
     }
 
     // Race condition verification: State transitions should be consistent
     // If we see Closed in try_recv, the sender must have been dropped
     if try_recv_closed > 0 {
-        assert!(sender_dropped || matches!(config.sender_action, SenderAction::KeepAlive),
-            "try_recv should only see Closed if sender was dropped");
+        assert!(
+            sender_dropped || matches!(config.sender_action, SenderAction::KeepAlive),
+            "try_recv should only see Closed if sender was dropped"
+        );
     }
 
     // Verify receive error semantics
     if blocking_recv_error > 0 {
         // Blocking recv error should only occur if sender was dropped without sending
-        assert!(sender_dropped,
-            "Blocking recv error should only occur when sender is dropped");
+        assert!(
+            sender_dropped,
+            "Blocking recv error should only occur when sender is dropped"
+        );
     }
 });

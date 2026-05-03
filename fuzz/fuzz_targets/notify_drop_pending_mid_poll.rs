@@ -13,15 +13,18 @@
 
 #![no_main]
 
-use libfuzzer_sys::fuzz_target;
 use arbitrary::Arbitrary;
 use asupersync::sync::Notify;
-use std::sync::{Arc, Barrier, atomic::{AtomicUsize, AtomicBool, Ordering}};
-use std::thread;
-use std::time::Duration;
+use libfuzzer_sys::fuzz_target;
 use std::future::Future;
 use std::pin::Pin;
+use std::sync::{
+    Arc, Barrier,
+    atomic::{AtomicBool, AtomicUsize, Ordering},
+};
 use std::task::{Context, Poll, Waker};
+use std::thread;
+use std::time::Duration;
 
 /// Configuration for notify + drop mid-poll race test
 #[derive(Debug, Arbitrary)]
@@ -76,22 +79,26 @@ impl NotifyDropMidPollConfig {
         self.poll_intensity = (self.poll_intensity % 20).max(1);
 
         // Ensure we have enough patterns
-        self.drop_timings.resize(self.future_count as usize, DropTiming::CompleteWait);
-        self.notify_patterns.resize(self.notifier_count as usize, NotifyPattern::DelayedNotify { delay_micros: 100 });
+        self.drop_timings
+            .resize(self.future_count as usize, DropTiming::CompleteWait);
+        self.notify_patterns.resize(
+            self.notifier_count as usize,
+            NotifyPattern::DelayedNotify { delay_micros: 100 },
+        );
 
         // Normalize timing parameters
         for timing in &mut self.drop_timings {
             match timing {
                 DropTiming::DropAfterPolls { poll_count } => {
                     *poll_count = (*poll_count % 10).max(1);
-                },
+                }
                 DropTiming::DropDuringPoll { target_poll } => {
                     *target_poll = (*target_poll % 10).max(1);
-                },
+                }
                 DropTiming::DropBeforeWakeup { delay_micros } => {
                     *delay_micros = *delay_micros % 500; // Max 0.5ms
-                },
-                _ => {},
+                }
+                _ => {}
             }
         }
 
@@ -99,18 +106,21 @@ impl NotifyDropMidPollConfig {
             match pattern {
                 NotifyPattern::DelayedNotify { delay_micros } => {
                     *delay_micros = *delay_micros % 1000; // Max 1ms
-                },
-                NotifyPattern::BurstNotify { count, interval_micros } => {
+                }
+                NotifyPattern::BurstNotify {
+                    count,
+                    interval_micros,
+                } => {
                     *count = (*count % 5).max(1);
                     *interval_micros = *interval_micros % 200;
-                },
+                }
                 NotifyPattern::StaggeredNotify { delays } => {
                     delays.truncate(5); // Max 5 staggered notifications
                     for delay in delays.iter_mut() {
                         *delay = *delay % 300;
                     }
-                },
-                _ => {},
+                }
+                _ => {}
             }
         }
     }
@@ -163,7 +173,10 @@ impl TrackingWaker {
                 results: Arc::clone(&waker.results),
                 future_dropped: Arc::clone(&waker.future_dropped),
             };
-            RawWaker::new(Box::into_raw(Box::new(cloned)) as *const (), &TRACKING_WAKER_VTABLE)
+            RawWaker::new(
+                Box::into_raw(Box::new(cloned)) as *const (),
+                &TRACKING_WAKER_VTABLE,
+            )
         }
 
         unsafe fn wake_tracking_waker(data: *const ()) {
@@ -171,7 +184,10 @@ impl TrackingWaker {
             waker.wake_count.fetch_add(1, Ordering::SeqCst);
 
             if waker.future_dropped.load(Ordering::SeqCst) {
-                waker.results.wakeups_after_drop.fetch_add(1, Ordering::SeqCst);
+                waker
+                    .results
+                    .wakeups_after_drop
+                    .fetch_add(1, Ordering::SeqCst);
             }
         }
 
@@ -180,7 +196,10 @@ impl TrackingWaker {
             waker.wake_count.fetch_add(1, Ordering::SeqCst);
 
             if waker.future_dropped.load(Ordering::SeqCst) {
-                waker.results.wakeups_after_drop.fetch_add(1, Ordering::SeqCst);
+                waker
+                    .results
+                    .wakeups_after_drop
+                    .fetch_add(1, Ordering::SeqCst);
             }
         }
 
@@ -198,7 +217,7 @@ impl TrackingWaker {
         unsafe {
             Waker::from_raw(RawWaker::new(
                 Box::into_raw(Box::new(self)) as *const (),
-                &TRACKING_WAKER_VTABLE
+                &TRACKING_WAKER_VTABLE,
             ))
         }
     }
@@ -254,7 +273,7 @@ impl MidPollNotified {
             DropTiming::DropRandomDuringPoll => {
                 // Simple pseudo-random based on poll count
                 (self.poll_count * 7) % 5 == 0
-            },
+            }
             DropTiming::DropBeforeWakeup { delay_micros } => {
                 // Drop after a brief delay (simulating drop just before wakeup)
                 if self.poll_count >= 2 {
@@ -263,14 +282,16 @@ impl MidPollNotified {
                 } else {
                     false
                 }
-            },
+            }
             DropTiming::CompleteWait => false,
         };
 
         if should_drop {
             // Mark as dropped BEFORE actually dropping to test the race window
             self.future_dropped_flag.store(true, Ordering::SeqCst);
-            results.drop_mid_poll_detected.fetch_add(1, Ordering::SeqCst);
+            results
+                .drop_mid_poll_detected
+                .fetch_add(1, Ordering::SeqCst);
 
             // Drop the future mid-poll
             self.future = None;
@@ -286,11 +307,11 @@ impl MidPollNotified {
                     self.completed.store(true, Ordering::SeqCst);
                     results.polls_ready.fetch_add(1, Ordering::SeqCst);
                     Poll::Ready(())
-                },
+                }
                 Poll::Pending => {
                     results.polls_pending.fetch_add(1, Ordering::SeqCst);
                     Poll::Pending
-                },
+                }
             }
         } else {
             Poll::Ready(())
@@ -308,10 +329,11 @@ impl MidPollNotified {
 
 fuzz_target!(|data: &[u8]| {
     // Parse fuzzer input into config
-    let mut config = match NotifyDropMidPollConfig::arbitrary(&mut arbitrary::Unstructured::new(data)) {
-        Ok(config) => config,
-        Err(_) => return, // Invalid input, skip
-    };
+    let mut config =
+        match NotifyDropMidPollConfig::arbitrary(&mut arbitrary::Unstructured::new(data)) {
+            Ok(config) => config,
+            Err(_) => return, // Invalid input, skip
+        };
     config.normalize();
 
     let notify = Arc::new(Notify::new());
@@ -337,17 +359,12 @@ fuzz_target!(|data: &[u8]| {
         let handle = thread::spawn(move || {
             results.futures_started.fetch_add(1, Ordering::SeqCst);
 
-            let (tracking_waker, _wake_count, future_dropped_flag) = TrackingWaker::new(
-                Arc::clone(&results)
-            );
+            let (tracking_waker, _wake_count, future_dropped_flag) =
+                TrackingWaker::new(Arc::clone(&results));
             let waker = tracking_waker.into_waker();
 
-            let mut notified = MidPollNotified::new(
-                notify,
-                drop_timing,
-                poll_intensity,
-                future_dropped_flag,
-            );
+            let mut notified =
+                MidPollNotified::new(notify, drop_timing, poll_intensity, future_dropped_flag);
 
             // Synchronize start if requested
             if let Some(barrier) = barrier {
@@ -362,7 +379,7 @@ fuzz_target!(|data: &[u8]| {
                             results.futures_completed.fetch_add(1, Ordering::SeqCst);
                         }
                         break;
-                    },
+                    }
                     Poll::Pending => {
                         if notified.is_dropped() {
                             results.futures_dropped.fetch_add(1, Ordering::SeqCst);
@@ -370,7 +387,7 @@ fuzz_target!(|data: &[u8]| {
                         }
                         // Brief wait between polls
                         thread::sleep(Duration::from_micros(10));
-                    },
+                    }
                 }
             }
 
@@ -406,9 +423,12 @@ fuzz_target!(|data: &[u8]| {
                     }
                     notify.notify_one();
                     results.notifications_sent.fetch_add(1, Ordering::SeqCst);
-                },
+                }
 
-                NotifyPattern::BurstNotify { count, interval_micros } => {
+                NotifyPattern::BurstNotify {
+                    count,
+                    interval_micros,
+                } => {
                     for _ in 0..count {
                         notify.notify_one();
                         results.notifications_sent.fetch_add(1, Ordering::SeqCst);
@@ -417,13 +437,13 @@ fuzz_target!(|data: &[u8]| {
                             thread::sleep(Duration::from_micros(interval_micros as u64));
                         }
                     }
-                },
+                }
 
                 NotifyPattern::SynchronizedNotify => {
                     // Immediate notification after barrier
                     notify.notify_one();
                     results.notifications_sent.fetch_add(1, Ordering::SeqCst);
-                },
+                }
 
                 NotifyPattern::StaggeredNotify { delays } => {
                     for delay in delays {
@@ -433,7 +453,7 @@ fuzz_target!(|data: &[u8]| {
                         notify.notify_one();
                         results.notifications_sent.fetch_add(1, Ordering::SeqCst);
                     }
-                },
+                }
             }
         });
 
@@ -457,19 +477,29 @@ fuzz_target!(|data: &[u8]| {
     let wakeups_after_drop = results.wakeups_after_drop.load(Ordering::SeqCst);
 
     // Basic accounting
-    assert_eq!(futures_started, config.future_count as usize,
-        "All futures should start");
+    assert_eq!(
+        futures_started, config.future_count as usize,
+        "All futures should start"
+    );
 
-    assert_eq!(polls_attempted, polls_ready + polls_pending,
-        "Poll accounting should be consistent");
+    assert_eq!(
+        polls_attempted,
+        polls_ready + polls_pending,
+        "Poll accounting should be consistent"
+    );
 
     // Future outcome accounting
-    assert_eq!(futures_started, futures_completed + futures_dropped,
-        "All futures should be either completed or dropped");
+    assert_eq!(
+        futures_started,
+        futures_completed + futures_dropped,
+        "All futures should be either completed or dropped"
+    );
 
     // Invariant: We should have sent notifications
-    assert!(notifications_sent > 0,
-        "Should have sent at least one notification");
+    assert!(
+        notifications_sent > 0,
+        "Should have sent at least one notification"
+    );
 
     // Race condition verification: The key property we're testing is that
     // dropping futures mid-poll doesn't cause undefined behavior or lost wakeups
@@ -484,9 +514,12 @@ fuzz_target!(|data: &[u8]| {
     }
 
     // Invariant: Wakeups after drop should not exceed total notifications
-    assert!(wakeups_after_drop <= notifications_sent,
+    assert!(
+        wakeups_after_drop <= notifications_sent,
         "Wakeups after drop ({}) should not exceed total notifications ({})",
-        wakeups_after_drop, notifications_sent);
+        wakeups_after_drop,
+        notifications_sent
+    );
 
     // The critical test: we survived the race condition without crashes or hangs
     // This validates that the notify implementation correctly handles the case where

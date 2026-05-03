@@ -19,8 +19,10 @@ use crate::runtime::RuntimeBuilder;
 use crate::test_utils::{init_runtime_logging, init_test_logging};
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
-use tracing::{Event, Subscriber};
-use tracing_core::{Interest, Metadata};
+use tracing::level_filters::LevelFilter;
+use tracing::span::{Attributes, Id, Record};
+use tracing::subscriber::Interest;
+use tracing::{Event, Metadata, Subscriber};
 
 /// Mock subscriber to capture tracing events and detect overrides.
 #[derive(Debug, Clone)]
@@ -57,19 +59,15 @@ impl Subscriber for MockApplicationSubscriber {
         true
     }
 
-    fn new_span(&self, _span: &tracing_core::span::Attributes<'_>) -> tracing_core::span::Id {
-        tracing_core::span::Id::from_u64(1)
+    fn new_span(&self, _span: &Attributes<'_>) -> Id {
+        Id::from_u64(1)
     }
 
-    fn record(&self, _span: &tracing_core::span::Id, _values: &tracing_core::span::Record<'_>) {
+    fn record(&self, _span: &Id, _values: &Record<'_>) {
         // No-op for this test
     }
 
-    fn record_follows_from(
-        &self,
-        _span: &tracing_core::span::Id,
-        _follows: &tracing_core::span::Id,
-    ) {
+    fn record_follows_from(&self, _span: &Id, _follows: &Id) {
         // No-op for this test
     }
 
@@ -82,11 +80,11 @@ impl Subscriber for MockApplicationSubscriber {
         self.record_event(message);
     }
 
-    fn enter(&self, _span: &tracing_core::span::Id) {
+    fn enter(&self, _span: &Id) {
         // No-op for this test
     }
 
-    fn exit(&self, _span: &tracing_core::span::Id) {
+    fn exit(&self, _span: &Id) {
         // No-op for this test
     }
 
@@ -94,11 +92,7 @@ impl Subscriber for MockApplicationSubscriber {
         Interest::always()
     }
 
-    fn enabled_callsite(&self, _metadata: &'static Metadata<'static>) -> bool {
-        true
-    }
-
-    fn max_level_hint(&self) -> Option<tracing_core::LevelFilter> {
+    fn max_level_hint(&self) -> Option<LevelFilter> {
         None
     }
 }

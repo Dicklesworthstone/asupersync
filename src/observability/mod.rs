@@ -67,22 +67,52 @@ pub mod otel_structured_concurrency;
 #[cfg(test)]
 pub mod otlp_attribute_size_cap_audit_test;
 #[cfg(test)]
+pub mod otlp_clock_skew_handling_audit_test;
+#[cfg(test)]
+pub mod otlp_collector_misbehavior_audit_test;
+#[cfg(test)]
+pub mod otlp_collector_oom_recovery_audit_test;
+#[cfg(test)]
 pub mod otlp_compression_audit_test;
+#[cfg(test)]
+pub mod otlp_compression_negotiation_audit_test;
+#[cfg(test)]
+pub mod otlp_dns_resolution_failure_audit_test;
+#[cfg(test)]
+pub mod otlp_empty_resource_attributes_audit_test;
 #[cfg(test)]
 pub mod otlp_graceful_shutdown_audit_test;
 #[cfg(test)]
 pub mod otlp_high_frequency_span_audit_test;
 #[cfg(test)]
-pub mod otlp_resource_detection_priority_audit_test;
+pub mod otlp_metrics_collection_interval_audit_test;
 #[cfg(test)]
 pub mod otlp_network_partition_audit_test;
 #[cfg(test)]
+pub mod otlp_partial_success_audit_test;
+#[cfg(test)]
 pub mod otlp_resource_attributes_inheritance_audit_test;
+#[cfg(test)]
+pub mod otlp_resource_detection_priority_audit_test;
 #[cfg(test)]
 pub mod otlp_retry_after_audit_test;
 #[cfg(test)]
+pub mod otlp_runtime_drop_deadlock_audit_test;
+#[cfg(test)]
 pub mod otlp_session_resumption_audit_test;
+#[cfg(test)]
+pub mod otlp_span_deduplication_audit_test;
+#[cfg(test)]
+pub mod otlp_span_event_timestamping_audit_test;
+#[cfg(test)]
+pub mod otlp_tail_based_sampling_audit_test;
 pub mod otlp_trace_exporter;
+#[cfg(test)]
+pub mod otlp_trace_state_propagation_audit_test;
+#[cfg(test)]
+pub mod otlp_unexpected_status_audit_test;
+#[cfg(test)]
+pub mod otlp_upgrade_required_audit_test;
 pub mod performance_budget_monitor;
 pub mod resource_accounting;
 #[cfg(all(test, feature = "metrics"))]
@@ -110,6 +140,10 @@ pub mod trace_id_format_audit_test;
 #[cfg(test)]
 pub mod trace_id_high_load_audit_test;
 pub mod w3c_trace_context;
+#[cfg(test)]
+pub mod w3c_baggage_propagation_audit_test;
+#[cfg(test)]
+pub mod w3c_trace_id_randomness_audit_test;
 
 pub use analyzer_plugin::{
     ANALYZER_PLUGIN_CONTRACT_VERSION, AggregatedAnalyzerFinding, AnalyzerCapability,

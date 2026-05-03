@@ -153,9 +153,7 @@ fn select_struct_carries_explicit_poll_a_first_fairness_state() {
 
     let struct_marker = "pub struct Select<A, B> {";
     let start = source.find(struct_marker).expect("Select struct");
-    let body_end = source[start..]
-        .find("\n}\n")
-        .expect("Select struct close");
+    let body_end = source[start..].find("\n}\n").expect("Select struct close");
     let body = &source[start..start + body_end];
 
     assert!(
@@ -224,7 +222,8 @@ fn select_poll_alternates_after_pending_via_explicit_flip() {
     // permanently poll one arm first — starvation risk.
     let source = read("src/combinator/select.rs");
 
-    let fn_marker = "fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {";
+    let fn_marker =
+        "fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {";
     let start = source.find(fn_marker).expect("Select::poll fn");
     let body_end = source[start..]
         .find("\n    }\n")
@@ -259,7 +258,8 @@ fn select_poll_polls_a_then_b_when_poll_a_first_is_true() {
     // polls a first, then b. This is the left-biased branch.
     let source = read("src/combinator/select.rs");
 
-    let fn_marker = "fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {";
+    let fn_marker =
+        "fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {";
     let start = source.find(fn_marker).expect("Select::poll fn");
     let body_end = source[start..]
         .find("\n    }\n")
@@ -294,7 +294,8 @@ fn select_poll_polls_b_then_a_when_poll_a_first_is_false() {
     // alternation that gives fairness over many repolls.
     let source = read("src/combinator/select.rs");
 
-    let fn_marker = "fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {";
+    let fn_marker =
+        "fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {";
     let start = source.find(fn_marker).expect("Select::poll fn");
     let body_end = source[start..]
         .find("\n    }\n")
@@ -345,7 +346,8 @@ fn select_completed_flag_set_when_winner_found() {
     // the PolledAfterCompletion check is unreachable.
     let source = read("src/combinator/select.rs");
 
-    let fn_marker = "fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {";
+    let fn_marker =
+        "fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {";
     let start = source.find(fn_marker).expect("Select::poll fn");
     let body_end = source[start..]
         .find("\n    }\n")
@@ -400,8 +402,7 @@ fn loser_drain_warning_documented_on_select_struct() {
     let source = read("src/combinator/select.rs");
 
     assert!(
-        source.contains("# Loser-Drain Warning")
-            && source.contains("MUST cancel"),
+        source.contains("# Loser-Drain Warning") && source.contains("MUST cancel"),
         "REGRESSION: Select Loser-Drain Warning docstring is \
          gone. Callers may forget to cancel + drain the \
          loser — obligation leak under cancellation.",

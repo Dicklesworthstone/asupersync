@@ -1,7 +1,7 @@
 #![no_main]
 
-use libfuzzer_sys::fuzz_target;
 use arbitrary::Arbitrary;
+use libfuzzer_sys::fuzz_target;
 
 /// Tests RFC 7540 §6.4 requirement: when local sends RST_STREAM(STREAM_CLOSED)
 /// for stream-id N, but peer sends DATA for stream-id N before processing the
@@ -14,9 +14,9 @@ use arbitrary::Arbitrary;
 struct DataAfterRstStreamInput {
     stream_id: u32,
     rst_error_code: u32,
-    data_payload_size: u8,  // Keep small to avoid OOM
+    data_payload_size: u8, // Keep small to avoid OOM
     data_flags: u8,
-    sequence_variant: u8,   // Controls exact frame sequencing
+    sequence_variant: u8, // Controls exact frame sequencing
 }
 
 /// Mock HTTP/2 stream state for testing RST_STREAM behavior
@@ -40,11 +40,15 @@ struct DataFrame {
 
 impl DataFrame {
     fn new(stream_id: u32, flags: u8, payload: Vec<u8>) -> Self {
-        Self { stream_id, flags, payload }
+        Self {
+            stream_id,
+            flags,
+            payload,
+        }
     }
 
     fn end_stream(&self) -> bool {
-        self.flags & 0x1 != 0  // END_STREAM flag
+        self.flags & 0x1 != 0 // END_STREAM flag
     }
 
     fn payload_len(&self) -> usize {
@@ -61,7 +65,10 @@ struct RstStreamFrame {
 
 impl RstStreamFrame {
     fn new(stream_id: u32, error_code: u32) -> Self {
-        Self { stream_id, error_code }
+        Self {
+            stream_id,
+            error_code,
+        }
     }
 }
 
@@ -78,7 +85,7 @@ impl MockDataAfterRstConnection {
     fn new() -> Self {
         Self {
             streams: std::collections::HashMap::new(),
-            connection_flow_window: 65535,  // Default initial window
+            connection_flow_window: 65535, // Default initial window
             stream_flow_windows: std::collections::HashMap::new(),
             discarded_data_count: 0,
             flow_control_violations: Vec::new(),
@@ -87,12 +94,13 @@ impl MockDataAfterRstConnection {
 
     fn create_stream(&mut self, stream_id: u32) {
         self.streams.insert(stream_id, StreamState::Open);
-        self.stream_flow_windows.insert(stream_id, 65535);  // Default stream window
+        self.stream_flow_windows.insert(stream_id, 65535); // Default stream window
     }
 
     fn send_rst_stream(&mut self, frame: &RstStreamFrame) {
         // Local sends RST_STREAM - mark stream as reset locally
-        self.streams.insert(frame.stream_id, StreamState::ResetLocal(frame.error_code));
+        self.streams
+            .insert(frame.stream_id, StreamState::ResetLocal(frame.error_code));
         // Stream flow control window is no longer relevant after reset
         self.stream_flow_windows.remove(&frame.stream_id);
     }
@@ -123,7 +131,7 @@ impl MockDataAfterRstConnection {
                     ));
                 }
 
-                false  // Frame discarded
+                false // Frame discarded
             }
             Some(StreamState::ResetRemote(_)) => {
                 // Peer already reset this stream - discard
@@ -143,9 +151,10 @@ impl MockDataAfterRstConnection {
                 if let Some(window) = self.stream_flow_windows.get_mut(&frame.stream_id) {
                     *window = window.saturating_sub(frame.payload_len() as i32);
                 }
-                self.connection_flow_window = self.connection_flow_window
+                self.connection_flow_window = self
+                    .connection_flow_window
                     .saturating_sub(frame.payload_len() as i32);
-                true  // Frame processed normally
+                true // Frame processed normally
             }
             Some(StreamState::HalfClosedRemote) => {
                 // Peer already closed their side - this is a protocol violation
@@ -201,18 +210,28 @@ fuzz_target!(|input: DataAfterRstStreamInput| {
 
             // Critical assertion: DATA after RST_STREAM must be silently discarded
             assert!(!processed, "DATA frame after RST_STREAM must be discarded");
-            assert_eq!(conn.discarded_data_count, 1, "DATA frame must be counted as discarded");
+            assert_eq!(
+                conn.discarded_data_count, 1,
+                "DATA frame must be counted as discarded"
+            );
         }
         1 => {
             // Scenario 2: Multiple DATA frames after RST_STREAM
             conn.send_rst_stream(&rst_frame);
-            let data_frame2 = DataFrame::new(input.stream_id, input.data_flags | 0x1, vec![0x43; 64]);
+            let data_frame2 =
+                DataFrame::new(input.stream_id, input.data_flags | 0x1, vec![0x43; 64]);
 
             let processed1 = conn.receive_data_frame(&data_frame);
             let processed2 = conn.receive_data_frame(&data_frame2);
 
-            assert!(!processed1 && !processed2, "All DATA after RST_STREAM must be discarded");
-            assert_eq!(conn.discarded_data_count, 2, "All DATA frames must be counted");
+            assert!(
+                !processed1 && !processed2,
+                "All DATA after RST_STREAM must be discarded"
+            );
+            assert_eq!(
+                conn.discarded_data_count, 2,
+                "All DATA frames must be counted"
+            );
         }
         2 => {
             // Scenario 3: DATA with END_STREAM after RST_STREAM
@@ -220,11 +239,14 @@ fuzz_target!(|input: DataAfterRstStreamInput| {
             let end_stream_data = DataFrame::new(
                 input.stream_id,
                 input.data_flags | 0x1, // Set END_STREAM
-                data_payload
+                data_payload,
             );
 
             let processed = conn.receive_data_frame(&end_stream_data);
-            assert!(!processed, "END_STREAM DATA after RST_STREAM must be discarded");
+            assert!(
+                !processed,
+                "END_STREAM DATA after RST_STREAM must be discarded"
+            );
         }
         3 => {
             // Scenario 4: Large DATA frame after RST_STREAM (flow control stress test)
@@ -240,17 +262,24 @@ fuzz_target!(|input: DataAfterRstStreamInput| {
             assert!(!processed, "Large DATA after RST_STREAM must be discarded");
 
             // CRITICAL: Flow control windows must remain unchanged after discarding DATA
-            assert_eq!(conn.connection_flow_window, initial_conn_window,
-                "Connection flow window must not change when discarding DATA");
-            assert_eq!(conn.stream_flow_windows, initial_stream_windows,
-                "Stream flow windows must not change when discarding DATA");
+            assert_eq!(
+                conn.connection_flow_window, initial_conn_window,
+                "Connection flow window must not change when discarding DATA"
+            );
+            assert_eq!(
+                conn.stream_flow_windows, initial_stream_windows,
+                "Stream flow windows must not change when discarding DATA"
+            );
         }
         _ => unreachable!(),
     }
 
     // Verify no flow control violations occurred
-    assert!(!conn.has_violations(),
-        "Flow control violations detected: {}", conn.violation_summary());
+    assert!(
+        !conn.has_violations(),
+        "Flow control violations detected: {}",
+        conn.violation_summary()
+    );
 });
 
 #[cfg(test)]
@@ -263,7 +292,7 @@ mod tests {
         conn.create_stream(1);
 
         // Send RST_STREAM
-        let rst = RstStreamFrame::new(1, 8);  // CANCEL
+        let rst = RstStreamFrame::new(1, 8); // CANCEL
         conn.send_rst_stream(&rst);
 
         // Receive DATA - should be discarded
@@ -313,10 +342,10 @@ mod tests {
         let mut conn = MockDataAfterRstConnection::new();
         conn.create_stream(7);
 
-        conn.send_rst_stream(&RstStreamFrame::new(7, 2));  // INTERNAL_ERROR
+        conn.send_rst_stream(&RstStreamFrame::new(7, 2)); // INTERNAL_ERROR
 
         // END_STREAM DATA should still be discarded
-        let end_data = DataFrame::new(7, 1, vec![0x44; 50]);  // END_STREAM=1
+        let end_data = DataFrame::new(7, 1, vec![0x44; 50]); // END_STREAM=1
         let processed = conn.receive_data_frame(&end_data);
 
         assert!(!processed);

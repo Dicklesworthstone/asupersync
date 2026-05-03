@@ -116,7 +116,8 @@ impl TransferEncodingVariant {
 
 fuzz_target!(|input: IdentityTransferRequest| {
     // Guard against excessive input size
-    if input.body.len() > 1_000_000 || input.prefix_headers.len() + input.suffix_headers.len() > 50 {
+    if input.body.len() > 1_000_000 || input.prefix_headers.len() + input.suffix_headers.len() > 50
+    {
         return;
     }
 
@@ -148,16 +149,21 @@ fn test_identity_pass_through(request: &IdentityTransferRequest) {
         Ok(Some(parsed_request)) => {
             // If parsing succeeded, body should be bit-for-bit identical to input
             assert_eq!(
-                parsed_request.body, original_body,
+                parsed_request.body,
+                original_body,
                 "Identity transfer encoding must preserve body exactly: \
                  expected {} bytes, got {} bytes",
-                original_body.len(), parsed_request.body.len()
+                original_body.len(),
+                parsed_request.body.len()
             );
 
             // Verify no transformation occurred
             if !original_body.is_empty() {
-                for (i, (&expected, &actual)) in original_body.iter()
-                    .zip(parsed_request.body.iter()).enumerate() {
+                for (i, (&expected, &actual)) in original_body
+                    .iter()
+                    .zip(parsed_request.body.iter())
+                    .enumerate()
+                {
                     assert_eq!(
                         expected, actual,
                         "Identity transfer encoding altered byte at position {}: \
@@ -236,7 +242,10 @@ fn test_identity_edge_cases(request: &IdentityTransferRequest) {
     let empty_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         empty_codec.decode(&mut empty_buffer)
     }));
-    assert!(empty_result.is_ok(), "Empty body with identity encoding should not panic");
+    assert!(
+        empty_result.is_ok(),
+        "Empty body with identity encoding should not panic"
+    );
 
     // Test case 2: Very large body with identity (up to limit)
     let large_body = vec![b'X'; 10000]; // 10KB test
@@ -251,7 +260,10 @@ fn test_identity_edge_cases(request: &IdentityTransferRequest) {
     let large_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         large_codec.decode(&mut large_buffer)
     }));
-    assert!(large_result.is_ok(), "Large body with identity encoding should not panic");
+    assert!(
+        large_result.is_ok(),
+        "Large body with identity encoding should not panic"
+    );
 
     // Test case 3: Binary data with identity
     let binary_body = (0u8..=255u8).cycle().take(1000).collect::<Vec<u8>>();
@@ -266,7 +278,10 @@ fn test_identity_edge_cases(request: &IdentityTransferRequest) {
     let binary_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         binary_codec.decode(&mut binary_buffer)
     }));
-    assert!(binary_result.is_ok(), "Binary data with identity encoding should not panic");
+    assert!(
+        binary_result.is_ok(),
+        "Binary data with identity encoding should not panic"
+    );
 }
 
 /// Build HTTP/1.1 request with Transfer-Encoding: identity
@@ -274,7 +289,8 @@ fn build_identity_request(request: &IdentityTransferRequest) -> Vec<u8> {
     let mut output = Vec::new();
 
     // Request line
-    let request_line = format!("{} {} {}",
+    let request_line = format!(
+        "{} {} {}",
         request.method.as_str(),
         sanitize_uri(&request.uri),
         request.version.as_str()
@@ -284,7 +300,8 @@ fn build_identity_request(request: &IdentityTransferRequest) -> Vec<u8> {
 
     // Prefix headers
     for header in &request.prefix_headers {
-        let header_line = format!("{}: {}",
+        let header_line = format!(
+            "{}: {}",
             sanitize_header_name(&header.name),
             sanitize_header_value(&header.value)
         );
@@ -307,7 +324,8 @@ fn build_identity_request(request: &IdentityTransferRequest) -> Vec<u8> {
 
     // Suffix headers
     for header in &request.suffix_headers {
-        let header_line = format!("{}: {}",
+        let header_line = format!(
+            "{}: {}",
             sanitize_header_name(&header.name),
             sanitize_header_value(&header.value)
         );

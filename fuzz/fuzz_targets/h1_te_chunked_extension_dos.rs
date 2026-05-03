@@ -1,7 +1,7 @@
 #![no_main]
 
-use libfuzzer_sys::fuzz_target;
 use arbitrary::Arbitrary;
+use libfuzzer_sys::fuzz_target;
 
 /// HTTP/1.1 chunked encoding extension DoS protection fuzz target.
 ///
@@ -90,10 +90,10 @@ struct ChunkedParserConfig {
 impl Default for ChunkedParserConfig {
     fn default() -> Self {
         Self {
-            max_extension_length: 8192,    // Reasonable total limit
-            max_name_length: 256,          // Reasonable name limit
-            max_value_length: 4096,        // Reasonable value limit
-            max_extension_count: 32,       // Reasonable count limit
+            max_extension_length: 8192, // Reasonable total limit
+            max_name_length: 256,       // Reasonable name limit
+            max_value_length: 4096,     // Reasonable value limit
+            max_extension_count: 32,    // Reasonable count limit
             strict_parsing: true,
         }
     }
@@ -154,17 +154,23 @@ impl MockChunkedParser {
         }
 
         // Parse hexadecimal chunk size
-        u64::from_str_radix(trimmed, 16)
-            .map_err(|_| format!("Invalid hex chunk size: {}", trimmed))
+        u64::from_str_radix(trimmed, 16).map_err(|_| format!("Invalid hex chunk size: {}", trimmed))
     }
 
-    fn parse_extensions_with_protection(&mut self, extensions_str: &str, chunk_size: u64) -> ChunkParseResult {
+    fn parse_extensions_with_protection(
+        &mut self,
+        extensions_str: &str,
+        chunk_size: u64,
+    ) -> ChunkParseResult {
         // Early DoS protection: check total length
         if extensions_str.len() > self.config.max_extension_length as usize {
             self.parse_stats.dos_attacks_blocked += 1;
             return ChunkParseResult::DoSBlocked {
-                reason: format!("Extension string length {} exceeds limit {}",
-                               extensions_str.len(), self.config.max_extension_length),
+                reason: format!(
+                    "Extension string length {} exceeds limit {}",
+                    extensions_str.len(),
+                    self.config.max_extension_length
+                ),
                 attack_type: "total_length".to_string(),
             };
         }
@@ -178,8 +184,10 @@ impl MockChunkedParser {
             if extension_count >= self.config.max_extension_count {
                 self.parse_stats.dos_attacks_blocked += 1;
                 return ChunkParseResult::DoSBlocked {
-                    reason: format!("Extension count {} exceeds limit {}",
-                                   extension_count, self.config.max_extension_count),
+                    reason: format!(
+                        "Extension count {} exceeds limit {}",
+                        extension_count, self.config.max_extension_count
+                    ),
                     attack_type: "extension_count".to_string(),
                 };
             }
@@ -188,11 +196,17 @@ impl MockChunkedParser {
                 Ok(ext) => {
                     extensions.push(ext);
                     extension_count += 1;
-                },
-                Err(ChunkExtensionError::DoSAttack { reason, attack_type }) => {
+                }
+                Err(ChunkExtensionError::DoSAttack {
+                    reason,
+                    attack_type,
+                }) => {
                     self.parse_stats.dos_attacks_blocked += 1;
-                    return ChunkParseResult::DoSBlocked { reason, attack_type };
-                },
+                    return ChunkParseResult::DoSBlocked {
+                        reason,
+                        attack_type,
+                    };
+                }
                 Err(ChunkExtensionError::ParseError(msg)) => {
                     return ChunkParseResult::ParseError(msg);
                 }
@@ -206,7 +220,11 @@ impl MockChunkedParser {
         }
     }
 
-    fn parse_single_extension(&mut self, ext_str: &str, total_length: &mut usize) -> Result<ParsedExtension, ChunkExtensionError> {
+    fn parse_single_extension(
+        &mut self,
+        ext_str: &str,
+        total_length: &mut usize,
+    ) -> Result<ParsedExtension, ChunkExtensionError> {
         if ext_str.is_empty() {
             return Ok(ParsedExtension {
                 name: String::new(),
@@ -227,8 +245,11 @@ impl MockChunkedParser {
         // DoS protection: check name length
         if name.len() > self.config.max_name_length as usize {
             return Err(ChunkExtensionError::DoSAttack {
-                reason: format!("Extension name length {} exceeds limit {}",
-                               name.len(), self.config.max_name_length),
+                reason: format!(
+                    "Extension name length {} exceeds limit {}",
+                    name.len(),
+                    self.config.max_name_length
+                ),
                 attack_type: "name_length".to_string(),
             });
         }
@@ -249,8 +270,10 @@ impl MockChunkedParser {
         // DoS protection: check accumulated total
         if *total_length > self.config.max_extension_length as usize {
             return Err(ChunkExtensionError::DoSAttack {
-                reason: format!("Total extension length {} exceeds limit {}",
-                               *total_length, self.config.max_extension_length),
+                reason: format!(
+                    "Total extension length {} exceeds limit {}",
+                    *total_length, self.config.max_extension_length
+                ),
                 attack_type: "accumulated_length".to_string(),
             });
         }
@@ -262,7 +285,10 @@ impl MockChunkedParser {
         })
     }
 
-    fn parse_extension_value(&self, value_str: &str) -> Result<ExtensionValue, ChunkExtensionError> {
+    fn parse_extension_value(
+        &self,
+        value_str: &str,
+    ) -> Result<ExtensionValue, ChunkExtensionError> {
         let trimmed = value_str.trim();
 
         // Check if quoted
@@ -272,8 +298,11 @@ impl MockChunkedParser {
             // DoS protection: check quoted value length before processing
             if quoted_content.len() > self.config.max_value_length as usize {
                 return Err(ChunkExtensionError::DoSAttack {
-                    reason: format!("Quoted extension value length {} exceeds limit {}",
-                                   quoted_content.len(), self.config.max_value_length),
+                    reason: format!(
+                        "Quoted extension value length {} exceeds limit {}",
+                        quoted_content.len(),
+                        self.config.max_value_length
+                    ),
                     attack_type: "quoted_value_length".to_string(),
                 });
             }
@@ -289,17 +318,21 @@ impl MockChunkedParser {
             // Unquoted value
             if trimmed.len() > self.config.max_value_length as usize {
                 return Err(ChunkExtensionError::DoSAttack {
-                    reason: format!("Extension value length {} exceeds limit {}",
-                                   trimmed.len(), self.config.max_value_length),
+                    reason: format!(
+                        "Extension value length {} exceeds limit {}",
+                        trimmed.len(),
+                        self.config.max_value_length
+                    ),
                     attack_type: "value_length".to_string(),
                 });
             }
 
             // Validate unquoted value characters
             if self.config.strict_parsing && !self.is_valid_token(trimmed) {
-                return Err(ChunkExtensionError::ParseError(
-                    format!("Invalid characters in unquoted extension value: {}", trimmed)
-                ));
+                return Err(ChunkExtensionError::ParseError(format!(
+                    "Invalid characters in unquoted extension value: {}",
+                    trimmed
+                )));
             }
 
             Ok(ExtensionValue {
@@ -353,8 +386,24 @@ impl MockChunkedParser {
     fn is_valid_token(&self, token: &str) -> bool {
         // RFC 9112 token validation (simplified)
         token.chars().all(|c| {
-            c.is_ascii_alphanumeric() ||
-            matches!(c, '!' | '#' | '$' | '%' | '&' | '\'' | '*' | '+' | '-' | '.' | '^' | '_' | '`' | '|' | '~')
+            c.is_ascii_alphanumeric()
+                || matches!(
+                    c,
+                    '!' | '#'
+                        | '$'
+                        | '%'
+                        | '&'
+                        | '\''
+                        | '*'
+                        | '+'
+                        | '-'
+                        | '.'
+                        | '^'
+                        | '_'
+                        | '`'
+                        | '|'
+                        | '~'
+                )
         })
     }
 
@@ -394,10 +443,7 @@ enum ChunkParseResult {
     },
 
     /// DoS attack blocked
-    DoSBlocked {
-        reason: String,
-        attack_type: String,
-    },
+    DoSBlocked { reason: String, attack_type: String },
 
     /// Parse error (malformed input)
     ParseError(String),
@@ -408,10 +454,7 @@ enum ChunkParseResult {
 
 #[derive(Debug)]
 enum ChunkExtensionError {
-    DoSAttack {
-        reason: String,
-        attack_type: String,
-    },
+    DoSAttack { reason: String, attack_type: String },
     ParseError(String),
 }
 
@@ -454,55 +497,84 @@ fuzz_target!(|input: ChunkedExtensionDoSInput| {
         let dos_result = parser.parse_chunk_line(&dos_chunk_line);
 
         match dos_result {
-            ChunkParseResult::DoSBlocked { ref reason, ref attack_type } => {
+            ChunkParseResult::DoSBlocked {
+                ref reason,
+                ref attack_type,
+            } => {
                 // Verify DoS protection is working
                 match pattern {
                     DoSPattern::LongName { length } => {
-                        assert!(reason.contains("name") || reason.contains("length"),
-                               "DoS block should mention name length issue: {}", reason);
-                        assert_eq!(attack_type, "name_length" ,
-                                  "Attack type should be name_length for long name DoS");
-                    },
+                        assert!(
+                            reason.contains("name") || reason.contains("length"),
+                            "DoS block should mention name length issue: {}",
+                            reason
+                        );
+                        assert_eq!(
+                            attack_type, "name_length",
+                            "Attack type should be name_length for long name DoS"
+                        );
+                    }
 
                     DoSPattern::LongValue { length, .. } => {
-                        assert!(reason.contains("value") || reason.contains("length"),
-                               "DoS block should mention value length issue: {}", reason);
-                        assert!(attack_type.contains("value") || attack_type.contains("length"),
-                               "Attack type should mention value for long value DoS: {}", attack_type);
-                    },
+                        assert!(
+                            reason.contains("value") || reason.contains("length"),
+                            "DoS block should mention value length issue: {}",
+                            reason
+                        );
+                        assert!(
+                            attack_type.contains("value") || attack_type.contains("length"),
+                            "Attack type should mention value for long value DoS: {}",
+                            attack_type
+                        );
+                    }
 
                     DoSPattern::ManySmall { count, .. } => {
-                        assert!(reason.contains("count") || reason.contains("length"),
-                               "DoS block should mention count or total length: {}", reason);
-                    },
+                        assert!(
+                            reason.contains("count") || reason.contains("length"),
+                            "DoS block should mention count or total length: {}",
+                            reason
+                        );
+                    }
 
                     _ => {
                         // Other patterns should also be blocked with appropriate reasons
                     }
                 }
-            },
+            }
 
             ChunkParseResult::ParseError(_) => {
                 // Parse errors are acceptable for malformed DoS attempts
-            },
+            }
 
-            ChunkParseResult::Success { total_extension_length, extensions, .. } => {
+            ChunkParseResult::Success {
+                total_extension_length,
+                extensions,
+                ..
+            } => {
                 // If parsing succeeded, verify limits are respected
-                assert!(total_extension_length <= parser.config.max_extension_length as usize,
-                       "Successful parse should not exceed configured limits");
-                assert!(extensions.len() <= parser.config.max_extension_count as usize,
-                       "Extension count should not exceed configured limits");
+                assert!(
+                    total_extension_length <= parser.config.max_extension_length as usize,
+                    "Successful parse should not exceed configured limits"
+                );
+                assert!(
+                    extensions.len() <= parser.config.max_extension_count as usize,
+                    "Extension count should not exceed configured limits"
+                );
 
                 // Check individual extension limits
                 for ext in &extensions {
-                    assert!(ext.name.len() <= parser.config.max_name_length as usize,
-                           "Extension name should not exceed limit");
+                    assert!(
+                        ext.name.len() <= parser.config.max_name_length as usize,
+                        "Extension name should not exceed limit"
+                    );
                     if let Some(ref val) = ext.value {
-                        assert!(val.value.len() <= parser.config.max_value_length as usize,
-                               "Extension value should not exceed limit");
+                        assert!(
+                            val.value.len() <= parser.config.max_value_length as usize,
+                            "Extension value should not exceed limit"
+                        );
                     }
                 }
-            },
+            }
 
             ChunkParseResult::InvalidChunkSize(_) => {
                 // Chunk size errors are separate from extension DoS
@@ -513,15 +585,18 @@ fuzz_target!(|input: ChunkedExtensionDoSInput| {
     // Test edge cases around limits
     let limit_tests = vec![
         // Exactly at limit
-        format!("{}; {}={}",
-                input.chunk_size_hex,
-                "x".repeat(parser.config.max_name_length as usize),
-                "y".repeat(parser.config.max_value_length as usize)),
-
+        format!(
+            "{}; {}={}",
+            input.chunk_size_hex,
+            "x".repeat(parser.config.max_name_length as usize),
+            "y".repeat(parser.config.max_value_length as usize)
+        ),
         // Just over limit
-        format!("{}; {}=z",
-                input.chunk_size_hex,
-                "x".repeat(parser.config.max_name_length as usize + 1)),
+        format!(
+            "{}; {}=z",
+            input.chunk_size_hex,
+            "x".repeat(parser.config.max_name_length as usize + 1)
+        ),
     ];
 
     for test_line in limit_tests {
@@ -531,10 +606,10 @@ fuzz_target!(|input: ChunkedExtensionDoSInput| {
         match result {
             ChunkParseResult::Success { .. } => {
                 // Should only succeed if within limits
-            },
+            }
             ChunkParseResult::DoSBlocked { .. } => {
                 // Should be blocked if over limits
-            },
+            }
             _ => {
                 // Other results are acceptable
             }
@@ -553,7 +628,7 @@ fn build_dos_chunk_line(pattern: &DoSPattern) -> String {
     match pattern {
         DoSPattern::LongName { length } => {
             format!("1000; {}=value", "a".repeat(*length as usize))
-        },
+        }
 
         DoSPattern::LongValue { length, quoted } => {
             let value = "b".repeat(*length as usize);
@@ -562,7 +637,7 @@ fn build_dos_chunk_line(pattern: &DoSPattern) -> String {
             } else {
                 format!("1000; name={}", value)
             }
-        },
+        }
 
         DoSPattern::ManySmall { count, each_size } => {
             let mut chunk_line = "1000".to_string();
@@ -570,17 +645,24 @@ fn build_dos_chunk_line(pattern: &DoSPattern) -> String {
                 chunk_line.push_str(&format!("; name{}={}", i, "x".repeat(*each_size as usize)));
             }
             chunk_line
-        },
+        }
 
-        DoSPattern::NestedQuoted { depth, size_per_level } => {
+        DoSPattern::NestedQuoted {
+            depth,
+            size_per_level,
+        } => {
             let mut value = "base".to_string();
             for _ in 0..*depth {
                 value = format!("\"{}{}\"", value, "y".repeat(*size_per_level as usize));
             }
             format!("1000; name={}", value)
-        },
+        }
 
-        DoSPattern::Mixed { long_names, long_values, small_count } => {
+        DoSPattern::Mixed {
+            long_names,
+            long_values,
+            small_count,
+        } => {
             let mut chunk_line = "1000".to_string();
 
             // Add long names

@@ -159,8 +159,7 @@ fn current_cx_guard_drop_pops_from_thread_local_stack() {
     let body = &source[start..start + body_end];
 
     assert!(
-        body.contains("if !self.pushed {")
-            && body.contains("return;"),
+        body.contains("if !self.pushed {") && body.contains("return;"),
         "REGRESSION: CurrentCxGuard::drop no longer guards on \
          self.pushed before popping. A guard from \
          set_current(None) would pop a frame that doesn't \
@@ -168,8 +167,7 @@ fn current_cx_guard_drop_pops_from_thread_local_stack() {
     );
 
     assert!(
-        body.contains("CURRENT_CX_STACK.try_with(")
-            && body.contains("stack.borrow_mut().pop();"),
+        body.contains("CURRENT_CX_STACK.try_with(") && body.contains("stack.borrow_mut().pop();"),
         "REGRESSION: CurrentCxGuard::drop no longer pops \
          from CURRENT_CX_STACK. Frames leak — \
          Cx::current() returns stale Cxs from prior scopes.",
@@ -214,9 +212,7 @@ fn mask_guard_drop_decrements_mask_depth_via_saturating_sub() {
 
     let impl_marker = "impl Drop for MaskGuard<'_> {";
     let start = source.find(impl_marker).expect("MaskGuard Drop impl");
-    let body_end = source[start..]
-        .find("\n}\n")
-        .expect("MaskGuard Drop close");
+    let body_end = source[start..].find("\n}\n").expect("MaskGuard Drop close");
     let body = &source[start..start + body_end];
 
     assert!(
@@ -367,9 +363,7 @@ fn cx_scope_returns_scope_handle_bound_to_current_region_not_a_new_region() {
     // is for the CURRENT region, not a new one.
     let fn_marker = "pub fn scope(&self) -> crate::cx::Scope<'static> {";
     let start = source.find(fn_marker).expect("Cx::scope fn");
-    let body_end = source[start..]
-        .find("\n    }\n")
-        .expect("Cx::scope close");
+    let body_end = source[start..].find("\n    }\n").expect("Cx::scope close");
     let body = &source[start..start + body_end];
 
     assert!(

@@ -1,19 +1,19 @@
 #![no_main]
 
-use libfuzzer_sys::fuzz_target;
 use arbitrary::{Arbitrary, Unstructured};
+use libfuzzer_sys::fuzz_target;
+use std::collections::HashMap;
+use std::future::Future;
+use std::panic::{AssertUnwindSafe, catch_unwind};
+use std::pin::Pin;
 use std::sync::{Arc, Mutex as StdMutex};
+use std::task::{Context, Poll, RawWaker, RawWakerVTable, Waker};
 use std::thread;
 use std::time::Duration;
-use std::panic::{catch_unwind, AssertUnwindSafe};
-use std::collections::HashMap;
-use std::task::{Context, Poll, RawWaker, RawWakerVTable, Waker};
-use std::future::Future;
-use std::pin::Pin;
 
-use asupersync::sync::{Mutex, OwnedMutexGuard, LockError};
 use asupersync::cx::Cx;
 use asupersync::cx::cap;
+use asupersync::sync::{LockError, Mutex, OwnedMutexGuard};
 use asupersync::types::CancelKind;
 
 // TrackedWaker implementation for manual polling
@@ -26,7 +26,11 @@ struct TrackedWaker {
 
 impl TrackedWaker {
     fn new(context_id: usize, operation_id: usize, tracker: LockArcCancelTracker) -> Self {
-        Self { context_id, operation_id, tracker }
+        Self {
+            context_id,
+            operation_id,
+            tracker,
+        }
     }
 
     fn create_waker(&self) -> Waker {
@@ -177,7 +181,10 @@ impl LockArcCancelTracker {
                         violation.violation_type, violation.description
                     ));
                 }
-                panic!("Mutex lock_arc cancel invariant violations detected: {} violations", violations.len());
+                panic!(
+                    "Mutex lock_arc cancel invariant violations detected: {} violations",
+                    violations.len()
+                );
             }
         }
     }
@@ -192,12 +199,26 @@ struct LockArcCancelConfig {
 #[derive(Debug, Clone, Arbitrary)]
 enum CancelPattern {
     SimpleLockCancel,
-    ConcurrentLockCancel { delays: Vec<u16> },
-    SequentialLockCancel { attempts: u8 },
-    InterleavedLockCancel { operations: Vec<Operation> },
-    RapidCancelSequence { sequence: Vec<RapidOp> },
-    HoldAndCancel { hold_duration_us: u16, cancel_delay_us: u16 },
-    MultiContextCancel { context_count: u8, cancel_pattern: Vec<bool> },
+    ConcurrentLockCancel {
+        delays: Vec<u16>,
+    },
+    SequentialLockCancel {
+        attempts: u8,
+    },
+    InterleavedLockCancel {
+        operations: Vec<Operation>,
+    },
+    RapidCancelSequence {
+        sequence: Vec<RapidOp>,
+    },
+    HoldAndCancel {
+        hold_duration_us: u16,
+        cancel_delay_us: u16,
+    },
+    MultiContextCancel {
+        context_count: u8,
+        cancel_pattern: Vec<bool>,
+    },
 }
 
 #[derive(Debug, Clone, Arbitrary)]
@@ -253,11 +274,17 @@ fuzz_target!(|data: &[u8]| {
             test_rapid_cancel_sequence(&tracker, sequence);
         }
 
-        CancelPattern::HoldAndCancel { hold_duration_us, cancel_delay_us } => {
+        CancelPattern::HoldAndCancel {
+            hold_duration_us,
+            cancel_delay_us,
+        } => {
             test_hold_and_cancel(&tracker, hold_duration_us, cancel_delay_us);
         }
 
-        CancelPattern::MultiContextCancel { context_count, cancel_pattern } => {
+        CancelPattern::MultiContextCancel {
+            context_count,
+            cancel_pattern,
+        } => {
             test_multi_context_cancel(&tracker, context_count.min(6), cancel_pattern);
         }
     }
@@ -314,7 +341,11 @@ fn test_simple_lock_cancel(tracker: &LockArcCancelTracker) {
     });
 }
 
-fn test_concurrent_lock_cancel(tracker: &LockArcCancelTracker, delays: &[u16], concurrent_count: u8) {
+fn test_concurrent_lock_cancel(
+    tracker: &LockArcCancelTracker,
+    delays: &[u16],
+    concurrent_count: u8,
+) {
     tracker.record_operation("test_concurrent_lock_cancel");
 
     let mutex = Arc::new(Mutex::new(42u32));
@@ -345,7 +376,8 @@ fn test_concurrent_lock_cancel(tracker: &LockArcCancelTracker, delays: &[u16], c
             let result = catch_unwind(AssertUnwindSafe(|| {
                 let mutex_for_lock = Arc::clone(&mutex_clone);
                 let mut lock_future = Box::pin(OwnedMutexGuard::lock(mutex_for_lock, &cx));
-                let tracked_waker = TrackedWaker::new(i as usize, i as usize + 1, tracker_clone.clone());
+                let tracked_waker =
+                    TrackedWaker::new(i as usize, i as usize + 1, tracker_clone.clone());
                 let waker = tracked_waker.create_waker();
                 let mut context = Context::from_waker(&waker);
 
@@ -464,7 +496,9 @@ fn test_interleaved_lock_cancel(tracker: &LockArcCancelTracker, operations: Vec<
 
         match operation {
             Operation::StartLock { context_id } => {
-                let cx = contexts.entry(*context_id).or_insert_with(|| Cx::<cap::All>::new());
+                let cx = contexts
+                    .entry(*context_id)
+                    .or_insert_with(|| Cx::<cap::All>::new());
 
                 let waiters_before = mutex.waiters();
                 let locked_before = mutex.is_locked();
@@ -473,7 +507,8 @@ fn test_interleaved_lock_cancel(tracker: &LockArcCancelTracker, operations: Vec<
                     let mutex_clone = Arc::clone(&mutex);
                     let cx_ref = &*cx;
                     let mut lock_future = Box::pin(OwnedMutexGuard::lock(mutex_clone, cx_ref));
-                    let tracked_waker = TrackedWaker::new(*context_id as usize, operation_id, tracker.clone());
+                    let tracked_waker =
+                        TrackedWaker::new(*context_id as usize, operation_id, tracker.clone());
                     let waker = tracked_waker.create_waker();
                     let mut context = Context::from_waker(&waker);
 
@@ -529,14 +564,14 @@ fn test_interleaved_lock_cancel(tracker: &LockArcCancelTracker, operations: Vec<
                 let waiters = mutex.waiters();
                 let locked = mutex.is_locked();
                 let poisoned = mutex.is_poisoned();
-                tracker.record_operation(&format!("state_check_waiters_{}_locked_{}_poisoned_{}",
-                    waiters, locked, poisoned));
+                tracker.record_operation(&format!(
+                    "state_check_waiters_{}_locked_{}_poisoned_{}",
+                    waiters, locked, poisoned
+                ));
             }
 
             Operation::TryLock => {
-                let try_result = catch_unwind(AssertUnwindSafe(|| {
-                    mutex.try_lock()
-                }));
+                let try_result = catch_unwind(AssertUnwindSafe(|| mutex.try_lock()));
 
                 match try_result {
                     Ok(Ok(_guard)) => {
@@ -567,7 +602,9 @@ fn test_rapid_cancel_sequence(tracker: &LockArcCancelTracker, sequence: Vec<Rapi
 
         match op {
             RapidOp::Lock { context_id } => {
-                let cx = contexts.entry(*context_id).or_insert_with(|| Cx::<cap::All>::new());
+                let cx = contexts
+                    .entry(*context_id)
+                    .or_insert_with(|| Cx::<cap::All>::new());
 
                 let waiters_before = mutex.waiters();
                 let locked_before = mutex.is_locked();
@@ -576,7 +613,8 @@ fn test_rapid_cancel_sequence(tracker: &LockArcCancelTracker, sequence: Vec<Rapi
                     let mutex_clone = Arc::clone(&mutex);
                     let cx_ref = &*cx;
                     let mut lock_future = Box::pin(OwnedMutexGuard::lock(mutex_clone, cx_ref));
-                    let tracked_waker = TrackedWaker::new(*context_id as usize, operation_id, tracker.clone());
+                    let tracked_waker =
+                        TrackedWaker::new(*context_id as usize, operation_id, tracker.clone());
                     let waker = tracked_waker.create_waker();
                     let mut context = Context::from_waker(&waker);
 
@@ -629,7 +667,11 @@ fn test_rapid_cancel_sequence(tracker: &LockArcCancelTracker, sequence: Vec<Rapi
     }
 }
 
-fn test_hold_and_cancel(tracker: &LockArcCancelTracker, hold_duration_us: u16, cancel_delay_us: u16) {
+fn test_hold_and_cancel(
+    tracker: &LockArcCancelTracker,
+    hold_duration_us: u16,
+    cancel_delay_us: u16,
+) {
     tracker.record_operation("test_hold_and_cancel");
 
     let mutex = Arc::new(Mutex::new(42u32));
@@ -717,7 +759,11 @@ fn test_hold_and_cancel(tracker: &LockArcCancelTracker, hold_duration_us: u16, c
     }
 }
 
-fn test_multi_context_cancel(tracker: &LockArcCancelTracker, context_count: u8, cancel_pattern: Vec<bool>) {
+fn test_multi_context_cancel(
+    tracker: &LockArcCancelTracker,
+    context_count: u8,
+    cancel_pattern: Vec<bool>,
+) {
     tracker.record_operation("test_multi_context_cancel");
 
     let mutex = Arc::new(Mutex::new(42u32));
@@ -740,7 +786,8 @@ fn test_multi_context_cancel(tracker: &LockArcCancelTracker, context_count: u8, 
 
             let result = catch_unwind(AssertUnwindSafe(|| {
                 let mut lock_future = Box::pin(OwnedMutexGuard::lock(mutex_clone, &cx));
-                let tracked_waker = TrackedWaker::new(i as usize, i as usize + 1, tracker_clone.clone());
+                let tracked_waker =
+                    TrackedWaker::new(i as usize, i as usize + 1, tracker_clone.clone());
                 let waker = tracked_waker.create_waker();
                 let mut context = Context::from_waker(&waker);
 

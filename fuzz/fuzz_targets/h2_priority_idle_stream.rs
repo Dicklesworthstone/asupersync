@@ -18,8 +18,8 @@
 
 #![no_main]
 
-use libfuzzer_sys::fuzz_target;
 use arbitrary::Arbitrary;
+use libfuzzer_sys::fuzz_target;
 use std::collections::HashMap;
 
 /// Mock HTTP/2 connection for testing PRIORITY frame edge cases.
@@ -90,18 +90,11 @@ pub struct PriorityConfig {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PriorityViolation {
     /// Stream depends on itself (RFC 7540 §5.3.1)
-    SelfDependency {
-        stream_id: u32,
-    },
+    SelfDependency { stream_id: u32 },
     /// PRIORITY for stream ID higher than max peer-initiated
-    IdlePriorityAboveMax {
-        stream_id: u32,
-        max_allowed: u32,
-    },
+    IdlePriorityAboveMax { stream_id: u32, max_allowed: u32 },
     /// Weight was 0 but should be treated as 1
-    ZeroWeightNormalized {
-        stream_id: u32,
-    },
+    ZeroWeightNormalized { stream_id: u32 },
     /// Dependency cycle detected
     DependencyCycle {
         stream_id: u32,
@@ -197,13 +190,16 @@ impl MockPriorityConnection {
         };
 
         // Stream 0 is implicit root
-        tree.nodes.insert(0, PriorityNode {
-            stream_id: 0,
-            parent: None,
-            weight: 1,
-            exclusive: false,
-            children: Vec::new(),
-        });
+        tree.nodes.insert(
+            0,
+            PriorityNode {
+                stream_id: 0,
+                parent: None,
+                weight: 1,
+                exclusive: false,
+                children: Vec::new(),
+            },
+        );
 
         Self {
             max_client_stream_id: if is_server { 0 } else { 1 }, // Server sees no client streams yet
@@ -235,18 +231,20 @@ impl MockPriorityConnection {
         };
 
         if frame.stream_id > max_allowed && frame.stream_id > max_allowed + 2 {
-            self.violations.push(PriorityViolation::IdlePriorityAboveMax {
-                stream_id: frame.stream_id,
-                max_allowed,
-            });
+            self.violations
+                .push(PriorityViolation::IdlePriorityAboveMax {
+                    stream_id: frame.stream_id,
+                    max_allowed,
+                });
             // This is allowed but worth noting for testing
         }
 
         // Weight 0 must be treated as 1 (RFC 7540 §5.3.2)
         let effective_weight = if frame.weight == 0 {
-            self.violations.push(PriorityViolation::ZeroWeightNormalized {
-                stream_id: frame.stream_id,
-            });
+            self.violations
+                .push(PriorityViolation::ZeroWeightNormalized {
+                    stream_id: frame.stream_id,
+                });
             1
         } else {
             frame.weight
@@ -263,16 +261,22 @@ impl MockPriorityConnection {
         }
 
         // Update or create the priority node
-        let old_parent = self.priority_tree.nodes
+        let old_parent = self
+            .priority_tree
+            .nodes
             .get(&frame.stream_id)
             .and_then(|node| node.parent);
 
         // Remove from old parent's children
         if let Some(old_parent_id) = old_parent {
             if let Some(old_parent_node) = self.priority_tree.nodes.get_mut(&old_parent_id) {
-                old_parent_node.children.retain(|&child| child != frame.stream_id);
+                old_parent_node
+                    .children
+                    .retain(|&child| child != frame.stream_id);
             } else if old_parent_id == 0 {
-                self.priority_tree.root_children.retain(|&child| child != frame.stream_id);
+                self.priority_tree
+                    .root_children
+                    .retain(|&child| child != frame.stream_id);
             }
         }
 
@@ -283,7 +287,8 @@ impl MockPriorityConnection {
             let existing_children = if frame.dependency_stream_id == 0 {
                 self.priority_tree.root_children.clone()
             } else {
-                self.priority_tree.nodes
+                self.priority_tree
+                    .nodes
                     .get(&frame.dependency_stream_id)
                     .map(|node| node.children.clone())
                     .unwrap_or_default()
@@ -299,7 +304,11 @@ impl MockPriorityConnection {
             // Clear old parent's children
             if frame.dependency_stream_id == 0 {
                 self.priority_tree.root_children.clear();
-            } else if let Some(parent_node) = self.priority_tree.nodes.get_mut(&frame.dependency_stream_id) {
+            } else if let Some(parent_node) = self
+                .priority_tree
+                .nodes
+                .get_mut(&frame.dependency_stream_id)
+            {
                 parent_node.children.clear();
             }
 
@@ -307,7 +316,11 @@ impl MockPriorityConnection {
             if frame.dependency_stream_id == 0 {
                 self.priority_tree.root_children.push(frame.stream_id);
             } else {
-                if let Some(parent_node) = self.priority_tree.nodes.get_mut(&frame.dependency_stream_id) {
+                if let Some(parent_node) = self
+                    .priority_tree
+                    .nodes
+                    .get_mut(&frame.dependency_stream_id)
+                {
                     parent_node.children.push(frame.stream_id);
                     // Check children limit
                     if parent_node.children.len() > self.config.max_children_per_node as usize {
@@ -321,13 +334,20 @@ impl MockPriorityConnection {
             }
 
             // Update the stream's node
-            self.priority_tree.nodes.insert(frame.stream_id, PriorityNode {
-                stream_id: frame.stream_id,
-                parent: if frame.dependency_stream_id == 0 { None } else { Some(frame.dependency_stream_id) },
-                weight: effective_weight,
-                exclusive: frame.exclusive,
-                children: existing_children,
-            });
+            self.priority_tree.nodes.insert(
+                frame.stream_id,
+                PriorityNode {
+                    stream_id: frame.stream_id,
+                    parent: if frame.dependency_stream_id == 0 {
+                        None
+                    } else {
+                        Some(frame.dependency_stream_id)
+                    },
+                    weight: effective_weight,
+                    exclusive: frame.exclusive,
+                    children: existing_children,
+                },
+            );
 
             tree_restructured = true;
         } else {
@@ -336,18 +356,31 @@ impl MockPriorityConnection {
                 self.priority_tree.root_children.push(frame.stream_id);
             } else {
                 // Ensure dependency parent exists
-                if !self.priority_tree.nodes.contains_key(&frame.dependency_stream_id) {
-                    self.priority_tree.nodes.insert(frame.dependency_stream_id, PriorityNode {
-                        stream_id: frame.dependency_stream_id,
-                        parent: None, // Will be root child
-                        weight: 16, // Default weight
-                        exclusive: false,
-                        children: Vec::new(),
-                    });
-                    self.priority_tree.root_children.push(frame.dependency_stream_id);
+                if !self
+                    .priority_tree
+                    .nodes
+                    .contains_key(&frame.dependency_stream_id)
+                {
+                    self.priority_tree.nodes.insert(
+                        frame.dependency_stream_id,
+                        PriorityNode {
+                            stream_id: frame.dependency_stream_id,
+                            parent: None, // Will be root child
+                            weight: 16,   // Default weight
+                            exclusive: false,
+                            children: Vec::new(),
+                        },
+                    );
+                    self.priority_tree
+                        .root_children
+                        .push(frame.dependency_stream_id);
                 }
 
-                if let Some(parent_node) = self.priority_tree.nodes.get_mut(&frame.dependency_stream_id) {
+                if let Some(parent_node) = self
+                    .priority_tree
+                    .nodes
+                    .get_mut(&frame.dependency_stream_id)
+                {
                     if !parent_node.children.contains(&frame.stream_id) {
                         parent_node.children.push(frame.stream_id);
                     }
@@ -362,16 +395,25 @@ impl MockPriorityConnection {
                 }
             }
 
-            self.priority_tree.nodes.insert(frame.stream_id, PriorityNode {
-                stream_id: frame.stream_id,
-                parent: if frame.dependency_stream_id == 0 { None } else { Some(frame.dependency_stream_id) },
-                weight: effective_weight,
-                exclusive: frame.exclusive,
-                children: self.priority_tree.nodes
-                    .get(&frame.stream_id)
-                    .map(|node| node.children.clone())
-                    .unwrap_or_default(),
-            });
+            self.priority_tree.nodes.insert(
+                frame.stream_id,
+                PriorityNode {
+                    stream_id: frame.stream_id,
+                    parent: if frame.dependency_stream_id == 0 {
+                        None
+                    } else {
+                        Some(frame.dependency_stream_id)
+                    },
+                    weight: effective_weight,
+                    exclusive: frame.exclusive,
+                    children: self
+                        .priority_tree
+                        .nodes
+                        .get(&frame.stream_id)
+                        .map(|node| node.children.clone())
+                        .unwrap_or_default(),
+                },
+            );
         }
 
         // Check tree depth
@@ -434,7 +476,9 @@ impl MockPriorityConnection {
             }
             visited.insert(current);
 
-            current = self.priority_tree.nodes
+            current = self
+                .priority_tree
+                .nodes
                 .get(&current)
                 .and_then(|node| node.parent)
                 .unwrap_or(0);
@@ -449,7 +493,9 @@ impl MockPriorityConnection {
         let mut current = dependency_id;
 
         while current != 0 && current != stream_id {
-            current = self.priority_tree.nodes
+            current = self
+                .priority_tree
+                .nodes
                 .get(&current)
                 .and_then(|node| node.parent)
                 .unwrap_or(0);
@@ -472,7 +518,9 @@ impl MockPriorityConnection {
         let mut current = stream_id;
 
         while current != 0 {
-            current = self.priority_tree.nodes
+            current = self
+                .priority_tree
+                .nodes
                 .get(&current)
                 .and_then(|node| node.parent)
                 .unwrap_or(0);
@@ -495,12 +543,16 @@ impl MockPriorityConnection {
     pub fn tree_stats(&self) -> TreeStats {
         TreeStats {
             node_count: self.priority_tree.nodes.len(),
-            max_depth: self.priority_tree.nodes
+            max_depth: self
+                .priority_tree
+                .nodes
                 .keys()
                 .map(|&stream_id| self.calculate_stream_depth(stream_id))
                 .max()
                 .unwrap_or(0),
-            max_children: self.priority_tree.nodes
+            max_children: self
+                .priority_tree
+                .nodes
                 .values()
                 .map(|node| node.children.len())
                 .max()
@@ -535,7 +587,10 @@ fn test_self_dependency_detection() {
 
     let violations = conn.violations();
     assert_eq!(violations.len(), 1);
-    assert!(matches!(violations[0], PriorityViolation::SelfDependency { stream_id: 5 }));
+    assert!(matches!(
+        violations[0],
+        PriorityViolation::SelfDependency { stream_id: 5 }
+    ));
 }
 
 /// Test weight=0 normalization
@@ -554,7 +609,10 @@ fn test_zero_weight_normalization() {
 
     let violations = conn.violations();
     assert_eq!(violations.len(), 1);
-    assert!(matches!(violations[0], PriorityViolation::ZeroWeightNormalized { stream_id: 3 }));
+    assert!(matches!(
+        violations[0],
+        PriorityViolation::ZeroWeightNormalized { stream_id: 3 }
+    ));
 
     // Verify the weight was actually normalized
     let node = conn.priority_tree.nodes.get(&3).unwrap();
@@ -578,10 +636,13 @@ fn test_idle_stream_priority() {
 
     let violations = conn.violations();
     assert_eq!(violations.len(), 1);
-    assert!(matches!(violations[0], PriorityViolation::IdlePriorityAboveMax {
-        stream_id: 101,
-        max_allowed: 1
-    }));
+    assert!(matches!(
+        violations[0],
+        PriorityViolation::IdlePriorityAboveMax {
+            stream_id: 101,
+            max_allowed: 1
+        }
+    ));
 }
 
 /// Test dependency cycle detection
@@ -619,7 +680,11 @@ fn test_dependency_cycle_detection() {
 
     let violations = conn.violations();
     // Should find the cycle violation
-    assert!(violations.iter().any(|v| matches!(v, PriorityViolation::DependencyCycle { .. })));
+    assert!(
+        violations
+            .iter()
+            .any(|v| matches!(v, PriorityViolation::DependencyCycle { .. }))
+    );
 }
 
 /// Test exclusive dependency tree restructuring
@@ -724,13 +789,25 @@ fuzz_target!(|scenario: PriorityFrameScenario| {
 
     // Verify tree consistency at the end
     let stats = conn.tree_stats();
-    assert!(stats.node_count <= 2000, "Tree grew too large: {} nodes", stats.node_count);
-    assert!(stats.max_depth <= 100, "Tree too deep: {} levels", stats.max_depth);
+    assert!(
+        stats.node_count <= 2000,
+        "Tree grew too large: {} nodes",
+        stats.node_count
+    );
+    assert!(
+        stats.max_depth <= 100,
+        "Tree too deep: {} levels",
+        stats.max_depth
+    );
 
     // Verify no self-dependencies exist in final tree
     for (stream_id, node) in &conn.priority_tree.nodes {
         if let Some(parent) = node.parent {
-            assert_ne!(*stream_id, parent, "Self-dependency found: stream {} depends on itself", stream_id);
+            assert_ne!(
+                *stream_id, parent,
+                "Self-dependency found: stream {} depends on itself",
+                stream_id
+            );
         }
     }
 
@@ -745,7 +822,17 @@ fuzz_target!(|scenario: PriorityFrameScenario| {
 
     // Ensure all weights are >= 1
     for node in conn.priority_tree.nodes.values() {
-        assert!(node.weight >= 1, "Weight below minimum: stream {} has weight {}", node.stream_id, node.weight);
-        assert!(node.weight <= 256, "Weight above maximum: stream {} has weight {}", node.stream_id, node.weight);
+        assert!(
+            node.weight >= 1,
+            "Weight below minimum: stream {} has weight {}",
+            node.stream_id,
+            node.weight
+        );
+        assert!(
+            node.weight <= 256,
+            "Weight above maximum: stream {} has weight {}",
+            node.stream_id,
+            node.weight
+        );
     }
 });

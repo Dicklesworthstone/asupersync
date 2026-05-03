@@ -62,7 +62,8 @@ const THREAD_TIMEOUT: Duration = Duration::from_secs(10);
 
 fuzz_target!(|data: &[u8]| {
     // Parse fuzzer input into config
-    let mut input = match OnceCellConcurrentFuzz::arbitrary(&mut arbitrary::Unstructured::new(data)) {
+    let mut input = match OnceCellConcurrentFuzz::arbitrary(&mut arbitrary::Unstructured::new(data))
+    {
         Ok(input) => input,
         Err(_) => return, // Invalid input, skip
     };
@@ -76,7 +77,9 @@ fuzz_target!(|data: &[u8]| {
         Duration::from_millis((input.config.startup_delay_ms as u64).min(MAX_STARTUP_DELAY_MS));
 
     // Normalize patterns to match thread count
-    input.init_patterns.resize(thread_count, InitPattern::BlockingInit);
+    input
+        .init_patterns
+        .resize(thread_count, InitPattern::BlockingInit);
 
     // Execute the enhanced concurrent initialization test
     test_concurrent_init_enhanced(
@@ -223,7 +226,7 @@ fn test_concurrent_init_enhanced(
                     });
                     successful_inits.fetch_add(1, Ordering::SeqCst);
                     *result
-                },
+                }
 
                 InitPattern::DirectSet => {
                     set_attempts.fetch_add(1, Ordering::SeqCst);
@@ -231,14 +234,16 @@ fn test_concurrent_init_enhanced(
                         Ok(()) => {
                             successful_inits.fetch_add(1, Ordering::SeqCst);
                             init_value
-                        },
+                        }
                         Err(_value) => {
                             // Already initialized - get the existing value
                             failed_inits.fetch_add(1, Ordering::SeqCst);
-                            *once_cell_clone.get().expect("should be initialized if set failed")
-                        },
+                            *once_cell_clone
+                                .get()
+                                .expect("should be initialized if set failed")
+                        }
                     }
-                },
+                }
 
                 InitPattern::GetOnly => {
                     get_calls.fetch_add(1, Ordering::SeqCst);
@@ -248,9 +253,9 @@ fn test_concurrent_init_enhanced(
                             // Not initialized yet - this is valid for GetOnly pattern
                             // Return a sentinel value to indicate "not found"
                             0u32.wrapping_sub(1) // u32::MAX as sentinel
-                        },
+                        }
                     }
-                },
+                }
 
                 InitPattern::GetThenInit => {
                     get_calls.fetch_add(1, Ordering::SeqCst);
@@ -267,9 +272,9 @@ fn test_concurrent_init_enhanced(
                             });
                             successful_inits.fetch_add(1, Ordering::SeqCst);
                             *result
-                        },
+                        }
                     }
-                },
+                }
 
                 InitPattern::AsyncTryInitSuccess => {
                     async_attempts.fetch_add(1, Ordering::SeqCst);
@@ -282,7 +287,7 @@ fn test_concurrent_init_enhanced(
                     });
                     successful_inits.fetch_add(1, Ordering::SeqCst);
                     *result
-                },
+                }
 
                 InitPattern::AsyncTryInitFailure => {
                     async_attempts.fetch_add(1, Ordering::SeqCst);
@@ -292,11 +297,13 @@ fn test_concurrent_init_enhanced(
                         Some(v) => *v,
                         None => 0u32.wrapping_sub(1), // Sentinel for "not initialized"
                     }
-                },
+                }
             };
 
             // Record the result
-            results_clone.lock().push((thread_id, thread_result, pattern));
+            results_clone
+                .lock()
+                .push((thread_id, thread_result, pattern));
             thread_result
         });
 
@@ -446,18 +453,24 @@ fn verify_enhanced_correctness(
 
     // Property 1: If any successful init happened, cell should be initialized
     if success_count > 0 {
-        assert!(final_value.is_some(),
-            "OnceCell should be initialized after {} successful attempts", success_count);
+        assert!(
+            final_value.is_some(),
+            "OnceCell should be initialized after {} successful attempts",
+            success_count
+        );
 
         if let Some(value) = final_value {
-            assert_eq!(*value, expected_value,
-                "Final value should match expected value");
+            assert_eq!(
+                *value, expected_value,
+                "Final value should match expected value"
+            );
         }
     }
 
     // Property 2: All results should be consistent among non-sentinel values
     let sentinel = 0u32.wrapping_sub(1); // u32::MAX
-    let non_sentinel_values: Vec<u32> = results_guard.iter()
+    let non_sentinel_values: Vec<u32> = results_guard
+        .iter()
         .map(|(_, value, _)| *value)
         .filter(|&v| v != sentinel)
         .collect();
@@ -465,20 +478,25 @@ fn verify_enhanced_correctness(
     if !non_sentinel_values.is_empty() {
         let first_value = non_sentinel_values[0];
         for &value in &non_sentinel_values {
-            assert_eq!(value, first_value,
+            assert_eq!(
+                value, first_value,
                 "All non-sentinel values should be identical, but got {} and {}",
-                first_value, value);
+                first_value, value
+            );
         }
 
         // If we have non-sentinel values, they should match the expected value
         if success_count > 0 {
-            assert_eq!(first_value, expected_value,
-                "Non-sentinel values should match expected value");
+            assert_eq!(
+                first_value, expected_value,
+                "Non-sentinel values should match expected value"
+            );
         }
     }
 
     // Property 3: Thread results consistency
-    let non_sentinel_thread_results: Vec<u32> = thread_results.iter()
+    let non_sentinel_thread_results: Vec<u32> = thread_results
+        .iter()
         .filter(|&&v| v != sentinel)
         .copied()
         .collect();
@@ -486,32 +504,47 @@ fn verify_enhanced_correctness(
     if !non_sentinel_thread_results.is_empty() {
         let first_result = non_sentinel_thread_results[0];
         for &result in &non_sentinel_thread_results {
-            assert_eq!(result, first_result,
-                "All thread results should be consistent");
+            assert_eq!(
+                result, first_result,
+                "All thread results should be consistent"
+            );
         }
     }
 
     // Property 4: Accounting consistency
-    assert_eq!(results_guard.len(), thread_count,
-        "Should have results from all threads");
+    assert_eq!(
+        results_guard.len(),
+        thread_count,
+        "Should have results from all threads"
+    );
 
     // Property 5: Init attempt accounting should be reasonable
     let total_init_attempts = blocking_attempts + async_attempts + set_count;
     if total_init_attempts > 0 {
         // We should have at least some success if there were init attempts
         // (unless all were GetOnly patterns)
-        let _get_only_count = results_guard.iter()
+        let _get_only_count = results_guard
+            .iter()
             .filter(|(_, _, pattern)| matches!(pattern, InitPattern::GetOnly))
             .count();
 
-        let active_init_count = results_guard.iter()
-            .filter(|(_, _, pattern)| !matches!(pattern, InitPattern::GetOnly | InitPattern::AsyncTryInitFailure))
+        let active_init_count = results_guard
+            .iter()
+            .filter(|(_, _, pattern)| {
+                !matches!(
+                    pattern,
+                    InitPattern::GetOnly | InitPattern::AsyncTryInitFailure
+                )
+            })
             .count();
 
         if active_init_count > 0 {
             // Should have at least one successful initialization
-            assert!(success_count >= 1 || final_value.is_some(),
-                "Should have at least one successful init with {} active init threads", active_init_count);
+            assert!(
+                success_count >= 1 || final_value.is_some(),
+                "Should have at least one successful init with {} active init threads",
+                active_init_count
+            );
         }
     }
 
@@ -521,14 +554,19 @@ fn verify_enhanced_correctness(
             InitPattern::GetOnly | InitPattern::AsyncTryInitFailure => {
                 // These patterns may see sentinel values if cell is uninitialized
                 // No specific assertion needed
-            },
-            InitPattern::BlockingInit | InitPattern::DirectSet |
-            InitPattern::GetThenInit | InitPattern::AsyncTryInitSuccess => {
+            }
+            InitPattern::BlockingInit
+            | InitPattern::DirectSet
+            | InitPattern::GetThenInit
+            | InitPattern::AsyncTryInitSuccess => {
                 if *observed_value != sentinel {
-                    assert_eq!(*observed_value, expected_value,
-                        "Thread {} with pattern {:?} should see expected value", thread_id, pattern);
+                    assert_eq!(
+                        *observed_value, expected_value,
+                        "Thread {} with pattern {:?} should see expected value",
+                        thread_id, pattern
+                    );
                 }
-            },
+            }
         }
     }
 }

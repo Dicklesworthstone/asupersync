@@ -77,7 +77,9 @@ struct TransportConfig {
 /// Generate bounded string for fuzzing
 fn arbitrary_string(u: &mut arbitrary::Unstructured) -> arbitrary::Result<String> {
     let len = u.int_in_range(0..=MAX_LINE_LEN)?;
-    let bytes: Vec<u8> = (0..len).map(|_| u.arbitrary::<u8>()).collect::<Result<Vec<_>, _>>()?;
+    let bytes: Vec<u8> = (0..len)
+        .map(|_| u.arbitrary::<u8>())
+        .collect::<Result<Vec<_>, _>>()?;
 
     // Convert to valid UTF-8, replacing invalid sequences
     Ok(String::from_utf8_lossy(&bytes).into_owned())
@@ -102,7 +104,8 @@ struct ChunkedTransport {
 
 impl ChunkedTransport {
     fn new(data: Vec<u8>, config: TransportConfig) -> Self {
-        let chunk_sizes: VecDeque<usize> = config.chunk_sizes
+        let chunk_sizes: VecDeque<usize> = config
+            .chunk_sizes
             .into_iter()
             .map(|size| (size as usize).max(1).min(64))
             .collect();
@@ -133,7 +136,7 @@ impl AsyncRead for ChunkedTransport {
             if this.bytes_read >= error_after {
                 return Poll::Ready(Err(io::Error::new(
                     io::ErrorKind::BrokenPipe,
-                    "injected transport error"
+                    "injected transport error",
                 )));
             }
         }
@@ -142,7 +145,8 @@ impl AsyncRead for ChunkedTransport {
             return Poll::Ready(Ok(()));
         }
 
-        let to_read = buf.remaining()
+        let to_read = buf
+            .remaining()
             .min(this.current_chunk_remaining)
             .min(this.read_data.len());
 
@@ -214,7 +218,9 @@ fn apply_buffer_modification(
 }
 
 /// Reconstruct Framed from parts - this is the core reset-and-reuse pattern
-fn reconstruct_framed(mut parts: FramedParts<ChunkedTransport, LinesCodec>) -> (Framed<ChunkedTransport, LinesCodec>, BytesMut, BytesMut) {
+fn reconstruct_framed(
+    mut parts: FramedParts<ChunkedTransport, LinesCodec>,
+) -> (Framed<ChunkedTransport, LinesCodec>, BytesMut, BytesMut) {
     // The reset-and-reuse pattern: extract codec with its internal decoder state,
     // and create a new Framed instance. Return the orphaned buffers for validation.
 
@@ -236,12 +242,16 @@ fuzz_target!(|input: ResetReuseInput| {
 
     // Prepare test data by encoding lines
     let mut encoded_data = Vec::new();
-    let expected_lines: Vec<String> = input.lines.iter().map(|line_data| {
-        let line_ending = if line_data.use_crlf { "\r\n" } else { "\n" };
-        let full_line = format!("{}{}", line_data.content, line_ending);
-        encoded_data.extend_from_slice(full_line.as_bytes());
-        line_data.content.clone()
-    }).collect();
+    let expected_lines: Vec<String> = input
+        .lines
+        .iter()
+        .map(|line_data| {
+            let line_ending = if line_data.use_crlf { "\r\n" } else { "\n" };
+            let full_line = format!("{}{}", line_data.content, line_ending);
+            encoded_data.extend_from_slice(full_line.as_bytes());
+            line_data.content.clone()
+        })
+        .collect();
 
     if encoded_data.len() > 1_000_000 {
         return; // Prevent excessive memory usage
@@ -264,7 +274,8 @@ fuzz_target!(|input: ResetReuseInput| {
     // Main fuzzing loop with reset-and-reuse cycles
     loop {
         // Check if we should trigger a reset cycle
-        let should_reset = reset_cycles.front()
+        let should_reset = reset_cycles
+            .front()
             .map(|cycle| frames_decoded >= cycle.after_frames as u32)
             .unwrap_or(false);
 
@@ -286,8 +297,14 @@ fuzz_target!(|input: ResetReuseInput| {
             // INVARIANT: Orphaned buffers represent data that was mid-flight during reset
             // In a real implementation, this data would need to be preserved or handled
             // For testing purposes, verify the buffers don't contain invalid state
-            assert!(orphaned_read_buf.len() <= 8192, "Read buffer too large after reset");
-            assert!(orphaned_write_buf.len() <= 8192, "Write buffer too large after reset");
+            assert!(
+                orphaned_read_buf.len() <= 8192,
+                "Read buffer too large after reset"
+            );
+            assert!(
+                orphaned_write_buf.len() <= 8192,
+                "Write buffer too large after reset"
+            );
 
             // Reset frame counter for next cycle
             frames_decoded = 0;
@@ -331,8 +348,10 @@ fuzz_target!(|input: ResetReuseInput| {
     // (may be fewer due to transport errors or partial processing)
     for (i, decoded) in decoded_lines.iter().enumerate() {
         if let Some(expected) = expected_lines.get(i) {
-            assert_eq!(decoded, expected,
-                "Frame {i} mismatch after {reset_count} reset cycles: expected '{expected}', got '{decoded}'");
+            assert_eq!(
+                decoded, expected,
+                "Frame {i} mismatch after {reset_count} reset cycles: expected '{expected}', got '{decoded}'"
+            );
         }
     }
 
