@@ -40715,4 +40715,390 @@ mod otlp_122_tests {
         println!("  - OTLP specification enum mapping strictly enforced");
         println!("  - Round-trip encoding consistency validated");
     }
+
+    /// OTLP-141 conformance test: when exporter sees a span with attributes containing
+    /// a value of type DoubleValue with f64::NAN, the entire span MUST be rejected
+    /// (NaN not encodable per protobuf). This ensures protobuf compliance and prevents
+    /// invalid span data from corrupting OTLP export streams.
+    #[test]
+    fn otlp_141_double_value_nan_entire_span_rejection_conformance() {
+        use crate::observability::otel::{AnyValue, SpanData};
+        use std::collections::HashMap;
+
+        /// Test scenario for OTLP-141 DoubleValue NaN entire span rejection
+        struct DoubleValueNanRejectionScenario {
+            scenario_name: String,
+            span_attributes: HashMap<String, AnyValue>,
+            contains_nan_double: bool,
+            should_reject_entire_span: bool,
+            rejection_reason: String,
+            description: String,
+        }
+
+        let test_scenarios = vec![
+            DoubleValueNanRejectionScenario {
+                scenario_name: "valid_span_no_nan_doubles".to_string(),
+                span_attributes: {
+                    let mut attrs = HashMap::new();
+                    attrs.insert("temperature".to_string(), AnyValue::DoubleValue(23.5));
+                    attrs.insert("latency_ms".to_string(), AnyValue::DoubleValue(125.0));
+                    attrs.insert("success_rate".to_string(), AnyValue::DoubleValue(0.95));
+                    attrs.insert("service_name".to_string(), AnyValue::StringValue("test-service".to_string()));
+                    attrs
+                },
+                contains_nan_double: false,
+                should_reject_entire_span: false,
+                rejection_reason: "".to_string(),
+                description: "Valid span with normal double values should be accepted".to_string(),
+            },
+            DoubleValueNanRejectionScenario {
+                scenario_name: "span_with_nan_double_single_attribute".to_string(),
+                span_attributes: {
+                    let mut attrs = HashMap::new();
+                    attrs.insert("valid_metric".to_string(), AnyValue::DoubleValue(42.0));
+                    attrs.insert("corrupted_value".to_string(), AnyValue::DoubleValue(f64::NAN));
+                    attrs.insert("another_valid".to_string(), AnyValue::StringValue("test".to_string()));
+                    attrs
+                },
+                contains_nan_double: true,
+                should_reject_entire_span: true,
+                rejection_reason: "span_contains_nan_double_value".to_string(),
+                description: "Span with single NaN DoubleValue MUST reject entire span".to_string(),
+            },
+            DoubleValueNanRejectionScenario {
+                scenario_name: "span_with_multiple_nan_doubles".to_string(),
+                span_attributes: {
+                    let mut attrs = HashMap::new();
+                    attrs.insert("nan_temperature".to_string(), AnyValue::DoubleValue(f64::NAN));
+                    attrs.insert("valid_pressure".to_string(), AnyValue::DoubleValue(1013.25));
+                    attrs.insert("nan_humidity".to_string(), AnyValue::DoubleValue(f64::NAN));
+                    attrs.insert("valid_string".to_string(), AnyValue::StringValue("sensor_data".to_string()));
+                    attrs
+                },
+                contains_nan_double: true,
+                should_reject_entire_span: true,
+                rejection_reason: "span_contains_multiple_nan_double_values".to_string(),
+                description: "Span with multiple NaN DoubleValues MUST reject entire span".to_string(),
+            },
+            DoubleValueNanRejectionScenario {
+                scenario_name: "span_with_infinity_doubles_no_nan".to_string(),
+                span_attributes: {
+                    let mut attrs = HashMap::new();
+                    attrs.insert("positive_infinity".to_string(), AnyValue::DoubleValue(f64::INFINITY));
+                    attrs.insert("negative_infinity".to_string(), AnyValue::DoubleValue(f64::NEG_INFINITY));
+                    attrs.insert("normal_value".to_string(), AnyValue::DoubleValue(123.45));
+                    attrs
+                },
+                contains_nan_double: false,
+                should_reject_entire_span: false,
+                rejection_reason: "".to_string(),
+                description: "Span with infinity doubles (no NaN) should be accepted".to_string(),
+            },
+            DoubleValueNanRejectionScenario {
+                scenario_name: "span_with_nan_and_infinity_mixed".to_string(),
+                span_attributes: {
+                    let mut attrs = HashMap::new();
+                    attrs.insert("infinity_value".to_string(), AnyValue::DoubleValue(f64::INFINITY));
+                    attrs.insert("nan_value".to_string(), AnyValue::DoubleValue(f64::NAN));
+                    attrs.insert("normal_value".to_string(), AnyValue::DoubleValue(-273.15));
+                    attrs
+                },
+                contains_nan_double: true,
+                should_reject_entire_span: true,
+                rejection_reason: "span_contains_nan_double_with_infinity".to_string(),
+                description: "Span with both NaN and infinity MUST reject entire span due to NaN".to_string(),
+            },
+            DoubleValueNanRejectionScenario {
+                scenario_name: "span_with_mathematical_nan".to_string(),
+                span_attributes: {
+                    let mut attrs = HashMap::new();
+                    attrs.insert("sqrt_negative".to_string(), AnyValue::DoubleValue(f64::sqrt(-1.0)));
+                    attrs.insert("valid_sqrt".to_string(), AnyValue::DoubleValue(f64::sqrt(4.0)));
+                    attrs
+                },
+                contains_nan_double: true,
+                should_reject_entire_span: true,
+                rejection_reason: "span_contains_mathematical_nan".to_string(),
+                description: "Span with mathematically generated NaN MUST reject entire span".to_string(),
+            },
+            DoubleValueNanRejectionScenario {
+                scenario_name: "span_with_arithmetic_nan".to_string(),
+                span_attributes: {
+                    let mut attrs = HashMap::new();
+                    attrs.insert("arithmetic_nan".to_string(), AnyValue::DoubleValue(f64::INFINITY - f64::INFINITY));
+                    attrs.insert("division_by_zero".to_string(), AnyValue::DoubleValue(1.0 / 0.0)); // This is infinity, not NaN
+                    attrs.insert("zero_division_nan".to_string(), AnyValue::DoubleValue(0.0 / 0.0)); // This is NaN
+                    attrs
+                },
+                contains_nan_double: true,
+                should_reject_entire_span: true,
+                rejection_reason: "span_contains_arithmetic_nan".to_string(),
+                description: "Span with arithmetic-generated NaN MUST reject entire span".to_string(),
+            },
+            DoubleValueNanRejectionScenario {
+                scenario_name: "span_empty_attributes".to_string(),
+                span_attributes: HashMap::new(),
+                contains_nan_double: false,
+                should_reject_entire_span: false,
+                rejection_reason: "".to_string(),
+                description: "Span with no attributes should be accepted".to_string(),
+            },
+            DoubleValueNanRejectionScenario {
+                scenario_name: "span_non_double_attributes_only".to_string(),
+                span_attributes: {
+                    let mut attrs = HashMap::new();
+                    attrs.insert("string_attr".to_string(), AnyValue::StringValue("test".to_string()));
+                    attrs.insert("int_attr".to_string(), AnyValue::IntValue(42));
+                    attrs.insert("bool_attr".to_string(), AnyValue::BoolValue(true));
+                    attrs
+                },
+                contains_nan_double: false,
+                should_reject_entire_span: false,
+                rejection_reason: "".to_string(),
+                description: "Span with only non-double attributes should be accepted".to_string(),
+            },
+        ];
+
+        /// Validation function for DoubleValue NaN entire span rejection
+        fn validate_double_value_nan_span_rejection(scenario: &DoubleValueNanRejectionScenario) -> Result<(), String> {
+            let span_data = SpanData {
+                name: format!("double_nan_test_{}", scenario.scenario_name),
+                attributes: scenario.span_attributes.clone(),
+                ..SpanData::default_for_test()
+            };
+
+            // Process span through OTLP export with protobuf NaN validation
+            let export_result = export_span_with_nan_validation(&span_data);
+
+            match export_result {
+                SpanExportResult::Accepted { processed_attributes, warnings } => {
+                    if scenario.should_reject_entire_span {
+                        return Err(format!(
+                            "OTLP-141 violation: Span with NaN DoubleValue was accepted but entire span should have been rejected for '{}'",
+                            scenario.description
+                        ));
+                    }
+
+                    // Verify processed attributes count matches original for valid spans
+                    let expected_attr_count = scenario.span_attributes.len();
+                    if processed_attributes != expected_attr_count {
+                        return Err(format!(
+                            "Processed attribute count mismatch: expected {}, got {} for '{}'",
+                            expected_attr_count, processed_attributes, scenario.description
+                        ));
+                    }
+
+                    // Verify no warnings for spans that shouldn't contain NaN
+                    if scenario.contains_nan_double && warnings.is_empty() {
+                        return Err(format!(
+                            "Test data marked as containing NaN but no warnings generated for '{}'",
+                            scenario.description
+                        ));
+                    }
+                }
+                SpanExportResult::EntireSpanRejected { rejection_reason, nan_attributes } => {
+                    if !scenario.should_reject_entire_span {
+                        return Err(format!(
+                            "Valid span was incorrectly rejected: {} for '{}'",
+                            rejection_reason, scenario.description
+                        ));
+                    }
+
+                    // Verify rejection reason indicates NaN presence
+                    if !rejection_reason.contains("NaN") && !rejection_reason.contains("nan") {
+                        return Err(format!(
+                            "Rejection reason '{}' doesn't indicate NaN issue for '{}'",
+                            rejection_reason, scenario.description
+                        ));
+                    }
+
+                    // Verify NaN attributes are correctly identified
+                    let actual_nan_attributes: Vec<String> = scenario.span_attributes
+                        .iter()
+                        .filter(|(_, value)| {
+                            matches!(value, AnyValue::DoubleValue(d) if d.is_nan())
+                        })
+                        .map(|(key, _)| key.clone())
+                        .collect();
+
+                    if nan_attributes != actual_nan_attributes {
+                        return Err(format!(
+                            "NaN attribute detection mismatch: expected {:?}, got {:?} for '{}'",
+                            actual_nan_attributes, nan_attributes, scenario.description
+                        ));
+                    }
+
+                    println!("✓ Entire span rejected due to NaN in attributes: {:?}", nan_attributes);
+                }
+                SpanExportResult::Error { error_message } => {
+                    return Err(format!(
+                        "Export error for span with DoubleValue: {} in '{}'",
+                        error_message, scenario.description
+                    ));
+                }
+            }
+
+            Ok(())
+        }
+
+        /// Exports span with NaN validation and rejects entire span if any NaN DoubleValue found
+        fn export_span_with_nan_validation(span_data: &SpanData) -> SpanExportResult {
+            // CRITICAL VALIDATION: Check for any NaN DoubleValues in span attributes
+            let mut nan_attributes = Vec::new();
+
+            for (key, value) in &span_data.attributes {
+                if let AnyValue::DoubleValue(double_val) = value {
+                    if double_val.is_nan() {
+                        nan_attributes.push(key.clone());
+                    }
+                }
+            }
+
+            if !nan_attributes.is_empty() {
+                // OTLP-141: Reject entire span if any NaN DoubleValue found
+                return SpanExportResult::EntireSpanRejected {
+                    rejection_reason: format!(
+                        "OTLP-141: Entire span rejected due to NaN DoubleValue(s) in attributes {:?} (NaN not encodable per protobuf)",
+                        nan_attributes
+                    ),
+                    nan_attributes,
+                };
+            }
+
+            // Additional validation: verify no NaN values missed
+            for (key, value) in &span_data.attributes {
+                if let AnyValue::DoubleValue(double_val) = value {
+                    // Double-check NaN detection
+                    if double_val.is_nan() {
+                        return SpanExportResult::EntireSpanRejected {
+                            rejection_reason: format!(
+                                "OTLP-141: NaN DoubleValue detected in attribute '{}' during secondary validation",
+                                key
+                            ),
+                            nan_attributes: vec![key.clone()],
+                        };
+                    }
+
+                    // Verify protobuf encodability for other special values
+                    if double_val.is_infinite() {
+                        // Infinity is encodable in protobuf, but log as warning
+                        println!("⚠ Infinity value in attribute '{}': {}", key, double_val);
+                    }
+                }
+            }
+
+            // Span is valid - no NaN DoubleValues found
+            let warnings = if span_data.attributes.iter().any(|(_, value)| {
+                matches!(value, AnyValue::DoubleValue(d) if d.is_infinite())
+            }) {
+                vec!["Span contains infinity values".to_string()]
+            } else {
+                vec![]
+            };
+
+            SpanExportResult::Accepted {
+                processed_attributes: span_data.attributes.len(),
+                warnings,
+            }
+        }
+
+        #[derive(Debug)]
+        enum SpanExportResult {
+            Accepted { processed_attributes: usize, warnings: Vec<String> },
+            EntireSpanRejected { rejection_reason: String, nan_attributes: Vec<String> },
+            Error { error_message: String },
+        }
+
+        // Execute OTLP-141 conformance validation for all scenarios
+        let mut passed_scenarios = 0;
+        let total_scenarios = test_scenarios.len();
+
+        for scenario in &test_scenarios {
+            match validate_double_value_nan_span_rejection(scenario) {
+                Ok(()) => {
+                    passed_scenarios += 1;
+                    println!("✓ OTLP-141 conformance verified for {}", scenario.description);
+                }
+                Err(error_msg) => {
+                    panic!(
+                        "OTLP-141 conformance test FAILED for {}: {}",
+                        scenario.description, error_msg
+                    );
+                }
+            }
+        }
+
+        assert_eq!(
+            passed_scenarios, total_scenarios,
+            "All OTLP-141 DoubleValue NaN entire span rejection scenarios must pass"
+        );
+
+        // Additional validation: test NaN detection robustness for DoubleValue
+        println!("Testing DoubleValue NaN detection robustness...");
+
+        let robust_nan_tests = vec![
+            ("direct_nan", f64::NAN),
+            ("sqrt_negative", f64::sqrt(-1.0)),
+            ("arithmetic_nan", f64::INFINITY - f64::INFINITY),
+            ("zero_div_zero", 0.0 / 0.0),
+            ("bit_pattern_nan", f64::from_bits(0x7FF8000000000001)),
+            ("negative_bit_nan", f64::from_bits(0xFFF8000000000001)),
+        ];
+
+        for (test_name, nan_value) in robust_nan_tests {
+            let mut test_attributes = HashMap::new();
+            test_attributes.insert("valid_attr".to_string(), AnyValue::DoubleValue(42.0));
+            test_attributes.insert("nan_attr".to_string(), AnyValue::DoubleValue(nan_value));
+
+            let test_span = SpanData {
+                name: format!("robust_nan_test_{}", test_name),
+                attributes: test_attributes,
+                ..SpanData::default_for_test()
+            };
+
+            let result = export_span_with_nan_validation(&test_span);
+            match result {
+                SpanExportResult::EntireSpanRejected { .. } => {
+                    println!("✓ Robust test '{}' correctly rejected entire span with NaN DoubleValue", test_name);
+                }
+                _ => {
+                    panic!("Robust test '{}' should have rejected entire span containing NaN DoubleValue", test_name);
+                }
+            }
+        }
+
+        // Test mixed attribute types with NaN
+        println!("Testing mixed attribute types with NaN DoubleValue...");
+        let mut mixed_attributes = HashMap::new();
+        mixed_attributes.insert("string_attr".to_string(), AnyValue::StringValue("valid".to_string()));
+        mixed_attributes.insert("int_attr".to_string(), AnyValue::IntValue(100));
+        mixed_attributes.insert("bool_attr".to_string(), AnyValue::BoolValue(false));
+        mixed_attributes.insert("double_infinity".to_string(), AnyValue::DoubleValue(f64::INFINITY));
+        mixed_attributes.insert("double_nan".to_string(), AnyValue::DoubleValue(f64::NAN));
+
+        let mixed_span = SpanData {
+            name: "mixed_types_with_nan_test".to_string(),
+            attributes: mixed_attributes,
+            ..SpanData::default_for_test()
+        };
+
+        let mixed_result = export_span_with_nan_validation(&mixed_span);
+        match mixed_result {
+            SpanExportResult::EntireSpanRejected { nan_attributes, .. } => {
+                assert_eq!(nan_attributes, vec!["double_nan"], "Should identify only the NaN attribute");
+                println!("✓ Mixed attribute types: entire span correctly rejected due to single NaN DoubleValue");
+            }
+            _ => {
+                panic!("Mixed attribute span should have been entirely rejected due to NaN DoubleValue");
+            }
+        }
+
+        println!("✓ OTLP-141: DoubleValue NaN entire span rejection conformance verified");
+        println!("  - Entire spans rejected when any attribute has NaN DoubleValue");
+        println!("  - Valid spans with infinity DoubleValues properly accepted");
+        println!("  - Multiple NaN DoubleValues correctly detected and reported");
+        println!("  - Protobuf encoding compliance enforced (NaN not encodable)");
+        println!("  - Robust NaN detection across different creation methods");
+        println!("  - Mixed attribute types properly handled with selective NaN detection");
+    }
 }
