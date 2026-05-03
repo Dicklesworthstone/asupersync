@@ -32,6 +32,8 @@ use crate::record::RegionLimits;
 use crate::runtime::deadline_monitor::{DeadlineWarning, MonitorConfig};
 use crate::trace::distributed::LogicalClockMode;
 use crate::types::CancelAttributionConfig;
+use std::fmt;
+use std::str::FromStr;
 use std::sync::Arc;
 
 /// Configuration for the blocking pool.
@@ -182,6 +184,18 @@ pub enum TraceStorageProfile {
     LargeMemory256G,
 }
 
+/// Parse error for [`TraceStorageProfile`] text values.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ParseTraceStorageProfileError;
+
+impl fmt::Display for ParseTraceStorageProfileError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("unknown trace storage profile")
+    }
+}
+
+impl std::error::Error for ParseTraceStorageProfileError {}
+
 /// Operator-facing budget summary for a [`TraceStorageProfile`].
 ///
 /// The byte totals are planning estimates derived from explicit per-slot
@@ -251,6 +265,15 @@ impl TraceStorageProfile {
     const ASSUMED_CANCELLATION_TRACE_BYTES: usize = 2_048;
     const ASSUMED_DISTRIBUTED_TRACE_BYTES: usize = 1_536;
 
+    /// Returns the stable operator-facing name for the profile.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Default => "default",
+            Self::LargeMemory256G => "large-memory-256g",
+        }
+    }
+
     /// Returns the hot trace ring capacity for the profile.
     #[must_use]
     pub const fn trace_buffer_capacity(self) -> usize {
@@ -302,6 +325,24 @@ impl TraceStorageProfile {
             assumed_trace_event_bytes: Self::ASSUMED_TRACE_EVENT_BYTES,
             assumed_cancellation_trace_bytes: Self::ASSUMED_CANCELLATION_TRACE_BYTES,
             assumed_distributed_trace_bytes: Self::ASSUMED_DISTRIBUTED_TRACE_BYTES,
+        }
+    }
+}
+
+impl fmt::Display for TraceStorageProfile {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl FromStr for TraceStorageProfile {
+    type Err = ParseTraceStorageProfileError;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "default" => Ok(Self::Default),
+            "large-memory-256g" | "large_memory_256g" => Ok(Self::LargeMemory256G),
+            _ => Err(ParseTraceStorageProfileError),
         }
     }
 }
@@ -810,6 +851,63 @@ mod tests {
             config.cancel_attribution
         );
         crate::test_complete!("test_default_config_sane");
+    }
+
+    #[test]
+    fn trace_storage_profile_text_roundtrip_is_stable() {
+        init_test("trace_storage_profile_text_roundtrip_is_stable");
+        crate::assert_with_log!(
+            TraceStorageProfile::Default.as_str() == "default",
+            "default as_str",
+            "default",
+            TraceStorageProfile::Default.as_str()
+        );
+        crate::assert_with_log!(
+            TraceStorageProfile::LargeMemory256G.as_str() == "large-memory-256g",
+            "large-memory as_str",
+            "large-memory-256g",
+            TraceStorageProfile::LargeMemory256G.as_str()
+        );
+        crate::assert_with_log!(
+            TraceStorageProfile::Default.to_string() == "default",
+            "default display",
+            "default",
+            TraceStorageProfile::Default.to_string()
+        );
+        crate::assert_with_log!(
+            TraceStorageProfile::LargeMemory256G.to_string() == "large-memory-256g",
+            "large-memory display",
+            "large-memory-256g",
+            TraceStorageProfile::LargeMemory256G.to_string()
+        );
+        crate::assert_with_log!(
+            TraceStorageProfile::from_str("default").expect("parse default")
+                == TraceStorageProfile::Default,
+            "default parse",
+            TraceStorageProfile::Default,
+            TraceStorageProfile::from_str("default").expect("parse default")
+        );
+        crate::assert_with_log!(
+            TraceStorageProfile::from_str("large-memory-256g").expect("parse large-memory kebab")
+                == TraceStorageProfile::LargeMemory256G,
+            "large-memory kebab parse",
+            TraceStorageProfile::LargeMemory256G,
+            TraceStorageProfile::from_str("large-memory-256g").expect("parse large-memory kebab")
+        );
+        crate::assert_with_log!(
+            TraceStorageProfile::from_str("large_memory_256g").expect("parse large-memory alias")
+                == TraceStorageProfile::LargeMemory256G,
+            "large-memory underscore parse",
+            TraceStorageProfile::LargeMemory256G,
+            TraceStorageProfile::from_str("large_memory_256g").expect("parse large-memory alias")
+        );
+        crate::assert_with_log!(
+            TraceStorageProfile::from_str("invalid-profile").is_err(),
+            "invalid parse rejected",
+            true,
+            TraceStorageProfile::from_str("invalid-profile").is_err()
+        );
+        crate::test_complete!("trace_storage_profile_text_roundtrip_is_stable");
     }
 
     fn zero_minimums_config() -> RuntimeConfig {
