@@ -52,6 +52,8 @@ pub mod health;
 pub mod interceptor;
 pub mod protobuf;
 pub mod reflection;
+#[cfg(test)]
+pub mod reflection_method_list_audit;
 pub mod server;
 pub mod service;
 pub mod status;
