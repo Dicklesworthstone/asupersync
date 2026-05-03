@@ -4919,3 +4919,9 @@ name = "h2_data_with_padding_full_frame"
 path = "fuzz_targets/h2_data_with_padding_full_frame.rs"
 test = false
 doc = false
+
+[[bin]]
+name = "h2_settings_unknown_id_with_known"
+path = "fuzz_targets/h2_settings_unknown_id_with_known.rs"
+test = false
+doc = false
