@@ -151,10 +151,22 @@ The runner reads `artifacts/decision_plane_validation_v1.json` and emits:
 
 1. Per-scenario bundle manifests with schema `decision-plane-validation-smoke-bundle-v1`
 2. Aggregate run report with schema `decision-plane-validation-smoke-run-report-v1`
-3. For `AA023-SMOKE-CONTROLLER-LEDGER`, deterministic exported controller-state artifacts:
+3. Timeout-bounded execute-mode diagnostics:
+   - `timeout_seconds`
+   - `command_exit_code`
+   - `timeout_observed`
+   - `rch_remote_success_observed`
+   - `required_log_markers`
+   - `missing_log_markers`
+4. Required marker checks for every scenario so an `rch` wrapper success cannot hide
+   missing proof output.
+5. `passed_after_rch_retrieval_timeout` when the remote cargo command finished
+   successfully, every required marker is present, and only `.rch-target` artifact
+   retrieval timed out locally.
+6. For `AA023-SMOKE-CONTROLLER-LEDGER`, deterministic exported controller-state artifacts:
    - `.decision-plane-validation-smoke-artifacts/run_*/AA023-SMOKE-CONTROLLER-LEDGER/controller_snapshot_ledger.json`
    - `.decision-plane-validation-smoke-artifacts/run_*/AA023-SMOKE-CONTROLLER-LEDGER/controller_snapshot_planner_rows.json`
-4. For `AA023-SMOKE-CONTROLLER-INTERFERENCE`, deterministic composition artifacts:
+7. For `AA023-SMOKE-CONTROLLER-INTERFERENCE`, deterministic composition artifacts:
    - `.decision-plane-validation-smoke-artifacts/run_*/AA023-SMOKE-CONTROLLER-INTERFERENCE/controller_interference_matrix.json`
    - `.decision-plane-validation-smoke-artifacts/run_*/AA023-SMOKE-CONTROLLER-INTERFERENCE/controller_interference_report.json`
 
@@ -168,10 +180,10 @@ bash ./scripts/run_decision_plane_validation_smoke.sh --list
 bash ./scripts/run_decision_plane_validation_smoke.sh --scenario AA023-SMOKE-TRANSITIONS --dry-run
 
 # Execute one scenario
-bash ./scripts/run_decision_plane_validation_smoke.sh --scenario AA023-SMOKE-TRANSITIONS --execute
+bash ./scripts/run_decision_plane_validation_smoke.sh --scenario AA023-SMOKE-TRANSITIONS --execute --timeout-seconds 240
 
 # Execute controller-composition proof
-bash ./scripts/run_decision_plane_validation_smoke.sh --scenario AA023-SMOKE-CONTROLLER-INTERFERENCE --execute
+bash ./scripts/run_decision_plane_validation_smoke.sh --scenario AA023-SMOKE-CONTROLLER-INTERFERENCE --execute --timeout-seconds 240
 ```
 
 ## Validation
@@ -179,7 +191,7 @@ bash ./scripts/run_decision_plane_validation_smoke.sh --scenario AA023-SMOKE-CON
 Focused invariant test command (routed through `rch`):
 
 ```bash
-rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=/tmp/rch-codex-aa023 cargo test --test decision_plane_validation_contract -- --nocapture
+rch exec -- env CARGO_INCREMENTAL=0 cargo test --test decision_plane_validation_contract -- --nocapture
 ```
 
 ## Cross-References

@@ -388,25 +388,54 @@
     {
       "scenario_id": "AA023-SMOKE-TRANSITIONS",
       "description": "Validate state transition scenarios via contract tests",
-      "command": "rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=/tmp/rch-codex-aa023 cargo test --test decision_plane_validation_contract transition -- --nocapture",
+      "command": "rch exec -- env CARGO_INCREMENTAL=0 cargo test --test decision_plane_validation_contract transition -- --nocapture",
+      "required_log_markers": [
+        "transition_shadow_observe",
+        "transition_promote_shadow_canary",
+        "transition_reject_skip_shadow_active",
+        "test result: ok",
+        "Remote command finished: exit=0"
+      ],
       "expected_artifacts": []
     },
     {
       "scenario_id": "AA023-SMOKE-ROLLBACKS",
       "description": "Validate rollback and recovery command scenarios",
-      "command": "rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=/tmp/rch-codex-aa023 cargo test --test decision_plane_validation_contract rollback -- --nocapture",
+      "command": "rch exec -- env CARGO_INCREMENTAL=0 cargo test --test decision_plane_validation_contract rollback -- --nocapture",
+      "required_log_markers": [
+        "rollback_calibration_regression",
+        "rollback_budget_overruns",
+        "rollback_fallback_triggered",
+        "test result: ok",
+        "Remote command finished: exit=0"
+      ],
       "expected_artifacts": []
     },
     {
       "scenario_id": "AA023-SMOKE-EVIDENCE",
       "description": "Validate evidence ledger completeness and bypass prevention",
-      "command": "rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=/tmp/rch-codex-aa023 cargo test --test decision_plane_validation_contract evidence -- --nocapture",
+      "command": "rch exec -- env CARGO_INCREMENTAL=0 cargo test --test decision_plane_validation_contract evidence -- --nocapture",
+      "required_log_markers": [
+        "evidence_completeness_full_lifecycle",
+        "evidence_decision_budget_tracking",
+        "evidence_rollback_leaves_conservative_state",
+        "test result: ok",
+        "Remote command finished: exit=0"
+      ],
       "expected_artifacts": []
     },
     {
       "scenario_id": "AA023-SMOKE-CONTROLLER-LEDGER",
       "description": "Validate controller snapshot ledger schema and planner-facing rendering",
-      "command": "rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=/tmp/rch-codex-aa023 cargo test --test decision_plane_validation_contract controller_snapshot_ledger -- --nocapture",
+      "command": "rch exec -- env CARGO_INCREMENTAL=0 cargo test --test decision_plane_validation_contract controller_snapshot_ledger -- --nocapture",
+      "required_log_markers": [
+        "controller_snapshot_ledger_defaults_when_registry_is_empty",
+        "controller_snapshot_ledger_multi_controller_rendering_is_stable",
+        "ASUPERSYNC_CONTROLLER_LEDGER_JSON=",
+        "ASUPERSYNC_CONTROLLER_LEDGER_PLANNER_ROWS_JSON=",
+        "test result: ok",
+        "Remote command finished: exit=0"
+      ],
       "expected_artifacts": [
         ".decision-plane-validation-smoke-artifacts/run_*/AA023-SMOKE-CONTROLLER-LEDGER/controller_snapshot_ledger.json",
         ".decision-plane-validation-smoke-artifacts/run_*/AA023-SMOKE-CONTROLLER-LEDGER/controller_snapshot_planner_rows.json"
@@ -415,7 +444,15 @@
     {
       "scenario_id": "AA023-SMOKE-CONTROLLER-INTERFERENCE",
       "description": "Validate controller interference matrix schema plus stable, oscillating, and missing-evidence composition reports",
-      "command": "rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=/tmp/rch-codex-aa023 cargo test --test decision_plane_validation_contract controller_interference -- --nocapture",
+      "command": "rch exec -- env CARGO_INCREMENTAL=0 cargo test --test decision_plane_validation_contract controller_interference -- --nocapture",
+      "required_log_markers": [
+        "controller_interference_matrix_schema_is_stable",
+        "controller_interference_replay_report_is_stable",
+        "ASUPERSYNC_CONTROLLER_INTERFERENCE_MATRIX_JSON=",
+        "ASUPERSYNC_CONTROLLER_INTERFERENCE_REPORT_JSON=",
+        "test result: ok",
+        "Remote command finished: exit=0"
+      ],
       "expected_artifacts": [
         ".decision-plane-validation-smoke-artifacts/run_*/AA023-SMOKE-CONTROLLER-INTERFERENCE/controller_interference_matrix.json",
         ".decision-plane-validation-smoke-artifacts/run_*/AA023-SMOKE-CONTROLLER-INTERFERENCE/controller_interference_report.json"
