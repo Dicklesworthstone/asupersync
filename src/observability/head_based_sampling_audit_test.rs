@@ -16,7 +16,7 @@
 use crate::observability::otlp_trace_exporter::{
     LoadSheddingTraceExporter, MockOtlpHttpExporter, OtlpSpan, SpanBatch, TraceExporter,
 };
-use crate::observability::w3c_trace_context::{W3CTraceContext, extract_from_http};
+use crate::observability::w3c_trace_context::extract_from_http;
 use std::collections::HashMap;
 use std::time::Duration;
 
@@ -79,7 +79,7 @@ fn audit_head_based_sampling_compliance() {
             1000000000,
             1000001000,
             vec![("sampled".to_string(), "false".to_string())],
-            unsampled_context.flags.0, // Use actual flags from context
+            unsampled_context.flags.bits(), // Use actual flags from context
         )],
         created_at: std::time::Instant::now(),
     };
@@ -108,7 +108,7 @@ fn audit_head_based_sampling_compliance() {
             1000002000,
             1000003000,
             vec![("sampled".to_string(), "true".to_string())],
-            sampled_context.flags.0, // Use actual flags from context
+            sampled_context.flags.bits(), // Use actual flags from context
         )],
         created_at: std::time::Instant::now(),
     };

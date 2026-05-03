@@ -18,7 +18,7 @@
 use crate::observability::otlp_trace_exporter::{
     LoadSheddingTraceExporter, MockOtlpHttpExporter, OtlpSpan, SpanBatch, TraceExporter,
 };
-use crate::observability::w3c_trace_context::{TraceFlags, W3CTraceContext, extract_from_http};
+use crate::observability::w3c_trace_context::extract_from_http;
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
@@ -420,7 +420,7 @@ fn audit_current_implementation_w3c_compliance() {
         1000000000,
         1000001000,
         vec![("test_case".to_string(), "upstream_sampled".to_string())],
-        sampled_context.flags.0, // Use upstream flags directly
+        sampled_context.flags.bits(), // Use upstream flags directly
     ));
 
     // Test 2: Upstream sampled=0
@@ -436,7 +436,7 @@ fn audit_current_implementation_w3c_compliance() {
         1000002000,
         1000003000,
         vec![("test_case".to_string(), "upstream_unsampled".to_string())],
-        unsampled_context.flags.0, // Use upstream flags directly
+        unsampled_context.flags.bits(), // Use upstream flags directly
     ));
 
     // Test 3: No upstream (root span - local decision)
