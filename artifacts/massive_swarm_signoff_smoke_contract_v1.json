@@ -217,11 +217,11 @@
         "trusted_child_count": 1,
         "fail_closed_child_count": 5,
         "open_tracker_blocker_count": 4,
-        "dirty_cluster_fail_closed_count": 3,
+        "dirty_cluster_fail_closed_count": 1,
         "missing_artifact_path_count": 0,
         "missing_runner_path_count": 0,
         "no_unexplained_artifacts": false,
-        "projection_hash": "9b6e979f80c97afdacb4bbd8bbe30a62ac003cfc3143d940ce185bafe242558c"
+        "projection_hash": "7e082354c9779c996e3f1583b8bd0790d0496bd65812e770ca08131d2e8d2edf"
       },
       "required_log_fields": [
         "scenario_id",
@@ -251,11 +251,11 @@
         "trusted_child_count": 1,
         "fail_closed_child_count": 5,
         "open_tracker_blocker_count": 4,
-        "dirty_cluster_fail_closed_count": 3,
+        "dirty_cluster_fail_closed_count": 1,
         "missing_artifact_path_count": 0,
         "missing_runner_path_count": 0,
         "no_unexplained_artifacts": false,
-        "projection_hash": "5fa3411ec9368b49d558b903be1cae0cafaf0e409c83bb70601d6079af47cf3a"
+        "projection_hash": "e047293ec390ec589bb26c94d04352babd12d6b79affcae2400160fea13d01e0"
       },
       "required_log_fields": [
         "scenario_id",

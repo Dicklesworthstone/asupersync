@@ -1,7 +1,7 @@
 {
   "schema_version": "generated-smoke-artifact-inventory-v1",
   "bead_id": "asupersync-beih6k",
-  "generated_at": "2026-05-03T17:53:14Z",
+  "generated_at": "2026-05-03T22:50:55Z",
   "purpose": "Assign owner beads, retention decisions, reproduction commands, and stable checksums to generated swarm-perf smoke output clusters without deleting local evidence.",
   "policy": {
     "no_deletion_confirmation": true,
@@ -23,10 +23,10 @@
     }
   ],
   "local_host_snapshot": {
-    "git_head_at_inventory": "1ae94d77352e",
+    "git_head_at_inventory": "77a6a85e08de",
     "expected_cluster_count": 9,
-    "expected_file_count": 43,
-    "expected_total_bytes": 193908,
+    "expected_file_count": 44,
+    "expected_total_bytes": 203047,
     "inventory_command": "find <cluster> -maxdepth 3 -type f | sort; sha256sum over stable file lists",
     "no_deletion_confirmation": true
   },
@@ -56,17 +56,17 @@
       "cluster_id": "cohort_admission_steering",
       "output_root": ".cohort-admission-steering-smoke-artifacts",
       "owner_beads": ["asupersync-j1980r"],
-      "owner_status": "open",
+      "owner_status": "closed",
       "runner_path": "scripts/run_cohort_admission_steering_smoke.sh",
-      "runner_path_status": "tracked_runner_contract_present_owner_open",
+      "runner_path_status": "tracked_runner_contract_present_owner_closed",
       "scenario_ids": [
         "AA-COHORT-ADMISSION-STEERING-LOCALITY-WIN-2C",
         "AA-COHORT-ADMISSION-STEERING-KEEP-GLOBAL-2C"
       ],
       "report_glob": "*/AA-COHORT-ADMISSION-STEERING-*/cohort_admission_steering_report.json",
       "reproduction_command": "scripts/run_cohort_admission_steering_smoke.sh --execute --output-root .cohort-admission-steering-smoke-artifacts",
-      "retention_decision": "ignore_generated_root_keep_inventory_and_owner_blocker",
-      "signoff_status": "fail_closed_until_asupersync_j1980r_closes_with_tracked_runner_contract_and_tests",
+      "retention_decision": "ignore_generated_root_keep_inventory",
+      "signoff_status": "trusted_when_runner_contract_and_owner_closeout_are_present",
       "expected_file_count": 3,
       "expected_total_bytes": 23357,
       "stable_file_list_sha256": "4486c0a7c9826a0c7d55a77483dceb788f4ef839ca4fbf4485bd84a1a1ef24e6",
@@ -157,7 +157,7 @@
       "cluster_id": "trace_storage_profile",
       "output_root": ".trace-storage-profile-smoke-artifacts",
       "owner_beads": ["asupersync-yaj7g6"],
-      "owner_status": "open",
+      "owner_status": "closed",
       "runner_path": "scripts/run_trace_storage_profile_smoke.sh",
       "scenario_ids": ["AA-TRACE-STORAGE-LARGE-MEMORY-256G"],
       "report_glob": "*/AA-TRACE-STORAGE-*/trace_storage_profile_comparison.json",
@@ -174,7 +174,7 @@
       "cluster_id": "overload_brownout",
       "output_root": ".overload-brownout-smoke-artifacts",
       "owner_beads": ["asupersync-m1k0pz"],
-      "owner_status": "open",
+      "owner_status": "closed",
       "runner_path": "scripts/run_overload_brownout_smoke.sh",
       "scenario_ids": [
         "AA-OVERLOAD-BROWNOUT-OPTIONAL-FIRST",
@@ -182,12 +182,12 @@
       ],
       "report_glob": "*/AA-OVERLOAD-BROWNOUT-*/overload_brownout_report.json",
       "reproduction_command": "scripts/run_overload_brownout_smoke.sh --execute --output-root .overload-brownout-smoke-artifacts",
-      "retention_decision": "ignore_generated_root_keep_inventory_and_owner_blocker",
-      "signoff_status": "fail_closed_until_asupersync_m1k0pz_closes_with_brownout_contract_and_tests",
-      "expected_file_count": 2,
-      "expected_total_bytes": 16453,
-      "stable_file_list_sha256": "75ff78349d035e6941f94ae36653b454a1a91601a91a57269cc651cedb7ac50f",
-      "checksum_manifest_sha256": "38bd3f2a3b3e17b92e2a0251cdb039df19dfc3abf3cbe2649775cd457110a683",
+      "retention_decision": "ignore_generated_root_keep_inventory",
+      "signoff_status": "trusted_when_runner_contract_and_owner_closeout_are_present",
+      "expected_file_count": 3,
+      "expected_total_bytes": 25592,
+      "stable_file_list_sha256": "7e8545944ea2bc37b98db0a5e29fa3fc6ac34c4ed13b4c5088c89f8aaecb6b70",
+      "checksum_manifest_sha256": "064ddd7942d9d8121f95196e01cbca4ac23b333110efbced8f515f60d41f902a",
       "no_deletion_confirmation": true
     },
     {
@@ -218,9 +218,9 @@
       "require_current_host_clusters": true,
       "expected_counts": {
         "cluster_count": 9,
-        "file_count": 43,
-        "total_bytes": 193908,
-        "fail_closed_cluster_count": 3,
+        "file_count": 44,
+        "total_bytes": 203047,
+        "fail_closed_cluster_count": 1,
         "no_deletion_confirmation_count": 9
       },
       "required_log_fields": [
