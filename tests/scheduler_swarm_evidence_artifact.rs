@@ -93,3 +93,51 @@ fn scheduler_evidence_artifact_rejects_invalid_inputs() {
         Err(SchedulerEvidenceError::RemoteStealRatioOutOfRange(101))
     );
 }
+
+#[test]
+fn scheduler_recommend_smoke_contract_matches_tuning_projection() {
+    let contract: serde_json::Value = serde_json::from_str(include_str!(
+        "../artifacts/scheduler_recommend_smoke_contract_v1.json"
+    ))
+    .expect("parse scheduler recommend smoke contract");
+    assert_eq!(
+        contract["runner_script"].as_str(),
+        Some("scripts/run_scheduler_recommend_smoke.sh")
+    );
+
+    let scenarios = contract["smoke_scenarios"]
+        .as_array()
+        .expect("smoke_scenarios should be an array");
+    assert_eq!(
+        scenarios.len(),
+        1,
+        "expected exactly one bounded smoke scenario"
+    );
+
+    let scenario = &scenarios[0];
+    assert_eq!(
+        scenario["scenario_id"].as_str(),
+        Some("AA-SCHED-RECOMMEND-MIXED-BURST-64C")
+    );
+
+    let evidence: SchedulerEvidenceArtifact =
+        serde_json::from_value(scenario["evidence_artifact"].clone())
+            .expect("scenario evidence should deserialize");
+    let report = evidence
+        .tune_report()
+        .expect("scenario evidence should tune");
+
+    let actual_projection = serde_json::json!({
+        "schema_version": report.schema_version,
+        "source_run_label": report.source_run_label,
+        "workload_class": report.workload_class,
+        "profile_name": report.profile_name,
+        "recommended_knobs": report.recommended_knobs,
+        "global_queue_limit_hint": report.global_queue_limit_hint,
+        "fallback_profile": report.fallback_profile,
+        "confidence_percent": report.confidence_percent,
+        "reason_codes": report.reason_codes,
+    });
+
+    assert_eq!(actual_projection, scenario["expected_report"]);
+}
