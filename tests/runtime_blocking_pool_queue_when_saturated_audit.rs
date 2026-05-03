@@ -409,11 +409,103 @@ fn blocking_pool_struct_holds_max_threads_bound() {
 
 #[cfg(feature = "test-internals")]
 mod behavioral {
-    use asupersync::runtime::BlockingPool;
+    use asupersync::runtime::config::BlockingPoolAffinityProfile;
+    use asupersync::runtime::{BlockingPool, BlockingPoolOptions};
+    use serde_json::json;
     use std::sync::Arc;
     use std::sync::Barrier;
     use std::sync::atomic::{AtomicUsize, Ordering};
-    use std::time::Duration;
+    use std::time::{Duration, Instant};
+
+    #[derive(Debug, Clone, Copy)]
+    struct AffinitySaturationSummary {
+        enabled: bool,
+        cohort_count: usize,
+        queued_task_count: usize,
+        pending_count_before_release: usize,
+        busy_threads_before_release: usize,
+        local_queue_dispatches: usize,
+        spill_dispatches: usize,
+        fallback_dispatches: usize,
+        completion_latency_ms: u128,
+    }
+
+    fn affinity_test_pool(
+        affinity_profile: BlockingPoolAffinityProfile,
+        cohort_count: Option<usize>,
+    ) -> BlockingPool {
+        let options = BlockingPoolOptions {
+            idle_timeout: Duration::from_millis(100),
+            time_getter: Instant::now,
+            sleep_fn: std::thread::sleep,
+            thread_name_prefix: "audit-blocking-affinity".to_string(),
+            on_thread_start: None,
+            on_thread_stop: None,
+            affinity_profile,
+            cohort_count,
+        };
+        BlockingPool::with_config(2, 2, options)
+    }
+
+    fn run_affinity_saturation_case(
+        affinity_profile: BlockingPoolAffinityProfile,
+        cohort_count: usize,
+        queued_task_count: usize,
+    ) -> AffinitySaturationSummary {
+        let pool = affinity_test_pool(affinity_profile, Some(cohort_count));
+        let start_barrier = Arc::new(Barrier::new(3));
+        let release_barrier = Arc::new(Barrier::new(3));
+
+        let blocker0_start = Arc::clone(&start_barrier);
+        let blocker0_release = Arc::clone(&release_barrier);
+        let blocker0 = pool.spawn_on_cohort(0, move || {
+            blocker0_start.wait();
+            blocker0_release.wait();
+        });
+
+        let blocker1_start = Arc::clone(&start_barrier);
+        let blocker1_release = Arc::clone(&release_barrier);
+        let blocker1 = pool.spawn_on_cohort(1 % cohort_count.max(1), move || {
+            blocker1_start.wait();
+            blocker1_release.wait();
+        });
+
+        start_barrier.wait();
+
+        let queued_handles: Vec<_> = (0..queued_task_count)
+            .map(|_| pool.spawn_on_cohort(0, || std::thread::yield_now()))
+            .collect();
+
+        let pending_count_before_release = pool.pending_count();
+        let busy_threads_before_release = pool.busy_threads();
+        let release_started_at = Instant::now();
+        release_barrier.wait();
+
+        blocker0.wait();
+        blocker1.wait();
+        for handle in queued_handles {
+            handle.wait();
+        }
+
+        let completion_latency_ms = release_started_at.elapsed().as_millis();
+        let metrics = pool.affinity_metrics();
+        assert!(
+            pool.shutdown_and_wait(Duration::from_secs(1)),
+            "blocking affinity audit pool should shutdown cleanly"
+        );
+
+        AffinitySaturationSummary {
+            enabled: metrics.enabled,
+            cohort_count,
+            queued_task_count,
+            pending_count_before_release,
+            busy_threads_before_release,
+            local_queue_dispatches: metrics.local_queue_dispatches,
+            spill_dispatches: metrics.spill_dispatches,
+            fallback_dispatches: metrics.fallback_dispatches,
+            completion_latency_ms,
+        }
+    }
 
     #[test]
     fn saturated_pool_queues_overflow_spawns_without_panic() {
@@ -547,5 +639,61 @@ mod behavioral {
              — caller sees a completed handle instead of \
              waiting forever.",
         );
+    }
+
+    #[test]
+    fn blocking_pool_affinity_saturation_emits_local_vs_spill_summary() {
+        let disabled = run_affinity_saturation_case(BlockingPoolAffinityProfile::Disabled, 2, 4);
+        let cohort_biased = run_affinity_saturation_case(
+            BlockingPoolAffinityProfile::CohortBiased {
+                local_queue_soft_limit: 1,
+                spill_check_interval: 1,
+            },
+            2,
+            4,
+        );
+
+        assert_eq!(disabled.pending_count_before_release, 4);
+        assert_eq!(disabled.busy_threads_before_release, 2);
+        assert!(!disabled.enabled);
+
+        assert_eq!(cohort_biased.pending_count_before_release, 4);
+        assert_eq!(cohort_biased.busy_threads_before_release, 2);
+        assert!(cohort_biased.enabled);
+        assert_eq!(cohort_biased.local_queue_dispatches, 3);
+        assert_eq!(cohort_biased.spill_dispatches, 3);
+        assert_eq!(cohort_biased.fallback_dispatches, 3);
+
+        let summary = json!({
+            "scenario_id": "AA-BLOCKING-POOL-AFFINITY-SATURATION-2C",
+            "profiles": {
+                "disabled": {
+                    "cohort_count": disabled.cohort_count,
+                    "queued_task_count": disabled.queued_task_count,
+                    "pending_count_before_release": disabled.pending_count_before_release,
+                    "busy_threads_before_release": disabled.busy_threads_before_release,
+                    "local_queue_dispatches": disabled.local_queue_dispatches,
+                    "spill_dispatches": disabled.spill_dispatches,
+                    "fallback_dispatches": disabled.fallback_dispatches,
+                    "completion_latency_ms": disabled.completion_latency_ms
+                },
+                "cohort_biased": {
+                    "cohort_count": cohort_biased.cohort_count,
+                    "queued_task_count": cohort_biased.queued_task_count,
+                    "pending_count_before_release": cohort_biased.pending_count_before_release,
+                    "busy_threads_before_release": cohort_biased.busy_threads_before_release,
+                    "local_queue_dispatches": cohort_biased.local_queue_dispatches,
+                    "spill_dispatches": cohort_biased.spill_dispatches,
+                    "fallback_dispatches": cohort_biased.fallback_dispatches,
+                    "completion_latency_ms": cohort_biased.completion_latency_ms
+                }
+            }
+        });
+        println!("BLOCKING_POOL_AFFINITY_SUMMARY_JSON_BEGIN");
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&summary).expect("serialize blocking affinity summary")
+        );
+        println!("BLOCKING_POOL_AFFINITY_SUMMARY_JSON_END");
     }
 }
