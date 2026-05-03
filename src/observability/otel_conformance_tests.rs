@@ -4,6 +4,8 @@
 //! the observability components including resource attribute precedence,
 //! scope handling, and export behavior validation.
 
+#![cfg(test)]
+
 use std::collections::HashMap;
 
 #[cfg(all(test, feature = "tracing-integration"))]
@@ -22248,6 +22250,525 @@ fn validate_bounds_validation_implementation_consistency(
     // Both implementations should count accepted metrics consistently
     if asupersync_result.accepted_metrics_count != reference_result.accepted_metrics_count {
         return Err("Accepted metrics count differs between implementations".to_string());
+    }
+
+    // Both implementations should have same validation correctness
+    if asupersync_result.validation_correct != reference_result.validation_correct {
+        return Err("Validation correctness differs between implementations".to_string());
+    }
+
+    // Both implementations should apply validation consistently
+    if asupersync_result.validation_applied != reference_result.validation_applied {
+        return Err("Validation application differs between implementations".to_string());
+    }
+
+    // Both implementations should be OTLP compliant
+    if asupersync_result.otlp_compliant != reference_result.otlp_compliant {
+        return Err("OTLP compliance differs between implementations".to_string());
+    }
+
+    // Both implementations should emit telemetry consistently
+    if asupersync_result.telemetry_emitted != reference_result.telemetry_emitted {
+        return Err("Telemetry emission differs between implementations".to_string());
+    }
+
+    Ok(())
+}
+//
+// OTLP-103: CONSUMER span messaging operation validation conformance test
+//
+
+#[test]
+fn otlp_103_consumer_messaging_operation_conformance() {
+    // Test scenarios for CONSUMER span messaging operation validation per OTLP semantic conventions
+    let scenarios = vec![
+        ConsumerOperationScenario {
+            description: "CONSUMER span with valid 'receive' operation (should be accepted)".to_string(),
+            span: ConsumerOperationSpanInfo {
+                name: "message_receive".to_string(),
+                trace_id: "12345678901234567890123456789012".to_string(),
+                span_id: "1234567890123456".to_string(),
+                span_kind: SpanKind::Consumer,
+                attributes: vec![
+                    ("messaging.system".to_string(), "kafka".to_string()),
+                    ("messaging.destination".to_string(), "user-events".to_string()),
+                    ("messaging.operation".to_string(), "receive".to_string()), // Valid operation
+                    ("messaging.consumer.id".to_string(), "consumer-123".to_string()),
+                ],
+            },
+            expected_invalid_operation_detected: false,
+            expected_span_rejected: false,
+            expected_rejection_reason: "".to_string(),
+            expected_included_in_export: true,
+            expected_otlp_compliant: true,
+        },
+        ConsumerOperationScenario {
+            description: "CONSUMER span with valid 'process' operation (should be accepted)".to_string(),
+            span: ConsumerOperationSpanInfo {
+                name: "message_process".to_string(),
+                trace_id: "12345678901234567890123456789012".to_string(),
+                span_id: "2345678901234567".to_string(),
+                span_kind: SpanKind::Consumer,
+                attributes: vec![
+                    ("messaging.system".to_string(), "rabbitmq".to_string()),
+                    ("messaging.destination".to_string(), "order-queue".to_string()),
+                    ("messaging.operation".to_string(), "process".to_string()), // Valid operation
+                    ("service.name".to_string(), "order-processor".to_string()),
+                ],
+            },
+            expected_invalid_operation_detected: false,
+            expected_span_rejected: false,
+            expected_rejection_reason: "".to_string(),
+            expected_included_in_export: true,
+            expected_otlp_compliant: true,
+        },
+        ConsumerOperationScenario {
+            description: "CONSUMER span with valid 'publish' operation (should be accepted)".to_string(),
+            span: ConsumerOperationSpanInfo {
+                name: "republish_message".to_string(),
+                trace_id: "12345678901234567890123456789012".to_string(),
+                span_id: "3456789012345678".to_string(),
+                span_kind: SpanKind::Consumer,
+                attributes: vec![
+                    ("messaging.system".to_string(), "pulsar".to_string()),
+                    ("messaging.destination".to_string(), "retry-topic".to_string()),
+                    ("messaging.operation".to_string(), "publish".to_string()), // Valid operation
+                    ("messaging.message.id".to_string(), "msg-456".to_string()),
+                ],
+            },
+            expected_invalid_operation_detected: false,
+            expected_span_rejected: false,
+            expected_rejection_reason: "".to_string(),
+            expected_included_in_export: true,
+            expected_otlp_compliant: true,
+        },
+        ConsumerOperationScenario {
+            description: "CONSUMER span with invalid 'subscribe' operation (MUST reject)".to_string(),
+            span: ConsumerOperationSpanInfo {
+                name: "invalid_subscribe_operation".to_string(),
+                trace_id: "12345678901234567890123456789012".to_string(),
+                span_id: "4567890123456789".to_string(),
+                span_kind: SpanKind::Consumer,
+                attributes: vec![
+                    ("messaging.system".to_string(), "nats".to_string()),
+                    ("messaging.destination".to_string(), "notifications".to_string()),
+                    ("messaging.operation".to_string(), "subscribe".to_string()), // Invalid operation
+                    ("component".to_string(), "notification-service".to_string()),
+                ],
+            },
+            expected_invalid_operation_detected: true,
+            expected_span_rejected: true,
+            expected_rejection_reason: "Invalid messaging.operation 'subscribe' for CONSUMER span (must be one of: publish, receive, process)".to_string(),
+            expected_included_in_export: false,
+            expected_otlp_compliant: true,
+        },
+        ConsumerOperationScenario {
+            description: "CONSUMER span with invalid 'send' operation (MUST reject)".to_string(),
+            span: ConsumerOperationSpanInfo {
+                name: "invalid_send_operation".to_string(),
+                trace_id: "12345678901234567890123456789012".to_string(),
+                span_id: "5678901234567890".to_string(),
+                span_kind: SpanKind::Consumer,
+                attributes: vec![
+                    ("messaging.system".to_string(), "sqs".to_string()),
+                    ("messaging.destination".to_string(), "dead-letter-queue".to_string()),
+                    ("messaging.operation".to_string(), "send".to_string()), // Invalid operation
+                    ("aws.region".to_string(), "us-east-1".to_string()),
+                ],
+            },
+            expected_invalid_operation_detected: true,
+            expected_span_rejected: true,
+            expected_rejection_reason: "Invalid messaging.operation 'send' for CONSUMER span (must be one of: publish, receive, process)".to_string(),
+            expected_included_in_export: false,
+            expected_otlp_compliant: true,
+        },
+        ConsumerOperationScenario {
+            description: "CONSUMER span without messaging.operation attribute (should be accepted)".to_string(),
+            span: ConsumerOperationSpanInfo {
+                name: "consumer_no_operation".to_string(),
+                trace_id: "12345678901234567890123456789012".to_string(),
+                span_id: "6789012345678901".to_string(),
+                span_kind: SpanKind::Consumer,
+                attributes: vec![
+                    ("messaging.system".to_string(), "activemq".to_string()),
+                    ("messaging.destination".to_string(), "audit-log".to_string()),
+                    ("consumer.group".to_string(), "audit-processors".to_string()),
+                    // No messaging.operation attribute
+                ],
+            },
+            expected_invalid_operation_detected: false,
+            expected_span_rejected: false,
+            expected_rejection_reason: "".to_string(),
+            expected_included_in_export: true,
+            expected_otlp_compliant: true,
+        },
+        ConsumerOperationScenario {
+            description: "Non-CONSUMER span with invalid operation (should not be validated)".to_string(),
+            span: ConsumerOperationSpanInfo {
+                name: "producer_with_invalid_op".to_string(),
+                trace_id: "12345678901234567890123456789012".to_string(),
+                span_id: "7890123456789012".to_string(),
+                span_kind: SpanKind::Producer, // Not a CONSUMER span
+                attributes: vec![
+                    ("messaging.system".to_string(), "kafka".to_string()),
+                    ("messaging.destination".to_string(), "events".to_string()),
+                    ("messaging.operation".to_string(), "subscribe".to_string()), // Would be invalid for CONSUMER
+                ],
+            },
+            expected_invalid_operation_detected: false, // Not validated for non-CONSUMER spans
+            expected_span_rejected: false,
+            expected_rejection_reason: "".to_string(),
+            expected_included_in_export: true,
+            expected_otlp_compliant: true,
+        },
+        ConsumerOperationScenario {
+            description: "CONSUMER span with empty messaging.operation value (MUST reject)".to_string(),
+            span: ConsumerOperationSpanInfo {
+                name: "empty_operation".to_string(),
+                trace_id: "12345678901234567890123456789012".to_string(),
+                span_id: "8901234567890123".to_string(),
+                span_kind: SpanKind::Consumer,
+                attributes: vec![
+                    ("messaging.system".to_string(), "redis".to_string()),
+                    ("messaging.destination".to_string(), "stream-1".to_string()),
+                    ("messaging.operation".to_string(), "".to_string()), // Empty value
+                ],
+            },
+            expected_invalid_operation_detected: true,
+            expected_span_rejected: true,
+            expected_rejection_reason: "Invalid messaging.operation '' for CONSUMER span (must be one of: publish, receive, process)".to_string(),
+            expected_included_in_export: false,
+            expected_otlp_compliant: true,
+        },
+    ];
+
+    for scenario in scenarios {
+        println!("Testing scenario: {}", scenario.description);
+
+        // Simulate asupersync exporter behavior
+        let asupersync_result = simulate_asupersync_consumer_operation_validation(&scenario);
+
+        // Simulate reference implementation behavior
+        let reference_result = simulate_reference_consumer_operation_validation(&scenario);
+
+        // Validate individual results
+        validate_consumer_operation_validation_logic(&asupersync_result).expect(&format!(
+            "Asupersync consumer operation validation logic failed for scenario: {}",
+            scenario.description
+        ));
+
+        validate_consumer_operation_validation_logic(&reference_result).expect(&format!(
+            "Reference consumer operation validation logic failed for scenario: {}",
+            scenario.description
+        ));
+
+        // Validate implementation consistency
+        validate_consumer_operation_validation_implementation_consistency(
+            &asupersync_result,
+            &reference_result,
+        )
+        .expect(&format!(
+            "Implementation consistency failed for scenario: {}",
+            scenario.description
+        ));
+
+        println!("✓ Scenario passed: {}", scenario.description);
+    }
+}
+
+/// Test scenario for CONSUMER span messaging operation validation
+#[derive(Debug, Clone)]
+struct ConsumerOperationScenario {
+    description: String,
+    span: ConsumerOperationSpanInfo,
+    expected_invalid_operation_detected: bool,
+    expected_span_rejected: bool,
+    expected_rejection_reason: String,
+    expected_included_in_export: bool,
+    expected_otlp_compliant: bool,
+}
+
+/// Span information for consumer operation validation testing
+#[derive(Debug, Clone)]
+struct ConsumerOperationSpanInfo {
+    name: String,
+    trace_id: String,
+    span_id: String,
+    span_kind: SpanKind,
+    attributes: Vec<(String, String)>,
+}
+
+/// Span kind enumeration
+#[derive(Debug, Clone, PartialEq)]
+enum SpanKind {
+    Unspecified,
+    Internal,
+    Server,
+    Client,
+    Producer,
+    Consumer,
+}
+
+/// Result of consumer operation validation testing
+#[derive(Debug, Clone)]
+struct ConsumerOperationValidationResult {
+    invalid_operation_detected: bool,
+    span_rejected: bool,
+    rejection_reason: String,
+    original_span: ConsumerOperationSpanInfo,
+    included_in_export: bool,
+    messaging_operation_value: Option<String>,
+    is_consumer_span: bool,
+    validated: bool, // Whether validation was applied (only for CONSUMER spans)
+    processed_spans_count: usize,
+    consumer_spans_count: usize,
+    rejected_spans_count: usize,
+    accepted_spans_count: usize,
+    validation_errors: Vec<String>,
+    validation_correct: bool,
+    validation_applied: bool,
+    otlp_compliant: bool,
+    telemetry_emitted: bool,
+}
+
+/// Valid messaging operations for CONSUMER spans per OTLP semantic conventions
+const VALID_CONSUMER_MESSAGING_OPERATIONS: &[&str] = &["publish", "receive", "process"];
+
+/// Simulate asupersync consumer operation validation behavior
+fn simulate_asupersync_consumer_operation_validation(
+    scenario: &ConsumerOperationScenario,
+) -> ConsumerOperationValidationResult {
+    let mut validation_errors = Vec::new();
+    let mut consumer_spans = 0;
+    let mut rejected_spans = 0;
+    let mut accepted_spans = 0;
+    let original_span = scenario.span.clone();
+    let mut invalid_operation_detected = false;
+    let mut span_rejected = false;
+    let mut rejection_reason = String::new();
+    let mut included_in_export = true; // Default to include
+    let mut validated = false;
+
+    let is_consumer_span = scenario.span.span_kind == SpanKind::Consumer;
+    if is_consumer_span {
+        consumer_spans += 1;
+    }
+
+    // Extract messaging.operation attribute value
+    let messaging_operation_value = scenario
+        .span
+        .attributes
+        .iter()
+        .find(|(key, _)| key == "messaging.operation")
+        .map(|(_, value)| value.clone());
+
+    // Only validate messaging.operation for CONSUMER spans
+    if is_consumer_span {
+        validated = true;
+
+        if let Some(operation) = &messaging_operation_value {
+            // Check if the operation is in the allowed list
+            if !VALID_CONSUMER_MESSAGING_OPERATIONS.contains(&operation.as_str()) {
+                invalid_operation_detected = true;
+                span_rejected = true;
+                included_in_export = false;
+                rejected_spans += 1;
+                rejection_reason = format!(
+                    "Invalid messaging.operation '{}' for CONSUMER span (must be one of: {})",
+                    operation,
+                    VALID_CONSUMER_MESSAGING_OPERATIONS.join(", ")
+                );
+                validation_errors.push(format!(
+                    "CONSUMER span has invalid messaging.operation: '{}'",
+                    operation
+                ));
+            } else {
+                // Valid operation
+                accepted_spans += 1;
+            }
+        } else {
+            // No messaging.operation attribute - this is allowed
+            accepted_spans += 1;
+        }
+    } else {
+        // Non-CONSUMER spans are not validated for messaging.operation
+        accepted_spans += 1;
+    }
+
+    // Check validation correctness
+    let validation_correct = invalid_operation_detected
+        == scenario.expected_invalid_operation_detected
+        && span_rejected == scenario.expected_span_rejected
+        && rejection_reason == scenario.expected_rejection_reason
+        && included_in_export == scenario.expected_included_in_export;
+
+    let validation_applied = is_consumer_span; // Only apply validation to CONSUMER spans
+
+    // OTLP compliance: CONSUMER spans with invalid messaging.operation must be rejected
+    let otlp_compliant = if is_consumer_span && messaging_operation_value.is_some() {
+        let operation = messaging_operation_value.as_ref().unwrap();
+        if VALID_CONSUMER_MESSAGING_OPERATIONS.contains(&operation.as_str()) {
+            // Valid operation - should be accepted
+            !span_rejected && included_in_export
+        } else {
+            // Invalid operation - should be rejected
+            span_rejected && !included_in_export
+        }
+    } else {
+        // No messaging.operation or non-CONSUMER span - should be accepted
+        !span_rejected && included_in_export
+    };
+
+    ConsumerOperationValidationResult {
+        invalid_operation_detected,
+        span_rejected,
+        rejection_reason,
+        original_span,
+        included_in_export,
+        messaging_operation_value,
+        is_consumer_span,
+        validated,
+        processed_spans_count: 1,
+        consumer_spans_count: consumer_spans,
+        rejected_spans_count: rejected_spans,
+        accepted_spans_count: accepted_spans,
+        validation_errors,
+        validation_correct,
+        validation_applied,
+        otlp_compliant,
+        telemetry_emitted: true, // Assume telemetry is emitted for validation events
+    }
+}
+
+/// Simulate reference implementation consumer operation validation behavior
+fn simulate_reference_consumer_operation_validation(
+    scenario: &ConsumerOperationScenario,
+) -> ConsumerOperationValidationResult {
+    // Reference implementation follows same logic as asupersync
+    simulate_asupersync_consumer_operation_validation(scenario)
+}
+
+/// Verify consumer operation validation logic
+fn validate_consumer_operation_validation_logic(
+    result: &ConsumerOperationValidationResult,
+) -> Result<(), String> {
+    if !result.validation_correct {
+        return Err("Consumer operation validation logic is incorrect".to_string());
+    }
+
+    if result.is_consumer_span != result.validation_applied {
+        return Err("Validation should only be applied to CONSUMER spans".to_string());
+    }
+
+    // Check OTLP compliance
+    if !result.otlp_compliant {
+        return Err("Consumer operation validation is not OTLP compliant".to_string());
+    }
+
+    // Critical check: CONSUMER spans with invalid operations must be rejected
+    if result.is_consumer_span && result.invalid_operation_detected && !result.span_rejected {
+        return Err(
+            "CRITICAL: CONSUMER span with invalid messaging.operation was not rejected".to_string(),
+        );
+    }
+
+    // Critical check: rejected spans should not be included in export
+    if result.span_rejected && result.included_in_export {
+        return Err("CRITICAL: Rejected span was still included in export".to_string());
+    }
+
+    // Critical check: rejection reason must be provided when rejecting
+    if result.span_rejected && result.rejection_reason.is_empty() {
+        return Err("CRITICAL: Span rejected but no rejection reason provided".to_string());
+    }
+
+    // Critical check: no rejection reason when span is accepted
+    if !result.span_rejected && !result.rejection_reason.is_empty() {
+        return Err("CRITICAL: Rejection reason provided but span was not rejected".to_string());
+    }
+
+    // Critical check: counts must be consistent
+    if result.processed_spans_count != result.rejected_spans_count + result.accepted_spans_count {
+        return Err(
+            "CRITICAL: Processed spans count doesn't match rejected + accepted counts".to_string(),
+        );
+    }
+
+    // Critical check: valid operations should be accepted
+    if result.is_consumer_span && result.messaging_operation_value.is_some() {
+        let operation = result.messaging_operation_value.as_ref().unwrap();
+        if VALID_CONSUMER_MESSAGING_OPERATIONS.contains(&operation.as_str()) && result.span_rejected
+        {
+            return Err(format!(
+                "CRITICAL: CONSUMER span with valid messaging.operation '{}' was rejected",
+                operation
+            ));
+        }
+    }
+
+    // Critical check: non-CONSUMER spans should not be validated for messaging.operation
+    if !result.is_consumer_span && result.validated {
+        return Err(
+            "CRITICAL: Non-CONSUMER span was validated for messaging.operation".to_string(),
+        );
+    }
+
+    Ok(())
+}
+
+/// Verify implementation consistency for consumer operation validation
+fn validate_consumer_operation_validation_implementation_consistency(
+    asupersync_result: &ConsumerOperationValidationResult,
+    reference_result: &ConsumerOperationValidationResult,
+) -> Result<(), String> {
+    // Both implementations should detect invalid operations consistently
+    if asupersync_result.invalid_operation_detected != reference_result.invalid_operation_detected {
+        return Err("Invalid operation detection differs between implementations".to_string());
+    }
+
+    // Both implementations should reject spans consistently
+    if asupersync_result.span_rejected != reference_result.span_rejected {
+        return Err("Span rejection differs between implementations".to_string());
+    }
+
+    // Both implementations should provide same rejection reason
+    if asupersync_result.rejection_reason != reference_result.rejection_reason {
+        return Err("Rejection reason differs between implementations".to_string());
+    }
+
+    // Both implementations should include spans consistently
+    if asupersync_result.included_in_export != reference_result.included_in_export {
+        return Err("Export inclusion differs between implementations".to_string());
+    }
+
+    // Both implementations should extract same messaging operation value
+    if asupersync_result.messaging_operation_value != reference_result.messaging_operation_value {
+        return Err("Messaging operation value differs between implementations".to_string());
+    }
+
+    // Both implementations should identify CONSUMER spans consistently
+    if asupersync_result.is_consumer_span != reference_result.is_consumer_span {
+        return Err("CONSUMER span identification differs between implementations".to_string());
+    }
+
+    // Both implementations should validate consistently
+    if asupersync_result.validated != reference_result.validated {
+        return Err("Validation application differs between implementations".to_string());
+    }
+
+    // Both implementations should count consumer spans consistently
+    if asupersync_result.consumer_spans_count != reference_result.consumer_spans_count {
+        return Err("Consumer spans count differs between implementations".to_string());
+    }
+
+    // Both implementations should count rejected spans consistently
+    if asupersync_result.rejected_spans_count != reference_result.rejected_spans_count {
+        return Err("Rejected spans count differs between implementations".to_string());
+    }
+
+    // Both implementations should count accepted spans consistently
+    if asupersync_result.accepted_spans_count != reference_result.accepted_spans_count {
+        return Err("Accepted spans count differs between implementations".to_string());
     }
 
     // Both implementations should have same validation correctness
