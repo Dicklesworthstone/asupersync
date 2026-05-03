@@ -5272,3 +5272,10 @@ path = "fuzz_targets/h2_request_with_too_many_pseudo_headers.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "h2_request_pseudo_method_extension"
+path = "fuzz_targets/h2_request_pseudo_method_extension.rs"
+test = false
+doc = false
+bench = false
