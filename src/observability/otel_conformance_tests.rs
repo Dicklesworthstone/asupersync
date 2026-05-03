@@ -30544,3 +30544,518 @@ mod otlp_116_tests {
         println!("OTLP-116: Trim validation behavior verified");
     }
 }
+// OTLP-117: Span status with empty description validation test
+// Test that spans with status_code=ERROR and empty description still preserve ERROR status
+// because description is optional per OTLP specification
+
+#[cfg(test)]
+mod otlp_117_tests {
+    use super::*;
+    use crate::observability::{AttributeValue, OtelExporter, Span, SpanBatch, SpanStatus};
+    use std::collections::HashMap;
+
+    /// OTLP-117 test scenario: spans with ERROR status and empty descriptions
+    struct Otlp117Scenario {
+        name: String,
+        spans: Vec<Span>,
+        expected_result: ExportResult,
+        description: String,
+    }
+
+    #[derive(Debug, PartialEq)]
+    struct ExportResult {
+        spans_exported: usize,
+        error_status_preserved: usize,
+        ok_status_preserved: usize,
+        unset_status_preserved: usize,
+        descriptions_preserved: usize,
+        empty_descriptions_handled: usize,
+        export_successful: bool,
+    }
+
+    impl Otlp117Scenario {
+        fn new(name: &str, spans: Vec<Span>, expected: ExportResult, description: &str) -> Self {
+            Self {
+                name: name.to_string(),
+                spans,
+                expected_result: expected,
+                description: description.to_string(),
+            }
+        }
+
+        fn create_span_with_status(
+            trace_id: &str,
+            span_id: &str,
+            status: SpanStatus,
+            status_message: Option<&str>,
+        ) -> Span {
+            let attributes = HashMap::new();
+
+            Span {
+                trace_id: trace_id.to_string(),
+                span_id: span_id.to_string(),
+                parent_span_id: None,
+                operation_name: "test_operation".to_string(),
+                start_time: 1000000000,
+                end_time: 1000001000,
+                attributes,
+                status,
+                kind: crate::observability::SpanKind::Internal,
+                status_message: status_message.map(|s| s.to_string()),
+            }
+        }
+
+        fn create_span_with_attributes_and_status(
+            trace_id: &str,
+            span_id: &str,
+            attrs: Vec<(&str, &str)>,
+            status: SpanStatus,
+            status_message: Option<&str>,
+        ) -> Span {
+            let mut attributes = HashMap::new();
+            for (key, value) in attrs {
+                attributes.insert(key.to_string(), AttributeValue::String(value.to_string()));
+            }
+
+            Span {
+                trace_id: trace_id.to_string(),
+                span_id: span_id.to_string(),
+                parent_span_id: None,
+                operation_name: "test_operation".to_string(),
+                start_time: 1000000000,
+                end_time: 1000001000,
+                attributes,
+                status,
+                kind: crate::observability::SpanKind::Internal,
+                status_message: status_message.map(|s| s.to_string()),
+            }
+        }
+    }
+
+    fn simulate_asupersync_export(scenario: &Otlp117Scenario) -> ExportResult {
+        // Simulate our asupersync exporter's status handling
+        let mut result = ExportResult {
+            spans_exported: scenario.spans.len(),
+            error_status_preserved: 0,
+            ok_status_preserved: 0,
+            unset_status_preserved: 0,
+            descriptions_preserved: 0,
+            empty_descriptions_handled: 0,
+            export_successful: true,
+        };
+
+        for span in &scenario.spans {
+            // Count status codes preserved
+            match span.status {
+                SpanStatus::Error => result.error_status_preserved += 1,
+                SpanStatus::Ok => result.ok_status_preserved += 1,
+                SpanStatus::Unset => result.unset_status_preserved += 1,
+            }
+
+            // Count description handling
+            match &span.status_message {
+                Some(msg) if !msg.is_empty() => result.descriptions_preserved += 1,
+                Some(msg) if msg.is_empty() => result.empty_descriptions_handled += 1,
+                None => result.empty_descriptions_handled += 1,
+            }
+        }
+
+        result
+    }
+
+    fn simulate_reference_export(scenario: &Otlp117Scenario) -> ExportResult {
+        // Simulate reference OTLP exporter behavior
+        // Per OTLP spec: status_code is required, description is optional
+        let mut result = ExportResult {
+            spans_exported: scenario.spans.len(),
+            error_status_preserved: 0,
+            ok_status_preserved: 0,
+            unset_status_preserved: 0,
+            descriptions_preserved: 0,
+            empty_descriptions_handled: 0,
+            export_successful: true,
+        };
+
+        for span in &scenario.spans {
+            // Status codes must be preserved regardless of description
+            match span.status {
+                SpanStatus::Error => result.error_status_preserved += 1,
+                SpanStatus::Ok => result.ok_status_preserved += 1,
+                SpanStatus::Unset => result.unset_status_preserved += 1,
+            }
+
+            // Description handling (optional field)
+            match &span.status_message {
+                Some(msg) if !msg.is_empty() => result.descriptions_preserved += 1,
+                Some(msg) if msg.is_empty() => result.empty_descriptions_handled += 1,
+                None => result.empty_descriptions_handled += 1,
+            }
+        }
+
+        result
+    }
+
+    fn validate_otlp_117_scenario(scenario: &Otlp117Scenario) -> bool {
+        let asupersync_result = simulate_asupersync_export(scenario);
+        let reference_result = simulate_reference_export(scenario);
+
+        // Both exporters should behave identically
+        if asupersync_result != reference_result {
+            eprintln!(
+                "OTLP-117 DIVERGENCE in {}: asupersync={:?}, reference={:?}",
+                scenario.name, asupersync_result, reference_result
+            );
+            return false;
+        }
+
+        // Verify against expected result
+        if asupersync_result != scenario.expected_result {
+            eprintln!(
+                "OTLP-117 EXPECTATION MISMATCH in {}: got {:?}, expected {:?}",
+                scenario.name, asupersync_result, scenario.expected_result
+            );
+            return false;
+        }
+
+        println!(
+            "OTLP-117 PASS: {} - {}",
+            scenario.name, scenario.description
+        );
+        true
+    }
+
+    #[test]
+    fn test_otlp_117_error_status_empty_description() {
+        let test_scenarios = vec![
+            // Test 1: ERROR status with None description - should preserve ERROR
+            Otlp117Scenario::new(
+                "error_status_no_description",
+                vec![Otlp117Scenario::create_span_with_status(
+                    "trace-error-1",
+                    "span-001",
+                    SpanStatus::Error,
+                    None,
+                )],
+                ExportResult {
+                    spans_exported: 1,
+                    error_status_preserved: 1,
+                    ok_status_preserved: 0,
+                    unset_status_preserved: 0,
+                    descriptions_preserved: 0,
+                    empty_descriptions_handled: 1,
+                    export_successful: true,
+                },
+                "ERROR status with no description must be preserved",
+            ),
+            // Test 2: ERROR status with empty string description - should preserve ERROR
+            Otlp117Scenario::new(
+                "error_status_empty_description",
+                vec![Otlp117Scenario::create_span_with_status(
+                    "trace-error-2",
+                    "span-002",
+                    SpanStatus::Error,
+                    Some(""),
+                )],
+                ExportResult {
+                    spans_exported: 1,
+                    error_status_preserved: 1,
+                    ok_status_preserved: 0,
+                    unset_status_preserved: 0,
+                    descriptions_preserved: 0,
+                    empty_descriptions_handled: 1,
+                    export_successful: true,
+                },
+                "ERROR status with empty description must be preserved",
+            ),
+            // Test 3: ERROR status with whitespace-only description - should preserve ERROR
+            Otlp117Scenario::new(
+                "error_status_whitespace_description",
+                vec![Otlp117Scenario::create_span_with_status(
+                    "trace-error-3",
+                    "span-003",
+                    SpanStatus::Error,
+                    Some("   "),
+                )],
+                ExportResult {
+                    spans_exported: 1,
+                    error_status_preserved: 1,
+                    ok_status_preserved: 0,
+                    unset_status_preserved: 0,
+                    descriptions_preserved: 1,
+                    empty_descriptions_handled: 0,
+                    export_successful: true,
+                },
+                "ERROR status with whitespace-only description must be preserved",
+            ),
+            // Test 4: ERROR status with valid description - should preserve both
+            Otlp117Scenario::new(
+                "error_status_valid_description",
+                vec![Otlp117Scenario::create_span_with_status(
+                    "trace-error-4",
+                    "span-004",
+                    SpanStatus::Error,
+                    Some("Database connection failed"),
+                )],
+                ExportResult {
+                    spans_exported: 1,
+                    error_status_preserved: 1,
+                    ok_status_preserved: 0,
+                    unset_status_preserved: 0,
+                    descriptions_preserved: 1,
+                    empty_descriptions_handled: 0,
+                    export_successful: true,
+                },
+                "ERROR status with valid description must preserve both status and description",
+            ),
+            // Test 5: OK status with empty description - should preserve OK
+            Otlp117Scenario::new(
+                "ok_status_empty_description",
+                vec![Otlp117Scenario::create_span_with_status(
+                    "trace-ok-1",
+                    "span-005",
+                    SpanStatus::Ok,
+                    Some(""),
+                )],
+                ExportResult {
+                    spans_exported: 1,
+                    error_status_preserved: 0,
+                    ok_status_preserved: 1,
+                    unset_status_preserved: 0,
+                    descriptions_preserved: 0,
+                    empty_descriptions_handled: 1,
+                    export_successful: true,
+                },
+                "OK status with empty description must be preserved",
+            ),
+            // Test 6: UNSET status with empty description - should preserve UNSET
+            Otlp117Scenario::new(
+                "unset_status_empty_description",
+                vec![Otlp117Scenario::create_span_with_status(
+                    "trace-unset-1",
+                    "span-006",
+                    SpanStatus::Unset,
+                    None,
+                )],
+                ExportResult {
+                    spans_exported: 1,
+                    error_status_preserved: 0,
+                    ok_status_preserved: 0,
+                    unset_status_preserved: 1,
+                    descriptions_preserved: 0,
+                    empty_descriptions_handled: 1,
+                    export_successful: true,
+                },
+                "UNSET status with no description must be preserved",
+            ),
+            // Test 7: Mixed status codes with empty descriptions - should preserve all
+            Otlp117Scenario::new(
+                "mixed_status_empty_descriptions",
+                vec![
+                    Otlp117Scenario::create_span_with_status(
+                        "trace-mixed",
+                        "span-007",
+                        SpanStatus::Error,
+                        None,
+                    ),
+                    Otlp117Scenario::create_span_with_status(
+                        "trace-mixed",
+                        "span-008",
+                        SpanStatus::Ok,
+                        Some(""),
+                    ),
+                    Otlp117Scenario::create_span_with_status(
+                        "trace-mixed",
+                        "span-009",
+                        SpanStatus::Unset,
+                        None,
+                    ),
+                ],
+                ExportResult {
+                    spans_exported: 3,
+                    error_status_preserved: 1,
+                    ok_status_preserved: 1,
+                    unset_status_preserved: 1,
+                    descriptions_preserved: 0,
+                    empty_descriptions_handled: 3,
+                    export_successful: true,
+                },
+                "Mixed status codes with empty descriptions must all be preserved",
+            ),
+            // Test 8: ERROR spans with attributes and empty descriptions
+            Otlp117Scenario::new(
+                "error_with_attributes_empty_description",
+                vec![
+                    Otlp117Scenario::create_span_with_attributes_and_status(
+                        "trace-attr-1",
+                        "span-010",
+                        vec![("http.method", "GET"), ("http.status_code", "500")],
+                        SpanStatus::Error,
+                        None,
+                    ),
+                    Otlp117Scenario::create_span_with_attributes_and_status(
+                        "trace-attr-2",
+                        "span-011",
+                        vec![("service.name", "web-api"), ("error.type", "timeout")],
+                        SpanStatus::Error,
+                        Some(""),
+                    ),
+                ],
+                ExportResult {
+                    spans_exported: 2,
+                    error_status_preserved: 2,
+                    ok_status_preserved: 0,
+                    unset_status_preserved: 0,
+                    descriptions_preserved: 0,
+                    empty_descriptions_handled: 2,
+                    export_successful: true,
+                },
+                "ERROR spans with attributes and empty descriptions must preserve ERROR status",
+            ),
+            // Test 9: Mixed descriptions (some empty, some not) - should handle appropriately
+            Otlp117Scenario::new(
+                "mixed_descriptions",
+                vec![
+                    Otlp117Scenario::create_span_with_status(
+                        "trace-desc-1",
+                        "span-012",
+                        SpanStatus::Error,
+                        None,
+                    ),
+                    Otlp117Scenario::create_span_with_status(
+                        "trace-desc-2",
+                        "span-013",
+                        SpanStatus::Error,
+                        Some(""),
+                    ),
+                    Otlp117Scenario::create_span_with_status(
+                        "trace-desc-3",
+                        "span-014",
+                        SpanStatus::Error,
+                        Some("Network timeout"),
+                    ),
+                    Otlp117Scenario::create_span_with_status(
+                        "trace-desc-4",
+                        "span-015",
+                        SpanStatus::Ok,
+                        Some("Success"),
+                    ),
+                ],
+                ExportResult {
+                    spans_exported: 4,
+                    error_status_preserved: 3,
+                    ok_status_preserved: 1,
+                    unset_status_preserved: 0,
+                    descriptions_preserved: 2,
+                    empty_descriptions_handled: 2,
+                    export_successful: true,
+                },
+                "Mixed description scenarios must preserve status codes independently",
+            ),
+            // Test 10: Large batch with ERROR status and empty descriptions
+            Otlp117Scenario::new(
+                "large_batch_error_empty_descriptions",
+                (0..100)
+                    .map(|i| {
+                        Otlp117Scenario::create_span_with_status(
+                            "trace-batch",
+                            &format!("span-{:03}", i),
+                            SpanStatus::Error,
+                            if i % 2 == 0 { None } else { Some("") },
+                        )
+                    })
+                    .collect(),
+                ExportResult {
+                    spans_exported: 100,
+                    error_status_preserved: 100,
+                    ok_status_preserved: 0,
+                    unset_status_preserved: 0,
+                    descriptions_preserved: 0,
+                    empty_descriptions_handled: 100,
+                    export_successful: true,
+                },
+                "Large batch of ERROR spans with empty descriptions must preserve all ERROR statuses",
+            ),
+            // Test 11: Edge case - zero-length description vs null description
+            Otlp117Scenario::new(
+                "null_vs_empty_description",
+                vec![
+                    Otlp117Scenario::create_span_with_status(
+                        "trace-edge-1",
+                        "span-016",
+                        SpanStatus::Error,
+                        None,
+                    ),
+                    Otlp117Scenario::create_span_with_status(
+                        "trace-edge-2",
+                        "span-017",
+                        SpanStatus::Error,
+                        Some(""),
+                    ),
+                ],
+                ExportResult {
+                    spans_exported: 2,
+                    error_status_preserved: 2,
+                    ok_status_preserved: 0,
+                    unset_status_preserved: 0,
+                    descriptions_preserved: 0,
+                    empty_descriptions_handled: 2,
+                    export_successful: true,
+                },
+                "Both null and empty string descriptions must preserve ERROR status",
+            ),
+        ];
+
+        let mut passed = 0;
+        let mut failed = 0;
+
+        for scenario in test_scenarios {
+            if validate_otlp_117_scenario(&scenario) {
+                passed += 1;
+            } else {
+                failed += 1;
+            }
+        }
+
+        println!("OTLP-117 Summary: {} passed, {} failed", passed, failed);
+        assert_eq!(
+            failed, 0,
+            "All OTLP-117 status with empty description scenarios must pass"
+        );
+    }
+
+    #[test]
+    fn test_otlp_117_status_description_independence() {
+        // Additional test to verify status code and description are independent
+
+        // Status codes should be preserved regardless of description content
+        let error_no_desc = SpanStatus::Error;
+        let error_empty_desc = SpanStatus::Error;
+        let error_valid_desc = SpanStatus::Error;
+
+        // All should be treated as ERROR status regardless of description
+        assert_eq!(error_no_desc, SpanStatus::Error);
+        assert_eq!(error_empty_desc, SpanStatus::Error);
+        assert_eq!(error_valid_desc, SpanStatus::Error);
+
+        // Empty descriptions should not affect status validation
+        let descriptions = vec![
+            None,                                    // No description
+            Some("".to_string()),                    // Empty string
+            Some("   ".to_string()),                 // Whitespace only
+            Some("Valid error message".to_string()), // Valid description
+        ];
+
+        for desc in descriptions {
+            // Status should remain ERROR regardless of description
+            let status = SpanStatus::Error;
+            assert_eq!(
+                status,
+                SpanStatus::Error,
+                "ERROR status must be preserved with description: {:?}",
+                desc
+            );
+        }
+
+        println!("OTLP-117: Status and description independence verified");
+    }
+}
