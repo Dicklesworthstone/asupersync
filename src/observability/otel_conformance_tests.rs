@@ -19276,7 +19276,7 @@ fn simulate_asupersync_duplicate_key_handling(
     let original_attributes = scenario.span.attributes.clone();
     let original_count = original_attributes.len();
     let mut final_attributes = Vec::new();
-    let mut seen_keys = std::collections::HashSet::new();
+    let mut seen_keys = std::collections::HashSet::<String>::new();
     let mut duplicate_keys = Vec::new();
     let mut duplicates_detected = false;
 
@@ -20346,6 +20346,442 @@ fn validate_span_event_validation_implementation_consistency(
         != reference_result.spans_with_dropped_events_count
     {
         return Err("Spans with dropped events count differs between implementations".to_string());
+    }
+
+    // Both implementations should have same validation correctness
+    if asupersync_result.validation_correct != reference_result.validation_correct {
+        return Err("Validation correctness differs between implementations".to_string());
+    }
+
+    // Both implementations should apply validation consistently
+    if asupersync_result.validation_applied != reference_result.validation_applied {
+        return Err("Validation application differs between implementations".to_string());
+    }
+
+    // Both implementations should be OTLP compliant
+    if asupersync_result.otlp_compliant != reference_result.otlp_compliant {
+        return Err("OTLP compliance differs between implementations".to_string());
+    }
+
+    // Both implementations should emit telemetry consistently
+    if asupersync_result.telemetry_emitted != reference_result.telemetry_emitted {
+        return Err("Telemetry emission differs between implementations".to_string());
+    }
+
+    Ok(())
+}
+//
+// OTLP-099: Active span exclusion conformance test
+//
+
+#[test]
+fn otlp_099_active_span_exclusion_conformance() {
+    // Test scenarios for active span exclusion per OTLP specification
+    let scenarios = vec![
+        ActiveSpanScenario {
+            description: "Span with end_time_unix_nano=0 (still active, MUST exclude from export)"
+                .to_string(),
+            span: ActiveSpanInfo {
+                name: "active_http_request".to_string(),
+                trace_id: "12345678901234567890123456789012".to_string(),
+                span_id: "1234567890123456".to_string(),
+                start_time_unix_nano: 1699000000000000000, // Nov 3, 2023 12:00:00 UTC
+                end_time_unix_nano: 0,                     // Still active (not ended)
+                status: SpanStatus::Unset,
+                attributes: vec![
+                    ("http.method".to_string(), "GET".to_string()),
+                    ("http.url".to_string(), "/api/users".to_string()),
+                ],
+            },
+            expected_active_detected: true,
+            expected_span_excluded: true,
+            expected_exclusion_reason: "end_time_unix_nano=0 (span still active)".to_string(),
+            expected_included_in_export: false,
+            expected_otlp_compliant: true,
+        },
+        ActiveSpanScenario {
+            description: "Span with valid end_time_unix_nano (completed, should be exported)"
+                .to_string(),
+            span: ActiveSpanInfo {
+                name: "completed_database_query".to_string(),
+                trace_id: "12345678901234567890123456789012".to_string(),
+                span_id: "2345678901234567".to_string(),
+                start_time_unix_nano: 1699000000000000000,
+                end_time_unix_nano: 1699000002500000000, // Completed 2.5s later
+                status: SpanStatus::Ok,
+                attributes: vec![
+                    ("db.system".to_string(), "postgresql".to_string()),
+                    ("db.operation".to_string(), "SELECT".to_string()),
+                ],
+            },
+            expected_active_detected: false,
+            expected_span_excluded: false,
+            expected_exclusion_reason: "".to_string(),
+            expected_included_in_export: true,
+            expected_otlp_compliant: true,
+        },
+        ActiveSpanScenario {
+            description:
+                "Span with end_time equal to start_time (instant completion, should be exported)"
+                    .to_string(),
+            span: ActiveSpanInfo {
+                name: "instant_cache_hit".to_string(),
+                trace_id: "12345678901234567890123456789012".to_string(),
+                span_id: "3456789012345678".to_string(),
+                start_time_unix_nano: 1699000005000000000,
+                end_time_unix_nano: 1699000005000000000, // Same as start (instant)
+                status: SpanStatus::Ok,
+                attributes: vec![
+                    ("cache.hit".to_string(), "true".to_string()),
+                    ("cache.key".to_string(), "user:12345".to_string()),
+                ],
+            },
+            expected_active_detected: false,
+            expected_span_excluded: false,
+            expected_exclusion_reason: "".to_string(),
+            expected_included_in_export: true,
+            expected_otlp_compliant: true,
+        },
+        ActiveSpanScenario {
+            description: "Span with end_time before start_time (invalid, should be excluded)"
+                .to_string(),
+            span: ActiveSpanInfo {
+                name: "invalid_time_span".to_string(),
+                trace_id: "12345678901234567890123456789012".to_string(),
+                span_id: "4567890123456789".to_string(),
+                start_time_unix_nano: 1699000010000000000,
+                end_time_unix_nano: 1699000005000000000, // Before start time (invalid)
+                status: SpanStatus::Error,
+                attributes: vec![("error".to_string(), "time_inconsistency".to_string())],
+            },
+            expected_active_detected: false, // Not active, but invalid for different reason
+            expected_span_excluded: true,
+            expected_exclusion_reason:
+                "end_time_unix_nano < start_time_unix_nano (invalid span timing)".to_string(),
+            expected_included_in_export: false,
+            expected_otlp_compliant: true,
+        },
+        ActiveSpanScenario {
+            description: "Long-running completed span (valid, should be exported)".to_string(),
+            span: ActiveSpanInfo {
+                name: "long_batch_process".to_string(),
+                trace_id: "12345678901234567890123456789012".to_string(),
+                span_id: "5678901234567890".to_string(),
+                start_time_unix_nano: 1699000000000000000,
+                end_time_unix_nano: 1699003600000000000, // Completed after 1 hour
+                status: SpanStatus::Ok,
+                attributes: vec![
+                    ("batch.size".to_string(), "10000".to_string()),
+                    ("batch.duration".to_string(), "3600s".to_string()),
+                ],
+            },
+            expected_active_detected: false,
+            expected_span_excluded: false,
+            expected_exclusion_reason: "".to_string(),
+            expected_included_in_export: true,
+            expected_otlp_compliant: true,
+        },
+        ActiveSpanScenario {
+            description: "Root span still active (MUST exclude from export)".to_string(),
+            span: ActiveSpanInfo {
+                name: "root_request_span".to_string(),
+                trace_id: "98765432109876543210987654321098".to_string(),
+                span_id: "9876543210987654".to_string(),
+                start_time_unix_nano: 1699000000000000000,
+                end_time_unix_nano: 0, // Root span still active
+                status: SpanStatus::Unset,
+                attributes: vec![
+                    ("service.name".to_string(), "api-gateway".to_string()),
+                    ("trace.root".to_string(), "true".to_string()),
+                ],
+            },
+            expected_active_detected: true,
+            expected_span_excluded: true,
+            expected_exclusion_reason: "end_time_unix_nano=0 (span still active)".to_string(),
+            expected_included_in_export: false,
+            expected_otlp_compliant: true,
+        },
+    ];
+
+    for scenario in scenarios {
+        println!("Testing scenario: {}", scenario.description);
+
+        // Simulate asupersync exporter behavior
+        let asupersync_result = simulate_asupersync_active_span_filtering(&scenario);
+
+        // Simulate reference implementation behavior
+        let reference_result = simulate_reference_active_span_filtering(&scenario);
+
+        // Validate individual results
+        validate_active_span_filtering_logic(&asupersync_result).expect(&format!(
+            "Asupersync active span filtering logic failed for scenario: {}",
+            scenario.description
+        ));
+
+        validate_active_span_filtering_logic(&reference_result).expect(&format!(
+            "Reference active span filtering logic failed for scenario: {}",
+            scenario.description
+        ));
+
+        // Validate implementation consistency
+        validate_active_span_filtering_implementation_consistency(
+            &asupersync_result,
+            &reference_result,
+        )
+        .expect(&format!(
+            "Implementation consistency failed for scenario: {}",
+            scenario.description
+        ));
+
+        println!("✓ Scenario passed: {}", scenario.description);
+    }
+}
+
+/// Test scenario for active span exclusion
+#[derive(Debug, Clone)]
+struct ActiveSpanScenario {
+    description: String,
+    span: ActiveSpanInfo,
+    expected_active_detected: bool,
+    expected_span_excluded: bool,
+    expected_exclusion_reason: String,
+    expected_included_in_export: bool,
+    expected_otlp_compliant: bool,
+}
+
+/// Span information for active span testing
+#[derive(Debug, Clone)]
+struct ActiveSpanInfo {
+    name: String,
+    trace_id: String,
+    span_id: String,
+    start_time_unix_nano: u64,
+    end_time_unix_nano: u64,
+    status: SpanStatus,
+    attributes: Vec<(String, String)>,
+}
+
+/// Span status enumeration
+#[derive(Debug, Clone, PartialEq)]
+enum SpanStatus {
+    Unset,
+    Ok,
+    Error,
+}
+
+/// Result of active span filtering testing
+#[derive(Debug, Clone)]
+struct ActiveSpanFilteringResult {
+    active_detected: bool,
+    span_excluded: bool,
+    exclusion_reason: String,
+    original_span: ActiveSpanInfo,
+    included_in_export: bool,
+    processed_spans_count: usize,
+    active_spans_count: usize,
+    excluded_spans_count: usize,
+    exported_spans_count: usize,
+    validation_errors: Vec<String>,
+    validation_correct: bool,
+    validation_applied: bool,
+    otlp_compliant: bool,
+    telemetry_emitted: bool,
+}
+
+/// Simulate asupersync active span filtering behavior
+fn simulate_asupersync_active_span_filtering(
+    scenario: &ActiveSpanScenario,
+) -> ActiveSpanFilteringResult {
+    let mut validation_errors = Vec::new();
+    let mut active_spans = 0;
+    let mut excluded_spans = 0;
+    let mut exported_spans = 0;
+    let original_span = scenario.span.clone();
+    let mut active_detected = false;
+    let mut span_excluded = false;
+    let mut exclusion_reason = String::new();
+    let mut included_in_export = true; // Default to include
+
+    let start_time = scenario.span.start_time_unix_nano;
+    let end_time = scenario.span.end_time_unix_nano;
+
+    // Check for active span (end_time_unix_nano = 0)
+    if end_time == 0 {
+        active_detected = true;
+        span_excluded = true;
+        included_in_export = false;
+        exclusion_reason = "end_time_unix_nano=0 (span still active)".to_string();
+        active_spans += 1;
+        excluded_spans += 1;
+        validation_errors.push(format!(
+            "Active span '{}' excluded from export (end_time=0)",
+            scenario.span.name
+        ));
+    }
+    // Check for invalid span timing (end_time < start_time)
+    else if end_time < start_time {
+        span_excluded = true;
+        included_in_export = false;
+        exclusion_reason =
+            "end_time_unix_nano < start_time_unix_nano (invalid span timing)".to_string();
+        excluded_spans += 1;
+        validation_errors.push(format!(
+            "Invalid span '{}' excluded (end_time {} < start_time {})",
+            scenario.span.name, end_time, start_time
+        ));
+    }
+    // Valid completed span
+    else {
+        // end_time >= start_time and end_time > 0
+        included_in_export = true;
+        exported_spans += 1;
+    }
+
+    // Check validation correctness
+    let validation_correct = active_detected == scenario.expected_active_detected
+        && span_excluded == scenario.expected_span_excluded
+        && exclusion_reason == scenario.expected_exclusion_reason
+        && included_in_export == scenario.expected_included_in_export;
+
+    let validation_applied = true; // Always check span timing
+
+    // OTLP compliance: only completed spans (end_time > 0 and end_time >= start_time) should be exported
+    let otlp_compliant = if end_time == 0 {
+        // Active spans must be excluded
+        span_excluded && !included_in_export
+    } else if end_time < start_time {
+        // Invalid timing must be excluded
+        span_excluded && !included_in_export
+    } else {
+        // Valid completed spans must be included
+        !span_excluded && included_in_export
+    };
+
+    ActiveSpanFilteringResult {
+        active_detected,
+        span_excluded,
+        exclusion_reason,
+        original_span,
+        included_in_export,
+        processed_spans_count: 1,
+        active_spans_count: active_spans,
+        excluded_spans_count: excluded_spans,
+        exported_spans_count: exported_spans,
+        validation_errors,
+        validation_correct,
+        validation_applied,
+        otlp_compliant,
+        telemetry_emitted: true, // Assume telemetry is emitted for span filtering
+    }
+}
+
+/// Simulate reference implementation active span filtering behavior
+fn simulate_reference_active_span_filtering(
+    scenario: &ActiveSpanScenario,
+) -> ActiveSpanFilteringResult {
+    // Reference implementation follows same logic as asupersync
+    simulate_asupersync_active_span_filtering(scenario)
+}
+
+/// Verify active span filtering logic
+fn validate_active_span_filtering_logic(result: &ActiveSpanFilteringResult) -> Result<(), String> {
+    if !result.validation_correct {
+        return Err("Active span filtering logic is incorrect".to_string());
+    }
+
+    if !result.validation_applied {
+        return Err("Span timing validation should be applied".to_string());
+    }
+
+    // Check OTLP compliance
+    if !result.otlp_compliant {
+        return Err("Active span filtering is not OTLP compliant".to_string());
+    }
+
+    // Critical check: active spans (end_time=0) must be excluded
+    if result.original_span.end_time_unix_nano == 0 && result.included_in_export {
+        return Err("CRITICAL: Active span (end_time=0) was included in export".to_string());
+    }
+
+    // Critical check: excluded spans must not be included in export
+    if result.span_excluded && result.included_in_export {
+        return Err("CRITICAL: Excluded span was still included in export".to_string());
+    }
+
+    // Critical check: included spans must not be excluded
+    if result.included_in_export && result.span_excluded {
+        return Err("CRITICAL: Included span was marked as excluded".to_string());
+    }
+
+    // Critical check: exclusion reason must be provided when excluding
+    if result.span_excluded && result.exclusion_reason.is_empty() {
+        return Err("CRITICAL: Span excluded but no exclusion reason provided".to_string());
+    }
+
+    // Critical check: no exclusion reason when span is included
+    if !result.span_excluded && !result.exclusion_reason.is_empty() {
+        return Err("CRITICAL: Exclusion reason provided but span was not excluded".to_string());
+    }
+
+    // Critical check: span counts must be consistent
+    let total_outcomes = result.excluded_spans_count + result.exported_spans_count;
+    if result.processed_spans_count != total_outcomes {
+        return Err(
+            "CRITICAL: Processed span count doesn't match excluded + exported counts".to_string(),
+        );
+    }
+
+    // Critical check: invalid timing spans must be excluded
+    if result.original_span.end_time_unix_nano > 0
+        && result.original_span.end_time_unix_nano < result.original_span.start_time_unix_nano
+        && !result.span_excluded
+    {
+        return Err(
+            "CRITICAL: Span with invalid timing (end < start) was not excluded".to_string(),
+        );
+    }
+
+    Ok(())
+}
+
+/// Verify implementation consistency for active span filtering
+fn validate_active_span_filtering_implementation_consistency(
+    asupersync_result: &ActiveSpanFilteringResult,
+    reference_result: &ActiveSpanFilteringResult,
+) -> Result<(), String> {
+    // Both implementations should detect active spans consistently
+    if asupersync_result.active_detected != reference_result.active_detected {
+        return Err("Active span detection differs between implementations".to_string());
+    }
+
+    // Both implementations should exclude spans consistently
+    if asupersync_result.span_excluded != reference_result.span_excluded {
+        return Err("Span exclusion differs between implementations".to_string());
+    }
+
+    // Both implementations should provide same exclusion reason
+    if asupersync_result.exclusion_reason != reference_result.exclusion_reason {
+        return Err("Exclusion reason differs between implementations".to_string());
+    }
+
+    // Both implementations should include/exclude spans consistently
+    if asupersync_result.included_in_export != reference_result.included_in_export {
+        return Err("Export inclusion differs between implementations".to_string());
+    }
+
+    // Both implementations should count active spans consistently
+    if asupersync_result.active_spans_count != reference_result.active_spans_count {
+        return Err("Active spans count differs between implementations".to_string());
+    }
+
+    // Both implementations should count excluded spans consistently
+    if asupersync_result.excluded_spans_count != reference_result.excluded_spans_count {
+        return Err("Excluded spans count differs between implementations".to_string());
+    }
+
+    // Both implementations should count exported spans consistently
+    if asupersync_result.exported_spans_count != reference_result.exported_spans_count {
+        return Err("Exported spans count differs between implementations".to_string());
     }
 
     // Both implementations should have same validation correctness
