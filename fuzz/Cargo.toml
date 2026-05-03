@@ -4955,3 +4955,9 @@ name = "h2_priority_self_dependency"
 path = "fuzz_targets/h2_priority_self_dependency.rs"
 test = false
 doc = false
+
+[[bin]]
+name = "h2_continuation_after_data"
+path = "fuzz_targets/h2_continuation_after_data.rs"
+test = false
+doc = false
