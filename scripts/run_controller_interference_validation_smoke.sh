@@ -43,6 +43,10 @@ json_escape() { printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g'; }
 contract_version() { jq -r '.contract_version' "$CONTRACT_ARTIFACT"; }
 bundle_schema_version() { jq -r '.runner_bundle_schema_version' "$CONTRACT_ARTIFACT"; }
 report_schema_version() { jq -r '.runner_report_schema_version' "$CONTRACT_ARTIFACT"; }
+bundle_required_fields_json() { jq -c '.runner_bundle_required_fields' "$CONTRACT_ARTIFACT"; }
+report_required_fields_json() { jq -c '.runner_report_required_fields' "$CONTRACT_ARTIFACT"; }
+env_fingerprint_fields_json() { jq -c '.env_fingerprint_fields' "$CONTRACT_ARTIFACT"; }
+operator_bundle_fields_json() { jq -c '.operator_bundle_fields' "$CONTRACT_ARTIFACT"; }
 
 list_scenarios() {
     jq -r '.smoke_scenarios[] | [.scenario_id, .description] | @tsv' "$CONTRACT_ARTIFACT" \
@@ -60,10 +64,19 @@ append_result() {
 
 run_scenario() {
     local sid="$1" scenario_json description command scenario_dir log_file summary_file started_ts ended_ts status rc
+    local env_fingerprint active_controller_set shared_telemetry_fields knob_writes fallback_activation_counts decision_trace compose_verdict operator_explanation
     scenario_json="$(load_scenario_json "$sid")"
     [[ -z "$scenario_json" ]] && { echo "FATAL: unknown scenario: $sid" >&2; return 1; }
     description="$(jq -r '.description' <<<"$scenario_json")"
     command="$(jq -r '.command' <<<"$scenario_json")"
+    env_fingerprint="$(jq -c '.env_fingerprint // {}' <<<"$scenario_json")"
+    active_controller_set="$(jq -c '.active_controller_set // []' <<<"$scenario_json")"
+    shared_telemetry_fields="$(jq -c '.shared_telemetry_fields // []' <<<"$scenario_json")"
+    knob_writes="$(jq -c '.knob_writes // []' <<<"$scenario_json")"
+    fallback_activation_counts="$(jq -c '.fallback_activation_counts // {}' <<<"$scenario_json")"
+    decision_trace="$(jq -c '.decision_trace // []' <<<"$scenario_json")"
+    compose_verdict="$(jq -r '.compose_verdict // "unclassified"' <<<"$scenario_json")"
+    operator_explanation="$(jq -r '.operator_explanation // ""' <<<"$scenario_json")"
     scenario_dir="${RUN_DIR}/${sid}"; log_file="${scenario_dir}/run.log"; summary_file="${scenario_dir}/bundle_manifest.json"
     mkdir -p "$scenario_dir"
     started_ts="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
@@ -84,7 +97,19 @@ run_scenario() {
   "status": "$(json_escape "$status")",
   "exit_code": ${rc},
   "started_ts": "$(json_escape "$started_ts")",
-  "ended_ts": "$(json_escape "$ended_ts")"
+  "ended_ts": "$(json_escape "$ended_ts")",
+  "artifact_path": "$(json_escape "$summary_file")",
+  "bundle_required_fields": $(bundle_required_fields_json),
+  "env_fingerprint_fields": $(env_fingerprint_fields_json),
+  "operator_bundle_fields": $(operator_bundle_fields_json),
+  "env_fingerprint": ${env_fingerprint},
+  "active_controller_set": ${active_controller_set},
+  "shared_telemetry_fields": ${shared_telemetry_fields},
+  "knob_writes": ${knob_writes},
+  "fallback_activation_counts": ${fallback_activation_counts},
+  "decision_trace": ${decision_trace},
+  "compose_verdict": "$(json_escape "$compose_verdict")",
+  "operator_explanation": "$(json_escape "$operator_explanation")"
 }
 JSON
     append_result "$(jq -c '.' "$summary_file")"
@@ -118,7 +143,10 @@ cat >"$RUN_REPORT" <<JSON
   "schema_version": "$(json_escape "$(report_schema_version)")",
   "contract_version": "$(json_escape "$(contract_version)")",
   "run_dir": "$(json_escape "$RUN_DIR")",
+  "artifact_path": "$(json_escape "$RUN_REPORT")",
   "dry_run": $( [[ "$DRY_RUN" -eq 1 ]] && printf 'true' || printf 'false' ),
+  "scenario_count": ${#SELECTED_SCENARIOS[@]},
+  "report_required_fields": $(report_required_fields_json),
   "results": [${RESULTS_JSON}],
   "status": "$([ "$OVERALL_RC" -eq 0 ] && printf "passed" || printf "failed")"
 }

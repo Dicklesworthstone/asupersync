@@ -369,6 +369,147 @@ fn runner_script_exists_and_declares_modes() {
     );
 }
 
+#[test]
+fn runner_declares_operator_grade_bundle_fields() {
+    let art = load_artifact();
+    let bundle_fields = art["runner_bundle_required_fields"]
+        .as_array()
+        .expect("runner_bundle_required_fields must be array");
+    let required = [
+        "artifact_path",
+        "env_fingerprint",
+        "active_controller_set",
+        "shared_telemetry_fields",
+        "knob_writes",
+        "fallback_activation_counts",
+        "decision_trace",
+        "compose_verdict",
+        "operator_explanation",
+    ];
+    for field in required {
+        assert!(
+            bundle_fields
+                .iter()
+                .any(|item| item.as_str() == Some(field)),
+            "bundle field list must include {field}"
+        );
+    }
+
+    let report_fields = art["runner_report_required_fields"]
+        .as_array()
+        .expect("runner_report_required_fields must be array");
+    for field in ["artifact_path", "scenario_count", "results", "status"] {
+        assert!(
+            report_fields
+                .iter()
+                .any(|item| item.as_str() == Some(field)),
+            "report field list must include {field}"
+        );
+    }
+}
+
+#[test]
+fn smoke_scenarios_declare_operator_metadata() {
+    let art = load_artifact();
+    let scenarios = art["smoke_scenarios"].as_array().unwrap();
+    for scenario in scenarios {
+        let sid = scenario["scenario_id"].as_str().unwrap();
+        assert!(
+            scenario["env_fingerprint"].is_object(),
+            "{sid}: env_fingerprint must be object"
+        );
+        assert!(
+            scenario["active_controller_set"].as_array().is_some(),
+            "{sid}: active_controller_set must be array"
+        );
+        assert!(
+            scenario["shared_telemetry_fields"].as_array().is_some(),
+            "{sid}: shared_telemetry_fields must be array"
+        );
+        assert!(
+            scenario["knob_writes"].as_array().is_some(),
+            "{sid}: knob_writes must be array"
+        );
+        assert!(
+            scenario["fallback_activation_counts"].is_object(),
+            "{sid}: fallback_activation_counts must be object"
+        );
+        assert!(
+            scenario["decision_trace"].as_array().is_some(),
+            "{sid}: decision_trace must be array"
+        );
+        assert!(
+            scenario["compose_verdict"].is_string(),
+            "{sid}: compose_verdict must be string"
+        );
+        assert!(
+            scenario["operator_explanation"].is_string(),
+            "{sid}: operator_explanation must be string"
+        );
+    }
+}
+
+#[test]
+fn runner_dry_run_emits_operator_grade_bundle_and_report() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let output_root = temp.path().join("controller-interference-smoke");
+    let status = std::process::Command::new("bash")
+        .arg(RUNNER_PATH)
+        .arg("--scenario")
+        .arg("CIV-SMOKE-INTERFERENCE")
+        .arg("--dry-run")
+        .arg("--output-root")
+        .arg(&output_root)
+        .status()
+        .expect("run dry-run smoke");
+    assert!(status.success(), "dry-run smoke must succeed");
+
+    let run_dirs: Vec<_> = std::fs::read_dir(&output_root)
+        .expect("output root")
+        .map(|entry| entry.expect("dir entry").path())
+        .collect();
+    assert_eq!(run_dirs.len(), 1, "expected exactly one run directory");
+    let run_dir = &run_dirs[0];
+    let bundle_path = run_dir
+        .join("CIV-SMOKE-INTERFERENCE")
+        .join("bundle_manifest.json");
+    let report_path = run_dir.join("run_report.json");
+    let bundle: Value =
+        serde_json::from_str(&std::fs::read_to_string(&bundle_path).expect("bundle manifest"))
+            .expect("bundle json");
+    let report: Value =
+        serde_json::from_str(&std::fs::read_to_string(&report_path).expect("run report"))
+            .expect("report json");
+
+    assert_eq!(
+        bundle["schema_version"].as_str(),
+        Some("controller-interference-validation-smoke-bundle-v1")
+    );
+    assert_eq!(bundle["status"].as_str(), Some("dry_run"));
+    assert!(bundle["artifact_path"].as_str().is_some());
+    assert!(bundle["env_fingerprint"].is_object());
+    assert!(bundle["active_controller_set"].is_array());
+    assert!(bundle["shared_telemetry_fields"].is_array());
+    assert!(bundle["knob_writes"].is_array());
+    assert!(bundle["fallback_activation_counts"].is_object());
+    assert!(bundle["decision_trace"].is_array());
+    assert!(bundle["compose_verdict"].is_string());
+    assert!(bundle["operator_explanation"].is_string());
+
+    assert_eq!(
+        report["schema_version"].as_str(),
+        Some("controller-interference-validation-smoke-run-report-v1")
+    );
+    assert_eq!(report["dry_run"].as_bool(), Some(true));
+    assert_eq!(report["scenario_count"].as_u64(), Some(1));
+    assert!(report["artifact_path"].as_str().is_some());
+    assert_eq!(report["status"].as_str(), Some("passed"));
+    assert_eq!(
+        report["results"].as_array().expect("results array").len(),
+        1
+    );
+}
+
 // ── Functional: interference oscillation detection ──────────────────
 
 #[test]

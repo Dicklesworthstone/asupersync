@@ -5,6 +5,35 @@
   "runner_script": "scripts/run_controller_interference_validation_smoke.sh",
   "runner_bundle_schema_version": "controller-interference-validation-smoke-bundle-v1",
   "runner_report_schema_version": "controller-interference-validation-smoke-run-report-v1",
+  "runner_bundle_required_fields": [
+    "schema_version",
+    "contract_version",
+    "scenario_id",
+    "description",
+    "status",
+    "exit_code",
+    "started_ts",
+    "ended_ts",
+    "artifact_path",
+    "env_fingerprint",
+    "active_controller_set",
+    "shared_telemetry_fields",
+    "knob_writes",
+    "fallback_activation_counts",
+    "decision_trace",
+    "compose_verdict",
+    "operator_explanation"
+  ],
+  "runner_report_required_fields": [
+    "schema_version",
+    "contract_version",
+    "run_dir",
+    "artifact_path",
+    "dry_run",
+    "scenario_count",
+    "results",
+    "status"
+  ],
   "interference_model": {
     "description": "Controllers targeting overlapping seams may create feedback loops. Interference is detected by monitoring decision oscillation across paired controllers.",
     "overlap_pairs": [
@@ -99,6 +128,22 @@
       "alarm_action": "log_structured_warning"
     }
   },
+  "env_fingerprint_fields": [
+    "host_class",
+    "worker_count",
+    "memory_gib",
+    "evidence_stream_id",
+    "lab_runtime"
+  ],
+  "operator_bundle_fields": [
+    "active_controller_set",
+    "shared_telemetry_fields",
+    "knob_writes",
+    "fallback_activation_counts",
+    "decision_trace",
+    "compose_verdict",
+    "operator_explanation"
+  ],
   "structured_log_fields_required": [
     "interference_pair_id",
     "oscillation_count",
@@ -119,22 +164,195 @@
     {
       "scenario_id": "CIV-SMOKE-INTERFERENCE",
       "description": "Validate interference detection across controller pairs",
-      "command": "rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=/tmp/rch-codex-aa033 cargo test --test controller_interference_validation_contract interference -- --nocapture"
+      "command": "rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=/tmp/rch-codex-aa033 cargo test --test controller_interference_validation_contract interference -- --nocapture",
+      "env_fingerprint": {
+        "host_class": "64c-256g-lab",
+        "worker_count": 64,
+        "memory_gib": 256,
+        "evidence_stream_id": "civ-interference-window-v1",
+        "lab_runtime": true
+      },
+      "active_controller_set": [
+        "SCHED-GOVERNOR",
+        "ADMISSION-GATE"
+      ],
+      "shared_telemetry_fields": [
+        "ready_queue_len"
+      ],
+      "knob_writes": [
+        "worker_parking_mode",
+        "admission_window"
+      ],
+      "fallback_activation_counts": {
+        "shadow_mode": 0,
+        "conservative_fallback": 0
+      },
+      "decision_trace": [
+        {
+          "epoch": 0,
+          "controller_id": "SCHED-GOVERNOR",
+          "action": "wake_worker",
+          "observable": "ready_queue_len",
+          "value": 96
+        },
+        {
+          "epoch": 1,
+          "controller_id": "ADMISSION-GATE",
+          "action": "hold_admission_window",
+          "observable": "ready_queue_len",
+          "value": 88
+        }
+      ],
+      "compose_verdict": "safe_to_compose",
+      "operator_explanation": "The pair shares ready_queue_len but remains below the oscillation threshold inside the validation window."
     },
     {
       "scenario_id": "CIV-SMOKE-TIMESCALE",
       "description": "Validate timescale separation invariants",
-      "command": "rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=/tmp/rch-codex-aa033 cargo test --test controller_interference_validation_contract timescale -- --nocapture"
+      "command": "rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=/tmp/rch-codex-aa033 cargo test --test controller_interference_validation_contract timescale -- --nocapture",
+      "env_fingerprint": {
+        "host_class": "64c-256g-lab",
+        "worker_count": 64,
+        "memory_gib": 256,
+        "evidence_stream_id": "civ-timescale-tier-v1",
+        "lab_runtime": true
+      },
+      "active_controller_set": [
+        "SCHED-GOVERNOR",
+        "ADMISSION-GATE",
+        "RETRY-BACKOFF"
+      ],
+      "shared_telemetry_fields": [
+        "ready_queue_len",
+        "active_timers",
+        "outstanding_obligations"
+      ],
+      "knob_writes": [
+        "worker_parking_mode",
+        "admission_window",
+        "retry_backoff_epoch"
+      ],
+      "fallback_activation_counts": {
+        "shadow_mode": 0,
+        "conservative_fallback": 0
+      },
+      "decision_trace": [
+        {
+          "epoch": 0,
+          "controller_id": "SCHED-GOVERNOR",
+          "action": "fast_epoch_tick",
+          "timescale_tier": "FAST"
+        },
+        {
+          "epoch": 4,
+          "controller_id": "ADMISSION-GATE",
+          "action": "medium_epoch_tick",
+          "timescale_tier": "MEDIUM"
+        },
+        {
+          "epoch": 8,
+          "controller_id": "RETRY-BACKOFF",
+          "action": "slow_epoch_tick",
+          "timescale_tier": "SLOW"
+        }
+      ],
+      "compose_verdict": "safe_to_compose",
+      "operator_explanation": "Distinct epoch tiers preserve the minimum 2:1 separation between controller updates."
     },
     {
       "scenario_id": "CIV-SMOKE-FALLBACK",
       "description": "Validate tail-SLO fallback gates and recovery",
-      "command": "rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=/tmp/rch-codex-aa033 cargo test --test controller_interference_validation_contract fallback -- --nocapture"
+      "command": "rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=/tmp/rch-codex-aa033 cargo test --test controller_interference_validation_contract fallback -- --nocapture",
+      "env_fingerprint": {
+        "host_class": "64c-256g-lab",
+        "worker_count": 64,
+        "memory_gib": 256,
+        "evidence_stream_id": "civ-tail-fallback-v1",
+        "lab_runtime": true
+      },
+      "active_controller_set": [
+        "SCHED-GOVERNOR",
+        "ADMISSION-GATE"
+      ],
+      "shared_telemetry_fields": [
+        "ready_queue_len",
+        "obligation_leak_count"
+      ],
+      "knob_writes": [
+        "controller_mode",
+        "conservative_comparator"
+      ],
+      "fallback_activation_counts": {
+        "shadow_mode": 2,
+        "conservative_fallback": 2
+      },
+      "decision_trace": [
+        {
+          "epoch": 0,
+          "controller_id": "SCHED-GOVERNOR",
+          "action": "promote_shadow",
+          "slo_field_id": "P99-TASK-LATENCY",
+          "breached": true
+        },
+        {
+          "epoch": 1,
+          "controller_id": "ADMISSION-GATE",
+          "action": "fallback_to_shadow",
+          "slo_field_id": "OBLIGATION-LEAK",
+          "breached": true
+        }
+      ],
+      "compose_verdict": "do_not_compose_until_recalibrated",
+      "operator_explanation": "Tail-SLO breaches force both controllers back to conservative shadow mode within the configured fallback deadline."
     },
     {
       "scenario_id": "CIV-SMOKE-SEQUENTIAL",
       "description": "Validate sequential decision ordering and drift alarms",
-      "command": "rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=/tmp/rch-codex-aa033 cargo test --test controller_interference_validation_contract sequential -- --nocapture"
+      "command": "rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=/tmp/rch-codex-aa033 cargo test --test controller_interference_validation_contract sequential -- --nocapture",
+      "env_fingerprint": {
+        "host_class": "64c-256g-lab",
+        "worker_count": 64,
+        "memory_gib": 256,
+        "evidence_stream_id": "civ-sequential-drift-v1",
+        "lab_runtime": true
+      },
+      "active_controller_set": [
+        "SCHED-GOVERNOR",
+        "ADMISSION-GATE",
+        "RETRY-BACKOFF"
+      ],
+      "shared_telemetry_fields": [
+        "ready_queue_len",
+        "active_timers",
+        "outstanding_obligations"
+      ],
+      "knob_writes": [
+        "worker_parking_mode",
+        "admission_window",
+        "retry_backoff_epoch"
+      ],
+      "fallback_activation_counts": {
+        "shadow_mode": 0,
+        "conservative_fallback": 1
+      },
+      "decision_trace": [
+        {
+          "epoch": 0,
+          "controller_id": "SCHED-GOVERNOR",
+          "action": "record_precedence",
+          "sequential_order": 0,
+          "drift_detected": false
+        },
+        {
+          "epoch": 0,
+          "controller_id": "ADMISSION-GATE",
+          "action": "observe_post_scheduler_state",
+          "sequential_order": 1,
+          "drift_detected": true
+        }
+      ],
+      "compose_verdict": "safe_with_drift_alarm",
+      "operator_explanation": "Controllers stay sequentially ordered; drift alarms surface when post-decision state would have changed the next controller's action."
     }
   ],
   "downstream_beads": [
