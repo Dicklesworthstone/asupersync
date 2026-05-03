@@ -3762,11 +3762,15 @@ mod tests {
             let deadline = context.deadline().expect("deadline should be parsed");
 
             let expected_deadline = now + Duration::from_secs(5);
+            let deadline_delta = deadline
+                .checked_duration_since(expected_deadline)
+                .or_else(|| expected_deadline.checked_duration_since(deadline))
+                .expect("deadline delta should be representable");
             crate::assert_with_log!(
-                deadline.abs_diff(expected_deadline) < Duration::from_millis(1),
+                deadline_delta < Duration::from_millis(1),
                 "grpc-timeout header correctly parsed to deadline",
                 true,
-                deadline.abs_diff(expected_deadline) < Duration::from_millis(1)
+                deadline_delta < Duration::from_millis(1)
             );
 
             // Verify deadline checking methods work
