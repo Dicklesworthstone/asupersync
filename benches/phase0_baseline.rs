@@ -32,13 +32,14 @@ use asupersync::config::RaptorQConfig;
 use asupersync::lab::{LabConfig, LabRuntime};
 #[cfg(feature = "test-internals")]
 use asupersync::raptorq::{RaptorQReceiverBuilder, RaptorQSenderBuilder};
+use asupersync::record::task::TaskRecord;
 use asupersync::runtime::RuntimeState;
 #[cfg(feature = "test-internals")]
 use asupersync::transport::mock::{SimTransportConfig, sim_channel};
-use asupersync::types::{Budget, CancelKind, CancelReason, Outcome, Time};
+use asupersync::types::{Budget, CancelKind, CancelReason, Outcome, TaskId, Time};
 #[cfg(feature = "test-internals")]
 use asupersync::types::{ObjectId, ObjectParams};
-use asupersync::util::Arena;
+use asupersync::util::{Arena, ArenaIndex};
 
 // =============================================================================
 // CORE TYPE BENCHMARKS
@@ -233,6 +234,58 @@ fn bench_runtime_state_operations(c: &mut Criterion) {
             total
         })
     });
+
+    group.bench_function(
+        "insert_task_placeholder_then_patch",
+        |b: &mut criterion::Bencher| {
+            b.iter_custom(|iters| {
+                let mut total = std::time::Duration::ZERO;
+                for _ in 0..iters {
+                    let mut state = RuntimeState::new();
+                    let region = state.create_root_region(Budget::INFINITE);
+                    let start = std::time::Instant::now();
+                    let idx = state.insert_task(TaskRecord::new_with_time(
+                        TaskId::from_arena(ArenaIndex::new(0, 0)),
+                        region,
+                        Budget::INFINITE,
+                        Time::ZERO,
+                    ));
+                    let task_id = TaskId::from_arena(idx);
+                    if let Some(record) = state.task_mut(task_id) {
+                        record.id = task_id;
+                    }
+                    total += start.elapsed();
+                    black_box(task_id);
+                }
+                total
+            })
+        },
+    );
+
+    group.bench_function(
+        "insert_task_with_canonical_id",
+        |b: &mut criterion::Bencher| {
+            b.iter_custom(|iters| {
+                let mut total = std::time::Duration::ZERO;
+                for _ in 0..iters {
+                    let mut state = RuntimeState::new();
+                    let region = state.create_root_region(Budget::INFINITE);
+                    let start = std::time::Instant::now();
+                    let idx = state.insert_task_with(|idx| {
+                        TaskRecord::new_with_time(
+                            TaskId::from_arena(idx),
+                            region,
+                            Budget::INFINITE,
+                            Time::ZERO,
+                        )
+                    });
+                    total += start.elapsed();
+                    black_box(TaskId::from_arena(idx));
+                }
+                total
+            })
+        },
+    );
 
     group.finish();
 }
