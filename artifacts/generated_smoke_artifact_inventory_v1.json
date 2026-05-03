@@ -1,0 +1,256 @@
+{
+  "schema_version": "generated-smoke-artifact-inventory-v1",
+  "bead_id": "asupersync-beih6k",
+  "generated_at": "2026-05-03T17:53:14Z",
+  "purpose": "Assign owner beads, retention decisions, reproduction commands, and stable checksums to generated swarm-perf smoke output clusters without deleting local evidence.",
+  "policy": {
+    "no_deletion_confirmation": true,
+    "retention_decision": "ignore_local_generated_roots_and_commit_inventory",
+    "source_of_truth": "committed versioned contracts, runners, and reports; local generated roots are reproducible evidence caches",
+    "final_signoff_rule": "fail_closed_when_cluster_is_unmapped_unreproducible_schema_missing_or_unsafe_to_retain",
+    "fallback_decision": "preserve the cluster in place, keep final signoff blocked, and require a precise owner/blocker bead before trusting the evidence"
+  },
+  "canonical_guidance": [
+    {
+      "source": "/data/projects/alien_cs_graveyard/high_level_summary_of_frankensuite_planned_and_implemented_features_and_concepts.md",
+      "line_hint": "Artifact Graph",
+      "reason": "Evidence must connect claims, policies, and proofs instead of relying on local scratch files."
+    },
+    {
+      "source": "/data/projects/alien_cs_graveyard/high_level_summary_of_frankensuite_planned_and_implemented_features_and_concepts.md",
+      "line_hint": "Loss + Calibration + Fallback",
+      "reason": "Untrusted or missing evidence must activate a conservative fallback rather than silently passing signoff."
+    }
+  ],
+  "local_host_snapshot": {
+    "git_head_at_inventory": "1ae94d77352e",
+    "expected_cluster_count": 9,
+    "expected_file_count": 43,
+    "expected_total_bytes": 193908,
+    "inventory_command": "find <cluster> -maxdepth 3 -type f | sort; sha256sum over stable file lists",
+    "no_deletion_confirmation": true
+  },
+  "clusters": [
+    {
+      "cluster_id": "blocking_pool_affinity",
+      "output_root": ".blocking-pool-affinity-smoke-artifacts",
+      "owner_beads": ["asupersync-lpffta"],
+      "owner_status": "closed",
+      "runner_path": "scripts/run_blocking_pool_affinity_smoke.sh",
+      "scenario_ids": [
+        "AA-BLOCKING-POOL-AFFINITY-SATURATION-2C",
+        "AA-BLOCKING-POOL-AFFINITY-MIXED-ASYNC-BLOCKING-2C",
+        "AA-BLOCKING-POOL-AFFINITY-MIXED-ASYNC-NO-WIN-2C"
+      ],
+      "report_glob": "*/AA-BLOCKING-POOL-AFFINITY-*/blocking_pool_affinity_report.json",
+      "reproduction_command": "scripts/run_blocking_pool_affinity_smoke.sh --execute --output-root .blocking-pool-affinity-smoke-artifacts",
+      "retention_decision": "ignore_generated_root_keep_inventory",
+      "signoff_status": "trusted_when_runner_contract_and_owner_closeout_are_present",
+      "expected_file_count": 3,
+      "expected_total_bytes": 16449,
+      "stable_file_list_sha256": "58ec320a856f0cd45fe32f5a2a690380ad43dbb747f42de884f83e0caccdc4c8",
+      "checksum_manifest_sha256": "f72db3ece4298c47da5e7fdb6402926f0d15a7ac4bd25fefe42d1ec835aade2c",
+      "no_deletion_confirmation": true
+    },
+    {
+      "cluster_id": "cohort_admission_steering",
+      "output_root": ".cohort-admission-steering-smoke-artifacts",
+      "owner_beads": ["asupersync-j1980r"],
+      "owner_status": "open",
+      "runner_path": "scripts/run_cohort_admission_steering_smoke.sh",
+      "runner_path_status": "tracked_runner_contract_present_owner_open",
+      "scenario_ids": [
+        "AA-COHORT-ADMISSION-STEERING-LOCALITY-WIN-2C",
+        "AA-COHORT-ADMISSION-STEERING-KEEP-GLOBAL-2C"
+      ],
+      "report_glob": "*/AA-COHORT-ADMISSION-STEERING-*/cohort_admission_steering_report.json",
+      "reproduction_command": "scripts/run_cohort_admission_steering_smoke.sh --execute --output-root .cohort-admission-steering-smoke-artifacts",
+      "retention_decision": "ignore_generated_root_keep_inventory_and_owner_blocker",
+      "signoff_status": "fail_closed_until_asupersync_j1980r_closes_with_tracked_runner_contract_and_tests",
+      "expected_file_count": 3,
+      "expected_total_bytes": 23357,
+      "stable_file_list_sha256": "4486c0a7c9826a0c7d55a77483dceb788f4ef839ca4fbf4485bd84a1a1ef24e6",
+      "checksum_manifest_sha256": "727e1ab9a2e7f8998c9509a1896d8ad5c9f27d0c703504f36254c6c894db2122",
+      "no_deletion_confirmation": true
+    },
+    {
+      "cluster_id": "decision_plane_validation",
+      "output_root": ".decision-plane-validation-smoke-artifacts",
+      "owner_beads": ["asupersync-b4guhs", "asupersync-ccgxc3"],
+      "owner_status": "closed",
+      "runner_path": "scripts/run_decision_plane_validation_smoke.sh",
+      "scenario_ids": [
+        "AA023-SMOKE-CONTROLLER-LEDGER",
+        "AA023-SMOKE-CONTROLLER-INTERFERENCE"
+      ],
+      "report_glob": "*/AA023-SMOKE-CONTROLLER-*/*.json",
+      "reproduction_command": "scripts/run_decision_plane_validation_smoke.sh --execute --output-root .decision-plane-validation-smoke-artifacts",
+      "retention_decision": "ignore_generated_root_keep_inventory",
+      "signoff_status": "trusted_when_owner_closeouts_are_present",
+      "expected_file_count": 14,
+      "expected_total_bytes": 52572,
+      "stable_file_list_sha256": "a45c39fdf709e0b5584a92fa7b7a10f612ee15a920ea7c2fe6acf48669c75769",
+      "checksum_manifest_sha256": "f5869eae89e1e0f48726d04a1ed0ab68329490a87b2e4bf42847e1c83d4d3ffb",
+      "no_deletion_confirmation": true
+    },
+    {
+      "cluster_id": "governor_state_snapshot",
+      "output_root": ".governor-state-snapshot-smoke-artifacts",
+      "owner_beads": ["asupersync-k7nx5t"],
+      "owner_status": "closed",
+      "runner_path": "scripts/run_governor_state_snapshot_smoke.sh",
+      "scenario_ids": [
+        "AA-GOVERNOR-SNAPSHOT-EQUIVALENCE-BASELINE",
+        "AA-GOVERNOR-SNAPSHOT-EQUIVALENCE-MANUAL-FALLBACK"
+      ],
+      "report_glob": "*/AA-GOVERNOR-SNAPSHOT-*/governor_state_snapshot_report.json",
+      "reproduction_command": "scripts/run_governor_state_snapshot_smoke.sh --execute --output-root .governor-state-snapshot-smoke-artifacts",
+      "retention_decision": "ignore_generated_root_keep_inventory",
+      "signoff_status": "trusted_when_runner_contract_and_owner_closeout_are_present",
+      "expected_file_count": 3,
+      "expected_total_bytes": 15383,
+      "stable_file_list_sha256": "9426f1c1396a94a76908c0d58b648d115c1e4c3158126c8022c1d83098c22a18",
+      "checksum_manifest_sha256": "c3e8925f15ee123a4dd56511233e73234fd17a6cf1e2a4c840fee4ee6c7975ee",
+      "no_deletion_confirmation": true
+    },
+    {
+      "cluster_id": "read_biased_region_snapshot",
+      "output_root": ".read-biased-region-snapshot-smoke-artifacts",
+      "owner_beads": ["asupersync-l0q0rs"],
+      "owner_status": "closed",
+      "runner_path": "scripts/run_read_biased_region_snapshot_smoke.sh",
+      "scenario_ids": [
+        "AA-READ-BIASED-REGION-SNAPSHOT-READ-HEAVY",
+        "AA-READ-BIASED-REGION-SNAPSHOT-WRITE-HEAVY"
+      ],
+      "report_glob": "*/AA-READ-BIASED-REGION-SNAPSHOT-*/read_biased_region_snapshot_report.json",
+      "reproduction_command": "scripts/run_read_biased_region_snapshot_smoke.sh --execute --output-root .read-biased-region-snapshot-smoke-artifacts",
+      "retention_decision": "ignore_generated_root_keep_inventory",
+      "signoff_status": "trusted_when_runner_contract_and_owner_closeout_are_present",
+      "expected_file_count": 2,
+      "expected_total_bytes": 3565,
+      "stable_file_list_sha256": "44c9c87cc12638072ff6c9d8e5fce687dd7df5e8849f33c9c7426abc11b54207",
+      "checksum_manifest_sha256": "c2b61d546446cdd84a362c9a6d07e2331e4b05e38997bbabc6708e68a99c778c",
+      "no_deletion_confirmation": true
+    },
+    {
+      "cluster_id": "tail_risk_admission",
+      "output_root": ".tail-risk-admission-smoke-artifacts",
+      "owner_beads": ["asupersync-g0aumf"],
+      "owner_status": "closed",
+      "runner_path": "scripts/run_tail_risk_admission_smoke.sh",
+      "scenario_ids": [
+        "AA-TAIL-RISK-ADMISSION-MIXED-OVERLOAD",
+        "AA-TAIL-RISK-ADMISSION-CONSERVATIVE-FALLBACK"
+      ],
+      "report_glob": "*/AA-TAIL-RISK-ADMISSION-*/tail_risk_admission_report.json",
+      "reproduction_command": "scripts/run_tail_risk_admission_smoke.sh --execute --output-root .tail-risk-admission-smoke-artifacts",
+      "retention_decision": "ignore_generated_root_keep_inventory",
+      "signoff_status": "trusted_when_runner_contract_and_owner_closeout_are_present",
+      "expected_file_count": 5,
+      "expected_total_bytes": 42177,
+      "stable_file_list_sha256": "ebed19c45251bd6d03981a62197e9d19d38202f29b2663df06c040cc81de8747",
+      "checksum_manifest_sha256": "7a515402f5c1e294b53101c4153b86a6900b90e15b0c1eb78a0064381cb9fdb7",
+      "no_deletion_confirmation": true
+    },
+    {
+      "cluster_id": "trace_storage_profile",
+      "output_root": ".trace-storage-profile-smoke-artifacts",
+      "owner_beads": ["asupersync-yaj7g6"],
+      "owner_status": "open",
+      "runner_path": "scripts/run_trace_storage_profile_smoke.sh",
+      "scenario_ids": ["AA-TRACE-STORAGE-LARGE-MEMORY-256G"],
+      "report_glob": "*/AA-TRACE-STORAGE-*/trace_storage_profile_comparison.json",
+      "reproduction_command": "scripts/run_trace_storage_profile_smoke.sh --execute --output-root .trace-storage-profile-smoke-artifacts",
+      "retention_decision": "ignore_generated_root_keep_inventory_and_owner_blocker",
+      "signoff_status": "fail_closed_until_asupersync_yaj7g6_closes_with_profile_contract_and_tests",
+      "expected_file_count": 1,
+      "expected_total_bytes": 3727,
+      "stable_file_list_sha256": "469c323a4817d3034b6184d0d831dc095ea964836831832cc226f833f017100d",
+      "checksum_manifest_sha256": "392cb662a6885a8608a4c11cc5a94f78430ad4ab5eba4e7e76a167af8d724279",
+      "no_deletion_confirmation": true
+    },
+    {
+      "cluster_id": "overload_brownout",
+      "output_root": ".overload-brownout-smoke-artifacts",
+      "owner_beads": ["asupersync-m1k0pz"],
+      "owner_status": "open",
+      "runner_path": "scripts/run_overload_brownout_smoke.sh",
+      "scenario_ids": [
+        "AA-OVERLOAD-BROWNOUT-OPTIONAL-FIRST",
+        "AA-OVERLOAD-BROWNOUT-KEEP-FULL-SURFACES"
+      ],
+      "report_glob": "*/AA-OVERLOAD-BROWNOUT-*/overload_brownout_report.json",
+      "reproduction_command": "scripts/run_overload_brownout_smoke.sh --execute --output-root .overload-brownout-smoke-artifacts",
+      "retention_decision": "ignore_generated_root_keep_inventory_and_owner_blocker",
+      "signoff_status": "fail_closed_until_asupersync_m1k0pz_closes_with_brownout_contract_and_tests",
+      "expected_file_count": 2,
+      "expected_total_bytes": 16453,
+      "stable_file_list_sha256": "75ff78349d035e6941f94ae36653b454a1a91601a91a57269cc651cedb7ac50f",
+      "checksum_manifest_sha256": "38bd3f2a3b3e17b92e2a0251cdb039df19dfc3abf3cbe2649775cd457110a683",
+      "no_deletion_confirmation": true
+    },
+    {
+      "cluster_id": "scheduler_topology_replay",
+      "output_root": "topology-smoke-out",
+      "owner_beads": ["asupersync-babudc", "asupersync-3ld2ri", "asupersync-wk0ciq"],
+      "owner_status": "closed",
+      "runner_path": "scripts/run_scheduler_topology_replay_smoke.sh",
+      "scenario_ids": [
+        "AA-SCHED-TOPOLOGY-STABLE-RERUN-4W2C",
+        "AA-SCHED-TOPOLOGY-REMOTE-SPILL-2W2C"
+      ],
+      "report_glob": "*/AA-SCHED-TOPOLOGY-*/*.json",
+      "reproduction_command": "scripts/run_scheduler_topology_replay_smoke.sh --execute --output-root topology-smoke-out",
+      "retention_decision": "ignore_generated_root_keep_inventory",
+      "signoff_status": "trusted_when_runner_contract_and_owner_closeouts_are_present",
+      "expected_file_count": 10,
+      "expected_total_bytes": 20225,
+      "stable_file_list_sha256": "445f05bd1dc5756d9680f434a196e6e97fc178db1d036135084127edeaddd5fd",
+      "checksum_manifest_sha256": "973e966f1d05d6887dd5d85d672a22dc8d1a554378440cdf81a842efb3f3a0af",
+      "no_deletion_confirmation": true
+    }
+  ],
+  "smoke_scenarios": [
+    {
+      "scenario_id": "AA-GENERATED-SMOKE-ARTIFACT-INVENTORY-CURRENT-HOST",
+      "description": "Validate the current local generated smoke output clusters against the committed owner/checksum inventory.",
+      "require_current_host_clusters": true,
+      "expected_counts": {
+        "cluster_count": 9,
+        "file_count": 43,
+        "total_bytes": 193908,
+        "fail_closed_cluster_count": 3,
+        "no_deletion_confirmation_count": 9
+      },
+      "required_log_fields": [
+        "scenario_id",
+        "contract_version",
+        "source_repo_hash",
+        "git_branch",
+        "git_upstream",
+        "output_root",
+        "run_dir",
+        "inventory_artifact_path",
+        "cluster_count",
+        "present_cluster_count",
+        "missing_cluster_count",
+        "file_count",
+        "total_bytes",
+        "checksum_match_count",
+        "owner_bead_count",
+        "fail_closed_cluster_count",
+        "no_deletion_confirmation_count",
+        "retention_decision",
+        "fallback_decision",
+        "rch_queue_state",
+        "cluster_report_path",
+        "bundle_manifest_path",
+        "run_report_path",
+        "run_log_path",
+        "generated_artifact_paths",
+        "final_verdict"
+      ]
+    }
+  ]
+}
