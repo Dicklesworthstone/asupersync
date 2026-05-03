@@ -258,7 +258,7 @@ fn audit_memory_bounded_during_partition() {
     println!("🔍 AUDIT: Memory boundedness during network partition");
 
     let partition_exporter = NetworkPartitionExporter::new();
-    let queue_capacity = 10;
+    let queue_capacity: usize = 10;
     let batch_timeout = Duration::from_millis(10);
 
     let exporter =
@@ -268,8 +268,8 @@ fn audit_memory_bounded_during_partition() {
     println!("   Queue capacity: {} batches", queue_capacity);
     println!("   Simulating sustained high-throughput load");
 
-    let spans_per_batch = 50; // Simulate high span volume
-    let num_batches = 100; // Much larger than capacity
+    let spans_per_batch: u64 = 50; // Simulate high span volume
+    let num_batches: u64 = 100; // Much larger than capacity
 
     for batch_id in 1..=num_batches {
         let mut spans = Vec::new();
@@ -301,7 +301,7 @@ fn audit_memory_bounded_during_partition() {
 
     let stats = exporter.load_shedding_stats();
     let total_spans_created = num_batches * spans_per_batch;
-    let max_spans_in_memory = queue_capacity * spans_per_batch;
+    let max_spans_in_memory = queue_capacity as u64 * spans_per_batch;
 
     println!("📊 Memory usage analysis:");
     println!("   Total spans created: {}", total_spans_created);
@@ -394,7 +394,7 @@ fn audit_partition_recovery_queue_processing() {
     println!("   Simulating network recovery with queue processing");
 
     // Queue some batches (simulate spans during recovery)
-    let num_batches = 3;
+    let num_batches: usize = 3;
     for batch_id in 1..=num_batches {
         let spans = vec![OtlpSpan {
             span_id: format!("recovery-span-{}", batch_id),
@@ -406,7 +406,7 @@ fn audit_partition_recovery_queue_processing() {
         }];
 
         let batch = SpanBatch {
-            batch_id,
+            batch_id: batch_id as u64,
             spans,
             created_at: Instant::now(),
         };

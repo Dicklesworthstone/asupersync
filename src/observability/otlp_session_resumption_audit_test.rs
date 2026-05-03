@@ -444,10 +444,10 @@ fn audit_resumption_data_integrity_and_ordering() {
                 .attributes
                 .iter()
                 .find(|(k, _)| k == expected_key)
-                .map(|(_, v)| v);
+                .map(|(_, v)| v.as_str());
             assert_eq!(
                 found,
-                Some(expected_value),
+                Some(*expected_value),
                 "Attribute {}={} should be preserved",
                 expected_key,
                 expected_value

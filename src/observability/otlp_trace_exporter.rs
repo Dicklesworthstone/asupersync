@@ -659,8 +659,11 @@ mod tests {
         let queue_capacity = 3;
         let batch_timeout = Duration::from_secs(1);
 
-        let exporter =
-            LoadSheddingTraceExporter::new(Box::new(mock_exporter), queue_capacity, batch_timeout);
+        let exporter = LoadSheddingTraceExporter::new(
+            Box::new(mock_exporter.clone()),
+            queue_capacity,
+            batch_timeout,
+        );
 
         // Create batches with 512 spans each (typical OTLP batch size)
         let batch_size = 512;
@@ -698,7 +701,7 @@ mod tests {
             .expect("queue processing should succeed");
         assert_eq!(processed, 3, "should process 3 remaining batches");
 
-        let exported = exporter.inner.exported_batches();
+        let exported = mock_exporter.exported_batches();
         assert_eq!(exported.len(), 3, "should have exported 3 batches");
 
         // Verify NEWEST batches were preserved (batch IDs 3, 4, 5)
@@ -721,7 +724,7 @@ mod tests {
     fn audit_normal_operation_no_shedding() {
         let mock_exporter = MockOtlpHttpExporter::new(Duration::from_millis(1));
         let exporter = LoadSheddingTraceExporter::new(
-            Box::new(mock_exporter),
+            Box::new(mock_exporter.clone()),
             10, // Large capacity
             Duration::from_secs(1),
         );
@@ -743,7 +746,7 @@ mod tests {
         exporter
             .process_queue()
             .expect("queue processing should succeed");
-        let exported_spans = exporter.inner.exported_span_count();
+        let exported_spans = mock_exporter.exported_span_count();
         assert_eq!(exported_spans, 500, "all 500 spans should be exported");
 
         println!("✅ NORMAL OPERATION AUDIT PASSED - No load shedding");
@@ -754,7 +757,7 @@ mod tests {
     fn audit_fifo_order_preserved_during_shedding() {
         let mock_exporter = MockOtlpHttpExporter::new(Duration::from_millis(1));
         let exporter = LoadSheddingTraceExporter::new(
-            Box::new(mock_exporter),
+            Box::new(mock_exporter.clone()),
             2, // Very small capacity
             Duration::from_secs(1),
         );
@@ -768,7 +771,7 @@ mod tests {
         exporter
             .process_queue()
             .expect("queue processing should succeed");
-        let exported = exporter.inner.exported_batches();
+        let exported = mock_exporter.exported_batches();
 
         // Should export batches 2,3 in FIFO order (oldest batches 0,1 dropped)
         assert_eq!(exported.len(), 2, "should export 2 batches");
