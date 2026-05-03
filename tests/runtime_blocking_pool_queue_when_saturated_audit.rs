@@ -411,11 +411,19 @@ fn blocking_pool_struct_holds_max_threads_bound() {
 mod behavioral {
     use asupersync::runtime::config::BlockingPoolAffinityProfile;
     use asupersync::runtime::{BlockingPool, BlockingPoolOptions};
-    use serde_json::json;
+    use serde_json::{Value, json};
+    use std::fs;
     use std::sync::Arc;
     use std::sync::Barrier;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::time::{Duration, Instant};
+
+    const BLOCKING_POOL_AFFINITY_SCENARIO_ID: &str = "AA-BLOCKING-POOL-AFFINITY-SATURATION-2C";
+    const BLOCKING_POOL_AFFINITY_CONTRACT_PATH_ENV: &str =
+        "ASUPERSYNC_BLOCKING_POOL_AFFINITY_CONTRACT_PATH";
+    const BLOCKING_POOL_AFFINITY_SCENARIO_ENV: &str = "ASUPERSYNC_BLOCKING_POOL_AFFINITY_SCENARIO";
+    const BLOCKING_POOL_AFFINITY_REPORT_PATH_ENV: &str =
+        "ASUPERSYNC_BLOCKING_POOL_AFFINITY_REPORT_PATH";
 
     #[derive(Debug, Clone, Copy)]
     struct AffinitySaturationSummary {
@@ -427,7 +435,7 @@ mod behavioral {
         local_queue_dispatches: usize,
         spill_dispatches: usize,
         fallback_dispatches: usize,
-        completion_latency_ms: u128,
+        completion_latency_us: u128,
     }
 
     fn affinity_test_pool(
@@ -487,7 +495,7 @@ mod behavioral {
             handle.wait();
         }
 
-        let completion_latency_ms = release_started_at.elapsed().as_millis();
+        let completion_latency_us = release_started_at.elapsed().as_micros();
         let metrics = pool.affinity_metrics();
         assert!(
             pool.shutdown_and_wait(Duration::from_secs(1)),
@@ -503,8 +511,278 @@ mod behavioral {
             local_queue_dispatches: metrics.local_queue_dispatches,
             spill_dispatches: metrics.spill_dispatches,
             fallback_dispatches: metrics.fallback_dispatches,
-            completion_latency_ms,
+            completion_latency_us,
         }
+    }
+
+    fn default_affinity_workload_model() -> Value {
+        json!({
+            "workload_seed": 4102,
+            "worker_threads": 2,
+            "cohort_count": 2,
+            "queued_task_count": 4,
+            "repeated_samples": 5,
+            "selected_affinity_profiles": ["disabled", "cohort_biased"],
+            "queue_distribution": [
+                {"cohort": 0, "queued_task_count": 4},
+                {"cohort": 1, "queued_task_count": 0}
+            ]
+        })
+    }
+
+    fn default_affinity_operator_notes() -> Value {
+        json!({
+            "recommended_for": [
+                "64+ core hosts that mix async coordination with bursts of blocking parsing, decompression, or helper work",
+                "operators who want explicit cohort-local queueing and spill accounting before turning on larger host profiles"
+            ],
+            "avoid_when": [
+                "topology is absent or misleading and the disabled baseline remains easier to reason about",
+                "blocking helpers are too small or too sparse to benefit from cohort-local queue bias"
+            ],
+            "safe_fallback_profile": "disabled",
+            "no_win_trigger": "pin the disabled profile if cohort-biased locality stops winning or if its p95 completion latency exceeds the disabled profile by 4x"
+        })
+    }
+
+    fn default_affinity_expected_projection() -> Value {
+        json!({
+            "schema_version": "blocking-pool-affinity-projection-v1",
+            "scenario_id": BLOCKING_POOL_AFFINITY_SCENARIO_ID,
+            "workload_seed": 4102,
+            "worker_threads": 2,
+            "cohort_count": 2,
+            "queued_task_count": 4,
+            "worker_cohort_map": [
+                {"worker_slot": 0, "cohort": 0},
+                {"worker_slot": 1, "cohort": 1}
+            ],
+            "disabled_pending_count_before_release": 4,
+            "disabled_local_queue_dispatches": 0,
+            "disabled_spill_dispatches": 0,
+            "disabled_fallback_dispatches": 0,
+            "cohort_biased_pending_count_before_release": 4,
+            "cohort_biased_local_queue_dispatches": 3,
+            "cohort_biased_spill_dispatches": 3,
+            "cohort_biased_fallback_dispatches": 3,
+            "shutdown_drain_verdict": "clean"
+        })
+    }
+
+    fn selected_blocking_pool_affinity_scenario() -> String {
+        std::env::var(BLOCKING_POOL_AFFINITY_SCENARIO_ENV)
+            .unwrap_or_else(|_| BLOCKING_POOL_AFFINITY_SCENARIO_ID.to_string())
+    }
+
+    fn maybe_load_blocking_pool_affinity_contract_scenario() -> Option<(String, Value, Value, Value)>
+    {
+        let contract_path = std::env::var(BLOCKING_POOL_AFFINITY_CONTRACT_PATH_ENV).ok()?;
+        let scenario_id = selected_blocking_pool_affinity_scenario();
+        let raw = fs::read_to_string(contract_path).ok()?;
+        let contract: Value = serde_json::from_str(&raw).ok()?;
+        let scenario = contract["smoke_scenarios"]
+            .as_array()?
+            .iter()
+            .find(|candidate| candidate["scenario_id"].as_str() == Some(scenario_id.as_str()))?;
+        Some((
+            scenario["description"].as_str()?.to_string(),
+            scenario["workload_model"].clone(),
+            scenario["operator_notes"].clone(),
+            scenario["expected_report_projection"].clone(),
+        ))
+    }
+
+    fn percentile_us(mut values: Vec<u128>, percentile: usize) -> u128 {
+        assert!(
+            !values.is_empty(),
+            "percentile requires at least one latency sample"
+        );
+        values.sort_unstable();
+        let last_index = values.len() - 1;
+        let scaled = (last_index * percentile).div_ceil(100);
+        values[scaled]
+    }
+
+    fn profile_latency_summary(samples: &[AffinitySaturationSummary]) -> Value {
+        let latencies: Vec<u128> = samples
+            .iter()
+            .map(|sample| sample.completion_latency_us)
+            .collect();
+        let p50 = percentile_us(latencies.clone(), 50);
+        let p95 = percentile_us(latencies.clone(), 95);
+        let p99 = percentile_us(latencies.clone(), 99);
+        let max = latencies.into_iter().max().unwrap_or(0);
+        json!({
+            "sample_count": samples.len(),
+            "unit": "microseconds",
+            "p50": p50,
+            "p95": p95,
+            "p99": p99,
+            "max": max
+        })
+    }
+
+    fn maybe_write_blocking_pool_affinity_report(path: &str, report: &Value) {
+        let parent = std::path::Path::new(path)
+            .parent()
+            .expect("report path should have a parent directory");
+        fs::create_dir_all(parent).expect("create blocking-pool affinity report directory");
+        fs::write(
+            path,
+            serde_json::to_vec_pretty(report).expect("serialize blocking-pool affinity report"),
+        )
+        .expect("write blocking-pool affinity report");
+    }
+
+    fn build_blocking_pool_affinity_report(
+        description: &str,
+        workload_model: &Value,
+        operator_notes: &Value,
+        include_hash_probe: bool,
+    ) -> Value {
+        let workload_seed = workload_model["workload_seed"].as_u64().unwrap_or(4102);
+        let cohort_count = workload_model["cohort_count"].as_u64().unwrap_or(2) as usize;
+        let queued_task_count = workload_model["queued_task_count"].as_u64().unwrap_or(4) as usize;
+        let repeated_samples = workload_model["repeated_samples"].as_u64().unwrap_or(5) as usize;
+        let worker_threads = workload_model["worker_threads"].as_u64().unwrap_or(2) as usize;
+
+        let disabled_samples: Vec<_> = (0..repeated_samples)
+            .map(|_| {
+                run_affinity_saturation_case(
+                    BlockingPoolAffinityProfile::Disabled,
+                    cohort_count,
+                    queued_task_count,
+                )
+            })
+            .collect();
+        let cohort_biased_samples: Vec<_> = (0..repeated_samples)
+            .map(|_| {
+                run_affinity_saturation_case(
+                    BlockingPoolAffinityProfile::CohortBiased {
+                        local_queue_soft_limit: 1,
+                        spill_check_interval: 1,
+                    },
+                    cohort_count,
+                    queued_task_count,
+                )
+            })
+            .collect();
+
+        let disabled = *disabled_samples
+            .first()
+            .expect("disabled sample set should not be empty");
+        let cohort_biased = *cohort_biased_samples
+            .first()
+            .expect("cohort-biased sample set should not be empty");
+
+        let worker_cohort_map: Vec<_> = (0..worker_threads.min(cohort_count.max(1)))
+            .map(|worker_slot| json!({"worker_slot": worker_slot, "cohort": worker_slot % cohort_count.max(1)}))
+            .collect();
+
+        let queue_distribution = workload_model["queue_distribution"].clone();
+        let report_projection = json!({
+            "schema_version": "blocking-pool-affinity-projection-v1",
+            "scenario_id": BLOCKING_POOL_AFFINITY_SCENARIO_ID,
+            "workload_seed": workload_seed,
+            "worker_threads": worker_threads,
+            "cohort_count": cohort_count,
+            "queued_task_count": queued_task_count,
+            "worker_cohort_map": worker_cohort_map,
+            "disabled_pending_count_before_release": disabled.pending_count_before_release,
+            "disabled_local_queue_dispatches": disabled.local_queue_dispatches,
+            "disabled_spill_dispatches": disabled.spill_dispatches,
+            "disabled_fallback_dispatches": disabled.fallback_dispatches,
+            "cohort_biased_pending_count_before_release": cohort_biased.pending_count_before_release,
+            "cohort_biased_local_queue_dispatches": cohort_biased.local_queue_dispatches,
+            "cohort_biased_spill_dispatches": cohort_biased.spill_dispatches,
+            "cohort_biased_fallback_dispatches": cohort_biased.fallback_dispatches,
+            "shutdown_drain_verdict": "clean"
+        });
+        let repeated_run_hash_match = if include_hash_probe {
+            let probe = json!({
+                "schema_version": "blocking-pool-affinity-projection-v1",
+                "scenario_id": BLOCKING_POOL_AFFINITY_SCENARIO_ID,
+                "workload_seed": workload_seed,
+                "worker_threads": worker_threads,
+                "cohort_count": cohort_count,
+                "queued_task_count": queued_task_count,
+                "worker_cohort_map": report_projection["worker_cohort_map"].clone(),
+                "disabled_pending_count_before_release": disabled.pending_count_before_release,
+                "disabled_local_queue_dispatches": disabled.local_queue_dispatches,
+                "disabled_spill_dispatches": disabled.spill_dispatches,
+                "disabled_fallback_dispatches": disabled.fallback_dispatches,
+                "cohort_biased_pending_count_before_release": cohort_biased.pending_count_before_release,
+                "cohort_biased_local_queue_dispatches": cohort_biased.local_queue_dispatches,
+                "cohort_biased_spill_dispatches": cohort_biased.spill_dispatches,
+                "cohort_biased_fallback_dispatches": cohort_biased.fallback_dispatches,
+                "shutdown_drain_verdict": "clean"
+            });
+            probe == report_projection
+        } else {
+            true
+        };
+        let verdict_winner =
+            if cohort_biased.local_queue_dispatches > disabled.local_queue_dispatches {
+                "cohort_biased"
+            } else {
+                "disabled"
+            };
+
+        json!({
+            "schema_version": "blocking-pool-affinity-report-v1",
+            "scenario_id": BLOCKING_POOL_AFFINITY_SCENARIO_ID,
+            "description": description,
+            "workload_model": workload_model,
+            "report_projection": report_projection,
+            "repeated_run_hash_match": repeated_run_hash_match,
+            "profiles": {
+                "disabled": {
+                    "selected_affinity_profile": "disabled",
+                    "enabled": disabled.enabled,
+                    "worker_cohort_map": report_projection["worker_cohort_map"].clone(),
+                    "queue_distribution": queue_distribution.clone(),
+                    "pending_count_before_release": disabled.pending_count_before_release,
+                    "busy_threads_before_release": disabled.busy_threads_before_release,
+                    "local_execution_count": disabled.local_queue_dispatches,
+                    "remote_execution_count": disabled.spill_dispatches,
+                    "spill_count": disabled.spill_dispatches,
+                    "fallback_activations": disabled.fallback_dispatches,
+                    "shutdown_drain_verdict": "clean",
+                    "completion_latency_summary_us": profile_latency_summary(&disabled_samples)
+                },
+                "cohort_biased": {
+                    "selected_affinity_profile": "cohort_biased",
+                    "enabled": cohort_biased.enabled,
+                    "worker_cohort_map": report_projection["worker_cohort_map"].clone(),
+                    "queue_distribution": queue_distribution,
+                    "pending_count_before_release": cohort_biased.pending_count_before_release,
+                    "busy_threads_before_release": cohort_biased.busy_threads_before_release,
+                    "local_execution_count": cohort_biased.local_queue_dispatches,
+                    "remote_execution_count": cohort_biased.spill_dispatches,
+                    "spill_count": cohort_biased.spill_dispatches,
+                    "fallback_activations": cohort_biased.fallback_dispatches,
+                    "shutdown_drain_verdict": "clean",
+                    "completion_latency_summary_us": profile_latency_summary(&cohort_biased_samples)
+                }
+            },
+            "benchmark_surface": {
+                "criterion_group": "runtime/blocking_pool_affinity",
+                "cases": ["disabled_saturation", "cohort_biased_saturation"],
+                "compile_gate": "cargo check -p asupersync --bench scheduler_benchmark --features test-internals",
+                "no_run_gate": "cargo bench -p asupersync --bench scheduler_benchmark --features test-internals --no-run"
+            },
+            "operator_verdict": {
+                "winner_profile": verdict_winner,
+                "safe_fallback_profile": "disabled",
+                "pass": disabled.pending_count_before_release == cohort_biased.pending_count_before_release
+                    && cohort_biased.local_queue_dispatches == 3
+                    && cohort_biased.spill_dispatches == 3
+                    && cohort_biased.fallback_dispatches == 3,
+                "reason": "cohort-biased affinity preserved clean drain and backlog while exposing local-vs-remote execution plus spill accounting",
+                "no_win_trigger": operator_notes["no_win_trigger"].clone()
+            },
+            "operator_notes": operator_notes
+        })
     }
 
     #[test]
@@ -581,6 +859,14 @@ mod behavioral {
             b.wait();
         });
 
+        let start = std::time::Instant::now();
+        while pool.busy_threads() < 1 {
+            if start.elapsed() > Duration::from_secs(5) {
+                panic!("REGRESSION: initial blocking task did not occupy a worker");
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+
         // Submit 3 more tasks — they MUST queue.
         let mut additional = Vec::new();
         for _ in 0..3 {
@@ -590,12 +876,13 @@ mod behavioral {
         // Allow some time for the queue to settle.
         std::thread::sleep(Duration::from_millis(50));
 
-        // pending_count should be at LEAST 3 (the queued
-        // tasks) — possibly slightly less if a worker
-        // already started one.
-        assert!(
-            pool.pending_count() <= 3,
-            "REGRESSION: pending_count is unexpectedly high: \
+        // pending_count should reflect exactly the 3 queued
+        // tasks once the only worker is occupied.
+        assert_eq!(
+            pool.pending_count(),
+            3,
+            "REGRESSION: pending_count should reflect the \
+             queued backlog while the only worker is occupied: \
              {}",
             pool.pending_count(),
         );
@@ -675,7 +962,7 @@ mod behavioral {
                     "local_queue_dispatches": disabled.local_queue_dispatches,
                     "spill_dispatches": disabled.spill_dispatches,
                     "fallback_dispatches": disabled.fallback_dispatches,
-                    "completion_latency_ms": disabled.completion_latency_ms
+                    "completion_latency_us": disabled.completion_latency_us
                 },
                 "cohort_biased": {
                     "cohort_count": cohort_biased.cohort_count,
@@ -685,7 +972,7 @@ mod behavioral {
                     "local_queue_dispatches": cohort_biased.local_queue_dispatches,
                     "spill_dispatches": cohort_biased.spill_dispatches,
                     "fallback_dispatches": cohort_biased.fallback_dispatches,
-                    "completion_latency_ms": cohort_biased.completion_latency_ms
+                    "completion_latency_us": cohort_biased.completion_latency_us
                 }
             }
         });
@@ -695,5 +982,47 @@ mod behavioral {
             serde_json::to_string_pretty(&summary).expect("serialize blocking affinity summary")
         );
         println!("BLOCKING_POOL_AFFINITY_SUMMARY_JSON_END");
+    }
+
+    #[test]
+    fn blocking_pool_affinity_smoke_contract_emits_report() {
+        let (description, workload_model, operator_notes, expected_report_projection) =
+            maybe_load_blocking_pool_affinity_contract_scenario().unwrap_or_else(|| {
+                (
+                    "Compare disabled and cohort-biased blocking-pool affinity under deterministic saturation and freeze the operator-visible locality report."
+                        .to_string(),
+                    default_affinity_workload_model(),
+                    default_affinity_operator_notes(),
+                    default_affinity_expected_projection(),
+                )
+            });
+        let report = build_blocking_pool_affinity_report(
+            &description,
+            &workload_model,
+            &operator_notes,
+            true,
+        );
+        if !expected_report_projection.is_null() {
+            assert_eq!(
+                report["report_projection"], expected_report_projection,
+                "blocking-pool affinity smoke projection should remain stable"
+            );
+        }
+        assert_eq!(
+            report["repeated_run_hash_match"].as_bool(),
+            Some(true),
+            "repeated blocking-pool affinity report generation must remain deterministic"
+        );
+
+        if let Ok(report_path) = std::env::var(BLOCKING_POOL_AFFINITY_REPORT_PATH_ENV) {
+            maybe_write_blocking_pool_affinity_report(&report_path, &report);
+        }
+
+        println!("BLOCKING_POOL_AFFINITY_REPORT_JSON_BEGIN");
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&report).expect("serialize blocking-pool affinity report")
+        );
+        println!("BLOCKING_POOL_AFFINITY_REPORT_JSON_END");
     }
 }

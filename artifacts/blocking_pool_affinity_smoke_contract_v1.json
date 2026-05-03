@@ -1,0 +1,149 @@
+{
+  "contract_version": "blocking-pool-affinity-smoke-contract-v1",
+  "bead_id": "asupersync-lpffta",
+  "description": "Contract-backed smoke proof for topology-aware blocking-pool affinity saturation, locality accounting, and safe fallback behavior.",
+  "runner_script": "scripts/run_blocking_pool_affinity_smoke.sh",
+  "runner_bundle_schema_version": "blocking-pool-affinity-smoke-bundle-v1",
+  "runner_report_schema_version": "blocking-pool-affinity-smoke-run-report-v1",
+  "required_bundle_fields": [
+    "schema_version",
+    "contract_version",
+    "scenario_id",
+    "description",
+    "run_id",
+    "mode",
+    "artifact_path",
+    "report_path",
+    "run_log_path",
+    "command",
+    "host_requirements",
+    "workload_model",
+    "operator_notes",
+    "host_fingerprint",
+    "expected_report_projection",
+    "actual_report_projection",
+    "verdict_summary",
+    "command_exit_code",
+    "script_exit_code",
+    "validation_passed",
+    "status",
+    "started_ts",
+    "ended_ts"
+  ],
+  "required_run_report_fields": [
+    "schema_version",
+    "contract_version",
+    "artifact_path",
+    "bundle_manifest_path",
+    "run_id",
+    "scenario_id",
+    "mode",
+    "command_exit_code",
+    "script_exit_code",
+    "validation_passed",
+    "status",
+    "message",
+    "host_requirements",
+    "workload_model",
+    "operator_notes",
+    "host_fingerprint",
+    "report_path",
+    "expected_report_projection",
+    "actual_report_projection"
+  ],
+  "required_execute_output_files": [
+    "bundle_manifest.json",
+    "run_report.json",
+    "blocking_pool_affinity_report.json",
+    "run.log"
+  ],
+  "required_dry_run_output_files": [
+    "bundle_manifest.json",
+    "run_report.json",
+    "run.log"
+  ],
+  "smoke_scenarios": [
+    {
+      "scenario_id": "AA-BLOCKING-POOL-AFFINITY-SATURATION-2C",
+      "description": "Compare disabled and cohort-biased blocking-pool affinity under deterministic saturation and freeze the operator-visible locality/fallback report.",
+      "output_root": "target/blocking-pool-affinity-smoke",
+      "execution_policy": "execute_or_dry_run",
+      "host_requirements": {
+        "min_worker_threads": 2,
+        "min_memory_gib": 1,
+        "notes": [
+          "Execute mode is deterministic because the proof uses fixed cohort count, fixed queue distribution, and barrier-gated blocking tasks.",
+          "The workload is small enough for normal scoped rch validation; it does not require a real 64-core host to prove the accounting surface."
+        ]
+      },
+      "template_env": {
+        "BLOCKING_POOL_AFFINITY_SMOKE_OUTPUT_DIR": "Override the bundle/report output root.",
+        "BLOCKING_POOL_AFFINITY_SMOKE_ARTIFACT_ROOT": "Override the retrieved affinity-report output root."
+      },
+      "workload_model": {
+        "workload_seed": 4102,
+        "worker_threads": 2,
+        "cohort_count": 2,
+        "queued_task_count": 4,
+        "repeated_samples": 5,
+        "selected_affinity_profiles": [
+          "disabled",
+          "cohort_biased"
+        ],
+        "queue_distribution": [
+          {
+            "cohort": 0,
+            "queued_task_count": 4
+          },
+          {
+            "cohort": 1,
+            "queued_task_count": 0
+          }
+        ]
+      },
+      "operator_notes": {
+        "recommended_for": [
+          "64+ core hosts that mix async coordination with bursts of blocking parsing, decompression, or helper work",
+          "operators who want explicit cohort-local queueing and spill accounting before turning on larger host profiles"
+        ],
+        "avoid_when": [
+          "topology is absent or misleading and the disabled baseline remains easier to reason about",
+          "blocking helpers are too small or too sparse to benefit from cohort-local queue bias"
+        ],
+        "safe_fallback_profile": "disabled",
+        "no_win_trigger": "pin the disabled profile if cohort-biased locality stops winning or if its p95 completion latency exceeds the disabled profile by 4x"
+      },
+      "capture_plan": [
+        "Run the runtime_blocking_pool_queue_when_saturated_audit integration test with the contract path, scenario id, and report output path injected through the environment.",
+        "Extract the blocking-pool affinity report JSON from the test log, persist it beside the run manifest, and validate its stable report_projection fields against this contract."
+      ],
+      "expected_report_projection": {
+        "schema_version": "blocking-pool-affinity-projection-v1",
+        "scenario_id": "AA-BLOCKING-POOL-AFFINITY-SATURATION-2C",
+        "workload_seed": 4102,
+        "worker_threads": 2,
+        "cohort_count": 2,
+        "queued_task_count": 4,
+        "worker_cohort_map": [
+          {
+            "worker_slot": 0,
+            "cohort": 0
+          },
+          {
+            "worker_slot": 1,
+            "cohort": 1
+          }
+        ],
+        "disabled_pending_count_before_release": 4,
+        "disabled_local_queue_dispatches": 0,
+        "disabled_spill_dispatches": 0,
+        "disabled_fallback_dispatches": 0,
+        "cohort_biased_pending_count_before_release": 4,
+        "cohort_biased_local_queue_dispatches": 3,
+        "cohort_biased_spill_dispatches": 3,
+        "cohort_biased_fallback_dispatches": 3,
+        "shutdown_drain_verdict": "clean"
+      }
+    }
+  ]
+}
