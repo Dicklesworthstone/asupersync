@@ -5111,3 +5111,9 @@ name = "h2_settings_zero_max_concurrent"
 path = "fuzz_targets/h2_settings_zero_max_concurrent.rs"
 test = false
 doc = false
+
+[[bin]]
+name = "h1_te_chunked_with_trailers"
+path = "fuzz_targets/h1_te_chunked_with_trailers.rs"
+test = false
+doc = false
