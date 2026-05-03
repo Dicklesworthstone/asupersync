@@ -57,6 +57,22 @@ report_schema_version() {
     jq -r '.runner_report_schema_version' "$CONTRACT_ARTIFACT"
 }
 
+controller_snapshot_ledger_schema_version() {
+    jq -r '.controller_snapshot_ledger.schema_version' "$CONTRACT_ARTIFACT"
+}
+
+controller_snapshot_ledger_top_level_fields_json() {
+    jq -c '.controller_snapshot_ledger.top_level_fields' "$CONTRACT_ARTIFACT"
+}
+
+controller_snapshot_ledger_controller_fields_json() {
+    jq -c '.controller_snapshot_ledger.controller_fields' "$CONTRACT_ARTIFACT"
+}
+
+controller_snapshot_ledger_planner_render_order_json() {
+    jq -c '.controller_snapshot_ledger.planner_render_order' "$CONTRACT_ARTIFACT"
+}
+
 list_scenarios() {
     jq -r '.smoke_scenarios[] | [.scenario_id, .description] | @tsv' "$CONTRACT_ARTIFACT" \
         | while IFS=$'\t' read -r sid desc; do
@@ -123,6 +139,10 @@ run_scenario() {
 {
   "schema_version": "$(json_escape "$(bundle_schema_version)")",
   "contract_version": "$(json_escape "$(contract_version)")",
+  "controller_snapshot_ledger_schema_version": "$(json_escape "$(controller_snapshot_ledger_schema_version)")",
+  "controller_snapshot_ledger_top_level_fields": $(controller_snapshot_ledger_top_level_fields_json),
+  "controller_snapshot_ledger_controller_fields": $(controller_snapshot_ledger_controller_fields_json),
+  "controller_snapshot_ledger_planner_render_order": $(controller_snapshot_ledger_planner_render_order_json),
   "scenario_id": "$(json_escape "$sid")",
   "description": "$(json_escape "$description")",
   "command": "$(json_escape "$command")",
@@ -201,6 +221,10 @@ cat >"$RUN_REPORT" <<JSON
 {
   "schema_version": "$(json_escape "$(report_schema_version)")",
   "contract_version": "$(json_escape "$(contract_version)")",
+  "controller_snapshot_ledger_schema_version": "$(json_escape "$(controller_snapshot_ledger_schema_version)")",
+  "controller_snapshot_ledger_top_level_fields": $(controller_snapshot_ledger_top_level_fields_json),
+  "controller_snapshot_ledger_controller_fields": $(controller_snapshot_ledger_controller_fields_json),
+  "controller_snapshot_ledger_planner_render_order": $(controller_snapshot_ledger_planner_render_order_json),
   "artifact_path": "$(json_escape "$RUN_REPORT")",
   "run_dir": "$(json_escape "$RUN_DIR")",
   "selected_scenarios": $(jq -nc --argjson ids "$(printf '%s\n' "${SELECTED_SCENARIOS[@]}" | jq -Rsc 'split("\n") | map(select(length > 0))')" '$ids'),

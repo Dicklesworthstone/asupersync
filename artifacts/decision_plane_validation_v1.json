@@ -28,6 +28,44 @@
     "at_snapshot_id",
     "remediation"
   ],
+  "controller_snapshot_ledger": {
+    "schema_version": "controller-snapshot-ledger-v1",
+    "top_level_fields": [
+      "schema_version",
+      "registered_controllers",
+      "shadow_controllers",
+      "controllers"
+    ],
+    "controller_fields": [
+      { "name": "controller_id", "units": "controller id" },
+      { "name": "controller_name", "units": "string" },
+      { "name": "mode", "units": "enum" },
+      { "name": "decisions_this_epoch", "units": "decisions" },
+      { "name": "fallback_active", "units": "flag" },
+      { "name": "calibration_score", "units": "unit interval [0,1]" },
+      { "name": "last_decision_confidence", "units": "unit interval [0,1] or null" },
+      { "name": "last_action_label", "units": "string or null" },
+      { "name": "last_evidence_tick", "units": "ledger entry id or null" },
+      { "name": "last_snapshot_id", "units": "SnapshotId(u64) or null" },
+      { "name": "epochs_in_current_mode", "units": "epochs" },
+      { "name": "budget_overruns", "units": "count" },
+      { "name": "proof_artifact_id", "units": "artifact id or null" }
+    ],
+    "planner_render_order": [
+      "controller_name",
+      "mode",
+      "calibration_score",
+      "last_decision_confidence",
+      "decisions_this_epoch",
+      "fallback_active",
+      "last_action_label",
+      "last_evidence_tick",
+      "last_snapshot_id",
+      "epochs_in_current_mode",
+      "budget_overruns",
+      "proof_artifact_id"
+    ]
+  },
   "evidence_ledger_event_types": [
     "Registered",
     "Promoted",
@@ -170,6 +208,20 @@
       "category": "recovery",
       "expect_recovery_command": true,
       "expect_remediation_nonempty": true
+    },
+    {
+      "scenario_id": "AA023-CONTROLLER-LEDGER-DEFAULTS",
+      "description": "Controller snapshot ledger exports empty and newly registered controller defaults without bespoke parsing.",
+      "category": "controller-ledger",
+      "expect_controller_snapshot_schema": true,
+      "expect_planner_renderable": true
+    },
+    {
+      "scenario_id": "AA023-CONTROLLER-LEDGER-MULTI-CONTROLLER",
+      "description": "Deterministic multi-controller evidence stream updates fallback, last action, confidence, and evidence ticks.",
+      "category": "controller-ledger",
+      "expect_controller_snapshot_schema": true,
+      "expect_planner_renderable": true
     }
   ],
   "smoke_scenarios": [
@@ -187,6 +239,11 @@
       "scenario_id": "AA023-SMOKE-EVIDENCE",
       "description": "Validate evidence ledger completeness and bypass prevention",
       "command": "rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=/tmp/rch-codex-aa023 cargo test --test decision_plane_validation_contract evidence -- --nocapture"
+    },
+    {
+      "scenario_id": "AA023-SMOKE-CONTROLLER-LEDGER",
+      "description": "Validate controller snapshot ledger schema and planner-facing rendering",
+      "command": "rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=/tmp/rch-codex-aa023 cargo test --test decision_plane_validation_contract controller_snapshot_ledger -- --nocapture"
     }
   ],
   "downstream_beads": [
