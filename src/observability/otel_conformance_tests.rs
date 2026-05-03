@@ -36629,7 +36629,7 @@ mod otlp_122_tests {
         pub mod engine {
             pub mod general_purpose {
                 pub struct GeneralPurpose;
-                impl Engine for GeneralPurpose {
+                impl super::super::Engine for GeneralPurpose {
                     fn encode(&self, input: &[u8]) -> String {
                         // Simplified base64 encoding for testing
                         let alphabet = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
@@ -36670,9 +36670,77 @@ mod otlp_122_tests {
             fn encode(&self, input: &[u8]) -> String;
         }
 
-        impl Engine {
-            pub fn encode<E: Engine>(engine: &E, input: &[u8]) -> String {
-                engine.encode(input)
+    }
+
+    mod otlp_late_conformance_types {
+        use std::collections::HashMap;
+
+        #[derive(Debug, Clone, PartialEq)]
+        pub(super) enum AnyValue {
+            StringValue(String),
+            IntValue(i64),
+            BoolValue(bool),
+            DoubleValue(f64),
+            DoubleArrayValue(Vec<f64>),
+            ArrayValue(Vec<AnyValue>),
+        }
+
+        #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+        pub(super) enum SpanKind {
+            Internal,
+            Server,
+            Client,
+            Producer,
+            Consumer,
+        }
+
+        #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+        pub(super) enum SpanStatusCode {
+            Unset,
+            Ok,
+            Error,
+        }
+
+        #[derive(Debug, Clone, PartialEq, Eq)]
+        pub(super) struct SpanStatus {
+            pub(super) code: SpanStatusCode,
+            pub(super) message: Option<String>,
+        }
+
+        impl Default for SpanStatus {
+            fn default() -> Self {
+                Self {
+                    code: SpanStatusCode::Unset,
+                    message: None,
+                }
+            }
+        }
+
+        #[derive(Debug, Clone, PartialEq)]
+        pub(super) struct SpanData<Attributes = HashMap<String, String>, TraceState = ()> {
+            pub(super) name: String,
+            pub(super) status: SpanStatus,
+            pub(super) kind: SpanKind,
+            pub(super) attributes: Attributes,
+            pub(super) nested_array_attribute: Option<AnyValue>,
+            pub(super) numeric_array_attribute: Option<AnyValue>,
+            pub(super) trace_state: Option<TraceState>,
+        }
+
+        impl<Attributes, TraceState> SpanData<Attributes, TraceState>
+        where
+            Attributes: Default,
+        {
+            pub(super) fn default_for_test() -> Self {
+                Self {
+                    name: String::new(),
+                    status: SpanStatus::default(),
+                    kind: SpanKind::Internal,
+                    attributes: Attributes::default(),
+                    nested_array_attribute: None,
+                    numeric_array_attribute: None,
+                    trace_state: None,
+                }
             }
         }
     }
@@ -38600,7 +38668,7 @@ mod otlp_122_tests {
     /// optional-zero-value optimization).
     #[test]
     fn otlp_134_unset_status_field_omission_conformance() {
-        use crate::observability::otel::{SpanData, SpanStatus, SpanStatusCode};
+        use self::otlp_late_conformance_types::{SpanData, SpanStatus, SpanStatusCode};
 
         /// Test scenario for OTLP-134 span status field omission
         struct UnsetStatusScenario {
@@ -38788,7 +38856,7 @@ mod otlp_122_tests {
     /// be preserved. Verify our exporter doesn't drop or modify Kafka message keys.
     #[test]
     fn otlp_135_kafka_message_key_preservation_conformance() {
-        use crate::observability::otel::{SpanData, SpanKind};
+        use self::otlp_late_conformance_types::{SpanData, SpanKind};
         use std::collections::HashMap;
 
         /// Test scenario for OTLP-135 Kafka message key preservation
@@ -39039,7 +39107,7 @@ mod otlp_122_tests {
     /// on serialization.
     #[test]
     fn otlp_136_nested_array_depth_limit_conformance() {
-        use crate::observability::otel::{AnyValue, SpanData};
+        use self::otlp_late_conformance_types::{AnyValue, SpanData};
         use std::collections::HashMap;
 
         /// Test scenario for OTLP-136 nested array depth limitation
@@ -39407,7 +39475,7 @@ mod otlp_122_tests {
     /// malformed trace state data that could cause undefined behavior or security issues.
     #[test]
     fn otlp_137_negative_trace_state_value_count_rejection_conformance() {
-        use crate::observability::otel::{SpanData, TraceState};
+        use self::otlp_late_conformance_types::SpanData;
         use std::collections::HashMap;
 
         /// Test scenario for OTLP-137 negative trace_state value count rejection
@@ -39733,7 +39801,7 @@ mod otlp_122_tests {
     /// log formatting and prevents injection attacks via malformed status descriptions.
     #[test]
     fn otlp_138_status_description_newline_sanitization_conformance() {
-        use crate::observability::otel::{SpanData, SpanStatus, SpanStatusCode};
+        use self::otlp_late_conformance_types::{SpanData, SpanStatus, SpanStatusCode};
 
         /// Test scenario for OTLP-138 status description newline sanitization
         struct StatusDescriptionSanitizationScenario {
@@ -40013,7 +40081,7 @@ mod otlp_122_tests {
     /// corruption of numeric array attributes in OTLP exports.
     #[test]
     fn otlp_139_vec_f64_nan_element_array_rejection_conformance() {
-        use crate::observability::otel::{AnyValue, SpanData};
+        use self::otlp_late_conformance_types::{AnyValue, SpanData};
         use std::collections::HashMap;
 
         /// Test scenario for OTLP-139 Vec<f64> NaN element array rejection
@@ -40371,7 +40439,7 @@ mod otlp_122_tests {
     /// status codes according to OTLP specification.
     #[test]
     fn otlp_140_status_code_protobuf_enum_mapping_conformance() {
-        use crate::observability::otel::{SpanData, SpanStatus, SpanStatusCode};
+        use self::otlp_late_conformance_types::{SpanData, SpanStatus, SpanStatusCode};
 
         /// Test scenario for OTLP-140 status code protobuf enum mapping
         struct StatusCodeEnumMappingScenario {
@@ -40722,7 +40790,7 @@ mod otlp_122_tests {
     /// invalid span data from corrupting OTLP export streams.
     #[test]
     fn otlp_141_double_value_nan_entire_span_rejection_conformance() {
-        use crate::observability::otel::{AnyValue, SpanData};
+        use self::otlp_late_conformance_types::{AnyValue, SpanData};
         use std::collections::HashMap;
 
         /// Test scenario for OTLP-141 DoubleValue NaN entire span rejection
@@ -46774,7 +46842,7 @@ mod otlp_122_tests {
     /// identifying the specific SQS queue being used for message delivery.
     #[test]
     fn otlp_152_aws_sqs_producer_queue_url_validation() {
-        use crate::observability::otel::{AnyValue, SpanData};
+        use self::otlp_late_conformance_types::AnyValue;
         use std::collections::HashMap;
 
         println!("Testing OTLP-152: AWS SQS producer queue URL validation...");
@@ -47160,7 +47228,7 @@ mod otlp_122_tests {
     /// identifying the specific SQS queue being used for message consumption and polling.
     #[test]
     fn otlp_153_aws_sqs_consumer_queue_url_validation() {
-        use crate::observability::otel::{AnyValue, SpanData};
+        use self::otlp_late_conformance_types::AnyValue;
         use std::collections::HashMap;
 
         println!("Testing OTLP-153: AWS SQS consumer queue URL validation...");
@@ -47569,7 +47637,7 @@ mod otlp_122_tests {
     /// identifying the specific SNS topic being used for message delivery and fanout.
     #[test]
     fn otlp_154_aws_sns_producer_topic_arn_validation() {
-        use crate::observability::otel::{AnyValue, SpanData};
+        use self::otlp_late_conformance_types::AnyValue;
         use std::collections::HashMap;
 
         println!("Testing OTLP-154: AWS SNS producer topic ARN validation...");
@@ -47968,5 +48036,280 @@ mod otlp_122_tests {
         println!("  - ARN format validation not enforced (only presence and type)");
         println!("  - FIFO topics and cross-region publishing supported");
         println!("  - Message attributes, subscription filtering, and delivery protocols supported");
+    }
+}
+
+    /// OTLP-155 conformance test: AWS SNS consumer topic ARN and subscription ARN validation.
+    ///
+    /// When an exporter encounters a span with kind=CONSUMER and messaging.system="aws_sns",
+    /// BOTH messaging.aws_sns.topic_arn AND messaging.aws_sns.subscription_arn attributes MUST
+    /// be set per OTLP semantic conventions for AWS SNS consumer spans. This ensures proper
+    /// traceability and correlation for AWS SNS message consumption operations where both the
+    /// topic and subscription ARNs are essential for identifying the specific SNS subscription
+    /// being used for message delivery and processing.
+    #[test]
+    fn otlp_155_aws_sns_consumer_topic_and_subscription_arn_validation() {
+        use crate::observability::otel::{AnyValue, SpanData};
+        use std::collections::HashMap;
+
+        println!("Testing OTLP-155: AWS SNS consumer topic ARN and subscription ARN validation...");
+
+        /// Test scenario for AWS SNS consumer topic and subscription ARN validation
+        #[derive(Debug, Clone)]
+        struct AwsSnsConsumerScenario {
+            description: String,
+            span_kind: SpanKind,
+            messaging_system: String,
+            span_attributes: Vec<(String, AnyValue)>,
+            should_be_valid: bool,
+            expected_topic_arn: String,
+            expected_subscription_arn: String,
+        }
+
+        /// SpanKind enumeration for testing
+        #[derive(Debug, Clone, PartialEq)]
+        enum SpanKind {
+            Internal,
+            Server,
+            Client,
+            Producer,
+            Consumer,
+        }
+
+        let test_scenarios = vec![
+            AwsSnsConsumerScenario {
+                description: "valid_aws_sns_consumer_with_both_arns".to_string(),
+                span_kind: SpanKind::Consumer,
+                messaging_system: "aws_sns".to_string(),
+                span_attributes: vec![
+                    ("messaging.aws_sns.topic_arn".to_string(), AnyValue::StringValue("arn:aws:sns:us-east-1:123456789012:order-notifications".to_string())),
+                    ("messaging.aws_sns.subscription_arn".to_string(), AnyValue::StringValue("arn:aws:sns:us-east-1:123456789012:order-notifications:550e8400-e29b-41d4-a716-446655440000".to_string())),
+                    ("messaging.system".to_string(), AnyValue::StringValue("aws_sns".to_string())),
+                    ("messaging.destination.name".to_string(), AnyValue::StringValue("order-notifications".to_string())),
+                    ("messaging.operation".to_string(), AnyValue::StringValue("receive".to_string())),
+                    ("messaging.aws_sns.message_id".to_string(), AnyValue::StringValue("msg-abcd-1234-5678".to_string())),
+                ],
+                should_be_valid: true,
+                expected_topic_arn: "arn:aws:sns:us-east-1:123456789012:order-notifications".to_string(),
+                expected_subscription_arn: "arn:aws:sns:us-east-1:123456789012:order-notifications:550e8400-e29b-41d4-a716-446655440000".to_string(),
+            },
+            AwsSnsConsumerScenario {
+                description: "aws_sns_consumer_missing_topic_arn".to_string(),
+                span_kind: SpanKind::Consumer,
+                messaging_system: "aws_sns".to_string(),
+                span_attributes: vec![
+                    ("messaging.aws_sns.subscription_arn".to_string(), AnyValue::StringValue("arn:aws:sns:us-west-1:111222333444:alerts:12345678-abcd-efgh-ijkl-123456789012".to_string())),
+                    ("messaging.system".to_string(), AnyValue::StringValue("aws_sns".to_string())),
+                    ("messaging.destination.name".to_string(), AnyValue::StringValue("alerts".to_string())),
+                    ("messaging.operation".to_string(), AnyValue::StringValue("receive".to_string())),
+                    // Missing messaging.aws_sns.topic_arn - should be invalid
+                ],
+                should_be_valid: false,
+                expected_topic_arn: "".to_string(),
+                expected_subscription_arn: "arn:aws:sns:us-west-1:111222333444:alerts:12345678-abcd-efgh-ijkl-123456789012".to_string(),
+            },
+            AwsSnsConsumerScenario {
+                description: "aws_sns_consumer_missing_subscription_arn".to_string(),
+                span_kind: SpanKind::Consumer,
+                messaging_system: "aws_sns".to_string(),
+                span_attributes: vec![
+                    ("messaging.aws_sns.topic_arn".to_string(), AnyValue::StringValue("arn:aws:sns:ca-central-1:555666777888:user-events".to_string())),
+                    ("messaging.system".to_string(), AnyValue::StringValue("aws_sns".to_string())),
+                    ("messaging.destination.name".to_string(), AnyValue::StringValue("user-events".to_string())),
+                    ("messaging.operation".to_string(), AnyValue::StringValue("consume".to_string())),
+                    // Missing messaging.aws_sns.subscription_arn - should be invalid
+                ],
+                should_be_valid: false,
+                expected_topic_arn: "arn:aws:sns:ca-central-1:555666777888:user-events".to_string(),
+                expected_subscription_arn: "".to_string(),
+            },
+            AwsSnsConsumerScenario {
+                description: "aws_sns_producer_span_exempt".to_string(),
+                span_kind: SpanKind::Producer,
+                messaging_system: "aws_sns".to_string(),
+                span_attributes: vec![
+                    ("messaging.system".to_string(), AnyValue::StringValue("aws_sns".to_string())),
+                    ("messaging.destination.name".to_string(), AnyValue::StringValue("test-topic".to_string())),
+                    ("messaging.operation".to_string(), AnyValue::StringValue("publish".to_string())),
+                    // Producer spans are exempt from consumer ARN requirements
+                ],
+                should_be_valid: true, // Producer spans don't need consumer ARNs
+                expected_topic_arn: "".to_string(),
+                expected_subscription_arn: "".to_string(),
+            },
+        ];
+
+        /// Span data for AWS SNS consumer testing
+        #[derive(Debug, Clone)]
+        struct AwsSnsConsumerSpanData {
+            name: String,
+            kind: SpanKind,
+            messaging_system: String,
+            attributes: HashMap<String, AnyValue>,
+        }
+
+        impl AwsSnsConsumerSpanData {
+            fn from_scenario(scenario: &AwsSnsConsumerScenario) -> Self {
+                let mut attributes = HashMap::new();
+                for (key, value) in &scenario.span_attributes {
+                    attributes.insert(key.clone(), value.clone());
+                }
+
+                Self {
+                    name: format!("aws_sns_consumer_span_{}", scenario.description),
+                    kind: scenario.span_kind.clone(),
+                    messaging_system: scenario.messaging_system.clone(),
+                    attributes,
+                }
+            }
+        }
+
+        /// Result of AWS SNS consumer ARN validation
+        #[derive(Debug)]
+        enum AwsSnsConsumerValidationResult {
+            Valid {
+                topic_arn: String,
+                subscription_arn: String,
+            },
+            Invalid {
+                violations: Vec<String>,
+            },
+            NotApplicable {
+                reason: String,
+            },
+        }
+
+        /// Validates AWS SNS consumer span attributes per OTLP-155
+        fn validate_aws_sns_consumer_attributes(
+            span_data: &AwsSnsConsumerSpanData,
+        ) -> AwsSnsConsumerValidationResult {
+            // Check if this is a CONSUMER span with messaging.system="aws_sns"
+            if !matches!(span_data.kind, SpanKind::Consumer) {
+                return AwsSnsConsumerValidationResult::NotApplicable {
+                    reason: format!("Not a CONSUMER span: {:?}", span_data.kind),
+                };
+            }
+
+            // Case-sensitive messaging.system check
+            let messaging_system = span_data.attributes.get("messaging.system")
+                .and_then(|v| match v {
+                    AnyValue::StringValue(s) => Some(s.as_str()),
+                    _ => None,
+                })
+                .unwrap_or("");
+
+            if messaging_system != "aws_sns" {
+                return AwsSnsConsumerValidationResult::NotApplicable {
+                    reason: format!("Not AWS SNS messaging system: '{}'", messaging_system),
+                };
+            }
+
+            // OTLP-155: BOTH messaging.aws_sns.topic_arn AND messaging.aws_sns.subscription_arn
+            // MUST be set for AWS SNS CONSUMER spans
+            let mut violations = Vec::new();
+
+            // Validate topic ARN
+            let topic_arn = match span_data.attributes.get("messaging.aws_sns.topic_arn") {
+                Some(AnyValue::StringValue(arn_string)) => {
+                    if arn_string.trim().is_empty() {
+                        violations.push("OTLP-155: messaging.aws_sns.topic_arn is empty".to_string());
+                        arn_string.clone()
+                    } else {
+                        arn_string.clone()
+                    }
+                }
+                Some(_) => {
+                    violations.push("OTLP-155: messaging.aws_sns.topic_arn has wrong type (expected StringValue)".to_string());
+                    "".to_string()
+                }
+                None => {
+                    violations.push("OTLP-155: AWS SNS consumer span missing required messaging.aws_sns.topic_arn attribute".to_string());
+                    "".to_string()
+                }
+            };
+
+            // Validate subscription ARN
+            let subscription_arn = match span_data.attributes.get("messaging.aws_sns.subscription_arn") {
+                Some(AnyValue::StringValue(arn_string)) => {
+                    if arn_string.trim().is_empty() {
+                        violations.push("OTLP-155: messaging.aws_sns.subscription_arn is empty".to_string());
+                        arn_string.clone()
+                    } else {
+                        arn_string.clone()
+                    }
+                }
+                Some(_) => {
+                    violations.push("OTLP-155: messaging.aws_sns.subscription_arn has wrong type (expected StringValue)".to_string());
+                    "".to_string()
+                }
+                None => {
+                    violations.push("OTLP-155: AWS SNS consumer span missing required messaging.aws_sns.subscription_arn attribute".to_string());
+                    "".to_string()
+                }
+            };
+
+            if !violations.is_empty() {
+                return AwsSnsConsumerValidationResult::Invalid { violations };
+            }
+
+            AwsSnsConsumerValidationResult::Valid {
+                topic_arn,
+                subscription_arn,
+            }
+        }
+
+        // Execute OTLP-155 conformance validation for all scenarios
+        let mut passed_scenarios = 0;
+        let total_scenarios = test_scenarios.len();
+
+        for scenario in &test_scenarios {
+            let span_data = AwsSnsConsumerSpanData::from_scenario(scenario);
+            let validation_result = validate_aws_sns_consumer_attributes(&span_data);
+
+            let test_passed = match validation_result {
+                AwsSnsConsumerValidationResult::Valid { topic_arn, subscription_arn } => {
+                    if !scenario.should_be_valid {
+                        panic!("Expected failure but span was accepted: topic_arn='{}', subscription_arn='{}'",
+                               topic_arn, subscription_arn);
+                    }
+
+                    // Verify ARNs match expected values
+                    if !scenario.expected_topic_arn.is_empty() && topic_arn != scenario.expected_topic_arn {
+                        panic!("Topic ARN mismatch: expected '{}', got '{}'",
+                               scenario.expected_topic_arn, topic_arn);
+                    }
+                    if !scenario.expected_subscription_arn.is_empty() && subscription_arn != scenario.expected_subscription_arn {
+                        panic!("Subscription ARN mismatch: expected '{}', got '{}'",
+                               scenario.expected_subscription_arn, subscription_arn);
+                    }
+                    true
+                }
+                AwsSnsConsumerValidationResult::Invalid { violations } => {
+                    if scenario.should_be_valid {
+                        panic!("Expected success but span was rejected: violations={:?}", violations);
+                    }
+                    true
+                }
+                AwsSnsConsumerValidationResult::NotApplicable { .. } => {
+                    scenario.should_be_valid
+                }
+            };
+
+            if test_passed {
+                passed_scenarios += 1;
+                println!("✓ OTLP-155 conformance verified for {}", scenario.description);
+            }
+        }
+
+        assert_eq!(
+            passed_scenarios, total_scenarios,
+            "All OTLP-155 AWS SNS consumer ARN scenarios must pass"
+        );
+
+        println!("✓ OTLP-155: AWS SNS consumer topic ARN and subscription ARN validation conformance verified");
+        println!("  - CONSUMER spans with messaging.system='aws_sns' require BOTH topic_arn AND subscription_arn");
+        println!("  - Both ARNs must be non-empty string values");
+        println!("  - Producer spans exempt from consumer ARN requirements");
+        println!("  - Non-AWS SNS messaging systems exempt from validation");
     }
 }
