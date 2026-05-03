@@ -45457,4 +45457,647 @@ mod otlp_122_tests {
         println!("  - Consumer operation validation (receive/process vs publish/send)");
         println!("  - Destination name consistency checking with queue name");
     }
+
+    /// OTLP-150 conformance test: Redis producer command requirement.
+    ///
+    /// When an exporter encounters a span with kind=PRODUCER and messaging.system="redis",
+    /// the messaging.redis.command attribute MUST be set per OTLP semantic conventions
+    /// for Redis producer spans. This ensures proper traceability and correlation for
+    /// Redis message/data production operations where the command identifies the specific
+    /// Redis operation being performed (e.g., LPUSH, RPUSH, PUBLISH, SET, HSET).
+    #[test]
+    fn otlp_150_redis_producer_command_conformance() {
+        println!("Testing OTLP-150: Redis producer command requirement...");
+
+        let test_scenarios = vec![
+            RedisProducerCommandScenario {
+                description: "valid_redis_producer_with_lpush_command".to_string(),
+                span_kind: SpanKind::Producer,
+                messaging_system: "redis".to_string(),
+                span_attributes: vec![
+                    ("messaging.redis.command".to_string(), AnyValue::StringValue("LPUSH".to_string())),
+                    ("messaging.system".to_string(), AnyValue::StringValue("redis".to_string())),
+                    ("messaging.destination.name".to_string(), AnyValue::StringValue("task.queue".to_string())),
+                    ("messaging.operation".to_string(), AnyValue::StringValue("publish".to_string())),
+                    ("net.peer.name".to_string(), AnyValue::StringValue("redis.example.com".to_string())),
+                ],
+                should_be_valid: true,
+                expected_command: Some("LPUSH".to_string()),
+            },
+            RedisProducerCommandScenario {
+                description: "valid_redis_producer_with_publish_command".to_string(),
+                span_kind: SpanKind::Producer,
+                messaging_system: "redis".to_string(),
+                span_attributes: vec![
+                    ("messaging.redis.command".to_string(), AnyValue::StringValue("PUBLISH".to_string())),
+                    ("messaging.system".to_string(), AnyValue::StringValue("redis".to_string())),
+                    ("messaging.destination.name".to_string(), AnyValue::StringValue("events.channel".to_string())),
+                    ("messaging.operation".to_string(), AnyValue::StringValue("publish".to_string())),
+                    ("messaging.redis.database_index".to_string(), AnyValue::IntValue(0)),
+                ],
+                should_be_valid: true,
+                expected_command: Some("PUBLISH".to_string()),
+            },
+            RedisProducerCommandScenario {
+                description: "redis_producer_missing_command".to_string(),
+                span_kind: SpanKind::Producer,
+                messaging_system: "redis".to_string(),
+                span_attributes: vec![
+                    ("messaging.system".to_string(), AnyValue::StringValue("redis".to_string())),
+                    ("messaging.destination.name".to_string(), AnyValue::StringValue("data.key".to_string())),
+                    ("messaging.operation".to_string(), AnyValue::StringValue("send".to_string())),
+                    // Missing messaging.redis.command - should be invalid
+                ],
+                should_be_valid: false,
+                expected_command: None,
+            },
+            RedisProducerCommandScenario {
+                description: "redis_producer_empty_command".to_string(),
+                span_kind: SpanKind::Producer,
+                messaging_system: "redis".to_string(),
+                span_attributes: vec![
+                    ("messaging.redis.command".to_string(), AnyValue::StringValue("".to_string())), // Empty
+                    ("messaging.system".to_string(), AnyValue::StringValue("redis".to_string())),
+                    ("messaging.destination.name".to_string(), AnyValue::StringValue("data.key".to_string())),
+                ],
+                should_be_valid: false,
+                expected_command: None,
+            },
+            RedisProducerCommandScenario {
+                description: "redis_producer_non_string_command".to_string(),
+                span_kind: SpanKind::Producer,
+                messaging_system: "redis".to_string(),
+                span_attributes: vec![
+                    ("messaging.redis.command".to_string(), AnyValue::IntValue(123)), // Wrong type
+                    ("messaging.system".to_string(), AnyValue::StringValue("redis".to_string())),
+                    ("messaging.destination.name".to_string(), AnyValue::StringValue("data.key".to_string())),
+                ],
+                should_be_valid: false,
+                expected_command: None,
+            },
+            RedisProducerCommandScenario {
+                description: "non_redis_producer_no_requirement".to_string(),
+                span_kind: SpanKind::Producer,
+                messaging_system: "kafka".to_string(), // Not Redis
+                span_attributes: vec![
+                    ("messaging.system".to_string(), AnyValue::StringValue("kafka".to_string())),
+                    ("messaging.destination.name".to_string(), AnyValue::StringValue("events".to_string())),
+                    ("messaging.kafka.message.partition".to_string(), AnyValue::IntValue(3)),
+                ],
+                should_be_valid: true, // No command requirement for non-Redis
+                expected_command: None,
+            },
+            RedisProducerCommandScenario {
+                description: "redis_consumer_no_requirement".to_string(),
+                span_kind: SpanKind::Consumer, // Not producer
+                messaging_system: "redis".to_string(),
+                span_attributes: vec![
+                    ("messaging.system".to_string(), AnyValue::StringValue("redis".to_string())),
+                    ("messaging.destination.name".to_string(), AnyValue::StringValue("task.queue".to_string())),
+                    ("messaging.operation".to_string(), AnyValue::StringValue("receive".to_string())),
+                ],
+                should_be_valid: true, // No command requirement for consumer spans
+                expected_command: None,
+            },
+            RedisProducerCommandScenario {
+                description: "valid_redis_producer_with_rpush_command".to_string(),
+                span_kind: SpanKind::Producer,
+                messaging_system: "redis".to_string(),
+                span_attributes: vec![
+                    ("messaging.redis.command".to_string(), AnyValue::StringValue("RPUSH".to_string())),
+                    ("messaging.system".to_string(), AnyValue::StringValue("redis".to_string())),
+                    ("messaging.destination.name".to_string(), AnyValue::StringValue("work.queue".to_string())),
+                    ("messaging.operation".to_string(), AnyValue::StringValue("send".to_string())),
+                    ("messaging.redis.database_index".to_string(), AnyValue::IntValue(1)),
+                    ("net.peer.name".to_string(), AnyValue::StringValue("redis-cluster.prod.com".to_string())),
+                    ("net.peer.port".to_string(), AnyValue::IntValue(6379)),
+                ],
+                should_be_valid: true,
+                expected_command: Some("RPUSH".to_string()),
+            },
+            RedisProducerCommandScenario {
+                description: "redis_case_sensitivity_check".to_string(),
+                span_kind: SpanKind::Producer,
+                messaging_system: "Redis".to_string(), // Different case
+                span_attributes: vec![
+                    ("messaging.system".to_string(), AnyValue::StringValue("Redis".to_string())),
+                    ("messaging.destination.name".to_string(), AnyValue::StringValue("data.key".to_string())),
+                ],
+                should_be_valid: true, // Not exact "redis" so no requirement
+                expected_command: None,
+            },
+            RedisProducerCommandScenario {
+                description: "valid_redis_producer_with_set_command".to_string(),
+                span_kind: SpanKind::Producer,
+                messaging_system: "redis".to_string(),
+                span_attributes: vec![
+                    ("messaging.redis.command".to_string(), AnyValue::StringValue("SET".to_string())),
+                    ("messaging.system".to_string(), AnyValue::StringValue("redis".to_string())),
+                    ("messaging.destination.name".to_string(), AnyValue::StringValue("user:12345:session".to_string())),
+                    ("messaging.operation".to_string(), AnyValue::StringValue("send".to_string())),
+                    ("messaging.redis.database_index".to_string(), AnyValue::IntValue(0)),
+                    ("messaging.message_payload_size_bytes".to_string(), AnyValue::IntValue(1024)),
+                ],
+                should_be_valid: true,
+                expected_command: Some("SET".to_string()),
+            },
+            RedisProducerCommandScenario {
+                description: "valid_redis_producer_with_hset_command".to_string(),
+                span_kind: SpanKind::Producer,
+                messaging_system: "redis".to_string(),
+                span_attributes: vec![
+                    ("messaging.redis.command".to_string(), AnyValue::StringValue("HSET".to_string())),
+                    ("messaging.system".to_string(), AnyValue::StringValue("redis".to_string())),
+                    ("messaging.destination.name".to_string(), AnyValue::StringValue("user:profile:12345".to_string())),
+                    ("messaging.operation".to_string(), AnyValue::StringValue("send".to_string())),
+                    ("messaging.redis.database_index".to_string(), AnyValue::IntValue(2)),
+                    ("messaging.batch.message_count".to_string(), AnyValue::IntValue(1)),
+                ],
+                should_be_valid: true,
+                expected_command: Some("HSET".to_string()),
+            },
+            RedisProducerCommandScenario {
+                description: "valid_redis_producer_with_sadd_command".to_string(),
+                span_kind: SpanKind::Producer,
+                messaging_system: "redis".to_string(),
+                span_attributes: vec![
+                    ("messaging.redis.command".to_string(), AnyValue::StringValue("SADD".to_string())),
+                    ("messaging.system".to_string(), AnyValue::StringValue("redis".to_string())),
+                    ("messaging.destination.name".to_string(), AnyValue::StringValue("active:users:set".to_string())),
+                    ("messaging.operation".to_string(), AnyValue::StringValue("send".to_string())),
+                    ("messaging.redis.database_index".to_string(), AnyValue::IntValue(0)),
+                ],
+                should_be_valid: true,
+                expected_command: Some("SADD".to_string()),
+            },
+            RedisProducerCommandScenario {
+                description: "valid_redis_producer_with_zadd_command".to_string(),
+                span_kind: SpanKind::Producer,
+                messaging_system: "redis".to_string(),
+                span_attributes: vec![
+                    ("messaging.redis.command".to_string(), AnyValue::StringValue("ZADD".to_string())),
+                    ("messaging.system".to_string(), AnyValue::StringValue("redis".to_string())),
+                    ("messaging.destination.name".to_string(), AnyValue::StringValue("leaderboard:scores".to_string())),
+                    ("messaging.operation".to_string(), AnyValue::StringValue("send".to_string())),
+                    ("messaging.redis.database_index".to_string(), AnyValue::IntValue(3)),
+                    ("messaging.message_payload_size_bytes".to_string(), AnyValue::IntValue(256)),
+                ],
+                should_be_valid: true,
+                expected_command: Some("ZADD".to_string()),
+            },
+            RedisProducerCommandScenario {
+                description: "valid_redis_producer_lowercase_command".to_string(),
+                span_kind: SpanKind::Producer,
+                messaging_system: "redis".to_string(),
+                span_attributes: vec![
+                    ("messaging.redis.command".to_string(), AnyValue::StringValue("lpush".to_string())), // Lowercase
+                    ("messaging.system".to_string(), AnyValue::StringValue("redis".to_string())),
+                    ("messaging.destination.name".to_string(), AnyValue::StringValue("task.queue".to_string())),
+                    ("messaging.operation".to_string(), AnyValue::StringValue("publish".to_string())),
+                ],
+                should_be_valid: true,
+                expected_command: Some("lpush".to_string()),
+            },
+        ];
+
+        /// Test scenario for Redis producer command validation
+        #[derive(Debug, Clone)]
+        struct RedisProducerCommandScenario {
+            description: String,
+            span_kind: SpanKind,
+            messaging_system: String,
+            span_attributes: Vec<(String, AnyValue)>,
+            should_be_valid: bool,
+            expected_command: Option<String>,
+        }
+
+        /// Span data for Redis producer testing
+        #[derive(Debug, Clone)]
+        struct RedisProducerSpanData {
+            name: String,
+            kind: SpanKind,
+            messaging_system: String,
+            attributes: HashMap<String, AnyValue>,
+        }
+
+        impl RedisProducerSpanData {
+            fn from_scenario(scenario: &RedisProducerCommandScenario) -> Self {
+                let mut attributes = HashMap::new();
+                for (key, value) in &scenario.span_attributes {
+                    attributes.insert(key.clone(), value.clone());
+                }
+
+                Self {
+                    name: format!("redis_producer_span_{}", scenario.description),
+                    kind: scenario.span_kind.clone(),
+                    messaging_system: scenario.messaging_system.clone(),
+                    attributes,
+                }
+            }
+        }
+
+        /// Result of Redis producer command validation
+        #[derive(Debug)]
+        enum RedisProducerValidationResult {
+            Valid {
+                command: Option<String>,
+                additional_redis_attributes: usize,
+            },
+            Invalid {
+                violations: Vec<String>,
+                missing_attributes: Vec<String>,
+            },
+            NotApplicable {
+                reason: String,
+            },
+        }
+
+        /// Validates Redis producer command requirement conformance
+        fn validate_redis_producer_command_conformance(
+            scenario: &RedisProducerCommandScenario,
+        ) -> Result<(), String> {
+            let span_data = RedisProducerSpanData::from_scenario(scenario);
+            let validation_result = validate_redis_producer_command(&span_data);
+
+            match (&validation_result, scenario.should_be_valid) {
+                (RedisProducerValidationResult::Valid { command, .. }, true) => {
+                    // Verify expected command matches
+                    if let Some(expected_cmd) = &scenario.expected_command {
+                        match command {
+                            Some(actual_cmd) if actual_cmd == expected_cmd => {
+                                println!("✓ Redis producer span has correct command: '{}'", actual_cmd);
+                            }
+                            Some(actual_cmd) => {
+                                return Err(format!(
+                                    "Command mismatch: expected '{}', got '{}'",
+                                    expected_cmd, actual_cmd
+                                ));
+                            }
+                            None => {
+                                return Err(format!(
+                                    "Expected command '{}' but none found",
+                                    expected_cmd
+                                ));
+                            }
+                        }
+                    } else {
+                        // No expected command - ensure none present when not required
+                        if command.is_some() && requires_redis_command(&span_data) {
+                            return Err("Unexpected command found when none expected".to_string());
+                        }
+                    }
+                }
+                (RedisProducerValidationResult::Invalid { .. }, false) => {
+                    println!("✓ Invalid Redis producer span correctly rejected");
+                }
+                (RedisProducerValidationResult::NotApplicable { reason }, true) => {
+                    println!("✓ Command requirement not applicable: {}", reason);
+                }
+                (RedisProducerValidationResult::Valid { .. }, false) => {
+                    return Err("Invalid span was incorrectly accepted".to_string());
+                }
+                (RedisProducerValidationResult::Invalid { violations, .. }, true) => {
+                    return Err(format!("Valid span was incorrectly rejected: {:?}", violations));
+                }
+                (RedisProducerValidationResult::NotApplicable { .. }, false) => {
+                    return Err("Expected validation failure but got not applicable".to_string());
+                }
+            }
+
+            Ok(())
+        }
+
+        /// Validates that Redis producer spans have required command attribute
+        fn validate_redis_producer_command(span_data: &RedisProducerSpanData) -> RedisProducerValidationResult {
+            // Check if this span requires command attribute
+            if !requires_redis_command(span_data) {
+                return RedisProducerValidationResult::NotApplicable {
+                    reason: format!(
+                        "Span kind {:?} with messaging.system '{}' doesn't require messaging.redis.command",
+                        span_data.kind, span_data.messaging_system
+                    ),
+                };
+            }
+
+            let mut violations = Vec::new();
+            let mut missing_attributes = Vec::new();
+
+            // Extract and validate messaging.redis.command attribute
+            let command = match span_data.attributes.get("messaging.redis.command") {
+                Some(AnyValue::StringValue(cmd_str)) if !cmd_str.is_empty() => {
+                    Some(cmd_str.clone())
+                }
+                Some(AnyValue::StringValue(cmd_str)) if cmd_str.is_empty() => {
+                    violations.push("messaging.redis.command attribute is empty".to_string());
+                    missing_attributes.push("messaging.redis.command".to_string());
+                    None
+                }
+                Some(_) => {
+                    violations.push("messaging.redis.command attribute must be a string value".to_string());
+                    missing_attributes.push("messaging.redis.command".to_string());
+                    None
+                }
+                None => {
+                    violations.push("OTLP-150: Redis producer span missing required messaging.redis.command attribute".to_string());
+                    missing_attributes.push("messaging.redis.command".to_string());
+                    None
+                }
+            };
+
+            // Validate command format and constraints
+            if let Some(cmd) = &command {
+                // Check for common Redis commands and categorize them
+                let cmd_upper = cmd.to_uppercase();
+                match cmd_upper.as_str() {
+                    // List operations (producer-like)
+                    "LPUSH" | "RPUSH" | "LPUSHX" | "RPUSHX" | "LINSERT" => {
+                        println!("✓ Detected Redis list producer command: {}", cmd);
+                    }
+                    // Pub/Sub operations
+                    "PUBLISH" | "SPUBLISH" => {
+                        println!("✓ Detected Redis pub/sub producer command: {}", cmd);
+                    }
+                    // String operations
+                    "SET" | "SETEX" | "PSETEX" | "SETNX" | "MSET" | "MSETNX" | "APPEND" => {
+                        println!("✓ Detected Redis string producer command: {}", cmd);
+                    }
+                    // Hash operations
+                    "HSET" | "HMSET" | "HSETNX" | "HINCRBY" | "HINCRBYFLOAT" => {
+                        println!("✓ Detected Redis hash producer command: {}", cmd);
+                    }
+                    // Set operations
+                    "SADD" | "SMOVE" => {
+                        println!("✓ Detected Redis set producer command: {}", cmd);
+                    }
+                    // Sorted set operations
+                    "ZADD" | "ZINCRBY" => {
+                        println!("✓ Detected Redis sorted set producer command: {}", cmd);
+                    }
+                    // Stream operations
+                    "XADD" | "XCLAIM" => {
+                        println!("✓ Detected Redis stream producer command: {}", cmd);
+                    }
+                    // Consumer-like commands (warn if used in producer span)
+                    "LPOP" | "RPOP" | "BLPOP" | "BRPOP" | "GET" | "MGET" | "HGET" | "HMGET" | "SMEMBERS" | "SRANDMEMBER" | "ZRANGE" | "SUBSCRIBE" => {
+                        println!("⚠ Command '{}' is typically consumer-oriented but used in producer span", cmd);
+                    }
+                    // Administrative commands
+                    "FLUSHDB" | "FLUSHALL" | "DEL" | "EXPIRE" | "TTL" => {
+                        println!("⚠ Command '{}' is administrative, consider if producer span is appropriate", cmd);
+                    }
+                    _ => {
+                        println!("⚠ Unusual or unrecognized Redis command: '{}'", cmd);
+                    }
+                }
+
+                // Validate command length
+                if cmd.len() > 50 {
+                    println!("⚠ Unusually long Redis command: {} characters", cmd.len());
+                }
+
+                // Check for command injection patterns
+                if cmd.contains('\n') || cmd.contains('\r') {
+                    violations.push("messaging.redis.command contains newline characters".to_string());
+                }
+
+                if cmd.contains('\0') {
+                    violations.push("messaging.redis.command contains null character".to_string());
+                }
+            }
+
+            // Check for recommended Redis producer attributes
+            let recommended_redis_attrs = [
+                "messaging.system",
+                "messaging.destination.name",
+                "messaging.operation",
+                "messaging.redis.database_index"
+            ];
+
+            let mut redis_attrs_present = 0;
+            for attr in &recommended_redis_attrs {
+                if span_data.attributes.contains_key(*attr) {
+                    redis_attrs_present += 1;
+                } else if attr != &"messaging.redis.database_index" {
+                    println!("⚠ Recommended Redis attribute '{}' not present", attr);
+                }
+            }
+
+            // Verify messaging.system is set to "redis" (case sensitive)
+            if let Some(AnyValue::StringValue(system)) = span_data.attributes.get("messaging.system") {
+                if system != "redis" {
+                    if system.to_lowercase() == "redis" {
+                        violations.push(format!("messaging.system should be exactly 'redis' (case-sensitive), got: '{}'", system));
+                    } else {
+                        violations.push(format!("messaging.system should be 'redis' for Redis producer spans, got: '{}'", system));
+                    }
+                }
+            }
+
+            // Verify messaging.operation is appropriate for producer if present
+            if let Some(AnyValue::StringValue(operation)) = span_data.attributes.get("messaging.operation") {
+                match operation.as_str() {
+                    "publish" | "send" => {
+                        // Valid producer operations
+                    }
+                    "receive" | "process" => {
+                        violations.push(format!("messaging.operation '{}' is inappropriate for producer spans (use 'publish' or 'send')", operation));
+                    }
+                    _ => {
+                        println!("⚠ Unusual messaging.operation '{}' for producer span", operation);
+                    }
+                }
+            }
+
+            // Additional Redis-specific validations
+            if let Some(AnyValue::StringValue(dest_name)) = span_data.attributes.get("messaging.destination.name") {
+                if dest_name.is_empty() {
+                    violations.push("messaging.destination.name should not be empty for Redis spans".to_string());
+                }
+
+                // Check for common Redis key patterns
+                if dest_name.contains(' ') {
+                    println!("⚠ Redis key '{}' contains spaces (may need proper escaping)", dest_name);
+                }
+            }
+
+            // Validate database index if present
+            if let Some(AnyValue::IntValue(db_index)) = span_data.attributes.get("messaging.redis.database_index") {
+                if *db_index < 0 {
+                    violations.push("messaging.redis.database_index must be non-negative".to_string());
+                }
+                if *db_index > 15 {
+                    println!("⚠ Redis database index {} is unusually high (typical range: 0-15)", db_index);
+                }
+            }
+
+            // Check command-destination consistency
+            if let (Some(cmd), Some(AnyValue::StringValue(dest))) =
+                (command.as_ref(), span_data.attributes.get("messaging.destination.name")) {
+                let cmd_upper = cmd.to_uppercase();
+
+                // Pub/sub commands should use channel-like destinations
+                if cmd_upper == "PUBLISH" && !dest.contains("channel") && !dest.contains("topic") {
+                    println!("⚠ PUBLISH command with destination '{}' - consider channel/topic naming", dest);
+                }
+
+                // List commands should use queue-like destinations
+                if (cmd_upper == "LPUSH" || cmd_upper == "RPUSH") && !dest.contains("queue") && !dest.contains("list") {
+                    println!("⚠ List command '{}' with destination '{}' - consider queue/list naming", cmd, dest);
+                }
+            }
+
+            if !violations.is_empty() {
+                RedisProducerValidationResult::Invalid {
+                    violations,
+                    missing_attributes,
+                }
+            } else {
+                RedisProducerValidationResult::Valid {
+                    command,
+                    additional_redis_attributes: redis_attrs_present,
+                }
+            }
+        }
+
+        /// Determines if a span requires Redis command attribute
+        fn requires_redis_command(span_data: &RedisProducerSpanData) -> bool {
+            // OTLP-150: Only PRODUCER spans with messaging.system="redis" require command
+            span_data.kind == SpanKind::Producer
+                && span_data.messaging_system == "redis"
+        }
+
+        // Execute OTLP-150 conformance validation for all scenarios
+        let mut passed_scenarios = 0;
+        let total_scenarios = test_scenarios.len();
+
+        for scenario in &test_scenarios {
+            match validate_redis_producer_command_conformance(scenario) {
+                Ok(()) => {
+                    passed_scenarios += 1;
+                    println!("✓ OTLP-150 conformance verified for {}", scenario.description);
+                }
+                Err(error_msg) => {
+                    panic!(
+                        "OTLP-150 conformance test FAILED for {}: {}",
+                        scenario.description, error_msg
+                    );
+                }
+            }
+        }
+
+        assert_eq!(
+            passed_scenarios, total_scenarios,
+            "All OTLP-150 Redis producer command scenarios must pass"
+        );
+
+        // Additional edge case testing
+        println!("Testing Redis producer command edge cases...");
+
+        // Test messaging.system case sensitivity
+        let system_cases = vec![
+            ("redis", true),       // Exact match - requires command
+            ("Redis", false),      // Wrong case - no requirement
+            ("REDIS", false),      // Wrong case - no requirement
+            ("memcached", false),  // Different system - no requirement
+        ];
+
+        for (system_name, should_require) in system_cases {
+            let mut test_attributes = HashMap::new();
+            test_attributes.insert("messaging.system".to_string(), AnyValue::StringValue(system_name.to_string()));
+            test_attributes.insert("messaging.destination.name".to_string(), AnyValue::StringValue("test.key".to_string()));
+
+            if should_require {
+                test_attributes.insert("messaging.redis.command".to_string(), AnyValue::StringValue("SET".to_string()));
+            }
+
+            let edge_span = RedisProducerSpanData {
+                name: format!("system_case_test_{}", system_name.to_lowercase()),
+                kind: SpanKind::Producer,
+                messaging_system: system_name.to_string(),
+                attributes: test_attributes,
+            };
+
+            let requires_cmd = requires_redis_command(&edge_span);
+            assert_eq!(
+                requires_cmd, should_require,
+                "Command requirement check failed for system '{}'",
+                system_name
+            );
+
+            if should_require {
+                match validate_redis_producer_command(&edge_span) {
+                    RedisProducerValidationResult::Valid { command, .. } => {
+                        assert!(command.is_some(), "Should have command for system '{}'", system_name);
+                        println!("✓ System case '{}' correctly requires and validates command", system_name);
+                    }
+                    _ => panic!("System case '{}' should be valid with command", system_name),
+                }
+            } else {
+                match validate_redis_producer_command(&edge_span) {
+                    RedisProducerValidationResult::NotApplicable { .. } => {
+                        println!("✓ System case '{}' correctly identified as not applicable", system_name);
+                    }
+                    _ => panic!("System case '{}' should not require command", system_name),
+                }
+            }
+        }
+
+        // Test Redis command validation
+        println!("Testing Redis command validation...");
+        let command_tests = vec![
+            ("lpush_command", "LPUSH", true),
+            ("rpush_command", "RPUSH", true),
+            ("publish_command", "PUBLISH", true),
+            ("set_command", "SET", true),
+            ("hset_command", "HSET", true),
+            ("sadd_command", "SADD", true),
+            ("zadd_command", "ZADD", true),
+            ("lowercase_command", "lpush", true),
+            ("mixed_case_command", "LpUsH", true),
+            ("empty_command", "", false),
+            ("custom_command", "MYCUSTOMCMD", true), // Custom commands allowed
+            ("with_newline", "SET\nkey", false), // Newline not allowed
+        ];
+
+        for (test_name, command_value, should_be_valid) in command_tests {
+            let mut test_attributes = HashMap::new();
+            test_attributes.insert("messaging.system".to_string(), AnyValue::StringValue("redis".to_string()));
+            test_attributes.insert("messaging.destination.name".to_string(), AnyValue::StringValue("test.key".to_string()));
+            test_attributes.insert("messaging.redis.command".to_string(), AnyValue::StringValue(command_value.to_string()));
+
+            let test_span = RedisProducerSpanData {
+                name: format!("command_test_{}", test_name),
+                kind: SpanKind::Producer,
+                messaging_system: "redis".to_string(),
+                attributes: test_attributes,
+            };
+
+            let result = validate_redis_producer_command(&test_span);
+            let is_valid = matches!(result, RedisProducerValidationResult::Valid { .. });
+
+            assert_eq!(
+                is_valid, should_be_valid,
+                "Command test '{}' (value: '{}') validation mismatch: expected {}, got {}",
+                test_name, command_value, should_be_valid, is_valid
+            );
+
+            if should_be_valid {
+                println!("✓ Command test '{}' (value: '{}') correctly validated", test_name, command_value);
+            } else {
+                println!("✓ Command test '{}' (value: '{}') correctly rejected", test_name, command_value);
+            }
+        }
+
+        println!("✓ OTLP-150: Redis producer command requirement conformance verified");
+        println!("  - PRODUCER spans with messaging.system='redis' require messaging.redis.command");
+        println!("  - Empty command is invalid (must be non-empty string)");
+        println!("  - Non-Redis producer systems exempt from requirement");
+        println!("  - Consumer spans exempt from requirement");
+        println!("  - Case-sensitive messaging.system matching enforced");
+        println!("  - Non-string command values rejected");
+        println!("  - Command categorization and validation (list, pub/sub, string, hash, set, sorted set)");
+        println!("  - Command injection protection (newline/null character detection)");
+        println!("  - Producer operation validation (publish/send vs receive/process)");
+        println!("  - Command-destination consistency recommendations");
+    }
 }
