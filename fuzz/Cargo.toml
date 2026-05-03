@@ -4937,3 +4937,9 @@ name = "h2_continuation_after_settings"
 path = "fuzz_targets/h2_continuation_after_settings.rs"
 test = false
 doc = false
+
+[[bin]]
+name = "h2_settings_with_ack_flag"
+path = "fuzz_targets/h2_settings_with_ack_flag.rs"
+test = false
+doc = false
