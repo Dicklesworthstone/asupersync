@@ -6072,6 +6072,7 @@ mod tests {
     use std::env;
     use std::fs;
     use std::path::Path;
+    use std::thread;
     use std::time::{Duration, Instant};
 
     const GLOBAL_READY_CONTENTION_CONTRACT_JSON: &str =
@@ -14820,8 +14821,8 @@ mod tests {
         let state = Arc::new(ContendedMutex::new("runtime_state", RuntimeState::new()));
         let mut scheduler = ThreeLaneScheduler::new(3, &state); // 3-lane as requested
 
-        let mut workers = scheduler.take_workers().into_iter().collect::<Vec<_>>();
-        let mut worker = workers.into_iter().next().unwrap();
+        let workers = scheduler.take_workers().into_iter().collect::<Vec<_>>();
+        let worker = workers.into_iter().next().unwrap();
 
         // Create specific deadline-ordering scenario with 5 tasks + 1 cancel
         let mut task_details = BTreeMap::new();
@@ -15018,9 +15019,10 @@ mod tests {
             snapshot_path => "../../tests/snapshots/scheduler",
             prepend_module_to_snapshot => false,
         }, {
-            insta::assert_debug_snapshot!(
+            let state_dump_snapshot = format!("{state_dump:#?}");
+            insta::assert_snapshot!(
                 "three_lane_scheduler_deadline_ordering_state",
-                state_dump,
+                state_dump_snapshot.as_str(),
                 @"SchedulerStateDump {
     scenario: \"3-lane-5-task-1-cancel-deadline-ordering\",
     timestamp: \"2026-05-03T17:00:00.000Z\",
