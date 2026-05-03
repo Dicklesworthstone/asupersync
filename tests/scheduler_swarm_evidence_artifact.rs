@@ -83,6 +83,44 @@ fn scheduler_evidence_artifact_generates_stable_recommendations() {
 }
 
 #[test]
+fn scheduler_evidence_recommendation_is_deterministic_for_fixed_inputs() {
+    let artifact = sample_artifact();
+    let first = artifact.tune_report().expect("first report");
+    let first_json = serde_json::to_value(&first).expect("serialize first report");
+
+    for iteration in 0..16 {
+        let next = artifact
+            .tune_report()
+            .unwrap_or_else(|err| panic!("report {iteration} should tune: {err}"));
+        let next_json = serde_json::to_value(&next).expect("serialize next report");
+        assert_eq!(
+            next_json, first_json,
+            "fixed scheduler evidence must produce byte-stable recommendation fields at iteration {iteration}"
+        );
+    }
+}
+
+#[test]
+fn scheduler_evidence_json_stays_compact_for_routine_collection() {
+    let artifact = sample_artifact();
+    let report = artifact.tune_report().expect("valid report");
+
+    let artifact_json = serde_json::to_vec(&artifact).expect("serialize compact artifact");
+    let report_json = serde_json::to_vec(&report).expect("serialize compact report");
+
+    assert!(
+        artifact_json.len() <= 2_048,
+        "scheduler evidence artifact should stay compact enough for routine collection: {} bytes",
+        artifact_json.len()
+    );
+    assert!(
+        report_json.len() <= 2_048,
+        "scheduler tuning report should stay compact enough for routine collection: {} bytes",
+        report_json.len()
+    );
+}
+
+#[test]
 fn scheduler_evidence_artifact_rejects_invalid_inputs() {
     let mut artifact = sample_artifact();
     artifact.schema_version = "asupersync.scheduler-evidence.v0".to_string();
@@ -99,6 +137,45 @@ fn scheduler_evidence_artifact_rejects_invalid_inputs() {
     assert_eq!(
         artifact.validate(),
         Err(SchedulerEvidenceError::RemoteStealRatioOutOfRange(101))
+    );
+}
+
+#[test]
+fn runtime_scheduler_evidence_disabled_mode_is_semantics_neutral() {
+    let state = Arc::new(ContendedMutex::new("runtime_state", RuntimeState::new()));
+    let mut scheduler = ThreeLaneScheduler::new_with_cancel_limit(1, &state, 16);
+
+    scheduler.inject_ready(TaskId::new_for_test(21, 0), 30);
+    scheduler.inject_cancel(TaskId::new_for_test(22, 0), 90);
+    scheduler.inject_timed(TaskId::new_for_test(23, 0), Time::ZERO);
+
+    let mut worker = scheduler.take_workers().remove(0);
+    let dispatch_trace = vec![
+        worker.next_task(),
+        worker.next_task(),
+        worker.next_task(),
+        worker.next_task(),
+    ];
+
+    assert_eq!(
+        dispatch_trace,
+        vec![
+            Some(TaskId::new_for_test(22, 0)),
+            Some(TaskId::new_for_test(23, 0)),
+            Some(TaskId::new_for_test(21, 0)),
+            None,
+        ],
+        "disabled evidence capture must not perturb lane dispatch order"
+    );
+    drop(worker);
+
+    let mut scheduler = ThreeLaneScheduler::new_with_cancel_limit(1, &state, 16);
+    scheduler.set_scheduler_evidence_window(0);
+    assert!(
+        scheduler
+            .scheduler_evidence_artifact("disabled", SchedulerWorkloadClass::MixedBurst, 256)
+            .is_none(),
+        "zero sample window should keep runtime evidence capture disabled"
     );
 }
 
