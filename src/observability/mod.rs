@@ -73,6 +73,8 @@ pub mod otlp_graceful_shutdown_audit_test;
 #[cfg(test)]
 pub mod otlp_high_frequency_span_audit_test;
 #[cfg(test)]
+pub mod otlp_resource_detection_priority_audit_test;
+#[cfg(test)]
 pub mod otlp_network_partition_audit_test;
 #[cfg(test)]
 pub mod otlp_resource_attributes_inheritance_audit_test;
