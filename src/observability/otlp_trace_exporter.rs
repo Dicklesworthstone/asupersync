@@ -10,10 +10,11 @@
 //! - Maintain FIFO export order
 //! - Background batch processing with configurable timeout
 
+use crossbeam_queue::ArrayQueue;
 use parking_lot::Mutex;
 use std::collections::VecDeque;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::time::Duration;
 
 /// Default maximum length for OTLP span attribute values per OTLP §2.5.3.
@@ -78,10 +79,14 @@ pub struct LoadSheddingStats {
 }
 
 /// Bounded export queue with oldest-drop load shedding.
+///
+/// **PERFORMANCE**: Uses lock-free ArrayQueue to eliminate mutex contention
+/// under high-frequency span creation (100K+ spans/sec).
 #[derive(Debug)]
 pub struct BoundedExportQueue<T> {
-    queue: Mutex<VecDeque<T>>,
+    queue: ArrayQueue<T>,
     capacity: usize,
+    current_len: AtomicUsize,
     dropped_count: AtomicU64,
 }
 
@@ -89,35 +94,71 @@ impl<T> BoundedExportQueue<T> {
     /// Create a new bounded queue with the given capacity.
     pub fn new(capacity: usize) -> Self {
         Self {
-            queue: Mutex::new(VecDeque::with_capacity(capacity)),
+            queue: ArrayQueue::new(capacity),
             capacity,
+            current_len: AtomicUsize::new(0),
             dropped_count: AtomicU64::new(0),
         }
     }
 
     /// Enqueue an item, dropping the oldest if capacity is exceeded.
     /// Returns true if an item was dropped.
+    ///
+    /// **LOCK-FREE**: Uses atomic operations to eliminate mutex contention.
+    /// **DROP-OLDEST**: When queue is full, removes oldest item before adding new one.
     pub fn enqueue(&self, item: T) -> bool {
-        let mut queue = self.queue.lock();
-        let dropped = if queue.len() >= self.capacity {
-            queue.pop_front(); // Drop oldest
-            self.dropped_count.fetch_add(1, Ordering::Relaxed);
-            true
-        } else {
-            false
-        };
-        queue.push_back(item);
+        let mut dropped = false;
+
+        // Fast path: try to push the item directly (most common case when queue isn't full)
+        match self.queue.push(item) {
+            Ok(()) => {
+                // Successfully enqueued
+                self.current_len.fetch_add(1, Ordering::Relaxed);
+                return false; // No item was dropped
+            }
+            Err(returned_item) => {
+                // Queue is full - need to drop oldest item first
+                if let Some(_oldest) = self.queue.pop() {
+                    // Successfully dropped oldest item
+                    self.dropped_count.fetch_add(1, Ordering::Relaxed);
+                    self.current_len.fetch_sub(1, Ordering::Relaxed);
+                    dropped = true;
+
+                    // Now try to push the new item again (this should succeed)
+                    if let Err(_) = self.queue.push(returned_item) {
+                        // This shouldn't happen, but handle gracefully
+                        return dropped;
+                    }
+                } else {
+                    // Queue became empty between our push attempt and pop attempt
+                    // Try to push again with the returned item
+                    if let Err(_) = self.queue.push(returned_item) {
+                        // Still failed - something went wrong, but continue
+                        return dropped;
+                    }
+                }
+            }
+        }
+
+        self.current_len.fetch_add(1, Ordering::Relaxed);
         dropped
     }
 
     /// Dequeue the oldest item.
+    ///
+    /// **LOCK-FREE**: Uses atomic operations for zero-contention access.
     pub fn dequeue(&self) -> Option<T> {
-        self.queue.lock().pop_front()
+        if let Some(item) = self.queue.pop() {
+            self.current_len.fetch_sub(1, Ordering::Relaxed);
+            Some(item)
+        } else {
+            None
+        }
     }
 
     /// Get current queue length.
     pub fn len(&self) -> usize {
-        self.queue.lock().len()
+        self.current_len.load(Ordering::Relaxed)
     }
 
     /// Get queue capacity.
@@ -466,12 +507,12 @@ impl Drop for LoadSheddingTraceExporter {
                         // Successfully exported, continue with next batch
                         continue;
                     }
-                    Err(e) => {
+                    Err(_e) => {
                         #[cfg(feature = "tracing-integration")]
                         crate::tracing_compat::warn!(
                             target: "asupersync::observability::otlp_trace",
                             "OTLP exporter shutdown: export failed for batch, continuing with remaining: {}",
-                            e
+                            _e
                         );
                         // Continue trying to export remaining batches even if one fails
                         continue;
@@ -490,9 +531,9 @@ impl Drop for LoadSheddingTraceExporter {
             }
         };
 
-        let flush_duration = flush_start.elapsed();
+        let _flush_duration = flush_start.elapsed();
         let final_queue_depth = self.export_queue.len();
-        let batches_flushed = queue_depth.saturating_sub(final_queue_depth);
+        let _batches_flushed = queue_depth.saturating_sub(final_queue_depth);
 
         match flush_result {
             Ok(()) => {
@@ -500,19 +541,19 @@ impl Drop for LoadSheddingTraceExporter {
                 crate::tracing_compat::info!(
                     target: "asupersync::observability::otlp_trace",
                     "OTLP exporter graceful shutdown completed: {} batches flushed in {:?}",
-                    batches_flushed,
-                    flush_duration
+                    _batches_flushed,
+                    _flush_duration
                 );
             }
-            Err(e) => {
+            Err(_e) => {
                 #[cfg(feature = "tracing-integration")]
                 crate::tracing_compat::warn!(
                     target: "asupersync::observability::otlp_trace",
                     "OTLP exporter shutdown flush failed: {} (flushed {} of {} batches in {:?})",
-                    e,
-                    batches_flushed,
+                    _e,
+                    _batches_flushed,
                     queue_depth,
-                    flush_duration
+                    _flush_duration
                 );
             }
         }
