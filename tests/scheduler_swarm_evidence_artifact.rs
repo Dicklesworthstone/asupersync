@@ -10,7 +10,8 @@ use asupersync::sync::ContendedMutex;
 use asupersync::types::{TaskId, Time};
 use serde_json::Value;
 use std::collections::BTreeSet;
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::process::Command;
 use std::sync::Arc;
 
 fn sample_artifact() -> SchedulerEvidenceArtifact {
@@ -219,6 +220,10 @@ fn scenario_by_id<'a>(contract: &'a Value, scenario_id: &str) -> &'a Value {
         .iter()
         .find(|scenario| scenario["scenario_id"].as_str() == Some(scenario_id))
         .unwrap_or_else(|| panic!("missing scenario: {scenario_id}"))
+}
+
+fn repo_root() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
 }
 
 #[test]
@@ -473,5 +478,171 @@ fn scheduler_recommend_smoke_contract_declares_real_host_template() {
             .iter()
             .any(|note| note == "real_host_template"),
         "template evidence should self-identify as real-host-only"
+    );
+}
+
+#[test]
+fn scheduler_recommend_smoke_runner_dry_run_emits_template_bundle_contract() {
+    let root = repo_root();
+    let output_root = tempfile::tempdir().expect("tempdir");
+    let script_path = root.join("scripts/run_scheduler_recommend_smoke.sh");
+    let run_id = "run_contract_real_host";
+
+    let status = Command::new("bash")
+        .arg(&script_path)
+        .arg("--scenario")
+        .arg("AA-SCHED-RECOMMEND-REAL-HOST-64C-256G")
+        .arg("--dry-run")
+        .current_dir(&root)
+        .env("SCHEDULER_RECOMMEND_SMOKE_RUN_ID", run_id)
+        .arg("--output-root")
+        .arg(output_root.path())
+        .status()
+        .expect("run real-host dry-run runner");
+    assert!(status.success(), "real-host dry-run should succeed");
+
+    let bundle_path = output_root
+        .path()
+        .join(run_id)
+        .join("AA-SCHED-RECOMMEND-REAL-HOST-64C-256G")
+        .join("bundle_manifest.json");
+    let report_path = output_root
+        .path()
+        .join(run_id)
+        .join("AA-SCHED-RECOMMEND-REAL-HOST-64C-256G")
+        .join("run_report.json");
+    assert!(bundle_path.exists(), "bundle manifest must exist");
+    assert!(report_path.exists(), "run report must exist");
+
+    let bundle_raw = std::fs::read_to_string(&bundle_path).expect("read bundle manifest");
+    let bundle: Value = serde_json::from_str(&bundle_raw).expect("parse bundle manifest");
+    let report_raw = std::fs::read_to_string(&report_path).expect("read run report");
+    let report: Value = serde_json::from_str(&report_raw).expect("parse run report");
+
+    assert_eq!(
+        bundle["schema_version"].as_str(),
+        Some("scheduler-recommend-smoke-bundle-v1")
+    );
+    assert_eq!(
+        bundle["artifact_path"].as_str(),
+        bundle_path.to_str(),
+        "bundle path should be recorded verbatim"
+    );
+    assert_eq!(
+        report["artifact_path"].as_str(),
+        report_path.to_str(),
+        "report path should be recorded verbatim"
+    );
+    assert_eq!(bundle["run_id"].as_str(), Some(run_id));
+    assert_eq!(report["run_id"].as_str(), Some(run_id));
+    assert_eq!(bundle["status"].as_str(), Some("dry_run"));
+    assert_eq!(report["status"].as_str(), Some("dry_run"));
+    assert_eq!(
+        bundle["verdict_summary"]["status"].as_str(),
+        Some("dry_run")
+    );
+    assert_eq!(
+        report["verdict_summary"]["execution_policy"].as_str(),
+        Some("dry_run_only")
+    );
+    assert_eq!(
+        bundle["config_snapshot"]["current_knobs"]["worker_threads"].as_u64(),
+        Some(64)
+    );
+    assert_eq!(
+        report["config_snapshot"]["source"].as_str(),
+        Some("scheduler_evidence.current_knobs")
+    );
+    assert!(
+        bundle["host_fingerprint"]["cpu_threads"]
+            .as_u64()
+            .is_some_and(|threads| threads > 0),
+        "host fingerprint should record the executing host's nonzero CPU thread count"
+    );
+    assert_eq!(
+        report["memory_profile"]["name"].as_str(),
+        Some("operator_template_256g")
+    );
+    assert_eq!(
+        report["queue_storm_shape"]["shape"].as_str(),
+        Some("operator_supplied")
+    );
+}
+
+#[test]
+fn scheduler_recommend_smoke_runner_execute_emits_config_snapshot_and_verdict() {
+    let root = repo_root();
+    let output_root = tempfile::tempdir().expect("tempdir");
+    let target_root = tempfile::tempdir().expect("tempdir");
+    let script_path = root.join("scripts/run_scheduler_recommend_smoke.sh");
+    let run_id = "run_contract_execute";
+
+    let status = Command::new("bash")
+        .arg(&script_path)
+        .arg("--scenario")
+        .arg("AA-SCHED-RECOMMEND-MIXED-BURST-64C")
+        .arg("--execute")
+        .current_dir(&root)
+        .env("SCHEDULER_RECOMMEND_SMOKE_RUN_ID", run_id)
+        .env("CARGO_TARGET_DIR", target_root.path())
+        .arg("--output-root")
+        .arg(output_root.path())
+        .status()
+        .expect("run execute runner");
+    assert!(status.success(), "execute runner should succeed");
+
+    let bundle_path = output_root
+        .path()
+        .join(run_id)
+        .join("AA-SCHED-RECOMMEND-MIXED-BURST-64C")
+        .join("bundle_manifest.json");
+    let report_path = output_root
+        .path()
+        .join(run_id)
+        .join("AA-SCHED-RECOMMEND-MIXED-BURST-64C")
+        .join("run_report.json");
+    assert!(bundle_path.exists(), "bundle manifest must exist");
+    assert!(report_path.exists(), "run report must exist");
+
+    let bundle_raw = std::fs::read_to_string(&bundle_path).expect("read bundle manifest");
+    let bundle: Value = serde_json::from_str(&bundle_raw).expect("parse bundle manifest");
+    let report_raw = std::fs::read_to_string(&report_path).expect("read run report");
+    let report: Value = serde_json::from_str(&report_raw).expect("parse run report");
+
+    assert_eq!(bundle["status"].as_str(), Some("passed"));
+    assert_eq!(report["status"].as_str(), Some("passed"));
+    assert_eq!(
+        bundle["verdict_summary"]["actual_profile_name"].as_str(),
+        Some("scale_workers")
+    );
+    assert_eq!(
+        report["verdict_summary"]["message"].as_str(),
+        Some("report matched expected projection")
+    );
+    assert_eq!(
+        bundle["config_snapshot"]["recommended_knobs"]["worker_threads"].as_u64(),
+        Some(66)
+    );
+    assert_eq!(
+        report["config_snapshot"]["fallback_profile"]["worker_threads"].as_u64(),
+        Some(64)
+    );
+    assert_eq!(
+        bundle["latency_summary"]["wake_to_run_ns"]["p99"].as_u64(),
+        Some(220_000)
+    );
+    assert_eq!(
+        report["throughput_summary"]["source"].as_str(),
+        Some("contract_fixture")
+    );
+    assert_eq!(
+        bundle["artifact_path"].as_str(),
+        bundle_path.to_str(),
+        "bundle path should be recorded verbatim"
+    );
+    assert_eq!(
+        report["bundle_manifest_path"].as_str(),
+        bundle_path.to_str(),
+        "run report should point back to the bundle manifest"
     );
 }
