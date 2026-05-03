@@ -59,6 +59,8 @@ pub mod obligation_tracker;
 #[cfg(feature = "metrics")]
 pub mod otel;
 pub mod otel_conformance_tests;
+#[cfg(test)]
+pub mod otel_sampling_strategy_audit_test;
 pub mod otel_structured_concurrency;
 #[cfg(test)]
 pub mod otlp_attribute_size_cap_audit_test;
