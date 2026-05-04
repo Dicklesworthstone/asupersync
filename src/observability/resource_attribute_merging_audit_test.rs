@@ -52,8 +52,8 @@ fn audit_attribute_precedence_requirement() {
 
     // OTLP spec: scope MUST take precedence for overlapping keys
     let mut merged_attrs = resource_attrs.clone();
-    for (key, value) in scope_attrs {
-        merged_attrs.insert(key, value); // Scope overwrites resource
+    for (key, value) in &scope_attrs {
+        merged_attrs.insert(key.clone(), value.clone()); // Scope overwrites resource
     }
 
     println!("📋 Resource attributes: {:?}", resource_attrs);
