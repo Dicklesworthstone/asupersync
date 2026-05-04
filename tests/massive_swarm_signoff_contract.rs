@@ -777,6 +777,42 @@ fn signoff_matrix_covers_dependency_rows_called_out_by_wqsael() {
 }
 
 #[test]
+fn jetstream_signoff_row_tracks_zero_wait_tail_evidence() {
+    let artifact = load_artifact();
+    let jetstream_row = artifact["signoff_matrix"]
+        .as_array()
+        .expect("signoff_matrix must be array")
+        .iter()
+        .find(|entry| entry["control_id"].as_str() == Some("jetstream_publish_backpressure"))
+        .expect("jetstream publish backpressure row must exist");
+
+    let operator_fields: BTreeSet<&str> = jetstream_row["operator_fields"]
+        .as_array()
+        .expect("operator_fields must be an array")
+        .iter()
+        .filter_map(Value::as_str)
+        .collect();
+    assert!(operator_fields.contains("tail_evidence_mode"));
+    assert!(operator_fields.contains("multi_publisher_tail_evidence_present"));
+    assert!(operator_fields.contains("queueing_model"));
+    assert!(operator_fields.contains("publish_wait_latency_p95_micros"));
+    assert!(operator_fields.contains("publish_wait_latency_p99_micros"));
+    assert!(operator_fields.contains("publish_wait_latency_p999_micros"));
+    assert!(operator_fields.contains("missing_evidence_requirement_count"));
+    assert_eq!(
+        jetstream_row["fallback_mode"].as_str(),
+        Some(
+            "retain the conservative refusal-only publish path and fail closed until any future nonzero-wait policy proves bounded-waiter fairness"
+        )
+    );
+    assert!(
+        jetstream_row["blocker_reason"]
+            .as_str()
+            .is_some_and(|reason| reason.contains("multi-publisher zero-wait tail evidence"))
+    );
+}
+
+#[test]
 fn objective_provenance_covers_required_skills_and_requirements() {
     let artifact = load_artifact();
     let coverage = objective_coverage_summary(&artifact);
