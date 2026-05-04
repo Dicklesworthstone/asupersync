@@ -57,6 +57,31 @@
 
 use asupersync::grpc::is_grpc_web_request;
 
+fn sanitized_header_fingerprint(
+    content_type: &str,
+    sec_fetch_mode: Option<&str>,
+    sec_fetch_site: Option<&str>,
+    x_user_agent: Option<&str>,
+    authorization: Option<&str>,
+) -> String {
+    fn field(name: &str, value: Option<&str>, redact: bool) -> String {
+        match value {
+            Some(value) if redact => format!("{name}=present(len={})", value.len()),
+            Some(value) => format!("{name}={value}"),
+            None => format!("{name}=none"),
+        }
+    }
+
+    [
+        format!("content-type={content_type}"),
+        field("sec-fetch-mode", sec_fetch_mode, false),
+        field("sec-fetch-site", sec_fetch_site, false),
+        field("x-user-agent", x_user_agent, false),
+        field("authorization", authorization, true),
+    ]
+    .join("|")
+}
+
 #[test]
 fn negotiation_is_content_type_only_not_sec_fetch_aware() {
     // Pin (a): the negotiation function takes a content-type
@@ -164,5 +189,129 @@ fn negotiation_is_case_insensitive_per_rfc9110_media_type_match() {
         is_grpc_web_request(upper),
         "uppercase content-type must match the gRPC-Web family per \
          RFC 9110 §8.3 case-insensitive media-type rules",
+    );
+}
+
+#[test]
+fn grpc_web_negotiation_header_matrix_logs_security_posture() {
+    const EXACT_RCH_COMMAND: &str = "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_asupersync_m3uar5_web cargo test -p asupersync --test grpc_web_negotiation_audit -- --nocapture";
+
+    struct Scenario {
+        scenario_id: &'static str,
+        content_type: &'static str,
+        sec_fetch_mode: Option<&'static str>,
+        sec_fetch_site: Option<&'static str>,
+        x_user_agent: Option<&'static str>,
+        authorization: Option<&'static str>,
+        expected_accept: bool,
+        accepted_rejected_reason: &'static str,
+        security_decision: &'static str,
+    }
+
+    let scenarios = [
+        Scenario {
+            scenario_id: "browser_cors_proto",
+            content_type: "application/grpc-web+proto",
+            sec_fetch_mode: Some("cors"),
+            sec_fetch_site: Some("same-origin"),
+            x_user_agent: Some("grpc-web-javascript/0.1"),
+            authorization: Some("Bearer top-secret-token"),
+            expected_accept: true,
+            accepted_rejected_reason: "grpc-web family accepted by content-type",
+            security_decision: "public-api-safe_browser-only-deployments-need-fetch-metadata-interceptor",
+        },
+        Scenario {
+            scenario_id: "browser_headers_absent_same_content_type",
+            content_type: "application/grpc-web+proto",
+            sec_fetch_mode: None,
+            sec_fetch_site: None,
+            x_user_agent: None,
+            authorization: Some("Bearer top-secret-token"),
+            expected_accept: true,
+            accepted_rejected_reason: "same grpc-web content-type remains accepted without browser headers",
+            security_decision: "public-api-safe_browser-only-deployments-need-fetch-metadata-interceptor",
+        },
+        Scenario {
+            scenario_id: "suspicious_fetch_metadata_still_accepts",
+            content_type: "application/grpc-web",
+            sec_fetch_mode: Some("navigate"),
+            sec_fetch_site: Some("cross-site"),
+            x_user_agent: Some("curl/8.7.1"),
+            authorization: None,
+            expected_accept: true,
+            accepted_rejected_reason: "content-type-only negotiation ignores suspicious fetch metadata",
+            security_decision: "browser-only-defense-gap_not-a-bug-for-public-api-surface",
+        },
+        Scenario {
+            scenario_id: "preflight_like_request_rejected",
+            content_type: "",
+            sec_fetch_mode: Some("cors"),
+            sec_fetch_site: Some("cross-site"),
+            x_user_agent: Some("Mozilla/5.0"),
+            authorization: None,
+            expected_accept: false,
+            accepted_rejected_reason: "missing grpc-web content-type rejects negotiation",
+            security_decision: "safe_reject",
+        },
+        Scenario {
+            scenario_id: "plain_grpc_not_grpc_web",
+            content_type: "application/grpc",
+            sec_fetch_mode: Some("cors"),
+            sec_fetch_site: Some("same-origin"),
+            x_user_agent: Some("grpc-web-javascript/0.1"),
+            authorization: Some("Bearer another-secret"),
+            expected_accept: false,
+            accepted_rejected_reason: "plain grpc is not in grpc-web content-type family",
+            security_decision: "safe_reject",
+        },
+        Scenario {
+            scenario_id: "mixed_case_content_type_preserves_interop",
+            content_type: "Application/Grpc-Web",
+            sec_fetch_mode: Some("cors"),
+            sec_fetch_site: Some("same-origin"),
+            x_user_agent: Some("grpc-web-javascript/0.1"),
+            authorization: None,
+            expected_accept: true,
+            accepted_rejected_reason: "media-type matching is case-insensitive",
+            security_decision: "interop_accept",
+        },
+    ];
+
+    for scenario in scenarios {
+        let accepted = is_grpc_web_request(scenario.content_type);
+        assert_eq!(
+            accepted, scenario.expected_accept,
+            "scenario {} drifted",
+            scenario.scenario_id
+        );
+
+        let header_fingerprint = sanitized_header_fingerprint(
+            scenario.content_type,
+            scenario.sec_fetch_mode,
+            scenario.sec_fetch_site,
+            scenario.x_user_agent,
+            scenario.authorization,
+        );
+        eprintln!(
+            "GRPC_WEB_NEGOTIATION scenario_id={} request_header_fingerprint={} negotiation_mode=content-type-only metadata_propagated_to_handler=not_applicable_content_type_gate accepted_rejected_reason={} security_decision={} exact_rch_command=\"{}\" artifact_paths=none final_smuggling_no_finding_verdict=pass",
+            scenario.scenario_id,
+            header_fingerprint,
+            scenario.accepted_rejected_reason,
+            scenario.security_decision,
+            EXACT_RCH_COMMAND,
+        );
+    }
+}
+
+#[test]
+fn grpc_web_source_does_not_inspect_sec_fetch_or_x_user_agent() {
+    let source = include_str!("../src/grpc/web.rs").to_ascii_lowercase();
+    assert!(
+        !source.contains("sec-fetch"),
+        "src/grpc/web.rs must not silently add Sec-Fetch-based trust decisions without updating the audit",
+    );
+    assert!(
+        !source.contains("x-user-agent"),
+        "src/grpc/web.rs must not add X-User-Agent handling without revisiting smuggling analysis",
     );
 }
