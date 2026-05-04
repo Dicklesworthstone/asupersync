@@ -92,7 +92,11 @@ extract_report_from_log() {
         /HOST_PROFILE_PLANNER_REPORT_JSON_BEGIN/ { capture=1; next }
         /HOST_PROFILE_PLANNER_REPORT_JSON_END/ { capture=0; exit }
         capture { print }
-    ' "$log_path" >"$output_path"
+    ' "$log_path" | awk '
+        BEGIN { json_started=0 }
+        /^[[:space:]]*{/ { json_started=1 }
+        json_started { print }
+    ' >"$output_path"
     [ -s "$output_path" ]
 }
 
