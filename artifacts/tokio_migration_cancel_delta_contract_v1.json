@@ -1,0 +1,113 @@
+{
+  "contract_version": "tokio-migration-cancel-delta-v1",
+  "schema_version": "tokio-migration-cancel-delta-schema-v1",
+  "generated_for_bead": "asupersync-candeb",
+  "shadow_runner": "scripts/run_tokio_migration_shadow_workload_smoke.sh",
+  "source_workload_contract": "artifacts/tokio_migration_shadow_workload_contract_v1.json",
+  "purpose": "Pin the cancellation-loss and orphan-task deltas that the Tokio migration proof pack must report before recommending a rewrite.",
+  "comparison_policy": "conservative_reference_observation_not_marketing_claim",
+  "required_delta_ids": [
+    "TM-CANCEL-001-MPSC-SEND-WAIT",
+    "TM-CANCEL-002-SELECT-TIMEOUT-LOSER",
+    "TM-CANCEL-003-SPAWNED-WORKER-ORPHAN",
+    "TM-CANCEL-004-SYNC-WAITER-CANCEL"
+  ],
+  "required_report_fields": [
+    "delta_id",
+    "source_shadow_scenario_id",
+    "invariant_name",
+    "tokio_reference_observation",
+    "asupersync_proof_row",
+    "caveat_text",
+    "safe_migration_rewrite",
+    "classification",
+    "projection_hash"
+  ],
+  "golden_artifacts": [
+    {
+      "artifact_id": "TM-CANCEL-GOLDEN-LOSS-MPSC-SEND",
+      "delta_id": "TM-CANCEL-001-MPSC-SEND-WAIT",
+      "classification": "loss_case",
+      "projection_hash": 2846637481236900126
+    },
+    {
+      "artifact_id": "TM-CANCEL-GOLDEN-NO-LOSS-REGION-CLOSE",
+      "delta_id": "TM-CANCEL-003-SPAWNED-WORKER-ORPHAN",
+      "classification": "no_loss_case",
+      "projection_hash": 8657037064756179505
+    }
+  ],
+  "validation_commands": [
+    "rch exec -- rustfmt --edition 2024 --check tests/tokio_migration_cancel_delta_contract.rs",
+    "rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_asupersync_candeb cargo test -p asupersync --test tokio_migration_cancel_delta_contract --features test-internals -- --nocapture",
+    "scripts/run_tokio_migration_shadow_workload_smoke.sh --dry-run --scenario TM-SHADOW-001-MPSC-BACKPRESSURE --output-root /tmp/asupersync-candeb-shadow-dry-run",
+    "scripts/run_tokio_migration_shadow_workload_smoke.sh --execute --scenario TM-SHADOW-004-SPAWN-JOIN-OWNERSHIP --output-root /tmp/asupersync-candeb-shadow-execute"
+  ],
+  "deltas": [
+    {
+      "delta_id": "TM-CANCEL-001-MPSC-SEND-WAIT",
+      "source_shadow_scenario_id": "TM-SHADOW-001-MPSC-BACKPRESSURE",
+      "tokio_idiom": "tokio_mpsc_send_future",
+      "invariant_name": "two_phase_send_no_loss",
+      "classification": "loss_case",
+      "tokio_reference_observation": "A plain Tokio send future owns the value while waiting for capacity; dropping the future before completion can abandon the caller's value unless the caller uses an explicit reservation discipline.",
+      "asupersync_proof_row": "channel::mpsc::Sender::reserve(&Cx).await returns a permit; the value is committed only by permit.send(value), so cancellation before commit leaves ownership with the caller and records no sent message.",
+      "caveat_text": "Tokio's reserve API can be used safely; this delta targets migrations from direct send-in-select patterns, not disciplined reserve_owned usage.",
+      "safe_migration_rewrite": "Replace send-in-select with reserve(&Cx).await followed by permit.send(value), and keep value ownership outside the cancelled wait until the permit commits.",
+      "expected_projection": {
+        "lost_messages_tokio_reference": 1,
+        "lost_messages_asupersync": 0,
+        "obligation_leaks_asupersync": 0,
+        "requires_manual_rewrite": true
+      }
+    },
+    {
+      "delta_id": "TM-CANCEL-002-SELECT-TIMEOUT-LOSER",
+      "source_shadow_scenario_id": "TM-SHADOW-002-SELECT-TIMEOUT-RACE",
+      "tokio_idiom": "tokio_select_timeout_race",
+      "invariant_name": "losers_drained",
+      "classification": "drain_case",
+      "tokio_reference_observation": "tokio::select! drops losing futures when a timeout branch wins; cleanup is limited to drop semantics unless the program explicitly drives loser shutdown.",
+      "asupersync_proof_row": "Scope::race cancels the losing branch and drains it through the cancellation protocol before surfacing the winner.",
+      "caveat_text": "This is an intentional semantic difference: Tokio can be correct with explicit abort-and-join code, but the convention is outside select! itself.",
+      "safe_migration_rewrite": "Model timeout races with asupersync race/timeout combinators or explicitly abort and join every Tokio loser before returning.",
+      "expected_projection": {
+        "undrained_losers_tokio_reference": 1,
+        "undrained_losers_asupersync": 0,
+        "winner_return_requires_drain": true
+      }
+    },
+    {
+      "delta_id": "TM-CANCEL-003-SPAWNED-WORKER-ORPHAN",
+      "source_shadow_scenario_id": "TM-SHADOW-004-SPAWN-JOIN-OWNERSHIP",
+      "tokio_idiom": "tokio_spawn_join_handle",
+      "invariant_name": "region_close_quiescence",
+      "classification": "no_loss_case",
+      "tokio_reference_observation": "A detached Tokio JoinHandle can keep running after its logical parent exits unless the parent keeps and awaits or aborts the handle.",
+      "asupersync_proof_row": "Scope::spawn binds the task to a region, and region close requires owned children to quiesce before close completes.",
+      "caveat_text": "Tokio programs can enforce this with JoinSet or explicit handle management; this proof targets migrations from unstructured spawn ownership.",
+      "safe_migration_rewrite": "Move unstructured tokio::spawn sites into Scope::spawn and close the owning region at shutdown boundaries.",
+      "expected_projection": {
+        "orphan_tasks_tokio_reference": 1,
+        "orphan_tasks_asupersync": 0,
+        "region_close_quiescent": true
+      }
+    },
+    {
+      "delta_id": "TM-CANCEL-004-SYNC-WAITER-CANCEL",
+      "source_shadow_scenario_id": "TM-SHADOW-005-MUTEX-CONTENTION",
+      "tokio_idiom": "tokio_mutex_semaphore_contention",
+      "invariant_name": "no_obligation_leak",
+      "classification": "obligation_case",
+      "tokio_reference_observation": "Cancelled Tokio mutex or semaphore waiters must be reasoned about at each call site; queue position and held guard cleanup are separate convention-level responsibilities.",
+      "asupersync_proof_row": "asupersync sync::Semaphore::acquire(&Cx, permits) and Cx-aware mutex waiters unlink cancelled waiters and preserve permit/guard accounting as part of the primitive contract.",
+      "caveat_text": "This does not claim Tokio leaks permits on cancellation; it records that asupersync makes the obligation invariant explicit and reportable.",
+      "safe_migration_rewrite": "Use asupersync sync primitives where cancellation is part of the wait contract, and keep held permits/guards inside region-owned cleanup scopes.",
+      "expected_projection": {
+        "obligation_leaks_tokio_reference": 0,
+        "obligation_leaks_asupersync": 0,
+        "explicit_obligation_report_asupersync": true
+      }
+    }
+  ]
+}
