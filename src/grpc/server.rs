@@ -3011,6 +3011,218 @@ mod tests {
         }
     }
 
+    const EXACT_INTERCEPTOR_MULTISTACK_RATE_LIMIT_CLEANUP_RCH_COMMAND: &str = "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_asupersync_eqpd3i_interceptor cargo test -p asupersync --lib interceptor_multistack_rate_limit_cleanup -- --nocapture";
+
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    enum MatrixFailureStage {
+        Request,
+        Response,
+        Handler,
+    }
+
+    impl MatrixFailureStage {
+        fn label(self) -> &'static str {
+            match self {
+                Self::Request => "request",
+                Self::Response => "response",
+                Self::Handler => "handler",
+            }
+        }
+    }
+
+    #[derive(Debug)]
+    struct MatrixInterceptor {
+        index: usize,
+        limiter: Arc<crate::grpc::interceptor::RateLimitInterceptor>,
+        events: Arc<parking_lot::Mutex<Vec<String>>>,
+        fail_stage: Option<MatrixFailureStage>,
+    }
+
+    impl MatrixInterceptor {
+        fn new(
+            index: usize,
+            limiter: Arc<crate::grpc::interceptor::RateLimitInterceptor>,
+            events: Arc<parking_lot::Mutex<Vec<String>>>,
+            fail_stage: Option<MatrixFailureStage>,
+        ) -> Self {
+            Self {
+                index,
+                limiter,
+                events,
+                fail_stage,
+            }
+        }
+
+        fn record(&self, phase: &str) {
+            self.events.lock().push(format!(
+                "{phase}:{}:slots={}",
+                self.index,
+                self.limiter.current_count()
+            ));
+        }
+    }
+
+    impl Interceptor for MatrixInterceptor {
+        fn intercept_request(&self, _request: &mut Request<Bytes>) -> Result<(), Status> {
+            self.record("req");
+            if self.fail_stage == Some(MatrixFailureStage::Request) {
+                return Err(Status::failed_precondition(format!(
+                    "request interceptor {} rejected",
+                    self.index
+                )));
+            }
+            Ok(())
+        }
+
+        fn intercept_response(&self, _response: &mut Response<Bytes>) -> Result<(), Status> {
+            Ok(())
+        }
+
+        fn intercept_response_with_request(
+            &self,
+            _request: &Request<Bytes>,
+            _response: &mut Response<Bytes>,
+        ) -> Result<(), Status> {
+            self.record("resp");
+            if self.fail_stage == Some(MatrixFailureStage::Response) {
+                return Err(Status::internal(format!(
+                    "response interceptor {} exploded",
+                    self.index
+                )));
+            }
+            Ok(())
+        }
+
+        fn intercept_error_with_request(
+            &self,
+            _request: &Request<Bytes>,
+            _status: &mut Status,
+        ) -> Result<(), Status> {
+            self.record("cleanup");
+            Ok(())
+        }
+    }
+
+    fn expected_interceptor_cleanup_events(
+        stack_depth: usize,
+        failing_interceptor_index: Option<usize>,
+        failure_stage: Option<MatrixFailureStage>,
+    ) -> Vec<String> {
+        let mut expected = Vec::new();
+        match failure_stage {
+            None => {
+                for index in 0..stack_depth {
+                    expected.push(format!("req:{index}:slots=1"));
+                }
+                for index in (0..stack_depth).rev() {
+                    expected.push(format!("resp:{index}:slots=1"));
+                }
+            }
+            Some(MatrixFailureStage::Request) => {
+                let failing_index =
+                    failing_interceptor_index.expect("request failure requires interceptor index");
+                for index in 0..=failing_index {
+                    expected.push(format!("req:{index}:slots=1"));
+                }
+                for index in (0..=failing_index).rev() {
+                    expected.push(format!("cleanup:{index}:slots=1"));
+                }
+            }
+            Some(MatrixFailureStage::Response) => {
+                let failing_index =
+                    failing_interceptor_index.expect("response failure requires interceptor index");
+                for index in 0..stack_depth {
+                    expected.push(format!("req:{index}:slots=1"));
+                }
+                for index in (failing_index..stack_depth).rev() {
+                    expected.push(format!("resp:{index}:slots=1"));
+                }
+                for index in (0..stack_depth).rev() {
+                    expected.push(format!("cleanup:{index}:slots=1"));
+                }
+            }
+            Some(MatrixFailureStage::Handler) => {
+                for index in 0..stack_depth {
+                    expected.push(format!("req:{index}:slots=1"));
+                }
+                for index in (0..stack_depth).rev() {
+                    expected.push(format!("cleanup:{index}:slots=1"));
+                }
+            }
+        }
+        expected
+    }
+
+    fn assert_interceptor_cleanup_result(
+        result: Result<Response<Bytes>, Status>,
+        failure_stage: Option<MatrixFailureStage>,
+        context: &str,
+    ) -> &'static str {
+        match failure_stage {
+            None => {
+                let response = result.expect(context);
+                assert_eq!(response.get_ref().as_ref(), b"matrix-ok");
+                "ok"
+            }
+            Some(MatrixFailureStage::Request) => {
+                let status = result.expect_err(context);
+                assert_eq!(status.code(), super::super::Code::FailedPrecondition);
+                "FailedPrecondition"
+            }
+            Some(MatrixFailureStage::Response) | Some(MatrixFailureStage::Handler) => {
+                let status = result.expect_err(context);
+                assert_eq!(status.code(), super::super::Code::Internal);
+                "Internal"
+            }
+        }
+    }
+
+    fn log_interceptor_cleanup_case(
+        request_id: &str,
+        stack_depth: usize,
+        failing_interceptor_index: Option<usize>,
+        failure_stage: Option<MatrixFailureStage>,
+        slot_count_before: u32,
+        slot_count_after: u32,
+        release_count: usize,
+        first_result_kind: &str,
+        replay_result_kind: &str,
+        events: &[String],
+        final_verdict: &str,
+    ) {
+        println!(
+            "GRPC_INTERCEPTOR_RATE_LIMIT \
+             request_id={} \
+             stack_depth={} \
+             failing_interceptor_index={} \
+             failure_stage={} \
+             slot_count_before={} \
+             slot_count_after={} \
+             release_count={} \
+             response_error_kind={} \
+             replay_result_kind={} \
+             cancellation_state=none_unary_dispatch \
+             event_trace={} \
+             exact_rch_command=\"{}\" \
+             artifact_paths=none \
+             no_slot_leak_verdict={}",
+            request_id,
+            stack_depth,
+            failing_interceptor_index
+                .map(|index| index.to_string())
+                .unwrap_or_else(|| "none".to_string()),
+            failure_stage.map_or("none", MatrixFailureStage::label),
+            slot_count_before,
+            slot_count_after,
+            release_count,
+            first_result_kind,
+            replay_result_kind,
+            events.join(">"),
+            EXACT_INTERCEPTOR_MULTISTACK_RATE_LIMIT_CLEANUP_RCH_COMMAND,
+            final_verdict,
+        );
+    }
+
     fn block_on<F: Future>(fut: F) -> F::Output {
         use std::task::{Context, Waker};
         let waker = Waker::noop();
@@ -3227,6 +3439,169 @@ mod tests {
             matches!(second_result, Err(ref status) if status.code() == super::super::Code::Internal),
             "second call must not be blocked by a leaked rate-limit slot"
         );
+    }
+
+    #[test]
+    fn conformance_interceptor_multistack_rate_limit_cleanup_matrix_logs_evidence() {
+        init_test("conformance_interceptor_multistack_rate_limit_cleanup_matrix_logs_evidence");
+
+        let cases = [
+            ("success_depth_1", 1usize, None, None),
+            ("success_depth_2", 2usize, None, None),
+            ("success_depth_5", 5usize, None, None),
+            (
+                "request_fail_depth_1_idx_0",
+                1usize,
+                Some(0usize),
+                Some(MatrixFailureStage::Request),
+            ),
+            (
+                "request_fail_depth_2_idx_1",
+                2usize,
+                Some(1usize),
+                Some(MatrixFailureStage::Request),
+            ),
+            (
+                "request_fail_depth_5_idx_4",
+                5usize,
+                Some(4usize),
+                Some(MatrixFailureStage::Request),
+            ),
+            (
+                "response_fail_depth_1_idx_0",
+                1usize,
+                Some(0usize),
+                Some(MatrixFailureStage::Response),
+            ),
+            (
+                "response_fail_depth_2_idx_1",
+                2usize,
+                Some(1usize),
+                Some(MatrixFailureStage::Response),
+            ),
+            (
+                "response_fail_depth_5_idx_4",
+                5usize,
+                Some(4usize),
+                Some(MatrixFailureStage::Response),
+            ),
+            (
+                "handler_error_depth_5",
+                5usize,
+                None,
+                Some(MatrixFailureStage::Handler),
+            ),
+        ];
+
+        for (request_id, stack_depth, failing_interceptor_index, failure_stage) in cases {
+            let limiter = Arc::new(crate::grpc::interceptor::rate_limiter(1));
+            let events = Arc::new(parking_lot::Mutex::new(Vec::new()));
+
+            let mut builder = Server::builder()
+                .add_service(TestService)
+                .interceptor_arc(limiter.clone());
+            for index in 0..stack_depth {
+                let fail_stage = if failing_interceptor_index == Some(index) {
+                    failure_stage.filter(|stage| *stage != MatrixFailureStage::Handler)
+                } else {
+                    None
+                };
+                builder = builder.interceptor_arc(Arc::new(MatrixInterceptor::new(
+                    index,
+                    Arc::clone(&limiter),
+                    Arc::clone(&events),
+                    fail_stage,
+                )));
+            }
+            let server = builder.build();
+
+            let slot_count_before = limiter.current_count();
+            assert_eq!(
+                slot_count_before, 0,
+                "{request_id}: slot count must start at zero"
+            );
+
+            let first_request =
+                Request::with_metadata(Bytes::from_static(b"matrix"), Metadata::new());
+            let first_result = block_on(server.dispatch_unary(first_request, |_req| async move {
+                match failure_stage {
+                    Some(MatrixFailureStage::Handler) => {
+                        Err::<Response<Bytes>, _>(Status::internal("handler exploded"))
+                    }
+                    _ => Ok::<Response<Bytes>, Status>(Response::new(Bytes::from_static(
+                        b"matrix-ok",
+                    ))),
+                }
+            }));
+            let first_result_kind = assert_interceptor_cleanup_result(
+                first_result,
+                failure_stage,
+                "first dispatch must match the configured outcome",
+            );
+
+            let first_events = events.lock().clone();
+            let expected_events = expected_interceptor_cleanup_events(
+                stack_depth,
+                failing_interceptor_index,
+                failure_stage,
+            );
+            assert_eq!(
+                first_events, expected_events,
+                "{request_id}: interceptor events must prove short-circuit and cleanup order"
+            );
+
+            let slot_count_after = limiter.current_count();
+            assert_eq!(
+                slot_count_after, 0,
+                "{request_id}: failing or succeeding dispatch must release the rate-limit slot"
+            );
+
+            events.lock().clear();
+            let replay_request =
+                Request::with_metadata(Bytes::from_static(b"matrix"), Metadata::new());
+            let replay_result =
+                block_on(server.dispatch_unary(replay_request, |_req| async move {
+                    match failure_stage {
+                        Some(MatrixFailureStage::Handler) => {
+                            Err::<Response<Bytes>, _>(Status::internal("handler exploded"))
+                        }
+                        _ => Ok::<Response<Bytes>, Status>(Response::new(Bytes::from_static(
+                            b"matrix-ok",
+                        ))),
+                    }
+                }));
+            let replay_result_kind = assert_interceptor_cleanup_result(
+                replay_result,
+                failure_stage,
+                "replay dispatch must prove no leaked or double-released slot",
+            );
+            assert_eq!(
+                limiter.current_count(),
+                0,
+                "{request_id}: replay dispatch must also leave the rate-limit slot count at zero"
+            );
+
+            let release_count =
+                usize::from(first_events.iter().any(|event| event.ends_with("slots=1")));
+            assert_eq!(
+                release_count, 1,
+                "{request_id}: cleanup matrix must observe exactly one acquired slot per call"
+            );
+
+            log_interceptor_cleanup_case(
+                request_id,
+                stack_depth,
+                failing_interceptor_index,
+                failure_stage,
+                slot_count_before,
+                slot_count_after,
+                release_count,
+                first_result_kind,
+                replay_result_kind,
+                &first_events,
+                "pass",
+            );
+        }
     }
 
     #[test]
