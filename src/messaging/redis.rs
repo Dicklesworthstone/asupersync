@@ -7039,6 +7039,65 @@ mod tests {
     }
 
     #[test]
+    fn resp3_verbatim_string_rejects_label_boundary_and_utf8_failures() {
+        let cases: [(&str, &[u8], &str); 3] = [
+            (
+                "short_label",
+                b"=5\r\ntx:ab\r\n",
+                "missing 3-byte format separator",
+            ),
+            (
+                "long_label",
+                b"=8\r\ntext:abc\r\n",
+                "missing 3-byte format separator",
+            ),
+            (
+                "invalid_utf8_label",
+                b"=5\r\n\xff\xfe\xfd:x\r\n",
+                "invalid UTF-8 in verbatim format",
+            ),
+        ];
+
+        for (label, wire, expected_fragment) in cases {
+            let error = RespValue::try_decode(wire)
+                .expect_err("malformed verbatim string must fail to decode");
+            match error {
+                RedisError::Protocol(message) => {
+                    assert!(
+                        message.contains(expected_fragment),
+                        "{label} should mention {expected_fragment:?}, got {message:?}"
+                    );
+                }
+                other => panic!("{label} returned unexpected error {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn resp3_nested_verbatim_values_preserve_binary_payloads() {
+        let value = RespValue::Array(Some(vec![
+            RespValue::Verbatim {
+                format: "bin".to_string(),
+                payload: vec![0x00, 0xff, b':', b'\r', b'\n'],
+            },
+            RespValue::Map(vec![(
+                RespValue::SimpleString("inner".to_string()),
+                RespValue::Verbatim {
+                    format: "mkd".to_string(),
+                    payload: b"*emphasis*\x00".to_vec(),
+                },
+            )]),
+        ]));
+
+        let wire = value.encode();
+        let (decoded, consumed) = RespValue::try_decode(&wire)
+            .unwrap()
+            .expect("nested verbatim values should decode");
+        assert_eq!(decoded, value);
+        assert_eq!(consumed, wire.len());
+    }
+
+    #[test]
     fn resp3_reference_vectors_match_redis_rs_value_model_for_composite_types() {
         // Keep a single differential matrix over the RESP3 composite/value
         // variants we care about here. redis-rs preserves map/set ordering on

@@ -20,6 +20,7 @@ struct VerbatimStringCase {
 enum VerbatimLabel {
     Txt,
     Mkd,
+    Bin,
 }
 
 impl VerbatimLabel {
@@ -27,6 +28,7 @@ impl VerbatimLabel {
         match self {
             Self::Txt => "txt",
             Self::Mkd => "mkd",
+            Self::Bin => "bin",
         }
     }
 }
@@ -36,6 +38,9 @@ enum VerbatimScenario {
     Exact,
     Truncated { keep_bytes: u16 },
     MissingSeparator,
+    ShortLabel,
+    LongLabel,
+    InvalidUtf8Label([u8; 3]),
     WrongTrailer([u8; 2]),
     OverLimit { extra: u16 },
 }
@@ -50,6 +55,8 @@ fn fuzz_verbatim_string(case: VerbatimStringCase) {
     let body_len = label.len().saturating_add(1).saturating_add(payload.len());
     let max_bulk_len = normalized_limit(case.limit).max(4);
     let limits = fuzz_limits(max_bulk_len);
+    let payload_fingerprint = payload_fingerprint(&payload);
+    let label_bytes = render_label_bytes(label.as_bytes());
 
     match case.scenario {
         VerbatimScenario::Exact => {
@@ -70,7 +77,13 @@ fn fuzz_verbatim_string(case: VerbatimStringCase) {
                     format,
                     payload: decoded_payload,
                 } => {
-                    assert_eq!(format.as_str(), label, "verbatim label must stay exact");
+                    assert_eq!(
+                        format.as_str(),
+                        label,
+                        "verbatim label must stay exact; label={label_bytes} payload_len={} \
+                         payload_fp={payload_fingerprint:#010x}",
+                        payload.len()
+                    );
                     assert_eq!(decoded_payload.as_slice(), payload.as_slice());
                 }
                 other => panic!("expected verbatim decode, got {other:?}"),
@@ -89,6 +102,53 @@ fn fuzz_verbatim_string(case: VerbatimStringCase) {
             assert!(matches!(
                 result,
                 Err(RedisError::Protocol(message)) if message.contains("separator")
+            ));
+        }
+        VerbatimScenario::ShortLabel => {
+            let payload = sanitize_short_label_payload(payload);
+            let wire = encode_raw_verbatim(
+                "tx",
+                &payload,
+                "tx".len() + 1 + payload.len(),
+                b':',
+                b"\r\n",
+            );
+            let result = RespValue::try_decode_with_limits(&wire, &limits);
+            assert!(matches!(
+                result,
+                Err(RedisError::Protocol(message)) if message.contains("separator")
+            ));
+        }
+        VerbatimScenario::LongLabel => {
+            let wire = encode_raw_verbatim(
+                "text",
+                &payload,
+                "text".len() + 1 + payload.len(),
+                b':',
+                b"\r\n",
+            );
+            let result = RespValue::try_decode_with_limits(&wire, &limits);
+            assert!(matches!(
+                result,
+                Err(RedisError::Protocol(message)) if message.contains("separator")
+            ));
+        }
+        VerbatimScenario::InvalidUtf8Label(raw_label) => {
+            let raw_label = sanitize_non_utf8_label(raw_label);
+            let wire = encode_raw_verbatim_bytes(
+                &raw_label,
+                &payload,
+                raw_label
+                    .len()
+                    .saturating_add(1)
+                    .saturating_add(payload.len()),
+                b':',
+                b"\r\n",
+            );
+            let result = RespValue::try_decode_with_limits(&wire, &limits);
+            assert!(matches!(
+                result,
+                Err(RedisError::Protocol(message)) if message.contains("invalid UTF-8")
             ));
         }
         VerbatimScenario::WrongTrailer(trailer) => {
@@ -140,15 +200,49 @@ fn encode_raw_verbatim(
     separator: u8,
     trailer: &[u8],
 ) -> Vec<u8> {
+    encode_raw_verbatim_bytes(label.as_bytes(), payload, declared_len, separator, trailer)
+}
+
+fn encode_raw_verbatim_bytes(
+    label: &[u8],
+    payload: &[u8],
+    declared_len: usize,
+    separator: u8,
+    trailer: &[u8],
+) -> Vec<u8> {
     let mut wire = Vec::with_capacity(label.len().saturating_add(payload.len()).saturating_add(32));
     wire.push(b'=');
     wire.extend_from_slice(declared_len.to_string().as_bytes());
     wire.extend_from_slice(b"\r\n");
-    wire.extend_from_slice(label.as_bytes());
+    wire.extend_from_slice(label);
     wire.push(separator);
     wire.extend_from_slice(payload);
     wire.extend_from_slice(trailer);
     wire
+}
+
+fn sanitize_short_label_payload(mut payload: Vec<u8>) -> Vec<u8> {
+    if payload.is_empty() {
+        payload.push(b'x');
+    }
+    if payload.first() == Some(&b':') {
+        payload[0] = b'x';
+    }
+    payload
+}
+
+fn sanitize_non_utf8_label(mut raw: [u8; 3]) -> [u8; 3] {
+    for byte in &mut raw {
+        if *byte == b':' {
+            *byte = b'x';
+        }
+    }
+    if std::str::from_utf8(&raw).is_ok() {
+        raw[0] = 0xff;
+        raw[1] = 0xfe;
+        raw[2] = 0xfd;
+    }
+    raw
 }
 
 fn sanitize_wrong_trailer(mut trailer: [u8; 2]) -> [u8; 2] {
@@ -156,4 +250,18 @@ fn sanitize_wrong_trailer(mut trailer: [u8; 2]) -> [u8; 2] {
         trailer[1] = b'x';
     }
     trailer
+}
+
+fn render_label_bytes(label: &[u8]) -> String {
+    label
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<Vec<_>>()
+        .join("")
+}
+
+fn payload_fingerprint(payload: &[u8]) -> u32 {
+    payload.iter().fold(0x811c9dc5u32, |acc, byte| {
+        acc.wrapping_mul(16777619) ^ u32::from(*byte)
+    })
 }
