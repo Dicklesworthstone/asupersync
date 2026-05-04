@@ -2,12 +2,13 @@
 
 use asupersync::runtime::config::{
     ArenaTemperaturePolicy, BlockingPoolAffinityProfile, CapacityEnvelopeBrownoutStage,
-    CapacityEnvelopeBudget, CapacityEnvelopeEvidenceSnapshot, CapacityEnvelopeHostFingerprint,
-    HostProfileEvidenceArtifact, HostProfileEvidenceSet, HostProfileHostResources, HostProfileId,
-    HostProfileManualOverrides, HostProfilePlannerObjective, HostProfilePlannerRequest,
-    RuntimeCapacityHints, SignedProfileBundleCapacityCertificateReference,
-    SignedProfileBundleControllerVersion, SignedProfileBundleExecutionMode,
-    SignedProfileBundleIntegrityMode, SignedProfileBundleManifestRequest, TraceStorageProfile,
+    CapacityEnvelopeBudget, CapacityEnvelopeCalibrationStatus, CapacityEnvelopeEvidenceSnapshot,
+    CapacityEnvelopeHostFingerprint, HostProfileEvidenceArtifact, HostProfileEvidenceSet,
+    HostProfileHostResources, HostProfileId, HostProfileManualOverrides,
+    HostProfilePlannerObjective, HostProfilePlannerRequest, RuntimeCapacityHints,
+    SignedProfileBundleCapacityCertificateReference, SignedProfileBundleControllerVersion,
+    SignedProfileBundleExecutionMode, SignedProfileBundleIntegrityMode,
+    SignedProfileBundleManifestRequest, TraceStorageProfile,
 };
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -124,6 +125,8 @@ struct CapacityEnvelopeEvidenceSnapshotFixture {
     scenario_artifact_id: String,
     scenario_artifact_hash: String,
     scenario_contract_version: String,
+    sample_count: usize,
+    calibration_status: String,
     host_fingerprint: HostFingerprintFixture,
     artifact_age_hours: u64,
     measured_worker_count: usize,
@@ -148,6 +151,7 @@ struct CapacityBudgetFixture {
     max_brownout_risk_basis_points: u16,
     max_queue_depth: usize,
     max_artifact_age_hours: u64,
+    min_sample_count: usize,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -251,6 +255,8 @@ impl From<CapacityEnvelopeEvidenceSnapshotFixture> for CapacityEnvelopeEvidenceS
             scenario_artifact_id: value.scenario_artifact_id,
             scenario_artifact_hash: value.scenario_artifact_hash,
             scenario_contract_version: value.scenario_contract_version,
+            sample_count: value.sample_count,
+            calibration_status: parse_calibration_status(&value.calibration_status),
             host_fingerprint: value.host_fingerprint.into(),
             artifact_age_hours: value.artifact_age_hours,
             measured_worker_count: value.measured_worker_count,
@@ -278,6 +284,7 @@ impl From<CapacityBudgetFixture> for CapacityEnvelopeBudget {
             max_brownout_risk_basis_points: value.max_brownout_risk_basis_points,
             max_queue_depth: value.max_queue_depth,
             max_artifact_age_hours: value.max_artifact_age_hours,
+            min_sample_count: value.min_sample_count,
         }
     }
 }
@@ -327,6 +334,14 @@ fn parse_brownout_stage(value: &str) -> CapacityEnvelopeBrownoutStage {
         "priority_gate" => CapacityEnvelopeBrownoutStage::PriorityGate,
         "standalone_fallback" => CapacityEnvelopeBrownoutStage::StandaloneFallback,
         other => panic!("unsupported brownout stage {other}"),
+    }
+}
+
+fn parse_calibration_status(value: &str) -> CapacityEnvelopeCalibrationStatus {
+    match value {
+        "calibrated" => CapacityEnvelopeCalibrationStatus::Calibrated,
+        "drifted" => CapacityEnvelopeCalibrationStatus::Drifted,
+        other => panic!("unsupported calibration status {other}"),
     }
 }
 

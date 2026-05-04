@@ -2,8 +2,8 @@
 
 use asupersync::runtime::config::{
     ArenaTemperaturePolicy, BlockingPoolAffinityProfile, CapacityEnvelopeBrownoutStage,
-    CapacityEnvelopeBudget, CapacityEnvelopeBudgetOverrides, CapacityEnvelopeCertificate,
-    CapacityEnvelopeEvidenceSnapshot, CapacityEnvelopeHostFingerprint,
+    CapacityEnvelopeBudget, CapacityEnvelopeBudgetOverrides, CapacityEnvelopeCalibrationStatus,
+    CapacityEnvelopeCertificate, CapacityEnvelopeEvidenceSnapshot, CapacityEnvelopeHostFingerprint,
     CapacityEnvelopePlannerRequest, HostProfileEvidenceArtifact, HostProfileEvidenceSet,
     HostProfileHostResources, HostProfileId, HostProfileManualOverrides,
     HostProfilePlannerObjective, RuntimeCapacityHints, RuntimeConfig, TraceStorageProfile,
@@ -114,6 +114,8 @@ struct EvidenceSnapshotFixture {
     scenario_artifact_id: String,
     scenario_artifact_hash: String,
     scenario_contract_version: String,
+    sample_count: usize,
+    calibration_status: String,
     host_fingerprint: HostFingerprintFixture,
     artifact_age_hours: u64,
     measured_worker_count: usize,
@@ -138,6 +140,7 @@ struct BudgetFixture {
     max_brownout_risk_basis_points: u16,
     max_queue_depth: usize,
     max_artifact_age_hours: u64,
+    min_sample_count: usize,
 }
 
 #[derive(Debug, Clone, Copy, Default, Deserialize)]
@@ -148,6 +151,7 @@ struct BudgetOverridesFixture {
     max_brownout_risk_basis_points: Option<u16>,
     max_queue_depth: Option<usize>,
     max_artifact_age_hours: Option<u64>,
+    min_sample_count: Option<usize>,
 }
 
 impl From<HostProfileEvidenceArtifactFixture> for HostProfileEvidenceArtifact {
@@ -241,6 +245,7 @@ impl From<BudgetFixture> for CapacityEnvelopeBudget {
             max_brownout_risk_basis_points: value.max_brownout_risk_basis_points,
             max_queue_depth: value.max_queue_depth,
             max_artifact_age_hours: value.max_artifact_age_hours,
+            min_sample_count: value.min_sample_count,
         }
     }
 }
@@ -254,6 +259,7 @@ impl From<BudgetOverridesFixture> for CapacityEnvelopeBudgetOverrides {
             max_brownout_risk_basis_points: value.max_brownout_risk_basis_points,
             max_queue_depth: value.max_queue_depth,
             max_artifact_age_hours: value.max_artifact_age_hours,
+            min_sample_count: value.min_sample_count,
         }
     }
 }
@@ -299,6 +305,14 @@ fn parse_brownout_stage(value: &str) -> CapacityEnvelopeBrownoutStage {
     }
 }
 
+fn parse_calibration_status(value: &str) -> CapacityEnvelopeCalibrationStatus {
+    match value {
+        "calibrated" => CapacityEnvelopeCalibrationStatus::Calibrated,
+        "drifted" => CapacityEnvelopeCalibrationStatus::Drifted,
+        other => panic!("unsupported calibration status {other}"),
+    }
+}
+
 fn default_contract() -> CapacityEnvelopeContract {
     serde_json::from_str(include_str!(
         "../artifacts/capacity_envelope_planner_smoke_contract_v1.json"
@@ -340,6 +354,10 @@ fn build_request(scenario: &CapacityEnvelopeScenario) -> CapacityEnvelopePlanner
             scenario_artifact_id: scenario.evidence_snapshot.scenario_artifact_id.clone(),
             scenario_artifact_hash: scenario.evidence_snapshot.scenario_artifact_hash.clone(),
             scenario_contract_version: scenario.evidence_snapshot.scenario_contract_version.clone(),
+            sample_count: scenario.evidence_snapshot.sample_count,
+            calibration_status: parse_calibration_status(
+                &scenario.evidence_snapshot.calibration_status,
+            ),
             host_fingerprint: scenario.evidence_snapshot.host_fingerprint.clone().into(),
             artifact_age_hours: scenario.evidence_snapshot.artifact_age_hours,
             measured_worker_count: scenario.evidence_snapshot.measured_worker_count,
@@ -447,6 +465,9 @@ fn report_projection(report: &Value) -> Value {
         "refusal_count": report["refusal_reasons"].as_array().expect("refusal reasons").len(),
         "target_p99_ns": report["effective_budget"]["target_p99_ns"],
         "target_cancel_debt_units": report["effective_budget"]["target_cancel_debt_units"],
+        "min_sample_count": report["effective_budget"]["min_sample_count"],
+        "sample_count": report["evidence_snapshot"]["sample_count"],
+        "calibration_status": report["evidence_snapshot"]["calibration_status"],
         "host_cpu_cores": report["host_fingerprint"]["cpu_cores"],
         "host_memory_gib": report["host_fingerprint"]["memory_gib"],
         "brownout_stage": report["evidence_snapshot"]["brownout_stage"],
@@ -491,6 +512,8 @@ fn certificate_report_json(
             "scenario_artifact_id": certificate.evidence_snapshot.scenario_artifact_id,
             "scenario_artifact_hash": certificate.evidence_snapshot.scenario_artifact_hash,
             "scenario_contract_version": certificate.evidence_snapshot.scenario_contract_version,
+            "sample_count": certificate.evidence_snapshot.sample_count,
+            "calibration_status": certificate.evidence_snapshot.calibration_status.as_str(),
             "artifact_age_hours": certificate.evidence_snapshot.artifact_age_hours,
             "measured_worker_count": certificate.evidence_snapshot.measured_worker_count,
             "measured_agent_count": certificate.evidence_snapshot.measured_agent_count,
@@ -512,6 +535,7 @@ fn certificate_report_json(
             "max_brownout_risk_basis_points": certificate.effective_budget.max_brownout_risk_basis_points,
             "max_queue_depth": certificate.effective_budget.max_queue_depth,
             "max_artifact_age_hours": certificate.effective_budget.max_artifact_age_hours,
+            "min_sample_count": certificate.effective_budget.min_sample_count,
         },
         "worker_count_sweep": certificate.candidate_worker_counts,
         "agent_count_sweep": certificate.candidate_agent_counts,
@@ -525,6 +549,7 @@ fn certificate_report_json(
             "checks": [
                 "host fingerprint and scenario evidence must match the requested host",
                 "capacity certificates refuse stale or invalid artifacts before certifying a profile",
+                "capacity certificates refuse under-sampled or drifted evidence before extrapolation",
                 "safe envelopes stay dry-run only and never mutate runtime state",
                 "manual SLO overrides take precedence over the default certificate budget",
                 "operator notes and validation commands are secret-scrubbed before reporting"
@@ -581,6 +606,40 @@ fn capacity_envelope_host_fingerprint_mismatch_is_rejected() {
             .refusal_reasons
             .iter()
             .any(|reason| reason.contains("did not match the requested host fingerprint")),
+        "{:?}",
+        certificate.refusal_reasons
+    );
+}
+
+#[test]
+fn capacity_envelope_under_sampled_evidence_is_rejected() {
+    let contract = default_contract();
+    let mut request = build_request(&contract.smoke_scenarios[0]);
+    request.evidence_snapshot.sample_count = request.budget.min_sample_count.saturating_sub(1);
+    let certificate = request.plan();
+    assert!(certificate.used_safe_fallback());
+    assert!(
+        certificate
+            .refusal_reasons
+            .iter()
+            .any(|reason| reason.contains("sample_count")),
+        "{:?}",
+        certificate.refusal_reasons
+    );
+}
+
+#[test]
+fn capacity_envelope_calibration_drift_is_rejected() {
+    let contract = default_contract();
+    let mut request = build_request(&contract.smoke_scenarios[0]);
+    request.evidence_snapshot.calibration_status = CapacityEnvelopeCalibrationStatus::Drifted;
+    let certificate = request.plan();
+    assert!(certificate.used_safe_fallback());
+    assert!(
+        certificate
+            .refusal_reasons
+            .iter()
+            .any(|reason| reason.contains("calibration_status")),
         "{:?}",
         certificate.refusal_reasons
     );
@@ -664,6 +723,26 @@ fn capacity_envelope_no_win_certificate_renders_refusal_reason() {
 }
 
 #[test]
+fn capacity_envelope_stricter_slo_shrinks_safe_envelope_monotonically() {
+    let contract = default_contract();
+    let mut request = build_request(&contract.smoke_scenarios[0]);
+    let relaxed = request.plan();
+    request.budget_overrides = CapacityEnvelopeBudgetOverrides {
+        target_p99_ns: Some(1_050_000),
+        ..CapacityEnvelopeBudgetOverrides::default()
+    };
+    let strict = request.plan();
+    assert_eq!(
+        relaxed.safe_envelope.expect("relaxed envelope").agent_max,
+        512
+    );
+    assert_eq!(
+        strict.safe_envelope.expect("strict envelope").agent_max,
+        384
+    );
+}
+
+#[test]
 fn capacity_envelope_redacts_sensitive_command_and_env_notes() {
     let contract = default_contract();
     let request = build_request(&contract.smoke_scenarios[0]);
@@ -726,7 +805,11 @@ fn capacity_envelope_smoke_contract_emits_report() {
     let request = build_request(scenario);
     let certificate = request.plan();
     let report = certificate_report_json(&contract.contract_version, scenario, &certificate);
-    if let Some(expected_projection) = &scenario.expected_report_projection {
+    if let Some(expected_projection) = scenario
+        .expected_report_projection
+        .as_ref()
+        .filter(|projection| !projection.is_null())
+    {
         assert_eq!(&report["report_projection"], expected_projection);
     }
     write_report_if_requested(&report);

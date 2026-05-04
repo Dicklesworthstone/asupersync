@@ -61,6 +61,8 @@
         "scenario_artifact_id": "artifacts/swarm_scenario_locality_64c_256g.json",
         "scenario_artifact_hash": "a74fd668c2b7d26ef6f7872f0d1048349f8d618fc79a4f8a01273f93be1f7b21",
         "scenario_contract_version": "swarm-scenario-evidence-v1",
+        "sample_count": 96,
+        "calibration_status": "calibrated",
         "host_fingerprint": {
           "hostname": "lab-64c-256g-a",
           "arch": "x86_64",
@@ -87,7 +89,8 @@
         "max_memory_pressure_basis_points": 7000,
         "max_brownout_risk_basis_points": 1400,
         "max_queue_depth": 45000,
-        "max_artifact_age_hours": 48
+        "max_artifact_age_hours": 48,
+        "min_sample_count": 32
       },
       "budget_overrides": {},
       "worker_count_sweep": [
@@ -106,16 +109,19 @@
       "output_root": "target/capacity-envelope-planner-smoke",
       "expected_report_projection": {
         "brownout_stage": "optional_first",
+        "calibration_status": "calibrated",
         "fallback_profile": "conservative_baseline",
         "host_cpu_cores": 64,
         "host_memory_gib": 256,
-        "projection_hash": 6236004879070828542,
+        "min_sample_count": 32,
+        "projection_hash": 6971661584632454468,
         "proof_artifact_count": 6,
         "refusal_count": 0,
         "refused_agent_min": 512,
         "refused_worker_min": 48,
         "safe_agent_max": 512,
         "safe_worker_max": 64,
+        "sample_count": 96,
         "selected_profile": "locality_first_64c_256g",
         "target_cancel_debt_units": 130,
         "target_p99_ns": 1300000,
@@ -174,6 +180,8 @@
         "scenario_artifact_id": "artifacts/swarm_scenario_tail_64c_256g.json",
         "scenario_artifact_hash": "be5eacaf3bf08f3a26e1bd88bce3a10e2900eb5cadf279fa7e9140997f06f7fd",
         "scenario_contract_version": "swarm-scenario-evidence-v1",
+        "sample_count": 96,
+        "calibration_status": "calibrated",
         "host_fingerprint": {
           "hostname": "lab-64c-256g-a",
           "arch": "x86_64",
@@ -200,7 +208,8 @@
         "max_memory_pressure_basis_points": 6500,
         "max_brownout_risk_basis_points": 1200,
         "max_queue_depth": 42000,
-        "max_artifact_age_hours": 48
+        "max_artifact_age_hours": 48,
+        "min_sample_count": 32
       },
       "budget_overrides": {},
       "worker_count_sweep": [
@@ -215,23 +224,404 @@
         640
       ],
       "output_root": "target/capacity-envelope-planner-smoke",
-      "expected_report_projection": {
+      "expected_report_projection": null
+    },
+    {
+      "scenario_id": "AA-CAPACITY-ENVELOPE-NO-WIN-64C-256G",
+      "description": "Valid high-load sweep that must refuse every candidate point and fall back conservatively without blaming stale evidence.",
+      "objective": "locality_first",
+      "requested_profile": "locality_first_64c_256g",
+      "host_resources": {
+        "cpu_cores": 64,
+        "memory_gib": 256
+      },
+      "host_fingerprint": {
+        "hostname": "lab-64c-256g-a",
+        "arch": "x86_64",
+        "cpu_cores": 64,
+        "memory_gib": 256
+      },
+      "controller_evidence": {
+        "brownout": {
+          "artifact_id": "artifacts/overload_brownout_smoke_contract_v1.json",
+          "contract_version": "overload-brownout-smoke-contract-v1",
+          "validation_passed": true
+        },
+        "otlp_brownout": {
+          "artifact_id": "artifacts/otlp_brownout_shedding_smoke_contract_v1.json",
+          "contract_version": "otlp-brownout-shedding-smoke-contract-v1",
+          "validation_passed": true
+        },
+        "admission_steering": {
+          "artifact_id": "artifacts/cohort_admission_steering_smoke_contract_v1.json",
+          "contract_version": "cohort-admission-steering-smoke-contract-v1",
+          "validation_passed": true
+        },
+        "adaptive_batch_sizing": {
+          "artifact_id": "artifacts/adaptive_batch_sizing_smoke_contract_v1.json",
+          "contract_version": "adaptive-batch-sizing-smoke-contract-v1",
+          "validation_passed": true
+        },
+        "blocking_pool_affinity": {
+          "artifact_id": "artifacts/blocking_pool_affinity_smoke_contract_v1.json",
+          "contract_version": "blocking-pool-affinity-smoke-contract-v1",
+          "validation_passed": true
+        },
+        "trace_storage_profile": {
+          "artifact_id": "artifacts/trace_storage_profile_smoke_contract_v1.json",
+          "contract_version": "trace-storage-profile-smoke-contract-v1",
+          "validation_passed": true
+        }
+      },
+      "manual_overrides": {
+        "global_queue_limit": 49152
+      },
+      "evidence_snapshot": {
+        "scenario_artifact_id": "artifacts/swarm_scenario_locality_64c_256g.json",
+        "scenario_artifact_hash": "a74fd668c2b7d26ef6f7872f0d1048349f8d618fc79a4f8a01273f93be1f7b21",
+        "scenario_contract_version": "swarm-scenario-evidence-v1",
+        "sample_count": 96,
+        "calibration_status": "calibrated",
+        "host_fingerprint": {
+          "hostname": "lab-64c-256g-a",
+          "arch": "x86_64",
+          "cpu_cores": 64,
+          "memory_gib": 256
+        },
+        "artifact_age_hours": 12,
+        "measured_worker_count": 64,
+        "measured_agent_count": 384,
+        "measured_queue_depth": 28000,
+        "throughput_ops_per_sec": 248000,
+        "wake_to_run_p50_ns": 220000,
+        "wake_to_run_p95_ns": 640000,
+        "wake_to_run_p99_ns": 900000,
+        "cancellation_debt_units": 96,
+        "memory_pressure_basis_points": 5100,
         "brownout_stage": "optional_first",
-        "fallback_profile": "conservative_baseline",
-        "host_cpu_cores": 64,
-        "host_memory_gib": 256,
-        "projection_hash": 14143081755741870396,
-        "proof_artifact_count": 6,
-        "refusal_count": 1,
-        "refused_agent_min": 256,
-        "refused_worker_min": 48,
-        "safe_agent_max": 0,
-        "safe_worker_max": 0,
-        "selected_profile": "conservative_baseline",
-        "target_cancel_debt_units": 120,
+        "brownout_risk_basis_points": 550,
+        "retention_budget_gib": 2
+      },
+      "budget": {
+        "target_p99_ns": 1300000,
+        "target_cancel_debt_units": 130,
+        "max_memory_pressure_basis_points": 7000,
+        "max_brownout_risk_basis_points": 1400,
+        "max_queue_depth": 45000,
+        "max_artifact_age_hours": 48,
+        "min_sample_count": 32
+      },
+      "budget_overrides": {},
+      "worker_count_sweep": [
+        48,
+        56,
+        64
+      ],
+      "agent_count_sweep": [
+        640,
+        768,
+        896
+      ],
+      "output_root": "target/capacity-envelope-planner-smoke",
+      "expected_report_projection": null
+    },
+    {
+      "scenario_id": "AA-CAPACITY-ENVELOPE-UNDER-SAMPLED-EVIDENCE",
+      "description": "Evidence quality gate that must refuse certification because the sample count is below the conservative minimum.",
+      "objective": "locality_first",
+      "requested_profile": "locality_first_64c_256g",
+      "host_resources": {
+        "cpu_cores": 64,
+        "memory_gib": 256
+      },
+      "host_fingerprint": {
+        "hostname": "lab-64c-256g-a",
+        "arch": "x86_64",
+        "cpu_cores": 64,
+        "memory_gib": 256
+      },
+      "controller_evidence": {
+        "brownout": {
+          "artifact_id": "artifacts/overload_brownout_smoke_contract_v1.json",
+          "contract_version": "overload-brownout-smoke-contract-v1",
+          "validation_passed": true
+        },
+        "otlp_brownout": {
+          "artifact_id": "artifacts/otlp_brownout_shedding_smoke_contract_v1.json",
+          "contract_version": "otlp-brownout-shedding-smoke-contract-v1",
+          "validation_passed": true
+        },
+        "admission_steering": {
+          "artifact_id": "artifacts/cohort_admission_steering_smoke_contract_v1.json",
+          "contract_version": "cohort-admission-steering-smoke-contract-v1",
+          "validation_passed": true
+        },
+        "adaptive_batch_sizing": {
+          "artifact_id": "artifacts/adaptive_batch_sizing_smoke_contract_v1.json",
+          "contract_version": "adaptive-batch-sizing-smoke-contract-v1",
+          "validation_passed": true
+        },
+        "blocking_pool_affinity": {
+          "artifact_id": "artifacts/blocking_pool_affinity_smoke_contract_v1.json",
+          "contract_version": "blocking-pool-affinity-smoke-contract-v1",
+          "validation_passed": true
+        },
+        "trace_storage_profile": {
+          "artifact_id": "artifacts/trace_storage_profile_smoke_contract_v1.json",
+          "contract_version": "trace-storage-profile-smoke-contract-v1",
+          "validation_passed": true
+        }
+      },
+      "manual_overrides": {
+        "global_queue_limit": 49152
+      },
+      "evidence_snapshot": {
+        "scenario_artifact_id": "artifacts/swarm_scenario_locality_64c_256g.json",
+        "scenario_artifact_hash": "a74fd668c2b7d26ef6f7872f0d1048349f8d618fc79a4f8a01273f93be1f7b21",
+        "scenario_contract_version": "swarm-scenario-evidence-v1",
+        "sample_count": 12,
+        "calibration_status": "calibrated",
+        "host_fingerprint": {
+          "hostname": "lab-64c-256g-a",
+          "arch": "x86_64",
+          "cpu_cores": 64,
+          "memory_gib": 256
+        },
+        "artifact_age_hours": 12,
+        "measured_worker_count": 64,
+        "measured_agent_count": 384,
+        "measured_queue_depth": 28000,
+        "throughput_ops_per_sec": 248000,
+        "wake_to_run_p50_ns": 220000,
+        "wake_to_run_p95_ns": 640000,
+        "wake_to_run_p99_ns": 900000,
+        "cancellation_debt_units": 96,
+        "memory_pressure_basis_points": 5100,
+        "brownout_stage": "optional_first",
+        "brownout_risk_basis_points": 550,
+        "retention_budget_gib": 2
+      },
+      "budget": {
+        "target_p99_ns": 1300000,
+        "target_cancel_debt_units": 130,
+        "max_memory_pressure_basis_points": 7000,
+        "max_brownout_risk_basis_points": 1400,
+        "max_queue_depth": 45000,
+        "max_artifact_age_hours": 48,
+        "min_sample_count": 32
+      },
+      "budget_overrides": {},
+      "worker_count_sweep": [
+        48,
+        56,
+        64
+      ],
+      "agent_count_sweep": [
+        256,
+        384,
+        512,
+        640
+      ],
+      "output_root": "target/capacity-envelope-planner-smoke",
+      "expected_report_projection": null
+    },
+    {
+      "scenario_id": "AA-CAPACITY-ENVELOPE-CALIBRATION-DRIFT-FALLBACK",
+      "description": "Evidence quality gate that must refuse certification because the calibration status has drifted out of contract.",
+      "objective": "tail_protection_first",
+      "requested_profile": "tail_protection_first_64c_256g",
+      "host_resources": {
+        "cpu_cores": 64,
+        "memory_gib": 256
+      },
+      "host_fingerprint": {
+        "hostname": "lab-64c-256g-a",
+        "arch": "x86_64",
+        "cpu_cores": 64,
+        "memory_gib": 256
+      },
+      "controller_evidence": {
+        "brownout": {
+          "artifact_id": "artifacts/overload_brownout_smoke_contract_v1.json",
+          "contract_version": "overload-brownout-smoke-contract-v1",
+          "validation_passed": true
+        },
+        "otlp_brownout": {
+          "artifact_id": "artifacts/otlp_brownout_shedding_smoke_contract_v1.json",
+          "contract_version": "otlp-brownout-shedding-smoke-contract-v1",
+          "validation_passed": true
+        },
+        "admission_steering": {
+          "artifact_id": "artifacts/cohort_admission_steering_smoke_contract_v1.json",
+          "contract_version": "cohort-admission-steering-smoke-contract-v1",
+          "validation_passed": true
+        },
+        "adaptive_batch_sizing": {
+          "artifact_id": "artifacts/adaptive_batch_sizing_smoke_contract_v1.json",
+          "contract_version": "adaptive-batch-sizing-smoke-contract-v1",
+          "validation_passed": true
+        },
+        "blocking_pool_affinity": {
+          "artifact_id": "artifacts/blocking_pool_affinity_smoke_contract_v1.json",
+          "contract_version": "blocking-pool-affinity-smoke-contract-v1",
+          "validation_passed": true
+        },
+        "trace_storage_profile": {
+          "artifact_id": "artifacts/trace_storage_profile_smoke_contract_v1.json",
+          "contract_version": "trace-storage-profile-smoke-contract-v1",
+          "validation_passed": true
+        }
+      },
+      "manual_overrides": {},
+      "evidence_snapshot": {
+        "scenario_artifact_id": "artifacts/swarm_scenario_tail_64c_256g.json",
+        "scenario_artifact_hash": "be5eacaf3bf08f3a26e1bd88bce3a10e2900eb5cadf279fa7e9140997f06f7fd",
+        "scenario_contract_version": "swarm-scenario-evidence-v1",
+        "sample_count": 96,
+        "calibration_status": "drifted",
+        "host_fingerprint": {
+          "hostname": "lab-64c-256g-a",
+          "arch": "x86_64",
+          "cpu_cores": 64,
+          "memory_gib": 256
+        },
+        "artifact_age_hours": 12,
+        "measured_worker_count": 64,
+        "measured_agent_count": 384,
+        "measured_queue_depth": 28000,
+        "throughput_ops_per_sec": 248000,
+        "wake_to_run_p50_ns": 220000,
+        "wake_to_run_p95_ns": 640000,
+        "wake_to_run_p99_ns": 900000,
+        "cancellation_debt_units": 96,
+        "memory_pressure_basis_points": 5100,
+        "brownout_stage": "optional_first",
+        "brownout_risk_basis_points": 550,
+        "retention_budget_gib": 2
+      },
+      "budget": {
         "target_p99_ns": 1200000,
-        "used_safe_fallback": true
-      }
+        "target_cancel_debt_units": 120,
+        "max_memory_pressure_basis_points": 6500,
+        "max_brownout_risk_basis_points": 1200,
+        "max_queue_depth": 42000,
+        "max_artifact_age_hours": 48,
+        "min_sample_count": 32
+      },
+      "budget_overrides": {},
+      "worker_count_sweep": [
+        48,
+        56,
+        64
+      ],
+      "agent_count_sweep": [
+        256,
+        384,
+        512,
+        640
+      ],
+      "output_root": "target/capacity-envelope-planner-smoke",
+      "expected_report_projection": null
+    },
+    {
+      "scenario_id": "AA-CAPACITY-ENVELOPE-STRICTER-SLO-SHRINK-64C-256G",
+      "description": "Monotonic shrinkage proof showing that a tighter p99 budget reduces the safe agent envelope without changing the underlying evidence.",
+      "objective": "locality_first",
+      "requested_profile": "locality_first_64c_256g",
+      "host_resources": {
+        "cpu_cores": 64,
+        "memory_gib": 256
+      },
+      "host_fingerprint": {
+        "hostname": "lab-64c-256g-a",
+        "arch": "x86_64",
+        "cpu_cores": 64,
+        "memory_gib": 256
+      },
+      "controller_evidence": {
+        "brownout": {
+          "artifact_id": "artifacts/overload_brownout_smoke_contract_v1.json",
+          "contract_version": "overload-brownout-smoke-contract-v1",
+          "validation_passed": true
+        },
+        "otlp_brownout": {
+          "artifact_id": "artifacts/otlp_brownout_shedding_smoke_contract_v1.json",
+          "contract_version": "otlp-brownout-shedding-smoke-contract-v1",
+          "validation_passed": true
+        },
+        "admission_steering": {
+          "artifact_id": "artifacts/cohort_admission_steering_smoke_contract_v1.json",
+          "contract_version": "cohort-admission-steering-smoke-contract-v1",
+          "validation_passed": true
+        },
+        "adaptive_batch_sizing": {
+          "artifact_id": "artifacts/adaptive_batch_sizing_smoke_contract_v1.json",
+          "contract_version": "adaptive-batch-sizing-smoke-contract-v1",
+          "validation_passed": true
+        },
+        "blocking_pool_affinity": {
+          "artifact_id": "artifacts/blocking_pool_affinity_smoke_contract_v1.json",
+          "contract_version": "blocking-pool-affinity-smoke-contract-v1",
+          "validation_passed": true
+        },
+        "trace_storage_profile": {
+          "artifact_id": "artifacts/trace_storage_profile_smoke_contract_v1.json",
+          "contract_version": "trace-storage-profile-smoke-contract-v1",
+          "validation_passed": true
+        }
+      },
+      "manual_overrides": {
+        "global_queue_limit": 49152
+      },
+      "evidence_snapshot": {
+        "scenario_artifact_id": "artifacts/swarm_scenario_locality_64c_256g.json",
+        "scenario_artifact_hash": "a74fd668c2b7d26ef6f7872f0d1048349f8d618fc79a4f8a01273f93be1f7b21",
+        "scenario_contract_version": "swarm-scenario-evidence-v1",
+        "sample_count": 96,
+        "calibration_status": "calibrated",
+        "host_fingerprint": {
+          "hostname": "lab-64c-256g-a",
+          "arch": "x86_64",
+          "cpu_cores": 64,
+          "memory_gib": 256
+        },
+        "artifact_age_hours": 12,
+        "measured_worker_count": 64,
+        "measured_agent_count": 384,
+        "measured_queue_depth": 28000,
+        "throughput_ops_per_sec": 248000,
+        "wake_to_run_p50_ns": 220000,
+        "wake_to_run_p95_ns": 640000,
+        "wake_to_run_p99_ns": 900000,
+        "cancellation_debt_units": 96,
+        "memory_pressure_basis_points": 5100,
+        "brownout_stage": "optional_first",
+        "brownout_risk_basis_points": 550,
+        "retention_budget_gib": 2
+      },
+      "budget": {
+        "target_p99_ns": 1050000,
+        "target_cancel_debt_units": 130,
+        "max_memory_pressure_basis_points": 7000,
+        "max_brownout_risk_basis_points": 1400,
+        "max_queue_depth": 45000,
+        "max_artifact_age_hours": 48,
+        "min_sample_count": 32
+      },
+      "budget_overrides": {},
+      "worker_count_sweep": [
+        48,
+        56,
+        64
+      ],
+      "agent_count_sweep": [
+        256,
+        384,
+        512,
+        640
+      ],
+      "output_root": "target/capacity-envelope-planner-smoke",
+      "expected_report_projection": null
     }
   ]
 }

@@ -63,6 +63,8 @@
         "scenario_artifact_id": "artifacts/swarm_scenario_locality_64c_256g.json",
         "scenario_artifact_hash": "a74fd668c2b7d26ef6f7872f0d1048349f8d618fc79a4f8a01273f93be1f7b21",
         "scenario_contract_version": "swarm-scenario-evidence-v1",
+        "sample_count": 96,
+        "calibration_status": "calibrated",
         "host_fingerprint": {
           "hostname": "lab-64c-256g-a",
           "arch": "x86_64",
@@ -89,7 +91,8 @@
         "max_memory_pressure_basis_points": 7000,
         "max_brownout_risk_basis_points": 1400,
         "max_queue_depth": 45000,
-        "max_artifact_age_hours": 48
+        "max_artifact_age_hours": 48,
+        "min_sample_count": 32
       },
       "worker_count_sweep": [
         48,
@@ -251,6 +254,8 @@
         "scenario_artifact_id": "artifacts/swarm_scenario_locality_64c_256g.json",
         "scenario_artifact_hash": "a74fd668c2b7d26ef6f7872f0d1048349f8d618fc79a4f8a01273f93be1f7b21",
         "scenario_contract_version": "swarm-scenario-evidence-v1",
+        "sample_count": 96,
+        "calibration_status": "calibrated",
         "host_fingerprint": {
           "hostname": "lab-64c-256g-a",
           "arch": "x86_64",
@@ -277,7 +282,8 @@
         "max_memory_pressure_basis_points": 7000,
         "max_brownout_risk_basis_points": 1400,
         "max_queue_depth": 45000,
-        "max_artifact_age_hours": 48
+        "max_artifact_age_hours": 48,
+        "min_sample_count": 32
       },
       "worker_count_sweep": [
         48,
@@ -439,6 +445,8 @@
         "scenario_artifact_id": "artifacts/swarm_scenario_locality_64c_256g_shadow_win.json",
         "scenario_artifact_hash": "b650c0e93b424af3d7782e332298672debf999efa6d5b393b7ae0566fa3f67d4",
         "scenario_contract_version": "swarm-scenario-evidence-v1",
+        "sample_count": 96,
+        "calibration_status": "calibrated",
         "host_fingerprint": {
           "hostname": "lab-64c-256g-a",
           "arch": "x86_64",
@@ -465,7 +473,8 @@
         "max_memory_pressure_basis_points": 7600,
         "max_brownout_risk_basis_points": 1800,
         "max_queue_depth": 50000,
-        "max_artifact_age_hours": 48
+        "max_artifact_age_hours": 48,
+        "min_sample_count": 32
       },
       "worker_count_sweep": [
         48,
@@ -632,6 +641,8 @@
         "scenario_artifact_id": "artifacts/swarm_scenario_locality_64c_256g_shadow_hold.json",
         "scenario_artifact_hash": "d86a65d6e4e016a4d9ac438c3d69465c5b8786f62f363da7e92238c4226d63f1",
         "scenario_contract_version": "swarm-scenario-evidence-v1",
+        "sample_count": 96,
+        "calibration_status": "calibrated",
         "host_fingerprint": {
           "hostname": "lab-64c-256g-a",
           "arch": "x86_64",
@@ -658,7 +669,8 @@
         "max_memory_pressure_basis_points": 7600,
         "max_brownout_risk_basis_points": 1800,
         "max_queue_depth": 45000,
-        "max_artifact_age_hours": 48
+        "max_artifact_age_hours": 48,
+        "min_sample_count": 32
       },
       "worker_count_sweep": [
         48,

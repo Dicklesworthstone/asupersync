@@ -2159,6 +2159,31 @@ impl fmt::Display for CapacityEnvelopeBrownoutStage {
     }
 }
 
+/// Calibration posture for the evidence driving a capacity certificate.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CapacityEnvelopeCalibrationStatus {
+    /// Tail and brownout evidence is current enough to certify against.
+    Calibrated,
+    /// Observed drift invalidated the certificate model; refuse conservatively.
+    Drifted,
+}
+
+impl CapacityEnvelopeCalibrationStatus {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Calibrated => "calibrated",
+            Self::Drifted => "drifted",
+        }
+    }
+}
+
+impl fmt::Display for CapacityEnvelopeCalibrationStatus {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
 /// Host fingerprint used to reject stale or mismatched capacity evidence.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CapacityEnvelopeHostFingerprint {
@@ -2215,6 +2240,10 @@ pub struct CapacityEnvelopeEvidenceSnapshot {
     pub scenario_artifact_hash: String,
     /// Scenario contract version.
     pub scenario_contract_version: String,
+    /// Number of independent samples backing this evidence snapshot.
+    pub sample_count: usize,
+    /// Whether the evidence is still calibrated enough to extrapolate conservatively.
+    pub calibration_status: CapacityEnvelopeCalibrationStatus,
     /// Host fingerprint that produced the evidence.
     pub host_fingerprint: CapacityEnvelopeHostFingerprint,
     /// Age of the evidence in hours.
@@ -2249,6 +2278,7 @@ impl CapacityEnvelopeEvidenceSnapshot {
     fn validate(
         &self,
         max_artifact_age_hours: u64,
+        min_sample_count: usize,
         resources: &HostProfileHostResources,
         request_fingerprint: &CapacityEnvelopeHostFingerprint,
     ) -> Result<(), String> {
@@ -2273,6 +2303,18 @@ impl CapacityEnvelopeEvidenceSnapshot {
         }
         if self.scenario_contract_version.trim().is_empty() {
             return Err("scenario_contract_version must not be empty".to_string());
+        }
+        if self.sample_count < min_sample_count.max(1) {
+            return Err(format!(
+                "sample_count {} was below the minimum evidence budget {}",
+                self.sample_count, min_sample_count
+            ));
+        }
+        if self.calibration_status != CapacityEnvelopeCalibrationStatus::Calibrated {
+            return Err(format!(
+                "calibration_status {} requires conservative fallback",
+                self.calibration_status
+            ));
         }
         self.host_fingerprint
             .validate_for_resources(resources, "scenario host fingerprint")?;
@@ -2333,6 +2375,8 @@ pub struct CapacityEnvelopeBudget {
     pub max_queue_depth: usize,
     /// Maximum age for accepted evidence artifacts.
     pub max_artifact_age_hours: u64,
+    /// Minimum number of measured samples required before extrapolation is allowed.
+    pub min_sample_count: usize,
 }
 
 impl Default for CapacityEnvelopeBudget {
@@ -2344,6 +2388,7 @@ impl Default for CapacityEnvelopeBudget {
             max_brownout_risk_basis_points: 1_400,
             max_queue_depth: 45_000,
             max_artifact_age_hours: 48,
+            min_sample_count: 32,
         }
     }
 }
@@ -2363,6 +2408,8 @@ pub struct CapacityEnvelopeBudgetOverrides {
     pub max_queue_depth: Option<usize>,
     /// Override for the evidence freshness budget.
     pub max_artifact_age_hours: Option<u64>,
+    /// Override for the minimum evidence sample count.
+    pub min_sample_count: Option<usize>,
 }
 
 impl CapacityEnvelopeBudget {
@@ -2392,6 +2439,10 @@ impl CapacityEnvelopeBudget {
             max_artifact_age_hours: match overrides.max_artifact_age_hours {
                 Some(value) => value,
                 None => self.max_artifact_age_hours,
+            },
+            min_sample_count: match overrides.min_sample_count {
+                Some(value) => value,
+                None => self.min_sample_count,
             },
         }
     }
@@ -2458,6 +2509,7 @@ impl CapacityEnvelopePlannerRequest {
         }
         if let Err(reason) = self.evidence_snapshot.validate(
             effective_budget.max_artifact_age_hours,
+            effective_budget.min_sample_count,
             &self.host_resources,
             &self.host_fingerprint,
         ) {
@@ -3975,6 +4027,10 @@ fn build_capacity_assumptions(
         format!(
             "evidence freshness is capped at {} hours and currently observed at {} hours",
             budget.max_artifact_age_hours, evidence.artifact_age_hours
+        ),
+        format!(
+            "sample_count={} against minimum {} with calibration_status={}",
+            evidence.sample_count, budget.min_sample_count, evidence.calibration_status
         ),
         format!(
             "p99 budget={}ns, cancellation budget={}, memory pressure budget={}bps, brownout budget={}bps",
