@@ -588,6 +588,230 @@ fn exercise_resp3_streamed_types(data: &[u8]) {
     );
 }
 
+fn resp_value_nesting_depth(value: &RespValue) -> usize {
+    match value {
+        RespValue::Array(Some(items)) | RespValue::Set(items) | RespValue::Push(items) => {
+            1 + items
+                .iter()
+                .map(resp_value_nesting_depth)
+                .max()
+                .unwrap_or(0)
+        }
+        RespValue::Map(pairs) | RespValue::Attribute(pairs) => {
+            1 + pairs
+                .iter()
+                .flat_map(|(key, value)| {
+                    [
+                        resp_value_nesting_depth(key),
+                        resp_value_nesting_depth(value),
+                    ]
+                })
+                .max()
+                .unwrap_or(0)
+        }
+        _ => 1,
+    }
+}
+
+fn resp_value_attribute_count(value: &RespValue) -> usize {
+    match value {
+        RespValue::Attribute(pairs) => {
+            pairs.len()
+                + pairs
+                    .iter()
+                    .map(|(key, value)| {
+                        resp_value_attribute_count(key) + resp_value_attribute_count(value)
+                    })
+                    .sum::<usize>()
+        }
+        RespValue::Array(Some(items)) | RespValue::Set(items) | RespValue::Push(items) => {
+            items.iter().map(resp_value_attribute_count).sum()
+        }
+        RespValue::Map(pairs) => pairs
+            .iter()
+            .map(|(key, value)| resp_value_attribute_count(key) + resp_value_attribute_count(value))
+            .sum(),
+        _ => 0,
+    }
+}
+
+fn resp_value_kind(value: &RespValue) -> &'static str {
+    match value {
+        RespValue::Attribute(_) => "attribute",
+        RespValue::Array(_) => "array",
+        RespValue::BulkString(_) => "bulk_string",
+        RespValue::SimpleString(_) => "simple_string",
+        RespValue::Error(_) => "error",
+        RespValue::Integer(_) => "integer",
+        RespValue::Null => "null",
+        RespValue::Boolean(_) => "boolean",
+        RespValue::Double(_) => "double",
+        RespValue::BigNumber(_) => "big_number",
+        RespValue::Verbatim { .. } => "verbatim",
+        RespValue::BlobError(_) => "blob_error",
+        RespValue::Map(_) => "map",
+        RespValue::Set(_) => "set",
+        RespValue::Push(_) => "push",
+    }
+}
+
+fn wire_fingerprint(bytes: &[u8]) -> String {
+    let mut acc = 0xcbf2_9ce4_8422_2325u64;
+    for &byte in bytes {
+        acc ^= u64::from(byte);
+        acc = acc.wrapping_mul(0x100_0000_01b3);
+    }
+    format!("{acc:016x}")
+}
+
+fn exercise_resp3_attributes(data: &[u8]) {
+    let payload = &data[..data.len().min(MAX_STRUCTURED_FIELD_BYTES)];
+    let split = payload.len() / 2;
+    let first = payload[..split].to_vec();
+    let second = payload[split..].to_vec();
+    let unknown_key = if payload.len() >= 3 {
+        payload[..3].to_vec()
+    } else {
+        vec![0x01, 0x02, 0x03]
+    };
+    let limits = RedisProtocolLimits::new()
+        .max_frame_size(payload.len().saturating_add(512))
+        .max_nesting_depth(8)
+        .max_array_len(16)
+        .max_bulk_string_len(payload.len().max(1).saturating_add(16));
+
+    let cases: Vec<(&str, RespValue)> = vec![
+        (
+            "scalar",
+            RespValue::Attribute(vec![(
+                RespValue::SimpleString("ttl".to_string()),
+                RespValue::Integer(i64::try_from(payload.len()).expect("payload length fits i64")),
+            )]),
+        ),
+        (
+            "array",
+            RespValue::Attribute(vec![(
+                RespValue::SimpleString("items".to_string()),
+                RespValue::Array(Some(vec![
+                    RespValue::BulkString(Some(first.clone())),
+                    RespValue::BulkString(Some(second.clone())),
+                ])),
+            )]),
+        ),
+        (
+            "map",
+            RespValue::Attribute(vec![(
+                RespValue::SimpleString("meta".to_string()),
+                RespValue::Map(vec![
+                    (
+                        RespValue::SimpleString("left".to_string()),
+                        RespValue::BulkString(Some(first.clone())),
+                    ),
+                    (
+                        RespValue::SimpleString("right".to_string()),
+                        RespValue::BulkString(Some(second.clone())),
+                    ),
+                ]),
+            )]),
+        ),
+        (
+            "set",
+            RespValue::Attribute(vec![(
+                RespValue::SimpleString("members".to_string()),
+                RespValue::Set(vec![
+                    RespValue::BulkString(Some(first.clone())),
+                    RespValue::BulkString(Some(second.clone())),
+                ]),
+            )]),
+        ),
+        (
+            "push",
+            RespValue::Attribute(vec![(
+                RespValue::SimpleString("push".to_string()),
+                RespValue::Push(vec![
+                    RespValue::BulkString(Some(b"message".to_vec())),
+                    RespValue::BulkString(Some(first.clone())),
+                    RespValue::BulkString(Some(second.clone())),
+                ]),
+            )]),
+        ),
+        (
+            "null",
+            RespValue::Attribute(vec![(
+                RespValue::SimpleString("nil".to_string()),
+                RespValue::Null,
+            )]),
+        ),
+        ("empty", RespValue::Attribute(vec![])),
+        (
+            "repeated",
+            RespValue::Attribute(vec![
+                (
+                    RespValue::SimpleString("dup".to_string()),
+                    RespValue::BulkString(Some(first.clone())),
+                ),
+                (
+                    RespValue::SimpleString("dup".to_string()),
+                    RespValue::BulkString(Some(second.clone())),
+                ),
+            ]),
+        ),
+        (
+            "unknown_key",
+            RespValue::Attribute(vec![(
+                RespValue::BulkString(Some(unknown_key)),
+                RespValue::SimpleString("opaque".to_string()),
+            )]),
+        ),
+        (
+            "nested_attribute",
+            RespValue::Array(Some(vec![
+                RespValue::Attribute(vec![(
+                    RespValue::SimpleString("outer".to_string()),
+                    RespValue::Attribute(vec![(
+                        RespValue::SimpleString("inner".to_string()),
+                        RespValue::Boolean(true),
+                    )]),
+                )]),
+                RespValue::SimpleString("tail".to_string()),
+            ])),
+        ),
+    ];
+
+    for (label, value) in cases {
+        let wire = value.encode();
+        let fingerprint = wire_fingerprint(&wire);
+        let decoded = decode_resp_value_for_fuzz(&wire, limits)
+            .expect("valid RESP3 attribute case should not error")
+            .expect("valid RESP3 attribute case should decode");
+        assert_eq!(
+            decoded.0,
+            value,
+            "{label} attribute case should round-trip; nesting_depth={} attribute_count={} value_kind={} parser_state=decoded fingerprint={fingerprint}",
+            resp_value_nesting_depth(&decoded.0),
+            resp_value_attribute_count(&decoded.0),
+            resp_value_kind(&decoded.0),
+        );
+        assert_eq!(decoded.1, wire.len());
+    }
+
+    for (label, wire) in [
+        (
+            "streamed_attribute_not_supported",
+            b"|?\r\n+meta\r\n.\r\n".as_slice(),
+        ),
+        (
+            "nested_streamed_map_missing_value",
+            b"|1\r\n+meta\r\n%?\r\n+field\r\n.\r\n".as_slice(),
+        ),
+    ] {
+        assert!(
+            decode_resp_value_for_fuzz(wire, limits).is_err(),
+            "{label} should fail closed with malformed RESP3 attribute nesting"
+        );
+    }
+}
+
 fn bulk_arg(bytes: &[u8]) -> RespValue {
     RespValue::BulkString(Some(bytes.to_vec()))
 }
@@ -1309,19 +1533,22 @@ fuzz_target!(|data: &[u8]| {
     // Test 10: RESP3 streamed string/aggregate parser seam
     exercise_resp3_streamed_types(data);
 
-    // Test 11: Redis SCRIPT EVAL command and Lua parser seam
+    // Test 11: RESP3 attribute-tagged nested value parity seam
+    exercise_resp3_attributes(data);
+
+    // Test 12: Redis SCRIPT EVAL command and Lua parser seam
     exercise_script_eval_parser(data);
 
-    // Test 12: Redis ZADD option parser seam
+    // Test 13: Redis ZADD option parser seam
     exercise_zadd_option_parser(data);
 
-    // Test 13: Redis CLIENT KILL filter parser seam
+    // Test 14: Redis CLIENT KILL filter parser seam
     exercise_client_kill_parser(data);
 
-    // Test 14: Redis SLOWLOG/LATENCY observability parser seams
+    // Test 15: Redis SLOWLOG/LATENCY observability parser seams
     exercise_slowlog_latency_parsers(data);
 
-    // Test 15: Redis ZRANGEBYSCORE range parser seam
+    // Test 16: Redis ZRANGEBYSCORE range parser seam
     exercise_zrangebyscore_parser(data);
 
     // Test 16: Redis ACL USER/CAT/reset rule parser seam

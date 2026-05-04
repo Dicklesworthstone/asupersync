@@ -7098,6 +7098,217 @@ mod tests {
     }
 
     #[test]
+    fn resp3_attribute_roundtrip_preserves_nested_value_kinds() {
+        fn nesting_depth(value: &RespValue) -> usize {
+            match value {
+                RespValue::Array(Some(items)) | RespValue::Set(items) | RespValue::Push(items) => {
+                    1 + items.iter().map(nesting_depth).max().unwrap_or(0)
+                }
+                RespValue::Map(pairs) | RespValue::Attribute(pairs) => {
+                    1 + pairs
+                        .iter()
+                        .flat_map(|(key, value)| [nesting_depth(key), nesting_depth(value)])
+                        .max()
+                        .unwrap_or(0)
+                }
+                _ => 1,
+            }
+        }
+
+        fn attribute_pair_count(value: &RespValue) -> usize {
+            match value {
+                RespValue::Attribute(pairs) => {
+                    pairs.len()
+                        + pairs
+                            .iter()
+                            .map(|(key, value)| {
+                                attribute_pair_count(key) + attribute_pair_count(value)
+                            })
+                            .sum::<usize>()
+                }
+                RespValue::Array(Some(items)) | RespValue::Set(items) | RespValue::Push(items) => {
+                    items.iter().map(attribute_pair_count).sum()
+                }
+                RespValue::Map(pairs) => pairs
+                    .iter()
+                    .map(|(key, value)| attribute_pair_count(key) + attribute_pair_count(value))
+                    .sum(),
+                _ => 0,
+            }
+        }
+
+        fn value_kind(value: &RespValue) -> &'static str {
+            match value {
+                RespValue::Attribute(_) => "attribute",
+                RespValue::Array(_) => "array",
+                RespValue::BulkString(_) => "bulk_string",
+                RespValue::SimpleString(_) => "simple_string",
+                RespValue::Error(_) => "error",
+                RespValue::Integer(_) => "integer",
+                RespValue::Null => "null",
+                RespValue::Boolean(_) => "boolean",
+                RespValue::Double(_) => "double",
+                RespValue::BigNumber(_) => "big_number",
+                RespValue::Verbatim { .. } => "verbatim",
+                RespValue::BlobError(_) => "blob_error",
+                RespValue::Map(_) => "map",
+                RespValue::Set(_) => "set",
+                RespValue::Push(_) => "push",
+            }
+        }
+
+        let cases: Vec<(&str, RespValue)> = vec![
+            (
+                "scalar",
+                RespValue::Attribute(vec![(
+                    RespValue::SimpleString("ttl".to_string()),
+                    RespValue::Integer(7),
+                )]),
+            ),
+            (
+                "array",
+                RespValue::Attribute(vec![(
+                    RespValue::SimpleString("items".to_string()),
+                    RespValue::Array(Some(vec![
+                        RespValue::BulkString(Some(b"alpha".to_vec())),
+                        RespValue::Null,
+                    ])),
+                )]),
+            ),
+            (
+                "map",
+                RespValue::Attribute(vec![(
+                    RespValue::SimpleString("meta".to_string()),
+                    RespValue::Map(vec![(
+                        RespValue::SimpleString("mode".to_string()),
+                        RespValue::SimpleString("standalone".to_string()),
+                    )]),
+                )]),
+            ),
+            (
+                "set",
+                RespValue::Attribute(vec![(
+                    RespValue::SimpleString("members".to_string()),
+                    RespValue::Set(vec![
+                        RespValue::SimpleString("a".to_string()),
+                        RespValue::SimpleString("b".to_string()),
+                    ]),
+                )]),
+            ),
+            (
+                "push",
+                RespValue::Attribute(vec![(
+                    RespValue::SimpleString("push".to_string()),
+                    RespValue::Push(vec![
+                        RespValue::BulkString(Some(b"message".to_vec())),
+                        RespValue::BulkString(Some(b"channel".to_vec())),
+                        RespValue::BulkString(Some(b"payload".to_vec())),
+                    ]),
+                )]),
+            ),
+            (
+                "null",
+                RespValue::Attribute(vec![(
+                    RespValue::SimpleString("nil".to_string()),
+                    RespValue::Null,
+                )]),
+            ),
+            ("empty", RespValue::Attribute(vec![])),
+            (
+                "repeated",
+                RespValue::Attribute(vec![
+                    (
+                        RespValue::SimpleString("dup".to_string()),
+                        RespValue::Integer(1),
+                    ),
+                    (
+                        RespValue::SimpleString("dup".to_string()),
+                        RespValue::Integer(2),
+                    ),
+                ]),
+            ),
+            (
+                "unknown_key",
+                RespValue::Attribute(vec![(
+                    RespValue::BulkString(Some(vec![0x01, 0x02, 0x03])),
+                    RespValue::SimpleString("opaque".to_string()),
+                )]),
+            ),
+            (
+                "nested_attribute",
+                RespValue::Array(Some(vec![
+                    RespValue::Attribute(vec![(
+                        RespValue::SimpleString("outer".to_string()),
+                        RespValue::Attribute(vec![(
+                            RespValue::SimpleString("inner".to_string()),
+                            RespValue::Boolean(true),
+                        )]),
+                    )]),
+                    RespValue::SimpleString("tail".to_string()),
+                ])),
+            ),
+        ];
+
+        for (scenario_id, value) in cases {
+            let wire = value.encode();
+            let fingerprint = buffer_fingerprint(&wire);
+            let (decoded, consumed) = RespValue::try_decode(&wire)
+                .unwrap()
+                .expect("RESP3 attribute reference vector should decode");
+            assert_eq!(
+                decoded, value,
+                "{scenario_id} should round-trip; fingerprint={fingerprint}"
+            );
+            assert_eq!(
+                consumed,
+                wire.len(),
+                "{scenario_id} should consume the full wire image"
+            );
+            eprintln!(
+                "RESP3_ATTRIBUTE scenario_id={scenario_id} nesting_depth={} attribute_count={} value_kind={} parser_state=decoded fingerprint={} verdict=pass",
+                nesting_depth(&decoded),
+                attribute_pair_count(&decoded),
+                value_kind(&decoded),
+                fingerprint
+            );
+        }
+    }
+
+    #[test]
+    fn resp3_attributes_reject_malformed_nested_pairs() {
+        let malformed_cases: [(&str, &[u8], &str); 2] = [
+            (
+                "streamed_attribute_not_supported",
+                b"|?\r\n+meta\r\n.\r\n",
+                "streamed aggregate not supported",
+            ),
+            (
+                "nested_streamed_map_missing_value",
+                b"|1\r\n+meta\r\n%?\r\n+field\r\n.\r\n",
+                "odd number of values",
+            ),
+        ];
+
+        for (scenario_id, wire, expected_fragment) in malformed_cases {
+            let error = RespValue::try_decode(wire)
+                .expect_err("malformed RESP3 attribute should fail to decode");
+            match error {
+                RedisError::Protocol(message) => {
+                    assert!(
+                        message.contains(expected_fragment),
+                        "{scenario_id} should mention {expected_fragment:?}, got {message:?}"
+                    );
+                    eprintln!(
+                        "RESP3_ATTRIBUTE scenario_id={scenario_id} parser_state=error error_kind=protocol fingerprint={} verdict=pass",
+                        buffer_fingerprint(wire)
+                    );
+                }
+                other => panic!("{scenario_id} returned unexpected error {other:?}"),
+            }
+        }
+    }
+
+    #[test]
     fn resp3_reference_vectors_match_redis_rs_value_model_for_composite_types() {
         // Keep a single differential matrix over the RESP3 composite/value
         // variants we care about here. redis-rs preserves map/set ordering on
