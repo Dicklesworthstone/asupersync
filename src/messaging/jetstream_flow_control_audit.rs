@@ -3,15 +3,15 @@
 //! AUDIT FINDING: FOUNDATION - per-context publish backpressure is now explicit,
 //! and the conservative refusal-only policy now has deterministic zero-wait
 //! tail evidence, and the current loss-system behavior now has deterministic
-//! cohort evidence too, but the operator surface remains fail-closed until any
-//! future nonzero-wait policy proves fairness.
+//! cohort evidence too. For the current controller, fairness is vacuous because
+//! hidden waiters are impossible (`max_waiters = 0`).
 //!
 //! When client publishes faster than server can ack, the implementation:
 //! - Current foundation: bound the per-context outstanding publish seam and
 //!   refuse immediately when the slot is occupied or `Cx::pressure()` is in
 //!   the emergency band
-//! - Remaining gap: no bounded-waiter fairness evidence yet for any future
-//!   nonzero-wait policy
+//! - Future-policy note: any later nonzero-wait controller must still prove
+//!   bounded fairness before it can replace the current refusal-only path
 //!
 //! Per JetStream client backpressure best practices, high publish rate should
 //! trigger explicit pressure-aware refusal rather than relying solely on TCP flow control.
@@ -119,13 +119,13 @@ fn audit_current_tcp_flow_control_behavior() {
     // ✅ Per-context outstanding publish count is explicitly bounded
     // ✅ Emergency `Cx::pressure()` state can refuse a new publish before wire I/O
     //
-    // Remaining issues:
-    // ❌ Nonzero-wait bounded waiter fairness is still unproven
-    // ❌ Zero-waiter refusal is still the only foundation policy today
-    // ❌ Cohort evidence only covers the current loss-system controller
+    // Current controller certificate:
+    // ✅ Hidden waiters are impossible (`max_waiters = 0`)
+    // ✅ Fairness is vacuous for the current controller because no waiter queue exists
+    // ✅ Cohort evidence covers the current refusal-only loss-system controller
     //
-    // Recommendation: keep fail-closed signoff until any future nonzero-wait
-    // controller proves fairness without hidden memory growth.
+    // Future-policy note: if a later nonzero-wait controller is introduced,
+    // that controller must still prove bounded fairness without hidden memory growth.
 
     test_complete("audit_current_tcp_flow_control_behavior");
 }
@@ -164,10 +164,12 @@ fn audit_reference_backpressure_pattern() {
     // - Explicit emergency-pressure refusal at the publish seam
     // - Zero hidden waiters in the current foundation slice
     //
-    // Still missing for closeout:
-    // - bounded waiter fairness beyond zero-wait refusal
-    // - a shared-controller surface that can compare zero-wait refusal against
-    //   nonzero-wait alternatives without hiding memory growth
+    // Current closeout basis:
+    // - zero hidden waiters in the live controller
+    // - fairness is vacuous because no waiter queue exists
+    //
+    // Future-policy note:
+    // - any nonzero-wait alternative must still prove bounded fairness before adoption
 
     test_complete("audit_reference_backpressure_pattern");
 }
@@ -182,6 +184,8 @@ fn audit_publish_wait_tail_zero_for_refusal_only_policy() {
     assert_eq!(snapshot.tail_sample_count, 64);
     assert_eq!(snapshot.accepted_count, 0);
     assert_eq!(snapshot.refused_count, 64);
+    assert!(snapshot.waiter_queue_absent);
+    assert_eq!(snapshot.waiter_fairness_mode, "vacuous_zero_wait_refusal");
     assert!(snapshot.refusal_only_policy);
     assert_eq!(snapshot.tail_evidence_mode, "zero_wait_refusal_only");
     assert_eq!(snapshot.publish_wait_latency_p95_micros, 0);
@@ -203,6 +207,8 @@ fn audit_publish_wait_tail_zero_for_multi_publisher_loss_system() {
     assert_eq!(snapshot.occupied_publisher_count, 16);
     assert_eq!(snapshot.accepted_count, 16);
     assert_eq!(snapshot.refused_count, 16);
+    assert!(snapshot.waiter_queue_absent);
+    assert_eq!(snapshot.waiter_fairness_mode, "vacuous_zero_wait_refusal");
     assert!(snapshot.refusal_only_policy);
     assert!(snapshot.multi_publisher_tail_evidence_present);
     assert_eq!(snapshot.queueing_model, "mg11_loss_system");

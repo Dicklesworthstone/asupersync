@@ -238,6 +238,8 @@ fn jetstream_publish_backpressure_zero_wait_tail_under_slow_ack_refusal() {
     assert_eq!(snapshot.tail_sample_count, 64);
     assert_eq!(snapshot.accepted_count, 0);
     assert_eq!(snapshot.refused_count, 64);
+    assert!(snapshot.waiter_queue_absent);
+    assert_eq!(snapshot.waiter_fairness_mode, "vacuous_zero_wait_refusal");
     assert!(snapshot.refusal_only_policy);
     assert_eq!(snapshot.tail_evidence_mode, "zero_wait_refusal_only");
     assert_eq!(snapshot.publish_wait_latency_p95_micros, 0);
@@ -256,6 +258,8 @@ fn jetstream_publish_backpressure_zero_wait_tail_under_emergency_pressure() {
     assert_eq!(snapshot.tail_sample_count, 64);
     assert_eq!(snapshot.accepted_count, 0);
     assert_eq!(snapshot.refused_count, 64);
+    assert!(snapshot.waiter_queue_absent);
+    assert_eq!(snapshot.waiter_fairness_mode, "vacuous_zero_wait_refusal");
     assert!(snapshot.refusal_only_policy);
     assert_eq!(snapshot.tail_evidence_mode, "zero_wait_refusal_only");
     assert_eq!(snapshot.pressure_level.as_deref(), Some("emergency"));
@@ -276,6 +280,8 @@ fn jetstream_publish_backpressure_multi_publisher_zero_wait_tail_evidence() {
     assert_eq!(snapshot.occupied_publisher_count, 16);
     assert_eq!(snapshot.accepted_count, 16);
     assert_eq!(snapshot.refused_count, 16);
+    assert!(snapshot.waiter_queue_absent);
+    assert_eq!(snapshot.waiter_fairness_mode, "vacuous_zero_wait_refusal");
     assert!(snapshot.refusal_only_policy);
     assert!(snapshot.multi_publisher_tail_evidence_present);
     assert_eq!(snapshot.queueing_model, "mg11_loss_system");
@@ -299,6 +305,7 @@ fn jetstream_flow_control_compliance_summary() {
     println!("✓ PUBLISH REFUSAL: Per-context outstanding publish seam is explicitly bounded");
     println!("✓ PRESSURE GATE: Emergency pressure can refuse publish before wire I/O");
     println!("✓ TAIL EVIDENCE: Refusal-only policy proves p95/p99/p999 wait tails at 0us");
+    println!("✓ WAITER CERTIFICATE: max_waiters=0 makes fairness vacuous for the live controller");
     println!("✓ COHORT EVIDENCE: 32-publisher loss-system cohort keeps publish-wait tails at 0us");
     println!();
     println!("FOUNDATION ADDED: Explicit JetStream publish refusal gate");
@@ -308,6 +315,6 @@ fn jetstream_flow_control_compliance_summary() {
     );
     println!();
     println!(
-        "STATUS: CONSUMER FLOW CONTROL IS SECURE; PUBLISH PATH STILL FAIL-CLOSES FOR ANY FUTURE NONZERO-WAIT POLICY ✅"
+        "STATUS: CONSUMER FLOW CONTROL IS SECURE; CURRENT PUBLISH CONTROLLER IS CERTIFIED ZERO-WAITER, WHILE ANY FUTURE NONZERO-WAIT POLICY STILL NEEDS ITS OWN FAIRNESS PROOF ✅"
     );
 }

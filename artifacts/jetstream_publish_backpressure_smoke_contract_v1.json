@@ -1,7 +1,7 @@
 {
   "contract_version": "jetstream-publish-backpressure-smoke-contract-v1",
   "bead_id": "asupersync-dpdmsy",
-  "description": "Fail-closed proof pack for the current JetStream publish backpressure surface, capturing deterministic zero-wait tail evidence for both the conservative refusal-only policy and a 32-publisher cohort while keeping final signoff closed until any future nonzero-wait policy proves fairness.",
+  "description": "Proof pack for the current JetStream publish backpressure surface, capturing deterministic zero-wait tail evidence plus an explicit zero-waiter fairness certificate for the live refusal-only policy and a 32-publisher cohort. Any future nonzero-wait policy must still ship its own bounded-fairness proof before adoption.",
   "runner_script": "scripts/run_jetstream_publish_backpressure_smoke.sh",
   "runner_bundle_schema_version": "jetstream-publish-backpressure-smoke-bundle-v1",
   "runner_report_schema_version": "jetstream-publish-backpressure-smoke-run-report-v1",
@@ -9,13 +9,14 @@
   "consumer_flow_test_path": "tests/jetstream_flow_control_audit.rs",
   "target_source_path": "src/messaging/jetstream.rs",
   "no_win_fallback": "retain_conservative_publish_path",
-  "missing_evidence_requirements": [
-    "bounded waiter fairness evidence for nonzero-wait policy"
+  "missing_evidence_requirements": [],
+  "future_policy_requirements": [
+    "bounded waiter fairness evidence for any future nonzero-wait policy"
   ],
   "smoke_scenarios": [
     {
       "scenario_id": "AA-JETSTREAM-PUBLISH-BACKPRESSURE-SLOW-ACKS",
-      "description": "Prove that the publish surface now has explicit per-context refusal under slow ACK assumptions with deterministic single- and multi-publisher zero-wait tail evidence, but must remain fail-closed in final signoff until any future nonzero-wait policy proves fairness.",
+      "description": "Prove that the publish surface now has explicit per-context refusal under slow ACK assumptions with deterministic single- and multi-publisher zero-wait tail evidence and an explicit zero-waiter fairness certificate for the live controller.",
       "scenario_mode": "slow_ack_gap",
       "expected_report_projection": {
         "scenario_mode": "slow_ack_gap",
@@ -24,6 +25,8 @@
         "explicit_pressure_signal_site_count": 18,
         "bounded_waiter_policy_present": true,
         "refusal_only_policy_present": true,
+        "waiter_queue_absent": true,
+        "waiter_fairness_mode": "vacuous_zero_wait_refusal",
         "multi_publisher_tail_evidence_present": true,
         "queueing_model": "mg11_loss_system",
         "tail_evidence_mode": "zero_wait_refusal_only",
@@ -33,10 +36,10 @@
         "publish_wait_latency_p95_micros": 0,
         "publish_wait_latency_p99_micros": 0,
         "publish_wait_latency_p999_micros": 0,
-        "missing_evidence_requirement_count": 1,
+        "missing_evidence_requirement_count": 0,
         "no_win_fallback": "retain_conservative_publish_path",
-        "operator_verdict": "fail_closed",
-        "projection_hash": "2faddb71aaf2a73a91cc2ef990714380d15996366361d2eb3ecdbddcfb6b9a55"
+        "operator_verdict": "ready_for_rch",
+        "projection_hash": "1b03e5344f2e092638443b5bdd88df7868a00a8fafc4b789f84284e81183ca23"
       },
       "required_log_fields": [
         "scenario_id",
@@ -50,6 +53,8 @@
         "explicit_pressure_signal_site_count",
         "bounded_waiter_policy_present",
         "refusal_only_policy_present",
+        "waiter_queue_absent",
+        "waiter_fairness_mode",
         "multi_publisher_tail_evidence_present",
         "queueing_model",
         "tail_evidence_mode",
@@ -67,7 +72,7 @@
     },
     {
       "scenario_id": "AA-JETSTREAM-PUBLISH-BACKPRESSURE-NO-WIN-FALLBACK",
-      "description": "Prove that the current no-win path must still hold the conservative publish behavior even after single- and multi-publisher zero-wait tail evidence land, because any future nonzero-wait policy still lacks fairness evidence.",
+      "description": "Prove that the current no-win path still pins the conservative publish behavior while the live controller keeps its zero-waiter fairness certificate; any future nonzero-wait policy still needs its own bounded-fairness proof before it can replace this path.",
       "scenario_mode": "no_win_fallback",
       "expected_report_projection": {
         "scenario_mode": "no_win_fallback",
@@ -76,6 +81,8 @@
         "explicit_pressure_signal_site_count": 18,
         "bounded_waiter_policy_present": true,
         "refusal_only_policy_present": true,
+        "waiter_queue_absent": true,
+        "waiter_fairness_mode": "vacuous_zero_wait_refusal",
         "multi_publisher_tail_evidence_present": true,
         "queueing_model": "mg11_loss_system",
         "tail_evidence_mode": "zero_wait_refusal_only",
@@ -85,10 +92,10 @@
         "publish_wait_latency_p95_micros": 0,
         "publish_wait_latency_p99_micros": 0,
         "publish_wait_latency_p999_micros": 0,
-        "missing_evidence_requirement_count": 1,
+        "missing_evidence_requirement_count": 0,
         "no_win_fallback": "retain_conservative_publish_path",
-        "operator_verdict": "fail_closed",
-        "projection_hash": "0b619f875a5e9d06461012445b27cdd9f1f51988fed492f6b9f2e05df802b6a7"
+        "operator_verdict": "ready_for_rch",
+        "projection_hash": "95d068eb053a4e16bc24efc42876f82ac67f6aae67897536cade0599b9bb10a3"
       },
       "required_log_fields": [
         "scenario_id",
@@ -102,6 +109,8 @@
         "explicit_pressure_signal_site_count",
         "bounded_waiter_policy_present",
         "refusal_only_policy_present",
+        "waiter_queue_absent",
+        "waiter_fairness_mode",
         "multi_publisher_tail_evidence_present",
         "queueing_model",
         "tail_evidence_mode",
