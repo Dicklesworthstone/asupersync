@@ -8,6 +8,10 @@ use crate::raptorq_rfc6330::{
     TestCategory,
 };
 use crate::rfc6330_fixtures::*;
+use asupersync::raptorq::{
+    rfc6330::{self, LtTuple},
+    systematic::SystematicParams,
+};
 
 // ============================================================================
 // P0 Priority Tests - Critical Requirements
@@ -38,39 +42,7 @@ impl ConformanceTest for LookupTableV0Test {
     }
 
     fn run(&self, _ctx: &ConformanceContext) -> ConformanceResult {
-        // For now, this validates that the fixtures themselves are correct.
-        // In a real integration, this would compare against the actual implementation.
-
-        // TODO: When integrated with asupersync main crate:
-        // let actual_v0 = asupersync::raptorq::rfc6330::V0;
-        // match validate_lookup_table(&actual_v0, &RFC6330_V0_TABLE, "V0") {
-
-        // For now, validate that we have the correct reference data structure
-        if RFC6330_V0_TABLE.len() != 256 {
-            return ConformanceResult::Fail {
-                reason: "V0 table has incorrect length".to_string(),
-                details: Some(format!(
-                    "Expected 256 entries, got {}",
-                    RFC6330_V0_TABLE.len()
-                )),
-            };
-        }
-
-        // Validate some known RFC values (first few entries)
-        let expected_first_values = [251291136u32, 3952231631, 3370958628];
-        for (i, &expected) in expected_first_values.iter().enumerate() {
-            if RFC6330_V0_TABLE[i] != expected {
-                return ConformanceResult::Fail {
-                    reason: format!("V0[{}] reference value incorrect", i),
-                    details: Some(format!(
-                        "Expected {}, got {}",
-                        expected, RFC6330_V0_TABLE[i]
-                    )),
-                };
-            }
-        }
-
-        ConformanceResult::Pass
+        lookup_table_result(&rfc6330::V0, &RFC6330_V0_TABLE, "V0")
     }
 
     fn tags(&self) -> Vec<&str> {
@@ -103,37 +75,7 @@ impl ConformanceTest for LookupTableV1Test {
     }
 
     fn run(&self, _ctx: &ConformanceContext) -> ConformanceResult {
-        // For now, this validates that the fixtures themselves are correct.
-        // TODO: When integrated with asupersync main crate:
-        // let actual_v1 = asupersync::raptorq::rfc6330::V1;
-        // match validate_lookup_table(&actual_v1, &RFC6330_V1_TABLE, "V1") {
-
-        // Validate that we have the correct reference data structure
-        if RFC6330_V1_TABLE.len() != 256 {
-            return ConformanceResult::Fail {
-                reason: "V1 table has incorrect length".to_string(),
-                details: Some(format!(
-                    "Expected 256 entries, got {}",
-                    RFC6330_V1_TABLE.len()
-                )),
-            };
-        }
-
-        // Validate some known RFC values (first few entries)
-        let expected_first_values = [807385413u32, 2043073223, 3336749796];
-        for (i, &expected) in expected_first_values.iter().enumerate() {
-            if RFC6330_V1_TABLE[i] != expected {
-                return ConformanceResult::Fail {
-                    reason: format!("V1[{}] reference value incorrect", i),
-                    details: Some(format!(
-                        "Expected {}, got {}",
-                        expected, RFC6330_V1_TABLE[i]
-                    )),
-                };
-            }
-        }
-
-        ConformanceResult::Pass
+        lookup_table_result(&rfc6330::V1, &RFC6330_V1_TABLE, "V1")
     }
 
     fn tags(&self) -> Vec<&str> {
@@ -166,28 +108,34 @@ impl ConformanceTest for SystematicIndexTest {
     }
 
     fn run(&self, _ctx: &ConformanceContext) -> ConformanceResult {
-        // Test systematic index calculation against RFC Table 2
-
         for entry in RFC6330_SYSTEMATIC_INDEX_TABLE.iter() {
-            let expected_j = entry.systematic_index;
+            let params =
+                match SystematicParams::try_for_source_block(usize::from(entry.k_prime), 1024) {
+                    Ok(params) => params,
+                    Err(err) => {
+                        return ConformanceResult::Fail {
+                            reason: format!(
+                                "Systematic parameter lookup failed for K'={}",
+                                entry.k_prime
+                            ),
+                            details: Some(format!("{err:?}")),
+                        };
+                    }
+                };
 
-            // Get the calculated systematic index from our implementation
-            if let Some(actual_j) = get_systematic_index(entry.k_prime) {
-                if actual_j != expected_j {
-                    return ConformanceResult::Fail {
-                        reason: format!("Systematic index mismatch for K'={}", entry.k_prime),
-                        details: Some(format!(
-                            "expected J({})={}, got {} (S={}, H={}, W={})",
-                            entry.k_prime, expected_j, actual_j, entry.s, entry.h, entry.w
-                        )),
-                    };
-                }
-            } else {
+            let actual = (params.k_prime, params.j, params.s, params.h, params.w);
+            let expected = (
+                usize::from(entry.k_prime),
+                usize::from(entry.systematic_index),
+                usize::from(entry.s),
+                usize::from(entry.h),
+                usize::try_from(entry.w).expect("RFC6330 W fixture fits usize"),
+            );
+            if actual != expected {
                 return ConformanceResult::Fail {
-                    reason: format!("No systematic index found for K'={}", entry.k_prime),
+                    reason: format!("Systematic parameters mismatch for K'={}", entry.k_prime),
                     details: Some(format!(
-                        "K'={} should be supported according to RFC Table 2",
-                        entry.k_prime
+                        "expected (K', J, S, H, W)={expected:?}, got {actual:?}"
                     )),
                 };
             }
@@ -226,83 +174,62 @@ impl ConformanceTest for SystematicTupleGenerationTest {
     }
 
     fn run(&self, _ctx: &ConformanceContext) -> ConformanceResult {
-        // Test tuple generation against reference test vectors
         for test_vector in RFC6330_TUPLE_TEST_VECTORS {
-            // Note: This test would require integration with the actual tuple generation
-            // implementation in asupersync::raptorq. For now, we validate the test vector
-            // structure and defer to future implementation.
-
-            // Validate test vector structure
-            if test_vector.k == 0 {
-                return ConformanceResult::Fail {
-                    reason: "Invalid test vector: K cannot be 0".to_string(),
-                    details: Some(format!("Test vector: {:?}", test_vector)),
+            let params =
+                match SystematicParams::try_for_source_block(usize::from(test_vector.k), 1024) {
+                    Ok(params) => params,
+                    Err(err) => {
+                        return ConformanceResult::Fail {
+                            reason: format!(
+                                "Systematic parameter lookup failed for K={}",
+                                test_vector.k
+                            ),
+                            details: Some(format!("{err:?}")),
+                        };
+                    }
                 };
-            }
+            let p1 = rfc6330::next_prime_ge(params.p);
+            let actual =
+                rfc6330::try_tuple(params.j, params.w, params.p, p1, test_vector.symbol_index);
+            let expected = LtTuple {
+                d: usize::try_from(test_vector.expected_d).expect("tuple d fixture fits usize"),
+                a: usize::try_from(test_vector.expected_a).expect("tuple a fixture fits usize"),
+                b: usize::try_from(test_vector.expected_b).expect("tuple b fixture fits usize"),
+                d1: usize::try_from(test_vector.expected_d1).expect("tuple d1 fixture fits usize"),
+                a1: usize::try_from(test_vector.expected_a1).expect("tuple a1 fixture fits usize"),
+                b1: usize::try_from(test_vector.expected_b1).expect("tuple b1 fixture fits usize"),
+            };
 
-            if [
-                test_vector.expected_d,
-                test_vector.expected_a,
-                test_vector.expected_b,
-                test_vector.expected_d1,
-                test_vector.expected_a1,
-                test_vector.expected_b1,
-            ]
-            .into_iter()
-            .any(|component| component == 0)
-            {
-                return ConformanceResult::Fail {
-                    reason: format!(
-                        "Invalid tuple fixture for K={}, X={}",
-                        test_vector.k, test_vector.symbol_index
-                    ),
-                    details: Some(format!(
-                        "tuple fixtures must contain canonical non-zero RFC components: {:?}",
-                        test_vector
-                    )),
-                };
+            match actual {
+                Some(actual) if actual == expected => {}
+                Some(actual) => {
+                    return ConformanceResult::Fail {
+                        reason: format!(
+                            "Tuple generation mismatch for K={}, X={}",
+                            test_vector.k, test_vector.symbol_index
+                        ),
+                        details: Some(format!(
+                            "expected {expected:?}, got {actual:?} (J={}, W={}, P={}, P1={p1})",
+                            params.j, params.w, params.p
+                        )),
+                    };
+                }
+                None => {
+                    return ConformanceResult::Fail {
+                        reason: format!(
+                            "Tuple generation rejected RFC fixture for K={}, X={}",
+                            test_vector.k, test_vector.symbol_index
+                        ),
+                        details: Some(format!(
+                            "live tuple seam rejected valid inputs J={}, W={}, P={}, P1={p1}",
+                            params.j, params.w, params.p
+                        )),
+                    };
+                }
             }
-
-            // TODO: When tuple generation is implemented:
-            // let (actual_d, actual_a, actual_b) =
-            //     asupersync::raptorq::generate_tuple(test_vector.k, test_vector.symbol_index);
-            //
-            // if (actual_d, actual_a, actual_b) !=
-            //    (test_vector.expected_d, test_vector.expected_a, test_vector.expected_b) {
-            //     return ConformanceResult::Fail {
-            //         reason: format!("Tuple generation mismatch for K={}, X={}",
-            //                        test_vector.k, test_vector.symbol_index),
-            //         details: Some(format!(
-            //             "expected (d={}, a={}, b={}), got (d={}, a={}, b={})",
-            //             test_vector.expected_d, test_vector.expected_a, test_vector.expected_b,
-            //             actual_d, actual_a, actual_b
-            //         )),
-            //     };
-            // }
         }
 
-        // For now, return skipped with improved error message
-        ConformanceResult::Skipped {
-            reason: "Tuple generation validation requires integration with asupersync::raptorq tuple generation API".to_string(),
-        }
-
-        // When implemented with reference implementation:
-        // for k in [4, 8, 16, 32, 64] {
-        //     for esi in 0..k {
-        //         let (d, a, b) = our_systematic_tuple_generation(k, esi);
-        //         let (ref_d, ref_a, ref_b) = reference_systematic_tuple_generation(k, esi);
-        //
-        //         if (d, a, b) != (ref_d, ref_a, ref_b) {
-        //             return ConformanceResult::Fail {
-        //                 reason: format!("Systematic tuple mismatch for K={k}, ESI={esi}"),
-        //                 details: Some(format!(
-        //                     "our: ({d}, {a}, {b}), reference: ({ref_d}, {ref_a}, {ref_b})"
-        //                 )),
-        //             };
-        //         }
-        //     }
-        // }
-        // ConformanceResult::Pass
+        ConformanceResult::Pass
     }
 
     fn dependencies(&self) -> Vec<&str> {
@@ -450,37 +377,7 @@ impl ConformanceTest for LookupTableV2Test {
     }
 
     fn run(&self, _ctx: &ConformanceContext) -> ConformanceResult {
-        // For now, this validates that the fixtures themselves are correct.
-        // TODO: When integrated with asupersync main crate:
-        // let actual_v2 = asupersync::raptorq::rfc6330::V2;
-        // match validate_lookup_table(&actual_v2, &RFC6330_V2_TABLE, "V2") {
-
-        // Validate that we have the correct reference data structure
-        if RFC6330_V2_TABLE.len() != 256 {
-            return ConformanceResult::Fail {
-                reason: "V2 table has incorrect length".to_string(),
-                details: Some(format!(
-                    "Expected 256 entries, got {}",
-                    RFC6330_V2_TABLE.len()
-                )),
-            };
-        }
-
-        // Validate some known RFC values (first few entries)
-        let expected_first_values = [1629829892u32, 282540176, 2794583710];
-        for (i, &expected) in expected_first_values.iter().enumerate() {
-            if RFC6330_V2_TABLE[i] != expected {
-                return ConformanceResult::Fail {
-                    reason: format!("V2[{}] reference value incorrect", i),
-                    details: Some(format!(
-                        "Expected {}, got {}",
-                        expected, RFC6330_V2_TABLE[i]
-                    )),
-                };
-            }
-        }
-
-        ConformanceResult::Pass
+        lookup_table_result(&rfc6330::V2, &RFC6330_V2_TABLE, "V2")
     }
 
     fn tags(&self) -> Vec<&str> {
@@ -513,37 +410,7 @@ impl ConformanceTest for LookupTableV3Test {
     }
 
     fn run(&self, _ctx: &ConformanceContext) -> ConformanceResult {
-        // For now, this validates that the fixtures themselves are correct.
-        // TODO: When integrated with asupersync main crate:
-        // let actual_v3 = asupersync::raptorq::rfc6330::V3;
-        // match validate_lookup_table(&actual_v3, &RFC6330_V3_TABLE, "V3") {
-
-        // Validate that we have the correct reference data structure
-        if RFC6330_V3_TABLE.len() != 256 {
-            return ConformanceResult::Fail {
-                reason: "V3 table has incorrect length".to_string(),
-                details: Some(format!(
-                    "Expected 256 entries, got {}",
-                    RFC6330_V3_TABLE.len()
-                )),
-            };
-        }
-
-        // Validate some known RFC values (first few entries)
-        let expected_first_values = [1191369816u32, 744902811, 2539772235];
-        for (i, &expected) in expected_first_values.iter().enumerate() {
-            if RFC6330_V3_TABLE[i] != expected {
-                return ConformanceResult::Fail {
-                    reason: format!("V3[{}] reference value incorrect", i),
-                    details: Some(format!(
-                        "Expected {}, got {}",
-                        expected, RFC6330_V3_TABLE[i]
-                    )),
-                };
-            }
-        }
-
-        ConformanceResult::Pass
+        lookup_table_result(&rfc6330::V3, &RFC6330_V3_TABLE, "V3")
     }
 
     fn tags(&self) -> Vec<&str> {
@@ -554,6 +421,20 @@ impl ConformanceTest for LookupTableV3Test {
 // ============================================================================
 // Test Registry Helper
 // ============================================================================
+
+fn lookup_table_result(
+    actual: &[u32; 256],
+    expected: &[u32; 256],
+    name: &str,
+) -> ConformanceResult {
+    match validate_lookup_table(actual, expected, name) {
+        Ok(()) => ConformanceResult::Pass,
+        Err(err) => ConformanceResult::Fail {
+            reason: format!("{name} lookup table diverges from RFC 6330 fixture"),
+            details: Some(err),
+        },
+    }
+}
 
 /// Get all example conformance tests for registration
 pub fn get_all_example_tests() -> Vec<Box<dyn ConformanceTest>> {
@@ -642,5 +523,21 @@ mod tests {
         assert_eq!(get_level_tests(RequirementLevel::Must).len(), 6);
         assert!(get_level_tests(RequirementLevel::Should).is_empty());
         assert_eq!(get_p0_tests().len(), 6);
+    }
+
+    #[test]
+    fn rfc6330_registered_tests_pass_against_runtime() {
+        let ctx = ConformanceContext::default();
+
+        for test in get_all_example_tests() {
+            let result = test.run(&ctx);
+            assert_eq!(
+                result,
+                ConformanceResult::Pass,
+                "{} returned {}",
+                test.name(),
+                result.description()
+            );
+        }
     }
 }
