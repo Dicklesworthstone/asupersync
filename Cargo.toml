@@ -56,7 +56,8 @@ wasm-browser-minimal = ["wasm-runtime"]
 # Enable internal test helpers for integration tests.
 # This exposes private APIs like Cx::new() and is NOT for production use.
 test-internals = ["dep:tracing", "dep:tracing-subscriber", "dep:visibility"]
-# OpenTelemetry metrics provider and OTLP wire helpers (optional).
+# OpenTelemetry metrics provider only. The normal dependency graph for this
+# feature stays Tokio-free; OTLP protobuf helpers remain fuzz/test-only.
 metrics = ["dep:opentelemetry", "dep:opentelemetry_sdk"]
 # Enable tracing integration for structured logging and spans.
 # When disabled, tracing macros compile to no-ops for zero overhead.
@@ -114,6 +115,8 @@ cancel-correctness-oracle = []
 # Enable stack trace capture for lab oracle violations.
 lab-stack-traces = ["dep:backtrace", "dep:rustc-demangle"]
 # Enable fuzzing support with arbitrary derive macros and OTLP request helpers.
+# This intentionally enables opentelemetry-proto's tonic-generated messages and
+# is outside the production no-Tokio guarantee.
 fuzz = ["dep:arbitrary", "dep:opentelemetry-proto"]
 
 [lib]
@@ -154,7 +157,9 @@ tracing-subscriber = { version = "0.3", optional = true }
 # Optional OpenTelemetry metrics provider
 opentelemetry = { version = "0.31", default-features = false, features = ["metrics", "trace"], optional = true }
 opentelemetry_sdk = { version = "0.31", default-features = false, features = ["metrics", "trace"], optional = true }
-# OTLP protobuf builders used by fuzz/test-only wire-format helpers.
+# OTLP protobuf builders used by fuzz/test-only wire-format helpers. The
+# gen-tonic-messages feature pulls tonic/tokio transitively and is intentionally
+# not part of the metrics feature.
 opentelemetry-proto = { version = "0.31", default-features = false, features = ["gen-tonic-messages", "trace", "metrics", "logs"], optional = true }
 # Optional Tower trait integration
 tower = { version = "0.5.3", optional = true }
@@ -297,6 +302,8 @@ tempfile = "3.25"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 opentelemetry_sdk = { version = "0.31", default-features = false, features = ["metrics", "testing"] }
+# Dev-only OTLP wire fixtures use tonic-generated protobuf messages; this edge
+# is scoped to tests/fuzzing and not to the default or metrics production graph.
 opentelemetry-proto = { version = "0.31", default-features = false, features = ["gen-tonic-messages", "trace", "metrics", "logs"] }
 lz4_flex = "0.13"
 toml = "1.0"

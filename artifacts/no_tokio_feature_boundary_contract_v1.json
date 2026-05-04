@@ -1,0 +1,78 @@
+{
+  "contract_version": "no-tokio-feature-boundary-contract-v1",
+  "bead_id": "asupersync-rcktok",
+  "signoff_date": "2026-05-04",
+  "description": "Checked no-Tokio boundary for default, metrics, and fuzz feature graphs.",
+  "source_of_truth": {
+    "cargo_manifest": "Cargo.toml",
+    "readme_section": "README.md#what-asupersync-doesnt-do",
+    "agent_instructions": "AGENTS.md#toolchain-rust--cargo",
+    "contract_test": "tests/no_tokio_feature_boundary_contract.rs"
+  },
+  "production_guarantees": [
+    {
+      "profile": "default-production",
+      "feature_args": "",
+      "status": "tokio_free_normal_graph",
+      "proof_command": "rch exec -- cargo tree -e normal -p asupersync -i tokio",
+      "expected_signal": "warning: nothing to print."
+    },
+    {
+      "profile": "metrics-production",
+      "feature_args": "--features metrics",
+      "status": "tokio_free_normal_graph",
+      "proof_command": "rch exec -- cargo tree -e normal -p asupersync --features metrics -i tokio",
+      "expected_signal": "warning: nothing to print."
+    }
+  ],
+  "quarantined_tokio_carrying_profiles": [
+    {
+      "profile": "fuzz",
+      "feature_args": "--features fuzz",
+      "status": "tokio_carrying_quarantined",
+      "proof_command": "rch exec -- cargo tree -e normal -p asupersync --features fuzz -i tokio",
+      "expected_path_fragments": [
+        "opentelemetry-proto",
+        "tonic",
+        "tonic-prost",
+        "tokio"
+      ],
+      "rationale": "The fuzz feature enables OTLP protobuf wire helpers through opentelemetry-proto gen-tonic-messages. This is not part of the default or metrics production graph."
+    }
+  ],
+  "cargo_feature_contract": {
+    "metrics_must_include": [
+      "dep:opentelemetry",
+      "dep:opentelemetry_sdk"
+    ],
+    "metrics_must_not_include": [
+      "dep:opentelemetry-proto"
+    ],
+    "fuzz_must_include": [
+      "dep:arbitrary",
+      "dep:opentelemetry-proto"
+    ],
+    "opentelemetry_proto_features": [
+      "gen-tonic-messages",
+      "trace",
+      "metrics",
+      "logs"
+    ]
+  },
+  "documentation_contract": {
+    "readme_must_state": [
+      "The optional `metrics` feature also has no normal-edge dependency on tokio",
+      "The `fuzz` feature is intentionally outside this guarantee",
+      "artifacts/no_tokio_feature_boundary_contract_v1.json"
+    ],
+    "agents_must_state": [
+      "The optional `metrics` feature also has no normal-edge dependency on tokio",
+      "The `fuzz` feature deliberately enables `opentelemetry-proto`"
+    ],
+    "forbidden_stale_claims": [
+      "metrics feature pulls tokio",
+      "metrics feature still pulls tokio",
+      "no-tokio guarantee does not yet extend to that feature"
+    ]
+  }
+}

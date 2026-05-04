@@ -124,20 +124,36 @@ We only use **Cargo** in this project, NEVER any other package manager.
 1. `asupersync-tokio-compat/` — a deliberate compat-shim crate whose entire purpose is providing tokio-API-shaped wrappers backed by asupersync. By design it depends on tokio (for trait/type signatures) and is opt-in via the `tokio-compat` feature.
 2. `conformance/` — the workspace's RFC-conformance test crate depends on `tokio = { version = "1.0", features = ["time"] }` for sleep/timeout primitives in vendor-comparison test scaffolding only.
 
-Additionally, full workspace graphs reveal tokio in scoped places: `opentelemetry_sdk`'s `testing` feature for `InMemoryMetricExporter`, tokio-util/sqlx reference implementations used by differential tests, and the two satellite workspace members above. Resolver 3 (Edition 2024) keeps the dev-dep/test edges scoped away from default production consumers of `asupersync`. The current known production-feature blocker is br-asupersync-dtbljp: enabling `asupersync`'s `metrics` feature pulls tokio through `opentelemetry-proto`'s `gen-tonic-messages` feature (`tonic`/`tonic-prost` -> `tokio`). That blocker must be fixed before the no-tokio guarantee can be extended to the `metrics` feature.
+Additionally, full workspace graphs reveal tokio in scoped places: `opentelemetry_sdk`'s `testing` feature for `InMemoryMetricExporter`, tokio-util/sqlx reference implementations used by differential tests, and the two satellite workspace members above. Resolver 3 (Edition 2024) keeps the dev-dep/test edges scoped away from default production consumers of `asupersync`. The optional `metrics` feature also has no normal-edge dependency on tokio. The `fuzz` feature deliberately enables `opentelemetry-proto`'s `gen-tonic-messages` feature (`tonic`/`tonic-prost` -> `tokio`) for OTLP wire-format fuzz helpers, so the no-tokio production guarantee explicitly excludes `fuzz`.
 
 **Verification** (default production runtime crate — what ships without optional tokio-carrying features):
 
 ```
-cargo tree -e normal -p asupersync -i tokio
+rch exec -- cargo tree -e normal -p asupersync -i tokio
 ```
 
 This must print `warning: nothing to print.` Any dependency path here is a default production regression and must be triaged.
 
+**Verification** (metrics production runtime crate — optional metrics without OTLP protobuf fuzz helpers):
+
+```
+rch exec -- cargo tree -e normal -p asupersync --features metrics -i tokio
+```
+
+This must also print `warning: nothing to print.` Any dependency path here is a metrics production regression and must be triaged.
+
+**Verification** (fuzz quarantine proof, expected to show tokio through OTLP generated messages):
+
+```
+rch exec -- cargo tree -e normal -p asupersync --features fuzz -i tokio
+```
+
+This is expected to show `opentelemetry-proto` -> `tonic` / `tonic-prost` -> `tokio`. That path is scoped to fuzz/test OTLP wire helpers and is not part of the default or metrics production guarantee.
+
 **Verification** (workspace audit, not a production-consumer proof):
 
 ```
-cargo tree -e normal --workspace -i tokio
+rch exec -- cargo tree -e normal --workspace -i tokio
 ```
 
 This intentionally includes the satellite crates and any workspace member that enables optional/test features. Use it to audit scoped edges, but do not treat its output as the default production dependency graph.
@@ -145,10 +161,10 @@ This intentionally includes the satellite crates and any workspace member that e
 **Verification** (full graph including dev-deps):
 
 ```
-cargo tree -e features --workspace --invert tokio
+rch exec -- cargo tree -e features --workspace --invert tokio
 ```
 
-This is expected to additionally surface `opentelemetry_sdk` (via the dev-dep `testing` feature -> `rt-tokio` chain), `tokio-stream`, tokio-util/sqlx differential-test edges, and the br-asupersync-dtbljp `metrics` feature blocker until that feature is made Tokio-free.
+This is expected to additionally surface `opentelemetry_sdk` (via the dev-dep `testing` feature -> `rt-tokio` chain), `tokio-stream`, tokio-util/sqlx differential-test edges, satellite crate edges, and the fuzz-only `opentelemetry-proto` generated-message edge.
 
 **Pattern**: All async functions take `&Cx` as first parameter. The `Cx` flows down through structured concurrency scopes.
 
