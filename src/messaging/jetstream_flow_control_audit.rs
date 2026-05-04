@@ -2,14 +2,16 @@
 //!
 //! AUDIT FINDING: FOUNDATION - per-context publish backpressure is now explicit,
 //! and the conservative refusal-only policy now has deterministic zero-wait
-//! tail evidence, but the operator surface remains fail-closed until shared
-//! multi-publisher evidence exists.
+//! tail evidence, and the current loss-system behavior now has deterministic
+//! cohort evidence too, but the operator surface remains fail-closed until any
+//! future nonzero-wait policy proves fairness.
 //!
 //! When client publishes faster than server can ack, the implementation:
 //! - Current foundation: bound the per-context outstanding publish seam and
 //!   refuse immediately when the slot is occupied or `Cx::pressure()` is in
 //!   the emergency band
-//! - Remaining gap: no shared multi-publisher publish-wait evidence yet
+//! - Remaining gap: no bounded-waiter fairness evidence yet for any future
+//!   nonzero-wait policy
 //!
 //! Per JetStream client backpressure best practices, high publish rate should
 //! trigger explicit pressure-aware refusal rather than relying solely on TCP flow control.
@@ -17,7 +19,8 @@
 #![cfg(test)]
 
 use crate::messaging::jetstream::{
-    fuzz_probe_publish_backpressure, fuzz_probe_publish_backpressure_tail_evidence,
+    fuzz_probe_publish_backpressure, fuzz_probe_publish_backpressure_cohort_tail_evidence,
+    fuzz_probe_publish_backpressure_tail_evidence,
 };
 
 fn init_test(name: &str) {
@@ -117,12 +120,12 @@ fn audit_current_tcp_flow_control_behavior() {
     // ✅ Emergency `Cx::pressure()` state can refuse a new publish before wire I/O
     //
     // Remaining issues:
-    // ❌ Shared multi-publisher wait-tail evidence is still absent
     // ❌ Nonzero-wait bounded waiter fairness is still unproven
     // ❌ Zero-waiter refusal is still the only foundation policy today
+    // ❌ Cohort evidence only covers the current loss-system controller
     //
-    // Recommendation: keep fail-closed signoff until shared multi-publisher
-    // evidence lands.
+    // Recommendation: keep fail-closed signoff until any future nonzero-wait
+    // controller proves fairness without hidden memory growth.
 
     test_complete("audit_current_tcp_flow_control_behavior");
 }
@@ -162,7 +165,6 @@ fn audit_reference_backpressure_pattern() {
     // - Zero hidden waiters in the current foundation slice
     //
     // Still missing for closeout:
-    // - shared multi-publisher waiter evidence
     // - bounded waiter fairness beyond zero-wait refusal
     // - a shared-controller surface that can compare zero-wait refusal against
     //   nonzero-wait alternatives without hiding memory growth
@@ -187,4 +189,26 @@ fn audit_publish_wait_tail_zero_for_refusal_only_policy() {
     assert_eq!(snapshot.publish_wait_latency_p999_micros, 0);
 
     test_complete("audit_publish_wait_tail_zero_for_refusal_only_policy");
+}
+
+/// AUDIT: Shared multi-publisher cohort evidence for the current refusal-only
+/// loss-system controller.
+#[test]
+fn audit_publish_wait_tail_zero_for_multi_publisher_loss_system() {
+    init_test("audit_publish_wait_tail_zero_for_multi_publisher_loss_system");
+
+    let snapshot = fuzz_probe_publish_backpressure_cohort_tail_evidence(32, 16);
+
+    assert_eq!(snapshot.publisher_count, 32);
+    assert_eq!(snapshot.occupied_publisher_count, 16);
+    assert_eq!(snapshot.accepted_count, 16);
+    assert_eq!(snapshot.refused_count, 16);
+    assert!(snapshot.refusal_only_policy);
+    assert!(snapshot.multi_publisher_tail_evidence_present);
+    assert_eq!(snapshot.queueing_model, "mg11_loss_system");
+    assert_eq!(snapshot.publish_wait_latency_p95_micros, 0);
+    assert_eq!(snapshot.publish_wait_latency_p99_micros, 0);
+    assert_eq!(snapshot.publish_wait_latency_p999_micros, 0);
+
+    test_complete("audit_publish_wait_tail_zero_for_multi_publisher_loss_system");
 }

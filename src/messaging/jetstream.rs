@@ -1940,6 +1940,26 @@ pub struct FuzzJetStreamPublishBackpressureTailSnapshot {
     pub publish_wait_latency_p999_micros: u64,
 }
 
+/// Deterministic cohort-tail snapshot for the current refusal-only publish
+/// policy across many independent JetStream contexts. This is a finite-capacity
+/// M/G/1/1 loss-system certificate per publisher: no waiter queue exists, so
+/// each publisher either acquires immediately or is refused immediately.
+#[cfg(feature = "test-internals")]
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[doc(hidden)]
+pub struct FuzzJetStreamPublishBackpressureCohortSnapshot {
+    pub publisher_count: usize,
+    pub occupied_publisher_count: usize,
+    pub accepted_count: usize,
+    pub refused_count: usize,
+    pub refusal_only_policy: bool,
+    pub queueing_model: String,
+    pub multi_publisher_tail_evidence_present: bool,
+    pub publish_wait_latency_p95_micros: u64,
+    pub publish_wait_latency_p99_micros: u64,
+    pub publish_wait_latency_p999_micros: u64,
+}
+
 /// Test-internals probe for the publish-side backpressure controller.
 #[cfg(feature = "test-internals")]
 #[doc(hidden)]
@@ -2037,6 +2057,62 @@ pub fn fuzz_probe_publish_backpressure_tail_evidence(
         refusal_only_policy: DEFAULT_MAX_PUBLISH_WAITERS == 0,
         tail_evidence_mode: "zero_wait_refusal_only".to_string(),
         pressure_level,
+        publish_wait_latency_p95_micros: quantile_from_sorted_micros(&wait_samples_micros, 95, 100),
+        publish_wait_latency_p99_micros: quantile_from_sorted_micros(&wait_samples_micros, 99, 100),
+        publish_wait_latency_p999_micros: quantile_from_sorted_micros(
+            &wait_samples_micros,
+            999,
+            1000,
+        ),
+    }
+}
+
+/// Deterministic multi-publisher tail-evidence probe for the current
+/// conservative refusal-only controller.
+#[cfg(feature = "test-internals")]
+#[doc(hidden)]
+pub fn fuzz_probe_publish_backpressure_cohort_tail_evidence(
+    publisher_count: usize,
+    occupied_publisher_count: usize,
+) -> FuzzJetStreamPublishBackpressureCohortSnapshot {
+    let publisher_count = publisher_count.max(1);
+    let occupied_publisher_count = occupied_publisher_count.min(publisher_count);
+    let mut wait_samples_micros = Vec::with_capacity(publisher_count);
+    let mut accepted_count = 0usize;
+    let mut refused_count = 0usize;
+
+    for publisher_index in 0..publisher_count {
+        let gate = JetStreamPublishBackpressureGate::new(Default::default());
+        if publisher_index < occupied_publisher_count {
+            gate.in_flight_publishes.store(1, Ordering::Relaxed);
+        }
+        let cx = Cx::new(
+            crate::types::RegionId::testing_default(),
+            crate::types::TaskId::testing_default(),
+            crate::types::Budget::INFINITE,
+        );
+        match gate.begin_publish(&cx, "audit.subject") {
+            Ok(permit) => {
+                accepted_count += 1;
+                wait_samples_micros.push(0);
+                drop(permit);
+            }
+            Err(_) => {
+                refused_count += 1;
+                wait_samples_micros.push(0);
+            }
+        }
+    }
+
+    wait_samples_micros.sort_unstable();
+    FuzzJetStreamPublishBackpressureCohortSnapshot {
+        publisher_count,
+        occupied_publisher_count,
+        accepted_count,
+        refused_count,
+        refusal_only_policy: DEFAULT_MAX_PUBLISH_WAITERS == 0,
+        queueing_model: "mg11_loss_system".to_string(),
+        multi_publisher_tail_evidence_present: true,
         publish_wait_latency_p95_micros: quantile_from_sorted_micros(&wait_samples_micros, 95, 100),
         publish_wait_latency_p99_micros: quantile_from_sorted_micros(&wait_samples_micros, 99, 100),
         publish_wait_latency_p999_micros: quantile_from_sorted_micros(

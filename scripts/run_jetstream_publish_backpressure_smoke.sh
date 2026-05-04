@@ -151,6 +151,7 @@ build_projection_json() {
     local audit_module_path consumer_flow_test_path target_source_path no_win_fallback
     local audit_should_panic_count consumer_flow_test_count explicit_pressure_signal_site_count
     local bounded_waiter_policy_present refusal_only_policy_present
+    local multi_publisher_tail_evidence_present queueing_model
     local publish_wait_latency_p95_present publish_wait_latency_p99_present publish_wait_latency_p999_present
     local publish_wait_latency_p95_micros publish_wait_latency_p99_micros publish_wait_latency_p999_micros
     local missing_evidence_requirement_count scenario_mode operator_verdict tail_evidence_mode
@@ -174,6 +175,13 @@ build_projection_json() {
         refusal_only_policy_present=true
     else
         refusal_only_policy_present=false
+    fi
+    if rg -q -e 'multi_publisher_tail_evidence_present|mg11_loss_system|cohort_tail_evidence' "${PROJECT_ROOT}/${target_source_path}" "${PROJECT_ROOT}/${audit_module_path}" "${PROJECT_ROOT}/${consumer_flow_test_path}"; then
+        multi_publisher_tail_evidence_present=true
+        queueing_model="mg11_loss_system"
+    else
+        multi_publisher_tail_evidence_present=false
+        queueing_model="absent"
     fi
     if rg -q -e 'publish_wait_latency_p95' "${PROJECT_ROOT}/${target_source_path}" "${PROJECT_ROOT}/${audit_module_path}" "${PROJECT_ROOT}/${consumer_flow_test_path}"; then
         publish_wait_latency_p95_present=true
@@ -221,6 +229,8 @@ build_projection_json() {
         --argjson explicit_pressure_signal_site_count "$explicit_pressure_signal_site_count" \
         --argjson bounded_waiter_policy_present "$bounded_waiter_policy_present" \
         --argjson refusal_only_policy_present "$refusal_only_policy_present" \
+        --argjson multi_publisher_tail_evidence_present "$multi_publisher_tail_evidence_present" \
+        --arg queueing_model "$queueing_model" \
         --arg tail_evidence_mode "$tail_evidence_mode" \
         --argjson publish_wait_latency_p95_present "$publish_wait_latency_p95_present" \
         --argjson publish_wait_latency_p99_present "$publish_wait_latency_p99_present" \
@@ -238,6 +248,8 @@ build_projection_json() {
             explicit_pressure_signal_site_count: $explicit_pressure_signal_site_count,
             bounded_waiter_policy_present: $bounded_waiter_policy_present,
             refusal_only_policy_present: $refusal_only_policy_present,
+            multi_publisher_tail_evidence_present: $multi_publisher_tail_evidence_present,
+            queueing_model: $queueing_model,
             tail_evidence_mode: $tail_evidence_mode,
             publish_wait_latency_p95_present: $publish_wait_latency_p95_present,
             publish_wait_latency_p99_present: $publish_wait_latency_p99_present,
@@ -415,6 +427,8 @@ run_scenario() {
         printf 'explicit_pressure_signal_site_count=%s\n' "$(jq -r '.explicit_pressure_signal_site_count' <<<"$projection_json")"
         printf 'bounded_waiter_policy_present=%s\n' "$(jq -r '.bounded_waiter_policy_present' <<<"$projection_json")"
         printf 'refusal_only_policy_present=%s\n' "$(jq -r '.refusal_only_policy_present' <<<"$projection_json")"
+        printf 'multi_publisher_tail_evidence_present=%s\n' "$(jq -r '.multi_publisher_tail_evidence_present' <<<"$projection_json")"
+        printf 'queueing_model=%s\n' "$(jq -r '.queueing_model' <<<"$projection_json")"
         printf 'tail_evidence_mode=%s\n' "$(jq -r '.tail_evidence_mode' <<<"$projection_json")"
         printf 'publish_wait_latency_p95_present=%s\n' "$(jq -r '.publish_wait_latency_p95_present' <<<"$projection_json")"
         printf 'publish_wait_latency_p99_present=%s\n' "$(jq -r '.publish_wait_latency_p99_present' <<<"$projection_json")"

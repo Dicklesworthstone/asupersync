@@ -12,7 +12,8 @@
 use asupersync::messaging::jetstream::{
     Consumer, fuzz_consumer_decrement_pending, fuzz_consumer_increment_pending,
     fuzz_consumer_max_ack_pending, fuzz_create_test_consumer, fuzz_create_test_js_message,
-    fuzz_probe_publish_backpressure, fuzz_probe_publish_backpressure_tail_evidence,
+    fuzz_probe_publish_backpressure, fuzz_probe_publish_backpressure_cohort_tail_evidence,
+    fuzz_probe_publish_backpressure_tail_evidence,
 };
 
 // Mock Consumer for testing flow control without JetStream server
@@ -266,6 +267,28 @@ fn jetstream_publish_backpressure_zero_wait_tail_under_emergency_pressure() {
 }
 
 #[test]
+fn jetstream_publish_backpressure_multi_publisher_zero_wait_tail_evidence() {
+    println!("\n=== JETSTREAM PUBLISH BACKPRESSURE: MULTI-PUBLISHER ZERO-WAIT TAIL ===");
+
+    let snapshot = fuzz_probe_publish_backpressure_cohort_tail_evidence(32, 16);
+
+    assert_eq!(snapshot.publisher_count, 32);
+    assert_eq!(snapshot.occupied_publisher_count, 16);
+    assert_eq!(snapshot.accepted_count, 16);
+    assert_eq!(snapshot.refused_count, 16);
+    assert!(snapshot.refusal_only_policy);
+    assert!(snapshot.multi_publisher_tail_evidence_present);
+    assert_eq!(snapshot.queueing_model, "mg11_loss_system");
+    assert_eq!(snapshot.publish_wait_latency_p95_micros, 0);
+    assert_eq!(snapshot.publish_wait_latency_p99_micros, 0);
+    assert_eq!(snapshot.publish_wait_latency_p999_micros, 0);
+
+    println!(
+        "✓ 32-publisher cohort preserves zero publish-wait tails under the loss-system policy"
+    );
+}
+
+#[test]
 fn jetstream_flow_control_compliance_summary() {
     println!("\n=== JETSTREAM FLOW CONTROL COMPLIANCE SUMMARY ===");
     println!("✓ FIXED: Added client-side max_ack_pending enforcement");
@@ -276,14 +299,15 @@ fn jetstream_flow_control_compliance_summary() {
     println!("✓ PUBLISH REFUSAL: Per-context outstanding publish seam is explicitly bounded");
     println!("✓ PRESSURE GATE: Emergency pressure can refuse publish before wire I/O");
     println!("✓ TAIL EVIDENCE: Refusal-only policy proves p95/p99/p999 wait tails at 0us");
+    println!("✓ COHORT EVIDENCE: 32-publisher loss-system cohort keeps publish-wait tails at 0us");
     println!();
     println!("FOUNDATION ADDED: Explicit JetStream publish refusal gate");
     println!("  Before: Publish path relied on TCP backpressure only");
     println!(
-        "  After:  Per-context refusal plus emergency pressure gate with zero-wait tail evidence"
+        "  After:  Per-context refusal plus emergency pressure gate with single- and multi-publisher zero-wait tail evidence"
     );
     println!();
     println!(
-        "STATUS: CONSUMER FLOW CONTROL IS SECURE; PUBLISH PATH STILL FAIL-CLOSES FOR SHARED MULTI-PUBLISHER EVIDENCE ✅"
+        "STATUS: CONSUMER FLOW CONTROL IS SECURE; PUBLISH PATH STILL FAIL-CLOSES FOR ANY FUTURE NONZERO-WAIT POLICY ✅"
     );
 }
