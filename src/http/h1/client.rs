@@ -28,6 +28,9 @@ const DEFAULT_MAX_TRAILERS_SIZE: usize = 64 * 1024;
 /// Maximum number of headers.
 const MAX_HEADERS: usize = 128;
 
+/// Maximum informational responses accepted before a final response is required.
+const MAX_INFORMATIONAL_RESPONSES: usize = 8;
+
 /// HTTP/1.1 client codec that encodes *requests* and decodes *responses*.
 ///
 /// This is the mirror of [`Http1Codec`](super::Http1Codec) which decodes
@@ -700,6 +703,7 @@ impl Http1Client {
         // Read response head (status line + headers).
         let mut read_buf = BytesMut::with_capacity(8192);
         let mut scratch = [0u8; 8192];
+        let mut informational_responses = 0usize;
         loop {
             if let Some(end) = find_headers_end(read_buf.as_ref()) {
                 if end > DEFAULT_MAX_HEADERS_SIZE {
@@ -730,6 +734,13 @@ impl Http1Client {
                 // terminal. `100 Continue` is the signal that allows a deferred
                 // request body to be sent.
                 if (100..=199).contains(&status) && status != 101 {
+                    informational_responses += 1;
+                    if informational_responses > MAX_INFORMATIONAL_RESPONSES {
+                        return Err(HttpError::TooManyInformationalResponses {
+                            actual: informational_responses,
+                            limit: MAX_INFORMATIONAL_RESPONSES,
+                        });
+                    }
                     if status == 100 && !request_body_sent {
                         io.write_all(body_bytes).await?;
                         io.flush().await?;
@@ -1584,6 +1595,90 @@ mod tests {
         let resp = block_on(Http1Client::request(io, req)).expect("response");
         assert_eq!(resp.status, 200);
         assert_eq!(resp.body, b"ok");
+    }
+
+    #[test]
+    fn request_streaming_handles_bounded_multiple_informational_responses() {
+        let response_bytes = concat!(
+            "HTTP/1.1 100 Continue\r\n\r\n",
+            "HTTP/1.1 103 Early Hints\r\nLink: </a.css>; rel=preload\r\n\r\n",
+            "HTTP/1.1 102 Processing\r\n\r\n",
+            "HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok"
+        )
+        .as_bytes();
+        let io = ExpectContinueIo::new(response_bytes);
+
+        let req = Request {
+            method: Method::Post,
+            uri: "/upload".to_string(),
+            version: Version::Http11,
+            headers: vec![
+                ("Host".to_string(), "example.com".to_string()),
+                ("Expect".to_string(), "100-continue".to_string()),
+            ],
+            body: b"hello".to_vec(),
+            trailers: Vec::new(),
+            peer_addr: None,
+        };
+
+        let resp = block_on(Http1Client::request_with_io(io, req)).expect("response");
+        assert_eq!(resp.0.status, 200);
+        assert_eq!(resp.0.body, b"ok");
+
+        let writes = resp.1.writes;
+        assert!(
+            writes.len() >= 2,
+            "100 Continue should still release the deferred request body"
+        );
+        assert_eq!(writes[1..].concat(), b"hello");
+    }
+
+    #[test]
+    fn request_rejects_excessive_informational_responses() {
+        let mut response_bytes = Vec::new();
+        for _ in 0..=MAX_INFORMATIONAL_RESPONSES {
+            response_bytes.extend_from_slice(b"HTTP/1.1 103 Early Hints\r\n\r\n");
+        }
+        response_bytes.extend_from_slice(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok");
+        let io = TestIo::new(&response_bytes);
+
+        let req = Request {
+            method: Method::Get,
+            uri: "/".to_string(),
+            version: Version::Http11,
+            headers: vec![("Host".to_string(), "example.com".to_string())],
+            body: Vec::new(),
+            trailers: Vec::new(),
+            peer_addr: None,
+        };
+
+        let err = block_on(Http1Client::request(io, req)).expect_err("excessive 1xx must fail");
+        match err {
+            HttpError::TooManyInformationalResponses { actual, limit } => {
+                assert_eq!(actual, MAX_INFORMATIONAL_RESPONSES + 1);
+                assert_eq!(limit, MAX_INFORMATIONAL_RESPONSES);
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn request_rejects_malformed_interim_response_headers() {
+        let response_bytes = b"HTTP/1.1 103 Early Hints\r\nBadHeader\r\n\r\n";
+        let io = TestIo::new(response_bytes);
+
+        let req = Request {
+            method: Method::Get,
+            uri: "/".to_string(),
+            version: Version::Http11,
+            headers: vec![("Host".to_string(), "example.com".to_string())],
+            body: Vec::new(),
+            trailers: Vec::new(),
+            peer_addr: None,
+        };
+
+        let err = block_on(Http1Client::request(io, req)).expect_err("bad interim header");
+        assert!(matches!(err, HttpError::BadHeader));
     }
 
     #[test]

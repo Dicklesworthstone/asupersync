@@ -52,6 +52,13 @@ pub enum HttpError {
     HeadersTooLarge,
     /// Too many headers.
     TooManyHeaders,
+    /// Too many informational responses were received before a final response.
+    TooManyInformationalResponses {
+        /// Number of informational responses seen.
+        actual: usize,
+        /// Maximum allowed informational responses.
+        limit: usize,
+    },
     /// Request line too long.
     RequestLineTooLong,
     /// Incomplete chunked encoding.
@@ -96,6 +103,12 @@ impl fmt::Display for HttpError {
             Self::InvalidHeaderValue => write!(f, "invalid header value"),
             Self::HeadersTooLarge => write!(f, "header block too large"),
             Self::TooManyHeaders => write!(f, "too many headers"),
+            Self::TooManyInformationalResponses { actual, limit } => {
+                write!(
+                    f,
+                    "received too many informational responses before a final response ({actual} > {limit})"
+                )
+            }
             Self::RequestLineTooLong => write!(f, "request line too long"),
             Self::BadChunkedEncoding => write!(f, "malformed chunked encoding"),
             Self::BodyTooLarge => write!(f, "body exceeds size limit"),
