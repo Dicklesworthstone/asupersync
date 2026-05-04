@@ -198,7 +198,6 @@ impl MockNegativeWindowConnection {
 
         if stream_id == 0 {
             // Connection-level window update
-            let old_window = self.connection_window;
             self.connection_window += increment as i64;
 
             // Check for overflow
@@ -208,6 +207,7 @@ impl MockNegativeWindowConnection {
             }
         } else {
             // Stream-level window update
+            let operation_id = self.operation_history.len() as u32;
             let stream = self.get_or_create_stream(stream_id);
             let old_window = stream.window;
             stream.window += increment as i64;
@@ -228,7 +228,7 @@ impl MockNegativeWindowConnection {
 
             // Log the change
             stream.window_history.push(WindowChange {
-                operation_id: self.operation_history.len() as u32,
+                operation_id,
                 old_window,
                 new_window: stream.window,
                 reason: WindowChangeReason::WindowUpdate { increment },
@@ -250,7 +250,8 @@ impl MockNegativeWindowConnection {
             return Err(H2Error::FlowControlError);
         }
 
-        // Check stream-level window
+        // Check stream-level window and consume
+        let operation_id = self.operation_history.len() as u32;
         let stream = self.get_or_create_stream(stream_id);
 
         if stream.window < data_length as i64 {
@@ -259,9 +260,6 @@ impl MockNegativeWindowConnection {
             self.stats.blocked_transmissions += 1;
             return Err(H2Error::FlowControlError);
         }
-
-        // Consume windows
-        self.connection_window -= data_length as i64;
 
         let old_window = stream.window;
         stream.window -= data_length as i64;
@@ -274,38 +272,49 @@ impl MockNegativeWindowConnection {
 
         // Log the change
         stream.window_history.push(WindowChange {
-            operation_id: self.operation_history.len() as u32,
+            operation_id,
             old_window,
             new_window: stream.window,
             reason: WindowChangeReason::DataSent { bytes: data_length },
         });
+
+        // Consume connection window after stream operations
+        self.connection_window -= data_length as i64;
 
         Ok(())
     }
 
     /// Create or get existing stream
     fn get_or_create_stream(&mut self, stream_id: u32) -> &mut StreamFlowControl {
-        self.streams.entry(stream_id).or_insert_with(|| {
+        if !self.streams.contains_key(&stream_id) {
+            // Stream doesn't exist, create it
+            let operation_id = self.operation_history.len() as u32;
+            let initial_window_size = self.initial_window_size;
+
             self.log_operation(Operation::StreamCreated { stream_id });
 
-            StreamFlowControl {
+            let stream = StreamFlowControl {
                 stream_id,
-                window: self.initial_window_size as i64,
+                window: initial_window_size as i64,
                 bytes_sent: 0,
                 window_updates_received: 0,
                 blocked: false,
                 state: StreamState::Open,
                 window_history: vec![WindowChange {
-                    operation_id: self.operation_history.len() as u32,
+                    operation_id: operation_id + 1, // +1 because we just added the log operation
                     old_window: 0,
-                    new_window: self.initial_window_size as i64,
+                    new_window: initial_window_size as i64,
                     reason: WindowChangeReason::InitialWindowSizeChange {
                         old_size: 0,
-                        new_size: self.initial_window_size
+                        new_size: initial_window_size
                     },
                 }],
-            }
-        })
+            };
+
+            self.streams.insert(stream_id, stream);
+        }
+
+        self.streams.get_mut(&stream_id).unwrap()
     }
 
     /// Log operation for debugging/analysis
