@@ -923,8 +923,11 @@ mod tests {
 
     const EXACT_CLIENT_HALF_CLOSE_RCH_COMMAND: &str = "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_asupersync_dl5tdd_half_close cargo test -p asupersync --lib conformance_client_streaming_half_close -- --nocapture";
     const EXACT_SERVER_STREAM_CANCEL_TIMING_RCH_COMMAND: &str = "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_asupersync_gtqoxm_cancel cargo test -p asupersync --lib conformance_server_streaming_cancel_timing -- --nocapture";
+    const EXACT_BIDI_CANCELLATION_RCH_COMMAND: &str = "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_asupersync_ftbe7b_bidi cargo test -p asupersync --lib conformance_bidirectional_cancellation -- --nocapture";
 
-    fn collect_streaming_request_events(stream: &mut StreamingRequest<u32>) -> Vec<String> {
+    fn collect_streaming_request_events<T: std::fmt::Display + Send + std::marker::Unpin>(
+        stream: &mut StreamingRequest<T>,
+    ) -> Vec<String> {
         let waker = noop_waker();
         let mut cx = Context::from_waker(&waker);
         let mut pinned = Pin::new(stream);
@@ -977,7 +980,9 @@ mod tests {
         );
     }
 
-    fn collect_response_stream_events(stream: &mut ResponseStream<u32>) -> Vec<String> {
+    fn collect_response_stream_events<T: std::fmt::Display + Send + std::marker::Unpin>(
+        stream: &mut ResponseStream<T>,
+    ) -> Vec<String> {
         let waker = noop_waker();
         let mut cx = Context::from_waker(&waker);
         let mut pinned = Pin::new(stream);
@@ -1062,6 +1067,88 @@ mod tests {
             trailer_presence,
             EXACT_SERVER_STREAM_CANCEL_TIMING_RCH_COMMAND,
             final_verdict,
+        );
+    }
+
+    fn summarize_events(observed_events: &[String]) -> String {
+        if observed_events.len() > 12 {
+            let mut summarized = observed_events.iter().take(5).cloned().collect::<Vec<_>>();
+            summarized.push("...".to_string());
+            summarized.extend(observed_events.iter().rev().take(2).rev().cloned());
+            summarized.join(">")
+        } else {
+            observed_events.join(">")
+        }
+    }
+
+    fn terminal_status_from_events(observed_events: &[String]) -> String {
+        observed_events
+            .iter()
+            .find_map(|event| {
+                event
+                    .strip_prefix("err:")
+                    .and_then(|rest| rest.split_once(':'))
+                    .map(|(code, _)| code.to_string())
+            })
+            .unwrap_or_else(|| "EOF".to_string())
+    }
+
+    fn log_bidirectional_cancellation_case(
+        scenario_id: &str,
+        initiator: &str,
+        client_events: &[String],
+        server_events: &[String],
+        pending_send_state: &str,
+        pending_recv_state: &str,
+        cancellation_tick: usize,
+    ) {
+        let client_status = terminal_status_from_events(client_events);
+        let server_status = terminal_status_from_events(server_events);
+        let client_message_count = client_events
+            .iter()
+            .filter(|event| event.starts_with("ok:"))
+            .count();
+        let server_message_count = server_events
+            .iter()
+            .filter(|event| event.starts_with("ok:"))
+            .count();
+        let drain_count = client_message_count + server_message_count;
+        let verdict = if client_status == "Cancelled" && server_status == "Cancelled" {
+            "pass"
+        } else {
+            "fail"
+        };
+        println!(
+            "GRPC_BIDI_CANCEL \
+             stream_id={} \
+             initiator={} \
+             client_message_count_before_cancel={} \
+             server_message_count_before_cancel={} \
+             pending_send_state={} \
+             pending_recv_state={} \
+             cancellation_tick={} \
+             drain_count={} \
+             client_status={} \
+             server_status={} \
+             client_drain_result={} \
+             server_drain_result={} \
+             exact_rch_command=\"{}\" \
+             artifact_paths=none \
+             final_both_ends_cancelled_verdict={}",
+            scenario_id,
+            initiator,
+            client_message_count,
+            server_message_count,
+            pending_send_state,
+            pending_recv_state,
+            cancellation_tick,
+            drain_count,
+            client_status,
+            server_status,
+            summarize_events(client_events),
+            summarize_events(server_events),
+            EXACT_BIDI_CANCELLATION_RCH_COMMAND,
+            verdict,
         );
     }
 
@@ -2966,6 +3053,353 @@ mod tests {
         }
 
         crate::test_complete!("differential_bidirectional_cancellation_semantics_vs_grpc_go");
+    }
+
+    #[test]
+    fn conformance_bidirectional_cancellation_client_initiated_after_buffered_messages() {
+        init_test(
+            "conformance_bidirectional_cancellation_client_initiated_after_buffered_messages",
+        );
+
+        let mut client_request_stream = StreamingRequest::<&'static str>::open();
+        let mut server_response_stream = ResponseStream::<&'static str>::open();
+        client_request_stream
+            .push("client-1")
+            .expect("first client request should buffer");
+        client_request_stream
+            .push("client-2")
+            .expect("second client request should buffer");
+        server_response_stream
+            .push(Ok("server-1"))
+            .expect("first server response should buffer");
+        server_response_stream
+            .push(Ok("server-2"))
+            .expect("second server response should buffer");
+
+        client_request_stream
+            .cancel_with_error(Status::cancelled("client initiated bidi cancellation"));
+        server_response_stream.cancel_with_error(Status::cancelled(
+            "server observed client bidi cancellation",
+        ));
+
+        let client_events = collect_streaming_request_events(&mut client_request_stream);
+        let server_events = collect_response_stream_events(&mut server_response_stream);
+        assert_eq!(
+            client_events,
+            vec![
+                "ok:client-1".to_string(),
+                "ok:client-2".to_string(),
+                "err:Cancelled:client initiated bidi cancellation".to_string(),
+            ],
+            "client side should drain buffered requests before terminal CANCELLED"
+        );
+        assert_eq!(
+            server_events,
+            vec![
+                "ok:server-1".to_string(),
+                "ok:server-2".to_string(),
+                "err:Cancelled:server observed client bidi cancellation".to_string(),
+            ],
+            "server side should drain buffered responses before terminal CANCELLED"
+        );
+        assert!(
+            client_request_stream.push("post-cancel").is_err(),
+            "client request side must reject new sends after cancellation"
+        );
+        assert!(
+            server_response_stream.push(Ok("post-cancel")).is_err(),
+            "server response side must reject new sends after cancellation"
+        );
+
+        crate::test_complete!(
+            "conformance_bidirectional_cancellation_client_initiated_after_buffered_messages"
+        );
+    }
+
+    #[test]
+    fn conformance_bidirectional_cancellation_server_initiated_before_first_message() {
+        init_test("conformance_bidirectional_cancellation_server_initiated_before_first_message");
+
+        let mut client_request_stream = StreamingRequest::<&'static str>::open();
+        let mut server_response_stream = ResponseStream::<&'static str>::open();
+        client_request_stream.cancel_with_error(Status::cancelled(
+            "server propagated cancellation before first client message",
+        ));
+        server_response_stream.cancel_with_error(Status::cancelled(
+            "server initiated cancellation before first response",
+        ));
+
+        let client_events = collect_streaming_request_events(&mut client_request_stream);
+        let server_events = collect_response_stream_events(&mut server_response_stream);
+        assert_eq!(
+            client_events,
+            vec![
+                "err:Cancelled:server propagated cancellation before first client message"
+                    .to_string()
+            ],
+            "client side should fail closed before any messages are sent"
+        );
+        assert_eq!(
+            server_events,
+            vec!["err:Cancelled:server initiated cancellation before first response".to_string()],
+            "server side should fail closed before any responses are sent"
+        );
+
+        crate::test_complete!(
+            "conformance_bidirectional_cancellation_server_initiated_before_first_message"
+        );
+    }
+
+    #[test]
+    fn conformance_bidirectional_cancellation_concurrent_cancel_while_recv_pending() {
+        init_test("conformance_bidirectional_cancellation_concurrent_cancel_while_recv_pending");
+
+        let mut client_request_stream = StreamingRequest::<&'static str>::open();
+        let mut server_response_stream = ResponseStream::<&'static str>::open();
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+
+        assert!(
+            matches!(
+                Pin::new(&mut client_request_stream).poll_next(&mut cx),
+                Poll::Pending
+            ),
+            "empty open client request stream should be pending before cancellation"
+        );
+        assert!(
+            matches!(
+                Pin::new(&mut server_response_stream).poll_next(&mut cx),
+                Poll::Pending
+            ),
+            "empty open server response stream should be pending before cancellation"
+        );
+
+        client_request_stream.cancel_with_error(Status::cancelled(
+            "client cancelled while both sides were recv-pending",
+        ));
+        server_response_stream.cancel_with_error(Status::cancelled(
+            "server cancelled while both sides were recv-pending",
+        ));
+
+        let client_events = collect_streaming_request_events(&mut client_request_stream);
+        let server_events = collect_response_stream_events(&mut server_response_stream);
+        assert_eq!(
+            client_events,
+            vec!["err:Cancelled:client cancelled while both sides were recv-pending".to_string()],
+            "recv-pending client side should transition directly to CANCELLED"
+        );
+        assert_eq!(
+            server_events,
+            vec!["err:Cancelled:server cancelled while both sides were recv-pending".to_string()],
+            "recv-pending server side should transition directly to CANCELLED"
+        );
+
+        crate::test_complete!(
+            "conformance_bidirectional_cancellation_concurrent_cancel_while_recv_pending"
+        );
+    }
+
+    #[test]
+    fn conformance_bidirectional_cancellation_while_send_blocked_drains_then_cancelled() {
+        init_test(
+            "conformance_bidirectional_cancellation_while_send_blocked_drains_then_cancelled",
+        );
+
+        let mut client_request_stream = StreamingRequest::<u32>::open();
+        let mut server_response_stream = ResponseStream::<u32>::open();
+        for value in 0..MAX_STREAM_BUFFERED as u32 {
+            client_request_stream
+                .push(value)
+                .expect("client side should fill request buffer");
+            server_response_stream
+                .push(Ok(value))
+                .expect("server side should fill response buffer");
+        }
+
+        let client_overflow = client_request_stream
+            .push(MAX_STREAM_BUFFERED as u32)
+            .expect_err("client overflow should fail while send is effectively blocked");
+        let server_overflow = server_response_stream
+            .push(Ok(MAX_STREAM_BUFFERED as u32))
+            .expect_err("server overflow should fail while send is effectively blocked");
+        assert_eq!(
+            client_overflow.code(),
+            Code::ResourceExhausted,
+            "client blocked-send proxy should report ResourceExhausted"
+        );
+        assert_eq!(
+            server_overflow.code(),
+            Code::ResourceExhausted,
+            "server blocked-send proxy should report ResourceExhausted"
+        );
+
+        client_request_stream.cancel_with_error(Status::cancelled(
+            "client cancelled while send was backpressured",
+        ));
+        server_response_stream.cancel_with_error(Status::cancelled(
+            "server cancelled while send was backpressured",
+        ));
+
+        let client_events = collect_streaming_request_events(&mut client_request_stream);
+        let server_events = collect_response_stream_events(&mut server_response_stream);
+        assert_eq!(
+            client_events
+                .iter()
+                .filter(|event| event.starts_with("ok:"))
+                .count(),
+            MAX_STREAM_BUFFERED,
+            "all buffered client request messages must drain before terminal CANCELLED"
+        );
+        assert_eq!(
+            server_events
+                .iter()
+                .filter(|event| event.starts_with("ok:"))
+                .count(),
+            MAX_STREAM_BUFFERED,
+            "all buffered server response messages must drain before terminal CANCELLED"
+        );
+        assert!(
+            matches!(client_events.last(), Some(last) if last.starts_with("err:Cancelled:")),
+            "client side must end with CANCELLED after draining"
+        );
+        assert!(
+            matches!(server_events.last(), Some(last) if last.starts_with("err:Cancelled:")),
+            "server side must end with CANCELLED after draining"
+        );
+
+        crate::test_complete!(
+            "conformance_bidirectional_cancellation_while_send_blocked_drains_then_cancelled"
+        );
+    }
+
+    #[test]
+    fn conformance_bidirectional_cancellation_matrix_logs_evidence() {
+        init_test("conformance_bidirectional_cancellation_matrix_logs_evidence");
+
+        {
+            let mut client_request_stream = StreamingRequest::<&'static str>::open();
+            let mut server_response_stream = ResponseStream::<&'static str>::open();
+            client_request_stream
+                .push("client-1")
+                .expect("buffer client message");
+            client_request_stream
+                .push("client-2")
+                .expect("buffer client message");
+            server_response_stream
+                .push(Ok("server-1"))
+                .expect("buffer server response");
+            server_response_stream
+                .push(Ok("server-2"))
+                .expect("buffer server response");
+            client_request_stream
+                .cancel_with_error(Status::cancelled("client initiated bidi cancellation"));
+            server_response_stream.cancel_with_error(Status::cancelled(
+                "server observed client bidi cancellation",
+            ));
+            let client_events = collect_streaming_request_events(&mut client_request_stream);
+            let server_events = collect_response_stream_events(&mut server_response_stream);
+            log_bidirectional_cancellation_case(
+                "client_initiated_after_buffered_messages",
+                "client",
+                &client_events,
+                &server_events,
+                "not_blocked",
+                "not_pending",
+                0,
+            );
+        }
+
+        {
+            let mut client_request_stream = StreamingRequest::<&'static str>::open();
+            let mut server_response_stream = ResponseStream::<&'static str>::open();
+            client_request_stream.cancel_with_error(Status::cancelled(
+                "server propagated cancellation before first client message",
+            ));
+            server_response_stream.cancel_with_error(Status::cancelled(
+                "server initiated cancellation before first response",
+            ));
+            let client_events = collect_streaming_request_events(&mut client_request_stream);
+            let server_events = collect_response_stream_events(&mut server_response_stream);
+            log_bidirectional_cancellation_case(
+                "server_initiated_before_first_message",
+                "server",
+                &client_events,
+                &server_events,
+                "not_blocked",
+                "not_pending",
+                0,
+            );
+        }
+
+        {
+            let mut client_request_stream = StreamingRequest::<&'static str>::open();
+            let mut server_response_stream = ResponseStream::<&'static str>::open();
+            let waker = noop_waker();
+            let mut cx = Context::from_waker(&waker);
+            assert!(matches!(
+                Pin::new(&mut client_request_stream).poll_next(&mut cx),
+                Poll::Pending
+            ));
+            assert!(matches!(
+                Pin::new(&mut server_response_stream).poll_next(&mut cx),
+                Poll::Pending
+            ));
+            client_request_stream.cancel_with_error(Status::cancelled(
+                "client cancelled while both sides were recv-pending",
+            ));
+            server_response_stream.cancel_with_error(Status::cancelled(
+                "server cancelled while both sides were recv-pending",
+            ));
+            let client_events = collect_streaming_request_events(&mut client_request_stream);
+            let server_events = collect_response_stream_events(&mut server_response_stream);
+            log_bidirectional_cancellation_case(
+                "concurrent_cancel_while_recv_pending",
+                "both",
+                &client_events,
+                &server_events,
+                "not_blocked",
+                "both_pending",
+                1,
+            );
+        }
+
+        {
+            let mut client_request_stream = StreamingRequest::<u32>::open();
+            let mut server_response_stream = ResponseStream::<u32>::open();
+            for value in 0..MAX_STREAM_BUFFERED as u32 {
+                client_request_stream
+                    .push(value)
+                    .expect("fill client request buffer");
+                server_response_stream
+                    .push(Ok(value))
+                    .expect("fill server response buffer");
+            }
+            let client_overflow = client_request_stream
+                .push(MAX_STREAM_BUFFERED as u32)
+                .expect_err("client overflow should fail");
+            let server_overflow = server_response_stream
+                .push(Ok(MAX_STREAM_BUFFERED as u32))
+                .expect_err("server overflow should fail");
+            assert_eq!(client_overflow.code(), Code::ResourceExhausted);
+            assert_eq!(server_overflow.code(), Code::ResourceExhausted);
+            client_request_stream.cancel_with_error(Status::cancelled(
+                "client cancelled while send was backpressured",
+            ));
+            server_response_stream.cancel_with_error(Status::cancelled(
+                "server cancelled while send was backpressured",
+            ));
+            let client_events = collect_streaming_request_events(&mut client_request_stream);
+            let server_events = collect_response_stream_events(&mut server_response_stream);
+            log_bidirectional_cancellation_case(
+                "both_cancel_while_send_blocked",
+                "both",
+                &client_events,
+                &server_events,
+                "both_backpressured",
+                "not_pending",
+                1,
+            );
+        }
     }
 
     #[test]
