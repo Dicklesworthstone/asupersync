@@ -1,0 +1,270 @@
+{
+  "contract_version": "tokio-migration-proof-pack-signoff-v1",
+  "schema_version": "tokio-migration-proof-pack-signoff-schema-v1",
+  "generated_for_bead": "asupersync-migsgn",
+  "proof_pack_epic": "asupersync-migprf",
+  "final_verdict": "ready_for_operator_review_with_conservative_fallbacks",
+  "proof_pack_hash": 7445096981454615660,
+  "required_child_beads": [
+    "asupersync-tokmap",
+    "asupersync-shdwrk",
+    "asupersync-candeb",
+    "asupersync-tokgrd",
+    "asupersync-miglat",
+    "asupersync-migrep"
+  ],
+  "source_contracts": {
+    "workload": {
+      "path": "artifacts/tokio_migration_shadow_workload_contract_v1.json",
+      "contract_version": "tokio-migration-shadow-workload-v1"
+    },
+    "cancel_delta": {
+      "path": "artifacts/tokio_migration_cancel_delta_contract_v1.json",
+      "contract_version": "tokio-migration-cancel-delta-v1"
+    },
+    "performance_report": {
+      "path": "artifacts/tokio_migration_perf_report_contract_v1.json",
+      "contract_version": "tokio-migration-perf-report-v1"
+    },
+    "operator_report": {
+      "path": "artifacts/tokio_migration_operator_report_contract_v1.json",
+      "contract_version": "tokio-migration-operator-report-v1"
+    }
+  },
+  "child_evidence": [
+    {
+      "bead_id": "asupersync-tokmap",
+      "status": "closed",
+      "commits": [
+        "f18464ba5"
+      ],
+      "touched_file_groups": [
+        "artifacts/tokio_migration_shadow_workload_contract_v1.json",
+        "tests/tokio_migration_shadow_workload_contract.rs"
+      ],
+      "rch_commands": [
+        "rch exec -- rustfmt --edition 2024 --check tests/tokio_migration_shadow_workload_contract.rs",
+        "rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=/tmp/rch_target_asupersync_tokmap cargo test -p asupersync --test tokio_migration_shadow_workload_contract --features test-internals -- --nocapture"
+      ],
+      "local_commands": [
+        "jq contract/version/scenario checks"
+      ],
+      "generated_artifact_paths": [
+        "artifacts/tokio_migration_shadow_workload_contract_v1.json"
+      ],
+      "projection_hashes": {
+        "scenario_inventory": 18211150902419493132
+      },
+      "no_win_hold_verdicts": [],
+      "residual_limitations": [
+        "workload mapping is a deterministic contract, not a performance claim"
+      ]
+    },
+    {
+      "bead_id": "asupersync-shdwrk",
+      "status": "closed",
+      "commits": [
+        "e5edc27d9",
+        "6c886b619",
+        "91329dc96"
+      ],
+      "touched_file_groups": [
+        "scripts/run_tokio_migration_shadow_workload_smoke.sh",
+        "tests/tokio_migration_shadow_workload_runner.rs"
+      ],
+      "rch_commands": [
+        "rch exec -- bash -n scripts/run_tokio_migration_shadow_workload_smoke.sh",
+        "rch exec -- rustfmt --edition 2024 --check tests/tokio_migration_shadow_workload_runner.rs",
+        "rch exec -- cargo tree -e normal -p asupersync -i tokio",
+        "rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_asupersync_shdwrk cargo test -p asupersync --test tokio_migration_shadow_workload_runner --features test-internals -- --nocapture"
+      ],
+      "local_commands": [
+        "scripts/run_tokio_migration_shadow_workload_smoke.sh --list",
+        "scripts/run_tokio_migration_shadow_workload_smoke.sh --dry-run --scenario TM-SHADOW-001-MPSC-BACKPRESSURE",
+        "scripts/run_tokio_migration_shadow_workload_smoke.sh --execute --scenario TM-SHADOW-001-MPSC-BACKPRESSURE"
+      ],
+      "generated_artifact_paths": [
+        "scripts/run_tokio_migration_shadow_workload_smoke.sh",
+        "tests/tokio_migration_shadow_workload_runner.rs",
+        "/tmp/asupersync-miglat-shadow-execute/TM-SHADOW-001-MPSC-BACKPRESSURE/shadow_workload_report.jsonl"
+      ],
+      "projection_hashes": {
+        "mpsc_tokio_reference_row": 1682780886,
+        "mpsc_asupersync_row": 3173629142
+      },
+      "no_win_hold_verdicts": [
+        "review_required_before_migration"
+      ],
+      "residual_limitations": [
+        "runner emits deterministic contract rows; cancellation deltas and performance cards are separate child proofs"
+      ]
+    },
+    {
+      "bead_id": "asupersync-candeb",
+      "status": "closed",
+      "commits": [
+        "4effec9f4"
+      ],
+      "touched_file_groups": [
+        "artifacts/tokio_migration_cancel_delta_contract_v1.json",
+        "tests/tokio_migration_cancel_delta_contract.rs"
+      ],
+      "rch_commands": [
+        "rch exec -- rustfmt --edition 2024 --check tests/tokio_migration_cancel_delta_contract.rs",
+        "rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_asupersync_candeb cargo test -p asupersync --test tokio_migration_cancel_delta_contract --features test-internals -- --nocapture"
+      ],
+      "local_commands": [
+        "jq cancel-delta contract/version/delta/golden check",
+        "scripts/run_tokio_migration_shadow_workload_smoke.sh --dry-run --scenario TM-SHADOW-001-MPSC-BACKPRESSURE",
+        "scripts/run_tokio_migration_shadow_workload_smoke.sh --execute --scenario TM-SHADOW-004-SPAWN-JOIN-OWNERSHIP"
+      ],
+      "generated_artifact_paths": [
+        "artifacts/tokio_migration_cancel_delta_contract_v1.json"
+      ],
+      "projection_hashes": {
+        "TM-CANCEL-GOLDEN-LOSS-MPSC-SEND": 2846637481236900126,
+        "TM-CANCEL-GOLDEN-NO-LOSS-REGION-CLOSE": 8657037064756179505
+      },
+      "no_win_hold_verdicts": [
+        "loss_case",
+        "no_loss_case"
+      ],
+      "residual_limitations": [
+        "Tokio reference observations are comparison rows, not a claim that Tokio is incorrect"
+      ]
+    },
+    {
+      "bead_id": "asupersync-tokgrd",
+      "status": "closed",
+      "commits": [
+        "7593b8958",
+        "159dbb4a1"
+      ],
+      "touched_file_groups": [
+        "tests/no_tokio_in_normal_dep_graph.rs",
+        ".beads/issues.jsonl"
+      ],
+      "rch_commands": [
+        "rch exec -- cargo tree -e normal -p asupersync -i tokio"
+      ],
+      "local_commands": [],
+      "generated_artifact_paths": [
+        "tests/no_tokio_in_normal_dep_graph.rs"
+      ],
+      "projection_hashes": {
+        "no_tokio_stdout": 3410396357771671462
+      },
+      "no_win_hold_verdicts": [],
+      "residual_limitations": [
+        "metrics and satellite workspace Tokio carve-outs remain outside the default production graph proof"
+      ]
+    },
+    {
+      "bead_id": "asupersync-miglat",
+      "status": "closed",
+      "commits": [
+        "c7067716b",
+        "8efd5d777"
+      ],
+      "touched_file_groups": [
+        "artifacts/tokio_migration_perf_report_contract_v1.json",
+        "tests/tokio_migration_perf_report_contract.rs",
+        ".beads/issues.jsonl"
+      ],
+      "rch_commands": [
+        "rch exec -- rustfmt --edition 2024 --check tests/tokio_migration_perf_report_contract.rs",
+        "rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_asupersync_miglat cargo test -p asupersync --test tokio_migration_perf_report_contract --features test-internals -- --nocapture"
+      ],
+      "local_commands": [
+        "jq perf-report contract shape check",
+        "scripts/run_tokio_migration_shadow_workload_smoke.sh --dry-run --scenario TM-SHADOW-001-MPSC-BACKPRESSURE",
+        "scripts/run_tokio_migration_shadow_workload_smoke.sh --execute --scenario TM-SHADOW-001-MPSC-BACKPRESSURE"
+      ],
+      "generated_artifact_paths": [
+        "artifacts/tokio_migration_perf_report_contract_v1.json"
+      ],
+      "projection_hashes": {
+        "TM-PERF-001-MPSC-BACKPRESSURE-SMALL": 8561592428857683231,
+        "TM-PERF-002-SELECT-TIMEOUT-NO-WIN": 18233413756100688206
+      },
+      "no_win_hold_verdicts": [
+        "small_proxy_asupersync_win",
+        "hold_conservative_no_win"
+      ],
+      "residual_limitations": [
+        "small-mode proxy evidence is not a 64-core real-host rollout certificate"
+      ]
+    },
+    {
+      "bead_id": "asupersync-migrep",
+      "status": "closed",
+      "commits": [
+        "ab42fee1f"
+      ],
+      "touched_file_groups": [
+        "artifacts/tokio_migration_operator_report_contract_v1.json",
+        "tests/tokio_migration_operator_report_contract.rs",
+        ".beads/issues.jsonl"
+      ],
+      "rch_commands": [
+        "rch exec -- rustfmt --edition 2024 --check tests/tokio_migration_operator_report_contract.rs",
+        "rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_asupersync_migrep cargo test -p asupersync --test tokio_migration_operator_report_contract --features test-internals -- --nocapture"
+      ],
+      "local_commands": [
+        "jq operator-report contract shape check",
+        "scripts/run_tokio_migration_shadow_workload_smoke.sh --execute --scenario TM-SHADOW-001-MPSC-BACKPRESSURE"
+      ],
+      "generated_artifact_paths": [
+        "artifacts/tokio_migration_operator_report_contract_v1.json"
+      ],
+      "projection_hashes": {
+        "TM-OPERATOR-GOLDEN-READY-MPSC": 11756154580624650466,
+        "TM-OPERATOR-GOLDEN-HOLD-SELECT": 1522752985468510461
+      },
+      "no_win_hold_verdicts": [
+        "ready_to_migrate",
+        "hold_conservative",
+        "partial_evidence",
+        "refuse_stale_evidence"
+      ],
+      "residual_limitations": [
+        "operator report requires conservative fallback language when performance evidence is missing or stale"
+      ]
+    }
+  ],
+  "no_tokio_graph_proof": {
+    "command": "rch exec -- cargo tree -e normal -p asupersync -i tokio",
+    "expected_stdout": "warning: nothing to print.",
+    "observed_stdout": "warning: nothing to print."
+  },
+  "graph_health": {
+    "command": "timeout 30s br dep cycles --json --blocking-only",
+    "result": "timeout_exit_124_no_output",
+    "blocks_signoff": false,
+    "operator_note": "The graph-health control plane timed out, but every migration proof-pack child row is closed in .beads/issues.jsonl and the timeout is recorded fail-closed for audit."
+  },
+  "dirty_tree_scope": {
+    "migration_paths_dirty": [],
+    "known_unrelated_active_paths": [
+      "artifacts/signed_profile_bundle_smoke_contract_v1.json",
+      "tests/signed_profile_bundle_contract.rs",
+      "src/bytes/buf/buf_trait.rs",
+      ".signed-profile-bundle-smoke-artifacts/",
+      ".capacity-envelope-planner-smoke-artifacts/",
+      ".task-record-pool-smoke-artifacts/"
+    ],
+    "operator_note": "No dirty tokio_migration contract, runner, or report path contradicted this signoff snapshot at creation time. Unrelated active signed-profile, Buf, and smoke artifact paths remain outside this proof pack."
+  },
+  "validation_commands": [
+    "jq -e '.contract_version == \"tokio-migration-proof-pack-signoff-v1\" and (.child_evidence | length == 6)' artifacts/tokio_migration_proof_pack_signoff_v1.json",
+    "rch exec -- rustfmt --edition 2024 --check tests/tokio_migration_proof_pack_signoff.rs",
+    "rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_asupersync_migsgn cargo test -p asupersync --test tokio_migration_proof_pack_signoff --features test-internals -- --nocapture",
+    "rch exec -- cargo tree -e normal -p asupersync -i tokio",
+    "timeout 30s br dep cycles --json --blocking-only"
+  ],
+  "residual_limitations": [
+    "real-host rollout still requires a fresh real-host template run before operator adoption",
+    "small-mode proxy wins must stay labeled as proxy evidence",
+    "the signed profile bundle trust-model work is tracked by asupersync-gk0cg3 and is outside this Tokio migration proof pack"
+  ]
+}
