@@ -9,33 +9,23 @@
 //! - NOT allow unbounded pending ack accumulation (prevents memory leak)
 //! - Track pending acks correctly across ack/nack/drop operations
 
-use asupersync::messaging::jetstream::{Consumer, ConsumerConfig, JsMessage};
-use asupersync::messaging::nats::Message;
-use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use asupersync::messaging::jetstream::{
+    Consumer, fuzz_consumer_decrement_pending, fuzz_consumer_increment_pending,
+    fuzz_consumer_max_ack_pending, fuzz_create_test_consumer, fuzz_create_test_js_message,
+    fuzz_probe_publish_backpressure,
+};
 
 // Mock Consumer for testing flow control without JetStream server
 fn create_test_consumer_with_limit(max_ack_pending: usize) -> Consumer {
-    Consumer {
-        stream: "TEST_STREAM".to_string(),
-        name: "test_consumer".to_string(),
-        prefix: "$JS.API".to_string(),
-        pending_acks: Arc::new(AtomicUsize::new(0)),
-        max_ack_pending,
-    }
+    fuzz_create_test_consumer(max_ack_pending)
 }
 
 // Mock JsMessage for testing
-fn create_mock_js_message(sequence: u64, pending_acks: Option<Arc<AtomicUsize>>) -> JsMessage {
-    JsMessage {
-        subject: "orders.new".to_string(),
-        payload: b"test payload".to_vec(),
-        sequence,
-        delivered: 1,
-        reply_subject: "$JS.ACK.TEST_STREAM.test_consumer.1.1.1.1234567890.0".to_string(),
-        ack_state: std::sync::atomic::AtomicU8::new(0), // ACK_STATE_PENDING
-        pending_acks,
-    }
+fn create_mock_js_message(
+    sequence: u64,
+    consumer: Option<&Consumer>,
+) -> asupersync::messaging::JsMessage {
+    fuzz_create_test_js_message(sequence, consumer)
 }
 
 #[test]
@@ -45,24 +35,24 @@ fn jetstream_flow_control_max_ack_pending_enforcement() {
     // Test Case 1: Consumer respects max_ack_pending limit
     let consumer = create_test_consumer_with_limit(3); // Allow max 3 pending acks
     assert_eq!(consumer.pending_acks(), 0);
-    assert_eq!(consumer.max_ack_pending, 3);
+    assert_eq!(fuzz_consumer_max_ack_pending(&consumer), 3);
 
     // Accept messages up to the limit
     assert!(consumer.can_accept_message());
-    assert!(consumer.increment_pending()); // 1/3
+    assert!(fuzz_consumer_increment_pending(&consumer)); // 1/3
     assert_eq!(consumer.pending_acks(), 1);
 
     assert!(consumer.can_accept_message());
-    assert!(consumer.increment_pending()); // 2/3
+    assert!(fuzz_consumer_increment_pending(&consumer)); // 2/3
     assert_eq!(consumer.pending_acks(), 2);
 
     assert!(consumer.can_accept_message());
-    assert!(consumer.increment_pending()); // 3/3 (at limit)
+    assert!(fuzz_consumer_increment_pending(&consumer)); // 3/3 (at limit)
     assert_eq!(consumer.pending_acks(), 3);
 
     // Now at limit - should reject new messages
     assert!(!consumer.can_accept_message());
-    assert!(!consumer.increment_pending()); // Should fail and not increment
+    assert!(!fuzz_consumer_increment_pending(&consumer)); // Should fail and not increment
     assert_eq!(consumer.pending_acks(), 3); // Should remain at limit
 
     println!("✓ Flow control correctly enforces max_ack_pending limit");
@@ -73,21 +63,16 @@ fn jetstream_flow_control_pending_count_decrements_on_ack() {
     println!("\n=== JETSTREAM FLOW CONTROL: PENDING COUNT MANAGEMENT ===");
 
     let consumer = create_test_consumer_with_limit(5);
-    let pending_acks = consumer.pending_acks.clone();
-
-    // Create messages that share the pending counter
-    let msg1 = create_mock_js_message(1, Some(pending_acks.clone()));
-    let msg2 = create_mock_js_message(2, Some(pending_acks.clone()));
-    let msg3 = create_mock_js_message(3, Some(pending_acks.clone()));
+    let msg2 = create_mock_js_message(2, Some(&consumer));
 
     // Simulate receiving messages (increment pending)
-    consumer.increment_pending(); // msg1
-    consumer.increment_pending(); // msg2
-    consumer.increment_pending(); // msg3
+    fuzz_consumer_increment_pending(&consumer); // msg1
+    fuzz_consumer_increment_pending(&consumer); // msg2
+    fuzz_consumer_increment_pending(&consumer); // msg3
     assert_eq!(consumer.pending_acks(), 3);
 
     // Simulate acking message (should decrement)
-    consumer.decrement_pending(); // msg1 acked
+    fuzz_consumer_decrement_pending(&consumer); // msg1 acked
     assert_eq!(consumer.pending_acks(), 2);
 
     // Drop a message without ack (should decrement in Drop)
@@ -95,7 +80,7 @@ fn jetstream_flow_control_pending_count_decrements_on_ack() {
     assert_eq!(consumer.pending_acks(), 1);
 
     // Ack another message
-    consumer.decrement_pending(); // msg3 acked
+    fuzz_consumer_decrement_pending(&consumer); // msg3 acked
     assert_eq!(consumer.pending_acks(), 0);
 
     println!("✓ Pending ack count correctly tracks ack/nack/drop operations");
@@ -115,7 +100,7 @@ fn jetstream_flow_control_burst_message_scenario() {
 
     // Simulate burst of 100 messages
     for i in 1..=burst_size {
-        if consumer.increment_pending() {
+        if fuzz_consumer_increment_pending(&consumer) {
             accepted += 1;
             println!(
                 "Message {}: ACCEPTED (pending: {})",
@@ -163,7 +148,6 @@ fn jetstream_flow_control_memory_safety_verification() {
 
     // Test that pending ack counter prevents unbounded memory growth
     let consumer = create_test_consumer_with_limit(5);
-    let pending_acks = consumer.pending_acks.clone();
 
     // Create a large number of messages
     let mut messages = Vec::new();
@@ -171,8 +155,8 @@ fn jetstream_flow_control_memory_safety_verification() {
 
     // Try to create 1000 messages
     for i in 1..=1000 {
-        if consumer.increment_pending() {
-            let msg = create_mock_js_message(i, Some(pending_acks.clone()));
+        if fuzz_consumer_increment_pending(&consumer) {
+            let msg = create_mock_js_message(i, Some(&consumer));
             messages.push(msg);
             accepted_count += 1;
         }
@@ -201,6 +185,50 @@ fn jetstream_flow_control_memory_safety_verification() {
 }
 
 #[test]
+fn jetstream_publish_backpressure_refuses_when_slot_is_occupied() {
+    println!("\n=== JETSTREAM PUBLISH BACKPRESSURE: OCCUPIED SLOT REFUSAL ===");
+
+    let snapshot = fuzz_probe_publish_backpressure(None, 1);
+
+    assert_eq!(snapshot.effective_max_in_flight_publishes, 1);
+    assert_eq!(snapshot.max_waiters, 0);
+    assert!(
+        !snapshot.acquired,
+        "occupied slot must refuse a new publish"
+    );
+    assert_eq!(snapshot.in_flight_publishes_after, 1);
+    assert_eq!(snapshot.refused_publishes, 1);
+    assert!(
+        snapshot
+            .error
+            .as_deref()
+            .is_some_and(|message| message.contains("local publish backpressure"))
+    );
+
+    println!("✓ Publish path now refuses before growing hidden waiters");
+}
+
+#[test]
+fn jetstream_publish_backpressure_respects_emergency_pressure() {
+    println!("\n=== JETSTREAM PUBLISH BACKPRESSURE: EMERGENCY PRESSURE ===");
+
+    let snapshot = fuzz_probe_publish_backpressure(Some(0.0), 0);
+
+    assert_eq!(snapshot.effective_max_in_flight_publishes, 0);
+    assert_eq!(snapshot.pressure_level.as_deref(), Some("emergency"));
+    assert!(!snapshot.acquired, "emergency pressure must fail closed");
+    assert_eq!(snapshot.refused_publishes, 1);
+    assert!(
+        snapshot
+            .error
+            .as_deref()
+            .is_some_and(|message| message.contains("pressure=emergency"))
+    );
+
+    println!("✓ Emergency pressure is visible at the publish seam");
+}
+
+#[test]
 fn jetstream_flow_control_compliance_summary() {
     println!("\n=== JETSTREAM FLOW CONTROL COMPLIANCE SUMMARY ===");
     println!("✓ FIXED: Added client-side max_ack_pending enforcement");
@@ -208,10 +236,14 @@ fn jetstream_flow_control_compliance_summary() {
     println!("✓ CORRECT: Tracks pending acks across ack/nack/drop operations");
     println!("✓ MEMORY SAFE: Bounded message acceptance prevents memory leaks");
     println!("✓ BACKPRESSURE: Flow control provides proper backpressure mechanism");
+    println!("✓ PUBLISH REFUSAL: Per-context outstanding publish seam is explicitly bounded");
+    println!("✓ PRESSURE GATE: Emergency pressure can refuse publish before wire I/O");
     println!();
-    println!("DEFECT FIXED: Added missing client-side flow control");
-    println!("  Before: Unbounded pending ack accumulation (memory leak risk)");
-    println!("  After:  Client-side max_ack_pending enforcement (bounded memory)");
+    println!("FOUNDATION ADDED: Explicit JetStream publish refusal gate");
+    println!("  Before: Publish path relied on TCP backpressure only");
+    println!("  After:  Per-context refusal plus emergency pressure gate");
     println!();
-    println!("STATUS: JETSTREAM FLOW CONTROL IS NOW SECURE AND COMPLIANT ✅");
+    println!(
+        "STATUS: CONSUMER FLOW CONTROL IS SECURE; PUBLISH PATH IS STILL FAIL-CLOSED UNTIL P99/P999 EVIDENCE LANDS ✅"
+    );
 }

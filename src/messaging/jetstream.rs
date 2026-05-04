@@ -74,6 +74,18 @@ const MAX_STREAM_SUBJECT_BYTES: usize = 4 * 1024;
 /// recommendation.
 const MAX_PULL_BATCH: usize = 1024;
 
+/// br-asupersync-dpdmsy: a single `JetStreamContext` publishes through
+/// `&mut self`, so the honest per-context default is one outstanding publish
+/// request at a time. Anything broader needs an explicit multi-context
+/// controller, not wishful thinking inside this type.
+const DEFAULT_MAX_IN_FLIGHT_PUBLISHES: usize = 1;
+/// br-asupersync-dpdmsy: foundation slice uses an explicit refusal policy
+/// rather than queuing hidden waiters.
+const DEFAULT_MAX_PUBLISH_WAITERS: usize = 0;
+/// br-asupersync-dpdmsy: under emergency pressure, fail closed before opening a
+/// new publish request.
+const DEFAULT_EMERGENCY_MAX_IN_FLIGHT_PUBLISHES: usize = 0;
+
 /// JetStream-specific errors.
 #[derive(Debug)]
 pub enum JsError {
@@ -866,16 +878,125 @@ impl Drop for JsMessage {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct JetStreamPublishBackpressurePolicy {
+    max_in_flight_publishes: usize,
+    max_waiters: usize,
+    emergency_max_in_flight_publishes: usize,
+}
+
+impl Default for JetStreamPublishBackpressurePolicy {
+    fn default() -> Self {
+        Self {
+            max_in_flight_publishes: DEFAULT_MAX_IN_FLIGHT_PUBLISHES,
+            max_waiters: DEFAULT_MAX_PUBLISH_WAITERS,
+            emergency_max_in_flight_publishes: DEFAULT_EMERGENCY_MAX_IN_FLIGHT_PUBLISHES,
+        }
+    }
+}
+
+#[derive(Debug)]
+struct JetStreamPublishBackpressureGate {
+    policy: JetStreamPublishBackpressurePolicy,
+    in_flight_publishes: AtomicUsize,
+    refused_publishes: AtomicUsize,
+}
+
+impl JetStreamPublishBackpressureGate {
+    fn new(policy: JetStreamPublishBackpressurePolicy) -> Self {
+        Self {
+            policy,
+            in_flight_publishes: AtomicUsize::new(0),
+            refused_publishes: AtomicUsize::new(0),
+        }
+    }
+
+    fn pressure_level_label(cx: &Cx) -> &'static str {
+        cx.pressure()
+            .map_or("detached", crate::types::SystemPressure::level_label)
+    }
+
+    fn effective_max_in_flight_publishes(&self, cx: &Cx) -> usize {
+        if cx
+            .pressure()
+            .is_some_and(|pressure| pressure.degradation_level() >= 4)
+        {
+            self.policy
+                .emergency_max_in_flight_publishes
+                .min(self.policy.max_in_flight_publishes)
+        } else {
+            self.policy.max_in_flight_publishes
+        }
+    }
+
+    fn refuse(&self, cx: &Cx, subject: &str, current: usize, limit: usize) -> JsError {
+        self.refused_publishes.fetch_add(1, Ordering::Relaxed);
+        JsError::Api {
+            code: 429,
+            description: format!(
+                "local publish backpressure: subject={subject} in_flight={current} limit={limit} \
+                 max_waiters={} pressure={}",
+                self.policy.max_waiters,
+                Self::pressure_level_label(cx),
+            ),
+        }
+    }
+
+    fn begin_publish<'a>(
+        &'a self,
+        cx: &Cx,
+        subject: &str,
+    ) -> Result<JetStreamPublishPermit<'a>, JsError> {
+        let limit = self.effective_max_in_flight_publishes(cx);
+        let mut current = self.in_flight_publishes.load(Ordering::Acquire);
+        loop {
+            if current >= limit {
+                return Err(self.refuse(cx, subject, current, limit));
+            }
+            match self.in_flight_publishes.compare_exchange_weak(
+                current,
+                current.saturating_add(1),
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => {
+                    return Ok(JetStreamPublishPermit { gate: self });
+                }
+                Err(observed) => {
+                    current = observed;
+                }
+            }
+        }
+    }
+}
+
+struct JetStreamPublishPermit<'a> {
+    gate: &'a JetStreamPublishBackpressureGate,
+}
+
+impl Drop for JetStreamPublishPermit<'_> {
+    fn drop(&mut self) {
+        self.gate
+            .in_flight_publishes
+            .fetch_sub(1, Ordering::Release);
+    }
+}
+
 /// JetStream context for stream and consumer operations.
 pub struct JetStreamContext {
     client: NatsClient,
     prefix: String,
+    publish_backpressure: JetStreamPublishBackpressureGate,
 }
 
 impl fmt::Debug for JetStreamContext {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("JetStreamContext")
             .field("prefix", &self.prefix)
+            .field(
+                "publish_backpressure_policy",
+                &self.publish_backpressure.policy,
+            )
             .finish_non_exhaustive()
     }
 }
@@ -886,6 +1007,7 @@ impl JetStreamContext {
         Self {
             client,
             prefix: "$JS.API".to_string(),
+            publish_backpressure: JetStreamPublishBackpressureGate::new(Default::default()),
         }
     }
 
@@ -894,6 +1016,7 @@ impl JetStreamContext {
         Self {
             client,
             prefix: prefix.into(),
+            publish_backpressure: JetStreamPublishBackpressureGate::new(Default::default()),
         }
     }
 
@@ -954,6 +1077,7 @@ impl JetStreamContext {
     ) -> Result<PubAck, JsError> {
         cx.checkpoint().map_err(|_| NatsError::Cancelled)?;
 
+        let _permit = self.publish_backpressure.begin_publish(cx, subject)?;
         // JetStream publishes go to regular subjects, ack comes via reply
         let response = self.client.request(cx, subject, payload).await?;
         Self::parse_pub_ack(&response.payload)
@@ -987,6 +1111,7 @@ impl JetStreamContext {
             ));
         }
 
+        let _permit = self.publish_backpressure.begin_publish(cx, subject)?;
         let headers: [(&str, &[u8]); 1] = [("Nats-Msg-Id", msg_id.as_bytes())];
         let response = self
             .client
@@ -1772,6 +1897,118 @@ pub fn fuzz_consumer_config_deliver_by_start_time_json(time: SystemTime) -> Stri
         .to_json()
 }
 
+/// Compact snapshot of the publish-side backpressure gate for audit and fuzz
+/// harnesses.
+#[cfg(feature = "test-internals")]
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[doc(hidden)]
+pub struct FuzzJetStreamPublishBackpressureSnapshot {
+    pub effective_max_in_flight_publishes: usize,
+    pub max_waiters: usize,
+    pub acquired: bool,
+    pub in_flight_publishes_after: usize,
+    pub refused_publishes: usize,
+    pub pressure_level: Option<String>,
+    pub error: Option<String>,
+}
+
+/// Test-internals probe for the publish-side backpressure controller.
+#[cfg(feature = "test-internals")]
+#[doc(hidden)]
+pub fn fuzz_probe_publish_backpressure(
+    pressure_headroom: Option<f32>,
+    preexisting_in_flight_publishes: usize,
+) -> FuzzJetStreamPublishBackpressureSnapshot {
+    let gate = JetStreamPublishBackpressureGate::new(Default::default());
+    gate.in_flight_publishes
+        .store(preexisting_in_flight_publishes, Ordering::Relaxed);
+
+    let mut cx = Cx::new(
+        crate::types::RegionId::testing_default(),
+        crate::types::TaskId::testing_default(),
+        crate::types::Budget::INFINITE,
+    );
+    let pressure_level = if let Some(headroom) = pressure_headroom {
+        let pressure = Arc::new(crate::types::SystemPressure::with_headroom(headroom));
+        let label = pressure.level_label().to_string();
+        cx = cx.with_pressure(pressure);
+        Some(label)
+    } else {
+        None
+    };
+
+    let effective_max_in_flight_publishes = gate.effective_max_in_flight_publishes(&cx);
+    let probe = gate.begin_publish(&cx, "audit.subject");
+    let (acquired, error) = match probe {
+        Ok(permit) => {
+            drop(permit);
+            (true, None)
+        }
+        Err(err) => (false, Some(err.to_string())),
+    };
+
+    FuzzJetStreamPublishBackpressureSnapshot {
+        effective_max_in_flight_publishes,
+        max_waiters: gate.policy.max_waiters,
+        acquired,
+        in_flight_publishes_after: gate.in_flight_publishes.load(Ordering::Relaxed),
+        refused_publishes: gate.refused_publishes.load(Ordering::Relaxed),
+        pressure_level,
+        error,
+    }
+}
+
+/// Test-internals constructor for a minimal consumer with a configurable
+/// `max_ack_pending` budget.
+#[cfg(feature = "test-internals")]
+#[doc(hidden)]
+pub fn fuzz_create_test_consumer(max_ack_pending: usize) -> Consumer {
+    Consumer {
+        stream: "TEST_STREAM".to_string(),
+        name: "test_consumer".to_string(),
+        prefix: "$JS.API".to_string(),
+        pending_acks: Arc::new(AtomicUsize::new(0)),
+        max_ack_pending: max_ack_pending.max(1),
+    }
+}
+
+/// Test-internals getter for the consumer-side `max_ack_pending` limit.
+#[cfg(feature = "test-internals")]
+#[doc(hidden)]
+pub fn fuzz_consumer_max_ack_pending(consumer: &Consumer) -> usize {
+    consumer.max_ack_pending
+}
+
+/// Test-internals shim for incrementing the pending-ack counter.
+#[cfg(feature = "test-internals")]
+#[doc(hidden)]
+pub fn fuzz_consumer_increment_pending(consumer: &Consumer) -> bool {
+    consumer.increment_pending()
+}
+
+/// Test-internals shim for decrementing the pending-ack counter.
+#[cfg(feature = "test-internals")]
+#[doc(hidden)]
+pub fn fuzz_consumer_decrement_pending(consumer: &Consumer) {
+    consumer.decrement_pending();
+}
+
+/// Test-internals constructor for a pending JetStream message that shares the
+/// consumer's flow-control counter.
+#[cfg(feature = "test-internals")]
+#[doc(hidden)]
+pub fn fuzz_create_test_js_message(sequence: u64, consumer: Option<&Consumer>) -> JsMessage {
+    JsMessage {
+        subject: "orders.new".to_string(),
+        payload: b"test payload".to_vec(),
+        sequence,
+        delivered: 1,
+        reply_subject: "$JS.ACK.TEST_STREAM.test_consumer.1.1.1.1234567890.0".to_string(),
+        ack_state: AtomicU8::new(ACK_STATE_PENDING),
+        pending_acks: consumer.map(|consumer| Arc::clone(&consumer.pending_acks)),
+    }
+}
+
 /// Compact termination classes for the pull-subscriber loop state machine.
 #[cfg(feature = "test-internals")]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2467,6 +2704,7 @@ mod tests {
     use super::*;
     use crate::messaging::NatsConfig;
     use crate::test_utils::run_test_with_cx;
+    use crate::types::{Budget, RegionId, TaskId};
     use serde_json::json;
     use std::sync::atomic::{AtomicU32, Ordering};
     use std::time::Instant;
@@ -3804,6 +4042,58 @@ mod tests {
         run_test_with_cx(|cx| action(cx, addr));
 
         server.join().expect("server thread join")
+    }
+
+    #[test]
+    fn jetstream_publish_backpressure_releases_slot_after_response() {
+        let gate = JetStreamPublishBackpressureGate::new(Default::default());
+        let cx = crate::cx::Cx::new(
+            RegionId::testing_default(),
+            TaskId::testing_default(),
+            Budget::INFINITE,
+        );
+
+        assert_eq!(gate.in_flight_publishes.load(Ordering::Relaxed), 0);
+        let permit = gate
+            .begin_publish(&cx, "orders.created")
+            .expect("first publish permit");
+        assert_eq!(gate.in_flight_publishes.load(Ordering::Relaxed), 1);
+        drop(permit);
+        assert_eq!(gate.in_flight_publishes.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn jetstream_publish_refuses_before_wire_under_emergency_pressure() {
+        let transcript = capture_publish_transcript(0, |cx, addr| async move {
+            let pressure = Arc::new(crate::types::SystemPressure::with_headroom(0.0));
+            let cx = cx.with_pressure(pressure);
+            let mut js = JetStreamContext::new(
+                NatsClient::connect_with_config(
+                    &cx,
+                    NatsConfig {
+                        host: addr.ip().to_string(),
+                        port: addr.port(),
+                        ..Default::default()
+                    },
+                )
+                .await
+                .expect("connect publish mock server"),
+            );
+
+            let err = js
+                .publish(&cx, "orders.created", b"ping")
+                .await
+                .expect_err("emergency pressure should refuse publish");
+            assert!(
+                matches!(err, JsError::Api { code: 429, .. }),
+                "expected local 429 backpressure error, got {err:?}"
+            );
+        });
+
+        assert!(
+            transcript.publishes.is_empty(),
+            "emergency pressure refusal must happen before any PUB frame"
+        );
     }
 
     #[test]

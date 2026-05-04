@@ -1,15 +1,21 @@
 //! JetStream publish flow control audit test.
 //!
-//! AUDIT FINDING: DEFECT - Missing explicit backpressure via Cx::pressure()
+//! AUDIT FINDING: FOUNDATION - per-context publish backpressure is now explicit,
+//! but tail-latency evidence is still missing so the operator surface remains
+//! fail-closed.
 //!
 //! When client publishes faster than server can ack, the implementation:
-//! - Current: (b) grows unbounded until TCP socket buffers fill (memory risk)
-//! - Expected: (a) bound publish queue with explicit backpressure via Cx::pressure()
+//! - Current foundation: bound the per-context outstanding publish seam and
+//!   refuse immediately when the slot is occupied or `Cx::pressure()` is in
+//!   the emergency band
+//! - Remaining gap: no p99/p999 publish-wait evidence yet
 //!
 //! Per JetStream client backpressure best practices, high publish rate should
-//! trigger explicit pressure signaling rather than relying solely on TCP flow control.
+//! trigger explicit pressure-aware refusal rather than relying solely on TCP flow control.
 
 #![cfg(test)]
+
+use crate::messaging::jetstream::fuzz_probe_publish_backpressure;
 
 fn init_test(name: &str) {
     println!("[jetstream-flow-control] START {name}");
@@ -23,97 +29,72 @@ fn test_complete(name: &str) {
 ///
 /// Per JetStream backpressure best practices, when client publishes faster
 /// than server can acknowledge:
-/// (a) bound the publish queue (correct: backpressure via Cx::pressure())
-/// NOT (b) grow unbounded (memory leak)
-/// NOT (c) drop published messages silently (data loss)
+/// (a) bound the per-context outstanding publish seam
+/// (b) refuse immediately when that seam is occupied
+/// NOT (c) grow hidden wait queues
 #[test]
-#[should_panic(
-    expected = "DEFECT: JetStream publish missing explicit Cx::pressure() backpressure signaling"
-)]
 fn audit_jetstream_publish_flow_control_backpressure() {
     init_test("audit_jetstream_publish_flow_control_backpressure");
 
-    // AUDIT FINDING: Current implementation relies on TCP socket backpressure
-    // rather than explicit application-level backpressure via Cx::pressure()
-    //
-    // The publish flow is:
-    // 1. js.publish() -> client.request()
-    // 2. publish_request() -> write_all() + flush() to TCP socket
-    // 3. Waits for server acknowledgment response
-    //
-    // DEFECT: Missing explicit Cx::pressure() calls when publish rate exceeds
-    // acknowledgment rate. Should signal backpressure before TCP buffers fill.
+    let snapshot = fuzz_probe_publish_backpressure(None, 1);
 
-    // Expected behavior pattern:
-    // ```
-    // // High publish rate scenario
-    // for i in 0..1000 {
-    //     if cx.check_pressure().is_some() {
-    //         // Should signal backpressure and potentially yield
-    //         cx.pressure().await; // Wait for backpressure relief
-    //     }
-    //     let ack = js.publish(&cx, "orders.high_rate", payload).await?;
-    // }
-    // ```
+    assert_eq!(snapshot.effective_max_in_flight_publishes, 1);
+    assert_eq!(snapshot.max_waiters, 0);
+    assert!(!snapshot.acquired);
+    assert_eq!(snapshot.in_flight_publishes_after, 1);
+    assert_eq!(snapshot.refused_publishes, 1);
+    assert!(
+        snapshot
+            .error
+            .as_deref()
+            .is_some_and(|message| message.contains("local publish backpressure"))
+    );
 
-    // AUDIT: The current implementation will:
-    // 1. Fill TCP socket send buffers (system-dependent size, typically ~64KB-256KB)
-    // 2. Block on write_all() when buffers are full
-    // 3. NOT signal explicit pressure via Cx::pressure() to callers
-    //
-    // This means:
-    // - Memory usage can grow until TCP buffers fill
-    // - No application-level flow control signaling
-    // - Callers can't react to backpressure conditions
-
-    panic!("DEFECT: JetStream publish missing explicit Cx::pressure() backpressure signaling");
+    test_complete("audit_jetstream_publish_flow_control_backpressure");
 }
 
 /// AUDIT: Test publish queue memory behavior under slow acknowledgments
 ///
 /// Verifies that high publish rate doesn't lead to unbounded memory growth.
 #[test]
-#[should_panic(
-    expected = "DEFECT: JetStream publish lacks explicit memory bounds and pressure signaling"
-)]
 fn audit_publish_memory_bounds_under_slow_acks() {
     init_test("audit_publish_memory_bounds_under_slow_acks");
 
-    // AUDIT FINDING: Current implementation has potential memory growth issues
-    //
-    // Each publish creates:
-    // - Temporary subscription (_INBOX.{id})
-    // - Message buffers in TCP socket send queue
-    // - Pending request state until acknowledgment
-    //
-    // Under slow server acknowledgments, these accumulate until TCP blocks.
-    // Should implement explicit bounds and pressure signaling.
+    let snapshot = fuzz_probe_publish_backpressure(None, 1);
 
-    panic!("DEFECT: JetStream publish lacks explicit memory bounds and pressure signaling");
+    assert_eq!(snapshot.effective_max_in_flight_publishes, 1);
+    assert_eq!(
+        snapshot.in_flight_publishes_after, 1,
+        "occupied publish slot must stay bounded under slow ACK assumptions"
+    );
+    assert_eq!(
+        snapshot.refused_publishes, 1,
+        "slow ACK path must refuse the next publish instead of accumulating hidden waiters"
+    );
+
+    test_complete("audit_publish_memory_bounds_under_slow_acks");
 }
 
 /// AUDIT: Test pressure signaling integration with Cx
 ///
 /// Verifies that publish backpressure integrates with Cx::pressure() system.
 #[test]
-#[should_panic(expected = "DEFECT: JetStream publish missing Cx::pressure() integration")]
 fn audit_pressure_signaling_integration() {
     init_test("audit_pressure_signaling_integration");
 
-    // AUDIT: Expected integration with Cx pressure system
-    //
-    // JetStream publish should:
-    // 1. Monitor outstanding publish requests count
-    // 2. Signal pressure when count exceeds threshold (e.g., 10-50 pending)
-    // 3. Allow callers to react via cx.pressure().await
-    // 4. Resume when outstanding count drops below threshold
-    //
-    // This provides:
-    // - Application-level flow control
-    // - Memory-bounded operation
-    // - Cooperative backpressure with caller
+    let snapshot = fuzz_probe_publish_backpressure(Some(0.0), 0);
 
-    panic!("DEFECT: JetStream publish missing Cx::pressure() integration");
+    assert_eq!(snapshot.effective_max_in_flight_publishes, 0);
+    assert_eq!(snapshot.pressure_level.as_deref(), Some("emergency"));
+    assert!(!snapshot.acquired);
+    assert!(
+        snapshot
+            .error
+            .as_deref()
+            .is_some_and(|message| message.contains("pressure=emergency"))
+    );
+
+    test_complete("audit_pressure_signaling_integration");
 }
 
 /// AUDIT: Document current TCP-based flow control behavior
@@ -123,20 +104,21 @@ fn audit_pressure_signaling_integration() {
 fn audit_current_tcp_flow_control_behavior() {
     init_test("audit_current_tcp_flow_control_behavior");
 
-    // AUDIT DOCUMENTATION: Current flow control relies on TCP socket buffers
+    // AUDIT DOCUMENTATION: The publish seam now has an explicit local refusal
+    // gate before the NATS request path, but it is still intentionally
+    // conservative and fail-closed until tail-latency evidence exists.
     //
     // Positive aspects:
     // ✅ Messages are not dropped silently (no data loss)
-    // ✅ Eventually provides backpressure when TCP buffers fill
-    // ✅ Each publish waits for acknowledgment (natural rate limiting)
+    // ✅ Per-context outstanding publish count is explicitly bounded
+    // ✅ Emergency `Cx::pressure()` state can refuse a new publish before wire I/O
     //
-    // Issues:
-    // ❌ No explicit application-level pressure signaling
-    // ❌ Memory usage can grow until TCP buffers fill (system-dependent)
-    // ❌ No cooperative flow control with callers
-    // ❌ Blocking behavior not observable by application
+    // Remaining issues:
+    // ❌ Wait-tail p99 evidence is still absent
+    // ❌ Wait-tail p999 evidence is still absent
+    // ❌ Zero-waiter refusal is the only foundation policy today
     //
-    // Recommendation: Add explicit publish queue bounds with Cx::pressure()
+    // Recommendation: keep fail-closed signoff until p99/p999 wait evidence lands.
 
     test_complete("audit_current_tcp_flow_control_behavior");
 }
@@ -148,36 +130,37 @@ fn audit_current_tcp_flow_control_behavior() {
 fn audit_reference_backpressure_pattern() {
     init_test("audit_reference_backpressure_pattern");
 
-    // AUDIT: Recommended backpressure implementation pattern
+    // AUDIT: Current foundation pattern
     //
     // ```rust
     // pub struct JetStreamContext {
     //     client: NatsClient,
-    //     pending_publishes: Arc<Semaphore>, // Bound outstanding requests
-    //     max_pending: usize, // Configurable limit (default: 16-32)
+    //     publish_backpressure: JetStreamPublishBackpressureGate,
     // }
     //
     // impl JetStreamContext {
-    //     pub async fn publish(&mut self, cx: &Cx, subject: &str, payload: &[u8]) -> Result<PubAck, JsError> {
-    //         // Explicit backpressure before attempting publish
-    //         let _permit = cx.with_pressure(|| {
-    //             self.pending_publishes.try_acquire()
-    //         }).await.map_err(|_| JsError::Backpressure)?;
-    //
-    //         // Existing publish logic...
+    //     pub async fn publish(
+    //         &mut self,
+    //         cx: &Cx,
+    //         subject: &str,
+    //         payload: &[u8],
+    //     ) -> Result<PubAck, JsError> {
+    //         let _permit = self.publish_backpressure.begin_publish(cx, subject)?;
     //         let response = self.client.request(cx, subject, payload).await?;
-    //         // _permit drops here, releasing semaphore
-    //
     //         Self::parse_pub_ack(&response.payload)
     //     }
     // }
     // ```
     //
     // Benefits:
-    // - Bounded memory usage (max_pending * average_message_size)
-    // - Explicit pressure signaling to callers
-    // - Configurable backpressure threshold
-    // - Cooperative flow control
+    // - Bounded per-context outstanding publish accounting
+    // - Explicit emergency-pressure refusal at the publish seam
+    // - Zero hidden waiters in the current foundation slice
+    //
+    // Still missing for closeout:
+    // - bounded waiter policy beyond zero-wait refusal
+    // - publish wait latency p99 evidence
+    // - publish wait latency p999 evidence
 
     test_complete("audit_reference_backpressure_pattern");
 }

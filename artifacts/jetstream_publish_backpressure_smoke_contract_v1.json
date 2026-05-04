@@ -1,7 +1,7 @@
 {
   "contract_version": "jetstream-publish-backpressure-smoke-contract-v1",
   "bead_id": "asupersync-dpdmsy",
-  "description": "Fail-closed proof pack for the current JetStream publish backpressure surface, capturing the still-audit-only publish path and the existing consumer-side max_ack_pending evidence.",
+  "description": "Fail-closed proof pack for the current JetStream publish backpressure surface, capturing the new per-context refusal foundation while keeping final signoff closed until publish-wait tail evidence exists.",
   "runner_script": "scripts/run_jetstream_publish_backpressure_smoke.sh",
   "runner_bundle_schema_version": "jetstream-publish-backpressure-smoke-bundle-v1",
   "runner_report_schema_version": "jetstream-publish-backpressure-smoke-run-report-v1",
@@ -10,29 +10,26 @@
   "target_source_path": "src/messaging/jetstream.rs",
   "no_win_fallback": "retain_conservative_publish_path",
   "missing_evidence_requirements": [
-    "bounded in-flight publish accounting in src/messaging/jetstream.rs",
-    "bounded waiter or refusal policy for delayed or missing ACKs",
-    "explicit pressure signaling integration at the JetStream publish seam",
     "publish-wait latency p99 evidence",
     "publish-wait latency p999 evidence"
   ],
   "smoke_scenarios": [
     {
       "scenario_id": "AA-JETSTREAM-PUBLISH-BACKPRESSURE-SLOW-ACKS",
-      "description": "Prove that the current publish surface is still audit-only under slow ACK assumptions and therefore must remain fail-closed in final signoff.",
+      "description": "Prove that the publish surface now has explicit per-context refusal under slow ACK assumptions, but must remain fail-closed in final signoff until p99/p999 wait evidence lands.",
       "scenario_mode": "slow_ack_gap",
       "expected_report_projection": {
         "scenario_mode": "slow_ack_gap",
-        "audit_should_panic_count": 3,
-        "consumer_flow_test_count": 5,
-        "explicit_pressure_signal_site_count": 0,
-        "bounded_waiter_policy_present": false,
+        "audit_should_panic_count": 0,
+        "consumer_flow_test_count": 7,
+        "explicit_pressure_signal_site_count": 18,
+        "bounded_waiter_policy_present": true,
         "publish_wait_latency_p99_present": false,
         "publish_wait_latency_p999_present": false,
-        "missing_evidence_requirement_count": 5,
+        "missing_evidence_requirement_count": 2,
         "no_win_fallback": "retain_conservative_publish_path",
         "operator_verdict": "fail_closed",
-        "projection_hash": "9381cb1735f11d6bcfae605181057857abb8b0f5f13a7eed9b818a89f4cb0599"
+        "projection_hash": "6b44e38bc708711a72bde28cd571c2e6cd20dfaea3ee13cc820ab8ff7bb20c5f"
       },
       "required_log_fields": [
         "scenario_id",
@@ -55,20 +52,20 @@
     },
     {
       "scenario_id": "AA-JETSTREAM-PUBLISH-BACKPRESSURE-NO-WIN-FALLBACK",
-      "description": "Prove that the current no-win path must hold the conservative publish behavior because the bounded publish controller and tail evidence are still absent.",
+      "description": "Prove that the current no-win path must still hold the conservative publish behavior because publish-wait tail evidence is absent even though the refusal foundation now exists.",
       "scenario_mode": "no_win_fallback",
       "expected_report_projection": {
         "scenario_mode": "no_win_fallback",
-        "audit_should_panic_count": 3,
-        "consumer_flow_test_count": 5,
-        "explicit_pressure_signal_site_count": 0,
-        "bounded_waiter_policy_present": false,
+        "audit_should_panic_count": 0,
+        "consumer_flow_test_count": 7,
+        "explicit_pressure_signal_site_count": 18,
+        "bounded_waiter_policy_present": true,
         "publish_wait_latency_p99_present": false,
         "publish_wait_latency_p999_present": false,
-        "missing_evidence_requirement_count": 5,
+        "missing_evidence_requirement_count": 2,
         "no_win_fallback": "retain_conservative_publish_path",
         "operator_verdict": "fail_closed",
-        "projection_hash": "66857f550033e17122325db5ab5ccd475cd92ef24e84b77be4dd181365ee309d"
+        "projection_hash": "65ddf7505221df0f438b9893f64535f30bf18d926b418eff360aeebd8a7d46bb"
       },
       "required_log_fields": [
         "scenario_id",
