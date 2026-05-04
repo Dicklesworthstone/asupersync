@@ -47,6 +47,14 @@ default_scenario_id() {
     jq -r '.smoke_scenarios[0].scenario_id' "$ARTIFACT"
 }
 
+default_run_id() {
+    local timestamp nanos pid
+    timestamp="$(date +%Y%m%d_%H%M%S)"
+    nanos="$(date +%N 2>/dev/null || printf '000000000')"
+    pid="$$"
+    printf '%s_%s_%s' "$timestamp" "$nanos" "$pid"
+}
+
 load_scenario_json() {
     local scenario_id="$1"
     jq -c --arg scenario_id "$scenario_id" '.smoke_scenarios[] | select(.scenario_id == $scenario_id)' "$ARTIFACT"
@@ -150,7 +158,7 @@ EXPECTED_REPORT_PROJECTION_JSON="$(jq -c '.expected_report_projection' <<<"$SCEN
 if [ -n "$RUN_ID_OVERRIDE" ]; then
     RUN_ID="$RUN_ID_OVERRIDE"
 else
-    RUN_ID="$(date +%Y%m%d_%H%M%S)"
+    RUN_ID="$(default_run_id)"
 fi
 
 RUN_DIR="${OUTPUT_ROOT}/run_${RUN_ID}/${SCENARIO}"
