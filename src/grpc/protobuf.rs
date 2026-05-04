@@ -193,7 +193,6 @@ mod tests {
         clippy::future_not_send
     )]
     use super::*;
-
     fn init_test(name: &str) {
         crate::test_utils::init_test_logging();
         crate::test_phase!(name);
@@ -403,6 +402,232 @@ mod tests {
         let is_err = matches!(result, Err(ProtobufError::DecodeError(_)));
         crate::assert_with_log!(is_err, "decode fails for invalid data", true, is_err);
         crate::test_complete!("test_prost_codec_invalid_data");
+    }
+
+    fn encode_test_varint(mut value: u64, out: &mut Vec<u8>) {
+        while value >= 0x80 {
+            out.push((value as u8 & 0x7f) | 0x80);
+            value >>= 7;
+        }
+        out.push(value as u8);
+    }
+
+    fn decode_test_varint(input: &[u8]) -> Option<(u64, usize)> {
+        let mut value = 0u64;
+        let mut shift = 0u32;
+        for (idx, byte) in input.iter().copied().enumerate() {
+            let chunk = u64::from(byte & 0x7f);
+            value |= chunk.checked_shl(shift)?;
+            if byte & 0x80 == 0 {
+                return Some((value, idx + 1));
+            }
+            shift += 7;
+            if shift >= 64 {
+                return None;
+            }
+        }
+        None
+    }
+
+    #[test]
+    fn conformance_protobuf_decode_malformed_boundary_matrix() {
+        init_test("conformance_protobuf_decode_malformed_boundary_matrix");
+
+        const EXACT_RCH_COMMAND: &str = "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_asupersync_eo6jp9_protobuf cargo test -p asupersync --lib conformance_protobuf_decode_malformed_boundary_matrix -- --nocapture";
+
+        enum DecodeExpectation {
+            DecodeError,
+            OkZeroLengthEmbedded,
+            OkAtCap,
+        }
+
+        struct DecodeScenario {
+            corpus_label: &'static str,
+            nesting_depth: usize,
+            declared_length: Option<usize>,
+            actual_length: usize,
+            overflow_guard_decision: &'static str,
+            parser_state: &'static str,
+            wire: Vec<u8>,
+            max_size: usize,
+            expectation: DecodeExpectation,
+        }
+
+        let mut malformed_varint = vec![0x10];
+        malformed_varint.extend_from_slice(&[0xFF; 10]);
+        malformed_varint.push(0x01);
+
+        let truncated_embedded = vec![0x0A, 0x02, 0x0A, 0x01];
+        let zero_length_embedded = vec![0x0A, 0x00];
+
+        let mut embedded_length_overflow = vec![0x0A];
+        encode_test_varint(u64::from(u32::MAX), &mut embedded_length_overflow);
+
+        let at_cap_inner = TestMessage {
+            name: "cap".to_string(),
+            value: 7,
+        };
+        let at_cap_outer = NestedMessage {
+            inner: Some(at_cap_inner),
+            items: Vec::new(),
+        };
+        let mut at_cap_codec: ProstCodec<NestedMessage, NestedMessage> = ProstCodec::new();
+        let at_cap_wire = at_cap_codec.encode(&at_cap_outer).unwrap().to_vec();
+        let at_cap_max_size = at_cap_wire.len();
+        let (declared_len, _) =
+            decode_test_varint(&at_cap_wire[1..]).expect("nested message length prefix");
+
+        let scenarios = vec![
+            DecodeScenario {
+                corpus_label: "malformed_overlong_varint",
+                nesting_depth: 0,
+                declared_length: None,
+                actual_length: malformed_varint.len(),
+                overflow_guard_decision: "pass-through",
+                parser_state: "top-level-varint",
+                wire: malformed_varint,
+                max_size: 256,
+                expectation: DecodeExpectation::DecodeError,
+            },
+            DecodeScenario {
+                corpus_label: "unsupported_wire_type",
+                nesting_depth: 0,
+                declared_length: None,
+                actual_length: 1,
+                overflow_guard_decision: "pass-through",
+                parser_state: "top-level-key",
+                wire: vec![0x0F],
+                max_size: 256,
+                expectation: DecodeExpectation::DecodeError,
+            },
+            DecodeScenario {
+                corpus_label: "arbitrary_bytes_typed_err",
+                nesting_depth: 0,
+                declared_length: None,
+                actual_length: 3,
+                overflow_guard_decision: "pass-through",
+                parser_state: "arbitrary-prefix",
+                wire: vec![0xFF, 0x00, 0xFF],
+                max_size: 256,
+                expectation: DecodeExpectation::DecodeError,
+            },
+            DecodeScenario {
+                corpus_label: "zero_length_embedded",
+                nesting_depth: 1,
+                declared_length: Some(0),
+                actual_length: 0,
+                overflow_guard_decision: "exact-fit",
+                parser_state: "embedded-message",
+                wire: zero_length_embedded,
+                max_size: 256,
+                expectation: DecodeExpectation::OkZeroLengthEmbedded,
+            },
+            DecodeScenario {
+                corpus_label: "truncated_embedded_message",
+                nesting_depth: 1,
+                declared_length: Some(2),
+                actual_length: 2,
+                overflow_guard_decision: "prefix-complete-payload-truncated",
+                parser_state: "embedded-message",
+                wire: truncated_embedded,
+                max_size: 256,
+                expectation: DecodeExpectation::DecodeError,
+            },
+            DecodeScenario {
+                corpus_label: "embedded_length_overflow",
+                nesting_depth: 1,
+                declared_length: Some(u32::MAX as usize),
+                actual_length: 0,
+                overflow_guard_decision: "declared>remaining",
+                parser_state: "embedded-message",
+                wire: embedded_length_overflow,
+                max_size: 256,
+                expectation: DecodeExpectation::DecodeError,
+            },
+            DecodeScenario {
+                corpus_label: "max_bounded_embedded_length",
+                nesting_depth: 1,
+                declared_length: Some(declared_len as usize),
+                actual_length: declared_len as usize,
+                overflow_guard_decision: "at-cap-accept",
+                parser_state: "embedded-message",
+                wire: at_cap_wire,
+                max_size: at_cap_max_size,
+                expectation: DecodeExpectation::OkAtCap,
+            },
+        ];
+
+        for scenario in scenarios {
+            let mut codec: ProstCodec<NestedMessage, NestedMessage> =
+                ProstCodec::with_max_size(scenario.max_size);
+            let bytes = Bytes::from(scenario.wire.clone());
+            let result = codec.decode(&bytes);
+
+            let (error_kind, final_verdict) = match (&scenario.expectation, &result) {
+                (DecodeExpectation::DecodeError, Err(ProtobufError::DecodeError(_))) => {
+                    ("DecodeError", "pass")
+                }
+                (DecodeExpectation::OkZeroLengthEmbedded, Ok(decoded)) => {
+                    let inner = decoded.inner.clone().expect("zero-length embedded inner");
+                    assert_eq!(inner, TestMessage::default());
+                    ("ok", "pass")
+                }
+                (DecodeExpectation::OkAtCap, Ok(decoded)) => {
+                    assert_eq!(decoded, &at_cap_outer);
+                    ("ok", "pass")
+                }
+                _ => panic!(
+                    "scenario {} produced unexpected result: {:?}",
+                    scenario.corpus_label, result
+                ),
+            };
+
+            eprintln!(
+                "PROTOBUF_MALFORMED_DECODE corpus_label={} nesting_depth={} declared_length={} actual_length={} overflow_guard_decision={} parser_state={} error_kind={} exact_rch_command=\"{}\" artifact_paths=none final_malformed_protobuf_verdict={}",
+                scenario.corpus_label,
+                scenario.nesting_depth,
+                scenario
+                    .declared_length
+                    .map_or_else(|| "none".to_string(), |len| len.to_string()),
+                scenario.actual_length,
+                scenario.overflow_guard_decision,
+                scenario.parser_state,
+                error_kind,
+                EXACT_RCH_COMMAND,
+                final_verdict,
+            );
+        }
+
+        crate::test_complete!("conformance_protobuf_decode_malformed_boundary_matrix");
+    }
+
+    #[test]
+    fn test_prost_codec_nested_length_prefix_consistency() {
+        init_test("test_prost_codec_nested_length_prefix_consistency");
+
+        let inner = TestMessage {
+            name: "nested".to_string(),
+            value: 99,
+        };
+        let outer = NestedMessage {
+            inner: Some(inner.clone()),
+            items: Vec::new(),
+        };
+
+        let mut codec: ProstCodec<NestedMessage, NestedMessage> = ProstCodec::new();
+        let encoded = codec.encode(&outer).unwrap();
+        assert_eq!(encoded[0], 0x0A, "expected field 1 nested-message tag");
+
+        let (declared_len, len_len) =
+            decode_test_varint(&encoded[1..]).expect("nested length varint");
+        let payload = &encoded[1 + len_len..1 + len_len + declared_len as usize];
+
+        assert_eq!(declared_len as usize, payload.len());
+
+        let decoded_inner = <TestMessage as prost::Message>::decode(payload).unwrap();
+        assert_eq!(decoded_inner, inner);
+
+        crate::test_complete!("test_prost_codec_nested_length_prefix_consistency");
     }
 
     #[test]
