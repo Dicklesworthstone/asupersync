@@ -5199,7 +5199,7 @@ mod tests {
                 assert_eq!(attempt, 1);
                 assert_eq!(delay, expected_delay);
             }
-            other => unreachable!("expected Restart, got {other:?}"),
+            other => panic!("expected Restart, got {other:?}"),
         }
 
         crate::test_complete!("supervisor_on_failure_with_budget_allows");
@@ -6066,7 +6066,9 @@ mod tests {
                             "Ok + {strategy_name} should Stop(ExplicitStop) (fallback)"
                         );
                     }
-                    _ => unreachable!(),
+                    _ => panic!(
+                        "unexpected outcome/strategy pair in monotone severity cross-product: outcome={outcome_name}, strategy={strategy_name}"
+                    ),
                 }
             }
         }
@@ -6251,7 +6253,7 @@ mod tests {
                 assert_eq!(tid, test_task_id());
                 assert_eq!(rid, test_region_id());
             }
-            other => unreachable!("expected Escalate, got {other:?}"),
+            other => panic!("expected Escalate, got {other:?}"),
         }
 
         crate::test_complete!("conformance_escalation_without_parent_region");
@@ -6473,7 +6475,7 @@ mod tests {
                     assert_eq!(rid, region);
                     assert_eq!(reason, StopReason::ExplicitStop);
                 }
-                other => unreachable!("expected Stop, got {other:?}"),
+                other => panic!("expected Stop, got {other:?}"),
             }
         }
 
@@ -6502,7 +6504,7 @@ mod tests {
                         assert_eq!(attempt, expected_attempt);
                     }
                     other => {
-                        unreachable!("expected Restart attempt={expected_attempt}, got {other:?}")
+                        panic!("expected Restart attempt={expected_attempt}, got {other:?}")
                     }
                 }
             }
@@ -6523,7 +6525,7 @@ mod tests {
                     assert_eq!(rid, region);
                     assert_eq!(parent_region_id, Some(parent));
                 }
-                other => unreachable!("expected Escalate, got {other:?}"),
+                other => panic!("expected Escalate, got {other:?}"),
             }
         }
 
@@ -6554,7 +6556,7 @@ mod tests {
                 assert_eq!(attempt, 1);
                 assert_eq!(delay, config.backoff.delay_for_attempt(0));
             }
-            other => unreachable!("expected Restart, got {other:?}"),
+            other => panic!("expected Restart, got {other:?}"),
         }
 
         // Attempt 2: delay should be for attempt index 1 = 200ms
@@ -6570,7 +6572,7 @@ mod tests {
                 assert_eq!(attempt, 2);
                 assert_eq!(delay, config.backoff.delay_for_attempt(1));
             }
-            other => unreachable!("expected Restart, got {other:?}"),
+            other => panic!("expected Restart, got {other:?}"),
         }
 
         // Attempt 3: delay should be for attempt index 2 = 400ms
@@ -6586,7 +6588,7 @@ mod tests {
                 assert_eq!(attempt, 3);
                 assert_eq!(delay, config.backoff.delay_for_attempt(2));
             }
-            other => unreachable!("expected Restart, got {other:?}"),
+            other => panic!("expected Restart, got {other:?}"),
         }
 
         crate::test_complete!("conformance_restart_delay_matches_backoff");
@@ -6835,10 +6837,10 @@ mod tests {
                     }
                 }
                 SupervisorSpawnError::RegionCreate(_) => {
-                    unreachable!("expected ChildStartFailed, got RegionCreate");
+                    panic!("expected ChildStartFailed, got RegionCreate");
                 }
                 SupervisorSpawnError::DependencyUnavailable { .. } => {
-                    unreachable!("expected ChildStartFailed, got DependencyUnavailable");
+                    panic!("expected ChildStartFailed, got DependencyUnavailable");
                 }
             }
         }
@@ -7409,7 +7411,7 @@ mod tests {
                 assert!(remaining.contains(&ChildName::from("b")));
                 assert!(remaining.contains(&ChildName::from("c")));
             }
-            other => unreachable!("expected CycleDetected, got {other:?}"),
+            other => panic!("expected CycleDetected, got {other:?}"),
         }
 
         crate::test_complete!("conformance_compile_rejects_cycles");
