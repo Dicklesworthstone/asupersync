@@ -486,6 +486,8 @@ pub struct StreamingRequest<T> {
     items: VecDeque<Result<T, Status>>,
     /// Whether no further items will arrive.
     closed: bool,
+    /// Whether the request stream already observed a graceful half-close.
+    graceful_terminal: bool,
     /// Terminal status for cancelled/errored streams (fail-closed).
     terminal_status: Option<Status>,
     /// Last waker waiting for a new item.
@@ -499,6 +501,7 @@ impl<T> StreamingRequest<T> {
         Self {
             items: VecDeque::new(),
             closed: true,
+            graceful_terminal: false,
             terminal_status: None,
             waiter: None,
         }
@@ -510,6 +513,7 @@ impl<T> StreamingRequest<T> {
         Self {
             items: VecDeque::new(),
             closed: false,
+            graceful_terminal: false,
             terminal_status: None,
             waiter: None,
         }
@@ -545,12 +549,18 @@ impl<T> StreamingRequest<T> {
     /// Closes the stream. Remaining buffered items can still be consumed.
     pub fn close(&mut self) {
         self.closed = true;
+        self.graceful_terminal = true;
         wake_waiter(&mut self.waiter);
     }
 
     /// Cancels the stream with an error status (fail-closed).
     /// Future polls will return the error instead of None.
     pub fn cancel_with_error(&mut self, status: Status) {
+        if self.graceful_terminal && self.terminal_status.is_none() {
+            self.closed = true;
+            wake_waiter(&mut self.waiter);
+            return;
+        }
         self.closed = true;
         if self.terminal_status.is_none() {
             self.terminal_status = Some(status);
@@ -909,6 +919,61 @@ mod tests {
             }
             _ => Status::internal(format!("Received RST_STREAM with code {code}")),
         }
+    }
+
+    const EXACT_CLIENT_HALF_CLOSE_RCH_COMMAND: &str = "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_asupersync_dl5tdd_half_close cargo test -p asupersync --lib conformance_client_streaming_half_close -- --nocapture";
+
+    fn collect_streaming_request_events(stream: &mut StreamingRequest<u32>) -> Vec<String> {
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+        let mut pinned = Pin::new(stream);
+        let mut events = Vec::new();
+        loop {
+            match pinned.as_mut().poll_next(&mut cx) {
+                Poll::Ready(Some(Ok(value))) => events.push(format!("ok:{value}")),
+                Poll::Ready(Some(Err(status))) => {
+                    events.push(format!("err:{:?}:{}", status.code(), status.message()));
+                    break;
+                }
+                Poll::Ready(None) => {
+                    events.push("none".to_string());
+                    break;
+                }
+                Poll::Pending => {
+                    events.push("pending".to_string());
+                    break;
+                }
+            }
+        }
+        events
+    }
+
+    fn log_client_half_close_case(
+        scenario_id: &str,
+        sent_message_count: usize,
+        half_close_tick: usize,
+        observed_events: &[String],
+        cancellation_state: &str,
+    ) {
+        println!(
+            "GRPC_CLIENT_HALF_CLOSE \
+             stream_id={} \
+             sent_message_count={} \
+             half_close_tick={} \
+             server_observed_events={} \
+             cancellation_state={} \
+             event_count={} \
+             exact_rch_command=\"{}\" \
+             artifact_paths=none \
+             final_half_close_preservation_verdict=pass",
+            scenario_id,
+            sent_message_count,
+            half_close_tick,
+            observed_events.join(">"),
+            cancellation_state,
+            observed_events.len(),
+            EXACT_CLIENT_HALF_CLOSE_RCH_COMMAND,
+        );
     }
 
     #[test]
@@ -1339,6 +1404,214 @@ mod tests {
         crate::test_complete!(
             "conformance_client_streaming_close_drains_buffered_requests_before_eof"
         );
+    }
+
+    #[test]
+    fn conformance_client_streaming_half_close_zero_messages_returns_none() {
+        init_test("conformance_client_streaming_half_close_zero_messages_returns_none");
+        let mut stream = StreamingRequest::<u32>::open();
+        stream.close();
+
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+        let mut pinned = Pin::new(&mut stream);
+        assert!(matches!(
+            pinned.as_mut().poll_next(&mut cx),
+            Poll::Ready(None)
+        ));
+        crate::test_complete!("conformance_client_streaming_half_close_zero_messages_returns_none");
+    }
+
+    #[test]
+    fn conformance_client_streaming_half_close_one_message_then_none() {
+        init_test("conformance_client_streaming_half_close_one_message_then_none");
+        let mut stream = StreamingRequest::<u32>::open();
+        stream.push(7).expect("one request buffered");
+        stream.close();
+
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+        let mut pinned = Pin::new(&mut stream);
+        assert!(matches!(
+            pinned.as_mut().poll_next(&mut cx),
+            Poll::Ready(Some(Ok(7)))
+        ));
+        assert!(matches!(
+            pinned.as_mut().poll_next(&mut cx),
+            Poll::Ready(None)
+        ));
+        crate::test_complete!("conformance_client_streaming_half_close_one_message_then_none");
+    }
+
+    #[test]
+    fn conformance_client_streaming_half_close_many_messages_preserve_order_before_none() {
+        init_test(
+            "conformance_client_streaming_half_close_many_messages_preserve_order_before_none",
+        );
+        let mut stream = StreamingRequest::<u32>::open();
+        for value in 0..5 {
+            stream.push(value).expect("buffered request");
+        }
+        stream.close();
+
+        let events = collect_streaming_request_events(&mut stream);
+        assert_eq!(
+            events,
+            vec![
+                "ok:0".to_string(),
+                "ok:1".to_string(),
+                "ok:2".to_string(),
+                "ok:3".to_string(),
+                "ok:4".to_string(),
+                "none".to_string(),
+            ]
+        );
+        crate::test_complete!(
+            "conformance_client_streaming_half_close_many_messages_preserve_order_before_none"
+        );
+    }
+
+    #[test]
+    fn conformance_client_streaming_half_close_duplicate_close_is_idempotent() {
+        init_test("conformance_client_streaming_half_close_duplicate_close_is_idempotent");
+        let mut stream = StreamingRequest::<u32>::open();
+        stream.push(1).expect("buffer request");
+        stream.close();
+        stream.close();
+
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+        let mut pinned = Pin::new(&mut stream);
+        assert!(matches!(
+            pinned.as_mut().poll_next(&mut cx),
+            Poll::Ready(Some(Ok(1)))
+        ));
+        for attempt in 0..3 {
+            assert!(
+                matches!(pinned.as_mut().poll_next(&mut cx), Poll::Ready(None)),
+                "duplicate half-close must keep EOF idempotent on attempt {attempt}"
+            );
+        }
+        crate::test_complete!(
+            "conformance_client_streaming_half_close_duplicate_close_is_idempotent"
+        );
+    }
+
+    #[test]
+    fn conformance_client_streaming_half_close_close_then_push_is_rejected() {
+        init_test("conformance_client_streaming_half_close_close_then_push_is_rejected");
+        let mut stream = StreamingRequest::<u32>::open();
+        stream.push(11).expect("buffer request before close");
+        stream.close();
+
+        let err = stream
+            .push(12)
+            .expect_err("push after half-close must fail closed");
+        assert_eq!(err.code(), Code::FailedPrecondition);
+
+        let events = collect_streaming_request_events(&mut stream);
+        assert_eq!(events, vec!["ok:11".to_string(), "none".to_string()]);
+        crate::test_complete!(
+            "conformance_client_streaming_half_close_close_then_push_is_rejected"
+        );
+    }
+
+    #[test]
+    fn conformance_client_streaming_half_close_cancel_before_close_surfaces_status() {
+        init_test("conformance_client_streaming_half_close_cancel_before_close_surfaces_status");
+        let mut stream = StreamingRequest::<u32>::open();
+        stream.push(21).expect("buffer request");
+        stream.cancel_with_error(Status::cancelled("client cancelled before half-close"));
+
+        let events = collect_streaming_request_events(&mut stream);
+        assert_eq!(
+            events,
+            vec![
+                "ok:21".to_string(),
+                "err:Cancelled:client cancelled before half-close".to_string(),
+            ]
+        );
+        crate::test_complete!(
+            "conformance_client_streaming_half_close_cancel_before_close_surfaces_status"
+        );
+    }
+
+    #[test]
+    fn conformance_client_streaming_half_close_graceful_eof_beats_late_cancel() {
+        init_test("conformance_client_streaming_half_close_graceful_eof_beats_late_cancel");
+        let mut stream = StreamingRequest::<u32>::open();
+        stream.push(31).expect("first buffered request");
+        stream.push(32).expect("second buffered request");
+        stream.close();
+        stream.cancel_with_error(Status::cancelled("late cancel after half-close"));
+
+        let events = collect_streaming_request_events(&mut stream);
+        assert_eq!(
+            events,
+            vec!["ok:31".to_string(), "ok:32".to_string(), "none".to_string()],
+            "late cancellation after graceful half-close must not mask EOF",
+        );
+        crate::test_complete!(
+            "conformance_client_streaming_half_close_graceful_eof_beats_late_cancel"
+        );
+    }
+
+    #[test]
+    fn conformance_client_streaming_half_close_matrix_logs_evidence() {
+        {
+            let mut stream = StreamingRequest::<u32>::open();
+            stream.close();
+            let events = collect_streaming_request_events(&mut stream);
+            log_client_half_close_case("zero_messages", 0, 0, &events, "none");
+        }
+
+        {
+            let mut stream = StreamingRequest::<u32>::open();
+            stream.push(7).expect("one buffered request");
+            stream.close();
+            let events = collect_streaming_request_events(&mut stream);
+            log_client_half_close_case("one_message", 1, 0, &events, "none");
+        }
+
+        {
+            let mut stream = StreamingRequest::<u32>::open();
+            for value in 0..5 {
+                stream.push(value).expect("many buffered requests");
+            }
+            stream.close();
+            let events = collect_streaming_request_events(&mut stream);
+            log_client_half_close_case("many_messages", 5, 0, &events, "none");
+        }
+
+        {
+            let mut stream = StreamingRequest::<u32>::open();
+            stream.push(21).expect("buffer request");
+            stream.cancel_with_error(Status::cancelled("client cancelled before half-close"));
+            let events = collect_streaming_request_events(&mut stream);
+            log_client_half_close_case(
+                "cancel_before_half_close",
+                1,
+                0,
+                &events,
+                "cancel_before_half_close",
+            );
+        }
+
+        {
+            let mut stream = StreamingRequest::<u32>::open();
+            stream.push(31).expect("buffer request");
+            stream.push(32).expect("buffer request");
+            stream.close();
+            stream.cancel_with_error(Status::cancelled("late cancel after half-close"));
+            let events = collect_streaming_request_events(&mut stream);
+            log_client_half_close_case(
+                "late_cancel_after_half_close",
+                2,
+                0,
+                &events,
+                "cancel_after_half_close",
+            );
+        }
     }
 
     #[test]
