@@ -1392,6 +1392,8 @@ pub struct HostProfileManualOverrides {
     pub capacity_hints: Option<RuntimeCapacityHints>,
     /// Explicit trace-storage profile override.
     pub trace_storage_profile: Option<TraceStorageProfile>,
+    /// Explicit arena-temperature policy override.
+    pub arena_temperature_policy: Option<ArenaTemperaturePolicy>,
     /// Explicit governor override.
     pub enable_governor: Option<bool>,
     /// Explicit read-biased snapshot override.
@@ -1426,6 +1428,9 @@ impl HostProfileManualOverrides {
         }
         if self.trace_storage_profile.is_some() {
             fields.push("trace_storage_profile");
+        }
+        if self.arena_temperature_policy.is_some() {
+            fields.push("arena_temperature_policy");
         }
         if self.enable_governor.is_some() {
             fields.push("enable_governor");
@@ -1463,6 +1468,9 @@ impl HostProfileManualOverrides {
         }
         if let Some(trace_storage_profile) = self.trace_storage_profile {
             config.trace_storage_profile = trace_storage_profile;
+        }
+        if let Some(arena_temperature_policy) = self.arena_temperature_policy {
+            config.arena_temperature_policy = arena_temperature_policy;
         }
         if let Some(enable_governor) = self.enable_governor {
             config.enable_governor = enable_governor;
@@ -1809,6 +1817,7 @@ fn host_profile_bundle(profile: HostProfileId) -> RuntimeConfig {
             config.capacity_hints =
                 Some(RuntimeCapacityHints::from_expected_concurrent_tasks(12_288));
             config.trace_storage_profile = TraceStorageProfile::LargeMemory256G;
+            config.arena_temperature_policy = ArenaTemperaturePolicy::TieredColdEvidence;
             config.enable_governor = true;
             config.enable_read_biased_region_snapshot = true;
             config.enable_adaptive_cancel_streak = true;
@@ -1981,6 +1990,13 @@ fn build_host_profile_config_diff(
         baseline.trace_storage_profile.to_string(),
         profile_bundle.trace_storage_profile.to_string(),
         final_bundle.trace_storage_profile.to_string(),
+    );
+    maybe_push_diff_entry(
+        &mut diff,
+        "arena_temperature_policy",
+        baseline.arena_temperature_policy.to_string(),
+        profile_bundle.arena_temperature_policy.to_string(),
+        final_bundle.arena_temperature_policy.to_string(),
     );
     maybe_push_diff_entry(
         &mut diff,

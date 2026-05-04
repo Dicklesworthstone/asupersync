@@ -1,13 +1,13 @@
 //! Contract-backed proofs for signed profile bundle manifests and rollback receipts.
 
 use asupersync::runtime::config::{
-    BlockingPoolAffinityProfile, CapacityEnvelopeBrownoutStage, CapacityEnvelopeBudget,
-    CapacityEnvelopeEvidenceSnapshot, CapacityEnvelopeHostFingerprint, HostProfileEvidenceArtifact,
-    HostProfileEvidenceSet, HostProfileHostResources, HostProfileId, HostProfileManualOverrides,
-    HostProfilePlannerObjective, HostProfilePlannerRequest, RuntimeCapacityHints,
-    SignedProfileBundleCapacityCertificateReference, SignedProfileBundleControllerVersion,
-    SignedProfileBundleExecutionMode, SignedProfileBundleIntegrityMode,
-    SignedProfileBundleManifestRequest, TraceStorageProfile,
+    ArenaTemperaturePolicy, BlockingPoolAffinityProfile, CapacityEnvelopeBrownoutStage,
+    CapacityEnvelopeBudget, CapacityEnvelopeEvidenceSnapshot, CapacityEnvelopeHostFingerprint,
+    HostProfileEvidenceArtifact, HostProfileEvidenceSet, HostProfileHostResources, HostProfileId,
+    HostProfileManualOverrides, HostProfilePlannerObjective, HostProfilePlannerRequest,
+    RuntimeCapacityHints, SignedProfileBundleCapacityCertificateReference,
+    SignedProfileBundleControllerVersion, SignedProfileBundleExecutionMode,
+    SignedProfileBundleIntegrityMode, SignedProfileBundleManifestRequest, TraceStorageProfile,
 };
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -87,6 +87,7 @@ struct HostProfileManualOverridesFixture {
     blocking_affinity_profile: Option<BlockingAffinityFixture>,
     capacity_hints: Option<CapacityHintsFixture>,
     trace_storage_profile: Option<String>,
+    arena_temperature_policy: Option<String>,
     enable_governor: Option<bool>,
     enable_read_biased_region_snapshot: Option<bool>,
     enable_adaptive_cancel_streak: Option<bool>,
@@ -221,6 +222,10 @@ impl From<HostProfileManualOverridesFixture> for HostProfileManualOverrides {
                 .trace_storage_profile
                 .as_deref()
                 .map(parse_trace_storage_profile),
+            arena_temperature_policy: value
+                .arena_temperature_policy
+                .as_deref()
+                .map(parse_arena_temperature_policy),
             enable_governor: value.enable_governor,
             enable_read_biased_region_snapshot: value.enable_read_biased_region_snapshot,
             enable_adaptive_cancel_streak: value.enable_adaptive_cancel_streak,
@@ -329,6 +334,12 @@ fn parse_trace_storage_profile(value: &str) -> TraceStorageProfile {
     value.parse().unwrap_or_else(|_| {
         panic!("unsupported trace storage profile override {value}");
     })
+}
+
+fn parse_arena_temperature_policy(value: &str) -> ArenaTemperaturePolicy {
+    value
+        .parse()
+        .unwrap_or_else(|_| panic!("unknown arena temperature policy fixture: {value}"))
 }
 
 fn parse_integrity_mode(value: &str) -> SignedProfileBundleIntegrityMode {

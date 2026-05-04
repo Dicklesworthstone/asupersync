@@ -1,10 +1,10 @@
 //! Contract-backed proofs for the explainable host-profile planner.
 
 use asupersync::runtime::config::{
-    BlockingPoolAffinityProfile, HostProfileConfigDiffSource, HostProfileEvidenceArtifact,
-    HostProfileEvidenceSet, HostProfileHostResources, HostProfileId, HostProfileManualOverrides,
-    HostProfilePlannerObjective, HostProfilePlannerRequest, RuntimeCapacityHints, RuntimeConfig,
-    TraceStorageProfile,
+    ArenaTemperaturePolicy, BlockingPoolAffinityProfile, HostProfileConfigDiffSource,
+    HostProfileEvidenceArtifact, HostProfileEvidenceSet, HostProfileHostResources, HostProfileId,
+    HostProfileManualOverrides, HostProfilePlannerObjective, HostProfilePlannerRequest,
+    RuntimeCapacityHints, RuntimeConfig, TraceStorageProfile,
 };
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -66,6 +66,7 @@ struct HostProfileManualOverridesFixture {
     blocking_affinity_profile: Option<BlockingAffinityFixture>,
     capacity_hints: Option<CapacityHintsFixture>,
     trace_storage_profile: Option<String>,
+    arena_temperature_policy: Option<String>,
     enable_governor: Option<bool>,
     enable_read_biased_region_snapshot: Option<bool>,
     enable_adaptive_cancel_streak: Option<bool>,
@@ -148,6 +149,10 @@ impl From<HostProfileManualOverridesFixture> for HostProfileManualOverrides {
                 .trace_storage_profile
                 .as_deref()
                 .map(parse_trace_storage_profile),
+            arena_temperature_policy: value
+                .arena_temperature_policy
+                .as_deref()
+                .map(parse_arena_temperature_policy),
             enable_governor: value.enable_governor,
             enable_read_biased_region_snapshot: value.enable_read_biased_region_snapshot,
             enable_adaptive_cancel_streak: value.enable_adaptive_cancel_streak,
@@ -209,6 +214,12 @@ fn parse_trace_storage_profile(value: &str) -> TraceStorageProfile {
     })
 }
 
+fn parse_arena_temperature_policy(value: &str) -> ArenaTemperaturePolicy {
+    value
+        .parse()
+        .unwrap_or_else(|_| panic!("unknown arena temperature policy fixture: {value}"))
+}
+
 fn build_request(scenario: &HostProfilePlannerScenario) -> HostProfilePlannerRequest {
     HostProfilePlannerRequest {
         objective: parse_objective(&scenario.objective),
@@ -266,6 +277,7 @@ fn summarize_config(config: &RuntimeConfig) -> Value {
         "blocking_affinity_profile": format_blocking_affinity(config.blocking.affinity_profile),
         "capacity_hints": format_capacity_hints(config),
         "trace_storage_profile": config.trace_storage_profile.to_string(),
+        "arena_temperature_policy": config.arena_temperature_policy.to_string(),
         "browser_ready_handoff_limit": config.browser_ready_handoff_limit,
         "enable_governor": config.enable_governor,
         "enable_read_biased_region_snapshot": config.enable_read_biased_region_snapshot,
@@ -491,6 +503,10 @@ fn host_profile_named_bundle_composes_expected_large_host_knobs() {
         TraceStorageProfile::LargeMemory256G
     );
     assert_eq!(
+        plan.profile_bundle.arena_temperature_policy,
+        ArenaTemperaturePolicy::Unified
+    );
+    assert_eq!(
         plan.profile_bundle.blocking.affinity_profile,
         BlockingPoolAffinityProfile::CohortBiased {
             local_queue_soft_limit: 32,
@@ -530,6 +546,52 @@ fn host_profile_manual_overrides_take_precedence() {
         .collect::<Vec<_>>();
     assert!(override_sources.contains(&"global_queue_limit".to_string()));
     assert!(override_sources.contains(&"trace_storage_profile".to_string()));
+}
+
+#[test]
+fn host_profile_large_memory_retention_bundle_enables_tiered_arena_temperature() {
+    let request = sample_request(
+        HostProfilePlannerObjective::EvidenceRetentionFirst,
+        Some(HostProfileId::LargeMemoryEvidenceRetention256G),
+    );
+    let plan = request.plan();
+    assert_eq!(
+        plan.selected_profile,
+        HostProfileId::LargeMemoryEvidenceRetention256G
+    );
+    assert_eq!(
+        plan.profile_bundle.arena_temperature_policy,
+        ArenaTemperaturePolicy::TieredColdEvidence
+    );
+    assert_eq!(
+        plan.final_bundle.arena_temperature_policy,
+        ArenaTemperaturePolicy::TieredColdEvidence
+    );
+}
+
+#[test]
+fn host_profile_arena_temperature_override_takes_precedence() {
+    let mut request = sample_request(
+        HostProfilePlannerObjective::EvidenceRetentionFirst,
+        Some(HostProfileId::LargeMemoryEvidenceRetention256G),
+    );
+    request.manual_overrides.arena_temperature_policy = Some(ArenaTemperaturePolicy::Unified);
+    let plan = request.plan();
+    assert_eq!(
+        plan.profile_bundle.arena_temperature_policy,
+        ArenaTemperaturePolicy::TieredColdEvidence
+    );
+    assert_eq!(
+        plan.final_bundle.arena_temperature_policy,
+        ArenaTemperaturePolicy::Unified
+    );
+    let override_sources = plan
+        .config_diff
+        .iter()
+        .filter(|entry| entry.source == HostProfileConfigDiffSource::ManualOverride)
+        .map(|entry| entry.field_path.clone())
+        .collect::<Vec<_>>();
+    assert!(override_sources.contains(&"arena_temperature_policy".to_string()));
 }
 
 #[test]
@@ -651,6 +713,10 @@ fn host_profile_disabled_mode_matches_default_runtime_config() {
     assert_eq!(
         plan.final_bundle.trace_storage_profile,
         defaults.trace_storage_profile
+    );
+    assert_eq!(
+        plan.final_bundle.arena_temperature_policy,
+        defaults.arena_temperature_policy
     );
     assert!(plan.config_diff.is_empty());
 }
