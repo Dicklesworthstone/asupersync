@@ -2192,6 +2192,213 @@ mod tests {
     }
 
     #[test]
+    fn try_abort_by_id_race_matrix_logs_evidence() {
+        init_test("try_abort_by_id_race_matrix_logs_evidence");
+
+        const SCENARIO_ID: &str = "TRY-ABORT-BY-ID-RACE-MATRIX-N3GXII";
+        const RCH_COMMAND: &str = "rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_asupersync_n3gxii_ledger_final cargo test -p asupersync --lib try_abort_by_id_race_matrix_logs_evidence --features test-internals -- --nocapture";
+
+        fn record_state(ledger: &ObligationLedger, id: ObligationId) -> &'static str {
+            ledger
+                .get(id)
+                .map_or("Missing", |record| match record.state {
+                    ObligationState::Reserved => "Reserved",
+                    ObligationState::Committed => "Committed",
+                    ObligationState::Aborted => "Aborted",
+                    ObligationState::Leaked => "Leaked",
+                })
+        }
+
+        fn abort_result(result: &Result<u64, LedgerError>) -> String {
+            match result {
+                Ok(duration) => format!("Ok({duration})"),
+                Err(LedgerError::NotFound { .. }) => "Err(NotFound)".to_string(),
+                Err(LedgerError::AlreadyResolved { state, .. }) => {
+                    format!("Err(AlreadyResolved::{state:?})")
+                }
+                Err(LedgerError::RegionFinalized { .. }) => "Err(RegionFinalized)".to_string(),
+            }
+        }
+
+        let mut ledger = ObligationLedger::new();
+        let task = make_task();
+        let region = make_region();
+        let mut rows = Vec::new();
+        let mut double_fulfillment_count = 0usize;
+
+        let missing_id = ObligationId::new_for_test(99_999, 9);
+        let missing_result = ledger.try_abort_by_id(
+            missing_id,
+            Time::from_nanos(1),
+            ObligationAbortReason::Cancel,
+        );
+        assert!(matches!(
+            missing_result,
+            Err(LedgerError::NotFound { obligation }) if obligation == missing_id
+        ));
+        rows.push(serde_json::json!({
+            "case": "missing_id",
+            "task_id": format!("{task:?}"),
+            "obligation_id": format!("{missing_id:?}"),
+            "generation": missing_id.arena_index().generation(),
+            "race_participant": "drain_abort_without_record",
+            "fulfillment_state_before": "Missing",
+            "abort_result": abort_result(&missing_result),
+            "fulfillment_state_after": record_state(&ledger, missing_id),
+        }));
+
+        let token_success = ledger.acquire(ObligationKind::Lease, task, region, Time::ZERO);
+        let id_success = token_success.id();
+        let before_success = record_state(&ledger, id_success);
+        let success_result = ledger.try_abort_by_id(
+            id_success,
+            Time::from_nanos(10),
+            ObligationAbortReason::Cancel,
+        );
+        assert_eq!(success_result, Ok(10));
+        rows.push(serde_json::json!({
+            "case": "reserved_abort_success",
+            "task_id": format!("{task:?}"),
+            "obligation_id": format!("{id_success:?}"),
+            "generation": id_success.arena_index().generation(),
+            "race_participant": "drain_abort_wins",
+            "fulfillment_state_before": before_success,
+            "abort_result": abort_result(&success_result),
+            "fulfillment_state_after": record_state(&ledger, id_success),
+        }));
+
+        let token_commit = ledger.acquire(ObligationKind::Lease, task, region, Time::ZERO);
+        let id_commit = token_commit.id();
+        let _duration = ledger.commit(token_commit, Time::from_nanos(20));
+        let before_commit_race = record_state(&ledger, id_commit);
+        let committed_result = ledger.try_abort_by_id(
+            id_commit,
+            Time::from_nanos(30),
+            ObligationAbortReason::Cancel,
+        );
+        assert!(matches!(
+            committed_result,
+            Err(LedgerError::AlreadyResolved {
+                obligation,
+                state: ObligationState::Committed,
+            }) if obligation == id_commit
+        ));
+        double_fulfillment_count += 1;
+        rows.push(serde_json::json!({
+            "case": "concurrent_fulfillment_commit_wins",
+            "task_id": format!("{task:?}"),
+            "obligation_id": format!("{id_commit:?}"),
+            "generation": id_commit.arena_index().generation(),
+            "race_participant": "token_commit_then_drain_abort",
+            "fulfillment_state_before": before_commit_race,
+            "abort_result": abort_result(&committed_result),
+            "fulfillment_state_after": record_state(&ledger, id_commit),
+        }));
+
+        let token_abort = ledger.acquire(ObligationKind::Lease, task, region, Time::ZERO);
+        let id_abort = token_abort.id();
+        let first_abort = ledger.try_abort_by_id(
+            id_abort,
+            Time::from_nanos(40),
+            ObligationAbortReason::Cancel,
+        );
+        assert_eq!(first_abort, Ok(40));
+        let before_double_abort = record_state(&ledger, id_abort);
+        let double_abort_result = ledger.try_abort_by_id(
+            id_abort,
+            Time::from_nanos(50),
+            ObligationAbortReason::Cancel,
+        );
+        assert!(matches!(
+            double_abort_result,
+            Err(LedgerError::AlreadyResolved {
+                obligation,
+                state: ObligationState::Aborted,
+            }) if obligation == id_abort
+        ));
+        double_fulfillment_count += 1;
+        rows.push(serde_json::json!({
+            "case": "concurrent_abort_double_abort_idempotence",
+            "task_id": format!("{task:?}"),
+            "obligation_id": format!("{id_abort:?}"),
+            "generation": id_abort.arena_index().generation(),
+            "race_participant": "two_drain_aborts_same_id",
+            "fulfillment_state_before": before_double_abort,
+            "abort_result": abort_result(&double_abort_result),
+            "fulfillment_state_after": record_state(&ledger, id_abort),
+        }));
+
+        let token_stale = ledger.acquire(ObligationKind::Lease, task, region, Time::ZERO);
+        let id_live = token_stale.id();
+        let live_index = id_live.arena_index();
+        let stale_id = ObligationId::new_for_test(
+            live_index.index(),
+            live_index.generation().saturating_add(1),
+        );
+        let stale_result = ledger.try_abort_by_id(
+            stale_id,
+            Time::from_nanos(60),
+            ObligationAbortReason::Cancel,
+        );
+        assert!(matches!(
+            stale_result,
+            Err(LedgerError::NotFound { obligation }) if obligation == stale_id
+        ));
+        rows.push(serde_json::json!({
+            "case": "stale_generation_aba_rejected",
+            "task_id": format!("{task:?}"),
+            "obligation_id": format!("{stale_id:?}"),
+            "generation": stale_id.arena_index().generation(),
+            "race_participant": "stale_generation_drain_abort",
+            "fulfillment_state_before": "Missing",
+            "abort_result": abort_result(&stale_result),
+            "fulfillment_state_after": record_state(&ledger, stale_id),
+            "live_obligation_state_after": record_state(&ledger, id_live),
+        }));
+        let live_cleanup = ledger.try_abort_by_id(
+            id_live,
+            Time::from_nanos(70),
+            ObligationAbortReason::Explicit,
+        );
+        assert_eq!(live_cleanup, Ok(70));
+
+        let stats = ledger.stats();
+        let leak_count = ledger.check_leaks().leaked.len();
+        assert_eq!(
+            stats.pending, 0,
+            "race matrix must not leak pending obligations"
+        );
+        assert_eq!(leak_count, 0, "race matrix leak report must be clean");
+
+        let report = serde_json::json!({
+            "scenario_id": SCENARIO_ID,
+            "task_id": format!("{task:?}"),
+            "region_id": format!("{region:?}"),
+            "race_matrix": rows,
+            "double_fulfillment_count": double_fulfillment_count,
+            "stats": {
+                "pending": stats.pending,
+                "total_committed": stats.total_committed,
+                "total_aborted": stats.total_aborted,
+                "total_leaked": stats.total_leaked,
+            },
+            "leak_count": leak_count,
+            "exact_rch_command": RCH_COMMAND,
+            "artifact_paths": [],
+            "final_race_tolerant_verdict": "pass"
+        });
+
+        println!("ASUPERSYNC_TRY_ABORT_BY_ID_RACE_MATRIX_BEGIN");
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&report).expect("serialize try_abort_by_id report")
+        );
+        println!("ASUPERSYNC_TRY_ABORT_BY_ID_RACE_MATRIX_END");
+
+        crate::test_complete!("try_abort_by_id_race_matrix_logs_evidence");
+    }
+
+    #[test]
     fn abort_by_id_supports_cancel_drain_without_leak_accounting() {
         init_test("abort_by_id_supports_cancel_drain_without_leak_accounting");
         let mut ledger = ObligationLedger::new();
