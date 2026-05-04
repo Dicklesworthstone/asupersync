@@ -224,7 +224,26 @@
         640
       ],
       "output_root": "target/capacity-envelope-planner-smoke",
-      "expected_report_projection": null
+      "expected_report_projection": {
+        "brownout_stage": "optional_first",
+        "calibration_status": "calibrated",
+        "fallback_profile": "conservative_baseline",
+        "host_cpu_cores": 64,
+        "host_memory_gib": 256,
+        "min_sample_count": 32,
+        "projection_hash": 6971661584632454468,
+        "proof_artifact_count": 6,
+        "refusal_count": 0,
+        "refused_agent_min": 512,
+        "refused_worker_min": 48,
+        "safe_agent_max": 512,
+        "safe_worker_max": 64,
+        "sample_count": 96,
+        "selected_profile": "locality_first_64c_256g",
+        "target_cancel_debt_units": 130,
+        "target_p99_ns": 1300000,
+        "used_safe_fallback": false
+      }
     },
     {
       "scenario_id": "AA-CAPACITY-ENVELOPE-NO-WIN-64C-256G",
@@ -323,7 +342,26 @@
         896
       ],
       "output_root": "target/capacity-envelope-planner-smoke",
-      "expected_report_projection": null
+      "expected_report_projection": {
+        "brownout_stage": "optional_first",
+        "calibration_status": "calibrated",
+        "fallback_profile": "conservative_baseline",
+        "host_cpu_cores": 64,
+        "host_memory_gib": 256,
+        "min_sample_count": 32,
+        "projection_hash": 1975763285885381603,
+        "proof_artifact_count": 6,
+        "refusal_count": 1,
+        "refused_agent_min": 640,
+        "refused_worker_min": 48,
+        "safe_agent_max": 0,
+        "safe_worker_max": 0,
+        "sample_count": 96,
+        "selected_profile": "conservative_baseline",
+        "target_cancel_debt_units": 130,
+        "target_p99_ns": 1300000,
+        "used_safe_fallback": true
+      }
     },
     {
       "scenario_id": "AA-CAPACITY-ENVELOPE-UNDER-SAMPLED-EVIDENCE",
@@ -423,7 +461,26 @@
         640
       ],
       "output_root": "target/capacity-envelope-planner-smoke",
-      "expected_report_projection": null
+      "expected_report_projection": {
+        "brownout_stage": "optional_first",
+        "calibration_status": "calibrated",
+        "fallback_profile": "conservative_baseline",
+        "host_cpu_cores": 64,
+        "host_memory_gib": 256,
+        "min_sample_count": 32,
+        "projection_hash": 18042509502394620633,
+        "proof_artifact_count": 6,
+        "refusal_count": 1,
+        "refused_agent_min": 256,
+        "refused_worker_min": 48,
+        "safe_agent_max": 0,
+        "safe_worker_max": 0,
+        "sample_count": 12,
+        "selected_profile": "conservative_baseline",
+        "target_cancel_debt_units": 130,
+        "target_p99_ns": 1300000,
+        "used_safe_fallback": true
+      }
     },
     {
       "scenario_id": "AA-CAPACITY-ENVELOPE-CALIBRATION-DRIFT-FALLBACK",
@@ -521,7 +578,26 @@
         640
       ],
       "output_root": "target/capacity-envelope-planner-smoke",
-      "expected_report_projection": null
+      "expected_report_projection": {
+        "brownout_stage": "optional_first",
+        "calibration_status": "drifted",
+        "fallback_profile": "conservative_baseline",
+        "host_cpu_cores": 64,
+        "host_memory_gib": 256,
+        "min_sample_count": 32,
+        "projection_hash": 4689834561679803857,
+        "proof_artifact_count": 6,
+        "refusal_count": 1,
+        "refused_agent_min": 256,
+        "refused_worker_min": 48,
+        "safe_agent_max": 0,
+        "safe_worker_max": 0,
+        "sample_count": 96,
+        "selected_profile": "conservative_baseline",
+        "target_cancel_debt_units": 120,
+        "target_p99_ns": 1200000,
+        "used_safe_fallback": true
+      }
     },
     {
       "scenario_id": "AA-CAPACITY-ENVELOPE-STRICTER-SLO-SHRINK-64C-256G",
@@ -621,7 +697,26 @@
         640
       ],
       "output_root": "target/capacity-envelope-planner-smoke",
-      "expected_report_projection": null
+      "expected_report_projection": {
+        "brownout_stage": "optional_first",
+        "calibration_status": "calibrated",
+        "fallback_profile": "conservative_baseline",
+        "host_cpu_cores": 64,
+        "host_memory_gib": 256,
+        "min_sample_count": 32,
+        "projection_hash": 8094973839640757010,
+        "proof_artifact_count": 6,
+        "refusal_count": 0,
+        "refused_agent_min": 384,
+        "refused_worker_min": 48,
+        "safe_agent_max": 384,
+        "safe_worker_max": 64,
+        "sample_count": 96,
+        "selected_profile": "locality_first_64c_256g",
+        "target_cancel_debt_units": 130,
+        "target_p99_ns": 1050000,
+        "used_safe_fallback": false
+      }
     }
   ]
 }
