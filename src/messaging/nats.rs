@@ -20,6 +20,11 @@ use crate::io::{AsyncRead, AsyncWriteExt, ReadBuf};
 use crate::net::TcpStream;
 use crate::tracing_compat::warn;
 use crate::types::Time;
+use base64::{
+    Engine as _,
+    engine::general_purpose::{URL_SAFE, URL_SAFE_NO_PAD},
+};
+use nkeys::{KeyPair, KeyPairType};
 use parking_lot::Mutex;
 use std::collections::HashMap;
 use std::fmt;
@@ -51,6 +56,8 @@ pub enum NatsError {
     Io(io::Error),
     /// Protocol error (malformed NATS message).
     Protocol(String),
+    /// Invalid authentication configuration or malformed credentials.
+    InvalidAuth(String),
     /// Server returned an error response (-ERR).
     Server(String),
     /// Invalid URL format.
@@ -81,6 +88,7 @@ impl fmt::Display for NatsError {
         match self {
             Self::Io(e) => write!(f, "NATS I/O error: {e}"),
             Self::Protocol(msg) => write!(f, "NATS protocol error: {msg}"),
+            Self::InvalidAuth(msg) => write!(f, "NATS invalid auth configuration: {msg}"),
             Self::Server(msg) => write!(f, "NATS server error: {msg}"),
             Self::InvalidUrl(url) => write!(f, "Invalid NATS URL: {url}"),
             Self::Cancelled => write!(f, "NATS operation cancelled"),
@@ -165,23 +173,23 @@ impl NatsError {
 /// absent ones.
 /// # Auth-method support matrix (audit, 2026-04-29)
 ///
-/// The asupersync NATS client supports the **legacy** auth methods only:
+/// The asupersync NATS client supports the following auth methods:
 ///
 /// | NATS auth method               | Supported here? | Notes |
 /// | ------------------------------ | --------------- | ----- |
 /// | None                           | ✅              | default |
 /// | `user` + `pass`                | ✅              | requires TLS via `require_tls` or server INFO `tls_required` |
 /// | `auth_token`                   | ✅              | same TLS gate as user/pass |
-/// | nkey (nonce challenge, ed25519) | ❌ NOT IMPLEMENTED | server INFO `nonce` field is not parsed; CONNECT has no `nkey`/`sig` field |
-/// | JWT (decentralized auth, NGS)  | ❌ NOT IMPLEMENTED | CONNECT has no `jwt`/`sig` field |
-/// | sealing-key rotation           | ❌ N/A          | no JWT, so nothing to rotate |
+/// | nkey (nonce challenge, ed25519) | ✅              | requires INFO `nonce` and a user `nkey_seed` |
+/// | JWT (decentralized auth, NGS)  | ✅              | requires INFO `nonce`, `user_jwt`, and matching user `nkey_seed` |
+/// | `.creds` file contents         | ✅              | load via [`NatsConfig::apply_creds`] |
+/// | sealing-key rotation           | delegated        | JWT verification remains server-side; client validates structure and subject match only |
 ///
 /// Filed as `[security-audit-for-saas] nats client lacks nkey/JWT auth`.
 /// Operators connecting to a server configured for nkey-only or JWT-only
-/// auth (typical for NGS / Synadia Cloud) will see every CONNECT
-/// rejected with `-ERR 'Authorization Violation'`. The future fix
-/// will add `Option<NkeyCredentials>` and `Option<UserJwt>` fields plus
-/// a sign-the-INFO-nonce path before CONNECT.
+/// auth (typical for NGS / Synadia Cloud) can now authenticate by
+/// signing the INFO nonce before CONNECT without weakening the
+/// existing legacy user/password/token path.
 ///
 /// Subject-permission enforcement is correctly delegated to the
 /// server; the client propagates server `-ERR 'Permissions Violation'`
@@ -206,9 +214,21 @@ pub struct NatsConfig {
     ///
     /// Same TLS gate. Note: this is the static `auth_token` field, NOT
     /// a JWT. NATS-protocol JWT auth (CONNECT `jwt` + nonce-signed
-    /// `sig`) is not supported; see the auth-method matrix on
-    /// [`NatsConfig`].
+    /// `sig`) uses [`Self::user_jwt`] plus [`Self::nkey_seed`].
     pub token: Option<String>,
+    /// Optional user JWT for decentralized NATS auth.
+    ///
+    /// This mode MUST be paired with [`Self::nkey_seed`], and the JWT
+    /// `sub` claim MUST match the public key derived from that seed.
+    /// The client validates the token structure and claim shape, then
+    /// signs the server INFO nonce and emits CONNECT `jwt` + `sig`.
+    pub user_jwt: Option<String>,
+    /// Optional user NKey seed used to sign the server INFO nonce.
+    ///
+    /// When set without [`Self::user_jwt`], the client emits CONNECT
+    /// `nkey` + `sig` for nkey-only auth. When set with
+    /// [`Self::user_jwt`], the client emits CONNECT `jwt` + `sig`.
+    pub nkey_seed: Option<String>,
     /// Client name sent to server.
     pub name: Option<String>,
     /// Enable verbose mode (server echoes +OK for each command).
@@ -261,12 +281,16 @@ impl fmt::Debug for NatsConfig {
         let user = self.user.as_deref().map(|_| "<redacted>");
         let password = self.password.as_deref().map(|_| "<redacted>");
         let token = self.token.as_deref().map(|_| "<redacted>");
+        let user_jwt = self.user_jwt.as_deref().map(|_| "<redacted>");
+        let nkey_seed = self.nkey_seed.as_deref().map(|_| "<redacted>");
         f.debug_struct("NatsConfig")
             .field("host", &self.host)
             .field("port", &self.port)
             .field("user", &user)
             .field("password", &password)
             .field("token", &token)
+            .field("user_jwt", &user_jwt)
+            .field("nkey_seed", &nkey_seed)
             .field("name", &self.name)
             .field("verbose", &self.verbose)
             .field("pedantic", &self.pedantic)
@@ -286,6 +310,8 @@ impl Default for NatsConfig {
             user: None,
             password: None,
             token: None,
+            user_jwt: None,
+            nkey_seed: None,
             name: None,
             verbose: false,
             pedantic: false,
@@ -360,6 +386,94 @@ impl NatsConfig {
 
         Ok(config)
     }
+
+    /// Parse NATS `.creds` file contents into JWT + user seed fields.
+    ///
+    /// This only populates [`Self::user_jwt`] and [`Self::nkey_seed`].
+    /// Mixed legacy auth (`user`/`password`/`token`) is rejected later
+    /// by CONNECT validation so callers can decide whether to clear it.
+    pub fn apply_creds(&mut self, creds: &str) -> Result<(), NatsError> {
+        let (user_jwt, nkey_seed) = parse_nats_creds(creds)?;
+        self.user_jwt = Some(user_jwt);
+        self.nkey_seed = Some(nkey_seed);
+        Ok(())
+    }
+
+    fn resolve_connect_auth(
+        &self,
+        server_info: Option<&ServerInfo>,
+    ) -> Result<ConnectAuthPayload, NatsError> {
+        let has_legacy_auth =
+            self.user.is_some() || self.password.is_some() || self.token.is_some();
+        let user_jwt = self.user_jwt.as_deref().map(str::trim);
+        let nkey_seed = self.nkey_seed.as_deref().map(str::trim);
+        let has_user_jwt = matches!(user_jwt, Some(jwt) if !jwt.is_empty());
+        let has_nkey_seed = matches!(nkey_seed, Some(seed) if !seed.is_empty());
+
+        if matches!(user_jwt, Some("")) {
+            return Err(NatsError::InvalidAuth(
+                "user_jwt must not be empty".to_string(),
+            ));
+        }
+        if matches!(nkey_seed, Some("")) {
+            return Err(NatsError::InvalidAuth(
+                "nkey_seed must not be empty".to_string(),
+            ));
+        }
+        if has_legacy_auth && (has_user_jwt || has_nkey_seed) {
+            return Err(NatsError::InvalidAuth(
+                "legacy NATS auth (user/password/token) cannot be combined with nkey/JWT auth"
+                    .to_string(),
+            ));
+        }
+        if has_user_jwt && !has_nkey_seed {
+            return Err(NatsError::InvalidAuth(
+                "JWT auth requires an nkey_seed to sign the server nonce".to_string(),
+            ));
+        }
+        if !has_user_jwt && !has_nkey_seed {
+            return Ok(ConnectAuthPayload::None);
+        }
+
+        let server_info = server_info.ok_or_else(|| {
+            NatsError::InvalidAuth("server INFO missing before CONNECT auth resolution".to_string())
+        })?;
+        let nonce = server_info
+            .nonce
+            .as_deref()
+            .filter(|nonce| !nonce.is_empty())
+            .ok_or_else(|| {
+                NatsError::InvalidAuth(
+                    "server INFO nonce is required for nkey/JWT authentication".to_string(),
+                )
+            })?;
+        let key_pair = load_user_nkey(nkey_seed.expect("checked nkey_seed presence"))?;
+        let signature = key_pair.sign(nonce.as_bytes()).map_err(|err| {
+            NatsError::InvalidAuth(format!("failed to sign NATS server nonce: {err}"))
+        })?;
+        let signature_b64url = URL_SAFE_NO_PAD.encode(signature);
+
+        if let Some(jwt) = user_jwt {
+            let claims = parse_nats_jwt_claims(jwt)?;
+            let public_key = key_pair.public_key();
+            if claims.subject != public_key {
+                return Err(NatsError::InvalidAuth(format!(
+                    "JWT sub claim {} does not match seed public key {}",
+                    claims.subject, public_key
+                )));
+            }
+            return Ok(ConnectAuthPayload::Jwt {
+                jwt: jwt.to_string(),
+                signature_b64url,
+                claims,
+            });
+        }
+
+        Ok(ConnectAuthPayload::Nkey {
+            public_key: key_pair.public_key(),
+            signature_b64url,
+        })
+    }
 }
 
 /// A message received from NATS.
@@ -399,6 +513,8 @@ pub struct ServerInfo {
     /// client MUST NOT emit HPUB frames or `Nats-Msg-Id`-style dedup
     /// headers on JetStream publishes (br-asupersync-byc2d1).
     pub headers: bool,
+    /// Optional nonce used for nkey/JWT CONNECT challenge signing.
+    pub nonce: Option<String>,
     /// Connected URL.
     pub connect_urls: Vec<String>,
 }
@@ -442,9 +558,188 @@ impl ServerInfo {
         if let Some(v) = extract_json_bool(json, "headers") {
             info.headers = v;
         }
+        if let Some(v) = extract_json_string(json, "nonce") {
+            info.nonce = Some(v);
+        }
 
         Ok(info)
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct JwtClaimsSummary {
+    subject: String,
+    issuer: Option<String>,
+    name: Option<String>,
+    expires_at: Option<i64>,
+}
+
+impl JwtClaimsSummary {
+    fn log_summary(&self) -> String {
+        format!(
+            "sub={} iss={} name={} exp={}",
+            self.subject,
+            self.issuer.as_deref().unwrap_or("<none>"),
+            self.name.as_deref().unwrap_or("<none>"),
+            self.expires_at
+                .map_or_else(|| "<none>".to_string(), |exp| exp.to_string())
+        )
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ConnectAuthPayload {
+    None,
+    Nkey {
+        public_key: String,
+        signature_b64url: String,
+    },
+    Jwt {
+        jwt: String,
+        signature_b64url: String,
+        claims: JwtClaimsSummary,
+    },
+}
+
+const NATS_CREDS_JWT_BEGIN: &str = "-----BEGIN NATS USER JWT-----";
+const NATS_CREDS_JWT_END: &str = "------END NATS USER JWT------";
+const NATS_CREDS_SEED_BEGIN: &str = "-----BEGIN USER NKEY SEED-----";
+const NATS_CREDS_SEED_END: &str = "------END USER NKEY SEED------";
+
+fn load_user_nkey(seed: &str) -> Result<KeyPair, NatsError> {
+    let key_pair = KeyPair::from_seed(seed)
+        .map_err(|err| NatsError::InvalidAuth(format!("invalid NKey seed: {err}")))?;
+    if key_pair.key_pair_type() != KeyPairType::User {
+        return Err(NatsError::InvalidAuth(format!(
+            "nkey_seed must be a USER seed, got {:?}",
+            key_pair.key_pair_type()
+        )));
+    }
+    Ok(key_pair)
+}
+
+fn decode_base64_url(input: &str, field_name: &str) -> Result<Vec<u8>, NatsError> {
+    URL_SAFE_NO_PAD
+        .decode(input)
+        .or_else(|_| URL_SAFE.decode(input))
+        .map_err(|err| NatsError::InvalidAuth(format!("invalid {field_name}: {err}")))
+}
+
+fn jwt_numeric_claim_to_i64(value: &serde_json::Value) -> Option<i64> {
+    value
+        .as_i64()
+        .or_else(|| value.as_u64().and_then(|value| i64::try_from(value).ok()))
+}
+
+fn parse_nats_jwt_claims(jwt: &str) -> Result<JwtClaimsSummary, NatsError> {
+    let mut parts = jwt.split('.');
+    let header = parts.next().unwrap_or_default();
+    let payload = parts.next().unwrap_or_default();
+    let signature = parts.next().unwrap_or_default();
+    if header.is_empty() || payload.is_empty() || signature.is_empty() || parts.next().is_some() {
+        return Err(NatsError::InvalidAuth(
+            "JWT auth expects a compact JWT with exactly 3 non-empty segments".to_string(),
+        ));
+    }
+
+    let header = decode_base64_url(header, "JWT header")?;
+    let header: serde_json::Value = serde_json::from_slice(&header)
+        .map_err(|err| NatsError::InvalidAuth(format!("JWT header is not valid JSON: {err}")))?;
+    if !header.is_object() {
+        return Err(NatsError::InvalidAuth(
+            "JWT header must decode to a JSON object".to_string(),
+        ));
+    }
+
+    let payload = decode_base64_url(payload, "JWT payload")?;
+    let payload: serde_json::Value = serde_json::from_slice(&payload)
+        .map_err(|err| NatsError::InvalidAuth(format!("JWT payload is not valid JSON: {err}")))?;
+    let payload_obj = payload.as_object().ok_or_else(|| {
+        NatsError::InvalidAuth("JWT payload must decode to a JSON object".to_string())
+    })?;
+    let subject = payload_obj
+        .get("sub")
+        .and_then(serde_json::Value::as_str)
+        .filter(|subject| !subject.is_empty())
+        .ok_or_else(|| {
+            NatsError::InvalidAuth(
+                "JWT payload must contain a non-empty string sub claim".to_string(),
+            )
+        })?;
+    let issuer = payload_obj
+        .get("iss")
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_string);
+    let name = payload_obj
+        .get("name")
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_string);
+    let expires_at = payload_obj.get("exp").and_then(jwt_numeric_claim_to_i64);
+
+    Ok(JwtClaimsSummary {
+        subject: subject.to_string(),
+        issuer,
+        name,
+        expires_at,
+    })
+}
+
+fn extract_credential_block(
+    creds: &str,
+    begin_marker: &str,
+    end_marker: &str,
+    label: &str,
+) -> Result<String, NatsError> {
+    let mut in_block = false;
+    let mut found_end = false;
+    let mut lines = Vec::new();
+
+    for line in creds.lines() {
+        let line = line.trim();
+        if !in_block {
+            if line == begin_marker {
+                in_block = true;
+            }
+            continue;
+        }
+        if line == end_marker {
+            found_end = true;
+            break;
+        }
+        if !line.is_empty() {
+            lines.push(line);
+        }
+    }
+
+    if !in_block {
+        return Err(NatsError::InvalidAuth(format!(
+            "credentials are missing the {label} begin marker"
+        )));
+    }
+    if !found_end {
+        return Err(NatsError::InvalidAuth(format!(
+            "credentials are missing the {label} end marker"
+        )));
+    }
+    if lines.is_empty() {
+        return Err(NatsError::InvalidAuth(format!(
+            "credentials {label} block is empty"
+        )));
+    }
+
+    Ok(lines.join(""))
+}
+
+fn parse_nats_creds(creds: &str) -> Result<(String, String), NatsError> {
+    let user_jwt =
+        extract_credential_block(creds, NATS_CREDS_JWT_BEGIN, NATS_CREDS_JWT_END, "JWT")?;
+    let nkey_seed = extract_credential_block(
+        creds,
+        NATS_CREDS_SEED_BEGIN,
+        NATS_CREDS_SEED_END,
+        "USER NKEY SEED",
+    )?;
+    Ok((user_jwt, nkey_seed))
 }
 
 fn extract_json_string(json: &str, key: &str) -> Option<String> {
@@ -1016,6 +1311,23 @@ impl NatsClient {
     /// Send CONNECT command to server.
     async fn send_connect(&mut self, cx: &Cx) -> Result<(), NatsError> {
         cx.checkpoint().map_err(|_| NatsError::Cancelled)?;
+        let server_info = self.state.server_info.lock().clone();
+        let connect_auth = self.config.resolve_connect_auth(server_info.as_ref())?;
+        let nonce_len = server_info
+            .as_ref()
+            .and_then(|info| info.nonce.as_ref())
+            .map_or(0, String::len);
+
+        match &connect_auth {
+            ConnectAuthPayload::None => {}
+            ConnectAuthPayload::Nkey { public_key, .. } => cx.trace(&format!(
+                "nats: sending CONNECT with nkey auth public_key={public_key} nonce_len={nonce_len}"
+            )),
+            ConnectAuthPayload::Jwt { claims, .. } => cx.trace(&format!(
+                "nats: sending CONNECT with jwt auth nonce_len={nonce_len} claims={}",
+                claims.log_summary()
+            )),
+        }
 
         // Build CONNECT JSON
         let mut connect = String::from("{");
@@ -1062,6 +1374,33 @@ impl NatsClient {
             connect.push_str(",\"auth_token\":\"");
             connect.push_str(&nats_json_escape(token));
             connect.push('"');
+        }
+
+        match connect_auth {
+            ConnectAuthPayload::None => {}
+            ConnectAuthPayload::Nkey {
+                public_key,
+                signature_b64url,
+            } => {
+                connect.push_str(",\"nkey\":\"");
+                connect.push_str(&nats_json_escape(&public_key));
+                connect.push('"');
+                connect.push_str(",\"sig\":\"");
+                connect.push_str(&signature_b64url);
+                connect.push('"');
+            }
+            ConnectAuthPayload::Jwt {
+                jwt,
+                signature_b64url,
+                ..
+            } => {
+                connect.push_str(",\"jwt\":\"");
+                connect.push_str(&nats_json_escape(&jwt));
+                connect.push('"');
+                connect.push_str(",\"sig\":\"");
+                connect.push_str(&signature_b64url);
+                connect.push('"');
+            }
         }
 
         connect.push('}');
@@ -2464,6 +2803,85 @@ mod tests {
         line.trim_end_matches(['\r', '\n']).to_string()
     }
 
+    fn parse_connect_json(connect_line: &str) -> serde_json::Value {
+        let connect_json = connect_line
+            .strip_prefix("CONNECT ")
+            .expect("CONNECT prefix");
+        serde_json::from_str(connect_json).expect("CONNECT JSON")
+    }
+
+    fn spawn_connect_recorder(
+        info_json: &str,
+        post_connect_line: Option<&str>,
+    ) -> (SocketAddr, JoinHandle<String>) {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind connect test listener");
+        let addr = listener.local_addr().expect("listener addr");
+        let info_line = format!("INFO {info_json}\r\n");
+        let post_connect_line = post_connect_line.map(|line| format!("{line}\r\n"));
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept connect client");
+            stream
+                .set_read_timeout(Some(Duration::from_secs(2)))
+                .expect("set read timeout");
+            stream
+                .write_all(info_line.as_bytes())
+                .expect("write INFO line");
+            stream.flush().expect("flush INFO line");
+
+            let mut reader = BufReader::new(stream);
+            let connect_line = trim_protocol_line(read_protocol_line(&mut reader));
+            if let Some(post_connect_line) = post_connect_line {
+                let stream = reader.get_mut();
+                stream
+                    .write_all(post_connect_line.as_bytes())
+                    .expect("write post-CONNECT response");
+                stream.flush().expect("flush post-CONNECT response");
+            }
+            connect_line
+        });
+        (addr, server)
+    }
+
+    fn deterministic_user_seed(byte: u8) -> String {
+        KeyPair::new_from_raw(KeyPairType::User, [byte; 32])
+            .expect("deterministic user seed")
+            .seed()
+            .expect("seed encoding")
+    }
+
+    fn deterministic_cluster_seed(byte: u8) -> String {
+        KeyPair::new_from_raw(KeyPairType::Cluster, [byte; 32])
+            .expect("deterministic cluster seed")
+            .seed()
+            .expect("seed encoding")
+    }
+
+    fn test_user_jwt_for_seed(seed: &str, issuer: &str, name: &str) -> String {
+        let public_key = KeyPair::from_seed(seed).expect("seed").public_key();
+        let header = URL_SAFE_NO_PAD.encode(br#"{"alg":"ed25519-nkey","typ":"JWT"}"#);
+        let payload = URL_SAFE_NO_PAD.encode(
+            serde_json::json!({
+                "sub": public_key,
+                "iss": issuer,
+                "name": name,
+                "exp": 4_102_444_800_u64,
+            })
+            .to_string()
+            .as_bytes(),
+        );
+        format!("{header}.{payload}.signature")
+    }
+
+    fn test_creds_document(jwt: &str, seed: &str) -> String {
+        format!(
+            "{jwt_begin}\n{jwt}\n{jwt_end}\n\n************************* IMPORTANT *************************\nNKEY Seed printed below can be used to sign and prove identity.\nNKEYs are sensitive and should be treated as secrets.\n\n{seed_begin}\n{seed}\n{seed_end}\n",
+            jwt_begin = NATS_CREDS_JWT_BEGIN,
+            jwt_end = NATS_CREDS_JWT_END,
+            seed_begin = NATS_CREDS_SEED_BEGIN,
+            seed_end = NATS_CREDS_SEED_END,
+        )
+    }
+
     fn spawn_reconnect_replay_recorder(
         expected_sub_count: usize,
     ) -> (SocketAddr, JoinHandle<Vec<String>>) {
@@ -2780,6 +3198,33 @@ mod tests {
     }
 
     #[test]
+    fn test_natsconfig_debug_redacts_jwt_and_nkey_seed_h1gf40() {
+        let seed = deterministic_user_seed(7);
+        let jwt = test_user_jwt_for_seed(&seed, "issuer", "operator");
+        let mut config = NatsConfig::default();
+        config.user_jwt = Some(jwt.clone());
+        config.nkey_seed = Some(seed.clone());
+        let debug_output = format!("{config:?}");
+
+        assert!(
+            !debug_output.contains(&jwt),
+            "Debug output leaked JWT: {debug_output}"
+        );
+        assert!(
+            !debug_output.contains(&seed),
+            "Debug output leaked seed: {debug_output}"
+        );
+        assert!(
+            debug_output.contains("user_jwt: Some(\"<redacted>\")"),
+            "JWT field must be redacted: {debug_output}"
+        );
+        assert!(
+            debug_output.contains("nkey_seed: Some(\"<redacted>\")"),
+            "seed field must be redacted: {debug_output}"
+        );
+    }
+
+    #[test]
     fn test_natsconfig_debug_unset_credentials_show_none_5in552() {
         let config = NatsConfig::default();
         let debug_output = format!("{config:?}");
@@ -2797,6 +3242,223 @@ mod tests {
         assert!(debug_output.contains("user: None"));
         assert!(debug_output.contains("password: None"));
         assert!(debug_output.contains("token: None"));
+        assert!(debug_output.contains("user_jwt: None"));
+        assert!(debug_output.contains("nkey_seed: None"));
+    }
+
+    #[test]
+    fn nats_config_apply_creds_extracts_jwt_and_seed_h1gf40() {
+        let seed = deterministic_user_seed(5);
+        let jwt = test_user_jwt_for_seed(&seed, "issuer-A", "operator-A");
+        let creds = test_creds_document(&jwt, &seed);
+        let mut config = NatsConfig::default();
+        config.apply_creds(&creds).expect("parse creds");
+
+        assert_eq!(config.user_jwt.as_deref(), Some(jwt.as_str()));
+        assert_eq!(config.nkey_seed.as_deref(), Some(seed.as_str()));
+    }
+
+    #[test]
+    fn nats_config_apply_creds_rejects_missing_seed_block_h1gf40() {
+        let seed = deterministic_user_seed(6);
+        let jwt = test_user_jwt_for_seed(&seed, "issuer-B", "operator-B");
+        let creds = format!("{NATS_CREDS_JWT_BEGIN}\n{jwt}\n{NATS_CREDS_JWT_END}\n");
+        let mut config = NatsConfig::default();
+        let err = config
+            .apply_creds(&creds)
+            .expect_err("missing seed block must fail closed");
+
+        assert!(
+            matches!(err, NatsError::InvalidAuth(ref msg) if msg.contains("USER NKEY SEED")),
+            "unexpected error: {err:?}"
+        );
+    }
+
+    #[test]
+    fn resolve_connect_auth_rejects_jwt_without_seed_h1gf40() {
+        let mut config = NatsConfig::default();
+        config.user_jwt = Some("a.b.c".to_string());
+        let err = config
+            .resolve_connect_auth(Some(&ServerInfo {
+                nonce: Some("nonce-1".to_string()),
+                ..ServerInfo::default()
+            }))
+            .expect_err("JWT without seed must fail closed");
+        assert!(
+            matches!(err, NatsError::InvalidAuth(ref msg) if msg.contains("requires an nkey_seed")),
+            "unexpected error: {err:?}"
+        );
+    }
+
+    #[test]
+    fn resolve_connect_auth_rejects_non_user_seed_h1gf40() {
+        let mut config = NatsConfig::default();
+        config.nkey_seed = Some(deterministic_cluster_seed(4));
+        let err = config
+            .resolve_connect_auth(Some(&ServerInfo {
+                nonce: Some("nonce-2".to_string()),
+                ..ServerInfo::default()
+            }))
+            .expect_err("non-user seed must fail closed");
+        assert!(
+            matches!(err, NatsError::InvalidAuth(ref msg) if msg.contains("USER seed")),
+            "unexpected error: {err:?}"
+        );
+    }
+
+    #[test]
+    fn resolve_connect_auth_rejects_malformed_seed_h1gf40() {
+        let mut config = NatsConfig::default();
+        config.nkey_seed = Some("not-a-valid-seed".to_string());
+        let err = config
+            .resolve_connect_auth(Some(&ServerInfo {
+                nonce: Some("nonce-3".to_string()),
+                ..ServerInfo::default()
+            }))
+            .expect_err("malformed seed must fail closed");
+        assert!(
+            matches!(err, NatsError::InvalidAuth(ref msg) if msg.contains("invalid NKey seed")),
+            "unexpected error: {err:?}"
+        );
+    }
+
+    #[test]
+    fn resolve_connect_auth_rejects_malformed_jwt_h1gf40() {
+        let mut config = NatsConfig::default();
+        config.user_jwt = Some("not-a-jwt".to_string());
+        config.nkey_seed = Some(deterministic_user_seed(12));
+        let err = config
+            .resolve_connect_auth(Some(&ServerInfo {
+                nonce: Some("nonce-4".to_string()),
+                ..ServerInfo::default()
+            }))
+            .expect_err("malformed JWT must fail closed");
+        assert!(
+            matches!(err, NatsError::InvalidAuth(ref msg) if msg.contains("compact JWT")),
+            "unexpected error: {err:?}"
+        );
+    }
+
+    #[test]
+    fn connect_user_password_auth_fields_unchanged_h1gf40() {
+        let (addr, server) = spawn_connect_recorder(
+            r#"{"server_id":"id","server_name":"test","version":"2.10.0","proto":1,"max_payload":1048576}"#,
+            None,
+        );
+
+        run_test_with_cx(|cx| async move {
+            let config = NatsConfig {
+                host: addr.ip().to_string(),
+                port: addr.port(),
+                user: Some("alice".into()),
+                password: Some("secret".into()),
+                ..Default::default()
+            };
+            let _client = NatsClient::connect_with_config(&cx, config)
+                .await
+                .expect("legacy user/password connect should still succeed");
+        });
+
+        let connect_line = server.join().expect("server join");
+        let connect = parse_connect_json(&connect_line);
+        assert_eq!(connect["user"], "alice");
+        assert_eq!(connect["pass"], "secret");
+        assert!(connect.get("jwt").is_none());
+        assert!(connect.get("nkey").is_none());
+        assert!(connect.get("sig").is_none());
+    }
+
+    #[test]
+    fn connect_nkey_auth_emits_signed_nonce_fields_h1gf40() {
+        let seed = deterministic_user_seed(9);
+        let nonce = "nkey-challenge-12345";
+        let (addr, server) = spawn_connect_recorder(
+            &format!(
+                r#"{{"server_id":"id","server_name":"test","version":"2.10.0","proto":1,"max_payload":1048576,"nonce":"{nonce}"}}"#
+            ),
+            None,
+        );
+        let seed_for_client = seed.clone();
+
+        run_test_with_cx(|cx| async move {
+            let config = NatsConfig {
+                host: addr.ip().to_string(),
+                port: addr.port(),
+                nkey_seed: Some(seed_for_client),
+                ..Default::default()
+            };
+            let _client = NatsClient::connect_with_config(&cx, config)
+                .await
+                .expect("nkey auth connect should succeed");
+        });
+
+        let connect_line = server.join().expect("server join");
+        let connect = parse_connect_json(&connect_line);
+        let public_key = KeyPair::from_seed(&seed).expect("seed").public_key();
+        let sig = connect["sig"].as_str().expect("sig field");
+        let sig = decode_base64_url(sig, "CONNECT sig").expect("decode sig");
+        KeyPair::from_public_key(&public_key)
+            .expect("public key")
+            .verify(nonce.as_bytes(), &sig)
+            .expect("signature verification");
+        assert_eq!(connect["nkey"], public_key);
+        assert!(connect.get("jwt").is_none());
+        assert!(connect.get("auth_token").is_none());
+        println!(
+            "NATS_AUTH_HANDSHAKE scenario=nkey_connect mode=nkey nonce_len={} signature_verified=true jwt_claims=none server_response=connect_ok reconnect_behavior=not_exercised verdict=pass",
+            nonce.len()
+        );
+    }
+
+    #[test]
+    fn connect_jwt_auth_signs_nonce_and_maps_auth_error_h1gf40() {
+        let seed = deterministic_user_seed(11);
+        let jwt = test_user_jwt_for_seed(&seed, "issuer-C", "operator-C");
+        let nonce = "jwt-challenge-abcdef";
+        let (addr, server) = spawn_connect_recorder(
+            &format!(
+                r#"{{"server_id":"id","server_name":"test","version":"2.10.0","proto":1,"max_payload":1048576,"nonce":"{nonce}"}}"#
+            ),
+            Some("-ERR 'Authorization Violation'"),
+        );
+        let seed_for_client = seed.clone();
+        let jwt_for_client = jwt.clone();
+
+        run_test_with_cx(|cx| async move {
+            let config = NatsConfig {
+                host: addr.ip().to_string(),
+                port: addr.port(),
+                user_jwt: Some(jwt_for_client),
+                nkey_seed: Some(seed_for_client),
+                verbose: true,
+                ..Default::default()
+            };
+            let err = NatsClient::connect_with_config(&cx, config)
+                .await
+                .expect_err("server auth violation must map to NatsError::Server");
+            assert!(
+                matches!(err, NatsError::Server(ref msg) if msg.contains("Authorization Violation")),
+                "unexpected error: {err:?}"
+            );
+        });
+
+        let connect_line = server.join().expect("server join");
+        let connect = parse_connect_json(&connect_line);
+        let claims = parse_nats_jwt_claims(&jwt).expect("claims summary");
+        let public_key = KeyPair::from_seed(&seed).expect("seed").public_key();
+        let sig = connect["sig"].as_str().expect("sig field");
+        let sig = decode_base64_url(sig, "CONNECT sig").expect("decode sig");
+        KeyPair::from_public_key(&public_key)
+            .expect("public key")
+            .verify(nonce.as_bytes(), &sig)
+            .expect("signature verification");
+        assert_eq!(connect["jwt"], jwt);
+        assert!(connect.get("nkey").is_none());
+        println!(
+            "NATS_AUTH_HANDSHAKE scenario=jwt_connect mode=jwt nonce_len={} signature_verified=true jwt_claims=\"{}\" server_response=authorization_violation reconnect_behavior=not_exercised verdict=pass",
+            nonce.len(),
+            claims.log_summary()
+        );
     }
 
     #[test]
@@ -2986,7 +3648,7 @@ mod tests {
 
     #[test]
     fn test_server_info_parse() {
-        let json = r#"{"server_id":"id123","server_name":"test","version":"2.9.0","proto":1,"max_payload":1048576,"tls_required":false}"#;
+        let json = r#"{"server_id":"id123","server_name":"test","version":"2.9.0","proto":1,"max_payload":1048576,"tls_required":false,"nonce":"abc123"}"#;
         let info = ServerInfo::parse(json).expect("valid INFO JSON");
         assert_eq!(info.server_id, "id123");
         assert_eq!(info.server_name, "test");
@@ -2994,6 +3656,7 @@ mod tests {
         assert_eq!(info.proto, 1);
         assert_eq!(info.max_payload, 1_048_576);
         assert!(!info.tls_required);
+        assert_eq!(info.nonce.as_deref(), Some("abc123"));
     }
 
     #[test]
@@ -3060,6 +3723,10 @@ mod tests {
         assert_eq!(
             format!("{}", NatsError::InvalidUrl("bad".to_string())),
             "Invalid NATS URL: bad"
+        );
+        assert_eq!(
+            format!("{}", NatsError::InvalidAuth("bad auth".to_string())),
+            "NATS invalid auth configuration: bad auth"
         );
     }
 
@@ -3171,6 +3838,8 @@ mod tests {
         assert!(config.user.is_none());
         assert!(config.password.is_none());
         assert!(config.token.is_none());
+        assert!(config.user_jwt.is_none());
+        assert!(config.nkey_seed.is_none());
         assert!(!config.verbose);
         assert!(!config.pedantic);
         assert_eq!(config.max_payload, 1_048_576);
@@ -3247,6 +3916,11 @@ mod tests {
             NatsError::InvalidUrl("bad://".into())
                 .to_string()
                 .contains("bad://")
+        );
+        assert!(
+            NatsError::InvalidAuth("bad auth".into())
+                .to_string()
+                .contains("bad auth")
         );
         assert!(NatsError::Cancelled.to_string().contains("cancelled"));
         assert!(NatsError::Closed.to_string().contains("closed"));
