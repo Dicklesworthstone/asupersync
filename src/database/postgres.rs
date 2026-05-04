@@ -1548,6 +1548,17 @@ impl MessageBuffer {
         self.buf.push(0);
     }
 
+    fn write_startup_cstring(&mut self, context: &str, s: &str) -> Result<(), PgError> {
+        if s.as_bytes().contains(&0) {
+            return Err(PgError::Protocol(format!(
+                "{context} contains embedded NUL byte"
+            )));
+        }
+        self.buf.extend_from_slice(s.as_bytes());
+        self.buf.push(0);
+        Ok(())
+    }
+
     /// Build a typed message with length prefix.
     fn build_message(&mut self, msg_type: u8) -> Result<Vec<u8>, PgError> {
         // PostgreSQL protocol uses i32 for message length. Guard against
@@ -2835,6 +2846,7 @@ fn cancelled_error(cx: &Cx) -> PgError {
     PgError::Cancelled(cancelled_reason(cx))
 }
 
+const POSTGRES_PROTOCOL_VERSION_3_0: i32 = 196_608;
 const MAX_BACKEND_MESSAGE_LEN: i32 = 64 * 1024 * 1024;
 const MAX_NOTIFICATION_CHANNEL_NAME_BYTES: usize = 63;
 const MAX_NOTIFICATION_PAYLOAD_BYTES: usize = 8_000;
@@ -2851,6 +2863,103 @@ fn backend_message_body_len(len_i32: i32) -> Result<usize, PgError> {
         )));
     }
     Ok(len_i32 as usize - 4)
+}
+
+#[cfg(any(test, feature = "test-internals"))]
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PgStartupMessage {
+    protocol_version: i32,
+    parameters: BTreeMap<String, String>,
+}
+
+#[cfg(any(test, feature = "test-internals"))]
+fn parse_startup_message(frame: &[u8]) -> Result<PgStartupMessage, PgError> {
+    if frame.len() < 8 {
+        return Err(PgError::Protocol("startup message too short".to_string()));
+    }
+
+    let len_i32 = i32::from_be_bytes([frame[0], frame[1], frame[2], frame[3]]);
+    let body_len = backend_message_body_len(len_i32)?;
+    let declared_len = body_len
+        .checked_add(4)
+        .ok_or_else(|| PgError::Protocol("startup message length overflow".to_string()))?;
+    if frame.len() != declared_len {
+        return Err(PgError::Protocol(format!(
+            "startup message length mismatch: declared {declared_len}, actual {}",
+            frame.len()
+        )));
+    }
+
+    let mut reader = MessageReader::new(&frame[4..]);
+    let protocol_version = reader.read_i32()?;
+    if protocol_version != POSTGRES_PROTOCOL_VERSION_3_0 {
+        return Err(PgError::Protocol(format!(
+            "unsupported startup protocol version: {protocol_version}"
+        )));
+    }
+
+    let mut parameters = BTreeMap::new();
+    loop {
+        if reader.remaining() == 0 {
+            return Err(PgError::Protocol(
+                "startup parameter list missing terminator".to_string(),
+            ));
+        }
+        if reader.data[reader.pos] == 0 {
+            reader.pos += 1;
+            reader.ensure_consumed("StartupMessage")?;
+            break;
+        }
+
+        let name = reader.read_cstring()?;
+        validate_startup_parameter_name(name)?;
+        if reader.remaining() == 0 {
+            return Err(PgError::Protocol(format!(
+                "startup parameter {name:?} missing value"
+            )));
+        }
+
+        let value = reader.read_cstring()?;
+        if parameters
+            .insert(name.to_string(), value.to_string())
+            .is_some()
+        {
+            return Err(PgError::Protocol(format!(
+                "duplicate startup parameter: {name}"
+            )));
+        }
+    }
+
+    match parameters.get("user") {
+        Some(user) if !user.is_empty() => Ok(PgStartupMessage {
+            protocol_version,
+            parameters,
+        }),
+        Some(_) => Err(PgError::Protocol(
+            "startup parameter user cannot be empty".to_string(),
+        )),
+        None => Err(PgError::Protocol(
+            "startup message missing required user parameter".to_string(),
+        )),
+    }
+}
+
+#[cfg(any(test, feature = "test-internals"))]
+fn validate_startup_parameter_name(name: &str) -> Result<(), PgError> {
+    if name.is_empty() {
+        return Err(PgError::Protocol(
+            "startup parameter name cannot be empty".to_string(),
+        ));
+    }
+    if !name
+        .bytes()
+        .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'.'))
+    {
+        return Err(PgError::Protocol(format!(
+            "invalid startup parameter name: {name:?}"
+        )));
+    }
+    Ok(())
 }
 
 fn validate_notification_channel_name(channel: &str) -> Result<(), PgError> {
@@ -3315,18 +3424,18 @@ impl PgConnection {
         let mut buf = MessageBuffer::new();
 
         // Protocol version 3.0
-        buf.write_i32(196_608); // 3 << 16
+        buf.write_i32(POSTGRES_PROTOCOL_VERSION_3_0); // 3 << 16
 
         // Parameters
-        buf.write_cstring("user");
-        buf.write_cstring(&options.user);
+        buf.write_startup_cstring("startup parameter name", "user")?;
+        buf.write_startup_cstring("startup user", &options.user)?;
 
-        buf.write_cstring("database");
-        buf.write_cstring(&options.database);
+        buf.write_startup_cstring("startup parameter name", "database")?;
+        buf.write_startup_cstring("startup database", &options.database)?;
 
         if let Some(ref app_name) = options.application_name {
-            buf.write_cstring("application_name");
-            buf.write_cstring(app_name);
+            buf.write_startup_cstring("startup parameter name", "application_name")?;
+            buf.write_startup_cstring("startup application_name", app_name)?;
         }
 
         // Terminating null
@@ -7020,6 +7129,16 @@ pub fn fuzz_parse_command_complete_tag(data: &[u8]) -> Result<u64, PgError> {
     })
 }
 
+/// Fuzz-target re-exporter for frontend StartupMessage parsing.
+#[cfg(feature = "test-internals")]
+#[doc(hidden)]
+pub fn fuzz_parse_startup_message(data: &[u8]) -> Result<FuzzStartupMessage, PgError> {
+    parse_startup_message(data).map(|message| FuzzStartupMessage {
+        protocol_version: message.protocol_version,
+        parameters: message.parameters,
+    })
+}
+
 /// Fuzz-target re-exporter for ReadyForQuery transaction-state parsing.
 #[cfg(feature = "test-internals")]
 #[doc(hidden)]
@@ -7131,6 +7250,15 @@ pub enum FuzzCopyInEnd {
 pub struct FuzzCopyInSequence {
     pub copy_data_chunks: Vec<Vec<u8>>,
     pub end: FuzzCopyInEnd,
+}
+
+/// Fuzz-target summary for a frontend StartupMessage.
+#[cfg(feature = "test-internals")]
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[doc(hidden)]
+pub struct FuzzStartupMessage {
+    pub protocol_version: i32,
+    pub parameters: BTreeMap<String, String>,
 }
 
 #[cfg(feature = "test-internals")]
@@ -7648,13 +7776,156 @@ mod tests {
     #[test]
     fn test_message_buffer() {
         let mut buf = MessageBuffer::new();
-        buf.write_i32(196_608);
+        buf.write_i32(POSTGRES_PROTOCOL_VERSION_3_0);
         buf.write_cstring("user");
         buf.write_cstring("testuser");
         buf.write_byte(0);
 
         let msg = buf.build_startup_message().unwrap();
         assert!(msg.len() > 4); // At least length prefix
+    }
+
+    fn startup_message_from_parts(parts: &[&[u8]], terminator: bool) -> Vec<u8> {
+        let mut body = Vec::new();
+        body.extend_from_slice(&POSTGRES_PROTOCOL_VERSION_3_0.to_be_bytes());
+        for part in parts {
+            body.extend_from_slice(part);
+            body.push(0);
+        }
+        if terminator {
+            body.push(0);
+        }
+
+        let len = i32::try_from(body.len() + 4).unwrap();
+        let mut frame = len.to_be_bytes().to_vec();
+        frame.extend_from_slice(&body);
+        frame
+    }
+
+    #[test]
+    fn startup_message_parser_accepts_valid_params() {
+        let frame =
+            startup_message_from_parts(&[b"user", b"testuser", b"database", b"testdb"], true);
+
+        let parsed = parse_startup_message(&frame).unwrap();
+
+        assert_eq!(parsed.protocol_version, POSTGRES_PROTOCOL_VERSION_3_0);
+        assert_eq!(parsed.parameters.get("user"), Some(&"testuser".to_string()));
+        assert_eq!(
+            parsed.parameters.get("database"),
+            Some(&"testdb".to_string())
+        );
+    }
+
+    #[test]
+    fn startup_message_parser_rejects_embedded_nul_in_key_shape() {
+        let frame = startup_message_from_parts(&[b"us", b"er", b"testuser"], true);
+
+        let err = parse_startup_message(&frame).unwrap_err();
+
+        assert!(
+            format!("{err}").contains("missing required user"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn startup_message_parser_rejects_embedded_nul_in_value_shape() {
+        let frame = startup_message_from_parts(&[b"user", b"alice", b"user", b"admin"], true);
+
+        let err = parse_startup_message(&frame).unwrap_err();
+
+        assert!(
+            format!("{err}").contains("duplicate startup parameter"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn startup_message_parser_rejects_duplicate_keys() {
+        let frame = startup_message_from_parts(&[b"user", b"alice", b"user", b"bob"], true);
+
+        let err = parse_startup_message(&frame).unwrap_err();
+
+        assert!(
+            format!("{err}").contains("duplicate startup parameter"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn startup_message_parser_rejects_unterminated_pairs() {
+        let frame = startup_message_from_parts(&[b"user", b"testuser", b"database"], false);
+
+        let err = parse_startup_message(&frame).unwrap_err();
+
+        assert!(
+            format!("{err}").contains("missing value"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn startup_message_parser_rejects_length_mismatch() {
+        let mut frame = startup_message_from_parts(&[b"user", b"testuser"], true);
+        frame[3] = frame[3].wrapping_add(1);
+
+        let err = parse_startup_message(&frame).unwrap_err();
+
+        assert!(
+            format!("{err}").contains("length mismatch"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn startup_message_parser_rejects_empty_key_trailing_payload() {
+        let mut frame = startup_message_from_parts(&[b"user", b"testuser"], true);
+        frame.extend_from_slice(b"smuggled");
+        let len = i32::try_from(frame.len()).unwrap();
+        frame[0..4].copy_from_slice(&len.to_be_bytes());
+
+        let err = parse_startup_message(&frame).unwrap_err();
+
+        assert!(
+            format!("{err}").contains("trailing byte"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn startup_message_parser_allows_empty_optional_value() {
+        let frame =
+            startup_message_from_parts(&[b"user", b"testuser", b"application_name", b""], true);
+
+        let parsed = parse_startup_message(&frame).unwrap();
+
+        assert_eq!(
+            parsed.parameters.get("application_name"),
+            Some(&String::new())
+        );
+    }
+
+    #[test]
+    fn startup_builder_rejects_embedded_nul_values() {
+        let mut buf = MessageBuffer::new();
+
+        let err = buf
+            .write_startup_cstring("startup user", "alice\0admin")
+            .unwrap_err();
+
+        assert!(
+            format!("{err}").contains("embedded NUL"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn startup_message_parser_is_panic_free_for_small_arbitrary_bytes() {
+        for len in 0..64usize {
+            let data = vec![0xA5; len];
+            let _ = parse_startup_message(&data);
+        }
     }
 
     #[test]

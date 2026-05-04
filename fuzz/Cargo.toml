@@ -3028,6 +3028,16 @@ test = false
 doc = false
 bench = false
 
+# br-asupersync-7b0zcm: PostgreSQL StartupMessage parser fuzzer.
+# Drives the production startup parser seam with valid packets, embedded-NUL
+# smuggling shapes, duplicate keys, unterminated pairs, and length mismatches.
+[[bin]]
+name = "postgres_startup_message"
+path = "fuzz_targets/postgres_startup_message.rs"
+test = false
+doc = false
+bench = false
+
 # PostgreSQL ErrorResponse/NoticeResponse/ParameterStatus message family fuzzer.
 # Tests src/database/postgres.rs auth/error message parsing with structure-aware
 # input generation for field codes, SQLSTATE validation, and parameter handling.
