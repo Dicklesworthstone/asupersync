@@ -1482,6 +1482,18 @@ impl ThreeLaneScheduler {
         }
     }
 
+    /// Seeds ready-combiner contention counters for deterministic adaptive-batch tests.
+    #[doc(hidden)]
+    #[cfg(any(test, feature = "test-internals"))]
+    pub fn seed_ready_combiner_pressure_for_test(
+        &self,
+        max_in_flight: usize,
+        combiner_claim_failures: usize,
+    ) {
+        self.global
+            .seed_ready_combiner_pressure_for_test(max_in_flight, combiner_claim_failures);
+    }
+
     /// Applies an explicit worker-to-cohort map for locality-aware stealing.
     ///
     /// Peers in the same cohort are placed at the front of each worker's

@@ -16,7 +16,6 @@ use std::fs;
 use std::hash::{Hash, Hasher};
 use std::path::Path;
 use std::sync::Arc;
-use std::thread;
 
 const REPORT_JSON_BEGIN: &str = "ADAPTIVE_BATCH_SIZING_REPORT_JSON_BEGIN";
 const REPORT_JSON_END: &str = "ADAPTIVE_BATCH_SIZING_REPORT_JSON_END";
@@ -46,6 +45,10 @@ struct AdaptiveBatchSizingFixture {
     tasks_per_producer: usize,
     priority: u8,
     fixed_batch_size: usize,
+    #[serde(default)]
+    combiner_max_in_flight: usize,
+    #[serde(default)]
+    combiner_claim_failures: usize,
     #[serde(default)]
     cancel_task_count: usize,
     #[serde(default = "default_cancel_streak_limit")]
@@ -290,8 +293,57 @@ fn synthetic_latency_ns(
     (p50, p95, p99, p999)
 }
 
+fn advance_workload_seed(state: &mut u64) -> u64 {
+    *state = state
+        .wrapping_mul(6_364_136_223_846_793_005)
+        .wrapping_add(1_442_695_040_888_963_407);
+    *state
+}
+
+fn inject_seeded_ready_workload(
+    scheduler: &ThreeLaneScheduler,
+    fixture: &AdaptiveBatchSizingFixture,
+    workload_seed: u64,
+) {
+    if fixture.producer_count == 0 || fixture.tasks_per_producer == 0 {
+        return;
+    }
+
+    let mut seed = workload_seed
+        ^ ((fixture.producer_count as u64) << 32)
+        ^ (fixture.tasks_per_producer as u64)
+        ^ (fixture.fixed_batch_size as u64);
+    let mut producer_order: Vec<usize> = (0..fixture.producer_count).collect();
+    for i in (1..producer_order.len()).rev() {
+        let j = (advance_workload_seed(&mut seed) as usize) % (i + 1);
+        producer_order.swap(i, j);
+    }
+
+    let mut remaining = vec![fixture.tasks_per_producer; fixture.producer_count];
+    let total_tasks = fixture.producer_count * fixture.tasks_per_producer;
+
+    for _ in 0..total_tasks {
+        let start = (advance_workload_seed(&mut seed) as usize) % fixture.producer_count;
+        for step in 0..fixture.producer_count {
+            let producer = producer_order[(start + step) % fixture.producer_count];
+            if remaining[producer] == 0 {
+                continue;
+            }
+
+            let offset = fixture.tasks_per_producer - remaining[producer];
+            scheduler.inject_ready(
+                task((producer * fixture.tasks_per_producer + offset) as u32),
+                fixture.priority,
+            );
+            remaining[producer] -= 1;
+            break;
+        }
+    }
+}
+
 fn execute_scenario(
     fixture: &AdaptiveBatchSizingFixture,
+    workload_seed: u64,
     adaptive_profile: Option<AdaptiveBatchSizingProfile>,
 ) -> AdaptiveBatchSizingRunMetrics {
     let total_injected = fixture.producer_count * fixture.tasks_per_producer;
@@ -300,36 +352,20 @@ fn execute_scenario(
         ThreeLaneScheduler::new_with_options(1, &state, fixture.cancel_streak_limit, false, 32);
     scheduler.set_steal_batch_size(fixture.fixed_batch_size);
     scheduler.set_adaptive_batch_profile_for_test(adaptive_profile);
-    let scheduler = Arc::new(scheduler);
-    let barrier = Arc::new(std::sync::Barrier::new(fixture.producer_count.max(1)));
-
-    let inject_handles: Vec<_> = (0..fixture.producer_count)
-        .map(|producer| {
-            let scheduler = Arc::clone(&scheduler);
-            let barrier = Arc::clone(&barrier);
-            let tasks_per_producer = fixture.tasks_per_producer;
-            let priority = fixture.priority;
-            thread::spawn(move || {
-                barrier.wait();
-                let base = producer * tasks_per_producer;
-                for offset in 0..tasks_per_producer {
-                    scheduler.inject_ready(task((base + offset) as u32), priority);
-                }
-            })
-        })
-        .collect();
-
-    for handle in inject_handles {
-        handle.join().expect("producer should complete");
-    }
+    inject_seeded_ready_workload(&scheduler, fixture, workload_seed);
 
     let cancel_start = total_injected as u32;
     for offset in 0..fixture.cancel_task_count {
         scheduler.inject_cancel(task(cancel_start + offset as u32), fixture.priority);
     }
 
-    let mut scheduler = Arc::try_unwrap(scheduler)
-        .expect("all producers should release the scheduler after injection");
+    if fixture.combiner_max_in_flight > 0 || fixture.combiner_claim_failures > 0 {
+        scheduler.seed_ready_combiner_pressure_for_test(
+            fixture.combiner_max_in_flight,
+            fixture.combiner_claim_failures,
+        );
+    }
+
     let mut workers = scheduler.take_workers();
     let worker = workers
         .get_mut(0)
@@ -494,12 +530,20 @@ fn adaptive_batch_sizing_smoke_contract_emits_report() {
     let scenario = selected_scenario(&contract);
     let adaptive_profile: AdaptiveBatchSizingProfile = scenario.fixture.adaptive_profile.into();
 
-    let fixed = execute_scenario(&scenario.fixture, None);
-    let adaptive = execute_scenario(&scenario.fixture, Some(adaptive_profile));
+    let fixed = execute_scenario(&scenario.fixture, scenario.workload_seed, None);
+    let adaptive = execute_scenario(
+        &scenario.fixture,
+        scenario.workload_seed,
+        Some(adaptive_profile),
+    );
     let repeated_projection = build_projection(
         scenario,
-        &execute_scenario(&scenario.fixture, None),
-        &execute_scenario(&scenario.fixture, Some(adaptive_profile)),
+        &execute_scenario(&scenario.fixture, scenario.workload_seed, None),
+        &execute_scenario(
+            &scenario.fixture,
+            scenario.workload_seed,
+            Some(adaptive_profile),
+        ),
     );
     let report_projection = build_projection(scenario, &fixed, &adaptive);
 
@@ -615,8 +659,12 @@ fn adaptive_batch_sizing_projection_has_expected_shape() {
     let contract = load_contract();
     let scenario = selected_scenario(&contract);
     let adaptive_profile: AdaptiveBatchSizingProfile = scenario.fixture.adaptive_profile.into();
-    let fixed = execute_scenario(&scenario.fixture, None);
-    let adaptive = execute_scenario(&scenario.fixture, Some(adaptive_profile));
+    let fixed = execute_scenario(&scenario.fixture, scenario.workload_seed, None);
+    let adaptive = execute_scenario(
+        &scenario.fixture,
+        scenario.workload_seed,
+        Some(adaptive_profile),
+    );
     let projection = build_projection(scenario, &fixed, &adaptive);
 
     assert_eq!(
@@ -654,6 +702,8 @@ fn adaptive_batch_disabled_profile_matches_fixed_path() {
         tasks_per_producer: 32,
         priority: 50,
         fixed_batch_size: 4,
+        combiner_max_in_flight: 0,
+        combiner_claim_failures: 0,
         cancel_task_count: 0,
         cancel_streak_limit: default_cancel_streak_limit(),
         adaptive_profile: ContractAdaptiveBatchSizingProfile {
@@ -669,8 +719,8 @@ fn adaptive_batch_disabled_profile_matches_fixed_path() {
     };
     let adaptive_profile: AdaptiveBatchSizingProfile = fixture.adaptive_profile.into();
 
-    let fixed = execute_scenario(&fixture, None);
-    let adaptive = execute_scenario(&fixture, Some(adaptive_profile));
+    let fixed = execute_scenario(&fixture, 0, None);
+    let adaptive = execute_scenario(&fixture, 0, Some(adaptive_profile));
 
     assert_eq!(adaptive.batch_reason, AdaptiveBatchDecisionReason::Disabled);
     assert_eq!(adaptive.selected_batch_size, fixture.fixed_batch_size);
@@ -689,6 +739,8 @@ fn adaptive_batch_cancel_floor_records_conservative_reason() {
         tasks_per_producer: 32,
         priority: 50,
         fixed_batch_size: 4,
+        combiner_max_in_flight: 0,
+        combiner_claim_failures: 0,
         cancel_task_count: 2,
         cancel_streak_limit: 1,
         adaptive_profile: ContractAdaptiveBatchSizingProfile {
@@ -704,8 +756,8 @@ fn adaptive_batch_cancel_floor_records_conservative_reason() {
     };
     let adaptive_profile: AdaptiveBatchSizingProfile = fixture.adaptive_profile.into();
 
-    let fixed = execute_scenario(&fixture, None);
-    let adaptive = execute_scenario(&fixture, Some(adaptive_profile));
+    let fixed = execute_scenario(&fixture, 0, None);
+    let adaptive = execute_scenario(&fixture, 0, Some(adaptive_profile));
     let projection = build_projection(
         &AdaptiveBatchSizingScenario {
             scenario_id: "cancel-floor-test".to_string(),
@@ -716,6 +768,8 @@ fn adaptive_batch_cancel_floor_records_conservative_reason() {
                 tasks_per_producer: fixture.tasks_per_producer,
                 priority: fixture.priority,
                 fixed_batch_size: fixture.fixed_batch_size,
+                combiner_max_in_flight: fixture.combiner_max_in_flight,
+                combiner_claim_failures: fixture.combiner_claim_failures,
                 cancel_task_count: fixture.cancel_task_count,
                 cancel_streak_limit: fixture.cancel_streak_limit,
                 adaptive_profile: fixture.adaptive_profile,

@@ -579,6 +579,24 @@ impl GlobalInjector {
     pub fn ready_combiner_snapshot(&self) -> ReadyCombinerSnapshot {
         self.ready_combiner.snapshot(self.ready_queue.len())
     }
+
+    /// Seeds ready-combiner contention counters for deterministic test harnesses.
+    #[doc(hidden)]
+    #[cfg(any(test, feature = "test-internals"))]
+    pub fn seed_ready_combiner_pressure_for_test(
+        &self,
+        max_in_flight: usize,
+        combiner_claim_failures: usize,
+    ) {
+        self.ready_combiner.active.store(false, Ordering::Release);
+        self.ready_combiner.in_flight.store(0, Ordering::Release);
+        self.ready_combiner
+            .max_in_flight
+            .store(max_in_flight, Ordering::Relaxed);
+        self.ready_combiner
+            .combiner_claim_failures
+            .store(combiner_claim_failures, Ordering::Relaxed);
+    }
 }
 
 #[cfg(test)]
