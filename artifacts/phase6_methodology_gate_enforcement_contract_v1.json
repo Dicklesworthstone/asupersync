@@ -1,0 +1,105 @@
+{
+  "contract_version": "phase6-methodology-gate-enforcement-contract-v1",
+  "bead_id": "asupersync-rckg8s",
+  "signoff_date": "2026-05-04",
+  "description": "Phase 6 methodology gate enforcement split for the main-only repository workflow.",
+  "source_of_truth": {
+    "readme_section": "README.md#phase-6-policy-gates",
+    "github_actions_workflow": ".github/workflows/methodology-gates.yml",
+    "contract_test": "tests/phase6_methodology_gate_contract.rs"
+  },
+  "repository_workflow": {
+    "branch_model": "main_only",
+    "normal_agent_landing": "direct_main_commit",
+    "legacy_mirror_ref": "legacy_compatibility_ref",
+    "pull_requests_required_for_agents": false
+  },
+  "final_signoff": {
+    "pr_only": true,
+    "push_enforced": false,
+    "local_enforced": true,
+    "release_only": false,
+    "summary": "The GitHub Actions methodology workflow is PR-only. Direct-main agent commits are enforced by local rch preflight commands and committed artifacts."
+  },
+  "github_actions_pr_gate": {
+    "workflow_path": ".github/workflows/methodology-gates.yml",
+    "event": "pull_request",
+    "branches": [
+      "main"
+    ],
+    "ci_blocking_for_prs": true,
+    "direct_main_push_trigger": false,
+    "pr_number_artifacts": [
+      "artifacts/flamegraphs/pr-<N>.svg",
+      "artifacts/proof_notes/pr-<N>.md"
+    ]
+  },
+  "direct_main_local_gates": [
+    {
+      "gate_id": "baseline-benchmarks",
+      "trigger": "Every substantive direct-main change before commit or push.",
+      "status": "local_enforced",
+      "rch_command": "rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_asupersync_phase6_baselines cargo bench -p asupersync --bench methodology_baselines --features test-internals -- --noplot",
+      "artifact_locations": [
+        "artifacts/baseline.json",
+        "target/criterion/"
+      ]
+    },
+    {
+      "gate_id": "golden-checksums-bench",
+      "trigger": "Every substantive direct-main change before commit or push.",
+      "status": "local_enforced",
+      "rch_command": "rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_asupersync_phase6_golden_bench cargo bench -p asupersync --bench golden_output --features test-internals -- --noplot",
+      "artifact_locations": [
+        "artifacts/golden_checksums.json"
+      ]
+    },
+    {
+      "gate_id": "golden-checksums-test",
+      "trigger": "Every substantive direct-main change before commit or push.",
+      "status": "local_enforced",
+      "rch_command": "rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_asupersync_phase6_golden_test cargo test -p asupersync --test golden_outputs --features test-internals -- --nocapture",
+      "artifact_locations": [
+        "artifacts/golden_checksums.json",
+        "tests/golden_outputs.rs"
+      ]
+    },
+    {
+      "gate_id": "flamegraph",
+      "trigger": "Direct-main changes under src/runtime/scheduler/, src/channel/, src/obligation/, src/cancel/, or src/sync/.",
+      "status": "local_enforced_when_triggered",
+      "rch_command": "rch exec -- cargo flamegraph --package asupersync --freq 997 --bench methodology_baselines -o artifacts/flamegraphs/main-<bead-or-short-sha>.svg",
+      "artifact_locations": [
+        "artifacts/flamegraphs/main-<bead-or-short-sha>.svg"
+      ]
+    },
+    {
+      "gate_id": "proof-note",
+      "trigger": "Direct-main changes under src/obligation/ or src/safety/, or any changed .rs file containing an unsafe block.",
+      "status": "local_enforced_when_triggered",
+      "rch_command": "rch exec -- bash -lc 'test -f artifacts/proof_notes/main-<bead-or-short-sha>.md && test \"$(wc -c < artifacts/proof_notes/main-<bead-or-short-sha>.md)\" -ge 100'",
+      "artifact_locations": [
+        "artifacts/proof_notes/main-<bead-or-short-sha>.md"
+      ]
+    }
+  ],
+  "conditional_path_sets": {
+    "hot_path_patterns": [
+      "src/runtime/scheduler/",
+      "src/channel/",
+      "src/obligation/",
+      "src/cancel/",
+      "src/sync/"
+    ],
+    "proof_note_patterns": [
+      "src/obligation/",
+      "src/safety/",
+      "*.rs files containing unsafe blocks"
+    ]
+  },
+  "forbidden_stale_readme_claims": [
+    "Phase 6 methodology gates are enforced only at PR review time",
+    "All four gates are live today only on pull_request events targeting main",
+    "Generate the artifact before opening the PR"
+  ]
+}

@@ -1536,26 +1536,55 @@ and known limitations.
 
 ## Phase 6 Policy Gates
 
-Phase 6 ships as a continuous hardening track rather than a one-shot release. The methodology bar is enforced at PR review time by [`.github/workflows/methodology-gates.yml`](./.github/workflows/methodology-gates.yml), which runs on every pull request targeting `main`. There are no advisory-only gates in this workflow today: every gate listed below either passes, skips its trigger condition, or fails the PR check (`exit 1`), and the summary job aggregates the results into a single comment on the PR.
+Phase 6 ships as a continuous hardening track rather than a one-shot release. The repository itself is main-only: agents land direct commits on `main`, then mirror the legacy compatibility ref as required by the repo workflow. Phase 6 therefore has two explicit enforcement lanes instead of a single PR-only story:
+
+- **Direct-main agent lane:** before committing or pushing a substantive change, run the local `rch` preflight gates that apply to the touched surface and commit any required artifact with the change.
+- **PR/release-review lane:** [`.github/workflows/methodology-gates.yml`](./.github/workflows/methodology-gates.yml) remains a PR-only GitHub Actions workflow for external review/release situations. It is CI-blocking for pull requests, but it is not the mechanism that protects normal agent commits to `main`.
+
+The checked signoff for this split is [`artifacts/phase6_methodology_gate_enforcement_contract_v1.json`](./artifacts/phase6_methodology_gate_enforcement_contract_v1.json), and [`tests/phase6_methodology_gate_contract.rs`](./tests/phase6_methodology_gate_contract.rs) verifies that this README, the signoff artifact, and the PR workflow agree about the enforcement mode.
 
 ### Gate matrix
 
-| Gate | Trigger condition | Enforcement | Failure mode | Required artifact |
-|------|-------------------|-------------|--------------|-------------------|
-| Baseline benchmarks | Every PR to `main` | **CI-blocking** | Fails the PR if any benchmark's p50 regresses by more than **5%** vs `artifacts/baseline.json`. | `artifacts/baseline.json` (committed); criterion output uploaded as `methodology-benchmark-results` for 14 days. |
-| Flamegraph | PR changes any file under `src/runtime/scheduler/`, `src/channel/`, `src/obligation/`, `src/cancel/`, or `src/sync/` | **CI-blocking** when triggered; otherwise skipped | Fails the PR if a hot-path file changed without an accompanying flamegraph. | `artifacts/flamegraphs/pr-<N>.svg` (commit alongside the change). Generate with `cargo flamegraph --freq 997 --bench methodology_baselines -o artifacts/flamegraphs/pr-<N>.svg`. |
-| Golden checksums | Every PR to `main` | **CI-blocking** | Fails the PR on any `[GOLDEN] MISMATCH` from `cargo bench --bench golden_output`, or any non-zero exit from the integration test `cargo test --test golden_outputs`. | `artifacts/golden_checksums.json` (committed). Update intentionally with `GOLDEN_UPDATE=1 cargo bench --bench golden_output` and commit the regenerated file. |
-| Proof notes | PR changes any file under `src/obligation/` or `src/safety/`, or any `.rs` file containing an `unsafe { ... }` block | **CI-blocking** when triggered; otherwise skipped | Fails the PR if no proof note is provided, or if the proof note is shorter than **100 bytes** (sentinel for "not substantive"). | `artifacts/proof_notes/pr-<N>.md`. Must explain what changed, the invariants preserved, the safety argument for any `unsafe`, and the test coverage that backs the change. |
+| Gate | Direct-main trigger | Direct-main enforcement | PR workflow enforcement | Required artifact |
+|------|---------------------|-------------------------|-------------------------|-------------------|
+| Baseline benchmarks | Every substantive direct-main change before commit/push | Run the scoped `rch exec --` benchmark command from the signoff contract and compare against `artifacts/baseline.json`. | **CI-blocking** for PRs. Fails if any benchmark's p50 regresses by more than **5%** vs `artifacts/baseline.json`. | `artifacts/baseline.json` plus criterion output. |
+| Flamegraph | Direct-main changes under `src/runtime/scheduler/`, `src/channel/`, `src/obligation/`, `src/cancel/`, or `src/sync/` | Generate and commit `artifacts/flamegraphs/main-<bead-or-short-sha>.svg`. | **CI-blocking** for PRs when triggered; otherwise skipped. | Direct-main: `artifacts/flamegraphs/main-<bead-or-short-sha>.svg`; PR lane: `artifacts/flamegraphs/pr-<N>.svg`. |
+| Golden checksums | Every substantive direct-main change before commit/push | Run the scoped `rch exec --` golden benchmark and integration test commands. | **CI-blocking** for PRs. Fails on any `[GOLDEN] MISMATCH` or failing `golden_outputs` integration test. | `artifacts/golden_checksums.json` when intentionally updated. |
+| Proof notes | Direct-main changes under `src/obligation/` or `src/safety/`, or any changed `.rs` file containing an `unsafe { ... }` block | Commit `artifacts/proof_notes/main-<bead-or-short-sha>.md` and validate it is substantive. | **CI-blocking** for PRs when triggered; otherwise skipped. | Direct-main: `artifacts/proof_notes/main-<bead-or-short-sha>.md`; PR lane: `artifacts/proof_notes/pr-<N>.md`. |
 
-The `summary` job (`needs: [baseline-gate, flamegraph-gate, golden-checksum-gate, proof-note-gate]`, `if: always()`) posts a single PR comment that lists the four gates with `:white_check_mark:` / `:x:` / `:fast_forward:` icons and the per-gate detail strings. The PR-check is "all green" only when every triggered gate is `success` and every untriggered gate is `skipped`. A `failure` on any gate prevents merge under the configured branch protection.
+The PR workflow `summary` job (`needs: [baseline-gate, flamegraph-gate, golden-checksum-gate, proof-note-gate]`, `if: always()`) posts a single PR comment that lists the four gates and their per-gate details. That workflow is all-green only when every triggered gate succeeds and every untriggered conditional gate skips. Direct-main commits do not depend on this PR comment path; they depend on the local preflight commands and committed artifacts recorded in the signoff contract.
+
+### Direct-main preflight commands
+
+Run only the gates that apply to the files you are landing. All cargo work stays behind `rch exec --` and is scoped to the `asupersync` crate:
+
+```bash
+rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_asupersync_phase6_baselines cargo bench -p asupersync --bench methodology_baselines --features test-internals -- --noplot
+```
+
+```bash
+rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_asupersync_phase6_golden_bench cargo bench -p asupersync --bench golden_output --features test-internals -- --noplot
+```
+
+```bash
+rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_asupersync_phase6_golden_test cargo test -p asupersync --test golden_outputs --features test-internals -- --nocapture
+```
+
+```bash
+rch exec -- cargo flamegraph --package asupersync --freq 997 --bench methodology_baselines -o artifacts/flamegraphs/main-<bead-or-short-sha>.svg
+```
+
+```bash
+rch exec -- bash -lc 'test -f artifacts/proof_notes/main-<bead-or-short-sha>.md && test "$(wc -c < artifacts/proof_notes/main-<bead-or-short-sha>.md)" -ge 100'
+```
 
 ### Rollout
 
-All four gates are **live today** on `pull_request` events targeting `main` — there is no staged or percentage-based rollout, and no opt-out flag. Phase 6 is "continuous" in the sense that new gates are added to this workflow as the methodology evolves; existing gates are tightened (lower regression thresholds, broader trigger directories, stricter proof-note minimums) rather than being relaxed. Two gates (flamegraph, proof note) are conditional on what the PR touches, so a PR limited to docs, configuration, or non-hot-path code typically sees those two as `skip` and only the two unconditional gates (baseline benchmarks, golden checksums) as enforcement.
+All four gates are live today, but their enforcement lane matters. The PR workflow is **PR-only and CI-blocking** for pull-request/release-review events. Normal agent work on `main` is **locally enforced** by the `rch` preflight commands above plus the required committed artifacts. Push-on-main GitHub enforcement is not currently enabled, and the signoff contract records that explicitly.
 
 Concrete escape valves are limited and intentional: a benchmark regression that reflects an intentional algorithmic change is resolved by re-recording `artifacts/baseline.json` (not by waiving the gate); a golden mismatch is resolved by re-running with `GOLDEN_UPDATE=1` and committing the new checksums (not by skipping the bench); a proof note that turns out to be insufficient is resolved by extending the note (not by removing it). The infrastructure intentionally has no `[skip ci]`-style waiver.
 
-If you are landing a change that touches a hot-path or safety-critical directory, generate the artifact (flamegraph or proof note) before opening the PR — the gate fails fast and re-running CI without committing the artifact will not change the outcome.
+If you are landing a change that touches a hot-path or safety-critical directory, generate the artifact (flamegraph or proof note) before committing the change to `main`. Re-running validation without committing the required artifact does not satisfy the direct-main gate.
 
 ---
 
