@@ -5164,6 +5164,160 @@ mod tests {
     }
 
     #[test]
+    fn pool_panic_drop_releases_capacity() {
+        init_test("pool_panic_drop_releases_capacity");
+
+        let pool = GenericPool::new(simple_factory, PoolConfig::with_max_size(1));
+        let cx = Cx::for_testing();
+
+        let panic_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _resource =
+                futures_lite::future::block_on(pool.acquire(&cx)).expect("initial acquire");
+            let stats = pool.stats();
+            crate::assert_with_log!(
+                stats.active == 1,
+                "panic path starts with one active resource",
+                1usize,
+                stats.active
+            );
+            panic!("intentional pool panic-drop proof");
+        }));
+        assert!(panic_result.is_err(), "panic path should unwind");
+
+        let stats_after_unwind = pool.stats();
+        crate::assert_with_log!(
+            stats_after_unwind.active == 0,
+            "unwinding drop releases active capacity",
+            0usize,
+            stats_after_unwind.active
+        );
+        crate::assert_with_log!(
+            stats_after_unwind.idle == 1,
+            "unwinding drop returns the resource to idle",
+            1usize,
+            stats_after_unwind.idle
+        );
+        crate::assert_with_log!(
+            stats_after_unwind.total <= stats_after_unwind.max_size,
+            "unwinding drop does not leak pool capacity",
+            true,
+            stats_after_unwind.total <= stats_after_unwind.max_size
+        );
+
+        let reacquired =
+            futures_lite::future::block_on(pool.acquire(&cx)).expect("reacquire after unwind");
+        crate::assert_with_log!(
+            pool.stats().active == 1,
+            "pool remains usable after panic-drop cleanup",
+            1usize,
+            pool.stats().active
+        );
+        reacquired.return_to_pool();
+
+        let final_stats = pool.stats();
+        crate::assert_with_log!(
+            final_stats.active == 0,
+            "no active permits remain after reacquire",
+            0usize,
+            final_stats.active
+        );
+
+        crate::test_complete!("pool_panic_drop_releases_capacity");
+    }
+
+    #[test]
+    fn pool_acquire_drop_equivalence_report_logs_capacity_counters() {
+        init_test("pool_acquire_drop_equivalence_report_logs_capacity_counters");
+
+        const SCENARIO_ID: &str = "POOL-ACQUIRE-DROP-EQUIVALENCE-TNW6ZI";
+        const RCH_COMMAND: &str = "rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_asupersync_tnw6zi_pool_tests cargo test -p asupersync --lib pool_acquire_drop_equivalence_report_logs_capacity_counters --features test-internals -- --nocapture";
+
+        let pool_capacity = 2usize;
+        let pool = GenericPool::new(simple_factory, PoolConfig::with_max_size(pool_capacity));
+        let cx = Cx::for_testing();
+        let mut acquire_count = 0usize;
+        let mut drop_release_count = 0usize;
+
+        for release_by_drop in [true, false, true, false] {
+            let resource =
+                futures_lite::future::block_on(pool.acquire(&cx)).expect("churn acquire");
+            acquire_count += 1;
+            if release_by_drop {
+                drop(resource);
+            } else {
+                resource.return_to_pool();
+            }
+            drop_release_count += 1;
+        }
+
+        let held_a = futures_lite::future::block_on(pool.acquire(&cx)).expect("held A");
+        acquire_count += 1;
+        let held_b = futures_lite::future::block_on(pool.acquire(&cx)).expect("held B");
+        acquire_count += 1;
+
+        let waker = noop_pool_waker();
+        let mut task_cx = Context::from_waker(&waker);
+        let mut blocked_acquire = pool.acquire(&cx);
+        assert!(
+            blocked_acquire.as_mut().poll(&mut task_cx).is_pending(),
+            "third acquire should wait while the pool is exhausted"
+        );
+        let waiter_count = pool.stats().waiters;
+        drop(blocked_acquire);
+        let cancellation_count = 1usize;
+
+        crate::assert_with_log!(
+            pool.stats().waiters == 0,
+            "dropping blocked acquire removes the waiter",
+            0usize,
+            pool.stats().waiters
+        );
+
+        drop(held_a);
+        drop_release_count += 1;
+        held_b.return_to_pool();
+        drop_release_count += 1;
+
+        let final_stats = pool.stats();
+        crate::assert_with_log!(
+            final_stats.active == 0,
+            "no outstanding pool permits after report scenario",
+            0usize,
+            final_stats.active
+        );
+        crate::assert_with_log!(
+            final_stats.total <= pool_capacity,
+            "report scenario preserves capacity bound",
+            true,
+            final_stats.total <= pool_capacity
+        );
+
+        let report = serde_json::json!({
+            "scenario_id": SCENARIO_ID,
+            "pool_capacity": pool_capacity,
+            "acquire_count": acquire_count,
+            "drop_release_count": drop_release_count,
+            "waiter_count": waiter_count,
+            "cancellation_count": cancellation_count,
+            "outstanding_permit_count": final_stats.active,
+            "final_idle_count": final_stats.idle,
+            "final_total_count": final_stats.total,
+            "exact_rch_command": RCH_COMMAND,
+            "artifact_paths": [],
+            "final_acquire_drop_equivalence_verdict": "pass"
+        });
+
+        println!("ASUPERSYNC_POOL_ACQUIRE_DROP_EQUIVALENCE_REPORT_BEGIN");
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&report).expect("serialize pool equivalence report")
+        );
+        println!("ASUPERSYNC_POOL_ACQUIRE_DROP_EQUIVALENCE_REPORT_END");
+
+        crate::test_complete!("pool_acquire_drop_equivalence_report_logs_capacity_counters");
+    }
+
+    #[test]
     fn metamorphic_broken_drop_matches_explicit_discard() {
         init_test("metamorphic_broken_drop_matches_explicit_discard");
 
