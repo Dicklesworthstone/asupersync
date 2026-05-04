@@ -2,7 +2,7 @@
   "schema_version": "otlp-audit-cluster-inventory-v1",
   "bead_id": "asupersync-7h2gyz",
   "blocker_bead_id": "asupersync-lf1a77",
-  "generated_at": "2026-05-03T18:45:00Z",
+  "generated_at": "2026-05-04T10:28:16Z",
   "purpose": "Explain every preserved untracked OTLP audit-test file without deleting, overwriting, or silently adopting stale-API tests.",
   "policy": {
     "no_deletion_confirmation": true,
@@ -70,12 +70,20 @@
       "status": "blocked_stale_api_preserved"
     },
     {
+      "path": "src/observability/otlp_100_continue_audit_test.rs",
+      "owner_bead": "asupersync-lf1a77",
+      "invariant": "100 Continue informational responses are not terminal OTLP responses",
+      "production_seam": "OTLP HTTP status classifier and HTTP response handling",
+      "deduplication_decision": "split from stale fake HTTP audit module before production-seam normalization",
+      "status": "blocked_stale_http_api_preserved"
+    },
+    {
       "path": "src/observability/otlp_401_unauthorized_audit_test.rs",
       "owner_bead": "asupersync-lf1a77",
       "invariant": "401/403 authentication failures are terminal non-retryable drops",
       "production_seam": "OTLP HTTP status classifier and retry policy",
       "deduplication_decision": "merge with status-classification table tests",
-      "status": "blocked_stale_http_api_preserved"
+      "status": "normalized_tracked_production_seam"
     },
     {
       "path": "src/observability/otlp_405_method_not_allowed_audit_test.rs",
@@ -83,7 +91,7 @@
       "invariant": "405 method-not-allowed responses are deterministic non-retryable client errors",
       "production_seam": "OTLP HTTP status classifier",
       "deduplication_decision": "merge with 4xx status-classification table tests",
-      "status": "blocked_stale_api_preserved"
+      "status": "normalized_tracked_production_seam"
     },
     {
       "path": "src/observability/otlp_408_timeout_retry_audit_test.rs",
@@ -91,7 +99,7 @@
       "invariant": "408 timeout responses follow the supported retry/fallback policy",
       "production_seam": "retry scheduler and timeout classifier",
       "deduplication_decision": "dedupe with retry-after and transport timeout fixtures",
-      "status": "blocked_policy_mapping_required"
+      "status": "normalized_tracked_production_seam"
     },
     {
       "path": "src/observability/otlp_414_uri_too_long_audit_test.rs",
@@ -99,7 +107,7 @@
       "invariant": "414 URI-too-long responses are terminal and redact endpoint details",
       "production_seam": "OTLP HTTP status classifier and endpoint sanitization",
       "deduplication_decision": "merge with 4xx terminal classifier tests",
-      "status": "blocked_stale_api_preserved"
+      "status": "normalized_tracked_production_seam"
     },
     {
       "path": "src/observability/otlp_429_retry_after_audit_test.rs",
@@ -107,7 +115,7 @@
       "invariant": "429 rate limits honor retry-after and bounded retry counters",
       "production_seam": "retry-after parser and retry budget",
       "deduplication_decision": "merge with tracked retry-after coverage",
-      "status": "blocked_policy_mapping_required"
+      "status": "normalized_tracked_production_seam"
     },
     {
       "path": "src/observability/otlp_502_bad_gateway_audit_test.rs",
@@ -115,7 +123,7 @@
       "invariant": "502 gateway failures are retryable with bounded recovery accounting",
       "production_seam": "OTLP HTTP status classifier and retry policy",
       "deduplication_decision": "merge with 5xx retry classifier tests",
-      "status": "blocked_stale_api_preserved"
+      "status": "normalized_tracked_production_seam"
     },
     {
       "path": "src/observability/otlp_503_retry_after_zero_audit_test.rs",
@@ -123,7 +131,7 @@
       "invariant": "503 retry-after zero does not spin and remains budget bounded",
       "production_seam": "retry-after parser, backoff floor, and retry budget",
       "deduplication_decision": "merge with retry-after edge-case table tests",
-      "status": "blocked_stale_api_preserved"
+      "status": "normalized_tracked_production_seam"
     },
     {
       "path": "src/observability/otlp_504_gateway_timeout_audit_test.rs",
@@ -131,7 +139,7 @@
       "invariant": "504 gateway timeout is retryable with deterministic fallback accounting",
       "production_seam": "OTLP HTTP status classifier and retry policy",
       "deduplication_decision": "merge with 5xx retry classifier tests",
-      "status": "blocked_policy_mapping_required"
+      "status": "normalized_tracked_production_seam"
     },
     {
       "path": "src/observability/otlp_511_network_auth_audit_test.rs",
@@ -139,7 +147,7 @@
       "invariant": "511 network-auth-required is treated as terminal operator action",
       "production_seam": "OTLP HTTP status classifier and auth redaction",
       "deduplication_decision": "merge with auth/client-error table tests",
-      "status": "blocked_policy_mapping_required"
+      "status": "normalized_tracked_production_seam"
     },
     {
       "path": "src/observability/otlp_cancellation_span_loss_audit_test.rs",
@@ -298,7 +306,7 @@
     {
       "scenario_id": "AA-OTLP-AUDIT-INVENTORY-PRESERVED-UNTRACKED",
       "description": "Validate that every preserved OTLP audit file is mapped to a blocker bead and no blocked file is accidentally compiled as a module.",
-      "expected_preserved_file_count": 29,
+      "expected_preserved_file_count": 30,
       "expected_blocker_bead": "asupersync-lf1a77",
       "output_root": "target/otlp-audit-inventory-smoke",
       "execution_policy": "inventory_proof_only_no_external_collector"

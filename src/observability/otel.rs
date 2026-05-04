@@ -1114,73 +1114,60 @@ impl OtlpHttpExporter {
             .map_err(|_| OtlpError::non_retryable("OTLP request timeout"))?
             .map_err(|e| OtlpError::non_retryable(format!("OTLP request failed: {}", e)))?;
 
-            // Helper function to parse Retry-After header per RFC 9110
-            let parse_retry_after = |headers: &[(String, String)]| -> Option<Duration> {
-                headers
-                    .iter()
-                    .find(|(name, _)| name.eq_ignore_ascii_case("retry-after"))
-                    .and_then(|(_, value)| value.parse::<u64>().ok())
-                    .map(Duration::from_secs)
-            };
-
             // Handle response per OTLP spec
-            match response.status {
-                200..=299 => Ok(()),
-                429 => {
-                    // Rate limited - honor Retry-After header per OTLP spec
-                    let retry_after = parse_retry_after(&response.headers);
-                    Err(OtlpError::retryable(response.status, retry_after))
-                }
-                408 => {
-                    // Request Timeout - retryable per RFC 9110 (server-side timeout)
-                    // OTLP spec: honor Retry-After header for ALL retryable responses
-                    let retry_after = parse_retry_after(&response.headers);
-                    Err(OtlpError::retryable(response.status, retry_after))
-                }
-                502 | 503 | 504 => {
-                    // Retryable server errors per OTLP spec
-                    // FIXED: Honor Retry-After header for all retryable responses (not just 429)
-                    let retry_after = parse_retry_after(&response.headers);
-                    Err(OtlpError::retryable(response.status, retry_after))
-                }
-                405 => {
-                    // Method Not Allowed - configuration error per OTLP spec
-                    // Extract Allow header for debugging (shows supported methods)
-                    let allowed_methods = response.headers
-                        .iter()
-                        .find(|(name, _)| name.eq_ignore_ascii_case("allow"))
-                        .map(|(_, value)| value.clone())
-                        .unwrap_or_else(|| "unknown".to_string());
-
-                    Err(OtlpError::non_retryable(format!(
-                        "OTLP Method Not Allowed (405) - configuration error. Allowed methods: {} - batch dropped",
-                        allowed_methods
-                    )))
-                }
-                415 => {
-                    // Unsupported Media Type - special case for compression fallback
-                    Err(OtlpError::compression_fallback(response.status))
-                }
-                400..=499 => {
-                    // Other client errors - not retryable
-                    Err(OtlpError::non_retryable(format!(
-                        "OTLP client error: {} - batch dropped",
-                        response.status
-                    )))
-                }
-                500..=599 => {
-                    // Other server errors - not retryable per OTLP spec
-                    Err(OtlpError::non_retryable(format!(
-                        "OTLP server error: {} - batch dropped",
-                        response.status
-                    )))
-                }
-                _ => Err(OtlpError::non_retryable(format!(
-                    "Unexpected OTLP response status: {}",
-                    response.status
-                ))),
-            }
+            classify_otlp_http_response(response.status, &response.headers)
         }
+    }
+}
+
+fn parse_otlp_retry_after(headers: &[(String, String)]) -> Option<Duration> {
+    headers
+        .iter()
+        .find(|(name, _)| name.eq_ignore_ascii_case("retry-after"))
+        .and_then(|(_, value)| value.parse::<u64>().ok())
+        .map(Duration::from_secs)
+}
+
+fn classify_otlp_http_response(status: u16, headers: &[(String, String)]) -> Result<(), OtlpError> {
+    match status {
+        200..=299 => Ok(()),
+        429 => {
+            // Rate limited - honor Retry-After header per OTLP spec.
+            let retry_after = parse_otlp_retry_after(headers);
+            Err(OtlpError::retryable(status, retry_after))
+        }
+        408 => {
+            // Request Timeout - retryable per RFC 9110 (server-side timeout).
+            let retry_after = parse_otlp_retry_after(headers);
+            Err(OtlpError::retryable(status, retry_after))
+        }
+        502 | 503 | 504 => {
+            // Retryable server errors per OTLP spec.
+            let retry_after = parse_otlp_retry_after(headers);
+            Err(OtlpError::retryable(status, retry_after))
+        }
+        405 => {
+            // Method Not Allowed - configuration error per OTLP spec.
+            let allowed_methods = headers
+                .iter()
+                .find(|(name, _)| name.eq_ignore_ascii_case("allow"))
+                .map(|(_, value)| value.clone())
+                .unwrap_or_else(|| "unknown".to_string());
+
+            Err(OtlpError::non_retryable(format!(
+                "OTLP Method Not Allowed (405) - configuration error. Allowed methods: {allowed_methods} - batch dropped",
+            )))
+        }
+        415 => Err(OtlpError::compression_fallback(status)),
+        400..=499 => Err(OtlpError::non_retryable(format!(
+            "OTLP client error: {status} - batch dropped"
+        ))),
+        500..=599 => Err(OtlpError::non_retryable(format!(
+            "OTLP server error: {status} - batch dropped"
+        ))),
+        _ => Err(OtlpError::non_retryable(format!(
+            "Unexpected OTLP response status: {status}"
+        ))),
     }
 }
 
@@ -1285,28 +1272,6 @@ fn deterministic_retry_jitter_ms(retry_count: u32, status_code: u16) -> u64 {
 mod otlp_retry_tests {
     use super::*;
 
-    /// Mock HTTP response for testing retry logic.
-    #[derive(Debug, Clone)]
-    struct MockResponse {
-        status: u16,
-        headers: HashMap<String, String>,
-    }
-
-    impl MockResponse {
-        fn new(status: u16) -> Self {
-            Self {
-                status,
-                headers: HashMap::new(),
-            }
-        }
-
-        fn with_retry_after(mut self, seconds: u64) -> Self {
-            self.headers
-                .insert("retry-after".to_string(), seconds.to_string());
-            self
-        }
-    }
-
     #[test]
     fn otlp_error_display() {
         let non_retryable = OtlpError::non_retryable("connection failed");
@@ -1358,6 +1323,194 @@ mod otlp_retry_tests {
                     // Expected
                 }
                 _ => panic!("Status {} should create non-retryable error", code),
+            }
+        }
+    }
+
+    #[test]
+    fn otlp_http_status_classifier_covers_preserved_audit_cluster() {
+        #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+        enum Expected {
+            Ok,
+            Retryable {
+                status: u16,
+                retry_after_secs: Option<u64>,
+            },
+            NonRetryable {
+                status: u16,
+                message_fragment: &'static str,
+            },
+            CompressionFallback {
+                status: u16,
+            },
+        }
+
+        let scenarios = [
+            (
+                "success-200",
+                200,
+                &[][..],
+                Expected::Ok,
+                "compiled production seam keeps normal success unchanged",
+            ),
+            (
+                "401-unauthorized-terminal",
+                401,
+                &[][..],
+                Expected::NonRetryable {
+                    status: 401,
+                    message_fragment: "OTLP client error: 401",
+                },
+                "otlp_401_unauthorized_audit_test.rs",
+            ),
+            (
+                "405-method-not-allowed-terminal-with-allow",
+                405,
+                &[("Allow", "POST")][..],
+                Expected::NonRetryable {
+                    status: 405,
+                    message_fragment: "Allowed methods: POST",
+                },
+                "otlp_405_method_not_allowed_audit_test.rs",
+            ),
+            (
+                "408-request-timeout-retryable",
+                408,
+                &[("Retry-After", "7")][..],
+                Expected::Retryable {
+                    status: 408,
+                    retry_after_secs: Some(7),
+                },
+                "otlp_408_timeout_retry_audit_test.rs",
+            ),
+            (
+                "414-uri-too-long-terminal",
+                414,
+                &[][..],
+                Expected::NonRetryable {
+                    status: 414,
+                    message_fragment: "OTLP client error: 414",
+                },
+                "otlp_414_uri_too_long_audit_test.rs",
+            ),
+            (
+                "429-retry-after-honored",
+                429,
+                &[("retry-after", "30")][..],
+                Expected::Retryable {
+                    status: 429,
+                    retry_after_secs: Some(30),
+                },
+                "otlp_429_retry_after_audit_test.rs",
+            ),
+            (
+                "502-bad-gateway-retryable",
+                502,
+                &[][..],
+                Expected::Retryable {
+                    status: 502,
+                    retry_after_secs: None,
+                },
+                "otlp_502_bad_gateway_audit_test.rs",
+            ),
+            (
+                "503-retry-after-zero-budgeted",
+                503,
+                &[("Retry-After", "0")][..],
+                Expected::Retryable {
+                    status: 503,
+                    retry_after_secs: Some(0),
+                },
+                "otlp_503_retry_after_zero_audit_test.rs",
+            ),
+            (
+                "504-gateway-timeout-retryable",
+                504,
+                &[][..],
+                Expected::Retryable {
+                    status: 504,
+                    retry_after_secs: None,
+                },
+                "otlp_504_gateway_timeout_audit_test.rs",
+            ),
+            (
+                "511-network-auth-terminal",
+                511,
+                &[][..],
+                Expected::NonRetryable {
+                    status: 511,
+                    message_fragment: "OTLP server error: 511",
+                },
+                "otlp_511_network_auth_audit_test.rs",
+            ),
+            (
+                "415-compression-fallback",
+                415,
+                &[][..],
+                Expected::CompressionFallback { status: 415 },
+                "existing compression fallback behavior",
+            ),
+        ];
+
+        for (scenario_id, status, raw_headers, expected, source) in scenarios {
+            let headers: Vec<(String, String)> = raw_headers
+                .iter()
+                .map(|(name, value)| (name.to_string(), value.to_string()))
+                .collect();
+            let result = classify_otlp_http_response(status, &headers);
+
+            println!(
+                "OTLP_STATUS_CLASSIFIER scenario_id={scenario_id} source={source} status={status} expected={expected:?} observed={result:?}"
+            );
+
+            match (expected, result) {
+                (Expected::Ok, Ok(())) => {}
+                (
+                    Expected::Retryable {
+                        status,
+                        retry_after_secs,
+                    },
+                    Err(OtlpError::Retryable {
+                        status_code,
+                        retry_after,
+                    }),
+                ) => {
+                    assert_eq!(status_code, status, "scenario {scenario_id}");
+                    assert_eq!(
+                        retry_after,
+                        retry_after_secs.map(Duration::from_secs),
+                        "scenario {scenario_id}"
+                    );
+                }
+                (
+                    Expected::NonRetryable {
+                        status,
+                        message_fragment,
+                    },
+                    Err(OtlpError::NonRetryable { message }),
+                ) => {
+                    assert!(
+                        message.contains(message_fragment),
+                        "scenario {scenario_id}: expected message to contain {message_fragment:?}, got {message:?}"
+                    );
+                    assert!(
+                        !message.contains("collector:4318"),
+                        "scenario {scenario_id}: terminal classifier must not leak endpoint details"
+                    );
+                    assert!(
+                        message.contains(&status.to_string()),
+                        "scenario {scenario_id}: message must include status code"
+                    );
+                }
+                (
+                    Expected::CompressionFallback { status },
+                    Err(OtlpError::CompressionFallback { status_code }),
+                ) => {
+                    assert_eq!(status_code, status, "scenario {scenario_id}");
+                }
+                (expected, observed) => {
+                    panic!("scenario {scenario_id}: expected {expected:?}, observed {observed:?}");
+                }
             }
         }
     }
@@ -6955,13 +7108,13 @@ mod otlp_wire_format_tests {
 
     #[test]
     fn otlp_051_gauge_first_write_semantics_conformance() {
-        use super::super::{MetricsSnapshot, MetricsState, OtelMetrics, MetricsConfig};
-        use opentelemetry::metrics::{MeterProvider, Meter};
-        use opentelemetry_sdk::metrics::{SdkMeterProvider, ManualReader};
+        use super::super::{MetricsConfig, MetricsSnapshot, MetricsState, OtelMetrics};
+        use opentelemetry::metrics::{Meter, MeterProvider};
+        use opentelemetry_sdk::metrics::{ManualReader, SdkMeterProvider};
         use std::sync::Arc;
         use std::sync::atomic::{AtomicU64, Ordering};
-        use std::time::{Instant, SystemTime};
         use std::thread;
+        use std::time::{Instant, SystemTime};
 
         /// OTLP-051 conformance test: when exporter sees a span with gauge metrics,
         /// it MUST handle first-write semantics correctly:
@@ -7044,11 +7197,7 @@ mod otlp_wire_format_tests {
                 }
 
                 // Apply gauge update
-                snapshot.add_gauge(
-                    &scenario.gauge_name,
-                    scenario.labels.clone(),
-                    update_value,
-                );
+                snapshot.add_gauge(&scenario.gauge_name, scenario.labels.clone(), update_value);
 
                 update_count += 1;
                 previous_timestamp = update_timestamp;
@@ -7102,7 +7251,10 @@ mod otlp_wire_format_tests {
                 // Test passed - gauge first-write semantics are correct
             }
             Err(error_msg) => {
-                panic!("OTLP-051 gauge first-write semantics test failed: {}", error_msg);
+                panic!(
+                    "OTLP-051 gauge first-write semantics test failed: {}",
+                    error_msg
+                );
             }
         }
 
@@ -7157,7 +7309,9 @@ mod otlp_wire_format_tests {
         // Test timestamp ordering across real OpenTelemetry gauge operations
         // This tests our actual OtelMetrics implementation
         let reader = ManualReader::builder().build();
-        let provider = SdkMeterProvider::builder().with_reader(reader.clone()).build();
+        let provider = SdkMeterProvider::builder()
+            .with_reader(reader.clone())
+            .build();
         let meter = provider.meter("otlp-051-test");
 
         let gauge_state = Arc::new(AtomicU64::new(1000));

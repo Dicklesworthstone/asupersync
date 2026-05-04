@@ -135,7 +135,10 @@ mod tests {
         let result = cx.block_on(async { exporter.export_spans(&cx, &spans).await });
 
         eprintln!("📊 Current Behavior (INCORRECT):");
-        assert!(result.is_err(), "100 Continue should not cause terminal error");
+        assert!(
+            result.is_err(),
+            "100 Continue should not cause terminal error"
+        );
 
         let error = result.unwrap_err();
         match error {
@@ -232,7 +235,10 @@ mod tests {
 
             let result = cx.block_on(async { exporter.export_spans(&cx, &spans).await });
 
-            eprintln!("\n📊 {} {} ({}):", test_case.status, test_case.name, test_case.description);
+            eprintln!(
+                "\n📊 {} {} ({}):",
+                test_case.status, test_case.name, test_case.description
+            );
 
             match result.unwrap_err() {
                 OtlpError::NonRetryable(message) => {
@@ -321,7 +327,10 @@ mod tests {
                 eprintln!("   3. Test with real servers that send 100 Continue");
                 eprintln!("   4. Ensure OTLP export succeeds with large payloads");
             }
-            other => panic!("Expected NonRetryable for current implementation, got: {:?}", other),
+            other => panic!(
+                "Expected NonRetryable for current implementation, got: {:?}",
+                other
+            ),
         }
     }
 
@@ -462,7 +471,10 @@ mod tests {
                 eprintln!("   3. OR ensure HTTP client handles 1xx transparently");
                 eprintln!("   4. Test with servers that use Expect: 100-continue");
             }
-            other => panic!("Expected NonRetryable for current implementation, got: {:?}", other),
+            other => panic!(
+                "Expected NonRetryable for current implementation, got: {:?}",
+                other
+            ),
         }
 
         eprintln!("\n🎯 PRIORITY: MEDIUM");
@@ -472,6 +484,6 @@ mod tests {
     }
 }
 
-/// **IMPLEMENTATION NOTE**: This test documents a real bug where 1xx informational
-/// responses are incorrectly treated as terminal errors. The fix should handle
-/// 1xx responses appropriately per RFC 9110.
+// IMPLEMENTATION NOTE: This test documents a real bug where 1xx informational
+// responses are incorrectly treated as terminal errors. The fix should handle
+// 1xx responses appropriately per RFC 9110.
