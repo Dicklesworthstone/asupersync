@@ -882,7 +882,7 @@ mod otlp_logs_proto {
 
     pub(super) mod any_value {
         #[derive(Clone, PartialEq, prost::Oneof)]
-        pub(super) enum Value {
+        pub enum Value {
             #[prost(string, tag = "1")]
             StringValue(String),
         }
@@ -1485,9 +1485,11 @@ impl<T> BoundedExportQueue<T> {
 
         // Apply load shedding: drop oldest batch if at capacity
         let dropped = if queue.len() >= self.capacity {
-            queue.pop_front(); // Remove OLDEST batch (correct OTLP behavior)
-            self.dropped_batches
-                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            let dropped_existing = queue.pop_front().is_some(); // Remove OLDEST batch (correct OTLP behavior)
+            if dropped_existing {
+                self.dropped_batches
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            }
             true
         } else {
             false
