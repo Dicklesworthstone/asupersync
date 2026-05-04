@@ -3,10 +3,10 @@
 
 use asupersync::record::task::TaskRecord;
 use asupersync::runtime::RuntimeState;
+use asupersync::runtime::scheduler::ThreeLaneScheduler;
 use asupersync::runtime::scheduler::three_lane::{
     AdaptiveBatchDecisionReason, AdaptiveBatchDecisionSnapshot, AdaptiveBatchSizingProfile,
 };
-use asupersync::runtime::scheduler::ThreeLaneScheduler;
 use asupersync::sync::ContendedMutex;
 use asupersync::types::{Budget, RegionId, TaskId};
 use serde::{Deserialize, Serialize};
@@ -46,7 +46,15 @@ struct AdaptiveBatchSizingFixture {
     tasks_per_producer: usize,
     priority: u8,
     fixed_batch_size: usize,
+    #[serde(default)]
+    cancel_task_count: usize,
+    #[serde(default = "default_cancel_streak_limit")]
+    cancel_streak_limit: usize,
     adaptive_profile: ContractAdaptiveBatchSizingProfile,
+}
+
+const fn default_cancel_streak_limit() -> usize {
+    16
 }
 
 #[derive(Debug, Clone, Copy, Deserialize)]
@@ -251,15 +259,15 @@ fn synthetic_latency_ns(
     let p50 = 40_000
         + shared_ready_touches.saturating_mul(450)
         + (producer_count as u64).saturating_mul(400);
-    let p95_tail =
-        (tasks_per_producer as u64).saturating_mul(900) + (selected_batch_size as u64).saturating_mul(250);
+    let p95_tail = (tasks_per_producer as u64).saturating_mul(900)
+        + (selected_batch_size as u64).saturating_mul(250);
     let p95_contention_credit = ((producer_count as u64)
         .saturating_mul(selected_batch_size.saturating_sub(1) as u64)
         .saturating_mul(80))
     .min(p95_tail.saturating_sub(1));
     let p95 = p50 + p95_tail.saturating_sub(p95_contention_credit);
-    let p99_tail = shared_ready_touches.saturating_mul(120)
-        + (selected_batch_size as u64).saturating_mul(500);
+    let p99_tail =
+        shared_ready_touches.saturating_mul(120) + (selected_batch_size as u64).saturating_mul(500);
     let p99_contention_credit = ((producer_count as u64)
         .saturating_mul(selected_batch_size.saturating_sub(1) as u64)
         .saturating_mul(150))
@@ -273,8 +281,9 @@ fn execute_scenario(
     adaptive_profile: Option<AdaptiveBatchSizingProfile>,
 ) -> AdaptiveBatchSizingRunMetrics {
     let total_injected = fixture.producer_count * fixture.tasks_per_producer;
-    let state = setup_runtime_state(total_injected as u32 + 1);
-    let mut scheduler = ThreeLaneScheduler::new(1, &state);
+    let state = setup_runtime_state((total_injected + fixture.cancel_task_count) as u32 + 1);
+    let mut scheduler =
+        ThreeLaneScheduler::new_with_options(1, &state, fixture.cancel_streak_limit, false, 32);
     scheduler.set_steal_batch_size(fixture.fixed_batch_size);
     scheduler.set_adaptive_batch_profile_for_test(adaptive_profile);
     let scheduler = Arc::new(scheduler);
@@ -300,6 +309,11 @@ fn execute_scenario(
         handle.join().expect("producer should complete");
     }
 
+    let cancel_start = total_injected as u32;
+    for offset in 0..fixture.cancel_task_count {
+        scheduler.inject_cancel(task(cancel_start + offset as u32), fixture.priority);
+    }
+
     let mut scheduler = Arc::try_unwrap(scheduler)
         .expect("all producers should release the scheduler after injection");
     let mut workers = scheduler.take_workers();
@@ -318,17 +332,18 @@ fn execute_scenario(
     let duplicate_dispatches = total_dispatched.saturating_sub(seen.len());
     let lost_tasks = total_injected.saturating_sub(seen.len());
     let metrics = worker.preemption_metrics();
-    let decision = worker
-        .adaptive_batch_snapshot_for_test()
-        .unwrap_or(AdaptiveBatchDecisionSnapshot {
-            selected_batch_size: fixture.fixed_batch_size.max(1),
-            fixed_batch_size: fixture.fixed_batch_size.max(1),
-            ready_depth: ready_count_before_drain,
-            cancel_debt: 0,
-            combiner_in_flight: 0,
-            combiner_claim_failures_delta: 0,
-            reason: AdaptiveBatchDecisionReason::Disabled,
-        });
+    let decision =
+        worker
+            .adaptive_batch_snapshot_for_test()
+            .unwrap_or(AdaptiveBatchDecisionSnapshot {
+                selected_batch_size: fixture.fixed_batch_size.max(1),
+                fixed_batch_size: fixture.fixed_batch_size.max(1),
+                ready_depth: ready_count_before_drain,
+                cancel_debt: 0,
+                combiner_in_flight: 0,
+                combiner_claim_failures_delta: 0,
+                reason: AdaptiveBatchDecisionReason::Disabled,
+            });
     let shared_ready_touches = if metrics.global_ready_batch_drains == 0 {
         total_dispatched as u64
     } else {
@@ -409,8 +424,7 @@ fn build_projection(
         .saturating_sub(adaptive.wake_to_run_p99_ns);
     let shared_ready_touches_delta =
         fixed.shared_ready_touches as i64 - adaptive.shared_ready_touches as i64;
-    let no_win_trigger =
-        wake_to_run_p99_improvement_ns < 20_000 || shared_ready_touches_delta <= 0;
+    let no_win_trigger = wake_to_run_p99_improvement_ns < 20_000 || shared_ready_touches_delta <= 0;
     let winner_profile = if no_win_trigger { "fixed" } else { "adaptive" };
 
     AdaptiveBatchSizingProjection {
@@ -473,7 +487,8 @@ fn adaptive_batch_sizing_smoke_contract_emits_report() {
     }
 
     assert_eq!(
-        fixed.total_injected, scenario.fixture.producer_count * scenario.fixture.tasks_per_producer,
+        fixed.total_injected,
+        scenario.fixture.producer_count * scenario.fixture.tasks_per_producer,
         "fixed profile must inject the expected task count"
     );
     assert_eq!(
@@ -482,7 +497,10 @@ fn adaptive_batch_sizing_smoke_contract_emits_report() {
         "adaptive profile must inject the expected task count"
     );
     assert_eq!(fixed.lost_tasks, 0, "fixed profile must not lose tasks");
-    assert_eq!(adaptive.lost_tasks, 0, "adaptive profile must not lose tasks");
+    assert_eq!(
+        adaptive.lost_tasks, 0,
+        "adaptive profile must not lose tasks"
+    );
     assert_eq!(
         fixed.duplicate_dispatches, 0,
         "fixed profile must not duplicate dispatches"
@@ -508,7 +526,8 @@ fn adaptive_batch_sizing_smoke_contract_emits_report() {
         );
     }
 
-    let repeated_run_hash_match = projection_hash(&report_projection) == projection_hash(&repeated_projection);
+    let repeated_run_hash_match =
+        projection_hash(&report_projection) == projection_hash(&repeated_projection);
     assert!(
         repeated_run_hash_match,
         "scenario {} should produce a stable projection hash",
@@ -517,8 +536,7 @@ fn adaptive_batch_sizing_smoke_contract_emits_report() {
 
     let winner_profile = report_projection.comparison.winner_profile.as_str();
     assert_eq!(
-        winner_profile,
-        scenario.expected_winner_profile,
+        winner_profile, scenario.expected_winner_profile,
         "scenario {} winner profile mismatch",
         scenario.scenario_id
     );
@@ -598,4 +616,95 @@ fn adaptive_batch_sizing_projection_has_expected_shape() {
         .is_ok(),
         "projection fragments must remain serializable"
     );
+}
+
+#[test]
+fn adaptive_batch_disabled_profile_matches_fixed_path() {
+    let fixture = AdaptiveBatchSizingFixture {
+        producer_count: 1,
+        tasks_per_producer: 32,
+        priority: 50,
+        fixed_batch_size: 4,
+        cancel_task_count: 0,
+        cancel_streak_limit: default_cancel_streak_limit(),
+        adaptive_profile: ContractAdaptiveBatchSizingProfile {
+            enabled: false,
+            min_batch_size: 1,
+            max_batch_size: 8,
+            scale_up_ready_depth: 32,
+            scale_up_in_flight: 4,
+            scale_up_claim_failures: 1,
+            cancel_debt_floor: 4,
+            cooldown_steps: 2,
+        },
+    };
+    let adaptive_profile: AdaptiveBatchSizingProfile = fixture.adaptive_profile.into();
+
+    let fixed = execute_scenario(&fixture, None);
+    let adaptive = execute_scenario(&fixture, Some(adaptive_profile));
+
+    assert_eq!(adaptive.batch_reason, AdaptiveBatchDecisionReason::Disabled);
+    assert_eq!(adaptive.selected_batch_size, fixture.fixed_batch_size);
+    assert_eq!(adaptive.scale_up_events, 0);
+    assert_eq!(adaptive.cancel_floor_hits, 0);
+    assert_eq!(adaptive.cooldown_holds, 0);
+    assert_eq!(adaptive.shared_ready_touches, fixed.shared_ready_touches);
+    assert_eq!(adaptive.wake_to_run_p99_ns, fixed.wake_to_run_p99_ns);
+}
+
+#[test]
+fn adaptive_batch_cancel_floor_records_conservative_reason() {
+    let fixture = AdaptiveBatchSizingFixture {
+        producer_count: 1,
+        tasks_per_producer: 32,
+        priority: 50,
+        fixed_batch_size: 4,
+        cancel_task_count: 2,
+        cancel_streak_limit: 1,
+        adaptive_profile: ContractAdaptiveBatchSizingProfile {
+            enabled: true,
+            min_batch_size: 1,
+            max_batch_size: 8,
+            scale_up_ready_depth: 64,
+            scale_up_in_flight: 4,
+            scale_up_claim_failures: 1,
+            cancel_debt_floor: 1,
+            cooldown_steps: 2,
+        },
+    };
+    let adaptive_profile: AdaptiveBatchSizingProfile = fixture.adaptive_profile.into();
+
+    let fixed = execute_scenario(&fixture, None);
+    let adaptive = execute_scenario(&fixture, Some(adaptive_profile));
+    let projection = build_projection(
+        &AdaptiveBatchSizingScenario {
+            scenario_id: "cancel-floor-test".to_string(),
+            description: "contract-level cancel-floor replay".to_string(),
+            workload_seed: 0,
+            fixture: AdaptiveBatchSizingFixture {
+                producer_count: fixture.producer_count,
+                tasks_per_producer: fixture.tasks_per_producer,
+                priority: fixture.priority,
+                fixed_batch_size: fixture.fixed_batch_size,
+                cancel_task_count: fixture.cancel_task_count,
+                cancel_streak_limit: fixture.cancel_streak_limit,
+                adaptive_profile: fixture.adaptive_profile,
+            },
+            expected_winner_profile: "fixed".to_string(),
+            safe_fallback_profile: "fixed".to_string(),
+            expected_report_projection: None,
+        },
+        &fixed,
+        &adaptive,
+    );
+
+    assert_eq!(fixed.cancel_floor_hits, 0);
+    assert_eq!(
+        adaptive.batch_reason,
+        AdaptiveBatchDecisionReason::CancelDebtFloor
+    );
+    assert_eq!(adaptive.cancel_floor_hits, 1);
+    assert!(adaptive.cancel_debt >= 1);
+    assert_eq!(projection.comparison.winner_profile, "fixed");
+    assert!(projection.comparison.no_win_trigger);
 }
