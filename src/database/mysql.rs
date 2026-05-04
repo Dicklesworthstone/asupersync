@@ -8676,3 +8676,8 @@ mod tests {
         println!("  - Transaction state flag preservation: PASS");
     }
 }
+
+// MySQL LOAD DATA LOCAL INFILE security audit
+#[cfg(test)]
+#[path = "mysql_load_data_infile_security_audit.rs"]
+mod mysql_load_data_infile_security_audit;

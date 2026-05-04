@@ -3630,12 +3630,17 @@ impl PgConnection {
     }
 
     /// Send cleartext password.
-    async fn send_password(&mut self, cx: &Cx, password: &str) -> Result<(), PgError> {
-        let mut buf = MessageBuffer::new();
-        buf.write_cstring(password);
-        let msg = buf.build_message(FrontendMessage::Password as u8)?;
-        self.write_all(cx, &msg).await?;
-        Ok(())
+    async fn send_password(
+        &mut self,
+        _cx: &Cx,
+        _password: &str,
+    ) -> Result<(), PgError> {
+        // PostgreSQL cleartext password authentication is vulnerable to downgrade attacks
+        // SCRAM-SHA-256 is the recommended secure authentication method
+        // For security, we require SCRAM-SHA-256
+        Err(PgError::UnsupportedAuth(
+            "Cleartext password rejected - please use SCRAM-SHA-256".to_string(),
+        ))
     }
 
     /// Send MD5-hashed password.
@@ -15100,3 +15105,8 @@ mod tests {
         }
     }
 }
+
+#[cfg(test)]
+mod postgres_copy_from_error_audit;
+#[cfg(test)]
+mod postgres_auth_downgrade_audit;
