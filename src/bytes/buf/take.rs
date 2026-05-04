@@ -109,6 +109,7 @@ mod tests {
         clippy::future_not_send
     )]
     use super::*;
+    use proptest::prelude::*;
 
     fn init_test(name: &str) {
         crate::test_utils::init_test_logging();
@@ -195,6 +196,69 @@ mod tests {
         let remaining = take.remaining();
         crate::assert_with_log!(remaining == 0, "remaining", 0, remaining);
         crate::test_complete!("test_take_copy_to_slice");
+    }
+
+    proptest! {
+        #[test]
+        fn take_metamorphic_nested_limits_match_min_limit(
+            payload in prop::collection::vec(any::<u8>(), 0..96),
+            outer_limit in 0usize..128,
+            inner_limit in 0usize..128,
+            read_steps in prop::collection::vec(0usize..64, 0..64),
+        ) {
+            let effective_len = payload.len().min(outer_limit).min(inner_limit);
+            let expected = &payload[..effective_len];
+
+            let mut nested = Take::new(Take::new(payload.as_slice(), outer_limit), inner_limit);
+            let mut flat = Take::new(payload.as_slice(), outer_limit.min(inner_limit));
+            let mut observed = Vec::with_capacity(effective_len);
+
+            prop_assert_eq!(nested.remaining(), effective_len);
+            prop_assert_eq!(flat.remaining(), effective_len);
+
+            for raw_step in read_steps {
+                if !nested.has_remaining() {
+                    break;
+                }
+
+                prop_assert_eq!(nested.remaining(), flat.remaining());
+                let read_len = 1 + raw_step % nested.remaining();
+
+                let mut nested_bytes = vec![0u8; read_len];
+                nested.copy_to_slice(&mut nested_bytes);
+
+                let mut flat_bytes = vec![0u8; read_len];
+                flat.copy_to_slice(&mut flat_bytes);
+
+                prop_assert_eq!(
+                    nested_bytes.as_slice(),
+                    flat_bytes.as_slice(),
+                    "nested Take limits must match the equivalent minimum limit",
+                );
+                observed.extend_from_slice(&nested_bytes);
+                prop_assert_eq!(nested.remaining(), flat.remaining());
+                prop_assert_eq!(&expected[..observed.len()], observed.as_slice());
+            }
+
+            let final_len = nested.remaining();
+            prop_assert_eq!(final_len, flat.remaining());
+
+            let mut nested_tail = vec![0u8; final_len];
+            nested.copy_to_slice(&mut nested_tail);
+
+            let mut flat_tail = vec![0u8; final_len];
+            flat.copy_to_slice(&mut flat_tail);
+
+            prop_assert_eq!(
+                nested_tail.as_slice(),
+                flat_tail.as_slice(),
+                "nested Take limits must match flat Take tails",
+            );
+            observed.extend_from_slice(&nested_tail);
+            prop_assert_eq!(observed.as_slice(), expected);
+            prop_assert_eq!(nested.remaining(), 0);
+            prop_assert_eq!(flat.remaining(), 0);
+        }
     }
 
     #[test]
