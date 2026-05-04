@@ -5615,6 +5615,8 @@ struct SemaphoreCancelRecoveryObservation {
     recovered_acquisitions: usize,
     available_after_cancel: usize,
     final_available_permits: usize,
+    unexpected_cancel_acquisitions: usize,
+    unexpected_cancel_errors: usize,
 }
 
 impl SemaphoreCancelRecoveryObservation {
@@ -5638,6 +5640,14 @@ impl SemaphoreCancelRecoveryObservation {
                 .with_counter(
                     "final_available_permits",
                     counter_i64(self.final_available_permits),
+                )
+                .with_counter(
+                    "unexpected_cancel_acquisitions",
+                    counter_i64(self.unexpected_cancel_acquisitions),
+                )
+                .with_counter(
+                    "unexpected_cancel_errors",
+                    counter_i64(self.unexpected_cancel_errors),
                 ),
         }
     }
@@ -5682,6 +5692,8 @@ fn live_semaphore_cancel_recovery_observation() -> SemaphoreCancelRecoveryObserv
         recovered_acquisitions,
         available_after_cancel,
         final_available_permits: semaphore.available_permits(),
+        unexpected_cancel_acquisitions: 0,
+        unexpected_cancel_errors: 0,
     }
 }
 
@@ -5693,9 +5705,13 @@ fn lab_semaphore_cancel_recovery_observation(seed: u64) -> SemaphoreCancelRecove
     let cancel_cx = Cx::for_testing();
     let waiter_cx = cancel_cx.clone();
     let cancelled_waiters = Arc::new(AtomicUsize::new(0));
+    let unexpected_cancel_acquisitions = Arc::new(AtomicUsize::new(0));
+    let unexpected_cancel_errors = Arc::new(AtomicUsize::new(0));
 
     let semaphore_for_waiter = Arc::clone(&semaphore);
     let waiter_result = Arc::clone(&cancelled_waiters);
+    let unexpected_acquires = Arc::clone(&unexpected_cancel_acquisitions);
+    let unexpected_errors = Arc::clone(&unexpected_cancel_errors);
     let (task_id, _) = runtime
         .state
         .create_task(region, Budget::INFINITE, async move {
@@ -5704,9 +5720,11 @@ fn lab_semaphore_cancel_recovery_observation(seed: u64) -> SemaphoreCancelRecove
                     waiter_result.fetch_add(1, Ordering::SeqCst);
                 }
                 Ok(_permit) => {
-                    panic!("cancelled waiter unexpectedly acquired semaphore");
+                    unexpected_acquires.fetch_add(1, Ordering::SeqCst);
                 }
-                Err(err) => panic!("unexpected semaphore acquire error: {err:?}"),
+                Err(_err) => {
+                    unexpected_errors.fetch_add(1, Ordering::SeqCst);
+                }
             }
         })
         .expect("create lab semaphore task");
@@ -5736,6 +5754,8 @@ fn lab_semaphore_cancel_recovery_observation(seed: u64) -> SemaphoreCancelRecove
         recovered_acquisitions,
         available_after_cancel,
         final_available_permits: semaphore.available_permits(),
+        unexpected_cancel_acquisitions: unexpected_cancel_acquisitions.load(Ordering::SeqCst),
+        unexpected_cancel_errors: unexpected_cancel_errors.load(Ordering::SeqCst),
     }
 }
 
@@ -5762,6 +5782,14 @@ fn make_sync_semaphore_live_result(
         witness.record_counter(
             "final_available_permits",
             counter_i64(observation.final_available_permits),
+        );
+        witness.record_counter(
+            "unexpected_cancel_acquisitions",
+            counter_i64(observation.unexpected_cancel_acquisitions),
+        );
+        witness.record_counter(
+            "unexpected_cancel_errors",
+            counter_i64(observation.unexpected_cancel_errors),
         );
     })
 }
@@ -7252,6 +7280,25 @@ mod tests {
     use insta::{assert_json_snapshot, assert_snapshot};
     use std::sync::{Arc, Mutex};
     use tempfile::NamedTempFile;
+
+    #[test]
+    fn cli_binary_has_no_production_panic_macros() {
+        let source = include_str!("asupersync.rs");
+        let production = source
+            .split("#[cfg(test)]")
+            .next()
+            .expect("CLI binary source should contain production section");
+        let panics: Vec<_> = production
+            .lines()
+            .enumerate()
+            .filter_map(|(idx, line)| line.contains("panic!(").then_some((idx + 1, line.trim())))
+            .collect();
+
+        assert!(
+            panics.is_empty(),
+            "production CLI code must return structured CliError/results instead of panic!: {panics:?}"
+        );
+    }
 
     #[derive(Clone, Default)]
     struct SharedWrite {
