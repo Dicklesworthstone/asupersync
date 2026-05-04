@@ -100,16 +100,18 @@
       "runner_path": "scripts/run_host_profile_planner_smoke.sh",
       "scenario_ids": [
         "AA-HOST-PROFILE-PLANNER-LOCALITY-FIRST-64C-256G",
-        "AA-HOST-PROFILE-PLANNER-MISSING-PROOF-FALLBACK"
+        "AA-HOST-PROFILE-PLANNER-MISSING-PROOF-FALLBACK",
+        "AA-HOST-PROFILE-PLANNER-EVIDENCE-RETENTION-64C-256G"
       ],
       "config_gate": "selected_profile and fallback profile must come from committed dry-run planner output only",
       "fallback_mode": "select conservative_baseline when proof references or evidence artifacts are missing or rejected",
       "unit_proof_ref": "tests/host_profile_planner_contract.rs",
-      "e2e_proof_ref": "scripts/run_host_profile_planner_smoke.sh --scenario AA-HOST-PROFILE-PLANNER-LOCALITY-FIRST-64C-256G --execute",
+      "e2e_proof_ref": "scripts/run_host_profile_planner_smoke.sh --scenario AA-HOST-PROFILE-PLANNER-EVIDENCE-RETENTION-64C-256G --execute",
       "operator_fields": [
         "selected_profile",
         "fallback_profile",
         "used_safe_fallback",
+        "final_arena_temperature_policy",
         "sanitized_operator_note",
         "sanitized_validation_command"
       ],
@@ -117,7 +119,91 @@
       "proof_status": "fail_closed",
       "blocker_reason": "host profile planner proof exists on main but tracker bead remains open, so final signoff must not treat the planner as closed",
       "report_glob": "target/host-profile-planner-smoke/run_*/AA-HOST-PROFILE-PLANNER-*/run_report.json",
-      "reproduction_command": "scripts/run_host_profile_planner_smoke.sh --scenario AA-HOST-PROFILE-PLANNER-LOCALITY-FIRST-64C-256G --execute"
+      "reproduction_command": "scripts/run_host_profile_planner_smoke.sh --scenario AA-HOST-PROFILE-PLANNER-EVIDENCE-RETENTION-64C-256G --execute"
+    },
+    {
+      "control_id": "adaptive_batch_sizing",
+      "tracker_bead_id": "asupersync-crtx9h",
+      "tracker_status": "open",
+      "artifact_path": "artifacts/adaptive_batch_sizing_smoke_contract_v1.json",
+      "contract_version": "adaptive-batch-sizing-smoke-contract-v1",
+      "runner_path": "scripts/run_adaptive_batch_sizing_smoke.sh",
+      "scenario_ids": [
+        "AA-ADAPTIVE-BATCH-SIZING-CONTENTION-WIN-32P",
+        "AA-ADAPTIVE-BATCH-SIZING-KEEP-FIXED-1P"
+      ],
+      "config_gate": "adaptive batch sizing must remain bounded, observable, and safe to pin back to fixed profiles at any time",
+      "fallback_mode": "keep the fixed batch profile pinned whenever the adaptive controller loses, oscillates, or lacks sufficient evidence",
+      "unit_proof_ref": "tests/adaptive_batch_sizing_contract.rs",
+      "e2e_proof_ref": "scripts/run_adaptive_batch_sizing_smoke.sh --scenario AA-ADAPTIVE-BATCH-SIZING-KEEP-FIXED-1P --execute",
+      "operator_fields": [
+        "winner_profile",
+        "shared_ready_touches_delta",
+        "wake_to_run_p99_improvement_ns",
+        "no_win_trigger",
+        "safe_fallback_profile"
+      ],
+      "rollback_surface": "fixed_profile_fallback",
+      "proof_status": "fail_closed",
+      "blocker_reason": "adaptive batch sizing proof exists on main but the tracker bead remains open, so signoff must still hold the scheduler batch controller closed",
+      "report_glob": "target/adaptive-batch-sizing-smoke/run_*/AA-ADAPTIVE-BATCH-SIZING-*/run_report.json",
+      "reproduction_command": "scripts/run_adaptive_batch_sizing_smoke.sh --scenario AA-ADAPTIVE-BATCH-SIZING-KEEP-FIXED-1P --execute"
+    },
+    {
+      "control_id": "hot_cold_arena_tiers",
+      "tracker_bead_id": "asupersync-hhlhjv",
+      "tracker_status": "open",
+      "artifact_path": "artifacts/hot_cold_arena_tiers_smoke_contract_v1.json",
+      "contract_version": "hot-cold-arena-tiers-smoke-contract-v1",
+      "runner_path": "scripts/run_hot_cold_arena_tiers_smoke.sh",
+      "scenario_ids": [
+        "AA-HOT-COLD-ARENA-TIERED-RETENTION-64C-256G",
+        "AA-HOT-COLD-ARENA-LARGE-PAGE-FALLBACK-64C-256G"
+      ],
+      "config_gate": "arena temperature policy must remain explicit, opt-in, and conservative by default on non-large-memory hosts",
+      "fallback_mode": "revert to unified allocation whenever large-page or cold-tier assumptions are unsupported, stale, or slower",
+      "unit_proof_ref": "tests/hot_cold_arena_tiers.rs",
+      "e2e_proof_ref": "scripts/run_hot_cold_arena_tiers_smoke.sh --scenario AA-HOT-COLD-ARENA-LARGE-PAGE-FALLBACK-64C-256G --execute",
+      "operator_fields": [
+        "effective_policy",
+        "fallback_reason",
+        "retained_evidence_bytes",
+        "hot_bytes_preserved",
+        "no_win_trigger",
+        "operator_verdict"
+      ],
+      "rollback_surface": "unified_allocator_fallback",
+      "proof_status": "fail_closed",
+      "blocker_reason": "hot/cold arena tier proofs exist on main but the tracker bead remains open, so signoff must keep the temperature layer fail-closed",
+      "report_glob": "target/hot-cold-arena-tiers-smoke/run_*/AA-HOT-COLD-ARENA-*/run_report.json",
+      "reproduction_command": "scripts/run_hot_cold_arena_tiers_smoke.sh --scenario AA-HOT-COLD-ARENA-LARGE-PAGE-FALLBACK-64C-256G --execute"
+    },
+    {
+      "control_id": "trace_storage_profile",
+      "tracker_bead_id": "asupersync-yaj7g6",
+      "tracker_status": "open",
+      "artifact_path": "artifacts/trace_storage_profile_smoke_contract_v1.json",
+      "contract_version": "trace-storage-profile-smoke-contract-v1",
+      "runner_path": "scripts/run_trace_storage_profile_smoke.sh",
+      "scenario_ids": [
+        "AA-TRACE-STORAGE-LARGE-MEMORY-256G"
+      ],
+      "config_gate": "large-memory trace retention must stay explicit, dry-runable, and separable from default trace budgets",
+      "fallback_mode": "fall back to the default trace storage profile whenever large-memory retention is unjustified, unsupported, or outside operator budget",
+      "unit_proof_ref": "tests/trace_storage_profile.rs",
+      "e2e_proof_ref": "scripts/run_trace_storage_profile_smoke.sh --scenario AA-TRACE-STORAGE-LARGE-MEMORY-256G --execute",
+      "operator_fields": [
+        "budget_total_mib_delta",
+        "hot_ring_turnover_reduction_ratio",
+        "large_retained_cancellation_traces",
+        "large_retained_distributed_traces",
+        "cold_write_amplification_reduction_ratio"
+      ],
+      "rollback_surface": "default_trace_storage_profile",
+      "proof_status": "fail_closed",
+      "blocker_reason": "trace storage profile proof exists on main but the tracker bead remains open, so signoff must not treat large-memory retention as operator-closed",
+      "report_glob": "target/trace-storage-profile-smoke/run_*/AA-TRACE-STORAGE-*/run_report.json",
+      "reproduction_command": "scripts/run_trace_storage_profile_smoke.sh --scenario AA-TRACE-STORAGE-LARGE-MEMORY-256G --execute"
     },
     {
       "control_id": "capacity_envelope_planner",
@@ -213,15 +299,15 @@
       "expected_report_projection": {
         "signoff_verdict": "fail_closed",
         "host_template_mode": false,
-        "child_artifact_count": 6,
+        "child_artifact_count": 9,
         "trusted_child_count": 1,
-        "fail_closed_child_count": 5,
-        "open_tracker_blocker_count": 4,
+        "fail_closed_child_count": 8,
+        "open_tracker_blocker_count": 7,
         "dirty_cluster_fail_closed_count": 1,
         "missing_artifact_path_count": 0,
         "missing_runner_path_count": 0,
         "no_unexplained_artifacts": false,
-        "projection_hash": "7e082354c9779c996e3f1583b8bd0790d0496bd65812e770ca08131d2e8d2edf"
+        "projection_hash": "138327ae093313c78ee002a1bfeb4588a427b2be44075dfc07241ae0e13201e2"
       },
       "required_log_fields": [
         "scenario_id",
@@ -247,15 +333,15 @@
       "expected_report_projection": {
         "signoff_verdict": "template_only",
         "host_template_mode": true,
-        "child_artifact_count": 6,
+        "child_artifact_count": 9,
         "trusted_child_count": 1,
-        "fail_closed_child_count": 5,
-        "open_tracker_blocker_count": 4,
+        "fail_closed_child_count": 8,
+        "open_tracker_blocker_count": 7,
         "dirty_cluster_fail_closed_count": 1,
         "missing_artifact_path_count": 0,
         "missing_runner_path_count": 0,
         "no_unexplained_artifacts": false,
-        "projection_hash": "e047293ec390ec589bb26c94d04352babd12d6b79affcae2400160fea13d01e0"
+        "projection_hash": "0c3ba09d9ad47a712a72d4ae1dbc39c7030d0d2797caf99ec3ce48b21a04e2e6"
       },
       "required_log_fields": [
         "scenario_id",
