@@ -14037,6 +14037,36 @@ mod tests {
         )
     }
 
+    fn create_ready_task_for_adaptive_metrics(
+        state: &Arc<ContendedMutex<RuntimeState>>,
+        root: RegionId,
+        region_seed: u32,
+    ) -> TaskId {
+        let mut runtime_state = state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        runtime_state
+            .create_task(root, Budget::INFINITE, async move {
+                let _ = region_seed;
+            })
+            .expect("task create")
+            .0
+    }
+
+    fn dispatch_ready_task_for_adaptive_metrics(
+        scheduler: &mut ThreeLaneScheduler,
+        state: &Arc<ContendedMutex<RuntimeState>>,
+        root: RegionId,
+        region_seed: u32,
+    ) -> TaskId {
+        let task_id = create_ready_task_for_adaptive_metrics(state, root, region_seed);
+        scheduler.inject_ready(task_id, 50);
+        let worker = scheduler.workers.first_mut().expect("worker");
+        assert_eq!(worker.next_task(), Some(task_id));
+        worker.execute(task_id);
+        task_id
+    }
+
     #[test]
     fn idle_probe_does_not_shift_first_adaptive_epoch_reward_window() {
         let baseline = first_adaptive_epoch_metrics_after_optional_idle_probe(false);
@@ -14046,6 +14076,169 @@ mod tests {
             with_idle_probe, baseline,
             "empty next_task probes must not change the first completed adaptive epoch metrics"
         );
+    }
+
+    #[test]
+    fn adaptive_metrics_enable_from_disabled_publishes_cold_start_metrics() {
+        let state = Arc::new(ContendedMutex::new("runtime_state", RuntimeState::new()));
+        let mut scheduler = ThreeLaneScheduler::new_with_cancel_limit(1, &state, 4);
+
+        {
+            let worker = scheduler.workers.first().expect("worker");
+            let metrics = worker.preemption_metrics();
+            assert!(worker.adaptive_cancel_policy.is_none());
+            assert_eq!(metrics.adaptive_epochs, 0);
+            assert_eq!(metrics.adaptive_current_limit, 4);
+            assert_eq!(metrics.adaptive_reward_ema, 0.0);
+            assert_eq!(metrics.adaptive_e_value, 1.0);
+            let dump = worker_state_dump_scrubbed("adaptive_disabled", worker, &[]);
+            assert_eq!(dump["fairness_certificate"]["adaptive_enabled"], false);
+            assert!(dump["adaptive_policy"].is_null());
+        }
+
+        scheduler.set_adaptive_cancel_streak(true, 8);
+
+        let worker = scheduler.workers.first().expect("worker");
+        let policy = worker
+            .adaptive_cancel_policy
+            .as_ref()
+            .expect("adaptive policy");
+        let metrics = worker.preemption_metrics();
+        assert_eq!(policy.epoch_steps, 8);
+        assert_eq!(policy.epoch_count, 0);
+        assert!(policy.epoch_start.is_none());
+        assert_eq!(metrics.adaptive_epochs, 0);
+        assert_eq!(metrics.adaptive_current_limit, policy.current_limit());
+        assert_eq!(metrics.adaptive_reward_ema, policy.reward_ema);
+        assert_eq!(metrics.adaptive_e_value, policy.e_value());
+
+        let dump = worker_state_dump_scrubbed("adaptive_enabled", worker, &[]);
+        assert_eq!(dump["fairness_certificate"]["adaptive_enabled"], true);
+        assert_eq!(
+            dump["fairness_certificate"]["adaptive_current_limit"],
+            json!(policy.current_limit())
+        );
+        assert_eq!(
+            dump["preemption_metrics"]["adaptive_current_limit"],
+            json!(policy.current_limit())
+        );
+        assert_eq!(dump["preemption_metrics"]["adaptive_epochs"], json!(0));
+        assert_eq!(dump["adaptive_policy"]["epoch_steps"], json!(8));
+        assert_eq!(dump["adaptive_policy"]["epoch_count"], json!(0));
+    }
+
+    fn first_adaptive_epoch_metrics_after_pre_enable_dispatches(
+        pre_enable_dispatches: usize,
+    ) -> (f64, f64, usize, u64, u64) {
+        let state = Arc::new(ContendedMutex::new("runtime_state", RuntimeState::new()));
+        let mut scheduler = ThreeLaneScheduler::new_with_cancel_limit(1, &state, 4);
+        let root = {
+            let mut runtime_state = state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            runtime_state.create_root_region(Budget::INFINITE)
+        };
+
+        for dispatch in 0..pre_enable_dispatches {
+            dispatch_ready_task_for_adaptive_metrics(
+                &mut scheduler,
+                &state,
+                root,
+                10_000 + u32::try_from(dispatch).expect("fixture dispatch count fits u32"),
+            );
+        }
+
+        let ready_dispatches_before_enable = {
+            let worker = scheduler.workers.first().expect("worker");
+            assert!(worker.adaptive_cancel_policy.is_none());
+            assert_eq!(
+                worker.preemption_metrics().adaptive_epochs,
+                0,
+                "disabled adaptive policy must not publish epoch counters"
+            );
+            worker.preemption_metrics().ready_dispatches
+        };
+
+        scheduler.set_adaptive_cancel_streak(true, 1);
+        dispatch_ready_task_for_adaptive_metrics(&mut scheduler, &state, root, 20_000);
+
+        let worker = scheduler.workers.first().expect("worker");
+        let policy = worker
+            .adaptive_cancel_policy
+            .as_ref()
+            .expect("adaptive policy");
+        let metrics = worker.preemption_metrics();
+        (
+            policy.mean_rewards[2],
+            metrics.adaptive_reward_ema,
+            metrics.adaptive_current_limit,
+            metrics.adaptive_epochs,
+            metrics
+                .ready_dispatches
+                .saturating_sub(ready_dispatches_before_enable),
+        )
+    }
+
+    #[test]
+    fn adaptive_metrics_enable_after_prior_disabled_samples_aligns_first_epoch_to_enable_tick() {
+        let cold_start = first_adaptive_epoch_metrics_after_pre_enable_dispatches(0);
+        let after_prior_samples = first_adaptive_epoch_metrics_after_pre_enable_dispatches(3);
+
+        assert_eq!(
+            after_prior_samples, cold_start,
+            "pre-enable dispatch metrics must not skew the first adaptive epoch"
+        );
+    }
+
+    #[test]
+    fn adaptive_metrics_reenable_rebases_metrics_to_new_policy() {
+        let state = Arc::new(ContendedMutex::new("runtime_state", RuntimeState::new()));
+        let mut scheduler = ThreeLaneScheduler::new_with_cancel_limit(1, &state, 4);
+        let root = {
+            let mut runtime_state = state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            runtime_state.create_root_region(Budget::INFINITE)
+        };
+        scheduler.set_adaptive_cancel_streak(true, 1);
+        dispatch_ready_task_for_adaptive_metrics(&mut scheduler, &state, root, 30_000);
+
+        {
+            let worker = scheduler.workers.first().expect("worker");
+            assert_eq!(worker.preemption_metrics().adaptive_epochs, 1);
+            assert!(
+                worker.preemption_metrics().adaptive_reward_ema > 0.0,
+                "first adaptive epoch should publish a non-default reward metric"
+            );
+        }
+
+        scheduler.set_adaptive_cancel_streak(false, 1);
+        {
+            let worker = scheduler.workers.first().expect("worker");
+            assert!(worker.adaptive_cancel_policy.is_none());
+            assert_eq!(worker.preemption_metrics().adaptive_epochs, 0);
+            assert_eq!(worker.preemption_metrics().adaptive_current_limit, 4);
+            assert_eq!(worker.preemption_metrics().adaptive_reward_ema, 0.0);
+            assert_eq!(worker.preemption_metrics().adaptive_e_value, 1.0);
+        }
+
+        scheduler.set_adaptive_cancel_streak(true, 4);
+        let worker = scheduler.workers.first().expect("worker");
+        let policy = worker
+            .adaptive_cancel_policy
+            .as_ref()
+            .expect("adaptive policy");
+        assert_eq!(policy.epoch_steps, 4);
+        assert_eq!(policy.epoch_count, 0);
+        assert_eq!(policy.reward_ema, 0.5);
+        assert!(policy.epoch_start.is_none());
+        assert_eq!(worker.preemption_metrics().adaptive_epochs, 0);
+        assert_eq!(
+            worker.preemption_metrics().adaptive_current_limit,
+            policy.current_limit()
+        );
+        assert_eq!(worker.preemption_metrics().adaptive_reward_ema, 0.5);
+        assert_eq!(worker.preemption_metrics().adaptive_e_value, 1.0);
     }
 
     #[test]
