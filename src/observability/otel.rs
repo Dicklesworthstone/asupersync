@@ -3214,7 +3214,9 @@ mod exporter_tests {
 
 // Re-export types for public API
 #[cfg(feature = "tracing-integration")]
-pub use span_semantics::{LogRecordBodyValue, log_record_body_value_to_any_value};
+pub use span_semantics::LogRecordBodyValue;
+#[cfg(all(feature = "tracing-integration", any(test, feature = "fuzz")))]
+pub use span_semantics::log_record_body_value_to_any_value;
 
 // =============================================================================
 // OpenTelemetry Span Semantics Conformance
@@ -3251,6 +3253,7 @@ pub mod span_semantics {
     use opentelemetry::trace::{
         SpanContext, SpanId, SpanKind, Status, TraceFlags, TraceId, TraceState,
     };
+    #[cfg(any(test, feature = "fuzz"))]
     use opentelemetry_proto::tonic::common::v1::{
         AnyValue, KeyValue, any_value::Value as ProtoValue,
     };
@@ -3676,6 +3679,7 @@ pub mod span_semantics {
         /// normalized keys and values before mutating the span, so filtering and
         /// capacity decisions cannot leave a partially normalized key/value pair
         /// in one of the parallel attribute maps.
+        #[cfg(any(test, feature = "fuzz"))]
         pub fn add_attributes(&mut self, attributes: Vec<KeyValue>) {
             let mut deduplicated: HashMap<String, (usize, AttributeValue)> = HashMap::new();
             let mut dropped = 0_u32;
@@ -3791,6 +3795,7 @@ pub mod span_semantics {
         }
 
         /// Convert span attributes to OTLP protobuf key/value pairs with stable ordering.
+        #[cfg(any(test, feature = "fuzz"))]
         pub fn to_otlp_attributes(&self) -> Vec<KeyValue> {
             let mut attributes: Vec<_> = self
                 .attribute_values
@@ -3820,6 +3825,7 @@ pub mod span_semantics {
         }
     }
 
+    #[cfg(any(test, feature = "fuzz"))]
     fn attribute_value_from_any_value(value: &AnyValue) -> Option<AttributeValue> {
         match value.value.as_ref()? {
             ProtoValue::StringValue(value) => Some(AttributeValue::String(value.clone())),
@@ -3831,6 +3837,7 @@ pub mod span_semantics {
         }
     }
 
+    #[cfg(any(test, feature = "fuzz"))]
     fn attribute_array_value_from_any_values(values: &[AnyValue]) -> Option<AttributeValue> {
         if values.is_empty() {
             return Some(AttributeValue::StringArray(Vec::new()));
@@ -3913,6 +3920,7 @@ pub mod span_semantics {
         }
     }
 
+    #[cfg(any(test, feature = "fuzz"))]
     fn attribute_value_to_any_value(value: &AttributeValue) -> AnyValue {
         use opentelemetry_proto::tonic::common::v1::ArrayValue;
 
@@ -3973,6 +3981,7 @@ pub mod span_semantics {
     }
 
     /// Convert LogRecord body value to OTLP AnyValue protobuf representation.
+    #[cfg(any(test, feature = "fuzz"))]
     pub fn log_record_body_value_to_any_value(value: &LogRecordBodyValue) -> AnyValue {
         use opentelemetry_proto::tonic::common::v1::ArrayValue;
 
