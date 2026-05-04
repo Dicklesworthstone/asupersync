@@ -1105,6 +1105,76 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "compression")]
+    #[derive(Debug)]
+    struct GzipBoundaryOutcome {
+        output: Vec<u8>,
+        error_kind: &'static str,
+        error_stage: &'static str,
+    }
+
+    #[cfg(feature = "compression")]
+    fn gzip_member_bytes(input: &[u8]) -> Vec<u8> {
+        let mut compressor = GzipCompressor::new();
+        let mut compressed = Vec::new();
+        compressor.compress(input, &mut compressed).unwrap();
+        compressor.finish(&mut compressed).unwrap();
+        compressed
+    }
+
+    #[cfg(feature = "compression")]
+    fn gzip_trailer_fields_for_log(input: &[u8]) -> String {
+        if input.len() < 8 {
+            return "none".to_string();
+        }
+
+        let trailer = &input[input.len() - 8..];
+        let crc32 = u32::from_le_bytes([trailer[0], trailer[1], trailer[2], trailer[3]]);
+        let isize = u32::from_le_bytes([trailer[4], trailer[5], trailer[6], trailer[7]]);
+        format!("crc32=0x{crc32:08x},isize={isize}")
+    }
+
+    #[cfg(feature = "compression")]
+    fn gzip_error_kind_for_log(error: &io::Error) -> &'static str {
+        match error.kind() {
+            io::ErrorKind::InvalidData => "InvalidData",
+            io::ErrorKind::InvalidInput => "InvalidInput",
+            io::ErrorKind::UnexpectedEof => "UnexpectedEof",
+            io::ErrorKind::WriteZero => "WriteZero",
+            io::ErrorKind::Other => "Other",
+            _ => "OtherKind",
+        }
+    }
+
+    #[cfg(feature = "compression")]
+    fn run_gzip_boundary_case(input: &[u8], max_size: Option<usize>) -> GzipBoundaryOutcome {
+        let mut decompressor = GzipDecompressor::new(max_size);
+        let mut output = Vec::new();
+
+        match decompressor.decompress(input, &mut output) {
+            Ok(()) => match decompressor.finish(&mut output) {
+                Ok(()) => GzipBoundaryOutcome {
+                    output,
+                    error_kind: "ok",
+                    error_stage: "ok",
+                },
+                Err(error) => GzipBoundaryOutcome {
+                    output,
+                    error_kind: gzip_error_kind_for_log(&error),
+                    error_stage: "finish",
+                },
+            },
+            Err(error) => {
+                let _ = decompressor.finish(&mut output);
+                GzipBoundaryOutcome {
+                    output,
+                    error_kind: gzip_error_kind_for_log(&error),
+                    error_stage: "decompress",
+                }
+            }
+        }
+    }
+
     // ====================================================================
     // ContentEncoding tests
     // ====================================================================
@@ -1830,6 +1900,267 @@ mod tests {
         assert!(result.is_err());
         assert_eq!(result.unwrap_err().kind(), io::ErrorKind::InvalidData);
         assert!(decompressed.is_empty());
+    }
+
+    /// Proves the HTTP gzip Content-Encoding seam fails closed on malformed
+    /// header/trailer/bomb cases while preserving valid single-member output.
+    #[cfg(feature = "compression")]
+    #[test]
+    fn conformance_gzip_content_encoding_boundary_matrix_logs_verdicts() {
+        const EXACT_RCH_COMMAND: &str = "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_asupersync_7t2qev_http_gzip cargo test -p asupersync --lib conformance_gzip_content_encoding_boundary_matrix_logs_verdicts --features compression -- --nocapture";
+
+        let log_case = |corpus_label: &str,
+                        compressed_len: usize,
+                        declared_output_len: usize,
+                        actual_output_len: usize,
+                        ratio: Option<f64>,
+                        cap_decision: &str,
+                        trailer_fields: &str,
+                        error_kind: &str,
+                        error_stage: &str| {
+            let ratio_field = ratio
+                .map(|value| format!("{value:.3}"))
+                .unwrap_or_else(|| "none".to_string());
+            println!(
+                "HTTP_GZIP_BOUNDARY \
+                 corpus_label={} \
+                 compressed_len={} \
+                 declared_output_len={} \
+                 actual_output_len={} \
+                 ratio={} \
+                 cap_decision={} \
+                 trailer_fields={} \
+                 error_kind={} \
+                 error_stage={} \
+                 exact_rch_command=\"{}\" \
+                 artifact_paths=none \
+                 final_bomb_malformed_rejection_verdict=pass",
+                corpus_label,
+                compressed_len,
+                declared_output_len,
+                actual_output_len,
+                ratio_field,
+                cap_decision,
+                trailer_fields,
+                error_kind,
+                error_stage,
+                EXACT_RCH_COMMAND,
+            );
+        };
+
+        let success_plain = b"hello gzip world";
+        let success_compressed = gzip_member_bytes(success_plain);
+        let success = run_gzip_boundary_case(&success_compressed, None);
+        assert_eq!(success.output, success_plain);
+        assert_eq!(success.error_kind, "ok");
+        log_case(
+            "success_single_member",
+            success_compressed.len(),
+            success_plain.len(),
+            success.output.len(),
+            Some(success_plain.len() as f64 / success_compressed.len() as f64),
+            "within-cap-accept",
+            &gzip_trailer_fields_for_log(&success_compressed),
+            success.error_kind,
+            success.error_stage,
+        );
+
+        let empty_compressed = gzip_member_bytes(b"");
+        let empty = run_gzip_boundary_case(&empty_compressed, None);
+        assert!(empty.output.is_empty());
+        assert_eq!(empty.error_kind, "ok");
+        log_case(
+            "empty_compressed_body",
+            empty_compressed.len(),
+            0,
+            empty.output.len(),
+            None,
+            "within-cap-accept",
+            &gzip_trailer_fields_for_log(&empty_compressed),
+            empty.error_kind,
+            empty.error_stage,
+        );
+
+        let mut malformed_header = success_compressed.clone();
+        malformed_header[2] = 0xff;
+        let malformed_header_outcome = run_gzip_boundary_case(&malformed_header, None);
+        assert_ne!(malformed_header_outcome.error_kind, "ok");
+        log_case(
+            "malformed_header_invalid_method",
+            malformed_header.len(),
+            success_plain.len(),
+            malformed_header_outcome.output.len(),
+            Some(success_plain.len() as f64 / malformed_header.len() as f64),
+            "within-cap-invalid-stream",
+            &gzip_trailer_fields_for_log(&malformed_header),
+            malformed_header_outcome.error_kind,
+            malformed_header_outcome.error_stage,
+        );
+
+        let mut malformed_trailer = success_compressed.clone();
+        let malformed_trailer_len = malformed_trailer.len();
+        malformed_trailer[malformed_trailer_len - 8..].fill(0xff);
+        let malformed_trailer_outcome = run_gzip_boundary_case(&malformed_trailer, None);
+        assert_ne!(malformed_trailer_outcome.error_kind, "ok");
+        log_case(
+            "malformed_trailer_bytes",
+            malformed_trailer.len(),
+            success_plain.len(),
+            malformed_trailer_outcome.output.len(),
+            Some(success_plain.len() as f64 / malformed_trailer.len() as f64),
+            "within-cap-invalid-stream",
+            &gzip_trailer_fields_for_log(&malformed_trailer),
+            malformed_trailer_outcome.error_kind,
+            malformed_trailer_outcome.error_stage,
+        );
+
+        let mut crc_mismatch = success_compressed.clone();
+        let crc_index = crc_mismatch.len() - 8;
+        crc_mismatch[crc_index] ^= 0x01;
+        let crc_outcome = run_gzip_boundary_case(&crc_mismatch, None);
+        assert_ne!(crc_outcome.error_kind, "ok");
+        log_case(
+            "crc_mismatch",
+            crc_mismatch.len(),
+            success_plain.len(),
+            crc_outcome.output.len(),
+            Some(success_plain.len() as f64 / crc_mismatch.len() as f64),
+            "within-cap-invalid-stream",
+            &gzip_trailer_fields_for_log(&crc_mismatch),
+            crc_outcome.error_kind,
+            crc_outcome.error_stage,
+        );
+
+        let mut isize_mismatch = success_compressed.clone();
+        let isize_index = isize_mismatch.len() - 4;
+        isize_mismatch[isize_index] ^= 0x01;
+        let isize_outcome = run_gzip_boundary_case(&isize_mismatch, None);
+        assert_ne!(isize_outcome.error_kind, "ok");
+        log_case(
+            "isize_mismatch",
+            isize_mismatch.len(),
+            success_plain.len(),
+            isize_outcome.output.len(),
+            Some(success_plain.len() as f64 / isize_mismatch.len() as f64),
+            "within-cap-invalid-stream",
+            &gzip_trailer_fields_for_log(&isize_mismatch),
+            isize_outcome.error_kind,
+            isize_outcome.error_stage,
+        );
+
+        let truncated_stream = success_compressed[..success_compressed.len() - 3].to_vec();
+        let truncated_outcome = run_gzip_boundary_case(&truncated_stream, None);
+        assert_ne!(truncated_outcome.error_kind, "ok");
+        log_case(
+            "truncated_stream",
+            truncated_stream.len(),
+            success_plain.len(),
+            truncated_outcome.output.len(),
+            Some(success_plain.len() as f64 / truncated_stream.len() as f64),
+            "within-cap-invalid-stream",
+            &gzip_trailer_fields_for_log(&truncated_stream),
+            truncated_outcome.error_kind,
+            truncated_outcome.error_stage,
+        );
+
+        let first_member = b"member-one";
+        let second_member = b"member-two";
+        let mut multi_member = gzip_member_bytes(first_member);
+        multi_member.extend(gzip_member_bytes(second_member));
+        let multi_member_outcome = run_gzip_boundary_case(&multi_member, None);
+        assert_ne!(multi_member_outcome.error_kind, "ok");
+        assert!(
+            multi_member_outcome.output.is_empty(),
+            "concatenated members must fail closed before releasing bytes"
+        );
+        log_case(
+            "multi_member_first_member_only",
+            multi_member.len(),
+            first_member.len() + second_member.len(),
+            multi_member_outcome.output.len(),
+            Some((first_member.len() + second_member.len()) as f64 / multi_member.len() as f64),
+            "single-member-fail-closed",
+            &gzip_trailer_fields_for_log(&multi_member),
+            multi_member_outcome.error_kind,
+            multi_member_outcome.error_stage,
+        );
+
+        let high_ratio_plain = vec![b'A'; 16 * 1024];
+        let high_ratio_compressed = gzip_member_bytes(&high_ratio_plain);
+        let high_ratio_value = high_ratio_plain.len() as f64 / high_ratio_compressed.len() as f64;
+        let high_ratio_outcome = run_gzip_boundary_case(&high_ratio_compressed, Some(1024));
+        assert!(
+            high_ratio_value > 20.0,
+            "expected a bomb-like expansion ratio"
+        );
+        assert_ne!(high_ratio_outcome.error_kind, "ok");
+        log_case(
+            "ratio_bomb_rejected_by_cap",
+            high_ratio_compressed.len(),
+            high_ratio_plain.len(),
+            high_ratio_outcome.output.len(),
+            Some(high_ratio_value),
+            "reject-over-cap",
+            &gzip_trailer_fields_for_log(&high_ratio_compressed),
+            high_ratio_outcome.error_kind,
+            high_ratio_outcome.error_stage,
+        );
+
+        let mut low_ratio_plain = Vec::with_capacity(4096);
+        let mut low_ratio_seed = 0x1234_5678u32;
+        for _ in 0..4096 {
+            low_ratio_seed ^= low_ratio_seed << 13;
+            low_ratio_seed ^= low_ratio_seed >> 17;
+            low_ratio_seed ^= low_ratio_seed << 5;
+            low_ratio_plain.push((low_ratio_seed & 0xff) as u8);
+        }
+        let low_ratio_compressed = gzip_member_bytes(&low_ratio_plain);
+        let low_ratio_value = low_ratio_plain.len() as f64 / low_ratio_compressed.len() as f64;
+        let low_ratio_outcome = run_gzip_boundary_case(&low_ratio_compressed, Some(1024));
+        assert!(
+            low_ratio_value < 4.0,
+            "expected a non-bomb compression ratio"
+        );
+        assert_ne!(low_ratio_outcome.error_kind, "ok");
+        log_case(
+            "absolute_output_cap_rejected",
+            low_ratio_compressed.len(),
+            low_ratio_plain.len(),
+            low_ratio_outcome.output.len(),
+            Some(low_ratio_value),
+            "reject-over-cap",
+            &gzip_trailer_fields_for_log(&low_ratio_compressed),
+            low_ratio_outcome.error_kind,
+            low_ratio_outcome.error_stage,
+        );
+
+        for (label, corpus) in [
+            ("arbitrary_bytes_empty", Vec::new()),
+            ("arbitrary_bytes_short_magic", vec![0x1f, 0x8b]),
+            (
+                "arbitrary_bytes_control_soup",
+                vec![0x00, 0xff, 0x10, 0x80, 0x7f, 0x01, 0xfe, 0x55],
+            ),
+        ] {
+            let arbitrary_result =
+                std::panic::catch_unwind(|| run_gzip_boundary_case(&corpus, Some(1024)));
+            assert!(
+                arbitrary_result.is_ok(),
+                "gzip arbitrary-bytes corpus must not panic: {label}"
+            );
+            let arbitrary_outcome = arbitrary_result.unwrap();
+            log_case(
+                label,
+                corpus.len(),
+                0,
+                arbitrary_outcome.output.len(),
+                None,
+                "panic-free-arbitrary-bytes",
+                &gzip_trailer_fields_for_log(&corpus),
+                arbitrary_outcome.error_kind,
+                arbitrary_outcome.error_stage,
+            );
+        }
     }
 
     // ====================================================================
