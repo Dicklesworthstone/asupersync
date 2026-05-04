@@ -3015,7 +3015,7 @@ mod tests {
         assert!(matches!(err, JsError::InvalidConfig(_)));
         assert!(
             err.to_string()
-                .contains("consumer name contains prohibited characters")
+                .contains("must contain only ASCII letters, digits, '-' or '_'")
         );
     }
 
@@ -5155,14 +5155,16 @@ mod tests {
             assert_eq!(msg_original.sequence, msg_redelivered.sequence);
             assert_ne!(msg_original.delivered, msg_redelivered.delivered);
 
-            // Applications should implement: "if I've processed sequence 100, skip this redelivery"
-            let application_processed_sequences = std::collections::HashSet::from([100u64]);
+            // Applications should implement: process the first delivery, then
+            // suppress later redeliveries for the same logical sequence.
+            let processed_before_first_delivery = std::collections::HashSet::<u64>::new();
             let should_process_original =
-                !application_processed_sequences.contains(&msg_original.sequence);
-            let should_process_redelivered =
-                !application_processed_sequences.contains(&msg_redelivered.sequence);
-
+                !processed_before_first_delivery.contains(&msg_original.sequence);
             assert!(should_process_original);
+
+            let processed_after_first_delivery = std::collections::HashSet::from([100u64]);
+            let should_process_redelivered =
+                !processed_after_first_delivery.contains(&msg_redelivered.sequence);
             assert!(!should_process_redelivered); // Idempotent - skip redelivery
         }
 
