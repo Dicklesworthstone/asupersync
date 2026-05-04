@@ -115,6 +115,7 @@ mod tests {
         clippy::future_not_send
     )]
     use super::*;
+    use proptest::prelude::*;
 
     fn init_test(name: &str) {
         crate::test_utils::init_test_logging();
@@ -157,6 +158,57 @@ mod tests {
         let ok = data[..5] == [1, 2, 3, 0, 0];
         crate::assert_with_log!(ok, "data", &[1, 2, 3, 0, 0], &data[..5]);
         crate::test_complete!("test_limit_put_slice");
+    }
+
+    proptest! {
+        #[test]
+        fn limit_metamorphic_chunked_put_matches_single_put(
+            payload in prop::collection::vec(any::<u8>(), 0..96),
+            capacity in 0usize..96,
+            limit in 0usize..96,
+            split_at in 0usize..96,
+        ) {
+            let write_len = payload.len().min(capacity).min(limit);
+            let payload = &payload[..write_len];
+
+            let mut single = vec![0xAA; capacity];
+            let single_remaining = {
+                let buf: &mut [u8] = &mut single;
+                let mut limited = Limit::new(buf, limit);
+                limited.put_slice(payload);
+                limited.remaining_mut()
+            };
+
+            let mut chunked = vec![0xAA; capacity];
+            let chunked_remaining = {
+                let split_at = split_at.min(write_len);
+                let buf: &mut [u8] = &mut chunked;
+                let mut limited = Limit::new(buf, limit);
+                limited.put_slice(&payload[..split_at]);
+                limited.put_slice(&payload[split_at..]);
+                limited.remaining_mut()
+            };
+
+            prop_assert_eq!(
+                chunked.as_slice(),
+                single.as_slice(),
+                "chunked writes through Limit must match one-shot writes",
+            );
+            prop_assert_eq!(
+                chunked_remaining,
+                single_remaining,
+                "chunking must not change effective remaining capacity",
+            );
+            prop_assert_eq!(
+                &single[..write_len],
+                payload,
+                "Limit must write exactly the admitted payload prefix",
+            );
+            prop_assert!(
+                single[write_len..].iter().all(|byte| *byte == 0xAA),
+                "Limit must not write past the admitted payload prefix",
+            );
+        }
     }
 
     #[test]
