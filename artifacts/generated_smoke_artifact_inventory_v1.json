@@ -157,7 +157,7 @@
       "cluster_id": "trace_storage_profile",
       "output_root": ".trace-storage-profile-smoke-artifacts",
       "owner_beads": ["asupersync-yaj7g6"],
-      "owner_status": "closed",
+      "owner_status": "open",
       "runner_path": "scripts/run_trace_storage_profile_smoke.sh",
       "scenario_ids": ["AA-TRACE-STORAGE-LARGE-MEMORY-256G"],
       "report_glob": "*/AA-TRACE-STORAGE-*/trace_storage_profile_comparison.json",

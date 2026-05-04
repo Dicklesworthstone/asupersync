@@ -111,7 +111,7 @@
       ],
       "rollback_surface": "not_applicable",
       "proof_status": "fail_closed",
-      "blocker_reason": "generated artifact inventory still records fail_closed clusters for cohort_admission_steering, trace_storage_profile, and overload_brownout",
+      "blocker_reason": "generated artifact inventory still records the trace_storage_profile cluster as fail_closed because asupersync-yaj7g6 remains open",
       "report_glob": "target/generated-smoke-artifact-inventory-smoke/run_*/AA-GENERATED-SMOKE-ARTIFACT-INVENTORY-CURRENT-HOST/run_report.json",
       "reproduction_command": "scripts/run_generated_smoke_artifact_inventory_smoke.sh --scenario AA-GENERATED-SMOKE-ARTIFACT-INVENTORY-CURRENT-HOST --execute"
     },
