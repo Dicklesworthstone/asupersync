@@ -668,6 +668,9 @@ mod tests {
     use futures_lite::future::block_on;
     use serde_json::Value;
     use std::sync::Mutex as StdMutex;
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use std::thread;
+    use std::time::{Duration, Instant};
 
     fn test_cx() -> Cx {
         Cx::new(
@@ -2865,16 +2868,16 @@ mod tests {
         println!("🛡️  GUARD EXCLUSIVE ACCESS VERIFICATION:");
 
         // Test that guards provide exclusive access only
-        let runtime = crate::LabRuntime::new();
+        let cx = test_cx();
         let (tx, mut rx) = crate::channel::oneshot::channel::<()>();
 
         let mutex_test = Arc::clone(&mutex);
         let guard_verification_completed = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let guard_verification_completed_worker = Arc::clone(&guard_verification_completed);
 
-        runtime.spawn(|cx| async move {
+        block_on(async {
             // Acquire exclusive lock
-            let guard = mutex_test.lock(cx).await.expect("Lock should succeed");
+            let guard = mutex_test.lock(&cx).await.expect("Lock should succeed");
 
             // Verify guard provides both immutable AND mutable access (exclusive)
             let immutable_ref: &i32 = &*guard; // Deref gives &T
@@ -2883,7 +2886,10 @@ mod tests {
             let mut guard = guard; // Move to mutable binding
             let mutable_ref: &mut i32 = &mut *guard; // DerefMut gives &mut T
             *mutable_ref += 1;
-            println!("  - Guard DerefMut: &mut T access ✅ (modified to: {})", *mutable_ref);
+            println!(
+                "  - Guard DerefMut: &mut T access ✅ (modified to: {})",
+                *mutable_ref
+            );
 
             // Verify guard is NOT Send (cannot be moved across threads)
             println!("  - Guard Send: NOT Send ✅ (correctly thread-local)");
@@ -2892,11 +2898,11 @@ mod tests {
 
             guard_verification_completed_worker.store(true, std::sync::atomic::Ordering::Release);
             drop(guard);
-            let _ = tx.send(()); // Signal completion
+            let _ = tx.send(&cx, ()); // Signal completion
         });
 
         // Wait for guard verification
-        let _ = runtime.run_until(async { rx.recv().await });
+        let _ = block_on(rx.recv(&cx));
 
         crate::assert_with_log!(
             guard_verification_completed.load(std::sync::atomic::Ordering::Acquire),
@@ -2922,29 +2928,31 @@ mod tests {
             let completed_count_worker = Arc::clone(&completed_count);
 
             let handle = thread::spawn(move || {
-                let runtime = crate::LabRuntime::new();
+                let cx = test_cx();
 
                 barrier_worker.wait(); // Synchronize start
 
-                runtime.run_until(async {
-                    runtime.spawn(|cx| async move {
-                        // Each worker tries to acquire exclusive lock
-                        let mut guard = mutex_worker.lock(cx).await
-                            .expect("Exclusive lock should succeed");
+                block_on(async {
+                    // Each worker tries to acquire exclusive lock
+                    let mut guard = mutex_worker
+                        .lock(&cx)
+                        .await
+                        .expect("Exclusive lock should succeed");
 
-                        let current_value = *guard;
+                    let current_value = *guard;
 
-                        // Hold lock briefly while modifying (exclusively)
-                        thread::sleep(Duration::from_millis(1));
-                        *guard = current_value + 1;
+                    // Hold lock briefly while modifying (exclusively)
+                    thread::sleep(Duration::from_millis(1));
+                    *guard = current_value + 1;
 
-                        println!("  - Worker {}: exclusive access ✅ (incremented to {})",
-                                worker_id, *guard);
+                    println!(
+                        "  - Worker {}: exclusive access ✅ (incremented to {})",
+                        worker_id, *guard
+                    );
 
-                        // Release lock
-                        drop(guard);
-                        completed_count_worker.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                    });
+                    // Release lock
+                    drop(guard);
+                    completed_count_worker.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 });
             });
 
@@ -2969,12 +2977,13 @@ mod tests {
         );
 
         // Verify final value shows exclusive access (no race conditions)
-        let runtime = crate::LabRuntime::new();
-        let final_value = runtime.run_until(async {
-            runtime.spawn(|cx| async move {
-                let guard = mutex_contention.lock(cx).await.expect("Final check lock");
-                *guard
-            })
+        let final_cx = test_cx();
+        let final_value = block_on(async {
+            let guard = mutex_contention
+                .lock(&final_cx)
+                .await
+                .expect("Final check lock");
+            *guard
         });
 
         crate::assert_with_log!(
@@ -2987,8 +2996,14 @@ mod tests {
         // Phase 5: Status Methods Verification (Non-locking)
         println!();
         println!("📊 STATUS METHOD VERIFICATION:");
-        println!("  - is_poisoned(): {} ✅ (non-locking query)", mutex.is_poisoned());
-        println!("  - is_locked(): {} ✅ (non-locking query)", mutex.is_locked());
+        println!(
+            "  - is_poisoned(): {} ✅ (non-locking query)",
+            mutex.is_poisoned()
+        );
+        println!(
+            "  - is_locked(): {} ✅ (non-locking query)",
+            mutex.is_locked()
+        );
         println!("  - waiters(): {} ✅ (non-locking query)", mutex.waiters());
 
         // Phase 6: Final Verdict
@@ -3019,8 +3034,8 @@ mod tests {
 
         init_test("audit_mutex_lock_cancel_cascade_prompt_detection");
 
-        use std::sync::{Arc, Barrier};
         use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+        use std::sync::{Arc, Barrier};
         use std::thread;
         use std::time::{Duration, Instant};
 
@@ -3040,43 +3055,46 @@ mod tests {
         println!("  - Cancel check happens BEFORE lock state check");
         println!("  - cleanup_waiter() called on cancellation");
 
-        let runtime = crate::LabRuntime::new();
-
         // Phase 2: Test immediate cancel detection (no lock holder)
         println!();
         println!("🔬 IMMEDIATE CANCEL DETECTION TEST:");
 
         let mutex = Arc::new(Mutex::new(42i32));
-        let immediate_cancelled = runtime.run_until(async {
-            runtime.spawn(|cx| async move {
-                // Cancel context immediately
-                cx.set_cancel_requested(true);
+        let immediate_cancelled = block_on(async {
+            let cx = test_cx();
+            // Cancel context immediately
+            cx.set_cancel_requested(true);
 
-                // Attempt to lock - should fail immediately
-                let start = Instant::now();
-                let result = mutex.lock(cx).await;
-                let duration = start.elapsed();
+            // Attempt to lock - should fail immediately
+            let start = Instant::now();
+            let result = mutex.lock(&cx).await;
+            let duration = start.elapsed();
 
-                (result, duration)
-            })
+            (
+                matches!(result, Err(LockError::Cancelled)),
+                format!("{result:?}"),
+                duration,
+            )
         });
 
         crate::assert_with_log!(
-            matches!(immediate_cancelled.0, Err(LockError::Cancelled)),
+            immediate_cancelled.0,
             "Immediate cancel should return Cancelled error",
             "Err(Cancelled)",
-            format!("{:?}", immediate_cancelled.0)
+            immediate_cancelled.1
         );
 
         crate::assert_with_log!(
-            immediate_cancelled.1 < Duration::from_millis(1),
+            immediate_cancelled.2 < Duration::from_millis(1),
             "Immediate cancel detection should be very fast",
             "< 1ms",
-            format!("{:.3}ms", immediate_cancelled.1.as_secs_f64() * 1000.0)
+            format!("{:.3}ms", immediate_cancelled.2.as_secs_f64() * 1000.0)
         );
 
-        println!("  - Immediate cancel: detected in {:.1}μs ✅",
-                immediate_cancelled.1.as_nanos() as f64 / 1000.0);
+        println!(
+            "  - Immediate cancel: detected in {:.1}μs ✅",
+            immediate_cancelled.2.as_nanos() as f64 / 1000.0
+        );
 
         // Phase 3: Test cancel cascade while waiting for held lock
         println!();
@@ -3090,20 +3108,21 @@ mod tests {
         let holder_mutex = Arc::clone(&cascade_mutex);
         let holder_barrier = Arc::clone(&barrier);
         let holder_handle = thread::spawn(move || {
-            let runtime = crate::LabRuntime::new();
-            runtime.run_until(async {
-                runtime.spawn(|cx| async move {
-                    let _guard = holder_mutex.lock(cx).await.expect("Holder should acquire lock");
+            let cx = test_cx();
+            block_on(async {
+                let _guard = holder_mutex
+                    .lock(&cx)
+                    .await
+                    .expect("Holder should acquire lock");
 
-                    // Signal that lock is held
-                    holder_barrier.wait();
+                // Signal that lock is held
+                holder_barrier.wait();
 
-                    // Hold lock for significant time (simulating long critical section)
-                    cx.sleep(Duration::from_millis(100)).await.ok();
+                // Hold lock for significant time (simulating long critical section)
+                thread::sleep(Duration::from_millis(100));
 
-                    println!("  - Lock holder: releasing after 100ms");
-                    // Guard drops here, releasing lock
-                })
+                println!("  - Lock holder: releasing after 100ms");
+                // Guard drops here, releasing lock
             });
         });
 
@@ -3113,39 +3132,43 @@ mod tests {
         let waiter_cancel_detected = Arc::clone(&cancel_detected);
 
         let waiter_handle = thread::spawn(move || {
-            let runtime = crate::LabRuntime::new();
-            runtime.run_until(async {
-                runtime.spawn(|cx| async move {
-                    // Wait for holder to acquire lock
-                    waiter_barrier.wait();
+            let cx = test_cx();
+            block_on(async {
+                // Wait for holder to acquire lock
+                waiter_barrier.wait();
 
-                    // Brief delay to ensure lock is held
-                    cx.sleep(Duration::from_millis(10)).await.ok();
+                // Brief delay to ensure lock is held
+                thread::sleep(Duration::from_millis(10));
 
-                    println!("  - Waiter: starting lock() on held mutex");
+                println!("  - Waiter: starting lock() on held mutex");
 
-                    // Start lock attempt (will wait because lock is held)
-                    let lock_future = waiter_mutex.lock(cx);
+                // Start lock attempt (will wait because lock is held)
+                let lock_future = waiter_mutex.lock(&cx);
 
-                    // Let it wait briefly, then cancel
-                    cx.sleep(Duration::from_millis(20)).await.ok();
-                    println!("  - Waiter: triggering cancellation after 20ms wait");
+                // Let it wait briefly, then cancel
+                thread::sleep(Duration::from_millis(20));
+                println!("  - Waiter: triggering cancellation after 20ms wait");
 
-                    let cancel_start = Instant::now();
-                    cx.set_cancel_requested(true);
+                let cancel_start = Instant::now();
+                cx.set_cancel_requested(true);
 
-                    // Complete lock attempt - should detect cancel promptly
-                    let result = lock_future.await;
-                    let cancel_duration = cancel_start.elapsed();
+                // Complete lock attempt - should detect cancel promptly
+                let result = lock_future.await;
+                let cancel_duration = cancel_start.elapsed();
 
-                    // Record results
-                    waiter_cancel_detected.store(true, Ordering::Release);
+                // Record results
+                waiter_cancel_detected.store(true, Ordering::Release);
 
-                    println!("  - Waiter: cancel detected in {:.1}μs",
-                            cancel_duration.as_nanos() as f64 / 1000.0);
+                println!(
+                    "  - Waiter: cancel detected in {:.1}μs",
+                    cancel_duration.as_nanos() as f64 / 1000.0
+                );
 
-                    (result, cancel_duration)
-                })
+                (
+                    matches!(result, Err(LockError::Cancelled)),
+                    format!("{result:?}"),
+                    cancel_duration,
+                )
             })
         });
 
@@ -3158,13 +3181,13 @@ mod tests {
 
         // Phase 4: Verify prompt cancel cascade detection
         crate::assert_with_log!(
-            matches!(waiter_result.0, Err(LockError::Cancelled)),
+            waiter_result.0,
             "Waiter should observe Cancelled error",
             "Err(Cancelled)",
-            format!("{:?}", waiter_result.0)
+            waiter_result.1
         );
 
-        let cancel_detection_duration = waiter_result.1;
+        let cancel_detection_duration = waiter_result.2;
 
         // Cancel detection should be prompt (within a few milliseconds)
         crate::assert_with_log!(
@@ -3192,23 +3215,23 @@ mod tests {
             let stress_mutex = Arc::new(Mutex::new(iteration));
             let prompt_cancels_iter = Arc::clone(&prompt_cancels);
 
-            let stress_result = runtime.run_until(async {
-                runtime.spawn(|cx| async move {
-                    let cancel_start = Instant::now();
+            let _stress_result = block_on(async {
+                let cx = test_cx();
+                let cancel_start = Instant::now();
 
-                    // Cancel immediately
-                    cx.set_cancel_requested(true);
+                // Cancel immediately
+                cx.set_cancel_requested(true);
 
-                    let result = stress_mutex.lock(cx).await;
-                    let detection_time = cancel_start.elapsed();
+                let result = stress_mutex.lock(&cx).await;
+                let detection_time = cancel_start.elapsed();
 
-                    if matches!(result, Err(LockError::Cancelled))
-                        && detection_time < Duration::from_millis(1) {
-                        prompt_cancels_iter.fetch_add(1, Ordering::Relaxed);
-                    }
+                if matches!(result, Err(LockError::Cancelled))
+                    && detection_time < Duration::from_millis(1)
+                {
+                    prompt_cancels_iter.fetch_add(1, Ordering::Relaxed);
+                }
 
-                    (result, detection_time)
-                })
+                (matches!(result, Err(LockError::Cancelled)), detection_time)
             });
         }
 
@@ -3216,8 +3239,10 @@ mod tests {
         let prompt_percentage = (final_prompt_cancels as f64 / stress_iterations as f64) * 100.0;
 
         println!("  - Stress iterations: {}", stress_iterations);
-        println!("  - Prompt cancels: {}/{} ({:.1}%)",
-                final_prompt_cancels, stress_iterations, prompt_percentage);
+        println!(
+            "  - Prompt cancels: {}/{} ({:.1}%)",
+            final_prompt_cancels, stress_iterations, prompt_percentage
+        );
 
         crate::assert_with_log!(
             prompt_percentage >= 95.0,
@@ -3233,7 +3258,10 @@ mod tests {
         println!("  - Cascade cancel: detected within 1 quantum ✅");
         println!("  - Architecture: cx.checkpoint() called FIRST in poll ✅");
         println!("  - Cleanup: waiter properly removed on cancel ✅");
-        println!("  - Stress test: {:.1}% prompt cancellation ✅", prompt_percentage);
+        println!(
+            "  - Stress test: {:.1}% prompt cancellation ✅",
+            prompt_percentage
+        );
         println!();
         println!("  - Implementation correctness:");
         println!("    • LockFuture::poll() checks cancellation FIRST ✅");
@@ -3262,8 +3290,7 @@ mod tests {
         //! there are waiters in the queue, even if the mutex is momentarily unlocked.
         //! This prevents queue-jumping and maintains fair FIFO ordering.
 
-        crate::test_utils::init_test_logging();
-        crate::test_utils::init_test("audit_mutex_try_lock_fifo_fairness_no_queue_jump");
+        init_test("audit_mutex_try_lock_fifo_fairness_no_queue_jump");
 
         // Phase 1: Basic fairness verification with queued waiters
         let cx = test_cx();
@@ -3272,57 +3299,24 @@ mod tests {
         println!("📊 Mutex try_lock() FIFO Fairness Analysis:");
 
         // Phase 2: Create initial lock holder
-        let mutex_for_holder = Arc::clone(&mutex);
-        let (holder_ready_tx, holder_ready_rx) = std::sync::mpsc::channel();
-        let (release_signal_tx, release_signal_rx) = std::sync::mpsc::channel();
-
-        let holder_thread = thread::spawn(move || {
-            let cx = test_cx();
-            let runtime = crate::LabRuntime::new();
-            runtime.run_until(async {
-                runtime.spawn(|_cx| async move {
-                    let _guard = mutex_for_holder.lock(&cx).await.expect("lock should succeed");
-                    holder_ready_tx.send(()).expect("signal ready");
-
-                    // Hold lock until signaled to release
-                    release_signal_rx.recv().expect("wait for release signal");
-                    // Guard drops here, releasing lock
-                })
-            })
-        });
-
-        // Wait for holder to acquire lock
-        holder_ready_rx.recv().expect("holder should be ready");
+        let mut holder_future = mutex.lock(&cx);
+        let holder_guard = poll_once(&mut holder_future)
+            .expect("holder should acquire immediately")
+            .expect("holder lock should succeed");
         println!("  - Initial lock holder established");
 
         // Phase 3: Create multiple waiters in FIFO queue
         const NUM_WAITERS: usize = 5;
-        let mut waiter_threads = Vec::new();
-        let barrier = Arc::new(std::sync::Barrier::new(NUM_WAITERS + 1)); // waiters + coordinator
+        let waiter_cxs: Vec<Cx> = (0..NUM_WAITERS).map(|_| test_cx()).collect();
+        let mut waiter_futures: Vec<_> = waiter_cxs
+            .iter()
+            .map(|waiter_cx| mutex.lock(waiter_cx))
+            .collect();
 
-        for waiter_id in 0..NUM_WAITERS {
-            let mutex_for_waiter = Arc::clone(&mutex);
-            let barrier_clone = Arc::clone(&barrier);
-
-            let waiter_thread = thread::spawn(move || {
-                let cx = test_cx();
-                barrier_clone.wait(); // Wait for coordination
-
-                let runtime = crate::LabRuntime::new();
-                runtime.run_until(async {
-                    runtime.spawn(|_cx| async move {
-                        let _guard = mutex_for_waiter.lock(&cx).await.expect("lock should succeed");
-                        waiter_id // Return waiter ID when lock acquired
-                    })
-                })
-            });
-
-            waiter_threads.push(waiter_thread);
+        for waiter_future in &mut waiter_futures {
+            let pending = poll_once(waiter_future).is_none();
+            crate::assert_with_log!(pending, "waiter queued behind holder", true, pending);
         }
-
-        // Coordinate all waiters to start simultaneously
-        barrier.wait();
-        thread::sleep(Duration::from_millis(100)); // Let waiters queue up
 
         // Phase 4: Verify waiters are queued
         let waiter_count = {
@@ -3352,12 +3346,10 @@ mod tests {
             matches!(try_lock_while_held, Err(TryLockError::Locked))
         );
 
-        // Release the lock holder to make mutex available
-        release_signal_tx.send(()).expect("signal release");
-        holder_thread.join().expect("holder should complete");
-
-        // Brief window for lock transition
-        thread::sleep(Duration::from_millis(50));
+        // Release the lock holder to make mutex available.
+        // unlock() should grant the first queued waiter without allowing a
+        // synchronous try_lock caller to jump ahead.
+        drop(holder_guard);
 
         // Phase 6: CRITICAL FAIRNESS TEST - try_lock should STILL fail even though mutex is unlocked
         // because waiters are queued (FIFO fairness)
@@ -3372,12 +3364,17 @@ mod tests {
 
             if matches!(try_lock_result, Err(TryLockError::Locked)) {
                 failed_attempts += 1;
-                println!("    - Attempt {} try_lock result: Err(Locked) ✅", attempt + 1);
+                println!(
+                    "    - Attempt {} try_lock result: Err(Locked) ✅",
+                    attempt + 1
+                );
             } else {
-                println!("    - Attempt {} try_lock result: {:?} ❌", attempt + 1, try_lock_result);
+                println!(
+                    "    - Attempt {} try_lock result: {:?} ❌",
+                    attempt + 1,
+                    try_lock_result
+                );
             }
-
-            thread::sleep(Duration::from_millis(10));
         }
 
         crate::assert_with_log!(
@@ -3401,17 +3398,18 @@ mod tests {
         // Phase 8: Implementation analysis of the fairness check
         println!();
         println!("📋 try_lock() Implementation Analysis:");
-        println!("  - Line 335: if state.locked || state.granted_waiter.is_some() || !state.waiters.is_empty()");
+        println!(
+            "  - Line 335: if state.locked || state.granted_waiter.is_some() || !state.waiters.is_empty()"
+        );
         println!("  - The key fairness condition: !state.waiters.is_empty()");
         println!("  - This prevents queue-jumping even when mutex is unlocked");
         println!("  - Ensures FIFO ordering: queued waiters get priority over new try_lock calls");
 
-        // Clean up: Let all waiters complete
-        for (i, waiter_thread) in waiter_threads.into_iter().enumerate() {
-            match waiter_thread.join() {
-                Ok(waiter_id) => println!("    - Waiter {} completed with ID {}", i, waiter_id),
-                Err(_) => println!("    - Waiter {} failed to complete", i),
-            }
+        // Clean up: let the queued waiters acquire in FIFO order.
+        for (i, waiter_future) in waiter_futures.iter_mut().enumerate() {
+            let guard = poll_until_ready(waiter_future).expect("waiter lock should succeed");
+            println!("    - Waiter {} acquired in FIFO cleanup", i);
+            drop(guard);
         }
 
         // Phase 9: Verify clean final state
@@ -3488,8 +3486,7 @@ mod tests {
         //! - Threshold: <100K ops/sec (requires performance bead)
         //! - Test: 16 threads × 100us hold time × tight loop
 
-        crate::test_utils::init_test_logging();
-        crate::test_utils::init_test("audit_mutex_contention_high_load_throughput_benchmark");
+        init_test("audit_mutex_contention_high_load_throughput_benchmark");
 
         // Phase 1: Test configuration
         const NUM_THREADS: usize = 16;
@@ -3501,7 +3498,10 @@ mod tests {
         println!("  - Threads: {}", NUM_THREADS);
         println!("  - Hold time: {}μs per acquisition", HOLD_TIME_US);
         println!("  - Benchmark duration: {}s", BENCHMARK_DURATION_SECS);
-        println!("  - Contention level: SEVERE ({}x over-subscription)", NUM_THREADS);
+        println!(
+            "  - Contention level: SEVERE ({}x over-subscription)",
+            NUM_THREADS
+        );
 
         // Phase 2: Setup shared state
         let mutex = Arc::new(Mutex::new(0u64));
@@ -3530,24 +3530,19 @@ mod tests {
 
                 // Tight contention loop
                 while benchmark_active_clone.load(Ordering::Acquire) {
-                    // Create runtime for this lock attempt
-                    let runtime = crate::LabRuntime::new();
+                    let result = block_on(async {
+                        // Acquire the mutex
+                        let mut guard = mutex_clone.lock(&cx).await?;
 
-                    let result = runtime.run_until(async {
-                        runtime.spawn(|_cx| async move {
-                            // Acquire the mutex
-                            let mut guard = mutex_clone.lock(&cx).await?;
+                        // Hold for specified duration
+                        let hold_start = Instant::now();
+                        while hold_start.elapsed() < Duration::from_micros(HOLD_TIME_US) {
+                            // Simulate some work while holding the lock
+                            *guard = guard.wrapping_add(1);
+                        }
 
-                            // Hold for specified duration
-                            let hold_start = Instant::now();
-                            while hold_start.elapsed() < Duration::from_micros(HOLD_TIME_US) {
-                                // Simulate some work while holding the lock
-                                *guard = guard.wrapping_add(1);
-                            }
-
-                            // Guard drops here, releasing the mutex
-                            Ok::<_, LockError>(())
-                        })
+                        // Guard drops here, releasing the mutex
+                        Ok::<_, LockError>(())
                     });
 
                     if result.is_ok() {
@@ -3559,7 +3554,10 @@ mod tests {
                     thread::sleep(Duration::from_nanos(1));
                 }
 
-                println!("    - Thread {} completed: {} operations", thread_id, local_ops);
+                println!(
+                    "    - Thread {} completed: {} operations",
+                    thread_id, local_ops
+                );
                 local_ops
             });
 
@@ -3621,32 +3619,60 @@ mod tests {
 
         println!();
         println!("🔬 Contention Analysis:");
-        println!("  - Theoretical max (100μs hold): {:.0} ops/sec", theoretical_max_ops_per_sec);
+        println!(
+            "  - Theoretical max (100μs hold): {:.0} ops/sec",
+            theoretical_max_ops_per_sec
+        );
         println!("  - Achieved efficiency: {:.1}%", efficiency_percentage);
-        println!("  - Lock contention overhead: {:.1}%", 100.0 - efficiency_percentage);
-        println!("  - Average lock acquisition latency: {:.1}μs", (actual_secs * 1_000_000.0) / global_operations as f64);
+        println!(
+            "  - Lock contention overhead: {:.1}%",
+            100.0 - efficiency_percentage
+        );
+        println!(
+            "  - Average lock acquisition latency: {:.1}μs",
+            (actual_secs * 1_000_000.0) / global_operations as f64
+        );
 
         // Phase 8: Mutex state verification
         let final_mutex_value = {
-            let final_guard = mutex.try_lock().expect("Mutex should be unlocked after benchmark");
+            let final_guard = mutex
+                .try_lock()
+                .expect("Mutex should be unlocked after benchmark");
             *final_guard
         };
-        println!("  - Final mutex value: {} (operations performed)", final_mutex_value);
+        println!(
+            "  - Final mutex value: {} (operations performed)",
+            final_mutex_value
+        );
 
         // Phase 9: Performance evaluation against thresholds
         println!();
 
         if throughput_ops_per_sec >= 1_000_000.0 {
             println!("🏆 SOUND: High-performance contention handling verified");
-            println!("  - Throughput: {:.3}M ops/sec exceeds 1M threshold ✅", throughput_m_ops_per_sec);
-            println!("  - {} threads handled efficiently under contention ✅", NUM_THREADS);
-            println!("  - Sustained performance over {} seconds ✅", BENCHMARK_DURATION_SECS);
-            println!("  - Lock efficiency: {:.1}% of theoretical maximum ✅", efficiency_percentage);
+            println!(
+                "  - Throughput: {:.3}M ops/sec exceeds 1M threshold ✅",
+                throughput_m_ops_per_sec
+            );
+            println!(
+                "  - {} threads handled efficiently under contention ✅",
+                NUM_THREADS
+            );
+            println!(
+                "  - Sustained performance over {} seconds ✅",
+                BENCHMARK_DURATION_SECS
+            );
+            println!(
+                "  - Lock efficiency: {:.1}% of theoretical maximum ✅",
+                efficiency_percentage
+            );
             println!("  - No performance bead required ✅");
-
         } else if throughput_ops_per_sec >= 100_000.0 {
             println!("⚠️  ACCEPTABLE: Moderate contention performance");
-            println!("  - Throughput: {:.1}K ops/sec meets 100K baseline ✅", throughput_k_ops_per_sec);
+            println!(
+                "  - Throughput: {:.1}K ops/sec meets 100K baseline ✅",
+                throughput_k_ops_per_sec
+            );
             println!("  - Below 1M ops/sec optimal threshold ⚠️");
             println!("  - Consider optimization opportunities ⚠️");
             println!("  - Potential bottlenecks:");
@@ -3654,10 +3680,12 @@ mod tests {
             println!("    • Parking lot mutex contention in MutexState");
             println!("    • Thread parking/unparking latency");
             println!("    • FIFO queue management overhead");
-
         } else {
             println!("❌ PERFORMANCE_ISSUE: Sub-optimal contention throughput");
-            println!("  - Throughput: {:.1}K ops/sec below 100K baseline ❌", throughput_k_ops_per_sec);
+            println!(
+                "  - Throughput: {:.1}K ops/sec below 100K baseline ❌",
+                throughput_k_ops_per_sec
+            );
             println!("  - Performance bead should be filed ❌");
             println!("  - Critical performance bottlenecks identified:");
             println!("    • Excessive lock acquisition latency");
@@ -3679,8 +3707,10 @@ mod tests {
         println!("🔍 Architecture Performance Impact:");
         println!("  - WaiterChain: FIFO slab-backed queue");
         println!("    • O(1) insertion/removal operations");
-        println!("    • Memory overhead: ~{} bytes per waiter slot",
-                 std::mem::size_of::<WaiterSlot>());
+        println!(
+            "    • Memory overhead: ~{} bytes per waiter slot",
+            std::mem::size_of::<WaiterSlot>()
+        );
         println!("    • Contention: Single parking_lot::Mutex guards entire state");
 
         println!("  - Fairness overhead:");
@@ -3710,17 +3740,20 @@ mod tests {
         );
 
         crate::assert_with_log!(
-            global_operations == total_thread_ops,
+            global_operations as u64 == total_thread_ops,
             "Global and thread-local operation counts should match",
             total_thread_ops,
-            global_operations
+            global_operations as u64
         );
 
         // Phase 13: Final verdict
         println!();
         if throughput_ops_per_sec >= 1_000_000.0 {
             println!("✅ PERFORMANCE VERDICT: High-throughput async mutex verified");
-            println!("  - Excellent contention handling: {:.3}M ops/sec ✅", throughput_m_ops_per_sec);
+            println!(
+                "  - Excellent contention handling: {:.3}M ops/sec ✅",
+                throughput_m_ops_per_sec
+            );
             println!("  - Scales well under {}-thread pressure ✅", NUM_THREADS);
             println!("  - Efficient FIFO fairness implementation ✅");
             println!("  - Ready for production high-contention workloads ✅");
@@ -3826,7 +3859,9 @@ mod tests {
 
         println!("    Required methods:");
         println!("    - MutexGuard::map<U, F>(self, f: F) -> MappedMutexGuard<T, U>");
-        println!("    - MutexGuard::try_map<U, F, E>(self, f: F) -> Result<MappedMutexGuard<T, U>, E>");
+        println!(
+            "    - MutexGuard::try_map<U, F, E>(self, f: F) -> Result<MappedMutexGuard<T, U>, E>"
+        );
         println!("    - OwnedMutexGuard::map<U, F>(self, f: F) -> OwnedMappedMutexGuard<T, U>");
 
         // Phase 6: Impact assessment
@@ -3902,8 +3937,6 @@ mod tests {
         let expected_data = test_data.clone();
 
         let mutex = Arc::new(Mutex::new(test_data));
-        let mutex_clone = Arc::clone(&mutex);
-
         println!();
         println!("🔍 Phase 1: API Surface Analysis");
 
@@ -3918,7 +3951,9 @@ mod tests {
         println!("    - Mutex::try_lock_owned(&self) -> OwnedMutexGuard<T> ❌ NOT FOUND");
 
         println!("  Available workaround via static method:");
-        println!("    - OwnedMutexGuard::try_lock(Arc<Mutex<T>>) -> Result<OwnedMutexGuard<T>, TryLockError> ✅");
+        println!(
+            "    - OwnedMutexGuard::try_lock(Arc<Mutex<T>>) -> Result<OwnedMutexGuard<T>, TryLockError> ✅"
+        );
 
         println!();
         println!("🚀 Phase 2: Verify OwnedMutexGuard functionality");
@@ -3931,8 +3966,10 @@ mod tests {
                 println!("  ✅ OwnedMutexGuard::try_lock() succeeds");
 
                 // Verify data access
-                assert_eq!(*owned_guard, expected_data,
-                    "OwnedMutexGuard should provide access to mutex data");
+                assert_eq!(
+                    *owned_guard, expected_data,
+                    "OwnedMutexGuard should provide access to mutex data"
+                );
                 println!("  ✅ Data access works: '{}'", *owned_guard);
 
                 // Test that this is truly owned (no lifetime dependency)
@@ -3944,8 +3981,10 @@ mod tests {
                     let scoped_data = &*moved_guard;
                     scoped_data.clone()
                 };
-                assert_eq!(scope_test, expected_data,
-                    "OwnedMutexGuard should work across scope boundaries");
+                assert_eq!(
+                    scope_test, expected_data,
+                    "OwnedMutexGuard should work across scope boundaries"
+                );
                 println!("  ✅ Works across scope boundaries");
 
                 drop(moved_guard); // Explicit drop to release lock
@@ -3966,7 +4005,7 @@ mod tests {
         // Function that takes ownership of the guard
         fn take_ownership<T>(guard: OwnedMutexGuard<T>) -> T
         where
-            T: Clone
+            T: Clone,
         {
             let data = (*guard).clone();
             drop(guard); // Explicitly drop to release
@@ -3974,25 +4013,31 @@ mod tests {
         }
 
         let extracted_data = take_ownership(owned_guard);
-        assert_eq!(extracted_data, expected_data,
-            "OwnedMutexGuard should transfer ownership correctly");
+        assert_eq!(
+            extracted_data, expected_data,
+            "OwnedMutexGuard should transfer ownership correctly"
+        );
         println!("  ✅ Ownership transfer to function works");
 
         println!();
         println!("🚀 Phase 4: Thread boundary test (Send/Sync)");
 
         // Verify OwnedMutexGuard is Send (can cross thread boundaries)
-        let owned_guard = OwnedMutexGuard::try_lock(Arc::clone(&mutex))
-            .expect("should acquire for Send test");
+        let owned_guard =
+            OwnedMutexGuard::try_lock(Arc::clone(&mutex)).expect("should acquire for Send test");
 
         let thread_result = std::thread::spawn(move || {
             let data = (*owned_guard).clone();
             drop(owned_guard);
             data
-        }).join().expect("thread should complete successfully");
+        })
+        .join()
+        .expect("thread should complete successfully");
 
-        assert_eq!(thread_result, expected_data,
-            "OwnedMutexGuard should work across thread boundaries");
+        assert_eq!(
+            thread_result, expected_data,
+            "OwnedMutexGuard should work across thread boundaries"
+        );
         println!("  ✅ OwnedMutexGuard is Send - works across threads");
 
         println!();
@@ -4009,12 +4054,16 @@ mod tests {
         println!("  Current asupersync pattern:");
         println!("    - mutex.try_lock() -> Result<MutexGuard<T>, TryLockError> ✅");
         println!("    - mutex.try_lock_owned() -> ... ❌ MISSING");
-        println!("    - OwnedMutexGuard::try_lock(arc) -> Result<OwnedMutexGuard<T>, TryLockError> ✅");
+        println!(
+            "    - OwnedMutexGuard::try_lock(arc) -> Result<OwnedMutexGuard<T>, TryLockError> ✅"
+        );
 
         println!();
         println!("❌ API GAP IDENTIFIED:");
         println!("  Missing convenience method: Mutex::try_lock_owned()");
-        println!("  - Expected signature: fn try_lock_owned(self: &Arc<Self>) -> Result<OwnedMutexGuard<T>, TryLockError>");
+        println!(
+            "  - Expected signature: fn try_lock_owned(self: &Arc<Self>) -> Result<OwnedMutexGuard<T>, TryLockError>"
+        );
         println!("  - Current workaround: OwnedMutexGuard::try_lock(Arc<Mutex<T>>)");
         println!("  - Impact: Verbose, non-ergonomic API compared to tokio");
 
@@ -4094,7 +4143,7 @@ mod tests {
         println!("🔍 Phase 1: Current API limitations");
 
         {
-            let guard = mutex.try_lock().expect("should acquire lock");
+            let _guard = mutex.try_lock().expect("should acquire lock");
             println!("  - Current guard type: MutexGuard<MultiFieldData>");
             println!("  - Access method: Whole struct dereference only");
             println!("  - Lock scope: Entire struct lifetime");
@@ -4107,7 +4156,10 @@ mod tests {
             println!("  - Field access: {} (counter)", guard.counter);
             println!("  - String field: '{}' (name)", guard.name);
             println!("  - Vec field: {:?} (values)", guard.values);
-            println!("  - Nested struct: enabled={} (config.enabled)", guard.config.enabled);
+            println!(
+                "  - Nested struct: enabled={} (config.enabled)",
+                guard.config.enabled
+            );
         }
 
         println!();
@@ -4145,11 +4197,17 @@ mod tests {
         println!("    std::sync::MutexGuard::try_map<U, F, E>(guard, f: F) -> Result<...> ✅");
 
         println!("  Tokio patterns:");
-        println!("    tokio::sync::MutexGuard::map<U, F>(guard, f: F) -> MappedMutexGuard<T, U> ✅");
-        println!("    tokio::sync::OwnedMutexGuard::map<U, F>(guard, f: F) -> OwnedMappedMutexGuard<T, U> ✅");
+        println!(
+            "    tokio::sync::MutexGuard::map<U, F>(guard, f: F) -> MappedMutexGuard<T, U> ✅"
+        );
+        println!(
+            "    tokio::sync::OwnedMutexGuard::map<U, F>(guard, f: F) -> OwnedMappedMutexGuard<T, U> ✅"
+        );
 
         println!("  async-std patterns:");
-        println!("    async_std::sync::MutexGuard::map<U, F>(guard, f: F) -> MappedMutexGuard<T, U> ✅");
+        println!(
+            "    async_std::sync::MutexGuard::map<U, F>(guard, f: F) -> MappedMutexGuard<T, U> ✅"
+        );
 
         println!("  Missing in asupersync:");
         println!("    asupersync::sync::MutexGuard::map() ❌ NOT AVAILABLE");

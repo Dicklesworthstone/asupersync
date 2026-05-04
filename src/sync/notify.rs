@@ -716,11 +716,12 @@ mod tests {
         clippy::future_not_send
     )]
     use super::*;
+    use crate::runtime::yield_now;
     use crate::test_utils::init_test_logging;
     use futures_lite::future::block_on;
     use std::sync::Arc;
-    use std::sync::mpsc;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use std::sync::mpsc;
     use std::thread;
     use std::time::{Duration, Instant};
 
@@ -4547,7 +4548,7 @@ mod tests {
 
         // Phase 2: Test if Notified future is Send (THIS IS THE ISSUE)
         let notify = Arc::new(Notify::new());
-        let notified_future = notify.notified();
+        let _notified_future = notify.notified();
 
         // This compilation test will reveal the Send bounds issue
         fn assert_send<T: Send>(_: T) {}
@@ -4635,8 +4636,8 @@ mod tests {
 
         init_test("audit_notify_thrashing_performance_benchmark");
 
+        use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
         use std::sync::{Arc, Barrier};
-        use std::sync::atomic::{AtomicU64, AtomicBool, Ordering};
         use std::thread;
         use std::time::{Duration, Instant};
 
@@ -4659,45 +4660,45 @@ mod tests {
         println!("📊 BENCHMARK SETUP:");
         println!("  - Concurrent tasks: {}", TASK_COUNT);
         println!("  - Duration: {} seconds", BENCHMARK_DURATION.as_secs());
-        println!("  - Operations per cycle: {} (notify_one + notified)", OPERATIONS_PER_CYCLE);
+        println!(
+            "  - Operations per cycle: {} (notify_one + notified)",
+            OPERATIONS_PER_CYCLE
+        );
         println!("  - Total workers: {} + coordinator", TASK_COUNT);
 
         // Phase 1: Spawn thrashing worker tasks
         let mut worker_handles = Vec::with_capacity(TASK_COUNT);
 
-        for worker_id in 0..TASK_COUNT {
+        for _worker_id in 0..TASK_COUNT {
             let notify_worker = Arc::clone(&notify);
             let operation_count_worker = Arc::clone(&operation_count);
             let benchmark_active_worker = Arc::clone(&benchmark_active);
             let barrier_worker = Arc::clone(&barrier);
 
             let handle = thread::spawn(move || {
-                let runtime = crate::LabRuntime::new();
-
                 // Wait for benchmark start coordination
                 barrier_worker.wait();
 
                 let mut local_operations = 0u64;
 
-                runtime.run_until(async {
-                    runtime.spawn(|cx| async move {
-                        while benchmark_active_worker.load(Ordering::Relaxed) {
-                            // Cycle 1: notify_one (producer)
-                            let _notify_result = notify_worker.notify_one();
+                block_on(async {
+                    while benchmark_active_worker.load(Ordering::Relaxed) {
+                        // Cycle 1: notify_one (producer)
+                        let _notify_result = notify_worker.notify_one();
 
-                            // Cycle 2: notified().await (consumer)
-                            let _notified_result = notify_worker.notified().await;
+                        // Cycle 2: notified().await (consumer)
+                        let _notified_result = notify_worker.notified().await;
 
-                            local_operations += OPERATIONS_PER_CYCLE;
+                        local_operations += OPERATIONS_PER_CYCLE;
+                        operation_count_worker.fetch_add(OPERATIONS_PER_CYCLE, Ordering::Relaxed);
 
-                            // Yield occasionally to prevent task starvation
-                            if local_operations % 100 == 0 {
-                                cx.yield_now().await;
-                            }
+                        // Yield occasionally to prevent task starvation
+                        if local_operations % 100 == 0 {
+                            yield_now().await;
                         }
+                    }
 
-                        local_operations
-                    })
+                    local_operations
                 })
             });
 
@@ -4723,7 +4724,10 @@ mod tests {
         let actual_duration = benchmark_end.duration_since(benchmark_start);
 
         println!("⏱️  BENCHMARK COMPLETED:");
-        println!("  - Actual duration: {:.3} seconds", actual_duration.as_secs_f64());
+        println!(
+            "  - Actual duration: {:.3} seconds",
+            actual_duration.as_secs_f64()
+        );
 
         // Phase 3: Collect results from all workers
         let mut total_local_operations = 0u64;
@@ -4794,15 +4798,24 @@ mod tests {
         let avg_cycle_time_ns = (duration_secs * 1_000_000_000.0) / total_local_operations as f64;
 
         println!("  - Ops per task: {:.0}", ops_per_task);
-        println!("  - Average cycle time: {:.1} nanoseconds", avg_cycle_time_ns);
+        println!(
+            "  - Average cycle time: {:.1} nanoseconds",
+            avg_cycle_time_ns
+        );
         println!("  - Concurrent task scaling: {} tasks", TASK_COUNT);
 
         if throughput_ops_per_sec >= 1_000_000.0 {
             println!();
             println!("✅ PERFORMANCE CHARACTERISTICS:");
             println!("  - WaiterSlab efficiency: High throughput under contention ✅");
-            println!("  - Mutex<WaiterSlab> overhead: Acceptable for {} tasks ✅", TASK_COUNT);
-            println!("  - notify_one() + notified() cycle: {:.1}ns average ✅", avg_cycle_time_ns);
+            println!(
+                "  - Mutex<WaiterSlab> overhead: Acceptable for {} tasks ✅",
+                TASK_COUNT
+            );
+            println!(
+                "  - notify_one() + notified() cycle: {:.1}ns average ✅",
+                avg_cycle_time_ns
+            );
             println!("  - Stored notifications handling: Efficient ✅");
             println!("  - Generation counter overhead: Minimal impact ✅");
 
@@ -4812,7 +4825,6 @@ mod tests {
             println!("  - Lock contention: Well-managed with parking_lot ✅");
             println!("  - Memory allocation: Minimal per-operation overhead ✅");
             println!("  - Cache locality: Good for tight loops ✅");
-
         } else {
             println!();
             println!("⚠️  PERFORMANCE BOTTLENECKS:");
@@ -4822,7 +4834,10 @@ mod tests {
                 println!("  - Memory allocation: Possible per-op overhead ⚠️");
                 println!("  - Lock implementation: May need tuning ⚠️");
             }
-            println!("  - Cycle time: {:.1}ns (higher than optimal) ⚠️", avg_cycle_time_ns);
+            println!(
+                "  - Cycle time: {:.1}ns (higher than optimal) ⚠️",
+                avg_cycle_time_ns
+            );
         }
 
         // Phase 7: Stress test consistency
@@ -4845,27 +4860,32 @@ mod tests {
         // Single-task consistency check
         let notify_consistency = Arc::clone(&notify);
         let consistency_ops = thread::spawn(move || {
-            let runtime = crate::LabRuntime::new();
-            runtime.run_until(async {
-                runtime.spawn(|_cx| async move {
-                    let mut ops = 0u64;
-                    let start = Instant::now();
+            block_on(async {
+                let mut ops = 0u64;
+                let start = Instant::now();
 
-                    while start.elapsed() < consistency_duration {
-                        notify_consistency.notify_one();
-                        let _notified = notify_consistency.notified().await;
-                        ops += 2;
-                    }
+                while start.elapsed() < consistency_duration {
+                    notify_consistency.notify_one();
+                    let _notified = notify_consistency.notified().await;
+                    ops += 2;
+                }
 
-                    ops
-                })
+                ops
             })
-        }).join().unwrap_or(0);
+        })
+        .join()
+        .unwrap_or(0);
 
         let consistency_throughput = consistency_ops as f64 / consistency_secs;
 
-        println!("  - Consistency check: {:.0} ops/sec", consistency_throughput);
-        println!("  - Single-task baseline: {:.2}M ops/sec", consistency_throughput / 1_000_000.0);
+        println!(
+            "  - Consistency check: {:.0} ops/sec",
+            consistency_throughput
+        );
+        println!(
+            "  - Single-task baseline: {:.2}M ops/sec",
+            consistency_throughput / 1_000_000.0
+        );
 
         // Phase 8: Final performance requirements check
         crate::assert_with_log!(
@@ -4878,23 +4898,33 @@ mod tests {
         if throughput_ops_per_sec >= 1_000_000.0 {
             println!();
             println!("🏆 SOUND: High-performance thrashing verified");
-            println!("  - Throughput: {:.2}M ops/sec exceeds 1M threshold ✅", throughput_m_ops_per_sec);
+            println!(
+                "  - Throughput: {:.2}M ops/sec exceeds 1M threshold ✅",
+                throughput_m_ops_per_sec
+            );
             println!("  - {} concurrent tasks handled efficiently ✅", TASK_COUNT);
-            println!("  - Sustained performance over {} seconds ✅", BENCHMARK_DURATION.as_secs());
+            println!(
+                "  - Sustained performance over {} seconds ✅",
+                BENCHMARK_DURATION.as_secs()
+            );
             println!("  - Architecture scales well under contention ✅");
             println!("  - No performance bead required ✅");
-
         } else if throughput_ops_per_sec >= 100_000.0 {
             println!();
             println!("⚠️  ACCEPTABLE: Moderate performance");
-            println!("  - Throughput: {:.1}K ops/sec meets 100K baseline ✅", throughput_k_ops_per_sec);
+            println!(
+                "  - Throughput: {:.1}K ops/sec meets 100K baseline ✅",
+                throughput_k_ops_per_sec
+            );
             println!("  - Below 1M ops/sec optimal threshold ⚠️");
             println!("  - Consider optimization opportunities ⚠️");
-
         } else {
             println!();
             println!("❌ PERFORMANCE_ISSUE: Sub-optimal thrashing performance");
-            println!("  - Throughput: {:.1}K ops/sec below 100K baseline ❌", throughput_k_ops_per_sec);
+            println!(
+                "  - Throughput: {:.1}K ops/sec below 100K baseline ❌",
+                throughput_k_ops_per_sec
+            );
             println!("  - Performance bead should be filed ❌");
             println!("  - Architecture optimization required ❌");
         }
@@ -4964,7 +4994,6 @@ mod tests {
             // Drop the future explicitly - this should release the slot
             drop(fut);
             println!("    - Dropped notified future");
-
         } // Future dropped here
 
         // Verify slot was released
@@ -5030,7 +5059,10 @@ mod tests {
             // Notify and verify a new waiter can consume it
             let notify_result = notify.notify_one();
             if notify_result {
-                panic!("notify_one should store notification (no waiters), iteration {}", i);
+                panic!(
+                    "notify_one should store notification (no waiters), iteration {}",
+                    i
+                );
             }
 
             let mut new_fut = notify.notified();
@@ -5039,13 +5071,19 @@ mod tests {
             let poll_result = std::pin::Pin::new(&mut new_fut).poll(&mut cx);
 
             if !matches!(poll_result, Poll::Ready(())) {
-                panic!("New future should consume stored notification, iteration {}", i);
+                panic!(
+                    "New future should consume stored notification, iteration {}",
+                    i
+                );
             }
 
             successful_cycles += 1;
         }
 
-        println!("    - Completed {} successful drop-notify cycles", successful_cycles);
+        println!(
+            "    - Completed {} successful drop-notify cycles",
+            successful_cycles
+        );
 
         crate::assert_with_log!(
             successful_cycles == STRESS_ITERATIONS,
@@ -5086,7 +5124,7 @@ mod tests {
         let notify2 = Arc::clone(&notify_concurrent);
         let barrier2 = Arc::clone(&barrier);
         let success2 = Arc::clone(&success_count);
-        let error2 = Arc::clone(&error_count);
+        let _error2 = Arc::clone(&error_count);
         let handle2 = thread::spawn(move || {
             barrier2.wait(); // Wait for coordination
 
@@ -5119,13 +5157,20 @@ mod tests {
         barrier.wait();
 
         // Wait for completion
-        handle1.join().expect("Worker 1 should complete successfully");
-        handle2.join().expect("Worker 2 should complete successfully");
+        handle1
+            .join()
+            .expect("Worker 1 should complete successfully");
+        handle2
+            .join()
+            .expect("Worker 2 should complete successfully");
 
         let final_success_count = success_count.load(Ordering::Acquire);
         let final_error_count = error_count.load(Ordering::Acquire);
 
-        println!("    - Concurrent operations: {} successes, {} errors", final_success_count, final_error_count);
+        println!(
+            "    - Concurrent operations: {} successes, {} errors",
+            final_success_count, final_error_count
+        );
 
         crate::assert_with_log!(
             final_error_count == 0,
@@ -5210,7 +5255,10 @@ mod tests {
         println!("📊 Notify Uneven Contention Analysis:");
         println!("  - Producers: {} (notify_one callers)", NUM_PRODUCERS);
         println!("  - Consumers: {} (notified awaiter)", NUM_CONSUMERS);
-        println!("  - Expected notifications: {}", EXPECTED_TOTAL_NOTIFICATIONS);
+        println!(
+            "  - Expected notifications: {}",
+            EXPECTED_TOTAL_NOTIFICATIONS
+        );
         println!("  - Contention pattern: MANY→ONE (uneven)");
 
         // Phase 2: Shared state setup
@@ -5284,21 +5332,22 @@ mod tests {
         let mut failed_consumptions = 0;
 
         for consumption_id in 0..EXPECTED_TOTAL_NOTIFICATIONS {
-            let runtime = crate::LabRuntime::new();
-            let consumption_result = runtime.run_until(async {
-                runtime.spawn(|_cx| async move {
-                    // Each notified() call should consume exactly one stored notification
-                    notify.notified().await;
-                    consumption_id
-                })
-            });
+            let consumption_result = Ok::<_, ()>(block_on(async {
+                // Each notified() call should consume exactly one stored notification
+                notify.notified().await;
+                consumption_id
+            }));
 
             match consumption_result {
                 Ok(id) => {
                     successful_consumptions += 1;
                     notifications_received.fetch_add(1, Ordering::Relaxed);
                     if id % 20 == 0 {
-                        println!("    - Consumed notification {}/{}", id + 1, EXPECTED_TOTAL_NOTIFICATIONS);
+                        println!(
+                            "    - Consumed notification {}/{}",
+                            id + 1,
+                            EXPECTED_TOTAL_NOTIFICATIONS
+                        );
                     }
                 }
                 Err(_) => {
@@ -5380,26 +5429,26 @@ mod tests {
         // Phase 8: One-more-consumer test to verify empty state
         println!("🔍 Phase 8: Empty state verification");
 
-        let extra_runtime = crate::LabRuntime::new();
-        let timeout_result = std::panic::catch_unwind(|| {
-            extra_runtime.run_until(async {
-                extra_runtime.spawn(|_cx| async move {
-                    // This should block indefinitely since no more notifications are stored
-                    let timeout_duration = Duration::from_millis(100);
-                    let start = Instant::now();
+        let timeout_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            block_on(async {
+                // This should block indefinitely since no more notifications are stored
+                let timeout_duration = Duration::from_millis(100);
+                let start = Instant::now();
 
-                    let mut notified_fut = notify.notified();
-                    let waker = std::task::Waker::noop();
-                    let mut context = std::task::Context::from_waker(&waker);
+                let mut notified_fut = notify.notified();
+                let waker = std::task::Waker::noop();
+                let mut context = std::task::Context::from_waker(waker);
 
-                    // Poll once - should be Pending since no stored notifications
-                    let poll_result = std::pin::Pin::new(&mut notified_fut).poll(&mut context);
+                // Poll once - should be Pending since no stored notifications
+                let poll_result = std::pin::Pin::new(&mut notified_fut).poll(&mut context);
 
-                    let elapsed = start.elapsed();
-                    (matches!(poll_result, Poll::Pending), elapsed < timeout_duration)
-                })
+                let elapsed = start.elapsed();
+                (
+                    matches!(poll_result, Poll::Pending),
+                    elapsed < timeout_duration,
+                )
             })
-        });
+        }));
 
         match timeout_result {
             Ok((is_pending, completed_quickly)) => {
@@ -5419,8 +5468,14 @@ mod tests {
         // Phase 9: Architecture analysis and verification
         println!();
         println!("✅ SOUND: Uneven contention stored notifications verification:");
-        println!("  - ALL {} notifications correctly stored ✅", EXPECTED_TOTAL_NOTIFICATIONS);
-        println!("  - ALL {} notifications successfully consumed ✅", EXPECTED_TOTAL_NOTIFICATIONS);
+        println!(
+            "  - ALL {} notifications correctly stored ✅",
+            EXPECTED_TOTAL_NOTIFICATIONS
+        );
+        println!(
+            "  - ALL {} notifications successfully consumed ✅",
+            EXPECTED_TOTAL_NOTIFICATIONS
+        );
         println!("  - No notification loss under uneven contention ✅");
         println!("  - Atomic counter mechanism works correctly ✅");
         println!("  - Sequential consumption preserves ordering ✅");
@@ -5428,7 +5483,9 @@ mod tests {
         println!();
         println!("📝 Implementation Analysis:");
         println!("  - notify_one() storage: stored_notifications.fetch_add(1, Release)");
-        println!("  - notified() consumption: compare_exchange_weak(stored, stored-1, AcqRel, Relaxed)");
+        println!(
+            "  - notified() consumption: compare_exchange_weak(stored, stored-1, AcqRel, Relaxed)"
+        );
         println!("  - Atomicity: Each notify_one increments, each notified() decrements");
         println!("  - Race protection: CAS loop handles concurrent modifications");
         println!("  - Memory ordering: Release-Acquire ensures happens-before");
@@ -5482,7 +5539,9 @@ mod tests {
         let notify = Arc::new(Notify::new());
 
         // Shared latency collection (lock-free for measurement accuracy)
-        let latencies = Arc::new(parking_lot::Mutex::new(Vec::with_capacity(TOTAL_MEASUREMENTS)));
+        let latencies = Arc::new(parking_lot::Mutex::new(Vec::with_capacity(
+            TOTAL_MEASUREMENTS,
+        )));
 
         // Synchronization for coordinated start
         let start_barrier = Arc::new(std::sync::Barrier::new(NUM_TASKS + 1));
@@ -5512,34 +5571,30 @@ mod tests {
                     thread::yield_now();
                 }
 
-                let runtime = crate::LabRuntime::new();
-                let mut task_latencies = Vec::with_capacity(CYCLES_PER_TASK);
+                let task_latencies = block_on(async {
+                    let mut task_latencies = Vec::with_capacity(CYCLES_PER_TASK);
+                    for cycle in 0..CYCLES_PER_TASK {
+                        // Measure notify_one → notified cycle latency
+                        let cycle_start = Instant::now();
 
-                runtime.run_until(async {
-                    runtime.spawn(|cx| async move {
-                        for cycle in 0..CYCLES_PER_TASK {
-                            // Measure notify_one → notified cycle latency
-                            let cycle_start = Instant::now();
+                        // Trigger notification (this task notifies)
+                        notify_clone.notify_one();
 
-                            // Trigger notification (this task notifies)
-                            notify_clone.notify_one();
+                        // Wait for notification (this task waits)
+                        notify_clone.notified().await;
 
-                            // Wait for notification (this task waits)
-                            notify_clone.notified().await;
+                        let cycle_end = Instant::now();
+                        let cycle_latency = cycle_end.duration_since(cycle_start);
 
-                            let cycle_end = Instant::now();
-                            let cycle_latency = cycle_end.duration_since(cycle_start);
+                        task_latencies.push(cycle_latency.as_nanos() as u64);
 
-                            task_latencies.push(cycle_latency.as_nanos() as u64);
-
-                            // Brief yield to allow other tasks to interleave
-                            if cycle % 10 == 0 {
-                                crate::yield_now().await;
-                            }
+                        // Brief yield to allow other tasks to interleave
+                        if cycle % 10 == 0 {
+                            yield_now().await;
                         }
+                    }
 
-                        task_latencies
-                    })
+                    task_latencies
                 });
 
                 // Append task latencies to shared collection
@@ -5574,7 +5629,10 @@ mod tests {
             thread::sleep(Duration::from_millis(500));
             let completed = completed_tasks.load(Ordering::SeqCst);
             let progress = (completed as f64 / NUM_TASKS as f64) * 100.0;
-            println!("  Progress: {:.1}% ({}/{} tasks completed)", progress, completed, NUM_TASKS);
+            println!(
+                "  Progress: {:.1}% ({}/{} tasks completed)",
+                progress, completed, NUM_TASKS
+            );
 
             if completed >= NUM_TASKS {
                 break;
@@ -5598,7 +5656,10 @@ mod tests {
 
         let n = sorted_latencies.len();
         println!("  Total measurements: {}", n);
-        println!("  Measurement duration: {:.2}s", total_measurement_time.as_secs_f64());
+        println!(
+            "  Measurement duration: {:.2}s",
+            total_measurement_time.as_secs_f64()
+        );
 
         if n == 0 {
             panic!("❌ No latency measurements collected!");
@@ -5639,14 +5700,20 @@ mod tests {
         println!("🚀 THROUGHPUT ANALYSIS:");
         println!("  - Total operations: {}", n);
         println!("  - Overall throughput: {:.0} ops/sec", ops_per_sec);
-        println!("  - Per-task throughput: {:.0} ops/sec", ops_per_task_per_sec);
+        println!(
+            "  - Per-task throughput: {:.0} ops/sec",
+            ops_per_task_per_sec
+        );
 
         // Performance classification
         println!();
         println!("📋 PERFORMANCE CLASSIFICATION:");
 
         if p99_us > 100.0 {
-            println!("❌ PERFORMANCE ISSUE: p99 = {:.2}μs > 100μs threshold", p99_us);
+            println!(
+                "❌ PERFORMANCE ISSUE: p99 = {:.2}μs > 100μs threshold",
+                p99_us
+            );
             println!("  - Action required: File performance bead");
             println!("  - Impact: High contention significantly degrades latency");
             println!("  - Root cause investigation needed");
@@ -5654,20 +5721,27 @@ mod tests {
             // Log detailed statistics for debugging
             println!();
             println!("🔍 PERFORMANCE DEBUGGING INFO:");
-            println!("  - WaiterSlab contention: likely high under {} tasks", NUM_TASKS);
+            println!(
+                "  - WaiterSlab contention: likely high under {} tasks",
+                NUM_TASKS
+            );
             println!("  - parking_lot::Mutex overhead: may be significant");
             println!("  - Atomic stored_notifications: contention possible");
             println!("  - Waker allocation: potential bottleneck");
-
         } else if p99_us < 10.0 {
-            println!("🏆 EXCELLENT PERFORMANCE: p99 = {:.2}μs < 10μs threshold", p99_us);
+            println!(
+                "🏆 EXCELLENT PERFORMANCE: p99 = {:.2}μs < 10μs threshold",
+                p99_us
+            );
             println!("  - Notify scales extremely well under heavy contention ✅");
             println!("  - {} concurrent tasks handled efficiently ✅", NUM_TASKS);
             println!("  - WaiterSlab + parking_lot architecture optimal ✅");
             println!("  - Pin behavior with this audit test ✅");
-
         } else {
-            println!("⚠️  ACCEPTABLE PERFORMANCE: p99 = {:.2}μs (10-100μs range)", p99_us);
+            println!(
+                "⚠️  ACCEPTABLE PERFORMANCE: p99 = {:.2}μs (10-100μs range)",
+                p99_us
+            );
             println!("  - Performance acceptable but not exceptional");
             println!("  - Monitor for regressions in future changes");
             println!("  - Consider optimization opportunities");
@@ -5707,17 +5781,21 @@ mod tests {
         println!();
         if p99_us > 100.0 {
             println!("🚨 VERDICT: FILE PERFORMANCE BEAD");
-            println!("  - p99 latency exceeds 100μs threshold under {} task contention", NUM_TASKS);
+            println!(
+                "  - p99 latency exceeds 100μs threshold under {} task contention",
+                NUM_TASKS
+            );
             println!("  - Priority: HIGH - affects runtime scalability");
             println!("  - Investigation areas: WaiterSlab, Mutex, atomic contention");
-
         } else if p99_us < 10.0 {
             println!("🏆 VERDICT: PIN EXCELLENT PERFORMANCE");
-            println!("  - p99 latency under 10μs with {} concurrent tasks ✅", NUM_TASKS);
+            println!(
+                "  - p99 latency under 10μs with {} concurrent tasks ✅",
+                NUM_TASKS
+            );
             println!("  - Notify implementation scales exceptionally well ✅");
             println!("  - Architecture choices validated ✅");
             println!("  - No performance bead required ✅");
-
         } else {
             println!("✅ VERDICT: ACCEPTABLE PERFORMANCE");
             println!("  - p99 latency {:.2}μs within acceptable range", p99_us);
@@ -5927,12 +6005,7 @@ mod tests {
         // Accumulate 5 permits
         for i in 1..=5 {
             let result = notify.notify_one();
-            crate::assert_with_log!(
-                !result,
-                format!("permit {} stored", i),
-                false,
-                result
-            );
+            crate::assert_with_log!(!result, format!("permit {} stored", i), false, result);
         }
 
         let stored_concurrent = notify.stored_notifications.load(Ordering::Acquire);
