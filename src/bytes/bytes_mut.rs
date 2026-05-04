@@ -490,6 +490,7 @@ mod tests {
         clippy::future_not_send
     )]
     use super::*;
+    use proptest::prelude::*;
 
     fn init_test(name: &str) {
         crate::test_utils::init_test_logging();
@@ -651,6 +652,75 @@ mod tests {
         let ok = &b[..] == b"world";
         crate::assert_with_log!(ok, "right", b"world", &b[..]);
         crate::test_complete!("test_bytes_mut_split_to");
+    }
+
+    #[test]
+    fn bytes_mut_split_parts_are_mutably_independent() {
+        init_test("bytes_mut_split_parts_are_mutably_independent");
+
+        let mut middle = BytesMut::from(&b"alpha|beta|gamma"[..]);
+        let mut prefix = middle.split_to(6);
+        let mut suffix = middle.split_off(5);
+
+        prefix[0] = b'A';
+        middle[0] = b'B';
+        suffix[0] = b'G';
+
+        crate::assert_with_log!(
+            &prefix[..] == b"Alpha|",
+            "prefix isolated",
+            b"Alpha|",
+            &prefix[..]
+        );
+        crate::assert_with_log!(
+            &middle[..] == b"Beta|",
+            "middle isolated",
+            b"Beta|",
+            &middle[..]
+        );
+        crate::assert_with_log!(
+            &suffix[..] == b"Gamma",
+            "suffix isolated",
+            b"Gamma",
+            &suffix[..]
+        );
+        crate::test_complete!("bytes_mut_split_parts_are_mutably_independent");
+    }
+
+    proptest! {
+        #[test]
+        fn bytes_mut_metamorphic_slice_matches_split_extraction(
+            data in prop::collection::vec(any::<u8>(), 0..128),
+            start in 0usize..128,
+            end in 0usize..128,
+        ) {
+            let bytes = BytesMut::from(data.as_slice());
+            let len = bytes.len();
+            let start = start.min(len);
+            let end = end.min(len);
+            let (start, end) = if start <= end {
+                (start, end)
+            } else {
+                (end, start)
+            };
+
+            let direct = bytes.slice(start..end).to_vec();
+
+            let mut split_view = bytes.clone();
+            let _prefix = split_view.split_to(start);
+            let middle = split_view.split_to(end - start);
+
+            prop_assert_eq!(
+                &middle[..],
+                direct.as_slice(),
+                "direct slicing and split-based extraction must expose identical contiguous bytes",
+            );
+            prop_assert_eq!(
+                &middle[..],
+                &data[start..end],
+                "both extraction paths must match the original contiguous source slice",
+            );
+        }
     }
 
     #[test]
