@@ -643,6 +643,8 @@ mod tests {
         clippy::future_not_send
     )]
     use super::*;
+    use crate::grpc::ProstCodec;
+    use prost::Message;
     use std::fmt::Write;
 
     fn init_test(name: &str) {
@@ -671,6 +673,33 @@ mod tests {
         let _ = writeln!(out, "payload_hex: {}", format_hex(payload));
 
         out
+    }
+
+    #[derive(Clone, PartialEq, prost::Message)]
+    struct GzipParityMessage {
+        #[prost(string, tag = "1")]
+        name: String,
+        #[prost(bytes = "vec", tag = "2")]
+        payload: Vec<u8>,
+        #[prost(uint64, tag = "3")]
+        counter: u64,
+    }
+
+    fn gzip_parity_message_fingerprint(message: &GzipParityMessage) -> String {
+        let mut hash = 14_695_981_039_346_656_037_u64;
+        hash ^= message.name.len() as u64;
+        hash = hash.wrapping_mul(1_099_511_628_211);
+        hash ^= message.payload.len() as u64;
+        hash = hash.wrapping_mul(1_099_511_628_211);
+        hash ^= message.counter;
+        hash = hash.wrapping_mul(1_099_511_628_211);
+
+        format!(
+            "name_len={},payload_len={},counter={},fnv1a64={hash:016x}",
+            message.name.len(),
+            message.payload.len(),
+            message.counter,
+        )
     }
 
     #[derive(Debug, thiserror::Error)]
@@ -1708,6 +1737,291 @@ mod tests {
         let ok = matches!(result, Err(GrpcError::MessageTooLarge));
         crate::assert_with_log!(ok, "decompress overflow rejected", true, ok);
         crate::test_complete!("test_framed_codec_custom_decompressor_enforces_size");
+    }
+
+    #[test]
+    #[cfg(feature = "compression")]
+    fn conformance_framed_codec_gzip_prost_parity_matrix() {
+        init_test("conformance_framed_codec_gzip_prost_parity_matrix");
+
+        const EXACT_RCH_COMMAND: &str = "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_asupersync_fzka3h_gzip cargo test -p asupersync --lib conformance_framed_codec_gzip_prost_parity_matrix --features compression -- --nocapture";
+
+        fn encode_wire_message(message: GrpcMessage) -> BytesMut {
+            let mut framing = GrpcCodec::new();
+            let mut wire = BytesMut::new();
+            framing
+                .encode(message, &mut wire)
+                .expect("wire framing must succeed");
+            wire
+        }
+
+        let log_case = |scenario_id: &str,
+                        compressed_len: Option<usize>,
+                        uncompressed_len: usize,
+                        declared_encoding: &str,
+                        decompression_guard_result: &str,
+                        prost_fingerprint: &str,
+                        error_kind: &str| {
+            let compression_ratio = compressed_len.map_or_else(
+                || "none".to_string(),
+                |len| {
+                    if uncompressed_len == 0 {
+                        "none".to_string()
+                    } else {
+                        format!("{:.3}", len as f64 / uncompressed_len as f64)
+                    }
+                },
+            );
+            eprintln!(
+                "GRPC_GZIP_PROST scenario_id={} compressed_len={} uncompressed_len={} compression_ratio={} declared_encoding={} decompression_guard_result={} prost_fingerprint={} error_kind={} exact_rch_command=\"{}\" artifact_paths=none final_gzip_parity_verdict=pass",
+                scenario_id,
+                compressed_len.map_or_else(|| "none".to_string(), |len| len.to_string()),
+                uncompressed_len,
+                compression_ratio,
+                declared_encoding,
+                decompression_guard_result,
+                prost_fingerprint,
+                error_kind,
+                EXACT_RCH_COMMAND,
+            );
+        };
+
+        let parity_message = GzipParityMessage {
+            name: "parity".to_string(),
+            payload: b"gzip vs identity parity fixture".to_vec(),
+            counter: 7,
+        };
+        let parity_raw = parity_message.encode_to_vec();
+        let parity_fingerprint = gzip_parity_message_fingerprint(&parity_message);
+
+        let mut identity_codec =
+            FramedCodec::new(ProstCodec::<GzipParityMessage, GzipParityMessage>::new());
+        let mut identity_wire = BytesMut::new();
+        identity_codec
+            .encode_message(&parity_message, &mut identity_wire)
+            .expect("identity prost encode");
+        let identity_decoded = identity_codec
+            .decode_message_with_encoding(&mut identity_wire, Some("identity"))
+            .expect("identity prost decode")
+            .expect("identity frame ready");
+        assert_eq!(
+            identity_decoded, parity_message,
+            "identity round-trip drift"
+        );
+        assert!(
+            identity_wire.is_empty(),
+            "identity prost frame must fully drain"
+        );
+
+        let mut gzip_codec =
+            FramedCodec::new(ProstCodec::<GzipParityMessage, GzipParityMessage>::new())
+                .with_gzip_frame_codec();
+        let mut gzip_wire = BytesMut::new();
+        gzip_codec
+            .encode_message(&parity_message, &mut gzip_wire)
+            .expect("gzip prost encode");
+        let compressed_len = gzip_wire.len().saturating_sub(MESSAGE_HEADER_SIZE);
+        let gzip_decoded = gzip_codec
+            .decode_message_with_encoding(&mut gzip_wire, Some("gzip"))
+            .expect("gzip prost decode")
+            .expect("gzip frame ready");
+        assert_eq!(gzip_decoded, parity_message, "gzip round-trip drift");
+        assert_eq!(
+            gzip_decoded, identity_decoded,
+            "gzip and identity decode results must converge"
+        );
+        assert!(gzip_wire.is_empty(), "gzip prost frame must fully drain");
+        log_case(
+            "gzip_roundtrip_vs_identity_parity",
+            Some(compressed_len),
+            parity_raw.len(),
+            "gzip",
+            "within-cap-accept",
+            &parity_fingerprint,
+            "ok",
+        );
+        log_case(
+            "identity_roundtrip_reference",
+            Some(parity_raw.len()),
+            parity_raw.len(),
+            "identity",
+            "within-cap-accept",
+            &parity_fingerprint,
+            "ok",
+        );
+
+        let empty_message = GzipParityMessage {
+            name: String::new(),
+            payload: Vec::new(),
+            counter: 0,
+        };
+        let empty_raw = empty_message.encode_to_vec();
+        let empty_fingerprint = gzip_parity_message_fingerprint(&empty_message);
+        let mut empty_codec =
+            FramedCodec::new(ProstCodec::<GzipParityMessage, GzipParityMessage>::new())
+                .with_gzip_frame_codec();
+        let mut empty_wire = BytesMut::new();
+        empty_codec
+            .encode_message(&empty_message, &mut empty_wire)
+            .expect("empty gzip prost encode");
+        let empty_compressed_len = empty_wire.len().saturating_sub(MESSAGE_HEADER_SIZE);
+        let empty_decoded = empty_codec
+            .decode_message_with_encoding(&mut empty_wire, Some("gzip"))
+            .expect("empty gzip prost decode")
+            .expect("empty gzip frame ready");
+        assert_eq!(empty_decoded, empty_message);
+        log_case(
+            "empty_payload",
+            Some(empty_compressed_len),
+            empty_raw.len(),
+            "gzip",
+            "within-cap-accept",
+            &empty_fingerprint,
+            "ok",
+        );
+
+        let large_message = GzipParityMessage {
+            name: "bounded".repeat(4),
+            payload: vec![0x41; 2048],
+            counter: 99,
+        };
+        let large_raw = large_message.encode_to_vec();
+        let large_cap = large_raw.len();
+        let large_fingerprint = gzip_parity_message_fingerprint(&large_message);
+        let mut large_codec = FramedCodec::with_message_size_limits(
+            ProstCodec::<GzipParityMessage, GzipParityMessage>::new(),
+            large_cap,
+            large_cap,
+        )
+        .with_gzip_frame_codec();
+        let mut large_wire = BytesMut::new();
+        large_codec
+            .encode_message(&large_message, &mut large_wire)
+            .expect("large bounded gzip prost encode");
+        let large_compressed_len = large_wire.len().saturating_sub(MESSAGE_HEADER_SIZE);
+        let large_decoded = large_codec
+            .decode_message_with_encoding(&mut large_wire, Some("gzip"))
+            .expect("large bounded gzip prost decode")
+            .expect("large bounded gzip frame ready");
+        assert_eq!(large_decoded, large_message);
+        log_case(
+            "large_bounded_payload",
+            Some(large_compressed_len),
+            large_raw.len(),
+            "gzip",
+            "exact-cap-accept",
+            &large_fingerprint,
+            "ok",
+        );
+
+        let malformed_payload = Bytes::from_static(b"not a valid gzip member");
+        let malformed_payload_len = malformed_payload.len();
+        let mut malformed_codec =
+            FramedCodec::new(ProstCodec::<GzipParityMessage, GzipParityMessage>::new())
+                .with_gzip_frame_codec();
+        let mut malformed_wire = encode_wire_message(GrpcMessage::compressed(malformed_payload));
+        let malformed_err = malformed_codec
+            .decode_message_with_encoding(&mut malformed_wire, Some("gzip"))
+            .expect_err("malformed gzip should reject");
+        assert!(
+            matches!(malformed_err, GrpcError::Compression(_)),
+            "malformed gzip member must classify as Compression"
+        );
+        log_case(
+            "malformed_gzip_member",
+            Some(malformed_payload_len),
+            0,
+            "gzip",
+            "inflate-failed",
+            "none",
+            "Compression",
+        );
+
+        let invalid_prost_plain = Bytes::from_static(b"\x0F");
+        let invalid_prost_gzip =
+            gzip_frame_compress(invalid_prost_plain.clone()).expect("compress invalid prost bytes");
+        let invalid_prost_len = invalid_prost_plain.len();
+        let mut invalid_prost_codec =
+            FramedCodec::new(ProstCodec::<GzipParityMessage, GzipParityMessage>::new())
+                .with_gzip_frame_codec();
+        let mut invalid_prost_wire =
+            encode_wire_message(GrpcMessage::compressed(invalid_prost_gzip.clone()));
+        let invalid_prost_err = invalid_prost_codec
+            .decode_message_with_encoding(&mut invalid_prost_wire, Some("gzip"))
+            .expect_err("valid gzip with invalid prost payload should reject");
+        assert!(
+            matches!(invalid_prost_err, GrpcError::InvalidMessage(_)),
+            "invalid prost bytes after successful decompression must surface as InvalidMessage"
+        );
+        log_case(
+            "valid_gzip_invalid_prost_payload",
+            Some(invalid_prost_gzip.len()),
+            invalid_prost_len,
+            "gzip",
+            "inflate-ok-prost-decode-failed",
+            "invalid-prost-bytes",
+            "InvalidMessage",
+        );
+
+        let mismatch_message = GzipParityMessage {
+            name: "mismatch".to_string(),
+            payload: b"compressed but declared identity".to_vec(),
+            counter: 5,
+        };
+        let mismatch_gzip = gzip_frame_compress(Bytes::from(mismatch_message.encode_to_vec()))
+            .expect("compress mismatch message");
+        let mismatch_compressed_len = mismatch_gzip.len();
+        let mismatch_fingerprint = gzip_parity_message_fingerprint(&mismatch_message);
+        let mut mismatch_codec =
+            FramedCodec::new(ProstCodec::<GzipParityMessage, GzipParityMessage>::new())
+                .with_gzip_frame_codec();
+        let mut mismatch_wire = encode_wire_message(GrpcMessage::compressed(mismatch_gzip.clone()));
+        let mismatch_err = mismatch_codec
+            .decode_message_with_encoding(&mut mismatch_wire, Some("identity"))
+            .expect_err("gzip frame declared as identity must reject");
+        assert!(
+            matches!(mismatch_err, GrpcError::Protocol(_)),
+            "compression flag/header mismatch must classify as Protocol"
+        );
+        log_case(
+            "compression_flag_header_mismatch",
+            Some(mismatch_compressed_len),
+            mismatch_message.encode_to_vec().len(),
+            "identity",
+            "flag-header-mismatch",
+            &mismatch_fingerprint,
+            "Protocol",
+        );
+
+        let oversized_plain = Bytes::from(vec![0u8; 1024]);
+        let oversized_compressed =
+            gzip_frame_compress(oversized_plain.clone()).expect("compress oversized payload");
+        let mut oversize_codec = FramedCodec::with_message_size_limits(
+            ProstCodec::<GzipParityMessage, GzipParityMessage>::new(),
+            128,
+            128,
+        )
+        .with_gzip_frame_codec();
+        let mut oversize_wire =
+            encode_wire_message(GrpcMessage::compressed(oversized_compressed.clone()));
+        let oversize_err = oversize_codec
+            .decode_message_with_encoding(&mut oversize_wire, Some("gzip"))
+            .expect_err("oversized decompressed payload must reject");
+        assert!(
+            matches!(oversize_err, GrpcError::MessageTooLarge),
+            "decompression size cap must classify as MessageTooLarge"
+        );
+        log_case(
+            "decompression_size_cap",
+            Some(oversized_compressed.len()),
+            oversized_plain.len(),
+            "gzip",
+            "reject-over-cap",
+            "oversized-decompressed-bytes",
+            "MessageTooLarge",
+        );
+
+        crate::test_complete!("conformance_framed_codec_gzip_prost_parity_matrix");
     }
 
     #[test]
