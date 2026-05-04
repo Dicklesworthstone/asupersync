@@ -31,6 +31,7 @@
 use crate::observability::ObservabilityConfig;
 use crate::observability::metrics::{MetricsProvider, NoOpMetrics};
 use crate::record::{ObligationRecord, RegionLimits, RegionRecord, TaskRecord};
+use crate::runtime::TaskTable;
 use crate::runtime::deadline_monitor::{DeadlineWarning, MonitorConfig};
 use crate::trace::distributed::LogicalClockMode;
 use crate::types::CancelAttributionConfig;
@@ -590,6 +591,204 @@ impl FromStr for TraceStorageProfile {
     }
 }
 
+fn cohort_local_touch_count(touches_by_cohort: &[u64]) -> u64 {
+    let mut best = 0;
+    for &touches in touches_by_cohort {
+        if touches > best {
+            best = touches;
+        }
+    }
+    best
+}
+
+fn baseline_local_touch_count(total_touches: u64, cohort_count: usize) -> u64 {
+    if cohort_count == 0 {
+        0
+    } else {
+        total_touches / cohort_count as u64
+    }
+}
+
+fn preferred_locality_cohort(touches_by_cohort: &[u64]) -> usize {
+    let mut best_index = 0usize;
+    let mut best_touches = 0u64;
+    for (index, &touches) in touches_by_cohort.iter().enumerate() {
+        if touches > best_touches {
+            best_index = index;
+            best_touches = touches;
+        }
+    }
+    best_index
+}
+
+fn build_candidate_locality_placements(
+    capacity_hints: RuntimeCapacityHints,
+    task_record_pool_capacity: usize,
+    access_model: &ArenaLocalityAccessModel,
+) -> Vec<ArenaLocalityPlacement> {
+    [
+        (
+            ArenaLocalityPlacementKind::TaskArena,
+            capacity_hints.task_capacity,
+        ),
+        (
+            ArenaLocalityPlacementKind::RegionArena,
+            capacity_hints.region_capacity,
+        ),
+        (
+            ArenaLocalityPlacementKind::ObligationArena,
+            capacity_hints.obligation_capacity,
+        ),
+        (
+            ArenaLocalityPlacementKind::TaskRecordPool,
+            task_record_pool_capacity,
+        ),
+    ]
+    .into_iter()
+    .map(|(kind, slot_budget)| {
+        let touches_by_cohort = access_model.touches_for_kind(kind);
+        let total_touches = touches_by_cohort.iter().copied().sum::<u64>();
+        let local_touch_count = cohort_local_touch_count(touches_by_cohort);
+        ArenaLocalityPlacement {
+            kind,
+            preferred_cohort: preferred_locality_cohort(touches_by_cohort),
+            slot_budget,
+            local_touch_count,
+            remote_touch_count: total_touches.saturating_sub(local_touch_count),
+        }
+    })
+    .collect()
+}
+
+fn build_arena_locality_report(
+    worker_threads: usize,
+    worker_cohort_map: Option<&WorkerCohortMapping>,
+    capacity_hints: RuntimeCapacityHints,
+    requested_policy: ArenaLocalityPolicy,
+    topology_confidence_percent: Option<u8>,
+    access_model: &ArenaLocalityAccessModel,
+) -> ArenaLocalityReport {
+    let requested_policy = {
+        let mut policy = requested_policy;
+        policy.normalize();
+        policy
+    };
+    let cohort_count = worker_cohort_map.map_or(0, WorkerCohortMapping::cohort_count);
+    let accounting_epoch = requested_policy.accounting_epoch();
+    let counter_epoch = if accounting_epoch == 0 {
+        1
+    } else {
+        accounting_epoch
+    };
+    let mut baseline = ArenaRemoteTouchCounters::new(counter_epoch);
+    let mut candidate = ArenaRemoteTouchCounters::new(counter_epoch);
+    let task_record_pool_capacity =
+        TaskTable::recommended_pool_limit_for_capacity(capacity_hints.task_capacity);
+    let hot_task_table_bytes =
+        Arena::<TaskRecord>::estimated_bytes_for_capacity(capacity_hints.task_capacity);
+    let hot_region_table_bytes =
+        Arena::<RegionRecord>::estimated_bytes_for_capacity(capacity_hints.region_capacity);
+    let hot_obligation_table_bytes =
+        Arena::<ObligationRecord>::estimated_bytes_for_capacity(capacity_hints.obligation_capacity);
+    let task_record_pool_bytes =
+        task_record_pool_capacity.saturating_mul(core::mem::size_of::<TaskRecord>());
+
+    let inputs_valid = worker_cohort_map
+        .is_some_and(|mapping| mapping.validate_for_workers(worker_threads).is_ok())
+        && access_model.validate_for_cohort_count(cohort_count).is_ok();
+
+    let placements = if inputs_valid {
+        build_candidate_locality_placements(capacity_hints, task_record_pool_capacity, access_model)
+    } else {
+        Vec::new()
+    };
+
+    for kind in [
+        ArenaLocalityPlacementKind::TaskArena,
+        ArenaLocalityPlacementKind::RegionArena,
+        ArenaLocalityPlacementKind::ObligationArena,
+        ArenaLocalityPlacementKind::TaskRecordPool,
+    ] {
+        let touches_by_cohort = access_model.touches_for_kind(kind);
+        let total_touches = touches_by_cohort.iter().copied().sum::<u64>();
+        let baseline_local = baseline_local_touch_count(total_touches, cohort_count);
+        baseline.record_sample(baseline_local, total_touches.saturating_sub(baseline_local));
+    }
+
+    for placement in &placements {
+        candidate.record_sample(placement.local_touch_count, placement.remote_touch_count);
+    }
+
+    let baseline_snapshot = baseline.snapshot();
+    let candidate_snapshot = candidate.snapshot();
+
+    let mut fallback_reason = None;
+    let mut effective_policy = requested_policy;
+    let no_win_trigger = matches!(requested_policy, ArenaLocalityPolicy::CohortPinned { .. })
+        && inputs_valid
+        && candidate_snapshot.remote_touch_count >= baseline_snapshot.remote_touch_count;
+
+    match requested_policy {
+        ArenaLocalityPolicy::Disabled => {
+            effective_policy = ArenaLocalityPolicy::Disabled;
+        }
+        ArenaLocalityPolicy::CohortPinned { .. } => {
+            if worker_cohort_map.is_none() {
+                fallback_reason = Some(ArenaLocalityFallbackReason::MissingWorkerCohortMap);
+                effective_policy = ArenaLocalityPolicy::Disabled;
+            } else if !inputs_valid {
+                fallback_reason = Some(ArenaLocalityFallbackReason::UnsupportedTopologyEvidence);
+                effective_policy = ArenaLocalityPolicy::Disabled;
+            } else if topology_confidence_percent.unwrap_or(0)
+                < requested_policy.min_topology_confidence_percent()
+            {
+                fallback_reason =
+                    Some(ArenaLocalityFallbackReason::TopologyConfidenceBelowThreshold);
+                effective_policy = ArenaLocalityPolicy::Disabled;
+            } else if no_win_trigger {
+                fallback_reason = Some(ArenaLocalityFallbackReason::NoRemoteTouchWin);
+                effective_policy = ArenaLocalityPolicy::Disabled;
+            } else if candidate_snapshot.remote_touch_ratio_bps()
+                > requested_policy.remote_touch_budget_bps()
+            {
+                fallback_reason = Some(ArenaLocalityFallbackReason::RemoteTouchBudgetExceeded);
+                effective_policy = ArenaLocalityPolicy::Disabled;
+            }
+        }
+    }
+
+    let selected = if matches!(effective_policy, ArenaLocalityPolicy::CohortPinned { .. }) {
+        candidate_snapshot
+    } else {
+        baseline_snapshot
+    };
+
+    ArenaLocalityReport {
+        requested_policy,
+        effective_policy,
+        fallback_reason,
+        worker_threads,
+        cohort_count,
+        topology_confidence_percent,
+        accounting_epoch,
+        remote_touch_budget_bps: requested_policy.remote_touch_budget_bps(),
+        task_capacity: capacity_hints.task_capacity,
+        region_capacity: capacity_hints.region_capacity,
+        obligation_capacity: capacity_hints.obligation_capacity,
+        task_record_pool_capacity,
+        hot_task_table_bytes,
+        hot_region_table_bytes,
+        hot_obligation_table_bytes,
+        task_record_pool_bytes,
+        placements,
+        baseline: baseline_snapshot,
+        candidate: candidate_snapshot,
+        selected,
+        no_win_trigger,
+        ownership_preserved: true,
+    }
+}
+
 fn build_arena_temperature_report(
     capacity_hints: RuntimeCapacityHints,
     trace_storage_budget: TraceStorageBudget,
@@ -806,6 +1005,446 @@ impl WorkerCohortMapping {
     }
 }
 
+/// Policy surface for deterministic arena-locality planning.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ArenaLocalityPolicy {
+    /// Keep all runtime metadata on the conservative non-locality path.
+    Disabled,
+    /// Prefer cohort-local placement for hot metadata when topology evidence is good enough.
+    CohortPinned {
+        /// Minimum topology confidence required before locality may activate.
+        min_topology_confidence_percent: u8,
+        /// Maximum selected remote-touch ratio tolerated before falling back.
+        remote_touch_budget_bps: u16,
+        /// Accounting epoch identifier used to reset operator-visible counters.
+        accounting_epoch: u64,
+    },
+}
+
+impl ArenaLocalityPolicy {
+    /// Returns the stable operator-facing policy name.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Disabled => "disabled",
+            Self::CohortPinned { .. } => "cohort_pinned",
+        }
+    }
+
+    /// Normalize policy parameters to safe non-zero bounds.
+    pub fn normalize(&mut self) {
+        if let Self::CohortPinned {
+            min_topology_confidence_percent,
+            remote_touch_budget_bps,
+            accounting_epoch,
+        } = self
+        {
+            if *min_topology_confidence_percent == 0 {
+                *min_topology_confidence_percent = 1;
+            }
+            if *remote_touch_budget_bps > 10_000 {
+                *remote_touch_budget_bps = 10_000;
+            }
+            if *accounting_epoch == 0 {
+                *accounting_epoch = 1;
+            }
+        }
+    }
+
+    #[must_use]
+    const fn min_topology_confidence_percent(self) -> u8 {
+        match self {
+            Self::Disabled => 0,
+            Self::CohortPinned {
+                min_topology_confidence_percent,
+                ..
+            } => {
+                if min_topology_confidence_percent == 0 {
+                    1
+                } else {
+                    min_topology_confidence_percent
+                }
+            }
+        }
+    }
+
+    #[must_use]
+    const fn remote_touch_budget_bps(self) -> u16 {
+        match self {
+            Self::Disabled => 10_000,
+            Self::CohortPinned {
+                remote_touch_budget_bps,
+                ..
+            } => {
+                if remote_touch_budget_bps > 10_000 {
+                    10_000
+                } else {
+                    remote_touch_budget_bps
+                }
+            }
+        }
+    }
+
+    #[must_use]
+    const fn accounting_epoch(self) -> u64 {
+        match self {
+            Self::Disabled => 0,
+            Self::CohortPinned {
+                accounting_epoch, ..
+            } => {
+                if accounting_epoch == 0 {
+                    1
+                } else {
+                    accounting_epoch
+                }
+            }
+        }
+    }
+}
+
+impl Default for ArenaLocalityPolicy {
+    fn default() -> Self {
+        Self::Disabled
+    }
+}
+
+impl fmt::Display for ArenaLocalityPolicy {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// Conservative fallback reasons for arena-locality planning.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ArenaLocalityFallbackReason {
+    /// The runtime does not have a validated worker/cohort mapping.
+    MissingWorkerCohortMap,
+    /// The supplied topology evidence cannot be trusted or is malformed.
+    UnsupportedTopologyEvidence,
+    /// The topology probe confidence is below the required policy threshold.
+    TopologyConfidenceBelowThreshold,
+    /// The candidate locality placement failed to beat the conservative baseline.
+    NoRemoteTouchWin,
+    /// The candidate locality placement exceeded the allowed remote-touch budget.
+    RemoteTouchBudgetExceeded,
+}
+
+impl ArenaLocalityFallbackReason {
+    /// Returns the stable operator-facing fallback identifier.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::MissingWorkerCohortMap => "missing_worker_cohort_map",
+            Self::UnsupportedTopologyEvidence => "unsupported_topology_evidence",
+            Self::TopologyConfidenceBelowThreshold => "topology_confidence_below_threshold",
+            Self::NoRemoteTouchWin => "no_remote_touch_win",
+            Self::RemoteTouchBudgetExceeded => "remote_touch_budget_exceeded",
+        }
+    }
+}
+
+/// Logical hot-metadata surfaces that can receive a preferred locality cohort.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ArenaLocalityPlacementKind {
+    /// Task arena backing storage.
+    TaskArena,
+    /// Region arena backing storage.
+    RegionArena,
+    /// Obligation arena backing storage.
+    ObligationArena,
+    /// Recycled `TaskRecord` pool backing storage.
+    TaskRecordPool,
+}
+
+impl ArenaLocalityPlacementKind {
+    /// Returns the stable operator-facing placement kind name.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::TaskArena => "task_arena",
+            Self::RegionArena => "region_arena",
+            Self::ObligationArena => "obligation_arena",
+            Self::TaskRecordPool => "task_record_pool",
+        }
+    }
+}
+
+/// Deterministic placement decision for one hot-metadata surface.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ArenaLocalityPlacement {
+    /// Metadata surface the placement applies to.
+    pub kind: ArenaLocalityPlacementKind,
+    /// Preferred cohort for the surface.
+    pub preferred_cohort: usize,
+    /// Slot budget attached to the surface.
+    pub slot_budget: usize,
+    /// Cohort-local touches preserved by the preferred placement.
+    pub local_touch_count: u64,
+    /// Cross-cohort touches that remain after the preferred placement.
+    pub remote_touch_count: u64,
+}
+
+/// Deterministic access evidence for arena-locality planning.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ArenaLocalityAccessModel {
+    /// Task arena touches attributed to each cohort.
+    pub task_arena_touches_by_cohort: Vec<u64>,
+    /// Region arena touches attributed to each cohort.
+    pub region_arena_touches_by_cohort: Vec<u64>,
+    /// Obligation arena touches attributed to each cohort.
+    pub obligation_arena_touches_by_cohort: Vec<u64>,
+    /// Task-record recycler touches attributed to each cohort.
+    pub task_record_pool_touches_by_cohort: Vec<u64>,
+}
+
+impl ArenaLocalityAccessModel {
+    /// Returns the touch counts for the selected metadata surface.
+    #[must_use]
+    fn touches_for_kind(&self, kind: ArenaLocalityPlacementKind) -> &[u64] {
+        match kind {
+            ArenaLocalityPlacementKind::TaskArena => &self.task_arena_touches_by_cohort,
+            ArenaLocalityPlacementKind::RegionArena => &self.region_arena_touches_by_cohort,
+            ArenaLocalityPlacementKind::ObligationArena => &self.obligation_arena_touches_by_cohort,
+            ArenaLocalityPlacementKind::TaskRecordPool => &self.task_record_pool_touches_by_cohort,
+        }
+    }
+
+    /// Verifies that the access evidence exactly covers the requested cohorts.
+    pub fn validate_for_cohort_count(&self, cohort_count: usize) -> Result<(), &'static str> {
+        if cohort_count == 0 {
+            return Err("cohort count must be non-zero");
+        }
+        for touches in [
+            &self.task_arena_touches_by_cohort,
+            &self.region_arena_touches_by_cohort,
+            &self.obligation_arena_touches_by_cohort,
+            &self.task_record_pool_touches_by_cohort,
+        ] {
+            if touches.len() != cohort_count {
+                return Err("arena locality access vectors must match cohort count");
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Snapshot of accumulated local vs remote touch accounting.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ArenaRemoteTouchCounterSnapshot {
+    /// Epoch the snapshot belongs to.
+    pub accounting_epoch: u64,
+    /// Number of times the counters were reset for a new epoch/window.
+    pub reset_count: u64,
+    /// Touches that stayed on the selected local cohort.
+    pub local_touch_count: u64,
+    /// Touches that still crossed cohorts.
+    pub remote_touch_count: u64,
+}
+
+impl ArenaRemoteTouchCounterSnapshot {
+    /// Total touches observed by the counter.
+    #[must_use]
+    pub const fn total_touch_count(self) -> u64 {
+        self.local_touch_count
+            .saturating_add(self.remote_touch_count)
+    }
+
+    /// Remote-touch ratio in basis points.
+    #[must_use]
+    pub const fn remote_touch_ratio_bps(self) -> u16 {
+        let total = self.total_touch_count();
+        if total == 0 {
+            0
+        } else {
+            let ratio = self.remote_touch_count.saturating_mul(10_000) / total;
+            if ratio > u16::MAX as u64 {
+                u16::MAX
+            } else {
+                ratio as u16
+            }
+        }
+    }
+}
+
+/// Mutable accumulator for local vs remote touch accounting.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ArenaRemoteTouchCounters {
+    accounting_epoch: u64,
+    reset_count: u64,
+    local_touch_count: u64,
+    remote_touch_count: u64,
+}
+
+impl ArenaRemoteTouchCounters {
+    /// Creates a new counter set for the selected accounting epoch.
+    #[must_use]
+    pub const fn new(accounting_epoch: u64) -> Self {
+        Self {
+            accounting_epoch: if accounting_epoch == 0 {
+                1
+            } else {
+                accounting_epoch
+            },
+            reset_count: 0,
+            local_touch_count: 0,
+            remote_touch_count: 0,
+        }
+    }
+
+    /// Records one local/remote sample with saturating arithmetic.
+    pub fn record_sample(&mut self, local_touch_count: u64, remote_touch_count: u64) {
+        self.local_touch_count = self.local_touch_count.saturating_add(local_touch_count);
+        self.remote_touch_count = self.remote_touch_count.saturating_add(remote_touch_count);
+    }
+
+    /// Resets the counters for the next accounting epoch/window.
+    pub fn reset_for_next_epoch(&mut self, next_epoch: u64) {
+        let next_epoch = if next_epoch == 0 { 1 } else { next_epoch };
+        if next_epoch != self.accounting_epoch {
+            self.accounting_epoch = next_epoch;
+            self.reset_count = self.reset_count.saturating_add(1);
+            self.local_touch_count = 0;
+            self.remote_touch_count = 0;
+        }
+    }
+
+    /// Captures the current immutable counter snapshot.
+    #[must_use]
+    pub const fn snapshot(self) -> ArenaRemoteTouchCounterSnapshot {
+        ArenaRemoteTouchCounterSnapshot {
+            accounting_epoch: self.accounting_epoch,
+            reset_count: self.reset_count,
+            local_touch_count: self.local_touch_count,
+            remote_touch_count: self.remote_touch_count,
+        }
+    }
+}
+
+/// Operator-facing accounting report for deterministic arena-locality planning.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ArenaLocalityReport {
+    /// Requested locality policy.
+    pub requested_policy: ArenaLocalityPolicy,
+    /// Effective locality policy after conservative fallback handling.
+    pub effective_policy: ArenaLocalityPolicy,
+    /// Optional conservative fallback reason when locality was not selected.
+    pub fallback_reason: Option<ArenaLocalityFallbackReason>,
+    /// Number of configured worker threads.
+    pub worker_threads: usize,
+    /// Number of cohorts implied by the worker map.
+    pub cohort_count: usize,
+    /// Optional topology confidence used during planning.
+    pub topology_confidence_percent: Option<u8>,
+    /// Accounting epoch attached to the planning decision.
+    pub accounting_epoch: u64,
+    /// Maximum allowed selected remote-touch ratio in basis points.
+    pub remote_touch_budget_bps: u16,
+    /// Task arena capacity used for the plan.
+    pub task_capacity: usize,
+    /// Region arena capacity used for the plan.
+    pub region_capacity: usize,
+    /// Obligation arena capacity used for the plan.
+    pub obligation_capacity: usize,
+    /// Derived `TaskRecord` recycler capacity.
+    pub task_record_pool_capacity: usize,
+    /// Estimated bytes reserved for the task arena.
+    pub hot_task_table_bytes: usize,
+    /// Estimated bytes reserved for the region arena.
+    pub hot_region_table_bytes: usize,
+    /// Estimated bytes reserved for the obligation arena.
+    pub hot_obligation_table_bytes: usize,
+    /// Estimated bytes reserved for the task-record recycler.
+    pub task_record_pool_bytes: usize,
+    /// Candidate preferred placements for each hot-metadata surface.
+    pub placements: Vec<ArenaLocalityPlacement>,
+    /// Conservative baseline accounting snapshot.
+    pub baseline: ArenaRemoteTouchCounterSnapshot,
+    /// Candidate locality-aware accounting snapshot.
+    pub candidate: ArenaRemoteTouchCounterSnapshot,
+    /// Selected accounting snapshot after fallback handling.
+    pub selected: ArenaRemoteTouchCounterSnapshot,
+    /// Whether the candidate failed to beat the conservative baseline.
+    pub no_win_trigger: bool,
+    /// Arena-locality planning must never change logical ownership invariants.
+    pub ownership_preserved: bool,
+}
+
+impl ArenaLocalityReport {
+    /// Estimated bytes intentionally kept on the hot path.
+    #[must_use]
+    pub const fn estimated_hot_bytes(&self) -> usize {
+        self.hot_task_table_bytes
+            .saturating_add(self.hot_region_table_bytes)
+            .saturating_add(self.hot_obligation_table_bytes)
+            .saturating_add(self.task_record_pool_bytes)
+    }
+
+    /// Whether the conservative fallback profile remained selected.
+    #[must_use]
+    pub const fn used_safe_fallback(&self) -> bool {
+        !matches!(
+            self.effective_policy,
+            ArenaLocalityPolicy::CohortPinned { .. }
+        )
+    }
+
+    /// Render the stable operator-facing report fields.
+    #[must_use]
+    pub fn render_report_fields(&self) -> Vec<(&'static str, String)> {
+        vec![
+            ("requested_policy", self.requested_policy.to_string()),
+            ("effective_policy", self.effective_policy.to_string()),
+            (
+                "fallback_reason",
+                self.fallback_reason
+                    .map_or_else(|| "none".to_string(), |reason| reason.as_str().to_string()),
+            ),
+            ("worker_threads", self.worker_threads.to_string()),
+            ("cohort_count", self.cohort_count.to_string()),
+            (
+                "topology_confidence_percent",
+                self.topology_confidence_percent
+                    .map_or_else(|| "none".to_string(), |value| value.to_string()),
+            ),
+            ("accounting_epoch", self.accounting_epoch.to_string()),
+            (
+                "remote_touch_budget_bps",
+                self.remote_touch_budget_bps.to_string(),
+            ),
+            ("task_capacity", self.task_capacity.to_string()),
+            ("region_capacity", self.region_capacity.to_string()),
+            ("obligation_capacity", self.obligation_capacity.to_string()),
+            (
+                "task_record_pool_capacity",
+                self.task_record_pool_capacity.to_string(),
+            ),
+            (
+                "baseline_remote_touch_count",
+                self.baseline.remote_touch_count.to_string(),
+            ),
+            (
+                "candidate_remote_touch_count",
+                self.candidate.remote_touch_count.to_string(),
+            ),
+            (
+                "selected_remote_touch_count",
+                self.selected.remote_touch_count.to_string(),
+            ),
+            (
+                "selected_remote_touch_ratio_bps",
+                self.selected.remote_touch_ratio_bps().to_string(),
+            ),
+            ("placement_count", self.placements.len().to_string()),
+            ("no_win_trigger", format_bool(self.no_win_trigger)),
+            ("ownership_preserved", format_bool(self.ownership_preserved)),
+            (
+                "estimated_hot_bytes",
+                self.estimated_hot_bytes().to_string(),
+            ),
+        ]
+    }
+}
+
 /// Runtime configuration.
 #[derive(Clone)]
 pub struct RuntimeConfig {
@@ -974,6 +1613,28 @@ impl RuntimeConfig {
             self.trace_storage_budget(),
             self.arena_temperature_policy,
             large_page_cold_slabs_supported,
+        )
+    }
+
+    /// Returns the operator-facing deterministic arena-locality report.
+    ///
+    /// This planner is policy-only: it computes the preferred hot-metadata
+    /// placement and conservative fallback decision without changing logical
+    /// task/region/obligation ownership semantics.
+    #[must_use]
+    pub fn arena_locality_report(
+        &self,
+        requested_policy: ArenaLocalityPolicy,
+        topology_confidence_percent: Option<u8>,
+        access_model: &ArenaLocalityAccessModel,
+    ) -> ArenaLocalityReport {
+        build_arena_locality_report(
+            self.worker_threads,
+            self.worker_cohort_map.as_ref(),
+            self.resolved_capacity_hints(),
+            requested_policy,
+            topology_confidence_percent,
+            access_model,
         )
     }
 
@@ -5423,6 +6084,207 @@ mod tests {
             unified.hot_obligation_table_bytes,
             tiered.hot_obligation_table_bytes
         );
+    }
+
+    #[test]
+    fn arena_locality_policy_normalize_clamps_bounds() {
+        init_test("arena_locality_policy_normalize_clamps_bounds");
+
+        let mut policy = ArenaLocalityPolicy::CohortPinned {
+            min_topology_confidence_percent: 0,
+            remote_touch_budget_bps: 20_000,
+            accounting_epoch: 0,
+        };
+        policy.normalize();
+
+        assert_eq!(
+            policy,
+            ArenaLocalityPolicy::CohortPinned {
+                min_topology_confidence_percent: 1,
+                remote_touch_budget_bps: 10_000,
+                accounting_epoch: 1,
+            }
+        );
+    }
+
+    #[test]
+    fn arena_remote_touch_counters_reset_and_saturate() {
+        init_test("arena_remote_touch_counters_reset_and_saturate");
+
+        let mut counters = ArenaRemoteTouchCounters::new(7);
+        counters.record_sample(u64::MAX, 5);
+        counters.record_sample(3, u64::MAX);
+
+        let saturated = counters.snapshot();
+        assert_eq!(saturated.accounting_epoch, 7);
+        assert_eq!(saturated.reset_count, 0);
+        assert_eq!(saturated.local_touch_count, u64::MAX);
+        assert_eq!(saturated.remote_touch_count, u64::MAX);
+
+        counters.reset_for_next_epoch(8);
+        let reset = counters.snapshot();
+        assert_eq!(reset.accounting_epoch, 8);
+        assert_eq!(reset.reset_count, 1);
+        assert_eq!(reset.local_touch_count, 0);
+        assert_eq!(reset.remote_touch_count, 0);
+    }
+
+    #[test]
+    fn arena_locality_report_prefers_skewed_cohorts_and_tracks_pool_budget() {
+        init_test("arena_locality_report_prefers_skewed_cohorts_and_tracks_pool_budget");
+
+        let config = RuntimeConfig {
+            worker_threads: 64,
+            worker_cohort_map: Some(large_host_worker_cohort_map()),
+            capacity_hints: Some(RuntimeCapacityHints::from_expected_concurrent_tasks(4096)),
+            ..RuntimeConfig::default()
+        };
+        let access_model = ArenaLocalityAccessModel {
+            task_arena_touches_by_cohort: vec![3200, 640, 640, 640, 640, 640, 640, 640],
+            region_arena_touches_by_cohort: vec![1024, 128, 128, 128, 128, 128, 128, 128],
+            obligation_arena_touches_by_cohort: vec![768, 768, 128, 128, 128, 128, 128, 128],
+            task_record_pool_touches_by_cohort: vec![3200, 640, 640, 640, 640, 640, 640, 640],
+        };
+
+        let report = config.arena_locality_report(
+            ArenaLocalityPolicy::CohortPinned {
+                min_topology_confidence_percent: 80,
+                remote_touch_budget_bps: 6500,
+                accounting_epoch: 11,
+            },
+            Some(91),
+            &access_model,
+        );
+
+        assert_eq!(
+            report.effective_policy,
+            ArenaLocalityPolicy::CohortPinned {
+                min_topology_confidence_percent: 80,
+                remote_touch_budget_bps: 6500,
+                accounting_epoch: 11,
+            }
+        );
+        assert_eq!(report.fallback_reason, None);
+        assert_eq!(report.cohort_count, 8);
+        assert_eq!(
+            report.task_record_pool_capacity,
+            TaskTable::recommended_pool_limit_for_capacity(report.task_capacity)
+        );
+        assert_eq!(report.placements.len(), 4);
+        assert_eq!(
+            report.placements[0].preferred_cohort, 0,
+            "task arena should pin to the busiest cohort"
+        );
+        assert!(
+            report.candidate.remote_touch_count < report.baseline.remote_touch_count,
+            "skewed locality evidence should beat the conservative baseline"
+        );
+        assert!(
+            report.selected.remote_touch_ratio_bps() <= 6500,
+            "selected placement must respect the remote-touch budget"
+        );
+        assert!(report.ownership_preserved);
+    }
+
+    #[test]
+    fn arena_locality_report_falls_back_when_confidence_is_too_low() {
+        init_test("arena_locality_report_falls_back_when_confidence_is_too_low");
+
+        let config = RuntimeConfig {
+            worker_threads: 64,
+            worker_cohort_map: Some(large_host_worker_cohort_map()),
+            capacity_hints: Some(RuntimeCapacityHints::from_expected_concurrent_tasks(4096)),
+            ..RuntimeConfig::default()
+        };
+        let access_model = ArenaLocalityAccessModel {
+            task_arena_touches_by_cohort: vec![3200, 640, 640, 640, 640, 640, 640, 640],
+            region_arena_touches_by_cohort: vec![1024, 128, 128, 128, 128, 128, 128, 128],
+            obligation_arena_touches_by_cohort: vec![768, 768, 128, 128, 128, 128, 128, 128],
+            task_record_pool_touches_by_cohort: vec![3200, 640, 640, 640, 640, 640, 640, 640],
+        };
+
+        let report = config.arena_locality_report(
+            ArenaLocalityPolicy::CohortPinned {
+                min_topology_confidence_percent: 90,
+                remote_touch_budget_bps: 6500,
+                accounting_epoch: 12,
+            },
+            Some(40),
+            &access_model,
+        );
+
+        assert_eq!(report.effective_policy, ArenaLocalityPolicy::Disabled);
+        assert_eq!(
+            report.fallback_reason,
+            Some(ArenaLocalityFallbackReason::TopologyConfidenceBelowThreshold)
+        );
+        assert_eq!(
+            report.selected.remote_touch_count,
+            report.baseline.remote_touch_count
+        );
+        assert!(report.used_safe_fallback());
+    }
+
+    #[test]
+    fn arena_locality_report_no_win_trigger_keeps_baseline() {
+        init_test("arena_locality_report_no_win_trigger_keeps_baseline");
+
+        let config = RuntimeConfig {
+            worker_threads: 64,
+            worker_cohort_map: Some(large_host_worker_cohort_map()),
+            capacity_hints: Some(RuntimeCapacityHints::from_expected_concurrent_tasks(4096)),
+            ..RuntimeConfig::default()
+        };
+        let access_model = ArenaLocalityAccessModel {
+            task_arena_touches_by_cohort: vec![1024; 8],
+            region_arena_touches_by_cohort: vec![256; 8],
+            obligation_arena_touches_by_cohort: vec![512; 8],
+            task_record_pool_touches_by_cohort: vec![1024; 8],
+        };
+
+        let report = config.arena_locality_report(
+            ArenaLocalityPolicy::CohortPinned {
+                min_topology_confidence_percent: 80,
+                remote_touch_budget_bps: 9000,
+                accounting_epoch: 13,
+            },
+            Some(95),
+            &access_model,
+        );
+
+        assert_eq!(report.effective_policy, ArenaLocalityPolicy::Disabled);
+        assert_eq!(
+            report.fallback_reason,
+            Some(ArenaLocalityFallbackReason::NoRemoteTouchWin)
+        );
+        assert!(report.no_win_trigger);
+        assert_eq!(report.selected, report.baseline);
+    }
+
+    #[test]
+    fn arena_locality_report_disabled_mode_preserves_baseline_projection() {
+        init_test("arena_locality_report_disabled_mode_preserves_baseline_projection");
+
+        let config = RuntimeConfig {
+            worker_threads: 64,
+            worker_cohort_map: Some(large_host_worker_cohort_map()),
+            capacity_hints: Some(RuntimeCapacityHints::from_expected_concurrent_tasks(4096)),
+            ..RuntimeConfig::default()
+        };
+        let access_model = ArenaLocalityAccessModel {
+            task_arena_touches_by_cohort: vec![3200, 640, 640, 640, 640, 640, 640, 640],
+            region_arena_touches_by_cohort: vec![1024, 128, 128, 128, 128, 128, 128, 128],
+            obligation_arena_touches_by_cohort: vec![768, 768, 128, 128, 128, 128, 128, 128],
+            task_record_pool_touches_by_cohort: vec![3200, 640, 640, 640, 640, 640, 640, 640],
+        };
+
+        let report =
+            config.arena_locality_report(ArenaLocalityPolicy::Disabled, Some(99), &access_model);
+
+        assert_eq!(report.effective_policy, ArenaLocalityPolicy::Disabled);
+        assert_eq!(report.fallback_reason, None);
+        assert_eq!(report.selected, report.baseline);
+        assert!(!report.no_win_trigger);
     }
 
     #[test]

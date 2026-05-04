@@ -68,6 +68,20 @@ pub struct TaskTable {
 }
 
 impl TaskTable {
+    /// Derives the recycler capacity bound from an arena task capacity hint.
+    #[must_use]
+    #[inline]
+    pub const fn recommended_pool_limit_for_capacity(capacity: usize) -> usize {
+        let quarter = capacity / 4;
+        if quarter < 64 {
+            64
+        } else if quarter > 512 {
+            512
+        } else {
+            quarter
+        }
+    }
+
     /// Creates a new empty task table.
     #[must_use]
     #[inline]
@@ -91,8 +105,8 @@ impl TaskTable {
     #[must_use]
     #[inline]
     pub fn with_capacity(capacity: usize) -> Self {
-        // Use 25% of capacity for pool size to balance memory vs recycling benefits
-        let pool_size = (capacity / 4).clamp(64, 512);
+        // Use 25% of capacity for pool size to balance memory vs recycling benefits.
+        let pool_size = Self::recommended_pool_limit_for_capacity(capacity);
         Self::with_capacity_and_pool_limit(capacity, pool_size)
     }
 

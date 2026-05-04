@@ -1,0 +1,264 @@
+{
+  "contract_version": "numa-arena-locality-smoke-contract-v1",
+  "runner_bundle_schema_version": "numa-arena-locality-smoke-bundle-v1",
+  "runner_report_schema_version": "numa-arena-locality-smoke-run-report-v1",
+  "runner_script": "scripts/run_numa_arena_locality_smoke.sh",
+  "report_artifacts": [
+    {
+      "schema_version": "asupersync.numa-arena-locality-report.v1",
+      "path_glob": ".numa-arena-locality-smoke-artifacts/run_*/AA-NUMA-ARENA-LOCALITY-*/numa_arena_locality_report.json"
+    }
+  ],
+  "smoke_scenarios": [
+    {
+      "scenario_id": "AA-NUMA-ARENA-LOCALITY-WIN-64C-256G",
+      "description": "Skewed cohort access on a 64-core / 256 GiB host where cohort-pinned metadata cuts remote touches versus the conservative interleaved baseline.",
+      "output_root": "target/numa-arena-locality-smoke",
+      "execution_policy": "execute_or_dry_run",
+      "topology_mode": "deterministic_fixture",
+      "safe_fallback_profile": "disabled",
+      "operator_verdict": "ready_for_rch",
+      "host_requirements": {
+        "min_worker_threads": 64,
+        "min_memory_gib": 256
+      },
+      "requested_policy": {
+        "mode": "cohort_pinned",
+        "min_topology_confidence_percent": 80,
+        "remote_touch_budget_bps": 6500,
+        "accounting_epoch": 11
+      },
+      "workload_model": {
+        "workload_seed": 640256,
+        "topology_confidence_percent": 91,
+        "capacity_hints": {
+          "task_capacity": 6144,
+          "region_capacity": 1024,
+          "obligation_capacity": 2048
+        },
+        "worker_to_cohort_map": [0,0,0,0,0,0,0,0,1,1,1,1,1,1,1,1,2,2,2,2,2,2,2,2,3,3,3,3,3,3,3,3,4,4,4,4,4,4,4,4,5,5,5,5,5,5,5,5,6,6,6,6,6,6,6,6,7,7,7,7,7,7,7,7],
+        "task_arena_touches_by_cohort": [3200,640,640,640,640,640,640,640],
+        "region_arena_touches_by_cohort": [1024,128,128,128,128,128,128,128],
+        "obligation_arena_touches_by_cohort": [768,768,128,128,128,128,128,128],
+        "task_record_pool_touches_by_cohort": [3200,640,640,640,640,640,640,640]
+      },
+      "expected_report_projection": {
+        "allocator_contention_events": 50,
+        "baseline_remote_touch_count": 17136,
+        "candidate_remote_touch_count": 11392,
+        "fallback_reason_codes": [],
+        "hot_path_latency_p50_ns": 106896,
+        "hot_path_latency_p95_ns": 125608,
+        "hot_path_latency_p99_ns": 150728,
+        "no_win_trigger": false,
+        "obligation_capacity": 2048,
+        "operator_verdict": "ready_for_rch",
+        "ownership_preserved": true,
+        "placement_fingerprint": 16186555795550753782,
+        "projection_hash": 13025071027085036720,
+        "region_capacity": 1024,
+        "remote_touch_reduction_ratio": 0.3352,
+        "rss_estimated_bytes": 4317184,
+        "safe_fallback_profile": "disabled",
+        "scenario_id": "AA-NUMA-ARENA-LOCALITY-WIN-64C-256G",
+        "selected_policy": "cohort_pinned",
+        "selected_remote_touch_count": 11392,
+        "selected_remote_touch_ratio_bps": 5816,
+        "task_capacity": 6144,
+        "task_record_pool_capacity": 512,
+        "topology_fixture_hash": 11240820598888380677,
+        "used_safe_fallback": false,
+        "worker_cohort_fingerprint": 9365066469077738429
+      }
+    },
+    {
+      "scenario_id": "AA-NUMA-ARENA-LOCALITY-LOW-CONFIDENCE-FALLBACK",
+      "description": "High-skew access evidence exists, but topology confidence is too low to activate locality so the conservative baseline remains pinned.",
+      "output_root": "target/numa-arena-locality-smoke",
+      "execution_policy": "execute_or_dry_run",
+      "topology_mode": "deterministic_fixture",
+      "safe_fallback_profile": "disabled",
+      "operator_verdict": "fallback_only",
+      "host_requirements": {
+        "min_worker_threads": 64,
+        "min_memory_gib": 256
+      },
+      "requested_policy": {
+        "mode": "cohort_pinned",
+        "min_topology_confidence_percent": 90,
+        "remote_touch_budget_bps": 6500,
+        "accounting_epoch": 12
+      },
+      "workload_model": {
+        "workload_seed": 9001,
+        "topology_confidence_percent": 40,
+        "capacity_hints": {
+          "task_capacity": 6144,
+          "region_capacity": 1024,
+          "obligation_capacity": 2048
+        },
+        "worker_to_cohort_map": [0,0,0,0,0,0,0,0,1,1,1,1,1,1,1,1,2,2,2,2,2,2,2,2,3,3,3,3,3,3,3,3,4,4,4,4,4,4,4,4,5,5,5,5,5,5,5,5,6,6,6,6,6,6,6,6,7,7,7,7,7,7,7,7],
+        "task_arena_touches_by_cohort": [3200,640,640,640,640,640,640,640],
+        "region_arena_touches_by_cohort": [1024,128,128,128,128,128,128,128],
+        "obligation_arena_touches_by_cohort": [768,768,128,128,128,128,128,128],
+        "task_record_pool_touches_by_cohort": [3200,640,640,640,640,640,640,640]
+      },
+      "expected_report_projection": {
+        "allocator_contention_events": 61,
+        "baseline_remote_touch_count": 17136,
+        "candidate_remote_touch_count": 11392,
+        "fallback_reason_codes": [
+          "topology_confidence_below_threshold"
+        ],
+        "hot_path_latency_p50_ns": 124500,
+        "hot_path_latency_p95_ns": 143571,
+        "hot_path_latency_p99_ns": 168691,
+        "no_win_trigger": false,
+        "obligation_capacity": 2048,
+        "operator_verdict": "fallback_only",
+        "ownership_preserved": true,
+        "placement_fingerprint": 16186555795550753782,
+        "projection_hash": 11734093094240740496,
+        "region_capacity": 1024,
+        "remote_touch_reduction_ratio": 0.0,
+        "rss_estimated_bytes": 4317184,
+        "safe_fallback_profile": "disabled",
+        "scenario_id": "AA-NUMA-ARENA-LOCALITY-LOW-CONFIDENCE-FALLBACK",
+        "selected_policy": "disabled",
+        "selected_remote_touch_count": 17136,
+        "selected_remote_touch_ratio_bps": 8750,
+        "task_capacity": 6144,
+        "task_record_pool_capacity": 512,
+        "topology_fixture_hash": 11810218157327062978,
+        "used_safe_fallback": true,
+        "worker_cohort_fingerprint": 9365066469077738429
+      }
+    },
+    {
+      "scenario_id": "AA-NUMA-ARENA-LOCALITY-NO-WIN-FALLBACK",
+      "description": "Balanced cohort touches produce no remote-touch win, so the conservative disabled profile remains selected even with high topology confidence.",
+      "output_root": "target/numa-arena-locality-smoke",
+      "execution_policy": "execute_or_dry_run",
+      "topology_mode": "deterministic_fixture",
+      "safe_fallback_profile": "disabled",
+      "operator_verdict": "fallback_only",
+      "host_requirements": {
+        "min_worker_threads": 64,
+        "min_memory_gib": 256
+      },
+      "requested_policy": {
+        "mode": "cohort_pinned",
+        "min_topology_confidence_percent": 80,
+        "remote_touch_budget_bps": 9000,
+        "accounting_epoch": 13
+      },
+      "workload_model": {
+        "workload_seed": 1313,
+        "topology_confidence_percent": 95,
+        "capacity_hints": {
+          "task_capacity": 6144,
+          "region_capacity": 1024,
+          "obligation_capacity": 2048
+        },
+        "worker_to_cohort_map": [0,0,0,0,0,0,0,0,1,1,1,1,1,1,1,1,2,2,2,2,2,2,2,2,3,3,3,3,3,3,3,3,4,4,4,4,4,4,4,4,5,5,5,5,5,5,5,5,6,6,6,6,6,6,6,6,7,7,7,7,7,7,7,7],
+        "task_arena_touches_by_cohort": [1024,1024,1024,1024,1024,1024,1024,1024],
+        "region_arena_touches_by_cohort": [256,256,256,256,256,256,256,256],
+        "obligation_arena_touches_by_cohort": [512,512,512,512,512,512,512,512],
+        "task_record_pool_touches_by_cohort": [1024,1024,1024,1024,1024,1024,1024,1024]
+      },
+      "expected_report_projection": {
+        "allocator_contention_events": 66,
+        "baseline_remote_touch_count": 19712,
+        "candidate_remote_touch_count": 19712,
+        "fallback_reason_codes": [
+          "no_remote_touch_win"
+        ],
+        "hot_path_latency_p50_ns": 124500,
+        "hot_path_latency_p95_ns": 143732,
+        "hot_path_latency_p99_ns": 168852,
+        "no_win_trigger": true,
+        "obligation_capacity": 2048,
+        "operator_verdict": "fallback_only",
+        "ownership_preserved": true,
+        "placement_fingerprint": 14518773727983361882,
+        "projection_hash": 9347777617409668103,
+        "region_capacity": 1024,
+        "remote_touch_reduction_ratio": 0.0,
+        "rss_estimated_bytes": 4317184,
+        "safe_fallback_profile": "disabled",
+        "scenario_id": "AA-NUMA-ARENA-LOCALITY-NO-WIN-FALLBACK",
+        "selected_policy": "disabled",
+        "selected_remote_touch_count": 19712,
+        "selected_remote_touch_ratio_bps": 8750,
+        "task_capacity": 6144,
+        "task_record_pool_capacity": 512,
+        "topology_fixture_hash": 11861930782471893701,
+        "used_safe_fallback": true,
+        "worker_cohort_fingerprint": 9365066469077738429
+      }
+    },
+    {
+      "scenario_id": "AA-NUMA-ARENA-LOCALITY-REAL-HOST-TEMPLATE",
+      "description": "Template-only scenario that documents the required inputs for real-host NUMA validation without pretending topology evidence exists on every machine.",
+      "output_root": "target/numa-arena-locality-smoke",
+      "execution_policy": "execute_or_dry_run",
+      "topology_mode": "host_template_optional",
+      "safe_fallback_profile": "disabled",
+      "operator_verdict": "template_only",
+      "host_requirements": {
+        "min_worker_threads": 64,
+        "min_memory_gib": 256
+      },
+      "requested_policy": {
+        "mode": "cohort_pinned",
+        "min_topology_confidence_percent": 80,
+        "remote_touch_budget_bps": 6500,
+        "accounting_epoch": 14
+      },
+      "workload_model": {
+        "workload_seed": 14,
+        "topology_confidence_percent": null,
+        "capacity_hints": {
+          "task_capacity": 6144,
+          "region_capacity": 1024,
+          "obligation_capacity": 2048
+        },
+        "worker_to_cohort_map": null,
+        "task_arena_touches_by_cohort": [],
+        "region_arena_touches_by_cohort": [],
+        "obligation_arena_touches_by_cohort": [],
+        "task_record_pool_touches_by_cohort": []
+      },
+      "expected_report_projection": {
+        "allocator_contention_events": 0,
+        "baseline_remote_touch_count": 0,
+        "candidate_remote_touch_count": 0,
+        "fallback_reason_codes": [
+          "missing_worker_cohort_map"
+        ],
+        "hot_path_latency_p50_ns": 72000,
+        "hot_path_latency_p95_ns": 90000,
+        "hot_path_latency_p99_ns": 114000,
+        "no_win_trigger": false,
+        "obligation_capacity": 2048,
+        "operator_verdict": "template_only",
+        "ownership_preserved": true,
+        "placement_fingerprint": 675868731199239589,
+        "projection_hash": 2560198759328901990,
+        "region_capacity": 1024,
+        "remote_touch_reduction_ratio": 0.0,
+        "rss_estimated_bytes": 4317184,
+        "safe_fallback_profile": "disabled",
+        "scenario_id": "AA-NUMA-ARENA-LOCALITY-REAL-HOST-TEMPLATE",
+        "selected_policy": "disabled",
+        "selected_remote_touch_count": 0,
+        "selected_remote_touch_ratio_bps": 0,
+        "task_capacity": 6144,
+        "task_record_pool_capacity": 512,
+        "topology_fixture_hash": null,
+        "used_safe_fallback": true,
+        "worker_cohort_fingerprint": 0
+      }
+    }
+  ]
+}
