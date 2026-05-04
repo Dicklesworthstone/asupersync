@@ -3018,6 +3018,16 @@ test = false
 doc = false
 bench = false
 
+# br-asupersync-ddgbpp: CommandComplete tag parser fuzzer.
+# Wires generated tags and arbitrary bytes into the production
+# fuzz_parse_command_complete_tag seam instead of a local mock oracle.
+[[bin]]
+name = "postgres_command_complete_tag_parser"
+path = "fuzz_targets/postgres_command_complete_tag_parser.rs"
+test = false
+doc = false
+bench = false
+
 # PostgreSQL ErrorResponse/NoticeResponse/ParameterStatus message family fuzzer.
 # Tests src/database/postgres.rs auth/error message parsing with structure-aware
 # input generation for field codes, SQLSTATE validation, and parameter handling.

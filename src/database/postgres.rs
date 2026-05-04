@@ -4852,7 +4852,7 @@ impl PgConnection {
                 }
                 count.parse::<u64>().ok()
             }
-            "UPDATE" | "DELETE" | "SELECT" | "COPY" => {
+            "UPDATE" | "DELETE" | "SELECT" | "COPY" | "MOVE" | "FETCH" => {
                 let count = parts.next()?;
                 if parts.next().is_some() {
                     return None;
@@ -10221,14 +10221,29 @@ mod tests {
     #[test]
     fn fuzz_parse_command_complete_tag_extracts_rows() {
         assert_eq!(fuzz_parse_command_complete_tag(b"INSERT 0 5\0").unwrap(), 5);
+        assert_eq!(
+            fuzz_parse_command_complete_tag(b"INSERT 123 0\0").unwrap(),
+            0
+        );
         assert_eq!(fuzz_parse_command_complete_tag(b"UPDATE 42\0").unwrap(), 42);
+        assert_eq!(
+            fuzz_parse_command_complete_tag(b"DELETE 18446744073709551615\0").unwrap(),
+            u64::MAX
+        );
+        assert_eq!(fuzz_parse_command_complete_tag(b"SELECT 0\0").unwrap(), 0);
         assert_eq!(fuzz_parse_command_complete_tag(b"COPY 7").unwrap(), 7);
+        assert_eq!(fuzz_parse_command_complete_tag(b"MOVE 8\0").unwrap(), 8);
+        assert_eq!(fuzz_parse_command_complete_tag(b"FETCH 9\0").unwrap(), 9);
     }
 
     #[test]
     fn fuzz_parse_command_complete_tag_rejects_malformed() {
         for payload in [
             b"UPDATE nope\0".as_slice(),
+            b"UPDATE 18446744073709551616\0".as_slice(),
+            b"UPDATE -1\0".as_slice(),
+            b"UPDATE 1 trailing\0".as_slice(),
+            b"UNKNOWN 1\0".as_slice(),
             b"\xff\xfe\x00".as_slice(),
             b"".as_slice(),
         ] {

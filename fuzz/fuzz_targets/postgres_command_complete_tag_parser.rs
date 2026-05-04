@@ -2,22 +2,15 @@
 
 //! Structure-aware fuzz target for PostgreSQL CommandComplete tag parser.
 //!
-//! This target specifically tests the parsing logic in postgres.rs lines 3494-3504
-//! that extracts affected row counts from CommandComplete message tags.
+//! This target exercises the production PostgreSQL parser seam that extracts
+//! affected row counts from CommandComplete message tags.
 //!
-//! Target parsing logic:
-//! 1. UTF-8 decode of tag data
-//! 2. Null terminator trimming
-//! 3. Space splitting and last-part extraction
-//! 4. u64 parsing of row count
-//!
-//! Test cases:
-//! - Standard tags: "INSERT 0 5", "UPDATE 10", "DELETE 3"
-//! - Edge cases: empty strings, malformed formats, integer overflow
-//! - Unicode/encoding attacks: non-UTF8, embedded nulls, whitespace variations
-//! - PostgreSQL command variants: COPY, MERGE, TRUNCATE, custom commands
+//! Test cases include valid SELECT/INSERT/UPDATE/DELETE/MOVE/FETCH/COPY tags,
+//! malformed tags, integer overflows, non-UTF-8 input, trailing garbage, empty
+//! tags, and unknown command families.
 
 use arbitrary::{Arbitrary, Unstructured};
+use asupersync::database::postgres::{PgError, fuzz_parse_command_complete_tag};
 use libfuzzer_sys::fuzz_target;
 
 /// Maximum tag length for reasonable fuzzing performance
@@ -37,39 +30,67 @@ struct CommandCompleteTag {
 enum TagVariant {
     /// Standard INSERT: "INSERT oid count"
     Insert { oid: u32, count: u64 },
-    /// UPDATE command: "UPDATE count"
-    Update { count: u64 },
-    /// DELETE command: "DELETE count"
-    Delete { count: u64 },
-    /// SELECT command: "SELECT count"
-    Select { count: u64 },
-    /// COPY command: "COPY count"
-    Copy { count: u64 },
-    /// Custom command with arbitrary name
-    Custom { command: String, count: u64 },
+    /// Single-count command: "UPDATE count", "SELECT count", etc.
+    Count {
+        family: CountCommandFamily,
+        count: u64,
+    },
+    /// Unknown command with a numeric suffix.
+    Unknown { count: u64 },
     /// Edge case: empty tag
     Empty,
     /// Malformed tags for parser robustness testing
     Malformed(MalformedTag),
 }
 
+/// PostgreSQL command families that carry a single affected-row token.
+#[derive(Arbitrary, Debug, Clone, Copy)]
+enum CountCommandFamily {
+    Update,
+    Delete,
+    Select,
+    Copy,
+    Move,
+    Fetch,
+}
+
+impl CountCommandFamily {
+    fn as_str(self) -> &'static str {
+        match self {
+            CountCommandFamily::Update => "UPDATE",
+            CountCommandFamily::Delete => "DELETE",
+            CountCommandFamily::Select => "SELECT",
+            CountCommandFamily::Copy => "COPY",
+            CountCommandFamily::Move => "MOVE",
+            CountCommandFamily::Fetch => "FETCH",
+        }
+    }
+}
+
 /// Malformed tag variants for edge case testing
 #[derive(Arbitrary, Debug, Clone)]
 enum MalformedTag {
-    /// No spaces: "UPDATE10"
-    NoSpaces(String),
-    /// Multiple spaces: "UPDATE   10"
-    ExcessiveSpaces { command: String, count: String },
-    /// Non-numeric count: "UPDATE abc"
-    NonNumericCount { command: String, suffix: String },
-    /// Negative numbers: "UPDATE -5"
-    NegativeCount { command: String, count: i64 },
-    /// Extremely large numbers: "UPDATE 99999999999999999999"
-    OversizedCount { command: String, digits: String },
+    /// Missing count token: "UPDATE"
+    MissingCount { family: CountCommandFamily },
+    /// INSERT missing the affected-row token: "INSERT oid"
+    InsertMissingRows { oid: u32 },
+    /// Non-numeric count: "UPDATE x"
+    NonNumericCount {
+        family: CountCommandFamily,
+        suffix: String,
+    },
+    /// One past u64::MAX.
+    OverflowCount { family: CountCommandFamily },
+    /// Negative count: "UPDATE -1"
+    NegativeCount { family: CountCommandFamily },
+    /// Valid count followed by trailing garbage.
+    TrailingGarbage {
+        family: CountCommandFamily,
+        count: u64,
+        suffix: String,
+    },
     /// Only numbers: "12345"
     NumberOnly(String),
-    /// Special characters: "UP∀ATE 10"
-    UnicodeCommand { command: String, count: u64 },
 }
 
 /// Parameters for tag encoding and format corruption
@@ -115,8 +136,6 @@ enum EncodingCorruption {
     Valid,
     /// Invalid UTF-8 sequences
     InvalidUtf8(Vec<u8>),
-    /// Mixed valid/invalid bytes
-    MixedEncoding { prefix: String, suffix: Vec<u8> },
 }
 
 impl CommandCompleteTag {
@@ -130,13 +149,35 @@ impl CommandCompleteTag {
     fn generate_base_tag(&self) -> String {
         match &self.variant {
             TagVariant::Insert { oid, count } => format!("INSERT {} {}", oid, count),
-            TagVariant::Update { count } => format!("UPDATE {}", count),
-            TagVariant::Delete { count } => format!("DELETE {}", count),
-            TagVariant::Select { count } => format!("SELECT {}", count),
-            TagVariant::Copy { count } => format!("COPY {}", count),
-            TagVariant::Custom { command, count } => format!("{} {}", command, count),
+            TagVariant::Count { family, count } => format!("{} {}", family.as_str(), count),
+            TagVariant::Unknown { count } => format!("UNKNOWN {}", count),
             TagVariant::Empty => String::new(),
             TagVariant::Malformed(malformed) => malformed.generate_string(),
+        }
+    }
+
+    fn expectation(&self) -> ParseExpectation {
+        if self.corruption.forces_error() {
+            return ParseExpectation::Err;
+        }
+
+        match &self.variant {
+            TagVariant::Insert { count, .. } | TagVariant::Count { count, .. } => {
+                ParseExpectation::Rows(*count)
+            }
+            TagVariant::Unknown { .. } | TagVariant::Empty | TagVariant::Malformed(_) => {
+                ParseExpectation::Err
+            }
+        }
+    }
+
+    fn command_family_label(&self) -> String {
+        match &self.variant {
+            TagVariant::Insert { .. } => "INSERT".to_string(),
+            TagVariant::Count { family, .. } => family.as_str().to_string(),
+            TagVariant::Unknown { .. } => "UNKNOWN".to_string(),
+            TagVariant::Empty => "EMPTY".to_string(),
+            TagVariant::Malformed(malformed) => malformed.command_family_label(),
         }
     }
 }
@@ -144,23 +185,33 @@ impl CommandCompleteTag {
 impl MalformedTag {
     fn generate_string(&self) -> String {
         match self {
-            MalformedTag::NoSpaces(s) => s.clone(),
-            MalformedTag::ExcessiveSpaces { command, count } => {
-                format!("{}   {}", command, count)
+            MalformedTag::MissingCount { family } => family.as_str().to_string(),
+            MalformedTag::InsertMissingRows { oid } => format!("INSERT {}", oid),
+            MalformedTag::NonNumericCount { family, suffix } => {
+                format!("{} x{}", family.as_str(), sanitize_token(suffix))
             }
-            MalformedTag::NonNumericCount { command, suffix } => {
-                format!("{} {}", command, suffix)
+            MalformedTag::OverflowCount { family } => {
+                format!("{} 18446744073709551616", family.as_str())
             }
-            MalformedTag::NegativeCount { command, count } => {
-                format!("{} {}", command, count)
-            }
-            MalformedTag::OversizedCount { command, digits } => {
-                format!("{} {}", command, digits)
-            }
+            MalformedTag::NegativeCount { family } => format!("{} -1", family.as_str()),
+            MalformedTag::TrailingGarbage {
+                family,
+                count,
+                suffix,
+            } => format!("{} {} x{}", family.as_str(), count, sanitize_token(suffix)),
             MalformedTag::NumberOnly(num) => num.clone(),
-            MalformedTag::UnicodeCommand { command, count } => {
-                format!("{} {}", command, count)
-            }
+        }
+    }
+
+    fn command_family_label(&self) -> String {
+        match self {
+            MalformedTag::MissingCount { family }
+            | MalformedTag::NonNumericCount { family, .. }
+            | MalformedTag::OverflowCount { family }
+            | MalformedTag::NegativeCount { family }
+            | MalformedTag::TrailingGarbage { family, .. } => family.as_str().to_string(),
+            MalformedTag::InsertMissingRows { .. } => "INSERT".to_string(),
+            MalformedTag::NumberOnly(_) => "NUMBER_ONLY".to_string(),
         }
     }
 }
@@ -173,10 +224,10 @@ impl TagCorruption {
         // Handle encoding corruption first
         let mut bytes = match &self.encoding {
             EncodingCorruption::Valid => base.into_bytes(),
-            EncodingCorruption::InvalidUtf8(invalid_bytes) => invalid_bytes.clone(),
-            EncodingCorruption::MixedEncoding { prefix, suffix } => {
-                let mut result = prefix.as_bytes().to_vec();
-                result.extend_from_slice(suffix);
+            EncodingCorruption::InvalidUtf8(invalid_bytes) => {
+                let mut result = Vec::with_capacity(invalid_bytes.len() + 1);
+                result.push(0xFF);
+                result.extend_from_slice(invalid_bytes);
                 result
             }
         };
@@ -209,6 +260,15 @@ impl TagCorruption {
 
         bytes
     }
+
+    fn forces_error(&self) -> bool {
+        matches!(self.encoding, EncodingCorruption::InvalidUtf8(_))
+            || matches!(
+                self.null_handling,
+                NullHandling::Embedded | NullHandling::OnlyNulls
+            )
+            || matches!(self.whitespace, WhitespaceVariant::Unicode)
+    }
 }
 
 impl WhitespaceVariant {
@@ -220,47 +280,153 @@ impl WhitespaceVariant {
             WhitespaceVariant::Mixed => s.replace(' ', " \t\n "),
             WhitespaceVariant::Leading => format!("  {}", s),
             WhitespaceVariant::Trailing => format!("{}  ", s),
-            WhitespaceVariant::Unicode => s.replace(' ', "\u{2000}"), // En quad
+            WhitespaceVariant::Unicode => s.replace(' ', "\u{2000}"),
         }
     }
 }
 
-/// Test the CommandComplete tag parsing logic directly
-fn test_command_complete_tag_parsing(data: &[u8]) {
-    // Guard against oversized inputs
+#[derive(Debug, Clone, Copy)]
+enum ParseExpectation {
+    Rows(u64),
+    Err,
+    Unconstrained,
+}
+
+#[derive(Debug)]
+struct CommandCompleteLabels {
+    command_family: String,
+    row_count_token_len: usize,
+    utf8_status: &'static str,
+    parse_outcome: &'static str,
+    error_kind: &'static str,
+    panic_free: bool,
+}
+
+impl CommandCompleteLabels {
+    fn new(command_family: Option<&str>, data: &[u8], result: &Result<u64, PgError>) -> Self {
+        let utf8 = std::str::from_utf8(data);
+        let command_family = command_family
+            .map(ToOwned::to_owned)
+            .or_else(|| {
+                utf8.ok()
+                    .and_then(|tag| tag.trim_end_matches('\0').split_ascii_whitespace().next())
+                    .map(|family| family.chars().take(32).collect())
+            })
+            .unwrap_or_else(|| {
+                if utf8.is_ok() {
+                    "EMPTY".to_string()
+                } else {
+                    "NON_UTF8".to_string()
+                }
+            });
+        let row_count_token_len = utf8
+            .ok()
+            .and_then(|tag| tag.trim_end_matches('\0').split_ascii_whitespace().last())
+            .map(str::len)
+            .unwrap_or(0);
+        let (parse_outcome, error_kind) = match result {
+            Ok(_) => ("rows", "none"),
+            Err(err) => ("error", pg_error_kind(err)),
+        };
+
+        Self {
+            command_family,
+            row_count_token_len,
+            utf8_status: if utf8.is_ok() { "valid" } else { "invalid" },
+            parse_outcome,
+            error_kind,
+            panic_free: true,
+        }
+    }
+
+    fn corpus_label(&self) -> String {
+        format!(
+            "command_family={} row_count_token_len={} utf8_status={} parse_outcome={} error_kind={} panic_free={}",
+            self.command_family,
+            self.row_count_token_len,
+            self.utf8_status,
+            self.parse_outcome,
+            self.error_kind,
+            self.panic_free
+        )
+    }
+}
+
+fn pg_error_kind(error: &PgError) -> &'static str {
+    match error {
+        PgError::Io(_) => "io",
+        PgError::Protocol(_) => "protocol",
+        PgError::AuthenticationFailed(_) => "authentication_failed",
+        PgError::Server { .. } => "server",
+        PgError::Cancelled(_) => "cancelled",
+        PgError::ConnectionClosed => "connection_closed",
+        PgError::ColumnNotFound(_) => "column_not_found",
+        PgError::TypeConversion { .. } => "type_conversion",
+        PgError::InvalidUrl(_) => "invalid_url",
+        PgError::TlsRequired => "tls_required",
+        PgError::Tls(_) => "tls",
+        PgError::TransactionFinished => "transaction_finished",
+        PgError::UnsupportedAuth(_) => "unsupported_auth",
+        PgError::IsolationLevelMismatch { .. } => "isolation_level_mismatch",
+    }
+}
+
+fn sanitize_token(value: &str) -> String {
+    let token: String = value
+        .chars()
+        .filter(|ch| !ch.is_ascii_whitespace() && *ch != '\0')
+        .take(32)
+        .collect();
+    if token.is_empty() {
+        "x".to_string()
+    } else {
+        token
+    }
+}
+
+fn exercise_command_complete_parser(
+    data: &[u8],
+    expectation: ParseExpectation,
+    command_family: Option<&str>,
+) {
     if data.len() > MAX_TAG_LENGTH {
         return;
     }
 
-    // This replicates the exact parsing logic from postgres.rs:3494-3504
-    if let Ok(tag) = std::str::from_utf8(data) {
-        let tag = tag.trim_end_matches('\0');
-        // Tag format: "INSERT 0 5" or "UPDATE 10" or "DELETE 3"
-        if let Some(num_str) = tag.rsplit(' ').next() {
-            // Test the u64 parsing - this should never panic
-            let _affected_rows = num_str.parse::<u64>().unwrap_or(0);
+    let result = fuzz_parse_command_complete_tag(data);
+    let labels = CommandCompleteLabels::new(command_family, data, &result);
 
-            // Additional invariant: if parsing succeeds, the number should be valid
-            if let Ok(parsed_num) = num_str.parse::<u64>() {
-                // Invariant: parsed number should be the same when formatted back
-                assert_eq!(num_str, parsed_num.to_string(),
-                    "Round-trip parsing invariant violated for: {:?}", num_str);
+    match expectation {
+        ParseExpectation::Rows(expected) => match result {
+            Ok(actual) => assert_eq!(actual, expected, "{}", labels.corpus_label()),
+            Err(err) => {
+                panic!(
+                    "expected valid CommandComplete tag, got {err:?}; {}",
+                    labels.corpus_label()
+                )
             }
+        },
+        ParseExpectation::Err => {
+            assert!(
+                result.is_err(),
+                "expected malformed CommandComplete tag rejection; {}",
+                labels.corpus_label()
+            );
         }
+        ParseExpectation::Unconstrained => {}
     }
-    // Invalid UTF-8 is silently ignored, which is correct behavior
 }
 
 fuzz_target!(|data: &[u8]| {
-    // First test with raw input
-    test_command_complete_tag_parsing(data);
+    exercise_command_complete_parser(data, ParseExpectation::Unconstrained, None);
 
-    // Then test with structure-aware generation if we can parse the input
     if data.len() >= std::mem::size_of::<CommandCompleteTag>() {
         let mut u = Unstructured::new(data);
         if let Ok(tag_case) = CommandCompleteTag::arbitrary(&mut u) {
             let generated_bytes = tag_case.generate_bytes();
-            test_command_complete_tag_parsing(&generated_bytes);
+            let expectation = tag_case.expectation();
+            let command_family = tag_case.command_family_label();
+            exercise_command_complete_parser(&generated_bytes, expectation, Some(&command_family));
         }
     }
 });

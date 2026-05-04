@@ -77,6 +77,8 @@ enum CommandCompleteVariant {
     Delete { count: u64 },
     Select { count: u64 },
     Copy { count: u64 },
+    Move { count: u64 },
+    Fetch { count: u64 },
     Malformed(MalformedCommandComplete),
 }
 
@@ -87,6 +89,8 @@ enum CommandCompleteVerb {
     Delete,
     Select,
     Copy,
+    Move,
+    Fetch,
 }
 
 #[derive(Debug, Clone, Arbitrary)]
@@ -98,6 +102,20 @@ enum MalformedCommandComplete {
     NonNumericCount {
         command: CommandCompleteVerb,
         suffix: BoundedString,
+    },
+    OverflowCount {
+        command: CommandCompleteVerb,
+    },
+    NegativeCount {
+        command: CommandCompleteVerb,
+    },
+    TrailingGarbage {
+        command: CommandCompleteVerb,
+        count: u64,
+        suffix: BoundedString,
+    },
+    UnknownCommand {
+        count: u64,
     },
     NumberOnly(u64),
     InvalidUtf8,
@@ -111,6 +129,8 @@ impl CommandCompleteVerb {
             CommandCompleteVerb::Delete => "DELETE",
             CommandCompleteVerb::Select => "SELECT",
             CommandCompleteVerb::Copy => "COPY",
+            CommandCompleteVerb::Move => "MOVE",
+            CommandCompleteVerb::Fetch => "FETCH",
         }
     }
 }
@@ -493,6 +513,8 @@ fn build_command_complete_message(tag: &CommandCompleteCase) -> Vec<u8> {
         CommandCompleteVariant::Delete { count } => format!("DELETE {count}").into_bytes(),
         CommandCompleteVariant::Select { count } => format!("SELECT {count}").into_bytes(),
         CommandCompleteVariant::Copy { count } => format!("COPY {count}").into_bytes(),
+        CommandCompleteVariant::Move { count } => format!("MOVE {count}").into_bytes(),
+        CommandCompleteVariant::Fetch { count } => format!("FETCH {count}").into_bytes(),
         CommandCompleteVariant::Malformed(MalformedCommandComplete::Empty) => Vec::new(),
         CommandCompleteVariant::Malformed(MalformedCommandComplete::MissingCount { command }) => {
             command.as_str().as_bytes().to_vec()
@@ -506,6 +528,26 @@ fn build_command_complete_message(tag: &CommandCompleteCase) -> Vec<u8> {
             sanitize_field_value(&suffix.value)
         )
         .into_bytes(),
+        CommandCompleteVariant::Malformed(MalformedCommandComplete::OverflowCount { command }) => {
+            format!("{} 18446744073709551616", command.as_str()).into_bytes()
+        }
+        CommandCompleteVariant::Malformed(MalformedCommandComplete::NegativeCount { command }) => {
+            format!("{} -1", command.as_str()).into_bytes()
+        }
+        CommandCompleteVariant::Malformed(MalformedCommandComplete::TrailingGarbage {
+            command,
+            count,
+            suffix,
+        }) => format!(
+            "{} {} {}",
+            command.as_str(),
+            count,
+            sanitize_field_value(&suffix.value)
+        )
+        .into_bytes(),
+        CommandCompleteVariant::Malformed(MalformedCommandComplete::UnknownCommand { count }) => {
+            format!("UNKNOWN {count}").into_bytes()
+        }
         CommandCompleteVariant::Malformed(MalformedCommandComplete::NumberOnly(count)) => {
             count.to_string().into_bytes()
         }
@@ -527,7 +569,9 @@ fn expected_command_complete_rows(tag: &CommandCompleteCase) -> Option<u64> {
         | CommandCompleteVariant::Update { count }
         | CommandCompleteVariant::Delete { count }
         | CommandCompleteVariant::Select { count }
-        | CommandCompleteVariant::Copy { count } => Some(*count),
+        | CommandCompleteVariant::Copy { count }
+        | CommandCompleteVariant::Move { count }
+        | CommandCompleteVariant::Fetch { count } => Some(*count),
         CommandCompleteVariant::Malformed(_) => None,
     }
 }
