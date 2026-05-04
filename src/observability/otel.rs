@@ -5217,6 +5217,7 @@ pub mod span_semantics {
     #[cfg(test)]
     mod tests {
         use super::SpanConformanceResult;
+        use std::collections::HashMap;
 
         #[test]
         fn disabled_success_rate_reflects_recorded_counts() {
@@ -5237,6 +5238,7 @@ pub mod span_semantics {
             assert_eq!(partial.success_rate(), 75.0);
         }
 
+        #[cfg(feature = "tracing-integration")]
         #[test]
         fn log_record_body_value_to_any_value_conformance() {
             use super::super::{LogRecordBodyValue, log_record_body_value_to_any_value};
@@ -5302,7 +5304,7 @@ pub mod span_semantics {
 
         #[test]
         fn gauge_double_update_value_sequence_conformance() {
-            use super::super::{GaugeDataPoint, MetricsSnapshot};
+            use super::super::MetricsSnapshot;
 
             // Test that applying the same gauge value sequence twice produces identical results
             let value_sequence = vec![10, 20, 15, 30, 25];
@@ -5589,10 +5591,10 @@ pub mod span_semantics {
             );
         }
 
+        #[cfg(feature = "tracing-integration")]
         #[test]
         fn span_events_array_conformance() {
             use super::super::SpanEvent;
-            use std::collections::HashMap;
             use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
             // Test that same Event sequence produces identical span events array
