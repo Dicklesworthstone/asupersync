@@ -855,11 +855,9 @@ fn adaptive_batch_signoff_row_tracks_p999_no_win_evidence() {
             "scripts/run_adaptive_batch_sizing_smoke.sh --scenario AA-ADAPTIVE-BATCH-SIZING-NO-WIN-64P --execute"
         )
     );
-    assert!(
-        adaptive_row["blocker_reason"]
-            .as_str()
-            .is_some_and(|reason| reason.contains("64-producer no-win p999 comparator"))
-    );
+    assert_eq!(adaptive_row["tracker_status"].as_str(), Some("closed"));
+    assert_eq!(adaptive_row["proof_status"].as_str(), Some("trusted"));
+    assert_eq!(adaptive_row["blocker_reason"].as_str(), Some(""));
 }
 
 #[test]
