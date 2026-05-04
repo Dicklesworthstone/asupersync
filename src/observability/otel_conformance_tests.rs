@@ -2086,9 +2086,10 @@ mod tests {
         for _hop in 0..scenario.context_propagation_hops {
             // Enforce 32-entry limit
             if current_entries.len() > 32 {
+                let first_kept_entry = current_entries.len() - 32;
                 current_entries = current_entries
                     .into_iter()
-                    .skip(current_entries.len() - 32)
+                    .skip(first_kept_entry)
                     .collect();
                 overflow_occurred = true;
             }
@@ -2816,7 +2817,7 @@ mod tests {
     }
 
     /// Temporality types for OTLP delta-temporality testing
-    #[derive(Debug, Clone)]
+    #[derive(Debug, Clone, PartialEq)]
     enum TemporalityType {
         Delta,      // Delta temporality (differences between collections)
         Cumulative, // Cumulative temporality (absolute values)
@@ -2861,6 +2862,7 @@ mod tests {
         let operations_completed = Arc::new(AtomicUsize::new(0));
         let failed_operations = Arc::new(AtomicUsize::new(0));
         let snapshots = Arc::new(Mutex::new(Vec::<HashMap<String, f64>>::new()));
+        let metric_types_len = scenario.metric_types.len();
 
         // Spawn concurrent add operations
         let mut handles = Vec::new();
@@ -2871,7 +2873,7 @@ mod tests {
 
             let handle = thread::spawn(move || {
                 // Simulate metric.add() operation
-                let metric_name = format!("metric_{}", i % scenario.metric_types.len());
+                let metric_name = format!("metric_{}", i % metric_types_len);
                 let value = (i + 1) as f64;
 
                 match metric_data_clone.lock() {
@@ -2956,6 +2958,7 @@ mod tests {
         let operations_completed = Arc::new(AtomicUsize::new(0));
         let failed_operations = Arc::new(AtomicUsize::new(0));
         let snapshots = Arc::new(std::sync::Mutex::new(Vec::<HashMap<String, f64>>::new()));
+        let metric_types_len = scenario.metric_types.len();
 
         // Concurrent add operations
         let mut handles = Vec::new();
@@ -2964,7 +2967,7 @@ mod tests {
             let operations_completed_clone = Arc::clone(&operations_completed);
 
             let handle = thread::spawn(move || {
-                let metric_name = format!("metric_{}", i % scenario.metric_types.len());
+                let metric_name = format!("metric_{}", i % metric_types_len);
                 let value = (i + 1) as f64;
 
                 if let Ok(mut data) = metric_data_clone.write() {
@@ -5999,7 +6002,7 @@ mod tests {
             SpanStatusFieldScenario {
                 name: "unset_status_omit_field".to_string(),
                 span_status_info: SpanStatusInfo {
-                    status_code: SpanStatusCode::Unset,
+                    status_code: SpanStatusFieldCode::Unset,
                     status_message: "".to_string(),
                     is_explicitly_set: false,
                 },
@@ -6010,7 +6013,7 @@ mod tests {
             SpanStatusFieldScenario {
                 name: "error_status_include_field".to_string(),
                 span_status_info: SpanStatusInfo {
-                    status_code: SpanStatusCode::Error,
+                    status_code: SpanStatusFieldCode::Error,
                     status_message: "Operation failed".to_string(),
                     is_explicitly_set: true,
                 },
@@ -6021,7 +6024,7 @@ mod tests {
             SpanStatusFieldScenario {
                 name: "ok_status_include_field".to_string(),
                 span_status_info: SpanStatusInfo {
-                    status_code: SpanStatusCode::Ok,
+                    status_code: SpanStatusFieldCode::Ok,
                     status_message: "Operation successful".to_string(),
                     is_explicitly_set: true,
                 },
@@ -6032,7 +6035,7 @@ mod tests {
             SpanStatusFieldScenario {
                 name: "unset_status_with_empty_message".to_string(),
                 span_status_info: SpanStatusInfo {
-                    status_code: SpanStatusCode::Unset,
+                    status_code: SpanStatusFieldCode::Unset,
                     status_message: "".to_string(),
                     is_explicitly_set: false,
                 },
@@ -6043,7 +6046,7 @@ mod tests {
             SpanStatusFieldScenario {
                 name: "error_status_empty_message".to_string(),
                 span_status_info: SpanStatusInfo {
-                    status_code: SpanStatusCode::Error,
+                    status_code: SpanStatusFieldCode::Error,
                     status_message: "".to_string(), // Empty message but ERROR status
                     is_explicitly_set: true,
                 },
@@ -6054,7 +6057,7 @@ mod tests {
             SpanStatusFieldScenario {
                 name: "ok_status_empty_message".to_string(),
                 span_status_info: SpanStatusInfo {
-                    status_code: SpanStatusCode::Ok,
+                    status_code: SpanStatusFieldCode::Ok,
                     status_message: "".to_string(), // Empty message but OK status
                     is_explicitly_set: true,
                 },
@@ -6065,7 +6068,7 @@ mod tests {
             SpanStatusFieldScenario {
                 name: "unset_default_constructor".to_string(),
                 span_status_info: SpanStatusInfo {
-                    status_code: SpanStatusCode::Unset,
+                    status_code: SpanStatusFieldCode::Unset,
                     status_message: "".to_string(),
                     is_explicitly_set: false, // Default constructor value
                 },
@@ -6076,7 +6079,7 @@ mod tests {
             SpanStatusFieldScenario {
                 name: "error_status_long_message".to_string(),
                 span_status_info: SpanStatusInfo {
-                    status_code: SpanStatusCode::Error,
+                    status_code: SpanStatusFieldCode::Error,
                     status_message: "A very detailed error message explaining what went wrong during the operation execution".to_string(),
                     is_explicitly_set: true,
                 },
@@ -6118,14 +6121,14 @@ mod tests {
     /// Span status information for testing
     #[derive(Debug, Clone)]
     struct SpanStatusInfo {
-        status_code: SpanStatusCode, // Status code (UNSET, OK, ERROR)
+        status_code: SpanStatusFieldCode, // Status code (UNSET, OK, ERROR)
         status_message: String,      // Status message
         is_explicitly_set: bool,     // Was status explicitly set?
     }
 
     /// Span status codes for OTLP testing
     #[derive(Debug, Clone, PartialEq)]
-    enum SpanStatusCode {
+    enum SpanStatusFieldCode {
         Unset = 0, // STATUS_CODE_UNSET (default, should be omitted)
         Ok = 1,    // STATUS_CODE_OK (explicitly successful)
         Error = 2, // STATUS_CODE_ERROR (explicitly failed)
@@ -6151,11 +6154,11 @@ mod tests {
 
         // Determine if status field should be omitted based on OTLP spec
         let status_field_omitted = match status_info.status_code {
-            SpanStatusCode::Unset => {
+            SpanStatusFieldCode::Unset => {
                 // OTLP spec: UNSET status should be omitted from protobuf for optimization
                 true
             }
-            SpanStatusCode::Ok | SpanStatusCode::Error => {
+            SpanStatusFieldCode::Ok | SpanStatusFieldCode::Error => {
                 // Explicit status codes should always be included
                 false
             }
@@ -6169,19 +6172,19 @@ mod tests {
 
         // Verify UNSET handling correctness
         let correct_unset_handling = match status_info.status_code {
-            SpanStatusCode::Unset => status_field_omitted,
+            SpanStatusFieldCode::Unset => status_field_omitted,
             _ => true, // Non-UNSET codes don't affect this check
         };
 
         // Verify explicit status handling correctness
         let correct_explicit_status_handling = match status_info.status_code {
-            SpanStatusCode::Ok | SpanStatusCode::Error => !status_field_omitted,
-            SpanStatusCode::Unset => true, // UNSET doesn't affect explicit handling
+            SpanStatusFieldCode::Ok | SpanStatusFieldCode::Error => !status_field_omitted,
+            SpanStatusFieldCode::Unset => true, // UNSET doesn't affect explicit handling
         };
 
         // Payload size optimization when UNSET status is omitted
         let payload_size_optimized = match status_info.status_code {
-            SpanStatusCode::Unset => status_field_omitted,
+            SpanStatusFieldCode::Unset => status_field_omitted,
             _ => true, // Non-UNSET codes don't require optimization
         };
 
@@ -6207,8 +6210,8 @@ mod tests {
 
         // Reference implementation should also follow OTLP optimization
         let status_field_omitted = match status_info.status_code {
-            SpanStatusCode::Unset => true, // Reference should also omit UNSET
-            SpanStatusCode::Ok | SpanStatusCode::Error => false, // Include explicit statuses
+            SpanStatusFieldCode::Unset => true, // Reference should also omit UNSET
+            SpanStatusFieldCode::Ok | SpanStatusFieldCode::Error => false, // Include explicit statuses
         };
 
         let protobuf_optimization_applied = status_field_omitted;
@@ -16374,11 +16377,11 @@ fn otlp_087_span_error_status_preservation_conformance() {
                 name: "span-with-error-empty-desc".to_string(),
                 span_id: "span-12345678".to_string(),
                 trace_id: "trace-12345678901234567890123456789012".to_string(),
-                status_code: SpanStatusCode::Error,
+                status_code: ErrorSpanStatusCode::Error,
                 status_description: Some("".to_string()), // Empty description
             },
             expected_status_preserved: true,
-            expected_final_status: SpanStatusCode::Error,
+            expected_final_status: ErrorSpanStatusCode::Error,
             expected_silent_demotion: false,
             expected_description_handling: DescriptionHandling::PreserveEmpty,
             expected_otlp_compliant: true,
@@ -16389,11 +16392,11 @@ fn otlp_087_span_error_status_preservation_conformance() {
                 name: "span-with-error-no-desc".to_string(),
                 span_id: "span-23456789".to_string(),
                 trace_id: "trace-23456789012345678901234567890123".to_string(),
-                status_code: SpanStatusCode::Error,
+                status_code: ErrorSpanStatusCode::Error,
                 status_description: None, // No description
             },
             expected_status_preserved: true,
-            expected_final_status: SpanStatusCode::Error,
+            expected_final_status: ErrorSpanStatusCode::Error,
             expected_silent_demotion: false,
             expected_description_handling: DescriptionHandling::PreserveNone,
             expected_otlp_compliant: true,
@@ -16404,11 +16407,11 @@ fn otlp_087_span_error_status_preservation_conformance() {
                 name: "span-with-error-desc".to_string(),
                 span_id: "span-34567890".to_string(),
                 trace_id: "trace-34567890123456789012345678901234".to_string(),
-                status_code: SpanStatusCode::Error,
+                status_code: ErrorSpanStatusCode::Error,
                 status_description: Some("Database connection failed".to_string()),
             },
             expected_status_preserved: true,
-            expected_final_status: SpanStatusCode::Error,
+            expected_final_status: ErrorSpanStatusCode::Error,
             expected_silent_demotion: false,
             expected_description_handling: DescriptionHandling::PreserveNonEmpty,
             expected_otlp_compliant: true,
@@ -16419,11 +16422,11 @@ fn otlp_087_span_error_status_preservation_conformance() {
                 name: "span-with-ok-empty-desc".to_string(),
                 span_id: "span-45678901".to_string(),
                 trace_id: "trace-45678901234567890123456789012345".to_string(),
-                status_code: SpanStatusCode::Ok,
+                status_code: ErrorSpanStatusCode::Ok,
                 status_description: Some("".to_string()),
             },
             expected_status_preserved: true,
-            expected_final_status: SpanStatusCode::Ok,
+            expected_final_status: ErrorSpanStatusCode::Ok,
             expected_silent_demotion: false,
             expected_description_handling: DescriptionHandling::OmitForOk, // OK status should omit message per OTLP-080
             expected_otlp_compliant: true,
@@ -16434,11 +16437,11 @@ fn otlp_087_span_error_status_preservation_conformance() {
                 name: "span-with-unset-empty-desc".to_string(),
                 span_id: "span-56789012".to_string(),
                 trace_id: "trace-56789012345678901234567890123456".to_string(),
-                status_code: SpanStatusCode::Unset,
+                status_code: ErrorSpanStatusCode::Unset,
                 status_description: Some("".to_string()),
             },
             expected_status_preserved: true,
-            expected_final_status: SpanStatusCode::Unset,
+            expected_final_status: ErrorSpanStatusCode::Unset,
             expected_silent_demotion: false,
             expected_description_handling: DescriptionHandling::OmitForUnset,
             expected_otlp_compliant: true,
@@ -16449,11 +16452,11 @@ fn otlp_087_span_error_status_preservation_conformance() {
                 name: "span-with-error-whitespace-desc".to_string(),
                 span_id: "span-67890123".to_string(),
                 trace_id: "trace-67890123456789012345678901234567".to_string(),
-                status_code: SpanStatusCode::Error,
+                status_code: ErrorSpanStatusCode::Error,
                 status_description: Some("   \t\n   ".to_string()), // Whitespace-only
             },
             expected_status_preserved: true,
-            expected_final_status: SpanStatusCode::Error,
+            expected_final_status: ErrorSpanStatusCode::Error,
             expected_silent_demotion: false,
             expected_description_handling: DescriptionHandling::PreserveWhitespace,
             expected_otlp_compliant: true,
@@ -16464,11 +16467,11 @@ fn otlp_087_span_error_status_preservation_conformance() {
                 name: "span-with-silent-demotion".to_string(),
                 span_id: "span-78901234".to_string(),
                 trace_id: "trace-78901234567890123456789012345678".to_string(),
-                status_code: SpanStatusCode::Error,
+                status_code: ErrorSpanStatusCode::Error,
                 status_description: Some("".to_string()),
             },
             expected_status_preserved: false, // Violation case
-            expected_final_status: SpanStatusCode::Ok, // Incorrectly demoted
+            expected_final_status: ErrorSpanStatusCode::Ok, // Incorrectly demoted
             expected_silent_demotion: true, // This is the violation
             expected_description_handling: DescriptionHandling::ViolationDemotion,
             expected_otlp_compliant: false, // Violates OTLP specification
@@ -16479,11 +16482,11 @@ fn otlp_087_span_error_status_preservation_conformance() {
                 name: "span-with-error-long-desc".to_string(),
                 span_id: "span-89012345".to_string(),
                 trace_id: "trace-89012345678901234567890123456789".to_string(),
-                status_code: SpanStatusCode::Error,
+                status_code: ErrorSpanStatusCode::Error,
                 status_description: Some("A very detailed error description that explains what went wrong in the system and provides context for debugging and troubleshooting purposes".to_string()),
             },
             expected_status_preserved: true,
-            expected_final_status: SpanStatusCode::Error,
+            expected_final_status: ErrorSpanStatusCode::Error,
             expected_silent_demotion: false,
             expected_description_handling: DescriptionHandling::PreserveNonEmpty,
             expected_otlp_compliant: true,
@@ -16527,7 +16530,7 @@ struct ErrorStatusScenario {
     description: String,
     span: SpanErrorStatusInfo,
     expected_status_preserved: bool,
-    expected_final_status: SpanStatusCode,
+    expected_final_status: ErrorSpanStatusCode,
     expected_silent_demotion: bool,
     expected_description_handling: DescriptionHandling,
     expected_otlp_compliant: bool,
@@ -16539,13 +16542,13 @@ struct SpanErrorStatusInfo {
     name: String,
     span_id: String,
     trace_id: String,
-    status_code: SpanStatusCode,
+    status_code: ErrorSpanStatusCode,
     status_description: Option<String>,
 }
 
 /// Span status code enum
 #[derive(Debug, Clone, PartialEq)]
-enum SpanStatusCode {
+enum ErrorSpanStatusCode {
     Unset = 0,
     Ok = 1,
     Error = 2,
@@ -16567,8 +16570,8 @@ enum DescriptionHandling {
 #[derive(Debug, Clone)]
 struct ErrorStatusHandlingResult {
     status_preserved: bool,
-    final_status: SpanStatusCode,
-    original_status: SpanStatusCode,
+    final_status: ErrorSpanStatusCode,
+    original_status: ErrorSpanStatusCode,
     silent_demotion_detected: bool,
     description_handling: DescriptionHandling,
     final_description: Option<String>,
@@ -16601,14 +16604,14 @@ fn simulate_asupersync_error_status_handling(
 
     // Process span status per OTLP-087 specification
     match scenario.span.status_code {
-        SpanStatusCode::Error => {
+        ErrorSpanStatusCode::Error => {
             error_status_spans += 1;
 
             // Critical: ERROR status must NEVER be silently demoted to OK
             // even if description is empty or missing
             if scenario.expected_silent_demotion {
                 // This is a violation case for testing detection
-                final_status = SpanStatusCode::Ok;
+                final_status = ErrorSpanStatusCode::Ok;
                 status_preserved = false;
                 silent_demotion_detected = true;
                 silent_demotions += 1;
@@ -16617,7 +16620,7 @@ fn simulate_asupersync_error_status_handling(
                     .push("VIOLATION: ERROR status silently demoted to OK".to_string());
             } else {
                 // Correct behavior: preserve ERROR status regardless of description
-                final_status = SpanStatusCode::Error;
+                final_status = ErrorSpanStatusCode::Error;
                 status_preserved = true;
 
                 match &scenario.span.status_description {
@@ -16636,18 +16639,18 @@ fn simulate_asupersync_error_status_handling(
                 }
             }
         }
-        SpanStatusCode::Ok => {
+        ErrorSpanStatusCode::Ok => {
             ok_status_spans += 1;
-            final_status = SpanStatusCode::Ok;
+            final_status = ErrorSpanStatusCode::Ok;
             // Per OTLP-080, OK status should omit description
             if scenario.span.status_description.is_some() {
                 final_description = None; // Omit message for OK status
                 description_handling = DescriptionHandling::OmitForOk;
             }
         }
-        SpanStatusCode::Unset => {
+        ErrorSpanStatusCode::Unset => {
             unset_status_spans += 1;
-            final_status = SpanStatusCode::Unset;
+            final_status = ErrorSpanStatusCode::Unset;
             // UNSET status should omit description
             if scenario.span.status_description.is_some() {
                 final_description = None; // Omit message for UNSET status
@@ -16665,8 +16668,8 @@ fn simulate_asupersync_error_status_handling(
     let validation_applied = true; // Always apply ERROR status validation
 
     // OTLP compliance: must never silently demote ERROR status
-    let otlp_compliant = if scenario.span.status_code == SpanStatusCode::Error {
-        !silent_demotion_detected && final_status == SpanStatusCode::Error
+    let otlp_compliant = if scenario.span.status_code == ErrorSpanStatusCode::Error {
+        !silent_demotion_detected && final_status == ErrorSpanStatusCode::Error
     } else {
         true // Non-ERROR statuses are compliant
     };
@@ -16708,13 +16711,13 @@ fn simulate_reference_error_status_handling(
 
     // Reference implementation logic for ERROR status preservation
     match scenario.span.status_code {
-        SpanStatusCode::Error => {
+        ErrorSpanStatusCode::Error => {
             error_status_spans += 1;
 
             // Reference behavior: preserve ERROR status
             if scenario.expected_silent_demotion {
                 // Violation case for testing
-                final_status = SpanStatusCode::Ok;
+                final_status = ErrorSpanStatusCode::Ok;
                 status_preserved = false;
                 silent_demotion_detected = true;
                 silent_demotions += 1;
@@ -16722,7 +16725,7 @@ fn simulate_reference_error_status_handling(
                 validation_errors.push("Silent ERROR demotion detected".to_string());
             } else {
                 // Correct reference behavior
-                final_status = SpanStatusCode::Error;
+                final_status = ErrorSpanStatusCode::Error;
                 status_preserved = true;
 
                 match &scenario.span.status_description {
@@ -16737,17 +16740,17 @@ fn simulate_reference_error_status_handling(
                 }
             }
         }
-        SpanStatusCode::Ok => {
+        ErrorSpanStatusCode::Ok => {
             ok_status_spans += 1;
-            final_status = SpanStatusCode::Ok;
+            final_status = ErrorSpanStatusCode::Ok;
             if scenario.span.status_description.is_some() {
                 final_description = None;
                 description_handling = DescriptionHandling::OmitForOk;
             }
         }
-        SpanStatusCode::Unset => {
+        ErrorSpanStatusCode::Unset => {
             unset_status_spans += 1;
-            final_status = SpanStatusCode::Unset;
+            final_status = ErrorSpanStatusCode::Unset;
             if scenario.span.status_description.is_some() {
                 final_description = None;
                 description_handling = DescriptionHandling::OmitForUnset;
@@ -16764,8 +16767,8 @@ fn simulate_reference_error_status_handling(
     let validation_applied = true;
 
     // OTLP compliance
-    let otlp_compliant = if scenario.span.status_code == SpanStatusCode::Error {
-        !silent_demotion_detected && final_status == SpanStatusCode::Error
+    let otlp_compliant = if scenario.span.status_code == ErrorSpanStatusCode::Error {
+        !silent_demotion_detected && final_status == ErrorSpanStatusCode::Error
     } else {
         true
     };
@@ -16806,13 +16809,13 @@ fn validate_error_status_handling_logic(result: &ErrorStatusHandlingResult) -> R
     }
 
     // Critical check: ERROR status must never be silently demoted
-    if result.original_status == SpanStatusCode::Error && result.silent_demotion_detected {
+    if result.original_status == ErrorSpanStatusCode::Error && result.silent_demotion_detected {
         return Err("CRITICAL VIOLATION: ERROR status was silently demoted".to_string());
     }
 
     // Critical check: ERROR status must be preserved
-    if result.original_status == SpanStatusCode::Error
-        && result.final_status != SpanStatusCode::Error
+    if result.original_status == ErrorSpanStatusCode::Error
+        && result.final_status != ErrorSpanStatusCode::Error
         && !result.silent_demotion_detected
     {
         return Err("CRITICAL: ERROR status not preserved without detection".to_string());

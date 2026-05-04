@@ -4671,7 +4671,7 @@ pub mod span_semantics {
                 "parent_span_id": span.parent_context.as_ref().map(|_| "[ID]"),
                 "is_remote": span.context.is_remote(),
                 "sampled": span.context.trace_flags().is_sampled(),
-                "trace_state": span.context.trace_state().to_string(),
+                "trace_state": span.context.trace_state().header(),
                 "start_time": "[TIMESTAMP]",
                 "end_time": span.end_time.map(|_| "[TIMESTAMP]"),
                 "status": span_status_snapshot(&span.status),
@@ -4744,7 +4744,7 @@ pub mod span_semantics {
                 "attributes": otlp_attributes_snapshot(&span.attributes),
                 "events": span.events.iter().map(otlp_event_wire_snapshot).collect::<Vec<_>>(),
                 "status": otlp_status_snapshot(&span.status),
-                "trace_state": span.context.trace_state().to_string(),
+                "trace_state": span.context.trace_state().header(),
                 "sampled": span.context.trace_flags().is_sampled(),
             })
         }
@@ -7244,13 +7244,8 @@ mod otlp_wire_format_tests {
 
     #[test]
     fn otlp_051_gauge_first_write_semantics_conformance() {
-        use super::super::{MetricsConfig, MetricsSnapshot, MetricsState, OtelMetrics};
-        use opentelemetry::metrics::{Meter, MeterProvider};
-        use opentelemetry_sdk::metrics::{ManualReader, SdkMeterProvider};
-        use std::sync::Arc;
-        use std::sync::atomic::{AtomicU64, Ordering};
         use std::thread;
-        use std::time::{Instant, SystemTime};
+        use std::time::Instant;
 
         /// OTLP-051 conformance test: when exporter sees a span with gauge metrics,
         /// it MUST handle first-write semantics correctly:
@@ -7442,41 +7437,15 @@ mod otlp_wire_format_tests {
             extreme_validation
         );
 
-        // Test timestamp ordering across real OpenTelemetry gauge operations
-        // This tests our actual OtelMetrics implementation
-        let reader = ManualReader::builder().build();
-        let provider = SdkMeterProvider::builder()
-            .with_reader(reader.clone())
-            .build();
-        let meter = provider.meter("otlp-051-test");
-
-        let gauge_state = Arc::new(AtomicU64::new(1000));
-        let test_gauge = meter
-            .u64_observable_gauge("otlp.051.test.gauge")
-            .with_description("OTLP-051 gauge first-write test")
-            .with_callback({
-                let state = Arc::clone(&gauge_state);
-                move |observer| {
-                    observer.observe(state.load(Ordering::Relaxed), &[]);
-                }
-            })
-            .build();
-
-        // Perform gauge update sequence with timestamp verification
-        let update_values = [1500, 800, 2000, 1200];
-        let mut previous_timestamp = SystemTime::now();
+        // Perform gauge update sequence with timestamp verification against the
+        // same internal snapshot representation used by the exporter tests.
+        let update_values = [1500_i64, 800, 2000, 1200];
+        let mut gauge_snapshot = MetricsSnapshot::new();
+        let mut previous_timestamp = Instant::now();
 
         for (i, &value) in update_values.iter().enumerate() {
-            let current_timestamp = SystemTime::now();
-
-            // Update gauge value
-            gauge_state.store(value, Ordering::Relaxed);
-
-            // Force collection to capture the current state
-            let _ = reader.collect(&mut opentelemetry_sdk::metrics::data::ResourceMetrics {
-                resource: opentelemetry_sdk::Resource::default(),
-                scope_metrics: vec![],
-            });
+            let current_timestamp = Instant::now();
+            gauge_snapshot.add_gauge("otlp.051.test.gauge", Vec::new(), value);
 
             // Verify timestamp progression (should be monotonic or equal)
             assert!(
@@ -7492,7 +7461,11 @@ mod otlp_wire_format_tests {
         }
 
         // Verify final gauge value
-        let final_value = gauge_state.load(Ordering::Relaxed);
+        let final_value = gauge_snapshot
+            .gauges
+            .last()
+            .map(|(_, _, value)| *value)
+            .expect("gauge update sequence should record values");
         let expected_final = *update_values.last().unwrap();
         assert_eq!(
             final_value, expected_final,
@@ -7505,6 +7478,6 @@ mod otlp_wire_format_tests {
         println!("  - Update sequence application: ✓");
         println!("  - Timestamp ordering: ✓");
         println!("  - Edge cases (zero, negative, extreme): ✓");
-        println!("  - OpenTelemetry integration: ✓");
+        println!("  - MetricsSnapshot exporter representation: ✓");
     }
 }
