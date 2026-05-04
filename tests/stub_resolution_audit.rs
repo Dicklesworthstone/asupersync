@@ -8,6 +8,7 @@
 //!
 //! Probe naming: `probe_NN_description` where NN maps to the disposition matrix surface.
 
+use std::collections::BTreeSet;
 use std::fs;
 use std::path::Path;
 use std::process::Command;
@@ -41,6 +42,125 @@ fn path_is_git_ignored(path: &Path) -> bool {
         .arg(path)
         .status()
         .is_ok_and(|status| status.success())
+}
+
+#[derive(Debug, Clone, Eq, PartialEq, Ord, PartialOrd)]
+struct IncompleteMarker {
+    path: String,
+    line: usize,
+    kind: &'static str,
+    text: String,
+}
+
+fn brace_delta(line: &str) -> isize {
+    line.chars().filter(|ch| *ch == '{').count() as isize
+        - line.chars().filter(|ch| *ch == '}').count() as isize
+}
+
+fn production_incomplete_markers(path: &str, source: &str) -> Vec<IncompleteMarker> {
+    let lines = source.lines().collect::<Vec<_>>();
+    if lines
+        .iter()
+        .take(16)
+        .any(|line| line.contains("#![cfg(test)]"))
+    {
+        return Vec::new();
+    }
+
+    let mut hits = Vec::new();
+    let mut depth = 0isize;
+    let mut cfg_test_pending = false;
+    let mut test_attr_pending = false;
+    let mut cfg_test_depth: Option<isize> = None;
+    let mut test_fn_depth: Option<isize> = None;
+
+    for (index, line) in lines.iter().enumerate() {
+        let trimmed = line.trim();
+        if trimmed.starts_with("#[cfg(test)]") {
+            cfg_test_pending = true;
+        }
+        if trimmed.starts_with("#[test]") {
+            test_attr_pending = true;
+        }
+
+        let next_depth = depth + brace_delta(line);
+        let starts_cfg_test_scope = cfg_test_pending
+            && (trimmed.starts_with("mod ")
+                || trimmed.starts_with("fn ")
+                || trimmed.contains(" mod ")
+                || trimmed.contains(" fn "));
+        let starts_test_fn =
+            test_attr_pending && (trimmed.starts_with("fn ") || trimmed.contains(" fn "));
+
+        if starts_cfg_test_scope {
+            cfg_test_depth = Some(next_depth.max(depth + 1));
+            cfg_test_pending = false;
+        }
+        if starts_test_fn {
+            test_fn_depth = Some(next_depth.max(depth + 1));
+            test_attr_pending = false;
+        }
+
+        if cfg_test_depth.is_none() && test_fn_depth.is_none() {
+            let text = (*line).to_owned();
+            let lower = text.to_ascii_lowercase();
+            let kind = if text.contains("todo!(") {
+                Some("todo_macro")
+            } else if text.contains("unimplemented!(") {
+                Some("unimplemented_macro")
+            } else if text.contains("panic!(")
+                && (lower.contains("todo") || lower.contains("not implemented"))
+            {
+                Some("not_implemented_panic")
+            } else if text.contains("TODO") || text.contains("FIXME") {
+                Some("todo_comment")
+            } else {
+                None
+            };
+
+            if let Some(kind) = kind {
+                hits.push(IncompleteMarker {
+                    path: path.to_owned(),
+                    line: index + 1,
+                    kind,
+                    text: text.trim().to_owned(),
+                });
+            }
+        }
+
+        depth = next_depth;
+        if cfg_test_depth.is_some_and(|scope_depth| depth < scope_depth) {
+            cfg_test_depth = None;
+        }
+        if test_fn_depth.is_some_and(|scope_depth| depth < scope_depth) {
+            test_fn_depth = None;
+        }
+    }
+
+    hits
+}
+
+fn incomplete_marker_report_json(hits: &[IncompleteMarker]) -> String {
+    let unique = hits.iter().cloned().collect::<BTreeSet<_>>();
+    let markers = unique
+        .iter()
+        .map(|hit| {
+            serde_json::json!({
+                "path": hit.path,
+                "line": hit.line,
+                "kind": hit.kind,
+                "text": hit.text,
+            })
+        })
+        .collect::<Vec<_>>();
+
+    serde_json::json!({
+        "schema_version": "mock-code-finder-incomplete-marker-report-v1",
+        "scanned_roots": ["src"],
+        "marker_count": markers.len(),
+        "markers": markers,
+    })
+    .to_string()
 }
 
 // ── Probe 01: No stray binaries in src/ (Surface #14) ──────────────────
@@ -420,4 +540,118 @@ fn probe_18_stub_resolution_runner_publishes_stable_latest_manifests() {
     );
 
     eprintln!("[PASS] Stub-resolution runner publishes stable latest manifests");
+}
+
+// ── Probe 19: Mock-code-finder classifier contract ─────────────────────
+
+#[test]
+fn probe_19_mock_code_finder_classifier_contract() {
+    let source = r#"
+fn production_todo() {
+    // TODO: implement the real production behavior
+}
+
+fn production_not_implemented() {
+    panic!("not implemented yet");
+}
+
+fn production_invariant_panic() {
+    panic!("internal invariant violated");
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn ignored_test_markers() {
+        unimplemented!("test-only type check");
+        // TODO: test helper cleanup
+    }
+}
+
+#[test]
+fn standalone_test_marker() {
+    todo!("test-only macro");
+}
+"#;
+
+    let hits = production_incomplete_markers("src/demo.rs", source);
+    let hit_kinds = hits.iter().map(|hit| hit.kind).collect::<Vec<_>>();
+    assert_eq!(
+        hit_kinds,
+        vec!["todo_comment", "not_implemented_panic"],
+        "classifier must keep production incomplete markers while filtering test-only markers and invariant panics"
+    );
+
+    let mut duplicated = hits.clone();
+    duplicated.extend(hits.clone());
+    let once = incomplete_marker_report_json(&hits);
+    let twice = incomplete_marker_report_json(&duplicated);
+    assert_eq!(
+        once, twice,
+        "report serialization must be stable and de-duplicate repeated scanner output"
+    );
+    assert!(
+        once.contains("\"schema_version\":\"mock-code-finder-incomplete-marker-report-v1\"")
+            && once.contains("\"marker_count\":2"),
+        "serialized report must include schema and marker count: {once}"
+    );
+
+    eprintln!(
+        "[PASS] Mock-code-finder classifier filters tests, keeps prod findings, and serializes stably"
+    );
+}
+
+// ── Probe 20: Live production incomplete-marker gate ───────────────────
+
+#[test]
+fn probe_20_live_production_incomplete_markers_are_tracked() {
+    let known_markers = [(
+        "src/messaging/nats.rs",
+        "TODO: Re-establish subscriptions that existed before disconnect",
+        "asupersync-jh9g1j",
+    )];
+    let mut unknown = Vec::new();
+    let mut tracked = Vec::new();
+
+    for file in walk_rs_files(Path::new("src")) {
+        let path = file.to_string_lossy().replace('\\', "/");
+        let Ok(source) = fs::read_to_string(&file) else {
+            continue;
+        };
+        for hit in production_incomplete_markers(&path, &source) {
+            if let Some((_, _, bead_id)) = known_markers
+                .iter()
+                .find(|(known_path, text, _)| hit.path == *known_path && hit.text.contains(text))
+            {
+                assert!(
+                    bead_id.starts_with("asupersync-"),
+                    "known production marker {}:{} must be linked to a concrete asupersync bead id, got {bead_id}",
+                    hit.path,
+                    hit.line
+                );
+                tracked.push(format!("{}:{} -> {bead_id}", hit.path, hit.line));
+            } else {
+                unknown.push(format!(
+                    "{}:{}:{}: {}",
+                    hit.path, hit.line, hit.kind, hit.text
+                ));
+            }
+        }
+    }
+
+    let health = read_source("src/grpc/health.rs");
+    assert!(
+        !health.contains("TODO: Implement configurable authentication mode")
+            && !health.contains("Health check accessed without authentication validation"),
+        "stale gRPC health auth TODO must remain resolved under asupersync-xfx177"
+    );
+    assert!(
+        unknown.is_empty(),
+        "untracked production incomplete markers found; create a concrete br bead or add an explicit tracked-marker entry: {unknown:#?}"
+    );
+
+    eprintln!(
+        "[PASS] Live production incomplete markers are tracked: {}",
+        tracked.join(", ")
+    );
 }

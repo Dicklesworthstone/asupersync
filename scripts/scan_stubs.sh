@@ -261,7 +261,7 @@ check_no_crate_level_dead_code_allow() {
 
 check_no_todo_in_production() {
     local matches
-    matches="$(rg -n 'todo!\(' "${PROJECT_ROOT}/src" || true)"
+    matches="$(scan_production_rust_marker 'todo!\(' || true)"
     if [[ -z "$matches" ]]; then
         report_pass "ZR-SCAN-NO-TODO-IN-SRC" "No todo!() remains in production src/" "runtime source tree is free of todo!() sentinels"
     else
@@ -271,11 +271,128 @@ check_no_todo_in_production() {
 
 check_no_unimplemented_in_production() {
     local matches
-    matches="$(rg -n 'unimplemented!\(' "${PROJECT_ROOT}/src" || true)"
+    matches="$(scan_production_rust_marker 'unimplemented!\(' || true)"
     if [[ -z "$matches" ]]; then
         report_pass "ZR-SCAN-NO-UNIMPLEMENTED-IN-SRC" "No unimplemented!() remains in production src/" "runtime source tree is free of production unimplemented!() sentinels"
     else
         report_fail "ZR-SCAN-NO-UNIMPLEMENTED-IN-SRC" "Found unimplemented!() in production src/" "$matches"
+    fi
+}
+
+scan_production_rust_marker() {
+    local pattern="$1"
+    python3 - "$PROJECT_ROOT" "$pattern" <<'PY'
+import pathlib
+import re
+import sys
+
+root = pathlib.Path(sys.argv[1])
+pattern = re.compile(sys.argv[2])
+
+
+def brace_delta(line: str) -> int:
+    # Good enough for marker filtering: test modules/functions use ordinary
+    # braces, and marker comments/strings should not control test scope.
+    return line.count("{") - line.count("}")
+
+
+def production_lines(path: pathlib.Path) -> list[tuple[int, str]]:
+    text = path.read_text(encoding="utf-8", errors="replace")
+    lines = text.splitlines()
+    if any("#![cfg(test)]" in line for line in lines[:16]):
+        return []
+
+    out: list[tuple[int, str]] = []
+    depth = 0
+    cfg_test_pending = False
+    test_attr_pending = False
+    cfg_test_depth: int | None = None
+    test_fn_depth: int | None = None
+
+    for index, line in enumerate(lines, start=1):
+        stripped = line.strip()
+        if stripped.startswith("#[cfg(test)]"):
+            cfg_test_pending = True
+        if stripped.startswith("#[test]"):
+            test_attr_pending = True
+
+        delta = brace_delta(line)
+        next_depth = depth + delta
+        starts_cfg_test_scope = cfg_test_pending and (
+            stripped.startswith("mod ")
+            or stripped.startswith("fn ")
+            or " mod " in stripped
+            or " fn " in stripped
+        )
+        starts_test_fn = test_attr_pending and (
+            stripped.startswith("fn ") or " fn " in stripped
+        )
+
+        if starts_cfg_test_scope:
+            cfg_test_depth = max(next_depth, depth + 1)
+            cfg_test_pending = False
+        if starts_test_fn:
+            test_fn_depth = max(next_depth, depth + 1)
+            test_attr_pending = False
+
+        if cfg_test_depth is None and test_fn_depth is None and pattern.search(line):
+            out.append((index, line.rstrip()))
+
+        depth = next_depth
+        if cfg_test_depth is not None and depth < cfg_test_depth:
+            cfg_test_depth = None
+        if test_fn_depth is not None and depth < test_fn_depth:
+            test_fn_depth = None
+
+    return out
+
+
+for path in sorted((root / "src").rglob("*.rs")):
+    rel = path.relative_to(root).as_posix()
+    for line_no, line in production_lines(path):
+        print(f"{rel}:{line_no}:{line}")
+PY
+}
+
+check_production_todo_comments_are_tracked() {
+    local matches
+    matches="$(scan_production_rust_marker 'TODO|FIXME' || true)"
+    local unexpected=""
+    local tracked=""
+
+    while IFS= read -r line; do
+        [[ -z "$line" ]] && continue
+        if [[ "$line" == src/messaging/nats.rs:*"TODO: Re-establish subscriptions that existed before disconnect"* ]]; then
+            tracked+="${line} -> asupersync-jh9g1j"$'\n'
+        else
+            unexpected+="${line}"$'\n'
+        fi
+    done <<<"$matches"
+
+    if [[ -n "$unexpected" ]]; then
+        report_fail "ZR-SCAN-PROD-TODO-TRACKED" "Found untracked production TODO/FIXME markers" "$(printf '%s' "$unexpected" | sed '/^$/d'; printf '\nCreate a concrete br bead or add a specific tracked-marker entry.')"
+    else
+        report_pass "ZR-SCAN-PROD-TODO-TRACKED" "Production TODO/FIXME markers are tracked" "${tracked:-no live production TODO/FIXME markers}"
+    fi
+}
+
+check_no_not_implemented_panics_in_production() {
+    local matches
+    matches="$(scan_production_rust_marker 'panic!\([^)]*(TODO|todo|not implemented|Not implemented|NOT IMPLEMENTED)' || true)"
+    if [[ -z "$matches" ]]; then
+        report_pass "ZR-SCAN-NO-NOT-IMPLEMENTED-PANICS" "No not-implemented panic sentinels remain in production src/" "test-only audit panics are ignored by cfg(test) filtering"
+    else
+        report_fail "ZR-SCAN-NO-NOT-IMPLEMENTED-PANICS" "Found not-implemented panic sentinels in production src/" "$matches"
+    fi
+}
+
+check_grpc_health_auth_todo_resolved() {
+    local matches
+    matches="$(rg -n 'TODO: Implement configurable authentication mode|Health check accessed without authentication validation' "${PROJECT_ROOT}/src/grpc/health.rs" || true)"
+    if [[ -z "$matches" ]]; then
+        report_pass "ZR-SCAN-GRPC-HEALTH-XFX177-RESOLVED" "gRPC health auth TODO is resolved" "canonical blocker asupersync-xfx177 is closed; no stale TODO remains in src/grpc/health.rs"
+    else
+        report_fail "ZR-SCAN-GRPC-HEALTH-XFX177-RESOLVED" "gRPC health auth TODO is still present" "$matches"
     fi
 }
 
@@ -404,6 +521,9 @@ check_no_stray_binaries_in_src
 check_no_crate_level_dead_code_allow
 check_no_todo_in_production
 check_no_unimplemented_in_production
+check_production_todo_comments_are_tracked
+check_no_not_implemented_panics_in_production
+check_grpc_health_auth_todo_resolved
 check_combinator_compile_errors_are_gated
 check_transport_mock_is_gated
 check_no_conformance_dummy_panics
