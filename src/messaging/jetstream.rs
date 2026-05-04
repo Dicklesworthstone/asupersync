@@ -74,6 +74,38 @@ const MAX_STREAM_SUBJECT_BYTES: usize = 4 * 1024;
 /// recommendation.
 const MAX_PULL_BATCH: usize = 1024;
 
+fn redacted_name_fingerprint(value: &str) -> String {
+    // Stable FNV-1a fingerprint for deterministic redaction/logging.
+    let mut hash = 0xcbf2_9ce4_8422_2325_u64;
+    for byte in value.as_bytes() {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    format!("bytes={},fnv1a64={hash:016x}", value.len())
+}
+
+fn validate_pull_batch_size(batch: usize) -> Result<(), JsError> {
+    // br-asupersync-w7n2qx: cap the batch argument client-side.
+    // Vec::with_capacity(batch) below would otherwise allocate
+    // proportional to a caller-controlled value; usize::MAX panics
+    // the allocator and even moderate batches like 1_000_000 commit
+    // multi-megabyte allocations whose backing memory the server's
+    // own max_ack_pending will never let us fill. 1024 matches the
+    // typical batch ceiling in the upstream nats.go pull client.
+    if batch == 0 {
+        return Err(JsError::InvalidConfig(
+            "pull batch size must be > 0".to_string(),
+        ));
+    }
+    if batch > MAX_PULL_BATCH {
+        return Err(JsError::InvalidConfig(format!(
+            "pull batch size {batch} exceeds {MAX_PULL_BATCH}-message cap; \
+             issue multiple smaller pulls or raise the cap deliberately"
+        )));
+    }
+    Ok(())
+}
+
 /// br-asupersync-dpdmsy: a single `JetStreamContext` publishes through
 /// `&mut self`, so the honest per-context default is one outstanding publish
 /// request at a time. Anything broader needs an explicit multi-context
@@ -665,8 +697,9 @@ impl ConsumerConfig {
             .chars()
             .any(|ch| !matches!(ch, 'a'..='z' | 'A'..='Z' | '0'..='9' | '-' | '_'))
         {
+            let fingerprint = redacted_name_fingerprint(value);
             return Err(JsError::InvalidConfig(format!(
-                "consumer {field} must contain only ASCII letters, digits, '-' or '_' per JetStream spec: {value:?}"
+                "consumer {field} must contain only ASCII letters, digits, '-' or '_' per JetStream spec (fingerprint {fingerprint}, {char_count} chars)"
             )));
         }
 
@@ -700,8 +733,9 @@ impl ConsumerConfig {
             .chars()
             .any(|ch| !matches!(ch, 'a'..='z' | 'A'..='Z' | '0'..='9' | '-' | '_'))
         {
+            let fingerprint = redacted_name_fingerprint(name);
             return Err(JsError::InvalidConfig(format!(
-                "stream name must contain only ASCII letters, digits, '-' or '_': {name:?}"
+                "stream name must contain only ASCII letters, digits, '-' or '_' (fingerprint {fingerprint})"
             )));
         }
         Ok(())
@@ -1433,24 +1467,7 @@ impl Consumer {
     ) -> Result<Vec<JsMessage>, JsError> {
         cx.checkpoint().map_err(|_| NatsError::Cancelled)?;
 
-        // br-asupersync-w7n2qx: cap the batch argument client-side.
-        // Vec::with_capacity(batch) below would otherwise allocate
-        // proportional to a caller-controlled value; usize::MAX panics
-        // the allocator and even moderate batches like 1_000_000 commit
-        // multi-megabyte allocations whose backing memory the server's
-        // own max_ack_pending will never let us fill. 1024 matches the
-        // typical batch ceiling in the upstream nats.go pull client.
-        if batch == 0 {
-            return Err(JsError::InvalidConfig(
-                "pull batch size must be > 0".to_string(),
-            ));
-        }
-        if batch > MAX_PULL_BATCH {
-            return Err(JsError::InvalidConfig(format!(
-                "pull batch size {batch} exceeds {MAX_PULL_BATCH}-message cap; \
-                 issue multiple smaller pulls or raise the cap deliberately"
-            )));
-        }
+        validate_pull_batch_size(batch)?;
 
         let subject = format!(
             "{}.CONSUMER.MSG.NEXT.{}.{}",
@@ -3010,13 +3027,16 @@ mod tests {
 
     #[test]
     fn consumer_config_rejects_subject_injecting_names() {
-        let mut cfg = ConsumerConfig::new("worker.bad");
+        let raw_name = "worker.bad";
+        let mut cfg = ConsumerConfig::new(raw_name);
         let err = cfg.normalize_identity().unwrap_err();
         assert!(matches!(err, JsError::InvalidConfig(_)));
         assert!(
             err.to_string()
                 .contains("must contain only ASCII letters, digits, '-' or '_'")
         );
+        assert!(err.to_string().contains("fingerprint"));
+        assert!(!err.to_string().contains(raw_name));
     }
 
     #[test]
@@ -3056,15 +3076,287 @@ mod tests {
 
     #[test]
     fn stream_config_rejects_unicode_confusables() {
-        let err = ConsumerConfig::validate_stream_name("orders．prod").unwrap_err();
+        let raw_confusable = "orders．prod";
+        let err = ConsumerConfig::validate_stream_name(raw_confusable).unwrap_err();
         assert!(matches!(err, JsError::InvalidConfig(_)));
         assert!(err.to_string().contains("ASCII letters"));
+        assert!(err.to_string().contains("fingerprint"));
+        assert!(!err.to_string().contains(raw_confusable));
 
-        let err = ConsumerConfig::validate_stream_name("orders／prod").unwrap_err();
+        let raw_slash = "orders／prod";
+        let err = ConsumerConfig::validate_stream_name(raw_slash).unwrap_err();
         assert!(matches!(err, JsError::InvalidConfig(_)));
         assert!(err.to_string().contains("ASCII letters"));
+        assert!(err.to_string().contains("fingerprint"));
+        assert!(!err.to_string().contains(raw_slash));
 
         assert!(ConsumerConfig::validate_stream_name("orders_prod-1").is_ok());
+    }
+
+    #[test]
+    fn stream_name_validation_enforces_byte_boundary_and_keeps_valid_configs() {
+        let at_cap = "A".repeat(MAX_NAME_BYTES);
+        let over_cap = "A".repeat(MAX_NAME_BYTES + 1);
+
+        let empty = ConsumerConfig::validate_stream_name("").unwrap_err();
+        assert!(matches!(empty, JsError::InvalidConfig(_)));
+        assert!(empty.to_string().contains("must be non-empty"));
+
+        assert!(ConsumerConfig::validate_stream_name(&at_cap).is_ok());
+
+        let cfg = StreamConfig::new(at_cap.clone()).subjects(&["orders.>"]);
+        assert!(cfg.validate().is_ok());
+        assert!(cfg.to_json().contains(&format!("\"name\":\"{at_cap}\"")));
+
+        let err = ConsumerConfig::validate_stream_name(&over_cap).unwrap_err();
+        assert!(matches!(err, JsError::InvalidConfig(_)));
+        assert!(err.to_string().contains("256-byte cap"));
+        assert!(!err.to_string().contains(&over_cap));
+    }
+
+    #[test]
+    fn consumer_name_validation_enforces_char_and_byte_boundaries() {
+        let empty = ConsumerConfig::validate_consumer_name("name", Some("")).unwrap_err();
+        assert!(matches!(empty, JsError::InvalidConfig(_)));
+        assert!(empty.to_string().contains("must be non-empty"));
+
+        let at_char_cap = "a".repeat(MAX_CONSUMER_NAME_CHARS);
+        let over_char_cap = "a".repeat(MAX_CONSUMER_NAME_CHARS + 1);
+        let over_byte_cap = "🙂".repeat(70);
+
+        let mut cfg = ConsumerConfig::new(at_char_cap.clone());
+        assert!(cfg.validate().is_ok());
+        assert!(
+            cfg.to_json()
+                .contains(&format!("\"name\":\"{at_char_cap}\""))
+        );
+
+        let char_err = ConsumerConfig::new(over_char_cap.clone())
+            .validate()
+            .unwrap_err();
+        assert!(matches!(char_err, JsError::InvalidConfig(_)));
+        assert!(char_err.to_string().contains("128 characters"));
+        assert!(!char_err.to_string().contains(&over_char_cap));
+
+        let byte_err =
+            ConsumerConfig::validate_consumer_name("name", Some(&over_byte_cap)).unwrap_err();
+        assert!(matches!(byte_err, JsError::InvalidConfig(_)));
+        assert!(byte_err.to_string().contains("256-byte cap"));
+        assert!(!byte_err.to_string().contains(&over_byte_cap));
+    }
+
+    #[test]
+    fn pull_batch_validation_enforces_cap_and_keeps_request_shape() {
+        let zero = validate_pull_batch_size(0).unwrap_err();
+        assert!(matches!(zero, JsError::InvalidConfig(_)));
+        assert!(zero.to_string().contains("must be > 0"));
+
+        assert!(validate_pull_batch_size(MAX_PULL_BATCH).is_ok());
+
+        let over = validate_pull_batch_size(MAX_PULL_BATCH + 1).unwrap_err();
+        assert!(matches!(over, JsError::InvalidConfig(_)));
+        assert!(over.to_string().contains("1024-message cap"));
+
+        let request = build_pull_request_json(MAX_PULL_BATCH, 0, Some(4096));
+        assert_eq!(request, r#"{"batch":1024,"expires":0,"max_bytes":4096}"#);
+    }
+
+    #[test]
+    fn jetstream_length_cap_boundary_matrix_logs_structured_evidence() {
+        const EXACT_RCH_COMMAND: &str = "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_asupersync_s4p7iq_jetstream cargo test -p asupersync --lib jetstream_length_cap_boundary_matrix_logs_structured_evidence -- --nocapture";
+
+        fn log_scenario(
+            id: &str,
+            field_under_test: &str,
+            input_length: usize,
+            length_unit: &str,
+            configured_cap: usize,
+            result: &Result<(), JsError>,
+            sanitized_name_fingerprint: Option<String>,
+        ) {
+            let (accepted_rejected_verdict, error_kind) = match result {
+                Ok(()) => ("accepted", "none"),
+                Err(JsError::InvalidConfig(_)) => ("rejected", "invalid_config"),
+                Err(JsError::Nats(_)) => ("rejected", "nats"),
+                Err(JsError::Api { .. }) => ("rejected", "api"),
+                Err(JsError::StreamNotFound(_)) => ("rejected", "stream_not_found"),
+                Err(JsError::ConsumerNotFound { .. }) => ("rejected", "consumer_not_found"),
+                Err(JsError::NotAcked) => ("rejected", "not_acked"),
+                Err(JsError::AlreadyAcknowledged) => ("rejected", "already_acknowledged"),
+                Err(JsError::ParseError(_)) => ("rejected", "parse_error"),
+            };
+            eprintln!(
+                "{}",
+                json!({
+                    "id": id,
+                    "field_under_test": field_under_test,
+                    "input_length": input_length,
+                    "length_unit": length_unit,
+                    "configured_cap": configured_cap,
+                    "accepted_rejected_verdict": accepted_rejected_verdict,
+                    "error_kind": error_kind,
+                    "sanitized_name_fingerprint": sanitized_name_fingerprint,
+                    "rch_command": EXACT_RCH_COMMAND,
+                    "artifact_paths": [],
+                    "final_length_cap_verdict": "PASS",
+                })
+            );
+        }
+
+        let stream_at_cap = "A".repeat(MAX_NAME_BYTES);
+        let stream_over_cap = "A".repeat(MAX_NAME_BYTES + 1);
+        let consumer_at_char_cap = "a".repeat(MAX_CONSUMER_NAME_CHARS);
+        let consumer_over_char_cap = "a".repeat(MAX_CONSUMER_NAME_CHARS + 1);
+        let consumer_over_byte_cap = "🙂".repeat(70);
+        let invalid_stream = "orders.bad";
+        let invalid_consumer = "worker.bad";
+
+        let scenarios = [
+            (
+                "JETSTREAM-LEN-1",
+                "stream_name_bytes",
+                MAX_NAME_BYTES,
+                "bytes",
+                MAX_NAME_BYTES,
+                true,
+                ConsumerConfig::validate_stream_name(&stream_at_cap),
+                Some(stream_at_cap.as_str()),
+                Some(redacted_name_fingerprint(&stream_at_cap)),
+            ),
+            (
+                "JETSTREAM-LEN-2",
+                "stream_name_bytes",
+                MAX_NAME_BYTES + 1,
+                "bytes",
+                MAX_NAME_BYTES,
+                false,
+                ConsumerConfig::validate_stream_name(&stream_over_cap),
+                Some(stream_over_cap.as_str()),
+                Some(redacted_name_fingerprint(&stream_over_cap)),
+            ),
+            (
+                "JETSTREAM-LEN-3",
+                "stream_name_charset",
+                invalid_stream.len(),
+                "bytes",
+                MAX_NAME_BYTES,
+                false,
+                ConsumerConfig::validate_stream_name(invalid_stream),
+                Some(invalid_stream),
+                Some(redacted_name_fingerprint(invalid_stream)),
+            ),
+            (
+                "JETSTREAM-LEN-4",
+                "consumer_name_chars",
+                MAX_CONSUMER_NAME_CHARS,
+                "chars",
+                MAX_CONSUMER_NAME_CHARS,
+                true,
+                {
+                    let mut cfg = ConsumerConfig::new(consumer_at_char_cap.clone());
+                    cfg.validate()
+                },
+                Some(consumer_at_char_cap.as_str()),
+                Some(redacted_name_fingerprint(&consumer_at_char_cap)),
+            ),
+            (
+                "JETSTREAM-LEN-5",
+                "consumer_name_chars",
+                MAX_CONSUMER_NAME_CHARS + 1,
+                "chars",
+                MAX_CONSUMER_NAME_CHARS,
+                false,
+                {
+                    let mut cfg = ConsumerConfig::new(consumer_over_char_cap.clone());
+                    cfg.validate()
+                },
+                Some(consumer_over_char_cap.as_str()),
+                Some(redacted_name_fingerprint(&consumer_over_char_cap)),
+            ),
+            (
+                "JETSTREAM-LEN-6",
+                "consumer_name_bytes",
+                consumer_over_byte_cap.len(),
+                "bytes",
+                MAX_NAME_BYTES,
+                false,
+                ConsumerConfig::validate_consumer_name("name", Some(&consumer_over_byte_cap))
+                    .map(|_| ()),
+                Some(consumer_over_byte_cap.as_str()),
+                Some(redacted_name_fingerprint(&consumer_over_byte_cap)),
+            ),
+            (
+                "JETSTREAM-LEN-7",
+                "consumer_name_charset",
+                invalid_consumer.len(),
+                "bytes",
+                MAX_CONSUMER_NAME_CHARS,
+                false,
+                ConsumerConfig::validate_consumer_name("name", Some(invalid_consumer)).map(|_| ()),
+                Some(invalid_consumer),
+                Some(redacted_name_fingerprint(invalid_consumer)),
+            ),
+            (
+                "JETSTREAM-LEN-8",
+                "pull_batch",
+                0,
+                "messages",
+                MAX_PULL_BATCH,
+                false,
+                validate_pull_batch_size(0),
+                None,
+                None,
+            ),
+            (
+                "JETSTREAM-LEN-9",
+                "pull_batch",
+                MAX_PULL_BATCH,
+                "messages",
+                MAX_PULL_BATCH,
+                true,
+                validate_pull_batch_size(MAX_PULL_BATCH),
+                None,
+                None,
+            ),
+            (
+                "JETSTREAM-LEN-10",
+                "pull_batch",
+                MAX_PULL_BATCH + 1,
+                "messages",
+                MAX_PULL_BATCH,
+                false,
+                validate_pull_batch_size(MAX_PULL_BATCH + 1),
+                None,
+                None,
+            ),
+        ];
+
+        for (id, field, input_length, unit, cap, expect_ok, result, raw_input, fingerprint) in
+            scenarios
+        {
+            assert_eq!(
+                result.is_ok(),
+                expect_ok,
+                "{id} drifted for {field}: expected ok={expect_ok}, got {result:?}"
+            );
+            if let (Err(JsError::InvalidConfig(msg)), Some(raw_input)) = (&result, raw_input) {
+                assert!(
+                    !msg.contains(raw_input),
+                    "{id} leaked raw input in validation error: {msg}"
+                );
+            }
+            log_scenario(id, field, input_length, unit, cap, &result, fingerprint);
+        }
+
+        eprintln!(
+            "{}",
+            json!({
+                "id": "JETSTREAM-LEN-FINAL",
+                "rch_command": EXACT_RCH_COMMAND,
+                "artifact_paths": [],
+                "final_length_cap_verdict": "PASS",
+            })
+        );
     }
 
     #[test]
