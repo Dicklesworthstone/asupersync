@@ -253,6 +253,18 @@ mod tests {
         pub bytes_field: Vec<u8>,
     }
 
+    #[derive(Clone, PartialEq, prost::Message)]
+    pub struct OptionalU64VarintMessage {
+        #[prost(uint64, optional, tag = "1")]
+        pub value: Option<u64>,
+    }
+
+    #[derive(Clone, PartialEq, prost::Message)]
+    pub struct OptionalU32VarintMessage {
+        #[prost(uint32, optional, tag = "1")]
+        pub value: Option<u32>,
+    }
+
     #[test]
     fn test_prost_codec_roundtrip() {
         init_test("test_prost_codec_roundtrip");
@@ -429,6 +441,308 @@ mod tests {
             }
         }
         None
+    }
+
+    fn shortest_varint_len(mut value: u64) -> usize {
+        let mut len = 1usize;
+        while value >= 0x80 {
+            value >>= 7;
+            len += 1;
+        }
+        len
+    }
+
+    fn strict_decode_test_varint(input: &[u8]) -> Option<(u64, usize)> {
+        let mut value = 0u64;
+        let mut shift = 0u32;
+        for (idx, byte) in input.iter().copied().enumerate() {
+            let chunk = u64::from(byte & 0x7f);
+            if idx == 9 && chunk > 1 {
+                return None;
+            }
+            value |= chunk.checked_shl(shift)?;
+            if byte & 0x80 == 0 {
+                return Some((value, idx + 1));
+            }
+            if idx == 9 {
+                return None;
+            }
+            shift += 7;
+        }
+        None
+    }
+
+    fn shortest_varint_classification(
+        varint_bytes: &[u8],
+        decoded_value: Option<u64>,
+    ) -> &'static str {
+        match decoded_value {
+            Some(value) if shortest_varint_len(value) == varint_bytes.len() => "shortest",
+            Some(_) => "non_shortest",
+            None => "malformed",
+        }
+    }
+
+    fn encode_optional_u64_varint(
+        value: u64,
+    ) -> (
+        Bytes,
+        ProstCodec<OptionalU64VarintMessage, OptionalU64VarintMessage>,
+    ) {
+        let mut codec: ProstCodec<OptionalU64VarintMessage, OptionalU64VarintMessage> =
+            ProstCodec::new();
+        let encoded = codec
+            .encode(&OptionalU64VarintMessage { value: Some(value) })
+            .expect("encode optional u64 varint");
+        (encoded, codec)
+    }
+
+    fn encode_optional_u32_varint(
+        value: u32,
+    ) -> (
+        Bytes,
+        ProstCodec<OptionalU32VarintMessage, OptionalU32VarintMessage>,
+    ) {
+        let mut codec: ProstCodec<OptionalU32VarintMessage, OptionalU32VarintMessage> =
+            ProstCodec::new();
+        let encoded = codec
+            .encode(&OptionalU32VarintMessage { value: Some(value) })
+            .expect("encode optional u32 varint");
+        (encoded, codec)
+    }
+
+    fn single_field_varint_payload(encoded: &[u8]) -> &[u8] {
+        assert!(!encoded.is_empty(), "expected single-field varint payload");
+        assert_eq!(encoded[0], 0x08, "expected field-1 varint tag");
+        &encoded[1..]
+    }
+
+    fn classify_single_field_varint_wire(
+        bytes: &[u8],
+    ) -> (Option<u64>, Option<usize>, &'static str) {
+        if bytes.first() != Some(&0x08) {
+            return (None, None, "malformed");
+        }
+
+        let payload = &bytes[1..];
+        let Some((decoded_value, consumed)) = strict_decode_test_varint(payload) else {
+            return (None, None, "malformed");
+        };
+        if consumed != payload.len() {
+            return (None, None, "malformed");
+        }
+
+        (
+            Some(decoded_value),
+            Some(consumed),
+            shortest_varint_classification(payload, Some(decoded_value)),
+        )
+    }
+
+    #[test]
+    fn conformance_protobuf_varint_roundtrip_boundary_matrix() {
+        init_test("conformance_protobuf_varint_roundtrip_boundary_matrix");
+
+        const EXACT_RCH_COMMAND: &str = "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_asupersync_gnulez_varint cargo test -p asupersync --lib conformance_protobuf_varint_roundtrip_boundary_matrix -- --nocapture";
+
+        let log_case = |corpus_label: &str,
+                        input_byte_length: usize,
+                        decoded_value: Option<u64>,
+                        encoded_length: Option<usize>,
+                        shortest_classification: &str,
+                        error_kind: &str,
+                        final_verdict: &str| {
+            eprintln!(
+                "PROTOBUF_VARINT_ROUNDTRIP corpus_label={} input_byte_length={} decoded_value={} encoded_length={} shortest_classification={} error_kind={} exact_rch_command=\"{}\" artifact_paths=none final_varint_roundtrip_verdict={}",
+                corpus_label,
+                input_byte_length,
+                decoded_value.map_or_else(|| "none".to_string(), |value| value.to_string()),
+                encoded_length.map_or_else(|| "none".to_string(), |len| len.to_string()),
+                shortest_classification,
+                error_kind,
+                EXACT_RCH_COMMAND,
+                final_verdict,
+            );
+        };
+
+        struct ValidU64Case {
+            corpus_label: &'static str,
+            value: u64,
+        }
+
+        let valid_u64_cases = [
+            ValidU64Case {
+                corpus_label: "u64_zero",
+                value: 0,
+            },
+            ValidU64Case {
+                corpus_label: "u64_one",
+                value: 1,
+            },
+            ValidU64Case {
+                corpus_label: "u64_pow2_7",
+                value: 1_u64 << 7,
+            },
+            ValidU64Case {
+                corpus_label: "u64_pow2_14",
+                value: 1_u64 << 14,
+            },
+            ValidU64Case {
+                corpus_label: "u64_pow2_21",
+                value: 1_u64 << 21,
+            },
+            ValidU64Case {
+                corpus_label: "u64_pow2_28",
+                value: 1_u64 << 28,
+            },
+            ValidU64Case {
+                corpus_label: "u64_pow2_35",
+                value: 1_u64 << 35,
+            },
+            ValidU64Case {
+                corpus_label: "u64_pow2_42",
+                value: 1_u64 << 42,
+            },
+            ValidU64Case {
+                corpus_label: "u64_pow2_49",
+                value: 1_u64 << 49,
+            },
+            ValidU64Case {
+                corpus_label: "u64_pow2_56",
+                value: 1_u64 << 56,
+            },
+            ValidU64Case {
+                corpus_label: "u64_pow2_63",
+                value: 1_u64 << 63,
+            },
+            ValidU64Case {
+                corpus_label: "u64_max",
+                value: u64::MAX,
+            },
+        ];
+
+        for case in valid_u64_cases {
+            let (encoded, mut codec) = encode_optional_u64_varint(case.value);
+            let payload = single_field_varint_payload(encoded.as_ref());
+            let (decoded_value, consumed) =
+                decode_test_varint(payload).expect("u64 payload should decode");
+            assert_eq!(consumed, payload.len());
+            assert_eq!(decoded_value, case.value);
+            assert_eq!(payload.len(), shortest_varint_len(case.value));
+
+            let decoded = codec.decode(&encoded).expect("roundtrip decode u64");
+            assert_eq!(decoded.value, Some(case.value));
+
+            log_case(
+                case.corpus_label,
+                encoded.len(),
+                Some(decoded_value),
+                Some(payload.len()),
+                shortest_varint_classification(payload, Some(decoded_value)),
+                "ok",
+                "pass",
+            );
+        }
+
+        let (encoded_u32_max, mut u32_codec) = encode_optional_u32_varint(u32::MAX);
+        let payload_u32_max = single_field_varint_payload(encoded_u32_max.as_ref());
+        let (decoded_u32_max, consumed_u32_max) =
+            decode_test_varint(payload_u32_max).expect("u32 max payload should decode");
+        assert_eq!(consumed_u32_max, payload_u32_max.len());
+        assert_eq!(decoded_u32_max, u64::from(u32::MAX));
+        assert_eq!(
+            payload_u32_max.len(),
+            shortest_varint_len(u64::from(u32::MAX))
+        );
+        let decoded_u32_message = u32_codec
+            .decode(&encoded_u32_max)
+            .expect("roundtrip decode u32 max");
+        assert_eq!(decoded_u32_message.value, Some(u32::MAX));
+        log_case(
+            "u32_max",
+            encoded_u32_max.len(),
+            Some(decoded_u32_max),
+            Some(payload_u32_max.len()),
+            shortest_varint_classification(payload_u32_max, Some(decoded_u32_max)),
+            "ok",
+            "pass",
+        );
+
+        struct InvalidCase {
+            corpus_label: &'static str,
+            bytes: &'static [u8],
+            expected_error_kind: &'static str,
+            expected_decoded_value: Option<u64>,
+        }
+
+        let invalid_cases = [
+            InvalidCase {
+                corpus_label: "u64_one_non_shortest_manual",
+                bytes: &[0x08, 0x81, 0x00],
+                expected_error_kind: "ok",
+                expected_decoded_value: Some(1),
+            },
+            InvalidCase {
+                corpus_label: "overlong_varint_11_bytes",
+                bytes: &[
+                    0x08, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x00,
+                ],
+                expected_error_kind: "DecodeError",
+                expected_decoded_value: None,
+            },
+            InvalidCase {
+                corpus_label: "truncated_varint",
+                bytes: &[0x08, 0x80],
+                expected_error_kind: "DecodeError",
+                expected_decoded_value: None,
+            },
+            InvalidCase {
+                corpus_label: "continuation_overflow",
+                bytes: &[
+                    0x08, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x02,
+                ],
+                expected_error_kind: "DecodeError",
+                expected_decoded_value: None,
+            },
+            InvalidCase {
+                corpus_label: "arbitrary_malformed_bytes",
+                bytes: &[0xFF, 0x00, 0xFF],
+                expected_error_kind: "DecodeError",
+                expected_decoded_value: None,
+            },
+        ];
+
+        for case in invalid_cases {
+            let (decoded_value, encoded_length, shortest_classification) =
+                classify_single_field_varint_wire(case.bytes);
+
+            let mut codec: ProstCodec<OptionalU64VarintMessage, OptionalU64VarintMessage> =
+                ProstCodec::new();
+            let result = codec.decode(&Bytes::copy_from_slice(case.bytes));
+
+            match case.expected_error_kind {
+                "ok" => {
+                    let decoded = result.expect("non-shortest decode should still roundtrip");
+                    assert_eq!(decoded.value, case.expected_decoded_value);
+                }
+                "DecodeError" => {
+                    assert!(matches!(result, Err(ProtobufError::DecodeError(_))));
+                }
+                other => panic!("unexpected expected_error_kind {other}"),
+            }
+
+            log_case(
+                case.corpus_label,
+                case.bytes.len(),
+                decoded_value,
+                encoded_length,
+                shortest_classification,
+                case.expected_error_kind,
+                "pass",
+            );
+        }
+
+        crate::test_complete!("conformance_protobuf_varint_roundtrip_boundary_matrix");
     }
 
     #[test]
