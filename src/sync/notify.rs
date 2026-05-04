@@ -4550,9 +4550,6 @@ mod tests {
         let notify = Arc::new(Notify::new());
         let _notified_future = notify.notified();
 
-        // This compilation test will reveal the Send bounds issue
-        fn assert_send<T: Send>(_: T) {}
-
         // COMPILATION FAILURE EXPECTED HERE:
         // Error: `parking_lot::Mutex<WaiterSlab>` cannot be sent between threads safely
         // Root cause: WaiterEntry contains Option<Waker>, and Waker is !Send

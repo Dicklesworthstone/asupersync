@@ -3906,10 +3906,10 @@ mod tests {
 
         init_test("audit_cancel_during_recv_vs_send_race_coherent_semantics");
 
-        use std::sync::{Arc, Barrier};
         use std::sync::atomic::{AtomicU32, Ordering};
+        use std::sync::{Arc, Barrier};
         use std::thread;
-        use std::time::{Duration, Instant};
+        use std::time::Duration;
 
         println!("🏃 CANCEL-VS-SEND RACE COHERENCE AUDIT");
         println!("  - Scenario: Simultaneous send() + recv cancellation");
@@ -3927,24 +3927,21 @@ mod tests {
         println!("    3. Cancellation check (lowest priority)");
         println!("  - This means: value available → recv returns Ok(value) even if cancelled");
 
-        let runtime = crate::LabRuntime::new();
-
         // Test case 1: Value sent before cancellation check
         let (tx1, mut rx1) = channel::<i32>();
-        let outcome1 = runtime.run_until(async {
-            runtime.spawn(|cx| async move {
-                // Send value immediately
-                let send_result = tx1.send(cx, 42);
+        let cx1 = test_cx();
+        let outcome1 = {
+            // Send value immediately
+            let send_result = tx1.send(&cx1, 42);
 
-                // Then cancel the context
-                cx.set_cancel_requested(true);
+            // Then cancel the context
+            cx1.set_cancel_requested(true);
 
-                // Recv should still get the value (value check comes before cancel check)
-                let recv_result = rx1.recv(cx).await;
+            // Recv should still get the value (value check comes before cancel check)
+            let recv_result = block_on(rx1.recv(&cx1));
 
-                (send_result, recv_result)
-            })
-        });
+            (send_result, recv_result)
+        };
 
         crate::assert_with_log!(
             outcome1.0.is_ok(),
@@ -3985,38 +3982,31 @@ mod tests {
             // Sender thread: sends value at precise timing
             let tx_barrier = Arc::clone(&barrier);
             let sender_handle = thread::spawn(move || {
-                let runtime = crate::LabRuntime::new();
+                let cx = test_cx();
                 tx_barrier.wait(); // Synchronized start
 
-                runtime.run_until(async {
-                    runtime.spawn(|cx| async move {
-                        // Brief delay to increase race probability
-                        cx.sleep(Duration::from_nanos(iteration as u64 * 100)).await.ok();
+                // Brief delay to increase race probability without moving Cx
+                // across thread boundaries.
+                thread::sleep(Duration::from_nanos(iteration as u64 * 100));
 
-                        tx.send(cx, iteration)
-                    })
-                })
+                tx.send(&cx, iteration)
             });
 
             // Receiver thread: polls recv then gets cancelled
             let rx_barrier = Arc::clone(&barrier);
             let receiver_handle = thread::spawn(move || {
-                let runtime = crate::LabRuntime::new();
+                let cx = test_cx();
                 rx_barrier.wait(); // Synchronized start
 
-                runtime.run_until(async {
-                    runtime.spawn(|cx| async move {
-                        // Start recv polling
-                        let recv_fut = rx.recv(cx);
+                // Start recv polling
+                let recv_fut = rx.recv(&cx);
 
-                        // Brief delay then cancel
-                        cx.sleep(Duration::from_nanos(iteration as u64 * 50)).await.ok();
-                        cx.set_cancel_requested(true);
+                // Brief delay then cancel
+                thread::sleep(Duration::from_nanos(iteration as u64 * 50));
+                cx.set_cancel_requested(true);
 
-                        // Complete recv (may get value or cancellation)
-                        recv_fut.await
-                    })
-                })
+                // Complete recv (may get value or cancellation)
+                block_on(recv_fut)
             });
 
             // Coordinate the race
@@ -4044,6 +4034,10 @@ mod tests {
                     // Incoherent: send succeeded but recv thinks channel closed
                     false
                 }
+                (Ok(()), Err(RecvError::PolledAfterCompletion)) => {
+                    // Incoherent: this test creates a fresh receive future each iteration.
+                    false
+                }
                 (Err(_), Ok(_)) => {
                     // Impossible: send failed but recv got value
                     false
@@ -4065,9 +4059,12 @@ mod tests {
         let final_recv_cancelled = recv_cancelled_count.load(Ordering::Acquire);
 
         println!("  - Iterations: {}", iterations);
-        println!("  - Coherent outcomes: {}/{} ({:.1}%)",
-                final_coherent, iterations,
-                (final_coherent as f64 / iterations as f64) * 100.0);
+        println!(
+            "  - Coherent outcomes: {}/{} ({:.1}%)",
+            final_coherent,
+            iterations,
+            (final_coherent as f64 / iterations as f64) * 100.0
+        );
         println!("  - Send successes: {}", final_send_success);
         println!("  - Recv got value: {}", final_recv_value);
         println!("  - Recv cancelled: {}", final_recv_cancelled);
@@ -4077,7 +4074,10 @@ mod tests {
             final_coherent >= (iterations * 95) / 100, // At least 95% coherent
             "Race outcomes should be coherent",
             ">= 95%",
-            format!("{:.1}%", (final_coherent as f64 / iterations as f64) * 100.0)
+            format!(
+                "{:.1}%",
+                (final_coherent as f64 / iterations as f64) * 100.0
+            )
         );
 
         crate::assert_with_log!(
@@ -4122,11 +4122,11 @@ mod tests {
 
         init_test("audit_sender_poll_closed_spurious_wake_immunity");
 
-        use std::sync::{Arc, Barrier};
         use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::{Arc, Barrier};
+        use std::task::{Context, Poll, Waker};
         use std::thread;
         use std::time::Duration;
-        use std::task::{Context, Poll, Waker};
 
         println!("🚫 SPURIOUS-WAKE IMMUNITY AUDIT");
         println!("  - Target: Sender::poll_closed() spurious-wake resistance");
@@ -4223,7 +4223,10 @@ mod tests {
 
             if matches!(poll_result, Poll::Ready(_)) {
                 false_ready_stress.fetch_add(1, Ordering::Relaxed);
-                println!("    ❌ FALSE READY at iteration {}: {:?}", iteration, poll_result);
+                println!(
+                    "    ❌ FALSE READY at iteration {}: {:?}",
+                    iteration, poll_result
+                );
             }
 
             // Brief pause to allow any potential race conditions
@@ -4284,7 +4287,7 @@ mod tests {
         println!();
         println!("🧵 CONCURRENT SPURIOUS WAKE TEST:");
 
-        let (mut concurrent_sender, concurrent_receiver) = channel::<i64>();
+        let (concurrent_sender, concurrent_receiver) = channel::<i64>();
         let barrier = Arc::new(Barrier::new(3)); // poller + waker + coordinator
         let concurrent_false_ready = Arc::new(AtomicUsize::new(0));
 
@@ -4311,9 +4314,10 @@ mod tests {
         let poller_barrier = Arc::clone(&barrier);
         let poller_false_ready = Arc::clone(&concurrent_false_ready);
         let mut poller_sender = concurrent_sender;
-        let mut poller_context = Context::from_waker(&concurrent_waker);
+        let poller_waker = concurrent_waker.clone();
 
         let poller_handle = thread::spawn(move || {
+            let mut poller_context = Context::from_waker(&poller_waker);
             poller_barrier.wait(); // Wait for coordination
 
             // Initial poll
@@ -4336,14 +4340,22 @@ mod tests {
         barrier.wait();
 
         // Wait for completion
-        spurious_handle.join().expect("Spurious waker should complete");
+        spurious_handle
+            .join()
+            .expect("Spurious waker should complete");
         poller_handle.join().expect("Poller should complete");
 
         let concurrent_false_ready_final = concurrent_false_ready.load(Ordering::Acquire);
         let concurrent_wake_count_final = concurrent_wake_count.load(Ordering::Acquire);
 
-        println!("  - Concurrent spurious wakes: {}", concurrent_wake_count_final);
-        println!("  - Concurrent false Ready: {}", concurrent_false_ready_final);
+        println!(
+            "  - Concurrent spurious wakes: {}",
+            concurrent_wake_count_final
+        );
+        println!(
+            "  - Concurrent false Ready: {}",
+            concurrent_false_ready_final
+        );
 
         crate::assert_with_log!(
             concurrent_false_ready_final == 0,
@@ -4359,9 +4371,15 @@ mod tests {
         println!();
         println!("✅ SOUND: Spurious-wake immunity verified");
         println!("  - Basic spurious wake: Pending → wake → Pending ✅");
-        println!("  - Stress test: {} spurious wakes, 0 false Ready ✅", spurious_iterations);
+        println!(
+            "  - Stress test: {} spurious wakes, 0 false Ready ✅",
+            spurious_iterations
+        );
         println!("  - Legitimate Ready: Only on actual receiver drop ✅");
-        println!("  - Concurrent safety: {} concurrent wakes, 0 false Ready ✅", concurrent_wake_count_final);
+        println!(
+            "  - Concurrent safety: {} concurrent wakes, 0 false Ready ✅",
+            concurrent_wake_count_final
+        );
         println!();
         println!("  - Implementation correctness:");
         println!("    • poll_closed checks receiver_dropped on every poll ✅");
@@ -4425,8 +4443,14 @@ mod tests {
         }
 
         println!("📊 Box<T> Transfer Analysis:");
-        println!("  - Large value size: {} bytes", std::mem::size_of::<LargeData>());
-        println!("  - Box<LargeData> size: {} bytes", std::mem::size_of::<Box<LargeData>>());
+        println!(
+            "  - Large value size: {} bytes",
+            std::mem::size_of::<LargeData>()
+        );
+        println!(
+            "  - Box<LargeData> size: {} bytes",
+            std::mem::size_of::<Box<LargeData>>()
+        );
 
         // Phase 2: Verify Box<T> storage in channel
         let cx = test_cx();
@@ -4472,9 +4496,9 @@ mod tests {
 
         // Phase 6: Verify data integrity
         crate::assert_with_log!(
-            received_box.marker == 0xDEADBEEF,
+            received_box.marker == 0xDEADBEEF_u64,
             "Box<T> data should be intact",
-            0xDEADBEEF,
+            0xDEADBEEF_u64,
             received_box.marker
         );
 
@@ -4518,10 +4542,15 @@ mod tests {
         println!("🔬 Performance Implications:");
         println!("  - Box<T> transfer: O(1) pointer move");
         println!("  - No memcpy of underlying T data");
-        println!("  - Channel overhead: {} bytes vs {} bytes data",
-                 channel_value_size, std::mem::size_of::<LargeData>());
-        println!("  - Ratio: {:.1}x more efficient than inline storage",
-                 std::mem::size_of::<LargeData>() as f64 / channel_value_size as f64);
+        println!(
+            "  - Channel overhead: {} bytes vs {} bytes data",
+            channel_value_size,
+            std::mem::size_of::<LargeData>()
+        );
+        println!(
+            "  - Ratio: {:.1}x more efficient than inline storage",
+            std::mem::size_of::<LargeData>() as f64 / channel_value_size as f64
+        );
 
         // Behavior is SOUND - no performance bead needed
         println!();
@@ -4619,7 +4648,7 @@ mod tests {
             let (sender, mut receiver) = channel::<TestValue>();
             let cx = test_cx();
 
-            let test_value = TestValue {
+            let _test_value = TestValue {
                 data: "phase3_permit_drop".to_string(),
                 id: 3001,
             };
@@ -4697,7 +4726,10 @@ mod tests {
 
         println!("    - Successful sends: {}", successful_sends);
         println!("    - Cancelled sends: {}", cancelled_sends);
-        println!("    - Receiver closed observations: {}", receiver_closed_observations);
+        println!(
+            "    - Receiver closed observations: {}",
+            receiver_closed_observations
+        );
 
         crate::assert_with_log!(
             successful_sends + cancelled_sends == STRESS_ITERATIONS,
@@ -4743,11 +4775,17 @@ mod tests {
                     println!("    - Permit send succeeded despite cancelled context ✅");
                     // Receiver should be able to receive the value
                     let recv_result = receiver.try_recv();
-                    assert!(recv_result.is_ok(), "Should be able to receive after valid permit send");
+                    assert!(
+                        recv_result.is_ok(),
+                        "Should be able to receive after valid permit send"
+                    );
                     println!("    - Value successfully received ✅");
                 }
                 Err(SendError::Disconnected(_)) => {
                     println!("    - Send failed: receiver disconnected ✅");
+                }
+                Err(SendError::Cancelled(_)) => {
+                    panic!("Unexpected cancelled error after successful reserve");
                 }
             }
         }
@@ -4903,7 +4941,8 @@ mod tests {
         println!("  - Challenge: Must work without cloning or default construction");
 
         // Create the test value
-        let test_behavior = Box::new("unique_test_resource_v1".to_string()) as Box<dyn CustomBehavior>;
+        let test_behavior =
+            Box::new("unique_test_resource_v1".to_string()) as Box<dyn CustomBehavior>;
         let expected_identity = test_behavior.identify().to_string();
         let expected_unique_val = test_behavior.unique_value();
         let identity_marker = 0x1337_BEEF_DEAD_C0DEu64;
@@ -4932,8 +4971,11 @@ mod tests {
             Ok(()) => {
                 println!("  ✅ Send successful - value moved into channel");
             }
-            Err(send_err) => {
-                panic!("❌ Send failed unexpectedly: {:?}", send_err);
+            Err(SendError::Disconnected(_)) => {
+                panic!("❌ Send failed unexpectedly: receiver disconnected");
+            }
+            Err(SendError::Cancelled(_)) => {
+                panic!("❌ Send failed unexpectedly: cx cancelled");
             }
         }
 
@@ -4941,10 +4983,7 @@ mod tests {
         println!("🔄 Phase 2: Move value out of oneshot::Receiver::recv()");
 
         // Receive the value back
-        let runtime = crate::LabRuntime::new();
-        let received_resource = runtime.run_until(async {
-            receiver.recv(&cx).await
-        });
+        let received_resource = block_on(receiver.recv(&cx));
 
         match received_resource {
             Ok(resource) => {
@@ -4962,12 +5001,18 @@ mod tests {
                 println!("  - Received marker: 0x{:X}", received_marker);
 
                 // Assert identity preservation
-                assert_eq!(received_identity, expected_identity,
-                    "Trait object identity should be preserved across channel transfer");
-                assert_eq!(received_unique_val, expected_unique_val,
-                    "Trait object behavior should be preserved across channel transfer");
-                assert_eq!(received_marker, identity_marker,
-                    "Identity marker should be preserved across channel transfer");
+                assert_eq!(
+                    received_identity, expected_identity,
+                    "Trait object identity should be preserved across channel transfer"
+                );
+                assert_eq!(
+                    received_unique_val, expected_unique_val,
+                    "Trait object behavior should be preserved across channel transfer"
+                );
+                assert_eq!(
+                    received_marker, identity_marker,
+                    "Identity marker should be preserved across channel transfer"
+                );
 
                 println!("  ✅ Identity verification passed - same logical instance");
             }
@@ -5051,10 +5096,15 @@ mod tests {
         println!("  - Sender has no awareness of receiver state ✅");
 
         // Verify sender shows receiver as alive before drop
-        assert!(!sender.is_closed(),
-            "Sender should not see receiver as closed initially");
+        assert!(
+            !sender.is_closed(),
+            "Sender should not see receiver as closed initially"
+        );
 
-        println!("  - is_closed() shows receiver alive: {} ✅", !sender.is_closed());
+        println!(
+            "  - is_closed() shows receiver alive: {} ✅",
+            !sender.is_closed()
+        );
 
         println!();
         println!("💀 Phase 2: Drop receiver WITHOUT sender knowledge");
@@ -5066,10 +5116,15 @@ mod tests {
         println!("  - Receiver dropped silently (no notifications) ✅");
 
         // Verify the flag is set correctly
-        assert!(sender.is_closed(),
-            "Sender should detect receiver closure via is_closed() after drop");
+        assert!(
+            sender.is_closed(),
+            "Sender should detect receiver closure via is_closed() after drop"
+        );
 
-        println!("  - is_closed() now shows receiver dropped: {} ✅", sender.is_closed());
+        println!(
+            "  - is_closed() now shows receiver dropped: {} ✅",
+            sender.is_closed()
+        );
 
         println!();
         println!("🚀 Phase 3: Attempt send() without any prior poll_closed()");
@@ -5078,7 +5133,9 @@ mod tests {
         // and return the value in the error, not silently succeed
         match sender.send(&cx, test_value) {
             Ok(()) => {
-                panic!("❌ BUG: send() succeeded when receiver was dropped! This is a silent data loss bug.");
+                panic!(
+                    "❌ BUG: send() succeeded when receiver was dropped! This is a silent data loss bug."
+                );
             }
             Err(SendError::Disconnected(returned_value)) => {
                 println!("  ✅ send() correctly returned Err(SendError::Disconnected(value))");
@@ -5086,13 +5143,21 @@ mod tests {
                 println!("  - Returned value: '{}' ✅", returned_value);
 
                 // Verify the exact value was returned
-                assert_eq!(returned_value, expected_value,
-                    "send() should return the exact value that was attempted to be sent");
+                assert_eq!(
+                    returned_value, expected_value,
+                    "send() should return the exact value that was attempted to be sent"
+                );
 
-                println!("  - Value identity preserved: {} ✅", returned_value == expected_value);
+                println!(
+                    "  - Value identity preserved: {} ✅",
+                    returned_value == expected_value
+                );
             }
             Err(SendError::Cancelled(returned_value)) => {
-                panic!("❌ Unexpected Cancelled error (context was not cancelled): {}", returned_value);
+                panic!(
+                    "❌ Unexpected Cancelled error (context was not cancelled): {}",
+                    returned_value
+                );
             }
         }
 
@@ -5145,8 +5210,8 @@ mod tests {
 
         init_test("audit_sender_recv_race_during_drop_value_preservation");
 
-        use std::sync::atomic::{AtomicUsize, Ordering};
         use std::sync::Arc;
+        use std::sync::atomic::{AtomicUsize, Ordering};
         use std::thread;
         use std::time::Duration;
 
@@ -5165,7 +5230,10 @@ mod tests {
         const BATCH_SIZE: usize = 50; // Process in batches to avoid thread explosion
 
         println!();
-        println!("🔬 Phase 1: High-concurrency race testing ({} iterations)", RACE_ITERATIONS);
+        println!(
+            "🔬 Phase 1: High-concurrency race testing ({} iterations)",
+            RACE_ITERATIONS
+        );
 
         for batch_start in (0..RACE_ITERATIONS).step_by(BATCH_SIZE) {
             let batch_end = std::cmp::min(batch_start + BATCH_SIZE, RACE_ITERATIONS);
@@ -5175,7 +5243,7 @@ mod tests {
 
             for iteration in batch_start..batch_end {
                 let returned_counter = Arc::clone(&values_returned_to_sender);
-                let extracted_counter = Arc::clone(&values_extracted_by_receiver);
+                let _extracted_counter = Arc::clone(&values_extracted_by_receiver);
                 let unexpected_counter = Arc::clone(&unexpected_outcomes);
 
                 let handle = thread::spawn(move || {
@@ -5229,18 +5297,26 @@ mod tests {
                             // Sender succeeded - this should be impossible since receiver was dropped
                             // This would indicate a critical race condition bug
                             unexpected_counter.fetch_add(1, Ordering::SeqCst);
-                            eprintln!("❌ CRITICAL BUG: send() succeeded when receiver was dropped!");
+                            eprintln!(
+                                "❌ CRITICAL BUG: send() succeeded when receiver was dropped!"
+                            );
                         }
                         Err(SendError::Disconnected(returned_value)) => {
                             // Expected: receiver was dropped, value returned to sender
-                            assert_eq!(returned_value, expected_value,
-                                "Returned value should match original for iteration {}", iteration);
+                            assert_eq!(
+                                returned_value, expected_value,
+                                "Returned value should match original for iteration {}",
+                                iteration
+                            );
                             returned_counter.fetch_add(1, Ordering::SeqCst);
                         }
                         Err(SendError::Cancelled(returned_value)) => {
                             // Should not happen since Cx is not cancelled
-                            assert_eq!(returned_value, expected_value,
-                                "Cancelled value should match original for iteration {}", iteration);
+                            assert_eq!(
+                                returned_value, expected_value,
+                                "Cancelled value should match original for iteration {}",
+                                iteration
+                            );
                             unexpected_counter.fetch_add(1, Ordering::SeqCst);
                             eprintln!("⚠️  Unexpected cancelled error for iteration {}", iteration);
                         }
@@ -5269,14 +5345,22 @@ mod tests {
         println!("  - Values returned to sender: {}", final_returned);
         println!("  - Values extracted by receiver: {}", final_extracted);
         println!("  - Unexpected outcomes: {}", final_unexpected);
-        println!("  - Total accounted for: {}", final_returned + final_extracted + final_unexpected);
+        println!(
+            "  - Total accounted for: {}",
+            final_returned + final_extracted + final_unexpected
+        );
 
         // Critical assertions
-        assert_eq!(final_unexpected, 0,
-            "CRITICAL: No unexpected outcomes should occur - all values must be preserved");
+        assert_eq!(
+            final_unexpected, 0,
+            "CRITICAL: No unexpected outcomes should occur - all values must be preserved"
+        );
 
-        assert_eq!(final_returned + final_extracted + final_unexpected, RACE_ITERATIONS,
-            "CRITICAL: All values must be accounted for - none should be silently lost");
+        assert_eq!(
+            final_returned + final_extracted + final_unexpected,
+            RACE_ITERATIONS,
+            "CRITICAL: All values must be accounted for - none should be silently lost"
+        );
 
         println!();
         println!("🔬 RACE CONDITION ANALYSIS:");
@@ -5306,8 +5390,11 @@ mod tests {
         println!("  - Scenario 1 (drop-first): value returned via Err(SendError) ✅");
         println!("  - Scenario 2 (send-first): value extracted by receiver.drop() ✅");
         println!("  - Scenario 3 (true-race): serialized to scenario 1 or 2 ✅");
-        println!("  - No value loss: {} iterations, {} values preserved ✅",
-                 RACE_ITERATIONS, final_returned + final_extracted);
+        println!(
+            "  - No value loss: {} iterations, {} values preserved ✅",
+            RACE_ITERATIONS,
+            final_returned + final_extracted
+        );
 
         println!();
         println!("🏆 VERDICT: SOUND - Race condition handled correctly");
@@ -5335,7 +5422,7 @@ mod tests {
         init_test("audit_concurrent_send_drop_exact_moment_race_no_silent_success");
 
         use std::sync::Arc;
-        use std::sync::atomic::{AtomicUsize, AtomicBool, Ordering};
+        use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
         use std::thread;
         use std::time::Duration;
 
@@ -5355,7 +5442,10 @@ mod tests {
         const BATCH_SIZE: usize = 100;
 
         println!();
-        println!("🔬 Phase 1: Exact-moment race testing ({} iterations)", EXACT_MOMENT_ITERATIONS);
+        println!(
+            "🔬 Phase 1: Exact-moment race testing ({} iterations)",
+            EXACT_MOMENT_ITERATIONS
+        );
 
         for batch_start in (0..EXACT_MOMENT_ITERATIONS).step_by(BATCH_SIZE) {
             let batch_end = std::cmp::min(batch_start + BATCH_SIZE, EXACT_MOMENT_ITERATIONS);
@@ -5400,7 +5490,7 @@ mod tests {
                         sender_send_flag.store(true, Ordering::SeqCst);
 
                         // Wait for drop to start (if it does first)
-                        while !receiver_drop_flag.load(Ordering::Acquire) {
+                        while !sender_drop_flag.load(Ordering::Acquire) {
                             thread::yield_now();
                             // Don't wait too long to avoid deadlock
                             if sender_send_flag.load(Ordering::Acquire) {
@@ -5420,7 +5510,7 @@ mod tests {
                         receiver_drop_flag.store(true, Ordering::SeqCst);
 
                         // Wait for send to start (if it does first)
-                        while !sender_send_flag.load(Ordering::Acquire) {
+                        while !receiver_send_flag.load(Ordering::Acquire) {
                             thread::yield_now();
                             // Don't wait too long to avoid deadlock
                             if receiver_drop_flag.load(Ordering::Acquire) {
@@ -5445,19 +5535,28 @@ mod tests {
                             success_counter.fetch_add(1, Ordering::SeqCst);
 
                             // This might indicate a race condition bug
-                            eprintln!("⚠️  Iteration {}: send() returned Ok() despite receiver drop!", iteration);
+                            eprintln!(
+                                "⚠️  Iteration {}: send() returned Ok() despite receiver drop!",
+                                iteration
+                            );
                             bug_counter.fetch_add(1, Ordering::SeqCst);
                         }
                         Err(SendError::Disconnected(returned_value)) => {
                             // Expected outcome: receiver was dropped, value returned
-                            assert_eq!(returned_value, expected_value,
-                                "Disconnected error should return original value for iteration {}", iteration);
+                            assert_eq!(
+                                returned_value, expected_value,
+                                "Disconnected error should return original value for iteration {}",
+                                iteration
+                            );
                             disconnected_counter.fetch_add(1, Ordering::SeqCst);
                         }
                         Err(SendError::Cancelled(returned_value)) => {
                             // Unexpected: context was not cancelled
-                            assert_eq!(returned_value, expected_value,
-                                "Cancelled error should return original value for iteration {}", iteration);
+                            assert_eq!(
+                                returned_value, expected_value,
+                                "Cancelled error should return original value for iteration {}",
+                                iteration
+                            );
                             cancelled_counter.fetch_add(1, Ordering::SeqCst);
                             eprintln!("⚠️  Iteration {}: unexpected Cancelled error", iteration);
                         }
@@ -5493,18 +5592,26 @@ mod tests {
 
         // CRITICAL ASSERTION: No silent success bugs allowed
         if final_bugs > 0 {
-            panic!("❌ CRITICAL BUG: {} instances of send() returning Ok() when receiver was dropped! \
-                   This violates asupersync semantics and causes silent data loss.", final_bugs);
+            panic!(
+                "❌ CRITICAL BUG: {} instances of send() returning Ok() when receiver was dropped! \
+                   This violates asupersync semantics and causes silent data loss.",
+                final_bugs
+            );
         }
 
-        assert_eq!(total_outcomes, EXACT_MOMENT_ITERATIONS,
-            "All iterations must produce a valid outcome");
+        assert_eq!(
+            total_outcomes, EXACT_MOMENT_ITERATIONS,
+            "All iterations must produce a valid outcome"
+        );
 
         println!();
         println!("🔬 RACE OUTCOME ANALYSIS:");
 
         if final_success > 0 {
-            println!("⚠️  WARNING: {} send() operations succeeded despite receiver drop", final_success);
+            println!(
+                "⚠️  WARNING: {} send() operations succeeded despite receiver drop",
+                final_success
+            );
             println!("    This suggests either:");
             println!("    1. Race timing allowed some sends to complete before drop");
             println!("    2. Test synchronization has edge cases");
@@ -5519,14 +5626,18 @@ mod tests {
             println!("🏆 PERFECT: All send() operations correctly detected receiver drop ✅");
         }
 
-        println!("  - Disconnected outcomes: {} ({:.1}%)",
-                final_disconnected,
-                final_disconnected as f64 / EXACT_MOMENT_ITERATIONS as f64 * 100.0);
+        println!(
+            "  - Disconnected outcomes: {} ({:.1}%)",
+            final_disconnected,
+            final_disconnected as f64 / EXACT_MOMENT_ITERATIONS as f64 * 100.0
+        );
 
         if final_cancelled > 0 {
-            println!("⚠️  Unexpected cancelled outcomes: {} ({:.1}%)",
-                    final_cancelled,
-                    final_cancelled as f64 / EXACT_MOMENT_ITERATIONS as f64 * 100.0);
+            println!(
+                "⚠️  Unexpected cancelled outcomes: {} ({:.1}%)",
+                final_cancelled,
+                final_cancelled as f64 / EXACT_MOMENT_ITERATIONS as f64 * 100.0
+            );
         }
 
         println!();
@@ -5537,9 +5648,15 @@ mod tests {
 
         println!();
         println!("📋 ASUPERSYNC SEMANTICS VERIFICATION:");
-        println!("  - Send observes receiver drop: {} successes vs {} expected",
-                final_disconnected, EXACT_MOMENT_ITERATIONS - final_success);
-        println!("  - No silent data loss: {} violations detected", final_bugs);
+        println!(
+            "  - Send observes receiver drop: {} successes vs {} expected",
+            final_disconnected,
+            EXACT_MOMENT_ITERATIONS - final_success
+        );
+        println!(
+            "  - No silent data loss: {} violations detected",
+            final_bugs
+        );
         println!("  - Value preservation: All returned values verified ✅");
 
         println!();
@@ -5552,8 +5669,10 @@ mod tests {
         } else if final_bugs == 0 {
             println!("⚠️  VERDICT: INVESTIGATE - High success rate suspicious");
             println!("  - No silent bugs detected ✅");
-            println!("  - But {:.1}% success rate warrants investigation",
-                    final_success as f64 / EXACT_MOMENT_ITERATIONS as f64 * 100.0);
+            println!(
+                "  - But {:.1}% success rate warrants investigation",
+                final_success as f64 / EXACT_MOMENT_ITERATIONS as f64 * 100.0
+            );
         } else {
             println!("❌ VERDICT: CRITICAL BUG - Silent success violations detected");
             println!("  - {} instances of forbidden silent success", final_bugs);
@@ -5600,8 +5719,10 @@ mod tests {
             let (sender, mut receiver) = channel::<String>();
             let cx = test_cx();
 
-            // Create receiver future but DON'T poll it
-            let _receiver_future = receiver.recv(&cx);
+            // Create receiver future but DON'T poll it.
+            {
+                let _receiver_future = receiver.recv(&cx);
+            }
             println!("  - Created unpopulated RecvFuture (not polled)");
 
             // First try_recv should return Empty
@@ -5625,12 +5746,17 @@ mod tests {
             let second_try = receiver.try_recv();
             match second_try {
                 Ok(received_value) => {
-                    assert_eq!(received_value, expected_value,
-                        "Retrieved value should match sent value");
+                    assert_eq!(
+                        received_value, expected_value,
+                        "Retrieved value should match sent value"
+                    );
                     println!("  - Second try_recv correctly returns sent value ✅");
                 }
                 Err(err) => {
-                    panic!("❌ CRITICAL BUG: Second try_recv returned error {:?}, value lost!", err);
+                    panic!(
+                        "❌ CRITICAL BUG: Second try_recv returned error {:?}, value lost!",
+                        err
+                    );
                 }
             }
 
@@ -5651,14 +5777,18 @@ mod tests {
             let (sender, mut receiver) = channel::<String>();
             let cx = test_cx();
 
-            // Create unpopulated RecvFuture
-            let _receiver_future = receiver.recv(&cx);
+            // Create unpopulated RecvFuture.
+            {
+                let _receiver_future = receiver.recv(&cx);
+            }
 
             // Pattern: try_recv(Empty) → send → try_recv(should succeed)
             let first_result = receiver.try_recv();
             if !matches!(first_result, Err(TryRecvError::Empty)) {
-                panic!("Iteration {}: First try_recv should return Empty, got {:?}",
-                       iteration, first_result);
+                panic!(
+                    "Iteration {}: First try_recv should return Empty, got {:?}",
+                    iteration, first_result
+                );
             }
 
             // Send the value
@@ -5672,14 +5802,18 @@ mod tests {
                         success_counter.fetch_add(1, Ordering::SeqCst);
                     } else {
                         bug_counter.fetch_add(1, Ordering::SeqCst);
-                        eprintln!("❌ Iteration {}: Value corruption! Expected '{}', got '{}'",
-                                iteration, expected_value, received_value);
+                        eprintln!(
+                            "❌ Iteration {}: Value corruption! Expected '{}', got '{}'",
+                            iteration, expected_value, received_value
+                        );
                     }
                 }
                 Err(err) => {
                     bug_counter.fetch_add(1, Ordering::SeqCst);
-                    eprintln!("❌ Iteration {}: Value loss! try_recv returned error {:?}",
-                            iteration, err);
+                    eprintln!(
+                        "❌ Iteration {}: Value loss! try_recv returned error {:?}",
+                        iteration, err
+                    );
                 }
             }
 
@@ -5696,16 +5830,23 @@ mod tests {
         println!("  - Total iterations: {}", TEST_ITERATIONS);
         println!("  - Successful retrievals: {}", final_successes);
         println!("  - Value loss/corruption bugs: {}", final_bugs);
-        println!("  - Success rate: {:.2}%",
-                (final_successes as f64 / TEST_ITERATIONS as f64) * 100.0);
+        println!(
+            "  - Success rate: {:.2}%",
+            (final_successes as f64 / TEST_ITERATIONS as f64) * 100.0
+        );
 
         // Critical assertion: No value loss allowed
         if final_bugs > 0 {
-            panic!("❌ CRITICAL BUG: {} instances of value loss or corruption detected!", final_bugs);
+            panic!(
+                "❌ CRITICAL BUG: {} instances of value loss or corruption detected!",
+                final_bugs
+            );
         }
 
-        assert_eq!(final_successes, TEST_ITERATIONS,
-            "All iterations should successfully retrieve values");
+        assert_eq!(
+            final_successes, TEST_ITERATIONS,
+            "All iterations should successfully retrieve values"
+        );
 
         println!();
         println!("🔬 Phase 3: Concurrent interaction testing");
@@ -5727,8 +5868,10 @@ mod tests {
                 let (sender, mut receiver) = channel::<String>();
                 let cx = test_cx();
 
-                // Create unpopulated future
-                let _future = receiver.recv(&cx);
+                // Create unpopulated future.
+                {
+                    let _future = receiver.recv(&cx);
+                }
 
                 // Sequence with small delays to increase race probability
                 match receiver.try_recv() {
@@ -5751,8 +5894,10 @@ mod tests {
                         success_counter.fetch_add(1, Ordering::SeqCst);
                     }
                     Ok(wrong_value) => {
-                        eprintln!("Value corruption: expected '{}', got '{}'",
-                                expected_value, wrong_value);
+                        eprintln!(
+                            "Value corruption: expected '{}', got '{}'",
+                            expected_value, wrong_value
+                        );
                         bug_counter.fetch_add(1, Ordering::SeqCst);
                     }
                     Err(err) => {
@@ -5778,7 +5923,10 @@ mod tests {
         println!("  - Concurrent bugs: {}", concurrent_final_bugs);
 
         if concurrent_final_bugs > 0 {
-            panic!("❌ CRITICAL BUG: {} concurrent value loss bugs!", concurrent_final_bugs);
+            panic!(
+                "❌ CRITICAL BUG: {} concurrent value loss bugs!",
+                concurrent_final_bugs
+            );
         }
 
         println!();
@@ -5790,8 +5938,10 @@ mod tests {
 
         println!();
         println!("📋 INTERACTION VERIFICATION:");
-        println!("  - try_recv(Empty) → send → try_recv(Ok): {} successes ✅",
-                final_successes + concurrent_final_successes);
+        println!(
+            "  - try_recv(Empty) → send → try_recv(Ok): {} successes ✅",
+            final_successes + concurrent_final_successes
+        );
         println!("  - Value preservation: 100% success rate ✅");
         println!("  - No state corruption from unpopulated futures ✅");
         println!("  - Proper mutex synchronization ✅");
@@ -5803,7 +5953,9 @@ mod tests {
         println!("  - Proper field sharing via inner.value ✅");
         println!("  - Both sync and async paths work correctly ✅");
 
-        crate::test_complete!("audit_try_recv_unpopulated_future_send_interaction_value_preservation");
+        crate::test_complete!(
+            "audit_try_recv_unpopulated_future_send_interaction_value_preservation"
+        );
     }
 
     #[test]
@@ -5826,15 +5978,13 @@ mod tests {
         println!("  - Rationale: Reserve/commit protocol requires exclusive access");
 
         // Test helper types for different Send/Sync combinations
-        struct SendType(i32);
-        unsafe impl Send for SendType {}
-        // SendType is !Sync (not Sync)
+        type SendType = std::cell::Cell<i32>;
+        // Cell<T> is Send when T: Send, but !Sync.
 
-        struct SendSyncType(i32);
-        unsafe impl Send for SendSyncType {}
-        unsafe impl Sync for SendSyncType {}
+        type SendSyncType = i32;
+        // Plain integers make this type Send + Sync through auto traits.
 
-        struct NoSendNoSyncType(i32);
+        type NoSendNoSyncType = std::rc::Rc<i32>;
         // NoSendNoSyncType is !Send and !Sync
 
         // Phase 1: Verify Send bounds for Sender<T>
@@ -5863,7 +6013,6 @@ mod tests {
         println!();
         println!("🔒 Phase 2: Sync Trait Verification (should always be !Sync)");
 
-        fn assert_sync<T: Sync>() {}
         fn assert_not_sync<T>() {
             // This function should compile for any T that is !Sync
             // We can't directly assert !Sync in stable Rust, but we can
@@ -5891,7 +6040,7 @@ mod tests {
         println!();
         println!("📡 Phase 3: Cross-Thread Ownership Transfer Verification");
 
-        let (sender, receiver) = channel::<i32>();
+        let (sender, _receiver) = channel::<i32>();
 
         // Test 3.1: Verify we can move Sender across thread boundaries (Send)
         let handle = std::thread::spawn(move || {
@@ -5900,7 +6049,7 @@ mod tests {
             sender.send(&cx, 42)
         });
 
-        let result = handle.join().expect("Thread should not panic");
+        let _result = handle.join().expect("Thread should not panic");
         println!("  ✅ Sender<i32> successfully moved across threads (Send verified)");
 
         // Test 3.2: Verify we cannot share Sender by reference (would require Sync)

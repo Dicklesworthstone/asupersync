@@ -7960,12 +7960,20 @@ mod tests {
             pipeline.cmd(&["PING"]);
             let results = pipeline.exec(&cx).await.expect("pipeline exec");
 
-            assert_eq!(
-                results,
-                vec![
-                    Ok(RespValue::SimpleString("ONE".to_string())),
-                    Ok(RespValue::SimpleString("TWO".to_string())),
-                ]
+            assert_eq!(results.len(), 2, "pipeline response count");
+            assert!(
+                matches!(
+                    &results[0],
+                    Ok(RespValue::SimpleString(value)) if value == "ONE"
+                ),
+                "first pipeline response should be ONE: {results:?}"
+            );
+            assert!(
+                matches!(
+                    &results[1],
+                    Ok(RespValue::SimpleString(value)) if value == "TWO"
+                ),
+                "second pipeline response should be TWO: {results:?}"
             );
 
             tracing::info!(

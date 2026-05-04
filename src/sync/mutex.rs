@@ -3783,7 +3783,7 @@ mod tests {
         println!("🔍 MutexGuard API Completeness Analysis:");
 
         // Phase 1: Verify current API surface
-        let cx = test_cx();
+        let _cx = test_cx();
         let mutex = Mutex::new(TestStruct {
             field_a: 42,
             field_b: "hello".to_string(),
@@ -3794,6 +3794,8 @@ mod tests {
 
         println!("  Phase 1: Current MutexGuard API verification");
         println!("    - Deref: guard.field_a = {}", guard.field_a);
+        println!("    - Deref: guard.field_b = {}", guard.field_b);
+        println!("    - Deref: guard.field_c len = {}", guard.field_c.len());
         println!("    - DerefMut: Available ✅");
         println!("    - Debug: Available ✅");
         println!("    - Drop: Available ✅");
@@ -4143,7 +4145,7 @@ mod tests {
         println!("🔍 Phase 1: Current API limitations");
 
         {
-            let _guard = mutex.try_lock().expect("should acquire lock");
+            let guard = mutex.try_lock().expect("should acquire lock");
             println!("  - Current guard type: MutexGuard<MultiFieldData>");
             println!("  - Access method: Whole struct dereference only");
             println!("  - Lock scope: Entire struct lifetime");
@@ -4152,10 +4154,17 @@ mod tests {
             let _counter_value = guard.counter;
             let _name_ref = &guard.name;
             let _values_ref = &guard.values;
+            let _metadata_ref = &guard.metadata;
+            let _threshold = guard.config.threshold;
 
             println!("  - Field access: {} (counter)", guard.counter);
             println!("  - String field: '{}' (name)", guard.name);
             println!("  - Vec field: {:?} (values)", guard.values);
+            println!("  - Optional metadata: {:?} (metadata)", guard.metadata);
+            println!(
+                "  - Config threshold: {} (threshold)",
+                guard.config.threshold
+            );
             println!(
                 "  - Nested struct: enabled={} (config.enabled)",
                 guard.config.enabled
@@ -4166,7 +4175,7 @@ mod tests {
         println!("❌ Phase 2: Missing map() functionality demonstration");
 
         {
-            let guard = mutex.try_lock().expect("should acquire lock");
+            let _guard = mutex.try_lock().expect("should acquire lock");
 
             // These would be the ideal API calls, but they DON'T EXIST:
 
