@@ -48,7 +48,7 @@
 //! ```
 
 use arbitrary::Arbitrary;
-use asupersync::bytes::{BufMut, BytesMut};
+use asupersync::bytes::BytesMut;
 use asupersync::codec::{Decoder, Encoder};
 use asupersync::grpc::{GrpcCodec, GrpcMessage};
 use libfuzzer_sys::fuzz_target;
@@ -248,6 +248,4 @@ fuzz_target!(|stream: Stream| {
             }
         }
     }
-
-    let _ = BufMut::has_remaining_mut; // anchor BufMut import
 });

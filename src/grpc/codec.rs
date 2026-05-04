@@ -918,6 +918,396 @@ mod tests {
     }
 
     #[test]
+    fn conformance_grpc_codec_lpm_stream_boundary_matrix() {
+        init_test("conformance_grpc_codec_lpm_stream_boundary_matrix");
+
+        const EXACT_RCH_COMMAND: &str = "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_asupersync_daaw5q_lpm cargo test -p asupersync --lib conformance_grpc_codec_lpm_stream_boundary_matrix -- --nocapture";
+
+        fn encode_frame(message: GrpcMessage, max_size: usize) -> BytesMut {
+            let mut producer = GrpcCodec::with_max_size(max_size);
+            let mut wire = BytesMut::new();
+            producer
+                .encode(message, &mut wire)
+                .expect("frame should encode for boundary matrix");
+            wire
+        }
+
+        fn drain_ready_messages(
+            codec: &mut GrpcCodec,
+            buf: &mut BytesMut,
+        ) -> Result<Vec<GrpcMessage>, GrpcError> {
+            let mut out = Vec::new();
+            while let Some(message) = codec.decode(buf)? {
+                out.push(message);
+            }
+            Ok(out)
+        }
+
+        fn ordering(messages: &[GrpcMessage]) -> String {
+            if messages.is_empty() {
+                return "empty".to_string();
+            }
+
+            messages
+                .iter()
+                .map(|message| format!("{}:{}", u8::from(message.compressed), message.data.len()))
+                .collect::<Vec<_>>()
+                .join(">")
+        }
+
+        let log_case = |scenario_id: &str,
+                        frame_count: usize,
+                        split_pattern: &str,
+                        declared_length: &str,
+                        actual_length: &str,
+                        compression_flag: &str,
+                        decode_state: &str,
+                        allocation_guard_decision: &str,
+                        error_kind: &str,
+                        output_message_ordering: &str| {
+            eprintln!(
+                "GRPC_LPM_BOUNDARY scenario_id={} frame_count={} split_pattern={} declared_length={} actual_length={} compression_flag={} decode_state={} allocation_guard_decision={} error_kind={} output_message_ordering={} exact_rch_command=\"{}\" artifact_paths=none final_preservation_no_overflow_verdict=pass",
+                scenario_id,
+                frame_count,
+                split_pattern,
+                declared_length,
+                actual_length,
+                compression_flag,
+                decode_state,
+                allocation_guard_decision,
+                error_kind,
+                output_message_ordering,
+                EXACT_RCH_COMMAND,
+            );
+        };
+
+        let empty_wire = encode_frame(GrpcMessage::new(Bytes::new()), 16);
+        let mut empty_codec = GrpcCodec::with_max_size(16);
+        let mut empty_buf = empty_wire.clone();
+        let empty = empty_codec
+            .decode(&mut empty_buf)
+            .expect("empty frame decode")
+            .expect("empty frame ready");
+        assert!(empty_buf.is_empty(), "empty frame must drain");
+        assert!(!empty.compressed, "empty frame should be uncompressed");
+        assert!(empty.data.is_empty(), "empty payload should round-trip");
+        log_case(
+            "empty_payload",
+            1,
+            "joined",
+            "0",
+            "0",
+            "0",
+            "roundtrip-ok",
+            "exact-cap-accept",
+            "ok",
+            "0:0",
+        );
+
+        let one_byte_wire = encode_frame(GrpcMessage::compressed(Bytes::from_static(b"x")), 16);
+        let mut one_byte_codec = GrpcCodec::with_max_size(16);
+        let mut one_byte_buf = one_byte_wire.clone();
+        let one_byte = one_byte_codec
+            .decode(&mut one_byte_buf)
+            .expect("one-byte frame decode")
+            .expect("one-byte frame ready");
+        assert!(one_byte_buf.is_empty(), "one-byte frame must drain");
+        assert!(one_byte.compressed, "compressed flag must survive decode");
+        assert_eq!(one_byte.data, Bytes::from_static(b"x"));
+        log_case(
+            "one_byte_payload_compressed",
+            1,
+            "joined",
+            "1",
+            "1",
+            "1",
+            "roundtrip-ok",
+            "within-cap-accept",
+            "ok",
+            "1:1",
+        );
+
+        let mut two_frame_wire = BytesMut::new();
+        let mut producer = GrpcCodec::with_max_size(32);
+        producer
+            .encode(
+                GrpcMessage::new(Bytes::from_static(b"a")),
+                &mut two_frame_wire,
+            )
+            .expect("first joined frame");
+        producer
+            .encode(
+                GrpcMessage::new(Bytes::from_static(b"bc")),
+                &mut two_frame_wire,
+            )
+            .expect("second joined frame");
+        let mut two_frame_codec = GrpcCodec::with_max_size(32);
+        let mut two_frame_buf = two_frame_wire;
+        let two_frame_messages = drain_ready_messages(&mut two_frame_codec, &mut two_frame_buf)
+            .expect("joined frame stream should decode");
+        assert_eq!(two_frame_messages.len(), 2, "expected two joined messages");
+        assert_eq!(two_frame_messages[0].data, Bytes::from_static(b"a"));
+        assert_eq!(two_frame_messages[1].data, Bytes::from_static(b"bc"));
+        assert!(
+            two_frame_buf.is_empty(),
+            "joined two-frame stream must fully drain"
+        );
+        log_case(
+            "multiple_messages_one_buffer",
+            2,
+            "joined",
+            "1,2",
+            "1,2",
+            "0,0",
+            "roundtrip-ok",
+            "within-cap-accept",
+            "ok",
+            &ordering(&two_frame_messages),
+        );
+
+        let split_wire = encode_frame(
+            GrpcMessage::compressed(Bytes::from_static(b"split-boundary")),
+            64,
+        );
+        for split_at in 0..=split_wire.len() {
+            let mut codec = GrpcCodec::with_max_size(64);
+            let mut partial = BytesMut::from(&split_wire[..split_at]);
+            let mut decoded = drain_ready_messages(&mut codec, &mut partial)
+                .expect("split partial decode should not error");
+            partial.extend_from_slice(&split_wire[split_at..]);
+            decoded.extend(
+                drain_ready_messages(&mut codec, &mut partial)
+                    .expect("split completion decode should not error"),
+            );
+            assert_eq!(decoded.len(), 1, "split_at={split_at} must yield one frame");
+            assert_eq!(
+                decoded[0].data,
+                Bytes::from_static(b"split-boundary"),
+                "split_at={split_at} payload divergence"
+            );
+            assert!(
+                decoded[0].compressed,
+                "split_at={split_at} compressed flag must survive"
+            );
+            assert!(
+                partial.is_empty(),
+                "split_at={split_at} must fully drain after completion"
+            );
+        }
+        log_case(
+            "single_message_split_every_boundary",
+            1,
+            &format!("every-byte-0-{}", split_wire.len()),
+            "14",
+            "14",
+            "1",
+            "roundtrip-ok",
+            "within-cap-accept",
+            "ok",
+            "1:14",
+        );
+
+        let sequence_payloads = [
+            GrpcMessage::new(Bytes::from_static(b"aa")),
+            GrpcMessage::compressed(Bytes::from_static(b"bbb")),
+            GrpcMessage::new(Bytes::from_static(b"cccc")),
+            GrpcMessage::compressed(Bytes::from_static(b"ddddd")),
+        ];
+        let mut sequence_wire = BytesMut::new();
+        let mut sequence_producer = GrpcCodec::with_max_size(64);
+        for message in sequence_payloads {
+            sequence_producer
+                .encode(message, &mut sequence_wire)
+                .expect("sequence frame encode");
+        }
+        let mut sequence_codec = GrpcCodec::with_max_size(64);
+        let mut sequence_buf = sequence_wire;
+        let sequence_messages = drain_ready_messages(&mut sequence_codec, &mut sequence_buf)
+            .expect("sequence decode should succeed");
+        assert_eq!(
+            ordering(&sequence_messages),
+            "0:2>1:3>0:4>1:5",
+            "many-frame ordering must be preserved"
+        );
+        assert!(
+            sequence_buf.is_empty(),
+            "many-frame sequence must fully drain"
+        );
+        log_case(
+            "many_frames_sequence",
+            4,
+            "joined",
+            "2,3,4,5",
+            "2,3,4,5",
+            "0,1,0,1",
+            "roundtrip-ok",
+            "within-cap-accept",
+            "ok",
+            &ordering(&sequence_messages),
+        );
+
+        let exact_wire = encode_frame(GrpcMessage::new(Bytes::from_static(b"1234")), 4);
+        let mut exact_codec = GrpcCodec::with_max_size(4);
+        let mut exact_buf = exact_wire;
+        let exact = exact_codec
+            .decode(&mut exact_buf)
+            .expect("exact-cap decode")
+            .expect("exact-cap frame ready");
+        assert_eq!(exact.data, Bytes::from_static(b"1234"));
+        assert!(exact_buf.is_empty(), "exact-cap frame must fully drain");
+        log_case(
+            "length_exactly_at_configured_max",
+            1,
+            "joined",
+            "4",
+            "4",
+            "0",
+            "roundtrip-ok",
+            "exact-cap-accept",
+            "ok",
+            "0:4",
+        );
+
+        let over_wire = encode_frame(GrpcMessage::new(Bytes::from_static(b"12345")), 8);
+        let mut over_codec = GrpcCodec::with_max_size(4);
+        let mut over_buf = over_wire;
+        let over = over_codec.decode(&mut over_buf);
+        assert!(
+            matches!(over, Err(GrpcError::MessageTooLarge)),
+            "limit+1 frame must reject before allocation"
+        );
+        log_case(
+            "length_over_configured_max",
+            1,
+            "joined",
+            "5",
+            "5",
+            "0",
+            "decode-rejected",
+            "reject-before-alloc",
+            "MessageTooLarge",
+            "empty",
+        );
+
+        let mut u32_max_buf = BytesMut::new();
+        u32_max_buf.put_u8(0);
+        u32_max_buf.put_u32(u32::MAX);
+        let mut u32_max_codec = GrpcCodec::with_max_size(64);
+        let u32_max = u32_max_codec.decode(&mut u32_max_buf);
+        assert!(
+            matches!(u32_max, Err(GrpcError::MessageTooLarge)),
+            "u32::MAX declared length must reject immediately"
+        );
+        log_case(
+            "u32_max_length_prefix",
+            1,
+            "joined",
+            "4294967295",
+            "0",
+            "0",
+            "decode-rejected",
+            "reject-before-alloc",
+            "MessageTooLarge",
+            "empty",
+        );
+
+        let mut truncated_header_buf = BytesMut::from(&[0u8, 0, 0][..]);
+        let mut truncated_header_codec = GrpcCodec::with_max_size(16);
+        let truncated_header = truncated_header_codec
+            .decode(&mut truncated_header_buf)
+            .expect("truncated header should not error");
+        assert!(
+            truncated_header.is_none(),
+            "truncated header must wait for more bytes"
+        );
+        assert_eq!(
+            truncated_header_buf.len(),
+            3,
+            "truncated header bytes must remain buffered"
+        );
+        log_case(
+            "truncated_header",
+            1,
+            "joined",
+            "none",
+            "0",
+            "0",
+            "need-more-bytes",
+            "pending-under-cap",
+            "ok",
+            "empty",
+        );
+
+        let mut truncated_body_buf = BytesMut::new();
+        truncated_body_buf.put_u8(0);
+        truncated_body_buf.put_u32(3);
+        truncated_body_buf.extend_from_slice(b"ab");
+        let mut truncated_body_codec = GrpcCodec::with_max_size(16);
+        let truncated_body = truncated_body_codec
+            .decode(&mut truncated_body_buf)
+            .expect("truncated body should not error");
+        assert!(
+            truncated_body.is_none(),
+            "truncated body must wait for the missing byte"
+        );
+        assert_eq!(
+            truncated_body_buf.len(),
+            7,
+            "truncated body bytes must remain buffered"
+        );
+        log_case(
+            "truncated_body",
+            1,
+            "joined",
+            "3",
+            "2",
+            "0",
+            "need-more-bytes",
+            "pending-under-cap",
+            "ok",
+            "empty",
+        );
+
+        let mut malformed_then_valid = BytesMut::new();
+        malformed_then_valid.put_u8(7);
+        malformed_then_valid.put_u32(1);
+        malformed_then_valid.extend_from_slice(b"z");
+        malformed_then_valid.extend_from_slice(&encode_frame(
+            GrpcMessage::new(Bytes::from_static(b"ok")),
+            8,
+        ));
+        let mut malformed_codec = GrpcCodec::with_max_size(8);
+        let malformed_first = malformed_codec.decode(&mut malformed_then_valid);
+        assert!(
+            matches!(malformed_first, Err(GrpcError::Protocol(_))),
+            "invalid compression flag must error without panicking"
+        );
+        let recovered = malformed_codec
+            .decode(&mut malformed_then_valid)
+            .expect("valid follow-on frame should remain decodable")
+            .expect("follow-on frame should be ready");
+        assert_eq!(recovered.data, Bytes::from_static(b"ok"));
+        assert!(
+            malformed_then_valid.is_empty(),
+            "invalid frame consumption must preserve next frame ordering"
+        );
+        log_case(
+            "malformed_bytes_invalid_flag_then_recover",
+            2,
+            "joined",
+            "1,2",
+            "1,2",
+            "7,0",
+            "reject-then-recover",
+            "consume-invalid-frame",
+            "Protocol",
+            "0:2",
+        );
+
+        crate::test_complete!("conformance_grpc_codec_lpm_stream_boundary_matrix");
+    }
+
+    #[test]
     fn test_identity_codec() {
         init_test("test_identity_codec");
         let mut codec = IdentityCodec;
