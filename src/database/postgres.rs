@@ -2660,6 +2660,26 @@ impl PreparedStatementCache {
         names
     }
 
+    /// Remove a cached statement by its server-side statement name.
+    ///
+    /// Returns `true` when the name was present and removed from both
+    /// the entry map and the LRU queue.
+    fn remove_by_statement_name(&mut self, statement_name: &str) -> bool {
+        let Some(sql) = self
+            .entries
+            .iter()
+            .find_map(|(sql, stmt)| (stmt.name == statement_name).then(|| sql.clone()))
+        else {
+            return false;
+        };
+
+        self.entries.remove(&sql);
+        if let Some(pos) = self.lru.iter().position(|key| key == &sql) {
+            self.lru.remove(pos);
+        }
+        true
+    }
+
     #[cfg(test)]
     fn len(&self) -> usize {
         self.entries.len()
@@ -5250,6 +5270,10 @@ impl PgConnection {
                     if let Err(e) = self.handle_ready_for_query(&data) {
                         return self.fail_in_flight(e);
                     }
+                    let _ = self
+                        .inner
+                        .prepared_cache
+                        .remove_by_statement_name(&stmt.name);
                     break;
                 }
                 b'E' => {
@@ -13611,6 +13635,544 @@ mod tests {
             assert_eq!(
                 cold_value, warm_value,
                 "same SQL and same parameter bytes must decode identically regardless of cache state"
+            );
+        });
+    }
+
+    #[test]
+    fn prepared_statement_reexecution_format_vector_changes_do_not_leak() {
+        const EXACT_RCH_COMMAND: &str = "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_asupersync_3oc9b5_prepared cargo test -p asupersync --lib --features postgres,test-internals prepared_statement_reexecution -- --nocapture";
+
+        fn bytes_fingerprint(bytes: &[u8]) -> String {
+            if bytes.is_empty() {
+                return "empty".to_string();
+            }
+            let preview = bytes
+                .iter()
+                .take(16)
+                .map(|byte| format!("{byte:02x}"))
+                .collect::<String>();
+            format!("len:{}:{}", bytes.len(), preview)
+        }
+
+        fn log_case(
+            statement_id: &str,
+            execution_index: usize,
+            parameter_fingerprint: &str,
+            format_code_vector: &[i16],
+            expected_relation: &str,
+            observed_result_fingerprint: &str,
+            error_kind: &str,
+        ) {
+            println!(
+                "POSTGRES_PREPARED_REEXECUTION \
+                 statement_id={} \
+                 execution_index={} \
+                 parameter_fingerprint={} \
+                 format_code_vector={:?} \
+                 expected_isolation_relation={} \
+                 observed_result_fingerprint={} \
+                 error_kind={} \
+                 exact_rch_command=\"{}\" \
+                 artifact_paths=none \
+                 final_no_leak_verdict=pass",
+                statement_id,
+                execution_index,
+                parameter_fingerprint,
+                format_code_vector,
+                expected_relation,
+                observed_result_fingerprint,
+                error_kind,
+                EXACT_RCH_COMMAND,
+            );
+        }
+
+        let left = String::from("left");
+        let right = String::from("right");
+        let binary = 7i32;
+        let text_params: Vec<&dyn ToSql> = vec![&left, &right];
+        let mixed_params: Vec<&dyn ToSql> = vec![&left, &binary];
+
+        let text_bind = build_bind_msg("", "s_format", &text_params, Format::Text)
+            .expect("text Bind should build");
+        let mixed_bind = build_bind_msg("", "s_format", &mixed_params, Format::Text)
+            .expect("mixed-format Bind should build");
+
+        let text_parsed = fuzz_parse_bind_message(&text_bind).expect("text Bind should parse");
+        let mixed_parsed = fuzz_parse_bind_message(&mixed_bind).expect("mixed Bind should parse");
+
+        assert_eq!(
+            text_parsed.param_format_codes,
+            Vec::<i16>::new(),
+            "all-text re-execution should use PostgreSQL default format-count-zero encoding"
+        );
+        assert_eq!(
+            mixed_parsed.param_format_codes,
+            vec![0, 1],
+            "mixed text/binary re-execution must preserve the per-parameter format vector"
+        );
+        assert_eq!(
+            mixed_parsed.parameter_values,
+            vec![Some(b"left".to_vec()), Some(binary.to_be_bytes().to_vec())],
+            "binary/text re-execution must rebuild parameter bytes from scratch"
+        );
+        assert_ne!(
+            text_bind, mixed_bind,
+            "format-vector changes must perturb the wire bytes rather than leaking the prior Bind"
+        );
+
+        log_case(
+            &text_parsed.statement_name,
+            1,
+            "left|right",
+            &text_parsed.param_format_codes,
+            "all-text-default-format-count-zero",
+            &bytes_fingerprint(&text_bind),
+            "ok",
+        );
+        log_case(
+            &mixed_parsed.statement_name,
+            2,
+            "left|00000007",
+            &mixed_parsed.param_format_codes,
+            "mixed-format-reexecution-rebuilds-vector-without-byte-bleed",
+            &bytes_fingerprint(&mixed_bind),
+            "ok",
+        );
+    }
+
+    #[test]
+    fn prepared_statement_reexecution_leakage_matrix_logs_evidence() {
+        use std::io::Write;
+        use std::sync::{Arc, Mutex};
+
+        const EXACT_RCH_COMMAND: &str = "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_asupersync_3oc9b5_prepared cargo test -p asupersync --lib --features postgres,test-internals prepared_statement_reexecution -- --nocapture";
+
+        #[derive(Debug, Clone)]
+        struct ExecutionCapture {
+            execution_index: usize,
+            statement_id: String,
+            parameter_fingerprint: String,
+            format_codes: Vec<i16>,
+        }
+
+        fn bytes_fingerprint(bytes: &[u8]) -> String {
+            if bytes.is_empty() {
+                return "empty".to_string();
+            }
+            let preview = bytes
+                .iter()
+                .take(16)
+                .map(|byte| format!("{byte:02x}"))
+                .collect::<String>();
+            format!("len:{}:{}", bytes.len(), preview)
+        }
+
+        fn first_frontend_message(frame: &[u8], expected_type: u8) -> &[u8] {
+            assert!(
+                frame.len() >= 5,
+                "frontend frame should include type and length prefix"
+            );
+            assert_eq!(
+                frame[0], expected_type,
+                "expected frontend message type {}",
+                expected_type as char
+            );
+            let len_i32 = i32::from_be_bytes([frame[1], frame[2], frame[3], frame[4]]);
+            let body_len = backend_message_body_len(len_i32).expect("frontend length should fit");
+            let frame_end = 5usize
+                .checked_add(body_len)
+                .expect("frontend frame end should not overflow");
+            assert!(
+                frame.len() >= frame_end,
+                "frontend frame should contain its declared body"
+            );
+            &frame[..frame_end]
+        }
+
+        fn capture_bind(
+            execution_index: usize,
+            bind: &[u8],
+            captures: &Arc<Mutex<Vec<ExecutionCapture>>>,
+        ) {
+            let bind = first_frontend_message(bind, FrontendMessage::Bind as u8);
+            let parsed = fuzz_parse_bind_message(bind).expect("Bind frame should parse");
+            let parameter_fingerprint = parsed
+                .parameter_values
+                .iter()
+                .flatten()
+                .next()
+                .map(|bytes| bytes_fingerprint(bytes))
+                .unwrap_or_else(|| "none".to_string());
+            captures
+                .lock()
+                .expect("captures lock")
+                .push(ExecutionCapture {
+                    execution_index,
+                    statement_id: parsed.statement_name,
+                    parameter_fingerprint,
+                    format_codes: parsed.param_format_codes,
+                });
+        }
+
+        fn result_fingerprint(rows: &[PgRow]) -> String {
+            let value: String = rows[0]
+                .get_typed("value")
+                .expect("result row should decode TEXT column");
+            bytes_fingerprint(value.as_bytes())
+        }
+
+        fn error_kind(error: &PgError) -> &'static str {
+            match error {
+                PgError::Protocol(_) => "Protocol",
+                PgError::Io(_) => "Io",
+                PgError::Server { .. } => "Server",
+                PgError::Cancelled(_) => "Cancelled",
+                PgError::ConnectionClosed => "ConnectionClosed",
+                PgError::ColumnNotFound(_) => "ColumnNotFound",
+                PgError::TypeConversion { .. } => "TypeConversion",
+                PgError::InvalidUrl(_) => "InvalidUrl",
+                PgError::TlsRequired => "TlsRequired",
+                PgError::Tls(_) => "Tls",
+                PgError::AuthenticationFailed(_) => "AuthenticationFailed",
+                PgError::TransactionFinished => "TransactionFinished",
+                PgError::UnsupportedAuth(_) => "UnsupportedAuth",
+                PgError::IsolationLevelMismatch { .. } => "IsolationLevelMismatch",
+            }
+        }
+
+        fn log_case(
+            statement_id: &str,
+            execution_index: usize,
+            parameter_fingerprint: &str,
+            format_code_vector: &[i16],
+            expected_relation: &str,
+            observed_result_fingerprint: &str,
+            error_kind: &str,
+        ) {
+            println!(
+                "POSTGRES_PREPARED_REEXECUTION \
+                 statement_id={} \
+                 execution_index={} \
+                 parameter_fingerprint={} \
+                 format_code_vector={:?} \
+                 expected_isolation_relation={} \
+                 observed_result_fingerprint={} \
+                 error_kind={} \
+                 exact_rch_command=\"{}\" \
+                 artifact_paths=none \
+                 final_no_leak_verdict=pass",
+                statement_id,
+                execution_index,
+                parameter_fingerprint,
+                format_code_vector,
+                expected_relation,
+                observed_result_fingerprint,
+                error_kind,
+                EXACT_RCH_COMMAND,
+            );
+        }
+
+        run(async {
+            let (mut conn, mut peer) = make_test_connection_with_peer();
+            let cx = Cx::for_testing();
+            let sql = "SELECT $1::text AS value";
+            let other_sql = "SELECT $1::text AS value /* second stmt */";
+            let captures = Arc::new(Mutex::new(Vec::<ExecutionCapture>::new()));
+
+            let responder = std::thread::spawn({
+                let captures = Arc::clone(&captures);
+                let sql = sql.to_string();
+                let other_sql = other_sql.to_string();
+                let mut peer_clone = peer.try_clone().expect("clone peer");
+
+                move || {
+                    let prepare_response = || {
+                        let mut parameter_description = Vec::new();
+                        parameter_description.extend_from_slice(&1i16.to_be_bytes());
+                        parameter_description.extend_from_slice(&(oid::TEXT as i32).to_be_bytes());
+
+                        let mut response = Vec::new();
+                        response.extend_from_slice(&backend_message(b'1', &[]));
+                        response.extend_from_slice(&backend_message(b't', &parameter_description));
+                        response.extend_from_slice(&single_text_row_description());
+                        response.extend_from_slice(&ready_for_query(b'I'));
+                        response
+                    };
+
+                    let write_query_response = |peer: &mut std::net::TcpStream, value: &str| {
+                        let mut data_row = Vec::new();
+                        data_row.extend_from_slice(&1i16.to_be_bytes());
+                        data_row.extend_from_slice(&(value.len() as i32).to_be_bytes());
+                        data_row.extend_from_slice(value.as_bytes());
+
+                        let mut response = Vec::new();
+                        response.extend_from_slice(&backend_message(b'2', &[]));
+                        response.extend_from_slice(&single_text_row_description());
+                        response.extend_from_slice(&backend_message(b'D', &data_row));
+                        response.extend_from_slice(&backend_message(b'C', b"SELECT 1\0"));
+                        response.extend_from_slice(&ready_for_query(b'I'));
+                        peer.write_all(&response).expect("write query response");
+                    };
+
+                    let first_prepare = read_until_contains(&mut peer_clone, b"__asupersync_s0");
+                    assert!(
+                        first_prepare
+                            .windows(sql.len())
+                            .any(|window| window == sql.as_bytes()),
+                        "first prepare should parse the original SQL text"
+                    );
+                    peer_clone
+                        .write_all(&prepare_response())
+                        .expect("write first prepare response");
+
+                    let bind1 = read_until_contains(&mut peer_clone, b"alpha");
+                    capture_bind(1, &bind1, &captures);
+                    write_query_response(&mut peer_clone, "alpha");
+
+                    let bind2 = read_until_contains(&mut peer_clone, b"alpha");
+                    capture_bind(2, &bind2, &captures);
+                    write_query_response(&mut peer_clone, "alpha");
+
+                    let bind3 = read_until_contains(&mut peer_clone, b"beta");
+                    capture_bind(3, &bind3, &captures);
+                    assert!(
+                        !bind3
+                            .windows(b"alpha".len())
+                            .any(|window| window == b"alpha"),
+                        "changed-parameter re-execution must not retain the prior value bytes"
+                    );
+                    write_query_response(&mut peer_clone, "beta");
+
+                    let bind4 = read_until_contains(&mut peer_clone, b"gamma");
+                    capture_bind(5, &bind4, &captures);
+                    write_query_response(&mut peer_clone, "gamma");
+
+                    let close_request = read_until_contains(&mut peer_clone, b"__asupersync_s0");
+                    assert_eq!(close_request[0], b'C', "close path must emit Close message");
+                    let mut close_response = Vec::new();
+                    close_response.extend_from_slice(&backend_message(b'3', &[]));
+                    close_response.extend_from_slice(&ready_for_query(b'I'));
+                    peer_clone
+                        .write_all(&close_response)
+                        .expect("write close response");
+
+                    let second_prepare = read_until_contains(&mut peer_clone, b"__asupersync_s1");
+                    assert!(
+                        second_prepare
+                            .windows(sql.len())
+                            .any(|window| window == sql.as_bytes()),
+                        "re-prepare after close must parse the SQL text again with a new statement id"
+                    );
+                    peer_clone
+                        .write_all(&prepare_response())
+                        .expect("write second prepare response");
+
+                    let bind5 = read_until_contains(&mut peer_clone, b"delta");
+                    capture_bind(6, &bind5, &captures);
+                    write_query_response(&mut peer_clone, "delta");
+
+                    let third_prepare = read_until_contains(&mut peer_clone, b"__asupersync_s2");
+                    assert!(
+                        third_prepare
+                            .windows(other_sql.len())
+                            .any(|window| window == other_sql.as_bytes()),
+                        "different SQL should allocate an independent statement id"
+                    );
+                    peer_clone
+                        .write_all(&prepare_response())
+                        .expect("write third prepare response");
+
+                    let bind6 = read_until_contains(&mut peer_clone, b"omega");
+                    capture_bind(7, &bind6, &captures);
+                    write_query_response(&mut peer_clone, "omega");
+                }
+            });
+
+            let cold_stmt = match conn.prepare(&cx, sql).await {
+                Outcome::Ok(stmt) => stmt,
+                other => panic!("cold prepare should succeed, got {other:?}"),
+            };
+            assert_eq!(cold_stmt.name, "__asupersync_s0");
+
+            let alpha = String::from("alpha");
+            let alpha_params: [&dyn ToSql; 1] = [&alpha];
+            let cold_rows = match conn.query_prepared(&cx, &cold_stmt, &alpha_params).await {
+                Outcome::Ok(rows) => rows,
+                other => panic!("cold execute should succeed, got {other:?}"),
+            };
+
+            let warm_stmt = match conn.prepare(&cx, sql).await {
+                Outcome::Ok(stmt) => stmt,
+                other => panic!("warm prepare should hit cache, got {other:?}"),
+            };
+            assert_eq!(
+                warm_stmt.name, cold_stmt.name,
+                "same SQL should reuse the cached prepared statement before close"
+            );
+
+            let warm_rows = match conn.query_prepared(&cx, &warm_stmt, &alpha_params).await {
+                Outcome::Ok(rows) => rows,
+                other => panic!("warm execute should succeed, got {other:?}"),
+            };
+
+            let beta = String::from("beta");
+            let beta_params: [&dyn ToSql; 1] = [&beta];
+            let changed_rows = match conn.query_prepared(&cx, &warm_stmt, &beta_params).await {
+                Outcome::Ok(rows) => rows,
+                other => panic!("changed-parameter execute should succeed, got {other:?}"),
+            };
+
+            let missing_params: [&dyn ToSql; 0] = [];
+            let missing_error = match conn.query_prepared(&cx, &warm_stmt, &missing_params).await {
+                Outcome::Err(err) => err,
+                other => panic!("missing-parameter call should fail before I/O, got {other:?}"),
+            };
+            assert!(
+                matches!(missing_error, PgError::Protocol(_)),
+                "missing-parameter path should fail with Protocol, got {missing_error:?}"
+            );
+
+            let gamma = String::from("gamma");
+            let gamma_params: [&dyn ToSql; 1] = [&gamma];
+            let retry_rows = match conn.query_prepared(&cx, &warm_stmt, &gamma_params).await {
+                Outcome::Ok(rows) => rows,
+                other => panic!("retry after local error should succeed, got {other:?}"),
+            };
+
+            match conn.close_statement(&cx, &warm_stmt).await {
+                Outcome::Ok(()) => {}
+                other => panic!("close_statement should succeed, got {other:?}"),
+            }
+
+            let reused_stmt = match conn.prepare(&cx, sql).await {
+                Outcome::Ok(stmt) => stmt,
+                other => panic!("prepare after close should succeed, got {other:?}"),
+            };
+            assert_ne!(
+                reused_stmt.name, warm_stmt.name,
+                "close must evict the cached statement so re-prepare allocates a fresh statement id"
+            );
+
+            let delta = String::from("delta");
+            let delta_params: [&dyn ToSql; 1] = [&delta];
+            let reused_rows = match conn.query_prepared(&cx, &reused_stmt, &delta_params).await {
+                Outcome::Ok(rows) => rows,
+                other => panic!("execute after close/re-prepare should succeed, got {other:?}"),
+            };
+
+            let other_stmt = match conn.prepare(&cx, other_sql).await {
+                Outcome::Ok(stmt) => stmt,
+                other => panic!("different SQL prepare should succeed, got {other:?}"),
+            };
+            assert_ne!(
+                other_stmt.name, reused_stmt.name,
+                "independent SQL statements must have distinct statement ids"
+            );
+
+            let omega = String::from("omega");
+            let omega_params: [&dyn ToSql; 1] = [&omega];
+            let concurrent_rows = match conn.query_prepared(&cx, &other_stmt, &omega_params).await {
+                Outcome::Ok(rows) => rows,
+                other => panic!("second statement execution should succeed, got {other:?}"),
+            };
+
+            responder.join().expect("responder");
+
+            let captures = captures.lock().expect("captures lock");
+            let capture_for = |execution_index| {
+                captures
+                    .iter()
+                    .find(|capture| capture.execution_index == execution_index)
+                    .cloned()
+                    .expect("expected execution capture")
+            };
+
+            let same_cold = capture_for(1);
+            let same_warm = capture_for(2);
+            let changed = capture_for(3);
+            let retry = capture_for(5);
+            let reused = capture_for(6);
+            let concurrent = capture_for(7);
+
+            assert_eq!(result_fingerprint(&cold_rows), bytes_fingerprint(b"alpha"));
+            assert_eq!(result_fingerprint(&warm_rows), bytes_fingerprint(b"alpha"));
+            assert_eq!(
+                result_fingerprint(&changed_rows),
+                bytes_fingerprint(b"beta")
+            );
+            assert_eq!(result_fingerprint(&retry_rows), bytes_fingerprint(b"gamma"));
+            assert_eq!(
+                result_fingerprint(&reused_rows),
+                bytes_fingerprint(b"delta")
+            );
+            assert_eq!(
+                result_fingerprint(&concurrent_rows),
+                bytes_fingerprint(b"omega")
+            );
+
+            log_case(
+                &same_cold.statement_id,
+                same_cold.execution_index,
+                &same_cold.parameter_fingerprint,
+                &same_cold.format_codes,
+                "cold-prepare-and-first-execution-produce-alpha-without-leakage",
+                &result_fingerprint(&cold_rows),
+                "ok",
+            );
+            log_case(
+                &same_warm.statement_id,
+                same_warm.execution_index,
+                &same_warm.parameter_fingerprint,
+                &same_warm.format_codes,
+                "cache-hit-reexecution-with-same-params-preserves-result-fingerprint",
+                &result_fingerprint(&warm_rows),
+                "ok",
+            );
+            log_case(
+                &changed.statement_id,
+                changed.execution_index,
+                &changed.parameter_fingerprint,
+                &changed.format_codes,
+                "changed-params-must-change-result-without-stale-parameter-bleed",
+                &result_fingerprint(&changed_rows),
+                "ok",
+            );
+            log_case(
+                &warm_stmt.name,
+                4,
+                "none",
+                &[],
+                "missing-params-fails-before-io-and-does-not-poison-retry",
+                "none",
+                error_kind(&missing_error),
+            );
+            log_case(
+                &retry.statement_id,
+                retry.execution_index,
+                &retry.parameter_fingerprint,
+                &retry.format_codes,
+                "retry-after-local-error-rebuilds-bind-and-returns-gamma",
+                &result_fingerprint(&retry_rows),
+                "ok",
+            );
+            log_case(
+                &reused.statement_id,
+                reused.execution_index,
+                &reused.parameter_fingerprint,
+                &reused.format_codes,
+                "close-then-reprepare-allocates-fresh-id-and-returns-delta",
+                &result_fingerprint(&reused_rows),
+                "ok",
+            );
+            log_case(
+                &concurrent.statement_id,
+                concurrent.execution_index,
+                &concurrent.parameter_fingerprint,
+                &concurrent.format_codes,
+                "independent-sql-statements-keep-distinct-ids-and-results",
+                &result_fingerprint(&concurrent_rows),
+                "ok",
             );
         });
     }
