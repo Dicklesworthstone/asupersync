@@ -8,6 +8,91 @@
     "bundle_manifest.json",
     "run_report.json"
   ],
+  "trust_model": {
+    "active_integrity_mode": "digest_only_sha256",
+    "true_signature_status": "not_wired",
+    "follow_up_blocker_required": true,
+    "follow_up_blocker_title": "Wire asymmetric signature verification for signed profile bundles before signed-mode rollout",
+    "digest_only_limitations": [
+      "Digest-only mode detects tampering in the committed manifest bytes but does not authenticate an operator identity.",
+      "Digest-only mode must not be upgraded to a signed-mode recommendation unless key, domain, epoch, and revocation checks are implemented.",
+      "Digest-only artifacts remain review and rollback evidence only; they never auto-apply a runtime profile."
+    ],
+    "fail_closed_cases": [
+      {
+        "case_id": "SPB-TRUST-SIGNING-DOMAIN-MISMATCH",
+        "category": "signature_policy",
+        "reason": "A bundle signed for another domain could be replayed across environments.",
+        "operator_verdict": "fail_closed"
+      },
+      {
+        "case_id": "SPB-TRUST-KEY-ID-MISMATCH",
+        "category": "signature_policy",
+        "reason": "The key identifier must match the verified signing key before signed mode can be trusted.",
+        "operator_verdict": "fail_closed"
+      },
+      {
+        "case_id": "SPB-TRUST-UNSUPPORTED-SIGNATURE-ALGORITHM",
+        "category": "signature_policy",
+        "reason": "Unsupported signature algorithms must not be interpreted as digest-only success.",
+        "operator_verdict": "fail_closed"
+      },
+      {
+        "case_id": "SPB-TRUST-UNKNOWN-SIGNING-KEY",
+        "category": "signature_policy",
+        "reason": "Unknown signing keys have no trust root in the current profile-bundle verifier.",
+        "operator_verdict": "fail_closed"
+      },
+      {
+        "case_id": "SPB-TRUST-REVOKED-SIGNING-KEY",
+        "category": "signature_policy",
+        "reason": "Revoked signing keys must reject even when the manifest digest is otherwise stable.",
+        "operator_verdict": "fail_closed"
+      },
+      {
+        "case_id": "SPB-TRUST-EXPIRED-BUNDLE",
+        "category": "time_window",
+        "reason": "Expired bundles must not be applied against current host evidence.",
+        "operator_verdict": "fail_closed"
+      },
+      {
+        "case_id": "SPB-TRUST-NOT-YET-VALID-ISSUED-AT",
+        "category": "time_window",
+        "reason": "Future issued-at windows must use deterministic clock and skew handling before use.",
+        "operator_verdict": "fail_closed"
+      },
+      {
+        "case_id": "SPB-TRUST-REPLAYED-LOWER-EPOCH",
+        "category": "replay",
+        "reason": "A lower bundle epoch or sequence can roll operators back to stale policy.",
+        "operator_verdict": "fail_closed"
+      },
+      {
+        "case_id": "SPB-TRUST-DIGEST-DOWNGRADE-WHEN-SIGNED-REQUIRED",
+        "category": "downgrade",
+        "reason": "When signed mode is required, digest-only evidence is a downgrade attempt, not a warning-only state.",
+        "operator_verdict": "fail_closed"
+      },
+      {
+        "case_id": "SPB-TRUST-CAPACITY-CERTIFICATE-DIGEST-LOCK-MISMATCH",
+        "category": "digest_lock",
+        "reason": "The capacity certificate digest must be locked to the bundle before rollout evidence can be trusted.",
+        "operator_verdict": "fail_closed"
+      },
+      {
+        "case_id": "SPB-TRUST-CHILD-PROOF-GRAPH-ROOT-MISMATCH",
+        "category": "proof_graph",
+        "reason": "Child proof hashes must roll up to the expected proof graph root.",
+        "operator_verdict": "fail_closed"
+      },
+      {
+        "case_id": "SPB-TRUST-ROLLBACK-RECEIPT-CHAIN-MISMATCH",
+        "category": "rollback_chain",
+        "reason": "Rollback receipts must chain to the applied bundle digest and previous config digest.",
+        "operator_verdict": "fail_closed"
+      }
+    ]
+  },
   "smoke_scenarios": [
     {
       "scenario_id": "AA-SIGNED-PROFILE-BUNDLE-DIGEST-ONLY-ACCEPT-64C-256G",

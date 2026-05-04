@@ -13,7 +13,7 @@ use asupersync::runtime::config::{
 };
 use serde::Deserialize;
 use serde_json::{Value, json};
-use std::collections::hash_map::DefaultHasher;
+use std::collections::{BTreeSet, hash_map::DefaultHasher};
 use std::fs;
 use std::hash::{Hash, Hasher};
 
@@ -22,7 +22,26 @@ const DEFAULT_SCENARIO_ID: &str = "AA-SIGNED-PROFILE-BUNDLE-DIGEST-ONLY-ACCEPT-6
 #[derive(Debug, Clone, Deserialize)]
 struct SignedProfileBundleContract {
     contract_version: String,
+    trust_model: SignedProfileBundleTrustModel,
     smoke_scenarios: Vec<SignedProfileBundleScenario>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct SignedProfileBundleTrustModel {
+    active_integrity_mode: String,
+    true_signature_status: String,
+    follow_up_blocker_required: bool,
+    follow_up_blocker_title: String,
+    digest_only_limitations: Vec<String>,
+    fail_closed_cases: Vec<SignedProfileBundleFailClosedCase>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct SignedProfileBundleFailClosedCase {
+    case_id: String,
+    category: String,
+    reason: String,
+    operator_verdict: String,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -741,6 +760,96 @@ fn signed_profile_bundle_accepts_valid_digest_only_manifest() {
             .iter()
             .any(|line| line.contains("digest-only") || line.contains("no asymmetric signature"))
     );
+}
+
+#[test]
+fn signed_profile_bundle_trust_model_declares_digest_only_boundary() {
+    let contract = default_contract();
+    let trust = &contract.trust_model;
+
+    assert_eq!(trust.active_integrity_mode, "digest_only_sha256");
+    assert_eq!(trust.true_signature_status, "not_wired");
+    assert!(trust.follow_up_blocker_required);
+    assert!(
+        trust
+            .follow_up_blocker_title
+            .contains("asymmetric signature verification")
+    );
+    assert!(
+        trust
+            .digest_only_limitations
+            .iter()
+            .any(|limitation| limitation.contains("does not authenticate"))
+    );
+    assert!(
+        trust
+            .digest_only_limitations
+            .iter()
+            .any(|limitation| limitation.contains("never auto-apply"))
+    );
+}
+
+#[test]
+fn signed_profile_bundle_unwired_signature_cases_fail_closed() {
+    let contract = default_contract();
+    let cases: BTreeSet<_> = contract
+        .trust_model
+        .fail_closed_cases
+        .iter()
+        .map(|case| case.case_id.as_str())
+        .collect();
+
+    for required in [
+        "SPB-TRUST-SIGNING-DOMAIN-MISMATCH",
+        "SPB-TRUST-KEY-ID-MISMATCH",
+        "SPB-TRUST-UNSUPPORTED-SIGNATURE-ALGORITHM",
+        "SPB-TRUST-UNKNOWN-SIGNING-KEY",
+        "SPB-TRUST-REVOKED-SIGNING-KEY",
+        "SPB-TRUST-EXPIRED-BUNDLE",
+        "SPB-TRUST-NOT-YET-VALID-ISSUED-AT",
+        "SPB-TRUST-REPLAYED-LOWER-EPOCH",
+        "SPB-TRUST-DIGEST-DOWNGRADE-WHEN-SIGNED-REQUIRED",
+        "SPB-TRUST-CAPACITY-CERTIFICATE-DIGEST-LOCK-MISMATCH",
+        "SPB-TRUST-CHILD-PROOF-GRAPH-ROOT-MISMATCH",
+        "SPB-TRUST-ROLLBACK-RECEIPT-CHAIN-MISMATCH",
+    ] {
+        assert!(
+            cases.contains(required),
+            "missing fail-closed case {required}"
+        );
+    }
+
+    let categories: BTreeSet<_> = contract
+        .trust_model
+        .fail_closed_cases
+        .iter()
+        .map(|case| case.category.as_str())
+        .collect();
+    for category in [
+        "signature_policy",
+        "time_window",
+        "replay",
+        "downgrade",
+        "digest_lock",
+        "proof_graph",
+        "rollback_chain",
+    ] {
+        assert!(categories.contains(category), "missing category {category}");
+    }
+
+    for case in &contract.trust_model.fail_closed_cases {
+        assert_eq!(case.operator_verdict, "fail_closed");
+        assert!(
+            !case.reason.is_empty(),
+            "case {} needs reason text",
+            case.case_id
+        );
+        assert!(
+            !case.reason.to_ascii_lowercase().contains("accept"),
+            "case {} must not imply signed-mode acceptance",
+            case.case_id
+        );
+    }
 }
 
 #[test]
