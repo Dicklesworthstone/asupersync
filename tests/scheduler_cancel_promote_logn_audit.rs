@@ -244,7 +244,7 @@ mod behavioral {
     use asupersync::types::TaskId;
 
     fn task(n: u64) -> TaskId {
-        TaskId::from_arena_index(n as usize)
+        TaskId::new_for_test(n as u32, 0)
     }
 
     #[test]
