@@ -42,18 +42,26 @@ impl<T> Pool<T> {
     /// Returns an object to the pool for recycling.
     ///
     /// Objects are silently dropped if the pool is at capacity.
-    pub fn put(&self, item: T) {
+    pub fn put(&self, item: T) -> bool {
         let mut storage = self.lock_storage();
         if storage.len() < self.max_size {
             storage.push_front(item);
+            return true;
         }
         // Silently drop if pool is full
+        false
     }
 
     /// Returns the current number of objects in the pool.
     #[must_use]
     pub fn len(&self) -> usize {
         self.lock_storage().len()
+    }
+
+    /// Returns the configured maximum pool size.
+    #[must_use]
+    pub const fn max_size(&self) -> usize {
+        self.max_size
     }
 
     /// Returns true if the pool is empty.
@@ -106,16 +114,27 @@ where
         self.pool.try_get().unwrap_or_else(factory)
     }
 
+    /// Attempts to get an object from the pool without allocating.
+    pub fn try_get(&self) -> Option<T> {
+        self.pool.try_get()
+    }
+
     /// Returns an object to the pool after resetting it.
-    pub fn put_recycled(&self, mut item: T) {
+    pub fn put_recycled(&self, mut item: T) -> bool {
         item.reset();
-        self.pool.put(item);
+        self.pool.put(item)
     }
 
     /// Returns the current number of objects in the pool.
     #[must_use]
     pub fn len(&self) -> usize {
         self.pool.len()
+    }
+
+    /// Returns the configured maximum pool size.
+    #[must_use]
+    pub const fn max_size(&self) -> usize {
+        self.pool.max_size()
     }
 
     /// Returns true if the pool is empty.

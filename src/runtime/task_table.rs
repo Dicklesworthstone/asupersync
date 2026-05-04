@@ -11,6 +11,19 @@ use crate::util::{Arena, ArenaIndex, RecyclingPool};
 /// Number of task phases that are considered "live" (not Completed).
 const LIVE_PHASE_COUNT: usize = 5;
 
+/// Telemetry for the `TaskRecord` recycling pool.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct TaskRecordPoolStats {
+    /// Number of pooled acquisitions satisfied from cached recycled records.
+    pub hits: usize,
+    /// Number of pooled acquisitions that fell back to a fresh heap allocation.
+    pub misses: usize,
+    /// Number of recycle attempts accepted back into the pool cache.
+    pub recycled: usize,
+    /// Number of recycle attempts dropped because pooling was disabled or full.
+    pub recycle_drops: usize,
+}
+
 /// Encapsulates task arena and stored futures for hot-path isolation.
 ///
 /// This table owns the hot-path data structures accessed during every poll cycle:
@@ -37,6 +50,8 @@ pub struct TaskTable {
     /// Reduces 35% of hot-path allocations by reusing TaskRecord objects instead
     /// of creating new ones. Pool size is bounded to prevent unbounded growth.
     task_record_pool: RecyclingPool<TaskRecord>,
+    /// Incremental telemetry for pooled vs heap-fallback behavior.
+    task_record_pool_stats: TaskRecordPoolStats,
     /// Incremental counters for tasks in each phase (Created, Running, etc.).
     /// Used for O(1) Lyapunov snapshots (br-asupersync-xxcss5).
     /// Indexed by `TaskPhase` enum values 0..5.
@@ -62,6 +77,7 @@ impl TaskTable {
             stored_futures: Vec::new(),
             stored_future_len: 0,
             task_record_pool: RecyclingPool::new(256), // Pool up to 256 recycled TaskRecords
+            task_record_pool_stats: TaskRecordPoolStats::default(),
             phase_counts: [0; LIVE_PHASE_COUNT],
             deadline_sum_ns: 0,
             tasks_with_deadline: 0,
@@ -77,11 +93,22 @@ impl TaskTable {
     pub fn with_capacity(capacity: usize) -> Self {
         // Use 25% of capacity for pool size to balance memory vs recycling benefits
         let pool_size = (capacity / 4).clamp(64, 512);
+        Self::with_capacity_and_pool_limit(capacity, pool_size)
+    }
+
+    /// Creates a new task table with explicit arena capacity and pool limit.
+    ///
+    /// Passing `pool_limit = 0` disables recycling and forces heap fallback on
+    /// every task-record acquisition while preserving the same task-table API.
+    #[must_use]
+    #[inline]
+    pub fn with_capacity_and_pool_limit(capacity: usize, pool_limit: usize) -> Self {
         Self {
             tasks: Arena::with_capacity(capacity),
             stored_futures: Vec::with_capacity(capacity),
             stored_future_len: 0,
-            task_record_pool: RecyclingPool::new(pool_size),
+            task_record_pool: RecyclingPool::new(pool_limit),
+            task_record_pool_stats: TaskRecordPoolStats::default(),
             phase_counts: [0; LIVE_PHASE_COUNT],
             deadline_sum_ns: 0,
             tasks_with_deadline: 0,
@@ -104,6 +131,33 @@ impl TaskTable {
     #[must_use]
     pub(crate) fn recycled_task_record_count(&self) -> usize {
         self.task_record_pool.len()
+    }
+
+    /// Returns the configured maximum number of recycled task records cached in the pool.
+    #[cfg(any(test, feature = "test-internals"))]
+    #[allow(dead_code)]
+    #[inline]
+    #[must_use]
+    pub fn task_record_pool_capacity(&self) -> usize {
+        self.task_record_pool.max_size()
+    }
+
+    /// Returns whether task-record pooling is enabled for this table.
+    #[cfg(any(test, feature = "test-internals"))]
+    #[allow(dead_code)]
+    #[inline]
+    #[must_use]
+    pub fn task_record_pool_enabled(&self) -> bool {
+        self.task_record_pool.max_size() > 0
+    }
+
+    /// Returns pooled-vs-heap fallback telemetry for this table.
+    #[cfg(any(test, feature = "test-internals"))]
+    #[allow(dead_code)]
+    #[inline]
+    #[must_use]
+    pub fn task_record_pool_stats(&self) -> TaskRecordPoolStats {
+        self.task_record_pool_stats
     }
 
     /// Returns a shared reference to a task record by arena index.
@@ -255,7 +309,11 @@ impl TaskTable {
     pub fn remove_and_recycle(&mut self, index: ArenaIndex) {
         if let Some(record) = self.remove(index) {
             // Recycle the TaskRecord for future reuse
-            self.task_record_pool.put_recycled(record);
+            if self.task_record_pool.put_recycled(record) {
+                self.task_record_pool_stats.recycled += 1;
+            } else {
+                self.task_record_pool_stats.recycle_drops += 1;
+            }
         }
     }
 
@@ -312,12 +370,15 @@ impl TaskTable {
         budget: crate::types::Budget,
         created_at: crate::types::Time,
     ) -> ArenaIndex {
-        let record = self
-            .task_record_pool
-            .get_or_create(|| TaskRecord::new_with_time(task_id, owner, budget, created_at));
+        let mut record = if let Some(record) = self.task_record_pool.try_get() {
+            self.task_record_pool_stats.hits += 1;
+            record
+        } else {
+            self.task_record_pool_stats.misses += 1;
+            TaskRecord::new_with_time(task_id, owner, budget, created_at)
+        };
 
-        // Initialize the pooled record
-        let mut record = record;
+        // Initialize the pooled record or fresh heap fallback.
         record.id = task_id;
         record.owner = owner;
         record.created_at = created_at;
@@ -376,16 +437,19 @@ impl TaskTable {
     where
         F: FnOnce(ArenaIndex, &mut TaskRecord),
     {
-        let idx = self.tasks.insert_with(|idx| {
-            let record = self.task_record_pool.get_or_create(|| {
-                TaskRecord::new(
-                    TaskId::from_arena(idx),
-                    crate::types::RegionId::testing_default(),
-                    crate::types::Budget::INFINITE,
-                )
-            });
+        let mut record = if let Some(record) = self.task_record_pool.try_get() {
+            self.task_record_pool_stats.hits += 1;
+            record
+        } else {
+            self.task_record_pool_stats.misses += 1;
+            TaskRecord::new(
+                TaskId::from_arena(crate::util::ArenaIndex::new(0, 0)),
+                crate::types::RegionId::testing_default(),
+                crate::types::Budget::INFINITE,
+            )
+        };
 
-            let mut record = record;
+        let idx = self.tasks.insert_with(|idx| {
             // Apply custom initialization
             factory(idx, &mut record);
             // Ensure TaskTable invariant: record.id matches arena slot
@@ -845,6 +909,83 @@ mod tests {
         }
 
         assert_eq!(table.recycled_task_record_count(), expected_pool_cap);
+    }
+
+    #[test]
+    fn task_record_pool_disabled_mode_forces_heap_fallback() {
+        let mut table = TaskTable::with_capacity_and_pool_limit(256, 0);
+        let owner = RegionId::from_arena(ArenaIndex::new(1, 0));
+
+        assert!(!table.task_record_pool_enabled());
+        assert_eq!(table.task_record_pool_capacity(), 0);
+
+        let idx_a = table.insert_pooled_task_with(|idx, record| {
+            *record = TaskRecord::new_with_time(
+                TaskId::from_arena(idx),
+                owner,
+                Budget::new().with_poll_quota(3),
+                Time::from_nanos(11),
+            );
+        });
+        let first_id = TaskId::from_arena(idx_a);
+        table.remove_and_recycle_task(first_id);
+
+        let idx_b = table.insert_pooled_task_with(|idx, record| {
+            *record = TaskRecord::new_with_time(
+                TaskId::from_arena(idx),
+                owner,
+                Budget::new().with_poll_quota(5),
+                Time::from_nanos(22),
+            );
+        });
+        let second_id = TaskId::from_arena(idx_b);
+
+        assert!(table.task(first_id).is_none());
+        assert!(table.task(second_id).is_some());
+        assert_eq!(table.recycled_task_record_count(), 0);
+
+        let stats = table.task_record_pool_stats();
+        assert_eq!(stats.hits, 0);
+        assert_eq!(stats.misses, 2);
+        assert_eq!(stats.recycled, 0);
+        assert_eq!(stats.recycle_drops, 1);
+    }
+
+    #[test]
+    fn pooled_recycle_rejects_stale_task_id_after_slot_reuse() {
+        let mut table = TaskTable::with_capacity_and_pool_limit(1, 1);
+        let owner = RegionId::from_arena(ArenaIndex::new(1, 0));
+
+        let first_idx = table.insert_pooled_task_with(|idx, record| {
+            *record = TaskRecord::new_with_time(
+                TaskId::from_arena(idx),
+                owner,
+                Budget::new().with_poll_quota(1),
+                Time::from_nanos(7),
+            );
+        });
+        let first_id = TaskId::from_arena(first_idx);
+        table.remove_and_recycle_task(first_id);
+
+        let second_idx = table.insert_pooled_task_with(|idx, record| {
+            *record = TaskRecord::new_with_time(
+                TaskId::from_arena(idx),
+                owner,
+                Budget::new().with_poll_quota(2),
+                Time::from_nanos(8),
+            );
+        });
+        let second_id = TaskId::from_arena(second_idx);
+
+        assert_ne!(first_id, second_id);
+        assert!(table.task(first_id).is_none());
+        assert!(table.task(second_id).is_some());
+
+        let stats = table.task_record_pool_stats();
+        assert_eq!(stats.hits, 1);
+        assert_eq!(stats.misses, 1);
+        assert_eq!(stats.recycled, 1);
+        assert_eq!(stats.recycle_drops, 0);
     }
 
     // === Lock Ordering Conformance Tests ===
