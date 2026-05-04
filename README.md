@@ -970,9 +970,12 @@ error messages. See `docs/macro-dsl.md` for the full pattern catalog.
 
 Current reality: the Cargo-compiled conformance registry for this repository is
 the integration-test entrypoint at `tests/conformance.rs`, which includes the
-live module list from `tests/conformance/mod.rs`. That registry currently wires
-61 `pub mod` suites, with some entries or result lanes gated by `mysql`,
-`quic`, `tls`, or platform-specific cfgs.
+live module list from `tests/conformance/mod.rs`. Do not copy the registry
+counts into prose: the checked source of truth is
+`artifacts/conformance_registry_contract_v1.json`, and
+`tests/conformance_registry_contract.rs` verifies that its active and dormant
+module lists still match `tests/conformance/mod.rs`. Some active entries or
+result lanes are gated by `mysql`, `quic`, `tls`, or platform-specific cfgs.
 
 The active registry covers:
 
@@ -984,12 +987,14 @@ The active registry covers:
 
 Important limitation: the repository also preserves many conformance files on
 disk that are **not** part of the live registry today. `tests/conformance/mod.rs`
-currently leaves 21 `pub mod` entries commented out as known bit-rot or
-unresolved-dependency follow-ups, including older `h1_*` siblings,
-`sqlite_prepared_statements`, the full `websocket_rfc6455` suite,
+leaves explicit commented-out `pub mod` entries as known bit-rot,
+superseded-suite, or unresolved-dependency follow-ups, including older `h1_*`
+siblings, `sqlite_prepared_statements`, the full `websocket_rfc6455` suite,
 `grpc_deadline`, `grpc_health`, `grpc_status`, `h3_settings`, `quic_initial`,
-and `task_inspector_wire`. Those files remain in-tree for repair work, but they
-do not compile or run until they are re-wired in `tests/conformance/mod.rs`.
+and `task_inspector_wire`. The contract artifact records each dormant suite's
+current disposition, owner bead or supersession path, and retention reason.
+Those files remain in-tree for repair work, but they do not compile or run
+until they are re-wired in `tests/conformance/mod.rs`.
 
 The separate `conformance/` workspace member still exists for standalone
 vendor/spec harnesses, but it should not be read as proof that every
