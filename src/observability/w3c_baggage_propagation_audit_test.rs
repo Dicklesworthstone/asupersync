@@ -13,17 +13,20 @@
 //!
 //! **CURRENT IMPLEMENTATION ANALYSIS**:
 //! - otel.rs: Has baggage data structures and internal propagation
-//! - w3c_trace_context.rs: extract_from_http() only handles traceparent/tracestate
-//! - w3c_trace_context.rs: inject_to_grpc() only handles traceparent/tracestate
-//! - Missing: HTTP "baggage" header extraction and injection
+//! - w3c_trace_context.rs now exposes production W3C baggage extraction and
+//!   injection helpers alongside traceparent/tracestate support
 //!
-//! **CRITICAL GAP IDENTIFIED**:
-//! - W3C Baggage header not extracted from incoming HTTP requests
-//! - W3C Baggage header not injected into outgoing HTTP/gRPC requests
-//! - Breaks cross-service baggage propagation per W3C specification
+//! **REGRESSION COVERAGE**:
+//! - W3C Baggage header extraction from incoming HTTP requests
+//! - W3C Baggage header injection into outgoing HTTP/gRPC requests
+//! - Baggage propagation independent of trace context
 
 #![cfg(test)]
 
+use crate::observability::w3c_trace_context::{
+    W3CBaggage, W3CTraceContext, extract_baggage_from_http, extract_propagation_from_http,
+    inject_to_http,
+};
 use std::collections::HashMap;
 
 /// W3C Baggage header parser for testing compliance.
@@ -87,18 +90,6 @@ impl W3CBaggageParser {
 
         Ok(())
     }
-
-    /// Serialize baggage to W3C header format.
-    fn serialize_to_header(&self) -> String {
-        let mut entries: Vec<String> = self
-            .parsed_baggage
-            .iter()
-            .map(|(key, value)| format!("{}={}", key, value))
-            .collect();
-
-        entries.sort(); // Deterministic order for testing
-        entries.join(",")
-    }
 }
 
 /// Mock HTTP request with headers for testing extraction.
@@ -127,129 +118,55 @@ impl MockHttpRequest {
     }
 }
 
-/// Mock W3C trace context with baggage support for testing.
-#[derive(Debug, Clone)]
-struct MockW3CContext {
-    trace_id: String,
-    span_id: String,
-    flags: u8,
-    tracestate: Option<String>,
-    baggage: HashMap<String, String>,
-}
+#[test]
+fn production_w3c_baggage_http_propagation_closes_audit_gap() {
+    let mut headers = HashMap::new();
+    headers.insert(
+        "traceparent".to_string(),
+        "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01".to_string(),
+    );
+    headers.insert(
+        "baggage".to_string(),
+        "tenant=production,feature.flag=experiment-v2,user=alice%20smith".to_string(),
+    );
 
-impl MockW3CContext {
-    fn new_with_baggage(baggage: HashMap<String, String>) -> Self {
-        Self {
-            trace_id: "4bf92f3577b34da6a3ce929d0e0e4736".to_string(),
-            span_id: "00f067aa0ba902b7".to_string(),
-            flags: 1,
-            tracestate: None,
-            baggage,
-        }
-    }
+    let propagation =
+        extract_propagation_from_http(&headers).expect("production propagation extraction");
+    let trace_context = propagation
+        .trace_context
+        .expect("trace context should be present");
+    assert_eq!(trace_context.baggage.get("tenant"), Some("production"));
+    assert_eq!(
+        trace_context.baggage.get("feature.flag"),
+        Some("experiment-v2")
+    );
+    assert_eq!(trace_context.baggage.get("user"), Some("alice smith"));
 
-    /// Current defective implementation: no baggage extraction.
-    fn extract_from_http_defective(headers: &HashMap<String, String>) -> Option<Self> {
-        // Only extract traceparent (current w3c_trace_context.rs behavior)
-        if let Some(traceparent) = headers.get("traceparent") {
-            let parts: Vec<&str> = traceparent.split('-').collect();
-            if parts.len() >= 4 {
-                return Some(Self {
-                    trace_id: parts[1].to_string(),
-                    span_id: parts[2].to_string(),
-                    flags: u8::from_str_radix(parts[3], 16).unwrap_or(0),
-                    tracestate: headers.get("tracestate").cloned(),
-                    baggage: HashMap::new(), // DEFECTIVE: No baggage extraction
-                });
-            }
-        }
-        None
-    }
+    let mut baggage_only_headers = HashMap::new();
+    baggage_only_headers.insert("baggage".to_string(), "session.id=sess-123".to_string());
+    let baggage_only = extract_baggage_from_http(&baggage_only_headers)
+        .expect("production baggage-only extraction");
+    assert_eq!(baggage_only.get("session.id"), Some("sess-123"));
 
-    /// Correct implementation: extract baggage header per W3C spec.
-    fn extract_from_http_correct(headers: &HashMap<String, String>) -> Option<Self> {
-        let mut context = if let Some(traceparent) = headers.get("traceparent") {
-            let parts: Vec<&str> = traceparent.split('-').collect();
-            if parts.len() >= 4 {
-                Self {
-                    trace_id: parts[1].to_string(),
-                    span_id: parts[2].to_string(),
-                    flags: u8::from_str_radix(parts[3], 16).unwrap_or(0),
-                    tracestate: headers.get("tracestate").cloned(),
-                    baggage: HashMap::new(),
-                }
-            } else {
-                return None;
-            }
-        } else {
-            // W3C spec: Baggage can exist without trace context
-            Self {
-                trace_id: "00000000000000000000000000000000".to_string(),
-                span_id: "0000000000000000".to_string(),
-                flags: 0,
-                tracestate: None,
-                baggage: HashMap::new(),
-            }
-        };
+    let mut context = W3CTraceContext::new_root();
+    let mut baggage = W3CBaggage::new();
+    baggage.insert("tenant", "production").unwrap();
+    baggage.insert("user", "alice smith").unwrap();
+    context.baggage = baggage;
 
-        // CORRECT: Extract baggage header per W3C Baggage spec
-        if let Some(baggage_header) = headers.get("baggage") {
-            let mut parser = W3CBaggageParser::new();
-            if parser.parse_baggage_header(baggage_header).is_ok() {
-                context.baggage = parser.parsed_baggage;
-            }
-        }
-
-        Some(context)
-    }
-
-    /// Current defective injection: no baggage header.
-    fn inject_to_http_defective(&self) -> HashMap<String, String> {
-        let mut headers = HashMap::new();
-
-        // Only inject traceparent/tracestate (current behavior)
-        let traceparent = format!("00-{}-{}-{:02x}", self.trace_id, self.span_id, self.flags);
-        headers.insert("traceparent".to_string(), traceparent);
-
-        if let Some(ref tracestate) = self.tracestate {
-            headers.insert("tracestate".to_string(), tracestate.clone());
-        }
-
-        // DEFECTIVE: No baggage injection
-        headers
-    }
-
-    /// Correct injection: include baggage header per W3C spec.
-    fn inject_to_http_correct(&self) -> HashMap<String, String> {
-        let mut headers = HashMap::new();
-
-        // Inject traceparent/tracestate
-        let traceparent = format!("00-{}-{}-{:02x}", self.trace_id, self.span_id, self.flags);
-        headers.insert("traceparent".to_string(), traceparent);
-
-        if let Some(ref tracestate) = self.tracestate {
-            headers.insert("tracestate".to_string(), tracestate.clone());
-        }
-
-        // CORRECT: Inject baggage header per W3C Baggage spec
-        if !self.baggage.is_empty() {
-            let baggage_parser = W3CBaggageParser {
-                parsed_baggage: self.baggage.clone(),
-                parse_errors: Vec::new(),
-            };
-            let baggage_header = baggage_parser.serialize_to_header();
-            headers.insert("baggage".to_string(), baggage_header);
-        }
-
-        headers
-    }
+    let mut outbound = HashMap::new();
+    inject_to_http(&context, &mut outbound).expect("production HTTP injection");
+    assert_eq!(
+        outbound.get("baggage").map(String::as_str),
+        Some("tenant=production,user=alice%20smith")
+    );
 }
 
 /// **AUDIT TEST**: Verify W3C Baggage header extraction from HTTP requests.
 ///
 /// **SCENARIO**: HTTP server receives request with baggage header containing tenant info.
 /// **REQUIREMENT**: Should extract baggage key-value pairs per W3C Baggage spec.
-/// **ASSESSMENT**: MISSING - baggage header not extracted by current implementation.
+/// **ASSESSMENT**: Production extraction must preserve all W3C baggage members.
 #[test]
 fn audit_baggage_extraction_from_http() {
     println!("🔍 AUDIT: W3C Baggage header extraction from HTTP requests");
@@ -270,51 +187,35 @@ fn audit_baggage_extraction_from_http() {
     println!("   Baggage: tenant=alpha,request.class=gold,user.id=12345");
     println!("   Expected: Extract all three baggage key-value pairs");
 
-    // **DEFECTIVE IMPLEMENTATION**: Current w3c_trace_context.rs behavior
-    println!("📊 Testing current implementation (defective):");
-    let defective_context = MockW3CContext::extract_from_http_defective(&request.headers);
+    println!("📊 Testing production W3C baggage extraction:");
+    let propagation =
+        extract_propagation_from_http(&request.headers).expect("production propagation extraction");
+    let context = propagation
+        .trace_context
+        .as_ref()
+        .expect("trace context should be present");
 
-    if let Some(ref context) = defective_context {
-        println!("   Extracted baggage: {:?}", context.baggage);
-        println!("   Baggage count: {}", context.baggage.len());
-    }
-
-    assert!(defective_context.is_some());
-    assert_eq!(defective_context.as_ref().unwrap().baggage.len(), 0);
-
-    println!("⚠️  DEFECTIVE: No baggage extracted despite header presence");
-
-    // **CORRECT IMPLEMENTATION**: W3C Baggage spec compliant
-    println!("📊 Testing W3C compliant implementation:");
-    let correct_context = MockW3CContext::extract_from_http_correct(&request.headers);
-
-    if let Some(ref context) = correct_context {
-        println!("   Extracted baggage: {:?}", context.baggage);
-        println!("   Baggage count: {}", context.baggage.len());
-    }
-
-    assert!(correct_context.is_some());
-    let context = correct_context.as_ref().unwrap();
-    assert_eq!(context.baggage.len(), 3);
-    assert_eq!(context.baggage.get("tenant"), Some(&"alpha".to_string()));
-    assert_eq!(
-        context.baggage.get("request.class"),
-        Some(&"gold".to_string())
+    println!(
+        "   Extracted baggage: {:?}",
+        context.baggage.iter().collect::<Vec<_>>()
     );
-    assert_eq!(context.baggage.get("user.id"), Some(&"12345".to_string()));
+    println!("   Baggage count: {}", context.baggage.len());
+
+    assert_eq!(context.baggage.len(), 3);
+    assert_eq!(context.baggage.get("tenant"), Some("alpha"));
+    assert_eq!(context.baggage.get("request.class"), Some("gold"));
+    assert_eq!(context.baggage.get("user.id"), Some("12345"));
 
     println!("✅ CORRECT: All baggage key-value pairs extracted successfully");
 
-    println!("🚨 AUDIT FINDING: MISSING");
-    println!("   Current: w3c_trace_context.rs ignores 'baggage' header");
-    println!("   Required: Extract and propagate baggage per W3C specification");
+    println!("✅ AUDIT CLOSURE: w3c_trace_context.rs extracts and propagates baggage");
 }
 
 /// **AUDIT TEST**: Verify W3C Baggage header injection into outgoing requests.
 ///
 /// **SCENARIO**: Service makes downstream call with baggage context.
 /// **REQUIREMENT**: Should inject baggage into 'baggage' header per W3C spec.
-/// **ASSESSMENT**: MISSING - baggage header not injected by current implementation.
+/// **ASSESSMENT**: Production HTTP injection must include baggage when present.
 #[test]
 fn audit_baggage_injection_to_http() {
     println!("🔍 AUDIT: W3C Baggage header injection into outgoing requests");
@@ -325,39 +226,21 @@ fn audit_baggage_injection_to_http() {
     println!("   • Include all baggage from current span context");
     println!("   • Maintain baggage across service boundaries");
 
-    // Create context with baggage
-    let mut baggage = HashMap::new();
-    baggage.insert("tenant".to_string(), "beta".to_string());
-    baggage.insert("correlation.id".to_string(), "req-987654".to_string());
-    baggage.insert("user.role".to_string(), "admin".to_string());
-
-    let context = MockW3CContext::new_with_baggage(baggage);
+    let mut context = W3CTraceContext::new_root();
+    context.baggage.insert("tenant", "beta").unwrap();
+    context
+        .baggage
+        .insert("correlation.id", "req-987654")
+        .unwrap();
+    context.baggage.insert("user.role", "admin").unwrap();
 
     println!("📊 Test scenario:");
     println!("   Baggage: tenant=beta, correlation.id=req-987654, user.role=admin");
     println!("   Expected: Include 'baggage' header in outgoing request");
 
-    // **DEFECTIVE IMPLEMENTATION**: Current w3c_trace_context.rs behavior
-    println!("📊 Testing current implementation (defective):");
-    let defective_headers = context.inject_to_http_defective();
-
-    println!(
-        "   Injected headers: {:?}",
-        defective_headers.keys().collect::<Vec<_>>()
-    );
-    println!(
-        "   Contains 'baggage' header: {}",
-        defective_headers.contains_key("baggage")
-    );
-
-    assert!(defective_headers.contains_key("traceparent"));
-    assert!(!defective_headers.contains_key("baggage"));
-
-    println!("⚠️  DEFECTIVE: No 'baggage' header injected despite context having baggage");
-
-    // **CORRECT IMPLEMENTATION**: W3C Baggage spec compliant
-    println!("📊 Testing W3C compliant implementation:");
-    let correct_headers = context.inject_to_http_correct();
+    println!("📊 Testing production W3C baggage injection:");
+    let mut correct_headers = HashMap::new();
+    inject_to_http(&context, &mut correct_headers).expect("production HTTP injection");
 
     println!(
         "   Injected headers: {:?}",
@@ -382,16 +265,14 @@ fn audit_baggage_injection_to_http() {
 
     println!("✅ CORRECT: 'baggage' header injected with all context baggage");
 
-    println!("🚨 AUDIT FINDING: MISSING");
-    println!("   Current: w3c_trace_context.rs doesn't inject baggage header");
-    println!("   Required: Inject baggage into outgoing requests per W3C spec");
+    println!("✅ AUDIT CLOSURE: w3c_trace_context.rs injects baggage for outgoing requests");
 }
 
 /// **AUDIT TEST**: Verify baggage independence from trace context.
 ///
 /// **SCENARIO**: Request has baggage but no traceparent header.
 /// **REQUIREMENT**: Should extract baggage even without trace context.
-/// **ASSESSMENT**: MISSING - current implementation requires traceparent.
+/// **ASSESSMENT**: Production baggage extraction must not require traceparent.
 #[test]
 fn audit_baggage_independence_from_trace_context() {
     println!("🔍 AUDIT: W3C Baggage independence from trace context");
@@ -411,47 +292,28 @@ fn audit_baggage_independence_from_trace_context() {
     println!("   No traceparent header present");
     println!("   Expected: Extract baggage despite no trace context");
 
-    // **DEFECTIVE IMPLEMENTATION**: Requires traceparent
-    println!("📊 Testing current implementation (defective):");
-    let defective_context =
-        MockW3CContext::extract_from_http_defective(&request_baggage_only.headers);
+    println!("📊 Testing production baggage-only extraction:");
+    let propagation = extract_propagation_from_http(&request_baggage_only.headers)
+        .expect("production baggage-only extraction");
 
-    println!("   Context extracted: {}", defective_context.is_some());
-    if let Some(ref context) = defective_context {
-        println!("   Baggage count: {}", context.baggage.len());
-    }
-
-    assert!(defective_context.is_none()); // Current impl requires traceparent
-
-    println!("⚠️  DEFECTIVE: No context extracted without traceparent (baggage lost)");
-
-    // **CORRECT IMPLEMENTATION**: Baggage independence
-    println!("📊 Testing W3C compliant implementation:");
-    let correct_context = MockW3CContext::extract_from_http_correct(&request_baggage_only.headers);
-
-    println!("   Context extracted: {}", correct_context.is_some());
-    if let Some(ref context) = correct_context {
-        println!("   Baggage count: {}", context.baggage.len());
-        println!("   Extracted baggage: {:?}", context.baggage);
-    }
-
-    assert!(correct_context.is_some());
-    let context = correct_context.as_ref().unwrap();
-    assert_eq!(context.baggage.len(), 2);
-    assert_eq!(
-        context.baggage.get("session.id"),
-        Some(&"sess-abc123".to_string())
+    println!(
+        "   Trace context extracted: {}",
+        propagation.trace_context.is_some()
     );
-    assert_eq!(
-        context.baggage.get("feature.flag"),
-        Some(&"new-ui".to_string())
+    println!("   Baggage count: {}", propagation.baggage.len());
+    println!(
+        "   Extracted baggage: {:?}",
+        propagation.baggage.iter().collect::<Vec<_>>()
     );
+
+    assert!(propagation.trace_context.is_none());
+    assert_eq!(propagation.baggage.len(), 2);
+    assert_eq!(propagation.baggage.get("session.id"), Some("sess-abc123"));
+    assert_eq!(propagation.baggage.get("feature.flag"), Some("new-ui"));
 
     println!("✅ CORRECT: Baggage extracted independently of trace context");
 
-    println!("🚨 AUDIT FINDING: MISSING");
-    println!("   Current: Baggage extraction coupled to traceparent presence");
-    println!("   Required: Independent baggage propagation per W3C spec");
+    println!("✅ AUDIT CLOSURE: Baggage extraction is independent of trace context");
 }
 
 /// **AUDIT TEST**: Verify W3C Baggage header format compliance.
@@ -531,19 +393,18 @@ fn audit_baggage_header_format_compliance() {
 
     println!("✅ W3C Baggage format parsing implemented correctly");
 
-    println!("📊 Integration requirement:");
-    println!("   Missing: Integrate baggage parser with w3c_trace_context.rs");
-    println!("   Required: Add baggage extraction/injection to HTTP functions");
+    println!("📊 Production integration:");
+    println!("   w3c_trace_context.rs uses compatible parser semantics for HTTP propagation");
 }
 
-/// **AUDIT TEST**: Verify current OTLP baggage support vs HTTP integration gap.
+/// **AUDIT TEST**: Verify OTLP baggage support is bridged to HTTP propagation.
 ///
-/// **SCENARIO**: Document existing baggage support and HTTP integration gap.
+/// **SCENARIO**: Document existing baggage support and the W3C HTTP bridge.
 /// **REQUIREMENT**: Bridge internal baggage with W3C header propagation.
-/// **ASSESSMENT**: Internal support exists, HTTP integration missing.
+/// **ASSESSMENT**: Internal support exists and production HTTP propagation is wired.
 #[test]
 fn audit_otlp_baggage_internal_vs_http_gap() {
-    println!("🔍 AUDIT: OTLP internal baggage support vs HTTP integration gap");
+    println!("🔍 AUDIT: OTLP internal baggage support vs HTTP propagation bridge");
 
     println!("📋 Current OTLP baggage support in otel.rs:");
     println!("   ✅ baggage: HashMap<String, String> field in TestSpan");
@@ -554,27 +415,26 @@ fn audit_otlp_baggage_internal_vs_http_gap() {
     println!("📋 Current W3C trace context in w3c_trace_context.rs:");
     println!("   ✅ extract_from_http() for traceparent/tracestate");
     println!("   ✅ inject_to_grpc() for traceparent/tracestate");
-    println!("   ❌ Missing: baggage header extraction");
-    println!("   ❌ Missing: baggage header injection");
+    println!("   ✅ baggage header extraction");
+    println!("   ✅ baggage header injection");
 
-    println!("📊 Integration gap analysis:");
-    println!("   Problem: Baggage exists in OTLP spans but not in HTTP headers");
-    println!("   Impact: Cross-service baggage propagation broken");
+    println!("📊 Integration bridge analysis:");
+    println!("   Problem: Baggage must cross process boundaries via HTTP headers");
     println!("   Solution: Bridge W3C baggage headers with OTLP baggage fields");
 
-    println!("📌 Required integration points:");
-    println!("   1. Modify extract_from_http() to extract 'baggage' header");
-    println!("   2. Return baggage data alongside trace context");
-    println!("   3. Modify inject_to_grpc() to inject baggage header");
-    println!("   4. Add inject_to_http() function for HTTP client calls");
-    println!("   5. Update span creation to use extracted baggage");
+    println!("📌 Implemented integration points:");
+    println!("   1. extract_from_http() extracts 'baggage' header");
+    println!("   2. Production propagation returns baggage alongside trace context");
+    println!("   3. inject_to_grpc() injects baggage header");
+    println!("   4. inject_to_http() supports HTTP client calls");
+    println!("   5. Span creation can use extracted baggage");
 
-    println!("📊 W3C specification compliance gap:");
+    println!("📊 W3C specification compliance:");
     println!("   Required by spec: Propagate baggage via HTTP headers");
-    println!("   Current status: Partial implementation (internal only)");
-    println!("   Compliance level: Non-compliant (missing HTTP integration)");
+    println!("   Current status: Production HTTP extraction/injection implemented");
+    println!("   Compliance level: HTTP propagation bridge present");
 
-    // Simulate the gap
+    // Demonstrate the production bridge.
     let internal_baggage = {
         let mut baggage = HashMap::new();
         baggage.insert("tenant".to_string(), "production".to_string());
@@ -582,10 +442,9 @@ fn audit_otlp_baggage_internal_vs_http_gap() {
         baggage
     };
 
-    println!("📊 Gap demonstration:");
+    println!("📊 Bridge demonstration:");
     println!("   Internal baggage: {:?}", internal_baggage);
 
-    // Current w3c_trace_context.rs would not extract this from HTTP headers
     let http_headers = {
         let mut headers = HashMap::new();
         headers.insert(
@@ -603,9 +462,13 @@ fn audit_otlp_baggage_internal_vs_http_gap() {
         "   HTTP baggage header: {}",
         http_headers.get("baggage").unwrap()
     );
-    println!("   Current extraction result: None (header ignored)");
+    let propagation =
+        extract_propagation_from_http(&http_headers).expect("production propagation extraction");
+    assert_eq!(propagation.baggage.get("tenant"), Some("production"));
+    assert_eq!(
+        propagation.baggage.get("feature.flag"),
+        Some("experiment-v2")
+    );
 
-    println!("🚨 COMPLIANCE GAP: W3C Baggage specification not implemented");
-    println!("   Status: MISSING - HTTP baggage propagation not supported");
-    println!("   Required: Implement W3C Baggage header integration");
+    println!("✅ COMPLIANCE: W3C Baggage HTTP propagation is implemented");
 }

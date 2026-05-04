@@ -222,8 +222,9 @@ pub use task_inspector::{
     TaskSummaryWire,
 };
 pub use w3c_trace_context::{
-    SpanId as W3CSpanId, TraceContextError, TraceFlags, TraceId, W3CTraceContext,
-    extract_from_http, inject_to_grpc,
+    SpanId as W3CSpanId, TraceContextError, TraceFlags, TraceId, W3CBaggage, W3CPropagationContext,
+    W3CTraceContext, extract_baggage_from_http, extract_from_http, extract_propagation_from_http,
+    inject_baggage_to_http, inject_to_grpc, inject_to_http,
 };
 
 /// br-asupersync-z5ge0x: globally-installable observability clock for

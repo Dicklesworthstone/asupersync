@@ -26,13 +26,15 @@
 //! inject_to_grpc(&child_ctx, &mut grpc_request.metadata_mut());
 //! ```
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fmt;
 use std::str::FromStr;
 
 /// Maximum length for trace context values to prevent amplification attacks.
 /// Aligned with web middleware bounds (br-asupersync-pol3ps).
 const MAX_TRACE_CONTEXT_LENGTH: usize = 128;
+const MAX_BAGGAGE_HEADER_LENGTH: usize = 8192;
+const MAX_BAGGAGE_ITEMS: usize = 64;
 
 /// W3C Trace Context representation.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -47,6 +49,23 @@ pub struct W3CTraceContext {
     pub flags: TraceFlags,
     /// Optional tracestate for vendor-specific data
     pub tracestate: Option<String>,
+    /// W3C baggage entries propagated alongside, but independent from, trace context.
+    pub baggage: W3CBaggage,
+}
+
+/// W3C propagation data extracted from headers.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct W3CPropagationContext {
+    /// Optional trace context. Baggage can be present without it.
+    pub trace_context: Option<W3CTraceContext>,
+    /// Baggage entries from the `baggage` header.
+    pub baggage: W3CBaggage,
+}
+
+/// W3C Baggage entries.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct W3CBaggage {
+    entries: BTreeMap<String, String>,
 }
 
 /// 16-byte trace identifier.
@@ -80,6 +99,7 @@ impl TraceFlags {
     }
 }
 
+/// Errors raised while parsing or formatting W3C trace context and baggage headers.
 #[derive(Debug, Clone)]
 pub enum TraceContextError {
     /// Invalid traceparent format.
@@ -90,6 +110,10 @@ pub enum TraceContextError {
     InvalidSpanId,
     /// Header value too long (security bound).
     ValueTooLong(usize),
+    /// Invalid W3C baggage member.
+    InvalidBaggage(String),
+    /// Too many baggage members.
+    TooManyBaggageItems(usize),
 }
 
 impl fmt::Display for TraceContextError {
@@ -98,10 +122,11 @@ impl fmt::Display for TraceContextError {
             Self::InvalidFormat(msg) => write!(f, "invalid traceparent format: {msg}"),
             Self::InvalidTraceId => write!(f, "trace ID cannot be all zeros"),
             Self::InvalidSpanId => write!(f, "span ID cannot be all zeros"),
-            Self::ValueTooLong(len) => write!(
-                f,
-                "trace context too long: {len} > {MAX_TRACE_CONTEXT_LENGTH}"
-            ),
+            Self::ValueTooLong(len) => write!(f, "header value too long: {len} bytes"),
+            Self::InvalidBaggage(msg) => write!(f, "invalid baggage header: {msg}"),
+            Self::TooManyBaggageItems(count) => {
+                write!(f, "too many baggage members: {count} > {MAX_BAGGAGE_ITEMS}")
+            }
         }
     }
 }
@@ -122,6 +147,222 @@ impl TraceId {
     pub fn to_hex(&self) -> String {
         hex::encode(self.0)
     }
+}
+
+impl W3CBaggage {
+    /// Creates empty baggage.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Returns true when no entries are present.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+
+    /// Returns the number of baggage entries.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    /// Returns a baggage value by key.
+    #[must_use]
+    pub fn get(&self, key: &str) -> Option<&str> {
+        self.entries.get(key).map(String::as_str)
+    }
+
+    /// Iterates entries in deterministic key order.
+    pub fn iter(&self) -> impl Iterator<Item = (&str, &str)> {
+        self.entries
+            .iter()
+            .map(|(key, value)| (key.as_str(), value.as_str()))
+    }
+
+    /// Inserts or replaces a baggage entry.
+    pub fn insert(
+        &mut self,
+        key: impl Into<String>,
+        value: impl Into<String>,
+    ) -> Result<(), TraceContextError> {
+        let key = key.into();
+        let value = value.into();
+        validate_baggage_key(&key)?;
+        validate_baggage_value(&value)?;
+        if !self.entries.contains_key(&key) && self.entries.len() >= MAX_BAGGAGE_ITEMS {
+            return Err(TraceContextError::TooManyBaggageItems(
+                self.entries.len() + 1,
+            ));
+        }
+        self.entries.insert(key, value);
+        Ok(())
+    }
+
+    /// Parses a W3C `baggage` header.
+    pub fn from_header(header: &str) -> Result<Self, TraceContextError> {
+        if header.len() > MAX_BAGGAGE_HEADER_LENGTH {
+            return Err(TraceContextError::ValueTooLong(header.len()));
+        }
+
+        let mut baggage = Self::new();
+        let mut valid_members = 0usize;
+        for raw_member in header.split(',') {
+            let member = raw_member.trim();
+            if member.is_empty() {
+                continue;
+            }
+
+            valid_members += 1;
+            if valid_members > MAX_BAGGAGE_ITEMS {
+                return Err(TraceContextError::TooManyBaggageItems(valid_members));
+            }
+
+            let (key, value_with_metadata) = member.split_once('=').ok_or_else(|| {
+                TraceContextError::InvalidBaggage(format!("missing '=' in member `{member}`"))
+            })?;
+            let key = key.trim();
+            validate_baggage_key(key)?;
+
+            let raw_value = value_with_metadata
+                .split(';')
+                .next()
+                .unwrap_or_default()
+                .trim();
+            let value = percent_decode_baggage_value(raw_value)?;
+            validate_baggage_value(&value)?;
+            baggage.entries.insert(key.to_string(), value);
+        }
+
+        Ok(baggage)
+    }
+
+    /// Formats as a W3C `baggage` header.
+    pub fn to_header(&self) -> Result<String, TraceContextError> {
+        let header = self
+            .entries
+            .iter()
+            .map(|(key, value)| format!("{key}={}", percent_encode_baggage_value(value)))
+            .collect::<Vec<_>>()
+            .join(",");
+        if header.len() > MAX_BAGGAGE_HEADER_LENGTH {
+            return Err(TraceContextError::ValueTooLong(header.len()));
+        }
+        Ok(header)
+    }
+}
+
+fn validate_baggage_key(key: &str) -> Result<(), TraceContextError> {
+    if key.is_empty() {
+        return Err(TraceContextError::InvalidBaggage(
+            "member key is empty".to_string(),
+        ));
+    }
+    if key.bytes().all(is_baggage_key_byte) {
+        Ok(())
+    } else {
+        Err(TraceContextError::InvalidBaggage(format!(
+            "invalid member key `{key}`"
+        )))
+    }
+}
+
+fn validate_baggage_value(value: &str) -> Result<(), TraceContextError> {
+    if value.bytes().any(|byte| matches!(byte, 0x00..=0x1f | 0x7f)) {
+        return Err(TraceContextError::InvalidBaggage(
+            "member value contains control characters".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+fn is_baggage_key_byte(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric()
+        || matches!(
+            byte,
+            b'!' | b'#'
+                | b'$'
+                | b'%'
+                | b'&'
+                | b'\''
+                | b'*'
+                | b'+'
+                | b'-'
+                | b'.'
+                | b'^'
+                | b'_'
+                | b'`'
+                | b'|'
+                | b'~'
+        )
+}
+
+fn percent_decode_baggage_value(value: &str) -> Result<String, TraceContextError> {
+    let bytes = value.as_bytes();
+    let mut decoded = Vec::with_capacity(bytes.len());
+    let mut index = 0usize;
+    while index < bytes.len() {
+        if bytes[index] == b'%' {
+            let Some(hex) = bytes.get(index + 1..index + 3) else {
+                return Err(TraceContextError::InvalidBaggage(
+                    "truncated percent escape".to_string(),
+                ));
+            };
+            let hex = std::str::from_utf8(hex).map_err(|_| {
+                TraceContextError::InvalidBaggage("invalid percent escape".to_string())
+            })?;
+            let byte = u8::from_str_radix(hex, 16).map_err(|_| {
+                TraceContextError::InvalidBaggage("invalid percent escape".to_string())
+            })?;
+            decoded.push(byte);
+            index += 3;
+        } else {
+            decoded.push(bytes[index]);
+            index += 1;
+        }
+    }
+    String::from_utf8(decoded)
+        .map_err(|_| TraceContextError::InvalidBaggage("value is not UTF-8".to_string()))
+}
+
+fn percent_encode_baggage_value(value: &str) -> String {
+    let mut encoded = String::with_capacity(value.len());
+    for byte in value.bytes() {
+        if byte.is_ascii_alphanumeric()
+            || matches!(
+                byte,
+                b'!' | b'#'
+                    | b'$'
+                    | b'&'
+                    | b'\''
+                    | b'*'
+                    | b'+'
+                    | b'-'
+                    | b'.'
+                    | b'/'
+                    | b':'
+                    | b'<'
+                    | b'>'
+                    | b'?'
+                    | b'@'
+                    | b'['
+                    | b']'
+                    | b'^'
+                    | b'_'
+                    | b'`'
+                    | b'{'
+                    | b'|'
+                    | b'}'
+                    | b'~'
+            )
+        {
+            encoded.push(char::from(byte));
+        } else {
+            encoded.push_str(&format!("%{byte:02X}"));
+        }
+    }
+    encoded
 }
 
 impl FromStr for TraceId {
@@ -196,6 +437,7 @@ impl W3CTraceContext {
             span_id: SpanId::new_random(),
             flags: TraceFlags::SAMPLED,
             tracestate: None,
+            baggage: W3CBaggage::new(),
         }
     }
 
@@ -208,6 +450,7 @@ impl W3CTraceContext {
             span_id: SpanId::new_random(),
             flags: self.flags,
             tracestate: self.tracestate.clone(),
+            baggage: self.baggage.clone(),
         }
     }
 
@@ -262,8 +505,48 @@ impl FromStr for W3CTraceContext {
             span_id,
             flags: TraceFlags(flags_byte),
             tracestate: None,
+            baggage: W3CBaggage::new(),
         })
     }
+}
+
+/// Extracts W3C trace context and baggage from HTTP headers.
+///
+/// Baggage is independent of trace context; callers can receive baggage even
+/// when no `traceparent` header exists.
+pub fn extract_propagation_from_http(
+    headers: &HashMap<String, String>,
+) -> Result<W3CPropagationContext, TraceContextError> {
+    let baggage = extract_baggage_from_http(headers)?;
+    let trace_context = match headers.get("traceparent") {
+        Some(traceparent) => {
+            let mut context = W3CTraceContext::from_str(traceparent)?;
+
+            if let Some(tracestate) = headers.get("tracestate") {
+                if tracestate.len() <= MAX_TRACE_CONTEXT_LENGTH {
+                    context.tracestate = Some(tracestate.clone());
+                }
+            }
+            context.baggage = baggage.clone();
+            Some(context)
+        }
+        None => None,
+    };
+
+    Ok(W3CPropagationContext {
+        trace_context,
+        baggage,
+    })
+}
+
+/// Extracts W3C baggage from HTTP headers.
+pub fn extract_baggage_from_http(
+    headers: &HashMap<String, String>,
+) -> Result<W3CBaggage, TraceContextError> {
+    headers.get("baggage").map_or_else(
+        || Ok(W3CBaggage::new()),
+        |value| W3CBaggage::from_header(value),
+    )
 }
 
 /// Extracts W3C trace context from HTTP headers.
@@ -273,21 +556,32 @@ impl FromStr for W3CTraceContext {
 pub fn extract_from_http(
     headers: &HashMap<String, String>,
 ) -> Result<Option<W3CTraceContext>, TraceContextError> {
-    let traceparent = match headers.get("traceparent") {
-        Some(value) => value,
-        None => return Ok(None), // No trace context present
-    };
+    extract_propagation_from_http(headers).map(|propagation| propagation.trace_context)
+}
 
-    let mut context = W3CTraceContext::from_str(traceparent)?;
+/// Injects W3C baggage into HTTP headers.
+pub fn inject_baggage_to_http(
+    baggage: &W3CBaggage,
+    headers: &mut HashMap<String, String>,
+) -> Result<(), TraceContextError> {
+    if !baggage.is_empty() {
+        headers.insert("baggage".to_string(), baggage.to_header()?);
+    }
+    Ok(())
+}
 
-    // Extract tracestate if present
-    if let Some(tracestate) = headers.get("tracestate") {
-        if tracestate.len() <= MAX_TRACE_CONTEXT_LENGTH {
-            context.tracestate = Some(tracestate.clone());
-        }
+/// Injects W3C trace context and baggage into HTTP headers.
+pub fn inject_to_http(
+    context: &W3CTraceContext,
+    headers: &mut HashMap<String, String>,
+) -> Result<(), TraceContextError> {
+    headers.insert("traceparent".to_string(), context.to_traceparent());
+
+    if let Some(ref tracestate) = context.tracestate {
+        headers.insert("tracestate".to_string(), tracestate.clone());
     }
 
-    Ok(Some(context))
+    inject_baggage_to_http(&context.baggage, headers)
 }
 
 /// Injects W3C trace context into gRPC metadata.
@@ -297,6 +591,8 @@ pub fn inject_to_grpc(context: &W3CTraceContext, metadata: &mut HashMap<String, 
     if let Some(ref tracestate) = context.tracestate {
         metadata.insert("tracestate".to_string(), tracestate.clone());
     }
+
+    let _ = inject_baggage_to_http(&context.baggage, metadata);
 }
 
 #[cfg(test)]
@@ -351,6 +647,149 @@ mod tests {
     }
 
     #[test]
+    fn baggage_extraction_with_traceparent_preserves_context() {
+        let mut headers = HashMap::new();
+        headers.insert(
+            "traceparent".to_string(),
+            "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01".to_string(),
+        );
+        headers.insert("tracestate".to_string(), "vendor=opaque".to_string());
+        headers.insert(
+            "baggage".to_string(),
+            "tenant=alpha,request.class=gold;metadata=kept,user.id=12345".to_string(),
+        );
+
+        let propagation =
+            extract_propagation_from_http(&headers).expect("propagation extraction failed");
+        let context = propagation
+            .trace_context
+            .expect("trace context should be present");
+
+        assert_eq!(context.tracestate.as_deref(), Some("vendor=opaque"));
+        assert_eq!(context.baggage.get("tenant"), Some("alpha"));
+        assert_eq!(context.baggage.get("request.class"), Some("gold"));
+        assert_eq!(context.baggage.get("user.id"), Some("12345"));
+        assert_eq!(propagation.baggage, context.baggage);
+
+        let legacy_context = extract_from_http(&headers)
+            .expect("legacy extraction failed")
+            .expect("trace context should be present");
+        assert_eq!(legacy_context.baggage.get("tenant"), Some("alpha"));
+    }
+
+    #[test]
+    fn baggage_extraction_does_not_require_traceparent() {
+        let mut headers = HashMap::new();
+        headers.insert(
+            "baggage".to_string(),
+            "session.id=sess-abc123,feature.flag=new-ui".to_string(),
+        );
+
+        let propagation =
+            extract_propagation_from_http(&headers).expect("propagation extraction failed");
+
+        assert!(propagation.trace_context.is_none());
+        assert_eq!(propagation.baggage.len(), 2);
+        assert_eq!(propagation.baggage.get("session.id"), Some("sess-abc123"));
+        assert_eq!(propagation.baggage.get("feature.flag"), Some("new-ui"));
+        assert!(
+            extract_from_http(&headers)
+                .expect("trace-only extraction failed")
+                .is_none(),
+            "trace-only compatibility API should still report no trace context"
+        );
+    }
+
+    #[test]
+    fn baggage_injection_to_http_and_grpc_is_deterministic() {
+        let mut context = W3CTraceContext::new_root();
+        context.baggage.insert("tenant", "beta").unwrap();
+        context
+            .baggage
+            .insert("correlation.id", "req-987654")
+            .unwrap();
+        context.baggage.insert("user.role", "admin").unwrap();
+
+        let mut http_headers = HashMap::new();
+        inject_to_http(&context, &mut http_headers).expect("HTTP injection failed");
+        assert_eq!(
+            http_headers.get("baggage").map(String::as_str),
+            Some("correlation.id=req-987654,tenant=beta,user.role=admin")
+        );
+        let traceparent = context.to_traceparent();
+        assert_eq!(
+            http_headers.get("traceparent").map(String::as_str),
+            Some(traceparent.as_str())
+        );
+
+        let mut grpc_metadata = HashMap::new();
+        inject_to_grpc(&context, &mut grpc_metadata);
+        assert_eq!(grpc_metadata.get("baggage"), http_headers.get("baggage"));
+    }
+
+    #[test]
+    fn baggage_percent_decoding_and_metadata_are_handled() {
+        let baggage =
+            W3CBaggage::from_header("user=alice%20smith;tenant=ignored,encoded=a%2Cb%3Bc,empty=")
+                .expect("baggage parse failed");
+
+        assert_eq!(baggage.get("user"), Some("alice smith"));
+        assert_eq!(baggage.get("encoded"), Some("a,b;c"));
+        assert_eq!(baggage.get("empty"), Some(""));
+        assert_eq!(
+            baggage.to_header().expect("baggage serialization failed"),
+            "empty=,encoded=a%2Cb%3Bc,user=alice%20smith"
+        );
+    }
+
+    #[test]
+    fn baggage_duplicate_keys_use_last_value_and_invalid_members_fail() {
+        let baggage = W3CBaggage::from_header("tenant=alpha,tenant=beta")
+            .expect("duplicate baggage parse failed");
+        assert_eq!(baggage.get("tenant"), Some("beta"));
+
+        assert!(matches!(
+            W3CBaggage::from_header("=value"),
+            Err(TraceContextError::InvalidBaggage(_))
+        ));
+        assert!(matches!(
+            W3CBaggage::from_header("bad@key=value"),
+            Err(TraceContextError::InvalidBaggage(_))
+        ));
+        assert!(matches!(
+            W3CBaggage::from_header("key=%GG"),
+            Err(TraceContextError::InvalidBaggage(_))
+        ));
+    }
+
+    #[test]
+    fn baggage_security_bounds_are_enforced() {
+        let long_header = format!("key={}", "x".repeat(MAX_BAGGAGE_HEADER_LENGTH));
+        assert!(matches!(
+            W3CBaggage::from_header(&long_header),
+            Err(TraceContextError::ValueTooLong(_))
+        ));
+
+        let too_many = (0..=MAX_BAGGAGE_ITEMS)
+            .map(|index| format!("k{index}=v"))
+            .collect::<Vec<_>>()
+            .join(",");
+        assert!(matches!(
+            W3CBaggage::from_header(&too_many),
+            Err(TraceContextError::TooManyBaggageItems(_))
+        ));
+
+        let mut baggage = W3CBaggage::new();
+        for index in 0..MAX_BAGGAGE_ITEMS {
+            baggage.insert(format!("k{index}"), "v").unwrap();
+        }
+        assert!(matches!(
+            baggage.insert("overflow", "v"),
+            Err(TraceContextError::TooManyBaggageItems(_))
+        ));
+    }
+
+    #[test]
     fn child_context_preserves_trace_id() {
         let parent = W3CTraceContext::new_root();
         let child = parent.create_child();
@@ -358,6 +797,7 @@ mod tests {
         assert_eq!(parent.trace_id, child.trace_id);
         assert_eq!(parent.span_id, child.parent_span_id);
         assert_ne!(parent.span_id, child.span_id);
+        assert_eq!(parent.baggage, child.baggage);
     }
 
     #[test]
