@@ -53,7 +53,27 @@
       },
       "operator_note": "ticket=OPS-64 api_token=super-secret",
       "output_root": "target/host-profile-planner-smoke",
-      "expected_report_projection": null
+      "expected_report_projection": {
+        "adaptive_batch_sizing_stance": "builtin_adaptive",
+        "admission_steering_stance": "cohort_locality",
+        "blocking_pool_affinity_stance": "cohort_biased",
+        "brownout_stage": "optional_first",
+        "dry_run_line_count": 9,
+        "fallback_profile": "conservative_baseline",
+        "final_arena_temperature_policy": "unified",
+        "final_global_queue_limit": 49152,
+        "final_trace_storage_profile": "large-memory-256g",
+        "final_worker_threads": 64,
+        "large_memory_trace_profile_stance": "large_memory_256g",
+        "manual_override_count": 1,
+        "otlp_shedding_stance": "priority_gate",
+        "projection_hash": 6973863446670655626,
+        "proof_artifact_count": 6,
+        "refusal_count": 0,
+        "sanitized_operator_note": "ticket=OPS-64 api_token=[REDACTED]",
+        "selected_profile": "locality_first_64c_256g",
+        "used_safe_fallback": false
+      }
     },
     {
       "scenario_id": "AA-HOST-PROFILE-PLANNER-MISSING-PROOF-FALLBACK",
@@ -98,7 +118,27 @@
       },
       "manual_overrides": {},
       "output_root": "target/host-profile-planner-smoke",
-      "expected_report_projection": null
+      "expected_report_projection": {
+        "adaptive_batch_sizing_stance": "conservative_fixed",
+        "admission_steering_stance": "conservative_global",
+        "blocking_pool_affinity_stance": "disabled",
+        "brownout_stage": "full_surfaces",
+        "dry_run_line_count": 0,
+        "fallback_profile": "conservative_baseline",
+        "final_arena_temperature_policy": "unified",
+        "final_global_queue_limit": 0,
+        "final_trace_storage_profile": "default",
+        "final_worker_threads": 4,
+        "large_memory_trace_profile_stance": "default",
+        "manual_override_count": 0,
+        "otlp_shedding_stance": "standalone_fallback",
+        "projection_hash": 10938932904720285412,
+        "proof_artifact_count": 6,
+        "refusal_count": 1,
+        "sanitized_operator_note": null,
+        "selected_profile": "conservative_baseline",
+        "used_safe_fallback": true
+      }
     },
     {
       "scenario_id": "AA-HOST-PROFILE-PLANNER-EVIDENCE-RETENTION-64C-256G",
@@ -144,7 +184,27 @@
       "manual_overrides": {},
       "operator_note": "ticket=OPS-RETENTION api_token=super-secret",
       "output_root": "target/host-profile-planner-smoke",
-      "expected_report_projection": null
+      "expected_report_projection": {
+        "adaptive_batch_sizing_stance": "builtin_adaptive",
+        "admission_steering_stance": "cohort_locality",
+        "blocking_pool_affinity_stance": "cohort_biased",
+        "brownout_stage": "optional_first",
+        "dry_run_line_count": 9,
+        "fallback_profile": "conservative_baseline",
+        "final_arena_temperature_policy": "tiered-cold-evidence",
+        "final_global_queue_limit": 65536,
+        "final_trace_storage_profile": "large-memory-256g",
+        "final_worker_threads": 64,
+        "large_memory_trace_profile_stance": "large_memory_256g",
+        "manual_override_count": 0,
+        "otlp_shedding_stance": "priority_gate",
+        "projection_hash": 4038417209486475511,
+        "proof_artifact_count": 6,
+        "refusal_count": 0,
+        "sanitized_operator_note": "ticket=OPS-RETENTION api_token=[REDACTED]",
+        "selected_profile": "large_memory_evidence_retention_256g",
+        "used_safe_fallback": false
+      }
     }
   ]
 }
