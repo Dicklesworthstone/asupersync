@@ -109,88 +109,29 @@ def run_scan(roots: list[str], terms: list[str]) -> dict[str, list[dict[str, Any
 
 
 def no_mock_snapshot(policy_path: Path, output: Path) -> int:
-    policy = load_json(policy_path)
-    if policy.get("schema_version") != "no-mock-policy-v1":
-        raise ValueError("unsupported no-mock policy schema")
-
-    roots = list(policy.get("scan", {}).get("roots", ["src", "tests"]))
-    terms = list(policy.get("scan", {}).get("terms", ["mock", "fake", "stub"]))
-    allowlist = set(policy.get("allowlist_paths", []))
-    waivers = list(policy.get("waivers", []))
-    routes = list(policy.get("owner_routes", []))
-    default_owner = str(policy.get("default_owner", "runtime-core"))
-    now_utc = dt.datetime.now(dt.timezone.utc)
-
-    active_waiver_by_path: dict[str, dict[str, Any]] = {}
-    expired_waivers: list[dict[str, Any]] = []
-    for waiver in waivers:
-        path = waiver.get("path")
-        status = waiver.get("status")
-        expiry_raw = waiver.get("expires_at_utc")
-        if not isinstance(path, str) or not isinstance(status, str) or not isinstance(expiry_raw, str):
-            continue
-        expiry = parse_iso8601_utc(expiry_raw)
-        if status == "active":
-            active_waiver_by_path[path] = waiver
-            if expiry <= now_utc:
-                expired_waivers.append(waiver)
-
-    hits_by_path = run_scan(roots, terms)
-
-    violations: list[dict[str, Any]] = []
-    for path, path_hits in sorted(hits_by_path.items()):
-        if path in allowlist:
-            continue
-        waiver = active_waiver_by_path.get(path)
-        if waiver is not None and waiver not in expired_waivers:
-            continue
-        owner = route_owner(path, routes, default_owner)
-        tokens = sorted({token for hit in path_hits for token in hit["tokens"]})
-        first_line = min(hit["line"] for hit in path_hits)
-        violations.append(
-            {
-                "path": path,
-                "owner": owner,
-                "first_line": first_line,
-                "tokens": tokens,
-                "hit_count": len(path_hits),
-            }
-        )
-
-    report = {
-        "schema_version": "no-mock-policy-report-v1",
-        "generated_at": utc_now(),
-        "policy_path": str(policy_path),
-        "scan": {
-            "roots": roots,
-            "terms": terms,
-        },
-        "policy_counts": {
-            "allowlist_paths": len(allowlist),
-            "waivers_total": len(waivers),
-            "waivers_active": sum(1 for waiver in waivers if waiver.get("status") == "active"),
-        },
-        "scan_counts": {
-            "matching_paths": len(hits_by_path),
-            "matching_hits": sum(len(path_hits) for path_hits in hits_by_path.values()),
-            "violating_paths": len(violations),
-            "expired_waivers": len(expired_waivers),
-        },
-        "expired_waivers": [
-            {
-                "waiver_id": waiver.get("waiver_id", "<unknown>"),
-                "path": waiver.get("path"),
-                "owner": waiver.get("owner", route_owner(str(waiver.get("path", "")), routes, default_owner)),
-                "expires_at_utc": waiver.get("expires_at_utc"),
-                "replacement_issue": waiver.get("replacement_issue"),
-            }
-            for waiver in expired_waivers
+    script = Path(__file__).with_name("check_no_mock_policy.py")
+    output.parent.mkdir(parents=True, exist_ok=True)
+    proc = subprocess.run(
+        [
+            sys.executable,
+            str(script),
+            "--policy",
+            str(policy_path),
+            "--report-json",
+            str(output),
+            "--max-errors",
+            "0",
         ],
-        "violations": violations,
-        "status": "pass" if not violations and not expired_waivers else "fail",
-    }
-
-    write_json(output, report)
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if proc.stdout:
+        print(proc.stdout, end="")
+    if proc.stderr:
+        sys.stderr.write(proc.stderr)
+    if not output.is_file():
+        return proc.returncode
     print(f"No-mock policy report: {output}")
     return 0
 

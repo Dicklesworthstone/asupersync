@@ -9,10 +9,55 @@
     "terms": [
       "mock",
       "fake",
-      "stub"
+      "stub",
+      "placeholder",
+      "todo",
+      "unimplemented"
     ]
   },
   "default_owner": "runtime-core",
+  "classification_rules": [
+    {
+      "pattern": "tests/conformance/**",
+      "category": "conformance_placeholder"
+    },
+    {
+      "pattern": "conformance/**",
+      "category": "conformance_placeholder"
+    },
+    {
+      "pattern": "src/**/*_audit_test.rs",
+      "category": "stale_audit_prose"
+    },
+    {
+      "pattern": "src/**/*_audit.rs",
+      "category": "stale_audit_prose"
+    },
+    {
+      "pattern": "tests/**/*_audit.rs",
+      "category": "stale_audit_prose"
+    },
+    {
+      "pattern": "tests/metamorphic/**",
+      "category": "intentional_test_double"
+    },
+    {
+      "pattern": "tests/artifacts/**",
+      "category": "fixture_reference_implementation"
+    },
+    {
+      "pattern": "tests/**",
+      "category": "intentional_test_double"
+    },
+    {
+      "pattern": "scripts/**",
+      "category": "fixture_reference_implementation"
+    },
+    {
+      "pattern": "src/**",
+      "category": "production_stub"
+    }
+  ],
   "owner_routes": [
     {
       "pattern": "src/net/quic_core/**",
@@ -67,10 +112,125 @@
     "tests/property_region_ops.rs",
     "tests/recovery_security.rs"
   ],
+  "allowlist_entries": [
+    {
+      "pattern": "src/channel/session.rs",
+      "category": "production_stub",
+      "owner": "runtime-core",
+      "reason": "Protocol test hooks use mock terminology for documented session-state probes, not incomplete production behavior.",
+      "revisit_condition": "Revisit when session protocol test helpers are renamed or moved.",
+      "replacement_issue": "asupersync-yex"
+    },
+    {
+      "pattern": "src/net/unix/ancillary.rs",
+      "category": "production_stub",
+      "owner": "runtime-core",
+      "reason": "Unix ancillary-data fixtures are documented kernel-boundary examples rather than runtime stubs.",
+      "revisit_condition": "Revisit when ancillary-data conformance coverage is split into tests.",
+      "replacement_issue": "asupersync-yex"
+    },
+    {
+      "pattern": "src/plan/certificate.rs",
+      "category": "production_stub",
+      "owner": "runtime-core",
+      "reason": "Certificate planning text uses stub/mock words in proof descriptions, not fake execution paths.",
+      "revisit_condition": "Revisit when plan certificate proof wording is normalized.",
+      "replacement_issue": "asupersync-yex"
+    },
+    {
+      "pattern": "src/remote.rs",
+      "category": "production_stub",
+      "owner": "runtime-core",
+      "reason": "Remote runtime examples include mock labels for deterministic peer fixtures.",
+      "revisit_condition": "Revisit when remote peer fixtures are moved under tests.",
+      "replacement_issue": "asupersync-yex"
+    },
+    {
+      "pattern": "src/runtime/obligation_table.rs",
+      "category": "production_stub",
+      "owner": "runtime-core",
+      "reason": "Obligation-table tests use mock labels for deterministic obligation records.",
+      "revisit_condition": "Revisit when obligation fixtures are renamed away from mock terminology.",
+      "replacement_issue": "asupersync-yex"
+    },
+    {
+      "pattern": "src/runtime/region_table.rs",
+      "category": "production_stub",
+      "owner": "runtime-core",
+      "reason": "Region-table tests use mock labels for deterministic region records.",
+      "revisit_condition": "Revisit when region fixtures are renamed away from mock terminology.",
+      "replacement_issue": "asupersync-yex"
+    },
+    {
+      "pattern": "src/runtime/reactor/io_uring.rs",
+      "category": "production_stub",
+      "owner": "runtime-reactor",
+      "reason": "io_uring fallback wording is tracked by the reactor platform support work, not hidden fake behavior.",
+      "expires_at_utc": "2026-06-30T00:00:00Z",
+      "replacement_issue": "asupersync-yex"
+    },
+    {
+      "pattern": "src/test_logging.rs",
+      "category": "production_stub",
+      "owner": "test-infra",
+      "reason": "Test logging helper lives under src for crate reuse and only names test doubles.",
+      "revisit_condition": "Revisit when shared test support moves out of runtime source.",
+      "replacement_issue": "asupersync-yex"
+    },
+    {
+      "pattern": "src/transport/mod.rs",
+      "category": "production_stub",
+      "owner": "runtime-core",
+      "reason": "Transport mock export is separately cfg-gated by scripts/scan_stubs.sh.",
+      "revisit_condition": "Revisit when transport mock module is retired or test-only.",
+      "replacement_issue": "asupersync-yex"
+    },
+    {
+      "pattern": "src/transport/tests.rs",
+      "category": "production_stub",
+      "owner": "test-infra",
+      "reason": "Transport tests use mock terminology for deterministic in-memory peers.",
+      "revisit_condition": "Revisit when transport tests are moved under tests/.",
+      "replacement_issue": "asupersync-yex"
+    },
+    {
+      "pattern": "tests/grpc_e2e.rs",
+      "category": "intentional_test_double",
+      "owner": "test-infra",
+      "reason": "gRPC E2E coverage uses named mock services as intentional test doubles.",
+      "revisit_condition": "Revisit when gRPC E2E doubles are renamed or replaced by fixture servers.",
+      "replacement_issue": "asupersync-yex"
+    },
+    {
+      "pattern": "tests/http_shutdown_test.rs",
+      "category": "intentional_test_double",
+      "owner": "test-infra",
+      "reason": "HTTP shutdown coverage uses mock labels for deterministic server fixtures.",
+      "revisit_condition": "Revisit when HTTP shutdown fixture naming is normalized.",
+      "replacement_issue": "asupersync-yex"
+    },
+    {
+      "pattern": "tests/property_region_ops.rs",
+      "category": "intentional_test_double",
+      "owner": "test-infra",
+      "reason": "Property tests use synthetic region-operation fixtures and are not production placeholders.",
+      "revisit_condition": "Revisit when property fixture names are normalized.",
+      "replacement_issue": "asupersync-yex"
+    },
+    {
+      "pattern": "tests/recovery_security.rs",
+      "category": "intentional_test_double",
+      "owner": "test-infra",
+      "reason": "Recovery-security tests use mock labels for adversarial fixtures.",
+      "revisit_condition": "Revisit when recovery fixtures are renamed away from mock terminology.",
+      "replacement_issue": "asupersync-yex"
+    }
+  ],
   "waivers": [
     {
       "waiver_id": "waiver.messaging.kafka.phase0-stub.2026-02-18",
       "path": "src/messaging/kafka.rs",
+      "category": "production_stub",
       "owner": "messaging-core",
       "status": "active",
       "reason": "Phase-0 Kafka API surface intentionally uses stub implementations until real transport completion.",
@@ -80,6 +240,7 @@
     {
       "waiver_id": "waiver.messaging.kafka-consumer.phase0-stub.2026-02-18",
       "path": "src/messaging/kafka_consumer.rs",
+      "category": "production_stub",
       "owner": "messaging-core",
       "status": "active",
       "reason": "Phase-0 consumer path is intentionally stubbed; tracked for replacement in coverage closure.",
@@ -89,6 +250,7 @@
     {
       "waiver_id": "waiver.reactor.uring.phase0-stub.2026-02-18",
       "path": "src/runtime/reactor/uring.rs",
+      "category": "production_stub",
       "owner": "runtime-reactor",
       "status": "active",
       "reason": "The uring module is a documented stub gate and is intentionally tracked as technical debt.",
@@ -98,6 +260,7 @@
     {
       "waiver_id": "waiver.reactor.macos.stub-export.2026-02-18",
       "path": "src/runtime/reactor/macos.rs",
+      "category": "production_stub",
       "owner": "runtime-reactor",
       "status": "active",
       "reason": "Platform fallback/stub export remains while deterministic cross-platform support is hardened.",
@@ -107,6 +270,7 @@
     {
       "waiver_id": "waiver.reactor.windows.stub-export.2026-02-18",
       "path": "src/runtime/reactor/windows.rs",
+      "category": "production_stub",
       "owner": "runtime-reactor",
       "status": "active",
       "reason": "Platform fallback/stub export remains while deterministic cross-platform support is hardened.",
