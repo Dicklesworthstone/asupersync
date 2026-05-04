@@ -16,8 +16,8 @@
 
 #[cfg(all(test, feature = "metrics"))]
 mod tests {
-    use crate::observability::otel::{SpanKind, TestSpan, Status};
-    use std::collections::HashMap;
+    use crate::observability::otel::span_semantics::TestSpan;
+    use opentelemetry::trace::{SpanKind, Status};
 
     #[test]
     fn test_span_drop_without_end_emits_nothing() {
@@ -31,9 +31,19 @@ mod tests {
         span.set_status(Status::Ok);
 
         // Verify span is not ended
-        assert!(!span.is_ended(), "Span should not be ended before explicit end() call");
-        assert_eq!(span.duration(), None, "Incomplete span should have no duration");
-        assert!(span.end_time.is_none(), "Incomplete span should have no end_time");
+        assert!(
+            !span.is_ended(),
+            "Span should not be ended before explicit end() call"
+        );
+        assert_eq!(
+            span.duration(),
+            None,
+            "Incomplete span should have no duration"
+        );
+        assert!(
+            span.end_time.is_none(),
+            "Incomplete span should have no end_time"
+        );
 
         // Now drop the span WITHOUT calling end() - simulates cancellation
         drop(span);
@@ -57,21 +67,35 @@ mod tests {
         ended_span.set_status(Status::Ok);
         ended_span.end(); // ✅ Proper completion
 
-        assert!(ended_span.is_ended(), "Properly ended span should be marked as ended");
-        assert!(ended_span.end_time.is_some(), "Properly ended span should have end_time");
-        assert!(ended_span.duration().is_some(), "Properly ended span should have duration");
+        assert!(
+            ended_span.is_ended(),
+            "Properly ended span should be marked as ended"
+        );
+        assert!(
+            ended_span.end_time.is_some(),
+            "Properly ended span should have end_time"
+        );
+        assert!(
+            ended_span.duration().is_some(),
+            "Properly ended span should have duration"
+        );
 
         // Case 2: Cancelled/dropped span
         let mut cancelled_span = TestSpan::new("cancelled_operation", SpanKind::Internal);
         cancelled_span.set_attribute("operation.cancelled", "true");
         cancelled_span.set_status(Status::Error {
-            code: "CANCELLED".to_string(),
-            message: "Operation was cancelled".to_string(),
+            description: "Operation was cancelled".into(),
         });
 
         // Verify span state before drop
-        assert!(!cancelled_span.is_ended(), "Cancelled span should not be ended before drop");
-        assert!(cancelled_span.end_time.is_none(), "Cancelled span should have no end_time before drop");
+        assert!(
+            !cancelled_span.is_ended(),
+            "Cancelled span should not be ended before drop"
+        );
+        assert!(
+            cancelled_span.end_time.is_none(),
+            "Cancelled span should have no end_time before drop"
+        );
 
         // Drop without end() - simulates mid-operation cancellation
         drop(cancelled_span);
@@ -101,7 +125,10 @@ mod tests {
         };
 
         assert!(!observer.original_ended, "Span should start unended");
-        assert!(observer.original_end_time.is_none(), "Span should start with no end_time");
+        assert!(
+            observer.original_end_time.is_none(),
+            "Span should start with no end_time"
+        );
 
         // Drop span - this should NOT add synthetic end_time
         drop(span);
@@ -142,7 +169,10 @@ mod tests {
         // ✅ CORRECT: No explicit Drop impl means standard Rust drop semantics
         // All span memory is properly deallocated, no leaks
 
-        eprintln!("  Created {} spans, dropped {} spans", spans_created, spans_dropped);
+        eprintln!(
+            "  Created {} spans, dropped {} spans",
+            spans_created, spans_dropped
+        );
         eprintln!("  ✅ No memory leaks (standard Rust drop semantics)");
         eprintln!("  ✅ No span storage accumulation");
         eprintln!("  ✅ Cancelled operations clean up properly");
@@ -167,7 +197,10 @@ mod tests {
         incomplete_span.set_attribute("status", "in_progress");
 
         assert!(!incomplete_span.is_ended(), "Incomplete span not ended");
-        assert!(incomplete_span.end_time.is_none(), "Incomplete span has no end_time");
+        assert!(
+            incomplete_span.end_time.is_none(),
+            "Incomplete span has no end_time"
+        );
 
         // Would this be exported? Let's check the export criteria
         let should_export = incomplete_span.is_ended();
@@ -210,8 +243,7 @@ mod tests {
                     span.set_attribute("http.url", "https://api.example.com/slow");
                     span.set_attribute("http.timeout", "30s");
                     span.set_status(Status::Error {
-                        code: "TIMEOUT".to_string(),
-                        message: "Request timed out".to_string(),
+                        description: "Request timed out".into(),
                     });
                     span
                 }),
@@ -223,8 +255,7 @@ mod tests {
                     span.set_attribute("file.size", "1048576");
                     span.set_attribute("upload.progress", "45%");
                     span.set_status(Status::Error {
-                        code: "ABORTED".to_string(),
-                        message: "User cancelled upload".to_string(),
+                        description: "User cancelled upload".into(),
                     });
                     span
                 }),
@@ -236,8 +267,7 @@ mod tests {
                     span.set_attribute("batch.size", "1000");
                     span.set_attribute("memory.limit", "512MB");
                     span.set_status(Status::Error {
-                        code: "RESOURCE_EXHAUSTED".to_string(),
-                        message: "Out of memory".to_string(),
+                        description: "Out of memory".into(),
                     });
                     span
                 }),
@@ -248,13 +278,19 @@ mod tests {
             let span = (scenario.setup)();
 
             // All scenarios: span is not ended before cancellation
-            assert!(!span.is_ended(),
-                "Scenario '{}' span should not be ended before cancellation", scenario.name);
+            assert!(
+                !span.is_ended(),
+                "Scenario '{}' span should not be ended before cancellation",
+                scenario.name
+            );
 
             // Drop span - simulates cancellation
             drop(span);
 
-            eprintln!("  Scenario '{}': ✅ Dropped cleanly (no emission)", scenario.name);
+            eprintln!(
+                "  Scenario '{}': ✅ Dropped cleanly (no emission)",
+                scenario.name
+            );
         }
 
         eprintln!("\n✅ ALL CANCELLATION PATTERNS:");

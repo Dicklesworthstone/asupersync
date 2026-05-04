@@ -13,9 +13,8 @@
 //! Audit date: 2026-05-03
 //! OTLP spec reference: Span status updates are last-write-wins
 
-use std::collections::HashMap;
-
-use crate::observability::otel::{SpanKind, TestSpan, Status, SpanConformanceConfig};
+use crate::observability::otel::span_semantics::TestSpan;
+use opentelemetry::trace::{SpanKind, Status};
 
 #[cfg(test)]
 mod tests {
@@ -29,15 +28,13 @@ mod tests {
 
         // Set initial error status
         span.set_status(Status::Error {
-            code: "500".to_string(),
-            message: "Internal server error".to_string(),
+            description: "Internal server error".into(),
         });
 
         // Verify error status is set
         match &span.status {
-            Status::Error { code, message } => {
-                assert_eq!(code, "500");
-                assert_eq!(message, "Internal server error");
+            Status::Error { description } => {
+                assert_eq!(description.as_ref(), "Internal server error");
             }
             _ => panic!("Expected error status after set_status(Error)"),
         }
@@ -72,21 +69,19 @@ mod tests {
 
         // Verify OK status is set
         match &span.status {
-            Status::Ok => {},
+            Status::Ok => {}
             _ => panic!("Expected OK status after set_status(Ok)"),
         }
 
         // Now set error status - this should WIN per OTLP spec (last-write-wins)
         span.set_status(Status::Error {
-            code: "404".to_string(),
-            message: "Not found".to_string(),
+            description: "Not found".into(),
         });
 
         // This direction should work correctly
         match &span.status {
-            Status::Error { code, message } => {
-                assert_eq!(code, "404");
-                assert_eq!(message, "Not found");
+            Status::Error { description } => {
+                assert_eq!(description.as_ref(), "Not found");
                 eprintln!("✅ OK→ERROR transition works correctly");
             }
             _ => panic!("Expected error status after set_status(Error)"),
@@ -103,10 +98,12 @@ mod tests {
         let transitions = vec![
             ("UNSET", Status::Unset),
             ("OK", Status::Ok),
-            ("ERROR", Status::Error {
-                code: "500".to_string(),
-                message: "Test error".to_string(),
-            }),
+            (
+                "ERROR",
+                Status::Error {
+                    description: "Test error".into(),
+                },
+            ),
         ];
 
         let mut results = Vec::new();
@@ -131,10 +128,20 @@ mod tests {
                 let actual_wins = actual_status_name;
                 let last_write_wins = expected_wins == actual_wins;
 
-                results.push((from_name, to_name, expected_wins, actual_wins, last_write_wins));
+                results.push((
+                    from_name,
+                    to_name,
+                    expected_wins,
+                    actual_wins,
+                    last_write_wins,
+                ));
 
-                eprintln!("  {}→{}: Expected={}, Actual={} {}",
-                    from_name, to_name, expected_wins, actual_wins,
+                eprintln!(
+                    "  {}→{}: Expected={}, Actual={} {}",
+                    from_name,
+                    to_name,
+                    expected_wins,
+                    actual_wins,
                     if last_write_wins { "✅" } else { "❌" }
                 );
             }
@@ -146,8 +153,10 @@ mod tests {
         if !violations.is_empty() {
             eprintln!("\n❌ OTLP SPEC VIOLATIONS DETECTED:");
             for (from, to, expected, actual, _) in violations {
-                eprintln!("   {}→{}: Expected {} (last-write-wins), got {} (wrong)",
-                    from, to, expected, actual);
+                eprintln!(
+                    "   {}→{}: Expected {} (last-write-wins), got {} (wrong)",
+                    from, to, expected, actual
+                );
             }
             panic!("set_status() implementation violates OTLP last-write-wins semantics");
         } else {
@@ -168,25 +177,22 @@ mod tests {
         span.set_status(Status::Ok);
 
         match &span.status {
-            Status::Ok => {},
+            Status::Ok => {}
             _ => panic!("Multiple OK calls should result in OK status"),
         }
 
         // Set error multiple times
         span.set_status(Status::Error {
-            code: "400".to_string(),
-            message: "Bad request".to_string(),
+            description: "Bad request".into(),
         });
         span.set_status(Status::Error {
-            code: "401".to_string(),
-            message: "Unauthorized".to_string(),
+            description: "Unauthorized".into(),
         });
 
         // Last error should win
         match &span.status {
-            Status::Error { code, message } => {
-                assert_eq!(code, "401");
-                assert_eq!(message, "Unauthorized");
+            Status::Error { description } => {
+                assert_eq!(description.as_ref(), "Unauthorized");
                 eprintln!("✅ Multiple ERROR calls follow last-write-wins");
             }
             _ => panic!("Expected final error status"),
@@ -224,8 +230,7 @@ mod tests {
 
         // Test the spec requirement: ERROR can be overwritten by OK
         span.set_status(Status::Error {
-            code: "503".to_string(),
-            message: "Service unavailable".to_string(),
+            description: "Service unavailable".into(),
         });
         eprintln!("  1. Set ERROR status");
 

@@ -238,10 +238,11 @@ write_missing_preserved_report "$MISSING_REPORT_PATH"
 EXPECTED_PRESERVED_FILE_COUNT="$(jq -r '.smoke_scenarios[0].expected_preserved_file_count' "$ARTIFACT")"
 TOTAL_OTLP_AUDIT_FILE_COUNT="$(jq 'length' "$FILE_REPORT_PATH")"
 TRACKED_OTLP_AUDIT_FILE_COUNT="$(jq '[.[] | select(.git_state == "tracked")] | length' "$FILE_REPORT_PATH")"
+PRESERVED_MAPPED_FILE_COUNT="$(jq --arg blocker "$(artifact_value '.blocker_bead_id')" '[.[] | select(.owner_bead == $blocker)] | length' "$FILE_REPORT_PATH")"
 PRESERVED_UNTRACKED_FILE_COUNT="$(jq --arg blocker "$(artifact_value '.blocker_bead_id')" '[.[] | select(.git_state == "untracked" and .owner_bead == $blocker)] | length' "$FILE_REPORT_PATH")"
 UNEXPLAINED_UNTRACKED_FILE_COUNT="$(jq '[.[] | select(.git_state == "untracked" and .owner_bead == "unmapped")] | length' "$FILE_REPORT_PATH")"
 MISSING_PRESERVED_FILE_COUNT="$(jq 'length' "$MISSING_REPORT_PATH")"
-MODULE_DECLARED_BLOCKED_FILE_COUNT="$(jq --arg blocker "$(artifact_value '.blocker_bead_id')" '[.[] | select(.owner_bead == $blocker and .module_declared == true)] | length' "$FILE_REPORT_PATH")"
+MODULE_DECLARED_BLOCKED_FILE_COUNT="$(jq --arg blocker "$(artifact_value '.blocker_bead_id')" '[.[] | select(.owner_bead == $blocker and .module_declared == true and (.status | startswith("blocked")))] | length' "$FILE_REPORT_PATH")"
 INVARIANT_NAMES_JSON="$(jq '[.preserved_untracked_files[].invariant] | unique' "$ARTIFACT")"
 PRODUCTION_SEAMS_JSON="$(jq '[.preserved_untracked_files[].production_seam] | unique' "$ARTIFACT")"
 DEDUPLICATION_DECISIONS_JSON="$(jq '[.preserved_untracked_files[].deduplication_decision] | unique' "$ARTIFACT")"
@@ -256,7 +257,7 @@ ARTIFACT_SHA256="$(sha256sum "$ARTIFACT" | awk '{print $1}')"
 VALIDATION_PASSED=false
 FINAL_VERDICT="blocked_inventory_failed"
 SCRIPT_EXIT_CODE=1
-if [ "$PRESERVED_UNTRACKED_FILE_COUNT" -eq "$EXPECTED_PRESERVED_FILE_COUNT" ] \
+if [ "$PRESERVED_MAPPED_FILE_COUNT" -eq "$EXPECTED_PRESERVED_FILE_COUNT" ] \
     && [ "$UNEXPLAINED_UNTRACKED_FILE_COUNT" -eq 0 ] \
     && [ "$MISSING_PRESERVED_FILE_COUNT" -eq 0 ] \
     && [ "$MODULE_DECLARED_BLOCKED_FILE_COUNT" -eq 0 ]; then
@@ -291,6 +292,7 @@ jq -n \
     --argjson script_exit_code "$SCRIPT_EXIT_CODE" \
     --argjson total_otlp_audit_file_count "$TOTAL_OTLP_AUDIT_FILE_COUNT" \
     --argjson tracked_otlp_audit_file_count "$TRACKED_OTLP_AUDIT_FILE_COUNT" \
+    --argjson preserved_mapped_file_count "$PRESERVED_MAPPED_FILE_COUNT" \
     --argjson preserved_untracked_file_count "$PRESERVED_UNTRACKED_FILE_COUNT" \
     --argjson expected_preserved_file_count "$EXPECTED_PRESERVED_FILE_COUNT" \
     --argjson unexplained_untracked_file_count "$UNEXPLAINED_UNTRACKED_FILE_COUNT" \
@@ -321,6 +323,7 @@ jq -n \
         blocked_full_test_check_command: $blocked_full_test_check_command,
         total_otlp_audit_file_count: $total_otlp_audit_file_count,
         tracked_otlp_audit_file_count: $tracked_otlp_audit_file_count,
+        preserved_mapped_file_count: $preserved_mapped_file_count,
         preserved_untracked_file_count: $preserved_untracked_file_count,
         expected_preserved_file_count: $expected_preserved_file_count,
         unexplained_untracked_file_count: $unexplained_untracked_file_count,
@@ -360,6 +363,7 @@ jq -n \
     printf 'blocked_full_test_check_command=%s\n' "$BLOCKED_FULL_TEST_CHECK_COMMAND"
     printf 'total_otlp_audit_file_count=%s\n' "$TOTAL_OTLP_AUDIT_FILE_COUNT"
     printf 'tracked_otlp_audit_file_count=%s\n' "$TRACKED_OTLP_AUDIT_FILE_COUNT"
+    printf 'preserved_mapped_file_count=%s\n' "$PRESERVED_MAPPED_FILE_COUNT"
     printf 'preserved_untracked_file_count=%s\n' "$PRESERVED_UNTRACKED_FILE_COUNT"
     printf 'expected_preserved_file_count=%s\n' "$EXPECTED_PRESERVED_FILE_COUNT"
     printf 'unexplained_untracked_file_count=%s\n' "$UNEXPLAINED_UNTRACKED_FILE_COUNT"

@@ -28,6 +28,7 @@
     "blocked_full_test_check_command",
     "total_otlp_audit_file_count",
     "tracked_otlp_audit_file_count",
+    "preserved_mapped_file_count",
     "preserved_untracked_file_count",
     "expected_preserved_file_count",
     "unexplained_untracked_file_count",
@@ -234,7 +235,15 @@
       "invariant": "repeated span status updates are idempotent and deterministic under the chosen OTLP status policy",
       "production_seam": "span semantics status transition logic",
       "deduplication_decision": "merge with span status conformance tests and last-write/idempotency table fixtures",
-      "status": "blocked_policy_mapping_required"
+      "status": "normalized_tracked_production_seam"
+    },
+    {
+      "path": "src/observability/otlp_span_drop_under_cancel_audit_test.rs",
+      "owner_bead": "asupersync-lf1a77",
+      "invariant": "incomplete spans dropped under cancellation are not exported or synthetic-ended",
+      "production_seam": "span semantics lifecycle state and explicit end-time export eligibility",
+      "deduplication_decision": "merge with span lifecycle cancellation/drop fixtures",
+      "status": "normalized_tracked_production_seam"
     },
     {
       "path": "src/observability/otlp_span_attribute_filtering_audit_test.rs",
@@ -288,8 +297,8 @@
   "smoke_scenarios": [
     {
       "scenario_id": "AA-OTLP-AUDIT-INVENTORY-PRESERVED-UNTRACKED",
-      "description": "Validate that every preserved untracked OTLP audit file is mapped to a blocker bead and not accidentally compiled as a module.",
-      "expected_preserved_file_count": 28,
+      "description": "Validate that every preserved OTLP audit file is mapped to a blocker bead and no blocked file is accidentally compiled as a module.",
+      "expected_preserved_file_count": 29,
       "expected_blocker_bead": "asupersync-lf1a77",
       "output_root": "target/otlp-audit-inventory-smoke",
       "execution_policy": "inventory_proof_only_no_external_collector"
