@@ -2087,10 +2087,7 @@ mod tests {
             // Enforce 32-entry limit
             if current_entries.len() > 32 {
                 let first_kept_entry = current_entries.len() - 32;
-                current_entries = current_entries
-                    .into_iter()
-                    .skip(first_kept_entry)
-                    .collect();
+                current_entries = current_entries.into_iter().skip(first_kept_entry).collect();
                 overflow_occurred = true;
             }
 
@@ -6122,8 +6119,8 @@ mod tests {
     #[derive(Debug, Clone)]
     struct SpanStatusInfo {
         status_code: SpanStatusFieldCode, // Status code (UNSET, OK, ERROR)
-        status_message: String,      // Status message
-        is_explicitly_set: bool,     // Was status explicitly set?
+        status_message: String,           // Status message
+        is_explicitly_set: bool,          // Was status explicitly set?
     }
 
     /// Span status codes for OTLP testing
@@ -34097,8 +34094,8 @@ mod otlp_121_tests {
 
 #[cfg(test)]
 mod otlp_122_tests {
-    use super::otlp_late_test_support::{AttributeValue, Span, SpanKind, SpanStatus};
     use self::otlp_late_conformance_types::{AnyValue, InstrumentationScope};
+    use super::otlp_late_test_support::{AttributeValue, Span, SpanKind, SpanStatus};
     use std::collections::HashMap;
 
     /// OTLP-122 test scenario: span links with invalid trace IDs
@@ -34737,7 +34734,7 @@ mod otlp_122_tests {
     #[derive(Debug, Clone)]
     enum Otlp124AttributeValue {
         String(String),
-        ArrayEmpty, // Empty array with elements_count=0
+        ArrayEmpty,                 // Empty array with elements_count=0
         ArrayNonEmpty(Vec<String>), // Non-empty array for comparison
     }
 
@@ -34771,11 +34768,17 @@ mod otlp_122_tests {
             match attr_value {
                 Otlp124AttributeValue::ArrayEmpty => {
                     // Empty arrays MUST be valid according to OTLP-124
-                    println!("  Found empty ArrayValue attribute '{}' - MUST be valid", attr_name);
+                    println!(
+                        "  Found empty ArrayValue attribute '{}' - MUST be valid",
+                        attr_name
+                    );
                 }
                 Otlp124AttributeValue::ArrayNonEmpty(values) => {
-                    println!("  Found non-empty ArrayValue attribute '{}' with {} elements",
-                            attr_name, values.len());
+                    println!(
+                        "  Found non-empty ArrayValue attribute '{}' with {} elements",
+                        attr_name,
+                        values.len()
+                    );
                 }
                 Otlp124AttributeValue::String(value) => {
                     println!("  Found String attribute '{}': '{}'", attr_name, value);
@@ -34788,7 +34791,7 @@ mod otlp_122_tests {
             match value {
                 Otlp124AttributeValue::ArrayEmpty => true, // Empty arrays are valid
                 Otlp124AttributeValue::ArrayNonEmpty(_) => true, // Non-empty arrays are valid
-                Otlp124AttributeValue::String(_) => true, // String attributes are valid
+                Otlp124AttributeValue::String(_) => true,  // String attributes are valid
             }
         });
 
@@ -34813,14 +34816,19 @@ mod otlp_122_tests {
                 "4bf92f3577b34da6a3ce929d0e0e4736",
                 "00f067aa0ba902b7",
                 vec![
-                    ("service.name".to_string(), Otlp124AttributeValue::String("web-service".to_string())),
+                    (
+                        "service.name".to_string(),
+                        Otlp124AttributeValue::String("web-service".to_string()),
+                    ),
                     ("tags".to_string(), Otlp124AttributeValue::ArrayEmpty), // Empty array with elements_count=0
-                    ("environment".to_string(), Otlp124AttributeValue::String("production".to_string())),
+                    (
+                        "environment".to_string(),
+                        Otlp124AttributeValue::String("production".to_string()),
+                    ),
                 ],
                 true,
                 "Span with empty ArrayValue (elements_count=0) must be valid per OTLP-124",
             ),
-
             // Test 2: Span with multiple empty ArrayValue attributes - MUST be valid
             Otlp124Scenario::new(
                 "span_with_multiple_empty_arrays",
@@ -34835,7 +34843,6 @@ mod otlp_122_tests {
                 true,
                 "Multiple empty ArrayValues in a single span must be valid",
             ),
-
             // Test 3: Span with mixed empty and non-empty arrays - MUST be valid
             Otlp124Scenario::new(
                 "span_with_mixed_arrays",
@@ -34844,13 +34851,21 @@ mod otlp_122_tests {
                 "00f067aa0ba902b9",
                 vec![
                     ("empty_tags".to_string(), Otlp124AttributeValue::ArrayEmpty), // Empty
-                    ("filled_tags".to_string(), Otlp124AttributeValue::ArrayNonEmpty(vec!["tag1".to_string(), "tag2".to_string()])), // Non-empty
-                    ("user.id".to_string(), Otlp124AttributeValue::String("123".to_string())),
+                    (
+                        "filled_tags".to_string(),
+                        Otlp124AttributeValue::ArrayNonEmpty(vec![
+                            "tag1".to_string(),
+                            "tag2".to_string(),
+                        ]),
+                    ), // Non-empty
+                    (
+                        "user.id".to_string(),
+                        Otlp124AttributeValue::String("123".to_string()),
+                    ),
                 ],
                 true,
                 "Mix of empty and non-empty arrays must be valid",
             ),
-
             // Test 4: Span with only empty arrays - MUST be valid
             Otlp124Scenario::new(
                 "span_only_empty_arrays",
@@ -34902,7 +34917,10 @@ mod otlp_122_tests {
         let non_empty_array = Otlp124AttributeValue::ArrayNonEmpty(vec!["item".to_string()]);
         match non_empty_array {
             Otlp124AttributeValue::ArrayNonEmpty(values) => {
-                assert!(!values.is_empty(), "Non-empty array should contain elements");
+                assert!(
+                    !values.is_empty(),
+                    "Non-empty array should contain elements"
+                );
             }
             _ => panic!("Expected ArrayNonEmpty"),
         }
@@ -34928,9 +34946,9 @@ mod otlp_122_tests {
     #[derive(Debug, Clone)]
     enum Otlp125AttributeValue {
         String(String),
-        IntMin,         // i64::MIN value
-        IntMax,         // i64::MAX value
-        IntZero,        // Zero value
+        IntMin,          // i64::MIN value
+        IntMax,          // i64::MAX value
+        IntZero,         // Zero value
         IntRegular(i64), // Regular int value for comparison
     }
 
@@ -34965,22 +34983,34 @@ mod otlp_122_tests {
                 Otlp125AttributeValue::IntMin => {
                     // i64::MIN MUST be preserved correctly according to OTLP-125
                     let min_value = i64::MIN;
-                    println!("  Found i64::MIN IntValue attribute '{}': {} - MUST be preserved",
-                            attr_name, min_value);
+                    println!(
+                        "  Found i64::MIN IntValue attribute '{}': {} - MUST be preserved",
+                        attr_name, min_value
+                    );
 
                     // Verify no overflow occurs during encoding/decoding
                     let encoded_value = min_value;
-                    assert_eq!(encoded_value, i64::MIN, "i64::MIN must not overflow during encoding");
+                    assert_eq!(
+                        encoded_value,
+                        i64::MIN,
+                        "i64::MIN must not overflow during encoding"
+                    );
                 }
                 Otlp125AttributeValue::IntMax => {
                     let max_value = i64::MAX;
-                    println!("  Found i64::MAX IntValue attribute '{}': {}", attr_name, max_value);
+                    println!(
+                        "  Found i64::MAX IntValue attribute '{}': {}",
+                        attr_name, max_value
+                    );
                 }
                 Otlp125AttributeValue::IntZero => {
                     println!("  Found zero IntValue attribute '{}': 0", attr_name);
                 }
                 Otlp125AttributeValue::IntRegular(value) => {
-                    println!("  Found regular IntValue attribute '{}': {}", attr_name, value);
+                    println!(
+                        "  Found regular IntValue attribute '{}': {}",
+                        attr_name, value
+                    );
                 }
                 Otlp125AttributeValue::String(value) => {
                     println!("  Found String attribute '{}': '{}'", attr_name, value);
@@ -34995,7 +35025,7 @@ mod otlp_122_tests {
                     // Critical test: i64::MIN must be encodable and decodable without overflow
                     let original = i64::MIN;
                     let encoded = original; // In real implementation, this would go through OTLP encoding
-                    let decoded = encoded;  // In real implementation, this would go through OTLP decoding
+                    let decoded = encoded; // In real implementation, this would go through OTLP decoding
                     decoded == original
                 }
                 Otlp125AttributeValue::IntMax => {
@@ -35032,14 +35062,19 @@ mod otlp_122_tests {
                 "4bf92f3577b34da6a3ce929d0e0e4736",
                 "00f067aa0ba902b7",
                 vec![
-                    ("service.name".to_string(), Otlp125AttributeValue::String("metrics-service".to_string())),
+                    (
+                        "service.name".to_string(),
+                        Otlp125AttributeValue::String("metrics-service".to_string()),
+                    ),
                     ("count.min".to_string(), Otlp125AttributeValue::IntMin), // i64::MIN
-                    ("environment".to_string(), Otlp125AttributeValue::String("production".to_string())),
+                    (
+                        "environment".to_string(),
+                        Otlp125AttributeValue::String("production".to_string()),
+                    ),
                 ],
                 true,
                 "Span with i64::MIN IntValue must be preserved correctly per OTLP-125",
             ),
-
             // Test 2: Span with boundary values (MIN, MAX, zero) - all MUST be preserved
             Otlp125Scenario::new(
                 "span_with_boundary_int_values",
@@ -35047,14 +35082,13 @@ mod otlp_122_tests {
                 "4bf92f3577b34da6a3ce929d0e0e4737",
                 "00f067aa0ba902b8",
                 vec![
-                    ("value.min".to_string(), Otlp125AttributeValue::IntMin),    // i64::MIN
-                    ("value.max".to_string(), Otlp125AttributeValue::IntMax),    // i64::MAX
-                    ("value.zero".to_string(), Otlp125AttributeValue::IntZero),  // 0
+                    ("value.min".to_string(), Otlp125AttributeValue::IntMin), // i64::MIN
+                    ("value.max".to_string(), Otlp125AttributeValue::IntMax), // i64::MAX
+                    ("value.zero".to_string(), Otlp125AttributeValue::IntZero), // 0
                 ],
                 true,
                 "All boundary IntValues (MIN, MAX, zero) must be preserved",
             ),
-
             // Test 3: Span with multiple i64::MIN values - MUST be preserved
             Otlp125Scenario::new(
                 "span_with_multiple_int_min",
@@ -35064,12 +35098,14 @@ mod otlp_122_tests {
                 vec![
                     ("counter.minimum".to_string(), Otlp125AttributeValue::IntMin),
                     ("offset.minimum".to_string(), Otlp125AttributeValue::IntMin),
-                    ("threshold.minimum".to_string(), Otlp125AttributeValue::IntMin),
+                    (
+                        "threshold.minimum".to_string(),
+                        Otlp125AttributeValue::IntMin,
+                    ),
                 ],
                 true,
                 "Multiple i64::MIN IntValues in a single span must be preserved",
             ),
-
             // Test 4: Span with mixed regular and extreme int values - MUST be preserved
             Otlp125Scenario::new(
                 "span_with_mixed_int_values",
@@ -35077,10 +35113,16 @@ mod otlp_122_tests {
                 "4bf92f3577b34da6a3ce929d0e0e4739",
                 "00f067aa0ba902ba",
                 vec![
-                    ("extreme.min".to_string(), Otlp125AttributeValue::IntMin),             // i64::MIN
-                    ("regular.positive".to_string(), Otlp125AttributeValue::IntRegular(42)), // Regular positive
-                    ("regular.negative".to_string(), Otlp125AttributeValue::IntRegular(-100)), // Regular negative
-                    ("extreme.max".to_string(), Otlp125AttributeValue::IntMax),             // i64::MAX
+                    ("extreme.min".to_string(), Otlp125AttributeValue::IntMin), // i64::MIN
+                    (
+                        "regular.positive".to_string(),
+                        Otlp125AttributeValue::IntRegular(42),
+                    ), // Regular positive
+                    (
+                        "regular.negative".to_string(),
+                        Otlp125AttributeValue::IntRegular(-100),
+                    ), // Regular negative
+                    ("extreme.max".to_string(), Otlp125AttributeValue::IntMax), // i64::MAX
                 ],
                 true,
                 "Mix of regular and extreme IntValues must all be preserved correctly",
@@ -35114,10 +35156,13 @@ mod otlp_122_tests {
         println!("Testing i64::MIN: {}", min_value);
 
         // Simulate encoding/decoding cycle (in real OTLP implementation)
-        let encoded_min = min_value;  // Would go through OTLP wire format
+        let encoded_min = min_value; // Would go through OTLP wire format
         let decoded_min = encoded_min; // Would be decoded from wire format
 
-        assert_eq!(decoded_min, min_value, "i64::MIN must survive encoding/decoding cycle");
+        assert_eq!(
+            decoded_min, min_value,
+            "i64::MIN must survive encoding/decoding cycle"
+        );
 
         // Test i64::MAX preservation
         let max_value = i64::MAX;
@@ -35126,15 +35171,34 @@ mod otlp_122_tests {
         let encoded_max = max_value;
         let decoded_max = encoded_max;
 
-        assert_eq!(decoded_max, max_value, "i64::MAX must survive encoding/decoding cycle");
+        assert_eq!(
+            decoded_max, max_value,
+            "i64::MAX must survive encoding/decoding cycle"
+        );
 
         // Test that MIN and MAX are actually at the boundaries
-        assert_eq!(min_value.wrapping_add(1), i64::MIN + 1, "MIN value boundary check");
-        assert_eq!(max_value.wrapping_sub(1), i64::MAX - 1, "MAX value boundary check");
+        assert_eq!(
+            min_value.wrapping_add(1),
+            i64::MIN + 1,
+            "MIN value boundary check"
+        );
+        assert_eq!(
+            max_value.wrapping_sub(1),
+            i64::MAX - 1,
+            "MAX value boundary check"
+        );
 
         // Test overflow behavior awareness (should not occur in proper implementation)
-        assert_ne!(min_value.wrapping_sub(1), min_value, "Underflow changes value");
-        assert_ne!(max_value.wrapping_add(1), max_value, "Overflow changes value");
+        assert_ne!(
+            min_value.wrapping_sub(1),
+            min_value,
+            "Underflow changes value"
+        );
+        assert_ne!(
+            max_value.wrapping_add(1),
+            max_value,
+            "Overflow changes value"
+        );
 
         println!("OTLP-125: IntValue boundary preservation logic verified");
     }
@@ -35144,17 +35208,9 @@ mod otlp_122_tests {
         // Test specific edge cases that could cause encoding issues
 
         // Test near-boundary values
-        let near_min_values = vec![
-            i64::MIN,
-            i64::MIN + 1,
-            i64::MIN + 1000,
-        ];
+        let near_min_values = vec![i64::MIN, i64::MIN + 1, i64::MIN + 1000];
 
-        let near_max_values = vec![
-            i64::MAX,
-            i64::MAX - 1,
-            i64::MAX - 1000,
-        ];
+        let near_max_values = vec![i64::MAX, i64::MAX - 1, i64::MAX - 1000];
 
         for value in near_min_values {
             // Simulate OTLP encoding constraints
@@ -35174,7 +35230,10 @@ mod otlp_122_tests {
 
         // Test magnitude preservation
         let min_abs = min_value.wrapping_abs(); // Use wrapping to handle MIN case
-        assert_ne!(min_abs, min_value, "Absolute value should differ for negative");
+        assert_ne!(
+            min_abs, min_value,
+            "Absolute value should differ for negative"
+        );
 
         println!("OTLP-125: Encoding edge cases verified");
     }
@@ -35237,38 +35296,60 @@ mod otlp_122_tests {
                 Otlp126AttributeValue::DoubleMinPositive => {
                     // f64::MIN_POSITIVE MUST be preserved correctly according to OTLP-126
                     let min_positive = f64::MIN_POSITIVE;
-                    println!("  Found f64::MIN_POSITIVE DoubleValue attribute '{}': {} - MUST be preserved",
-                            attr_name, min_positive);
+                    println!(
+                        "  Found f64::MIN_POSITIVE DoubleValue attribute '{}': {} - MUST be preserved",
+                        attr_name, min_positive
+                    );
 
                     // Verify this is indeed subnormal
-                    assert!(min_positive.is_subnormal() || min_positive.is_normal(),
-                           "f64::MIN_POSITIVE should be the smallest positive normal number");
+                    assert!(
+                        min_positive.is_subnormal() || min_positive.is_normal(),
+                        "f64::MIN_POSITIVE should be the smallest positive normal number"
+                    );
                     assert!(min_positive > 0.0, "MIN_POSITIVE must be positive");
                     assert_ne!(min_positive, 0.0, "MIN_POSITIVE must not underflow to zero");
                 }
                 Otlp126AttributeValue::DoubleEpsilon => {
                     let epsilon = f64::EPSILON;
-                    println!("  Found f64::EPSILON DoubleValue attribute '{}': {}", attr_name, epsilon);
+                    println!(
+                        "  Found f64::EPSILON DoubleValue attribute '{}': {}",
+                        attr_name, epsilon
+                    );
                 }
                 Otlp126AttributeValue::DoubleSubnormal(value) => {
-                    println!("  Found subnormal DoubleValue attribute '{}': {} (subnormal: {})",
-                            attr_name, value, value.is_subnormal());
+                    println!(
+                        "  Found subnormal DoubleValue attribute '{}': {} (subnormal: {})",
+                        attr_name,
+                        value,
+                        value.is_subnormal()
+                    );
                     if value.is_subnormal() {
                         assert_ne!(*value, 0.0, "Subnormal value must not underflow to zero");
                     }
                 }
                 Otlp126AttributeValue::DoubleRegular(value) => {
-                    println!("  Found regular DoubleValue attribute '{}': {}", attr_name, value);
+                    println!(
+                        "  Found regular DoubleValue attribute '{}': {}",
+                        attr_name, value
+                    );
                 }
                 Otlp126AttributeValue::DoubleZero => {
                     println!("  Found zero DoubleValue attribute '{}': 0.0", attr_name);
                 }
                 Otlp126AttributeValue::DoubleNegMinPositive => {
                     let neg_min_positive = -f64::MIN_POSITIVE;
-                    println!("  Found -f64::MIN_POSITIVE DoubleValue attribute '{}': {}",
-                            attr_name, neg_min_positive);
-                    assert!(neg_min_positive < 0.0, "Negative MIN_POSITIVE must be negative");
-                    assert_ne!(neg_min_positive, 0.0, "Negative MIN_POSITIVE must not underflow to zero");
+                    println!(
+                        "  Found -f64::MIN_POSITIVE DoubleValue attribute '{}': {}",
+                        attr_name, neg_min_positive
+                    );
+                    assert!(
+                        neg_min_positive < 0.0,
+                        "Negative MIN_POSITIVE must be negative"
+                    );
+                    assert_ne!(
+                        neg_min_positive, 0.0,
+                        "Negative MIN_POSITIVE must not underflow to zero"
+                    );
                 }
                 Otlp126AttributeValue::String(value) => {
                     println!("  Found String attribute '{}': '{}'", attr_name, value);
@@ -35283,7 +35364,7 @@ mod otlp_122_tests {
                     // Critical test: f64::MIN_POSITIVE must be encodable and decodable without underflow
                     let original = f64::MIN_POSITIVE;
                     let encoded = original; // In real implementation, this would go through OTLP encoding
-                    let decoded = encoded;  // In real implementation, this would go through OTLP decoding
+                    let decoded = encoded; // In real implementation, this would go through OTLP decoding
                     decoded == original && decoded != 0.0
                 }
                 Otlp126AttributeValue::DoubleNegMinPositive => {
@@ -35338,14 +35419,22 @@ mod otlp_122_tests {
                 "4bf92f3577b34da6a3ce929d0e0e4736",
                 "00f067aa0ba902b7",
                 vec![
-                    ("service.name".to_string(), Otlp126AttributeValue::String("precision-service".to_string())),
-                    ("value.min_positive".to_string(), Otlp126AttributeValue::DoubleMinPositive), // f64::MIN_POSITIVE
-                    ("environment".to_string(), Otlp126AttributeValue::String("production".to_string())),
+                    (
+                        "service.name".to_string(),
+                        Otlp126AttributeValue::String("precision-service".to_string()),
+                    ),
+                    (
+                        "value.min_positive".to_string(),
+                        Otlp126AttributeValue::DoubleMinPositive,
+                    ), // f64::MIN_POSITIVE
+                    (
+                        "environment".to_string(),
+                        Otlp126AttributeValue::String("production".to_string()),
+                    ),
                 ],
                 true,
                 "Span with f64::MIN_POSITIVE DoubleValue must be preserved without underflow per OTLP-126",
             ),
-
             // Test 2: Span with various subnormal values - all MUST be preserved
             Otlp126Scenario::new(
                 "span_with_subnormal_doubles",
@@ -35353,15 +35442,23 @@ mod otlp_122_tests {
                 "4bf92f3577b34da6a3ce929d0e0e4737",
                 "00f067aa0ba902b8",
                 vec![
-                    ("min_positive".to_string(), Otlp126AttributeValue::DoubleMinPositive),
-                    ("neg_min_positive".to_string(), Otlp126AttributeValue::DoubleNegMinPositive),
-                    ("tiny_subnormal".to_string(), Otlp126AttributeValue::DoubleSubnormal(tiny_subnormal)),
+                    (
+                        "min_positive".to_string(),
+                        Otlp126AttributeValue::DoubleMinPositive,
+                    ),
+                    (
+                        "neg_min_positive".to_string(),
+                        Otlp126AttributeValue::DoubleNegMinPositive,
+                    ),
+                    (
+                        "tiny_subnormal".to_string(),
+                        Otlp126AttributeValue::DoubleSubnormal(tiny_subnormal),
+                    ),
                     ("epsilon".to_string(), Otlp126AttributeValue::DoubleEpsilon),
                 ],
                 true,
                 "All subnormal and epsilon DoubleValues must be preserved",
             ),
-
             // Test 3: Span with edge case subnormals - MUST be preserved
             Otlp126Scenario::new(
                 "span_with_edge_subnormals",
@@ -35369,14 +35466,19 @@ mod otlp_122_tests {
                 "4bf92f3577b34da6a3ce929d0e0e4738",
                 "00f067aa0ba902b9",
                 vec![
-                    ("subnormal1".to_string(), Otlp126AttributeValue::DoubleSubnormal(another_subnormal)),
+                    (
+                        "subnormal1".to_string(),
+                        Otlp126AttributeValue::DoubleSubnormal(another_subnormal),
+                    ),
                     ("zero".to_string(), Otlp126AttributeValue::DoubleZero), // Contrast with non-zero subnormals
-                    ("near_zero".to_string(), Otlp126AttributeValue::DoubleMinPositive),
+                    (
+                        "near_zero".to_string(),
+                        Otlp126AttributeValue::DoubleMinPositive,
+                    ),
                 ],
                 true,
                 "Edge case subnormal DoubleValues must not underflow to zero",
             ),
-
             // Test 4: Span mixing regular and subnormal doubles - all MUST be preserved
             Otlp126Scenario::new(
                 "span_with_mixed_doubles",
@@ -35384,10 +35486,22 @@ mod otlp_122_tests {
                 "4bf92f3577b34da6a3ce929d0e0e4739",
                 "00f067aa0ba902ba",
                 vec![
-                    ("subnormal.positive".to_string(), Otlp126AttributeValue::DoubleMinPositive),
-                    ("regular.small".to_string(), Otlp126AttributeValue::DoubleRegular(1e-100)),
-                    ("regular.large".to_string(), Otlp126AttributeValue::DoubleRegular(1.23456789)),
-                    ("subnormal.negative".to_string(), Otlp126AttributeValue::DoubleNegMinPositive),
+                    (
+                        "subnormal.positive".to_string(),
+                        Otlp126AttributeValue::DoubleMinPositive,
+                    ),
+                    (
+                        "regular.small".to_string(),
+                        Otlp126AttributeValue::DoubleRegular(1e-100),
+                    ),
+                    (
+                        "regular.large".to_string(),
+                        Otlp126AttributeValue::DoubleRegular(1.23456789),
+                    ),
+                    (
+                        "subnormal.negative".to_string(),
+                        Otlp126AttributeValue::DoubleNegMinPositive,
+                    ),
                 ],
                 true,
                 "Mix of regular and subnormal DoubleValues must all be preserved correctly",
@@ -35424,7 +35538,10 @@ mod otlp_122_tests {
         println!("  Is finite: {}", min_positive.is_finite());
 
         // f64::MIN_POSITIVE is actually the smallest positive normal number, not subnormal
-        assert!(min_positive.is_normal(), "f64::MIN_POSITIVE should be normal, not subnormal");
+        assert!(
+            min_positive.is_normal(),
+            "f64::MIN_POSITIVE should be normal, not subnormal"
+        );
         assert!(min_positive > 0.0, "MIN_POSITIVE must be positive");
         assert_ne!(min_positive, 0.0, "MIN_POSITIVE must not be zero");
 
@@ -35436,13 +35553,22 @@ mod otlp_122_tests {
         if actual_subnormal.is_subnormal() {
             assert!(actual_subnormal > 0.0, "Subnormal must be positive");
             assert_ne!(actual_subnormal, 0.0, "Subnormal must not be zero");
-            assert!(actual_subnormal < min_positive, "Subnormal must be smaller than MIN_POSITIVE");
+            assert!(
+                actual_subnormal < min_positive,
+                "Subnormal must be smaller than MIN_POSITIVE"
+            );
 
             // Test encoding/decoding preservation
             let encoded = actual_subnormal;
             let decoded = encoded;
-            assert_eq!(decoded, actual_subnormal, "Subnormal must survive encoding/decoding");
-            assert!(decoded.is_subnormal(), "Decoded value must remain subnormal");
+            assert_eq!(
+                decoded, actual_subnormal,
+                "Subnormal must survive encoding/decoding"
+            );
+            assert!(
+                decoded.is_subnormal(),
+                "Decoded value must remain subnormal"
+            );
         }
 
         // Test negative subnormal
@@ -35473,8 +35599,12 @@ mod otlp_122_tests {
         ];
 
         for value in boundary_values {
-            println!("Testing boundary value: {} (subnormal: {}, normal: {})",
-                    value, value.is_subnormal(), value.is_normal());
+            println!(
+                "Testing boundary value: {} (subnormal: {}, normal: {})",
+                value,
+                value.is_subnormal(),
+                value.is_normal()
+            );
 
             // Critical requirement: value must not underflow to zero
             assert_ne!(value, 0.0, "Boundary value {} must not be zero", value);
@@ -35484,22 +35614,34 @@ mod otlp_122_tests {
                 let encoded = value;
                 let decoded = encoded;
 
-                assert_eq!(decoded, value, "Subnormal value {} must be preserved exactly", value);
+                assert_eq!(
+                    decoded, value,
+                    "Subnormal value {} must be preserved exactly",
+                    value
+                );
                 assert_ne!(decoded, 0.0, "Decoded subnormal must not underflow to zero");
-                assert!(decoded.is_subnormal() || decoded.is_normal(),
-                        "Decoded value must remain subnormal or normal");
+                assert!(
+                    decoded.is_subnormal() || decoded.is_normal(),
+                    "Decoded value must remain subnormal or normal"
+                );
             }
         }
 
         // Test that we can distinguish between zero and very small numbers
         let very_small = f64::MIN_POSITIVE / 1e100;
         if very_small != 0.0 {
-            assert_ne!(very_small, 0.0, "Very small number must be distinguishable from zero");
+            assert_ne!(
+                very_small, 0.0,
+                "Very small number must be distinguishable from zero"
+            );
 
             // Test arithmetic properties
             let doubled = very_small * 2.0;
             if doubled != 0.0 {
-                assert!(doubled > very_small, "Doubled small number should be larger");
+                assert!(
+                    doubled > very_small,
+                    "Doubled small number should be larger"
+                );
             }
         }
 
@@ -35523,17 +35665,17 @@ mod otlp_122_tests {
 
     #[derive(Debug, Clone)]
     enum Otlp127AttributeValue {
-        StringRegular(String),           // Normal sized string
-        StringLarge(usize),              // Large string (specified by size in bytes)
-        StringExtraLarge(usize),         // Extra large string (>10MB)
-        StringMaxAllowed,                // String at maximum allowed size (≤10MB)
-        StringOverLimit,                 // String over the limit (>10MB)
+        StringRegular(String),   // Normal sized string
+        StringLarge(usize),      // Large string (specified by size in bytes)
+        StringExtraLarge(usize), // Extra large string (>10MB)
+        StringMaxAllowed,        // String at maximum allowed size (≤10MB)
+        StringOverLimit,         // String over the limit (>10MB)
     }
 
     #[derive(Debug, Clone, PartialEq)]
     enum Otlp127ValidationResult {
-        Accept,    // Span should be accepted
-        Reject,    // Span should be rejected due to size limit
+        Accept, // Span should be accepted
+        Reject, // Span should be rejected due to size limit
     }
 
     impl Otlp127Scenario {
@@ -35571,29 +35713,47 @@ mod otlp_122_tests {
             let attribute_size = match attr_value {
                 Otlp127AttributeValue::StringRegular(s) => {
                     let size = s.len();
-                    println!("  Found regular string attribute '{}': {} bytes", attr_name, size);
+                    println!(
+                        "  Found regular string attribute '{}': {} bytes",
+                        attr_name, size
+                    );
                     size
                 }
                 Otlp127AttributeValue::StringLarge(size) => {
-                    println!("  Found large string attribute '{}': {} bytes", attr_name, size);
+                    println!(
+                        "  Found large string attribute '{}': {} bytes",
+                        attr_name, size
+                    );
                     *size
                 }
                 Otlp127AttributeValue::StringExtraLarge(size) => {
-                    println!("  Found extra large string attribute '{}': {} bytes", attr_name, size);
+                    println!(
+                        "  Found extra large string attribute '{}': {} bytes",
+                        attr_name, size
+                    );
                     if *size > MAX_ATTRIBUTE_SIZE_BYTES {
-                        println!("    ⚠️  EXCEEDS LIMIT: {} bytes > {} bytes", size, MAX_ATTRIBUTE_SIZE_BYTES);
+                        println!(
+                            "    ⚠️  EXCEEDS LIMIT: {} bytes > {} bytes",
+                            size, MAX_ATTRIBUTE_SIZE_BYTES
+                        );
                         should_reject = true;
                     }
                     *size
                 }
                 Otlp127AttributeValue::StringMaxAllowed => {
                     let size = MAX_ATTRIBUTE_SIZE_BYTES;
-                    println!("  Found max-allowed string attribute '{}': {} bytes (at limit)", attr_name, size);
+                    println!(
+                        "  Found max-allowed string attribute '{}': {} bytes (at limit)",
+                        attr_name, size
+                    );
                     size
                 }
                 Otlp127AttributeValue::StringOverLimit => {
                     let size = MAX_ATTRIBUTE_SIZE_BYTES + 1;
-                    println!("  Found over-limit string attribute '{}': {} bytes (OVER LIMIT)", attr_name, size);
+                    println!(
+                        "  Found over-limit string attribute '{}': {} bytes (OVER LIMIT)",
+                        attr_name, size
+                    );
                     should_reject = true;
                     size
                 }
@@ -35604,13 +35764,18 @@ mod otlp_122_tests {
             // Per OTLP-127: Single attribute >10MB MUST cause rejection
             if attribute_size > MAX_ATTRIBUTE_SIZE_BYTES {
                 should_reject = true;
-                println!("    🚫 REJECTION TRIGGERED: Single attribute exceeds {}MB limit",
-                        MAX_ATTRIBUTE_SIZE_BYTES / (1024 * 1024));
+                println!(
+                    "    🚫 REJECTION TRIGGERED: Single attribute exceeds {}MB limit",
+                    MAX_ATTRIBUTE_SIZE_BYTES / (1024 * 1024)
+                );
             }
         }
 
-        println!("  Total attributes size: {} bytes ({:.2}MB)",
-                total_size, total_size as f64 / (1024.0 * 1024.0));
+        println!(
+            "  Total attributes size: {} bytes ({:.2}MB)",
+            total_size,
+            total_size as f64 / (1024.0 * 1024.0)
+        );
 
         // Determine expected validation result
         let actual_result = if should_reject {
@@ -35630,7 +35795,10 @@ mod otlp_122_tests {
             }
         } else {
             println!("  ✗ FAIL: {}", scenario.description);
-            println!("    Expected: {:?}, Got: {:?}", scenario.expected_result, actual_result);
+            println!(
+                "    Expected: {:?}, Got: {:?}",
+                scenario.expected_result, actual_result
+            );
         }
 
         result
@@ -35646,14 +35814,24 @@ mod otlp_122_tests {
                 "4bf92f3577b34da6a3ce929d0e0e4736",
                 "00f067aa0ba902b7",
                 vec![
-                    ("service.name".to_string(), Otlp127AttributeValue::StringRegular("web-service".to_string())),
-                    ("description".to_string(), Otlp127AttributeValue::StringRegular("A normal length description".to_string())),
-                    ("user.id".to_string(), Otlp127AttributeValue::StringRegular("12345".to_string())),
+                    (
+                        "service.name".to_string(),
+                        Otlp127AttributeValue::StringRegular("web-service".to_string()),
+                    ),
+                    (
+                        "description".to_string(),
+                        Otlp127AttributeValue::StringRegular(
+                            "A normal length description".to_string(),
+                        ),
+                    ),
+                    (
+                        "user.id".to_string(),
+                        Otlp127AttributeValue::StringRegular("12345".to_string()),
+                    ),
                 ],
                 Otlp127ValidationResult::Accept,
                 "Span with normal sized strings must be accepted",
             ),
-
             // Test 2: Span with large but acceptable strings - MUST be accepted
             Otlp127Scenario::new(
                 "span_with_large_acceptable_strings",
@@ -35661,14 +35839,22 @@ mod otlp_122_tests {
                 "4bf92f3577b34da6a3ce929d0e0e4737",
                 "00f067aa0ba902b8",
                 vec![
-                    ("large_data".to_string(), Otlp127AttributeValue::StringLarge(1024 * 1024)), // 1MB
-                    ("medium_data".to_string(), Otlp127AttributeValue::StringLarge(512 * 1024)), // 512KB
-                    ("service.name".to_string(), Otlp127AttributeValue::StringRegular("service".to_string())),
+                    (
+                        "large_data".to_string(),
+                        Otlp127AttributeValue::StringLarge(1024 * 1024),
+                    ), // 1MB
+                    (
+                        "medium_data".to_string(),
+                        Otlp127AttributeValue::StringLarge(512 * 1024),
+                    ), // 512KB
+                    (
+                        "service.name".to_string(),
+                        Otlp127AttributeValue::StringRegular("service".to_string()),
+                    ),
                 ],
                 Otlp127ValidationResult::Accept,
                 "Span with large but acceptable strings must be accepted",
             ),
-
             // Test 3: Span with string at maximum allowed size - MUST be accepted
             Otlp127Scenario::new(
                 "span_with_max_size_string",
@@ -35676,13 +35862,18 @@ mod otlp_122_tests {
                 "4bf92f3577b34da6a3ce929d0e0e4738",
                 "00f067aa0ba902b9",
                 vec![
-                    ("max_data".to_string(), Otlp127AttributeValue::StringMaxAllowed), // Exactly 10MB
-                    ("service.name".to_string(), Otlp127AttributeValue::StringRegular("boundary-test".to_string())),
+                    (
+                        "max_data".to_string(),
+                        Otlp127AttributeValue::StringMaxAllowed,
+                    ), // Exactly 10MB
+                    (
+                        "service.name".to_string(),
+                        Otlp127AttributeValue::StringRegular("boundary-test".to_string()),
+                    ),
                 ],
                 Otlp127ValidationResult::Accept,
                 "Span with string at maximum allowed size (10MB) must be accepted",
             ),
-
             // Test 4: Span with string over size limit - MUST be rejected
             Otlp127Scenario::new(
                 "span_with_oversized_string",
@@ -35690,13 +35881,18 @@ mod otlp_122_tests {
                 "4bf92f3577b34da6a3ce929d0e0e4739",
                 "00f067aa0ba902ba",
                 vec![
-                    ("service.name".to_string(), Otlp127AttributeValue::StringRegular("service".to_string())),
-                    ("oversized_data".to_string(), Otlp127AttributeValue::StringOverLimit), // 10MB + 1 byte
+                    (
+                        "service.name".to_string(),
+                        Otlp127AttributeValue::StringRegular("service".to_string()),
+                    ),
+                    (
+                        "oversized_data".to_string(),
+                        Otlp127AttributeValue::StringOverLimit,
+                    ), // 10MB + 1 byte
                 ],
                 Otlp127ValidationResult::Reject,
                 "Span with string over size limit (>10MB) must be rejected per OTLP-127",
             ),
-
             // Test 5: Span with extremely large string - MUST be rejected
             Otlp127Scenario::new(
                 "span_with_extremely_large_string",
@@ -35704,12 +35900,14 @@ mod otlp_122_tests {
                 "4bf92f3577b34da6a3ce929d0e0e473a",
                 "00f067aa0ba902bb",
                 vec![
-                    ("huge_payload".to_string(), Otlp127AttributeValue::StringExtraLarge(50 * 1024 * 1024)), // 50MB
+                    (
+                        "huge_payload".to_string(),
+                        Otlp127AttributeValue::StringExtraLarge(50 * 1024 * 1024),
+                    ), // 50MB
                 ],
                 Otlp127ValidationResult::Reject,
                 "Span with extremely large string (50MB) must be rejected",
             ),
-
             // Test 6: Span with multiple large strings, one over limit - MUST be rejected
             Otlp127Scenario::new(
                 "span_with_mixed_sizes_one_over",
@@ -35717,9 +35915,18 @@ mod otlp_122_tests {
                 "4bf92f3577b34da6a3ce929d0e0e473b",
                 "00f067aa0ba902bc",
                 vec![
-                    ("acceptable1".to_string(), Otlp127AttributeValue::StringLarge(5 * 1024 * 1024)), // 5MB - OK
-                    ("acceptable2".to_string(), Otlp127AttributeValue::StringLarge(3 * 1024 * 1024)), // 3MB - OK
-                    ("oversized".to_string(), Otlp127AttributeValue::StringExtraLarge(15 * 1024 * 1024)), // 15MB - REJECT
+                    (
+                        "acceptable1".to_string(),
+                        Otlp127AttributeValue::StringLarge(5 * 1024 * 1024),
+                    ), // 5MB - OK
+                    (
+                        "acceptable2".to_string(),
+                        Otlp127AttributeValue::StringLarge(3 * 1024 * 1024),
+                    ), // 3MB - OK
+                    (
+                        "oversized".to_string(),
+                        Otlp127AttributeValue::StringExtraLarge(15 * 1024 * 1024),
+                    ), // 15MB - REJECT
                 ],
                 Otlp127ValidationResult::Reject,
                 "Span with multiple strings where one exceeds limit must be rejected",
@@ -35759,23 +35966,33 @@ mod otlp_122_tests {
         ];
 
         for (size, should_accept, description) in boundary_tests {
-            println!("Testing boundary: {} bytes ({}MB) - {}",
-                    size, size / (1024 * 1024), description);
+            println!(
+                "Testing boundary: {} bytes ({}MB) - {}",
+                size,
+                size / (1024 * 1024),
+                description
+            );
 
             // Simulate attribute size check
             let exceeds_limit = size > MAX_SIZE;
             let actual_accept = !exceeds_limit;
 
-            assert_eq!(actual_accept, should_accept,
-                      "Size {} bytes: expected accept={}, got accept={}",
-                      size, should_accept, actual_accept);
+            assert_eq!(
+                actual_accept, should_accept,
+                "Size {} bytes: expected accept={}, got accept={}",
+                size, should_accept, actual_accept
+            );
 
             if exceeds_limit {
-                println!("  ✓ Correctly identified as oversized ({}MB > 10MB)",
-                        size / (1024 * 1024));
+                println!(
+                    "  ✓ Correctly identified as oversized ({}MB > 10MB)",
+                    size / (1024 * 1024)
+                );
             } else {
-                println!("  ✓ Correctly identified as acceptable ({}MB ≤ 10MB)",
-                        size / (1024 * 1024));
+                println!(
+                    "  ✓ Correctly identified as acceptable ({}MB ≤ 10MB)",
+                    size / (1024 * 1024)
+                );
             }
         }
 
@@ -35788,31 +36005,60 @@ mod otlp_122_tests {
 
         // Test UTF-8 string size calculation
         let ascii_string = "Hello World"; // 11 bytes
-        assert_eq!(ascii_string.len(), 11, "ASCII string size should be character count");
+        assert_eq!(
+            ascii_string.len(),
+            11,
+            "ASCII string size should be character count"
+        );
 
         let utf8_string = "Hello 世界"; // "Hello " (6) + "世" (3) + "界" (3) = 12 bytes
-        assert_eq!(utf8_string.len(), 12, "UTF-8 string size should be byte count, not character count");
+        assert_eq!(
+            utf8_string.len(),
+            12,
+            "UTF-8 string size should be byte count, not character count"
+        );
 
         let emoji_string = "👋🌍"; // Each emoji is 4 bytes = 8 bytes total
-        assert_eq!(emoji_string.len(), 8, "Emoji string size should count UTF-8 bytes");
+        assert_eq!(
+            emoji_string.len(),
+            8,
+            "Emoji string size should count UTF-8 bytes"
+        );
 
         // Test size threshold calculations
         let kb = 1024;
         let mb = kb * 1024;
         let size_10mb = 10 * mb;
 
-        assert_eq!(size_10mb, 10_485_760, "10MB should be exactly 10,485,760 bytes");
+        assert_eq!(
+            size_10mb, 10_485_760,
+            "10MB should be exactly 10,485,760 bytes"
+        );
 
         // Test that we're measuring the right thing
         let test_string = "x".repeat(size_10mb);
-        assert_eq!(test_string.len(), size_10mb, "Generated string should be exactly 10MB");
+        assert_eq!(
+            test_string.len(),
+            size_10mb,
+            "Generated string should be exactly 10MB"
+        );
 
         let oversized_string = "x".repeat(size_10mb + 1);
-        assert_eq!(oversized_string.len(), size_10mb + 1, "Oversized string should be 10MB + 1 byte");
+        assert_eq!(
+            oversized_string.len(),
+            size_10mb + 1,
+            "Oversized string should be 10MB + 1 byte"
+        );
 
         // Verify size comparisons work correctly
-        assert!(oversized_string.len() > size_10mb, "Oversized string should exceed limit");
-        assert!(test_string.len() <= size_10mb, "10MB string should be at or under limit");
+        assert!(
+            oversized_string.len() > size_10mb,
+            "Oversized string should exceed limit"
+        );
+        assert!(
+            test_string.len() <= size_10mb,
+            "10MB string should be at or under limit"
+        );
 
         println!("OTLP-127: Size calculation accuracy verified");
     }
@@ -35827,23 +36073,35 @@ mod otlp_122_tests {
         let many_small_total = 1000 * 1024; // 1000 attributes of 1KB each = 1MB total
         for i in 0..10 {
             let small_attr_size = 1024; // 1KB each
-            assert!(small_attr_size <= MAX_SIZE, "Small attribute {} should be acceptable", i);
+            assert!(
+                small_attr_size <= MAX_SIZE,
+                "Small attribute {} should be acceptable",
+                i
+            );
         }
 
         // Scenario 2: Few large attributes under individual limits
         let large_attr_sizes = vec![
-            5 * 1024 * 1024,   // 5MB
-            3 * 1024 * 1024,   // 3MB
-            2 * 1024 * 1024,   // 2MB
+            5 * 1024 * 1024, // 5MB
+            3 * 1024 * 1024, // 3MB
+            2 * 1024 * 1024, // 2MB
         ]; // Total: 10MB, but each individual attribute is under 10MB limit
 
         for (i, size) in large_attr_sizes.iter().enumerate() {
-            assert!(*size <= MAX_SIZE, "Large attribute {} ({} bytes) should be under individual limit", i, size);
+            assert!(
+                *size <= MAX_SIZE,
+                "Large attribute {} ({} bytes) should be under individual limit",
+                i,
+                size
+            );
         }
 
         // Scenario 3: Single oversized attribute (should trigger rejection)
         let oversized_attr = MAX_SIZE + 1;
-        assert!(oversized_attr > MAX_SIZE, "Oversized attribute should exceed individual limit");
+        assert!(
+            oversized_attr > MAX_SIZE,
+            "Oversized attribute should exceed individual limit"
+        );
 
         // Key insight: OTLP-127 is about INDIVIDUAL attribute size limit, not total span size
         println!("OTLP-127: Individual vs total size limits - individual limit is what matters");
@@ -35870,9 +36128,9 @@ mod otlp_122_tests {
     #[derive(Debug, Clone)]
     enum Otlp128AttributeValue {
         String(String),
-        BoolTrue,             // Explicit true value
-        BoolFalse,            // Explicit false value
-        BoolValue(bool),      // Generic bool value for testing
+        BoolTrue,        // Explicit true value
+        BoolFalse,       // Explicit false value
+        BoolValue(bool), // Generic bool value for testing
     }
 
     impl Otlp128Scenario {
@@ -35907,12 +36165,20 @@ mod otlp_122_tests {
                     // Explicit true MUST be preserved as true according to OTLP-128
                     let original = true;
                     let encoded = original; // In real implementation, this would go through OTLP encoding
-                    let decoded = encoded;  // In real implementation, this would go through OTLP decoding
+                    let decoded = encoded; // In real implementation, this would go through OTLP decoding
 
-                    println!("  Found explicit true BoolValue attribute '{}': {} → {} (preserved: {})",
-                            attr_name, original, decoded, original == decoded);
+                    println!(
+                        "  Found explicit true BoolValue attribute '{}': {} → {} (preserved: {})",
+                        attr_name,
+                        original,
+                        decoded,
+                        original == decoded
+                    );
 
-                    assert_eq!(decoded, true, "Explicit true must remain true after encoding/decoding");
+                    assert_eq!(
+                        decoded, true,
+                        "Explicit true must remain true after encoding/decoding"
+                    );
                     assert_ne!(decoded, false, "True must not become false");
                 }
                 Otlp128AttributeValue::BoolFalse => {
@@ -35921,10 +36187,18 @@ mod otlp_122_tests {
                     let encoded = original;
                     let decoded = encoded;
 
-                    println!("  Found explicit false BoolValue attribute '{}': {} → {} (preserved: {})",
-                            attr_name, original, decoded, original == decoded);
+                    println!(
+                        "  Found explicit false BoolValue attribute '{}': {} → {} (preserved: {})",
+                        attr_name,
+                        original,
+                        decoded,
+                        original == decoded
+                    );
 
-                    assert_eq!(decoded, false, "Explicit false must remain false after encoding/decoding");
+                    assert_eq!(
+                        decoded, false,
+                        "Explicit false must remain false after encoding/decoding"
+                    );
                     assert_ne!(decoded, true, "False must not become true");
                 }
                 Otlp128AttributeValue::BoolValue(value) => {
@@ -35933,10 +36207,19 @@ mod otlp_122_tests {
                     let encoded = original;
                     let decoded = encoded;
 
-                    println!("  Found BoolValue attribute '{}': {} → {} (preserved: {})",
-                            attr_name, original, decoded, original == decoded);
+                    println!(
+                        "  Found BoolValue attribute '{}': {} → {} (preserved: {})",
+                        attr_name,
+                        original,
+                        decoded,
+                        original == decoded
+                    );
 
-                    assert_eq!(decoded, original, "Bool value {} must be preserved exactly", original);
+                    assert_eq!(
+                        decoded, original,
+                        "Bool value {} must be preserved exactly",
+                        original
+                    );
                 }
                 Otlp128AttributeValue::String(value) => {
                     println!("  Found String attribute '{}': '{}'", attr_name, value);
@@ -36000,15 +36283,20 @@ mod otlp_122_tests {
                 "4bf92f3577b34da6a3ce929d0e0e4736",
                 "00f067aa0ba902b7",
                 vec![
-                    ("service.name".to_string(), Otlp128AttributeValue::String("bool-service".to_string())),
-                    ("feature.enabled".to_string(), Otlp128AttributeValue::BoolTrue),
+                    (
+                        "service.name".to_string(),
+                        Otlp128AttributeValue::String("bool-service".to_string()),
+                    ),
+                    (
+                        "feature.enabled".to_string(),
+                        Otlp128AttributeValue::BoolTrue,
+                    ),
                     ("debug.mode".to_string(), Otlp128AttributeValue::BoolTrue),
                     ("production".to_string(), Otlp128AttributeValue::BoolTrue),
                 ],
                 true,
                 "Span with explicit true BoolValues must preserve all as true per OTLP-128",
             ),
-
             // Test 2: Span with explicit false values - MUST be preserved
             Otlp128Scenario::new(
                 "span_with_false_values",
@@ -36016,15 +36304,23 @@ mod otlp_122_tests {
                 "4bf92f3577b34da6a3ce929d0e0e4737",
                 "00f067aa0ba902b8",
                 vec![
-                    ("service.name".to_string(), Otlp128AttributeValue::String("bool-service".to_string())),
-                    ("feature.disabled".to_string(), Otlp128AttributeValue::BoolFalse),
+                    (
+                        "service.name".to_string(),
+                        Otlp128AttributeValue::String("bool-service".to_string()),
+                    ),
+                    (
+                        "feature.disabled".to_string(),
+                        Otlp128AttributeValue::BoolFalse,
+                    ),
                     ("cache.hit".to_string(), Otlp128AttributeValue::BoolFalse),
-                    ("error.occurred".to_string(), Otlp128AttributeValue::BoolFalse),
+                    (
+                        "error.occurred".to_string(),
+                        Otlp128AttributeValue::BoolFalse,
+                    ),
                 ],
                 true,
                 "Span with explicit false BoolValues must preserve all as false",
             ),
-
             // Test 3: Span with mixed true/false values - ALL MUST be preserved exactly
             Otlp128Scenario::new(
                 "span_with_mixed_bool_values",
@@ -36035,13 +36331,15 @@ mod otlp_122_tests {
                     ("auth.success".to_string(), Otlp128AttributeValue::BoolTrue),
                     ("cache.miss".to_string(), Otlp128AttributeValue::BoolFalse),
                     ("retry.needed".to_string(), Otlp128AttributeValue::BoolTrue),
-                    ("timeout.occurred".to_string(), Otlp128AttributeValue::BoolFalse),
+                    (
+                        "timeout.occurred".to_string(),
+                        Otlp128AttributeValue::BoolFalse,
+                    ),
                     ("admin.user".to_string(), Otlp128AttributeValue::BoolTrue),
                 ],
                 true,
                 "Mix of true and false BoolValues must all be preserved exactly",
             ),
-
             // Test 4: Span with only false values to test no default-to-true behavior
             Otlp128Scenario::new(
                 "span_with_only_false_values",
@@ -36057,7 +36355,6 @@ mod otlp_122_tests {
                 true,
                 "Multiple false BoolValues must not default to true",
             ),
-
             // Test 5: Span with programmatic bool values (true/false mixed)
             Otlp128Scenario::new(
                 "span_with_programmatic_bools",
@@ -36065,10 +36362,22 @@ mod otlp_122_tests {
                 "4bf92f3577b34da6a3ce929d0e0e473a",
                 "00f067aa0ba902bb",
                 vec![
-                    ("condition1".to_string(), Otlp128AttributeValue::BoolValue(true)),
-                    ("condition2".to_string(), Otlp128AttributeValue::BoolValue(false)),
-                    ("condition3".to_string(), Otlp128AttributeValue::BoolValue(true && false)), // false
-                    ("condition4".to_string(), Otlp128AttributeValue::BoolValue(true || false)), // true
+                    (
+                        "condition1".to_string(),
+                        Otlp128AttributeValue::BoolValue(true),
+                    ),
+                    (
+                        "condition2".to_string(),
+                        Otlp128AttributeValue::BoolValue(false),
+                    ),
+                    (
+                        "condition3".to_string(),
+                        Otlp128AttributeValue::BoolValue(true && false),
+                    ), // false
+                    (
+                        "condition4".to_string(),
+                        Otlp128AttributeValue::BoolValue(true || false),
+                    ), // true
                 ],
                 true,
                 "Programmatically generated BoolValues must be preserved exactly",
@@ -36100,24 +36409,45 @@ mod otlp_122_tests {
         // Test true preservation
         let original_true = true;
         let encoded_true = simulate_encoding_cycle_bool(original_true);
-        assert_eq!(encoded_true, true, "True must remain true after encoding cycle");
-        assert_eq!(encoded_true, original_true, "Encoded true must match original");
+        assert_eq!(
+            encoded_true, true,
+            "True must remain true after encoding cycle"
+        );
+        assert_eq!(
+            encoded_true, original_true,
+            "Encoded true must match original"
+        );
 
         // Test false preservation
         let original_false = false;
         let encoded_false = simulate_encoding_cycle_bool(original_false);
-        assert_eq!(encoded_false, false, "False must remain false after encoding cycle");
-        assert_eq!(encoded_false, original_false, "Encoded false must match original");
+        assert_eq!(
+            encoded_false, false,
+            "False must remain false after encoding cycle"
+        );
+        assert_eq!(
+            encoded_false, original_false,
+            "Encoded false must match original"
+        );
 
         // Test that true and false are distinguishable after encoding
-        assert_ne!(encoded_true, encoded_false, "True and false must remain distinguishable");
+        assert_ne!(
+            encoded_true, encoded_false,
+            "True and false must remain distinguishable"
+        );
 
         // Test multiple cycles (should be stable)
         let double_encoded_true = simulate_encoding_cycle_bool(encoded_true);
         let double_encoded_false = simulate_encoding_cycle_bool(encoded_false);
 
-        assert_eq!(double_encoded_true, original_true, "True must survive multiple encoding cycles");
-        assert_eq!(double_encoded_false, original_false, "False must survive multiple encoding cycles");
+        assert_eq!(
+            double_encoded_true, original_true,
+            "True must survive multiple encoding cycles"
+        );
+        assert_eq!(
+            double_encoded_false, original_false,
+            "False must survive multiple encoding cycles"
+        );
 
         println!("OTLP-128: Boolean encoding cycle integrity verified");
     }
@@ -36127,14 +36457,15 @@ mod otlp_122_tests {
         // Test that there are no surprising defaults or implicit conversions
 
         // Test explicit values
-        let explicit_cases = vec![
-            (true, "explicit true"),
-            (false, "explicit false"),
-        ];
+        let explicit_cases = vec![(true, "explicit true"), (false, "explicit false")];
 
         for (value, description) in explicit_cases {
             let encoded = simulate_encoding_cycle_bool(value);
-            assert_eq!(encoded, value, "{} must not change during encoding", description);
+            assert_eq!(
+                encoded, value,
+                "{} must not change during encoding",
+                description
+            );
 
             // Test no implicit conversion to "default" value
             if value {
@@ -36157,10 +36488,18 @@ mod otlp_122_tests {
         ];
 
         for (computed, expected, description) in computed_cases {
-            assert_eq!(computed, expected, "Computed boolean {} should equal {}", description, expected);
+            assert_eq!(
+                computed, expected,
+                "Computed boolean {} should equal {}",
+                description, expected
+            );
 
             let encoded = simulate_encoding_cycle_bool(computed);
-            assert_eq!(encoded, expected, "Encoded computed boolean {} must preserve value", description);
+            assert_eq!(
+                encoded, expected,
+                "Encoded computed boolean {} must preserve value",
+                description
+            );
         }
 
         // Test edge cases that might cause surprising behavior
@@ -36168,7 +36507,10 @@ mod otlp_122_tests {
             // These should all be false and stay false
             (false, "literal false"),
             (0 == 1, "false from comparison"),
-            (!"non-empty".is_empty(), "false from negated non-empty check"),
+            (
+                !"non-empty".is_empty(),
+                "false from negated non-empty check",
+            ),
             // These should all be true and stay true
             (true, "literal true"),
             (1 == 1, "true from comparison"),
@@ -36177,7 +36519,11 @@ mod otlp_122_tests {
 
         for (value, description) in edge_cases {
             let encoded = simulate_encoding_cycle_bool(value);
-            assert_eq!(encoded, value, "Edge case {} must preserve original value", description);
+            assert_eq!(
+                encoded, value,
+                "Edge case {} must preserve original value",
+                description
+            );
         }
 
         println!("OTLP-128: No surprising defaults verified");
@@ -36192,7 +36538,7 @@ mod otlp_122_tests {
         let false_bool = false;
 
         // In Rust, these conversions are explicit and controlled
-        let true_as_u8 = true_bool as u8;   // 1
+        let true_as_u8 = true_bool as u8; // 1
         let false_as_u8 = false_bool as u8; // 0
 
         assert_eq!(true_as_u8, 1, "True as u8 should be 1");
@@ -36246,11 +36592,11 @@ mod otlp_122_tests {
     #[derive(Debug, Clone)]
     enum Otlp129AttributeValue {
         String(String),
-        BytesEmpty,                    // Empty byte array
-        BytesSmall(Vec<u8>),          // Small binary data
-        BytesLarge(Vec<u8>),          // Large binary data
-        BytesSpecial,                 // Special binary patterns (null bytes, high bytes, etc.)
-        BytesUtf8Invalid,             // Invalid UTF-8 sequences (pure binary)
+        BytesEmpty,          // Empty byte array
+        BytesSmall(Vec<u8>), // Small binary data
+        BytesLarge(Vec<u8>), // Large binary data
+        BytesSpecial,        // Special binary patterns (null bytes, high bytes, etc.)
+        BytesUtf8Invalid,    // Invalid UTF-8 sequences (pure binary)
     }
 
     impl Otlp129Scenario {
@@ -36285,51 +36631,83 @@ mod otlp_122_tests {
                     // Empty bytes MUST be encoded as bytes (not base64 string) according to OTLP-129
                     let original_bytes = Vec::<u8>::new();
                     let encoding_result = validate_bytes_encoding(&original_bytes, attr_name);
-                    assert!(encoding_result.is_binary_encoding,
-                           "Empty bytes must be encoded as binary, not as base64 string");
+                    assert!(
+                        encoding_result.is_binary_encoding,
+                        "Empty bytes must be encoded as binary, not as base64 string"
+                    );
 
-                    println!("  Found empty ByteValue attribute '{}': {} bytes - encoded as binary: {}",
-                            attr_name, original_bytes.len(), encoding_result.is_binary_encoding);
+                    println!(
+                        "  Found empty ByteValue attribute '{}': {} bytes - encoded as binary: {}",
+                        attr_name,
+                        original_bytes.len(),
+                        encoding_result.is_binary_encoding
+                    );
                 }
                 Otlp129AttributeValue::BytesSmall(bytes) => {
                     let encoding_result = validate_bytes_encoding(bytes, attr_name);
-                    assert!(encoding_result.is_binary_encoding,
-                           "Small bytes must be encoded as binary, not as base64 string");
+                    assert!(
+                        encoding_result.is_binary_encoding,
+                        "Small bytes must be encoded as binary, not as base64 string"
+                    );
 
-                    println!("  Found small ByteValue attribute '{}': {} bytes - encoded as binary: {}",
-                            attr_name, bytes.len(), encoding_result.is_binary_encoding);
+                    println!(
+                        "  Found small ByteValue attribute '{}': {} bytes - encoded as binary: {}",
+                        attr_name,
+                        bytes.len(),
+                        encoding_result.is_binary_encoding
+                    );
                 }
                 Otlp129AttributeValue::BytesLarge(bytes) => {
                     let encoding_result = validate_bytes_encoding(bytes, attr_name);
-                    assert!(encoding_result.is_binary_encoding,
-                           "Large bytes must be encoded as binary, not as base64 string");
+                    assert!(
+                        encoding_result.is_binary_encoding,
+                        "Large bytes must be encoded as binary, not as base64 string"
+                    );
 
-                    println!("  Found large ByteValue attribute '{}': {} bytes - encoded as binary: {}",
-                            attr_name, bytes.len(), encoding_result.is_binary_encoding);
+                    println!(
+                        "  Found large ByteValue attribute '{}': {} bytes - encoded as binary: {}",
+                        attr_name,
+                        bytes.len(),
+                        encoding_result.is_binary_encoding
+                    );
                 }
                 Otlp129AttributeValue::BytesSpecial => {
                     // Test special binary patterns that could be problematic if encoded as base64
                     let special_bytes = generate_special_binary_patterns();
                     let encoding_result = validate_bytes_encoding(&special_bytes, attr_name);
-                    assert!(encoding_result.is_binary_encoding,
-                           "Special binary patterns must be encoded as binary, not as base64 string");
+                    assert!(
+                        encoding_result.is_binary_encoding,
+                        "Special binary patterns must be encoded as binary, not as base64 string"
+                    );
 
-                    println!("  Found special ByteValue attribute '{}': {} bytes with special patterns - encoded as binary: {}",
-                            attr_name, special_bytes.len(), encoding_result.is_binary_encoding);
+                    println!(
+                        "  Found special ByteValue attribute '{}': {} bytes with special patterns - encoded as binary: {}",
+                        attr_name,
+                        special_bytes.len(),
+                        encoding_result.is_binary_encoding
+                    );
                 }
                 Otlp129AttributeValue::BytesUtf8Invalid => {
                     // Test invalid UTF-8 sequences that MUST be binary (can't be strings)
                     let invalid_utf8 = generate_invalid_utf8_bytes();
                     let encoding_result = validate_bytes_encoding(&invalid_utf8, attr_name);
-                    assert!(encoding_result.is_binary_encoding,
-                           "Invalid UTF-8 bytes must be encoded as binary, not as base64 string");
+                    assert!(
+                        encoding_result.is_binary_encoding,
+                        "Invalid UTF-8 bytes must be encoded as binary, not as base64 string"
+                    );
 
                     // Verify these bytes are indeed invalid UTF-8
-                    assert!(std::str::from_utf8(&invalid_utf8).is_err(),
-                           "Test bytes should be invalid UTF-8");
+                    assert!(
+                        std::str::from_utf8(&invalid_utf8).is_err(),
+                        "Test bytes should be invalid UTF-8"
+                    );
 
-                    println!("  Found invalid UTF-8 ByteValue attribute '{}': {} bytes - encoded as binary: {}",
-                            attr_name, invalid_utf8.len(), encoding_result.is_binary_encoding);
+                    println!(
+                        "  Found invalid UTF-8 ByteValue attribute '{}': {} bytes - encoded as binary: {}",
+                        attr_name,
+                        invalid_utf8.len(),
+                        encoding_result.is_binary_encoding
+                    );
                 }
                 Otlp129AttributeValue::String(value) => {
                     println!("  Found String attribute '{}': '{}'", attr_name, value);
@@ -36434,12 +36812,12 @@ mod otlp_122_tests {
     /// Generate special binary patterns that could cause encoding issues
     fn generate_special_binary_patterns() -> Vec<u8> {
         vec![
-            0x00,       // Null byte
-            0x01,       // Start of text
-            0x1B,       // Escape
-            0x7F,       // DEL
-            0x80,       // High bit set
-            0xFF,       // All bits set
+            0x00, // Null byte
+            0x01, // Start of text
+            0x1B, // Escape
+            0x7F, // DEL
+            0x80, // High bit set
+            0xFF, // All bits set
             0xDE, 0xAD, 0xBE, 0xEF, // Classic hex pattern
             0x00, 0x01, 0x02, 0x03, // Sequence
             0xFE, 0xFF, // UTF-16 BOM-like bytes
@@ -36449,10 +36827,10 @@ mod otlp_122_tests {
     /// Generate invalid UTF-8 byte sequences
     fn generate_invalid_utf8_bytes() -> Vec<u8> {
         vec![
-            0xFF, 0xFE,             // Invalid UTF-8 start bytes
-            0x80, 0x80,             // Invalid continuation bytes
-            0xC0, 0x80,             // Overlong encoding
-            0xED, 0xA0, 0x80,       // Surrogate half
+            0xFF, 0xFE, // Invalid UTF-8 start bytes
+            0x80, 0x80, // Invalid continuation bytes
+            0xC0, 0x80, // Overlong encoding
+            0xED, 0xA0, 0x80, // Surrogate half
             0xF4, 0x90, 0x80, 0x80, // Code point too large
         ]
     }
@@ -36471,13 +36849,15 @@ mod otlp_122_tests {
                 "4bf92f3577b34da6a3ce929d0e0e4736",
                 "00f067aa0ba902b7",
                 vec![
-                    ("service.name".to_string(), Otlp129AttributeValue::String("binary-service".to_string())),
+                    (
+                        "service.name".to_string(),
+                        Otlp129AttributeValue::String("binary-service".to_string()),
+                    ),
                     ("empty.blob".to_string(), Otlp129AttributeValue::BytesEmpty),
                 ],
                 true,
                 "Span with empty binary data must be encoded as bytes per OTLP-129",
             ),
-
             // Test 2: Span with small binary data - MUST be encoded as bytes
             Otlp129Scenario::new(
                 "span_with_small_binary",
@@ -36485,13 +36865,18 @@ mod otlp_122_tests {
                 "4bf92f3577b34da6a3ce929d0e0e4737",
                 "00f067aa0ba902b8",
                 vec![
-                    ("small.data".to_string(), Otlp129AttributeValue::BytesSmall(small_binary)),
-                    ("environment".to_string(), Otlp129AttributeValue::String("test".to_string())),
+                    (
+                        "small.data".to_string(),
+                        Otlp129AttributeValue::BytesSmall(small_binary),
+                    ),
+                    (
+                        "environment".to_string(),
+                        Otlp129AttributeValue::String("test".to_string()),
+                    ),
                 ],
                 true,
                 "Span with small binary data must be encoded as bytes, not base64",
             ),
-
             // Test 3: Span with large binary data - MUST be encoded as bytes
             Otlp129Scenario::new(
                 "span_with_large_binary",
@@ -36499,26 +36884,31 @@ mod otlp_122_tests {
                 "4bf92f3577b34da6a3ce929d0e0e4738",
                 "00f067aa0ba902b9",
                 vec![
-                    ("large.payload".to_string(), Otlp129AttributeValue::BytesLarge(large_binary)),
-                    ("compression".to_string(), Otlp129AttributeValue::String("none".to_string())),
+                    (
+                        "large.payload".to_string(),
+                        Otlp129AttributeValue::BytesLarge(large_binary),
+                    ),
+                    (
+                        "compression".to_string(),
+                        Otlp129AttributeValue::String("none".to_string()),
+                    ),
                 ],
                 true,
                 "Span with large binary data must be encoded as bytes efficiently",
             ),
-
             // Test 4: Span with special binary patterns - MUST be encoded as bytes
             Otlp129Scenario::new(
                 "span_with_special_binary",
                 "test-span-special-patterns",
                 "4bf92f3577b34da6a3ce929d0e0e4739",
                 "00f067aa0ba902ba",
-                vec![
-                    ("special.patterns".to_string(), Otlp129AttributeValue::BytesSpecial),
-                ],
+                vec![(
+                    "special.patterns".to_string(),
+                    Otlp129AttributeValue::BytesSpecial,
+                )],
                 true,
                 "Span with special binary patterns must be encoded as bytes",
             ),
-
             // Test 5: Span with invalid UTF-8 binary - MUST be encoded as bytes
             Otlp129Scenario::new(
                 "span_with_invalid_utf8",
@@ -36526,8 +36916,14 @@ mod otlp_122_tests {
                 "4bf92f3577b34da6a3ce929d0e0e473a",
                 "00f067aa0ba902bb",
                 vec![
-                    ("invalid.utf8".to_string(), Otlp129AttributeValue::BytesUtf8Invalid),
-                    ("format".to_string(), Otlp129AttributeValue::String("binary".to_string())),
+                    (
+                        "invalid.utf8".to_string(),
+                        Otlp129AttributeValue::BytesUtf8Invalid,
+                    ),
+                    (
+                        "format".to_string(),
+                        Otlp129AttributeValue::String("binary".to_string()),
+                    ),
                 ],
                 true,
                 "Span with invalid UTF-8 bytes must be encoded as binary, not string",
@@ -36557,11 +36953,11 @@ mod otlp_122_tests {
         // Test that binary encoding is more efficient than base64 string encoding
 
         let test_data_sizes = vec![
-            0,     // Empty
-            1,     // Single byte
-            16,    // Small
-            256,   // Medium
-            1024,  // Large
+            0,    // Empty
+            1,    // Single byte
+            16,   // Small
+            256,  // Medium
+            1024, // Large
         ];
 
         for size in test_data_sizes {
@@ -36573,7 +36969,8 @@ mod otlp_122_tests {
             let binary_encoded_size = binary_data.len(); // No overhead in true binary encoding
 
             // Base64 encoding: has significant overhead
-            let base64_encoded = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &binary_data);
+            let base64_encoded =
+                base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &binary_data);
             let base64_size = base64_encoded.len();
 
             println!("  Binary encoding: {} bytes", binary_encoded_size);
@@ -36589,9 +36986,18 @@ mod otlp_122_tests {
 
             // OTLP-129 requirement: binary data should use binary encoding (no base64)
             let encoding_result = simulate_binary_encoding_cycle(&binary_data);
-            assert!(encoding_result.is_binary_preserved, "Binary data must stay binary");
-            assert!(encoding_result.no_base64_conversion, "Must not convert to base64");
-            assert!(encoding_result.size_unchanged, "Binary encoding should not change size");
+            assert!(
+                encoding_result.is_binary_preserved,
+                "Binary data must stay binary"
+            );
+            assert!(
+                encoding_result.no_base64_conversion,
+                "Must not convert to base64"
+            );
+            assert!(
+                encoding_result.size_unchanged,
+                "Binary encoding should not change size"
+            );
         }
 
         println!("OTLP-129: Binary vs base64 efficiency verified");
@@ -36605,7 +37011,10 @@ mod otlp_122_tests {
             ("all_zeros", vec![0u8; 16]),
             ("all_ones", vec![0xFFu8; 16]),
             ("sequential", (0u8..16u8).collect()),
-            ("random_pattern", vec![0xDE, 0xAD, 0xBE, 0xEF, 0xCA, 0xFE, 0xBA, 0xBE]),
+            (
+                "random_pattern",
+                vec![0xDE, 0xAD, 0xBE, 0xEF, 0xCA, 0xFE, 0xBA, 0xBE],
+            ),
             ("mixed_ascii_binary", b"Hello\x00World\xFF\xFE".to_vec()),
         ];
 
@@ -36614,21 +37023,34 @@ mod otlp_122_tests {
 
             let encoding_result = simulate_binary_encoding_cycle(&original_data);
 
-            assert!(encoding_result.is_binary_preserved,
-                   "Pattern '{}' must preserve binary data exactly", pattern_name);
+            assert!(
+                encoding_result.is_binary_preserved,
+                "Pattern '{}' must preserve binary data exactly",
+                pattern_name
+            );
 
             // Verify byte-by-byte integrity
             // In a real implementation, this would verify the decoded bytes match exactly
-            assert_eq!(original_data.len(), original_data.len(), "Size must be preserved");
+            assert_eq!(
+                original_data.len(),
+                original_data.len(),
+                "Size must be preserved"
+            );
 
             // Test that special bytes are preserved
             for (i, &byte) in original_data.iter().enumerate() {
-                assert_eq!(byte, original_data[i],
-                          "Byte {} at position {} must be preserved in pattern '{}'",
-                          byte, i, pattern_name);
+                assert_eq!(
+                    byte, original_data[i],
+                    "Byte {} at position {} must be preserved in pattern '{}'",
+                    byte, i, pattern_name
+                );
             }
 
-            println!("  ✓ Pattern '{}': {} bytes preserved correctly", pattern_name, original_data.len());
+            println!(
+                "  ✓ Pattern '{}': {} bytes preserved correctly",
+                pattern_name,
+                original_data.len()
+            );
         }
 
         println!("OTLP-129: Binary data integrity verified");
@@ -36643,7 +37065,8 @@ mod otlp_122_tests {
                 impl super::super::Engine for GeneralPurpose {
                     fn encode(&self, input: &[u8]) -> String {
                         // Simplified base64 encoding for testing
-                        let alphabet = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+                        let alphabet =
+                            b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
                         let mut result = String::new();
 
                         for chunk in input.chunks(3) {
@@ -36680,7 +37103,6 @@ mod otlp_122_tests {
         pub trait Engine {
             fn encode(&self, input: &[u8]) -> String;
         }
-
     }
 
     mod otlp_late_conformance_types {
@@ -36782,11 +37204,11 @@ mod otlp_122_tests {
     #[derive(Debug, Clone)]
     enum Otlp130AttributeValue {
         String(String),
-        KvlistFlat(Vec<(String, String)>),           // Flat key-value list
+        KvlistFlat(Vec<(String, String)>), // Flat key-value list
         KvlistNested(Vec<(String, Otlp130NestedValue)>), // Nested key-value list
-        KvlistDeep(u32),                             // Deep nesting to specified level
-        KvlistMaxDepth,                              // Maximum allowed depth (~32)
-        KvlistEmpty,                                 // Empty key-value list
+        KvlistDeep(u32),                   // Deep nesting to specified level
+        KvlistMaxDepth,                    // Maximum allowed depth (~32)
+        KvlistEmpty,                       // Empty key-value list
     }
 
     #[derive(Debug, Clone)]
@@ -36794,7 +37216,7 @@ mod otlp_122_tests {
         String(String),
         Integer(i64),
         Boolean(bool),
-        Kvlist(Vec<(String, Otlp130NestedValue)>),   // Recursive nesting
+        Kvlist(Vec<(String, Otlp130NestedValue)>), // Recursive nesting
     }
 
     impl Otlp130Scenario {
@@ -36828,53 +37250,92 @@ mod otlp_122_tests {
         for (attr_name, attr_value) in &scenario.attributes {
             match attr_value {
                 Otlp130AttributeValue::KvlistFlat(kvpairs) => {
-                    println!("  Found flat KvlistValue attribute '{}': {} pairs", attr_name, kvpairs.len());
+                    println!(
+                        "  Found flat KvlistValue attribute '{}': {} pairs",
+                        attr_name,
+                        kvpairs.len()
+                    );
 
                     let encoding_result = validate_kvlist_encoding_flat(kvpairs, attr_name);
-                    assert!(encoding_result.is_properly_encoded,
-                           "Flat kvlist must be encoded properly");
+                    assert!(
+                        encoding_result.is_properly_encoded,
+                        "Flat kvlist must be encoded properly"
+                    );
                     assert_eq!(encoding_result.depth, 1, "Flat kvlist should have depth 1");
                 }
                 Otlp130AttributeValue::KvlistNested(nested_pairs) => {
-                    println!("  Found nested KvlistValue attribute '{}': {} top-level pairs", attr_name, nested_pairs.len());
+                    println!(
+                        "  Found nested KvlistValue attribute '{}': {} top-level pairs",
+                        attr_name,
+                        nested_pairs.len()
+                    );
 
                     let encoding_result = validate_kvlist_encoding_nested(nested_pairs, attr_name);
-                    assert!(encoding_result.is_properly_encoded,
-                           "Nested kvlist must be encoded properly");
-                    assert!(encoding_result.depth <= MAX_KVLIST_DEPTH,
-                           "Nested kvlist depth {} must not exceed maximum {}", encoding_result.depth, MAX_KVLIST_DEPTH);
+                    assert!(
+                        encoding_result.is_properly_encoded,
+                        "Nested kvlist must be encoded properly"
+                    );
+                    assert!(
+                        encoding_result.depth <= MAX_KVLIST_DEPTH,
+                        "Nested kvlist depth {} must not exceed maximum {}",
+                        encoding_result.depth,
+                        MAX_KVLIST_DEPTH
+                    );
                 }
                 Otlp130AttributeValue::KvlistDeep(target_depth) => {
                     let deep_kvlist = generate_deep_kvlist(*target_depth);
-                    println!("  Found deep KvlistValue attribute '{}': target depth {}", attr_name, target_depth);
+                    println!(
+                        "  Found deep KvlistValue attribute '{}': target depth {}",
+                        attr_name, target_depth
+                    );
 
                     let encoding_result = validate_kvlist_encoding_nested(&deep_kvlist, attr_name);
-                    assert!(encoding_result.is_properly_encoded,
-                           "Deep kvlist must be encoded properly");
-                    assert_eq!(encoding_result.depth, *target_depth,
-                              "Deep kvlist should reach target depth {}", target_depth);
+                    assert!(
+                        encoding_result.is_properly_encoded,
+                        "Deep kvlist must be encoded properly"
+                    );
+                    assert_eq!(
+                        encoding_result.depth, *target_depth,
+                        "Deep kvlist should reach target depth {}",
+                        target_depth
+                    );
 
                     if *target_depth <= MAX_KVLIST_DEPTH {
-                        assert!(encoding_result.is_within_limits,
-                               "Kvlist within depth limit should be accepted");
+                        assert!(
+                            encoding_result.is_within_limits,
+                            "Kvlist within depth limit should be accepted"
+                        );
                     }
                 }
                 Otlp130AttributeValue::KvlistMaxDepth => {
                     let max_depth_kvlist = generate_deep_kvlist(MAX_KVLIST_DEPTH);
-                    println!("  Found max-depth KvlistValue attribute '{}': depth {}", attr_name, MAX_KVLIST_DEPTH);
+                    println!(
+                        "  Found max-depth KvlistValue attribute '{}': depth {}",
+                        attr_name, MAX_KVLIST_DEPTH
+                    );
 
-                    let encoding_result = validate_kvlist_encoding_nested(&max_depth_kvlist, attr_name);
-                    assert!(encoding_result.is_properly_encoded,
-                           "Max-depth kvlist must be encoded properly");
-                    assert!(encoding_result.is_within_limits,
-                           "Max-depth kvlist should be within limits");
+                    let encoding_result =
+                        validate_kvlist_encoding_nested(&max_depth_kvlist, attr_name);
+                    assert!(
+                        encoding_result.is_properly_encoded,
+                        "Max-depth kvlist must be encoded properly"
+                    );
+                    assert!(
+                        encoding_result.is_within_limits,
+                        "Max-depth kvlist should be within limits"
+                    );
                 }
                 Otlp130AttributeValue::KvlistEmpty => {
-                    println!("  Found empty KvlistValue attribute '{}': 0 pairs", attr_name);
+                    println!(
+                        "  Found empty KvlistValue attribute '{}': 0 pairs",
+                        attr_name
+                    );
 
                     let encoding_result = validate_kvlist_encoding_flat(&vec![], attr_name);
-                    assert!(encoding_result.is_properly_encoded,
-                           "Empty kvlist must be encoded properly");
+                    assert!(
+                        encoding_result.is_properly_encoded,
+                        "Empty kvlist must be encoded properly"
+                    );
                 }
                 Otlp130AttributeValue::String(value) => {
                     println!("  Found String attribute '{}': '{}'", attr_name, value);
@@ -36883,8 +37344,8 @@ mod otlp_122_tests {
         }
 
         // Per OTLP-130: KvlistValue MUST be encoded recursively with proper depth limits
-        let all_kvlists_properly_encoded = scenario.attributes.iter().all(|(_, value)| {
-            match value {
+        let all_kvlists_properly_encoded =
+            scenario.attributes.iter().all(|(_, value)| match value {
                 Otlp130AttributeValue::KvlistFlat(kvpairs) => {
                     simulate_kvlist_encoding_cycle_flat(kvpairs).is_properly_preserved
                 }
@@ -36894,7 +37355,8 @@ mod otlp_122_tests {
                 Otlp130AttributeValue::KvlistDeep(depth) => {
                     let deep_kvlist = generate_deep_kvlist(*depth);
                     let result = simulate_kvlist_encoding_cycle_nested(&deep_kvlist);
-                    result.is_properly_preserved && (*depth <= MAX_KVLIST_DEPTH || !result.exceeds_depth_limit)
+                    result.is_properly_preserved
+                        && (*depth <= MAX_KVLIST_DEPTH || !result.exceeds_depth_limit)
                 }
                 Otlp130AttributeValue::KvlistMaxDepth => {
                     let max_kvlist = generate_deep_kvlist(MAX_KVLIST_DEPTH);
@@ -36904,8 +37366,7 @@ mod otlp_122_tests {
                     simulate_kvlist_encoding_cycle_flat(&vec![]).is_properly_preserved
                 }
                 Otlp130AttributeValue::String(_) => true,
-            }
-        });
+            });
 
         let result = all_kvlists_properly_encoded == scenario.expected_valid;
 
@@ -36927,7 +37388,10 @@ mod otlp_122_tests {
     }
 
     /// Validate encoding of flat key-value list
-    fn validate_kvlist_encoding_flat(kvpairs: &[(String, String)], attr_name: &str) -> KvlistEncodingResult {
+    fn validate_kvlist_encoding_flat(
+        kvpairs: &[(String, String)],
+        attr_name: &str,
+    ) -> KvlistEncodingResult {
         KvlistEncodingResult {
             is_properly_encoded: true, // Flat kvlists should always encode properly
             depth: 1,
@@ -36937,7 +37401,10 @@ mod otlp_122_tests {
     }
 
     /// Validate encoding of nested key-value list
-    fn validate_kvlist_encoding_nested(nested_pairs: &[(String, Otlp130NestedValue)], attr_name: &str) -> KvlistEncodingResult {
+    fn validate_kvlist_encoding_nested(
+        nested_pairs: &[(String, Otlp130NestedValue)],
+        attr_name: &str,
+    ) -> KvlistEncodingResult {
         let depth = calculate_kvlist_depth(nested_pairs);
         let total_pairs = count_total_pairs(nested_pairs);
 
@@ -36955,9 +37422,7 @@ mod otlp_122_tests {
 
         for (_, value) in pairs {
             let value_depth = match value {
-                Otlp130NestedValue::Kvlist(nested) => {
-                    1 + calculate_kvlist_depth(nested)
-                }
+                Otlp130NestedValue::Kvlist(nested) => 1 + calculate_kvlist_depth(nested),
                 _ => 1,
             };
             max_depth = max_depth.max(value_depth);
@@ -36982,14 +37447,24 @@ mod otlp_122_tests {
     /// Generate a deeply nested kvlist structure
     fn generate_deep_kvlist(target_depth: u32) -> Vec<(String, Otlp130NestedValue)> {
         if target_depth <= 1 {
-            vec![
-                ("leaf_key".to_string(), Otlp130NestedValue::String("leaf_value".to_string())),
-            ]
+            vec![(
+                "leaf_key".to_string(),
+                Otlp130NestedValue::String("leaf_value".to_string()),
+            )]
         } else {
             vec![
-                ("depth_info".to_string(), Otlp130NestedValue::String(format!("level_{}", target_depth))),
-                ("nested".to_string(), Otlp130NestedValue::Kvlist(generate_deep_kvlist(target_depth - 1))),
-                ("sibling".to_string(), Otlp130NestedValue::Integer(target_depth as i64)),
+                (
+                    "depth_info".to_string(),
+                    Otlp130NestedValue::String(format!("level_{}", target_depth)),
+                ),
+                (
+                    "nested".to_string(),
+                    Otlp130NestedValue::Kvlist(generate_deep_kvlist(target_depth - 1)),
+                ),
+                (
+                    "sibling".to_string(),
+                    Otlp130NestedValue::Integer(target_depth as i64),
+                ),
             ]
         }
     }
@@ -37002,7 +37477,9 @@ mod otlp_122_tests {
     }
 
     /// Simulate encoding/decoding cycle for flat kvlist
-    fn simulate_kvlist_encoding_cycle_flat(kvpairs: &[(String, String)]) -> KvlistEncodingCycleResult {
+    fn simulate_kvlist_encoding_cycle_flat(
+        kvpairs: &[(String, String)],
+    ) -> KvlistEncodingCycleResult {
         // Simulate the requirement: flat kvlists should preserve perfectly
         KvlistEncodingCycleResult {
             is_properly_preserved: true,
@@ -37012,7 +37489,9 @@ mod otlp_122_tests {
     }
 
     /// Simulate encoding/decoding cycle for nested kvlist
-    fn simulate_kvlist_encoding_cycle_nested(nested_pairs: &[(String, Otlp130NestedValue)]) -> KvlistEncodingCycleResult {
+    fn simulate_kvlist_encoding_cycle_nested(
+        nested_pairs: &[(String, Otlp130NestedValue)],
+    ) -> KvlistEncodingCycleResult {
         let depth = calculate_kvlist_depth(nested_pairs);
 
         // Simulate the key requirements of OTLP-130
@@ -37033,14 +37512,26 @@ mod otlp_122_tests {
         ];
 
         let nested_kvlist = vec![
-            ("metadata".to_string(), Otlp130NestedValue::Kvlist(vec![
-                ("author".to_string(), Otlp130NestedValue::String("alice".to_string())),
-                ("settings".to_string(), Otlp130NestedValue::Kvlist(vec![
-                    ("debug".to_string(), Otlp130NestedValue::Boolean(true)),
-                    ("timeout".to_string(), Otlp130NestedValue::Integer(30)),
-                ])),
-            ])),
-            ("environment".to_string(), Otlp130NestedValue::String("production".to_string())),
+            (
+                "metadata".to_string(),
+                Otlp130NestedValue::Kvlist(vec![
+                    (
+                        "author".to_string(),
+                        Otlp130NestedValue::String("alice".to_string()),
+                    ),
+                    (
+                        "settings".to_string(),
+                        Otlp130NestedValue::Kvlist(vec![
+                            ("debug".to_string(), Otlp130NestedValue::Boolean(true)),
+                            ("timeout".to_string(), Otlp130NestedValue::Integer(30)),
+                        ]),
+                    ),
+                ]),
+            ),
+            (
+                "environment".to_string(),
+                Otlp130NestedValue::String("production".to_string()),
+            ),
         ];
 
         let test_scenarios = vec![
@@ -37051,61 +37542,67 @@ mod otlp_122_tests {
                 "4bf92f3577b34da6a3ce929d0e0e4736",
                 "00f067aa0ba902b7",
                 vec![
-                    ("service.name".to_string(), Otlp130AttributeValue::String("kvlist-service".to_string())),
-                    ("config".to_string(), Otlp130AttributeValue::KvlistFlat(flat_kvlist)),
+                    (
+                        "service.name".to_string(),
+                        Otlp130AttributeValue::String("kvlist-service".to_string()),
+                    ),
+                    (
+                        "config".to_string(),
+                        Otlp130AttributeValue::KvlistFlat(flat_kvlist),
+                    ),
                 ],
                 true,
                 "Span with flat KvlistValue must be encoded properly per OTLP-130",
             ),
-
             // Test 2: Span with nested kvlist - MUST be encoded recursively
             Otlp130Scenario::new(
                 "span_with_nested_kvlist",
                 "test-span-nested-kv",
                 "4bf92f3577b34da6a3ce929d0e0e4737",
                 "00f067aa0ba902b8",
-                vec![
-                    ("nested.config".to_string(), Otlp130AttributeValue::KvlistNested(nested_kvlist)),
-                ],
+                vec![(
+                    "nested.config".to_string(),
+                    Otlp130AttributeValue::KvlistNested(nested_kvlist),
+                )],
                 true,
                 "Span with nested KvlistValue must be encoded recursively",
             ),
-
             // Test 3: Span with empty kvlist - MUST be encoded properly
             Otlp130Scenario::new(
                 "span_with_empty_kvlist",
                 "test-span-empty-kv",
                 "4bf92f3577b34da6a3ce929d0e0e4738",
                 "00f067aa0ba902b9",
-                vec![
-                    ("empty.config".to_string(), Otlp130AttributeValue::KvlistEmpty),
-                ],
+                vec![(
+                    "empty.config".to_string(),
+                    Otlp130AttributeValue::KvlistEmpty,
+                )],
                 true,
                 "Span with empty KvlistValue must be encoded properly",
             ),
-
             // Test 4: Span with moderate depth kvlist - MUST be encoded
             Otlp130Scenario::new(
                 "span_with_moderate_depth_kvlist",
                 "test-span-moderate-depth",
                 "4bf92f3577b34da6a3ce929d0e0e4739",
                 "00f067aa0ba902ba",
-                vec![
-                    ("deep.config".to_string(), Otlp130AttributeValue::KvlistDeep(10)),
-                ],
+                vec![(
+                    "deep.config".to_string(),
+                    Otlp130AttributeValue::KvlistDeep(10),
+                )],
                 true,
                 "Span with moderate depth (10) KvlistValue must be encoded",
             ),
-
             // Test 5: Span with maximum depth kvlist - MUST be encoded
             Otlp130Scenario::new(
                 "span_with_max_depth_kvlist",
                 "test-span-max-depth",
                 "4bf92f3577b34da6a3ce929d0e0e473a",
                 "00f067aa0ba902bb",
-                vec![
-                    ("max.depth.config".to_string(), Otlp130AttributeValue::KvlistMaxDepth),
-                ],
+                vec![(
+                    "max.depth.config".to_string(),
+                    Otlp130AttributeValue::KvlistMaxDepth,
+                )],
                 true,
                 "Span with maximum depth (~32) KvlistValue must be encoded",
             ),
@@ -37148,25 +37645,39 @@ mod otlp_122_tests {
             let deep_kvlist = generate_deep_kvlist(depth);
             let calculated_depth = calculate_kvlist_depth(&deep_kvlist);
 
-            assert_eq!(calculated_depth, depth, "Generated depth should match requested depth");
+            assert_eq!(
+                calculated_depth, depth,
+                "Generated depth should match requested depth"
+            );
 
             let encoding_result = simulate_kvlist_encoding_cycle_nested(&deep_kvlist);
 
             if depth <= MAX_KVLIST_DEPTH {
-                assert!(encoding_result.is_properly_preserved,
-                       "Depth {} should be properly preserved (within limit)", depth);
-                assert!(!encoding_result.exceeds_depth_limit,
-                       "Depth {} should not exceed limit", depth);
+                assert!(
+                    encoding_result.is_properly_preserved,
+                    "Depth {} should be properly preserved (within limit)",
+                    depth
+                );
+                assert!(
+                    !encoding_result.exceeds_depth_limit,
+                    "Depth {} should not exceed limit",
+                    depth
+                );
             } else {
                 // Over the limit - behavior may vary but should be handled gracefully
                 if should_succeed {
-                    assert!(encoding_result.is_properly_preserved,
-                           "Depth {} should still be preserved even if over limit", depth);
+                    assert!(
+                        encoding_result.is_properly_preserved,
+                        "Depth {} should still be preserved even if over limit",
+                        depth
+                    );
                 }
             }
 
-            println!("  ✓ Depth {} handled correctly: preserved={}, within_limit={}",
-                    depth, encoding_result.is_properly_preserved, !encoding_result.exceeds_depth_limit);
+            println!(
+                "  ✓ Depth {} handled correctly: preserved={}, within_limit={}",
+                depth, encoding_result.is_properly_preserved, !encoding_result.exceeds_depth_limit
+            );
         }
 
         println!("OTLP-130: Depth limits verified");
@@ -37178,42 +37689,75 @@ mod otlp_122_tests {
 
         // Create a complex nested structure
         let complex_kvlist = vec![
-            ("root".to_string(), Otlp130NestedValue::String("value".to_string())),
-            ("branch1".to_string(), Otlp130NestedValue::Kvlist(vec![
-                ("leaf1".to_string(), Otlp130NestedValue::Integer(42)),
-                ("subbranch".to_string(), Otlp130NestedValue::Kvlist(vec![
-                    ("deep_leaf".to_string(), Otlp130NestedValue::Boolean(true)),
-                ])),
-            ])),
-            ("branch2".to_string(), Otlp130NestedValue::Kvlist(vec![
-                ("leaf2".to_string(), Otlp130NestedValue::String("another_value".to_string())),
-            ])),
+            (
+                "root".to_string(),
+                Otlp130NestedValue::String("value".to_string()),
+            ),
+            (
+                "branch1".to_string(),
+                Otlp130NestedValue::Kvlist(vec![
+                    ("leaf1".to_string(), Otlp130NestedValue::Integer(42)),
+                    (
+                        "subbranch".to_string(),
+                        Otlp130NestedValue::Kvlist(vec![(
+                            "deep_leaf".to_string(),
+                            Otlp130NestedValue::Boolean(true),
+                        )]),
+                    ),
+                ]),
+            ),
+            (
+                "branch2".to_string(),
+                Otlp130NestedValue::Kvlist(vec![(
+                    "leaf2".to_string(),
+                    Otlp130NestedValue::String("another_value".to_string()),
+                )]),
+            ),
         ];
 
         let depth = calculate_kvlist_depth(&complex_kvlist);
         let total_pairs = count_total_pairs(&complex_kvlist);
 
-        println!("Complex structure: depth={}, total_pairs={}", depth, total_pairs);
+        println!(
+            "Complex structure: depth={}, total_pairs={}",
+            depth, total_pairs
+        );
 
         assert_eq!(depth, 3, "Complex structure should have depth 3");
         assert_eq!(total_pairs, 6, "Should count 6 total key-value pairs");
 
         let encoding_result = simulate_kvlist_encoding_cycle_nested(&complex_kvlist);
-        assert!(encoding_result.is_properly_preserved, "Complex structure should be preserved");
-        assert!(encoding_result.structure_intact, "Structure should remain intact");
+        assert!(
+            encoding_result.is_properly_preserved,
+            "Complex structure should be preserved"
+        );
+        assert!(
+            encoding_result.structure_intact,
+            "Structure should remain intact"
+        );
 
         // Test different value types in kvlist
         let mixed_types_kvlist = vec![
-            ("string_val".to_string(), Otlp130NestedValue::String("hello".to_string())),
+            (
+                "string_val".to_string(),
+                Otlp130NestedValue::String("hello".to_string()),
+            ),
             ("int_val".to_string(), Otlp130NestedValue::Integer(-123)),
             ("bool_val".to_string(), Otlp130NestedValue::Boolean(false)),
-            ("nested_val".to_string(), Otlp130NestedValue::Kvlist(vec![
-                ("inner_string".to_string(), Otlp130NestedValue::String("world".to_string())),
-            ])),
+            (
+                "nested_val".to_string(),
+                Otlp130NestedValue::Kvlist(vec![(
+                    "inner_string".to_string(),
+                    Otlp130NestedValue::String("world".to_string()),
+                )]),
+            ),
         ];
 
         let mixed_result = simulate_kvlist_encoding_cycle_nested(&mixed_types_kvlist);
-        assert!(mixed_result.is_properly_preserved, "Mixed types should be preserved");
+        assert!(
+            mixed_result.is_properly_preserved,
+            "Mixed types should be preserved"
+        );
 
         println!("OTLP-130: Recursive structure integrity verified");
     }
@@ -37223,12 +37767,13 @@ mod otlp_122_tests {
         // Test edge cases for kvlist encoding
 
         // Empty nested structure
-        let empty_nested = vec![
-            ("empty_nest".to_string(), Otlp130NestedValue::Kvlist(vec![])),
-        ];
+        let empty_nested = vec![("empty_nest".to_string(), Otlp130NestedValue::Kvlist(vec![]))];
 
         let empty_result = simulate_kvlist_encoding_cycle_nested(&empty_nested);
-        assert!(empty_result.is_properly_preserved, "Empty nested kvlist should be preserved");
+        assert!(
+            empty_result.is_properly_preserved,
+            "Empty nested kvlist should be preserved"
+        );
 
         // Single deep chain (no branching)
         let linear_deep = generate_linear_kvlist_chain(10);
@@ -37236,7 +37781,10 @@ mod otlp_122_tests {
         assert_eq!(linear_depth, 10, "Linear chain should have expected depth");
 
         let linear_result = simulate_kvlist_encoding_cycle_nested(&linear_deep);
-        assert!(linear_result.is_properly_preserved, "Linear deep chain should be preserved");
+        assert!(
+            linear_result.is_properly_preserved,
+            "Linear deep chain should be preserved"
+        );
 
         // Wide structure (many siblings, shallow)
         let wide_kvlist: Vec<(String, Otlp130NestedValue)> = (0..20)
@@ -37247,7 +37795,10 @@ mod otlp_122_tests {
         assert_eq!(wide_depth, 1, "Wide structure should have depth 1");
 
         let wide_result = simulate_kvlist_encoding_cycle_nested(&wide_kvlist);
-        assert!(wide_result.is_properly_preserved, "Wide structure should be preserved");
+        assert!(
+            wide_result.is_properly_preserved,
+            "Wide structure should be preserved"
+        );
 
         println!("OTLP-130: Edge cases verified");
     }
@@ -37255,11 +37806,15 @@ mod otlp_122_tests {
     /// Generate a linear chain of nested kvlists (no branching)
     fn generate_linear_kvlist_chain(depth: u32) -> Vec<(String, Otlp130NestedValue)> {
         if depth <= 1 {
-            vec![("end".to_string(), Otlp130NestedValue::String("terminal".to_string()))]
+            vec![(
+                "end".to_string(),
+                Otlp130NestedValue::String("terminal".to_string()),
+            )]
         } else {
-            vec![
-                ("chain_link".to_string(), Otlp130NestedValue::Kvlist(generate_linear_kvlist_chain(depth - 1))),
-            ]
+            vec![(
+                "chain_link".to_string(),
+                Otlp130NestedValue::Kvlist(generate_linear_kvlist_chain(depth - 1)),
+            )]
         }
     }
 
@@ -37289,8 +37844,8 @@ mod otlp_122_tests {
 
     #[derive(Debug, Clone, PartialEq)]
     enum Otlp131ValidationResult {
-        Accept,    // Span should be accepted (colon keys are valid)
-        Reject,    // Should not happen - for comparison testing
+        Accept, // Span should be accepted (colon keys are valid)
+        Reject, // Should not happen - for comparison testing
     }
 
     impl Otlp131Scenario {
@@ -37340,15 +37895,23 @@ mod otlp_122_tests {
             // Check for colon in key and validate it's accepted
             if attr_key.contains(':') {
                 let colon_count = attr_key.matches(':').count();
-                println!("    ✓ Key contains {} colon(s) - MUST be accepted per OTLP §6.2.5",
-                        colon_count);
+                println!(
+                    "    ✓ Key contains {} colon(s) - MUST be accepted per OTLP §6.2.5",
+                    colon_count
+                );
 
                 // Per OTLP-131: Attribute keys with colons MUST be accepted
                 let key_validation_result = validate_attribute_key_with_colon(attr_key);
-                assert!(key_validation_result.is_valid,
-                       "Attribute key '{}' with colon(s) must be valid per OTLP §6.2.5", attr_key);
-                assert!(!key_validation_result.should_be_rejected,
-                       "Attribute key '{}' with colon(s) must not be rejected", attr_key);
+                assert!(
+                    key_validation_result.is_valid,
+                    "Attribute key '{}' with colon(s) must be valid per OTLP §6.2.5",
+                    attr_key
+                );
+                assert!(
+                    !key_validation_result.should_be_rejected,
+                    "Attribute key '{}' with colon(s) must not be rejected",
+                    attr_key
+                );
             } else {
                 println!("    ℹ Key has no colons (standard key)");
             }
@@ -37370,7 +37933,10 @@ mod otlp_122_tests {
             }
         } else {
             println!("  ✗ FAIL: {}", scenario.description);
-            println!("    Expected: {:?}, Got: {:?}", scenario.expected_result, actual_result);
+            println!(
+                "    Expected: {:?}, Got: {:?}",
+                scenario.expected_result, actual_result
+            );
         }
 
         result
@@ -37391,7 +37957,7 @@ mod otlp_122_tests {
         let key_pattern = classify_colon_key_pattern(key);
 
         AttributeKeyValidationResult {
-            is_valid: true,  // Colons should always be valid per OTLP spec
+            is_valid: true,            // Colons should always be valid per OTLP spec
             should_be_rejected: false, // Should never be rejected
             colon_positions,
             key_pattern,
@@ -37425,15 +37991,26 @@ mod otlp_122_tests {
                 "4bf92f3577b34da6a3ce929d0e0e4736",
                 "00f067aa0ba902b7",
                 vec![
-                    ("service:name".to_string(), Otlp131AttributeValue::String("web-api".to_string())),
-                    ("service:version".to_string(), Otlp131AttributeValue::String("1.2.3".to_string())),
-                    ("deployment:environment".to_string(), Otlp131AttributeValue::String("production".to_string())),
-                    ("regular_key".to_string(), Otlp131AttributeValue::String("regular_value".to_string())),
+                    (
+                        "service:name".to_string(),
+                        Otlp131AttributeValue::String("web-api".to_string()),
+                    ),
+                    (
+                        "service:version".to_string(),
+                        Otlp131AttributeValue::String("1.2.3".to_string()),
+                    ),
+                    (
+                        "deployment:environment".to_string(),
+                        Otlp131AttributeValue::String("production".to_string()),
+                    ),
+                    (
+                        "regular_key".to_string(),
+                        Otlp131AttributeValue::String("regular_value".to_string()),
+                    ),
                 ],
                 Otlp131ValidationResult::Accept,
                 "Span with namespace:key pattern attributes must be accepted per OTLP-131",
             ),
-
             // Test 2: Various colon positions - all MUST be accepted
             Otlp131Scenario::new(
                 "span_with_various_colon_positions",
@@ -37441,15 +38018,26 @@ mod otlp_122_tests {
                 "4bf92f3577b34da6a3ce929d0e0e4737",
                 "00f067aa0ba902b8",
                 vec![
-                    (":starts_with_colon".to_string(), Otlp131AttributeValue::String("value1".to_string())),
-                    ("ends_with_colon:".to_string(), Otlp131AttributeValue::String("value2".to_string())),
-                    ("middle:colon".to_string(), Otlp131AttributeValue::String("value3".to_string())),
-                    ("multiple:colon:keys".to_string(), Otlp131AttributeValue::String("value4".to_string())),
+                    (
+                        ":starts_with_colon".to_string(),
+                        Otlp131AttributeValue::String("value1".to_string()),
+                    ),
+                    (
+                        "ends_with_colon:".to_string(),
+                        Otlp131AttributeValue::String("value2".to_string()),
+                    ),
+                    (
+                        "middle:colon".to_string(),
+                        Otlp131AttributeValue::String("value3".to_string()),
+                    ),
+                    (
+                        "multiple:colon:keys".to_string(),
+                        Otlp131AttributeValue::String("value4".to_string()),
+                    ),
                 ],
                 Otlp131ValidationResult::Accept,
                 "Span with colons in various positions must be accepted",
             ),
-
             // Test 3: Multiple colons in keys - MUST be accepted
             Otlp131Scenario::new(
                 "span_with_multiple_colons",
@@ -37457,15 +38045,26 @@ mod otlp_122_tests {
                 "4bf92f3577b34da6a3ce929d0e0e4738",
                 "00f067aa0ba902b9",
                 vec![
-                    ("app:module:function".to_string(), Otlp131AttributeValue::String("user_auth".to_string())),
-                    ("trace:span:event:id".to_string(), Otlp131AttributeValue::Integer(12345)),
-                    ("config:db:pool:size".to_string(), Otlp131AttributeValue::Integer(10)),
-                    ("feature:flag:enabled:strict".to_string(), Otlp131AttributeValue::Boolean(true)),
+                    (
+                        "app:module:function".to_string(),
+                        Otlp131AttributeValue::String("user_auth".to_string()),
+                    ),
+                    (
+                        "trace:span:event:id".to_string(),
+                        Otlp131AttributeValue::Integer(12345),
+                    ),
+                    (
+                        "config:db:pool:size".to_string(),
+                        Otlp131AttributeValue::Integer(10),
+                    ),
+                    (
+                        "feature:flag:enabled:strict".to_string(),
+                        Otlp131AttributeValue::Boolean(true),
+                    ),
                 ],
                 Otlp131ValidationResult::Accept,
                 "Span with multiple colons in keys must be accepted",
             ),
-
             // Test 4: Mixed key patterns - all MUST be accepted
             Otlp131Scenario::new(
                 "span_with_mixed_key_patterns",
@@ -37473,16 +38072,30 @@ mod otlp_122_tests {
                 "4bf92f3577b34da6a3ce929d0e0e4739",
                 "00f067aa0ba902ba",
                 vec![
-                    ("http:method".to_string(), Otlp131AttributeValue::String("POST".to_string())),
-                    ("http.status_code".to_string(), Otlp131AttributeValue::Integer(200)),  // dot notation
-                    ("db_query_time".to_string(), Otlp131AttributeValue::Double(0.025)),    // underscore
-                    ("user:session:timeout".to_string(), Otlp131AttributeValue::Double(3600.0)),
-                    ("CamelCaseKey".to_string(), Otlp131AttributeValue::Boolean(false)),     // no separators
+                    (
+                        "http:method".to_string(),
+                        Otlp131AttributeValue::String("POST".to_string()),
+                    ),
+                    (
+                        "http.status_code".to_string(),
+                        Otlp131AttributeValue::Integer(200),
+                    ), // dot notation
+                    (
+                        "db_query_time".to_string(),
+                        Otlp131AttributeValue::Double(0.025),
+                    ), // underscore
+                    (
+                        "user:session:timeout".to_string(),
+                        Otlp131AttributeValue::Double(3600.0),
+                    ),
+                    (
+                        "CamelCaseKey".to_string(),
+                        Otlp131AttributeValue::Boolean(false),
+                    ), // no separators
                 ],
                 Otlp131ValidationResult::Accept,
                 "Span with mixed key naming patterns including colons must be accepted",
             ),
-
             // Test 5: Common real-world colon usage patterns - all MUST be accepted
             Otlp131Scenario::new(
                 "span_with_real_world_colon_patterns",
@@ -37490,12 +38103,30 @@ mod otlp_122_tests {
                 "4bf92f3577b34da6a3ce929d0e0e473a",
                 "00f067aa0ba902bb",
                 vec![
-                    ("otel:library:name".to_string(), Otlp131AttributeValue::String("opentelemetry-rust".to_string())),
-                    ("otel:library:version".to_string(), Otlp131AttributeValue::String("0.20.0".to_string())),
-                    ("k8s:pod:name".to_string(), Otlp131AttributeValue::String("web-server-abc123".to_string())),
-                    ("k8s:namespace".to_string(), Otlp131AttributeValue::String("production".to_string())),
-                    ("aws:region".to_string(), Otlp131AttributeValue::String("us-west-2".to_string())),
-                    ("custom:metric:counter".to_string(), Otlp131AttributeValue::Integer(42)),
+                    (
+                        "otel:library:name".to_string(),
+                        Otlp131AttributeValue::String("opentelemetry-rust".to_string()),
+                    ),
+                    (
+                        "otel:library:version".to_string(),
+                        Otlp131AttributeValue::String("0.20.0".to_string()),
+                    ),
+                    (
+                        "k8s:pod:name".to_string(),
+                        Otlp131AttributeValue::String("web-server-abc123".to_string()),
+                    ),
+                    (
+                        "k8s:namespace".to_string(),
+                        Otlp131AttributeValue::String("production".to_string()),
+                    ),
+                    (
+                        "aws:region".to_string(),
+                        Otlp131AttributeValue::String("us-west-2".to_string()),
+                    ),
+                    (
+                        "custom:metric:counter".to_string(),
+                        Otlp131AttributeValue::Integer(42),
+                    ),
                 ],
                 Otlp131ValidationResult::Accept,
                 "Span with real-world colon usage patterns must be accepted",
@@ -37528,11 +38159,23 @@ mod otlp_122_tests {
             ("service:name", true, "Standard namespace:key pattern"),
             (":leading_colon", true, "Leading colon should be valid"),
             ("trailing_colon:", true, "Trailing colon should be valid"),
-            ("multiple:colon:key", true, "Multiple colons should be valid"),
+            (
+                "multiple:colon:key",
+                true,
+                "Multiple colons should be valid",
+            ),
             ("no_colon_key", true, "No colon should also be valid"),
             ("::double_colon", true, "Double colon should be valid"),
-            ("key:with:many:colons:here", true, "Many colons should be valid"),
-            ("", true, "Empty key should be handled (though may have other validation)"),
+            (
+                "key:with:many:colons:here",
+                true,
+                "Many colons should be valid",
+            ),
+            (
+                "",
+                true,
+                "Empty key should be handled (though may have other validation)",
+            ),
             (":", true, "Single colon should be valid"),
         ];
 
@@ -37541,17 +38184,26 @@ mod otlp_122_tests {
 
             let validation_result = validate_attribute_key_with_colon(key);
 
-            assert_eq!(validation_result.is_valid, should_be_valid,
-                      "Key '{}' validity mismatch: expected {}, got {}",
-                      key, should_be_valid, validation_result.is_valid);
+            assert_eq!(
+                validation_result.is_valid, should_be_valid,
+                "Key '{}' validity mismatch: expected {}, got {}",
+                key, should_be_valid, validation_result.is_valid
+            );
 
-            assert!(!validation_result.should_be_rejected,
-                   "Key '{}' should not be rejected per OTLP §6.2.5", key);
+            assert!(
+                !validation_result.should_be_rejected,
+                "Key '{}' should not be rejected per OTLP §6.2.5",
+                key
+            );
 
             // Test colon position detection
             let expected_colon_count = key.matches(':').count();
-            assert_eq!(validation_result.colon_positions.len(), expected_colon_count,
-                      "Key '{}' colon count mismatch", key);
+            assert_eq!(
+                validation_result.colon_positions.len(),
+                expected_colon_count,
+                "Key '{}' colon count mismatch",
+                key
+            );
 
             // Test pattern classification
             let pattern = classify_colon_key_pattern(key);
@@ -37561,15 +38213,31 @@ mod otlp_122_tests {
             if key.is_empty() {
                 // Empty key is a special case
             } else if key.starts_with(':') {
-                assert_eq!(pattern, "starts_with_colon", "Pattern mismatch for key '{}'", key);
+                assert_eq!(
+                    pattern, "starts_with_colon",
+                    "Pattern mismatch for key '{}'",
+                    key
+                );
             } else if key.ends_with(':') {
-                assert_eq!(pattern, "ends_with_colon", "Pattern mismatch for key '{}'", key);
+                assert_eq!(
+                    pattern, "ends_with_colon",
+                    "Pattern mismatch for key '{}'",
+                    key
+                );
             } else if !key.contains(':') {
                 assert_eq!(pattern, "no_colons", "Pattern mismatch for key '{}'", key);
             } else if key.matches(':').count() == 1 {
-                assert_eq!(pattern, "single_colon", "Pattern mismatch for key '{}'", key);
+                assert_eq!(
+                    pattern, "single_colon",
+                    "Pattern mismatch for key '{}'",
+                    key
+                );
             } else if key.matches(':').count() > 1 {
-                assert_eq!(pattern, "multiple_colons", "Pattern mismatch for key '{}'", key);
+                assert_eq!(
+                    pattern, "multiple_colons",
+                    "Pattern mismatch for key '{}'",
+                    key
+                );
             }
 
             println!("  ✓ Key '{}' validated correctly", key);
@@ -37586,20 +38254,20 @@ mod otlp_122_tests {
         // This is important for namespace patterns and hierarchical keys
 
         let spec_compliant_keys = vec![
-            "service:name",                    // Basic namespace pattern
-            "service:version",                 // Another namespace pattern
-            "otel:library:name",              // OpenTelemetry standard keys
-            "otel:library:version",           // OpenTelemetry standard keys
-            "k8s:pod:name",                   // Kubernetes resource keys
-            "k8s:container:name",             // Kubernetes resource keys
-            "aws:region",                     // Cloud provider keys
-            "gcp:zone",                       // Cloud provider keys
-            "custom:metric:name",             // Custom metric keys
-            "trace:span:id",                  // Tracing hierarchy
-            "log:level",                      // Logging keys
-            "http:method",                    // Protocol keys
-            "db:connection:pool",             // Database keys
-            "cache:redis:timeout",            // Cache configuration keys
+            "service:name",         // Basic namespace pattern
+            "service:version",      // Another namespace pattern
+            "otel:library:name",    // OpenTelemetry standard keys
+            "otel:library:version", // OpenTelemetry standard keys
+            "k8s:pod:name",         // Kubernetes resource keys
+            "k8s:container:name",   // Kubernetes resource keys
+            "aws:region",           // Cloud provider keys
+            "gcp:zone",             // Cloud provider keys
+            "custom:metric:name",   // Custom metric keys
+            "trace:span:id",        // Tracing hierarchy
+            "log:level",            // Logging keys
+            "http:method",          // Protocol keys
+            "db:connection:pool",   // Database keys
+            "cache:redis:timeout",  // Cache configuration keys
         ];
 
         for key in spec_compliant_keys {
@@ -37607,10 +38275,16 @@ mod otlp_122_tests {
 
             // Per specification, these keys MUST be accepted
             let validation_result = validate_attribute_key_with_colon(key);
-            assert!(validation_result.is_valid,
-                   "Key '{}' must be valid per OTLP §6.2.5", key);
-            assert!(!validation_result.should_be_rejected,
-                   "Key '{}' must not be rejected per OTLP §6.2.5", key);
+            assert!(
+                validation_result.is_valid,
+                "Key '{}' must be valid per OTLP §6.2.5",
+                key
+            );
+            assert!(
+                !validation_result.should_be_rejected,
+                "Key '{}' must not be rejected per OTLP §6.2.5",
+                key
+            );
 
             // Test in a span context
             let span_with_colon_key = Otlp131Scenario::new(
@@ -37618,15 +38292,19 @@ mod otlp_122_tests {
                 "spec-compliance-span",
                 "4bf92f3577b34da6a3ce929d0e0e4736",
                 "00f067aa0ba902b7",
-                vec![
-                    (key.to_string(), Otlp131AttributeValue::String("test_value".to_string())),
-                ],
+                vec![(
+                    key.to_string(),
+                    Otlp131AttributeValue::String("test_value".to_string()),
+                )],
                 Otlp131ValidationResult::Accept,
                 &format!("OTLP §6.2.5 compliance for key '{}'", key),
             );
 
-            assert!(validate_otlp_131_scenario(&span_with_colon_key),
-                   "Span with key '{}' must pass validation per OTLP §6.2.5", key);
+            assert!(
+                validate_otlp_131_scenario(&span_with_colon_key),
+                "Span with key '{}' must pass validation per OTLP §6.2.5",
+                key
+            );
 
             println!("  ✓ Key '{}' is OTLP §6.2.5 compliant", key);
         }
@@ -37642,23 +38320,21 @@ mod otlp_122_tests {
             // Consecutive colons
             ("key::double_colon", "Consecutive colons"),
             (":::triple_colon", "Triple consecutive colons"),
-
             // Mixed with other special characters
             ("key:name.sub_field", "Colon with dot and underscore"),
             ("key:name-with-dashes", "Colon with dashes"),
             ("key:name_with_underscores", "Colon with underscores"),
-
             // Unicode characters with colons
             ("测试:key", "Unicode characters with colon"),
             ("key:测试", "Colon with unicode characters"),
-
             // Numbers with colons
             ("metric:123", "Colon with numbers"),
             ("123:metric", "Numbers with colon"),
-
             // Very long keys with colons
-            ("very:long:key:with:many:segments:that:tests:the:maximum:length:handling", "Long key with many colons"),
-
+            (
+                "very:long:key:with:many:segments:that:tests:the:maximum:length:handling",
+                "Long key with many colons",
+            ),
             // Special character combinations
             ("key:@#$%", "Colon with special characters"),
         ];
@@ -37669,14 +38345,22 @@ mod otlp_122_tests {
             let validation_result = validate_attribute_key_with_colon(key);
 
             // Per OTLP §6.2.5, colons are permitted, so these should all be valid
-            assert!(validation_result.is_valid,
-                   "Edge case key '{}' should be valid", key);
-            assert!(!validation_result.should_be_rejected,
-                   "Edge case key '{}' should not be rejected", key);
+            assert!(
+                validation_result.is_valid,
+                "Edge case key '{}' should be valid",
+                key
+            );
+            assert!(
+                !validation_result.should_be_rejected,
+                "Edge case key '{}' should not be rejected",
+                key
+            );
 
             let pattern = classify_colon_key_pattern(key);
-            println!("  Pattern: {}, Colons at positions: {:?}",
-                    pattern, validation_result.colon_positions);
+            println!(
+                "  Pattern: {}, Colons at positions: {:?}",
+                pattern, validation_result.colon_positions
+            );
 
             println!("  ✓ Edge case '{}' handled correctly", key);
         }
@@ -37742,25 +38426,46 @@ mod otlp_122_tests {
 
                     if value.contains(' ') {
                         let space_validation_result = validate_space_preservation(value, attr_key);
-                        assert!(space_validation_result.spaces_preserved,
-                               "Spaces in attribute '{}' value '{}' must be preserved verbatim", attr_key, value);
-                        assert!(!space_validation_result.is_url_encoded,
-                               "Attribute '{}' value '{}' must not be URL-encoded", attr_key, value);
-                        assert!(!space_validation_result.is_trimmed,
-                               "Attribute '{}' value '{}' must not be trimmed", attr_key, value);
+                        assert!(
+                            space_validation_result.spaces_preserved,
+                            "Spaces in attribute '{}' value '{}' must be preserved verbatim",
+                            attr_key, value
+                        );
+                        assert!(
+                            !space_validation_result.is_url_encoded,
+                            "Attribute '{}' value '{}' must not be URL-encoded",
+                            attr_key, value
+                        );
+                        assert!(
+                            !space_validation_result.is_trimmed,
+                            "Attribute '{}' value '{}' must not be trimmed",
+                            attr_key, value
+                        );
                     }
                 }
                 Otlp132AttributeValue::StringWithSpaces(value) => {
-                    println!("  Found attribute '{}': StringWithSpaces('{}')", attr_key, value);
+                    println!(
+                        "  Found attribute '{}': StringWithSpaces('{}')",
+                        attr_key, value
+                    );
 
                     // Critical test: spaces MUST be preserved exactly
                     let space_validation_result = validate_space_preservation(value, attr_key);
-                    assert!(space_validation_result.spaces_preserved,
-                           "Spaces in attribute '{}' value '{}' must be preserved verbatim per OTLP-132", attr_key, value);
-                    assert!(!space_validation_result.is_url_encoded,
-                           "Attribute '{}' value '{}' must not be URL-encoded per OTLP-132", attr_key, value);
-                    assert!(!space_validation_result.is_trimmed,
-                           "Attribute '{}' value '{}' must not be trimmed per OTLP-132", attr_key, value);
+                    assert!(
+                        space_validation_result.spaces_preserved,
+                        "Spaces in attribute '{}' value '{}' must be preserved verbatim per OTLP-132",
+                        attr_key, value
+                    );
+                    assert!(
+                        !space_validation_result.is_url_encoded,
+                        "Attribute '{}' value '{}' must not be URL-encoded per OTLP-132",
+                        attr_key, value
+                    );
+                    assert!(
+                        !space_validation_result.is_trimmed,
+                        "Attribute '{}' value '{}' must not be trimmed per OTLP-132",
+                        attr_key, value
+                    );
 
                     // Additional checks for space patterns
                     if value.starts_with(' ') || value.ends_with(' ') {
@@ -37831,7 +38536,11 @@ mod otlp_122_tests {
         // In a real implementation, this would check the encoded/decoded value
         // For this test, assume proper preservation
         let spaces_preserved = !is_url_encoded && !is_trimmed;
-        let preserved_space_count = if spaces_preserved { original_space_count } else { 0 };
+        let preserved_space_count = if spaces_preserved {
+            original_space_count
+        } else {
+            0
+        };
 
         SpacePreservationResult {
             spaces_preserved,
@@ -37863,7 +38572,8 @@ mod otlp_122_tests {
         let is_preserved_verbatim = encoded_value == original_value;
         let no_url_encoding = !encoded_value.contains("%20") && !encoded_value.contains("+");
         let no_trimming = encoded_value == original_value; // No leading/trailing space removal
-        let spaces_intact = encoded_value.matches(' ').count() == original_value.matches(' ').count();
+        let spaces_intact =
+            encoded_value.matches(' ').count() == original_value.matches(' ').count();
 
         SpacePreservationCycleResult {
             is_preserved_verbatim,
@@ -37883,14 +38593,22 @@ mod otlp_122_tests {
                 "4bf92f3577b34da6a3ce929d0e0e4736",
                 "00f067aa0ba902b7",
                 vec![
-                    ("service.name".to_string(), Otlp132AttributeValue::StringWithSpaces("My Cool Service".to_string())),
-                    ("service.version".to_string(), Otlp132AttributeValue::String("1.0.0".to_string())),
-                    ("deployment.environment".to_string(), Otlp132AttributeValue::String("production".to_string())),
+                    (
+                        "service.name".to_string(),
+                        Otlp132AttributeValue::StringWithSpaces("My Cool Service".to_string()),
+                    ),
+                    (
+                        "service.version".to_string(),
+                        Otlp132AttributeValue::String("1.0.0".to_string()),
+                    ),
+                    (
+                        "deployment.environment".to_string(),
+                        Otlp132AttributeValue::String("production".to_string()),
+                    ),
                 ],
                 true,
                 "Span with service.name containing spaces must preserve them verbatim per OTLP-132",
             ),
-
             // Test 2: Various space patterns - all MUST be preserved exactly
             Otlp132Scenario::new(
                 "span_with_various_space_patterns",
@@ -37898,15 +38616,32 @@ mod otlp_122_tests {
                 "4bf92f3577b34da6a3ce929d0e0e4737",
                 "00f067aa0ba902b8",
                 vec![
-                    ("user.display.name".to_string(), Otlp132AttributeValue::StringWithSpaces("John Doe".to_string())),
-                    ("application.title".to_string(), Otlp132AttributeValue::StringWithSpaces("Web Application Server".to_string())),
-                    ("error.message".to_string(), Otlp132AttributeValue::StringWithSpaces("Connection failed to remote server".to_string())),
-                    ("custom.description".to_string(), Otlp132AttributeValue::StringWithSpaces("A very long description with multiple spaces".to_string())),
+                    (
+                        "user.display.name".to_string(),
+                        Otlp132AttributeValue::StringWithSpaces("John Doe".to_string()),
+                    ),
+                    (
+                        "application.title".to_string(),
+                        Otlp132AttributeValue::StringWithSpaces(
+                            "Web Application Server".to_string(),
+                        ),
+                    ),
+                    (
+                        "error.message".to_string(),
+                        Otlp132AttributeValue::StringWithSpaces(
+                            "Connection failed to remote server".to_string(),
+                        ),
+                    ),
+                    (
+                        "custom.description".to_string(),
+                        Otlp132AttributeValue::StringWithSpaces(
+                            "A very long description with multiple spaces".to_string(),
+                        ),
+                    ),
                 ],
                 true,
                 "Span with various space patterns in values must preserve all spaces exactly",
             ),
-
             // Test 3: Leading/trailing spaces - MUST NOT be trimmed
             Otlp132Scenario::new(
                 "span_with_leading_trailing_spaces",
@@ -37914,15 +38649,26 @@ mod otlp_122_tests {
                 "4bf92f3577b34da6a3ce929d0e0e4738",
                 "00f067aa0ba902b9",
                 vec![
-                    ("padded.value".to_string(), Otlp132AttributeValue::StringWithSpaces("  leading spaces".to_string())),
-                    ("trailing.value".to_string(), Otlp132AttributeValue::StringWithSpaces("trailing spaces  ".to_string())),
-                    ("both.value".to_string(), Otlp132AttributeValue::StringWithSpaces("  both sides  ".to_string())),
-                    ("internal.value".to_string(), Otlp132AttributeValue::StringWithSpaces("internal  spaces".to_string())),
+                    (
+                        "padded.value".to_string(),
+                        Otlp132AttributeValue::StringWithSpaces("  leading spaces".to_string()),
+                    ),
+                    (
+                        "trailing.value".to_string(),
+                        Otlp132AttributeValue::StringWithSpaces("trailing spaces  ".to_string()),
+                    ),
+                    (
+                        "both.value".to_string(),
+                        Otlp132AttributeValue::StringWithSpaces("  both sides  ".to_string()),
+                    ),
+                    (
+                        "internal.value".to_string(),
+                        Otlp132AttributeValue::StringWithSpaces("internal  spaces".to_string()),
+                    ),
                 ],
                 true,
                 "Span with leading/trailing spaces must not be trimmed",
             ),
-
             // Test 4: Multiple consecutive spaces - MUST be preserved
             Otlp132Scenario::new(
                 "span_with_multiple_spaces",
@@ -37930,15 +38676,30 @@ mod otlp_122_tests {
                 "4bf92f3577b34da6a3ce929d0e0e4739",
                 "00f067aa0ba902ba",
                 vec![
-                    ("formatted.text".to_string(), Otlp132AttributeValue::StringWithSpaces("word1    word2".to_string())),
-                    ("table.data".to_string(), Otlp132AttributeValue::StringWithSpaces("col1      col2      col3".to_string())),
-                    ("special.spacing".to_string(), Otlp132AttributeValue::StringWithSpaces("a        b        c".to_string())),
-                    ("mixed.spacing".to_string(), Otlp132AttributeValue::StringWithSpaces("normal space   wide space".to_string())),
+                    (
+                        "formatted.text".to_string(),
+                        Otlp132AttributeValue::StringWithSpaces("word1    word2".to_string()),
+                    ),
+                    (
+                        "table.data".to_string(),
+                        Otlp132AttributeValue::StringWithSpaces(
+                            "col1      col2      col3".to_string(),
+                        ),
+                    ),
+                    (
+                        "special.spacing".to_string(),
+                        Otlp132AttributeValue::StringWithSpaces("a        b        c".to_string()),
+                    ),
+                    (
+                        "mixed.spacing".to_string(),
+                        Otlp132AttributeValue::StringWithSpaces(
+                            "normal space   wide space".to_string(),
+                        ),
+                    ),
                 ],
                 true,
                 "Span with multiple consecutive spaces must preserve exact spacing",
             ),
-
             // Test 5: Real-world service names with spaces - MUST be preserved
             Otlp132Scenario::new(
                 "span_with_real_world_service_names",
@@ -37946,11 +38707,32 @@ mod otlp_122_tests {
                 "4bf92f3577b34da6a3ce929d0e0e473a",
                 "00f067aa0ba902bb",
                 vec![
-                    ("service.name".to_string(), Otlp132AttributeValue::StringWithSpaces("User Authentication Service".to_string())),
-                    ("service.name".to_string(), Otlp132AttributeValue::StringWithSpaces("Payment Processing API".to_string())),
-                    ("service.name".to_string(), Otlp132AttributeValue::StringWithSpaces("Data Analytics Engine".to_string())),
-                    ("component.name".to_string(), Otlp132AttributeValue::StringWithSpaces("Redis Cache Manager".to_string())),
-                    ("module.name".to_string(), Otlp132AttributeValue::StringWithSpaces("HTTP Request Handler".to_string())),
+                    (
+                        "service.name".to_string(),
+                        Otlp132AttributeValue::StringWithSpaces(
+                            "User Authentication Service".to_string(),
+                        ),
+                    ),
+                    (
+                        "service.name".to_string(),
+                        Otlp132AttributeValue::StringWithSpaces(
+                            "Payment Processing API".to_string(),
+                        ),
+                    ),
+                    (
+                        "service.name".to_string(),
+                        Otlp132AttributeValue::StringWithSpaces(
+                            "Data Analytics Engine".to_string(),
+                        ),
+                    ),
+                    (
+                        "component.name".to_string(),
+                        Otlp132AttributeValue::StringWithSpaces("Redis Cache Manager".to_string()),
+                    ),
+                    (
+                        "module.name".to_string(),
+                        Otlp132AttributeValue::StringWithSpaces("HTTP Request Handler".to_string()),
+                    ),
                 ],
                 true,
                 "Real-world service names with spaces must be preserved exactly",
@@ -37995,26 +38777,47 @@ mod otlp_122_tests {
         ];
 
         for (original_value, description) in test_values {
-            println!("Testing space preservation: {} - '{}'", description, original_value);
+            println!(
+                "Testing space preservation: {} - '{}'",
+                description, original_value
+            );
 
             let preservation_result = simulate_space_preservation_cycle(original_value);
 
-            assert!(preservation_result.is_preserved_verbatim,
-                   "Value '{}' must be preserved verbatim", original_value);
-            assert!(preservation_result.no_url_encoding,
-                   "Value '{}' must not be URL encoded", original_value);
-            assert!(preservation_result.no_trimming,
-                   "Value '{}' must not be trimmed", original_value);
-            assert!(preservation_result.spaces_intact,
-                   "Spaces in value '{}' must remain intact", original_value);
+            assert!(
+                preservation_result.is_preserved_verbatim,
+                "Value '{}' must be preserved verbatim",
+                original_value
+            );
+            assert!(
+                preservation_result.no_url_encoding,
+                "Value '{}' must not be URL encoded",
+                original_value
+            );
+            assert!(
+                preservation_result.no_trimming,
+                "Value '{}' must not be trimmed",
+                original_value
+            );
+            assert!(
+                preservation_result.spaces_intact,
+                "Spaces in value '{}' must remain intact",
+                original_value
+            );
 
             // Test specific space characteristics
             let original_space_count = original_value.matches(' ').count();
             println!("  Original space count: {}", original_space_count);
 
             // Verify no URL encoding occurred
-            assert!(!original_value.contains("%20"), "Test value should not contain URL encoding");
-            assert!(!original_value.contains("+"), "Test value should not contain plus encoding");
+            assert!(
+                !original_value.contains("%20"),
+                "Test value should not contain URL encoding"
+            );
+            assert!(
+                !original_value.contains("+"),
+                "Test value should not contain plus encoding"
+            );
 
             println!("  ✓ Value '{}' space preservation verified", original_value);
         }
@@ -38027,10 +38830,26 @@ mod otlp_122_tests {
         // Test that spaces are NOT URL-encoded
 
         let test_cases = vec![
-            ("My Service", "My%20Service", "Basic space should not become %20"),
-            ("User  Service", "User%20%20Service", "Multiple spaces should not become multiple %20"),
-            ("A B C", "A%20B%20C", "Multiple single spaces should not be encoded"),
-            ("Service Name", "Service+Name", "Spaces should not become plus signs"),
+            (
+                "My Service",
+                "My%20Service",
+                "Basic space should not become %20",
+            ),
+            (
+                "User  Service",
+                "User%20%20Service",
+                "Multiple spaces should not become multiple %20",
+            ),
+            (
+                "A B C",
+                "A%20B%20C",
+                "Multiple single spaces should not be encoded",
+            ),
+            (
+                "Service Name",
+                "Service+Name",
+                "Spaces should not become plus signs",
+            ),
         ];
 
         for (original, encoded_version, description) in test_cases {
@@ -38039,15 +38858,27 @@ mod otlp_122_tests {
             let preservation_result = simulate_space_preservation_cycle(original);
 
             // The result should be the original, NOT the encoded version
-            assert!(preservation_result.is_preserved_verbatim,
-                   "Original '{}' must be preserved, not encoded as '{}'", original, encoded_version);
-            assert!(preservation_result.no_url_encoding,
-                   "Value '{}' must not be URL encoded", original);
+            assert!(
+                preservation_result.is_preserved_verbatim,
+                "Original '{}' must be preserved, not encoded as '{}'",
+                original, encoded_version
+            );
+            assert!(
+                preservation_result.no_url_encoding,
+                "Value '{}' must not be URL encoded",
+                original
+            );
 
             // Specifically test that it doesn't become the encoded version
-            assert_ne!(encoded_version, original, "Test setup check: encoded should differ from original");
+            assert_ne!(
+                encoded_version, original,
+                "Test setup check: encoded should differ from original"
+            );
 
-            println!("  ✓ '{}' correctly preserved without URL encoding", original);
+            println!(
+                "  ✓ '{}' correctly preserved without URL encoding",
+                original
+            );
         }
 
         println!("OTLP-132: URL encoding prevention verified");
@@ -38058,11 +38889,31 @@ mod otlp_122_tests {
         // Test that leading/trailing spaces are NOT trimmed
 
         let test_cases = vec![
-            ("  leading", "leading", "Leading spaces should not be trimmed"),
-            ("trailing  ", "trailing", "Trailing spaces should not be trimmed"),
-            ("  both  ", "both", "Both leading and trailing should not be trimmed"),
-            (" single ", "single", "Single leading/trailing should not be trimmed"),
-            ("   multiple   ", "multiple", "Multiple leading/trailing should not be trimmed"),
+            (
+                "  leading",
+                "leading",
+                "Leading spaces should not be trimmed",
+            ),
+            (
+                "trailing  ",
+                "trailing",
+                "Trailing spaces should not be trimmed",
+            ),
+            (
+                "  both  ",
+                "both",
+                "Both leading and trailing should not be trimmed",
+            ),
+            (
+                " single ",
+                "single",
+                "Single leading/trailing should not be trimmed",
+            ),
+            (
+                "   multiple   ",
+                "multiple",
+                "Multiple leading/trailing should not be trimmed",
+            ),
         ];
 
         for (original, trimmed_version, description) in test_cases {
@@ -38071,18 +38922,30 @@ mod otlp_122_tests {
             let preservation_result = simulate_space_preservation_cycle(original);
 
             // The result should be the original, NOT the trimmed version
-            assert!(preservation_result.is_preserved_verbatim,
-                   "Original '{}' must be preserved, not trimmed to '{}'", original, trimmed_version);
-            assert!(preservation_result.no_trimming,
-                   "Value '{}' must not be trimmed", original);
+            assert!(
+                preservation_result.is_preserved_verbatim,
+                "Original '{}' must be preserved, not trimmed to '{}'",
+                original, trimmed_version
+            );
+            assert!(
+                preservation_result.no_trimming,
+                "Value '{}' must not be trimmed",
+                original
+            );
 
             // Specifically test that it doesn't become the trimmed version
-            assert_ne!(trimmed_version, original, "Test setup check: trimmed should differ from original");
+            assert_ne!(
+                trimmed_version, original,
+                "Test setup check: trimmed should differ from original"
+            );
 
             // Test space count preservation
             let original_spaces = original.matches(' ').count();
-            assert!(preservation_result.spaces_intact,
-                   "All {} spaces in '{}' must be preserved", original_spaces, original);
+            assert!(
+                preservation_result.spaces_intact,
+                "All {} spaces in '{}' must be preserved",
+                original_spaces, original
+            );
 
             println!("  ✓ '{}' correctly preserved without trimming", original);
         }
@@ -38112,24 +38975,37 @@ mod otlp_122_tests {
 
             // Create a span scenario specifically for service.name
             let scenario = Otlp132Scenario::new(
-                &format!("service_name_{}", service_name.replace(' ', "_").to_lowercase()),
+                &format!(
+                    "service_name_{}",
+                    service_name.replace(' ', "_").to_lowercase()
+                ),
                 "service-name-test",
                 "4bf92f3577b34da6a3ce929d0e0e4736",
                 "00f067aa0ba902b7",
-                vec![
-                    ("service.name".to_string(), Otlp132AttributeValue::StringWithSpaces(service_name.to_string())),
-                ],
+                vec![(
+                    "service.name".to_string(),
+                    Otlp132AttributeValue::StringWithSpaces(service_name.to_string()),
+                )],
                 true,
-                &format!("Service name '{}' must preserve spaces exactly", service_name),
+                &format!(
+                    "Service name '{}' must preserve spaces exactly",
+                    service_name
+                ),
             );
 
-            assert!(validate_otlp_132_scenario(&scenario),
-                   "Service name '{}' scenario must pass validation", service_name);
+            assert!(
+                validate_otlp_132_scenario(&scenario),
+                "Service name '{}' scenario must pass validation",
+                service_name
+            );
 
             // Verify space preservation specifically
             let preservation_result = simulate_space_preservation_cycle(service_name);
-            assert!(preservation_result.is_preserved_verbatim,
-                   "Service name '{}' must be preserved verbatim", service_name);
+            assert!(
+                preservation_result.is_preserved_verbatim,
+                "Service name '{}' must be preserved verbatim",
+                service_name
+            );
 
             println!("  ✓ Service name '{}' correctly preserved", service_name);
         }
@@ -38156,8 +39032,8 @@ mod otlp_122_tests {
     #[derive(Debug, Clone)]
     enum Otlp133AttributeValue {
         String(String),
-        StringWithEmoji(String),     // String containing emoji/4-byte UTF-8
-        StringWithUnicode(String),   // String with various Unicode characters
+        StringWithEmoji(String),   // String containing emoji/4-byte UTF-8
+        StringWithUnicode(String), // String with various Unicode characters
         Integer(i64),
         Boolean(bool),
         Double(f64),
@@ -38196,42 +39072,75 @@ mod otlp_122_tests {
 
                     if contains_multibyte_utf8(value) {
                         let utf8_validation_result = validate_utf8_encoding(value, attr_key);
-                        assert!(utf8_validation_result.is_valid_utf8,
-                               "Multi-byte UTF-8 in attribute '{}' value '{}' must be valid UTF-8", attr_key, value);
-                        assert!(utf8_validation_result.properly_encoded,
-                               "Multi-byte UTF-8 in attribute '{}' value '{}' must be properly encoded", attr_key, value);
+                        assert!(
+                            utf8_validation_result.is_valid_utf8,
+                            "Multi-byte UTF-8 in attribute '{}' value '{}' must be valid UTF-8",
+                            attr_key, value
+                        );
+                        assert!(
+                            utf8_validation_result.properly_encoded,
+                            "Multi-byte UTF-8 in attribute '{}' value '{}' must be properly encoded",
+                            attr_key, value
+                        );
                     }
                 }
                 Otlp133AttributeValue::StringWithEmoji(value) => {
-                    println!("  Found attribute '{}': StringWithEmoji('{}')", attr_key, value);
+                    println!(
+                        "  Found attribute '{}': StringWithEmoji('{}')",
+                        attr_key, value
+                    );
 
                     // Critical test: emoji MUST be encoded correctly as UTF-8 bytes
                     let utf8_validation_result = validate_utf8_encoding(value, attr_key);
-                    assert!(utf8_validation_result.is_valid_utf8,
-                           "Emoji in attribute '{}' value '{}' must be valid UTF-8 per OTLP-133", attr_key, value);
-                    assert!(utf8_validation_result.properly_encoded,
-                           "Emoji in attribute '{}' value '{}' must be properly encoded per protobuf spec", attr_key, value);
-                    assert!(!utf8_validation_result.has_replacement_chars,
-                           "Emoji in attribute '{}' value '{}' must not have replacement characters", attr_key, value);
+                    assert!(
+                        utf8_validation_result.is_valid_utf8,
+                        "Emoji in attribute '{}' value '{}' must be valid UTF-8 per OTLP-133",
+                        attr_key, value
+                    );
+                    assert!(
+                        utf8_validation_result.properly_encoded,
+                        "Emoji in attribute '{}' value '{}' must be properly encoded per protobuf spec",
+                        attr_key, value
+                    );
+                    assert!(
+                        !utf8_validation_result.has_replacement_chars,
+                        "Emoji in attribute '{}' value '{}' must not have replacement characters",
+                        attr_key, value
+                    );
 
                     // Check for 4-byte UTF-8 sequences (emoji are typically 4-byte)
                     if contains_4_byte_utf8(value) {
-                        println!("    ✓ 4-byte UTF-8 sequences detected - MUST be encoded correctly");
+                        println!(
+                            "    ✓ 4-byte UTF-8 sequences detected - MUST be encoded correctly"
+                        );
                     }
                 }
                 Otlp133AttributeValue::StringWithUnicode(value) => {
-                    println!("  Found attribute '{}': StringWithUnicode('{}')", attr_key, value);
+                    println!(
+                        "  Found attribute '{}': StringWithUnicode('{}')",
+                        attr_key, value
+                    );
 
                     let utf8_validation_result = validate_utf8_encoding(value, attr_key);
-                    assert!(utf8_validation_result.is_valid_utf8,
-                           "Unicode in attribute '{}' value '{}' must be valid UTF-8", attr_key, value);
-                    assert!(utf8_validation_result.properly_encoded,
-                           "Unicode in attribute '{}' value '{}' must be properly encoded", attr_key, value);
+                    assert!(
+                        utf8_validation_result.is_valid_utf8,
+                        "Unicode in attribute '{}' value '{}' must be valid UTF-8",
+                        attr_key, value
+                    );
+                    assert!(
+                        utf8_validation_result.properly_encoded,
+                        "Unicode in attribute '{}' value '{}' must be properly encoded",
+                        attr_key, value
+                    );
 
                     // Analyze Unicode composition
                     let unicode_analysis = analyze_unicode_composition(value);
-                    println!("    Unicode analysis: {} chars, {} bytes, {} multi-byte chars",
-                            unicode_analysis.char_count, unicode_analysis.byte_count, unicode_analysis.multibyte_count);
+                    println!(
+                        "    Unicode analysis: {} chars, {} bytes, {} multi-byte chars",
+                        unicode_analysis.char_count,
+                        unicode_analysis.byte_count,
+                        unicode_analysis.multibyte_count
+                    );
                 }
                 Otlp133AttributeValue::Integer(value) => {
                     println!("  Found attribute '{}': Integer({})", attr_key, value);
@@ -38248,9 +39157,9 @@ mod otlp_122_tests {
         // Per OTLP-133: UTF-8 characters MUST be encoded correctly per protobuf spec
         let all_utf8_properly_encoded = scenario.attributes.iter().all(|(_, value)| {
             match value {
-                Otlp133AttributeValue::String(s) |
-                Otlp133AttributeValue::StringWithEmoji(s) |
-                Otlp133AttributeValue::StringWithUnicode(s) => {
+                Otlp133AttributeValue::String(s)
+                | Otlp133AttributeValue::StringWithEmoji(s)
+                | Otlp133AttributeValue::StringWithUnicode(s) => {
                     simulate_utf8_encoding_cycle(s).is_correctly_encoded
                 }
                 _ => true, // Non-string values not under test
@@ -38290,7 +39199,8 @@ mod otlp_122_tests {
         let char_count = value.chars().count();
 
         // Collect multi-byte sequences
-        let multibyte_sequences: Vec<String> = value.chars()
+        let multibyte_sequences: Vec<String> = value
+            .chars()
             .filter(|c| c.len_utf8() > 1)
             .map(|c| format!("{} (U+{:04X})", c, c as u32))
             .collect();
@@ -38394,13 +39304,18 @@ mod otlp_122_tests {
                 "4bf92f3577b34da6a3ce929d0e0e4736",
                 "00f067aa0ba902b7",
                 vec![
-                    ("service.name".to_string(), Otlp133AttributeValue::StringWithEmoji("Hello 🦀 Service".to_string())),
-                    ("environment".to_string(), Otlp133AttributeValue::String("production".to_string())),
+                    (
+                        "service.name".to_string(),
+                        Otlp133AttributeValue::StringWithEmoji("Hello 🦀 Service".to_string()),
+                    ),
+                    (
+                        "environment".to_string(),
+                        Otlp133AttributeValue::String("production".to_string()),
+                    ),
                 ],
                 true,
                 "Span with emoji in service.name must encode UTF-8 correctly per OTLP-133",
             ),
-
             // Test 2: Various emoji types - all MUST be encoded correctly
             Otlp133Scenario::new(
                 "span_with_various_emoji",
@@ -38408,15 +39323,26 @@ mod otlp_122_tests {
                 "4bf92f3577b34da6a3ce929d0e0e4737",
                 "00f067aa0ba902b8",
                 vec![
-                    ("status.emoji".to_string(), Otlp133AttributeValue::StringWithEmoji("✅ Success".to_string())),
-                    ("error.emoji".to_string(), Otlp133AttributeValue::StringWithEmoji("❌ Failed".to_string())),
-                    ("warning.emoji".to_string(), Otlp133AttributeValue::StringWithEmoji("⚠️  Warning".to_string())),
-                    ("progress.emoji".to_string(), Otlp133AttributeValue::StringWithEmoji("🚀 Processing".to_string())),
+                    (
+                        "status.emoji".to_string(),
+                        Otlp133AttributeValue::StringWithEmoji("✅ Success".to_string()),
+                    ),
+                    (
+                        "error.emoji".to_string(),
+                        Otlp133AttributeValue::StringWithEmoji("❌ Failed".to_string()),
+                    ),
+                    (
+                        "warning.emoji".to_string(),
+                        Otlp133AttributeValue::StringWithEmoji("⚠️  Warning".to_string()),
+                    ),
+                    (
+                        "progress.emoji".to_string(),
+                        Otlp133AttributeValue::StringWithEmoji("🚀 Processing".to_string()),
+                    ),
                 ],
                 true,
                 "Various emoji types must be encoded correctly as UTF-8",
             ),
-
             // Test 3: Multi-codepoint emoji sequences - MUST be preserved
             Otlp133Scenario::new(
                 "span_with_complex_emoji",
@@ -38424,15 +39350,26 @@ mod otlp_122_tests {
                 "4bf92f3577b34da6a3ce929d0e0e4738",
                 "00f067aa0ba902b9",
                 vec![
-                    ("user.reaction".to_string(), Otlp133AttributeValue::StringWithEmoji("👨‍💻 Developer".to_string())), // Man technologist
-                    ("family.emoji".to_string(), Otlp133AttributeValue::StringWithEmoji("👩‍👩‍👧‍👦 Family".to_string())), // Family emoji
-                    ("flag.emoji".to_string(), Otlp133AttributeValue::StringWithEmoji("🏳️‍🌈 Pride".to_string())), // Flag with rainbow
-                    ("skin.tone".to_string(), Otlp133AttributeValue::StringWithEmoji("👋🏽 Hello".to_string())), // Waving hand with skin tone
+                    (
+                        "user.reaction".to_string(),
+                        Otlp133AttributeValue::StringWithEmoji("👨‍💻 Developer".to_string()),
+                    ), // Man technologist
+                    (
+                        "family.emoji".to_string(),
+                        Otlp133AttributeValue::StringWithEmoji("👩‍👩‍👧‍👦 Family".to_string()),
+                    ), // Family emoji
+                    (
+                        "flag.emoji".to_string(),
+                        Otlp133AttributeValue::StringWithEmoji("🏳️‍🌈 Pride".to_string()),
+                    ), // Flag with rainbow
+                    (
+                        "skin.tone".to_string(),
+                        Otlp133AttributeValue::StringWithEmoji("👋🏽 Hello".to_string()),
+                    ), // Waving hand with skin tone
                 ],
                 true,
                 "Complex multi-codepoint emoji sequences must be preserved exactly",
             ),
-
             // Test 4: Mixed Unicode from different planes - all MUST be encoded correctly
             Otlp133Scenario::new(
                 "span_with_mixed_unicode",
@@ -38440,15 +39377,26 @@ mod otlp_122_tests {
                 "4bf92f3577b34da6a3ce929d0e0e4739",
                 "00f067aa0ba902ba",
                 vec![
-                    ("text.mixed".to_string(), Otlp133AttributeValue::StringWithUnicode("Hello 世界 🌍 مرحبا".to_string())),
-                    ("math.symbols".to_string(), Otlp133AttributeValue::StringWithUnicode("∑∆√∞±≠".to_string())),
-                    ("chinese.text".to_string(), Otlp133AttributeValue::StringWithUnicode("你好，世界！".to_string())),
-                    ("arabic.text".to_string(), Otlp133AttributeValue::StringWithUnicode("مرحبا بالعالم".to_string())),
+                    (
+                        "text.mixed".to_string(),
+                        Otlp133AttributeValue::StringWithUnicode("Hello 世界 🌍 مرحبا".to_string()),
+                    ),
+                    (
+                        "math.symbols".to_string(),
+                        Otlp133AttributeValue::StringWithUnicode("∑∆√∞±≠".to_string()),
+                    ),
+                    (
+                        "chinese.text".to_string(),
+                        Otlp133AttributeValue::StringWithUnicode("你好，世界！".to_string()),
+                    ),
+                    (
+                        "arabic.text".to_string(),
+                        Otlp133AttributeValue::StringWithUnicode("مرحبا بالعالم".to_string()),
+                    ),
                 ],
                 true,
                 "Mixed Unicode from different planes must be encoded correctly",
             ),
-
             // Test 5: 4-byte UTF-8 edge cases - MUST be handled correctly
             Otlp133Scenario::new(
                 "span_with_4byte_utf8_edge_cases",
@@ -38456,10 +39404,22 @@ mod otlp_122_tests {
                 "4bf92f3577b34da6a3ce929d0e0e473a",
                 "00f067aa0ba902bb",
                 vec![
-                    ("emoji.sequence".to_string(), Otlp133AttributeValue::StringWithEmoji("🔥🚀⭐🎉".to_string())),
-                    ("supplementary.chars".to_string(), Otlp133AttributeValue::StringWithUnicode("𝔘𝔫𝔦𝔠𝔬𝔡𝔢".to_string())), // Mathematical double-struck
-                    ("musical.symbols".to_string(), Otlp133AttributeValue::StringWithUnicode("𝄞𝄢𝅘𝅥𝅮".to_string())), // Musical notation
-                    ("ancient.scripts".to_string(), Otlp133AttributeValue::StringWithUnicode("𓀀𓁀𓂀".to_string())), // Egyptian hieroglyphs
+                    (
+                        "emoji.sequence".to_string(),
+                        Otlp133AttributeValue::StringWithEmoji("🔥🚀⭐🎉".to_string()),
+                    ),
+                    (
+                        "supplementary.chars".to_string(),
+                        Otlp133AttributeValue::StringWithUnicode("𝔘𝔫𝔦𝔠𝔬𝔡𝔢".to_string()),
+                    ), // Mathematical double-struck
+                    (
+                        "musical.symbols".to_string(),
+                        Otlp133AttributeValue::StringWithUnicode("𝄞𝄢𝅘𝅥𝅮".to_string()),
+                    ), // Musical notation
+                    (
+                        "ancient.scripts".to_string(),
+                        Otlp133AttributeValue::StringWithUnicode("𓀀𓁀𓂀".to_string()),
+                    ), // Egyptian hieroglyphs
                 ],
                 true,
                 "4-byte UTF-8 edge cases must be encoded correctly per protobuf spec",
@@ -38502,32 +39462,58 @@ mod otlp_122_tests {
         ];
 
         for (original_string, description) in test_strings {
-            println!("Testing UTF-8 encoding: {} - '{}'", description, original_string);
+            println!(
+                "Testing UTF-8 encoding: {} - '{}'",
+                description, original_string
+            );
 
             let validation_result = validate_utf8_encoding(original_string, "test.attr");
 
-            assert!(validation_result.is_valid_utf8,
-                   "String '{}' must be valid UTF-8", original_string);
-            assert!(validation_result.properly_encoded,
-                   "String '{}' must be properly encoded", original_string);
-            assert!(!validation_result.has_replacement_chars,
-                   "String '{}' must not have replacement characters", original_string);
+            assert!(
+                validation_result.is_valid_utf8,
+                "String '{}' must be valid UTF-8",
+                original_string
+            );
+            assert!(
+                validation_result.properly_encoded,
+                "String '{}' must be properly encoded",
+                original_string
+            );
+            assert!(
+                !validation_result.has_replacement_chars,
+                "String '{}' must not have replacement characters",
+                original_string
+            );
 
             // Test encoding cycle
             let cycle_result = simulate_utf8_encoding_cycle(original_string);
-            assert!(cycle_result.is_correctly_encoded,
-                   "String '{}' must survive encoding cycle", original_string);
-            assert!(cycle_result.preserves_utf8,
-                   "String '{}' must preserve UTF-8 encoding", original_string);
-            assert!(cycle_result.no_corruption,
-                   "String '{}' must not be corrupted", original_string);
-            assert!(cycle_result.byte_identical,
-                   "String '{}' bytes must be identical after cycle", original_string);
+            assert!(
+                cycle_result.is_correctly_encoded,
+                "String '{}' must survive encoding cycle",
+                original_string
+            );
+            assert!(
+                cycle_result.preserves_utf8,
+                "String '{}' must preserve UTF-8 encoding",
+                original_string
+            );
+            assert!(
+                cycle_result.no_corruption,
+                "String '{}' must not be corrupted",
+                original_string
+            );
+            assert!(
+                cycle_result.byte_identical,
+                "String '{}' bytes must be identical after cycle",
+                original_string
+            );
 
-            println!("  Chars: {}, Bytes: {}, Multi-byte sequences: {}",
-                    validation_result.char_count,
-                    validation_result.byte_count,
-                    validation_result.multibyte_sequences.len());
+            println!(
+                "  Chars: {}, Bytes: {}, Multi-byte sequences: {}",
+                validation_result.char_count,
+                validation_result.byte_count,
+                validation_result.multibyte_sequences.len()
+            );
 
             println!("  ✓ String '{}' UTF-8 encoding verified", original_string);
         }
@@ -38551,34 +39537,55 @@ mod otlp_122_tests {
         ];
 
         for (character, unicode_info, description) in four_byte_chars {
-            println!("Testing 4-byte UTF-8: {} ({}) - '{}'", description, unicode_info, character);
+            println!(
+                "Testing 4-byte UTF-8: {} ({}) - '{}'",
+                description, unicode_info, character
+            );
 
             // Verify it's actually 4-byte UTF-8 (or multi-codepoint)
             let has_4_byte = contains_4_byte_utf8(character);
             if unicode_info != "Multi-codepoint" {
-                assert!(has_4_byte, "Character '{}' should contain 4-byte UTF-8", character);
+                assert!(
+                    has_4_byte,
+                    "Character '{}' should contain 4-byte UTF-8",
+                    character
+                );
             }
 
             // Test UTF-8 validity
             let validation_result = validate_utf8_encoding(character, "test.4byte");
-            assert!(validation_result.is_valid_utf8,
-                   "4-byte character '{}' must be valid UTF-8", character);
-            assert!(validation_result.properly_encoded,
-                   "4-byte character '{}' must be properly encoded", character);
+            assert!(
+                validation_result.is_valid_utf8,
+                "4-byte character '{}' must be valid UTF-8",
+                character
+            );
+            assert!(
+                validation_result.properly_encoded,
+                "4-byte character '{}' must be properly encoded",
+                character
+            );
 
             // Test byte preservation
             let original_bytes = character.as_bytes();
             let cycle_result = simulate_utf8_encoding_cycle(character);
-            assert!(cycle_result.byte_identical,
-                   "4-byte character '{}' bytes must be preserved exactly", character);
+            assert!(
+                cycle_result.byte_identical,
+                "4-byte character '{}' bytes must be preserved exactly",
+                character
+            );
 
-            println!("  Byte length: {}, Char count: {}",
-                    original_bytes.len(), character.chars().count());
+            println!(
+                "  Byte length: {}, Char count: {}",
+                original_bytes.len(),
+                character.chars().count()
+            );
 
             // Analyze Unicode composition
             let composition = analyze_unicode_composition(character);
-            println!("  Unicode planes: {:?}, 4-byte chars: {}",
-                    composition.planes, composition.four_byte_count);
+            println!(
+                "  Unicode planes: {:?}, 4-byte chars: {}",
+                composition.planes, composition.four_byte_count
+            );
 
             println!("  ✓ 4-byte character '{}' correctly handled", character);
         }
@@ -38593,14 +39600,33 @@ mod otlp_122_tests {
         // Per protobuf spec, string fields must be UTF-8 encoded
         let protobuf_test_cases = vec![
             ("service.name", "User Service 👤", "Service name with emoji"),
-            ("error.message", "Failed to connect 🔌 retrying...", "Error message with emoji"),
-            ("user.display_name", "Alice 👩‍💻 Smith", "User name with emoji"),
-            ("log.message", "Processing 📊 analytics data", "Log message with emoji"),
-            ("description", "Multi-language: Hello 世界 مرحبا 🌍", "Multi-script with emoji"),
+            (
+                "error.message",
+                "Failed to connect 🔌 retrying...",
+                "Error message with emoji",
+            ),
+            (
+                "user.display_name",
+                "Alice 👩‍💻 Smith",
+                "User name with emoji",
+            ),
+            (
+                "log.message",
+                "Processing 📊 analytics data",
+                "Log message with emoji",
+            ),
+            (
+                "description",
+                "Multi-language: Hello 世界 مرحبا 🌍",
+                "Multi-script with emoji",
+            ),
         ];
 
         for (attr_key, attr_value, description) in protobuf_test_cases {
-            println!("Testing protobuf compliance: {} - '{}'", description, attr_value);
+            println!(
+                "Testing protobuf compliance: {} - '{}'",
+                description, attr_value
+            );
 
             // Create a span scenario for protobuf compliance testing
             let scenario = Otlp133Scenario::new(
@@ -38608,27 +39634,40 @@ mod otlp_122_tests {
                 "protobuf-compliance-test",
                 "4bf92f3577b34da6a3ce929d0e0e4736",
                 "00f067aa0ba902b7",
-                vec![
-                    (attr_key.to_string(), Otlp133AttributeValue::StringWithEmoji(attr_value.to_string())),
-                ],
+                vec![(
+                    attr_key.to_string(),
+                    Otlp133AttributeValue::StringWithEmoji(attr_value.to_string()),
+                )],
                 true,
                 &format!("Protobuf string compliance for '{}'", attr_key),
             );
 
-            assert!(validate_otlp_133_scenario(&scenario),
-                   "Protobuf compliance test for '{}' must pass", attr_key);
+            assert!(
+                validate_otlp_133_scenario(&scenario),
+                "Protobuf compliance test for '{}' must pass",
+                attr_key
+            );
 
             // Verify UTF-8 encoding specifically
             let validation_result = validate_utf8_encoding(attr_value, attr_key);
-            assert!(validation_result.is_valid_utf8,
-                   "Protobuf string field '{}' must be valid UTF-8", attr_key);
-            assert!(validation_result.properly_encoded,
-                   "Protobuf string field '{}' must be properly encoded", attr_key);
+            assert!(
+                validation_result.is_valid_utf8,
+                "Protobuf string field '{}' must be valid UTF-8",
+                attr_key
+            );
+            assert!(
+                validation_result.properly_encoded,
+                "Protobuf string field '{}' must be properly encoded",
+                attr_key
+            );
 
             // Test bytes are valid UTF-8
             let utf8_bytes = attr_value.as_bytes();
-            assert!(std::str::from_utf8(utf8_bytes).is_ok(),
-                   "Bytes for '{}' must be valid UTF-8", attr_key);
+            assert!(
+                std::str::from_utf8(utf8_bytes).is_ok(),
+                "Bytes for '{}' must be valid UTF-8",
+                attr_key
+            );
 
             println!("  ✓ Protobuf compliance verified for '{}'", attr_key);
         }
@@ -38645,35 +39684,43 @@ mod otlp_122_tests {
             ("🚀 Rocket Start", "Emoji at start"),
             ("End Rocket 🚀", "Emoji at end"),
             ("🚀", "Single emoji only"),
-
             // Mixed byte lengths
             ("a🦀b", "1-byte + 4-byte + 1-byte"),
             ("你🌍好", "3-byte + 4-byte + 3-byte"),
-
             // Zero-width and combining characters
             ("e\u{0301}", "Combining acute accent"),
             ("நி", "Tamil script"),
-
             // Surrogate pairs (handled by Rust's UTF-8)
             ("𝕳𝖊𝖑𝖑𝖔", "Mathematical fraktur"),
-
             // Boundary cases
             ("\u{10000}", "First 4-byte Unicode character"),
             ("\u{10FFFF}", "Last valid Unicode character"),
         ];
 
         for (test_string, description) in edge_case_scenarios {
-            println!("Testing encoding edge case: {} - '{}'", description, test_string);
+            println!(
+                "Testing encoding edge case: {} - '{}'",
+                description, test_string
+            );
 
             let validation_result = validate_utf8_encoding(test_string, "edge.case");
-            assert!(validation_result.is_valid_utf8,
-                   "Edge case '{}' must be valid UTF-8", test_string);
-            assert!(validation_result.properly_encoded,
-                   "Edge case '{}' must be properly encoded", test_string);
+            assert!(
+                validation_result.is_valid_utf8,
+                "Edge case '{}' must be valid UTF-8",
+                test_string
+            );
+            assert!(
+                validation_result.properly_encoded,
+                "Edge case '{}' must be properly encoded",
+                test_string
+            );
 
             let cycle_result = simulate_utf8_encoding_cycle(test_string);
-            assert!(cycle_result.is_correctly_encoded,
-                   "Edge case '{}' must survive encoding cycle", test_string);
+            assert!(
+                cycle_result.is_correctly_encoded,
+                "Edge case '{}' must survive encoding cycle",
+                test_string
+            );
 
             println!("  ✓ Edge case '{}' handled correctly", test_string);
         }
@@ -38798,7 +39845,7 @@ mod otlp_122_tests {
             match span_data.status.code {
                 SpanStatusCode::Unset => {
                     // Per OTLP §6.4: omit status field entirely for UNSET
-                },
+                }
                 SpanStatusCode::Ok => {
                     protobuf_bytes.extend_from_slice(b"status_field");
                     protobuf_bytes.push(1); // OK = 1
@@ -38816,13 +39863,19 @@ mod otlp_122_tests {
         }
 
         // Mock function to analyze protobuf field presence
-        fn analyze_protobuf_field_presence(protobuf_bytes: &[u8]) -> Result<ProtobufFieldPresence, String> {
+        fn analyze_protobuf_field_presence(
+            protobuf_bytes: &[u8],
+        ) -> Result<ProtobufFieldPresence, String> {
             let has_status_field = protobuf_bytes.windows(12).any(|w| w == b"status_field");
             let encoded_status_code = if has_status_field {
                 // Extract status code from mock protobuf
-                if protobuf_bytes.contains(&1u8) { 1 }
-                else if protobuf_bytes.contains(&2u8) { 2 }
-                else { 0 }
+                if protobuf_bytes.contains(&1u8) {
+                    1
+                } else if protobuf_bytes.contains(&2u8) {
+                    2
+                } else {
+                    0
+                }
             } else {
                 0
             };
@@ -38846,7 +39899,10 @@ mod otlp_122_tests {
             match validate_status_field_omission(scenario) {
                 Ok(()) => {
                     passed_scenarios += 1;
-                    println!("✓ OTLP-134 conformance verified for {}", scenario.description);
+                    println!(
+                        "✓ OTLP-134 conformance verified for {}",
+                        scenario.description
+                    );
                 }
                 Err(error_msg) => {
                     panic!(
@@ -38896,7 +39952,10 @@ mod otlp_122_tests {
                 kafka_message_key: Some("user.profile.update".to_string()),
                 additional_attributes: {
                     let mut attrs = HashMap::new();
-                    attrs.insert("messaging.destination.name".to_string(), "user-events".to_string());
+                    attrs.insert(
+                        "messaging.destination.name".to_string(),
+                        "user-events".to_string(),
+                    );
                     attrs.insert("messaging.kafka.partition".to_string(), "3".to_string());
                     attrs
                 },
@@ -38910,8 +39969,14 @@ mod otlp_122_tests {
                 kafka_message_key: Some("\\x01\\x02\\x03\\xAB\\xCD\\xEF".to_string()),
                 additional_attributes: {
                     let mut attrs = HashMap::new();
-                    attrs.insert("messaging.destination.name".to_string(), "binary-events".to_string());
-                    attrs.insert("messaging.kafka.client_id".to_string(), "producer-123".to_string());
+                    attrs.insert(
+                        "messaging.destination.name".to_string(),
+                        "binary-events".to_string(),
+                    );
+                    attrs.insert(
+                        "messaging.kafka.client_id".to_string(),
+                        "producer-123".to_string(),
+                    );
                     attrs
                 },
                 should_preserve_key: true,
@@ -38924,8 +39989,14 @@ mod otlp_122_tests {
                 kafka_message_key: Some("550e8400-e29b-41d4-a716-446655440000".to_string()),
                 additional_attributes: {
                     let mut attrs = HashMap::new();
-                    attrs.insert("messaging.destination.name".to_string(), "uuid-events".to_string());
-                    attrs.insert("messaging.kafka.consumer_group".to_string(), "analytics-group".to_string());
+                    attrs.insert(
+                        "messaging.destination.name".to_string(),
+                        "uuid-events".to_string(),
+                    );
+                    attrs.insert(
+                        "messaging.kafka.consumer_group".to_string(),
+                        "analytics-group".to_string(),
+                    );
                     attrs
                 },
                 should_preserve_key: true,
@@ -38938,7 +40009,10 @@ mod otlp_122_tests {
                 kafka_message_key: None,
                 additional_attributes: {
                     let mut attrs = HashMap::new();
-                    attrs.insert("messaging.destination.name".to_string(), "no-key-events".to_string());
+                    attrs.insert(
+                        "messaging.destination.name".to_string(),
+                        "no-key-events".to_string(),
+                    );
                     attrs
                 },
                 should_preserve_key: false, // No key to preserve
@@ -38951,7 +40025,10 @@ mod otlp_122_tests {
                 kafka_message_key: None,
                 additional_attributes: {
                     let mut attrs = HashMap::new();
-                    attrs.insert("messaging.destination.name".to_string(), "queue-name".to_string());
+                    attrs.insert(
+                        "messaging.destination.name".to_string(),
+                        "queue-name".to_string(),
+                    );
                     attrs
                 },
                 should_preserve_key: false, // Not Kafka, no key expected
@@ -38964,7 +40041,10 @@ mod otlp_122_tests {
                 kafka_message_key: Some("consumed.key".to_string()),
                 additional_attributes: {
                     let mut attrs = HashMap::new();
-                    attrs.insert("messaging.destination.name".to_string(), "input-topic".to_string());
+                    attrs.insert(
+                        "messaging.destination.name".to_string(),
+                        "input-topic".to_string(),
+                    );
                     attrs.insert("messaging.kafka.partition".to_string(), "0".to_string());
                     attrs
                 },
@@ -38974,11 +40054,16 @@ mod otlp_122_tests {
         ];
 
         /// Validation function for Kafka message key preservation
-        fn validate_kafka_key_preservation(scenario: &KafkaKeyPreservationScenario) -> Result<(), String> {
+        fn validate_kafka_key_preservation(
+            scenario: &KafkaKeyPreservationScenario,
+        ) -> Result<(), String> {
             let mut span_attributes = scenario.additional_attributes.clone();
 
             // Add messaging system attribute
-            span_attributes.insert("messaging.system".to_string(), scenario.messaging_system.clone());
+            span_attributes.insert(
+                "messaging.system".to_string(),
+                scenario.messaging_system.clone(),
+            );
 
             // Add Kafka message key if present
             if let Some(ref key) = scenario.kafka_message_key {
@@ -39095,7 +40180,10 @@ mod otlp_122_tests {
             match validate_kafka_key_preservation(scenario) {
                 Ok(()) => {
                     passed_scenarios += 1;
-                    println!("✓ OTLP-135 conformance verified for {}", scenario.description);
+                    println!(
+                        "✓ OTLP-135 conformance verified for {}",
+                        scenario.description
+                    );
                 }
                 Err(error_msg) => {
                     panic!(
@@ -39165,7 +40253,8 @@ mod otlp_122_tests {
                 should_accept: true,
                 should_reject: false,
                 expected_behavior: "accept_and_serialize".to_string(),
-                description: "Boundary case (depth 32) should be accepted per OTLP spec".to_string(),
+                description: "Boundary case (depth 32) should be accepted per OTLP spec"
+                    .to_string(),
             },
             NestedArrayDepthScenario {
                 scenario_name: "exceed_limit_depth_33".to_string(),
@@ -39197,14 +40286,19 @@ mod otlp_122_tests {
         ];
 
         /// Validation function for nested array depth limitation per OTLP spec
-        fn validate_nested_array_depth_limit(scenario: &NestedArrayDepthScenario) -> Result<(), String> {
+        fn validate_nested_array_depth_limit(
+            scenario: &NestedArrayDepthScenario,
+        ) -> Result<(), String> {
             // Create nested AnyValue array structure with specified depth
             let deeply_nested_array = create_nested_array_value(scenario.nesting_depth)
                 .map_err(|e| format!("Failed to create nested array: {}", e))?;
 
             let mut span_attributes = HashMap::new();
             span_attributes.insert("test.scenario".to_string(), scenario.scenario_name.clone());
-            span_attributes.insert("nested.array.depth".to_string(), scenario.nesting_depth.to_string());
+            span_attributes.insert(
+                "nested.array.depth".to_string(),
+                scenario.nesting_depth.to_string(),
+            );
 
             let span_data = SpanData {
                 name: format!("nested_array_test_{}", scenario.scenario_name),
@@ -39218,7 +40312,10 @@ mod otlp_122_tests {
 
             // Verify OTLP spec compliance for depth limits
             match serialization_result {
-                SerializationResult::Success { max_depth_reached, serialized_bytes } => {
+                SerializationResult::Success {
+                    max_depth_reached,
+                    serialized_bytes,
+                } => {
                     if scenario.should_reject {
                         return Err(format!(
                             "OTLP-136 violation: Excessive nesting (depth {}) was serialized but should have been rejected/truncated for '{}'",
@@ -39242,7 +40339,10 @@ mod otlp_122_tests {
                         ));
                     }
                 }
-                SerializationResult::DepthLimitExceeded { attempted_depth, truncated_at } => {
+                SerializationResult::DepthLimitExceeded {
+                    attempted_depth,
+                    truncated_at,
+                } => {
                     if scenario.should_accept && scenario.nesting_depth <= 32 {
                         return Err(format!(
                             "Valid depth {} was incorrectly rejected as exceeding limit for '{}'",
@@ -39275,8 +40375,10 @@ mod otlp_122_tests {
                         ));
                     }
 
-                    println!("✓ Stack overflow correctly prevented at depth {} for '{}'",
-                            attempted_depth, scenario.description);
+                    println!(
+                        "✓ Stack overflow correctly prevented at depth {} for '{}'",
+                        attempted_depth, scenario.description
+                    );
                 }
                 SerializationResult::Error { error_message } => {
                     return Err(format!(
@@ -39316,7 +40418,8 @@ mod otlp_122_tests {
 
             // Simulate traversal of nested array structure
             if let Some(ref nested_array) = span_data.nested_array_attribute {
-                match measure_array_depth(nested_array, &mut current_depth, &mut max_depth_reached) {
+                match measure_array_depth(nested_array, &mut current_depth, &mut max_depth_reached)
+                {
                     DepthMeasurementResult::WithinLimits => {
                         if max_depth_reached <= max_allowed_depth {
                             // Safe to serialize
@@ -39346,7 +40449,9 @@ mod otlp_122_tests {
                         }
                     }
                     DepthMeasurementResult::Error { message } => {
-                        return SerializationResult::Error { error_message: message };
+                        return SerializationResult::Error {
+                            error_message: message,
+                        };
                     }
                 }
             }
@@ -39441,7 +40546,10 @@ mod otlp_122_tests {
             match validate_nested_array_depth_limit(scenario) {
                 Ok(()) => {
                     passed_scenarios += 1;
-                    println!("✓ OTLP-136 conformance verified for {}", scenario.description);
+                    println!(
+                        "✓ OTLP-136 conformance verified for {}",
+                        scenario.description
+                    );
                 }
                 Err(error_msg) => {
                     panic!(
@@ -39463,20 +40571,24 @@ mod otlp_122_tests {
         let pathological_depth = 500;
         let result = serialize_span_with_depth_monitoring(&SpanData {
             name: "pathological_depth_test".to_string(),
-            nested_array_attribute: Some(create_nested_array_value(pathological_depth).unwrap_or_else(|_| {
-                // If we can't create it due to memory limits, create a simpler deep structure
-                AnyValue::ArrayValue(vec![AnyValue::StringValue("deep_test".to_string())])
-            })),
+            nested_array_attribute: Some(
+                create_nested_array_value(pathological_depth).unwrap_or_else(|_| {
+                    // If we can't create it due to memory limits, create a simpler deep structure
+                    AnyValue::ArrayValue(vec![AnyValue::StringValue("deep_test".to_string())])
+                }),
+            ),
             ..SpanData::default_for_test()
         });
 
         match result {
-            SerializationResult::StackOverflowPrevented { .. } |
-            SerializationResult::DepthLimitExceeded { .. } => {
+            SerializationResult::StackOverflowPrevented { .. }
+            | SerializationResult::DepthLimitExceeded { .. } => {
                 println!("✓ Stack overflow prevention working correctly");
             }
             _ => {
-                println!("⚠ Stack overflow prevention may need strengthening for very deep structures");
+                println!(
+                    "⚠ Stack overflow prevention may need strengthening for very deep structures"
+                );
             }
         }
 
@@ -39507,7 +40619,7 @@ mod otlp_122_tests {
 
         #[derive(Debug, Clone)]
         struct TraceStateData {
-            raw_value_count: i32,  // Can be negative (corrupt)
+            raw_value_count: i32, // Can be negative (corrupt)
             key_value_pairs: Vec<(String, String)>,
             encoded_string: String,
             is_corrupt: bool,
@@ -39546,9 +40658,7 @@ mod otlp_122_tests {
                 scenario_name: "corrupt_trace_state_negative_one".to_string(),
                 trace_state_data: TraceStateData {
                     raw_value_count: -1,
-                    key_value_pairs: vec![
-                        ("vendor1".to_string(), "value1".to_string()),
-                    ],
+                    key_value_pairs: vec![("vendor1".to_string(), "value1".to_string())],
                     encoded_string: "vendor1=value1".to_string(),
                     is_corrupt: true,
                 },
@@ -39566,15 +40676,14 @@ mod otlp_122_tests {
                 },
                 should_reject: true,
                 rejection_reason: "negative_value_count".to_string(),
-                description: "Corrupt trace_state with large negative count MUST be rejected".to_string(),
+                description: "Corrupt trace_state with large negative count MUST be rejected"
+                    .to_string(),
             },
             TraceStateCorruptionScenario {
                 scenario_name: "corrupt_trace_state_integer_underflow".to_string(),
                 trace_state_data: TraceStateData {
                     raw_value_count: i32::MIN,
-                    key_value_pairs: vec![
-                        ("test".to_string(), "data".to_string()),
-                    ],
+                    key_value_pairs: vec![("test".to_string(), "data".to_string())],
                     encoded_string: "test=data".to_string(),
                     is_corrupt: true,
                 },
@@ -39600,7 +40709,9 @@ mod otlp_122_tests {
         ];
 
         /// Validation function for trace_state negative count rejection
-        fn validate_trace_state_corruption_rejection(scenario: &TraceStateCorruptionScenario) -> Result<(), String> {
+        fn validate_trace_state_corruption_rejection(
+            scenario: &TraceStateCorruptionScenario,
+        ) -> Result<(), String> {
             let span_data = SpanData {
                 name: format!("trace_state_test_{}", scenario.scenario_name),
                 trace_state: Some(scenario.trace_state_data.clone()),
@@ -39623,7 +40734,9 @@ mod otlp_122_tests {
                     if processed_count != scenario.trace_state_data.raw_value_count as usize {
                         return Err(format!(
                             "Processed count mismatch: expected {}, got {} for '{}'",
-                            scenario.trace_state_data.raw_value_count, processed_count, scenario.description
+                            scenario.trace_state_data.raw_value_count,
+                            processed_count,
+                            scenario.description
                         ));
                     }
 
@@ -39635,16 +40748,23 @@ mod otlp_122_tests {
                         ));
                     }
                 }
-                TraceStateValidationResult::Rejected { rejection_reason, raw_count } => {
+                TraceStateValidationResult::Rejected {
+                    rejection_reason,
+                    raw_count,
+                } => {
                     if !scenario.should_reject {
                         return Err(format!(
                             "Valid trace_state with count {} was incorrectly rejected: {} for '{}'",
-                            scenario.trace_state_data.raw_value_count, rejection_reason, scenario.description
+                            scenario.trace_state_data.raw_value_count,
+                            rejection_reason,
+                            scenario.description
                         ));
                     }
 
                     // Verify rejection reason matches expected
-                    if !rejection_reason.contains("negative") && scenario.trace_state_data.raw_value_count < 0 {
+                    if !rejection_reason.contains("negative")
+                        && scenario.trace_state_data.raw_value_count < 0
+                    {
                         return Err(format!(
                             "Rejection reason '{}' doesn't indicate negative count issue for '{}'",
                             rejection_reason, scenario.description
@@ -39655,14 +40775,18 @@ mod otlp_122_tests {
                     if raw_count != scenario.trace_state_data.raw_value_count {
                         return Err(format!(
                             "Rejection raw count mismatch: expected {}, got {} for '{}'",
-                            scenario.trace_state_data.raw_value_count, raw_count, scenario.description
+                            scenario.trace_state_data.raw_value_count,
+                            raw_count,
+                            scenario.description
                         ));
                     }
                 }
                 TraceStateValidationResult::Error { error_message } => {
                     return Err(format!(
                         "Validation error for trace_state count {}: {} in '{}'",
-                        scenario.trace_state_data.raw_value_count, error_message, scenario.description
+                        scenario.trace_state_data.raw_value_count,
+                        error_message,
+                        scenario.description
                     ));
                 }
             }
@@ -39713,13 +40837,17 @@ mod otlp_122_tests {
                 for (key, value) in &trace_state_data.key_value_pairs {
                     if key.is_empty() || value.is_empty() {
                         return TraceStateValidationResult::Rejected {
-                            rejection_reason: "OTLP-137: trace_state contains empty key or value".to_string(),
+                            rejection_reason: "OTLP-137: trace_state contains empty key or value"
+                                .to_string(),
                             raw_count: trace_state_data.raw_value_count,
                         };
                     }
 
                     // Basic key format validation (vendor identifier rules)
-                    if !key.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-') {
+                    if !key
+                        .chars()
+                        .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+                    {
                         return TraceStateValidationResult::Rejected {
                             rejection_reason: format!(
                                 "OTLP-137: trace_state key '{}' contains invalid characters",
@@ -39742,9 +40870,16 @@ mod otlp_122_tests {
 
         #[derive(Debug)]
         enum TraceStateValidationResult {
-            Accepted { processed_count: usize },
-            Rejected { rejection_reason: String, raw_count: i32 },
-            Error { error_message: String },
+            Accepted {
+                processed_count: usize,
+            },
+            Rejected {
+                rejection_reason: String,
+                raw_count: i32,
+            },
+            Error {
+                error_message: String,
+            },
         }
 
         // Execute OTLP-137 conformance validation for all scenarios
@@ -39755,7 +40890,10 @@ mod otlp_122_tests {
             match validate_trace_state_corruption_rejection(scenario) {
                 Ok(()) => {
                     passed_scenarios += 1;
-                    println!("✓ OTLP-137 conformance verified for {}", scenario.description);
+                    println!(
+                        "✓ OTLP-137 conformance verified for {}",
+                        scenario.description
+                    );
                 }
                 Err(error_msg) => {
                     panic!(
@@ -39798,10 +40936,16 @@ mod otlp_122_tests {
             let result = validate_span_trace_state_integrity(&span_data);
             match result {
                 TraceStateValidationResult::Rejected { .. } => {
-                    println!("✓ Edge case '{}' with count {} correctly rejected", description, negative_count);
+                    println!(
+                        "✓ Edge case '{}' with count {} correctly rejected",
+                        description, negative_count
+                    );
                 }
                 _ => {
-                    panic!("Edge case '{}' with negative count {} should have been rejected", description, negative_count);
+                    panic!(
+                        "Edge case '{}' with negative count {} should have been rejected",
+                        description, negative_count
+                    );
                 }
             }
         }
@@ -39847,8 +40991,12 @@ mod otlp_122_tests {
             StatusDescriptionSanitizationScenario {
                 scenario_name: "error_status_multiple_newlines".to_string(),
                 status_code: SpanStatusCode::Error,
-                original_description: "Request failed\nCause: Timeout\nDetails: Connection refused\nRetrying...".to_string(),
-                expected_sanitized: "Request failed Cause: Timeout Details: Connection refused Retrying...".to_string(),
+                original_description:
+                    "Request failed\nCause: Timeout\nDetails: Connection refused\nRetrying..."
+                        .to_string(),
+                expected_sanitized:
+                    "Request failed Cause: Timeout Details: Connection refused Retrying..."
+                        .to_string(),
                 should_sanitize: true,
                 sanitization_type: "replace_multiple_newlines".to_string(),
                 description: "ERROR status with multiple newlines should sanitize all".to_string(),
@@ -39856,8 +41004,10 @@ mod otlp_122_tests {
             StatusDescriptionSanitizationScenario {
                 scenario_name: "error_status_crlf_sequences".to_string(),
                 status_code: SpanStatusCode::Error,
-                original_description: "Network error\r\nSSL handshake failed\r\nPeer disconnected".to_string(),
-                expected_sanitized: "Network error SSL handshake failed Peer disconnected".to_string(),
+                original_description: "Network error\r\nSSL handshake failed\r\nPeer disconnected"
+                    .to_string(),
+                expected_sanitized: "Network error SSL handshake failed Peer disconnected"
+                    .to_string(),
                 should_sanitize: true,
                 sanitization_type: "replace_crlf_sequences".to_string(),
                 description: "ERROR status with CRLF sequences should sanitize".to_string(),
@@ -39865,8 +41015,10 @@ mod otlp_122_tests {
             StatusDescriptionSanitizationScenario {
                 scenario_name: "error_status_mixed_line_endings".to_string(),
                 status_code: SpanStatusCode::Error,
-                original_description: "Auth failed\nInvalid credentials\r\nUser locked\n\rSession expired".to_string(),
-                expected_sanitized: "Auth failed Invalid credentials User locked Session expired".to_string(),
+                original_description:
+                    "Auth failed\nInvalid credentials\r\nUser locked\n\rSession expired".to_string(),
+                expected_sanitized: "Auth failed Invalid credentials User locked Session expired"
+                    .to_string(),
                 should_sanitize: true,
                 sanitization_type: "replace_mixed_line_endings".to_string(),
                 description: "ERROR status with mixed line endings should sanitize".to_string(),
@@ -39883,11 +41035,13 @@ mod otlp_122_tests {
             StatusDescriptionSanitizationScenario {
                 scenario_name: "ok_status_with_newlines".to_string(),
                 status_code: SpanStatusCode::Ok,
-                original_description: "Operation completed\nAll checks passed\nNo errors".to_string(),
+                original_description: "Operation completed\nAll checks passed\nNo errors"
+                    .to_string(),
                 expected_sanitized: "Operation completed All checks passed No errors".to_string(),
                 should_sanitize: true,
                 sanitization_type: "sanitize_non_error_status".to_string(),
-                description: "OK status with newlines should also sanitize for consistency".to_string(),
+                description: "OK status with newlines should also sanitize for consistency"
+                    .to_string(),
             },
             StatusDescriptionSanitizationScenario {
                 scenario_name: "unset_status_with_newlines".to_string(),
@@ -39901,25 +41055,33 @@ mod otlp_122_tests {
             StatusDescriptionSanitizationScenario {
                 scenario_name: "error_status_injection_attempt".to_string(),
                 status_code: SpanStatusCode::Error,
-                original_description: "Error occurred\nINJECTED: malicious content\nREMOTE_EXEC: dangerous".to_string(),
-                expected_sanitized: "Error occurred INJECTED: malicious content REMOTE_EXEC: dangerous".to_string(),
+                original_description:
+                    "Error occurred\nINJECTED: malicious content\nREMOTE_EXEC: dangerous"
+                        .to_string(),
+                expected_sanitized:
+                    "Error occurred INJECTED: malicious content REMOTE_EXEC: dangerous".to_string(),
                 should_sanitize: true,
                 sanitization_type: "prevent_injection_attack".to_string(),
-                description: "ERROR status injection attempt should be neutralized by sanitization".to_string(),
+                description: "ERROR status injection attempt should be neutralized by sanitization"
+                    .to_string(),
             },
             StatusDescriptionSanitizationScenario {
                 scenario_name: "error_status_unicode_newlines".to_string(),
                 status_code: SpanStatusCode::Error,
-                original_description: "Unicode error\u{2028}Line separator\u{2029}Paragraph separator".to_string(),
+                original_description:
+                    "Unicode error\u{2028}Line separator\u{2029}Paragraph separator".to_string(),
                 expected_sanitized: "Unicode error Line separator Paragraph separator".to_string(),
                 should_sanitize: true,
                 sanitization_type: "replace_unicode_line_separators".to_string(),
-                description: "ERROR status with Unicode line separators should sanitize".to_string(),
+                description: "ERROR status with Unicode line separators should sanitize"
+                    .to_string(),
             },
         ];
 
         /// Validation function for status description newline sanitization
-        fn validate_status_description_sanitization(scenario: &StatusDescriptionSanitizationScenario) -> Result<(), String> {
+        fn validate_status_description_sanitization(
+            scenario: &StatusDescriptionSanitizationScenario,
+        ) -> Result<(), String> {
             let span_data = SpanData {
                 name: format!("status_sanitization_test_{}", scenario.scenario_name),
                 status: SpanStatus {
@@ -39934,7 +41096,9 @@ mod otlp_122_tests {
                 .map_err(|e| format!("OTLP export with sanitization failed: {}", e))?;
 
             // Verify status description sanitization
-            let sanitized_description = exported_span.status.message
+            let sanitized_description = exported_span
+                .status
+                .message
                 .ok_or("Status message was lost during export".to_string())?;
 
             if scenario.should_sanitize {
@@ -39951,10 +41115,11 @@ mod otlp_122_tests {
                 }
 
                 // Verify no newlines remain in sanitized description
-                if sanitized_description.contains('\n') ||
-                   sanitized_description.contains('\r') ||
-                   sanitized_description.contains('\u{2028}') ||
-                   sanitized_description.contains('\u{2029}') {
+                if sanitized_description.contains('\n')
+                    || sanitized_description.contains('\r')
+                    || sanitized_description.contains('\u{2028}')
+                    || sanitized_description.contains('\u{2029}')
+                {
                     return Err(format!(
                         "OTLP-138 sanitization incomplete for '{}': \
                          newlines still present in '{}'",
@@ -39962,9 +41127,14 @@ mod otlp_122_tests {
                     ));
                 }
 
-                println!("✓ Sanitization applied: '{}' → '{}'",
-                        scenario.original_description.replace('\n', "\\n").replace('\r', "\\r"),
-                        sanitized_description);
+                println!(
+                    "✓ Sanitization applied: '{}' → '{}'",
+                    scenario
+                        .original_description
+                        .replace('\n', "\\n")
+                        .replace('\r', "\\r"),
+                    sanitized_description
+                );
             } else {
                 // No sanitization needed - description should be unchanged
                 if sanitized_description != scenario.original_description {
@@ -40026,7 +41196,10 @@ mod otlp_122_tests {
             match validate_status_description_sanitization(scenario) {
                 Ok(()) => {
                     passed_scenarios += 1;
-                    println!("✓ OTLP-138 conformance verified for {}", scenario.description);
+                    println!(
+                        "✓ OTLP-138 conformance verified for {}",
+                        scenario.description
+                    );
                 }
                 Err(error_msg) => {
                     panic!(
@@ -40047,11 +41220,20 @@ mod otlp_122_tests {
 
         let preservation_test_cases = vec![
             ("Error\nMessage", "Error Message"),
-            ("Multi\nLine\nError\nDescription", "Multi Line Error Description"),
+            (
+                "Multi\nLine\nError\nDescription",
+                "Multi Line Error Description",
+            ),
             ("CRLF\r\nTest\r\nCase", "CRLF Test Case"),
             ("Mixed\n\rLine\r\nEndings\n", "Mixed Line Endings"),
-            ("Unicode\u{2028}Separators\u{2029}Test", "Unicode Separators Test"),
-            ("   Spaces   \n  And  \n  Newlines   ", "Spaces And Newlines"),
+            (
+                "Unicode\u{2028}Separators\u{2029}Test",
+                "Unicode Separators Test",
+            ),
+            (
+                "   Spaces   \n  And  \n  Newlines   ",
+                "Spaces And Newlines",
+            ),
         ];
 
         for (original, expected) in preservation_test_cases {
@@ -40061,20 +41243,23 @@ mod otlp_122_tests {
                 "Content preservation failed for '{}': expected '{}', got '{}'",
                 original, expected, sanitized
             );
-            println!("✓ Content preserved: '{}' → '{}'",
-                    original.replace('\n', "\\n").replace('\r', "\\r"), sanitized);
+            println!(
+                "✓ Content preserved: '{}' → '{}'",
+                original.replace('\n', "\\n").replace('\r', "\\r"),
+                sanitized
+            );
         }
 
         // Test edge cases for robustness
         println!("Testing edge cases...");
 
         let edge_cases = vec![
-            ("", ""),  // Empty string
-            ("   ", ""),  // Only whitespace
-            ("\n\n\n", ""),  // Only newlines
-            ("\r\n\r\n", ""),  // Only CRLF
-            ("a\nb\nc", "a b c"),  // Single characters
-            ("Normal text without issues", "Normal text without issues"),  // No changes needed
+            ("", ""),                                                     // Empty string
+            ("   ", ""),                                                  // Only whitespace
+            ("\n\n\n", ""),                                               // Only newlines
+            ("\r\n\r\n", ""),                                             // Only CRLF
+            ("a\nb\nc", "a b c"),                                         // Single characters
+            ("Normal text without issues", "Normal text without issues"), // No changes needed
         ];
 
         for (input, expected) in edge_cases {
@@ -40177,7 +41362,8 @@ mod otlp_122_tests {
                 contains_nan: true,
                 should_reject_entire_array: true,
                 rejection_reason: "array_contains_nan_with_infinity".to_string(),
-                description: "f64 array with both NaN and infinity MUST reject entire array".to_string(),
+                description: "f64 array with both NaN and infinity MUST reject entire array"
+                    .to_string(),
             },
             NanArrayRejectionScenario {
                 scenario_name: "f64_array_empty".to_string(),
@@ -40198,13 +41384,21 @@ mod otlp_122_tests {
         ];
 
         /// Validation function for Vec<f64> NaN element array rejection
-        fn validate_f64_array_nan_rejection(scenario: &NanArrayRejectionScenario) -> Result<(), String> {
+        fn validate_f64_array_nan_rejection(
+            scenario: &NanArrayRejectionScenario,
+        ) -> Result<(), String> {
             let array_any_value = AnyValue::DoubleArrayValue(scenario.array_values.clone());
 
             let mut span_attributes = HashMap::new();
             span_attributes.insert("test.scenario".to_string(), scenario.scenario_name.clone());
-            span_attributes.insert("array.element.count".to_string(), scenario.array_values.len().to_string());
-            span_attributes.insert("contains.nan".to_string(), scenario.contains_nan.to_string());
+            span_attributes.insert(
+                "array.element.count".to_string(),
+                scenario.array_values.len().to_string(),
+            );
+            span_attributes.insert(
+                "contains.nan".to_string(),
+                scenario.contains_nan.to_string(),
+            );
 
             let span_data = SpanData {
                 name: format!("f64_array_nan_test_{}", scenario.scenario_name),
@@ -40217,7 +41411,10 @@ mod otlp_122_tests {
             let validation_result = validate_span_numeric_arrays(&span_data);
 
             match validation_result {
-                NumericArrayValidationResult::Accepted { processed_elements, array_type } => {
+                NumericArrayValidationResult::Accepted {
+                    processed_elements,
+                    array_type,
+                } => {
                     if scenario.should_reject_entire_array {
                         return Err(format!(
                             "OTLP-139 violation: f64 array with NaN was accepted but entire array should have been rejected for '{}'",
@@ -40229,7 +41426,9 @@ mod otlp_122_tests {
                     if processed_elements != scenario.array_values.len() {
                         return Err(format!(
                             "Processed element count mismatch: expected {}, got {} for '{}'",
-                            scenario.array_values.len(), processed_elements, scenario.description
+                            scenario.array_values.len(),
+                            processed_elements,
+                            scenario.description
                         ));
                     }
 
@@ -40249,7 +41448,11 @@ mod otlp_122_tests {
                         ));
                     }
                 }
-                NumericArrayValidationResult::EntireArrayRejected { rejection_reason, element_count, nan_positions } => {
+                NumericArrayValidationResult::EntireArrayRejected {
+                    rejection_reason,
+                    element_count,
+                    nan_positions,
+                } => {
                     if !scenario.should_reject_entire_array {
                         return Err(format!(
                             "Valid f64 array was incorrectly rejected: {} for '{}'",
@@ -40269,12 +41472,15 @@ mod otlp_122_tests {
                     if element_count != scenario.array_values.len() {
                         return Err(format!(
                             "Rejection element count mismatch: expected {}, got {} for '{}'",
-                            scenario.array_values.len(), element_count, scenario.description
+                            scenario.array_values.len(),
+                            element_count,
+                            scenario.description
                         ));
                     }
 
                     // Verify NaN positions are correctly identified
-                    let actual_nan_positions: Vec<usize> = scenario.array_values
+                    let actual_nan_positions: Vec<usize> = scenario
+                        .array_values
                         .iter()
                         .enumerate()
                         .filter(|(_, value)| value.is_nan())
@@ -40288,7 +41494,10 @@ mod otlp_122_tests {
                         ));
                     }
 
-                    println!("✓ Entire array rejected due to NaN at positions: {:?}", nan_positions);
+                    println!(
+                        "✓ Entire array rejected due to NaN at positions: {:?}",
+                        nan_positions
+                    );
                 }
                 NumericArrayValidationResult::Error { error_message } => {
                     return Err(format!(
@@ -40347,11 +41556,9 @@ mod otlp_122_tests {
                             array_type: "f64_array".to_string(),
                         }
                     }
-                    _ => {
-                        NumericArrayValidationResult::Error {
-                            error_message: "Not a f64 array type".to_string(),
-                        }
-                    }
+                    _ => NumericArrayValidationResult::Error {
+                        error_message: "Not a f64 array type".to_string(),
+                    },
                 }
             } else {
                 // No numeric array present
@@ -40364,9 +41571,18 @@ mod otlp_122_tests {
 
         #[derive(Debug)]
         enum NumericArrayValidationResult {
-            Accepted { processed_elements: usize, array_type: String },
-            EntireArrayRejected { rejection_reason: String, element_count: usize, nan_positions: Vec<usize> },
-            Error { error_message: String },
+            Accepted {
+                processed_elements: usize,
+                array_type: String,
+            },
+            EntireArrayRejected {
+                rejection_reason: String,
+                element_count: usize,
+                nan_positions: Vec<usize>,
+            },
+            Error {
+                error_message: String,
+            },
         }
 
         // Execute OTLP-139 conformance validation for all scenarios
@@ -40377,7 +41593,10 @@ mod otlp_122_tests {
             match validate_f64_array_nan_rejection(scenario) {
                 Ok(()) => {
                     passed_scenarios += 1;
-                    println!("✓ OTLP-139 conformance verified for {}", scenario.description);
+                    println!(
+                        "✓ OTLP-139 conformance verified for {}",
+                        scenario.description
+                    );
                 }
                 Err(error_msg) => {
                     panic!(
@@ -40397,11 +41616,11 @@ mod otlp_122_tests {
         println!("Testing NaN detection robustness...");
 
         let robust_test_cases = vec![
-            vec![0.0 / 0.0],  // Direct NaN creation
-            vec![f64::sqrt(-1.0)],  // Mathematical NaN
-            vec![f64::INFINITY - f64::INFINITY],  // Arithmetic NaN
-            vec![1.0, f64::from_bits(0x7FF8000000000001)],  // Bit-pattern NaN
-            vec![f64::from_bits(0xFFF8000000000001), 2.0],  // Negative NaN
+            vec![0.0 / 0.0],                               // Direct NaN creation
+            vec![f64::sqrt(-1.0)],                         // Mathematical NaN
+            vec![f64::INFINITY - f64::INFINITY],           // Arithmetic NaN
+            vec![1.0, f64::from_bits(0x7FF8000000000001)], // Bit-pattern NaN
+            vec![f64::from_bits(0xFFF8000000000001), 2.0], // Negative NaN
         ];
 
         for (index, test_array) in robust_test_cases.iter().enumerate() {
@@ -40414,10 +41633,16 @@ mod otlp_122_tests {
             let result = validate_span_numeric_arrays(&span_data);
             match result {
                 NumericArrayValidationResult::EntireArrayRejected { .. } => {
-                    println!("✓ Robust test case {} correctly rejected array with NaN", index);
+                    println!(
+                        "✓ Robust test case {} correctly rejected array with NaN",
+                        index
+                    );
                 }
                 _ => {
-                    panic!("Robust test case {} should have rejected array containing NaN", index);
+                    panic!(
+                        "Robust test case {} should have rejected array containing NaN",
+                        index
+                    );
                 }
             }
         }
@@ -40425,7 +41650,7 @@ mod otlp_122_tests {
         // Test edge case: very large arrays with single NaN
         println!("Testing large array NaN detection...");
         let mut large_array = vec![1.0; 1000];
-        large_array[500] = f64::NAN;  // Single NaN in middle of large array
+        large_array[500] = f64::NAN; // Single NaN in middle of large array
 
         let large_array_span = SpanData {
             name: "large_array_single_nan_test".to_string(),
@@ -40436,7 +41661,11 @@ mod otlp_122_tests {
         let large_array_result = validate_span_numeric_arrays(&large_array_span);
         match large_array_result {
             NumericArrayValidationResult::EntireArrayRejected { nan_positions, .. } => {
-                assert_eq!(nan_positions, vec![500], "NaN should be detected at position 500");
+                assert_eq!(
+                    nan_positions,
+                    vec![500],
+                    "NaN should be detected at position 500"
+                );
                 println!("✓ Large array (1000 elements) with single NaN correctly rejected");
             }
             _ => {
@@ -40497,7 +41726,8 @@ mod otlp_122_tests {
                 status_code: SpanStatusCode::Error,
                 expected_protobuf_value: 2,
                 status_message: None,
-                description: "ERROR status without message still maps to protobuf value 2".to_string(),
+                description: "ERROR status without message still maps to protobuf value 2"
+                    .to_string(),
             },
             StatusCodeEnumMappingScenario {
                 scenario_name: "unset_status_with_message".to_string(),
@@ -40516,7 +41746,9 @@ mod otlp_122_tests {
         ];
 
         /// Validation function for status code protobuf enum mapping
-        fn validate_status_code_protobuf_mapping(scenario: &StatusCodeEnumMappingScenario) -> Result<(), String> {
+        fn validate_status_code_protobuf_mapping(
+            scenario: &StatusCodeEnumMappingScenario,
+        ) -> Result<(), String> {
             let span_data = SpanData {
                 name: format!("status_code_enum_test_{}", scenario.scenario_name),
                 status: SpanStatus {
@@ -40538,7 +41770,10 @@ mod otlp_122_tests {
             if parsed_status.code_value != scenario.expected_protobuf_value {
                 return Err(format!(
                     "OTLP-140 enum mapping violation: {:?} status should map to protobuf value {}, but got {} for '{}'",
-                    scenario.status_code, scenario.expected_protobuf_value, parsed_status.code_value, scenario.description
+                    scenario.status_code,
+                    scenario.expected_protobuf_value,
+                    parsed_status.code_value,
+                    scenario.description
                 ));
             }
 
@@ -40648,7 +41883,10 @@ mod otlp_122_tests {
 
             // Extract status code value from protobuf
             let mut code_value = 0i32;
-            if let Some(pos) = protobuf_bytes.windows(13).position(|w| w == b"status_field:") {
+            if let Some(pos) = protobuf_bytes
+                .windows(13)
+                .position(|w| w == b"status_field:")
+            {
                 if pos + 13 < protobuf_bytes.len() {
                     code_value = protobuf_bytes[pos + 13] as i32;
                 }
@@ -40660,7 +41898,10 @@ mod otlp_122_tests {
                     let start = msg_pos + 8;
                     let remaining = &protobuf_bytes[start..];
                     // Simple extraction for test - find next field or end
-                    let end = remaining.iter().position(|&b| b == b':').unwrap_or(remaining.len());
+                    let end = remaining
+                        .iter()
+                        .position(|&b| b == b':')
+                        .unwrap_or(remaining.len());
                     Some(String::from_utf8_lossy(&remaining[..end]).to_string())
                 } else {
                     None
@@ -40691,8 +41932,14 @@ mod otlp_122_tests {
             match validate_status_code_protobuf_mapping(scenario) {
                 Ok(()) => {
                     passed_scenarios += 1;
-                    println!("✓ OTLP-140 conformance verified for {}", scenario.description);
-                    println!("  {:?} → protobuf value {}", scenario.status_code, scenario.expected_protobuf_value);
+                    println!(
+                        "✓ OTLP-140 conformance verified for {}",
+                        scenario.description
+                    );
+                    println!(
+                        "  {:?} → protobuf value {}",
+                        scenario.status_code, scenario.expected_protobuf_value
+                    );
                 }
                 Err(error_msg) => {
                     panic!(
@@ -40735,10 +41982,17 @@ mod otlp_122_tests {
 
             match status_code {
                 SpanStatusCode::Unset => {
-                    assert!(!parsed.field_present, "UNSET should not have status field present");
+                    assert!(
+                        !parsed.field_present,
+                        "UNSET should not have status field present"
+                    );
                 }
                 SpanStatusCode::Ok | SpanStatusCode::Error => {
-                    assert!(parsed.field_present, "{:?} should have status field present", status_code);
+                    assert!(
+                        parsed.field_present,
+                        "{:?} should have status field present",
+                        status_code
+                    );
                     assert_eq!(
                         parsed.code_value, expected_value,
                         "{:?} should map to protobuf value {}",
@@ -40747,7 +42001,10 @@ mod otlp_122_tests {
                 }
             }
 
-            println!("✓ Enum consistency verified: {:?} maps to {}", status_code, expected_value);
+            println!(
+                "✓ Enum consistency verified: {:?} maps to {}",
+                status_code, expected_value
+            );
         }
 
         // Test round-trip encoding consistency
@@ -40792,7 +42049,10 @@ mod otlp_122_tests {
                 );
             }
 
-            println!("✓ Round-trip consistency verified for {:?} status", status_code);
+            println!(
+                "✓ Round-trip consistency verified for {:?} status",
+                status_code
+            );
         }
 
         println!("✓ OTLP-140: Status code protobuf enum mapping conformance verified");
@@ -40831,7 +42091,10 @@ mod otlp_122_tests {
                     attrs.insert("temperature".to_string(), AnyValue::DoubleValue(23.5));
                     attrs.insert("latency_ms".to_string(), AnyValue::DoubleValue(125.0));
                     attrs.insert("success_rate".to_string(), AnyValue::DoubleValue(0.95));
-                    attrs.insert("service_name".to_string(), AnyValue::StringValue("test-service".to_string()));
+                    attrs.insert(
+                        "service_name".to_string(),
+                        AnyValue::StringValue("test-service".to_string()),
+                    );
                     attrs
                 },
                 contains_nan_double: false,
@@ -40844,8 +42107,14 @@ mod otlp_122_tests {
                 span_attributes: {
                     let mut attrs = HashMap::new();
                     attrs.insert("valid_metric".to_string(), AnyValue::DoubleValue(42.0));
-                    attrs.insert("corrupted_value".to_string(), AnyValue::DoubleValue(f64::NAN));
-                    attrs.insert("another_valid".to_string(), AnyValue::StringValue("test".to_string()));
+                    attrs.insert(
+                        "corrupted_value".to_string(),
+                        AnyValue::DoubleValue(f64::NAN),
+                    );
+                    attrs.insert(
+                        "another_valid".to_string(),
+                        AnyValue::StringValue("test".to_string()),
+                    );
                     attrs
                 },
                 contains_nan_double: true,
@@ -40857,23 +42126,36 @@ mod otlp_122_tests {
                 scenario_name: "span_with_multiple_nan_doubles".to_string(),
                 span_attributes: {
                     let mut attrs = HashMap::new();
-                    attrs.insert("nan_temperature".to_string(), AnyValue::DoubleValue(f64::NAN));
+                    attrs.insert(
+                        "nan_temperature".to_string(),
+                        AnyValue::DoubleValue(f64::NAN),
+                    );
                     attrs.insert("valid_pressure".to_string(), AnyValue::DoubleValue(1013.25));
                     attrs.insert("nan_humidity".to_string(), AnyValue::DoubleValue(f64::NAN));
-                    attrs.insert("valid_string".to_string(), AnyValue::StringValue("sensor_data".to_string()));
+                    attrs.insert(
+                        "valid_string".to_string(),
+                        AnyValue::StringValue("sensor_data".to_string()),
+                    );
                     attrs
                 },
                 contains_nan_double: true,
                 should_reject_entire_span: true,
                 rejection_reason: "span_contains_multiple_nan_double_values".to_string(),
-                description: "Span with multiple NaN DoubleValues MUST reject entire span".to_string(),
+                description: "Span with multiple NaN DoubleValues MUST reject entire span"
+                    .to_string(),
             },
             DoubleValueNanRejectionScenario {
                 scenario_name: "span_with_infinity_doubles_no_nan".to_string(),
                 span_attributes: {
                     let mut attrs = HashMap::new();
-                    attrs.insert("positive_infinity".to_string(), AnyValue::DoubleValue(f64::INFINITY));
-                    attrs.insert("negative_infinity".to_string(), AnyValue::DoubleValue(f64::NEG_INFINITY));
+                    attrs.insert(
+                        "positive_infinity".to_string(),
+                        AnyValue::DoubleValue(f64::INFINITY),
+                    );
+                    attrs.insert(
+                        "negative_infinity".to_string(),
+                        AnyValue::DoubleValue(f64::NEG_INFINITY),
+                    );
                     attrs.insert("normal_value".to_string(), AnyValue::DoubleValue(123.45));
                     attrs
                 },
@@ -40886,7 +42168,10 @@ mod otlp_122_tests {
                 scenario_name: "span_with_nan_and_infinity_mixed".to_string(),
                 span_attributes: {
                     let mut attrs = HashMap::new();
-                    attrs.insert("infinity_value".to_string(), AnyValue::DoubleValue(f64::INFINITY));
+                    attrs.insert(
+                        "infinity_value".to_string(),
+                        AnyValue::DoubleValue(f64::INFINITY),
+                    );
                     attrs.insert("nan_value".to_string(), AnyValue::DoubleValue(f64::NAN));
                     attrs.insert("normal_value".to_string(), AnyValue::DoubleValue(-273.15));
                     attrs
@@ -40894,34 +42179,52 @@ mod otlp_122_tests {
                 contains_nan_double: true,
                 should_reject_entire_span: true,
                 rejection_reason: "span_contains_nan_double_with_infinity".to_string(),
-                description: "Span with both NaN and infinity MUST reject entire span due to NaN".to_string(),
+                description: "Span with both NaN and infinity MUST reject entire span due to NaN"
+                    .to_string(),
             },
             DoubleValueNanRejectionScenario {
                 scenario_name: "span_with_mathematical_nan".to_string(),
                 span_attributes: {
                     let mut attrs = HashMap::new();
-                    attrs.insert("sqrt_negative".to_string(), AnyValue::DoubleValue(f64::sqrt(-1.0)));
-                    attrs.insert("valid_sqrt".to_string(), AnyValue::DoubleValue(f64::sqrt(4.0)));
+                    attrs.insert(
+                        "sqrt_negative".to_string(),
+                        AnyValue::DoubleValue(f64::sqrt(-1.0)),
+                    );
+                    attrs.insert(
+                        "valid_sqrt".to_string(),
+                        AnyValue::DoubleValue(f64::sqrt(4.0)),
+                    );
                     attrs
                 },
                 contains_nan_double: true,
                 should_reject_entire_span: true,
                 rejection_reason: "span_contains_mathematical_nan".to_string(),
-                description: "Span with mathematically generated NaN MUST reject entire span".to_string(),
+                description: "Span with mathematically generated NaN MUST reject entire span"
+                    .to_string(),
             },
             DoubleValueNanRejectionScenario {
                 scenario_name: "span_with_arithmetic_nan".to_string(),
                 span_attributes: {
                     let mut attrs = HashMap::new();
-                    attrs.insert("arithmetic_nan".to_string(), AnyValue::DoubleValue(f64::INFINITY - f64::INFINITY));
-                    attrs.insert("division_by_zero".to_string(), AnyValue::DoubleValue(1.0 / 0.0)); // This is infinity, not NaN
-                    attrs.insert("zero_division_nan".to_string(), AnyValue::DoubleValue(0.0 / 0.0)); // This is NaN
+                    attrs.insert(
+                        "arithmetic_nan".to_string(),
+                        AnyValue::DoubleValue(f64::INFINITY - f64::INFINITY),
+                    );
+                    attrs.insert(
+                        "division_by_zero".to_string(),
+                        AnyValue::DoubleValue(1.0 / 0.0),
+                    ); // This is infinity, not NaN
+                    attrs.insert(
+                        "zero_division_nan".to_string(),
+                        AnyValue::DoubleValue(0.0 / 0.0),
+                    ); // This is NaN
                     attrs
                 },
                 contains_nan_double: true,
                 should_reject_entire_span: true,
                 rejection_reason: "span_contains_arithmetic_nan".to_string(),
-                description: "Span with arithmetic-generated NaN MUST reject entire span".to_string(),
+                description: "Span with arithmetic-generated NaN MUST reject entire span"
+                    .to_string(),
             },
             DoubleValueNanRejectionScenario {
                 scenario_name: "span_empty_attributes".to_string(),
@@ -40935,7 +42238,10 @@ mod otlp_122_tests {
                 scenario_name: "span_non_double_attributes_only".to_string(),
                 span_attributes: {
                     let mut attrs = HashMap::new();
-                    attrs.insert("string_attr".to_string(), AnyValue::StringValue("test".to_string()));
+                    attrs.insert(
+                        "string_attr".to_string(),
+                        AnyValue::StringValue("test".to_string()),
+                    );
                     attrs.insert("int_attr".to_string(), AnyValue::IntValue(42));
                     attrs.insert("bool_attr".to_string(), AnyValue::BoolValue(true));
                     attrs
@@ -40948,7 +42254,9 @@ mod otlp_122_tests {
         ];
 
         /// Validation function for DoubleValue NaN entire span rejection
-        fn validate_double_value_nan_span_rejection(scenario: &DoubleValueNanRejectionScenario) -> Result<(), String> {
+        fn validate_double_value_nan_span_rejection(
+            scenario: &DoubleValueNanRejectionScenario,
+        ) -> Result<(), String> {
             let span_data = SpanData {
                 name: format!("double_nan_test_{}", scenario.scenario_name),
                 attributes: scenario.span_attributes.clone(),
@@ -40959,7 +42267,10 @@ mod otlp_122_tests {
             let export_result = export_span_with_nan_validation(&span_data);
 
             match export_result {
-                SpanExportResult::Accepted { processed_attributes, warnings } => {
+                SpanExportResult::Accepted {
+                    processed_attributes,
+                    warnings,
+                } => {
                     if scenario.should_reject_entire_span {
                         return Err(format!(
                             "OTLP-141 violation: Span with NaN DoubleValue was accepted but entire span should have been rejected for '{}'",
@@ -40984,7 +42295,10 @@ mod otlp_122_tests {
                         ));
                     }
                 }
-                SpanExportResult::EntireSpanRejected { rejection_reason, nan_attributes } => {
+                SpanExportResult::EntireSpanRejected {
+                    rejection_reason,
+                    nan_attributes,
+                } => {
                     if !scenario.should_reject_entire_span {
                         return Err(format!(
                             "Valid span was incorrectly rejected: {} for '{}'",
@@ -41001,11 +42315,12 @@ mod otlp_122_tests {
                     }
 
                     // Verify NaN attributes are correctly identified
-                    let actual_nan_attributes: Vec<String> = scenario.span_attributes
+                    let actual_nan_attributes: Vec<String> = scenario
+                        .span_attributes
                         .iter()
-                        .filter(|(_, value)| {
-                            matches!(value, AnyValue::DoubleValue(d) if d.is_nan())
-                        })
+                        .filter(
+                            |(_, value)| matches!(value, AnyValue::DoubleValue(d) if d.is_nan()),
+                        )
                         .map(|(key, _)| key.clone())
                         .collect();
 
@@ -41016,7 +42331,10 @@ mod otlp_122_tests {
                         ));
                     }
 
-                    println!("✓ Entire span rejected due to NaN in attributes: {:?}", nan_attributes);
+                    println!(
+                        "✓ Entire span rejected due to NaN in attributes: {:?}",
+                        nan_attributes
+                    );
                 }
                 SpanExportResult::Error { error_message } => {
                     return Err(format!(
@@ -41078,9 +42396,11 @@ mod otlp_122_tests {
             }
 
             // Span is valid - no NaN DoubleValues found
-            let warnings = if span_data.attributes.iter().any(|(_, value)| {
-                matches!(value, AnyValue::DoubleValue(d) if d.is_infinite())
-            }) {
+            let warnings = if span_data
+                .attributes
+                .iter()
+                .any(|(_, value)| matches!(value, AnyValue::DoubleValue(d) if d.is_infinite()))
+            {
                 vec!["Span contains infinity values".to_string()]
             } else {
                 vec![]
@@ -41094,9 +42414,17 @@ mod otlp_122_tests {
 
         #[derive(Debug)]
         enum SpanExportResult {
-            Accepted { processed_attributes: usize, warnings: Vec<String> },
-            EntireSpanRejected { rejection_reason: String, nan_attributes: Vec<String> },
-            Error { error_message: String },
+            Accepted {
+                processed_attributes: usize,
+                warnings: Vec<String>,
+            },
+            EntireSpanRejected {
+                rejection_reason: String,
+                nan_attributes: Vec<String>,
+            },
+            Error {
+                error_message: String,
+            },
         }
 
         // Execute OTLP-141 conformance validation for all scenarios
@@ -41107,7 +42435,10 @@ mod otlp_122_tests {
             match validate_double_value_nan_span_rejection(scenario) {
                 Ok(()) => {
                     passed_scenarios += 1;
-                    println!("✓ OTLP-141 conformance verified for {}", scenario.description);
+                    println!(
+                        "✓ OTLP-141 conformance verified for {}",
+                        scenario.description
+                    );
                 }
                 Err(error_msg) => {
                     panic!(
@@ -41149,10 +42480,16 @@ mod otlp_122_tests {
             let result = export_span_with_nan_validation(&test_span);
             match result {
                 SpanExportResult::EntireSpanRejected { .. } => {
-                    println!("✓ Robust test '{}' correctly rejected entire span with NaN DoubleValue", test_name);
+                    println!(
+                        "✓ Robust test '{}' correctly rejected entire span with NaN DoubleValue",
+                        test_name
+                    );
                 }
                 _ => {
-                    panic!("Robust test '{}' should have rejected entire span containing NaN DoubleValue", test_name);
+                    panic!(
+                        "Robust test '{}' should have rejected entire span containing NaN DoubleValue",
+                        test_name
+                    );
                 }
             }
         }
@@ -41160,10 +42497,16 @@ mod otlp_122_tests {
         // Test mixed attribute types with NaN
         println!("Testing mixed attribute types with NaN DoubleValue...");
         let mut mixed_attributes = HashMap::new();
-        mixed_attributes.insert("string_attr".to_string(), AnyValue::StringValue("valid".to_string()));
+        mixed_attributes.insert(
+            "string_attr".to_string(),
+            AnyValue::StringValue("valid".to_string()),
+        );
         mixed_attributes.insert("int_attr".to_string(), AnyValue::IntValue(100));
         mixed_attributes.insert("bool_attr".to_string(), AnyValue::BoolValue(false));
-        mixed_attributes.insert("double_infinity".to_string(), AnyValue::DoubleValue(f64::INFINITY));
+        mixed_attributes.insert(
+            "double_infinity".to_string(),
+            AnyValue::DoubleValue(f64::INFINITY),
+        );
         mixed_attributes.insert("double_nan".to_string(), AnyValue::DoubleValue(f64::NAN));
 
         let mixed_span = SpanData {
@@ -41175,11 +42518,19 @@ mod otlp_122_tests {
         let mixed_result = export_span_with_nan_validation(&mixed_span);
         match mixed_result {
             SpanExportResult::EntireSpanRejected { nan_attributes, .. } => {
-                assert_eq!(nan_attributes, vec!["double_nan"], "Should identify only the NaN attribute");
-                println!("✓ Mixed attribute types: entire span correctly rejected due to single NaN DoubleValue");
+                assert_eq!(
+                    nan_attributes,
+                    vec!["double_nan"],
+                    "Should identify only the NaN attribute"
+                );
+                println!(
+                    "✓ Mixed attribute types: entire span correctly rejected due to single NaN DoubleValue"
+                );
             }
             _ => {
-                panic!("Mixed attribute span should have been entirely rejected due to NaN DoubleValue");
+                panic!(
+                    "Mixed attribute span should have been entirely rejected due to NaN DoubleValue"
+                );
             }
         }
 
@@ -41208,9 +42559,18 @@ mod otlp_122_tests {
                 instrumentation_scope_name: "grpc.server".to_string(),
                 instrumentation_scope_version: Some("1.0.0".to_string()),
                 span_attributes: vec![
-                    ("rpc.method".to_string(), AnyValue::StringValue("/api/v1/GetUser".to_string())),
-                    ("rpc.service".to_string(), AnyValue::StringValue("UserService".to_string())),
-                    ("rpc.system".to_string(), AnyValue::StringValue("grpc".to_string())),
+                    (
+                        "rpc.method".to_string(),
+                        AnyValue::StringValue("/api/v1/GetUser".to_string()),
+                    ),
+                    (
+                        "rpc.service".to_string(),
+                        AnyValue::StringValue("UserService".to_string()),
+                    ),
+                    (
+                        "rpc.system".to_string(),
+                        AnyValue::StringValue("grpc".to_string()),
+                    ),
                     ("rpc.grpc.status_code".to_string(), AnyValue::IntValue(0)),
                 ],
                 should_be_valid: true,
@@ -41222,8 +42582,14 @@ mod otlp_122_tests {
                 instrumentation_scope_name: "grpc.server".to_string(),
                 instrumentation_scope_version: Some("1.0.0".to_string()),
                 span_attributes: vec![
-                    ("rpc.service".to_string(), AnyValue::StringValue("UserService".to_string())),
-                    ("rpc.system".to_string(), AnyValue::StringValue("grpc".to_string())),
+                    (
+                        "rpc.service".to_string(),
+                        AnyValue::StringValue("UserService".to_string()),
+                    ),
+                    (
+                        "rpc.system".to_string(),
+                        AnyValue::StringValue("grpc".to_string()),
+                    ),
                     ("rpc.grpc.status_code".to_string(), AnyValue::IntValue(0)),
                     // Missing rpc.method - should be invalid
                 ],
@@ -41236,9 +42602,18 @@ mod otlp_122_tests {
                 instrumentation_scope_name: "grpc.server".to_string(),
                 instrumentation_scope_version: Some("1.0.0".to_string()),
                 span_attributes: vec![
-                    ("rpc.method".to_string(), AnyValue::StringValue("".to_string())), // Empty method
-                    ("rpc.service".to_string(), AnyValue::StringValue("UserService".to_string())),
-                    ("rpc.system".to_string(), AnyValue::StringValue("grpc".to_string())),
+                    (
+                        "rpc.method".to_string(),
+                        AnyValue::StringValue("".to_string()),
+                    ), // Empty method
+                    (
+                        "rpc.service".to_string(),
+                        AnyValue::StringValue("UserService".to_string()),
+                    ),
+                    (
+                        "rpc.system".to_string(),
+                        AnyValue::StringValue("grpc".to_string()),
+                    ),
                 ],
                 should_be_valid: false,
                 expected_rpc_method: None,
@@ -41250,8 +42625,14 @@ mod otlp_122_tests {
                 instrumentation_scope_version: Some("1.0.0".to_string()),
                 span_attributes: vec![
                     ("rpc.method".to_string(), AnyValue::IntValue(42)), // Wrong type
-                    ("rpc.service".to_string(), AnyValue::StringValue("UserService".to_string())),
-                    ("rpc.system".to_string(), AnyValue::StringValue("grpc".to_string())),
+                    (
+                        "rpc.service".to_string(),
+                        AnyValue::StringValue("UserService".to_string()),
+                    ),
+                    (
+                        "rpc.system".to_string(),
+                        AnyValue::StringValue("grpc".to_string()),
+                    ),
                 ],
                 should_be_valid: false,
                 expected_rpc_method: None,
@@ -41262,8 +42643,14 @@ mod otlp_122_tests {
                 instrumentation_scope_name: "http.server".to_string(), // Not gRPC
                 instrumentation_scope_version: Some("1.0.0".to_string()),
                 span_attributes: vec![
-                    ("http.method".to_string(), AnyValue::StringValue("GET".to_string())),
-                    ("http.url".to_string(), AnyValue::StringValue("/api/users".to_string())),
+                    (
+                        "http.method".to_string(),
+                        AnyValue::StringValue("GET".to_string()),
+                    ),
+                    (
+                        "http.url".to_string(),
+                        AnyValue::StringValue("/api/users".to_string()),
+                    ),
                 ],
                 should_be_valid: true, // No rpc.method requirement for non-gRPC
                 expected_rpc_method: None,
@@ -41274,8 +42661,14 @@ mod otlp_122_tests {
                 instrumentation_scope_name: "grpc.server".to_string(),
                 instrumentation_scope_version: Some("1.0.0".to_string()),
                 span_attributes: vec![
-                    ("rpc.service".to_string(), AnyValue::StringValue("UserService".to_string())),
-                    ("rpc.system".to_string(), AnyValue::StringValue("grpc".to_string())),
+                    (
+                        "rpc.service".to_string(),
+                        AnyValue::StringValue("UserService".to_string()),
+                    ),
+                    (
+                        "rpc.system".to_string(),
+                        AnyValue::StringValue("grpc".to_string()),
+                    ),
                     // No rpc.method but it's client span, so OK
                 ],
                 should_be_valid: true, // No requirement for client spans
@@ -41287,11 +42680,25 @@ mod otlp_122_tests {
                 instrumentation_scope_name: "grpc.server".to_string(),
                 instrumentation_scope_version: Some("1.0.0".to_string()),
                 span_attributes: vec![
-                    ("rpc.method".to_string(), AnyValue::StringValue("/com.example.UserService/GetUserProfile".to_string())),
-                    ("rpc.service".to_string(), AnyValue::StringValue("com.example.UserService".to_string())),
-                    ("rpc.system".to_string(), AnyValue::StringValue("grpc".to_string())),
+                    (
+                        "rpc.method".to_string(),
+                        AnyValue::StringValue(
+                            "/com.example.UserService/GetUserProfile".to_string(),
+                        ),
+                    ),
+                    (
+                        "rpc.service".to_string(),
+                        AnyValue::StringValue("com.example.UserService".to_string()),
+                    ),
+                    (
+                        "rpc.system".to_string(),
+                        AnyValue::StringValue("grpc".to_string()),
+                    ),
                     ("rpc.grpc.status_code".to_string(), AnyValue::IntValue(0)),
-                    ("net.peer.ip".to_string(), AnyValue::StringValue("192.168.1.100".to_string())),
+                    (
+                        "net.peer.ip".to_string(),
+                        AnyValue::StringValue("192.168.1.100".to_string()),
+                    ),
                 ],
                 should_be_valid: true,
                 expected_rpc_method: Some("/com.example.UserService/GetUserProfile".to_string()),
@@ -41302,8 +42709,14 @@ mod otlp_122_tests {
                 instrumentation_scope_name: "GRPC.SERVER".to_string(), // Wrong case
                 instrumentation_scope_version: Some("1.0.0".to_string()),
                 span_attributes: vec![
-                    ("rpc.service".to_string(), AnyValue::StringValue("UserService".to_string())),
-                    ("rpc.system".to_string(), AnyValue::StringValue("grpc".to_string())),
+                    (
+                        "rpc.service".to_string(),
+                        AnyValue::StringValue("UserService".to_string()),
+                    ),
+                    (
+                        "rpc.system".to_string(),
+                        AnyValue::StringValue("grpc".to_string()),
+                    ),
                 ],
                 should_be_valid: true, // Not exact "grpc.server" so no requirement
                 expected_rpc_method: None,
@@ -41314,9 +42727,18 @@ mod otlp_122_tests {
                 instrumentation_scope_name: "grpc.server".to_string(),
                 instrumentation_scope_version: None, // No version specified
                 span_attributes: vec![
-                    ("rpc.method".to_string(), AnyValue::StringValue("/health/check".to_string())),
-                    ("rpc.service".to_string(), AnyValue::StringValue("HealthService".to_string())),
-                    ("rpc.system".to_string(), AnyValue::StringValue("grpc".to_string())),
+                    (
+                        "rpc.method".to_string(),
+                        AnyValue::StringValue("/health/check".to_string()),
+                    ),
+                    (
+                        "rpc.service".to_string(),
+                        AnyValue::StringValue("HealthService".to_string()),
+                    ),
+                    (
+                        "rpc.system".to_string(),
+                        AnyValue::StringValue("grpc".to_string()),
+                    ),
                 ],
                 should_be_valid: true,
                 expected_rpc_method: Some("/health/check".to_string()),
@@ -41327,13 +42749,31 @@ mod otlp_122_tests {
                 instrumentation_scope_name: "grpc.server".to_string(),
                 instrumentation_scope_version: Some("2.1.0".to_string()),
                 span_attributes: vec![
-                    ("rpc.method".to_string(), AnyValue::StringValue("/api/v2/UpdateUser".to_string())),
-                    ("rpc.service".to_string(), AnyValue::StringValue("UserService".to_string())),
-                    ("rpc.system".to_string(), AnyValue::StringValue("grpc".to_string())),
+                    (
+                        "rpc.method".to_string(),
+                        AnyValue::StringValue("/api/v2/UpdateUser".to_string()),
+                    ),
+                    (
+                        "rpc.service".to_string(),
+                        AnyValue::StringValue("UserService".to_string()),
+                    ),
+                    (
+                        "rpc.system".to_string(),
+                        AnyValue::StringValue("grpc".to_string()),
+                    ),
                     ("rpc.grpc.status_code".to_string(), AnyValue::IntValue(0)),
-                    ("custom.trace.id".to_string(), AnyValue::StringValue("trace-12345".to_string())),
-                    ("net.transport".to_string(), AnyValue::StringValue("tcp".to_string())),
-                    ("user.id".to_string(), AnyValue::StringValue("user-67890".to_string())),
+                    (
+                        "custom.trace.id".to_string(),
+                        AnyValue::StringValue("trace-12345".to_string()),
+                    ),
+                    (
+                        "net.transport".to_string(),
+                        AnyValue::StringValue("tcp".to_string()),
+                    ),
+                    (
+                        "user.id".to_string(),
+                        AnyValue::StringValue("user-67890".to_string()),
+                    ),
                 ],
                 should_be_valid: true,
                 expected_rpc_method: Some("/api/v2/UpdateUser".to_string()),
@@ -41428,7 +42868,10 @@ mod otlp_122_tests {
                     if let Some(expected_method) = &scenario.expected_rpc_method {
                         match rpc_method {
                             Some(actual_method) if actual_method == expected_method => {
-                                println!("✓ gRPC server span has correct rpc.method: '{}'", actual_method);
+                                println!(
+                                    "✓ gRPC server span has correct rpc.method: '{}'",
+                                    actual_method
+                                );
                             }
                             Some(actual_method) => {
                                 return Err(format!(
@@ -41446,7 +42889,9 @@ mod otlp_122_tests {
                     } else {
                         // No expected method - ensure none present when not required
                         if rpc_method.is_some() && requires_rpc_method(&span_data) {
-                            return Err("Unexpected rpc.method found when none expected".to_string());
+                            return Err(
+                                "Unexpected rpc.method found when none expected".to_string()
+                            );
                         }
                     }
                 }
@@ -41460,7 +42905,10 @@ mod otlp_122_tests {
                     return Err("Invalid span was incorrectly accepted".to_string());
                 }
                 (GrpcServerValidationResult::Invalid { violation, .. }, true) => {
-                    return Err(format!("Valid span was incorrectly rejected: {}", violation));
+                    return Err(format!(
+                        "Valid span was incorrectly rejected: {}",
+                        violation
+                    ));
                 }
                 (GrpcServerValidationResult::NotApplicable { .. }, false) => {
                     return Err("Expected validation failure but got not applicable".to_string());
@@ -41501,7 +42949,9 @@ mod otlp_122_tests {
                 }
                 None => {
                     return GrpcServerValidationResult::Invalid {
-                        violation: "OTLP-142: gRPC server span missing required rpc.method attribute".to_string(),
+                        violation:
+                            "OTLP-142: gRPC server span missing required rpc.method attribute"
+                                .to_string(),
                         missing_attributes: vec!["rpc.method".to_string()],
                     };
                 }
@@ -41561,7 +43011,10 @@ mod otlp_122_tests {
             match validate_grpc_server_rpc_method_conformance(scenario) {
                 Ok(()) => {
                     passed_scenarios += 1;
-                    println!("✓ OTLP-142 conformance verified for {}", scenario.description);
+                    println!(
+                        "✓ OTLP-142 conformance verified for {}",
+                        scenario.description
+                    );
                 }
                 Err(error_msg) => {
                     panic!(
@@ -41582,18 +43035,24 @@ mod otlp_122_tests {
 
         // Test with exactly "grpc.server" scope (case sensitive)
         let edge_cases = vec![
-            ("grpc.server", true),      // Exact match - requires rpc.method
-            ("grpc.Server", false),     // Wrong case - no requirement
-            ("grpc.server.v2", false),  // Suffix - no requirement
-            ("my.grpc.server", false),  // Prefix - no requirement
+            ("grpc.server", true),     // Exact match - requires rpc.method
+            ("grpc.Server", false),    // Wrong case - no requirement
+            ("grpc.server.v2", false), // Suffix - no requirement
+            ("my.grpc.server", false), // Prefix - no requirement
         ];
 
         for (scope_name, should_require) in edge_cases {
             let mut test_attributes = HashMap::new();
-            test_attributes.insert("rpc.service".to_string(), AnyValue::StringValue("TestService".to_string()));
+            test_attributes.insert(
+                "rpc.service".to_string(),
+                AnyValue::StringValue("TestService".to_string()),
+            );
 
             if should_require {
-                test_attributes.insert("rpc.method".to_string(), AnyValue::StringValue("/test/method".to_string()));
+                test_attributes.insert(
+                    "rpc.method".to_string(),
+                    AnyValue::StringValue("/test/method".to_string()),
+                );
             }
 
             let edge_span = GrpcSpanData {
@@ -41617,15 +43076,25 @@ mod otlp_122_tests {
             if should_require {
                 match validate_grpc_server_rpc_method(&edge_span) {
                     GrpcServerValidationResult::Valid { rpc_method, .. } => {
-                        assert!(rpc_method.is_some(), "Should have rpc.method for scope '{}'", scope_name);
-                        println!("✓ Edge case '{}' correctly requires and validates rpc.method", scope_name);
+                        assert!(
+                            rpc_method.is_some(),
+                            "Should have rpc.method for scope '{}'",
+                            scope_name
+                        );
+                        println!(
+                            "✓ Edge case '{}' correctly requires and validates rpc.method",
+                            scope_name
+                        );
                     }
                     _ => panic!("Edge case '{}' should be valid with rpc.method", scope_name),
                 }
             } else {
                 match validate_grpc_server_rpc_method(&edge_span) {
                     GrpcServerValidationResult::NotApplicable { .. } => {
-                        println!("✓ Edge case '{}' correctly identified as not applicable", scope_name);
+                        println!(
+                            "✓ Edge case '{}' correctly identified as not applicable",
+                            scope_name
+                        );
                     }
                     _ => panic!("Edge case '{}' should not require rpc.method", scope_name),
                 }
@@ -41649,7 +43118,9 @@ mod otlp_122_tests {
     /// in distributed tracing scenarios.
     #[test]
     fn otlp_143_grpc_client_rpc_service_method_conformance() {
-        println!("Testing OTLP-143: gRPC client instrumentation scope RPC service and method requirement...");
+        println!(
+            "Testing OTLP-143: gRPC client instrumentation scope RPC service and method requirement..."
+        );
 
         let test_scenarios = vec![
             GrpcClientRpcAttributesScenario {
@@ -41658,11 +43129,23 @@ mod otlp_122_tests {
                 instrumentation_scope_name: "grpc.client".to_string(),
                 instrumentation_scope_version: Some("1.0.0".to_string()),
                 span_attributes: vec![
-                    ("rpc.service".to_string(), AnyValue::StringValue("UserService".to_string())),
-                    ("rpc.method".to_string(), AnyValue::StringValue("/api/v1/GetUser".to_string())),
-                    ("rpc.system".to_string(), AnyValue::StringValue("grpc".to_string())),
+                    (
+                        "rpc.service".to_string(),
+                        AnyValue::StringValue("UserService".to_string()),
+                    ),
+                    (
+                        "rpc.method".to_string(),
+                        AnyValue::StringValue("/api/v1/GetUser".to_string()),
+                    ),
+                    (
+                        "rpc.system".to_string(),
+                        AnyValue::StringValue("grpc".to_string()),
+                    ),
                     ("rpc.grpc.status_code".to_string(), AnyValue::IntValue(0)),
-                    ("net.peer.name".to_string(), AnyValue::StringValue("api.example.com".to_string())),
+                    (
+                        "net.peer.name".to_string(),
+                        AnyValue::StringValue("api.example.com".to_string()),
+                    ),
                 ],
                 should_be_valid: true,
                 expected_rpc_service: Some("UserService".to_string()),
@@ -41674,8 +43157,14 @@ mod otlp_122_tests {
                 instrumentation_scope_name: "grpc.client".to_string(),
                 instrumentation_scope_version: Some("1.0.0".to_string()),
                 span_attributes: vec![
-                    ("rpc.method".to_string(), AnyValue::StringValue("/api/v1/GetUser".to_string())),
-                    ("rpc.system".to_string(), AnyValue::StringValue("grpc".to_string())),
+                    (
+                        "rpc.method".to_string(),
+                        AnyValue::StringValue("/api/v1/GetUser".to_string()),
+                    ),
+                    (
+                        "rpc.system".to_string(),
+                        AnyValue::StringValue("grpc".to_string()),
+                    ),
                     // Missing rpc.service - should be invalid
                 ],
                 should_be_valid: false,
@@ -41688,8 +43177,14 @@ mod otlp_122_tests {
                 instrumentation_scope_name: "grpc.client".to_string(),
                 instrumentation_scope_version: Some("1.0.0".to_string()),
                 span_attributes: vec![
-                    ("rpc.service".to_string(), AnyValue::StringValue("UserService".to_string())),
-                    ("rpc.system".to_string(), AnyValue::StringValue("grpc".to_string())),
+                    (
+                        "rpc.service".to_string(),
+                        AnyValue::StringValue("UserService".to_string()),
+                    ),
+                    (
+                        "rpc.system".to_string(),
+                        AnyValue::StringValue("grpc".to_string()),
+                    ),
                     // Missing rpc.method - should be invalid
                 ],
                 should_be_valid: false,
@@ -41702,8 +43197,14 @@ mod otlp_122_tests {
                 instrumentation_scope_name: "grpc.client".to_string(),
                 instrumentation_scope_version: Some("1.0.0".to_string()),
                 span_attributes: vec![
-                    ("rpc.system".to_string(), AnyValue::StringValue("grpc".to_string())),
-                    ("net.peer.name".to_string(), AnyValue::StringValue("api.example.com".to_string())),
+                    (
+                        "rpc.system".to_string(),
+                        AnyValue::StringValue("grpc".to_string()),
+                    ),
+                    (
+                        "net.peer.name".to_string(),
+                        AnyValue::StringValue("api.example.com".to_string()),
+                    ),
                     // Missing both rpc.service and rpc.method - should be invalid
                 ],
                 should_be_valid: false,
@@ -41716,9 +43217,18 @@ mod otlp_122_tests {
                 instrumentation_scope_name: "grpc.client".to_string(),
                 instrumentation_scope_version: Some("1.0.0".to_string()),
                 span_attributes: vec![
-                    ("rpc.service".to_string(), AnyValue::StringValue("".to_string())), // Empty service
-                    ("rpc.method".to_string(), AnyValue::StringValue("/api/v1/GetUser".to_string())),
-                    ("rpc.system".to_string(), AnyValue::StringValue("grpc".to_string())),
+                    (
+                        "rpc.service".to_string(),
+                        AnyValue::StringValue("".to_string()),
+                    ), // Empty service
+                    (
+                        "rpc.method".to_string(),
+                        AnyValue::StringValue("/api/v1/GetUser".to_string()),
+                    ),
+                    (
+                        "rpc.system".to_string(),
+                        AnyValue::StringValue("grpc".to_string()),
+                    ),
                 ],
                 should_be_valid: false,
                 expected_rpc_service: None,
@@ -41730,9 +43240,18 @@ mod otlp_122_tests {
                 instrumentation_scope_name: "grpc.client".to_string(),
                 instrumentation_scope_version: Some("1.0.0".to_string()),
                 span_attributes: vec![
-                    ("rpc.service".to_string(), AnyValue::StringValue("UserService".to_string())),
-                    ("rpc.method".to_string(), AnyValue::StringValue("".to_string())), // Empty method
-                    ("rpc.system".to_string(), AnyValue::StringValue("grpc".to_string())),
+                    (
+                        "rpc.service".to_string(),
+                        AnyValue::StringValue("UserService".to_string()),
+                    ),
+                    (
+                        "rpc.method".to_string(),
+                        AnyValue::StringValue("".to_string()),
+                    ), // Empty method
+                    (
+                        "rpc.system".to_string(),
+                        AnyValue::StringValue("grpc".to_string()),
+                    ),
                 ],
                 should_be_valid: false,
                 expected_rpc_service: Some("UserService".to_string()),
@@ -41745,8 +43264,14 @@ mod otlp_122_tests {
                 instrumentation_scope_version: Some("1.0.0".to_string()),
                 span_attributes: vec![
                     ("rpc.service".to_string(), AnyValue::IntValue(42)), // Wrong type
-                    ("rpc.method".to_string(), AnyValue::StringValue("/api/v1/GetUser".to_string())),
-                    ("rpc.system".to_string(), AnyValue::StringValue("grpc".to_string())),
+                    (
+                        "rpc.method".to_string(),
+                        AnyValue::StringValue("/api/v1/GetUser".to_string()),
+                    ),
+                    (
+                        "rpc.system".to_string(),
+                        AnyValue::StringValue("grpc".to_string()),
+                    ),
                 ],
                 should_be_valid: false,
                 expected_rpc_service: None,
@@ -41758,9 +43283,15 @@ mod otlp_122_tests {
                 instrumentation_scope_name: "grpc.client".to_string(),
                 instrumentation_scope_version: Some("1.0.0".to_string()),
                 span_attributes: vec![
-                    ("rpc.service".to_string(), AnyValue::StringValue("UserService".to_string())),
+                    (
+                        "rpc.service".to_string(),
+                        AnyValue::StringValue("UserService".to_string()),
+                    ),
                     ("rpc.method".to_string(), AnyValue::BoolValue(true)), // Wrong type
-                    ("rpc.system".to_string(), AnyValue::StringValue("grpc".to_string())),
+                    (
+                        "rpc.system".to_string(),
+                        AnyValue::StringValue("grpc".to_string()),
+                    ),
                 ],
                 should_be_valid: false,
                 expected_rpc_service: Some("UserService".to_string()),
@@ -41772,8 +43303,14 @@ mod otlp_122_tests {
                 instrumentation_scope_name: "http.client".to_string(), // Not gRPC
                 instrumentation_scope_version: Some("1.0.0".to_string()),
                 span_attributes: vec![
-                    ("http.method".to_string(), AnyValue::StringValue("GET".to_string())),
-                    ("http.url".to_string(), AnyValue::StringValue("https://api.example.com/users".to_string())),
+                    (
+                        "http.method".to_string(),
+                        AnyValue::StringValue("GET".to_string()),
+                    ),
+                    (
+                        "http.url".to_string(),
+                        AnyValue::StringValue("https://api.example.com/users".to_string()),
+                    ),
                 ],
                 should_be_valid: true, // No rpc.* requirement for non-gRPC
                 expected_rpc_service: None,
@@ -41785,7 +43322,10 @@ mod otlp_122_tests {
                 instrumentation_scope_name: "grpc.client".to_string(),
                 instrumentation_scope_version: Some("1.0.0".to_string()),
                 span_attributes: vec![
-                    ("http.method".to_string(), AnyValue::StringValue("POST".to_string())),
+                    (
+                        "http.method".to_string(),
+                        AnyValue::StringValue("POST".to_string()),
+                    ),
                     // No rpc.* attributes but it's server span, so OK
                 ],
                 should_be_valid: true, // No requirement for server spans
@@ -41798,26 +43338,46 @@ mod otlp_122_tests {
                 instrumentation_scope_name: "grpc.client".to_string(),
                 instrumentation_scope_version: Some("2.0.0".to_string()),
                 span_attributes: vec![
-                    ("rpc.service".to_string(), AnyValue::StringValue("com.example.user.UserService".to_string())),
-                    ("rpc.method".to_string(), AnyValue::StringValue("/com.example.user.UserService/GetUserProfile".to_string())),
-                    ("rpc.system".to_string(), AnyValue::StringValue("grpc".to_string())),
+                    (
+                        "rpc.service".to_string(),
+                        AnyValue::StringValue("com.example.user.UserService".to_string()),
+                    ),
+                    (
+                        "rpc.method".to_string(),
+                        AnyValue::StringValue(
+                            "/com.example.user.UserService/GetUserProfile".to_string(),
+                        ),
+                    ),
+                    (
+                        "rpc.system".to_string(),
+                        AnyValue::StringValue("grpc".to_string()),
+                    ),
                     ("rpc.grpc.status_code".to_string(), AnyValue::IntValue(0)),
-                    ("net.peer.ip".to_string(), AnyValue::StringValue("192.168.1.100".to_string())),
+                    (
+                        "net.peer.ip".to_string(),
+                        AnyValue::StringValue("192.168.1.100".to_string()),
+                    ),
                     ("net.peer.port".to_string(), AnyValue::IntValue(443)),
-                    ("user.id".to_string(), AnyValue::StringValue("user-12345".to_string())),
+                    (
+                        "user.id".to_string(),
+                        AnyValue::StringValue("user-12345".to_string()),
+                    ),
                 ],
                 should_be_valid: true,
                 expected_rpc_service: Some("com.example.user.UserService".to_string()),
-                expected_rpc_method: Some("/com.example.user.UserService/GetUserProfile".to_string()),
+                expected_rpc_method: Some(
+                    "/com.example.user.UserService/GetUserProfile".to_string(),
+                ),
             },
             GrpcClientRpcAttributesScenario {
                 description: "grpc_client_case_sensitive_scope_check".to_string(),
                 span_kind: SpanKind::Client,
                 instrumentation_scope_name: "GRPC.CLIENT".to_string(), // Wrong case
                 instrumentation_scope_version: Some("1.0.0".to_string()),
-                span_attributes: vec![
-                    ("http.method".to_string(), AnyValue::StringValue("POST".to_string())),
-                ],
+                span_attributes: vec![(
+                    "http.method".to_string(),
+                    AnyValue::StringValue("POST".to_string()),
+                )],
                 should_be_valid: true, // Not exact "grpc.client" so no requirement
                 expected_rpc_service: None,
                 expected_rpc_method: None,
@@ -41828,11 +43388,26 @@ mod otlp_122_tests {
                 instrumentation_scope_name: "grpc.client".to_string(),
                 instrumentation_scope_version: None, // No version specified
                 span_attributes: vec![
-                    ("rpc.service".to_string(), AnyValue::StringValue("StreamingService".to_string())),
-                    ("rpc.method".to_string(), AnyValue::StringValue("/streaming/GetUpdates".to_string())),
-                    ("rpc.system".to_string(), AnyValue::StringValue("grpc".to_string())),
-                    ("rpc.grpc.request.metadata.content-encoding".to_string(), AnyValue::StringValue("gzip".to_string())),
-                    ("rpc.grpc.response.metadata.content-encoding".to_string(), AnyValue::StringValue("gzip".to_string())),
+                    (
+                        "rpc.service".to_string(),
+                        AnyValue::StringValue("StreamingService".to_string()),
+                    ),
+                    (
+                        "rpc.method".to_string(),
+                        AnyValue::StringValue("/streaming/GetUpdates".to_string()),
+                    ),
+                    (
+                        "rpc.system".to_string(),
+                        AnyValue::StringValue("grpc".to_string()),
+                    ),
+                    (
+                        "rpc.grpc.request.metadata.content-encoding".to_string(),
+                        AnyValue::StringValue("gzip".to_string()),
+                    ),
+                    (
+                        "rpc.grpc.response.metadata.content-encoding".to_string(),
+                        AnyValue::StringValue("gzip".to_string()),
+                    ),
                     ("grpc.streaming".to_string(), AnyValue::BoolValue(true)),
                 ],
                 should_be_valid: true,
@@ -41844,9 +43419,10 @@ mod otlp_122_tests {
                 span_kind: SpanKind::Client,
                 instrumentation_scope_name: "grpc.client.interceptor".to_string(), // Has suffix
                 instrumentation_scope_version: Some("1.0.0".to_string()),
-                span_attributes: vec![
-                    ("interceptor.type".to_string(), AnyValue::StringValue("retry".to_string())),
-                ],
+                span_attributes: vec![(
+                    "interceptor.type".to_string(),
+                    AnyValue::StringValue("retry".to_string()),
+                )],
                 should_be_valid: true, // Not exact "grpc.client" so no requirement
                 expected_rpc_service: None,
                 expected_rpc_method: None,
@@ -41920,12 +43496,22 @@ mod otlp_122_tests {
             let validation_result = validate_grpc_client_rpc_attributes(&span_data);
 
             match (&validation_result, scenario.should_be_valid) {
-                (GrpcClientValidationResult::Valid { rpc_service, rpc_method, .. }, true) => {
+                (
+                    GrpcClientValidationResult::Valid {
+                        rpc_service,
+                        rpc_method,
+                        ..
+                    },
+                    true,
+                ) => {
                     // Verify expected RPC service matches
                     if let Some(expected_service) = &scenario.expected_rpc_service {
                         match rpc_service {
                             Some(actual_service) if actual_service == expected_service => {
-                                println!("✓ gRPC client span has correct rpc.service: '{}'", actual_service);
+                                println!(
+                                    "✓ gRPC client span has correct rpc.service: '{}'",
+                                    actual_service
+                                );
                             }
                             Some(actual_service) => {
                                 return Err(format!(
@@ -41946,7 +43532,10 @@ mod otlp_122_tests {
                     if let Some(expected_method) = &scenario.expected_rpc_method {
                         match rpc_method {
                             Some(actual_method) if actual_method == expected_method => {
-                                println!("✓ gRPC client span has correct rpc.method: '{}'", actual_method);
+                                println!(
+                                    "✓ gRPC client span has correct rpc.method: '{}'",
+                                    actual_method
+                                );
                             }
                             Some(actual_method) => {
                                 return Err(format!(
@@ -41964,11 +43553,17 @@ mod otlp_122_tests {
                     }
 
                     // Ensure no unexpected values when not required
-                    if scenario.expected_rpc_service.is_none() && rpc_service.is_some() && requires_rpc_service_method(&span_data) {
+                    if scenario.expected_rpc_service.is_none()
+                        && rpc_service.is_some()
+                        && requires_rpc_service_method(&span_data)
+                    {
                         return Err("Unexpected rpc.service found when none expected".to_string());
                     }
 
-                    if scenario.expected_rpc_method.is_none() && rpc_method.is_some() && requires_rpc_service_method(&span_data) {
+                    if scenario.expected_rpc_method.is_none()
+                        && rpc_method.is_some()
+                        && requires_rpc_service_method(&span_data)
+                    {
                         return Err("Unexpected rpc.method found when none expected".to_string());
                     }
                 }
@@ -41976,13 +43571,19 @@ mod otlp_122_tests {
                     println!("✓ Invalid gRPC client span correctly rejected");
                 }
                 (GrpcClientValidationResult::NotApplicable { reason }, true) => {
-                    println!("✓ RPC service/method requirement not applicable: {}", reason);
+                    println!(
+                        "✓ RPC service/method requirement not applicable: {}",
+                        reason
+                    );
                 }
                 (GrpcClientValidationResult::Valid { .. }, false) => {
                     return Err("Invalid span was incorrectly accepted".to_string());
                 }
                 (GrpcClientValidationResult::Invalid { violations, .. }, true) => {
-                    return Err(format!("Valid span was incorrectly rejected: {:?}", violations));
+                    return Err(format!(
+                        "Valid span was incorrectly rejected: {:?}",
+                        violations
+                    ));
                 }
                 (GrpcClientValidationResult::NotApplicable { .. }, false) => {
                     return Err("Expected validation failure but got not applicable".to_string());
@@ -41993,7 +43594,9 @@ mod otlp_122_tests {
         }
 
         /// Validates that gRPC client spans have required rpc.service and rpc.method attributes
-        fn validate_grpc_client_rpc_attributes(span_data: &GrpcClientSpanData) -> GrpcClientValidationResult {
+        fn validate_grpc_client_rpc_attributes(
+            span_data: &GrpcClientSpanData,
+        ) -> GrpcClientValidationResult {
             // Check if this span requires rpc.service and rpc.method attributes
             if !requires_rpc_service_method(span_data) {
                 return GrpcClientValidationResult::NotApplicable {
@@ -42023,7 +43626,10 @@ mod otlp_122_tests {
                     None
                 }
                 None => {
-                    violations.push("OTLP-143: gRPC client span missing required rpc.service attribute".to_string());
+                    violations.push(
+                        "OTLP-143: gRPC client span missing required rpc.service attribute"
+                            .to_string(),
+                    );
                     missing_attributes.push("rpc.service".to_string());
                     None
                 }
@@ -42045,7 +43651,10 @@ mod otlp_122_tests {
                     None
                 }
                 None => {
-                    violations.push("OTLP-143: gRPC client span missing required rpc.method attribute".to_string());
+                    violations.push(
+                        "OTLP-143: gRPC client span missing required rpc.method attribute"
+                            .to_string(),
+                    );
                     missing_attributes.push("rpc.method".to_string());
                     None
                 }
@@ -42090,7 +43699,10 @@ mod otlp_122_tests {
             // Verify rpc.system is set to "grpc" if present
             if let Some(AnyValue::StringValue(system)) = span_data.attributes.get("rpc.system") {
                 if system != "grpc" {
-                    println!("⚠ rpc.system should be 'grpc' for gRPC client spans, got: '{}'", system);
+                    println!(
+                        "⚠ rpc.system should be 'grpc' for gRPC client spans, got: '{}'",
+                        system
+                    );
                 }
             }
 
@@ -42123,7 +43735,10 @@ mod otlp_122_tests {
             match validate_grpc_client_rpc_attributes_conformance(scenario) {
                 Ok(()) => {
                     passed_scenarios += 1;
-                    println!("✓ OTLP-143 conformance verified for {}", scenario.description);
+                    println!(
+                        "✓ OTLP-143 conformance verified for {}",
+                        scenario.description
+                    );
                 }
                 Err(error_msg) => {
                     panic!(
@@ -42144,22 +43759,34 @@ mod otlp_122_tests {
 
         // Test with exactly "grpc.client" scope (case sensitive)
         let edge_cases = vec![
-            ("grpc.client", true),       // Exact match - requires both attributes
-            ("grpc.Client", false),      // Wrong case - no requirement
-            ("grpc.client.v2", false),   // Suffix - no requirement
-            ("my.grpc.client", false),   // Prefix - no requirement
-            ("grpc", false),             // Partial match - no requirement
+            ("grpc.client", true),     // Exact match - requires both attributes
+            ("grpc.Client", false),    // Wrong case - no requirement
+            ("grpc.client.v2", false), // Suffix - no requirement
+            ("my.grpc.client", false), // Prefix - no requirement
+            ("grpc", false),           // Partial match - no requirement
         ];
 
         for (scope_name, should_require) in edge_cases {
             let mut test_attributes = HashMap::new();
 
             if should_require {
-                test_attributes.insert("rpc.service".to_string(), AnyValue::StringValue("TestService".to_string()));
-                test_attributes.insert("rpc.method".to_string(), AnyValue::StringValue("/test/method".to_string()));
-                test_attributes.insert("rpc.system".to_string(), AnyValue::StringValue("grpc".to_string()));
+                test_attributes.insert(
+                    "rpc.service".to_string(),
+                    AnyValue::StringValue("TestService".to_string()),
+                );
+                test_attributes.insert(
+                    "rpc.method".to_string(),
+                    AnyValue::StringValue("/test/method".to_string()),
+                );
+                test_attributes.insert(
+                    "rpc.system".to_string(),
+                    AnyValue::StringValue("grpc".to_string()),
+                );
             } else {
-                test_attributes.insert("http.method".to_string(), AnyValue::StringValue("POST".to_string()));
+                test_attributes.insert(
+                    "http.method".to_string(),
+                    AnyValue::StringValue("POST".to_string()),
+                );
             }
 
             let edge_span = GrpcClientSpanData {
@@ -42182,19 +43809,38 @@ mod otlp_122_tests {
 
             if should_require {
                 match validate_grpc_client_rpc_attributes(&edge_span) {
-                    GrpcClientValidationResult::Valid { rpc_service, rpc_method, .. } => {
-                        assert!(rpc_service.is_some() && rpc_method.is_some(),
-                               "Should have both rpc.service and rpc.method for scope '{}'", scope_name);
-                        println!("✓ Edge case '{}' correctly requires and validates both attributes", scope_name);
+                    GrpcClientValidationResult::Valid {
+                        rpc_service,
+                        rpc_method,
+                        ..
+                    } => {
+                        assert!(
+                            rpc_service.is_some() && rpc_method.is_some(),
+                            "Should have both rpc.service and rpc.method for scope '{}'",
+                            scope_name
+                        );
+                        println!(
+                            "✓ Edge case '{}' correctly requires and validates both attributes",
+                            scope_name
+                        );
                     }
-                    _ => panic!("Edge case '{}' should be valid with both rpc.service and rpc.method", scope_name),
+                    _ => panic!(
+                        "Edge case '{}' should be valid with both rpc.service and rpc.method",
+                        scope_name
+                    ),
                 }
             } else {
                 match validate_grpc_client_rpc_attributes(&edge_span) {
                     GrpcClientValidationResult::NotApplicable { .. } => {
-                        println!("✓ Edge case '{}' correctly identified as not applicable", scope_name);
+                        println!(
+                            "✓ Edge case '{}' correctly identified as not applicable",
+                            scope_name
+                        );
                     }
-                    _ => panic!("Edge case '{}' should not require rpc.service/rpc.method", scope_name),
+                    _ => panic!(
+                        "Edge case '{}' should not require rpc.service/rpc.method",
+                        scope_name
+                    ),
                 }
             }
         }
@@ -42204,19 +43850,33 @@ mod otlp_122_tests {
         let partial_tests = vec![
             ("only_service", Some("TestService"), None, false),
             ("only_method", None, Some("/test/method"), false),
-            ("both_present", Some("TestService"), Some("/test/method"), true),
+            (
+                "both_present",
+                Some("TestService"),
+                Some("/test/method"),
+                true,
+            ),
         ];
 
         for (test_name, service, method, should_be_valid) in partial_tests {
             let mut partial_attributes = HashMap::new();
-            partial_attributes.insert("rpc.system".to_string(), AnyValue::StringValue("grpc".to_string()));
+            partial_attributes.insert(
+                "rpc.system".to_string(),
+                AnyValue::StringValue("grpc".to_string()),
+            );
 
             if let Some(svc) = service {
-                partial_attributes.insert("rpc.service".to_string(), AnyValue::StringValue(svc.to_string()));
+                partial_attributes.insert(
+                    "rpc.service".to_string(),
+                    AnyValue::StringValue(svc.to_string()),
+                );
             }
 
             if let Some(mtd) = method {
-                partial_attributes.insert("rpc.method".to_string(), AnyValue::StringValue(mtd.to_string()));
+                partial_attributes.insert(
+                    "rpc.method".to_string(),
+                    AnyValue::StringValue(mtd.to_string()),
+                );
             }
 
             let partial_span = GrpcClientSpanData {
@@ -42239,12 +43899,17 @@ mod otlp_122_tests {
                 test_name, should_be_valid, is_valid
             );
 
-            println!("✓ Partial test '{}' correctly evaluated as {}",
-                    test_name, if is_valid { "valid" } else { "invalid" });
+            println!(
+                "✓ Partial test '{}' correctly evaluated as {}",
+                test_name,
+                if is_valid { "valid" } else { "invalid" }
+            );
         }
 
         println!("✓ OTLP-143: gRPC client RPC service and method requirement conformance verified");
-        println!("  - CLIENT spans with 'grpc.client' scope require BOTH rpc.service AND rpc.method");
+        println!(
+            "  - CLIENT spans with 'grpc.client' scope require BOTH rpc.service AND rpc.method"
+        );
         println!("  - Non-gRPC client scopes exempt from requirement");
         println!("  - Server spans exempt from requirement");
         println!("  - Case-sensitive scope name matching enforced");
@@ -42270,11 +43935,26 @@ mod otlp_122_tests {
                 instrumentation_scope_name: "messaging.kafka".to_string(),
                 instrumentation_scope_version: Some("1.0.0".to_string()),
                 span_attributes: vec![
-                    ("messaging.kafka.message.partition".to_string(), AnyValue::IntValue(3)),
-                    ("messaging.system".to_string(), AnyValue::StringValue("kafka".to_string())),
-                    ("messaging.destination.name".to_string(), AnyValue::StringValue("user.events".to_string())),
-                    ("messaging.kafka.message.key".to_string(), AnyValue::StringValue("user-12345".to_string())),
-                    ("messaging.kafka.message.offset".to_string(), AnyValue::IntValue(98765)),
+                    (
+                        "messaging.kafka.message.partition".to_string(),
+                        AnyValue::IntValue(3),
+                    ),
+                    (
+                        "messaging.system".to_string(),
+                        AnyValue::StringValue("kafka".to_string()),
+                    ),
+                    (
+                        "messaging.destination.name".to_string(),
+                        AnyValue::StringValue("user.events".to_string()),
+                    ),
+                    (
+                        "messaging.kafka.message.key".to_string(),
+                        AnyValue::StringValue("user-12345".to_string()),
+                    ),
+                    (
+                        "messaging.kafka.message.offset".to_string(),
+                        AnyValue::IntValue(98765),
+                    ),
                 ],
                 partition_is_known: true,
                 should_be_valid: true,
@@ -42286,9 +43966,18 @@ mod otlp_122_tests {
                 instrumentation_scope_name: "messaging.kafka".to_string(),
                 instrumentation_scope_version: Some("1.0.0".to_string()),
                 span_attributes: vec![
-                    ("messaging.system".to_string(), AnyValue::StringValue("kafka".to_string())),
-                    ("messaging.destination.name".to_string(), AnyValue::StringValue("user.events".to_string())),
-                    ("messaging.kafka.message.key".to_string(), AnyValue::StringValue("user-12345".to_string())),
+                    (
+                        "messaging.system".to_string(),
+                        AnyValue::StringValue("kafka".to_string()),
+                    ),
+                    (
+                        "messaging.destination.name".to_string(),
+                        AnyValue::StringValue("user.events".to_string()),
+                    ),
+                    (
+                        "messaging.kafka.message.key".to_string(),
+                        AnyValue::StringValue("user-12345".to_string()),
+                    ),
                     // Missing messaging.kafka.message.partition when partition is known - should be invalid
                 ],
                 partition_is_known: true,
@@ -42301,9 +43990,18 @@ mod otlp_122_tests {
                 instrumentation_scope_name: "messaging.kafka".to_string(),
                 instrumentation_scope_version: Some("1.0.0".to_string()),
                 span_attributes: vec![
-                    ("messaging.system".to_string(), AnyValue::StringValue("kafka".to_string())),
-                    ("messaging.destination.name".to_string(), AnyValue::StringValue("user.events".to_string())),
-                    ("messaging.kafka.message.key".to_string(), AnyValue::StringValue("user-12345".to_string())),
+                    (
+                        "messaging.system".to_string(),
+                        AnyValue::StringValue("kafka".to_string()),
+                    ),
+                    (
+                        "messaging.destination.name".to_string(),
+                        AnyValue::StringValue("user.events".to_string()),
+                    ),
+                    (
+                        "messaging.kafka.message.key".to_string(),
+                        AnyValue::StringValue("user-12345".to_string()),
+                    ),
                     // No partition attribute when partition is unknown - should be valid
                 ],
                 partition_is_known: false,
@@ -42316,9 +44014,18 @@ mod otlp_122_tests {
                 instrumentation_scope_name: "messaging.kafka".to_string(),
                 instrumentation_scope_version: Some("1.0.0".to_string()),
                 span_attributes: vec![
-                    ("messaging.kafka.message.partition".to_string(), AnyValue::StringValue("3".to_string())), // Wrong type
-                    ("messaging.system".to_string(), AnyValue::StringValue("kafka".to_string())),
-                    ("messaging.destination.name".to_string(), AnyValue::StringValue("user.events".to_string())),
+                    (
+                        "messaging.kafka.message.partition".to_string(),
+                        AnyValue::StringValue("3".to_string()),
+                    ), // Wrong type
+                    (
+                        "messaging.system".to_string(),
+                        AnyValue::StringValue("kafka".to_string()),
+                    ),
+                    (
+                        "messaging.destination.name".to_string(),
+                        AnyValue::StringValue("user.events".to_string()),
+                    ),
                 ],
                 partition_is_known: true,
                 should_be_valid: false,
@@ -42330,9 +44037,18 @@ mod otlp_122_tests {
                 instrumentation_scope_name: "messaging.kafka".to_string(),
                 instrumentation_scope_version: Some("1.0.0".to_string()),
                 span_attributes: vec![
-                    ("messaging.kafka.message.partition".to_string(), AnyValue::IntValue(-1)), // Negative partition
-                    ("messaging.system".to_string(), AnyValue::StringValue("kafka".to_string())),
-                    ("messaging.destination.name".to_string(), AnyValue::StringValue("user.events".to_string())),
+                    (
+                        "messaging.kafka.message.partition".to_string(),
+                        AnyValue::IntValue(-1),
+                    ), // Negative partition
+                    (
+                        "messaging.system".to_string(),
+                        AnyValue::StringValue("kafka".to_string()),
+                    ),
+                    (
+                        "messaging.destination.name".to_string(),
+                        AnyValue::StringValue("user.events".to_string()),
+                    ),
                 ],
                 partition_is_known: true,
                 should_be_valid: false,
@@ -42344,8 +44060,14 @@ mod otlp_122_tests {
                 instrumentation_scope_name: "messaging.rabbitmq".to_string(), // Not Kafka
                 instrumentation_scope_version: Some("1.0.0".to_string()),
                 span_attributes: vec![
-                    ("messaging.system".to_string(), AnyValue::StringValue("rabbitmq".to_string())),
-                    ("messaging.destination.name".to_string(), AnyValue::StringValue("user.events".to_string())),
+                    (
+                        "messaging.system".to_string(),
+                        AnyValue::StringValue("rabbitmq".to_string()),
+                    ),
+                    (
+                        "messaging.destination.name".to_string(),
+                        AnyValue::StringValue("user.events".to_string()),
+                    ),
                 ],
                 partition_is_known: true,
                 should_be_valid: true, // No partition requirement for non-Kafka
@@ -42357,8 +44079,14 @@ mod otlp_122_tests {
                 instrumentation_scope_name: "messaging.kafka".to_string(),
                 instrumentation_scope_version: Some("1.0.0".to_string()),
                 span_attributes: vec![
-                    ("messaging.system".to_string(), AnyValue::StringValue("kafka".to_string())),
-                    ("messaging.destination.name".to_string(), AnyValue::StringValue("user.events".to_string())),
+                    (
+                        "messaging.system".to_string(),
+                        AnyValue::StringValue("kafka".to_string()),
+                    ),
+                    (
+                        "messaging.destination.name".to_string(),
+                        AnyValue::StringValue("user.events".to_string()),
+                    ),
                     // No partition requirement for consumer spans
                 ],
                 partition_is_known: true,
@@ -42371,10 +44099,22 @@ mod otlp_122_tests {
                 instrumentation_scope_name: "messaging.kafka".to_string(),
                 instrumentation_scope_version: Some("1.0.0".to_string()),
                 span_attributes: vec![
-                    ("messaging.kafka.message.partition".to_string(), AnyValue::IntValue(0)), // Valid zero partition
-                    ("messaging.system".to_string(), AnyValue::StringValue("kafka".to_string())),
-                    ("messaging.destination.name".to_string(), AnyValue::StringValue("logs".to_string())),
-                    ("messaging.kafka.consumer.group".to_string(), AnyValue::StringValue("log-processors".to_string())),
+                    (
+                        "messaging.kafka.message.partition".to_string(),
+                        AnyValue::IntValue(0),
+                    ), // Valid zero partition
+                    (
+                        "messaging.system".to_string(),
+                        AnyValue::StringValue("kafka".to_string()),
+                    ),
+                    (
+                        "messaging.destination.name".to_string(),
+                        AnyValue::StringValue("logs".to_string()),
+                    ),
+                    (
+                        "messaging.kafka.consumer.group".to_string(),
+                        AnyValue::StringValue("log-processors".to_string()),
+                    ),
                 ],
                 partition_is_known: true,
                 should_be_valid: true,
@@ -42386,10 +44126,22 @@ mod otlp_122_tests {
                 instrumentation_scope_name: "messaging.kafka".to_string(),
                 instrumentation_scope_version: Some("1.0.0".to_string()),
                 span_attributes: vec![
-                    ("messaging.kafka.message.partition".to_string(), AnyValue::IntValue(4095)), // Large but valid
-                    ("messaging.system".to_string(), AnyValue::StringValue("kafka".to_string())),
-                    ("messaging.destination.name".to_string(), AnyValue::StringValue("high.volume.events".to_string())),
-                    ("messaging.kafka.message.key".to_string(), AnyValue::StringValue("event-999999".to_string())),
+                    (
+                        "messaging.kafka.message.partition".to_string(),
+                        AnyValue::IntValue(4095),
+                    ), // Large but valid
+                    (
+                        "messaging.system".to_string(),
+                        AnyValue::StringValue("kafka".to_string()),
+                    ),
+                    (
+                        "messaging.destination.name".to_string(),
+                        AnyValue::StringValue("high.volume.events".to_string()),
+                    ),
+                    (
+                        "messaging.kafka.message.key".to_string(),
+                        AnyValue::StringValue("event-999999".to_string()),
+                    ),
                 ],
                 partition_is_known: true,
                 should_be_valid: true,
@@ -42401,8 +44153,14 @@ mod otlp_122_tests {
                 instrumentation_scope_name: "MESSAGING.KAFKA".to_string(), // Wrong case
                 instrumentation_scope_version: Some("1.0.0".to_string()),
                 span_attributes: vec![
-                    ("messaging.system".to_string(), AnyValue::StringValue("kafka".to_string())),
-                    ("messaging.destination.name".to_string(), AnyValue::StringValue("events".to_string())),
+                    (
+                        "messaging.system".to_string(),
+                        AnyValue::StringValue("kafka".to_string()),
+                    ),
+                    (
+                        "messaging.destination.name".to_string(),
+                        AnyValue::StringValue("events".to_string()),
+                    ),
                 ],
                 partition_is_known: true,
                 should_be_valid: true, // Not exact "messaging.kafka" so no requirement
@@ -42414,15 +44172,42 @@ mod otlp_122_tests {
                 instrumentation_scope_name: "messaging.kafka".to_string(),
                 instrumentation_scope_version: Some("2.1.0".to_string()),
                 span_attributes: vec![
-                    ("messaging.kafka.message.partition".to_string(), AnyValue::IntValue(7)),
-                    ("messaging.system".to_string(), AnyValue::StringValue("kafka".to_string())),
-                    ("messaging.destination.name".to_string(), AnyValue::StringValue("transaction.events".to_string())),
-                    ("messaging.kafka.message.key".to_string(), AnyValue::StringValue("txn-abc123".to_string())),
-                    ("messaging.kafka.message.offset".to_string(), AnyValue::IntValue(123456789)),
-                    ("messaging.kafka.consumer.group".to_string(), AnyValue::StringValue("transaction-processors".to_string())),
-                    ("messaging.kafka.client_id".to_string(), AnyValue::StringValue("producer-01".to_string())),
-                    ("messaging.kafka.destination.partition_count".to_string(), AnyValue::IntValue(16)),
-                    ("net.peer.name".to_string(), AnyValue::StringValue("kafka.example.com".to_string())),
+                    (
+                        "messaging.kafka.message.partition".to_string(),
+                        AnyValue::IntValue(7),
+                    ),
+                    (
+                        "messaging.system".to_string(),
+                        AnyValue::StringValue("kafka".to_string()),
+                    ),
+                    (
+                        "messaging.destination.name".to_string(),
+                        AnyValue::StringValue("transaction.events".to_string()),
+                    ),
+                    (
+                        "messaging.kafka.message.key".to_string(),
+                        AnyValue::StringValue("txn-abc123".to_string()),
+                    ),
+                    (
+                        "messaging.kafka.message.offset".to_string(),
+                        AnyValue::IntValue(123456789),
+                    ),
+                    (
+                        "messaging.kafka.consumer.group".to_string(),
+                        AnyValue::StringValue("transaction-processors".to_string()),
+                    ),
+                    (
+                        "messaging.kafka.client_id".to_string(),
+                        AnyValue::StringValue("producer-01".to_string()),
+                    ),
+                    (
+                        "messaging.kafka.destination.partition_count".to_string(),
+                        AnyValue::IntValue(16),
+                    ),
+                    (
+                        "net.peer.name".to_string(),
+                        AnyValue::StringValue("kafka.example.com".to_string()),
+                    ),
                     ("net.peer.port".to_string(), AnyValue::IntValue(9092)),
                 ],
                 partition_is_known: true,
@@ -42435,8 +44220,14 @@ mod otlp_122_tests {
                 instrumentation_scope_name: "messaging.kafka.producer".to_string(), // Has suffix
                 instrumentation_scope_version: Some("1.0.0".to_string()),
                 span_attributes: vec![
-                    ("messaging.system".to_string(), AnyValue::StringValue("kafka".to_string())),
-                    ("producer.type".to_string(), AnyValue::StringValue("async".to_string())),
+                    (
+                        "messaging.system".to_string(),
+                        AnyValue::StringValue("kafka".to_string()),
+                    ),
+                    (
+                        "producer.type".to_string(),
+                        AnyValue::StringValue("async".to_string()),
+                    ),
                 ],
                 partition_is_known: true,
                 should_be_valid: true, // Not exact "messaging.kafka" so no requirement
@@ -42448,9 +44239,18 @@ mod otlp_122_tests {
                 instrumentation_scope_name: "messaging.kafka".to_string(),
                 instrumentation_scope_version: None, // No version
                 span_attributes: vec![
-                    ("messaging.kafka.message.partition".to_string(), AnyValue::IntValue(5)),
-                    ("messaging.system".to_string(), AnyValue::StringValue("kafka".to_string())),
-                    ("messaging.destination.name".to_string(), AnyValue::StringValue("events".to_string())),
+                    (
+                        "messaging.kafka.message.partition".to_string(),
+                        AnyValue::IntValue(5),
+                    ),
+                    (
+                        "messaging.system".to_string(),
+                        AnyValue::StringValue("kafka".to_string()),
+                    ),
+                    (
+                        "messaging.destination.name".to_string(),
+                        AnyValue::StringValue("events".to_string()),
+                    ),
                 ],
                 partition_is_known: false, // Partition unknown but attribute present (valid)
                 should_be_valid: true,
@@ -42531,7 +44331,10 @@ mod otlp_122_tests {
                     if let Some(expected_partition) = scenario.expected_partition {
                         match partition {
                             Some(actual_partition) if *actual_partition == expected_partition => {
-                                println!("✓ Kafka producer span has correct partition: {}", actual_partition);
+                                println!(
+                                    "✓ Kafka producer span has correct partition: {}",
+                                    actual_partition
+                                );
                             }
                             Some(actual_partition) => {
                                 return Err(format!(
@@ -42548,7 +44351,10 @@ mod otlp_122_tests {
                         }
                     } else {
                         // No expected partition - ensure none present when not required
-                        if partition.is_some() && requires_partition_if_known(&span_data) && span_data.partition_is_known {
+                        if partition.is_some()
+                            && requires_partition_if_known(&span_data)
+                            && span_data.partition_is_known
+                        {
                             return Err("Unexpected partition found when none expected".to_string());
                         }
                     }
@@ -42563,7 +44369,10 @@ mod otlp_122_tests {
                     return Err("Invalid span was incorrectly accepted".to_string());
                 }
                 (KafkaProducerValidationResult::Invalid { violations, .. }, true) => {
-                    return Err(format!("Valid span was incorrectly rejected: {:?}", violations));
+                    return Err(format!(
+                        "Valid span was incorrectly rejected: {:?}",
+                        violations
+                    ));
                 }
                 (KafkaProducerValidationResult::NotApplicable { .. }, false) => {
                     return Err("Expected validation failure but got not applicable".to_string());
@@ -42574,7 +44383,9 @@ mod otlp_122_tests {
         }
 
         /// Validates that Kafka producer spans have required partition attribute when known
-        fn validate_kafka_producer_partition(span_data: &KafkaProducerSpanData) -> KafkaProducerValidationResult {
+        fn validate_kafka_producer_partition(
+            span_data: &KafkaProducerSpanData,
+        ) -> KafkaProducerValidationResult {
             // Check if this span requires partition attribute when known
             if !requires_partition_if_known(span_data) {
                 return KafkaProducerValidationResult::NotApplicable {
@@ -42589,16 +44400,25 @@ mod otlp_122_tests {
             let mut missing_attributes = Vec::new();
 
             // Extract and validate messaging.kafka.message.partition attribute
-            let partition = match span_data.attributes.get("messaging.kafka.message.partition") {
+            let partition = match span_data
+                .attributes
+                .get("messaging.kafka.message.partition")
+            {
                 Some(AnyValue::IntValue(partition_val)) if *partition_val >= 0 => {
                     Some(*partition_val)
                 }
                 Some(AnyValue::IntValue(partition_val)) if *partition_val < 0 => {
-                    violations.push(format!("messaging.kafka.message.partition must be non-negative, got: {}", partition_val));
+                    violations.push(format!(
+                        "messaging.kafka.message.partition must be non-negative, got: {}",
+                        partition_val
+                    ));
                     None
                 }
                 Some(_) => {
-                    violations.push("messaging.kafka.message.partition attribute must be an integer value".to_string());
+                    violations.push(
+                        "messaging.kafka.message.partition attribute must be an integer value"
+                            .to_string(),
+                    );
                     None
                 }
                 None => {
@@ -42613,7 +44433,10 @@ mod otlp_122_tests {
             // Validate partition bounds (Kafka partitions are typically bounded)
             if let Some(partition_val) = partition {
                 if partition_val > 100_000 {
-                    println!("⚠ Unusually large partition number: {} (typical max ~10,000)", partition_val);
+                    println!(
+                        "⚠ Unusually large partition number: {} (typical max ~10,000)",
+                        partition_val
+                    );
                 }
             }
 
@@ -42622,7 +44445,7 @@ mod otlp_122_tests {
                 "messaging.system",
                 "messaging.destination.name",
                 "messaging.kafka.message.key",
-                "messaging.kafka.message.offset"
+                "messaging.kafka.message.offset",
             ];
 
             let mut kafka_attrs_present = 0;
@@ -42635,22 +44458,36 @@ mod otlp_122_tests {
             }
 
             // Verify messaging.system is set to "kafka" if present
-            if let Some(AnyValue::StringValue(system)) = span_data.attributes.get("messaging.system") {
+            if let Some(AnyValue::StringValue(system)) =
+                span_data.attributes.get("messaging.system")
+            {
                 if system != "kafka" {
-                    violations.push(format!("messaging.system should be 'kafka' for Kafka producer spans, got: '{}'", system));
+                    violations.push(format!(
+                        "messaging.system should be 'kafka' for Kafka producer spans, got: '{}'",
+                        system
+                    ));
                 }
             }
 
             // Additional Kafka-specific validations
-            if let Some(AnyValue::StringValue(dest_name)) = span_data.attributes.get("messaging.destination.name") {
+            if let Some(AnyValue::StringValue(dest_name)) =
+                span_data.attributes.get("messaging.destination.name")
+            {
                 if dest_name.is_empty() {
-                    violations.push("messaging.destination.name should not be empty for Kafka spans".to_string());
+                    violations.push(
+                        "messaging.destination.name should not be empty for Kafka spans"
+                            .to_string(),
+                    );
                 }
             }
 
             // Check for invalid partition count relationship
-            if let (Some(partition_val), Some(AnyValue::IntValue(partition_count))) =
-                (partition, span_data.attributes.get("messaging.kafka.destination.partition_count")) {
+            if let (Some(partition_val), Some(AnyValue::IntValue(partition_count))) = (
+                partition,
+                span_data
+                    .attributes
+                    .get("messaging.kafka.destination.partition_count"),
+            ) {
                 if partition_val >= *partition_count {
                     violations.push(format!(
                         "messaging.kafka.message.partition ({}) should be less than partition_count ({})",
@@ -42687,7 +44524,10 @@ mod otlp_122_tests {
             match validate_kafka_producer_partition_conformance(scenario) {
                 Ok(()) => {
                     passed_scenarios += 1;
-                    println!("✓ OTLP-144 conformance verified for {}", scenario.description);
+                    println!(
+                        "✓ OTLP-144 conformance verified for {}",
+                        scenario.description
+                    );
                 }
                 Err(error_msg) => {
                     panic!(
@@ -42708,20 +44548,29 @@ mod otlp_122_tests {
 
         // Test with exactly "messaging.kafka" scope (case sensitive)
         let edge_cases = vec![
-            ("messaging.kafka", true),       // Exact match - requires partition when known
-            ("messaging.Kafka", false),      // Wrong case - no requirement
+            ("messaging.kafka", true),  // Exact match - requires partition when known
+            ("messaging.Kafka", false), // Wrong case - no requirement
             ("messaging.kafka.producer", false), // Suffix - no requirement
-            ("my.messaging.kafka", false),   // Prefix - no requirement
-            ("kafka", false),                // Partial match - no requirement
+            ("my.messaging.kafka", false), // Prefix - no requirement
+            ("kafka", false),           // Partial match - no requirement
         ];
 
         for (scope_name, should_require) in edge_cases {
             let mut test_attributes = HashMap::new();
-            test_attributes.insert("messaging.system".to_string(), AnyValue::StringValue("kafka".to_string()));
-            test_attributes.insert("messaging.destination.name".to_string(), AnyValue::StringValue("test.topic".to_string()));
+            test_attributes.insert(
+                "messaging.system".to_string(),
+                AnyValue::StringValue("kafka".to_string()),
+            );
+            test_attributes.insert(
+                "messaging.destination.name".to_string(),
+                AnyValue::StringValue("test.topic".to_string()),
+            );
 
             if should_require {
-                test_attributes.insert("messaging.kafka.message.partition".to_string(), AnyValue::IntValue(1));
+                test_attributes.insert(
+                    "messaging.kafka.message.partition".to_string(),
+                    AnyValue::IntValue(1),
+                );
             }
 
             let edge_span = KafkaProducerSpanData {
@@ -42746,15 +44595,25 @@ mod otlp_122_tests {
             if should_require {
                 match validate_kafka_producer_partition(&edge_span) {
                     KafkaProducerValidationResult::Valid { partition, .. } => {
-                        assert!(partition.is_some(), "Should have partition for scope '{}'", scope_name);
-                        println!("✓ Edge case '{}' correctly requires and validates partition", scope_name);
+                        assert!(
+                            partition.is_some(),
+                            "Should have partition for scope '{}'",
+                            scope_name
+                        );
+                        println!(
+                            "✓ Edge case '{}' correctly requires and validates partition",
+                            scope_name
+                        );
                     }
                     _ => panic!("Edge case '{}' should be valid with partition", scope_name),
                 }
             } else {
                 match validate_kafka_producer_partition(&edge_span) {
                     KafkaProducerValidationResult::NotApplicable { .. } => {
-                        println!("✓ Edge case '{}' correctly identified as not applicable", scope_name);
+                        println!(
+                            "✓ Edge case '{}' correctly identified as not applicable",
+                            scope_name
+                        );
                     }
                     _ => panic!("Edge case '{}' should not require partition", scope_name),
                 }
@@ -42764,19 +44623,28 @@ mod otlp_122_tests {
         // Test partition known vs unknown scenarios
         println!("Testing partition known vs unknown scenarios...");
         let known_tests = vec![
-            ("partition_known_missing_attr", true, false, false),   // Known, missing attr - invalid
-            ("partition_known_with_attr", true, true, true),        // Known, with attr - valid
+            ("partition_known_missing_attr", true, false, false), // Known, missing attr - invalid
+            ("partition_known_with_attr", true, true, true),      // Known, with attr - valid
             ("partition_unknown_missing_attr", false, false, true), // Unknown, missing attr - valid
-            ("partition_unknown_with_attr", false, true, true),     // Unknown, with attr - valid
+            ("partition_unknown_with_attr", false, true, true),   // Unknown, with attr - valid
         ];
 
         for (test_name, partition_known, has_partition_attr, should_be_valid) in known_tests {
             let mut test_attributes = HashMap::new();
-            test_attributes.insert("messaging.system".to_string(), AnyValue::StringValue("kafka".to_string()));
-            test_attributes.insert("messaging.destination.name".to_string(), AnyValue::StringValue("test.events".to_string()));
+            test_attributes.insert(
+                "messaging.system".to_string(),
+                AnyValue::StringValue("kafka".to_string()),
+            );
+            test_attributes.insert(
+                "messaging.destination.name".to_string(),
+                AnyValue::StringValue("test.events".to_string()),
+            );
 
             if has_partition_attr {
-                test_attributes.insert("messaging.kafka.message.partition".to_string(), AnyValue::IntValue(2));
+                test_attributes.insert(
+                    "messaging.kafka.message.partition".to_string(),
+                    AnyValue::IntValue(2),
+                );
             }
 
             let test_span = KafkaProducerSpanData {
@@ -42800,8 +44668,11 @@ mod otlp_122_tests {
                 test_name, should_be_valid, is_valid
             );
 
-            println!("✓ Known test '{}' correctly evaluated as {}",
-                    test_name, if is_valid { "valid" } else { "invalid" });
+            println!(
+                "✓ Known test '{}' correctly evaluated as {}",
+                test_name,
+                if is_valid { "valid" } else { "invalid" }
+            );
         }
 
         println!("✓ OTLP-144: Kafka producer partition requirement conformance verified");
@@ -42823,7 +44694,9 @@ mod otlp_122_tests {
     /// operations in distributed messaging scenarios.
     #[test]
     fn otlp_145_kafka_consumer_group_conformance() {
-        println!("Testing OTLP-145: Kafka consumer instrumentation scope consumer group requirement...");
+        println!(
+            "Testing OTLP-145: Kafka consumer instrumentation scope consumer group requirement..."
+        );
 
         let test_scenarios = vec![
             KafkaConsumerGroupScenario {
@@ -42832,11 +44705,26 @@ mod otlp_122_tests {
                 instrumentation_scope_name: "messaging.kafka".to_string(),
                 instrumentation_scope_version: Some("1.0.0".to_string()),
                 span_attributes: vec![
-                    ("messaging.kafka.consumer.group".to_string(), AnyValue::StringValue("user-events-processors".to_string())),
-                    ("messaging.system".to_string(), AnyValue::StringValue("kafka".to_string())),
-                    ("messaging.destination.name".to_string(), AnyValue::StringValue("user.events".to_string())),
-                    ("messaging.kafka.message.partition".to_string(), AnyValue::IntValue(3)),
-                    ("messaging.kafka.message.offset".to_string(), AnyValue::IntValue(98765)),
+                    (
+                        "messaging.kafka.consumer.group".to_string(),
+                        AnyValue::StringValue("user-events-processors".to_string()),
+                    ),
+                    (
+                        "messaging.system".to_string(),
+                        AnyValue::StringValue("kafka".to_string()),
+                    ),
+                    (
+                        "messaging.destination.name".to_string(),
+                        AnyValue::StringValue("user.events".to_string()),
+                    ),
+                    (
+                        "messaging.kafka.message.partition".to_string(),
+                        AnyValue::IntValue(3),
+                    ),
+                    (
+                        "messaging.kafka.message.offset".to_string(),
+                        AnyValue::IntValue(98765),
+                    ),
                 ],
                 should_be_valid: true,
                 expected_consumer_group: Some("user-events-processors".to_string()),
@@ -42847,9 +44735,18 @@ mod otlp_122_tests {
                 instrumentation_scope_name: "messaging.kafka".to_string(),
                 instrumentation_scope_version: Some("1.0.0".to_string()),
                 span_attributes: vec![
-                    ("messaging.system".to_string(), AnyValue::StringValue("kafka".to_string())),
-                    ("messaging.destination.name".to_string(), AnyValue::StringValue("user.events".to_string())),
-                    ("messaging.kafka.message.partition".to_string(), AnyValue::IntValue(3)),
+                    (
+                        "messaging.system".to_string(),
+                        AnyValue::StringValue("kafka".to_string()),
+                    ),
+                    (
+                        "messaging.destination.name".to_string(),
+                        AnyValue::StringValue("user.events".to_string()),
+                    ),
+                    (
+                        "messaging.kafka.message.partition".to_string(),
+                        AnyValue::IntValue(3),
+                    ),
                     // Missing messaging.kafka.consumer.group - should be invalid
                 ],
                 should_be_valid: false,
@@ -42861,9 +44758,18 @@ mod otlp_122_tests {
                 instrumentation_scope_name: "messaging.kafka".to_string(),
                 instrumentation_scope_version: Some("1.0.0".to_string()),
                 span_attributes: vec![
-                    ("messaging.kafka.consumer.group".to_string(), AnyValue::StringValue("".to_string())), // Empty group
-                    ("messaging.system".to_string(), AnyValue::StringValue("kafka".to_string())),
-                    ("messaging.destination.name".to_string(), AnyValue::StringValue("user.events".to_string())),
+                    (
+                        "messaging.kafka.consumer.group".to_string(),
+                        AnyValue::StringValue("".to_string()),
+                    ), // Empty group
+                    (
+                        "messaging.system".to_string(),
+                        AnyValue::StringValue("kafka".to_string()),
+                    ),
+                    (
+                        "messaging.destination.name".to_string(),
+                        AnyValue::StringValue("user.events".to_string()),
+                    ),
                 ],
                 should_be_valid: false,
                 expected_consumer_group: None,
@@ -42874,9 +44780,18 @@ mod otlp_122_tests {
                 instrumentation_scope_name: "messaging.kafka".to_string(),
                 instrumentation_scope_version: Some("1.0.0".to_string()),
                 span_attributes: vec![
-                    ("messaging.kafka.consumer.group".to_string(), AnyValue::IntValue(12345)), // Wrong type
-                    ("messaging.system".to_string(), AnyValue::StringValue("kafka".to_string())),
-                    ("messaging.destination.name".to_string(), AnyValue::StringValue("user.events".to_string())),
+                    (
+                        "messaging.kafka.consumer.group".to_string(),
+                        AnyValue::IntValue(12345),
+                    ), // Wrong type
+                    (
+                        "messaging.system".to_string(),
+                        AnyValue::StringValue("kafka".to_string()),
+                    ),
+                    (
+                        "messaging.destination.name".to_string(),
+                        AnyValue::StringValue("user.events".to_string()),
+                    ),
                 ],
                 should_be_valid: false,
                 expected_consumer_group: None,
@@ -42887,8 +44802,14 @@ mod otlp_122_tests {
                 instrumentation_scope_name: "messaging.rabbitmq".to_string(), // Not Kafka
                 instrumentation_scope_version: Some("1.0.0".to_string()),
                 span_attributes: vec![
-                    ("messaging.system".to_string(), AnyValue::StringValue("rabbitmq".to_string())),
-                    ("messaging.destination.name".to_string(), AnyValue::StringValue("user.events".to_string())),
+                    (
+                        "messaging.system".to_string(),
+                        AnyValue::StringValue("rabbitmq".to_string()),
+                    ),
+                    (
+                        "messaging.destination.name".to_string(),
+                        AnyValue::StringValue("user.events".to_string()),
+                    ),
                 ],
                 should_be_valid: true, // No consumer group requirement for non-Kafka
                 expected_consumer_group: None,
@@ -42899,8 +44820,14 @@ mod otlp_122_tests {
                 instrumentation_scope_name: "messaging.kafka".to_string(),
                 instrumentation_scope_version: Some("1.0.0".to_string()),
                 span_attributes: vec![
-                    ("messaging.system".to_string(), AnyValue::StringValue("kafka".to_string())),
-                    ("messaging.destination.name".to_string(), AnyValue::StringValue("user.events".to_string())),
+                    (
+                        "messaging.system".to_string(),
+                        AnyValue::StringValue("kafka".to_string()),
+                    ),
+                    (
+                        "messaging.destination.name".to_string(),
+                        AnyValue::StringValue("user.events".to_string()),
+                    ),
                     // No consumer group requirement for producer spans
                 ],
                 should_be_valid: true, // No requirement for producer spans
@@ -42912,10 +44839,22 @@ mod otlp_122_tests {
                 instrumentation_scope_name: "messaging.kafka".to_string(),
                 instrumentation_scope_version: Some("1.0.0".to_string()),
                 span_attributes: vec![
-                    ("messaging.kafka.consumer.group".to_string(), AnyValue::StringValue("analytics-service-v2.1".to_string())),
-                    ("messaging.system".to_string(), AnyValue::StringValue("kafka".to_string())),
-                    ("messaging.destination.name".to_string(), AnyValue::StringValue("page.views".to_string())),
-                    ("messaging.kafka.message.key".to_string(), AnyValue::StringValue("page-view-123".to_string())),
+                    (
+                        "messaging.kafka.consumer.group".to_string(),
+                        AnyValue::StringValue("analytics-service-v2.1".to_string()),
+                    ),
+                    (
+                        "messaging.system".to_string(),
+                        AnyValue::StringValue("kafka".to_string()),
+                    ),
+                    (
+                        "messaging.destination.name".to_string(),
+                        AnyValue::StringValue("page.views".to_string()),
+                    ),
+                    (
+                        "messaging.kafka.message.key".to_string(),
+                        AnyValue::StringValue("page-view-123".to_string()),
+                    ),
                 ],
                 should_be_valid: true,
                 expected_consumer_group: Some("analytics-service-v2.1".to_string()),
@@ -42926,8 +44865,14 @@ mod otlp_122_tests {
                 instrumentation_scope_name: "MESSAGING.KAFKA".to_string(), // Wrong case
                 instrumentation_scope_version: Some("1.0.0".to_string()),
                 span_attributes: vec![
-                    ("messaging.system".to_string(), AnyValue::StringValue("kafka".to_string())),
-                    ("messaging.destination.name".to_string(), AnyValue::StringValue("events".to_string())),
+                    (
+                        "messaging.system".to_string(),
+                        AnyValue::StringValue("kafka".to_string()),
+                    ),
+                    (
+                        "messaging.destination.name".to_string(),
+                        AnyValue::StringValue("events".to_string()),
+                    ),
                 ],
                 should_be_valid: true, // Not exact "messaging.kafka" so no requirement
                 expected_consumer_group: None,
@@ -42938,15 +44883,42 @@ mod otlp_122_tests {
                 instrumentation_scope_name: "messaging.kafka".to_string(),
                 instrumentation_scope_version: Some("2.0.0".to_string()),
                 span_attributes: vec![
-                    ("messaging.kafka.consumer.group".to_string(), AnyValue::StringValue("transaction-processors".to_string())),
-                    ("messaging.system".to_string(), AnyValue::StringValue("kafka".to_string())),
-                    ("messaging.destination.name".to_string(), AnyValue::StringValue("transaction.events".to_string())),
-                    ("messaging.kafka.message.partition".to_string(), AnyValue::IntValue(7)),
-                    ("messaging.kafka.message.offset".to_string(), AnyValue::IntValue(123456789)),
-                    ("messaging.kafka.message.key".to_string(), AnyValue::StringValue("txn-abc123".to_string())),
-                    ("messaging.kafka.client_id".to_string(), AnyValue::StringValue("consumer-01".to_string())),
-                    ("messaging.operation".to_string(), AnyValue::StringValue("receive".to_string())),
-                    ("net.peer.name".to_string(), AnyValue::StringValue("kafka.example.com".to_string())),
+                    (
+                        "messaging.kafka.consumer.group".to_string(),
+                        AnyValue::StringValue("transaction-processors".to_string()),
+                    ),
+                    (
+                        "messaging.system".to_string(),
+                        AnyValue::StringValue("kafka".to_string()),
+                    ),
+                    (
+                        "messaging.destination.name".to_string(),
+                        AnyValue::StringValue("transaction.events".to_string()),
+                    ),
+                    (
+                        "messaging.kafka.message.partition".to_string(),
+                        AnyValue::IntValue(7),
+                    ),
+                    (
+                        "messaging.kafka.message.offset".to_string(),
+                        AnyValue::IntValue(123456789),
+                    ),
+                    (
+                        "messaging.kafka.message.key".to_string(),
+                        AnyValue::StringValue("txn-abc123".to_string()),
+                    ),
+                    (
+                        "messaging.kafka.client_id".to_string(),
+                        AnyValue::StringValue("consumer-01".to_string()),
+                    ),
+                    (
+                        "messaging.operation".to_string(),
+                        AnyValue::StringValue("receive".to_string()),
+                    ),
+                    (
+                        "net.peer.name".to_string(),
+                        AnyValue::StringValue("kafka.example.com".to_string()),
+                    ),
                     ("net.peer.port".to_string(), AnyValue::IntValue(9092)),
                 ],
                 should_be_valid: true,
@@ -42958,8 +44930,14 @@ mod otlp_122_tests {
                 instrumentation_scope_name: "messaging.kafka.consumer".to_string(), // Has suffix
                 instrumentation_scope_version: Some("1.0.0".to_string()),
                 span_attributes: vec![
-                    ("messaging.system".to_string(), AnyValue::StringValue("kafka".to_string())),
-                    ("consumer.type".to_string(), AnyValue::StringValue("high-level".to_string())),
+                    (
+                        "messaging.system".to_string(),
+                        AnyValue::StringValue("kafka".to_string()),
+                    ),
+                    (
+                        "consumer.type".to_string(),
+                        AnyValue::StringValue("high-level".to_string()),
+                    ),
                 ],
                 should_be_valid: true, // Not exact "messaging.kafka" so no requirement
                 expected_consumer_group: None,
@@ -42970,12 +44948,27 @@ mod otlp_122_tests {
                 instrumentation_scope_name: "messaging.kafka".to_string(),
                 instrumentation_scope_version: None, // No version
                 span_attributes: vec![
-                    ("messaging.kafka.consumer.group".to_string(), AnyValue::StringValue("very-long-consumer-group-name-for-microservice-analytics-pipeline-v3".to_string())),
-                    ("messaging.system".to_string(), AnyValue::StringValue("kafka".to_string())),
-                    ("messaging.destination.name".to_string(), AnyValue::StringValue("events".to_string())),
+                    (
+                        "messaging.kafka.consumer.group".to_string(),
+                        AnyValue::StringValue(
+                            "very-long-consumer-group-name-for-microservice-analytics-pipeline-v3"
+                                .to_string(),
+                        ),
+                    ),
+                    (
+                        "messaging.system".to_string(),
+                        AnyValue::StringValue("kafka".to_string()),
+                    ),
+                    (
+                        "messaging.destination.name".to_string(),
+                        AnyValue::StringValue("events".to_string()),
+                    ),
                 ],
                 should_be_valid: true,
-                expected_consumer_group: Some("very-long-consumer-group-name-for-microservice-analytics-pipeline-v3".to_string()),
+                expected_consumer_group: Some(
+                    "very-long-consumer-group-name-for-microservice-analytics-pipeline-v3"
+                        .to_string(),
+                ),
             },
             KafkaConsumerGroupScenario {
                 description: "kafka_consumer_with_numeric_group_name".to_string(),
@@ -42983,10 +44976,22 @@ mod otlp_122_tests {
                 instrumentation_scope_name: "messaging.kafka".to_string(),
                 instrumentation_scope_version: Some("1.5.0".to_string()),
                 span_attributes: vec![
-                    ("messaging.kafka.consumer.group".to_string(), AnyValue::StringValue("group-123".to_string())),
-                    ("messaging.system".to_string(), AnyValue::StringValue("kafka".to_string())),
-                    ("messaging.destination.name".to_string(), AnyValue::StringValue("metrics".to_string())),
-                    ("messaging.kafka.message.timestamp".to_string(), AnyValue::IntValue(1642685400000)),
+                    (
+                        "messaging.kafka.consumer.group".to_string(),
+                        AnyValue::StringValue("group-123".to_string()),
+                    ),
+                    (
+                        "messaging.system".to_string(),
+                        AnyValue::StringValue("kafka".to_string()),
+                    ),
+                    (
+                        "messaging.destination.name".to_string(),
+                        AnyValue::StringValue("metrics".to_string()),
+                    ),
+                    (
+                        "messaging.kafka.message.timestamp".to_string(),
+                        AnyValue::IntValue(1642685400000),
+                    ),
                 ],
                 should_be_valid: true,
                 expected_consumer_group: Some("group-123".to_string()),
@@ -42997,10 +45002,22 @@ mod otlp_122_tests {
                 instrumentation_scope_name: "messaging.kafka".to_string(),
                 instrumentation_scope_version: Some("1.0.0".to_string()),
                 span_attributes: vec![
-                    ("messaging.kafka.consumer.group".to_string(), AnyValue::StringValue("analytics_service.v2-beta".to_string())),
-                    ("messaging.system".to_string(), AnyValue::StringValue("kafka".to_string())),
-                    ("messaging.destination.name".to_string(), AnyValue::StringValue("user.activity".to_string())),
-                    ("messaging.kafka.message.headers".to_string(), AnyValue::StringValue("content-type:application/json".to_string())),
+                    (
+                        "messaging.kafka.consumer.group".to_string(),
+                        AnyValue::StringValue("analytics_service.v2-beta".to_string()),
+                    ),
+                    (
+                        "messaging.system".to_string(),
+                        AnyValue::StringValue("kafka".to_string()),
+                    ),
+                    (
+                        "messaging.destination.name".to_string(),
+                        AnyValue::StringValue("user.activity".to_string()),
+                    ),
+                    (
+                        "messaging.kafka.message.headers".to_string(),
+                        AnyValue::StringValue("content-type:application/json".to_string()),
+                    ),
                 ],
                 should_be_valid: true,
                 expected_consumer_group: Some("analytics_service.v2-beta".to_string()),
@@ -43077,7 +45094,10 @@ mod otlp_122_tests {
                     if let Some(expected_group) = &scenario.expected_consumer_group {
                         match consumer_group {
                             Some(actual_group) if actual_group == expected_group => {
-                                println!("✓ Kafka consumer span has correct consumer group: '{}'", actual_group);
+                                println!(
+                                    "✓ Kafka consumer span has correct consumer group: '{}'",
+                                    actual_group
+                                );
                             }
                             Some(actual_group) => {
                                 return Err(format!(
@@ -43095,7 +45115,9 @@ mod otlp_122_tests {
                     } else {
                         // No expected consumer group - ensure none present when not required
                         if consumer_group.is_some() && requires_consumer_group(&span_data) {
-                            return Err("Unexpected consumer group found when none expected".to_string());
+                            return Err(
+                                "Unexpected consumer group found when none expected".to_string()
+                            );
                         }
                     }
                 }
@@ -43109,7 +45131,10 @@ mod otlp_122_tests {
                     return Err("Invalid span was incorrectly accepted".to_string());
                 }
                 (KafkaConsumerValidationResult::Invalid { violations, .. }, true) => {
-                    return Err(format!("Valid span was incorrectly rejected: {:?}", violations));
+                    return Err(format!(
+                        "Valid span was incorrectly rejected: {:?}",
+                        violations
+                    ));
                 }
                 (KafkaConsumerValidationResult::NotApplicable { .. }, false) => {
                     return Err("Expected validation failure but got not applicable".to_string());
@@ -43120,7 +45145,9 @@ mod otlp_122_tests {
         }
 
         /// Validates that Kafka consumer spans have required consumer group attribute
-        fn validate_kafka_consumer_group(span_data: &KafkaConsumerSpanData) -> KafkaConsumerValidationResult {
+        fn validate_kafka_consumer_group(
+            span_data: &KafkaConsumerSpanData,
+        ) -> KafkaConsumerValidationResult {
             // Check if this span requires consumer group attribute
             if !requires_consumer_group(span_data) {
                 return KafkaConsumerValidationResult::NotApplicable {
@@ -43140,12 +45167,16 @@ mod otlp_122_tests {
                     Some(group_str.clone())
                 }
                 Some(AnyValue::StringValue(group_str)) if group_str.is_empty() => {
-                    violations.push("messaging.kafka.consumer.group attribute is empty".to_string());
+                    violations
+                        .push("messaging.kafka.consumer.group attribute is empty".to_string());
                     missing_attributes.push("messaging.kafka.consumer.group".to_string());
                     None
                 }
                 Some(_) => {
-                    violations.push("messaging.kafka.consumer.group attribute must be a string value".to_string());
+                    violations.push(
+                        "messaging.kafka.consumer.group attribute must be a string value"
+                            .to_string(),
+                    );
                     missing_attributes.push("messaging.kafka.consumer.group".to_string());
                     None
                 }
@@ -43160,22 +45191,32 @@ mod otlp_122_tests {
             if let Some(group) = &consumer_group {
                 // Warn about unusual group names
                 if group.len() > 255 {
-                    println!("⚠ Unusually long consumer group name: {} characters (max recommended: 255)", group.len());
+                    println!(
+                        "⚠ Unusually long consumer group name: {} characters (max recommended: 255)",
+                        group.len()
+                    );
                 }
 
                 // Check for reserved group name patterns that may cause issues
                 if group.starts_with("__") {
-                    println!("⚠ Consumer group '{}' starts with '__' (reserved pattern in some Kafka configurations)", group);
+                    println!(
+                        "⚠ Consumer group '{}' starts with '__' (reserved pattern in some Kafka configurations)",
+                        group
+                    );
                 }
 
                 // Validate typical Kafka group name constraints
                 if group.contains('\0') {
-                    violations.push("messaging.kafka.consumer.group contains null character".to_string());
+                    violations
+                        .push("messaging.kafka.consumer.group contains null character".to_string());
                 }
 
                 // Additional format checks for common patterns
                 if group.contains(' ') && !group.contains('-') && !group.contains('_') {
-                    println!("⚠ Consumer group '{}' contains spaces but no separators (consider using hyphens or underscores)", group);
+                    println!(
+                        "⚠ Consumer group '{}' contains spaces but no separators (consider using hyphens or underscores)",
+                        group
+                    );
                 }
             }
 
@@ -43184,7 +45225,7 @@ mod otlp_122_tests {
                 "messaging.system",
                 "messaging.destination.name",
                 "messaging.operation",
-                "messaging.kafka.message.partition"
+                "messaging.kafka.message.partition",
             ];
 
             let mut kafka_attrs_present = 0;
@@ -43192,19 +45233,29 @@ mod otlp_122_tests {
                 if span_data.attributes.contains_key(*attr) {
                     kafka_attrs_present += 1;
                 } else {
-                    println!("⚠ Recommended Kafka consumer attribute '{}' not present", attr);
+                    println!(
+                        "⚠ Recommended Kafka consumer attribute '{}' not present",
+                        attr
+                    );
                 }
             }
 
             // Verify messaging.system is set to "kafka" if present
-            if let Some(AnyValue::StringValue(system)) = span_data.attributes.get("messaging.system") {
+            if let Some(AnyValue::StringValue(system)) =
+                span_data.attributes.get("messaging.system")
+            {
                 if system != "kafka" {
-                    violations.push(format!("messaging.system should be 'kafka' for Kafka consumer spans, got: '{}'", system));
+                    violations.push(format!(
+                        "messaging.system should be 'kafka' for Kafka consumer spans, got: '{}'",
+                        system
+                    ));
                 }
             }
 
             // Verify messaging.operation is appropriate for consumer if present
-            if let Some(AnyValue::StringValue(operation)) = span_data.attributes.get("messaging.operation") {
+            if let Some(AnyValue::StringValue(operation)) =
+                span_data.attributes.get("messaging.operation")
+            {
                 match operation.as_str() {
                     "receive" | "process" => {
                         // Valid consumer operations
@@ -43213,15 +45264,23 @@ mod otlp_122_tests {
                         violations.push(format!("messaging.operation '{}' is inappropriate for consumer spans (use 'receive' or 'process')", operation));
                     }
                     _ => {
-                        println!("⚠ Unusual messaging.operation '{}' for consumer span", operation);
+                        println!(
+                            "⚠ Unusual messaging.operation '{}' for consumer span",
+                            operation
+                        );
                     }
                 }
             }
 
             // Additional Kafka-specific validations
-            if let Some(AnyValue::StringValue(dest_name)) = span_data.attributes.get("messaging.destination.name") {
+            if let Some(AnyValue::StringValue(dest_name)) =
+                span_data.attributes.get("messaging.destination.name")
+            {
                 if dest_name.is_empty() {
-                    violations.push("messaging.destination.name should not be empty for Kafka spans".to_string());
+                    violations.push(
+                        "messaging.destination.name should not be empty for Kafka spans"
+                            .to_string(),
+                    );
                 }
             }
 
@@ -43261,7 +45320,10 @@ mod otlp_122_tests {
             match validate_kafka_consumer_group_conformance(scenario) {
                 Ok(()) => {
                     passed_scenarios += 1;
-                    println!("✓ OTLP-145 conformance verified for {}", scenario.description);
+                    println!(
+                        "✓ OTLP-145 conformance verified for {}",
+                        scenario.description
+                    );
                 }
                 Err(error_msg) => {
                     panic!(
@@ -43282,20 +45344,29 @@ mod otlp_122_tests {
 
         // Test with exactly "messaging.kafka" scope (case sensitive)
         let edge_cases = vec![
-            ("messaging.kafka", true),       // Exact match - requires consumer group
-            ("messaging.Kafka", false),      // Wrong case - no requirement
+            ("messaging.kafka", true),  // Exact match - requires consumer group
+            ("messaging.Kafka", false), // Wrong case - no requirement
             ("messaging.kafka.consumer", false), // Suffix - no requirement
-            ("my.messaging.kafka", false),   // Prefix - no requirement
-            ("kafka", false),                // Partial match - no requirement
+            ("my.messaging.kafka", false), // Prefix - no requirement
+            ("kafka", false),           // Partial match - no requirement
         ];
 
         for (scope_name, should_require) in edge_cases {
             let mut test_attributes = HashMap::new();
-            test_attributes.insert("messaging.system".to_string(), AnyValue::StringValue("kafka".to_string()));
-            test_attributes.insert("messaging.destination.name".to_string(), AnyValue::StringValue("test.topic".to_string()));
+            test_attributes.insert(
+                "messaging.system".to_string(),
+                AnyValue::StringValue("kafka".to_string()),
+            );
+            test_attributes.insert(
+                "messaging.destination.name".to_string(),
+                AnyValue::StringValue("test.topic".to_string()),
+            );
 
             if should_require {
-                test_attributes.insert("messaging.kafka.consumer.group".to_string(), AnyValue::StringValue("test-group".to_string()));
+                test_attributes.insert(
+                    "messaging.kafka.consumer.group".to_string(),
+                    AnyValue::StringValue("test-group".to_string()),
+                );
             }
 
             let edge_span = KafkaConsumerSpanData {
@@ -43319,17 +45390,33 @@ mod otlp_122_tests {
             if should_require {
                 match validate_kafka_consumer_group(&edge_span) {
                     KafkaConsumerValidationResult::Valid { consumer_group, .. } => {
-                        assert!(consumer_group.is_some(), "Should have consumer group for scope '{}'", scope_name);
-                        println!("✓ Edge case '{}' correctly requires and validates consumer group", scope_name);
+                        assert!(
+                            consumer_group.is_some(),
+                            "Should have consumer group for scope '{}'",
+                            scope_name
+                        );
+                        println!(
+                            "✓ Edge case '{}' correctly requires and validates consumer group",
+                            scope_name
+                        );
                     }
-                    _ => panic!("Edge case '{}' should be valid with consumer group", scope_name),
+                    _ => panic!(
+                        "Edge case '{}' should be valid with consumer group",
+                        scope_name
+                    ),
                 }
             } else {
                 match validate_kafka_consumer_group(&edge_span) {
                     KafkaConsumerValidationResult::NotApplicable { .. } => {
-                        println!("✓ Edge case '{}' correctly identified as not applicable", scope_name);
+                        println!(
+                            "✓ Edge case '{}' correctly identified as not applicable",
+                            scope_name
+                        );
                     }
-                    _ => panic!("Edge case '{}' should not require consumer group", scope_name),
+                    _ => panic!(
+                        "Edge case '{}' should not require consumer group",
+                        scope_name
+                    ),
                 }
             }
         }
@@ -43347,9 +45434,18 @@ mod otlp_122_tests {
 
         for (test_name, group_name, should_be_valid) in group_tests {
             let mut test_attributes = HashMap::new();
-            test_attributes.insert("messaging.system".to_string(), AnyValue::StringValue("kafka".to_string()));
-            test_attributes.insert("messaging.destination.name".to_string(), AnyValue::StringValue("test.events".to_string()));
-            test_attributes.insert("messaging.kafka.consumer.group".to_string(), AnyValue::StringValue(group_name.to_string()));
+            test_attributes.insert(
+                "messaging.system".to_string(),
+                AnyValue::StringValue("kafka".to_string()),
+            );
+            test_attributes.insert(
+                "messaging.destination.name".to_string(),
+                AnyValue::StringValue("test.events".to_string()),
+            );
+            test_attributes.insert(
+                "messaging.kafka.consumer.group".to_string(),
+                AnyValue::StringValue(group_name.to_string()),
+            );
 
             let test_span = KafkaConsumerSpanData {
                 name: format!("group_test_{}", test_name),
@@ -43371,12 +45467,17 @@ mod otlp_122_tests {
                 test_name, should_be_valid, is_valid
             );
 
-            println!("✓ Group test '{}' correctly evaluated as {}",
-                    test_name, if is_valid { "valid" } else { "invalid" });
+            println!(
+                "✓ Group test '{}' correctly evaluated as {}",
+                test_name,
+                if is_valid { "valid" } else { "invalid" }
+            );
         }
 
         println!("✓ OTLP-145: Kafka consumer group requirement conformance verified");
-        println!("  - CONSUMER spans with 'messaging.kafka' scope require messaging.kafka.consumer.group");
+        println!(
+            "  - CONSUMER spans with 'messaging.kafka' scope require messaging.kafka.consumer.group"
+        );
         println!("  - Non-Kafka consumer scopes exempt from requirement");
         println!("  - Producer spans exempt from requirement");
         println!("  - Case-sensitive scope name matching enforced");
@@ -43404,11 +45505,26 @@ mod otlp_122_tests {
                 span_kind: SpanKind::Producer,
                 messaging_system: "amqp".to_string(),
                 span_attributes: vec![
-                    ("messaging.amqp.delivery_mode".to_string(), AnyValue::IntValue(1)), // Transient
-                    ("messaging.system".to_string(), AnyValue::StringValue("amqp".to_string())),
-                    ("messaging.destination.name".to_string(), AnyValue::StringValue("user.notifications".to_string())),
-                    ("messaging.amqp.routing_key".to_string(), AnyValue::StringValue("user.123.email".to_string())),
-                    ("net.peer.name".to_string(), AnyValue::StringValue("rabbitmq.example.com".to_string())),
+                    (
+                        "messaging.amqp.delivery_mode".to_string(),
+                        AnyValue::IntValue(1),
+                    ), // Transient
+                    (
+                        "messaging.system".to_string(),
+                        AnyValue::StringValue("amqp".to_string()),
+                    ),
+                    (
+                        "messaging.destination.name".to_string(),
+                        AnyValue::StringValue("user.notifications".to_string()),
+                    ),
+                    (
+                        "messaging.amqp.routing_key".to_string(),
+                        AnyValue::StringValue("user.123.email".to_string()),
+                    ),
+                    (
+                        "net.peer.name".to_string(),
+                        AnyValue::StringValue("rabbitmq.example.com".to_string()),
+                    ),
                 ],
                 should_be_valid: true,
                 expected_delivery_mode: Some(1),
@@ -43418,11 +45534,26 @@ mod otlp_122_tests {
                 span_kind: SpanKind::Producer,
                 messaging_system: "amqp".to_string(),
                 span_attributes: vec![
-                    ("messaging.amqp.delivery_mode".to_string(), AnyValue::IntValue(2)), // Persistent
-                    ("messaging.system".to_string(), AnyValue::StringValue("amqp".to_string())),
-                    ("messaging.destination.name".to_string(), AnyValue::StringValue("order.events".to_string())),
-                    ("messaging.amqp.exchange".to_string(), AnyValue::StringValue("orders".to_string())),
-                    ("messaging.amqp.routing_key".to_string(), AnyValue::StringValue("order.created".to_string())),
+                    (
+                        "messaging.amqp.delivery_mode".to_string(),
+                        AnyValue::IntValue(2),
+                    ), // Persistent
+                    (
+                        "messaging.system".to_string(),
+                        AnyValue::StringValue("amqp".to_string()),
+                    ),
+                    (
+                        "messaging.destination.name".to_string(),
+                        AnyValue::StringValue("order.events".to_string()),
+                    ),
+                    (
+                        "messaging.amqp.exchange".to_string(),
+                        AnyValue::StringValue("orders".to_string()),
+                    ),
+                    (
+                        "messaging.amqp.routing_key".to_string(),
+                        AnyValue::StringValue("order.created".to_string()),
+                    ),
                 ],
                 should_be_valid: true,
                 expected_delivery_mode: Some(2),
@@ -43432,9 +45563,18 @@ mod otlp_122_tests {
                 span_kind: SpanKind::Producer,
                 messaging_system: "amqp".to_string(),
                 span_attributes: vec![
-                    ("messaging.system".to_string(), AnyValue::StringValue("amqp".to_string())),
-                    ("messaging.destination.name".to_string(), AnyValue::StringValue("events".to_string())),
-                    ("messaging.amqp.routing_key".to_string(), AnyValue::StringValue("event.created".to_string())),
+                    (
+                        "messaging.system".to_string(),
+                        AnyValue::StringValue("amqp".to_string()),
+                    ),
+                    (
+                        "messaging.destination.name".to_string(),
+                        AnyValue::StringValue("events".to_string()),
+                    ),
+                    (
+                        "messaging.amqp.routing_key".to_string(),
+                        AnyValue::StringValue("event.created".to_string()),
+                    ),
                     // Missing messaging.amqp.delivery_mode - should be invalid
                 ],
                 should_be_valid: false,
@@ -43445,9 +45585,18 @@ mod otlp_122_tests {
                 span_kind: SpanKind::Producer,
                 messaging_system: "amqp".to_string(),
                 span_attributes: vec![
-                    ("messaging.amqp.delivery_mode".to_string(), AnyValue::IntValue(0)), // Invalid
-                    ("messaging.system".to_string(), AnyValue::StringValue("amqp".to_string())),
-                    ("messaging.destination.name".to_string(), AnyValue::StringValue("events".to_string())),
+                    (
+                        "messaging.amqp.delivery_mode".to_string(),
+                        AnyValue::IntValue(0),
+                    ), // Invalid
+                    (
+                        "messaging.system".to_string(),
+                        AnyValue::StringValue("amqp".to_string()),
+                    ),
+                    (
+                        "messaging.destination.name".to_string(),
+                        AnyValue::StringValue("events".to_string()),
+                    ),
                 ],
                 should_be_valid: false,
                 expected_delivery_mode: None,
@@ -43457,9 +45606,18 @@ mod otlp_122_tests {
                 span_kind: SpanKind::Producer,
                 messaging_system: "amqp".to_string(),
                 span_attributes: vec![
-                    ("messaging.amqp.delivery_mode".to_string(), AnyValue::IntValue(3)), // Invalid
-                    ("messaging.system".to_string(), AnyValue::StringValue("amqp".to_string())),
-                    ("messaging.destination.name".to_string(), AnyValue::StringValue("events".to_string())),
+                    (
+                        "messaging.amqp.delivery_mode".to_string(),
+                        AnyValue::IntValue(3),
+                    ), // Invalid
+                    (
+                        "messaging.system".to_string(),
+                        AnyValue::StringValue("amqp".to_string()),
+                    ),
+                    (
+                        "messaging.destination.name".to_string(),
+                        AnyValue::StringValue("events".to_string()),
+                    ),
                 ],
                 should_be_valid: false,
                 expected_delivery_mode: None,
@@ -43469,9 +45627,18 @@ mod otlp_122_tests {
                 span_kind: SpanKind::Producer,
                 messaging_system: "amqp".to_string(),
                 span_attributes: vec![
-                    ("messaging.amqp.delivery_mode".to_string(), AnyValue::IntValue(-1)), // Invalid
-                    ("messaging.system".to_string(), AnyValue::StringValue("amqp".to_string())),
-                    ("messaging.destination.name".to_string(), AnyValue::StringValue("events".to_string())),
+                    (
+                        "messaging.amqp.delivery_mode".to_string(),
+                        AnyValue::IntValue(-1),
+                    ), // Invalid
+                    (
+                        "messaging.system".to_string(),
+                        AnyValue::StringValue("amqp".to_string()),
+                    ),
+                    (
+                        "messaging.destination.name".to_string(),
+                        AnyValue::StringValue("events".to_string()),
+                    ),
                 ],
                 should_be_valid: false,
                 expected_delivery_mode: None,
@@ -43481,9 +45648,18 @@ mod otlp_122_tests {
                 span_kind: SpanKind::Producer,
                 messaging_system: "amqp".to_string(),
                 span_attributes: vec![
-                    ("messaging.amqp.delivery_mode".to_string(), AnyValue::StringValue("persistent".to_string())), // Wrong type
-                    ("messaging.system".to_string(), AnyValue::StringValue("amqp".to_string())),
-                    ("messaging.destination.name".to_string(), AnyValue::StringValue("events".to_string())),
+                    (
+                        "messaging.amqp.delivery_mode".to_string(),
+                        AnyValue::StringValue("persistent".to_string()),
+                    ), // Wrong type
+                    (
+                        "messaging.system".to_string(),
+                        AnyValue::StringValue("amqp".to_string()),
+                    ),
+                    (
+                        "messaging.destination.name".to_string(),
+                        AnyValue::StringValue("events".to_string()),
+                    ),
                 ],
                 should_be_valid: false,
                 expected_delivery_mode: None,
@@ -43493,9 +45669,18 @@ mod otlp_122_tests {
                 span_kind: SpanKind::Producer,
                 messaging_system: "kafka".to_string(), // Not AMQP
                 span_attributes: vec![
-                    ("messaging.system".to_string(), AnyValue::StringValue("kafka".to_string())),
-                    ("messaging.destination.name".to_string(), AnyValue::StringValue("events".to_string())),
-                    ("messaging.kafka.message.partition".to_string(), AnyValue::IntValue(3)),
+                    (
+                        "messaging.system".to_string(),
+                        AnyValue::StringValue("kafka".to_string()),
+                    ),
+                    (
+                        "messaging.destination.name".to_string(),
+                        AnyValue::StringValue("events".to_string()),
+                    ),
+                    (
+                        "messaging.kafka.message.partition".to_string(),
+                        AnyValue::IntValue(3),
+                    ),
                 ],
                 should_be_valid: true, // No delivery mode requirement for non-AMQP
                 expected_delivery_mode: None,
@@ -43505,9 +45690,18 @@ mod otlp_122_tests {
                 span_kind: SpanKind::Consumer, // Not producer
                 messaging_system: "amqp".to_string(),
                 span_attributes: vec![
-                    ("messaging.system".to_string(), AnyValue::StringValue("amqp".to_string())),
-                    ("messaging.destination.name".to_string(), AnyValue::StringValue("events".to_string())),
-                    ("messaging.operation".to_string(), AnyValue::StringValue("receive".to_string())),
+                    (
+                        "messaging.system".to_string(),
+                        AnyValue::StringValue("amqp".to_string()),
+                    ),
+                    (
+                        "messaging.destination.name".to_string(),
+                        AnyValue::StringValue("events".to_string()),
+                    ),
+                    (
+                        "messaging.operation".to_string(),
+                        AnyValue::StringValue("receive".to_string()),
+                    ),
                 ],
                 should_be_valid: true, // No delivery mode requirement for consumer spans
                 expected_delivery_mode: None,
@@ -43517,14 +45711,38 @@ mod otlp_122_tests {
                 span_kind: SpanKind::Producer,
                 messaging_system: "amqp".to_string(),
                 span_attributes: vec![
-                    ("messaging.amqp.delivery_mode".to_string(), AnyValue::IntValue(2)), // Persistent
-                    ("messaging.system".to_string(), AnyValue::StringValue("amqp".to_string())),
-                    ("messaging.destination.name".to_string(), AnyValue::StringValue("critical.events".to_string())),
-                    ("messaging.amqp.exchange".to_string(), AnyValue::StringValue("application.events".to_string())),
-                    ("messaging.amqp.routing_key".to_string(), AnyValue::StringValue("app.error.critical".to_string())),
-                    ("messaging.operation".to_string(), AnyValue::StringValue("publish".to_string())),
-                    ("messaging.message_id".to_string(), AnyValue::StringValue("msg-12345-abcdef".to_string())),
-                    ("net.peer.name".to_string(), AnyValue::StringValue("rabbitmq-cluster.prod.com".to_string())),
+                    (
+                        "messaging.amqp.delivery_mode".to_string(),
+                        AnyValue::IntValue(2),
+                    ), // Persistent
+                    (
+                        "messaging.system".to_string(),
+                        AnyValue::StringValue("amqp".to_string()),
+                    ),
+                    (
+                        "messaging.destination.name".to_string(),
+                        AnyValue::StringValue("critical.events".to_string()),
+                    ),
+                    (
+                        "messaging.amqp.exchange".to_string(),
+                        AnyValue::StringValue("application.events".to_string()),
+                    ),
+                    (
+                        "messaging.amqp.routing_key".to_string(),
+                        AnyValue::StringValue("app.error.critical".to_string()),
+                    ),
+                    (
+                        "messaging.operation".to_string(),
+                        AnyValue::StringValue("publish".to_string()),
+                    ),
+                    (
+                        "messaging.message_id".to_string(),
+                        AnyValue::StringValue("msg-12345-abcdef".to_string()),
+                    ),
+                    (
+                        "net.peer.name".to_string(),
+                        AnyValue::StringValue("rabbitmq-cluster.prod.com".to_string()),
+                    ),
                     ("net.peer.port".to_string(), AnyValue::IntValue(5672)),
                 ],
                 should_be_valid: true,
@@ -43535,8 +45753,14 @@ mod otlp_122_tests {
                 span_kind: SpanKind::Producer,
                 messaging_system: "AMQP".to_string(), // Different case
                 span_attributes: vec![
-                    ("messaging.system".to_string(), AnyValue::StringValue("AMQP".to_string())),
-                    ("messaging.destination.name".to_string(), AnyValue::StringValue("events".to_string())),
+                    (
+                        "messaging.system".to_string(),
+                        AnyValue::StringValue("AMQP".to_string()),
+                    ),
+                    (
+                        "messaging.destination.name".to_string(),
+                        AnyValue::StringValue("events".to_string()),
+                    ),
                 ],
                 should_be_valid: true, // Not exact "amqp" so no requirement
                 expected_delivery_mode: None,
@@ -43546,13 +45770,34 @@ mod otlp_122_tests {
                 span_kind: SpanKind::Producer,
                 messaging_system: "amqp".to_string(),
                 span_attributes: vec![
-                    ("messaging.amqp.delivery_mode".to_string(), AnyValue::IntValue(1)), // Transient
-                    ("messaging.system".to_string(), AnyValue::StringValue("amqp".to_string())),
-                    ("messaging.destination.name".to_string(), AnyValue::StringValue("temp.notifications".to_string())),
-                    ("messaging.amqp.exchange".to_string(), AnyValue::StringValue("notifications.direct".to_string())),
-                    ("messaging.amqp.routing_key".to_string(), AnyValue::StringValue("notification.ephemeral".to_string())),
-                    ("messaging.operation".to_string(), AnyValue::StringValue("publish".to_string())),
-                    ("messaging.message_payload_size_bytes".to_string(), AnyValue::IntValue(1024)),
+                    (
+                        "messaging.amqp.delivery_mode".to_string(),
+                        AnyValue::IntValue(1),
+                    ), // Transient
+                    (
+                        "messaging.system".to_string(),
+                        AnyValue::StringValue("amqp".to_string()),
+                    ),
+                    (
+                        "messaging.destination.name".to_string(),
+                        AnyValue::StringValue("temp.notifications".to_string()),
+                    ),
+                    (
+                        "messaging.amqp.exchange".to_string(),
+                        AnyValue::StringValue("notifications.direct".to_string()),
+                    ),
+                    (
+                        "messaging.amqp.routing_key".to_string(),
+                        AnyValue::StringValue("notification.ephemeral".to_string()),
+                    ),
+                    (
+                        "messaging.operation".to_string(),
+                        AnyValue::StringValue("publish".to_string()),
+                    ),
+                    (
+                        "messaging.message_payload_size_bytes".to_string(),
+                        AnyValue::IntValue(1024),
+                    ),
                 ],
                 should_be_valid: true,
                 expected_delivery_mode: Some(1),
@@ -43562,13 +45807,34 @@ mod otlp_122_tests {
                 span_kind: SpanKind::Producer,
                 messaging_system: "amqp".to_string(),
                 span_attributes: vec![
-                    ("messaging.amqp.delivery_mode".to_string(), AnyValue::IntValue(2)), // Persistent
-                    ("messaging.system".to_string(), AnyValue::StringValue("amqp".to_string())),
-                    ("messaging.destination.name".to_string(), AnyValue::StringValue("high-priority.orders".to_string())),
-                    ("messaging.amqp.exchange".to_string(), AnyValue::StringValue("orders.topic".to_string())),
-                    ("messaging.amqp.routing_key".to_string(), AnyValue::StringValue("order.urgent.payment".to_string())),
-                    ("messaging.message_payload_size_bytes".to_string(), AnyValue::IntValue(2048)),
-                    ("messaging.batch.message_count".to_string(), AnyValue::IntValue(1)),
+                    (
+                        "messaging.amqp.delivery_mode".to_string(),
+                        AnyValue::IntValue(2),
+                    ), // Persistent
+                    (
+                        "messaging.system".to_string(),
+                        AnyValue::StringValue("amqp".to_string()),
+                    ),
+                    (
+                        "messaging.destination.name".to_string(),
+                        AnyValue::StringValue("high-priority.orders".to_string()),
+                    ),
+                    (
+                        "messaging.amqp.exchange".to_string(),
+                        AnyValue::StringValue("orders.topic".to_string()),
+                    ),
+                    (
+                        "messaging.amqp.routing_key".to_string(),
+                        AnyValue::StringValue("order.urgent.payment".to_string()),
+                    ),
+                    (
+                        "messaging.message_payload_size_bytes".to_string(),
+                        AnyValue::IntValue(2048),
+                    ),
+                    (
+                        "messaging.batch.message_count".to_string(),
+                        AnyValue::IntValue(1),
+                    ),
                 ],
                 should_be_valid: true,
                 expected_delivery_mode: Some(2),
@@ -43645,7 +45911,10 @@ mod otlp_122_tests {
                                     2 => "persistent",
                                     _ => "unknown",
                                 };
-                                println!("✓ AMQP producer span has correct delivery mode: {} ({})", actual_mode, mode_description);
+                                println!(
+                                    "✓ AMQP producer span has correct delivery mode: {} ({})",
+                                    actual_mode, mode_description
+                                );
                             }
                             Some(actual_mode) => {
                                 return Err(format!(
@@ -43663,7 +45932,9 @@ mod otlp_122_tests {
                     } else {
                         // No expected delivery mode - ensure none present when not required
                         if delivery_mode.is_some() && requires_amqp_delivery_mode(&span_data) {
-                            return Err("Unexpected delivery mode found when none expected".to_string());
+                            return Err(
+                                "Unexpected delivery mode found when none expected".to_string()
+                            );
                         }
                     }
                 }
@@ -43677,7 +45948,10 @@ mod otlp_122_tests {
                     return Err("Invalid span was incorrectly accepted".to_string());
                 }
                 (AmqpProducerValidationResult::Invalid { violations, .. }, true) => {
-                    return Err(format!("Valid span was incorrectly rejected: {:?}", violations));
+                    return Err(format!(
+                        "Valid span was incorrectly rejected: {:?}",
+                        violations
+                    ));
                 }
                 (AmqpProducerValidationResult::NotApplicable { .. }, false) => {
                     return Err("Expected validation failure but got not applicable".to_string());
@@ -43688,7 +45962,9 @@ mod otlp_122_tests {
         }
 
         /// Validates that AMQP producer spans have required delivery mode attribute
-        fn validate_amqp_producer_delivery_mode(span_data: &AmqpProducerSpanData) -> AmqpProducerValidationResult {
+        fn validate_amqp_producer_delivery_mode(
+            span_data: &AmqpProducerSpanData,
+        ) -> AmqpProducerValidationResult {
             // Check if this span requires delivery mode attribute
             if !requires_amqp_delivery_mode(span_data) {
                 return AmqpProducerValidationResult::NotApplicable {
@@ -43720,7 +45996,10 @@ mod otlp_122_tests {
                     None
                 }
                 Some(_) => {
-                    violations.push("messaging.amqp.delivery_mode attribute must be an integer value".to_string());
+                    violations.push(
+                        "messaging.amqp.delivery_mode attribute must be an integer value"
+                            .to_string(),
+                    );
                     missing_attributes.push("messaging.amqp.delivery_mode".to_string());
                     None
                 }
@@ -43737,31 +46016,43 @@ mod otlp_122_tests {
                 "messaging.destination.name",
                 "messaging.operation",
                 "messaging.amqp.exchange",
-                "messaging.amqp.routing_key"
+                "messaging.amqp.routing_key",
             ];
 
             let mut amqp_attrs_present = 0;
             for attr in &recommended_amqp_attrs {
                 if span_data.attributes.contains_key(*attr) {
                     amqp_attrs_present += 1;
-                } else if attr != &"messaging.amqp.exchange" && attr != &"messaging.amqp.routing_key" {
+                } else if attr != &"messaging.amqp.exchange"
+                    && attr != &"messaging.amqp.routing_key"
+                {
                     println!("⚠ Recommended AMQP attribute '{}' not present", attr);
                 }
             }
 
             // Verify messaging.system is set to "amqp" (case sensitive)
-            if let Some(AnyValue::StringValue(system)) = span_data.attributes.get("messaging.system") {
+            if let Some(AnyValue::StringValue(system)) =
+                span_data.attributes.get("messaging.system")
+            {
                 if system != "amqp" {
                     if system.to_lowercase() == "amqp" {
-                        violations.push(format!("messaging.system should be exactly 'amqp' (case-sensitive), got: '{}'", system));
+                        violations.push(format!(
+                            "messaging.system should be exactly 'amqp' (case-sensitive), got: '{}'",
+                            system
+                        ));
                     } else {
-                        violations.push(format!("messaging.system should be 'amqp' for AMQP producer spans, got: '{}'", system));
+                        violations.push(format!(
+                            "messaging.system should be 'amqp' for AMQP producer spans, got: '{}'",
+                            system
+                        ));
                     }
                 }
             }
 
             // Verify messaging.operation is appropriate for producer if present
-            if let Some(AnyValue::StringValue(operation)) = span_data.attributes.get("messaging.operation") {
+            if let Some(AnyValue::StringValue(operation)) =
+                span_data.attributes.get("messaging.operation")
+            {
                 match operation.as_str() {
                     "publish" | "send" => {
                         // Valid producer operations
@@ -43770,39 +46061,61 @@ mod otlp_122_tests {
                         violations.push(format!("messaging.operation '{}' is inappropriate for producer spans (use 'publish' or 'send')", operation));
                     }
                     _ => {
-                        println!("⚠ Unusual messaging.operation '{}' for producer span", operation);
+                        println!(
+                            "⚠ Unusual messaging.operation '{}' for producer span",
+                            operation
+                        );
                     }
                 }
             }
 
             // Additional AMQP-specific validations
-            if let Some(AnyValue::StringValue(dest_name)) = span_data.attributes.get("messaging.destination.name") {
+            if let Some(AnyValue::StringValue(dest_name)) =
+                span_data.attributes.get("messaging.destination.name")
+            {
                 if dest_name.is_empty() {
-                    violations.push("messaging.destination.name should not be empty for AMQP spans".to_string());
+                    violations.push(
+                        "messaging.destination.name should not be empty for AMQP spans".to_string(),
+                    );
                 }
             }
 
             // Validate AMQP exchange and routing key if present
-            if let Some(AnyValue::StringValue(exchange)) = span_data.attributes.get("messaging.amqp.exchange") {
+            if let Some(AnyValue::StringValue(exchange)) =
+                span_data.attributes.get("messaging.amqp.exchange")
+            {
                 if exchange.is_empty() {
-                    violations.push("messaging.amqp.exchange should not be empty when present".to_string());
+                    violations.push(
+                        "messaging.amqp.exchange should not be empty when present".to_string(),
+                    );
                 }
             }
 
-            if let Some(AnyValue::StringValue(routing_key)) = span_data.attributes.get("messaging.amqp.routing_key") {
+            if let Some(AnyValue::StringValue(routing_key)) =
+                span_data.attributes.get("messaging.amqp.routing_key")
+            {
                 if routing_key.len() > 255 {
-                    println!("⚠ Unusually long AMQP routing key: {} characters (max recommended: 255)", routing_key.len());
+                    println!(
+                        "⚠ Unusually long AMQP routing key: {} characters (max recommended: 255)",
+                        routing_key.len()
+                    );
                 }
             }
 
             // Check for delivery mode consistency with message durability expectations
             if let Some(mode) = delivery_mode {
-                if let Some(AnyValue::StringValue(dest_name)) = span_data.attributes.get("messaging.destination.name") {
+                if let Some(AnyValue::StringValue(dest_name)) =
+                    span_data.attributes.get("messaging.destination.name")
+                {
                     if mode == 1 && dest_name.contains("critical") {
-                        println!("⚠ Transient delivery mode for destination containing 'critical': consider persistent mode");
+                        println!(
+                            "⚠ Transient delivery mode for destination containing 'critical': consider persistent mode"
+                        );
                     }
                     if mode == 2 && dest_name.contains("temp") {
-                        println!("⚠ Persistent delivery mode for destination containing 'temp': consider transient mode");
+                        println!(
+                            "⚠ Persistent delivery mode for destination containing 'temp': consider transient mode"
+                        );
                     }
                 }
             }
@@ -43823,8 +46136,7 @@ mod otlp_122_tests {
         /// Determines if a span requires AMQP delivery mode attribute
         fn requires_amqp_delivery_mode(span_data: &AmqpProducerSpanData) -> bool {
             // OTLP-146: Only PRODUCER spans with messaging.system="amqp" require delivery mode
-            span_data.kind == SpanKind::Producer
-                && span_data.messaging_system == "amqp"
+            span_data.kind == SpanKind::Producer && span_data.messaging_system == "amqp"
         }
 
         // Execute OTLP-146 conformance validation for all scenarios
@@ -43835,7 +46147,10 @@ mod otlp_122_tests {
             match validate_amqp_producer_delivery_mode_conformance(scenario) {
                 Ok(()) => {
                     passed_scenarios += 1;
-                    println!("✓ OTLP-146 conformance verified for {}", scenario.description);
+                    println!(
+                        "✓ OTLP-146 conformance verified for {}",
+                        scenario.description
+                    );
                 }
                 Err(error_msg) => {
                     panic!(
@@ -43856,19 +46171,28 @@ mod otlp_122_tests {
 
         // Test messaging.system case sensitivity
         let system_cases = vec![
-            ("amqp", true),       // Exact match - requires delivery mode
-            ("AMQP", false),      // Wrong case - no requirement
-            ("Amqp", false),      // Wrong case - no requirement
-            ("rabbitmq", false),  // Different system - no requirement
+            ("amqp", true),      // Exact match - requires delivery mode
+            ("AMQP", false),     // Wrong case - no requirement
+            ("Amqp", false),     // Wrong case - no requirement
+            ("rabbitmq", false), // Different system - no requirement
         ];
 
         for (system_name, should_require) in system_cases {
             let mut test_attributes = HashMap::new();
-            test_attributes.insert("messaging.system".to_string(), AnyValue::StringValue(system_name.to_string()));
-            test_attributes.insert("messaging.destination.name".to_string(), AnyValue::StringValue("test.queue".to_string()));
+            test_attributes.insert(
+                "messaging.system".to_string(),
+                AnyValue::StringValue(system_name.to_string()),
+            );
+            test_attributes.insert(
+                "messaging.destination.name".to_string(),
+                AnyValue::StringValue("test.queue".to_string()),
+            );
 
             if should_require {
-                test_attributes.insert("messaging.amqp.delivery_mode".to_string(), AnyValue::IntValue(1));
+                test_attributes.insert(
+                    "messaging.amqp.delivery_mode".to_string(),
+                    AnyValue::IntValue(1),
+                );
             }
 
             let edge_span = AmqpProducerSpanData {
@@ -43888,17 +46212,33 @@ mod otlp_122_tests {
             if should_require {
                 match validate_amqp_producer_delivery_mode(&edge_span) {
                     AmqpProducerValidationResult::Valid { delivery_mode, .. } => {
-                        assert!(delivery_mode.is_some(), "Should have delivery mode for system '{}'", system_name);
-                        println!("✓ System case '{}' correctly requires and validates delivery mode", system_name);
+                        assert!(
+                            delivery_mode.is_some(),
+                            "Should have delivery mode for system '{}'",
+                            system_name
+                        );
+                        println!(
+                            "✓ System case '{}' correctly requires and validates delivery mode",
+                            system_name
+                        );
                     }
-                    _ => panic!("System case '{}' should be valid with delivery mode", system_name),
+                    _ => panic!(
+                        "System case '{}' should be valid with delivery mode",
+                        system_name
+                    ),
                 }
             } else {
                 match validate_amqp_producer_delivery_mode(&edge_span) {
                     AmqpProducerValidationResult::NotApplicable { .. } => {
-                        println!("✓ System case '{}' correctly identified as not applicable", system_name);
+                        println!(
+                            "✓ System case '{}' correctly identified as not applicable",
+                            system_name
+                        );
                     }
-                    _ => panic!("System case '{}' should not require delivery mode", system_name),
+                    _ => panic!(
+                        "System case '{}' should not require delivery mode",
+                        system_name
+                    ),
                 }
             }
         }
@@ -43916,9 +46256,18 @@ mod otlp_122_tests {
 
         for (test_name, mode_value, should_be_valid) in mode_tests {
             let mut test_attributes = HashMap::new();
-            test_attributes.insert("messaging.system".to_string(), AnyValue::StringValue("amqp".to_string()));
-            test_attributes.insert("messaging.destination.name".to_string(), AnyValue::StringValue("test.events".to_string()));
-            test_attributes.insert("messaging.amqp.delivery_mode".to_string(), AnyValue::IntValue(mode_value));
+            test_attributes.insert(
+                "messaging.system".to_string(),
+                AnyValue::StringValue("amqp".to_string()),
+            );
+            test_attributes.insert(
+                "messaging.destination.name".to_string(),
+                AnyValue::StringValue("test.events".to_string()),
+            );
+            test_attributes.insert(
+                "messaging.amqp.delivery_mode".to_string(),
+                AnyValue::IntValue(mode_value),
+            );
 
             let test_span = AmqpProducerSpanData {
                 name: format!("mode_test_{}", test_name),
@@ -43936,12 +46285,18 @@ mod otlp_122_tests {
                 test_name, should_be_valid, is_valid
             );
 
-            println!("✓ Mode test '{}' (value: {}) correctly evaluated as {}",
-                    test_name, mode_value, if is_valid { "valid" } else { "invalid" });
+            println!(
+                "✓ Mode test '{}' (value: {}) correctly evaluated as {}",
+                test_name,
+                mode_value,
+                if is_valid { "valid" } else { "invalid" }
+            );
         }
 
         println!("✓ OTLP-146: AMQP producer delivery mode requirement conformance verified");
-        println!("  - PRODUCER spans with messaging.system='amqp' require messaging.amqp.delivery_mode");
+        println!(
+            "  - PRODUCER spans with messaging.system='amqp' require messaging.amqp.delivery_mode"
+        );
         println!("  - Delivery mode must be exactly 1 (transient) or 2 (persistent)");
         println!("  - Non-AMQP producer systems exempt from requirement");
         println!("  - Consumer spans exempt from requirement");
@@ -43970,51 +46325,108 @@ mod otlp_122_tests {
                 span_kind: SpanKind::Producer,
                 messaging_system: "amqp".to_string(),
                 span_attributes: vec![
-                    ("messaging.amqp.delivery_mode".to_string(), AnyValue::IntValue(0)), // Invalid zero
-                    ("messaging.system".to_string(), AnyValue::StringValue("amqp".to_string())),
-                    ("messaging.destination.name".to_string(), AnyValue::StringValue("test.queue".to_string())),
+                    (
+                        "messaging.amqp.delivery_mode".to_string(),
+                        AnyValue::IntValue(0),
+                    ), // Invalid zero
+                    (
+                        "messaging.system".to_string(),
+                        AnyValue::StringValue("amqp".to_string()),
+                    ),
+                    (
+                        "messaging.destination.name".to_string(),
+                        AnyValue::StringValue("test.queue".to_string()),
+                    ),
                 ],
                 should_be_rejected: true,
-                expected_violation: "delivery_mode must be 1 (transient) or 2 (persistent), got: 0".to_string(),
+                expected_violation: "delivery_mode must be 1 (transient) or 2 (persistent), got: 0"
+                    .to_string(),
             },
             AmqpDeliveryModeZeroScenario {
                 description: "amqp_producer_delivery_mode_zero_with_exchange".to_string(),
                 span_kind: SpanKind::Producer,
                 messaging_system: "amqp".to_string(),
                 span_attributes: vec![
-                    ("messaging.amqp.delivery_mode".to_string(), AnyValue::IntValue(0)), // Invalid zero
-                    ("messaging.system".to_string(), AnyValue::StringValue("amqp".to_string())),
-                    ("messaging.destination.name".to_string(), AnyValue::StringValue("critical.alerts".to_string())),
-                    ("messaging.amqp.exchange".to_string(), AnyValue::StringValue("alerts.direct".to_string())),
-                    ("messaging.amqp.routing_key".to_string(), AnyValue::StringValue("alert.critical.system".to_string())),
+                    (
+                        "messaging.amqp.delivery_mode".to_string(),
+                        AnyValue::IntValue(0),
+                    ), // Invalid zero
+                    (
+                        "messaging.system".to_string(),
+                        AnyValue::StringValue("amqp".to_string()),
+                    ),
+                    (
+                        "messaging.destination.name".to_string(),
+                        AnyValue::StringValue("critical.alerts".to_string()),
+                    ),
+                    (
+                        "messaging.amqp.exchange".to_string(),
+                        AnyValue::StringValue("alerts.direct".to_string()),
+                    ),
+                    (
+                        "messaging.amqp.routing_key".to_string(),
+                        AnyValue::StringValue("alert.critical.system".to_string()),
+                    ),
                 ],
                 should_be_rejected: true,
-                expected_violation: "delivery_mode must be 1 (transient) or 2 (persistent), got: 0".to_string(),
+                expected_violation: "delivery_mode must be 1 (transient) or 2 (persistent), got: 0"
+                    .to_string(),
             },
             AmqpDeliveryModeZeroScenario {
                 description: "amqp_producer_delivery_mode_zero_with_priority".to_string(),
                 span_kind: SpanKind::Producer,
                 messaging_system: "amqp".to_string(),
                 span_attributes: vec![
-                    ("messaging.amqp.delivery_mode".to_string(), AnyValue::IntValue(0)), // Invalid zero
-                    ("messaging.system".to_string(), AnyValue::StringValue("amqp".to_string())),
-                    ("messaging.destination.name".to_string(), AnyValue::StringValue("high-priority.orders".to_string())),
-                    ("messaging.amqp.exchange".to_string(), AnyValue::StringValue("orders.topic".to_string())),
-                    ("messaging.amqp.routing_key".to_string(), AnyValue::StringValue("order.urgent".to_string())),
-                    ("messaging.operation".to_string(), AnyValue::StringValue("publish".to_string())),
-                    ("messaging.message_payload_size_bytes".to_string(), AnyValue::IntValue(2048)),
+                    (
+                        "messaging.amqp.delivery_mode".to_string(),
+                        AnyValue::IntValue(0),
+                    ), // Invalid zero
+                    (
+                        "messaging.system".to_string(),
+                        AnyValue::StringValue("amqp".to_string()),
+                    ),
+                    (
+                        "messaging.destination.name".to_string(),
+                        AnyValue::StringValue("high-priority.orders".to_string()),
+                    ),
+                    (
+                        "messaging.amqp.exchange".to_string(),
+                        AnyValue::StringValue("orders.topic".to_string()),
+                    ),
+                    (
+                        "messaging.amqp.routing_key".to_string(),
+                        AnyValue::StringValue("order.urgent".to_string()),
+                    ),
+                    (
+                        "messaging.operation".to_string(),
+                        AnyValue::StringValue("publish".to_string()),
+                    ),
+                    (
+                        "messaging.message_payload_size_bytes".to_string(),
+                        AnyValue::IntValue(2048),
+                    ),
                 ],
                 should_be_rejected: true,
-                expected_violation: "delivery_mode must be 1 (transient) or 2 (persistent), got: 0".to_string(),
+                expected_violation: "delivery_mode must be 1 (transient) or 2 (persistent), got: 0"
+                    .to_string(),
             },
             AmqpDeliveryModeZeroScenario {
                 description: "amqp_producer_valid_delivery_mode_one_control".to_string(),
                 span_kind: SpanKind::Producer,
                 messaging_system: "amqp".to_string(),
                 span_attributes: vec![
-                    ("messaging.amqp.delivery_mode".to_string(), AnyValue::IntValue(1)), // Valid transient
-                    ("messaging.system".to_string(), AnyValue::StringValue("amqp".to_string())),
-                    ("messaging.destination.name".to_string(), AnyValue::StringValue("test.queue".to_string())),
+                    (
+                        "messaging.amqp.delivery_mode".to_string(),
+                        AnyValue::IntValue(1),
+                    ), // Valid transient
+                    (
+                        "messaging.system".to_string(),
+                        AnyValue::StringValue("amqp".to_string()),
+                    ),
+                    (
+                        "messaging.destination.name".to_string(),
+                        AnyValue::StringValue("test.queue".to_string()),
+                    ),
                 ],
                 should_be_rejected: false,
                 expected_violation: "".to_string(),
@@ -44024,9 +46436,18 @@ mod otlp_122_tests {
                 span_kind: SpanKind::Producer,
                 messaging_system: "amqp".to_string(),
                 span_attributes: vec![
-                    ("messaging.amqp.delivery_mode".to_string(), AnyValue::IntValue(2)), // Valid persistent
-                    ("messaging.system".to_string(), AnyValue::StringValue("amqp".to_string())),
-                    ("messaging.destination.name".to_string(), AnyValue::StringValue("test.queue".to_string())),
+                    (
+                        "messaging.amqp.delivery_mode".to_string(),
+                        AnyValue::IntValue(2),
+                    ), // Valid persistent
+                    (
+                        "messaging.system".to_string(),
+                        AnyValue::StringValue("amqp".to_string()),
+                    ),
+                    (
+                        "messaging.destination.name".to_string(),
+                        AnyValue::StringValue("test.queue".to_string()),
+                    ),
                 ],
                 should_be_rejected: false,
                 expected_violation: "".to_string(),
@@ -44036,9 +46457,18 @@ mod otlp_122_tests {
                 span_kind: SpanKind::Producer,
                 messaging_system: "kafka".to_string(), // Not AMQP
                 span_attributes: vec![
-                    ("messaging.amqp.delivery_mode".to_string(), AnyValue::IntValue(0)), // Zero but not AMQP
-                    ("messaging.system".to_string(), AnyValue::StringValue("kafka".to_string())),
-                    ("messaging.destination.name".to_string(), AnyValue::StringValue("events".to_string())),
+                    (
+                        "messaging.amqp.delivery_mode".to_string(),
+                        AnyValue::IntValue(0),
+                    ), // Zero but not AMQP
+                    (
+                        "messaging.system".to_string(),
+                        AnyValue::StringValue("kafka".to_string()),
+                    ),
+                    (
+                        "messaging.destination.name".to_string(),
+                        AnyValue::StringValue("events".to_string()),
+                    ),
                 ],
                 should_be_rejected: false, // Not AMQP so no validation applied
                 expected_violation: "".to_string(),
@@ -44048,9 +46478,18 @@ mod otlp_122_tests {
                 span_kind: SpanKind::Consumer, // Not producer
                 messaging_system: "amqp".to_string(),
                 span_attributes: vec![
-                    ("messaging.amqp.delivery_mode".to_string(), AnyValue::IntValue(0)), // Zero but consumer
-                    ("messaging.system".to_string(), AnyValue::StringValue("amqp".to_string())),
-                    ("messaging.destination.name".to_string(), AnyValue::StringValue("test.queue".to_string())),
+                    (
+                        "messaging.amqp.delivery_mode".to_string(),
+                        AnyValue::IntValue(0),
+                    ), // Zero but consumer
+                    (
+                        "messaging.system".to_string(),
+                        AnyValue::StringValue("amqp".to_string()),
+                    ),
+                    (
+                        "messaging.destination.name".to_string(),
+                        AnyValue::StringValue("test.queue".to_string()),
+                    ),
                 ],
                 should_be_rejected: false, // Consumer span so no validation applied
                 expected_violation: "".to_string(),
@@ -44060,43 +46499,99 @@ mod otlp_122_tests {
                 span_kind: SpanKind::Producer,
                 messaging_system: "amqp".to_string(),
                 span_attributes: vec![
-                    ("messaging.amqp.delivery_mode".to_string(), AnyValue::IntValue(0)), // Invalid zero
-                    ("messaging.system".to_string(), AnyValue::StringValue("amqp".to_string())),
-                    ("messaging.destination.name".to_string(), AnyValue::StringValue("mixed.queue".to_string())),
-                    ("messaging.amqp.exchange".to_string(), AnyValue::StringValue("app.events".to_string())),
-                    ("messaging.amqp.routing_key".to_string(), AnyValue::StringValue("user.created".to_string())),
-                    ("messaging.operation".to_string(), AnyValue::StringValue("publish".to_string())),
-                    ("messaging.message_id".to_string(), AnyValue::StringValue("msg-12345".to_string())),
-                    ("net.peer.name".to_string(), AnyValue::StringValue("rabbitmq.prod.com".to_string())),
+                    (
+                        "messaging.amqp.delivery_mode".to_string(),
+                        AnyValue::IntValue(0),
+                    ), // Invalid zero
+                    (
+                        "messaging.system".to_string(),
+                        AnyValue::StringValue("amqp".to_string()),
+                    ),
+                    (
+                        "messaging.destination.name".to_string(),
+                        AnyValue::StringValue("mixed.queue".to_string()),
+                    ),
+                    (
+                        "messaging.amqp.exchange".to_string(),
+                        AnyValue::StringValue("app.events".to_string()),
+                    ),
+                    (
+                        "messaging.amqp.routing_key".to_string(),
+                        AnyValue::StringValue("user.created".to_string()),
+                    ),
+                    (
+                        "messaging.operation".to_string(),
+                        AnyValue::StringValue("publish".to_string()),
+                    ),
+                    (
+                        "messaging.message_id".to_string(),
+                        AnyValue::StringValue("msg-12345".to_string()),
+                    ),
+                    (
+                        "net.peer.name".to_string(),
+                        AnyValue::StringValue("rabbitmq.prod.com".to_string()),
+                    ),
                     ("net.peer.port".to_string(), AnyValue::IntValue(5672)),
-                    ("user.id".to_string(), AnyValue::StringValue("user-67890".to_string())),
+                    (
+                        "user.id".to_string(),
+                        AnyValue::StringValue("user-67890".to_string()),
+                    ),
                 ],
                 should_be_rejected: true,
-                expected_violation: "delivery_mode must be 1 (transient) or 2 (persistent), got: 0".to_string(),
+                expected_violation: "delivery_mode must be 1 (transient) or 2 (persistent), got: 0"
+                    .to_string(),
             },
             AmqpDeliveryModeZeroScenario {
                 description: "amqp_producer_delivery_mode_zero_batch_message".to_string(),
                 span_kind: SpanKind::Producer,
                 messaging_system: "amqp".to_string(),
                 span_attributes: vec![
-                    ("messaging.amqp.delivery_mode".to_string(), AnyValue::IntValue(0)), // Invalid zero
-                    ("messaging.system".to_string(), AnyValue::StringValue("amqp".to_string())),
-                    ("messaging.destination.name".to_string(), AnyValue::StringValue("bulk.events".to_string())),
-                    ("messaging.amqp.exchange".to_string(), AnyValue::StringValue("bulk.fanout".to_string())),
-                    ("messaging.batch.message_count".to_string(), AnyValue::IntValue(100)),
-                    ("messaging.message_payload_size_bytes".to_string(), AnyValue::IntValue(10240)),
+                    (
+                        "messaging.amqp.delivery_mode".to_string(),
+                        AnyValue::IntValue(0),
+                    ), // Invalid zero
+                    (
+                        "messaging.system".to_string(),
+                        AnyValue::StringValue("amqp".to_string()),
+                    ),
+                    (
+                        "messaging.destination.name".to_string(),
+                        AnyValue::StringValue("bulk.events".to_string()),
+                    ),
+                    (
+                        "messaging.amqp.exchange".to_string(),
+                        AnyValue::StringValue("bulk.fanout".to_string()),
+                    ),
+                    (
+                        "messaging.batch.message_count".to_string(),
+                        AnyValue::IntValue(100),
+                    ),
+                    (
+                        "messaging.message_payload_size_bytes".to_string(),
+                        AnyValue::IntValue(10240),
+                    ),
                 ],
                 should_be_rejected: true,
-                expected_violation: "delivery_mode must be 1 (transient) or 2 (persistent), got: 0".to_string(),
+                expected_violation: "delivery_mode must be 1 (transient) or 2 (persistent), got: 0"
+                    .to_string(),
             },
             AmqpDeliveryModeZeroScenario {
                 description: "amqp_producer_delivery_mode_zero_case_sensitivity".to_string(),
                 span_kind: SpanKind::Producer,
                 messaging_system: "AMQP".to_string(), // Different case
                 span_attributes: vec![
-                    ("messaging.amqp.delivery_mode".to_string(), AnyValue::IntValue(0)), // Zero but wrong case
-                    ("messaging.system".to_string(), AnyValue::StringValue("AMQP".to_string())),
-                    ("messaging.destination.name".to_string(), AnyValue::StringValue("test.queue".to_string())),
+                    (
+                        "messaging.amqp.delivery_mode".to_string(),
+                        AnyValue::IntValue(0),
+                    ), // Zero but wrong case
+                    (
+                        "messaging.system".to_string(),
+                        AnyValue::StringValue("AMQP".to_string()),
+                    ),
+                    (
+                        "messaging.destination.name".to_string(),
+                        AnyValue::StringValue("test.queue".to_string()),
+                    ),
                 ],
                 should_be_rejected: false, // Not exact "amqp" so no validation applied
                 expected_violation: "".to_string(),
@@ -44170,10 +46665,16 @@ mod otlp_122_tests {
                             scenario.expected_violation, violation
                         ));
                     }
-                    println!("✓ AMQP producer span with delivery_mode=0 correctly rejected: {}", violation);
+                    println!(
+                        "✓ AMQP producer span with delivery_mode=0 correctly rejected: {}",
+                        violation
+                    );
                 }
                 (AmqpDeliveryModeZeroValidationResult::Accepted { delivery_mode }, false) => {
-                    println!("✓ Valid AMQP producer span accepted with delivery_mode={}", delivery_mode);
+                    println!(
+                        "✓ Valid AMQP producer span accepted with delivery_mode={}",
+                        delivery_mode
+                    );
                 }
                 (AmqpDeliveryModeZeroValidationResult::NotApplicable { reason }, false) => {
                     println!("✓ Delivery mode validation not applicable: {}", reason);
@@ -44182,7 +46683,9 @@ mod otlp_122_tests {
                     return Err("Valid span was incorrectly rejected".to_string());
                 }
                 (AmqpDeliveryModeZeroValidationResult::Accepted { .. }, true) => {
-                    return Err("Invalid span with delivery_mode=0 was incorrectly accepted".to_string());
+                    return Err(
+                        "Invalid span with delivery_mode=0 was incorrectly accepted".to_string()
+                    );
                 }
                 (AmqpDeliveryModeZeroValidationResult::NotApplicable { .. }, true) => {
                     return Err("Expected validation failure but got not applicable".to_string());
@@ -44193,7 +46696,9 @@ mod otlp_122_tests {
         }
 
         /// Validates that AMQP producer spans with delivery_mode=0 are rejected
-        fn validate_amqp_delivery_mode_zero(span_data: &AmqpDeliveryModeZeroSpanData) -> AmqpDeliveryModeZeroValidationResult {
+        fn validate_amqp_delivery_mode_zero(
+            span_data: &AmqpDeliveryModeZeroSpanData,
+        ) -> AmqpDeliveryModeZeroValidationResult {
             // Check if this span requires delivery mode validation
             if !requires_amqp_delivery_mode_validation(span_data) {
                 return AmqpDeliveryModeZeroValidationResult::NotApplicable {
@@ -44214,14 +46719,10 @@ mod otlp_122_tests {
                     }
                 }
                 Some(AnyValue::IntValue(1)) => {
-                    AmqpDeliveryModeZeroValidationResult::Accepted {
-                        delivery_mode: 1,
-                    }
+                    AmqpDeliveryModeZeroValidationResult::Accepted { delivery_mode: 1 }
                 }
                 Some(AnyValue::IntValue(2)) => {
-                    AmqpDeliveryModeZeroValidationResult::Accepted {
-                        delivery_mode: 2,
-                    }
+                    AmqpDeliveryModeZeroValidationResult::Accepted { delivery_mode: 2 }
                 }
                 Some(AnyValue::IntValue(other_value)) => {
                     // Other invalid values also rejected, but this test focuses on zero
@@ -44235,7 +46736,8 @@ mod otlp_122_tests {
                 }
                 Some(_) => {
                     AmqpDeliveryModeZeroValidationResult::Rejected {
-                        violation: "messaging.amqp.delivery_mode must be an integer value".to_string(),
+                        violation: "messaging.amqp.delivery_mode must be an integer value"
+                            .to_string(),
                         delivery_mode_value: -999, // Sentinel for non-integer
                     }
                 }
@@ -44249,10 +46751,11 @@ mod otlp_122_tests {
         }
 
         /// Determines if a span requires delivery mode validation
-        fn requires_amqp_delivery_mode_validation(span_data: &AmqpDeliveryModeZeroSpanData) -> bool {
+        fn requires_amqp_delivery_mode_validation(
+            span_data: &AmqpDeliveryModeZeroSpanData,
+        ) -> bool {
             // OTLP-147: Only PRODUCER spans with messaging.system="amqp" (case-sensitive)
-            span_data.kind == SpanKind::Producer
-                && span_data.messaging_system == "amqp"
+            span_data.kind == SpanKind::Producer && span_data.messaging_system == "amqp"
         }
 
         // Execute OTLP-147 conformance validation for all scenarios
@@ -44263,7 +46766,10 @@ mod otlp_122_tests {
             match validate_amqp_delivery_mode_zero_conformance(scenario) {
                 Ok(()) => {
                     passed_scenarios += 1;
-                    println!("✓ OTLP-147 conformance verified for {}", scenario.description);
+                    println!(
+                        "✓ OTLP-147 conformance verified for {}",
+                        scenario.description
+                    );
                 }
                 Err(error_msg) => {
                     panic!(
@@ -44284,25 +46790,52 @@ mod otlp_122_tests {
 
         // Test various contexts where delivery_mode=0 appears
         let zero_contexts = vec![
-            ("minimal_attributes", vec![("messaging.destination.name", "queue")]),
-            ("with_exchange", vec![("messaging.destination.name", "queue"), ("messaging.amqp.exchange", "exchange")]),
-            ("with_routing_key", vec![("messaging.destination.name", "queue"), ("messaging.amqp.routing_key", "key")]),
-            ("full_context", vec![
-                ("messaging.destination.name", "queue"),
-                ("messaging.amqp.exchange", "exchange"),
-                ("messaging.amqp.routing_key", "key"),
-                ("messaging.operation", "publish"),
-                ("net.peer.name", "broker.example.com")
-            ]),
+            (
+                "minimal_attributes",
+                vec![("messaging.destination.name", "queue")],
+            ),
+            (
+                "with_exchange",
+                vec![
+                    ("messaging.destination.name", "queue"),
+                    ("messaging.amqp.exchange", "exchange"),
+                ],
+            ),
+            (
+                "with_routing_key",
+                vec![
+                    ("messaging.destination.name", "queue"),
+                    ("messaging.amqp.routing_key", "key"),
+                ],
+            ),
+            (
+                "full_context",
+                vec![
+                    ("messaging.destination.name", "queue"),
+                    ("messaging.amqp.exchange", "exchange"),
+                    ("messaging.amqp.routing_key", "key"),
+                    ("messaging.operation", "publish"),
+                    ("net.peer.name", "broker.example.com"),
+                ],
+            ),
         ];
 
         for (context_name, additional_attrs) in zero_contexts {
             let mut test_attributes = HashMap::new();
-            test_attributes.insert("messaging.system".to_string(), AnyValue::StringValue("amqp".to_string()));
-            test_attributes.insert("messaging.amqp.delivery_mode".to_string(), AnyValue::IntValue(0));
+            test_attributes.insert(
+                "messaging.system".to_string(),
+                AnyValue::StringValue("amqp".to_string()),
+            );
+            test_attributes.insert(
+                "messaging.amqp.delivery_mode".to_string(),
+                AnyValue::IntValue(0),
+            );
 
             for (key, value) in additional_attrs {
-                test_attributes.insert(format!("messaging.{}", key), AnyValue::StringValue(value.to_string()));
+                test_attributes.insert(
+                    format!("messaging.{}", key),
+                    AnyValue::StringValue(value.to_string()),
+                );
             }
 
             let test_span = AmqpDeliveryModeZeroSpanData {
@@ -44314,11 +46847,20 @@ mod otlp_122_tests {
 
             let result = validate_amqp_delivery_mode_zero(&test_span);
             match result {
-                AmqpDeliveryModeZeroValidationResult::Rejected { delivery_mode_value: 0, .. } => {
-                    println!("✓ Context test '{}' correctly rejected delivery_mode=0", context_name);
+                AmqpDeliveryModeZeroValidationResult::Rejected {
+                    delivery_mode_value: 0,
+                    ..
+                } => {
+                    println!(
+                        "✓ Context test '{}' correctly rejected delivery_mode=0",
+                        context_name
+                    );
                 }
                 _ => {
-                    panic!("Context test '{}' should have rejected delivery_mode=0", context_name);
+                    panic!(
+                        "Context test '{}' should have rejected delivery_mode=0",
+                        context_name
+                    );
                 }
             }
         }
@@ -44326,17 +46868,26 @@ mod otlp_122_tests {
         // Test edge cases around zero value
         println!("Testing edge cases around delivery_mode=0...");
         let edge_values = vec![
-            ("exactly_zero", 0, true),        // Should be rejected
-            ("positive_one", 1, false),       // Should be accepted
-            ("positive_two", 2, false),       // Should be accepted
-            ("negative_one", -1, true),       // Should be rejected (not zero but invalid)
+            ("exactly_zero", 0, true),  // Should be rejected
+            ("positive_one", 1, false), // Should be accepted
+            ("positive_two", 2, false), // Should be accepted
+            ("negative_one", -1, true), // Should be rejected (not zero but invalid)
         ];
 
         for (test_name, delivery_mode_val, should_reject) in edge_values {
             let mut test_attributes = HashMap::new();
-            test_attributes.insert("messaging.system".to_string(), AnyValue::StringValue("amqp".to_string()));
-            test_attributes.insert("messaging.destination.name".to_string(), AnyValue::StringValue("test".to_string()));
-            test_attributes.insert("messaging.amqp.delivery_mode".to_string(), AnyValue::IntValue(delivery_mode_val));
+            test_attributes.insert(
+                "messaging.system".to_string(),
+                AnyValue::StringValue("amqp".to_string()),
+            );
+            test_attributes.insert(
+                "messaging.destination.name".to_string(),
+                AnyValue::StringValue("test".to_string()),
+            );
+            test_attributes.insert(
+                "messaging.amqp.delivery_mode".to_string(),
+                AnyValue::IntValue(delivery_mode_val),
+            );
 
             let test_span = AmqpDeliveryModeZeroSpanData {
                 name: format!("edge_test_{}", test_name),
@@ -44346,23 +46897,42 @@ mod otlp_122_tests {
             };
 
             let result = validate_amqp_delivery_mode_zero(&test_span);
-            let is_rejected = matches!(result, AmqpDeliveryModeZeroValidationResult::Rejected { .. });
+            let is_rejected = matches!(
+                result,
+                AmqpDeliveryModeZeroValidationResult::Rejected { .. }
+            );
 
             assert_eq!(
-                is_rejected, should_reject,
+                is_rejected,
+                should_reject,
                 "Edge test '{}' (value: {}) validation mismatch: expected {}, got {}",
-                test_name, delivery_mode_val, if should_reject { "rejected" } else { "accepted" }, if is_rejected { "rejected" } else { "accepted" }
+                test_name,
+                delivery_mode_val,
+                if should_reject {
+                    "rejected"
+                } else {
+                    "accepted"
+                },
+                if is_rejected { "rejected" } else { "accepted" }
             );
 
             if delivery_mode_val == 0 && is_rejected {
-                println!("✓ Edge test '{}' correctly rejected delivery_mode=0 specifically", test_name);
+                println!(
+                    "✓ Edge test '{}' correctly rejected delivery_mode=0 specifically",
+                    test_name
+                );
             } else if !should_reject && !is_rejected {
-                println!("✓ Edge test '{}' correctly accepted valid delivery_mode={}", test_name, delivery_mode_val);
+                println!(
+                    "✓ Edge test '{}' correctly accepted valid delivery_mode={}",
+                    test_name, delivery_mode_val
+                );
             }
         }
 
         println!("✓ OTLP-147: AMQP producer delivery mode zero rejection conformance verified");
-        println!("  - PRODUCER spans with messaging.system='amqp' and delivery_mode=0 are REJECTED");
+        println!(
+            "  - PRODUCER spans with messaging.system='amqp' and delivery_mode=0 are REJECTED"
+        );
         println!("  - Valid delivery modes 1 (transient) and 2 (persistent) are accepted");
         println!("  - Non-AMQP systems and consumer spans exempt from validation");
         println!("  - Case-sensitive messaging.system matching enforced");
@@ -44388,11 +46958,26 @@ mod otlp_122_tests {
                 span_kind: SpanKind::Producer,
                 messaging_system: "rabbitmq".to_string(),
                 span_attributes: vec![
-                    ("messaging.rabbitmq.destination_routing_key".to_string(), AnyValue::StringValue("user.notifications.email".to_string())),
-                    ("messaging.system".to_string(), AnyValue::StringValue("rabbitmq".to_string())),
-                    ("messaging.destination.name".to_string(), AnyValue::StringValue("user.notifications".to_string())),
-                    ("messaging.operation".to_string(), AnyValue::StringValue("publish".to_string())),
-                    ("net.peer.name".to_string(), AnyValue::StringValue("rabbitmq.example.com".to_string())),
+                    (
+                        "messaging.rabbitmq.destination_routing_key".to_string(),
+                        AnyValue::StringValue("user.notifications.email".to_string()),
+                    ),
+                    (
+                        "messaging.system".to_string(),
+                        AnyValue::StringValue("rabbitmq".to_string()),
+                    ),
+                    (
+                        "messaging.destination.name".to_string(),
+                        AnyValue::StringValue("user.notifications".to_string()),
+                    ),
+                    (
+                        "messaging.operation".to_string(),
+                        AnyValue::StringValue("publish".to_string()),
+                    ),
+                    (
+                        "net.peer.name".to_string(),
+                        AnyValue::StringValue("rabbitmq.example.com".to_string()),
+                    ),
                 ],
                 should_be_valid: true,
                 expected_routing_key: Some("user.notifications.email".to_string()),
@@ -44402,9 +46987,18 @@ mod otlp_122_tests {
                 span_kind: SpanKind::Producer,
                 messaging_system: "rabbitmq".to_string(),
                 span_attributes: vec![
-                    ("messaging.system".to_string(), AnyValue::StringValue("rabbitmq".to_string())),
-                    ("messaging.destination.name".to_string(), AnyValue::StringValue("events".to_string())),
-                    ("messaging.operation".to_string(), AnyValue::StringValue("publish".to_string())),
+                    (
+                        "messaging.system".to_string(),
+                        AnyValue::StringValue("rabbitmq".to_string()),
+                    ),
+                    (
+                        "messaging.destination.name".to_string(),
+                        AnyValue::StringValue("events".to_string()),
+                    ),
+                    (
+                        "messaging.operation".to_string(),
+                        AnyValue::StringValue("publish".to_string()),
+                    ),
                     // Missing messaging.rabbitmq.destination_routing_key - should be invalid
                 ],
                 should_be_valid: false,
@@ -44415,9 +47009,18 @@ mod otlp_122_tests {
                 span_kind: SpanKind::Producer,
                 messaging_system: "rabbitmq".to_string(),
                 span_attributes: vec![
-                    ("messaging.rabbitmq.destination_routing_key".to_string(), AnyValue::StringValue("".to_string())), // Empty
-                    ("messaging.system".to_string(), AnyValue::StringValue("rabbitmq".to_string())),
-                    ("messaging.destination.name".to_string(), AnyValue::StringValue("events".to_string())),
+                    (
+                        "messaging.rabbitmq.destination_routing_key".to_string(),
+                        AnyValue::StringValue("".to_string()),
+                    ), // Empty
+                    (
+                        "messaging.system".to_string(),
+                        AnyValue::StringValue("rabbitmq".to_string()),
+                    ),
+                    (
+                        "messaging.destination.name".to_string(),
+                        AnyValue::StringValue("events".to_string()),
+                    ),
                 ],
                 should_be_valid: true, // Empty routing key is valid in RabbitMQ (default exchange)
                 expected_routing_key: Some("".to_string()),
@@ -44427,9 +47030,18 @@ mod otlp_122_tests {
                 span_kind: SpanKind::Producer,
                 messaging_system: "rabbitmq".to_string(),
                 span_attributes: vec![
-                    ("messaging.rabbitmq.destination_routing_key".to_string(), AnyValue::IntValue(12345)), // Wrong type
-                    ("messaging.system".to_string(), AnyValue::StringValue("rabbitmq".to_string())),
-                    ("messaging.destination.name".to_string(), AnyValue::StringValue("events".to_string())),
+                    (
+                        "messaging.rabbitmq.destination_routing_key".to_string(),
+                        AnyValue::IntValue(12345),
+                    ), // Wrong type
+                    (
+                        "messaging.system".to_string(),
+                        AnyValue::StringValue("rabbitmq".to_string()),
+                    ),
+                    (
+                        "messaging.destination.name".to_string(),
+                        AnyValue::StringValue("events".to_string()),
+                    ),
                 ],
                 should_be_valid: false,
                 expected_routing_key: None,
@@ -44439,9 +47051,18 @@ mod otlp_122_tests {
                 span_kind: SpanKind::Producer,
                 messaging_system: "kafka".to_string(), // Not RabbitMQ
                 span_attributes: vec![
-                    ("messaging.system".to_string(), AnyValue::StringValue("kafka".to_string())),
-                    ("messaging.destination.name".to_string(), AnyValue::StringValue("events".to_string())),
-                    ("messaging.kafka.message.partition".to_string(), AnyValue::IntValue(3)),
+                    (
+                        "messaging.system".to_string(),
+                        AnyValue::StringValue("kafka".to_string()),
+                    ),
+                    (
+                        "messaging.destination.name".to_string(),
+                        AnyValue::StringValue("events".to_string()),
+                    ),
+                    (
+                        "messaging.kafka.message.partition".to_string(),
+                        AnyValue::IntValue(3),
+                    ),
                 ],
                 should_be_valid: true, // No routing key requirement for non-RabbitMQ
                 expected_routing_key: None,
@@ -44451,9 +47072,18 @@ mod otlp_122_tests {
                 span_kind: SpanKind::Consumer, // Not producer
                 messaging_system: "rabbitmq".to_string(),
                 span_attributes: vec![
-                    ("messaging.system".to_string(), AnyValue::StringValue("rabbitmq".to_string())),
-                    ("messaging.destination.name".to_string(), AnyValue::StringValue("events".to_string())),
-                    ("messaging.operation".to_string(), AnyValue::StringValue("receive".to_string())),
+                    (
+                        "messaging.system".to_string(),
+                        AnyValue::StringValue("rabbitmq".to_string()),
+                    ),
+                    (
+                        "messaging.destination.name".to_string(),
+                        AnyValue::StringValue("events".to_string()),
+                    ),
+                    (
+                        "messaging.operation".to_string(),
+                        AnyValue::StringValue("receive".to_string()),
+                    ),
                 ],
                 should_be_valid: true, // No routing key requirement for consumer spans
                 expected_routing_key: None,
@@ -44463,12 +47093,30 @@ mod otlp_122_tests {
                 span_kind: SpanKind::Producer,
                 messaging_system: "rabbitmq".to_string(),
                 span_attributes: vec![
-                    ("messaging.rabbitmq.destination_routing_key".to_string(), AnyValue::StringValue("orders.payment.success.visa".to_string())),
-                    ("messaging.system".to_string(), AnyValue::StringValue("rabbitmq".to_string())),
-                    ("messaging.destination.name".to_string(), AnyValue::StringValue("payment.events".to_string())),
-                    ("messaging.operation".to_string(), AnyValue::StringValue("publish".to_string())),
-                    ("messaging.message_id".to_string(), AnyValue::StringValue("msg-payment-12345".to_string())),
-                    ("net.peer.name".to_string(), AnyValue::StringValue("rabbitmq-cluster.prod.com".to_string())),
+                    (
+                        "messaging.rabbitmq.destination_routing_key".to_string(),
+                        AnyValue::StringValue("orders.payment.success.visa".to_string()),
+                    ),
+                    (
+                        "messaging.system".to_string(),
+                        AnyValue::StringValue("rabbitmq".to_string()),
+                    ),
+                    (
+                        "messaging.destination.name".to_string(),
+                        AnyValue::StringValue("payment.events".to_string()),
+                    ),
+                    (
+                        "messaging.operation".to_string(),
+                        AnyValue::StringValue("publish".to_string()),
+                    ),
+                    (
+                        "messaging.message_id".to_string(),
+                        AnyValue::StringValue("msg-payment-12345".to_string()),
+                    ),
+                    (
+                        "net.peer.name".to_string(),
+                        AnyValue::StringValue("rabbitmq-cluster.prod.com".to_string()),
+                    ),
                     ("net.peer.port".to_string(), AnyValue::IntValue(5672)),
                 ],
                 should_be_valid: true,
@@ -44479,8 +47127,14 @@ mod otlp_122_tests {
                 span_kind: SpanKind::Producer,
                 messaging_system: "RabbitMQ".to_string(), // Different case
                 span_attributes: vec![
-                    ("messaging.system".to_string(), AnyValue::StringValue("RabbitMQ".to_string())),
-                    ("messaging.destination.name".to_string(), AnyValue::StringValue("events".to_string())),
+                    (
+                        "messaging.system".to_string(),
+                        AnyValue::StringValue("RabbitMQ".to_string()),
+                    ),
+                    (
+                        "messaging.destination.name".to_string(),
+                        AnyValue::StringValue("events".to_string()),
+                    ),
                 ],
                 should_be_valid: true, // Not exact "rabbitmq" so no requirement
                 expected_routing_key: None,
@@ -44490,13 +47144,34 @@ mod otlp_122_tests {
                 span_kind: SpanKind::Producer,
                 messaging_system: "rabbitmq".to_string(),
                 span_attributes: vec![
-                    ("messaging.rabbitmq.destination_routing_key".to_string(), AnyValue::StringValue("alert.system.critical".to_string())),
-                    ("messaging.system".to_string(), AnyValue::StringValue("rabbitmq".to_string())),
-                    ("messaging.destination.name".to_string(), AnyValue::StringValue("alerts.topic".to_string())),
-                    ("messaging.rabbitmq.destination_exchange".to_string(), AnyValue::StringValue("alerts".to_string())),
-                    ("messaging.rabbitmq.exchange_type".to_string(), AnyValue::StringValue("topic".to_string())),
-                    ("messaging.operation".to_string(), AnyValue::StringValue("publish".to_string())),
-                    ("messaging.message_payload_size_bytes".to_string(), AnyValue::IntValue(1024)),
+                    (
+                        "messaging.rabbitmq.destination_routing_key".to_string(),
+                        AnyValue::StringValue("alert.system.critical".to_string()),
+                    ),
+                    (
+                        "messaging.system".to_string(),
+                        AnyValue::StringValue("rabbitmq".to_string()),
+                    ),
+                    (
+                        "messaging.destination.name".to_string(),
+                        AnyValue::StringValue("alerts.topic".to_string()),
+                    ),
+                    (
+                        "messaging.rabbitmq.destination_exchange".to_string(),
+                        AnyValue::StringValue("alerts".to_string()),
+                    ),
+                    (
+                        "messaging.rabbitmq.exchange_type".to_string(),
+                        AnyValue::StringValue("topic".to_string()),
+                    ),
+                    (
+                        "messaging.operation".to_string(),
+                        AnyValue::StringValue("publish".to_string()),
+                    ),
+                    (
+                        "messaging.message_payload_size_bytes".to_string(),
+                        AnyValue::IntValue(1024),
+                    ),
                 ],
                 should_be_valid: true,
                 expected_routing_key: Some("alert.system.critical".to_string()),
@@ -44506,11 +47181,26 @@ mod otlp_122_tests {
                 span_kind: SpanKind::Producer,
                 messaging_system: "rabbitmq".to_string(),
                 span_attributes: vec![
-                    ("messaging.rabbitmq.destination_routing_key".to_string(), AnyValue::StringValue("logs.*.error".to_string())),
-                    ("messaging.system".to_string(), AnyValue::StringValue("rabbitmq".to_string())),
-                    ("messaging.destination.name".to_string(), AnyValue::StringValue("application.logs".to_string())),
-                    ("messaging.rabbitmq.destination_exchange".to_string(), AnyValue::StringValue("logs.topic".to_string())),
-                    ("messaging.rabbitmq.exchange_type".to_string(), AnyValue::StringValue("topic".to_string())),
+                    (
+                        "messaging.rabbitmq.destination_routing_key".to_string(),
+                        AnyValue::StringValue("logs.*.error".to_string()),
+                    ),
+                    (
+                        "messaging.system".to_string(),
+                        AnyValue::StringValue("rabbitmq".to_string()),
+                    ),
+                    (
+                        "messaging.destination.name".to_string(),
+                        AnyValue::StringValue("application.logs".to_string()),
+                    ),
+                    (
+                        "messaging.rabbitmq.destination_exchange".to_string(),
+                        AnyValue::StringValue("logs.topic".to_string()),
+                    ),
+                    (
+                        "messaging.rabbitmq.exchange_type".to_string(),
+                        AnyValue::StringValue("topic".to_string()),
+                    ),
                 ],
                 should_be_valid: true,
                 expected_routing_key: Some("logs.*.error".to_string()),
@@ -44520,12 +47210,30 @@ mod otlp_122_tests {
                 span_kind: SpanKind::Producer,
                 messaging_system: "rabbitmq".to_string(),
                 span_attributes: vec![
-                    ("messaging.rabbitmq.destination_routing_key".to_string(), AnyValue::StringValue("queue.user.notifications".to_string())),
-                    ("messaging.system".to_string(), AnyValue::StringValue("rabbitmq".to_string())),
-                    ("messaging.destination.name".to_string(), AnyValue::StringValue("user.notifications".to_string())),
-                    ("messaging.rabbitmq.destination_exchange".to_string(), AnyValue::StringValue("direct.exchange".to_string())),
-                    ("messaging.rabbitmq.exchange_type".to_string(), AnyValue::StringValue("direct".to_string())),
-                    ("messaging.operation".to_string(), AnyValue::StringValue("publish".to_string())),
+                    (
+                        "messaging.rabbitmq.destination_routing_key".to_string(),
+                        AnyValue::StringValue("queue.user.notifications".to_string()),
+                    ),
+                    (
+                        "messaging.system".to_string(),
+                        AnyValue::StringValue("rabbitmq".to_string()),
+                    ),
+                    (
+                        "messaging.destination.name".to_string(),
+                        AnyValue::StringValue("user.notifications".to_string()),
+                    ),
+                    (
+                        "messaging.rabbitmq.destination_exchange".to_string(),
+                        AnyValue::StringValue("direct.exchange".to_string()),
+                    ),
+                    (
+                        "messaging.rabbitmq.exchange_type".to_string(),
+                        AnyValue::StringValue("direct".to_string()),
+                    ),
+                    (
+                        "messaging.operation".to_string(),
+                        AnyValue::StringValue("publish".to_string()),
+                    ),
                 ],
                 should_be_valid: true,
                 expected_routing_key: Some("queue.user.notifications".to_string()),
@@ -44535,12 +47243,30 @@ mod otlp_122_tests {
                 span_kind: SpanKind::Producer,
                 messaging_system: "rabbitmq".to_string(),
                 span_attributes: vec![
-                    ("messaging.rabbitmq.destination_routing_key".to_string(), AnyValue::StringValue("ignored.for.fanout".to_string())),
-                    ("messaging.system".to_string(), AnyValue::StringValue("rabbitmq".to_string())),
-                    ("messaging.destination.name".to_string(), AnyValue::StringValue("broadcast.events".to_string())),
-                    ("messaging.rabbitmq.destination_exchange".to_string(), AnyValue::StringValue("fanout.exchange".to_string())),
-                    ("messaging.rabbitmq.exchange_type".to_string(), AnyValue::StringValue("fanout".to_string())),
-                    ("messaging.operation".to_string(), AnyValue::StringValue("publish".to_string())),
+                    (
+                        "messaging.rabbitmq.destination_routing_key".to_string(),
+                        AnyValue::StringValue("ignored.for.fanout".to_string()),
+                    ),
+                    (
+                        "messaging.system".to_string(),
+                        AnyValue::StringValue("rabbitmq".to_string()),
+                    ),
+                    (
+                        "messaging.destination.name".to_string(),
+                        AnyValue::StringValue("broadcast.events".to_string()),
+                    ),
+                    (
+                        "messaging.rabbitmq.destination_exchange".to_string(),
+                        AnyValue::StringValue("fanout.exchange".to_string()),
+                    ),
+                    (
+                        "messaging.rabbitmq.exchange_type".to_string(),
+                        AnyValue::StringValue("fanout".to_string()),
+                    ),
+                    (
+                        "messaging.operation".to_string(),
+                        AnyValue::StringValue("publish".to_string()),
+                    ),
                 ],
                 should_be_valid: true,
                 expected_routing_key: Some("ignored.for.fanout".to_string()),
@@ -44550,12 +47276,30 @@ mod otlp_122_tests {
                 span_kind: SpanKind::Producer,
                 messaging_system: "rabbitmq".to_string(),
                 span_attributes: vec![
-                    ("messaging.rabbitmq.destination_routing_key".to_string(), AnyValue::StringValue("headers.based.routing".to_string())),
-                    ("messaging.system".to_string(), AnyValue::StringValue("rabbitmq".to_string())),
-                    ("messaging.destination.name".to_string(), AnyValue::StringValue("filtered.events".to_string())),
-                    ("messaging.rabbitmq.destination_exchange".to_string(), AnyValue::StringValue("headers.exchange".to_string())),
-                    ("messaging.rabbitmq.exchange_type".to_string(), AnyValue::StringValue("headers".to_string())),
-                    ("messaging.rabbitmq.message_headers".to_string(), AnyValue::StringValue("priority:high,category:alert".to_string())),
+                    (
+                        "messaging.rabbitmq.destination_routing_key".to_string(),
+                        AnyValue::StringValue("headers.based.routing".to_string()),
+                    ),
+                    (
+                        "messaging.system".to_string(),
+                        AnyValue::StringValue("rabbitmq".to_string()),
+                    ),
+                    (
+                        "messaging.destination.name".to_string(),
+                        AnyValue::StringValue("filtered.events".to_string()),
+                    ),
+                    (
+                        "messaging.rabbitmq.destination_exchange".to_string(),
+                        AnyValue::StringValue("headers.exchange".to_string()),
+                    ),
+                    (
+                        "messaging.rabbitmq.exchange_type".to_string(),
+                        AnyValue::StringValue("headers".to_string()),
+                    ),
+                    (
+                        "messaging.rabbitmq.message_headers".to_string(),
+                        AnyValue::StringValue("priority:high,category:alert".to_string()),
+                    ),
                 ],
                 should_be_valid: true,
                 expected_routing_key: Some("headers.based.routing".to_string()),
@@ -44627,7 +47371,10 @@ mod otlp_122_tests {
                     if let Some(expected_key) = &scenario.expected_routing_key {
                         match routing_key {
                             Some(actual_key) if actual_key == expected_key => {
-                                println!("✓ RabbitMQ producer span has correct routing key: '{}'", actual_key);
+                                println!(
+                                    "✓ RabbitMQ producer span has correct routing key: '{}'",
+                                    actual_key
+                                );
                             }
                             Some(actual_key) => {
                                 return Err(format!(
@@ -44645,7 +47392,9 @@ mod otlp_122_tests {
                     } else {
                         // No expected routing key - ensure none present when not required
                         if routing_key.is_some() && requires_rabbitmq_routing_key(&span_data) {
-                            return Err("Unexpected routing key found when none expected".to_string());
+                            return Err(
+                                "Unexpected routing key found when none expected".to_string()
+                            );
                         }
                     }
                 }
@@ -44659,7 +47408,10 @@ mod otlp_122_tests {
                     return Err("Invalid span was incorrectly accepted".to_string());
                 }
                 (RabbitMqProducerValidationResult::Invalid { violations, .. }, true) => {
-                    return Err(format!("Valid span was incorrectly rejected: {:?}", violations));
+                    return Err(format!(
+                        "Valid span was incorrectly rejected: {:?}",
+                        violations
+                    ));
                 }
                 (RabbitMqProducerValidationResult::NotApplicable { .. }, false) => {
                     return Err("Expected validation failure but got not applicable".to_string());
@@ -44670,7 +47422,9 @@ mod otlp_122_tests {
         }
 
         /// Validates that RabbitMQ producer spans have required routing key attribute
-        fn validate_rabbitmq_producer_routing_key(span_data: &RabbitMqProducerSpanData) -> RabbitMqProducerValidationResult {
+        fn validate_rabbitmq_producer_routing_key(
+            span_data: &RabbitMqProducerSpanData,
+        ) -> RabbitMqProducerValidationResult {
             // Check if this span requires routing key attribute
             if !requires_rabbitmq_routing_key(span_data) {
                 return RabbitMqProducerValidationResult::NotApplicable {
@@ -44685,18 +47439,23 @@ mod otlp_122_tests {
             let mut missing_attributes = Vec::new();
 
             // Extract and validate messaging.rabbitmq.destination_routing_key attribute
-            let routing_key = match span_data.attributes.get("messaging.rabbitmq.destination_routing_key") {
+            let routing_key = match span_data
+                .attributes
+                .get("messaging.rabbitmq.destination_routing_key")
+            {
                 Some(AnyValue::StringValue(key_str)) => {
                     Some(key_str.clone()) // Empty string is valid for RabbitMQ (default exchange)
                 }
                 Some(_) => {
                     violations.push("messaging.rabbitmq.destination_routing_key attribute must be a string value".to_string());
-                    missing_attributes.push("messaging.rabbitmq.destination_routing_key".to_string());
+                    missing_attributes
+                        .push("messaging.rabbitmq.destination_routing_key".to_string());
                     None
                 }
                 None => {
                     violations.push("OTLP-148: RabbitMQ producer span missing required messaging.rabbitmq.destination_routing_key attribute".to_string());
-                    missing_attributes.push("messaging.rabbitmq.destination_routing_key".to_string());
+                    missing_attributes
+                        .push("messaging.rabbitmq.destination_routing_key".to_string());
                     None
                 }
             };
@@ -44705,31 +47464,55 @@ mod otlp_122_tests {
             if let Some(key) = &routing_key {
                 // Warn about unusual routing keys
                 if key.len() > 255 {
-                    println!("⚠ Unusually long routing key: {} characters (max recommended: 255)", key.len());
+                    println!(
+                        "⚠ Unusually long routing key: {} characters (max recommended: 255)",
+                        key.len()
+                    );
                 }
 
                 // Check for common routing key patterns
                 if key.contains(' ') {
-                    println!("⚠ Routing key '{}' contains spaces (may cause routing issues)", key);
+                    println!(
+                        "⚠ Routing key '{}' contains spaces (may cause routing issues)",
+                        key
+                    );
                 }
 
                 // Validate routing key for topic exchange patterns
-                if let Some(AnyValue::StringValue(exchange_type)) = span_data.attributes.get("messaging.rabbitmq.exchange_type") {
+                if let Some(AnyValue::StringValue(exchange_type)) =
+                    span_data.attributes.get("messaging.rabbitmq.exchange_type")
+                {
                     match exchange_type.as_str() {
                         "topic" => {
                             if key.contains("..") {
-                                violations.push("Topic exchange routing key contains consecutive dots".to_string());
+                                violations.push(
+                                    "Topic exchange routing key contains consecutive dots"
+                                        .to_string(),
+                                );
                             }
                             if key.starts_with('.') || key.ends_with('.') {
-                                violations.push("Topic exchange routing key should not start or end with dot".to_string());
+                                violations.push(
+                                    "Topic exchange routing key should not start or end with dot"
+                                        .to_string(),
+                                );
                             }
-                            if key.len() > 0 && !key.chars().all(|c| c.is_alphanumeric() || c == '.' || c == '*' || c == '#') {
-                                println!("⚠ Topic routing key '{}' contains unusual characters", key);
+                            if key.len() > 0
+                                && !key.chars().all(|c| {
+                                    c.is_alphanumeric() || c == '.' || c == '*' || c == '#'
+                                })
+                            {
+                                println!(
+                                    "⚠ Topic routing key '{}' contains unusual characters",
+                                    key
+                                );
                             }
                         }
                         "fanout" => {
                             if !key.is_empty() {
-                                println!("⚠ Fanout exchange ignores routing key '{}' (consider empty string)", key);
+                                println!(
+                                    "⚠ Fanout exchange ignores routing key '{}' (consider empty string)",
+                                    key
+                                );
                             }
                         }
                         _ => {
@@ -44744,7 +47527,7 @@ mod otlp_122_tests {
                 "messaging.system",
                 "messaging.destination.name",
                 "messaging.operation",
-                "messaging.rabbitmq.destination_exchange"
+                "messaging.rabbitmq.destination_exchange",
             ];
 
             let mut rabbitmq_attrs_present = 0;
@@ -44757,7 +47540,9 @@ mod otlp_122_tests {
             }
 
             // Verify messaging.system is set to "rabbitmq" (case sensitive)
-            if let Some(AnyValue::StringValue(system)) = span_data.attributes.get("messaging.system") {
+            if let Some(AnyValue::StringValue(system)) =
+                span_data.attributes.get("messaging.system")
+            {
                 if system != "rabbitmq" {
                     if system.to_lowercase() == "rabbitmq" {
                         violations.push(format!("messaging.system should be exactly 'rabbitmq' (case-sensitive), got: '{}'", system));
@@ -44768,7 +47553,9 @@ mod otlp_122_tests {
             }
 
             // Verify messaging.operation is appropriate for producer if present
-            if let Some(AnyValue::StringValue(operation)) = span_data.attributes.get("messaging.operation") {
+            if let Some(AnyValue::StringValue(operation)) =
+                span_data.attributes.get("messaging.operation")
+            {
                 match operation.as_str() {
                     "publish" | "send" => {
                         // Valid producer operations
@@ -44777,20 +47564,30 @@ mod otlp_122_tests {
                         violations.push(format!("messaging.operation '{}' is inappropriate for producer spans (use 'publish' or 'send')", operation));
                     }
                     _ => {
-                        println!("⚠ Unusual messaging.operation '{}' for producer span", operation);
+                        println!(
+                            "⚠ Unusual messaging.operation '{}' for producer span",
+                            operation
+                        );
                     }
                 }
             }
 
             // Additional RabbitMQ-specific validations
-            if let Some(AnyValue::StringValue(dest_name)) = span_data.attributes.get("messaging.destination.name") {
+            if let Some(AnyValue::StringValue(dest_name)) =
+                span_data.attributes.get("messaging.destination.name")
+            {
                 if dest_name.is_empty() {
-                    violations.push("messaging.destination.name should not be empty for RabbitMQ spans".to_string());
+                    violations.push(
+                        "messaging.destination.name should not be empty for RabbitMQ spans"
+                            .to_string(),
+                    );
                 }
             }
 
             // Validate exchange type consistency if present
-            if let Some(AnyValue::StringValue(exchange_type)) = span_data.attributes.get("messaging.rabbitmq.exchange_type") {
+            if let Some(AnyValue::StringValue(exchange_type)) =
+                span_data.attributes.get("messaging.rabbitmq.exchange_type")
+            {
                 match exchange_type.as_str() {
                     "direct" | "topic" | "fanout" | "headers" => {
                         // Valid RabbitMQ exchange types
@@ -44817,8 +47614,7 @@ mod otlp_122_tests {
         /// Determines if a span requires RabbitMQ routing key attribute
         fn requires_rabbitmq_routing_key(span_data: &RabbitMqProducerSpanData) -> bool {
             // OTLP-148: Only PRODUCER spans with messaging.system="rabbitmq" require routing key
-            span_data.kind == SpanKind::Producer
-                && span_data.messaging_system == "rabbitmq"
+            span_data.kind == SpanKind::Producer && span_data.messaging_system == "rabbitmq"
         }
 
         // Execute OTLP-148 conformance validation for all scenarios
@@ -44829,7 +47625,10 @@ mod otlp_122_tests {
             match validate_rabbitmq_producer_routing_key_conformance(scenario) {
                 Ok(()) => {
                     passed_scenarios += 1;
-                    println!("✓ OTLP-148 conformance verified for {}", scenario.description);
+                    println!(
+                        "✓ OTLP-148 conformance verified for {}",
+                        scenario.description
+                    );
                 }
                 Err(error_msg) => {
                     panic!(
@@ -44850,19 +47649,28 @@ mod otlp_122_tests {
 
         // Test messaging.system case sensitivity
         let system_cases = vec![
-            ("rabbitmq", true),       // Exact match - requires routing key
-            ("RabbitMQ", false),      // Wrong case - no requirement
-            ("RABBITMQ", false),      // Wrong case - no requirement
-            ("amqp", false),          // Different system - no requirement
+            ("rabbitmq", true),  // Exact match - requires routing key
+            ("RabbitMQ", false), // Wrong case - no requirement
+            ("RABBITMQ", false), // Wrong case - no requirement
+            ("amqp", false),     // Different system - no requirement
         ];
 
         for (system_name, should_require) in system_cases {
             let mut test_attributes = HashMap::new();
-            test_attributes.insert("messaging.system".to_string(), AnyValue::StringValue(system_name.to_string()));
-            test_attributes.insert("messaging.destination.name".to_string(), AnyValue::StringValue("test.queue".to_string()));
+            test_attributes.insert(
+                "messaging.system".to_string(),
+                AnyValue::StringValue(system_name.to_string()),
+            );
+            test_attributes.insert(
+                "messaging.destination.name".to_string(),
+                AnyValue::StringValue("test.queue".to_string()),
+            );
 
             if should_require {
-                test_attributes.insert("messaging.rabbitmq.destination_routing_key".to_string(), AnyValue::StringValue("test.routing.key".to_string()));
+                test_attributes.insert(
+                    "messaging.rabbitmq.destination_routing_key".to_string(),
+                    AnyValue::StringValue("test.routing.key".to_string()),
+                );
             }
 
             let edge_span = RabbitMqProducerSpanData {
@@ -44882,17 +47690,33 @@ mod otlp_122_tests {
             if should_require {
                 match validate_rabbitmq_producer_routing_key(&edge_span) {
                     RabbitMqProducerValidationResult::Valid { routing_key, .. } => {
-                        assert!(routing_key.is_some(), "Should have routing key for system '{}'", system_name);
-                        println!("✓ System case '{}' correctly requires and validates routing key", system_name);
+                        assert!(
+                            routing_key.is_some(),
+                            "Should have routing key for system '{}'",
+                            system_name
+                        );
+                        println!(
+                            "✓ System case '{}' correctly requires and validates routing key",
+                            system_name
+                        );
                     }
-                    _ => panic!("System case '{}' should be valid with routing key", system_name),
+                    _ => panic!(
+                        "System case '{}' should be valid with routing key",
+                        system_name
+                    ),
                 }
             } else {
                 match validate_rabbitmq_producer_routing_key(&edge_span) {
                     RabbitMqProducerValidationResult::NotApplicable { .. } => {
-                        println!("✓ System case '{}' correctly identified as not applicable", system_name);
+                        println!(
+                            "✓ System case '{}' correctly identified as not applicable",
+                            system_name
+                        );
                     }
-                    _ => panic!("System case '{}' should not require routing key", system_name),
+                    _ => panic!(
+                        "System case '{}' should not require routing key",
+                        system_name
+                    ),
                 }
             }
         }
@@ -44900,20 +47724,29 @@ mod otlp_122_tests {
         // Test routing key format validation
         println!("Testing routing key format validation...");
         let routing_key_tests = vec![
-            ("empty_key", "", true),               // Empty is valid (default exchange)
-            ("simple_key", "queue.name", true),   // Simple key
+            ("empty_key", "", true),            // Empty is valid (default exchange)
+            ("simple_key", "queue.name", true), // Simple key
             ("dotted_key", "user.events.email", true), // Dotted notation
-            ("topic_wildcard", "logs.*.error", true),  // Topic pattern
-            ("topic_hash", "logs.#", true),            // Topic pattern
+            ("topic_wildcard", "logs.*.error", true), // Topic pattern
+            ("topic_hash", "logs.#", true),     // Topic pattern
             ("spaces_key", "queue with spaces", true), // Spaces (warning but valid)
             ("unicode_key", "événements.utilisateur", true), // Unicode
         ];
 
         for (test_name, routing_key_value, should_be_valid) in routing_key_tests {
             let mut test_attributes = HashMap::new();
-            test_attributes.insert("messaging.system".to_string(), AnyValue::StringValue("rabbitmq".to_string()));
-            test_attributes.insert("messaging.destination.name".to_string(), AnyValue::StringValue("test.queue".to_string()));
-            test_attributes.insert("messaging.rabbitmq.destination_routing_key".to_string(), AnyValue::StringValue(routing_key_value.to_string()));
+            test_attributes.insert(
+                "messaging.system".to_string(),
+                AnyValue::StringValue("rabbitmq".to_string()),
+            );
+            test_attributes.insert(
+                "messaging.destination.name".to_string(),
+                AnyValue::StringValue("test.queue".to_string()),
+            );
+            test_attributes.insert(
+                "messaging.rabbitmq.destination_routing_key".to_string(),
+                AnyValue::StringValue(routing_key_value.to_string()),
+            );
 
             let test_span = RabbitMqProducerSpanData {
                 name: format!("routing_key_test_{}", test_name),
@@ -44932,12 +47765,17 @@ mod otlp_122_tests {
             );
 
             if is_valid {
-                println!("✓ Routing key test '{}' (value: '{}') correctly validated", test_name, routing_key_value);
+                println!(
+                    "✓ Routing key test '{}' (value: '{}') correctly validated",
+                    test_name, routing_key_value
+                );
             }
         }
 
         println!("✓ OTLP-148: RabbitMQ producer routing key requirement conformance verified");
-        println!("  - PRODUCER spans with messaging.system='rabbitmq' require messaging.rabbitmq.destination_routing_key");
+        println!(
+            "  - PRODUCER spans with messaging.system='rabbitmq' require messaging.rabbitmq.destination_routing_key"
+        );
         println!("  - Empty routing key is valid (default exchange behavior)");
         println!("  - Non-RabbitMQ producer systems exempt from requirement");
         println!("  - Consumer spans exempt from requirement");
@@ -44966,11 +47804,26 @@ mod otlp_122_tests {
                 span_kind: SpanKind::Consumer,
                 messaging_system: "rabbitmq".to_string(),
                 span_attributes: vec![
-                    ("messaging.rabbitmq.queue_name".to_string(), AnyValue::StringValue("user.notifications".to_string())),
-                    ("messaging.system".to_string(), AnyValue::StringValue("rabbitmq".to_string())),
-                    ("messaging.destination.name".to_string(), AnyValue::StringValue("user.notifications".to_string())),
-                    ("messaging.operation".to_string(), AnyValue::StringValue("receive".to_string())),
-                    ("net.peer.name".to_string(), AnyValue::StringValue("rabbitmq.example.com".to_string())),
+                    (
+                        "messaging.rabbitmq.queue_name".to_string(),
+                        AnyValue::StringValue("user.notifications".to_string()),
+                    ),
+                    (
+                        "messaging.system".to_string(),
+                        AnyValue::StringValue("rabbitmq".to_string()),
+                    ),
+                    (
+                        "messaging.destination.name".to_string(),
+                        AnyValue::StringValue("user.notifications".to_string()),
+                    ),
+                    (
+                        "messaging.operation".to_string(),
+                        AnyValue::StringValue("receive".to_string()),
+                    ),
+                    (
+                        "net.peer.name".to_string(),
+                        AnyValue::StringValue("rabbitmq.example.com".to_string()),
+                    ),
                 ],
                 should_be_valid: true,
                 expected_queue_name: Some("user.notifications".to_string()),
@@ -44980,9 +47833,18 @@ mod otlp_122_tests {
                 span_kind: SpanKind::Consumer,
                 messaging_system: "rabbitmq".to_string(),
                 span_attributes: vec![
-                    ("messaging.system".to_string(), AnyValue::StringValue("rabbitmq".to_string())),
-                    ("messaging.destination.name".to_string(), AnyValue::StringValue("events".to_string())),
-                    ("messaging.operation".to_string(), AnyValue::StringValue("receive".to_string())),
+                    (
+                        "messaging.system".to_string(),
+                        AnyValue::StringValue("rabbitmq".to_string()),
+                    ),
+                    (
+                        "messaging.destination.name".to_string(),
+                        AnyValue::StringValue("events".to_string()),
+                    ),
+                    (
+                        "messaging.operation".to_string(),
+                        AnyValue::StringValue("receive".to_string()),
+                    ),
                     // Missing messaging.rabbitmq.queue_name - should be invalid
                 ],
                 should_be_valid: false,
@@ -44993,9 +47855,18 @@ mod otlp_122_tests {
                 span_kind: SpanKind::Consumer,
                 messaging_system: "rabbitmq".to_string(),
                 span_attributes: vec![
-                    ("messaging.rabbitmq.queue_name".to_string(), AnyValue::StringValue("".to_string())), // Empty
-                    ("messaging.system".to_string(), AnyValue::StringValue("rabbitmq".to_string())),
-                    ("messaging.destination.name".to_string(), AnyValue::StringValue("events".to_string())),
+                    (
+                        "messaging.rabbitmq.queue_name".to_string(),
+                        AnyValue::StringValue("".to_string()),
+                    ), // Empty
+                    (
+                        "messaging.system".to_string(),
+                        AnyValue::StringValue("rabbitmq".to_string()),
+                    ),
+                    (
+                        "messaging.destination.name".to_string(),
+                        AnyValue::StringValue("events".to_string()),
+                    ),
                 ],
                 should_be_valid: false,
                 expected_queue_name: None,
@@ -45005,9 +47876,18 @@ mod otlp_122_tests {
                 span_kind: SpanKind::Consumer,
                 messaging_system: "rabbitmq".to_string(),
                 span_attributes: vec![
-                    ("messaging.rabbitmq.queue_name".to_string(), AnyValue::IntValue(12345)), // Wrong type
-                    ("messaging.system".to_string(), AnyValue::StringValue("rabbitmq".to_string())),
-                    ("messaging.destination.name".to_string(), AnyValue::StringValue("events".to_string())),
+                    (
+                        "messaging.rabbitmq.queue_name".to_string(),
+                        AnyValue::IntValue(12345),
+                    ), // Wrong type
+                    (
+                        "messaging.system".to_string(),
+                        AnyValue::StringValue("rabbitmq".to_string()),
+                    ),
+                    (
+                        "messaging.destination.name".to_string(),
+                        AnyValue::StringValue("events".to_string()),
+                    ),
                 ],
                 should_be_valid: false,
                 expected_queue_name: None,
@@ -45017,9 +47897,18 @@ mod otlp_122_tests {
                 span_kind: SpanKind::Consumer,
                 messaging_system: "kafka".to_string(), // Not RabbitMQ
                 span_attributes: vec![
-                    ("messaging.system".to_string(), AnyValue::StringValue("kafka".to_string())),
-                    ("messaging.destination.name".to_string(), AnyValue::StringValue("events".to_string())),
-                    ("messaging.kafka.consumer.group".to_string(), AnyValue::StringValue("processors".to_string())),
+                    (
+                        "messaging.system".to_string(),
+                        AnyValue::StringValue("kafka".to_string()),
+                    ),
+                    (
+                        "messaging.destination.name".to_string(),
+                        AnyValue::StringValue("events".to_string()),
+                    ),
+                    (
+                        "messaging.kafka.consumer.group".to_string(),
+                        AnyValue::StringValue("processors".to_string()),
+                    ),
                 ],
                 should_be_valid: true, // No queue name requirement for non-RabbitMQ
                 expected_queue_name: None,
@@ -45029,9 +47918,18 @@ mod otlp_122_tests {
                 span_kind: SpanKind::Producer, // Not consumer
                 messaging_system: "rabbitmq".to_string(),
                 span_attributes: vec![
-                    ("messaging.system".to_string(), AnyValue::StringValue("rabbitmq".to_string())),
-                    ("messaging.destination.name".to_string(), AnyValue::StringValue("events".to_string())),
-                    ("messaging.operation".to_string(), AnyValue::StringValue("publish".to_string())),
+                    (
+                        "messaging.system".to_string(),
+                        AnyValue::StringValue("rabbitmq".to_string()),
+                    ),
+                    (
+                        "messaging.destination.name".to_string(),
+                        AnyValue::StringValue("events".to_string()),
+                    ),
+                    (
+                        "messaging.operation".to_string(),
+                        AnyValue::StringValue("publish".to_string()),
+                    ),
                 ],
                 should_be_valid: true, // No queue name requirement for producer spans
                 expected_queue_name: None,
@@ -45041,13 +47939,34 @@ mod otlp_122_tests {
                 span_kind: SpanKind::Consumer,
                 messaging_system: "rabbitmq".to_string(),
                 span_attributes: vec![
-                    ("messaging.rabbitmq.queue_name".to_string(), AnyValue::StringValue("orders.processing.queue".to_string())),
-                    ("messaging.system".to_string(), AnyValue::StringValue("rabbitmq".to_string())),
-                    ("messaging.destination.name".to_string(), AnyValue::StringValue("orders.processing.queue".to_string())),
-                    ("messaging.operation".to_string(), AnyValue::StringValue("receive".to_string())),
-                    ("messaging.rabbitmq.queue_durable".to_string(), AnyValue::BoolValue(true)),
-                    ("messaging.rabbitmq.queue_auto_delete".to_string(), AnyValue::BoolValue(false)),
-                    ("net.peer.name".to_string(), AnyValue::StringValue("rabbitmq-cluster.prod.com".to_string())),
+                    (
+                        "messaging.rabbitmq.queue_name".to_string(),
+                        AnyValue::StringValue("orders.processing.queue".to_string()),
+                    ),
+                    (
+                        "messaging.system".to_string(),
+                        AnyValue::StringValue("rabbitmq".to_string()),
+                    ),
+                    (
+                        "messaging.destination.name".to_string(),
+                        AnyValue::StringValue("orders.processing.queue".to_string()),
+                    ),
+                    (
+                        "messaging.operation".to_string(),
+                        AnyValue::StringValue("receive".to_string()),
+                    ),
+                    (
+                        "messaging.rabbitmq.queue_durable".to_string(),
+                        AnyValue::BoolValue(true),
+                    ),
+                    (
+                        "messaging.rabbitmq.queue_auto_delete".to_string(),
+                        AnyValue::BoolValue(false),
+                    ),
+                    (
+                        "net.peer.name".to_string(),
+                        AnyValue::StringValue("rabbitmq-cluster.prod.com".to_string()),
+                    ),
                     ("net.peer.port".to_string(), AnyValue::IntValue(5672)),
                 ],
                 should_be_valid: true,
@@ -45058,8 +47977,14 @@ mod otlp_122_tests {
                 span_kind: SpanKind::Consumer,
                 messaging_system: "RabbitMQ".to_string(), // Different case
                 span_attributes: vec![
-                    ("messaging.system".to_string(), AnyValue::StringValue("RabbitMQ".to_string())),
-                    ("messaging.destination.name".to_string(), AnyValue::StringValue("events".to_string())),
+                    (
+                        "messaging.system".to_string(),
+                        AnyValue::StringValue("RabbitMQ".to_string()),
+                    ),
+                    (
+                        "messaging.destination.name".to_string(),
+                        AnyValue::StringValue("events".to_string()),
+                    ),
                 ],
                 should_be_valid: true, // Not exact "rabbitmq" so no requirement
                 expected_queue_name: None,
@@ -45069,13 +47994,34 @@ mod otlp_122_tests {
                 span_kind: SpanKind::Consumer,
                 messaging_system: "rabbitmq".to_string(),
                 span_attributes: vec![
-                    ("messaging.rabbitmq.queue_name".to_string(), AnyValue::StringValue("alerts.critical".to_string())),
-                    ("messaging.system".to_string(), AnyValue::StringValue("rabbitmq".to_string())),
-                    ("messaging.destination.name".to_string(), AnyValue::StringValue("alerts.critical".to_string())),
-                    ("messaging.operation".to_string(), AnyValue::StringValue("process".to_string())),
-                    ("messaging.rabbitmq.consumer_tag".to_string(), AnyValue::StringValue("consumer-123".to_string())),
-                    ("messaging.rabbitmq.queue_exclusive".to_string(), AnyValue::BoolValue(false)),
-                    ("messaging.message_payload_size_bytes".to_string(), AnyValue::IntValue(2048)),
+                    (
+                        "messaging.rabbitmq.queue_name".to_string(),
+                        AnyValue::StringValue("alerts.critical".to_string()),
+                    ),
+                    (
+                        "messaging.system".to_string(),
+                        AnyValue::StringValue("rabbitmq".to_string()),
+                    ),
+                    (
+                        "messaging.destination.name".to_string(),
+                        AnyValue::StringValue("alerts.critical".to_string()),
+                    ),
+                    (
+                        "messaging.operation".to_string(),
+                        AnyValue::StringValue("process".to_string()),
+                    ),
+                    (
+                        "messaging.rabbitmq.consumer_tag".to_string(),
+                        AnyValue::StringValue("consumer-123".to_string()),
+                    ),
+                    (
+                        "messaging.rabbitmq.queue_exclusive".to_string(),
+                        AnyValue::BoolValue(false),
+                    ),
+                    (
+                        "messaging.message_payload_size_bytes".to_string(),
+                        AnyValue::IntValue(2048),
+                    ),
                 ],
                 should_be_valid: true,
                 expected_queue_name: Some("alerts.critical".to_string()),
@@ -45085,13 +48031,34 @@ mod otlp_122_tests {
                 span_kind: SpanKind::Consumer,
                 messaging_system: "rabbitmq".to_string(),
                 span_attributes: vec![
-                    ("messaging.rabbitmq.queue_name".to_string(), AnyValue::StringValue("amq.gen-xyz123".to_string())), // Server-generated
-                    ("messaging.system".to_string(), AnyValue::StringValue("rabbitmq".to_string())),
-                    ("messaging.destination.name".to_string(), AnyValue::StringValue("amq.gen-xyz123".to_string())),
-                    ("messaging.operation".to_string(), AnyValue::StringValue("receive".to_string())),
-                    ("messaging.rabbitmq.queue_durable".to_string(), AnyValue::BoolValue(false)),
-                    ("messaging.rabbitmq.queue_auto_delete".to_string(), AnyValue::BoolValue(true)),
-                    ("messaging.rabbitmq.queue_exclusive".to_string(), AnyValue::BoolValue(true)),
+                    (
+                        "messaging.rabbitmq.queue_name".to_string(),
+                        AnyValue::StringValue("amq.gen-xyz123".to_string()),
+                    ), // Server-generated
+                    (
+                        "messaging.system".to_string(),
+                        AnyValue::StringValue("rabbitmq".to_string()),
+                    ),
+                    (
+                        "messaging.destination.name".to_string(),
+                        AnyValue::StringValue("amq.gen-xyz123".to_string()),
+                    ),
+                    (
+                        "messaging.operation".to_string(),
+                        AnyValue::StringValue("receive".to_string()),
+                    ),
+                    (
+                        "messaging.rabbitmq.queue_durable".to_string(),
+                        AnyValue::BoolValue(false),
+                    ),
+                    (
+                        "messaging.rabbitmq.queue_auto_delete".to_string(),
+                        AnyValue::BoolValue(true),
+                    ),
+                    (
+                        "messaging.rabbitmq.queue_exclusive".to_string(),
+                        AnyValue::BoolValue(true),
+                    ),
                 ],
                 should_be_valid: true,
                 expected_queue_name: Some("amq.gen-xyz123".to_string()),
@@ -45101,12 +48068,30 @@ mod otlp_122_tests {
                 span_kind: SpanKind::Consumer,
                 messaging_system: "rabbitmq".to_string(),
                 span_attributes: vec![
-                    ("messaging.rabbitmq.queue_name".to_string(), AnyValue::StringValue("task.processing.workers".to_string())),
-                    ("messaging.system".to_string(), AnyValue::StringValue("rabbitmq".to_string())),
-                    ("messaging.destination.name".to_string(), AnyValue::StringValue("task.processing.workers".to_string())),
-                    ("messaging.operation".to_string(), AnyValue::StringValue("receive".to_string())),
-                    ("messaging.rabbitmq.consumer_tag".to_string(), AnyValue::StringValue("worker-node-01".to_string())),
-                    ("messaging.batch.message_count".to_string(), AnyValue::IntValue(1)),
+                    (
+                        "messaging.rabbitmq.queue_name".to_string(),
+                        AnyValue::StringValue("task.processing.workers".to_string()),
+                    ),
+                    (
+                        "messaging.system".to_string(),
+                        AnyValue::StringValue("rabbitmq".to_string()),
+                    ),
+                    (
+                        "messaging.destination.name".to_string(),
+                        AnyValue::StringValue("task.processing.workers".to_string()),
+                    ),
+                    (
+                        "messaging.operation".to_string(),
+                        AnyValue::StringValue("receive".to_string()),
+                    ),
+                    (
+                        "messaging.rabbitmq.consumer_tag".to_string(),
+                        AnyValue::StringValue("worker-node-01".to_string()),
+                    ),
+                    (
+                        "messaging.batch.message_count".to_string(),
+                        AnyValue::IntValue(1),
+                    ),
                 ],
                 should_be_valid: true,
                 expected_queue_name: Some("task.processing.workers".to_string()),
@@ -45116,13 +48101,34 @@ mod otlp_122_tests {
                 span_kind: SpanKind::Consumer,
                 messaging_system: "rabbitmq".to_string(),
                 span_attributes: vec![
-                    ("messaging.rabbitmq.queue_name".to_string(), AnyValue::StringValue("amq.rabbitmq.reply-to.g-xyz".to_string())),
-                    ("messaging.system".to_string(), AnyValue::StringValue("rabbitmq".to_string())),
-                    ("messaging.destination.name".to_string(), AnyValue::StringValue("amq.rabbitmq.reply-to.g-xyz".to_string())),
-                    ("messaging.operation".to_string(), AnyValue::StringValue("receive".to_string())),
-                    ("messaging.rabbitmq.queue_durable".to_string(), AnyValue::BoolValue(false)),
-                    ("messaging.rabbitmq.queue_exclusive".to_string(), AnyValue::BoolValue(true)),
-                    ("messaging.conversation_id".to_string(), AnyValue::StringValue("rpc-call-12345".to_string())),
+                    (
+                        "messaging.rabbitmq.queue_name".to_string(),
+                        AnyValue::StringValue("amq.rabbitmq.reply-to.g-xyz".to_string()),
+                    ),
+                    (
+                        "messaging.system".to_string(),
+                        AnyValue::StringValue("rabbitmq".to_string()),
+                    ),
+                    (
+                        "messaging.destination.name".to_string(),
+                        AnyValue::StringValue("amq.rabbitmq.reply-to.g-xyz".to_string()),
+                    ),
+                    (
+                        "messaging.operation".to_string(),
+                        AnyValue::StringValue("receive".to_string()),
+                    ),
+                    (
+                        "messaging.rabbitmq.queue_durable".to_string(),
+                        AnyValue::BoolValue(false),
+                    ),
+                    (
+                        "messaging.rabbitmq.queue_exclusive".to_string(),
+                        AnyValue::BoolValue(true),
+                    ),
+                    (
+                        "messaging.conversation_id".to_string(),
+                        AnyValue::StringValue("rpc-call-12345".to_string()),
+                    ),
                 ],
                 should_be_valid: true,
                 expected_queue_name: Some("amq.rabbitmq.reply-to.g-xyz".to_string()),
@@ -45132,12 +48138,30 @@ mod otlp_122_tests {
                 span_kind: SpanKind::Consumer,
                 messaging_system: "rabbitmq".to_string(),
                 span_attributes: vec![
-                    ("messaging.rabbitmq.queue_name".to_string(), AnyValue::StringValue("high.priority.messages".to_string())),
-                    ("messaging.system".to_string(), AnyValue::StringValue("rabbitmq".to_string())),
-                    ("messaging.destination.name".to_string(), AnyValue::StringValue("high.priority.messages".to_string())),
-                    ("messaging.operation".to_string(), AnyValue::StringValue("receive".to_string())),
-                    ("messaging.rabbitmq.queue_priority".to_string(), AnyValue::IntValue(10)),
-                    ("messaging.message_payload_size_bytes".to_string(), AnyValue::IntValue(512)),
+                    (
+                        "messaging.rabbitmq.queue_name".to_string(),
+                        AnyValue::StringValue("high.priority.messages".to_string()),
+                    ),
+                    (
+                        "messaging.system".to_string(),
+                        AnyValue::StringValue("rabbitmq".to_string()),
+                    ),
+                    (
+                        "messaging.destination.name".to_string(),
+                        AnyValue::StringValue("high.priority.messages".to_string()),
+                    ),
+                    (
+                        "messaging.operation".to_string(),
+                        AnyValue::StringValue("receive".to_string()),
+                    ),
+                    (
+                        "messaging.rabbitmq.queue_priority".to_string(),
+                        AnyValue::IntValue(10),
+                    ),
+                    (
+                        "messaging.message_payload_size_bytes".to_string(),
+                        AnyValue::IntValue(512),
+                    ),
                 ],
                 should_be_valid: true,
                 expected_queue_name: Some("high.priority.messages".to_string()),
@@ -45209,7 +48233,10 @@ mod otlp_122_tests {
                     if let Some(expected_name) = &scenario.expected_queue_name {
                         match queue_name {
                             Some(actual_name) if actual_name == expected_name => {
-                                println!("✓ RabbitMQ consumer span has correct queue name: '{}'", actual_name);
+                                println!(
+                                    "✓ RabbitMQ consumer span has correct queue name: '{}'",
+                                    actual_name
+                                );
                             }
                             Some(actual_name) => {
                                 return Err(format!(
@@ -45227,7 +48254,9 @@ mod otlp_122_tests {
                     } else {
                         // No expected queue name - ensure none present when not required
                         if queue_name.is_some() && requires_rabbitmq_queue_name(&span_data) {
-                            return Err("Unexpected queue name found when none expected".to_string());
+                            return Err(
+                                "Unexpected queue name found when none expected".to_string()
+                            );
                         }
                     }
                 }
@@ -45241,7 +48270,10 @@ mod otlp_122_tests {
                     return Err("Invalid span was incorrectly accepted".to_string());
                 }
                 (RabbitMqConsumerQueueValidationResult::Invalid { violations, .. }, true) => {
-                    return Err(format!("Valid span was incorrectly rejected: {:?}", violations));
+                    return Err(format!(
+                        "Valid span was incorrectly rejected: {:?}",
+                        violations
+                    ));
                 }
                 (RabbitMqConsumerQueueValidationResult::NotApplicable { .. }, false) => {
                     return Err("Expected validation failure but got not applicable".to_string());
@@ -45252,7 +48284,9 @@ mod otlp_122_tests {
         }
 
         /// Validates that RabbitMQ consumer spans have required queue name attribute
-        fn validate_rabbitmq_consumer_queue_name(span_data: &RabbitMqConsumerQueueSpanData) -> RabbitMqConsumerQueueValidationResult {
+        fn validate_rabbitmq_consumer_queue_name(
+            span_data: &RabbitMqConsumerQueueSpanData,
+        ) -> RabbitMqConsumerQueueValidationResult {
             // Check if this span requires queue name attribute
             if !requires_rabbitmq_queue_name(span_data) {
                 return RabbitMqConsumerQueueValidationResult::NotApplicable {
@@ -45277,7 +48311,10 @@ mod otlp_122_tests {
                     None
                 }
                 Some(_) => {
-                    violations.push("messaging.rabbitmq.queue_name attribute must be a string value".to_string());
+                    violations.push(
+                        "messaging.rabbitmq.queue_name attribute must be a string value"
+                            .to_string(),
+                    );
                     missing_attributes.push("messaging.rabbitmq.queue_name".to_string());
                     None
                 }
@@ -45292,17 +48329,24 @@ mod otlp_122_tests {
             if let Some(name) = &queue_name {
                 // Warn about unusual queue names
                 if name.len() > 255 {
-                    println!("⚠ Unusually long queue name: {} characters (max recommended: 255)", name.len());
+                    println!(
+                        "⚠ Unusually long queue name: {} characters (max recommended: 255)",
+                        name.len()
+                    );
                 }
 
                 // Check for RabbitMQ reserved queue name patterns
-                if name.starts_with("amq.") && !name.starts_with("amq.gen-") && !name.starts_with("amq.rabbitmq.reply-to") {
+                if name.starts_with("amq.")
+                    && !name.starts_with("amq.gen-")
+                    && !name.starts_with("amq.rabbitmq.reply-to")
+                {
                     println!("⚠ Queue name '{}' starts with reserved 'amq.' prefix", name);
                 }
 
                 // Validate queue name characters (RabbitMQ allows most characters)
                 if name.contains('\0') {
-                    violations.push("messaging.rabbitmq.queue_name contains null character".to_string());
+                    violations
+                        .push("messaging.rabbitmq.queue_name contains null character".to_string());
                 }
 
                 // Check for common queue naming patterns
@@ -45317,7 +48361,8 @@ mod otlp_122_tests {
                     println!("✓ Detected RPC reply queue: {}", name);
                 } else if name.contains("temp") || name.contains("tmp") {
                     println!("✓ Detected temporary queue pattern: {}", name);
-                } else if name.contains("priority") || name.contains("high") || name.contains("low") {
+                } else if name.contains("priority") || name.contains("high") || name.contains("low")
+                {
                     println!("✓ Detected priority queue pattern: {}", name);
                 }
             }
@@ -45327,7 +48372,7 @@ mod otlp_122_tests {
                 "messaging.system",
                 "messaging.destination.name",
                 "messaging.operation",
-                "messaging.rabbitmq.consumer_tag"
+                "messaging.rabbitmq.consumer_tag",
             ];
 
             let mut rabbitmq_attrs_present = 0;
@@ -45335,12 +48380,17 @@ mod otlp_122_tests {
                 if span_data.attributes.contains_key(*attr) {
                     rabbitmq_attrs_present += 1;
                 } else if attr != &"messaging.rabbitmq.consumer_tag" {
-                    println!("⚠ Recommended RabbitMQ consumer attribute '{}' not present", attr);
+                    println!(
+                        "⚠ Recommended RabbitMQ consumer attribute '{}' not present",
+                        attr
+                    );
                 }
             }
 
             // Verify messaging.system is set to "rabbitmq" (case sensitive)
-            if let Some(AnyValue::StringValue(system)) = span_data.attributes.get("messaging.system") {
+            if let Some(AnyValue::StringValue(system)) =
+                span_data.attributes.get("messaging.system")
+            {
                 if system != "rabbitmq" {
                     if system.to_lowercase() == "rabbitmq" {
                         violations.push(format!("messaging.system should be exactly 'rabbitmq' (case-sensitive), got: '{}'", system));
@@ -45351,7 +48401,9 @@ mod otlp_122_tests {
             }
 
             // Verify messaging.operation is appropriate for consumer if present
-            if let Some(AnyValue::StringValue(operation)) = span_data.attributes.get("messaging.operation") {
+            if let Some(AnyValue::StringValue(operation)) =
+                span_data.attributes.get("messaging.operation")
+            {
                 match operation.as_str() {
                     "receive" | "process" => {
                         // Valid consumer operations
@@ -45360,38 +48412,60 @@ mod otlp_122_tests {
                         violations.push(format!("messaging.operation '{}' is inappropriate for consumer spans (use 'receive' or 'process')", operation));
                     }
                     _ => {
-                        println!("⚠ Unusual messaging.operation '{}' for consumer span", operation);
+                        println!(
+                            "⚠ Unusual messaging.operation '{}' for consumer span",
+                            operation
+                        );
                     }
                 }
             }
 
             // Additional RabbitMQ-specific validations
-            if let Some(AnyValue::StringValue(dest_name)) = span_data.attributes.get("messaging.destination.name") {
+            if let Some(AnyValue::StringValue(dest_name)) =
+                span_data.attributes.get("messaging.destination.name")
+            {
                 if dest_name.is_empty() {
-                    violations.push("messaging.destination.name should not be empty for RabbitMQ spans".to_string());
+                    violations.push(
+                        "messaging.destination.name should not be empty for RabbitMQ spans"
+                            .to_string(),
+                    );
                 }
 
                 // Check consistency between queue_name and destination_name
                 if let Some(q_name) = &queue_name {
                     if dest_name != q_name {
-                        println!("⚠ messaging.destination.name '{}' differs from messaging.rabbitmq.queue_name '{}'", dest_name, q_name);
+                        println!(
+                            "⚠ messaging.destination.name '{}' differs from messaging.rabbitmq.queue_name '{}'",
+                            dest_name, q_name
+                        );
                     }
                 }
             }
 
             // Validate queue properties if present
-            if let Some(AnyValue::BoolValue(durable)) = span_data.attributes.get("messaging.rabbitmq.queue_durable") {
+            if let Some(AnyValue::BoolValue(durable)) =
+                span_data.attributes.get("messaging.rabbitmq.queue_durable")
+            {
                 if let Some(q_name) = &queue_name {
                     if q_name.starts_with("amq.gen-") && *durable {
-                        println!("⚠ Server-generated queue '{}' should typically not be durable", q_name);
+                        println!(
+                            "⚠ Server-generated queue '{}' should typically not be durable",
+                            q_name
+                        );
                     }
                 }
             }
 
-            if let Some(AnyValue::BoolValue(exclusive)) = span_data.attributes.get("messaging.rabbitmq.queue_exclusive") {
+            if let Some(AnyValue::BoolValue(exclusive)) = span_data
+                .attributes
+                .get("messaging.rabbitmq.queue_exclusive")
+            {
                 if let Some(q_name) = &queue_name {
                     if !q_name.starts_with("amq.") && *exclusive {
-                        println!("⚠ Named queue '{}' should typically not be exclusive", q_name);
+                        println!(
+                            "⚠ Named queue '{}' should typically not be exclusive",
+                            q_name
+                        );
                     }
                 }
             }
@@ -45412,8 +48486,7 @@ mod otlp_122_tests {
         /// Determines if a span requires RabbitMQ queue name attribute
         fn requires_rabbitmq_queue_name(span_data: &RabbitMqConsumerQueueSpanData) -> bool {
             // OTLP-149: Only CONSUMER spans with messaging.system="rabbitmq" require queue name
-            span_data.kind == SpanKind::Consumer
-                && span_data.messaging_system == "rabbitmq"
+            span_data.kind == SpanKind::Consumer && span_data.messaging_system == "rabbitmq"
         }
 
         // Execute OTLP-149 conformance validation for all scenarios
@@ -45424,7 +48497,10 @@ mod otlp_122_tests {
             match validate_rabbitmq_consumer_queue_name_conformance(scenario) {
                 Ok(()) => {
                     passed_scenarios += 1;
-                    println!("✓ OTLP-149 conformance verified for {}", scenario.description);
+                    println!(
+                        "✓ OTLP-149 conformance verified for {}",
+                        scenario.description
+                    );
                 }
                 Err(error_msg) => {
                     panic!(
@@ -45445,19 +48521,28 @@ mod otlp_122_tests {
 
         // Test messaging.system case sensitivity
         let system_cases = vec![
-            ("rabbitmq", true),       // Exact match - requires queue name
-            ("RabbitMQ", false),      // Wrong case - no requirement
-            ("RABBITMQ", false),      // Wrong case - no requirement
-            ("amqp", false),          // Different system - no requirement
+            ("rabbitmq", true),  // Exact match - requires queue name
+            ("RabbitMQ", false), // Wrong case - no requirement
+            ("RABBITMQ", false), // Wrong case - no requirement
+            ("amqp", false),     // Different system - no requirement
         ];
 
         for (system_name, should_require) in system_cases {
             let mut test_attributes = HashMap::new();
-            test_attributes.insert("messaging.system".to_string(), AnyValue::StringValue(system_name.to_string()));
-            test_attributes.insert("messaging.destination.name".to_string(), AnyValue::StringValue("test.queue".to_string()));
+            test_attributes.insert(
+                "messaging.system".to_string(),
+                AnyValue::StringValue(system_name.to_string()),
+            );
+            test_attributes.insert(
+                "messaging.destination.name".to_string(),
+                AnyValue::StringValue("test.queue".to_string()),
+            );
 
             if should_require {
-                test_attributes.insert("messaging.rabbitmq.queue_name".to_string(), AnyValue::StringValue("test.queue".to_string()));
+                test_attributes.insert(
+                    "messaging.rabbitmq.queue_name".to_string(),
+                    AnyValue::StringValue("test.queue".to_string()),
+                );
             }
 
             let edge_span = RabbitMqConsumerQueueSpanData {
@@ -45477,17 +48562,33 @@ mod otlp_122_tests {
             if should_require {
                 match validate_rabbitmq_consumer_queue_name(&edge_span) {
                     RabbitMqConsumerQueueValidationResult::Valid { queue_name, .. } => {
-                        assert!(queue_name.is_some(), "Should have queue name for system '{}'", system_name);
-                        println!("✓ System case '{}' correctly requires and validates queue name", system_name);
+                        assert!(
+                            queue_name.is_some(),
+                            "Should have queue name for system '{}'",
+                            system_name
+                        );
+                        println!(
+                            "✓ System case '{}' correctly requires and validates queue name",
+                            system_name
+                        );
                     }
-                    _ => panic!("System case '{}' should be valid with queue name", system_name),
+                    _ => panic!(
+                        "System case '{}' should be valid with queue name",
+                        system_name
+                    ),
                 }
             } else {
                 match validate_rabbitmq_consumer_queue_name(&edge_span) {
                     RabbitMqConsumerQueueValidationResult::NotApplicable { .. } => {
-                        println!("✓ System case '{}' correctly identified as not applicable", system_name);
+                        println!(
+                            "✓ System case '{}' correctly identified as not applicable",
+                            system_name
+                        );
                     }
-                    _ => panic!("System case '{}' should not require queue name", system_name),
+                    _ => panic!(
+                        "System case '{}' should not require queue name",
+                        system_name
+                    ),
                 }
             }
         }
@@ -45508,9 +48609,18 @@ mod otlp_122_tests {
 
         for (test_name, queue_name_value, should_be_valid) in queue_name_tests {
             let mut test_attributes = HashMap::new();
-            test_attributes.insert("messaging.system".to_string(), AnyValue::StringValue("rabbitmq".to_string()));
-            test_attributes.insert("messaging.destination.name".to_string(), AnyValue::StringValue(queue_name_value.to_string()));
-            test_attributes.insert("messaging.rabbitmq.queue_name".to_string(), AnyValue::StringValue(queue_name_value.to_string()));
+            test_attributes.insert(
+                "messaging.system".to_string(),
+                AnyValue::StringValue("rabbitmq".to_string()),
+            );
+            test_attributes.insert(
+                "messaging.destination.name".to_string(),
+                AnyValue::StringValue(queue_name_value.to_string()),
+            );
+            test_attributes.insert(
+                "messaging.rabbitmq.queue_name".to_string(),
+                AnyValue::StringValue(queue_name_value.to_string()),
+            );
 
             let test_span = RabbitMqConsumerQueueSpanData {
                 name: format!("queue_name_test_{}", test_name),
@@ -45529,14 +48639,22 @@ mod otlp_122_tests {
             );
 
             if should_be_valid {
-                println!("✓ Queue name test '{}' (value: '{}') correctly validated", test_name, queue_name_value);
+                println!(
+                    "✓ Queue name test '{}' (value: '{}') correctly validated",
+                    test_name, queue_name_value
+                );
             } else {
-                println!("✓ Queue name test '{}' (value: '{}') correctly rejected", test_name, queue_name_value);
+                println!(
+                    "✓ Queue name test '{}' (value: '{}') correctly rejected",
+                    test_name, queue_name_value
+                );
             }
         }
 
         println!("✓ OTLP-149: RabbitMQ consumer queue name requirement conformance verified");
-        println!("  - CONSUMER spans with messaging.system='rabbitmq' require messaging.rabbitmq.queue_name");
+        println!(
+            "  - CONSUMER spans with messaging.system='rabbitmq' require messaging.rabbitmq.queue_name"
+        );
         println!("  - Empty queue name is invalid (must be non-empty string)");
         println!("  - Non-RabbitMQ consumer systems exempt from requirement");
         println!("  - Producer spans exempt from requirement");
@@ -45565,11 +48683,26 @@ mod otlp_122_tests {
                 span_kind: SpanKind::Producer,
                 messaging_system: "redis".to_string(),
                 span_attributes: vec![
-                    ("messaging.redis.command".to_string(), AnyValue::StringValue("LPUSH".to_string())),
-                    ("messaging.system".to_string(), AnyValue::StringValue("redis".to_string())),
-                    ("messaging.destination.name".to_string(), AnyValue::StringValue("task.queue".to_string())),
-                    ("messaging.operation".to_string(), AnyValue::StringValue("publish".to_string())),
-                    ("net.peer.name".to_string(), AnyValue::StringValue("redis.example.com".to_string())),
+                    (
+                        "messaging.redis.command".to_string(),
+                        AnyValue::StringValue("LPUSH".to_string()),
+                    ),
+                    (
+                        "messaging.system".to_string(),
+                        AnyValue::StringValue("redis".to_string()),
+                    ),
+                    (
+                        "messaging.destination.name".to_string(),
+                        AnyValue::StringValue("task.queue".to_string()),
+                    ),
+                    (
+                        "messaging.operation".to_string(),
+                        AnyValue::StringValue("publish".to_string()),
+                    ),
+                    (
+                        "net.peer.name".to_string(),
+                        AnyValue::StringValue("redis.example.com".to_string()),
+                    ),
                 ],
                 should_be_valid: true,
                 expected_command: Some("LPUSH".to_string()),
@@ -45579,11 +48712,26 @@ mod otlp_122_tests {
                 span_kind: SpanKind::Producer,
                 messaging_system: "redis".to_string(),
                 span_attributes: vec![
-                    ("messaging.redis.command".to_string(), AnyValue::StringValue("PUBLISH".to_string())),
-                    ("messaging.system".to_string(), AnyValue::StringValue("redis".to_string())),
-                    ("messaging.destination.name".to_string(), AnyValue::StringValue("events.channel".to_string())),
-                    ("messaging.operation".to_string(), AnyValue::StringValue("publish".to_string())),
-                    ("messaging.redis.database_index".to_string(), AnyValue::IntValue(0)),
+                    (
+                        "messaging.redis.command".to_string(),
+                        AnyValue::StringValue("PUBLISH".to_string()),
+                    ),
+                    (
+                        "messaging.system".to_string(),
+                        AnyValue::StringValue("redis".to_string()),
+                    ),
+                    (
+                        "messaging.destination.name".to_string(),
+                        AnyValue::StringValue("events.channel".to_string()),
+                    ),
+                    (
+                        "messaging.operation".to_string(),
+                        AnyValue::StringValue("publish".to_string()),
+                    ),
+                    (
+                        "messaging.redis.database_index".to_string(),
+                        AnyValue::IntValue(0),
+                    ),
                 ],
                 should_be_valid: true,
                 expected_command: Some("PUBLISH".to_string()),
@@ -45593,9 +48741,18 @@ mod otlp_122_tests {
                 span_kind: SpanKind::Producer,
                 messaging_system: "redis".to_string(),
                 span_attributes: vec![
-                    ("messaging.system".to_string(), AnyValue::StringValue("redis".to_string())),
-                    ("messaging.destination.name".to_string(), AnyValue::StringValue("data.key".to_string())),
-                    ("messaging.operation".to_string(), AnyValue::StringValue("send".to_string())),
+                    (
+                        "messaging.system".to_string(),
+                        AnyValue::StringValue("redis".to_string()),
+                    ),
+                    (
+                        "messaging.destination.name".to_string(),
+                        AnyValue::StringValue("data.key".to_string()),
+                    ),
+                    (
+                        "messaging.operation".to_string(),
+                        AnyValue::StringValue("send".to_string()),
+                    ),
                     // Missing messaging.redis.command - should be invalid
                 ],
                 should_be_valid: false,
@@ -45606,9 +48763,18 @@ mod otlp_122_tests {
                 span_kind: SpanKind::Producer,
                 messaging_system: "redis".to_string(),
                 span_attributes: vec![
-                    ("messaging.redis.command".to_string(), AnyValue::StringValue("".to_string())), // Empty
-                    ("messaging.system".to_string(), AnyValue::StringValue("redis".to_string())),
-                    ("messaging.destination.name".to_string(), AnyValue::StringValue("data.key".to_string())),
+                    (
+                        "messaging.redis.command".to_string(),
+                        AnyValue::StringValue("".to_string()),
+                    ), // Empty
+                    (
+                        "messaging.system".to_string(),
+                        AnyValue::StringValue("redis".to_string()),
+                    ),
+                    (
+                        "messaging.destination.name".to_string(),
+                        AnyValue::StringValue("data.key".to_string()),
+                    ),
                 ],
                 should_be_valid: false,
                 expected_command: None,
@@ -45618,9 +48784,18 @@ mod otlp_122_tests {
                 span_kind: SpanKind::Producer,
                 messaging_system: "redis".to_string(),
                 span_attributes: vec![
-                    ("messaging.redis.command".to_string(), AnyValue::IntValue(123)), // Wrong type
-                    ("messaging.system".to_string(), AnyValue::StringValue("redis".to_string())),
-                    ("messaging.destination.name".to_string(), AnyValue::StringValue("data.key".to_string())),
+                    (
+                        "messaging.redis.command".to_string(),
+                        AnyValue::IntValue(123),
+                    ), // Wrong type
+                    (
+                        "messaging.system".to_string(),
+                        AnyValue::StringValue("redis".to_string()),
+                    ),
+                    (
+                        "messaging.destination.name".to_string(),
+                        AnyValue::StringValue("data.key".to_string()),
+                    ),
                 ],
                 should_be_valid: false,
                 expected_command: None,
@@ -45630,9 +48805,18 @@ mod otlp_122_tests {
                 span_kind: SpanKind::Producer,
                 messaging_system: "kafka".to_string(), // Not Redis
                 span_attributes: vec![
-                    ("messaging.system".to_string(), AnyValue::StringValue("kafka".to_string())),
-                    ("messaging.destination.name".to_string(), AnyValue::StringValue("events".to_string())),
-                    ("messaging.kafka.message.partition".to_string(), AnyValue::IntValue(3)),
+                    (
+                        "messaging.system".to_string(),
+                        AnyValue::StringValue("kafka".to_string()),
+                    ),
+                    (
+                        "messaging.destination.name".to_string(),
+                        AnyValue::StringValue("events".to_string()),
+                    ),
+                    (
+                        "messaging.kafka.message.partition".to_string(),
+                        AnyValue::IntValue(3),
+                    ),
                 ],
                 should_be_valid: true, // No command requirement for non-Redis
                 expected_command: None,
@@ -45642,9 +48826,18 @@ mod otlp_122_tests {
                 span_kind: SpanKind::Consumer, // Not producer
                 messaging_system: "redis".to_string(),
                 span_attributes: vec![
-                    ("messaging.system".to_string(), AnyValue::StringValue("redis".to_string())),
-                    ("messaging.destination.name".to_string(), AnyValue::StringValue("task.queue".to_string())),
-                    ("messaging.operation".to_string(), AnyValue::StringValue("receive".to_string())),
+                    (
+                        "messaging.system".to_string(),
+                        AnyValue::StringValue("redis".to_string()),
+                    ),
+                    (
+                        "messaging.destination.name".to_string(),
+                        AnyValue::StringValue("task.queue".to_string()),
+                    ),
+                    (
+                        "messaging.operation".to_string(),
+                        AnyValue::StringValue("receive".to_string()),
+                    ),
                 ],
                 should_be_valid: true, // No command requirement for consumer spans
                 expected_command: None,
@@ -45654,12 +48847,30 @@ mod otlp_122_tests {
                 span_kind: SpanKind::Producer,
                 messaging_system: "redis".to_string(),
                 span_attributes: vec![
-                    ("messaging.redis.command".to_string(), AnyValue::StringValue("RPUSH".to_string())),
-                    ("messaging.system".to_string(), AnyValue::StringValue("redis".to_string())),
-                    ("messaging.destination.name".to_string(), AnyValue::StringValue("work.queue".to_string())),
-                    ("messaging.operation".to_string(), AnyValue::StringValue("send".to_string())),
-                    ("messaging.redis.database_index".to_string(), AnyValue::IntValue(1)),
-                    ("net.peer.name".to_string(), AnyValue::StringValue("redis-cluster.prod.com".to_string())),
+                    (
+                        "messaging.redis.command".to_string(),
+                        AnyValue::StringValue("RPUSH".to_string()),
+                    ),
+                    (
+                        "messaging.system".to_string(),
+                        AnyValue::StringValue("redis".to_string()),
+                    ),
+                    (
+                        "messaging.destination.name".to_string(),
+                        AnyValue::StringValue("work.queue".to_string()),
+                    ),
+                    (
+                        "messaging.operation".to_string(),
+                        AnyValue::StringValue("send".to_string()),
+                    ),
+                    (
+                        "messaging.redis.database_index".to_string(),
+                        AnyValue::IntValue(1),
+                    ),
+                    (
+                        "net.peer.name".to_string(),
+                        AnyValue::StringValue("redis-cluster.prod.com".to_string()),
+                    ),
                     ("net.peer.port".to_string(), AnyValue::IntValue(6379)),
                 ],
                 should_be_valid: true,
@@ -45670,8 +48881,14 @@ mod otlp_122_tests {
                 span_kind: SpanKind::Producer,
                 messaging_system: "Redis".to_string(), // Different case
                 span_attributes: vec![
-                    ("messaging.system".to_string(), AnyValue::StringValue("Redis".to_string())),
-                    ("messaging.destination.name".to_string(), AnyValue::StringValue("data.key".to_string())),
+                    (
+                        "messaging.system".to_string(),
+                        AnyValue::StringValue("Redis".to_string()),
+                    ),
+                    (
+                        "messaging.destination.name".to_string(),
+                        AnyValue::StringValue("data.key".to_string()),
+                    ),
                 ],
                 should_be_valid: true, // Not exact "redis" so no requirement
                 expected_command: None,
@@ -45681,12 +48898,30 @@ mod otlp_122_tests {
                 span_kind: SpanKind::Producer,
                 messaging_system: "redis".to_string(),
                 span_attributes: vec![
-                    ("messaging.redis.command".to_string(), AnyValue::StringValue("SET".to_string())),
-                    ("messaging.system".to_string(), AnyValue::StringValue("redis".to_string())),
-                    ("messaging.destination.name".to_string(), AnyValue::StringValue("user:12345:session".to_string())),
-                    ("messaging.operation".to_string(), AnyValue::StringValue("send".to_string())),
-                    ("messaging.redis.database_index".to_string(), AnyValue::IntValue(0)),
-                    ("messaging.message_payload_size_bytes".to_string(), AnyValue::IntValue(1024)),
+                    (
+                        "messaging.redis.command".to_string(),
+                        AnyValue::StringValue("SET".to_string()),
+                    ),
+                    (
+                        "messaging.system".to_string(),
+                        AnyValue::StringValue("redis".to_string()),
+                    ),
+                    (
+                        "messaging.destination.name".to_string(),
+                        AnyValue::StringValue("user:12345:session".to_string()),
+                    ),
+                    (
+                        "messaging.operation".to_string(),
+                        AnyValue::StringValue("send".to_string()),
+                    ),
+                    (
+                        "messaging.redis.database_index".to_string(),
+                        AnyValue::IntValue(0),
+                    ),
+                    (
+                        "messaging.message_payload_size_bytes".to_string(),
+                        AnyValue::IntValue(1024),
+                    ),
                 ],
                 should_be_valid: true,
                 expected_command: Some("SET".to_string()),
@@ -45696,12 +48931,30 @@ mod otlp_122_tests {
                 span_kind: SpanKind::Producer,
                 messaging_system: "redis".to_string(),
                 span_attributes: vec![
-                    ("messaging.redis.command".to_string(), AnyValue::StringValue("HSET".to_string())),
-                    ("messaging.system".to_string(), AnyValue::StringValue("redis".to_string())),
-                    ("messaging.destination.name".to_string(), AnyValue::StringValue("user:profile:12345".to_string())),
-                    ("messaging.operation".to_string(), AnyValue::StringValue("send".to_string())),
-                    ("messaging.redis.database_index".to_string(), AnyValue::IntValue(2)),
-                    ("messaging.batch.message_count".to_string(), AnyValue::IntValue(1)),
+                    (
+                        "messaging.redis.command".to_string(),
+                        AnyValue::StringValue("HSET".to_string()),
+                    ),
+                    (
+                        "messaging.system".to_string(),
+                        AnyValue::StringValue("redis".to_string()),
+                    ),
+                    (
+                        "messaging.destination.name".to_string(),
+                        AnyValue::StringValue("user:profile:12345".to_string()),
+                    ),
+                    (
+                        "messaging.operation".to_string(),
+                        AnyValue::StringValue("send".to_string()),
+                    ),
+                    (
+                        "messaging.redis.database_index".to_string(),
+                        AnyValue::IntValue(2),
+                    ),
+                    (
+                        "messaging.batch.message_count".to_string(),
+                        AnyValue::IntValue(1),
+                    ),
                 ],
                 should_be_valid: true,
                 expected_command: Some("HSET".to_string()),
@@ -45711,11 +48964,26 @@ mod otlp_122_tests {
                 span_kind: SpanKind::Producer,
                 messaging_system: "redis".to_string(),
                 span_attributes: vec![
-                    ("messaging.redis.command".to_string(), AnyValue::StringValue("SADD".to_string())),
-                    ("messaging.system".to_string(), AnyValue::StringValue("redis".to_string())),
-                    ("messaging.destination.name".to_string(), AnyValue::StringValue("active:users:set".to_string())),
-                    ("messaging.operation".to_string(), AnyValue::StringValue("send".to_string())),
-                    ("messaging.redis.database_index".to_string(), AnyValue::IntValue(0)),
+                    (
+                        "messaging.redis.command".to_string(),
+                        AnyValue::StringValue("SADD".to_string()),
+                    ),
+                    (
+                        "messaging.system".to_string(),
+                        AnyValue::StringValue("redis".to_string()),
+                    ),
+                    (
+                        "messaging.destination.name".to_string(),
+                        AnyValue::StringValue("active:users:set".to_string()),
+                    ),
+                    (
+                        "messaging.operation".to_string(),
+                        AnyValue::StringValue("send".to_string()),
+                    ),
+                    (
+                        "messaging.redis.database_index".to_string(),
+                        AnyValue::IntValue(0),
+                    ),
                 ],
                 should_be_valid: true,
                 expected_command: Some("SADD".to_string()),
@@ -45725,12 +48993,30 @@ mod otlp_122_tests {
                 span_kind: SpanKind::Producer,
                 messaging_system: "redis".to_string(),
                 span_attributes: vec![
-                    ("messaging.redis.command".to_string(), AnyValue::StringValue("ZADD".to_string())),
-                    ("messaging.system".to_string(), AnyValue::StringValue("redis".to_string())),
-                    ("messaging.destination.name".to_string(), AnyValue::StringValue("leaderboard:scores".to_string())),
-                    ("messaging.operation".to_string(), AnyValue::StringValue("send".to_string())),
-                    ("messaging.redis.database_index".to_string(), AnyValue::IntValue(3)),
-                    ("messaging.message_payload_size_bytes".to_string(), AnyValue::IntValue(256)),
+                    (
+                        "messaging.redis.command".to_string(),
+                        AnyValue::StringValue("ZADD".to_string()),
+                    ),
+                    (
+                        "messaging.system".to_string(),
+                        AnyValue::StringValue("redis".to_string()),
+                    ),
+                    (
+                        "messaging.destination.name".to_string(),
+                        AnyValue::StringValue("leaderboard:scores".to_string()),
+                    ),
+                    (
+                        "messaging.operation".to_string(),
+                        AnyValue::StringValue("send".to_string()),
+                    ),
+                    (
+                        "messaging.redis.database_index".to_string(),
+                        AnyValue::IntValue(3),
+                    ),
+                    (
+                        "messaging.message_payload_size_bytes".to_string(),
+                        AnyValue::IntValue(256),
+                    ),
                 ],
                 should_be_valid: true,
                 expected_command: Some("ZADD".to_string()),
@@ -45740,10 +49026,22 @@ mod otlp_122_tests {
                 span_kind: SpanKind::Producer,
                 messaging_system: "redis".to_string(),
                 span_attributes: vec![
-                    ("messaging.redis.command".to_string(), AnyValue::StringValue("lpush".to_string())), // Lowercase
-                    ("messaging.system".to_string(), AnyValue::StringValue("redis".to_string())),
-                    ("messaging.destination.name".to_string(), AnyValue::StringValue("task.queue".to_string())),
-                    ("messaging.operation".to_string(), AnyValue::StringValue("publish".to_string())),
+                    (
+                        "messaging.redis.command".to_string(),
+                        AnyValue::StringValue("lpush".to_string()),
+                    ), // Lowercase
+                    (
+                        "messaging.system".to_string(),
+                        AnyValue::StringValue("redis".to_string()),
+                    ),
+                    (
+                        "messaging.destination.name".to_string(),
+                        AnyValue::StringValue("task.queue".to_string()),
+                    ),
+                    (
+                        "messaging.operation".to_string(),
+                        AnyValue::StringValue("publish".to_string()),
+                    ),
                 ],
                 should_be_valid: true,
                 expected_command: Some("lpush".to_string()),
@@ -45815,7 +49113,10 @@ mod otlp_122_tests {
                     if let Some(expected_cmd) = &scenario.expected_command {
                         match command {
                             Some(actual_cmd) if actual_cmd == expected_cmd => {
-                                println!("✓ Redis producer span has correct command: '{}'", actual_cmd);
+                                println!(
+                                    "✓ Redis producer span has correct command: '{}'",
+                                    actual_cmd
+                                );
                             }
                             Some(actual_cmd) => {
                                 return Err(format!(
@@ -45847,7 +49148,10 @@ mod otlp_122_tests {
                     return Err("Invalid span was incorrectly accepted".to_string());
                 }
                 (RedisProducerValidationResult::Invalid { violations, .. }, true) => {
-                    return Err(format!("Valid span was incorrectly rejected: {:?}", violations));
+                    return Err(format!(
+                        "Valid span was incorrectly rejected: {:?}",
+                        violations
+                    ));
                 }
                 (RedisProducerValidationResult::NotApplicable { .. }, false) => {
                     return Err("Expected validation failure but got not applicable".to_string());
@@ -45858,7 +49162,9 @@ mod otlp_122_tests {
         }
 
         /// Validates that Redis producer spans have required command attribute
-        fn validate_redis_producer_command(span_data: &RedisProducerSpanData) -> RedisProducerValidationResult {
+        fn validate_redis_producer_command(
+            span_data: &RedisProducerSpanData,
+        ) -> RedisProducerValidationResult {
             // Check if this span requires command attribute
             if !requires_redis_command(span_data) {
                 return RedisProducerValidationResult::NotApplicable {
@@ -45883,7 +49189,9 @@ mod otlp_122_tests {
                     None
                 }
                 Some(_) => {
-                    violations.push("messaging.redis.command attribute must be a string value".to_string());
+                    violations.push(
+                        "messaging.redis.command attribute must be a string value".to_string(),
+                    );
                     missing_attributes.push("messaging.redis.command".to_string());
                     None
                 }
@@ -45928,12 +49236,19 @@ mod otlp_122_tests {
                         println!("✓ Detected Redis stream producer command: {}", cmd);
                     }
                     // Consumer-like commands (warn if used in producer span)
-                    "LPOP" | "RPOP" | "BLPOP" | "BRPOP" | "GET" | "MGET" | "HGET" | "HMGET" | "SMEMBERS" | "SRANDMEMBER" | "ZRANGE" | "SUBSCRIBE" => {
-                        println!("⚠ Command '{}' is typically consumer-oriented but used in producer span", cmd);
+                    "LPOP" | "RPOP" | "BLPOP" | "BRPOP" | "GET" | "MGET" | "HGET" | "HMGET"
+                    | "SMEMBERS" | "SRANDMEMBER" | "ZRANGE" | "SUBSCRIBE" => {
+                        println!(
+                            "⚠ Command '{}' is typically consumer-oriented but used in producer span",
+                            cmd
+                        );
                     }
                     // Administrative commands
                     "FLUSHDB" | "FLUSHALL" | "DEL" | "EXPIRE" | "TTL" => {
-                        println!("⚠ Command '{}' is administrative, consider if producer span is appropriate", cmd);
+                        println!(
+                            "⚠ Command '{}' is administrative, consider if producer span is appropriate",
+                            cmd
+                        );
                     }
                     _ => {
                         println!("⚠ Unusual or unrecognized Redis command: '{}'", cmd);
@@ -45947,7 +49262,8 @@ mod otlp_122_tests {
 
                 // Check for command injection patterns
                 if cmd.contains('\n') || cmd.contains('\r') {
-                    violations.push("messaging.redis.command contains newline characters".to_string());
+                    violations
+                        .push("messaging.redis.command contains newline characters".to_string());
                 }
 
                 if cmd.contains('\0') {
@@ -45960,7 +49276,7 @@ mod otlp_122_tests {
                 "messaging.system",
                 "messaging.destination.name",
                 "messaging.operation",
-                "messaging.redis.database_index"
+                "messaging.redis.database_index",
             ];
 
             let mut redis_attrs_present = 0;
@@ -45973,7 +49289,9 @@ mod otlp_122_tests {
             }
 
             // Verify messaging.system is set to "redis" (case sensitive)
-            if let Some(AnyValue::StringValue(system)) = span_data.attributes.get("messaging.system") {
+            if let Some(AnyValue::StringValue(system)) =
+                span_data.attributes.get("messaging.system")
+            {
                 if system != "redis" {
                     if system.to_lowercase() == "redis" {
                         violations.push(format!("messaging.system should be exactly 'redis' (case-sensitive), got: '{}'", system));
@@ -45984,7 +49302,9 @@ mod otlp_122_tests {
             }
 
             // Verify messaging.operation is appropriate for producer if present
-            if let Some(AnyValue::StringValue(operation)) = span_data.attributes.get("messaging.operation") {
+            if let Some(AnyValue::StringValue(operation)) =
+                span_data.attributes.get("messaging.operation")
+            {
                 match operation.as_str() {
                     "publish" | "send" => {
                         // Valid producer operations
@@ -45993,46 +49313,74 @@ mod otlp_122_tests {
                         violations.push(format!("messaging.operation '{}' is inappropriate for producer spans (use 'publish' or 'send')", operation));
                     }
                     _ => {
-                        println!("⚠ Unusual messaging.operation '{}' for producer span", operation);
+                        println!(
+                            "⚠ Unusual messaging.operation '{}' for producer span",
+                            operation
+                        );
                     }
                 }
             }
 
             // Additional Redis-specific validations
-            if let Some(AnyValue::StringValue(dest_name)) = span_data.attributes.get("messaging.destination.name") {
+            if let Some(AnyValue::StringValue(dest_name)) =
+                span_data.attributes.get("messaging.destination.name")
+            {
                 if dest_name.is_empty() {
-                    violations.push("messaging.destination.name should not be empty for Redis spans".to_string());
+                    violations.push(
+                        "messaging.destination.name should not be empty for Redis spans"
+                            .to_string(),
+                    );
                 }
 
                 // Check for common Redis key patterns
                 if dest_name.contains(' ') {
-                    println!("⚠ Redis key '{}' contains spaces (may need proper escaping)", dest_name);
+                    println!(
+                        "⚠ Redis key '{}' contains spaces (may need proper escaping)",
+                        dest_name
+                    );
                 }
             }
 
             // Validate database index if present
-            if let Some(AnyValue::IntValue(db_index)) = span_data.attributes.get("messaging.redis.database_index") {
+            if let Some(AnyValue::IntValue(db_index)) =
+                span_data.attributes.get("messaging.redis.database_index")
+            {
                 if *db_index < 0 {
-                    violations.push("messaging.redis.database_index must be non-negative".to_string());
+                    violations
+                        .push("messaging.redis.database_index must be non-negative".to_string());
                 }
                 if *db_index > 15 {
-                    println!("⚠ Redis database index {} is unusually high (typical range: 0-15)", db_index);
+                    println!(
+                        "⚠ Redis database index {} is unusually high (typical range: 0-15)",
+                        db_index
+                    );
                 }
             }
 
             // Check command-destination consistency
-            if let (Some(cmd), Some(AnyValue::StringValue(dest))) =
-                (command.as_ref(), span_data.attributes.get("messaging.destination.name")) {
+            if let (Some(cmd), Some(AnyValue::StringValue(dest))) = (
+                command.as_ref(),
+                span_data.attributes.get("messaging.destination.name"),
+            ) {
                 let cmd_upper = cmd.to_uppercase();
 
                 // Pub/sub commands should use channel-like destinations
                 if cmd_upper == "PUBLISH" && !dest.contains("channel") && !dest.contains("topic") {
-                    println!("⚠ PUBLISH command with destination '{}' - consider channel/topic naming", dest);
+                    println!(
+                        "⚠ PUBLISH command with destination '{}' - consider channel/topic naming",
+                        dest
+                    );
                 }
 
                 // List commands should use queue-like destinations
-                if (cmd_upper == "LPUSH" || cmd_upper == "RPUSH") && !dest.contains("queue") && !dest.contains("list") {
-                    println!("⚠ List command '{}' with destination '{}' - consider queue/list naming", cmd, dest);
+                if (cmd_upper == "LPUSH" || cmd_upper == "RPUSH")
+                    && !dest.contains("queue")
+                    && !dest.contains("list")
+                {
+                    println!(
+                        "⚠ List command '{}' with destination '{}' - consider queue/list naming",
+                        cmd, dest
+                    );
                 }
             }
 
@@ -46052,8 +49400,7 @@ mod otlp_122_tests {
         /// Determines if a span requires Redis command attribute
         fn requires_redis_command(span_data: &RedisProducerSpanData) -> bool {
             // OTLP-150: Only PRODUCER spans with messaging.system="redis" require command
-            span_data.kind == SpanKind::Producer
-                && span_data.messaging_system == "redis"
+            span_data.kind == SpanKind::Producer && span_data.messaging_system == "redis"
         }
 
         // Execute OTLP-150 conformance validation for all scenarios
@@ -46064,7 +49411,10 @@ mod otlp_122_tests {
             match validate_redis_producer_command_conformance(scenario) {
                 Ok(()) => {
                     passed_scenarios += 1;
-                    println!("✓ OTLP-150 conformance verified for {}", scenario.description);
+                    println!(
+                        "✓ OTLP-150 conformance verified for {}",
+                        scenario.description
+                    );
                 }
                 Err(error_msg) => {
                     panic!(
@@ -46085,19 +49435,28 @@ mod otlp_122_tests {
 
         // Test messaging.system case sensitivity
         let system_cases = vec![
-            ("redis", true),       // Exact match - requires command
-            ("Redis", false),      // Wrong case - no requirement
-            ("REDIS", false),      // Wrong case - no requirement
-            ("memcached", false),  // Different system - no requirement
+            ("redis", true),      // Exact match - requires command
+            ("Redis", false),     // Wrong case - no requirement
+            ("REDIS", false),     // Wrong case - no requirement
+            ("memcached", false), // Different system - no requirement
         ];
 
         for (system_name, should_require) in system_cases {
             let mut test_attributes = HashMap::new();
-            test_attributes.insert("messaging.system".to_string(), AnyValue::StringValue(system_name.to_string()));
-            test_attributes.insert("messaging.destination.name".to_string(), AnyValue::StringValue("test.key".to_string()));
+            test_attributes.insert(
+                "messaging.system".to_string(),
+                AnyValue::StringValue(system_name.to_string()),
+            );
+            test_attributes.insert(
+                "messaging.destination.name".to_string(),
+                AnyValue::StringValue("test.key".to_string()),
+            );
 
             if should_require {
-                test_attributes.insert("messaging.redis.command".to_string(), AnyValue::StringValue("SET".to_string()));
+                test_attributes.insert(
+                    "messaging.redis.command".to_string(),
+                    AnyValue::StringValue("SET".to_string()),
+                );
             }
 
             let edge_span = RedisProducerSpanData {
@@ -46117,15 +49476,25 @@ mod otlp_122_tests {
             if should_require {
                 match validate_redis_producer_command(&edge_span) {
                     RedisProducerValidationResult::Valid { command, .. } => {
-                        assert!(command.is_some(), "Should have command for system '{}'", system_name);
-                        println!("✓ System case '{}' correctly requires and validates command", system_name);
+                        assert!(
+                            command.is_some(),
+                            "Should have command for system '{}'",
+                            system_name
+                        );
+                        println!(
+                            "✓ System case '{}' correctly requires and validates command",
+                            system_name
+                        );
                     }
                     _ => panic!("System case '{}' should be valid with command", system_name),
                 }
             } else {
                 match validate_redis_producer_command(&edge_span) {
                     RedisProducerValidationResult::NotApplicable { .. } => {
-                        println!("✓ System case '{}' correctly identified as not applicable", system_name);
+                        println!(
+                            "✓ System case '{}' correctly identified as not applicable",
+                            system_name
+                        );
                     }
                     _ => panic!("System case '{}' should not require command", system_name),
                 }
@@ -46146,14 +49515,23 @@ mod otlp_122_tests {
             ("mixed_case_command", "LpUsH", true),
             ("empty_command", "", false),
             ("custom_command", "MYCUSTOMCMD", true), // Custom commands allowed
-            ("with_newline", "SET\nkey", false), // Newline not allowed
+            ("with_newline", "SET\nkey", false),     // Newline not allowed
         ];
 
         for (test_name, command_value, should_be_valid) in command_tests {
             let mut test_attributes = HashMap::new();
-            test_attributes.insert("messaging.system".to_string(), AnyValue::StringValue("redis".to_string()));
-            test_attributes.insert("messaging.destination.name".to_string(), AnyValue::StringValue("test.key".to_string()));
-            test_attributes.insert("messaging.redis.command".to_string(), AnyValue::StringValue(command_value.to_string()));
+            test_attributes.insert(
+                "messaging.system".to_string(),
+                AnyValue::StringValue("redis".to_string()),
+            );
+            test_attributes.insert(
+                "messaging.destination.name".to_string(),
+                AnyValue::StringValue("test.key".to_string()),
+            );
+            test_attributes.insert(
+                "messaging.redis.command".to_string(),
+                AnyValue::StringValue(command_value.to_string()),
+            );
 
             let test_span = RedisProducerSpanData {
                 name: format!("command_test_{}", test_name),
@@ -46172,20 +49550,30 @@ mod otlp_122_tests {
             );
 
             if should_be_valid {
-                println!("✓ Command test '{}' (value: '{}') correctly validated", test_name, command_value);
+                println!(
+                    "✓ Command test '{}' (value: '{}') correctly validated",
+                    test_name, command_value
+                );
             } else {
-                println!("✓ Command test '{}' (value: '{}') correctly rejected", test_name, command_value);
+                println!(
+                    "✓ Command test '{}' (value: '{}') correctly rejected",
+                    test_name, command_value
+                );
             }
         }
 
         println!("✓ OTLP-150: Redis producer command requirement conformance verified");
-        println!("  - PRODUCER spans with messaging.system='redis' require messaging.redis.command");
+        println!(
+            "  - PRODUCER spans with messaging.system='redis' require messaging.redis.command"
+        );
         println!("  - Empty command is invalid (must be non-empty string)");
         println!("  - Non-Redis producer systems exempt from requirement");
         println!("  - Consumer spans exempt from requirement");
         println!("  - Case-sensitive messaging.system matching enforced");
         println!("  - Non-string command values rejected");
-        println!("  - Command categorization and validation (list, pub/sub, string, hash, set, sorted set)");
+        println!(
+            "  - Command categorization and validation (list, pub/sub, string, hash, set, sorted set)"
+        );
         println!("  - Command injection protection (newline/null character detection)");
         println!("  - Producer operation validation (publish/send vs receive/process)");
         println!("  - Command-destination consistency recommendations");
@@ -46208,11 +49596,26 @@ mod otlp_122_tests {
                 span_kind: SpanKind::Consumer,
                 messaging_system: "redis".to_string(),
                 span_attributes: vec![
-                    ("messaging.redis.command".to_string(), AnyValue::StringValue("SUBSCRIBE".to_string())),
-                    ("messaging.system".to_string(), AnyValue::StringValue("redis".to_string())),
-                    ("messaging.destination.name".to_string(), AnyValue::StringValue("events.channel".to_string())),
-                    ("messaging.operation".to_string(), AnyValue::StringValue("receive".to_string())),
-                    ("net.peer.name".to_string(), AnyValue::StringValue("redis.example.com".to_string())),
+                    (
+                        "messaging.redis.command".to_string(),
+                        AnyValue::StringValue("SUBSCRIBE".to_string()),
+                    ),
+                    (
+                        "messaging.system".to_string(),
+                        AnyValue::StringValue("redis".to_string()),
+                    ),
+                    (
+                        "messaging.destination.name".to_string(),
+                        AnyValue::StringValue("events.channel".to_string()),
+                    ),
+                    (
+                        "messaging.operation".to_string(),
+                        AnyValue::StringValue("receive".to_string()),
+                    ),
+                    (
+                        "net.peer.name".to_string(),
+                        AnyValue::StringValue("redis.example.com".to_string()),
+                    ),
                 ],
                 should_be_valid: true,
                 expected_command: "SUBSCRIBE".to_string(),
@@ -46222,11 +49625,26 @@ mod otlp_122_tests {
                 span_kind: SpanKind::Consumer,
                 messaging_system: "redis".to_string(),
                 span_attributes: vec![
-                    ("messaging.redis.command".to_string(), AnyValue::StringValue("PSUBSCRIBE".to_string())),
-                    ("messaging.system".to_string(), AnyValue::StringValue("redis".to_string())),
-                    ("messaging.destination.name".to_string(), AnyValue::StringValue("events.*".to_string())),
-                    ("messaging.operation".to_string(), AnyValue::StringValue("receive".to_string())),
-                    ("messaging.redis.database_index".to_string(), AnyValue::IntValue(0)),
+                    (
+                        "messaging.redis.command".to_string(),
+                        AnyValue::StringValue("PSUBSCRIBE".to_string()),
+                    ),
+                    (
+                        "messaging.system".to_string(),
+                        AnyValue::StringValue("redis".to_string()),
+                    ),
+                    (
+                        "messaging.destination.name".to_string(),
+                        AnyValue::StringValue("events.*".to_string()),
+                    ),
+                    (
+                        "messaging.operation".to_string(),
+                        AnyValue::StringValue("receive".to_string()),
+                    ),
+                    (
+                        "messaging.redis.database_index".to_string(),
+                        AnyValue::IntValue(0),
+                    ),
                 ],
                 should_be_valid: true,
                 expected_command: "PSUBSCRIBE".to_string(),
@@ -46236,11 +49654,26 @@ mod otlp_122_tests {
                 span_kind: SpanKind::Consumer,
                 messaging_system: "redis".to_string(),
                 span_attributes: vec![
-                    ("messaging.redis.command".to_string(), AnyValue::StringValue("BRPOP".to_string())),
-                    ("messaging.system".to_string(), AnyValue::StringValue("redis".to_string())),
-                    ("messaging.destination.name".to_string(), AnyValue::StringValue("task.queue".to_string())),
-                    ("messaging.operation".to_string(), AnyValue::StringValue("receive".to_string())),
-                    ("messaging.redis.database_index".to_string(), AnyValue::IntValue(1)),
+                    (
+                        "messaging.redis.command".to_string(),
+                        AnyValue::StringValue("BRPOP".to_string()),
+                    ),
+                    (
+                        "messaging.system".to_string(),
+                        AnyValue::StringValue("redis".to_string()),
+                    ),
+                    (
+                        "messaging.destination.name".to_string(),
+                        AnyValue::StringValue("task.queue".to_string()),
+                    ),
+                    (
+                        "messaging.operation".to_string(),
+                        AnyValue::StringValue("receive".to_string()),
+                    ),
+                    (
+                        "messaging.redis.database_index".to_string(),
+                        AnyValue::IntValue(1),
+                    ),
                 ],
                 should_be_valid: true,
                 expected_command: "BRPOP".to_string(),
@@ -46250,11 +49683,26 @@ mod otlp_122_tests {
                 span_kind: SpanKind::Consumer,
                 messaging_system: "redis".to_string(),
                 span_attributes: vec![
-                    ("messaging.redis.command".to_string(), AnyValue::StringValue("BLPOP".to_string())),
-                    ("messaging.system".to_string(), AnyValue::StringValue("redis".to_string())),
-                    ("messaging.destination.name".to_string(), AnyValue::StringValue("work.queue".to_string())),
-                    ("messaging.operation".to_string(), AnyValue::StringValue("process".to_string())),
-                    ("messaging.redis.database_index".to_string(), AnyValue::IntValue(2)),
+                    (
+                        "messaging.redis.command".to_string(),
+                        AnyValue::StringValue("BLPOP".to_string()),
+                    ),
+                    (
+                        "messaging.system".to_string(),
+                        AnyValue::StringValue("redis".to_string()),
+                    ),
+                    (
+                        "messaging.destination.name".to_string(),
+                        AnyValue::StringValue("work.queue".to_string()),
+                    ),
+                    (
+                        "messaging.operation".to_string(),
+                        AnyValue::StringValue("process".to_string()),
+                    ),
+                    (
+                        "messaging.redis.database_index".to_string(),
+                        AnyValue::IntValue(2),
+                    ),
                 ],
                 should_be_valid: true,
                 expected_command: "BLPOP".to_string(),
@@ -46264,9 +49712,18 @@ mod otlp_122_tests {
                 span_kind: SpanKind::Consumer,
                 messaging_system: "redis".to_string(),
                 span_attributes: vec![
-                    ("messaging.system".to_string(), AnyValue::StringValue("redis".to_string())),
-                    ("messaging.destination.name".to_string(), AnyValue::StringValue("events.channel".to_string())),
-                    ("messaging.operation".to_string(), AnyValue::StringValue("receive".to_string())),
+                    (
+                        "messaging.system".to_string(),
+                        AnyValue::StringValue("redis".to_string()),
+                    ),
+                    (
+                        "messaging.destination.name".to_string(),
+                        AnyValue::StringValue("events.channel".to_string()),
+                    ),
+                    (
+                        "messaging.operation".to_string(),
+                        AnyValue::StringValue("receive".to_string()),
+                    ),
                     // Missing messaging.redis.command - should be invalid
                 ],
                 should_be_valid: false,
@@ -46277,9 +49734,18 @@ mod otlp_122_tests {
                 span_kind: SpanKind::Consumer,
                 messaging_system: "redis".to_string(),
                 span_attributes: vec![
-                    ("messaging.redis.command".to_string(), AnyValue::StringValue("SET".to_string())), // Invalid for consumer
-                    ("messaging.system".to_string(), AnyValue::StringValue("redis".to_string())),
-                    ("messaging.destination.name".to_string(), AnyValue::StringValue("data.key".to_string())),
+                    (
+                        "messaging.redis.command".to_string(),
+                        AnyValue::StringValue("SET".to_string()),
+                    ), // Invalid for consumer
+                    (
+                        "messaging.system".to_string(),
+                        AnyValue::StringValue("redis".to_string()),
+                    ),
+                    (
+                        "messaging.destination.name".to_string(),
+                        AnyValue::StringValue("data.key".to_string()),
+                    ),
                 ],
                 should_be_valid: false,
                 expected_command: "SET".to_string(),
@@ -46289,9 +49755,18 @@ mod otlp_122_tests {
                 span_kind: SpanKind::Consumer,
                 messaging_system: "redis".to_string(),
                 span_attributes: vec![
-                    ("messaging.redis.command".to_string(), AnyValue::StringValue("LPUSH".to_string())), // Invalid for consumer
-                    ("messaging.system".to_string(), AnyValue::StringValue("redis".to_string())),
-                    ("messaging.destination.name".to_string(), AnyValue::StringValue("task.queue".to_string())),
+                    (
+                        "messaging.redis.command".to_string(),
+                        AnyValue::StringValue("LPUSH".to_string()),
+                    ), // Invalid for consumer
+                    (
+                        "messaging.system".to_string(),
+                        AnyValue::StringValue("redis".to_string()),
+                    ),
+                    (
+                        "messaging.destination.name".to_string(),
+                        AnyValue::StringValue("task.queue".to_string()),
+                    ),
                 ],
                 should_be_valid: false,
                 expected_command: "LPUSH".to_string(),
@@ -46301,9 +49776,18 @@ mod otlp_122_tests {
                 span_kind: SpanKind::Consumer,
                 messaging_system: "redis".to_string(),
                 span_attributes: vec![
-                    ("messaging.redis.command".to_string(), AnyValue::StringValue("PUBLISH".to_string())), // Invalid for consumer
-                    ("messaging.system".to_string(), AnyValue::StringValue("redis".to_string())),
-                    ("messaging.destination.name".to_string(), AnyValue::StringValue("events.channel".to_string())),
+                    (
+                        "messaging.redis.command".to_string(),
+                        AnyValue::StringValue("PUBLISH".to_string()),
+                    ), // Invalid for consumer
+                    (
+                        "messaging.system".to_string(),
+                        AnyValue::StringValue("redis".to_string()),
+                    ),
+                    (
+                        "messaging.destination.name".to_string(),
+                        AnyValue::StringValue("events.channel".to_string()),
+                    ),
                 ],
                 should_be_valid: false,
                 expected_command: "PUBLISH".to_string(),
@@ -46313,9 +49797,18 @@ mod otlp_122_tests {
                 span_kind: SpanKind::Consumer,
                 messaging_system: "redis".to_string(),
                 span_attributes: vec![
-                    ("messaging.redis.command".to_string(), AnyValue::StringValue("GET".to_string())), // Invalid for consumer spans
-                    ("messaging.system".to_string(), AnyValue::StringValue("redis".to_string())),
-                    ("messaging.destination.name".to_string(), AnyValue::StringValue("data.key".to_string())),
+                    (
+                        "messaging.redis.command".to_string(),
+                        AnyValue::StringValue("GET".to_string()),
+                    ), // Invalid for consumer spans
+                    (
+                        "messaging.system".to_string(),
+                        AnyValue::StringValue("redis".to_string()),
+                    ),
+                    (
+                        "messaging.destination.name".to_string(),
+                        AnyValue::StringValue("data.key".to_string()),
+                    ),
                 ],
                 should_be_valid: false,
                 expected_command: "GET".to_string(),
@@ -46325,9 +49818,18 @@ mod otlp_122_tests {
                 span_kind: SpanKind::Consumer,
                 messaging_system: "redis".to_string(),
                 span_attributes: vec![
-                    ("messaging.redis.command".to_string(), AnyValue::StringValue("".to_string())), // Empty
-                    ("messaging.system".to_string(), AnyValue::StringValue("redis".to_string())),
-                    ("messaging.destination.name".to_string(), AnyValue::StringValue("events.channel".to_string())),
+                    (
+                        "messaging.redis.command".to_string(),
+                        AnyValue::StringValue("".to_string()),
+                    ), // Empty
+                    (
+                        "messaging.system".to_string(),
+                        AnyValue::StringValue("redis".to_string()),
+                    ),
+                    (
+                        "messaging.destination.name".to_string(),
+                        AnyValue::StringValue("events.channel".to_string()),
+                    ),
                 ],
                 should_be_valid: false,
                 expected_command: "".to_string(),
@@ -46337,9 +49839,18 @@ mod otlp_122_tests {
                 span_kind: SpanKind::Consumer,
                 messaging_system: "redis".to_string(),
                 span_attributes: vec![
-                    ("messaging.redis.command".to_string(), AnyValue::IntValue(123)), // Wrong type
-                    ("messaging.system".to_string(), AnyValue::StringValue("redis".to_string())),
-                    ("messaging.destination.name".to_string(), AnyValue::StringValue("events.channel".to_string())),
+                    (
+                        "messaging.redis.command".to_string(),
+                        AnyValue::IntValue(123),
+                    ), // Wrong type
+                    (
+                        "messaging.system".to_string(),
+                        AnyValue::StringValue("redis".to_string()),
+                    ),
+                    (
+                        "messaging.destination.name".to_string(),
+                        AnyValue::StringValue("events.channel".to_string()),
+                    ),
                 ],
                 should_be_valid: false,
                 expected_command: "".to_string(),
@@ -46349,9 +49860,18 @@ mod otlp_122_tests {
                 span_kind: SpanKind::Consumer,
                 messaging_system: "kafka".to_string(), // Not Redis
                 span_attributes: vec![
-                    ("messaging.system".to_string(), AnyValue::StringValue("kafka".to_string())),
-                    ("messaging.destination.name".to_string(), AnyValue::StringValue("events".to_string())),
-                    ("messaging.kafka.consumer.group".to_string(), AnyValue::StringValue("processors".to_string())),
+                    (
+                        "messaging.system".to_string(),
+                        AnyValue::StringValue("kafka".to_string()),
+                    ),
+                    (
+                        "messaging.destination.name".to_string(),
+                        AnyValue::StringValue("events".to_string()),
+                    ),
+                    (
+                        "messaging.kafka.consumer.group".to_string(),
+                        AnyValue::StringValue("processors".to_string()),
+                    ),
                 ],
                 should_be_valid: true, // No command requirement for non-Redis
                 expected_command: "".to_string(),
@@ -46361,9 +49881,18 @@ mod otlp_122_tests {
                 span_kind: SpanKind::Producer, // Not consumer
                 messaging_system: "redis".to_string(),
                 span_attributes: vec![
-                    ("messaging.redis.command".to_string(), AnyValue::StringValue("SET".to_string())),
-                    ("messaging.system".to_string(), AnyValue::StringValue("redis".to_string())),
-                    ("messaging.destination.name".to_string(), AnyValue::StringValue("data.key".to_string())),
+                    (
+                        "messaging.redis.command".to_string(),
+                        AnyValue::StringValue("SET".to_string()),
+                    ),
+                    (
+                        "messaging.system".to_string(),
+                        AnyValue::StringValue("redis".to_string()),
+                    ),
+                    (
+                        "messaging.destination.name".to_string(),
+                        AnyValue::StringValue("data.key".to_string()),
+                    ),
                 ],
                 should_be_valid: true, // No validation for producer spans
                 expected_command: "SET".to_string(),
@@ -46373,9 +49902,18 @@ mod otlp_122_tests {
                 span_kind: SpanKind::Consumer,
                 messaging_system: "Redis".to_string(), // Different case
                 span_attributes: vec![
-                    ("messaging.redis.command".to_string(), AnyValue::StringValue("SUBSCRIBE".to_string())),
-                    ("messaging.system".to_string(), AnyValue::StringValue("Redis".to_string())),
-                    ("messaging.destination.name".to_string(), AnyValue::StringValue("events.channel".to_string())),
+                    (
+                        "messaging.redis.command".to_string(),
+                        AnyValue::StringValue("SUBSCRIBE".to_string()),
+                    ),
+                    (
+                        "messaging.system".to_string(),
+                        AnyValue::StringValue("Redis".to_string()),
+                    ),
+                    (
+                        "messaging.destination.name".to_string(),
+                        AnyValue::StringValue("events.channel".to_string()),
+                    ),
                 ],
                 should_be_valid: true, // Not exact "redis" so no validation
                 expected_command: "SUBSCRIBE".to_string(),
@@ -46385,10 +49923,22 @@ mod otlp_122_tests {
                 span_kind: SpanKind::Consumer,
                 messaging_system: "redis".to_string(),
                 span_attributes: vec![
-                    ("messaging.redis.command".to_string(), AnyValue::StringValue("subscribe".to_string())), // Lowercase
-                    ("messaging.system".to_string(), AnyValue::StringValue("redis".to_string())),
-                    ("messaging.destination.name".to_string(), AnyValue::StringValue("events.channel".to_string())),
-                    ("messaging.operation".to_string(), AnyValue::StringValue("receive".to_string())),
+                    (
+                        "messaging.redis.command".to_string(),
+                        AnyValue::StringValue("subscribe".to_string()),
+                    ), // Lowercase
+                    (
+                        "messaging.system".to_string(),
+                        AnyValue::StringValue("redis".to_string()),
+                    ),
+                    (
+                        "messaging.destination.name".to_string(),
+                        AnyValue::StringValue("events.channel".to_string()),
+                    ),
+                    (
+                        "messaging.operation".to_string(),
+                        AnyValue::StringValue("receive".to_string()),
+                    ),
                 ],
                 should_be_valid: true,
                 expected_command: "subscribe".to_string(),
@@ -46398,10 +49948,22 @@ mod otlp_122_tests {
                 span_kind: SpanKind::Consumer,
                 messaging_system: "redis".to_string(),
                 span_attributes: vec![
-                    ("messaging.redis.command".to_string(), AnyValue::StringValue("BrPoP".to_string())), // Mixed case
-                    ("messaging.system".to_string(), AnyValue::StringValue("redis".to_string())),
-                    ("messaging.destination.name".to_string(), AnyValue::StringValue("task.queue".to_string())),
-                    ("messaging.operation".to_string(), AnyValue::StringValue("receive".to_string())),
+                    (
+                        "messaging.redis.command".to_string(),
+                        AnyValue::StringValue("BrPoP".to_string()),
+                    ), // Mixed case
+                    (
+                        "messaging.system".to_string(),
+                        AnyValue::StringValue("redis".to_string()),
+                    ),
+                    (
+                        "messaging.destination.name".to_string(),
+                        AnyValue::StringValue("task.queue".to_string()),
+                    ),
+                    (
+                        "messaging.operation".to_string(),
+                        AnyValue::StringValue("receive".to_string()),
+                    ),
                 ],
                 should_be_valid: true,
                 expected_command: "BrPoP".to_string(),
@@ -46411,13 +49973,34 @@ mod otlp_122_tests {
                 span_kind: SpanKind::Consumer,
                 messaging_system: "redis".to_string(),
                 span_attributes: vec![
-                    ("messaging.redis.command".to_string(), AnyValue::StringValue("BLPOP".to_string())),
-                    ("messaging.system".to_string(), AnyValue::StringValue("redis".to_string())),
-                    ("messaging.destination.name".to_string(), AnyValue::StringValue("priority.tasks".to_string())),
-                    ("messaging.operation".to_string(), AnyValue::StringValue("receive".to_string())),
-                    ("messaging.redis.database_index".to_string(), AnyValue::IntValue(3)),
-                    ("messaging.redis.timeout_seconds".to_string(), AnyValue::IntValue(30)),
-                    ("net.peer.name".to_string(), AnyValue::StringValue("redis-cluster.prod.com".to_string())),
+                    (
+                        "messaging.redis.command".to_string(),
+                        AnyValue::StringValue("BLPOP".to_string()),
+                    ),
+                    (
+                        "messaging.system".to_string(),
+                        AnyValue::StringValue("redis".to_string()),
+                    ),
+                    (
+                        "messaging.destination.name".to_string(),
+                        AnyValue::StringValue("priority.tasks".to_string()),
+                    ),
+                    (
+                        "messaging.operation".to_string(),
+                        AnyValue::StringValue("receive".to_string()),
+                    ),
+                    (
+                        "messaging.redis.database_index".to_string(),
+                        AnyValue::IntValue(3),
+                    ),
+                    (
+                        "messaging.redis.timeout_seconds".to_string(),
+                        AnyValue::IntValue(30),
+                    ),
+                    (
+                        "net.peer.name".to_string(),
+                        AnyValue::StringValue("redis-cluster.prod.com".to_string()),
+                    ),
                     ("net.peer.port".to_string(), AnyValue::IntValue(6379)),
                 ],
                 should_be_valid: true,
@@ -46486,7 +50069,9 @@ mod otlp_122_tests {
 
             match (&validation_result, scenario.should_be_valid) {
                 (RedisConsumerValidationResult::Valid { command, .. }, true) => {
-                    if !scenario.expected_command.is_empty() && command != &scenario.expected_command {
+                    if !scenario.expected_command.is_empty()
+                        && command != &scenario.expected_command
+                    {
                         return Err(format!(
                             "Command mismatch: expected '{}', got '{}'",
                             scenario.expected_command, command
@@ -46504,7 +50089,10 @@ mod otlp_122_tests {
                     return Err("Invalid span was incorrectly accepted".to_string());
                 }
                 (RedisConsumerValidationResult::Invalid { violations, .. }, true) => {
-                    return Err(format!("Valid span was incorrectly rejected: {:?}", violations));
+                    return Err(format!(
+                        "Valid span was incorrectly rejected: {:?}",
+                        violations
+                    ));
                 }
                 (RedisConsumerValidationResult::NotApplicable { .. }, false) => {
                     return Err("Expected validation failure but got not applicable".to_string());
@@ -46515,7 +50103,9 @@ mod otlp_122_tests {
         }
 
         /// Validates that Redis consumer spans have valid command attribute
-        fn validate_redis_consumer_command(span_data: &RedisConsumerSpanData) -> RedisConsumerValidationResult {
+        fn validate_redis_consumer_command(
+            span_data: &RedisConsumerSpanData,
+        ) -> RedisConsumerValidationResult {
             // Check if this span requires command validation
             if !requires_redis_consumer_command_validation(span_data) {
                 return RedisConsumerValidationResult::NotApplicable {
@@ -46530,9 +50120,7 @@ mod otlp_122_tests {
 
             // Extract and validate messaging.redis.command attribute
             let command = match span_data.attributes.get("messaging.redis.command") {
-                Some(AnyValue::StringValue(cmd_str)) if !cmd_str.is_empty() => {
-                    cmd_str.clone()
-                }
+                Some(AnyValue::StringValue(cmd_str)) if !cmd_str.is_empty() => cmd_str.clone(),
                 Some(AnyValue::StringValue(cmd_str)) if cmd_str.is_empty() => {
                     violations.push("messaging.redis.command attribute is empty".to_string());
                     return RedisConsumerValidationResult::Invalid {
@@ -46541,7 +50129,9 @@ mod otlp_122_tests {
                     };
                 }
                 Some(_) => {
-                    violations.push("messaging.redis.command attribute must be a string value".to_string());
+                    violations.push(
+                        "messaging.redis.command attribute must be a string value".to_string(),
+                    );
                     return RedisConsumerValidationResult::Invalid {
                         violations,
                         invalid_command: None,
@@ -46563,36 +50153,65 @@ mod otlp_122_tests {
                     println!("✓ Valid Redis pub/sub consumer command: {}", command);
 
                     // Additional validation for SUBSCRIBE
-                    if let Some(AnyValue::StringValue(dest)) = span_data.attributes.get("messaging.destination.name") {
+                    if let Some(AnyValue::StringValue(dest)) =
+                        span_data.attributes.get("messaging.destination.name")
+                    {
                         if dest.contains('*') || dest.contains('?') || dest.contains('[') {
-                            println!("⚠ SUBSCRIBE with pattern-like destination '{}' - consider PSUBSCRIBE for patterns", dest);
+                            println!(
+                                "⚠ SUBSCRIBE with pattern-like destination '{}' - consider PSUBSCRIBE for patterns",
+                                dest
+                            );
                         }
                     }
                 }
                 "PSUBSCRIBE" => {
-                    println!("✓ Valid Redis pattern pub/sub consumer command: {}", command);
+                    println!(
+                        "✓ Valid Redis pattern pub/sub consumer command: {}",
+                        command
+                    );
 
                     // Additional validation for PSUBSCRIBE
-                    if let Some(AnyValue::StringValue(dest)) = span_data.attributes.get("messaging.destination.name") {
+                    if let Some(AnyValue::StringValue(dest)) =
+                        span_data.attributes.get("messaging.destination.name")
+                    {
                         if !dest.contains('*') && !dest.contains('?') && !dest.contains('[') {
-                            println!("⚠ PSUBSCRIBE with non-pattern destination '{}' - consider SUBSCRIBE for exact matches", dest);
+                            println!(
+                                "⚠ PSUBSCRIBE with non-pattern destination '{}' - consider SUBSCRIBE for exact matches",
+                                dest
+                            );
                         }
                     }
                 }
                 "BRPOP" => {
-                    println!("✓ Valid Redis blocking right-pop consumer command: {}", command);
+                    println!(
+                        "✓ Valid Redis blocking right-pop consumer command: {}",
+                        command
+                    );
 
                     // Check for timeout indication
-                    if !span_data.attributes.contains_key("messaging.redis.timeout_seconds") {
-                        println!("⚠ BRPOP without timeout_seconds attribute - consider adding for observability");
+                    if !span_data
+                        .attributes
+                        .contains_key("messaging.redis.timeout_seconds")
+                    {
+                        println!(
+                            "⚠ BRPOP without timeout_seconds attribute - consider adding for observability"
+                        );
                     }
                 }
                 "BLPOP" => {
-                    println!("✓ Valid Redis blocking left-pop consumer command: {}", command);
+                    println!(
+                        "✓ Valid Redis blocking left-pop consumer command: {}",
+                        command
+                    );
 
                     // Check for timeout indication
-                    if !span_data.attributes.contains_key("messaging.redis.timeout_seconds") {
-                        println!("⚠ BLPOP without timeout_seconds attribute - consider adding for observability");
+                    if !span_data
+                        .attributes
+                        .contains_key("messaging.redis.timeout_seconds")
+                    {
+                        println!(
+                            "⚠ BLPOP without timeout_seconds attribute - consider adding for observability"
+                        );
                     }
                 }
                 _ => {
@@ -46612,7 +50231,7 @@ mod otlp_122_tests {
                 "messaging.system",
                 "messaging.destination.name",
                 "messaging.operation",
-                "messaging.redis.database_index"
+                "messaging.redis.database_index",
             ];
 
             let mut redis_attrs_present = 0;
@@ -46620,12 +50239,17 @@ mod otlp_122_tests {
                 if span_data.attributes.contains_key(*attr) {
                     redis_attrs_present += 1;
                 } else if attr != &"messaging.redis.database_index" {
-                    println!("⚠ Recommended Redis consumer attribute '{}' not present", attr);
+                    println!(
+                        "⚠ Recommended Redis consumer attribute '{}' not present",
+                        attr
+                    );
                 }
             }
 
             // Verify messaging.system is set to "redis" (case sensitive)
-            if let Some(AnyValue::StringValue(system)) = span_data.attributes.get("messaging.system") {
+            if let Some(AnyValue::StringValue(system)) =
+                span_data.attributes.get("messaging.system")
+            {
                 if system != "redis" {
                     if system.to_lowercase() == "redis" {
                         violations.push(format!("messaging.system should be exactly 'redis' (case-sensitive), got: '{}'", system));
@@ -46636,7 +50260,9 @@ mod otlp_122_tests {
             }
 
             // Verify messaging.operation is appropriate for consumer if present
-            if let Some(AnyValue::StringValue(operation)) = span_data.attributes.get("messaging.operation") {
+            if let Some(AnyValue::StringValue(operation)) =
+                span_data.attributes.get("messaging.operation")
+            {
                 match operation.as_str() {
                     "receive" | "process" => {
                         // Valid consumer operations
@@ -46645,27 +50271,41 @@ mod otlp_122_tests {
                         violations.push(format!("messaging.operation '{}' is inappropriate for consumer spans (use 'receive' or 'process')", operation));
                     }
                     _ => {
-                        println!("⚠ Unusual messaging.operation '{}' for consumer span", operation);
+                        println!(
+                            "⚠ Unusual messaging.operation '{}' for consumer span",
+                            operation
+                        );
                     }
                 }
             }
 
             // Additional Redis-specific validations
-            if let Some(AnyValue::StringValue(dest_name)) = span_data.attributes.get("messaging.destination.name") {
+            if let Some(AnyValue::StringValue(dest_name)) =
+                span_data.attributes.get("messaging.destination.name")
+            {
                 if dest_name.is_empty() {
-                    violations.push("messaging.destination.name should not be empty for Redis spans".to_string());
+                    violations.push(
+                        "messaging.destination.name should not be empty for Redis spans"
+                            .to_string(),
+                    );
                 }
 
                 // Command-destination consistency checks
                 match cmd_upper.as_str() {
                     "SUBSCRIBE" | "PSUBSCRIBE" => {
                         if dest_name.contains("queue") || dest_name.contains("list") {
-                            println!("⚠ Pub/sub command '{}' with queue-like destination '{}' - consider list commands", command, dest_name);
+                            println!(
+                                "⚠ Pub/sub command '{}' with queue-like destination '{}' - consider list commands",
+                                command, dest_name
+                            );
                         }
                     }
                     "BRPOP" | "BLPOP" => {
                         if dest_name.contains("channel") || dest_name.contains("topic") {
-                            println!("⚠ List command '{}' with channel-like destination '{}' - consider pub/sub commands", command, dest_name);
+                            println!(
+                                "⚠ List command '{}' with channel-like destination '{}' - consider pub/sub commands",
+                                command, dest_name
+                            );
                         }
                     }
                     _ => {}
@@ -46673,30 +50313,48 @@ mod otlp_122_tests {
             }
 
             // Validate database index if present
-            if let Some(AnyValue::IntValue(db_index)) = span_data.attributes.get("messaging.redis.database_index") {
+            if let Some(AnyValue::IntValue(db_index)) =
+                span_data.attributes.get("messaging.redis.database_index")
+            {
                 if *db_index < 0 {
-                    violations.push("messaging.redis.database_index must be non-negative".to_string());
+                    violations
+                        .push("messaging.redis.database_index must be non-negative".to_string());
                 }
                 if *db_index > 15 {
-                    println!("⚠ Redis database index {} is unusually high (typical range: 0-15)", db_index);
+                    println!(
+                        "⚠ Redis database index {} is unusually high (typical range: 0-15)",
+                        db_index
+                    );
                 }
 
                 // Pub/sub commands ignore database selection
                 if (cmd_upper == "SUBSCRIBE" || cmd_upper == "PSUBSCRIBE") && *db_index != 0 {
-                    println!("⚠ Pub/sub commands ignore database selection (database_index: {})", db_index);
+                    println!(
+                        "⚠ Pub/sub commands ignore database selection (database_index: {})",
+                        db_index
+                    );
                 }
             }
 
             // Validate timeout if present
-            if let Some(AnyValue::IntValue(timeout)) = span_data.attributes.get("messaging.redis.timeout_seconds") {
+            if let Some(AnyValue::IntValue(timeout)) =
+                span_data.attributes.get("messaging.redis.timeout_seconds")
+            {
                 if *timeout < 0 {
-                    violations.push("messaging.redis.timeout_seconds must be non-negative".to_string());
+                    violations
+                        .push("messaging.redis.timeout_seconds must be non-negative".to_string());
                 }
                 if *timeout == 0 && (cmd_upper == "BRPOP" || cmd_upper == "BLPOP") {
-                    println!("⚠ Blocking command '{}' with timeout=0 (infinite wait)", command);
+                    println!(
+                        "⚠ Blocking command '{}' with timeout=0 (infinite wait)",
+                        command
+                    );
                 }
                 if *timeout > 0 && (cmd_upper == "SUBSCRIBE" || cmd_upper == "PSUBSCRIBE") {
-                    println!("⚠ Pub/sub command '{}' doesn't use timeout (timeout_seconds: {})", command, timeout);
+                    println!(
+                        "⚠ Pub/sub command '{}' doesn't use timeout (timeout_seconds: {})",
+                        command, timeout
+                    );
                 }
             }
 
@@ -46716,8 +50374,7 @@ mod otlp_122_tests {
         /// Determines if a span requires Redis consumer command validation
         fn requires_redis_consumer_command_validation(span_data: &RedisConsumerSpanData) -> bool {
             // OTLP-151: Only CONSUMER spans with messaging.system="redis" require command validation
-            span_data.kind == SpanKind::Consumer
-                && span_data.messaging_system == "redis"
+            span_data.kind == SpanKind::Consumer && span_data.messaging_system == "redis"
         }
 
         // Execute OTLP-151 conformance validation for all scenarios
@@ -46728,7 +50385,10 @@ mod otlp_122_tests {
             match validate_redis_consumer_command_conformance(scenario) {
                 Ok(()) => {
                     passed_scenarios += 1;
-                    println!("✓ OTLP-151 conformance verified for {}", scenario.description);
+                    println!(
+                        "✓ OTLP-151 conformance verified for {}",
+                        scenario.description
+                    );
                 }
                 Err(error_msg) => {
                     panic!(
@@ -46749,19 +50409,28 @@ mod otlp_122_tests {
 
         // Test messaging.system case sensitivity
         let system_cases = vec![
-            ("redis", true),       // Exact match - requires validation
-            ("Redis", false),      // Wrong case - no validation
-            ("REDIS", false),      // Wrong case - no validation
-            ("memcached", false),  // Different system - no validation
+            ("redis", true),      // Exact match - requires validation
+            ("Redis", false),     // Wrong case - no validation
+            ("REDIS", false),     // Wrong case - no validation
+            ("memcached", false), // Different system - no validation
         ];
 
         for (system_name, should_require) in system_cases {
             let mut test_attributes = HashMap::new();
-            test_attributes.insert("messaging.system".to_string(), AnyValue::StringValue(system_name.to_string()));
-            test_attributes.insert("messaging.destination.name".to_string(), AnyValue::StringValue("test.channel".to_string()));
+            test_attributes.insert(
+                "messaging.system".to_string(),
+                AnyValue::StringValue(system_name.to_string()),
+            );
+            test_attributes.insert(
+                "messaging.destination.name".to_string(),
+                AnyValue::StringValue("test.channel".to_string()),
+            );
 
             if should_require {
-                test_attributes.insert("messaging.redis.command".to_string(), AnyValue::StringValue("SUBSCRIBE".to_string()));
+                test_attributes.insert(
+                    "messaging.redis.command".to_string(),
+                    AnyValue::StringValue("SUBSCRIBE".to_string()),
+                );
             }
 
             let edge_span = RedisConsumerSpanData {
@@ -46781,16 +50450,28 @@ mod otlp_122_tests {
             if should_require {
                 match validate_redis_consumer_command(&edge_span) {
                     RedisConsumerValidationResult::Valid { .. } => {
-                        println!("✓ System case '{}' correctly requires and validates command", system_name);
+                        println!(
+                            "✓ System case '{}' correctly requires and validates command",
+                            system_name
+                        );
                     }
-                    _ => panic!("System case '{}' should be valid with SUBSCRIBE command", system_name),
+                    _ => panic!(
+                        "System case '{}' should be valid with SUBSCRIBE command",
+                        system_name
+                    ),
                 }
             } else {
                 match validate_redis_consumer_command(&edge_span) {
                     RedisConsumerValidationResult::NotApplicable { .. } => {
-                        println!("✓ System case '{}' correctly identified as not applicable", system_name);
+                        println!(
+                            "✓ System case '{}' correctly identified as not applicable",
+                            system_name
+                        );
                     }
-                    _ => panic!("System case '{}' should not require command validation", system_name),
+                    _ => panic!(
+                        "System case '{}' should not require command validation",
+                        system_name
+                    ),
                 }
             }
         }
@@ -46808,16 +50489,25 @@ mod otlp_122_tests {
             ("invalid_lpush", "LPUSH", false),     // Producer command
             ("invalid_set", "SET", false),         // Producer command
             ("invalid_get", "GET", false),         // Not a consumer pattern command
-            ("invalid_lpop", "LPOP", false),       // Non-blocking, not appropriate for consumer spans
-            ("invalid_rpop", "RPOP", false),       // Non-blocking, not appropriate for consumer spans
-            ("invalid_empty", "", false),          // Empty command
+            ("invalid_lpop", "LPOP", false), // Non-blocking, not appropriate for consumer spans
+            ("invalid_rpop", "RPOP", false), // Non-blocking, not appropriate for consumer spans
+            ("invalid_empty", "", false),    // Empty command
         ];
 
         for (test_name, command_value, should_be_valid) in command_tests {
             let mut test_attributes = HashMap::new();
-            test_attributes.insert("messaging.system".to_string(), AnyValue::StringValue("redis".to_string()));
-            test_attributes.insert("messaging.destination.name".to_string(), AnyValue::StringValue("test.target".to_string()));
-            test_attributes.insert("messaging.redis.command".to_string(), AnyValue::StringValue(command_value.to_string()));
+            test_attributes.insert(
+                "messaging.system".to_string(),
+                AnyValue::StringValue("redis".to_string()),
+            );
+            test_attributes.insert(
+                "messaging.destination.name".to_string(),
+                AnyValue::StringValue("test.target".to_string()),
+            );
+            test_attributes.insert(
+                "messaging.redis.command".to_string(),
+                AnyValue::StringValue(command_value.to_string()),
+            );
 
             let test_span = RedisConsumerSpanData {
                 name: format!("command_test_{}", test_name),
@@ -46836,14 +50526,22 @@ mod otlp_122_tests {
             );
 
             if should_be_valid {
-                println!("✓ Command test '{}' (value: '{}') correctly validated", test_name, command_value);
+                println!(
+                    "✓ Command test '{}' (value: '{}') correctly validated",
+                    test_name, command_value
+                );
             } else {
-                println!("✓ Command test '{}' (value: '{}') correctly rejected", test_name, command_value);
+                println!(
+                    "✓ Command test '{}' (value: '{}') correctly rejected",
+                    test_name, command_value
+                );
             }
         }
 
         println!("✓ OTLP-151: Redis consumer command validation conformance verified");
-        println!("  - CONSUMER spans with messaging.system='redis' require valid consumer commands");
+        println!(
+            "  - CONSUMER spans with messaging.system='redis' require valid consumer commands"
+        );
         println!("  - Valid consumer commands: SUBSCRIBE, PSUBSCRIBE, BRPOP, BLPOP");
         println!("  - Producer commands (SET, LPUSH, PUBLISH) rejected for consumer spans");
         println!("  - Non-Redis consumer systems exempt from validation");
@@ -47098,7 +50796,9 @@ mod otlp_122_tests {
                     }
 
                     // Verify queue URL matches expected
-                    if !scenario.expected_queue_url.is_empty() && queue_url != scenario.expected_queue_url {
+                    if !scenario.expected_queue_url.is_empty()
+                        && queue_url != scenario.expected_queue_url
+                    {
                         return Err(format!(
                             "Queue URL mismatch: expected '{}', got '{}' for '{}'",
                             scenario.expected_queue_url, queue_url, scenario.description
@@ -47142,7 +50842,9 @@ mod otlp_122_tests {
             }
 
             // Case-sensitive messaging.system check
-            let messaging_system = span_data.attributes.get("messaging.system")
+            let messaging_system = span_data
+                .attributes
+                .get("messaging.system")
                 .and_then(|v| match v {
                     AnyValue::StringValue(s) => Some(s.as_str()),
                     _ => None,
@@ -47162,7 +50864,10 @@ mod otlp_122_tests {
             let queue_url = match queue_url_attribute {
                 Some(AnyValue::StringValue(url_string)) => {
                     if url_string.trim().is_empty() {
-                        violations.push("OTLP-152: messaging.aws_sqs.queue_url is empty or whitespace-only".to_string());
+                        violations.push(
+                            "OTLP-152: messaging.aws_sqs.queue_url is empty or whitespace-only"
+                                .to_string(),
+                        );
                         url_string.clone()
                     } else {
                         url_string.clone()
@@ -47195,8 +50900,12 @@ mod otlp_122_tests {
             }
 
             // Count additional AWS SQS-specific attributes
-            let additional_aws_sqs_attributes = span_data.attributes.keys()
-                .filter(|k| k.starts_with("messaging.aws_sqs.") && *k != "messaging.aws_sqs.queue_url")
+            let additional_aws_sqs_attributes = span_data
+                .attributes
+                .keys()
+                .filter(|k| {
+                    k.starts_with("messaging.aws_sqs.") && *k != "messaging.aws_sqs.queue_url"
+                })
                 .count();
 
             AwsSqsProducerValidationResult::Valid {
@@ -47213,7 +50922,10 @@ mod otlp_122_tests {
             match validate_aws_sqs_producer_queue_url_conformance(scenario) {
                 Ok(()) => {
                     passed_scenarios += 1;
-                    println!("✓ OTLP-152 conformance verified for {}", scenario.description);
+                    println!(
+                        "✓ OTLP-152 conformance verified for {}",
+                        scenario.description
+                    );
                 }
                 Err(error_msg) => {
                     panic!(
@@ -47230,7 +50942,9 @@ mod otlp_122_tests {
         );
 
         println!("✓ OTLP-152: AWS SQS producer queue URL validation conformance verified");
-        println!("  - PRODUCER spans with messaging.system='aws_sqs' require messaging.aws_sqs.queue_url");
+        println!(
+            "  - PRODUCER spans with messaging.system='aws_sqs' require messaging.aws_sqs.queue_url"
+        );
         println!("  - Queue URL must be non-empty string value");
         println!("  - Consumer spans exempt from producer queue URL requirement");
         println!("  - Non-AWS SQS messaging systems exempt from validation");
@@ -47506,7 +51220,9 @@ mod otlp_122_tests {
                     }
 
                     // Verify queue URL matches expected
-                    if !scenario.expected_queue_url.is_empty() && queue_url != scenario.expected_queue_url {
+                    if !scenario.expected_queue_url.is_empty()
+                        && queue_url != scenario.expected_queue_url
+                    {
                         return Err(format!(
                             "Queue URL mismatch: expected '{}', got '{}' for '{}'",
                             scenario.expected_queue_url, queue_url, scenario.description
@@ -47550,7 +51266,9 @@ mod otlp_122_tests {
             }
 
             // Case-sensitive messaging.system check
-            let messaging_system = span_data.attributes.get("messaging.system")
+            let messaging_system = span_data
+                .attributes
+                .get("messaging.system")
                 .and_then(|v| match v {
                     AnyValue::StringValue(s) => Some(s.as_str()),
                     _ => None,
@@ -47570,7 +51288,10 @@ mod otlp_122_tests {
             let queue_url = match queue_url_attribute {
                 Some(AnyValue::StringValue(url_string)) => {
                     if url_string.trim().is_empty() {
-                        violations.push("OTLP-153: messaging.aws_sqs.queue_url is empty or whitespace-only".to_string());
+                        violations.push(
+                            "OTLP-153: messaging.aws_sqs.queue_url is empty or whitespace-only"
+                                .to_string(),
+                        );
                         url_string.clone()
                     } else {
                         url_string.clone()
@@ -47603,8 +51324,12 @@ mod otlp_122_tests {
             }
 
             // Count additional AWS SQS-specific attributes
-            let additional_aws_sqs_attributes = span_data.attributes.keys()
-                .filter(|k| k.starts_with("messaging.aws_sqs.") && *k != "messaging.aws_sqs.queue_url")
+            let additional_aws_sqs_attributes = span_data
+                .attributes
+                .keys()
+                .filter(|k| {
+                    k.starts_with("messaging.aws_sqs.") && *k != "messaging.aws_sqs.queue_url"
+                })
                 .count();
 
             AwsSqsConsumerValidationResult::Valid {
@@ -47621,7 +51346,10 @@ mod otlp_122_tests {
             match validate_aws_sqs_consumer_queue_url_conformance(scenario) {
                 Ok(()) => {
                     passed_scenarios += 1;
-                    println!("✓ OTLP-153 conformance verified for {}", scenario.description);
+                    println!(
+                        "✓ OTLP-153 conformance verified for {}",
+                        scenario.description
+                    );
                 }
                 Err(error_msg) => {
                     panic!(
@@ -47638,7 +51366,9 @@ mod otlp_122_tests {
         );
 
         println!("✓ OTLP-153: AWS SQS consumer queue URL validation conformance verified");
-        println!("  - CONSUMER spans with messaging.system='aws_sqs' require messaging.aws_sqs.queue_url");
+        println!(
+            "  - CONSUMER spans with messaging.system='aws_sqs' require messaging.aws_sqs.queue_url"
+        );
         println!("  - Queue URL must be non-empty string value");
         println!("  - Producer spans exempt from consumer queue URL requirement");
         println!("  - Non-AWS SQS messaging systems exempt from validation");
@@ -47691,38 +51421,86 @@ mod otlp_122_tests {
                 span_kind: SpanKind::Producer,
                 messaging_system: "aws_sns".to_string(),
                 span_attributes: vec![
-                    ("messaging.aws_sns.topic_arn".to_string(), AnyValue::StringValue("arn:aws:sns:us-east-1:123456789012:order-notifications".to_string())),
-                    ("messaging.system".to_string(), AnyValue::StringValue("aws_sns".to_string())),
-                    ("messaging.destination.name".to_string(), AnyValue::StringValue("order-notifications".to_string())),
-                    ("messaging.operation".to_string(), AnyValue::StringValue("publish".to_string())),
-                    ("messaging.aws_sns.message_id".to_string(), AnyValue::StringValue("msg-12345-67890".to_string())),
+                    (
+                        "messaging.aws_sns.topic_arn".to_string(),
+                        AnyValue::StringValue(
+                            "arn:aws:sns:us-east-1:123456789012:order-notifications".to_string(),
+                        ),
+                    ),
+                    (
+                        "messaging.system".to_string(),
+                        AnyValue::StringValue("aws_sns".to_string()),
+                    ),
+                    (
+                        "messaging.destination.name".to_string(),
+                        AnyValue::StringValue("order-notifications".to_string()),
+                    ),
+                    (
+                        "messaging.operation".to_string(),
+                        AnyValue::StringValue("publish".to_string()),
+                    ),
+                    (
+                        "messaging.aws_sns.message_id".to_string(),
+                        AnyValue::StringValue("msg-12345-67890".to_string()),
+                    ),
                 ],
                 should_be_valid: true,
-                expected_topic_arn: "arn:aws:sns:us-east-1:123456789012:order-notifications".to_string(),
+                expected_topic_arn: "arn:aws:sns:us-east-1:123456789012:order-notifications"
+                    .to_string(),
             },
             AwsSnsProducerScenario {
                 description: "valid_aws_sns_producer_with_fifo_topic".to_string(),
                 span_kind: SpanKind::Producer,
                 messaging_system: "aws_sns".to_string(),
                 span_attributes: vec![
-                    ("messaging.aws_sns.topic_arn".to_string(), AnyValue::StringValue("arn:aws:sns:eu-west-1:987654321098:payment-events.fifo".to_string())),
-                    ("messaging.system".to_string(), AnyValue::StringValue("aws_sns".to_string())),
-                    ("messaging.destination.name".to_string(), AnyValue::StringValue("payment-events.fifo".to_string())),
-                    ("messaging.operation".to_string(), AnyValue::StringValue("send".to_string())),
-                    ("messaging.aws_sns.message_group_id".to_string(), AnyValue::StringValue("payment-group-1".to_string())),
-                    ("messaging.aws_sns.message_deduplication_id".to_string(), AnyValue::StringValue("dedup-payment-456".to_string())),
+                    (
+                        "messaging.aws_sns.topic_arn".to_string(),
+                        AnyValue::StringValue(
+                            "arn:aws:sns:eu-west-1:987654321098:payment-events.fifo".to_string(),
+                        ),
+                    ),
+                    (
+                        "messaging.system".to_string(),
+                        AnyValue::StringValue("aws_sns".to_string()),
+                    ),
+                    (
+                        "messaging.destination.name".to_string(),
+                        AnyValue::StringValue("payment-events.fifo".to_string()),
+                    ),
+                    (
+                        "messaging.operation".to_string(),
+                        AnyValue::StringValue("send".to_string()),
+                    ),
+                    (
+                        "messaging.aws_sns.message_group_id".to_string(),
+                        AnyValue::StringValue("payment-group-1".to_string()),
+                    ),
+                    (
+                        "messaging.aws_sns.message_deduplication_id".to_string(),
+                        AnyValue::StringValue("dedup-payment-456".to_string()),
+                    ),
                 ],
                 should_be_valid: true,
-                expected_topic_arn: "arn:aws:sns:eu-west-1:987654321098:payment-events.fifo".to_string(),
+                expected_topic_arn: "arn:aws:sns:eu-west-1:987654321098:payment-events.fifo"
+                    .to_string(),
             },
             AwsSnsProducerScenario {
                 description: "aws_sns_producer_missing_topic_arn".to_string(),
                 span_kind: SpanKind::Producer,
                 messaging_system: "aws_sns".to_string(),
                 span_attributes: vec![
-                    ("messaging.system".to_string(), AnyValue::StringValue("aws_sns".to_string())),
-                    ("messaging.destination.name".to_string(), AnyValue::StringValue("notification-topic".to_string())),
-                    ("messaging.operation".to_string(), AnyValue::StringValue("publish".to_string())),
+                    (
+                        "messaging.system".to_string(),
+                        AnyValue::StringValue("aws_sns".to_string()),
+                    ),
+                    (
+                        "messaging.destination.name".to_string(),
+                        AnyValue::StringValue("notification-topic".to_string()),
+                    ),
+                    (
+                        "messaging.operation".to_string(),
+                        AnyValue::StringValue("publish".to_string()),
+                    ),
                     // Missing messaging.aws_sns.topic_arn - should be invalid
                 ],
                 should_be_valid: false,
@@ -47733,10 +51511,22 @@ mod otlp_122_tests {
                 span_kind: SpanKind::Producer,
                 messaging_system: "aws_sns".to_string(),
                 span_attributes: vec![
-                    ("messaging.aws_sns.topic_arn".to_string(), AnyValue::StringValue("".to_string())), // Empty topic ARN
-                    ("messaging.system".to_string(), AnyValue::StringValue("aws_sns".to_string())),
-                    ("messaging.destination.name".to_string(), AnyValue::StringValue("test-topic".to_string())),
-                    ("messaging.operation".to_string(), AnyValue::StringValue("publish".to_string())),
+                    (
+                        "messaging.aws_sns.topic_arn".to_string(),
+                        AnyValue::StringValue("".to_string()),
+                    ), // Empty topic ARN
+                    (
+                        "messaging.system".to_string(),
+                        AnyValue::StringValue("aws_sns".to_string()),
+                    ),
+                    (
+                        "messaging.destination.name".to_string(),
+                        AnyValue::StringValue("test-topic".to_string()),
+                    ),
+                    (
+                        "messaging.operation".to_string(),
+                        AnyValue::StringValue("publish".to_string()),
+                    ),
                 ],
                 should_be_valid: false,
                 expected_topic_arn: "".to_string(),
@@ -47746,10 +51536,22 @@ mod otlp_122_tests {
                 span_kind: SpanKind::Producer,
                 messaging_system: "aws_sns".to_string(),
                 span_attributes: vec![
-                    ("messaging.aws_sns.topic_arn".to_string(), AnyValue::IntValue(98765)), // Wrong type - should be string
-                    ("messaging.system".to_string(), AnyValue::StringValue("aws_sns".to_string())),
-                    ("messaging.destination.name".to_string(), AnyValue::StringValue("test-topic".to_string())),
-                    ("messaging.operation".to_string(), AnyValue::StringValue("send".to_string())),
+                    (
+                        "messaging.aws_sns.topic_arn".to_string(),
+                        AnyValue::IntValue(98765),
+                    ), // Wrong type - should be string
+                    (
+                        "messaging.system".to_string(),
+                        AnyValue::StringValue("aws_sns".to_string()),
+                    ),
+                    (
+                        "messaging.destination.name".to_string(),
+                        AnyValue::StringValue("test-topic".to_string()),
+                    ),
+                    (
+                        "messaging.operation".to_string(),
+                        AnyValue::StringValue("send".to_string()),
+                    ),
                 ],
                 should_be_valid: false,
                 expected_topic_arn: "".to_string(),
@@ -47759,9 +51561,18 @@ mod otlp_122_tests {
                 span_kind: SpanKind::Consumer,
                 messaging_system: "aws_sns".to_string(),
                 span_attributes: vec![
-                    ("messaging.system".to_string(), AnyValue::StringValue("aws_sns".to_string())),
-                    ("messaging.destination.name".to_string(), AnyValue::StringValue("test-topic".to_string())),
-                    ("messaging.operation".to_string(), AnyValue::StringValue("receive".to_string())),
+                    (
+                        "messaging.system".to_string(),
+                        AnyValue::StringValue("aws_sns".to_string()),
+                    ),
+                    (
+                        "messaging.destination.name".to_string(),
+                        AnyValue::StringValue("test-topic".to_string()),
+                    ),
+                    (
+                        "messaging.operation".to_string(),
+                        AnyValue::StringValue("receive".to_string()),
+                    ),
                     // Consumer spans are exempt from producer topic ARN requirement
                 ],
                 should_be_valid: true, // Consumer spans don't need producer topic ARN
@@ -47772,9 +51583,18 @@ mod otlp_122_tests {
                 span_kind: SpanKind::Producer,
                 messaging_system: "kafka".to_string(), // Different messaging system
                 span_attributes: vec![
-                    ("messaging.system".to_string(), AnyValue::StringValue("kafka".to_string())),
-                    ("messaging.destination.name".to_string(), AnyValue::StringValue("events-topic".to_string())),
-                    ("messaging.operation".to_string(), AnyValue::StringValue("publish".to_string())),
+                    (
+                        "messaging.system".to_string(),
+                        AnyValue::StringValue("kafka".to_string()),
+                    ),
+                    (
+                        "messaging.destination.name".to_string(),
+                        AnyValue::StringValue("events-topic".to_string()),
+                    ),
+                    (
+                        "messaging.operation".to_string(),
+                        AnyValue::StringValue("publish".to_string()),
+                    ),
                     // Non-AWS SNS systems exempt from topic ARN requirement
                 ],
                 should_be_valid: true,
@@ -47785,9 +51605,18 @@ mod otlp_122_tests {
                 span_kind: SpanKind::Producer,
                 messaging_system: "AWS_SNS".to_string(), // Wrong case
                 span_attributes: vec![
-                    ("messaging.system".to_string(), AnyValue::StringValue("AWS_SNS".to_string())),
-                    ("messaging.destination.name".to_string(), AnyValue::StringValue("test-topic".to_string())),
-                    ("messaging.operation".to_string(), AnyValue::StringValue("publish".to_string())),
+                    (
+                        "messaging.system".to_string(),
+                        AnyValue::StringValue("AWS_SNS".to_string()),
+                    ),
+                    (
+                        "messaging.destination.name".to_string(),
+                        AnyValue::StringValue("test-topic".to_string()),
+                    ),
+                    (
+                        "messaging.operation".to_string(),
+                        AnyValue::StringValue("publish".to_string()),
+                    ),
                     // Case-sensitive check - "AWS_SNS" != "aws_sns"
                 ],
                 should_be_valid: true, // Not exact "aws_sns" so exempt
@@ -47798,28 +51627,71 @@ mod otlp_122_tests {
                 span_kind: SpanKind::Producer,
                 messaging_system: "aws_sns".to_string(),
                 span_attributes: vec![
-                    ("messaging.aws_sns.topic_arn".to_string(), AnyValue::StringValue("arn:aws:sns:ap-southeast-1:111222333444:user-activity-events".to_string())),
-                    ("messaging.system".to_string(), AnyValue::StringValue("aws_sns".to_string())),
-                    ("messaging.destination.name".to_string(), AnyValue::StringValue("user-activity-events".to_string())),
-                    ("messaging.operation".to_string(), AnyValue::StringValue("publish".to_string())),
-                    ("messaging.aws_sns.message_attributes_count".to_string(), AnyValue::IntValue(3)),
-                    ("messaging.aws_sns.subject".to_string(), AnyValue::StringValue("User Login Event".to_string())),
-                    ("messaging.aws_sns.phone_number".to_string(), AnyValue::StringValue("+1234567890".to_string())),
-                    ("cloud.provider".to_string(), AnyValue::StringValue("aws".to_string())),
-                    ("cloud.region".to_string(), AnyValue::StringValue("ap-southeast-1".to_string())),
+                    (
+                        "messaging.aws_sns.topic_arn".to_string(),
+                        AnyValue::StringValue(
+                            "arn:aws:sns:ap-southeast-1:111222333444:user-activity-events"
+                                .to_string(),
+                        ),
+                    ),
+                    (
+                        "messaging.system".to_string(),
+                        AnyValue::StringValue("aws_sns".to_string()),
+                    ),
+                    (
+                        "messaging.destination.name".to_string(),
+                        AnyValue::StringValue("user-activity-events".to_string()),
+                    ),
+                    (
+                        "messaging.operation".to_string(),
+                        AnyValue::StringValue("publish".to_string()),
+                    ),
+                    (
+                        "messaging.aws_sns.message_attributes_count".to_string(),
+                        AnyValue::IntValue(3),
+                    ),
+                    (
+                        "messaging.aws_sns.subject".to_string(),
+                        AnyValue::StringValue("User Login Event".to_string()),
+                    ),
+                    (
+                        "messaging.aws_sns.phone_number".to_string(),
+                        AnyValue::StringValue("+1234567890".to_string()),
+                    ),
+                    (
+                        "cloud.provider".to_string(),
+                        AnyValue::StringValue("aws".to_string()),
+                    ),
+                    (
+                        "cloud.region".to_string(),
+                        AnyValue::StringValue("ap-southeast-1".to_string()),
+                    ),
                 ],
                 should_be_valid: true,
-                expected_topic_arn: "arn:aws:sns:ap-southeast-1:111222333444:user-activity-events".to_string(),
+                expected_topic_arn: "arn:aws:sns:ap-southeast-1:111222333444:user-activity-events"
+                    .to_string(),
             },
             AwsSnsProducerScenario {
                 description: "aws_sns_producer_whitespace_only_topic_arn".to_string(),
                 span_kind: SpanKind::Producer,
                 messaging_system: "aws_sns".to_string(),
                 span_attributes: vec![
-                    ("messaging.aws_sns.topic_arn".to_string(), AnyValue::StringValue("   ".to_string())), // Whitespace only
-                    ("messaging.system".to_string(), AnyValue::StringValue("aws_sns".to_string())),
-                    ("messaging.destination.name".to_string(), AnyValue::StringValue("test-topic".to_string())),
-                    ("messaging.operation".to_string(), AnyValue::StringValue("publish".to_string())),
+                    (
+                        "messaging.aws_sns.topic_arn".to_string(),
+                        AnyValue::StringValue("   ".to_string()),
+                    ), // Whitespace only
+                    (
+                        "messaging.system".to_string(),
+                        AnyValue::StringValue("aws_sns".to_string()),
+                    ),
+                    (
+                        "messaging.destination.name".to_string(),
+                        AnyValue::StringValue("test-topic".to_string()),
+                    ),
+                    (
+                        "messaging.operation".to_string(),
+                        AnyValue::StringValue("publish".to_string()),
+                    ),
                 ],
                 should_be_valid: false,
                 expected_topic_arn: "   ".to_string(),
@@ -47829,26 +51701,65 @@ mod otlp_122_tests {
                 span_kind: SpanKind::Producer,
                 messaging_system: "aws_sns".to_string(),
                 span_attributes: vec![
-                    ("messaging.aws_sns.topic_arn".to_string(), AnyValue::StringValue("arn:aws:sns:ca-central-1:555666777888:disaster-recovery-alerts".to_string())),
-                    ("messaging.system".to_string(), AnyValue::StringValue("aws_sns".to_string())),
-                    ("messaging.destination.name".to_string(), AnyValue::StringValue("disaster-recovery-alerts".to_string())),
-                    ("messaging.operation".to_string(), AnyValue::StringValue("publish".to_string())),
-                    ("messaging.aws_sns.target_arn".to_string(), AnyValue::StringValue("arn:aws:sqs:ca-central-1:555666777888:dr-queue".to_string())),
-                    ("messaging.aws_sns.subscription_endpoint".to_string(), AnyValue::StringValue("https://example.com/webhook".to_string())),
-                    ("messaging.aws_sns.protocol".to_string(), AnyValue::StringValue("https".to_string())),
+                    (
+                        "messaging.aws_sns.topic_arn".to_string(),
+                        AnyValue::StringValue(
+                            "arn:aws:sns:ca-central-1:555666777888:disaster-recovery-alerts"
+                                .to_string(),
+                        ),
+                    ),
+                    (
+                        "messaging.system".to_string(),
+                        AnyValue::StringValue("aws_sns".to_string()),
+                    ),
+                    (
+                        "messaging.destination.name".to_string(),
+                        AnyValue::StringValue("disaster-recovery-alerts".to_string()),
+                    ),
+                    (
+                        "messaging.operation".to_string(),
+                        AnyValue::StringValue("publish".to_string()),
+                    ),
+                    (
+                        "messaging.aws_sns.target_arn".to_string(),
+                        AnyValue::StringValue(
+                            "arn:aws:sqs:ca-central-1:555666777888:dr-queue".to_string(),
+                        ),
+                    ),
+                    (
+                        "messaging.aws_sns.subscription_endpoint".to_string(),
+                        AnyValue::StringValue("https://example.com/webhook".to_string()),
+                    ),
+                    (
+                        "messaging.aws_sns.protocol".to_string(),
+                        AnyValue::StringValue("https".to_string()),
+                    ),
                 ],
                 should_be_valid: true,
-                expected_topic_arn: "arn:aws:sns:ca-central-1:555666777888:disaster-recovery-alerts".to_string(),
+                expected_topic_arn:
+                    "arn:aws:sns:ca-central-1:555666777888:disaster-recovery-alerts".to_string(),
             },
             AwsSnsProducerScenario {
                 description: "aws_sns_producer_malformed_arn_accepted".to_string(),
                 span_kind: SpanKind::Producer,
                 messaging_system: "aws_sns".to_string(),
                 span_attributes: vec![
-                    ("messaging.aws_sns.topic_arn".to_string(), AnyValue::StringValue("not-a-valid-sns-arn".to_string())),
-                    ("messaging.system".to_string(), AnyValue::StringValue("aws_sns".to_string())),
-                    ("messaging.destination.name".to_string(), AnyValue::StringValue("test-topic".to_string())),
-                    ("messaging.operation".to_string(), AnyValue::StringValue("publish".to_string())),
+                    (
+                        "messaging.aws_sns.topic_arn".to_string(),
+                        AnyValue::StringValue("not-a-valid-sns-arn".to_string()),
+                    ),
+                    (
+                        "messaging.system".to_string(),
+                        AnyValue::StringValue("aws_sns".to_string()),
+                    ),
+                    (
+                        "messaging.destination.name".to_string(),
+                        AnyValue::StringValue("test-topic".to_string()),
+                    ),
+                    (
+                        "messaging.operation".to_string(),
+                        AnyValue::StringValue("publish".to_string()),
+                    ),
                 ],
                 should_be_valid: true, // ARN format validation not part of OTLP-154 requirement
                 expected_topic_arn: "not-a-valid-sns-arn".to_string(),
@@ -47915,7 +51826,9 @@ mod otlp_122_tests {
                     }
 
                     // Verify topic ARN matches expected
-                    if !scenario.expected_topic_arn.is_empty() && topic_arn != scenario.expected_topic_arn {
+                    if !scenario.expected_topic_arn.is_empty()
+                        && topic_arn != scenario.expected_topic_arn
+                    {
                         return Err(format!(
                             "Topic ARN mismatch: expected '{}', got '{}' for '{}'",
                             scenario.expected_topic_arn, topic_arn, scenario.description
@@ -47959,7 +51872,9 @@ mod otlp_122_tests {
             }
 
             // Case-sensitive messaging.system check
-            let messaging_system = span_data.attributes.get("messaging.system")
+            let messaging_system = span_data
+                .attributes
+                .get("messaging.system")
                 .and_then(|v| match v {
                     AnyValue::StringValue(s) => Some(s.as_str()),
                     _ => None,
@@ -47979,7 +51894,10 @@ mod otlp_122_tests {
             let topic_arn = match topic_arn_attribute {
                 Some(AnyValue::StringValue(arn_string)) => {
                     if arn_string.trim().is_empty() {
-                        violations.push("OTLP-154: messaging.aws_sns.topic_arn is empty or whitespace-only".to_string());
+                        violations.push(
+                            "OTLP-154: messaging.aws_sns.topic_arn is empty or whitespace-only"
+                                .to_string(),
+                        );
                         arn_string.clone()
                     } else {
                         arn_string.clone()
@@ -48012,8 +51930,12 @@ mod otlp_122_tests {
             }
 
             // Count additional AWS SNS-specific attributes
-            let additional_aws_sns_attributes = span_data.attributes.keys()
-                .filter(|k| k.starts_with("messaging.aws_sns.") && *k != "messaging.aws_sns.topic_arn")
+            let additional_aws_sns_attributes = span_data
+                .attributes
+                .keys()
+                .filter(|k| {
+                    k.starts_with("messaging.aws_sns.") && *k != "messaging.aws_sns.topic_arn"
+                })
                 .count();
 
             AwsSnsProducerValidationResult::Valid {
@@ -48030,7 +51952,10 @@ mod otlp_122_tests {
             match validate_aws_sns_producer_topic_arn_conformance(scenario) {
                 Ok(()) => {
                     passed_scenarios += 1;
-                    println!("✓ OTLP-154 conformance verified for {}", scenario.description);
+                    println!(
+                        "✓ OTLP-154 conformance verified for {}",
+                        scenario.description
+                    );
                 }
                 Err(error_msg) => {
                     panic!(
@@ -48047,7 +51972,9 @@ mod otlp_122_tests {
         );
 
         println!("✓ OTLP-154: AWS SNS producer topic ARN validation conformance verified");
-        println!("  - PRODUCER spans with messaging.system='aws_sns' require messaging.aws_sns.topic_arn");
+        println!(
+            "  - PRODUCER spans with messaging.system='aws_sns' require messaging.aws_sns.topic_arn"
+        );
         println!("  - Topic ARN must be non-empty string value");
         println!("  - Consumer spans exempt from producer topic ARN requirement");
         println!("  - Non-AWS SNS messaging systems exempt from validation");
@@ -48057,7 +51984,9 @@ mod otlp_122_tests {
         println!("  - Additional AWS SNS attributes preserved and counted");
         println!("  - ARN format validation not enforced (only presence and type)");
         println!("  - FIFO topics and cross-region publishing supported");
-        println!("  - Message attributes, subscription filtering, and delivery protocols supported");
+        println!(
+            "  - Message attributes, subscription filtering, and delivery protocols supported"
+        );
     }
 
     /// OTLP-155 conformance test: AWS SNS consumer topic ARN and subscription ARN validation.
@@ -48211,7 +52140,9 @@ mod otlp_122_tests {
             }
 
             // Case-sensitive messaging.system check
-            let messaging_system = span_data.attributes.get("messaging.system")
+            let messaging_system = span_data
+                .attributes
+                .get("messaging.system")
                 .and_then(|v| match v {
                     AnyValue::StringValue(s) => Some(s.as_str()),
                     _ => None,
@@ -48232,7 +52163,8 @@ mod otlp_122_tests {
             let topic_arn = match span_data.attributes.get("messaging.aws_sns.topic_arn") {
                 Some(AnyValue::StringValue(arn_string)) => {
                     if arn_string.trim().is_empty() {
-                        violations.push("OTLP-155: messaging.aws_sns.topic_arn is empty".to_string());
+                        violations
+                            .push("OTLP-155: messaging.aws_sns.topic_arn is empty".to_string());
                         arn_string.clone()
                     } else {
                         arn_string.clone()
@@ -48249,10 +52181,15 @@ mod otlp_122_tests {
             };
 
             // Validate subscription ARN
-            let subscription_arn = match span_data.attributes.get("messaging.aws_sns.subscription_arn") {
+            let subscription_arn = match span_data
+                .attributes
+                .get("messaging.aws_sns.subscription_arn")
+            {
                 Some(AnyValue::StringValue(arn_string)) => {
                     if arn_string.trim().is_empty() {
-                        violations.push("OTLP-155: messaging.aws_sns.subscription_arn is empty".to_string());
+                        violations.push(
+                            "OTLP-155: messaging.aws_sns.subscription_arn is empty".to_string(),
+                        );
                         arn_string.clone()
                     } else {
                         arn_string.clone()
@@ -48287,37 +52224,54 @@ mod otlp_122_tests {
             let validation_result = validate_aws_sns_consumer_attributes(&span_data);
 
             let test_passed = match validation_result {
-                AwsSnsConsumerValidationResult::Valid { topic_arn, subscription_arn } => {
+                AwsSnsConsumerValidationResult::Valid {
+                    topic_arn,
+                    subscription_arn,
+                } => {
                     if !scenario.should_be_valid {
-                        panic!("Expected failure but span was accepted: topic_arn='{}', subscription_arn='{}'",
-                               topic_arn, subscription_arn);
+                        panic!(
+                            "Expected failure but span was accepted: topic_arn='{}', subscription_arn='{}'",
+                            topic_arn, subscription_arn
+                        );
                     }
 
                     // Verify ARNs match expected values
-                    if !scenario.expected_topic_arn.is_empty() && topic_arn != scenario.expected_topic_arn {
-                        panic!("Topic ARN mismatch: expected '{}', got '{}'",
-                               scenario.expected_topic_arn, topic_arn);
+                    if !scenario.expected_topic_arn.is_empty()
+                        && topic_arn != scenario.expected_topic_arn
+                    {
+                        panic!(
+                            "Topic ARN mismatch: expected '{}', got '{}'",
+                            scenario.expected_topic_arn, topic_arn
+                        );
                     }
-                    if !scenario.expected_subscription_arn.is_empty() && subscription_arn != scenario.expected_subscription_arn {
-                        panic!("Subscription ARN mismatch: expected '{}', got '{}'",
-                               scenario.expected_subscription_arn, subscription_arn);
+                    if !scenario.expected_subscription_arn.is_empty()
+                        && subscription_arn != scenario.expected_subscription_arn
+                    {
+                        panic!(
+                            "Subscription ARN mismatch: expected '{}', got '{}'",
+                            scenario.expected_subscription_arn, subscription_arn
+                        );
                     }
                     true
                 }
                 AwsSnsConsumerValidationResult::Invalid { violations } => {
                     if scenario.should_be_valid {
-                        panic!("Expected success but span was rejected: violations={:?}", violations);
+                        panic!(
+                            "Expected success but span was rejected: violations={:?}",
+                            violations
+                        );
                     }
                     true
                 }
-                AwsSnsConsumerValidationResult::NotApplicable { .. } => {
-                    scenario.should_be_valid
-                }
+                AwsSnsConsumerValidationResult::NotApplicable { .. } => scenario.should_be_valid,
             };
 
             if test_passed {
                 passed_scenarios += 1;
-                println!("✓ OTLP-155 conformance verified for {}", scenario.description);
+                println!(
+                    "✓ OTLP-155 conformance verified for {}",
+                    scenario.description
+                );
             }
         }
 
@@ -48326,8 +52280,12 @@ mod otlp_122_tests {
             "All OTLP-155 AWS SNS consumer ARN scenarios must pass"
         );
 
-        println!("✓ OTLP-155: AWS SNS consumer topic ARN and subscription ARN validation conformance verified");
-        println!("  - CONSUMER spans with messaging.system='aws_sns' require BOTH topic_arn AND subscription_arn");
+        println!(
+            "✓ OTLP-155: AWS SNS consumer topic ARN and subscription ARN validation conformance verified"
+        );
+        println!(
+            "  - CONSUMER spans with messaging.system='aws_sns' require BOTH topic_arn AND subscription_arn"
+        );
         println!("  - Both ARNs must be non-empty string values");
         println!("  - Producer spans exempt from consumer ARN requirements");
         println!("  - Non-AWS SNS messaging systems exempt from validation");
@@ -48592,7 +52550,9 @@ mod otlp_122_tests {
             }
 
             // Case-sensitive messaging.system check
-            let messaging_system = span_data.attributes.get("messaging.system")
+            let messaging_system = span_data
+                .attributes
+                .get("messaging.system")
                 .and_then(|v| match v {
                     AnyValue::StringValue(s) => Some(s.as_str()),
                     _ => None,
@@ -48646,13 +52606,13 @@ mod otlp_122_tests {
         fn simulate_otlp_export_url_preservation(url: &str) -> String {
             // OTLP-156 compliance: URLs MUST be preserved verbatim
             // This simulation demonstrates that no normalization should occur
-            
+
             // Example of what NOT to do (normalization that violates OTLP-156):
             // - url.to_lowercase()  // Domain normalization forbidden
             // - url.trim_end_matches('/')  // Trailing slash removal forbidden
             // - url.replace("%20", " ")  // URL decoding forbidden
             // - url.replace("//", "/")  // Double slash normalization forbidden
-            
+
             // OTLP-156 compliant behavior: return URL exactly as provided
             url.to_string()
         }
@@ -48666,46 +52626,62 @@ mod otlp_122_tests {
             let validation_result = validate_aws_sqs_url_preservation(&span_data);
 
             let test_passed = match validation_result {
-                AwsSqsUrlPreservationResult::Valid { original_url, preserved_url, was_normalized } => {
+                AwsSqsUrlPreservationResult::Valid {
+                    original_url,
+                    preserved_url,
+                    was_normalized,
+                } => {
                     if !scenario.should_be_valid {
-                        panic!("Expected failure but URL was preserved: original='{}', preserved='{}'",
-                               original_url, preserved_url);
+                        panic!(
+                            "Expected failure but URL was preserved: original='{}', preserved='{}'",
+                            original_url, preserved_url
+                        );
                     }
 
                     // Verify URL was preserved exactly
                     if !scenario.original_queue_url.is_empty() {
                         if original_url != scenario.original_queue_url {
-                            panic!("Original URL mismatch: expected '{}', got '{}'",
-                                   scenario.original_queue_url, original_url);
+                            panic!(
+                                "Original URL mismatch: expected '{}', got '{}'",
+                                scenario.original_queue_url, original_url
+                            );
                         }
                         if preserved_url != scenario.expected_preserved_url {
-                            panic!("Preserved URL mismatch: expected '{}', got '{}'",
-                                   scenario.expected_preserved_url, preserved_url);
+                            panic!(
+                                "Preserved URL mismatch: expected '{}', got '{}'",
+                                scenario.expected_preserved_url, preserved_url
+                            );
                         }
                     }
 
                     // Verify normalization expectation
                     if was_normalized != scenario.path_normalization_expected {
-                        panic!("Normalization expectation mismatch: expected {}, got {}",
-                               scenario.path_normalization_expected, was_normalized);
+                        panic!(
+                            "Normalization expectation mismatch: expected {}, got {}",
+                            scenario.path_normalization_expected, was_normalized
+                        );
                     }
 
                     true
                 }
                 AwsSqsUrlPreservationResult::Invalid { violations } => {
                     if scenario.should_be_valid {
-                        panic!("Expected success but URL preservation failed: violations={:?}", violations);
+                        panic!(
+                            "Expected success but URL preservation failed: violations={:?}",
+                            violations
+                        );
                     }
                     true
                 }
-                AwsSqsUrlPreservationResult::NotApplicable { .. } => {
-                    scenario.should_be_valid
-                }
+                AwsSqsUrlPreservationResult::NotApplicable { .. } => scenario.should_be_valid,
             };
 
             if test_passed {
                 passed_scenarios += 1;
-                println!("✓ OTLP-156 conformance verified for {}", scenario.description);
+                println!(
+                    "✓ OTLP-156 conformance verified for {}",
+                    scenario.description
+                );
             }
         }
 
@@ -48715,7 +52691,9 @@ mod otlp_122_tests {
         );
 
         println!("✓ OTLP-156: AWS SQS producer queue URL path preservation conformance verified");
-        println!("  - PRODUCER spans with messaging.system='aws_sqs' preserve queue URL paths verbatim");
+        println!(
+            "  - PRODUCER spans with messaging.system='aws_sqs' preserve queue URL paths verbatim"
+        );
         println!("  - No URL normalization permitted (case, trailing slashes, encoding, etc.)");
         println!("  - Case-sensitive queue names preserved exactly");
         println!("  - Special characters and encoded characters preserved");
@@ -48997,7 +52975,9 @@ mod otlp_122_tests {
                     }
 
                     // Verify stream name matches expected
-                    if !scenario.expected_stream_name.is_empty() && stream_name != scenario.expected_stream_name {
+                    if !scenario.expected_stream_name.is_empty()
+                        && stream_name != scenario.expected_stream_name
+                    {
                         return Err(format!(
                             "Stream name mismatch: expected '{}', got '{}' for '{}'",
                             scenario.expected_stream_name, stream_name, scenario.description
@@ -49041,7 +53021,9 @@ mod otlp_122_tests {
             }
 
             // Case-sensitive messaging.system check
-            let messaging_system = span_data.attributes.get("messaging.system")
+            let messaging_system = span_data
+                .attributes
+                .get("messaging.system")
                 .and_then(|v| match v {
                     AnyValue::StringValue(s) => Some(s.as_str()),
                     _ => None,
@@ -49061,7 +53043,10 @@ mod otlp_122_tests {
             let stream_name = match stream_name_attribute {
                 Some(AnyValue::StringValue(name_string)) => {
                     if name_string.trim().is_empty() {
-                        violations.push("OTLP-157: messaging.kinesis.stream_name is empty or whitespace-only".to_string());
+                        violations.push(
+                            "OTLP-157: messaging.kinesis.stream_name is empty or whitespace-only"
+                                .to_string(),
+                        );
                         name_string.clone()
                     } else {
                         name_string.clone()
@@ -49094,8 +53079,12 @@ mod otlp_122_tests {
             }
 
             // Count additional Kinesis-specific attributes
-            let additional_kinesis_attributes = span_data.attributes.keys()
-                .filter(|k| k.starts_with("messaging.kinesis.") && *k != "messaging.kinesis.stream_name")
+            let additional_kinesis_attributes = span_data
+                .attributes
+                .keys()
+                .filter(|k| {
+                    k.starts_with("messaging.kinesis.") && *k != "messaging.kinesis.stream_name"
+                })
                 .count();
 
             KinesisProducerValidationResult::Valid {
@@ -49112,7 +53101,10 @@ mod otlp_122_tests {
             match validate_kinesis_producer_stream_name_conformance(scenario) {
                 Ok(()) => {
                     passed_scenarios += 1;
-                    println!("✓ OTLP-157 conformance verified for {}", scenario.description);
+                    println!(
+                        "✓ OTLP-157 conformance verified for {}",
+                        scenario.description
+                    );
                 }
                 Err(error_msg) => {
                     panic!(
@@ -49129,7 +53121,9 @@ mod otlp_122_tests {
         );
 
         println!("✓ OTLP-157: Kinesis producer stream name validation conformance verified");
-        println!("  - PRODUCER spans with messaging.system='kinesis' require messaging.kinesis.stream_name");
+        println!(
+            "  - PRODUCER spans with messaging.system='kinesis' require messaging.kinesis.stream_name"
+        );
         println!("  - Stream name must be non-empty string value");
         println!("  - Consumer spans exempt from producer stream name requirement");
         println!("  - Non-Kinesis messaging systems exempt from validation");
@@ -49142,54 +53136,54 @@ mod otlp_122_tests {
     }
 }
 
-    /// OTLP-158: Kinesis consumer shard ID validation conformance test.
-    /// Validates that when exporter sees a span with kind=CONSUMER and
-    /// messaging.system="kinesis", attribute messaging.kinesis.shard_id MUST be set
-    /// per OTLP semantic conventions.
-    #[test]
-    fn otlp_158_kinesis_consumer_shard_id_conformance() {
-        // Enum to represent OTLP attribute value types
-        #[derive(Debug, Clone)]
-        enum AttributeValue {
-            StringValue(String),
-            IntValue(i64),
-            BoolValue(bool),
-            ArrayValue(Vec<String>),
-            NullValue,
-        }
+/// OTLP-158: Kinesis consumer shard ID validation conformance test.
+/// Validates that when exporter sees a span with kind=CONSUMER and
+/// messaging.system="kinesis", attribute messaging.kinesis.shard_id MUST be set
+/// per OTLP semantic conventions.
+#[test]
+fn otlp_158_kinesis_consumer_shard_id_conformance() {
+    // Enum to represent OTLP attribute value types
+    #[derive(Debug, Clone)]
+    enum AttributeValue {
+        StringValue(String),
+        IntValue(i64),
+        BoolValue(bool),
+        ArrayValue(Vec<String>),
+        NullValue,
+    }
 
-        // Test scenario structure for Kinesis consumer shard ID validation
-        #[derive(Debug, Clone)]
-        struct KinesisConsumerShardIdScenario {
-            description: String,
-            span_kind: String,
-            messaging_system: Option<String>,
-            shard_id: Option<AttributeValue>,
-            additional_attributes: HashMap<String, AttributeValue>,
-            should_pass_validation: bool,
-            expected_error_pattern: Option<String>,
-        }
+    // Test scenario structure for Kinesis consumer shard ID validation
+    #[derive(Debug, Clone)]
+    struct KinesisConsumerShardIdScenario {
+        description: String,
+        span_kind: String,
+        messaging_system: Option<String>,
+        shard_id: Option<AttributeValue>,
+        additional_attributes: HashMap<String, AttributeValue>,
+        should_pass_validation: bool,
+        expected_error_pattern: Option<String>,
+    }
 
-        // Validation result for consumer shard ID conformance
-        #[derive(Debug)]
-        enum KinesisConsumerShardIdValidationResult {
-            Valid {
-                shard_id: String,
-                additional_kinesis_attributes: usize,
-            },
-            NotApplicable(String),
-            Invalid(String),
-        }
+    // Validation result for consumer shard ID conformance
+    #[derive(Debug)]
+    enum KinesisConsumerShardIdValidationResult {
+        Valid {
+            shard_id: String,
+            additional_kinesis_attributes: usize,
+        },
+        NotApplicable(String),
+        Invalid(String),
+    }
 
-        // Mock span data structure for testing
-        #[derive(Debug)]
-        struct SpanData {
-            kind: String,
-            attributes: HashMap<String, AttributeValue>,
-        }
+    // Mock span data structure for testing
+    #[derive(Debug)]
+    struct SpanData {
+        kind: String,
+        attributes: HashMap<String, AttributeValue>,
+    }
 
-        // Define comprehensive test scenarios for OTLP-158 validation
-        let test_scenarios = vec![
+    // Define comprehensive test scenarios for OTLP-158 validation
+    let test_scenarios = vec![
             KinesisConsumerShardIdScenario {
                 description: "Valid consumer span with shard ID".to_string(),
                 span_kind: "CONSUMER".to_string(),
@@ -49320,847 +53314,1148 @@ mod otlp_122_tests {
             },
         ];
 
-        // Validation function for Kinesis consumer shard ID conformance
-        fn validate_kinesis_consumer_shard_id_conformance(
-            scenario: &KinesisConsumerShardIdScenario,
-        ) -> Result<(), String> {
-            // Create span data from scenario
-            let mut attributes = scenario.additional_attributes.clone();
-            
-            if let Some(ref messaging_system) = scenario.messaging_system {
-                attributes.insert("messaging.system".to_string(), AttributeValue::StringValue(messaging_system.clone()));
-            }
-            
-            if let Some(ref shard_id) = scenario.shard_id {
-                attributes.insert("messaging.kinesis.shard_id".to_string(), shard_id.clone());
-            }
+    // Validation function for Kinesis consumer shard ID conformance
+    fn validate_kinesis_consumer_shard_id_conformance(
+        scenario: &KinesisConsumerShardIdScenario,
+    ) -> Result<(), String> {
+        // Create span data from scenario
+        let mut attributes = scenario.additional_attributes.clone();
 
-            let span_data = SpanData {
-                kind: scenario.span_kind.clone(),
-                attributes,
-            };
+        if let Some(ref messaging_system) = scenario.messaging_system {
+            attributes.insert(
+                "messaging.system".to_string(),
+                AttributeValue::StringValue(messaging_system.clone()),
+            );
+        }
 
-            // Perform validation
-            match validate_kinesis_consumer_shard_id(&span_data) {
-                KinesisConsumerShardIdValidationResult::Valid { .. } => {
-                    if scenario.should_pass_validation {
+        if let Some(ref shard_id) = scenario.shard_id {
+            attributes.insert("messaging.kinesis.shard_id".to_string(), shard_id.clone());
+        }
+
+        let span_data = SpanData {
+            kind: scenario.span_kind.clone(),
+            attributes,
+        };
+
+        // Perform validation
+        match validate_kinesis_consumer_shard_id(&span_data) {
+            KinesisConsumerShardIdValidationResult::Valid { .. } => {
+                if scenario.should_pass_validation {
+                    Ok(())
+                } else {
+                    Err("Expected validation to fail but it passed".to_string())
+                }
+            }
+            KinesisConsumerShardIdValidationResult::NotApplicable(_) => {
+                if scenario.should_pass_validation {
+                    Ok(())
+                } else {
+                    Err(
+                        "Validation was marked as not applicable when failure was expected"
+                            .to_string(),
+                    )
+                }
+            }
+            KinesisConsumerShardIdValidationResult::Invalid(error_msg) => {
+                if scenario.should_pass_validation {
+                    Err(format!(
+                        "Validation failed when it should have passed: {}",
+                        error_msg
+                    ))
+                } else if let Some(expected_pattern) = &scenario.expected_error_pattern {
+                    if error_msg.contains(expected_pattern) {
                         Ok(())
                     } else {
-                        Err("Expected validation to fail but it passed".to_string())
+                        Err(format!(
+                            "Error message '{}' doesn't contain expected pattern '{}'",
+                            error_msg, expected_pattern
+                        ))
                     }
-                }
-                KinesisConsumerShardIdValidationResult::NotApplicable(_) => {
-                    if scenario.should_pass_validation {
-                        Ok(())
-                    } else {
-                        Err("Validation was marked as not applicable when failure was expected".to_string())
-                    }
-                }
-                KinesisConsumerShardIdValidationResult::Invalid(error_msg) => {
-                    if scenario.should_pass_validation {
-                        Err(format!("Validation failed when it should have passed: {}", error_msg))
-                    } else if let Some(expected_pattern) = &scenario.expected_error_pattern {
-                        if error_msg.contains(expected_pattern) {
-                            Ok(())
-                        } else {
-                            Err(format!("Error message '{}' doesn't contain expected pattern '{}'", error_msg, expected_pattern))
-                        }
-                    } else {
-                        Ok(()) // Expected failure without specific pattern
-                    }
+                } else {
+                    Ok(()) // Expected failure without specific pattern
                 }
             }
         }
+    }
 
-        // Validation logic for Kinesis consumer shard ID
-        fn validate_kinesis_consumer_shard_id(span_data: &SpanData) -> KinesisConsumerShardIdValidationResult {
-            // Check if span kind is CONSUMER
-            if span_data.kind != "CONSUMER" {
+    // Validation logic for Kinesis consumer shard ID
+    fn validate_kinesis_consumer_shard_id(
+        span_data: &SpanData,
+    ) -> KinesisConsumerShardIdValidationResult {
+        // Check if span kind is CONSUMER
+        if span_data.kind != "CONSUMER" {
+            return KinesisConsumerShardIdValidationResult::NotApplicable(format!(
+                "Span kind '{}' is not CONSUMER, shard ID validation not required",
+                span_data.kind
+            ));
+        }
+
+        // Check if messaging.system is exactly "kinesis" (case-sensitive)
+        let messaging_system = span_data.attributes.get("messaging.system");
+        match messaging_system {
+            Some(AttributeValue::StringValue(system)) if system == "kinesis" => {
+                // This is a Kinesis consumer span - validate shard_id
+            }
+            _ => {
                 return KinesisConsumerShardIdValidationResult::NotApplicable(
-                    format!("Span kind '{}' is not CONSUMER, shard ID validation not required", span_data.kind)
+                    "Messaging system is not 'kinesis', shard ID validation not required"
+                        .to_string(),
                 );
             }
+        }
 
-            // Check if messaging.system is exactly "kinesis" (case-sensitive)
-            let messaging_system = span_data.attributes.get("messaging.system");
-            match messaging_system {
-                Some(AttributeValue::StringValue(system)) if system == "kinesis" => {
-                    // This is a Kinesis consumer span - validate shard_id
-                }
-                _ => {
-                    return KinesisConsumerShardIdValidationResult::NotApplicable(
-                        "Messaging system is not 'kinesis', shard ID validation not required".to_string()
-                    );
-                }
-            }
-
-            // Validate messaging.kinesis.shard_id attribute
-            match span_data.attributes.get("messaging.kinesis.shard_id") {
-                None => {
-                    return KinesisConsumerShardIdValidationResult::Invalid(
+        // Validate messaging.kinesis.shard_id attribute
+        match span_data.attributes.get("messaging.kinesis.shard_id") {
+            None => {
+                return KinesisConsumerShardIdValidationResult::Invalid(
                         "OTLP-158 violation: messaging.kinesis.shard_id attribute is required for CONSUMER spans with messaging.system='kinesis'".to_string()
                     );
-                }
-                Some(AttributeValue::StringValue(shard_id)) => {
-                    if shard_id.is_empty() || shard_id.trim().is_empty() {
-                        return KinesisConsumerShardIdValidationResult::Invalid(
+            }
+            Some(AttributeValue::StringValue(shard_id)) => {
+                if shard_id.is_empty() || shard_id.trim().is_empty() {
+                    return KinesisConsumerShardIdValidationResult::Invalid(
                             "OTLP-158 violation: messaging.kinesis.shard_id must be non-empty StringValue".to_string()
                         );
-                    }
-                    
-                    // Valid shard ID found
-                    let shard_id = shard_id.trim().to_string();
                 }
-                Some(_) => {
-                    return KinesisConsumerShardIdValidationResult::Invalid(
-                        "OTLP-158 violation: messaging.kinesis.shard_id must be a StringValue".to_string()
-                    );
-                }
+
+                // Valid shard ID found
+                let shard_id = shard_id.trim().to_string();
             }
-
-            // Extract final shard ID for result
-            let shard_id = match span_data.attributes.get("messaging.kinesis.shard_id") {
-                Some(AttributeValue::StringValue(shard_id)) => shard_id.trim().to_string(),
-                _ => unreachable!("Should have been caught above"),
-            };
-
-            // Count additional Kinesis-specific attributes
-            let additional_kinesis_attributes = span_data.attributes.keys()
-                .filter(|k| k.starts_with("messaging.kinesis.") && *k != "messaging.kinesis.shard_id")
-                .count();
-
-            KinesisConsumerShardIdValidationResult::Valid {
-                shard_id,
-                additional_kinesis_attributes,
-            }
-        }
-
-        // Execute OTLP-158 conformance validation for all scenarios
-        let mut passed_scenarios = 0;
-        let total_scenarios = test_scenarios.len();
-
-        for scenario in &test_scenarios {
-            match validate_kinesis_consumer_shard_id_conformance(scenario) {
-                Ok(()) => {
-                    passed_scenarios += 1;
-                    println!("✓ OTLP-158 conformance verified for {}", scenario.description);
-                }
-                Err(error_msg) => {
-                    panic!(
-                        "OTLP-158 conformance test FAILED for {}: {}",
-                        scenario.description, error_msg
-                    );
-                }
-            }
-        }
-
-        assert_eq!(
-            passed_scenarios, total_scenarios,
-            "All OTLP-158 Kinesis consumer shard ID scenarios must pass"
-        );
-
-        println!("✓ OTLP-158: Kinesis consumer shard ID validation conformance verified");
-        println!("  - CONSUMER spans with messaging.system='kinesis' require messaging.kinesis.shard_id");
-        println!("  - Shard ID must be non-empty string value");
-        println!("  - Producer spans exempt from consumer shard ID requirement");
-        println!("  - Non-Kinesis messaging systems exempt from validation");
-        println!("  - Case-sensitive messaging.system matching enforced");
-        println!("  - Wrong attribute types properly rejected");
-        println!("  - Empty and whitespace-only shard IDs rejected");
-        println!("  - Additional Kinesis attributes preserved and counted");
-        println!("  - Enhanced fan-out consumers, batch processing, and cross-region shards supported");
-        println!("  - Consumer ARNs, approximate arrival timestamps, and partition keys preserved");
-    }
-    /// OTLP-159: AWS Kinesis Firehose producer delivery stream name validation conformance test.
-    /// Validates that when exporter sees a span with kind=PRODUCER and
-    /// messaging.system="aws_kinesis_firehose", attribute messaging.aws_kinesis_firehose.delivery_stream_name
-    /// MUST be set per OTLP semantic conventions.
-    #[test]
-    fn otlp_159_kinesis_firehose_producer_delivery_stream_name_conformance() {
-        // Enum to represent OTLP attribute value types
-        #[derive(Debug, Clone)]
-        enum AttributeValue {
-            StringValue(String),
-            IntValue(i64),
-            BoolValue(bool),
-            ArrayValue(Vec<String>),
-            NullValue,
-        }
-
-        // Test scenario structure for Kinesis Firehose producer delivery stream name validation
-        #[derive(Debug, Clone)]
-        struct KinesisFirehoseProducerScenario {
-            description: String,
-            span_kind: String,
-            messaging_system: Option<String>,
-            delivery_stream_name: Option<AttributeValue>,
-            additional_attributes: HashMap<String, AttributeValue>,
-            should_pass_validation: bool,
-            expected_error_pattern: Option<String>,
-        }
-
-        // Validation result for producer delivery stream name conformance
-        #[derive(Debug)]
-        enum KinesisFirehoseProducerValidationResult {
-            Valid {
-                delivery_stream_name: String,
-                additional_firehose_attributes: usize,
-            },
-            NotApplicable(String),
-            Invalid(String),
-        }
-
-        // Mock span data structure for testing
-        #[derive(Debug)]
-        struct SpanData {
-            kind: String,
-            attributes: HashMap<String, AttributeValue>,
-        }
-
-        // Define comprehensive test scenarios for OTLP-159 validation
-        let test_scenarios = vec![
-            KinesisFirehoseProducerScenario {
-                description: "Valid producer span with delivery stream name".to_string(),
-                span_kind: "PRODUCER".to_string(),
-                messaging_system: Some("aws_kinesis_firehose".to_string()),
-                delivery_stream_name: Some(AttributeValue::StringValue("analytics-delivery-stream".to_string())),
-                additional_attributes: [
-                    ("messaging.aws_kinesis_firehose.destination".to_string(), AttributeValue::StringValue("s3".to_string())),
-                    ("messaging.aws_kinesis_firehose.record_format".to_string(), AttributeValue::StringValue("json".to_string())),
-                ].iter().cloned().collect(),
-                should_pass_validation: true,
-                expected_error_pattern: None,
-            },
-            KinesisFirehoseProducerScenario {
-                description: "Missing delivery stream name in producer span".to_string(),
-                span_kind: "PRODUCER".to_string(),
-                messaging_system: Some("aws_kinesis_firehose".to_string()),
-                delivery_stream_name: None,
-                additional_attributes: [
-                    ("messaging.aws_kinesis_firehose.destination".to_string(), AttributeValue::StringValue("redshift".to_string())),
-                ].iter().cloned().collect(),
-                should_pass_validation: false,
-                expected_error_pattern: Some("messaging.aws_kinesis_firehose.delivery_stream_name attribute is required".to_string()),
-            },
-            KinesisFirehoseProducerScenario {
-                description: "Empty string delivery stream name".to_string(),
-                span_kind: "PRODUCER".to_string(),
-                messaging_system: Some("aws_kinesis_firehose".to_string()),
-                delivery_stream_name: Some(AttributeValue::StringValue("".to_string())),
-                additional_attributes: HashMap::new(),
-                should_pass_validation: false,
-                expected_error_pattern: Some("messaging.aws_kinesis_firehose.delivery_stream_name must be non-empty".to_string()),
-            },
-            KinesisFirehoseProducerScenario {
-                description: "Wrong attribute type for delivery stream name".to_string(),
-                span_kind: "PRODUCER".to_string(),
-                messaging_system: Some("aws_kinesis_firehose".to_string()),
-                delivery_stream_name: Some(AttributeValue::IntValue(12345)),
-                additional_attributes: HashMap::new(),
-                should_pass_validation: false,
-                expected_error_pattern: Some("messaging.aws_kinesis_firehose.delivery_stream_name must be a StringValue".to_string()),
-            },
-            KinesisFirehoseProducerScenario {
-                description: "Valid delivery stream with S3 destination attributes".to_string(),
-                span_kind: "PRODUCER".to_string(),
-                messaging_system: Some("aws_kinesis_firehose".to_string()),
-                delivery_stream_name: Some(AttributeValue::StringValue("logs-to-s3-stream".to_string())),
-                additional_attributes: [
-                    ("messaging.aws_kinesis_firehose.destination".to_string(), AttributeValue::StringValue("s3".to_string())),
-                    ("messaging.aws_kinesis_firehose.s3_bucket".to_string(), AttributeValue::StringValue("analytics-bucket".to_string())),
-                    ("messaging.aws_kinesis_firehose.s3_prefix".to_string(), AttributeValue::StringValue("year=2024/month=01/day=15/".to_string())),
-                    ("messaging.aws_kinesis_firehose.compression".to_string(), AttributeValue::StringValue("gzip".to_string())),
-                ].iter().cloned().collect(),
-                should_pass_validation: true,
-                expected_error_pattern: None,
-            },
-            KinesisFirehoseProducerScenario {
-                description: "Valid delivery stream with Redshift destination".to_string(),
-                span_kind: "PRODUCER".to_string(),
-                messaging_system: Some("aws_kinesis_firehose".to_string()),
-                delivery_stream_name: Some(AttributeValue::StringValue("analytics-to-redshift".to_string())),
-                additional_attributes: [
-                    ("messaging.aws_kinesis_firehose.destination".to_string(), AttributeValue::StringValue("redshift".to_string())),
-                    ("messaging.aws_kinesis_firehose.redshift_cluster".to_string(), AttributeValue::StringValue("analytics-cluster".to_string())),
-                    ("messaging.aws_kinesis_firehose.redshift_table".to_string(), AttributeValue::StringValue("events".to_string())),
-                ].iter().cloned().collect(),
-                should_pass_validation: true,
-                expected_error_pattern: None,
-            },
-            KinesisFirehoseProducerScenario {
-                description: "Whitespace-only delivery stream name".to_string(),
-                span_kind: "PRODUCER".to_string(),
-                messaging_system: Some("aws_kinesis_firehose".to_string()),
-                delivery_stream_name: Some(AttributeValue::StringValue("   ".to_string())),
-                additional_attributes: HashMap::new(),
-                should_pass_validation: false,
-                expected_error_pattern: Some("messaging.aws_kinesis_firehose.delivery_stream_name must be non-empty".to_string()),
-            },
-            KinesisFirehoseProducerScenario {
-                description: "Consumer span should be exempt from producer delivery stream requirement".to_string(),
-                span_kind: "CONSUMER".to_string(),
-                messaging_system: Some("aws_kinesis_firehose".to_string()),
-                delivery_stream_name: None,
-                additional_attributes: HashMap::new(),
-                should_pass_validation: true,
-                expected_error_pattern: None,
-            },
-            KinesisFirehoseProducerScenario {
-                description: "Non-Kinesis Firehose messaging system should be exempt".to_string(),
-                span_kind: "PRODUCER".to_string(),
-                messaging_system: Some("kinesis".to_string()),
-                delivery_stream_name: None,
-                additional_attributes: [
-                    ("messaging.kinesis.stream_name".to_string(), AttributeValue::StringValue("regular-kinesis-stream".to_string())),
-                ].iter().cloned().collect(),
-                should_pass_validation: true,
-                expected_error_pattern: None,
-            },
-            KinesisFirehoseProducerScenario {
-                description: "Case-sensitive messaging system validation".to_string(),
-                span_kind: "PRODUCER".to_string(),
-                messaging_system: Some("AWS_Kinesis_Firehose".to_string()), // Wrong case
-                delivery_stream_name: None,
-                additional_attributes: HashMap::new(),
-                should_pass_validation: true, // Should be exempt due to case mismatch
-                expected_error_pattern: None,
-            },
-            KinesisFirehoseProducerScenario {
-                description: "Valid delivery stream with OpenSearch destination".to_string(),
-                span_kind: "PRODUCER".to_string(),
-                messaging_system: Some("aws_kinesis_firehose".to_string()),
-                delivery_stream_name: Some(AttributeValue::StringValue("logs-to-opensearch".to_string())),
-                additional_attributes: [
-                    ("messaging.aws_kinesis_firehose.destination".to_string(), AttributeValue::StringValue("opensearch".to_string())),
-                    ("messaging.aws_kinesis_firehose.opensearch_domain".to_string(), AttributeValue::StringValue("analytics-domain".to_string())),
-                    ("messaging.aws_kinesis_firehose.opensearch_index".to_string(), AttributeValue::StringValue("application-logs".to_string())),
-                ].iter().cloned().collect(),
-                should_pass_validation: true,
-                expected_error_pattern: None,
-            },
-            KinesisFirehoseProducerScenario {
-                description: "Valid delivery stream with data transformation enabled".to_string(),
-                span_kind: "PRODUCER".to_string(),
-                messaging_system: Some("aws_kinesis_firehose".to_string()),
-                delivery_stream_name: Some(AttributeValue::StringValue("transformed-data-stream".to_string())),
-                additional_attributes: [
-                    ("messaging.aws_kinesis_firehose.destination".to_string(), AttributeValue::StringValue("s3".to_string())),
-                    ("messaging.aws_kinesis_firehose.data_transformation".to_string(), AttributeValue::BoolValue(true)),
-                    ("messaging.aws_kinesis_firehose.lambda_processor".to_string(), AttributeValue::StringValue("arn:aws:lambda:us-east-1:123456789012:function:ProcessLogs".to_string())),
-                    ("messaging.aws_kinesis_firehose.buffer_size".to_string(), AttributeValue::IntValue(5242880)), // 5MB
-                    ("messaging.aws_kinesis_firehose.buffer_interval".to_string(), AttributeValue::IntValue(300)), // 5 minutes
-                ].iter().cloned().collect(),
-                should_pass_validation: true,
-                expected_error_pattern: None,
-            },
-            KinesisFirehoseProducerScenario {
-                description: "Missing messaging system should be exempt".to_string(),
-                span_kind: "PRODUCER".to_string(),
-                messaging_system: None,
-                delivery_stream_name: None,
-                additional_attributes: HashMap::new(),
-                should_pass_validation: true, // Exempt from Kinesis Firehose-specific validation
-                expected_error_pattern: None,
-            },
-        ];
-
-        // Validation function for Kinesis Firehose producer delivery stream name conformance
-        fn validate_kinesis_firehose_producer_delivery_stream_name_conformance(
-            scenario: &KinesisFirehoseProducerScenario,
-        ) -> Result<(), String> {
-            // Create span data from scenario
-            let mut attributes = scenario.additional_attributes.clone();
-            
-            if let Some(ref messaging_system) = scenario.messaging_system {
-                attributes.insert("messaging.system".to_string(), AttributeValue::StringValue(messaging_system.clone()));
-            }
-            
-            if let Some(ref delivery_stream_name) = scenario.delivery_stream_name {
-                attributes.insert("messaging.aws_kinesis_firehose.delivery_stream_name".to_string(), delivery_stream_name.clone());
-            }
-
-            let span_data = SpanData {
-                kind: scenario.span_kind.clone(),
-                attributes,
-            };
-
-            // Perform validation
-            match validate_kinesis_firehose_producer_delivery_stream_name(&span_data) {
-                KinesisFirehoseProducerValidationResult::Valid { .. } => {
-                    if scenario.should_pass_validation {
-                        Ok(())
-                    } else {
-                        Err("Expected validation to fail but it passed".to_string())
-                    }
-                }
-                KinesisFirehoseProducerValidationResult::NotApplicable(_) => {
-                    if scenario.should_pass_validation {
-                        Ok(())
-                    } else {
-                        Err("Validation was marked as not applicable when failure was expected".to_string())
-                    }
-                }
-                KinesisFirehoseProducerValidationResult::Invalid(error_msg) => {
-                    if scenario.should_pass_validation {
-                        Err(format!("Validation failed when it should have passed: {}", error_msg))
-                    } else if let Some(expected_pattern) = &scenario.expected_error_pattern {
-                        if error_msg.contains(expected_pattern) {
-                            Ok(())
-                        } else {
-                            Err(format!("Error message '{}' doesn't contain expected pattern '{}'", error_msg, expected_pattern))
-                        }
-                    } else {
-                        Ok(()) // Expected failure without specific pattern
-                    }
-                }
-            }
-        }
-
-        // Validation logic for Kinesis Firehose producer delivery stream name
-        fn validate_kinesis_firehose_producer_delivery_stream_name(span_data: &SpanData) -> KinesisFirehoseProducerValidationResult {
-            // Check if span kind is PRODUCER
-            if span_data.kind != "PRODUCER" {
-                return KinesisFirehoseProducerValidationResult::NotApplicable(
-                    format!("Span kind '{}' is not PRODUCER, delivery stream name validation not required", span_data.kind)
+            Some(_) => {
+                return KinesisConsumerShardIdValidationResult::Invalid(
+                    "OTLP-158 violation: messaging.kinesis.shard_id must be a StringValue"
+                        .to_string(),
                 );
             }
+        }
 
-            // Check if messaging.system is exactly "aws_kinesis_firehose" (case-sensitive)
-            let messaging_system = span_data.attributes.get("messaging.system");
-            match messaging_system {
-                Some(AttributeValue::StringValue(system)) if system == "aws_kinesis_firehose" => {
-                    // This is a Kinesis Firehose producer span - validate delivery_stream_name
+        // Extract final shard ID for result
+        let shard_id = match span_data.attributes.get("messaging.kinesis.shard_id") {
+            Some(AttributeValue::StringValue(shard_id)) => shard_id.trim().to_string(),
+            _ => unreachable!("Should have been caught above"),
+        };
+
+        // Count additional Kinesis-specific attributes
+        let additional_kinesis_attributes = span_data
+            .attributes
+            .keys()
+            .filter(|k| k.starts_with("messaging.kinesis.") && *k != "messaging.kinesis.shard_id")
+            .count();
+
+        KinesisConsumerShardIdValidationResult::Valid {
+            shard_id,
+            additional_kinesis_attributes,
+        }
+    }
+
+    // Execute OTLP-158 conformance validation for all scenarios
+    let mut passed_scenarios = 0;
+    let total_scenarios = test_scenarios.len();
+
+    for scenario in &test_scenarios {
+        match validate_kinesis_consumer_shard_id_conformance(scenario) {
+            Ok(()) => {
+                passed_scenarios += 1;
+                println!(
+                    "✓ OTLP-158 conformance verified for {}",
+                    scenario.description
+                );
+            }
+            Err(error_msg) => {
+                panic!(
+                    "OTLP-158 conformance test FAILED for {}: {}",
+                    scenario.description, error_msg
+                );
+            }
+        }
+    }
+
+    assert_eq!(
+        passed_scenarios, total_scenarios,
+        "All OTLP-158 Kinesis consumer shard ID scenarios must pass"
+    );
+
+    println!("✓ OTLP-158: Kinesis consumer shard ID validation conformance verified");
+    println!(
+        "  - CONSUMER spans with messaging.system='kinesis' require messaging.kinesis.shard_id"
+    );
+    println!("  - Shard ID must be non-empty string value");
+    println!("  - Producer spans exempt from consumer shard ID requirement");
+    println!("  - Non-Kinesis messaging systems exempt from validation");
+    println!("  - Case-sensitive messaging.system matching enforced");
+    println!("  - Wrong attribute types properly rejected");
+    println!("  - Empty and whitespace-only shard IDs rejected");
+    println!("  - Additional Kinesis attributes preserved and counted");
+    println!("  - Enhanced fan-out consumers, batch processing, and cross-region shards supported");
+    println!("  - Consumer ARNs, approximate arrival timestamps, and partition keys preserved");
+}
+/// OTLP-159: AWS Kinesis Firehose producer delivery stream name validation conformance test.
+/// Validates that when exporter sees a span with kind=PRODUCER and
+/// messaging.system="aws_kinesis_firehose", attribute messaging.aws_kinesis_firehose.delivery_stream_name
+/// MUST be set per OTLP semantic conventions.
+#[test]
+fn otlp_159_kinesis_firehose_producer_delivery_stream_name_conformance() {
+    // Enum to represent OTLP attribute value types
+    #[derive(Debug, Clone)]
+    enum AttributeValue {
+        StringValue(String),
+        IntValue(i64),
+        BoolValue(bool),
+        ArrayValue(Vec<String>),
+        NullValue,
+    }
+
+    // Test scenario structure for Kinesis Firehose producer delivery stream name validation
+    #[derive(Debug, Clone)]
+    struct KinesisFirehoseProducerScenario {
+        description: String,
+        span_kind: String,
+        messaging_system: Option<String>,
+        delivery_stream_name: Option<AttributeValue>,
+        additional_attributes: HashMap<String, AttributeValue>,
+        should_pass_validation: bool,
+        expected_error_pattern: Option<String>,
+    }
+
+    // Validation result for producer delivery stream name conformance
+    #[derive(Debug)]
+    enum KinesisFirehoseProducerValidationResult {
+        Valid {
+            delivery_stream_name: String,
+            additional_firehose_attributes: usize,
+        },
+        NotApplicable(String),
+        Invalid(String),
+    }
+
+    // Mock span data structure for testing
+    #[derive(Debug)]
+    struct SpanData {
+        kind: String,
+        attributes: HashMap<String, AttributeValue>,
+    }
+
+    // Define comprehensive test scenarios for OTLP-159 validation
+    let test_scenarios = vec![
+        KinesisFirehoseProducerScenario {
+            description: "Valid producer span with delivery stream name".to_string(),
+            span_kind: "PRODUCER".to_string(),
+            messaging_system: Some("aws_kinesis_firehose".to_string()),
+            delivery_stream_name: Some(AttributeValue::StringValue(
+                "analytics-delivery-stream".to_string(),
+            )),
+            additional_attributes: [
+                (
+                    "messaging.aws_kinesis_firehose.destination".to_string(),
+                    AttributeValue::StringValue("s3".to_string()),
+                ),
+                (
+                    "messaging.aws_kinesis_firehose.record_format".to_string(),
+                    AttributeValue::StringValue("json".to_string()),
+                ),
+            ]
+            .iter()
+            .cloned()
+            .collect(),
+            should_pass_validation: true,
+            expected_error_pattern: None,
+        },
+        KinesisFirehoseProducerScenario {
+            description: "Missing delivery stream name in producer span".to_string(),
+            span_kind: "PRODUCER".to_string(),
+            messaging_system: Some("aws_kinesis_firehose".to_string()),
+            delivery_stream_name: None,
+            additional_attributes: [(
+                "messaging.aws_kinesis_firehose.destination".to_string(),
+                AttributeValue::StringValue("redshift".to_string()),
+            )]
+            .iter()
+            .cloned()
+            .collect(),
+            should_pass_validation: false,
+            expected_error_pattern: Some(
+                "messaging.aws_kinesis_firehose.delivery_stream_name attribute is required"
+                    .to_string(),
+            ),
+        },
+        KinesisFirehoseProducerScenario {
+            description: "Empty string delivery stream name".to_string(),
+            span_kind: "PRODUCER".to_string(),
+            messaging_system: Some("aws_kinesis_firehose".to_string()),
+            delivery_stream_name: Some(AttributeValue::StringValue("".to_string())),
+            additional_attributes: HashMap::new(),
+            should_pass_validation: false,
+            expected_error_pattern: Some(
+                "messaging.aws_kinesis_firehose.delivery_stream_name must be non-empty".to_string(),
+            ),
+        },
+        KinesisFirehoseProducerScenario {
+            description: "Wrong attribute type for delivery stream name".to_string(),
+            span_kind: "PRODUCER".to_string(),
+            messaging_system: Some("aws_kinesis_firehose".to_string()),
+            delivery_stream_name: Some(AttributeValue::IntValue(12345)),
+            additional_attributes: HashMap::new(),
+            should_pass_validation: false,
+            expected_error_pattern: Some(
+                "messaging.aws_kinesis_firehose.delivery_stream_name must be a StringValue"
+                    .to_string(),
+            ),
+        },
+        KinesisFirehoseProducerScenario {
+            description: "Valid delivery stream with S3 destination attributes".to_string(),
+            span_kind: "PRODUCER".to_string(),
+            messaging_system: Some("aws_kinesis_firehose".to_string()),
+            delivery_stream_name: Some(AttributeValue::StringValue(
+                "logs-to-s3-stream".to_string(),
+            )),
+            additional_attributes: [
+                (
+                    "messaging.aws_kinesis_firehose.destination".to_string(),
+                    AttributeValue::StringValue("s3".to_string()),
+                ),
+                (
+                    "messaging.aws_kinesis_firehose.s3_bucket".to_string(),
+                    AttributeValue::StringValue("analytics-bucket".to_string()),
+                ),
+                (
+                    "messaging.aws_kinesis_firehose.s3_prefix".to_string(),
+                    AttributeValue::StringValue("year=2024/month=01/day=15/".to_string()),
+                ),
+                (
+                    "messaging.aws_kinesis_firehose.compression".to_string(),
+                    AttributeValue::StringValue("gzip".to_string()),
+                ),
+            ]
+            .iter()
+            .cloned()
+            .collect(),
+            should_pass_validation: true,
+            expected_error_pattern: None,
+        },
+        KinesisFirehoseProducerScenario {
+            description: "Valid delivery stream with Redshift destination".to_string(),
+            span_kind: "PRODUCER".to_string(),
+            messaging_system: Some("aws_kinesis_firehose".to_string()),
+            delivery_stream_name: Some(AttributeValue::StringValue(
+                "analytics-to-redshift".to_string(),
+            )),
+            additional_attributes: [
+                (
+                    "messaging.aws_kinesis_firehose.destination".to_string(),
+                    AttributeValue::StringValue("redshift".to_string()),
+                ),
+                (
+                    "messaging.aws_kinesis_firehose.redshift_cluster".to_string(),
+                    AttributeValue::StringValue("analytics-cluster".to_string()),
+                ),
+                (
+                    "messaging.aws_kinesis_firehose.redshift_table".to_string(),
+                    AttributeValue::StringValue("events".to_string()),
+                ),
+            ]
+            .iter()
+            .cloned()
+            .collect(),
+            should_pass_validation: true,
+            expected_error_pattern: None,
+        },
+        KinesisFirehoseProducerScenario {
+            description: "Whitespace-only delivery stream name".to_string(),
+            span_kind: "PRODUCER".to_string(),
+            messaging_system: Some("aws_kinesis_firehose".to_string()),
+            delivery_stream_name: Some(AttributeValue::StringValue("   ".to_string())),
+            additional_attributes: HashMap::new(),
+            should_pass_validation: false,
+            expected_error_pattern: Some(
+                "messaging.aws_kinesis_firehose.delivery_stream_name must be non-empty".to_string(),
+            ),
+        },
+        KinesisFirehoseProducerScenario {
+            description: "Consumer span should be exempt from producer delivery stream requirement"
+                .to_string(),
+            span_kind: "CONSUMER".to_string(),
+            messaging_system: Some("aws_kinesis_firehose".to_string()),
+            delivery_stream_name: None,
+            additional_attributes: HashMap::new(),
+            should_pass_validation: true,
+            expected_error_pattern: None,
+        },
+        KinesisFirehoseProducerScenario {
+            description: "Non-Kinesis Firehose messaging system should be exempt".to_string(),
+            span_kind: "PRODUCER".to_string(),
+            messaging_system: Some("kinesis".to_string()),
+            delivery_stream_name: None,
+            additional_attributes: [(
+                "messaging.kinesis.stream_name".to_string(),
+                AttributeValue::StringValue("regular-kinesis-stream".to_string()),
+            )]
+            .iter()
+            .cloned()
+            .collect(),
+            should_pass_validation: true,
+            expected_error_pattern: None,
+        },
+        KinesisFirehoseProducerScenario {
+            description: "Case-sensitive messaging system validation".to_string(),
+            span_kind: "PRODUCER".to_string(),
+            messaging_system: Some("AWS_Kinesis_Firehose".to_string()), // Wrong case
+            delivery_stream_name: None,
+            additional_attributes: HashMap::new(),
+            should_pass_validation: true, // Should be exempt due to case mismatch
+            expected_error_pattern: None,
+        },
+        KinesisFirehoseProducerScenario {
+            description: "Valid delivery stream with OpenSearch destination".to_string(),
+            span_kind: "PRODUCER".to_string(),
+            messaging_system: Some("aws_kinesis_firehose".to_string()),
+            delivery_stream_name: Some(AttributeValue::StringValue(
+                "logs-to-opensearch".to_string(),
+            )),
+            additional_attributes: [
+                (
+                    "messaging.aws_kinesis_firehose.destination".to_string(),
+                    AttributeValue::StringValue("opensearch".to_string()),
+                ),
+                (
+                    "messaging.aws_kinesis_firehose.opensearch_domain".to_string(),
+                    AttributeValue::StringValue("analytics-domain".to_string()),
+                ),
+                (
+                    "messaging.aws_kinesis_firehose.opensearch_index".to_string(),
+                    AttributeValue::StringValue("application-logs".to_string()),
+                ),
+            ]
+            .iter()
+            .cloned()
+            .collect(),
+            should_pass_validation: true,
+            expected_error_pattern: None,
+        },
+        KinesisFirehoseProducerScenario {
+            description: "Valid delivery stream with data transformation enabled".to_string(),
+            span_kind: "PRODUCER".to_string(),
+            messaging_system: Some("aws_kinesis_firehose".to_string()),
+            delivery_stream_name: Some(AttributeValue::StringValue(
+                "transformed-data-stream".to_string(),
+            )),
+            additional_attributes: [
+                (
+                    "messaging.aws_kinesis_firehose.destination".to_string(),
+                    AttributeValue::StringValue("s3".to_string()),
+                ),
+                (
+                    "messaging.aws_kinesis_firehose.data_transformation".to_string(),
+                    AttributeValue::BoolValue(true),
+                ),
+                (
+                    "messaging.aws_kinesis_firehose.lambda_processor".to_string(),
+                    AttributeValue::StringValue(
+                        "arn:aws:lambda:us-east-1:123456789012:function:ProcessLogs".to_string(),
+                    ),
+                ),
+                (
+                    "messaging.aws_kinesis_firehose.buffer_size".to_string(),
+                    AttributeValue::IntValue(5242880),
+                ), // 5MB
+                (
+                    "messaging.aws_kinesis_firehose.buffer_interval".to_string(),
+                    AttributeValue::IntValue(300),
+                ), // 5 minutes
+            ]
+            .iter()
+            .cloned()
+            .collect(),
+            should_pass_validation: true,
+            expected_error_pattern: None,
+        },
+        KinesisFirehoseProducerScenario {
+            description: "Missing messaging system should be exempt".to_string(),
+            span_kind: "PRODUCER".to_string(),
+            messaging_system: None,
+            delivery_stream_name: None,
+            additional_attributes: HashMap::new(),
+            should_pass_validation: true, // Exempt from Kinesis Firehose-specific validation
+            expected_error_pattern: None,
+        },
+    ];
+
+    // Validation function for Kinesis Firehose producer delivery stream name conformance
+    fn validate_kinesis_firehose_producer_delivery_stream_name_conformance(
+        scenario: &KinesisFirehoseProducerScenario,
+    ) -> Result<(), String> {
+        // Create span data from scenario
+        let mut attributes = scenario.additional_attributes.clone();
+
+        if let Some(ref messaging_system) = scenario.messaging_system {
+            attributes.insert(
+                "messaging.system".to_string(),
+                AttributeValue::StringValue(messaging_system.clone()),
+            );
+        }
+
+        if let Some(ref delivery_stream_name) = scenario.delivery_stream_name {
+            attributes.insert(
+                "messaging.aws_kinesis_firehose.delivery_stream_name".to_string(),
+                delivery_stream_name.clone(),
+            );
+        }
+
+        let span_data = SpanData {
+            kind: scenario.span_kind.clone(),
+            attributes,
+        };
+
+        // Perform validation
+        match validate_kinesis_firehose_producer_delivery_stream_name(&span_data) {
+            KinesisFirehoseProducerValidationResult::Valid { .. } => {
+                if scenario.should_pass_validation {
+                    Ok(())
+                } else {
+                    Err("Expected validation to fail but it passed".to_string())
                 }
-                _ => {
-                    return KinesisFirehoseProducerValidationResult::NotApplicable(
+            }
+            KinesisFirehoseProducerValidationResult::NotApplicable(_) => {
+                if scenario.should_pass_validation {
+                    Ok(())
+                } else {
+                    Err(
+                        "Validation was marked as not applicable when failure was expected"
+                            .to_string(),
+                    )
+                }
+            }
+            KinesisFirehoseProducerValidationResult::Invalid(error_msg) => {
+                if scenario.should_pass_validation {
+                    Err(format!(
+                        "Validation failed when it should have passed: {}",
+                        error_msg
+                    ))
+                } else if let Some(expected_pattern) = &scenario.expected_error_pattern {
+                    if error_msg.contains(expected_pattern) {
+                        Ok(())
+                    } else {
+                        Err(format!(
+                            "Error message '{}' doesn't contain expected pattern '{}'",
+                            error_msg, expected_pattern
+                        ))
+                    }
+                } else {
+                    Ok(()) // Expected failure without specific pattern
+                }
+            }
+        }
+    }
+
+    // Validation logic for Kinesis Firehose producer delivery stream name
+    fn validate_kinesis_firehose_producer_delivery_stream_name(
+        span_data: &SpanData,
+    ) -> KinesisFirehoseProducerValidationResult {
+        // Check if span kind is PRODUCER
+        if span_data.kind != "PRODUCER" {
+            return KinesisFirehoseProducerValidationResult::NotApplicable(format!(
+                "Span kind '{}' is not PRODUCER, delivery stream name validation not required",
+                span_data.kind
+            ));
+        }
+
+        // Check if messaging.system is exactly "aws_kinesis_firehose" (case-sensitive)
+        let messaging_system = span_data.attributes.get("messaging.system");
+        match messaging_system {
+            Some(AttributeValue::StringValue(system)) if system == "aws_kinesis_firehose" => {
+                // This is a Kinesis Firehose producer span - validate delivery_stream_name
+            }
+            _ => {
+                return KinesisFirehoseProducerValidationResult::NotApplicable(
                         "Messaging system is not 'aws_kinesis_firehose', delivery stream name validation not required".to_string()
                     );
-                }
             }
+        }
 
-            // Validate messaging.aws_kinesis_firehose.delivery_stream_name attribute
-            match span_data.attributes.get("messaging.aws_kinesis_firehose.delivery_stream_name") {
-                None => {
-                    return KinesisFirehoseProducerValidationResult::Invalid(
+        // Validate messaging.aws_kinesis_firehose.delivery_stream_name attribute
+        match span_data
+            .attributes
+            .get("messaging.aws_kinesis_firehose.delivery_stream_name")
+        {
+            None => {
+                return KinesisFirehoseProducerValidationResult::Invalid(
                         "OTLP-159 violation: messaging.aws_kinesis_firehose.delivery_stream_name attribute is required for PRODUCER spans with messaging.system='aws_kinesis_firehose'".to_string()
                     );
-                }
-                Some(AttributeValue::StringValue(delivery_stream_name)) => {
-                    if delivery_stream_name.is_empty() || delivery_stream_name.trim().is_empty() {
-                        return KinesisFirehoseProducerValidationResult::Invalid(
+            }
+            Some(AttributeValue::StringValue(delivery_stream_name)) => {
+                if delivery_stream_name.is_empty() || delivery_stream_name.trim().is_empty() {
+                    return KinesisFirehoseProducerValidationResult::Invalid(
                             "OTLP-159 violation: messaging.aws_kinesis_firehose.delivery_stream_name must be non-empty StringValue".to_string()
                         );
-                    }
-                    
-                    // Valid delivery stream name found
-                    let delivery_stream_name = delivery_stream_name.trim().to_string();
                 }
-                Some(_) => {
-                    return KinesisFirehoseProducerValidationResult::Invalid(
+
+                // Valid delivery stream name found
+                let delivery_stream_name = delivery_stream_name.trim().to_string();
+            }
+            Some(_) => {
+                return KinesisFirehoseProducerValidationResult::Invalid(
                         "OTLP-159 violation: messaging.aws_kinesis_firehose.delivery_stream_name must be a StringValue".to_string()
                     );
-                }
-            }
-
-            // Extract final delivery stream name for result
-            let delivery_stream_name = match span_data.attributes.get("messaging.aws_kinesis_firehose.delivery_stream_name") {
-                Some(AttributeValue::StringValue(delivery_stream_name)) => delivery_stream_name.trim().to_string(),
-                _ => unreachable!("Should have been caught above"),
-            };
-
-            // Count additional Kinesis Firehose-specific attributes
-            let additional_firehose_attributes = span_data.attributes.keys()
-                .filter(|k| k.starts_with("messaging.aws_kinesis_firehose.") && *k != "messaging.aws_kinesis_firehose.delivery_stream_name")
-                .count();
-
-            KinesisFirehoseProducerValidationResult::Valid {
-                delivery_stream_name,
-                additional_firehose_attributes,
             }
         }
 
-        // Execute OTLP-159 conformance validation for all scenarios
-        let mut passed_scenarios = 0;
-        let total_scenarios = test_scenarios.len();
-
-        for scenario in &test_scenarios {
-            match validate_kinesis_firehose_producer_delivery_stream_name_conformance(scenario) {
-                Ok(()) => {
-                    passed_scenarios += 1;
-                    println!("✓ OTLP-159 conformance verified for {}", scenario.description);
-                }
-                Err(error_msg) => {
-                    panic!(
-                        "OTLP-159 conformance test FAILED for {}: {}",
-                        scenario.description, error_msg
-                    );
-                }
+        // Extract final delivery stream name for result
+        let delivery_stream_name = match span_data
+            .attributes
+            .get("messaging.aws_kinesis_firehose.delivery_stream_name")
+        {
+            Some(AttributeValue::StringValue(delivery_stream_name)) => {
+                delivery_stream_name.trim().to_string()
             }
+            _ => unreachable!("Should have been caught above"),
+        };
+
+        // Count additional Kinesis Firehose-specific attributes
+        let additional_firehose_attributes = span_data
+            .attributes
+            .keys()
+            .filter(|k| {
+                k.starts_with("messaging.aws_kinesis_firehose.")
+                    && *k != "messaging.aws_kinesis_firehose.delivery_stream_name"
+            })
+            .count();
+
+        KinesisFirehoseProducerValidationResult::Valid {
+            delivery_stream_name,
+            additional_firehose_attributes,
         }
-
-        assert_eq!(
-            passed_scenarios, total_scenarios,
-            "All OTLP-159 Kinesis Firehose producer delivery stream name scenarios must pass"
-        );
-
-        println!("✓ OTLP-159: Kinesis Firehose producer delivery stream name validation conformance verified");
-        println!("  - PRODUCER spans with messaging.system='aws_kinesis_firehose' require messaging.aws_kinesis_firehose.delivery_stream_name");
-        println!("  - Delivery stream name must be non-empty string value");
-        println!("  - Consumer spans exempt from producer delivery stream name requirement");
-        println!("  - Non-Kinesis Firehose messaging systems exempt from validation");
-        println!("  - Case-sensitive messaging.system matching enforced");
-        println!("  - Wrong attribute types properly rejected");
-        println!("  - Empty and whitespace-only delivery stream names rejected");
-        println!("  - Additional Kinesis Firehose attributes preserved and counted");
-        println!("  - S3, Redshift, and OpenSearch destinations supported");
-        println!("  - Data transformation, buffering, and compression attributes preserved");
     }
-    /// OTLP-160: Azure Service Bus producer queue name validation conformance test.
-    /// Validates that when exporter sees a span with kind=PRODUCER and
-    /// messaging.system="azure_servicebus", attribute messaging.azure_servicebus.queue_name
-    /// MUST be set per OTLP semantic conventions.
-    #[test]
-    fn otlp_160_azure_servicebus_producer_queue_name_conformance() {
-        // Enum to represent OTLP attribute value types
-        #[derive(Debug, Clone)]
-        enum AttributeValue {
-            StringValue(String),
-            IntValue(i64),
-            BoolValue(bool),
-            ArrayValue(Vec<String>),
-            NullValue,
-        }
 
-        // Test scenario structure for Azure Service Bus producer queue name validation
-        #[derive(Debug, Clone)]
-        struct AzureServiceBusProducerScenario {
-            description: String,
-            span_kind: String,
-            messaging_system: Option<String>,
-            queue_name: Option<AttributeValue>,
-            additional_attributes: HashMap<String, AttributeValue>,
-            should_pass_validation: bool,
-            expected_error_pattern: Option<String>,
-        }
+    // Execute OTLP-159 conformance validation for all scenarios
+    let mut passed_scenarios = 0;
+    let total_scenarios = test_scenarios.len();
 
-        // Validation result for producer queue name conformance
-        #[derive(Debug)]
-        enum AzureServiceBusProducerValidationResult {
-            Valid {
-                queue_name: String,
-                additional_servicebus_attributes: usize,
-            },
-            NotApplicable(String),
-            Invalid(String),
-        }
-
-        // Mock span data structure for testing
-        #[derive(Debug)]
-        struct SpanData {
-            kind: String,
-            attributes: HashMap<String, AttributeValue>,
-        }
-
-        // Define comprehensive test scenarios for OTLP-160 validation
-        let test_scenarios = vec![
-            AzureServiceBusProducerScenario {
-                description: "Valid producer span with queue name".to_string(),
-                span_kind: "PRODUCER".to_string(),
-                messaging_system: Some("azure_servicebus".to_string()),
-                queue_name: Some(AttributeValue::StringValue("order-processing-queue".to_string())),
-                additional_attributes: [
-                    ("messaging.azure_servicebus.namespace".to_string(), AttributeValue::StringValue("production-servicebus".to_string())),
-                    ("messaging.azure_servicebus.subscription_name".to_string(), AttributeValue::StringValue("analytics-subscription".to_string())),
-                ].iter().cloned().collect(),
-                should_pass_validation: true,
-                expected_error_pattern: None,
-            },
-            AzureServiceBusProducerScenario {
-                description: "Missing queue name in producer span".to_string(),
-                span_kind: "PRODUCER".to_string(),
-                messaging_system: Some("azure_servicebus".to_string()),
-                queue_name: None,
-                additional_attributes: [
-                    ("messaging.azure_servicebus.namespace".to_string(), AttributeValue::StringValue("production-servicebus".to_string())),
-                ].iter().cloned().collect(),
-                should_pass_validation: false,
-                expected_error_pattern: Some("messaging.azure_servicebus.queue_name attribute is required".to_string()),
-            },
-            AzureServiceBusProducerScenario {
-                description: "Empty string queue name".to_string(),
-                span_kind: "PRODUCER".to_string(),
-                messaging_system: Some("azure_servicebus".to_string()),
-                queue_name: Some(AttributeValue::StringValue("".to_string())),
-                additional_attributes: HashMap::new(),
-                should_pass_validation: false,
-                expected_error_pattern: Some("messaging.azure_servicebus.queue_name must be non-empty".to_string()),
-            },
-            AzureServiceBusProducerScenario {
-                description: "Wrong attribute type for queue name".to_string(),
-                span_kind: "PRODUCER".to_string(),
-                messaging_system: Some("azure_servicebus".to_string()),
-                queue_name: Some(AttributeValue::IntValue(42)),
-                additional_attributes: HashMap::new(),
-                should_pass_validation: false,
-                expected_error_pattern: Some("messaging.azure_servicebus.queue_name must be a StringValue".to_string()),
-            },
-            AzureServiceBusProducerScenario {
-                description: "Valid queue with premium tier attributes".to_string(),
-                span_kind: "PRODUCER".to_string(),
-                messaging_system: Some("azure_servicebus".to_string()),
-                queue_name: Some(AttributeValue::StringValue("critical-orders-queue".to_string())),
-                additional_attributes: [
-                    ("messaging.azure_servicebus.namespace".to_string(), AttributeValue::StringValue("premium-servicebus".to_string())),
-                    ("messaging.azure_servicebus.tier".to_string(), AttributeValue::StringValue("premium".to_string())),
-                    ("messaging.azure_servicebus.session_id".to_string(), AttributeValue::StringValue("session-12345".to_string())),
-                    ("messaging.azure_servicebus.correlation_id".to_string(), AttributeValue::StringValue("corr-67890".to_string())),
-                    ("messaging.azure_servicebus.time_to_live".to_string(), AttributeValue::IntValue(3600)),
-                ].iter().cloned().collect(),
-                should_pass_validation: true,
-                expected_error_pattern: None,
-            },
-            AzureServiceBusProducerScenario {
-                description: "Valid queue with dead letter queue attributes".to_string(),
-                span_kind: "PRODUCER".to_string(),
-                messaging_system: Some("azure_servicebus".to_string()),
-                queue_name: Some(AttributeValue::StringValue("failed-messages-dlq".to_string())),
-                additional_attributes: [
-                    ("messaging.azure_servicebus.namespace".to_string(), AttributeValue::StringValue("servicebus-namespace".to_string())),
-                    ("messaging.azure_servicebus.dead_letter_queue".to_string(), AttributeValue::BoolValue(true)),
-                    ("messaging.azure_servicebus.dead_letter_reason".to_string(), AttributeValue::StringValue("MaxDeliveryCountExceeded".to_string())),
-                    ("messaging.azure_servicebus.delivery_count".to_string(), AttributeValue::IntValue(10)),
-                ].iter().cloned().collect(),
-                should_pass_validation: true,
-                expected_error_pattern: None,
-            },
-            AzureServiceBusProducerScenario {
-                description: "Whitespace-only queue name".to_string(),
-                span_kind: "PRODUCER".to_string(),
-                messaging_system: Some("azure_servicebus".to_string()),
-                queue_name: Some(AttributeValue::StringValue("   ".to_string())),
-                additional_attributes: HashMap::new(),
-                should_pass_validation: false,
-                expected_error_pattern: Some("messaging.azure_servicebus.queue_name must be non-empty".to_string()),
-            },
-            AzureServiceBusProducerScenario {
-                description: "Consumer span should be exempt from producer queue name requirement".to_string(),
-                span_kind: "CONSUMER".to_string(),
-                messaging_system: Some("azure_servicebus".to_string()),
-                queue_name: None,
-                additional_attributes: [
-                    ("messaging.azure_servicebus.namespace".to_string(), AttributeValue::StringValue("servicebus-namespace".to_string())),
-                ].iter().cloned().collect(),
-                should_pass_validation: true,
-                expected_error_pattern: None,
-            },
-            AzureServiceBusProducerScenario {
-                description: "Non-Azure Service Bus messaging system should be exempt".to_string(),
-                span_kind: "PRODUCER".to_string(),
-                messaging_system: Some("aws_sqs".to_string()),
-                queue_name: None,
-                additional_attributes: [
-                    ("messaging.aws_sqs.queue_url".to_string(), AttributeValue::StringValue("https://sqs.us-east-1.amazonaws.com/123456789012/orders".to_string())),
-                ].iter().cloned().collect(),
-                should_pass_validation: true,
-                expected_error_pattern: None,
-            },
-            AzureServiceBusProducerScenario {
-                description: "Case-sensitive messaging system validation".to_string(),
-                span_kind: "PRODUCER".to_string(),
-                messaging_system: Some("Azure_ServiceBus".to_string()), // Wrong case
-                queue_name: None,
-                additional_attributes: HashMap::new(),
-                should_pass_validation: true, // Should be exempt due to case mismatch
-                expected_error_pattern: None,
-            },
-            AzureServiceBusProducerScenario {
-                description: "Valid queue with topic and subscription attributes".to_string(),
-                span_kind: "PRODUCER".to_string(),
-                messaging_system: Some("azure_servicebus".to_string()),
-                queue_name: Some(AttributeValue::StringValue("notifications-queue".to_string())),
-                additional_attributes: [
-                    ("messaging.azure_servicebus.namespace".to_string(), AttributeValue::StringValue("notifications-servicebus".to_string())),
-                    ("messaging.azure_servicebus.topic_name".to_string(), AttributeValue::StringValue("user-events".to_string())),
-                    ("messaging.azure_servicebus.subscription_name".to_string(), AttributeValue::StringValue("email-processor".to_string())),
-                    ("messaging.azure_servicebus.message_id".to_string(), AttributeValue::StringValue("msg-abc-123".to_string())),
-                ].iter().cloned().collect(),
-                should_pass_validation: true,
-                expected_error_pattern: None,
-            },
-            AzureServiceBusProducerScenario {
-                description: "Valid queue with partition and batch attributes".to_string(),
-                span_kind: "PRODUCER".to_string(),
-                messaging_system: Some("azure_servicebus".to_string()),
-                queue_name: Some(AttributeValue::StringValue("partitioned-events-queue".to_string())),
-                additional_attributes: [
-                    ("messaging.azure_servicebus.namespace".to_string(), AttributeValue::StringValue("partitioned-servicebus".to_string())),
-                    ("messaging.azure_servicebus.partitioning_enabled".to_string(), AttributeValue::BoolValue(true)),
-                    ("messaging.azure_servicebus.partition_key".to_string(), AttributeValue::StringValue("customer-region-us-east".to_string())),
-                    ("messaging.batch.message_count".to_string(), AttributeValue::IntValue(50)),
-                    ("messaging.azure_servicebus.duplicate_detection".to_string(), AttributeValue::BoolValue(true)),
-                ].iter().cloned().collect(),
-                should_pass_validation: true,
-                expected_error_pattern: None,
-            },
-            AzureServiceBusProducerScenario {
-                description: "Missing messaging system should be exempt".to_string(),
-                span_kind: "PRODUCER".to_string(),
-                messaging_system: None,
-                queue_name: None,
-                additional_attributes: HashMap::new(),
-                should_pass_validation: true, // Exempt from Azure Service Bus-specific validation
-                expected_error_pattern: None,
-            },
-        ];
-
-        // Validation function for Azure Service Bus producer queue name conformance
-        fn validate_azure_servicebus_producer_queue_name_conformance(
-            scenario: &AzureServiceBusProducerScenario,
-        ) -> Result<(), String> {
-            // Create span data from scenario
-            let mut attributes = scenario.additional_attributes.clone();
-            
-            if let Some(ref messaging_system) = scenario.messaging_system {
-                attributes.insert("messaging.system".to_string(), AttributeValue::StringValue(messaging_system.clone()));
-            }
-            
-            if let Some(ref queue_name) = scenario.queue_name {
-                attributes.insert("messaging.azure_servicebus.queue_name".to_string(), queue_name.clone());
-            }
-
-            let span_data = SpanData {
-                kind: scenario.span_kind.clone(),
-                attributes,
-            };
-
-            // Perform validation
-            match validate_azure_servicebus_producer_queue_name(&span_data) {
-                AzureServiceBusProducerValidationResult::Valid { .. } => {
-                    if scenario.should_pass_validation {
-                        Ok(())
-                    } else {
-                        Err("Expected validation to fail but it passed".to_string())
-                    }
-                }
-                AzureServiceBusProducerValidationResult::NotApplicable(_) => {
-                    if scenario.should_pass_validation {
-                        Ok(())
-                    } else {
-                        Err("Validation was marked as not applicable when failure was expected".to_string())
-                    }
-                }
-                AzureServiceBusProducerValidationResult::Invalid(error_msg) => {
-                    if scenario.should_pass_validation {
-                        Err(format!("Validation failed when it should have passed: {}", error_msg))
-                    } else if let Some(expected_pattern) = &scenario.expected_error_pattern {
-                        if error_msg.contains(expected_pattern) {
-                            Ok(())
-                        } else {
-                            Err(format!("Error message '{}' doesn't contain expected pattern '{}'", error_msg, expected_pattern))
-                        }
-                    } else {
-                        Ok(()) // Expected failure without specific pattern
-                    }
-                }
-            }
-        }
-
-        // Validation logic for Azure Service Bus producer queue name
-        fn validate_azure_servicebus_producer_queue_name(span_data: &SpanData) -> AzureServiceBusProducerValidationResult {
-            // Check if span kind is PRODUCER
-            if span_data.kind != "PRODUCER" {
-                return AzureServiceBusProducerValidationResult::NotApplicable(
-                    format!("Span kind '{}' is not PRODUCER, queue name validation not required", span_data.kind)
+    for scenario in &test_scenarios {
+        match validate_kinesis_firehose_producer_delivery_stream_name_conformance(scenario) {
+            Ok(()) => {
+                passed_scenarios += 1;
+                println!(
+                    "✓ OTLP-159 conformance verified for {}",
+                    scenario.description
                 );
             }
+            Err(error_msg) => {
+                panic!(
+                    "OTLP-159 conformance test FAILED for {}: {}",
+                    scenario.description, error_msg
+                );
+            }
+        }
+    }
 
-            // Check if messaging.system is exactly "azure_servicebus" (case-sensitive)
-            let messaging_system = span_data.attributes.get("messaging.system");
-            match messaging_system {
-                Some(AttributeValue::StringValue(system)) if system == "azure_servicebus" => {
-                    // This is an Azure Service Bus producer span - validate queue_name
+    assert_eq!(
+        passed_scenarios, total_scenarios,
+        "All OTLP-159 Kinesis Firehose producer delivery stream name scenarios must pass"
+    );
+
+    println!(
+        "✓ OTLP-159: Kinesis Firehose producer delivery stream name validation conformance verified"
+    );
+    println!(
+        "  - PRODUCER spans with messaging.system='aws_kinesis_firehose' require messaging.aws_kinesis_firehose.delivery_stream_name"
+    );
+    println!("  - Delivery stream name must be non-empty string value");
+    println!("  - Consumer spans exempt from producer delivery stream name requirement");
+    println!("  - Non-Kinesis Firehose messaging systems exempt from validation");
+    println!("  - Case-sensitive messaging.system matching enforced");
+    println!("  - Wrong attribute types properly rejected");
+    println!("  - Empty and whitespace-only delivery stream names rejected");
+    println!("  - Additional Kinesis Firehose attributes preserved and counted");
+    println!("  - S3, Redshift, and OpenSearch destinations supported");
+    println!("  - Data transformation, buffering, and compression attributes preserved");
+}
+/// OTLP-160: Azure Service Bus producer queue name validation conformance test.
+/// Validates that when exporter sees a span with kind=PRODUCER and
+/// messaging.system="azure_servicebus", attribute messaging.azure_servicebus.queue_name
+/// MUST be set per OTLP semantic conventions.
+#[test]
+fn otlp_160_azure_servicebus_producer_queue_name_conformance() {
+    // Enum to represent OTLP attribute value types
+    #[derive(Debug, Clone)]
+    enum AttributeValue {
+        StringValue(String),
+        IntValue(i64),
+        BoolValue(bool),
+        ArrayValue(Vec<String>),
+        NullValue,
+    }
+
+    // Test scenario structure for Azure Service Bus producer queue name validation
+    #[derive(Debug, Clone)]
+    struct AzureServiceBusProducerScenario {
+        description: String,
+        span_kind: String,
+        messaging_system: Option<String>,
+        queue_name: Option<AttributeValue>,
+        additional_attributes: HashMap<String, AttributeValue>,
+        should_pass_validation: bool,
+        expected_error_pattern: Option<String>,
+    }
+
+    // Validation result for producer queue name conformance
+    #[derive(Debug)]
+    enum AzureServiceBusProducerValidationResult {
+        Valid {
+            queue_name: String,
+            additional_servicebus_attributes: usize,
+        },
+        NotApplicable(String),
+        Invalid(String),
+    }
+
+    // Mock span data structure for testing
+    #[derive(Debug)]
+    struct SpanData {
+        kind: String,
+        attributes: HashMap<String, AttributeValue>,
+    }
+
+    // Define comprehensive test scenarios for OTLP-160 validation
+    let test_scenarios = vec![
+        AzureServiceBusProducerScenario {
+            description: "Valid producer span with queue name".to_string(),
+            span_kind: "PRODUCER".to_string(),
+            messaging_system: Some("azure_servicebus".to_string()),
+            queue_name: Some(AttributeValue::StringValue(
+                "order-processing-queue".to_string(),
+            )),
+            additional_attributes: [
+                (
+                    "messaging.azure_servicebus.namespace".to_string(),
+                    AttributeValue::StringValue("production-servicebus".to_string()),
+                ),
+                (
+                    "messaging.azure_servicebus.subscription_name".to_string(),
+                    AttributeValue::StringValue("analytics-subscription".to_string()),
+                ),
+            ]
+            .iter()
+            .cloned()
+            .collect(),
+            should_pass_validation: true,
+            expected_error_pattern: None,
+        },
+        AzureServiceBusProducerScenario {
+            description: "Missing queue name in producer span".to_string(),
+            span_kind: "PRODUCER".to_string(),
+            messaging_system: Some("azure_servicebus".to_string()),
+            queue_name: None,
+            additional_attributes: [(
+                "messaging.azure_servicebus.namespace".to_string(),
+                AttributeValue::StringValue("production-servicebus".to_string()),
+            )]
+            .iter()
+            .cloned()
+            .collect(),
+            should_pass_validation: false,
+            expected_error_pattern: Some(
+                "messaging.azure_servicebus.queue_name attribute is required".to_string(),
+            ),
+        },
+        AzureServiceBusProducerScenario {
+            description: "Empty string queue name".to_string(),
+            span_kind: "PRODUCER".to_string(),
+            messaging_system: Some("azure_servicebus".to_string()),
+            queue_name: Some(AttributeValue::StringValue("".to_string())),
+            additional_attributes: HashMap::new(),
+            should_pass_validation: false,
+            expected_error_pattern: Some(
+                "messaging.azure_servicebus.queue_name must be non-empty".to_string(),
+            ),
+        },
+        AzureServiceBusProducerScenario {
+            description: "Wrong attribute type for queue name".to_string(),
+            span_kind: "PRODUCER".to_string(),
+            messaging_system: Some("azure_servicebus".to_string()),
+            queue_name: Some(AttributeValue::IntValue(42)),
+            additional_attributes: HashMap::new(),
+            should_pass_validation: false,
+            expected_error_pattern: Some(
+                "messaging.azure_servicebus.queue_name must be a StringValue".to_string(),
+            ),
+        },
+        AzureServiceBusProducerScenario {
+            description: "Valid queue with premium tier attributes".to_string(),
+            span_kind: "PRODUCER".to_string(),
+            messaging_system: Some("azure_servicebus".to_string()),
+            queue_name: Some(AttributeValue::StringValue(
+                "critical-orders-queue".to_string(),
+            )),
+            additional_attributes: [
+                (
+                    "messaging.azure_servicebus.namespace".to_string(),
+                    AttributeValue::StringValue("premium-servicebus".to_string()),
+                ),
+                (
+                    "messaging.azure_servicebus.tier".to_string(),
+                    AttributeValue::StringValue("premium".to_string()),
+                ),
+                (
+                    "messaging.azure_servicebus.session_id".to_string(),
+                    AttributeValue::StringValue("session-12345".to_string()),
+                ),
+                (
+                    "messaging.azure_servicebus.correlation_id".to_string(),
+                    AttributeValue::StringValue("corr-67890".to_string()),
+                ),
+                (
+                    "messaging.azure_servicebus.time_to_live".to_string(),
+                    AttributeValue::IntValue(3600),
+                ),
+            ]
+            .iter()
+            .cloned()
+            .collect(),
+            should_pass_validation: true,
+            expected_error_pattern: None,
+        },
+        AzureServiceBusProducerScenario {
+            description: "Valid queue with dead letter queue attributes".to_string(),
+            span_kind: "PRODUCER".to_string(),
+            messaging_system: Some("azure_servicebus".to_string()),
+            queue_name: Some(AttributeValue::StringValue(
+                "failed-messages-dlq".to_string(),
+            )),
+            additional_attributes: [
+                (
+                    "messaging.azure_servicebus.namespace".to_string(),
+                    AttributeValue::StringValue("servicebus-namespace".to_string()),
+                ),
+                (
+                    "messaging.azure_servicebus.dead_letter_queue".to_string(),
+                    AttributeValue::BoolValue(true),
+                ),
+                (
+                    "messaging.azure_servicebus.dead_letter_reason".to_string(),
+                    AttributeValue::StringValue("MaxDeliveryCountExceeded".to_string()),
+                ),
+                (
+                    "messaging.azure_servicebus.delivery_count".to_string(),
+                    AttributeValue::IntValue(10),
+                ),
+            ]
+            .iter()
+            .cloned()
+            .collect(),
+            should_pass_validation: true,
+            expected_error_pattern: None,
+        },
+        AzureServiceBusProducerScenario {
+            description: "Whitespace-only queue name".to_string(),
+            span_kind: "PRODUCER".to_string(),
+            messaging_system: Some("azure_servicebus".to_string()),
+            queue_name: Some(AttributeValue::StringValue("   ".to_string())),
+            additional_attributes: HashMap::new(),
+            should_pass_validation: false,
+            expected_error_pattern: Some(
+                "messaging.azure_servicebus.queue_name must be non-empty".to_string(),
+            ),
+        },
+        AzureServiceBusProducerScenario {
+            description: "Consumer span should be exempt from producer queue name requirement"
+                .to_string(),
+            span_kind: "CONSUMER".to_string(),
+            messaging_system: Some("azure_servicebus".to_string()),
+            queue_name: None,
+            additional_attributes: [(
+                "messaging.azure_servicebus.namespace".to_string(),
+                AttributeValue::StringValue("servicebus-namespace".to_string()),
+            )]
+            .iter()
+            .cloned()
+            .collect(),
+            should_pass_validation: true,
+            expected_error_pattern: None,
+        },
+        AzureServiceBusProducerScenario {
+            description: "Non-Azure Service Bus messaging system should be exempt".to_string(),
+            span_kind: "PRODUCER".to_string(),
+            messaging_system: Some("aws_sqs".to_string()),
+            queue_name: None,
+            additional_attributes: [(
+                "messaging.aws_sqs.queue_url".to_string(),
+                AttributeValue::StringValue(
+                    "https://sqs.us-east-1.amazonaws.com/123456789012/orders".to_string(),
+                ),
+            )]
+            .iter()
+            .cloned()
+            .collect(),
+            should_pass_validation: true,
+            expected_error_pattern: None,
+        },
+        AzureServiceBusProducerScenario {
+            description: "Case-sensitive messaging system validation".to_string(),
+            span_kind: "PRODUCER".to_string(),
+            messaging_system: Some("Azure_ServiceBus".to_string()), // Wrong case
+            queue_name: None,
+            additional_attributes: HashMap::new(),
+            should_pass_validation: true, // Should be exempt due to case mismatch
+            expected_error_pattern: None,
+        },
+        AzureServiceBusProducerScenario {
+            description: "Valid queue with topic and subscription attributes".to_string(),
+            span_kind: "PRODUCER".to_string(),
+            messaging_system: Some("azure_servicebus".to_string()),
+            queue_name: Some(AttributeValue::StringValue(
+                "notifications-queue".to_string(),
+            )),
+            additional_attributes: [
+                (
+                    "messaging.azure_servicebus.namespace".to_string(),
+                    AttributeValue::StringValue("notifications-servicebus".to_string()),
+                ),
+                (
+                    "messaging.azure_servicebus.topic_name".to_string(),
+                    AttributeValue::StringValue("user-events".to_string()),
+                ),
+                (
+                    "messaging.azure_servicebus.subscription_name".to_string(),
+                    AttributeValue::StringValue("email-processor".to_string()),
+                ),
+                (
+                    "messaging.azure_servicebus.message_id".to_string(),
+                    AttributeValue::StringValue("msg-abc-123".to_string()),
+                ),
+            ]
+            .iter()
+            .cloned()
+            .collect(),
+            should_pass_validation: true,
+            expected_error_pattern: None,
+        },
+        AzureServiceBusProducerScenario {
+            description: "Valid queue with partition and batch attributes".to_string(),
+            span_kind: "PRODUCER".to_string(),
+            messaging_system: Some("azure_servicebus".to_string()),
+            queue_name: Some(AttributeValue::StringValue(
+                "partitioned-events-queue".to_string(),
+            )),
+            additional_attributes: [
+                (
+                    "messaging.azure_servicebus.namespace".to_string(),
+                    AttributeValue::StringValue("partitioned-servicebus".to_string()),
+                ),
+                (
+                    "messaging.azure_servicebus.partitioning_enabled".to_string(),
+                    AttributeValue::BoolValue(true),
+                ),
+                (
+                    "messaging.azure_servicebus.partition_key".to_string(),
+                    AttributeValue::StringValue("customer-region-us-east".to_string()),
+                ),
+                (
+                    "messaging.batch.message_count".to_string(),
+                    AttributeValue::IntValue(50),
+                ),
+                (
+                    "messaging.azure_servicebus.duplicate_detection".to_string(),
+                    AttributeValue::BoolValue(true),
+                ),
+            ]
+            .iter()
+            .cloned()
+            .collect(),
+            should_pass_validation: true,
+            expected_error_pattern: None,
+        },
+        AzureServiceBusProducerScenario {
+            description: "Missing messaging system should be exempt".to_string(),
+            span_kind: "PRODUCER".to_string(),
+            messaging_system: None,
+            queue_name: None,
+            additional_attributes: HashMap::new(),
+            should_pass_validation: true, // Exempt from Azure Service Bus-specific validation
+            expected_error_pattern: None,
+        },
+    ];
+
+    // Validation function for Azure Service Bus producer queue name conformance
+    fn validate_azure_servicebus_producer_queue_name_conformance(
+        scenario: &AzureServiceBusProducerScenario,
+    ) -> Result<(), String> {
+        // Create span data from scenario
+        let mut attributes = scenario.additional_attributes.clone();
+
+        if let Some(ref messaging_system) = scenario.messaging_system {
+            attributes.insert(
+                "messaging.system".to_string(),
+                AttributeValue::StringValue(messaging_system.clone()),
+            );
+        }
+
+        if let Some(ref queue_name) = scenario.queue_name {
+            attributes.insert(
+                "messaging.azure_servicebus.queue_name".to_string(),
+                queue_name.clone(),
+            );
+        }
+
+        let span_data = SpanData {
+            kind: scenario.span_kind.clone(),
+            attributes,
+        };
+
+        // Perform validation
+        match validate_azure_servicebus_producer_queue_name(&span_data) {
+            AzureServiceBusProducerValidationResult::Valid { .. } => {
+                if scenario.should_pass_validation {
+                    Ok(())
+                } else {
+                    Err("Expected validation to fail but it passed".to_string())
                 }
-                _ => {
-                    return AzureServiceBusProducerValidationResult::NotApplicable(
+            }
+            AzureServiceBusProducerValidationResult::NotApplicable(_) => {
+                if scenario.should_pass_validation {
+                    Ok(())
+                } else {
+                    Err(
+                        "Validation was marked as not applicable when failure was expected"
+                            .to_string(),
+                    )
+                }
+            }
+            AzureServiceBusProducerValidationResult::Invalid(error_msg) => {
+                if scenario.should_pass_validation {
+                    Err(format!(
+                        "Validation failed when it should have passed: {}",
+                        error_msg
+                    ))
+                } else if let Some(expected_pattern) = &scenario.expected_error_pattern {
+                    if error_msg.contains(expected_pattern) {
+                        Ok(())
+                    } else {
+                        Err(format!(
+                            "Error message '{}' doesn't contain expected pattern '{}'",
+                            error_msg, expected_pattern
+                        ))
+                    }
+                } else {
+                    Ok(()) // Expected failure without specific pattern
+                }
+            }
+        }
+    }
+
+    // Validation logic for Azure Service Bus producer queue name
+    fn validate_azure_servicebus_producer_queue_name(
+        span_data: &SpanData,
+    ) -> AzureServiceBusProducerValidationResult {
+        // Check if span kind is PRODUCER
+        if span_data.kind != "PRODUCER" {
+            return AzureServiceBusProducerValidationResult::NotApplicable(format!(
+                "Span kind '{}' is not PRODUCER, queue name validation not required",
+                span_data.kind
+            ));
+        }
+
+        // Check if messaging.system is exactly "azure_servicebus" (case-sensitive)
+        let messaging_system = span_data.attributes.get("messaging.system");
+        match messaging_system {
+            Some(AttributeValue::StringValue(system)) if system == "azure_servicebus" => {
+                // This is an Azure Service Bus producer span - validate queue_name
+            }
+            _ => {
+                return AzureServiceBusProducerValidationResult::NotApplicable(
                         "Messaging system is not 'azure_servicebus', queue name validation not required".to_string()
                     );
-                }
             }
+        }
 
-            // Validate messaging.azure_servicebus.queue_name attribute
-            match span_data.attributes.get("messaging.azure_servicebus.queue_name") {
-                None => {
-                    return AzureServiceBusProducerValidationResult::Invalid(
+        // Validate messaging.azure_servicebus.queue_name attribute
+        match span_data
+            .attributes
+            .get("messaging.azure_servicebus.queue_name")
+        {
+            None => {
+                return AzureServiceBusProducerValidationResult::Invalid(
                         "OTLP-160 violation: messaging.azure_servicebus.queue_name attribute is required for PRODUCER spans with messaging.system='azure_servicebus'".to_string()
                     );
-                }
-                Some(AttributeValue::StringValue(queue_name)) => {
-                    if queue_name.is_empty() || queue_name.trim().is_empty() {
-                        return AzureServiceBusProducerValidationResult::Invalid(
+            }
+            Some(AttributeValue::StringValue(queue_name)) => {
+                if queue_name.is_empty() || queue_name.trim().is_empty() {
+                    return AzureServiceBusProducerValidationResult::Invalid(
                             "OTLP-160 violation: messaging.azure_servicebus.queue_name must be non-empty StringValue".to_string()
                         );
-                    }
-                    
-                    // Valid queue name found
-                    let queue_name = queue_name.trim().to_string();
                 }
-                Some(_) => {
-                    return AzureServiceBusProducerValidationResult::Invalid(
+
+                // Valid queue name found
+                let queue_name = queue_name.trim().to_string();
+            }
+            Some(_) => {
+                return AzureServiceBusProducerValidationResult::Invalid(
                         "OTLP-160 violation: messaging.azure_servicebus.queue_name must be a StringValue".to_string()
                     );
-                }
-            }
-
-            // Extract final queue name for result
-            let queue_name = match span_data.attributes.get("messaging.azure_servicebus.queue_name") {
-                Some(AttributeValue::StringValue(queue_name)) => queue_name.trim().to_string(),
-                _ => unreachable!("Should have been caught above"),
-            };
-
-            // Count additional Azure Service Bus-specific attributes
-            let additional_servicebus_attributes = span_data.attributes.keys()
-                .filter(|k| k.starts_with("messaging.azure_servicebus.") && *k != "messaging.azure_servicebus.queue_name")
-                .count();
-
-            AzureServiceBusProducerValidationResult::Valid {
-                queue_name,
-                additional_servicebus_attributes,
             }
         }
 
-        // Execute OTLP-160 conformance validation for all scenarios
-        let mut passed_scenarios = 0;
-        let total_scenarios = test_scenarios.len();
+        // Extract final queue name for result
+        let queue_name = match span_data
+            .attributes
+            .get("messaging.azure_servicebus.queue_name")
+        {
+            Some(AttributeValue::StringValue(queue_name)) => queue_name.trim().to_string(),
+            _ => unreachable!("Should have been caught above"),
+        };
 
-        for scenario in &test_scenarios {
-            match validate_azure_servicebus_producer_queue_name_conformance(scenario) {
-                Ok(()) => {
-                    passed_scenarios += 1;
-                    println!("✓ OTLP-160 conformance verified for {}", scenario.description);
-                }
-                Err(error_msg) => {
-                    panic!(
-                        "OTLP-160 conformance test FAILED for {}: {}",
-                        scenario.description, error_msg
-                    );
-                }
-            }
+        // Count additional Azure Service Bus-specific attributes
+        let additional_servicebus_attributes = span_data
+            .attributes
+            .keys()
+            .filter(|k| {
+                k.starts_with("messaging.azure_servicebus.")
+                    && *k != "messaging.azure_servicebus.queue_name"
+            })
+            .count();
+
+        AzureServiceBusProducerValidationResult::Valid {
+            queue_name,
+            additional_servicebus_attributes,
         }
-
-        assert_eq!(
-            passed_scenarios, total_scenarios,
-            "All OTLP-160 Azure Service Bus producer queue name scenarios must pass"
-        );
-
-        println!("✓ OTLP-160: Azure Service Bus producer queue name validation conformance verified");
-        println!("  - PRODUCER spans with messaging.system='azure_servicebus' require messaging.azure_servicebus.queue_name");
-        println!("  - Queue name must be non-empty string value");
-        println!("  - Consumer spans exempt from producer queue name requirement");
-        println!("  - Non-Azure Service Bus messaging systems exempt from validation");
-        println!("  - Case-sensitive messaging.system matching enforced");
-        println!("  - Wrong attribute types properly rejected");
-        println!("  - Empty and whitespace-only queue names rejected");
-        println!("  - Additional Azure Service Bus attributes preserved and counted");
-        println!("  - Premium tier, dead letter queue, and session-based messaging supported");
-        println!("  - Topic/subscription, partitioning, and duplicate detection attributes preserved");
     }
+
+    // Execute OTLP-160 conformance validation for all scenarios
+    let mut passed_scenarios = 0;
+    let total_scenarios = test_scenarios.len();
+
+    for scenario in &test_scenarios {
+        match validate_azure_servicebus_producer_queue_name_conformance(scenario) {
+            Ok(()) => {
+                passed_scenarios += 1;
+                println!(
+                    "✓ OTLP-160 conformance verified for {}",
+                    scenario.description
+                );
+            }
+            Err(error_msg) => {
+                panic!(
+                    "OTLP-160 conformance test FAILED for {}: {}",
+                    scenario.description, error_msg
+                );
+            }
+        }
+    }
+
+    assert_eq!(
+        passed_scenarios, total_scenarios,
+        "All OTLP-160 Azure Service Bus producer queue name scenarios must pass"
+    );
+
+    println!("✓ OTLP-160: Azure Service Bus producer queue name validation conformance verified");
+    println!(
+        "  - PRODUCER spans with messaging.system='azure_servicebus' require messaging.azure_servicebus.queue_name"
+    );
+    println!("  - Queue name must be non-empty string value");
+    println!("  - Consumer spans exempt from producer queue name requirement");
+    println!("  - Non-Azure Service Bus messaging systems exempt from validation");
+    println!("  - Case-sensitive messaging.system matching enforced");
+    println!("  - Wrong attribute types properly rejected");
+    println!("  - Empty and whitespace-only queue names rejected");
+    println!("  - Additional Azure Service Bus attributes preserved and counted");
+    println!("  - Premium tier, dead letter queue, and session-based messaging supported");
+    println!("  - Topic/subscription, partitioning, and duplicate detection attributes preserved");
+}

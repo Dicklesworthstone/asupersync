@@ -35,6 +35,10 @@ use asupersync::cli::{
     screen_engine_contract, structured_logging_contract, validate_core_diagnostics_report,
     validate_core_diagnostics_report_contract,
 };
+use asupersync::conformance::{
+    ScanWarning, SpecRequirement, TraceabilityMatrix, TraceabilityScanError,
+    requirements_from_entries, scan_conformance_attributes,
+};
 use asupersync::cx::Cx;
 use asupersync::lab::dual_run::{FinalDivergenceClass, ReplayPolicy, RerunDecision, SeedPlan};
 use asupersync::lab::replay::{
@@ -57,10 +61,6 @@ use asupersync::trace::{
 };
 use asupersync::types::Budget;
 use clap::{ArgAction, Args, Parser, Subcommand, ValueEnum};
-use conformance::{
-    ScanWarning, SpecRequirement, TraceabilityMatrix, TraceabilityScanError,
-    requirements_from_entries, scan_conformance_attributes,
-};
 use franken_decision::DecisionAuditEntry;
 use franken_evidence::{EvidenceLedger, EvidenceLedgerBuilder};
 use franken_kernel::{DecisionId, TraceId};
@@ -7471,7 +7471,7 @@ mod tests {
         assert_eq!(summary.target_compression, "lz4(level=1)");
         assert_eq!(summary.event_count, 2);
 
-        let mut reader = TraceReader::open(&output_path).expect("open compressed reader");
+        let reader = TraceReader::open(&output_path).expect("open compressed reader");
         assert!(reader.is_compressed());
         assert_eq!(reader.compression(), CompressionMode::Lz4 { level: 1 });
         let events = reader.load_all().expect("load compressed events");

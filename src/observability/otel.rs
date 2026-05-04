@@ -555,7 +555,10 @@ fn normalized_log_attributes(
             dropped = dropped.saturating_add(1);
             continue;
         }
-        if normalized.insert(key.clone(), truncate_log_attribute_value(value)).is_some() {
+        if normalized
+            .insert(key.clone(), truncate_log_attribute_value(value))
+            .is_some()
+        {
             dropped = dropped.saturating_add(1);
         }
     }
@@ -3664,6 +3667,290 @@ mod exporter_tests {
     fn export_error_display() {
         let err = ExportError::new("test error");
         assert!(err.to_string().contains("test error"));
+    }
+
+    #[test]
+    fn log_level_to_otlp_severity_matches_data_model_bases() {
+        assert_eq!(log_level_to_otlp_severity(LogLevel::Trace), (1, "TRACE"));
+        assert_eq!(log_level_to_otlp_severity(LogLevel::Debug), (5, "DEBUG"));
+        assert_eq!(log_level_to_otlp_severity(LogLevel::Info), (9, "INFO"));
+        assert_eq!(log_level_to_otlp_severity(LogLevel::Warn), (13, "WARN"));
+        assert_eq!(log_level_to_otlp_severity(LogLevel::Error), (17, "ERROR"));
+    }
+
+    #[test]
+    fn null_logs_exporter_is_disabled_noop() {
+        let exporter = NullLogsExporter::new();
+        let snapshot = LogsSnapshot::new("checkout").with_record(OtlpLogRecord::new(
+            LogLevel::Info,
+            "ignored",
+            10,
+        ));
+
+        assert!(exporter.export(&snapshot).is_ok());
+        assert!(exporter.flush().is_ok());
+    }
+
+    #[test]
+    fn in_memory_logs_exporter_collects_snapshots() {
+        let exporter = InMemoryLogsExporter::new();
+        let snapshot = LogsSnapshot::new("checkout")
+            .with_record(OtlpLogRecord::new(LogLevel::Info, "first", 10))
+            .with_record(OtlpLogRecord::new(LogLevel::Warn, "second", 20));
+
+        exporter.export(&snapshot).expect("logs export");
+        assert_eq!(exporter.total_records(), 2);
+        assert_eq!(exporter.snapshots(), vec![snapshot]);
+
+        exporter.clear();
+        assert_eq!(exporter.total_records(), 0);
+    }
+
+    #[test]
+    fn multi_logs_exporter_fans_out_and_reports_errors() {
+        struct ArcLogsExporter(Arc<InMemoryLogsExporter>);
+        impl LogsExporter for ArcLogsExporter {
+            fn export(&self, logs: &LogsSnapshot) -> Result<(), ExportError> {
+                self.0.export(logs)
+            }
+
+            fn flush(&self) -> Result<(), ExportError> {
+                self.0.flush()
+            }
+        }
+
+        struct FailingLogsExporter;
+        impl LogsExporter for FailingLogsExporter {
+            fn export(&self, _logs: &LogsSnapshot) -> Result<(), ExportError> {
+                Err(ExportError::new("collector rejected logs"))
+            }
+
+            fn flush(&self) -> Result<(), ExportError> {
+                Ok(())
+            }
+        }
+
+        let first = Arc::new(InMemoryLogsExporter::new());
+        let second = Arc::new(InMemoryLogsExporter::new());
+        let snapshot =
+            LogsSnapshot::new("checkout").with_record(OtlpLogRecord::new(LogLevel::Info, "ok", 1));
+
+        let multi = MultiLogsExporter::new(vec![
+            Box::new(ArcLogsExporter(Arc::clone(&first))),
+            Box::new(ArcLogsExporter(Arc::clone(&second))),
+        ]);
+        multi.export(&snapshot).expect("multi logs export");
+        assert_eq!(first.total_records(), 1);
+        assert_eq!(second.total_records(), 1);
+
+        let failing = MultiLogsExporter::new(vec![Box::new(FailingLogsExporter)]);
+        let error = failing
+            .export(&snapshot)
+            .expect_err("failure must propagate");
+        assert!(error.to_string().contains("collector rejected logs"));
+    }
+
+    #[test]
+    fn logs_load_shedding_drops_oldest_snapshots() {
+        struct ArcLogsExporter(Arc<InMemoryLogsExporter>);
+        impl LogsExporter for ArcLogsExporter {
+            fn export(&self, logs: &LogsSnapshot) -> Result<(), ExportError> {
+                self.0.export(logs)
+            }
+
+            fn flush(&self) -> Result<(), ExportError> {
+                self.0.flush()
+            }
+        }
+
+        fn snapshot(id: u64) -> LogsSnapshot {
+            LogsSnapshot::new("checkout").with_record(
+                OtlpLogRecord::new(LogLevel::Info, format!("batch-{id}"), id)
+                    .with_attribute("batch_id", id.to_string()),
+            )
+        }
+
+        let received = Arc::new(InMemoryLogsExporter::new());
+        let exporter =
+            LoadSheddingLogsExporter::new(Box::new(ArcLogsExporter(Arc::clone(&received))), 2);
+
+        exporter.export(&snapshot(0)).expect("export 0");
+        exporter.export(&snapshot(1)).expect("export 1");
+        exporter.export(&snapshot(2)).expect("export 2");
+
+        let stats = exporter.load_shedding_stats();
+        assert_eq!(stats.queue_depth, 2);
+        assert_eq!(stats.dropped_batches, 1);
+
+        assert_eq!(exporter.process_queue().expect("process logs"), 2);
+        let bodies: Vec<_> = received
+            .snapshots()
+            .iter()
+            .flat_map(|snapshot| snapshot.records.iter().map(|record| record.body.clone()))
+            .collect();
+        assert_eq!(bodies, vec!["batch-1", "batch-2"]);
+    }
+
+    #[test]
+    fn traces_metrics_and_logs_export_without_cross_signal_duplication() {
+        use crate::observability::otlp_trace_exporter::{
+            ExportError as TraceExportError, OtlpSpan, SpanBatch, TraceExporter,
+        };
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::time::Instant;
+
+        #[derive(Debug, Default)]
+        struct CountingTraceExporter {
+            batches: AtomicUsize,
+            spans: AtomicUsize,
+        }
+
+        impl TraceExporter for CountingTraceExporter {
+            fn export(&self, batch: &SpanBatch) -> Result<(), TraceExportError> {
+                self.batches.fetch_add(1, Ordering::Relaxed);
+                self.spans.fetch_add(batch.spans.len(), Ordering::Relaxed);
+                Ok(())
+            }
+
+            fn flush(&self) -> Result<(), TraceExportError> {
+                Ok(())
+            }
+        }
+
+        let trace_exporter = CountingTraceExporter::default();
+        let metrics_exporter = InMemoryExporter::new();
+        let logs_exporter = InMemoryLogsExporter::new();
+
+        let trace_batch = SpanBatch {
+            batch_id: 7,
+            spans: vec![OtlpSpan::new(
+                "span-1".to_string(),
+                "checkout".to_string(),
+                1,
+                2,
+                vec![("route".to_string(), "/pay".to_string())],
+            )],
+            created_at: Instant::now(),
+        };
+        trace_exporter
+            .export(&trace_batch)
+            .expect("trace export should work");
+
+        let mut metrics = MetricsSnapshot::new();
+        metrics.add_counter(
+            "otel.export.requests",
+            vec![("signal".into(), "metrics".into())],
+            1,
+        );
+        metrics_exporter
+            .export(&metrics)
+            .expect("metrics export should work");
+
+        let logs = LogsSnapshot::new("checkout").with_record(
+            OtlpLogRecord::new(LogLevel::Info, "checkout complete", 3)
+                .with_attribute("signal", "logs"),
+        );
+        logs_exporter
+            .export(&logs)
+            .expect("logs export should work");
+
+        assert_eq!(trace_exporter.batches.load(Ordering::Relaxed), 1);
+        assert_eq!(trace_exporter.spans.load(Ordering::Relaxed), 1);
+        assert_eq!(metrics_exporter.total_metrics(), 1);
+        assert_eq!(logs_exporter.total_records(), 1);
+    }
+
+    #[test]
+    fn logs_exporter_reuses_otlp_retry_classifier() {
+        let retry = classify_otlp_http_response(503, &[]);
+        assert!(matches!(
+            retry,
+            Err(OtlpError::Retryable {
+                status_code: 503,
+                ..
+            })
+        ));
+
+        let terminal = classify_otlp_http_response(400, &[]);
+        assert!(matches!(terminal, Err(OtlpError::NonRetryable { .. })));
+
+        let exporter = OtlpLogsHttpExporter::new("http://collector:4318/v1/logs")
+            .with_retry_config(4, Duration::from_millis(50), Duration::from_secs(5))
+            .with_timeout(Duration::from_secs(3));
+        assert_eq!(exporter.endpoint(), "http://collector:4318/v1/logs");
+
+        let logs = LogsSnapshot::new("checkout");
+        let sync_error = exporter.export(&logs).expect_err("sync export rejected");
+        assert!(sync_error.to_string().contains("requires async context"));
+    }
+
+    #[test]
+    fn logs_snapshot_encodes_otlp_wire_compatible_records() {
+        use opentelemetry_proto::tonic::collector::logs::v1::ExportLogsServiceRequest;
+        use opentelemetry_proto::tonic::common::v1::any_value::Value as ProtoValue;
+        use opentelemetry_proto::tonic::logs::v1::SeverityNumber;
+        use prost::Message;
+
+        let long_value = "x".repeat(OTLP_LOGS_MAX_ATTRIBUTE_VALUE_BYTES + 16);
+        let record = OtlpLogRecord::new(LogLevel::Warn, "", 100)
+            .with_observed_time_unix_nano(101)
+            .with_attribute("component", "scheduler")
+            .with_attribute("long", long_value)
+            .with_attribute("", "dropped")
+            .with_trace_context(vec![1; 16], vec![2; 8], 0x0101)
+            .with_event_name("asupersync.scheduler.warning");
+        let snapshot = LogsSnapshot::new("checkout")
+            .with_scope("asupersync.test.logs", "test-version")
+            .with_resource_attribute("deployment.environment", "test")
+            .with_record(record);
+
+        let encoded = snapshot.to_otlp_protobuf();
+        let decoded = ExportLogsServiceRequest::decode(encoded.as_slice()).expect("decode logs");
+        assert_eq!(decoded.resource_logs.len(), 1);
+
+        let resource_logs = &decoded.resource_logs[0];
+        let resource = resource_logs.resource.as_ref().expect("resource");
+        assert!(
+            resource
+                .attributes
+                .iter()
+                .any(|attribute| attribute.key == "service.name")
+        );
+
+        let scope_logs = &resource_logs.scope_logs[0];
+        let scope = scope_logs.scope.as_ref().expect("scope");
+        assert_eq!(scope.name, "asupersync.test.logs");
+        assert_eq!(scope.version, "test-version");
+
+        let decoded_record = &scope_logs.log_records[0];
+        assert_eq!(decoded_record.severity_number, SeverityNumber::Warn as i32);
+        assert_eq!(decoded_record.severity_text, "WARN");
+        assert_eq!(decoded_record.time_unix_nano, 100);
+        assert_eq!(decoded_record.observed_time_unix_nano, 101);
+        assert_eq!(decoded_record.trace_id, vec![1; 16]);
+        assert_eq!(decoded_record.span_id, vec![2; 8]);
+        assert_eq!(decoded_record.flags, 1);
+        assert_eq!(decoded_record.event_name, "asupersync.scheduler.warning");
+        assert_eq!(decoded_record.dropped_attributes_count, 1);
+
+        let body = decoded_record.body.as_ref().expect("body");
+        assert!(matches!(
+            body.value.as_ref(),
+            Some(ProtoValue::StringValue(value)) if value.is_empty()
+        ));
+        let long = decoded_record
+            .attributes
+            .iter()
+            .find(|attribute| attribute.key == "long")
+            .expect("long attribute")
+            .value
+            .as_ref()
+            .expect("long attr value");
+        assert!(matches!(
+            long.value.as_ref(),
+            Some(ProtoValue::StringValue(value))
+                if value.len() == OTLP_LOGS_MAX_ATTRIBUTE_VALUE_BYTES
+        ));
     }
 
     #[test]
