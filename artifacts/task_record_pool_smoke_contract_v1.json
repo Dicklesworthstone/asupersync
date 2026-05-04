@@ -1,0 +1,160 @@
+{
+  "contract_version": "task-record-pool-smoke-contract-v1",
+  "runner_bundle_schema_version": "task-record-pool-smoke-bundle-v1",
+  "runner_report_schema_version": "task-record-pool-smoke-run-report-v1",
+  "runner_script": "scripts/run_task_record_pool_smoke.sh",
+  "report_artifacts": [
+    {
+      "schema_version": "asupersync.task-record-pool-report.v1",
+      "path_glob": ".task-record-pool-smoke-artifacts/run_*/AA-TASK-RECORD-POOL-*/task_record_pool_report.json"
+    }
+  ],
+  "smoke_scenarios": [
+    {
+      "scenario_id": "AA-TASK-RECORD-POOL-EXPECTED-TASKS-4096",
+      "description": "Expected concurrent task hints pre-size the live task-record recycler so steady-state bursts reuse records without heap fallback.",
+      "hint_mode": "expected_concurrent_tasks",
+      "expected_concurrent_tasks": 4096,
+      "explicit_pool_limit": null,
+      "workload": {
+        "warmup_bursts": 1,
+        "measured_bursts": 3,
+        "burst_size": 512,
+        "workload_seed": 4096
+      },
+      "operator_notes": {
+        "safe_fallback_profile": "heap_allocation_only",
+        "rationale": "Once the recycler has been warmed to its capacity bound, 512-task steady-state bursts on a 4096-task host hint should avoid all heap fallback."
+      },
+      "expected_report_projection": {
+        "allocation_count_total": 0,
+        "allocation_count_variance": 0.0,
+        "baseline_heap_fallback_count": 1536,
+        "baseline_spawn_latency_p99_ns": 75,
+        "configured_hint_source": "expected_concurrent_tasks:4096",
+        "fallback_reason_codes": [],
+        "heap_fallback_count": 0,
+        "heap_fallback_reduction_ratio": 1.0,
+        "hit_rate": 1.0,
+        "miss_rate": 0.0,
+        "no_win_trigger": false,
+        "operator_verdict": "ready_for_rch",
+        "pooling_enabled": true,
+        "projection_hash": 14622644497560200496,
+        "queue_depth_peak": 512,
+        "recycle_count": 1536,
+        "recycle_drop_count": 0,
+        "safe_fallback_profile": "heap_allocation_only",
+        "scenario_id": "AA-TASK-RECORD-POOL-EXPECTED-TASKS-4096",
+        "selected_pool_capacity": 512,
+        "spawn_latency_p50_ns": 48,
+        "spawn_latency_p95_ns": 48,
+        "spawn_latency_p99_ns": 48,
+        "stale_field_invariant_checksum": 5600711383556355317,
+        "task_capacity": 6144,
+        "used_safe_fallback": false,
+        "workload_seed": 4096
+      },
+      "operator_verdict": "ready_for_rch"
+    },
+    {
+      "scenario_id": "AA-TASK-RECORD-POOL-DISABLED-HEAP-FALLBACK",
+      "description": "Explicit zero-capacity mode disables recycler reuse and reports the conservative heap-allocation-only fallback surface.",
+      "hint_mode": "disabled_heap_fallback",
+      "expected_concurrent_tasks": 4096,
+      "explicit_pool_limit": 0,
+      "workload": {
+        "warmup_bursts": 1,
+        "measured_bursts": 2,
+        "burst_size": 256,
+        "workload_seed": 17
+      },
+      "operator_notes": {
+        "safe_fallback_profile": "heap_allocation_only",
+        "rationale": "If recycler correctness is ever in doubt, operators need a zero-capacity mode that falls back to heap allocation without hiding the performance loss."
+      },
+      "expected_report_projection": {
+        "allocation_count_total": 512,
+        "allocation_count_variance": 0.0,
+        "baseline_heap_fallback_count": 512,
+        "baseline_spawn_latency_p99_ns": 75,
+        "configured_hint_source": "disabled_heap_fallback:4096",
+        "fallback_reason_codes": [
+          "pool_disabled_heap_only",
+          "no_spawn_latency_p99_win"
+        ],
+        "heap_fallback_count": 512,
+        "heap_fallback_reduction_ratio": 0.0,
+        "hit_rate": 0.0,
+        "miss_rate": 1.0,
+        "no_win_trigger": true,
+        "operator_verdict": "fallback_only",
+        "pooling_enabled": false,
+        "projection_hash": 12070158990861383899,
+        "queue_depth_peak": 0,
+        "recycle_count": 0,
+        "recycle_drop_count": 512,
+        "safe_fallback_profile": "heap_allocation_only",
+        "scenario_id": "AA-TASK-RECORD-POOL-DISABLED-HEAP-FALLBACK",
+        "selected_pool_capacity": 0,
+        "spawn_latency_p50_ns": 75,
+        "spawn_latency_p95_ns": 75,
+        "spawn_latency_p99_ns": 75,
+        "stale_field_invariant_checksum": 17266023706951314653,
+        "task_capacity": 6144,
+        "used_safe_fallback": true,
+        "workload_seed": 17
+      },
+      "operator_verdict": "fallback_only"
+    },
+    {
+      "scenario_id": "AA-TASK-RECORD-POOL-SATURATION-BOUND-4096",
+      "description": "A slight burst above the recycler cap proves saturation stays bounded while preserving the steady-state p99 win over heap fallback.",
+      "hint_mode": "saturation_bound",
+      "expected_concurrent_tasks": 4096,
+      "explicit_pool_limit": null,
+      "workload": {
+        "warmup_bursts": 1,
+        "measured_bursts": 2,
+        "burst_size": 517,
+        "workload_seed": 73
+      },
+      "operator_notes": {
+        "safe_fallback_profile": "heap_allocation_only",
+        "rationale": "A 4096-task hint still clamps the recycler to 512 cached records, so a 517-task burst should show bounded recycle drops without losing the steady-state p99 advantage."
+      },
+      "expected_report_projection": {
+        "allocation_count_total": 10,
+        "allocation_count_variance": 0.0,
+        "baseline_heap_fallback_count": 1034,
+        "baseline_spawn_latency_p99_ns": 75,
+        "configured_hint_source": "saturation_bound:4096",
+        "fallback_reason_codes": [
+          "pool_capacity_saturated"
+        ],
+        "heap_fallback_count": 10,
+        "heap_fallback_reduction_ratio": 0.9903,
+        "hit_rate": 0.9903,
+        "miss_rate": 0.0097,
+        "no_win_trigger": false,
+        "operator_verdict": "ready_for_rch",
+        "pooling_enabled": true,
+        "projection_hash": 12859389176013076814,
+        "queue_depth_peak": 512,
+        "recycle_count": 1024,
+        "recycle_drop_count": 10,
+        "safe_fallback_profile": "heap_allocation_only",
+        "scenario_id": "AA-TASK-RECORD-POOL-SATURATION-BOUND-4096",
+        "selected_pool_capacity": 512,
+        "spawn_latency_p50_ns": 48,
+        "spawn_latency_p95_ns": 48,
+        "spawn_latency_p99_ns": 48,
+        "stale_field_invariant_checksum": 17426543330780978900,
+        "task_capacity": 6144,
+        "used_safe_fallback": false,
+        "workload_seed": 73
+      },
+      "operator_verdict": "ready_for_rch"
+    }
+  ]
+}
