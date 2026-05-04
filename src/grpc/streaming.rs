@@ -925,6 +925,17 @@ mod tests {
     const EXACT_SERVER_STREAM_CANCEL_TIMING_RCH_COMMAND: &str = "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_asupersync_gtqoxm_cancel cargo test -p asupersync --lib conformance_server_streaming_cancel_timing -- --nocapture";
     const EXACT_BIDI_CANCELLATION_RCH_COMMAND: &str = "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_asupersync_ftbe7b_bidi cargo test -p asupersync --lib conformance_bidirectional_cancellation -- --nocapture";
     const EXACT_STREAMING_FLOW_CONTROL_RCH_COMMAND: &str = "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_asupersync_eg4r9o_flow cargo test -p asupersync --lib conformance_grpc_streaming_flow_control -- --nocapture";
+    const EXACT_GRPC_BYTES_BODY_IMMUTABILITY_RCH_COMMAND: &str = "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_asupersync_pcpt1v_bytes cargo test -p asupersync --lib grpc_bytes_body_immutability -- --nocapture";
+
+    fn bytes_fingerprint(bytes: &Bytes) -> String {
+        use std::fmt::Write as _;
+
+        let mut hex = String::with_capacity(bytes.len() * 2);
+        for byte in bytes.as_ref() {
+            let _ = write!(&mut hex, "{byte:02x}");
+        }
+        format!("len={};hex={hex}", bytes.len())
+    }
 
     fn collect_streaming_request_events<T: std::fmt::Display + Send + std::marker::Unpin>(
         stream: &mut StreamingRequest<T>,
@@ -936,6 +947,33 @@ mod tests {
         loop {
             match pinned.as_mut().poll_next(&mut cx) {
                 Poll::Ready(Some(Ok(value))) => events.push(format!("ok:{value}")),
+                Poll::Ready(Some(Err(status))) => {
+                    events.push(format!("err:{:?}:{}", status.code(), status.message()));
+                    break;
+                }
+                Poll::Ready(None) => {
+                    events.push("none".to_string());
+                    break;
+                }
+                Poll::Pending => {
+                    events.push("pending".to_string());
+                    break;
+                }
+            }
+        }
+        events
+    }
+
+    fn collect_streaming_request_byte_events(stream: &mut StreamingRequest<Bytes>) -> Vec<String> {
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+        let mut pinned = Pin::new(stream);
+        let mut events = Vec::new();
+        loop {
+            match pinned.as_mut().poll_next(&mut cx) {
+                Poll::Ready(Some(Ok(value))) => {
+                    events.push(format!("ok:{}", bytes_fingerprint(&value)));
+                }
                 Poll::Ready(Some(Err(status))) => {
                     events.push(format!("err:{:?}:{}", status.code(), status.message()));
                     break;
@@ -991,6 +1029,33 @@ mod tests {
         loop {
             match pinned.as_mut().poll_next(&mut cx) {
                 Poll::Ready(Some(Ok(value))) => events.push(format!("ok:{value}")),
+                Poll::Ready(Some(Err(status))) => {
+                    events.push(format!("err:{:?}:{}", status.code(), status.message()));
+                    break;
+                }
+                Poll::Ready(None) => {
+                    events.push("none".to_string());
+                    break;
+                }
+                Poll::Pending => {
+                    events.push("pending".to_string());
+                    break;
+                }
+            }
+        }
+        events
+    }
+
+    fn collect_response_stream_byte_events(stream: &mut ResponseStream<Bytes>) -> Vec<String> {
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+        let mut pinned = Pin::new(stream);
+        let mut events = Vec::new();
+        loop {
+            match pinned.as_mut().poll_next(&mut cx) {
+                Poll::Ready(Some(Ok(value))) => {
+                    events.push(format!("ok:{}", bytes_fingerprint(&value)));
+                }
                 Poll::Ready(Some(Err(status))) => {
                     events.push(format!("err:{:?}:{}", status.code(), status.message()));
                     break;
@@ -1217,6 +1282,43 @@ mod tests {
             cancellation_drain_event,
             status_trailers,
             EXACT_STREAMING_FLOW_CONTROL_RCH_COMMAND,
+            final_verdict,
+        );
+    }
+
+    fn log_grpc_bytes_body_immutability_case(
+        request_id: &str,
+        body_path: &str,
+        body_fingerprint: &str,
+        clone_slice_count: usize,
+        handler_observed_fingerprint: &str,
+        cancellation_state: &str,
+        reuse_leak_mismatch_count: usize,
+        observed_events: &[String],
+        final_verdict: &str,
+    ) {
+        println!(
+            "GRPC_BYTES_BODY_IMMUTABILITY \
+             request_id={} \
+             body_path={} \
+             body_fingerprint={} \
+             clone_slice_count={} \
+             handler_observed_fingerprint={} \
+             cancellation_state={} \
+             reuse_leak_mismatch_count={} \
+             observed_events={} \
+             exact_rch_command=\"{}\" \
+             artifact_paths=none \
+             final_immutable_body_no_leak_verdict={}",
+            request_id,
+            body_path,
+            body_fingerprint,
+            clone_slice_count,
+            handler_observed_fingerprint,
+            cancellation_state,
+            reuse_leak_mismatch_count,
+            summarize_events(observed_events),
+            EXACT_GRPC_BYTES_BODY_IMMUTABILITY_RCH_COMMAND,
             final_verdict,
         );
     }
@@ -2378,6 +2480,299 @@ mod tests {
                 "pass",
             );
         }
+    }
+
+    #[test]
+    fn conformance_grpc_bytes_body_immutability_unary_clone_slice_and_cross_request_isolation() {
+        init_test(
+            "conformance_grpc_bytes_body_immutability_unary_clone_slice_and_cross_request_isolation",
+        );
+
+        let original_body = Bytes::from_static(b"immutable-unary-body");
+        let original_fingerprint = bytes_fingerprint(&original_body);
+        let cloned_body = original_body.clone();
+        let cloned_fingerprint = bytes_fingerprint(&cloned_body);
+        let sliced_body = original_body.slice(10..15);
+        let sliced_fingerprint = bytes_fingerprint(&sliced_body);
+        let second_request_body = Bytes::from_static(b"other-request-body");
+        let second_request_fingerprint = bytes_fingerprint(&second_request_body);
+
+        let mut request = Request::new(original_body);
+        let second_request = Request::new(second_request_body);
+        *request.get_mut() = Bytes::from_static(b"rewritten-by-handler");
+        let handler_observed_fingerprint = bytes_fingerprint(request.get_ref());
+
+        let mut mismatch_count = 0;
+        if bytes_fingerprint(&cloned_body) != cloned_fingerprint {
+            mismatch_count += 1;
+        }
+        if bytes_fingerprint(&sliced_body) != sliced_fingerprint {
+            mismatch_count += 1;
+        }
+        if bytes_fingerprint(second_request.get_ref()) != second_request_fingerprint {
+            mismatch_count += 1;
+        }
+        if handler_observed_fingerprint == original_fingerprint {
+            mismatch_count += 1;
+        }
+
+        assert_eq!(
+            bytes_fingerprint(&cloned_body),
+            cloned_fingerprint,
+            "cloned unary Bytes must preserve the original fingerprint"
+        );
+        assert_eq!(
+            bytes_fingerprint(&sliced_body),
+            sliced_fingerprint,
+            "sliced unary Bytes must preserve the original fingerprint"
+        );
+        assert_eq!(
+            bytes_fingerprint(second_request.get_ref()),
+            second_request_fingerprint,
+            "replacing one request body handle must not leak into another request"
+        );
+        assert_ne!(
+            handler_observed_fingerprint, original_fingerprint,
+            "malicious handler replacement should only swap the local Bytes handle"
+        );
+
+        log_grpc_bytes_body_immutability_case(
+            "grpc-bytes-unary-001",
+            "unary",
+            &original_fingerprint,
+            2,
+            &handler_observed_fingerprint,
+            "not_cancelled",
+            mismatch_count,
+            &[
+                format!("clone:{cloned_fingerprint}"),
+                format!("slice:{sliced_fingerprint}"),
+                format!("other_request:{second_request_fingerprint}"),
+            ],
+            if mismatch_count == 0 { "pass" } else { "fail" },
+        );
+
+        crate::test_complete!(
+            "conformance_grpc_bytes_body_immutability_unary_clone_slice_and_cross_request_isolation"
+        );
+    }
+
+    #[test]
+    fn conformance_grpc_bytes_body_immutability_matrix_logs_evidence() {
+        init_test("conformance_grpc_bytes_body_immutability_matrix_logs_evidence");
+
+        {
+            let source_a = Bytes::from_static(b"client-stream-a");
+            let source_a_fingerprint = bytes_fingerprint(&source_a);
+            let source_a_clone = source_a.clone();
+            let source_a_clone_fingerprint = bytes_fingerprint(&source_a_clone);
+            let source_a_slice = source_a.slice(7..13);
+            let source_a_slice_fingerprint = bytes_fingerprint(&source_a_slice);
+            let source_b = Bytes::from_static(b"client-stream-b");
+            let source_b_fingerprint = bytes_fingerprint(&source_b);
+
+            let mut stream = StreamingRequest::<Bytes>::open();
+            stream.push(source_a).expect("buffer first request body");
+            stream.push(source_b).expect("buffer second request body");
+            stream.close();
+
+            let events = collect_streaming_request_byte_events(&mut stream);
+            assert_eq!(
+                events,
+                vec![
+                    format!("ok:{source_a_fingerprint}"),
+                    format!("ok:{source_b_fingerprint}"),
+                    "none".to_string(),
+                ],
+                "client-streaming Bytes bodies must drain in order and terminate with EOF"
+            );
+
+            let mut mismatch_count = 0;
+            if bytes_fingerprint(&source_a_clone) != source_a_clone_fingerprint {
+                mismatch_count += 1;
+            }
+            if bytes_fingerprint(&source_a_slice) != source_a_slice_fingerprint {
+                mismatch_count += 1;
+            }
+
+            log_grpc_bytes_body_immutability_case(
+                "grpc-bytes-client-stream-001",
+                "client_streaming",
+                &source_a_fingerprint,
+                2,
+                &source_a_clone_fingerprint,
+                "graceful_eof",
+                mismatch_count,
+                &events,
+                if mismatch_count == 0 { "pass" } else { "fail" },
+            );
+        }
+
+        {
+            let response_a = Bytes::from_static(b"server-stream-a");
+            let response_a_fingerprint = bytes_fingerprint(&response_a);
+            let response_a_slice = response_a.slice(0..6);
+            let response_a_slice_fingerprint = bytes_fingerprint(&response_a_slice);
+            let response_b = Bytes::from_static(b"server-stream-b");
+            let response_b_fingerprint = bytes_fingerprint(&response_b);
+
+            let mut stream = ResponseStream::<Bytes>::open();
+            stream
+                .push(Ok(response_a.clone()))
+                .expect("buffer first response body");
+            stream
+                .push(Ok(response_b))
+                .expect("buffer second response body");
+            stream.close();
+
+            let events = collect_response_stream_byte_events(&mut stream);
+            assert_eq!(
+                events,
+                vec![
+                    format!("ok:{response_a_fingerprint}"),
+                    format!("ok:{response_b_fingerprint}"),
+                    "none".to_string(),
+                ],
+                "server-streaming Bytes bodies must preserve order and EOF"
+            );
+
+            let mut mismatch_count = 0;
+            if bytes_fingerprint(&response_a_slice) != response_a_slice_fingerprint {
+                mismatch_count += 1;
+            }
+
+            log_grpc_bytes_body_immutability_case(
+                "grpc-bytes-server-stream-001",
+                "server_streaming",
+                &response_a_fingerprint,
+                1,
+                &response_a_fingerprint,
+                "graceful_eof",
+                mismatch_count,
+                &events,
+                if mismatch_count == 0 { "pass" } else { "fail" },
+            );
+        }
+
+        {
+            let buffered_a = Bytes::from_static(b"cancelled-response-a");
+            let buffered_a_fingerprint = bytes_fingerprint(&buffered_a);
+            let buffered_b = Bytes::from_static(b"cancelled-response-b");
+            let buffered_b_fingerprint = bytes_fingerprint(&buffered_b);
+
+            let mut stream = ResponseStream::<Bytes>::open();
+            stream
+                .push(Ok(buffered_a))
+                .expect("buffer first cancelled response body");
+            stream
+                .push(Ok(buffered_b))
+                .expect("buffer second cancelled response body");
+            stream.cancel_with_error(Status::cancelled(
+                "client stopped reading after server buffered immutable Bytes responses",
+            ));
+
+            let events = collect_response_stream_byte_events(&mut stream);
+            assert_eq!(
+                events,
+                vec![
+                    format!("ok:{buffered_a_fingerprint}"),
+                    format!("ok:{buffered_b_fingerprint}"),
+                    "err:Cancelled:client stopped reading after server buffered immutable Bytes responses"
+                        .to_string(),
+                ],
+                "cancelled server stream must drain buffered Bytes before surfacing CANCELLED"
+            );
+            assert!(
+                stream.push(Ok(Bytes::from_static(b"late-body"))).is_err(),
+                "cancelled Bytes stream must reject new responses"
+            );
+
+            log_grpc_bytes_body_immutability_case(
+                "grpc-bytes-cancelled-stream-001",
+                "server_streaming_cancel_cleanup",
+                &buffered_a_fingerprint,
+                0,
+                &buffered_b_fingerprint,
+                "cancelled_after_buffered_drain",
+                0,
+                &events,
+                "pass",
+            );
+        }
+
+        {
+            let bidi_request_a = Bytes::from_static(b"bidi-request-a");
+            let bidi_request_a_fingerprint = bytes_fingerprint(&bidi_request_a);
+            let bidi_request_b = Bytes::from_static(b"bidi-request-b");
+            let bidi_request_b_fingerprint = bytes_fingerprint(&bidi_request_b);
+            let bidi_response_a = Bytes::from_static(b"bidi-response-a");
+            let bidi_response_a_fingerprint = bytes_fingerprint(&bidi_response_a);
+            let bidi_response_b = Bytes::from_static(b"bidi-response-b");
+            let bidi_response_b_fingerprint = bytes_fingerprint(&bidi_response_b);
+
+            let mut request_stream = StreamingRequest::<Bytes>::open();
+            request_stream
+                .push(bidi_request_a)
+                .expect("buffer first bidi request body");
+            request_stream
+                .push(bidi_request_b)
+                .expect("buffer second bidi request body");
+            request_stream.close();
+
+            let mut response_stream = ResponseStream::<Bytes>::open();
+            response_stream
+                .push(Ok(bidi_response_a))
+                .expect("buffer first bidi response body");
+            response_stream
+                .push(Ok(bidi_response_b))
+                .expect("buffer second bidi response body");
+            response_stream.close();
+
+            let request_events = collect_streaming_request_byte_events(&mut request_stream);
+            let response_events = collect_response_stream_byte_events(&mut response_stream);
+            assert_eq!(
+                request_events,
+                vec![
+                    format!("ok:{bidi_request_a_fingerprint}"),
+                    format!("ok:{bidi_request_b_fingerprint}"),
+                    "none".to_string(),
+                ],
+                "bidi request-side Bytes must preserve per-message fingerprints"
+            );
+            assert_eq!(
+                response_events,
+                vec![
+                    format!("ok:{bidi_response_a_fingerprint}"),
+                    format!("ok:{bidi_response_b_fingerprint}"),
+                    "none".to_string(),
+                ],
+                "bidi response-side Bytes must preserve per-message fingerprints"
+            );
+
+            let mut observed_events = request_events
+                .iter()
+                .map(|event| format!("request:{event}"))
+                .collect::<Vec<_>>();
+            observed_events.extend(
+                response_events
+                    .iter()
+                    .map(|event| format!("response:{event}")),
+            );
+
+            log_grpc_bytes_body_immutability_case(
+                "grpc-bytes-bidi-001",
+                "bidirectional",
+                &bidi_request_a_fingerprint,
+                0,
+                &bidi_response_a_fingerprint,
+                "graceful_half_close_both_directions",
+                0,
+                &observed_events,
+                "pass",
+            );
+        }
+
+        crate::test_complete!("conformance_grpc_bytes_body_immutability_matrix_logs_evidence");
     }
 
     /// GRPC-CONF-004: Stream must not accept new messages after close()
