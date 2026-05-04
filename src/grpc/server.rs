@@ -3235,6 +3235,473 @@ mod tests {
         }
     }
 
+    const EXACT_GRPC_UNARY_METADATA_ISOLATION_RCH_COMMAND: &str = "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_asupersync_6lxh8c_metadata cargo test -p asupersync --lib grpc_unary_metadata_isolation -- --nocapture";
+
+    #[derive(Clone, Debug, Default)]
+    struct UnaryMetadataIsolationRecord {
+        request_fingerprint: Option<String>,
+        handler_before_fingerprint: Option<String>,
+        handler_after_fingerprint: Option<String>,
+        snapshot_fingerprint: Option<String>,
+        duplicate_key_count: usize,
+        status_fingerprint: Option<String>,
+    }
+
+    #[derive(Debug)]
+    struct MetadataIsolationInterceptor {
+        records: Arc<
+            parking_lot::Mutex<std::collections::BTreeMap<String, UnaryMetadataIsolationRecord>>,
+        >,
+    }
+
+    impl MetadataIsolationInterceptor {
+        fn new(
+            records: Arc<
+                parking_lot::Mutex<
+                    std::collections::BTreeMap<String, UnaryMetadataIsolationRecord>,
+                >,
+            >,
+        ) -> Self {
+            Self { records }
+        }
+
+        fn call_id(metadata: &Metadata) -> String {
+            match metadata.get("x-call-id") {
+                Some(super::super::streaming::MetadataValue::Ascii(value)) => value.clone(),
+                Some(super::super::streaming::MetadataValue::Binary(value)) => {
+                    format!("binary-call-id:{}", value.len())
+                }
+                None => "missing-call-id".to_string(),
+            }
+        }
+    }
+
+    impl Interceptor for MetadataIsolationInterceptor {
+        fn intercept_request(&self, request: &mut Request<Bytes>) -> Result<(), Status> {
+            let call_id = Self::call_id(request.metadata());
+            let mut records = self.records.lock();
+            let record = records.entry(call_id).or_default();
+            record.request_fingerprint = Some(sanitized_metadata_fingerprint(request.metadata()));
+            record.duplicate_key_count = metadata_key_count(request.metadata(), "x-dup");
+            Ok(())
+        }
+
+        fn intercept_response(&self, _response: &mut Response<Bytes>) -> Result<(), Status> {
+            Ok(())
+        }
+
+        fn intercept_response_with_request(
+            &self,
+            request: &Request<Bytes>,
+            response: &mut Response<Bytes>,
+        ) -> Result<(), Status> {
+            let call_id = Self::call_id(request.metadata());
+            let snapshot_fingerprint = sanitized_metadata_fingerprint(request.metadata());
+            let duplicate_key_count = metadata_key_count(request.metadata(), "x-dup");
+            let _ = response
+                .metadata_mut()
+                .insert("x-call-id-echo", call_id.clone());
+            let _ = response
+                .metadata_mut()
+                .insert("x-request-snapshot", snapshot_fingerprint.clone());
+            let _ = response
+                .metadata_mut()
+                .insert("x-request-dup-count", duplicate_key_count.to_string());
+
+            let mut records = self.records.lock();
+            let record = records.entry(call_id).or_default();
+            record.snapshot_fingerprint = Some(snapshot_fingerprint);
+            record.duplicate_key_count = duplicate_key_count;
+            Ok(())
+        }
+
+        fn intercept_error_with_request(
+            &self,
+            request: &Request<Bytes>,
+            status: &mut Status,
+        ) -> Result<(), Status> {
+            let call_id = Self::call_id(request.metadata());
+            let mut records = self.records.lock();
+            let record = records.entry(call_id).or_default();
+            record.snapshot_fingerprint = Some(sanitized_metadata_fingerprint(request.metadata()));
+            record.duplicate_key_count = metadata_key_count(request.metadata(), "x-dup");
+            record.status_fingerprint = Some(format!("{:?}:{}", status.code(), status.message()));
+            Ok(())
+        }
+    }
+
+    fn metadata_value_fingerprint(
+        key: &str,
+        value: &super::super::streaming::MetadataValue,
+    ) -> String {
+        match value {
+            super::super::streaming::MetadataValue::Ascii(text) => {
+                let sanitized = super::super::streaming::sanitize_metadata_ascii_value(text);
+                if matches!(key, "authorization" | "x-trace-id" | "grpc-timeout") {
+                    format!("{key}=redacted:{}", sanitized.len())
+                } else {
+                    format!("{key}={sanitized}")
+                }
+            }
+            super::super::streaming::MetadataValue::Binary(bytes) => {
+                format!("{key}=bin:{}", bytes.len())
+            }
+        }
+    }
+
+    fn sanitized_metadata_fingerprint(metadata: &Metadata) -> String {
+        let mut entries = metadata
+            .iter()
+            .map(|(key, value)| metadata_value_fingerprint(key, value))
+            .collect::<Vec<_>>();
+        entries.sort();
+        if entries.is_empty() {
+            "empty".to_string()
+        } else {
+            entries.join("|")
+        }
+    }
+
+    fn metadata_key_count(metadata: &Metadata, key: &str) -> usize {
+        metadata
+            .iter()
+            .filter(|(existing_key, _)| existing_key.eq_ignore_ascii_case(key))
+            .count()
+    }
+
+    fn metadata_ascii_value(metadata: &Metadata, key: &str) -> Option<String> {
+        match metadata.get(key) {
+            Some(super::super::streaming::MetadataValue::Ascii(value)) => Some(value.clone()),
+            _ => None,
+        }
+    }
+
+    #[derive(Clone, Debug)]
+    struct UnaryMetadataCase {
+        call_id: &'static str,
+        duplicate_values: &'static [&'static str],
+        include_binary: bool,
+        include_auth: bool,
+        include_trace: bool,
+        large_value_len: usize,
+        cancel: bool,
+    }
+
+    #[derive(Debug)]
+    struct UnaryMetadataOutcome {
+        call_id: String,
+        expected_request_fingerprint: String,
+        expected_duplicate_count: usize,
+        response_metadata: Option<Metadata>,
+        status: Option<Status>,
+    }
+
+    fn build_unary_metadata_request(case: &UnaryMetadataCase) -> Request<Bytes> {
+        let mut metadata = Metadata::new();
+        let _ = metadata.insert("x-call-id", case.call_id);
+        let _ = metadata.insert("content-type", "application/grpc+proto");
+        let _ = metadata.insert("te", "trailers");
+        if case.include_auth {
+            let _ = metadata.insert("authorization", format!("Bearer secret-{}", case.call_id));
+        }
+        if case.include_trace {
+            let _ = metadata.insert("x-trace-id", format!("trace-{}-token", case.call_id));
+        }
+        if case.include_binary {
+            let _ = metadata.insert_bin(
+                "trace-context",
+                Bytes::from(case.call_id.as_bytes().to_vec()),
+            );
+        }
+        for value in case.duplicate_values {
+            let _ = metadata.insert("x-dup", (*value).to_string());
+        }
+        if case.large_value_len > 0 {
+            let _ = metadata.insert("x-large", "x".repeat(case.large_value_len));
+        }
+        Request::with_metadata(Bytes::from(case.call_id.as_bytes().to_vec()), metadata)
+    }
+
+    fn log_grpc_unary_metadata_case(
+        scenario_id: &str,
+        call_id: &str,
+        sanitized_metadata_fingerprint: &str,
+        handler_observed_fingerprint: &str,
+        response_trailer_fingerprint: &str,
+        cancellation_state: &str,
+        mismatch_count: usize,
+        leaked_key_list: &str,
+        final_isolation_verdict: &str,
+    ) {
+        println!(
+            "GRPC_UNARY_METADATA_ISOLATION \
+             scenario_id={} \
+             call_id={} \
+             sanitized_metadata_fingerprint={} \
+             handler_observed_fingerprint={} \
+             response_trailer_fingerprint={} \
+             cancellation_state={} \
+             mismatch_count={} \
+             leaked_key_list={} \
+             exact_rch_command=\"{}\" \
+             artifact_paths=none \
+             final_isolation_verdict={}",
+            scenario_id,
+            call_id,
+            sanitized_metadata_fingerprint,
+            handler_observed_fingerprint,
+            response_trailer_fingerprint,
+            cancellation_state,
+            mismatch_count,
+            leaked_key_list,
+            EXACT_GRPC_UNARY_METADATA_ISOLATION_RCH_COMMAND,
+            final_isolation_verdict,
+        );
+    }
+
+    fn run_grpc_unary_metadata_isolation_scenario(scenario_id: &str, cases: &[UnaryMetadataCase]) {
+        let records = Arc::new(parking_lot::Mutex::new(std::collections::BTreeMap::<
+            String,
+            UnaryMetadataIsolationRecord,
+        >::new()));
+        let server = std::sync::Arc::new(
+            Server::builder()
+                .add_service(TestService)
+                .interceptor(MetadataIsolationInterceptor::new(Arc::clone(&records)))
+                .build(),
+        );
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(cases.len()));
+
+        let outcomes = std::thread::scope(|scope| {
+            let mut joins = Vec::new();
+            for case in cases.iter().cloned() {
+                let server = std::sync::Arc::clone(&server);
+                let barrier = std::sync::Arc::clone(&barrier);
+                let records = Arc::clone(&records);
+                joins.push(scope.spawn(move || {
+                    let request = build_unary_metadata_request(&case);
+                    let expected_request_fingerprint =
+                        sanitized_metadata_fingerprint(request.metadata());
+                    let expected_duplicate_count = metadata_key_count(request.metadata(), "x-dup");
+                    let call_id = case.call_id.to_string();
+                    let cancel = case.cancel;
+
+                    let result = block_on(server.dispatch_unary(request, {
+                        let barrier = std::sync::Arc::clone(&barrier);
+                        let records = Arc::clone(&records);
+                        let call_id = call_id.clone();
+                        move |mut request| {
+                            let barrier = std::sync::Arc::clone(&barrier);
+                            let records = Arc::clone(&records);
+                            let call_id = call_id.clone();
+                            async move {
+                                let handler_before =
+                                    sanitized_metadata_fingerprint(request.metadata());
+                                {
+                                    let mut map = records.lock();
+                                    let record = map.entry(call_id.clone()).or_default();
+                                    record.handler_before_fingerprint = Some(handler_before);
+                                }
+
+                                barrier.wait();
+
+                                let _ = request
+                                    .metadata_mut()
+                                    .insert("x-local-handler-only", format!("mut-{call_id}"));
+                                let _ = request.metadata_mut().insert_or_replace(
+                                    "authorization",
+                                    format!("Bearer handler-mutated-{call_id}"),
+                                );
+
+                                let handler_after =
+                                    sanitized_metadata_fingerprint(request.metadata());
+                                {
+                                    let mut map = records.lock();
+                                    let record = map.entry(call_id.clone()).or_default();
+                                    record.handler_after_fingerprint = Some(handler_after.clone());
+                                }
+
+                                if cancel {
+                                    Err(Status::cancelled(format!("cancelled-{call_id}")))
+                                } else {
+                                    let mut response = Response::new(request.into_inner());
+                                    let _ = response
+                                        .metadata_mut()
+                                        .insert("x-handler-call-id", call_id.clone());
+                                    let _ = response
+                                        .metadata_mut()
+                                        .insert("x-handler-fingerprint", handler_after);
+                                    Ok(response)
+                                }
+                            }
+                        }
+                    }));
+
+                    match result {
+                        Ok(response) => UnaryMetadataOutcome {
+                            call_id,
+                            expected_request_fingerprint,
+                            expected_duplicate_count,
+                            response_metadata: Some(response.metadata().clone()),
+                            status: None,
+                        },
+                        Err(status) => UnaryMetadataOutcome {
+                            call_id,
+                            expected_request_fingerprint,
+                            expected_duplicate_count,
+                            response_metadata: None,
+                            status: Some(status),
+                        },
+                    }
+                }));
+            }
+            joins
+                .into_iter()
+                .map(|join| {
+                    join.join()
+                        .expect("metadata isolation worker must complete")
+                })
+                .collect::<Vec<_>>()
+        });
+
+        let records = records.lock().clone();
+        let all_call_ids = outcomes
+            .iter()
+            .map(|outcome| outcome.call_id.clone())
+            .collect::<Vec<_>>();
+
+        for outcome in outcomes {
+            let record = records
+                .get(&outcome.call_id)
+                .expect("every call must produce an isolation record");
+
+            let mut mismatches = Vec::new();
+            if record.request_fingerprint.as_deref()
+                != Some(outcome.expected_request_fingerprint.as_str())
+            {
+                mismatches.push("request_fingerprint");
+            }
+            if record.handler_before_fingerprint.as_deref()
+                != Some(outcome.expected_request_fingerprint.as_str())
+            {
+                mismatches.push("handler_before_fingerprint");
+            }
+            if record.snapshot_fingerprint.as_deref()
+                != Some(outcome.expected_request_fingerprint.as_str())
+            {
+                mismatches.push("snapshot_fingerprint");
+            }
+            if record.duplicate_key_count != outcome.expected_duplicate_count {
+                mismatches.push("duplicate_key_count");
+            }
+
+            let handler_after = record
+                .handler_after_fingerprint
+                .as_deref()
+                .expect("handler_after_fingerprint must be recorded");
+            assert!(
+                handler_after.contains("x-local-handler-only=mut-"),
+                "{}: handler-local mutation must stay visible to the handler copy",
+                outcome.call_id
+            );
+
+            let response_trailer_fingerprint = if let Some(ref response_metadata) =
+                outcome.response_metadata
+            {
+                let echoed_call_id = metadata_ascii_value(response_metadata, "x-call-id-echo")
+                    .expect("response interceptor must echo request call id");
+                let handler_call_id = metadata_ascii_value(response_metadata, "x-handler-call-id")
+                    .expect("handler must echo its local call id");
+                let request_snapshot =
+                    metadata_ascii_value(response_metadata, "x-request-snapshot")
+                        .expect("response interceptor must preserve request snapshot");
+                let duplicate_key_count =
+                    metadata_ascii_value(response_metadata, "x-request-dup-count")
+                        .expect("response interceptor must surface duplicate count");
+                let handler_fingerprint =
+                    metadata_ascii_value(response_metadata, "x-handler-fingerprint")
+                        .expect("handler must surface local metadata fingerprint");
+
+                if echoed_call_id != outcome.call_id {
+                    mismatches.push("response_call_id_echo");
+                }
+                if handler_call_id != outcome.call_id {
+                    mismatches.push("handler_call_id_echo");
+                }
+                if request_snapshot != outcome.expected_request_fingerprint {
+                    mismatches.push("response_request_snapshot");
+                }
+                if duplicate_key_count != outcome.expected_duplicate_count.to_string() {
+                    mismatches.push("response_duplicate_key_count");
+                }
+                if handler_fingerprint != handler_after {
+                    mismatches.push("response_handler_fingerprint");
+                }
+
+                sanitized_metadata_fingerprint(response_metadata)
+            } else {
+                let status = outcome
+                    .status
+                    .as_ref()
+                    .expect("cancelled/error case must carry status");
+                if status.code() != super::super::Code::Cancelled {
+                    mismatches.push("cancelled_status_code");
+                }
+                let expected_status = format!("Cancelled:cancelled-{}", outcome.call_id);
+                if record.status_fingerprint.as_deref() != Some(expected_status.as_str()) {
+                    mismatches.push("status_fingerprint");
+                }
+                expected_status
+            };
+
+            let leaked_key_list = all_call_ids
+                .iter()
+                .filter(|other| **other != outcome.call_id)
+                .filter(|other| {
+                    outcome
+                        .expected_request_fingerprint
+                        .contains(other.as_str())
+                        || record
+                            .snapshot_fingerprint
+                            .as_deref()
+                            .is_some_and(|value| value.contains(other.as_str()))
+                        || handler_after.contains(other.as_str())
+                        || response_trailer_fingerprint.contains(other.as_str())
+                })
+                .cloned()
+                .collect::<Vec<_>>();
+
+            let mismatch_count = mismatches.len() + leaked_key_list.len();
+            assert_eq!(
+                mismatch_count, 0,
+                "{}: metadata isolation mismatches={:?} leaked={:?}",
+                outcome.call_id, mismatches, leaked_key_list
+            );
+
+            let cancellation_state = if outcome.response_metadata.is_some() {
+                "completed"
+            } else {
+                "cancelled_overlap"
+            };
+            let leaked_key_summary = if leaked_key_list.is_empty() {
+                "none".to_string()
+            } else {
+                leaked_key_list.join("|")
+            };
+            log_grpc_unary_metadata_case(
+                scenario_id,
+                &outcome.call_id,
+                &outcome.expected_request_fingerprint,
+                handler_after,
+                &response_trailer_fingerprint,
+                cancellation_state,
+                mismatch_count,
+                &leaked_key_summary,
+                "pass",
+            );
+        }
+    }
+
     #[test]
     fn mfk14i_dispatch_unary_runs_interceptor_chain_around_handler() {
         // Pre-fix the dispatch_unary API did not exist and registered
@@ -3602,6 +4069,93 @@ mod tests {
                 "pass",
             );
         }
+    }
+
+    #[test]
+    fn grpc_unary_metadata_isolation_two_call_cancelled_overlap() {
+        init_test("grpc_unary_metadata_isolation_two_call_cancelled_overlap");
+
+        let cases = [
+            UnaryMetadataCase {
+                call_id: "call-alpha",
+                duplicate_values: &["alpha-0", "alpha-1"],
+                include_binary: true,
+                include_auth: true,
+                include_trace: true,
+                large_value_len: 0,
+                cancel: false,
+            },
+            UnaryMetadataCase {
+                call_id: "call-bravo",
+                duplicate_values: &[],
+                include_binary: false,
+                include_auth: false,
+                include_trace: false,
+                large_value_len: 0,
+                cancel: true,
+            },
+        ];
+
+        run_grpc_unary_metadata_isolation_scenario("two_call_cancelled_overlap", &cases);
+        crate::test_complete!("grpc_unary_metadata_isolation_two_call_cancelled_overlap");
+    }
+
+    #[test]
+    fn conformance_grpc_unary_metadata_isolation_many_call_matrix_logs_evidence() {
+        init_test("conformance_grpc_unary_metadata_isolation_many_call_matrix_logs_evidence");
+
+        let cases = [
+            UnaryMetadataCase {
+                call_id: "call-charlie",
+                duplicate_values: &["charlie-0", "charlie-1"],
+                include_binary: true,
+                include_auth: true,
+                include_trace: true,
+                large_value_len: 0,
+                cancel: false,
+            },
+            UnaryMetadataCase {
+                call_id: "call-delta",
+                duplicate_values: &[],
+                include_binary: false,
+                include_auth: false,
+                include_trace: true,
+                large_value_len: 3072,
+                cancel: false,
+            },
+            UnaryMetadataCase {
+                call_id: "call-echo",
+                duplicate_values: &["echo-0"],
+                include_binary: true,
+                include_auth: false,
+                include_trace: false,
+                large_value_len: 0,
+                cancel: false,
+            },
+            UnaryMetadataCase {
+                call_id: "call-foxtrot",
+                duplicate_values: &[],
+                include_binary: false,
+                include_auth: true,
+                include_trace: false,
+                large_value_len: 0,
+                cancel: true,
+            },
+            UnaryMetadataCase {
+                call_id: "call-golf",
+                duplicate_values: &[],
+                include_binary: false,
+                include_auth: false,
+                include_trace: false,
+                large_value_len: 0,
+                cancel: false,
+            },
+        ];
+
+        run_grpc_unary_metadata_isolation_scenario("many_call_mixed_metadata", &cases);
+        crate::test_complete!(
+            "conformance_grpc_unary_metadata_isolation_many_call_matrix_logs_evidence"
+        );
     }
 
     #[test]
