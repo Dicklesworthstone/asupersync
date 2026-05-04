@@ -26,7 +26,6 @@
   ],
   "tracked_dirty_blocker_fixture_paths": [
     ".beads/issues.jsonl",
-    "src/grpc/health.rs",
     "src/lib.rs",
     "src/tls/connector.rs",
     "src/tls/error.rs"
@@ -344,7 +343,7 @@
       ],
       "rollback_surface": "retain_conservative_publish_path",
       "proof_status": "fail_closed",
-      "blocker_reason": "only audit and consumer-side flow-control proofs exist on main; the committed publish-backpressure artifact/runner pair and bounded waiter or p999 evidence are still missing",
+      "blocker_reason": "publish backpressure proof pack now exists, but it still reports an audit-only publish path with no explicit pressure site, no bounded waiter policy, and no p99/p999 wait-latency evidence",
       "report_glob": "target/jetstream-publish-backpressure-smoke/run_*/AA-JETSTREAM-PUBLISH-BACKPRESSURE-*/run_report.json",
       "reproduction_command": "rch exec -- cargo test -p asupersync --lib jetstream --features test-internals -- --nocapture"
     },
@@ -371,8 +370,8 @@
         "frontier_outcome_verdict"
       ],
       "rollback_surface": "not_applicable",
-      "proof_status": "fail_closed",
-      "blocker_reason": "the compile-debt umbrella is closed and the downstream notify proof now runs, but signoff still lacks a committed compile-frontier artifact/runner pair with checksums and first-failure movement evidence",
+      "proof_status": "trusted",
+      "blocker_reason": "",
       "report_glob": "target/compile-frontier-movement-smoke/run_*/AA-COMPILE-FRONTIER-MOVEMENT-*/run_report.json",
       "reproduction_command": "rch exec -- cargo test -p asupersync --lib audit_notify_send_sync_bounds --features test-internals -- --nocapture"
     }
@@ -386,11 +385,11 @@
         "signoff_verdict": "fail_closed",
         "host_template_mode": false,
         "child_artifact_count": 11,
-      "trusted_child_count": 1,
-      "fail_closed_child_count": 10,
+      "trusted_child_count": 2,
+      "fail_closed_child_count": 9,
       "open_tracker_blocker_count": 8,
       "dirty_cluster_fail_closed_count": 1,
-      "tracked_dirty_blocker_count": 5,
+      "tracked_dirty_blocker_count": 4,
       "source_skill_count": 4,
       "required_source_skill_count": 4,
       "missing_required_source_skill_count": 0,
@@ -403,11 +402,11 @@
       "missing_required_objective_requirement_count": 0,
       "unmapped_objective_requirement_count": 0,
       "selected_bead_mapping_count": 17,
-      "missing_artifact_path_count": 2,
-      "missing_runner_path_count": 2,
+      "missing_artifact_path_count": 0,
+      "missing_runner_path_count": 0,
       "objective_checklist_complete": true,
       "no_unexplained_artifacts": false,
-      "projection_hash": "a968b897afc94b8afc2bd840d25bec4fbc088eb452606869857fe96ccea08888"
+      "projection_hash": "0496fedd81674b64af4fe976b98870d9aeedde76afa88340de706dd246bd503d"
     },
     "required_log_fields": [
       "scenario_id",
@@ -453,11 +452,11 @@
         "signoff_verdict": "template_only",
         "host_template_mode": true,
         "child_artifact_count": 11,
-      "trusted_child_count": 1,
-      "fail_closed_child_count": 10,
+      "trusted_child_count": 2,
+      "fail_closed_child_count": 9,
       "open_tracker_blocker_count": 8,
       "dirty_cluster_fail_closed_count": 1,
-      "tracked_dirty_blocker_count": 5,
+      "tracked_dirty_blocker_count": 4,
       "source_skill_count": 4,
       "required_source_skill_count": 4,
       "missing_required_source_skill_count": 0,
@@ -470,11 +469,11 @@
       "missing_required_objective_requirement_count": 0,
       "unmapped_objective_requirement_count": 0,
       "selected_bead_mapping_count": 17,
-      "missing_artifact_path_count": 2,
-      "missing_runner_path_count": 2,
+      "missing_artifact_path_count": 0,
+      "missing_runner_path_count": 0,
       "objective_checklist_complete": true,
       "no_unexplained_artifacts": false,
-      "projection_hash": "71f6f8654ed27c04bfaca633dada0f8aa86b77c62a2fb0825e6c03470c1423f1"
+      "projection_hash": "29e0609afabe0cba7557cd3d1a0ce0eac3dd87ca6735d216eb8bc53de0889eb5"
     },
     "required_log_fields": [
       "scenario_id",

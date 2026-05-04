@@ -1,0 +1,71 @@
+{
+  "contract_version": "compile-frontier-movement-proof-v1",
+  "bead_id": "asupersync-i1vce6",
+  "description": "Deterministic proof pack for the shared-main compile frontier movement that restored the downstream notify lib proof path.",
+  "runner_script": "scripts/run_compile_frontier_movement_smoke.sh",
+  "runner_bundle_schema_version": "compile-frontier-movement-smoke-bundle-v1",
+  "runner_report_schema_version": "compile-frontier-movement-smoke-run-report-v1",
+  "source_fix_commit": "4d6c97c6d",
+  "beads_sync_commit": "d1015f947",
+  "target_command": "rch exec -- env CARGO_TARGET_DIR=/tmp/rch_target_asupersync_i1vce6_audit_notify cargo test -p asupersync --lib audit_notify_send_sync_bounds --features test-internals -- --nocapture",
+  "check_command": "rch exec -- env CARGO_TARGET_DIR=/tmp/rch_target_asupersync_i1vce6_check cargo check -p asupersync --lib --features test-internals",
+  "target_test_name": "audit_notify_send_sync_bounds",
+  "first_failure_before": "src/observability/otel_conformance_tests.rs:36214-36215 deny(enum_intrinsics_non_enums) from std::mem::discriminant on bool",
+  "first_failure_after": "none; downstream notify proof compiled and ran audit_notify_send_sync_bounds",
+  "downstream_result": {
+    "tests_passed": 1,
+    "tests_failed": 0,
+    "filtered_out": 16304,
+    "cargo_check_exit_code": 0
+  },
+  "no_cfg_hide_confirmation": true,
+  "tests_deleted_confirmation": false,
+  "retained_constraints": [
+    "full-file rustfmt drift remains in src/observability/otel_conformance_tests.rs and was intentionally not rewritten by the umbrella closeout",
+    "bv --robot-next and br dep cycles graph checks were degraded by timeout during closeout; br show and targeted proof commands remained usable"
+  ],
+  "smoke_scenarios": [
+    {
+      "scenario_id": "AA-COMPILE-FRONTIER-MOVEMENT-AUDIT-NOTIFY",
+      "description": "Verify that the compile-debt umbrella closeout evidence is still reachable from the current main tip and still describes a downstream notify proof that reached the target module.",
+      "expected_report_projection": {
+        "source_fix_commit_present": true,
+        "beads_sync_commit_present": true,
+        "downstream_test_binary_compiled": true,
+        "cargo_check_passed": true,
+        "tests_passed": 1,
+        "tests_failed": 0,
+        "filtered_out": 16304,
+        "no_cfg_hide_confirmation": true,
+        "tests_deleted_confirmation": false,
+        "target_command": "rch exec -- env CARGO_TARGET_DIR=/tmp/rch_target_asupersync_i1vce6_audit_notify cargo test -p asupersync --lib audit_notify_send_sync_bounds --features test-internals -- --nocapture",
+        "first_failure_before": "src/observability/otel_conformance_tests.rs:36214-36215 deny(enum_intrinsics_non_enums) from std::mem::discriminant on bool",
+        "first_failure_after": "none; downstream notify proof compiled and ran audit_notify_send_sync_bounds",
+        "frontier_outcome_verdict": "reached_target_module",
+        "projection_hash": "6419aa5d51ad9ac2d9ac902a3c27afd8b4712ea336491c841864c0be05ffc3b5"
+      },
+      "required_log_fields": [
+        "scenario_id",
+        "contract_version",
+        "source_fix_commit",
+        "source_fix_commit_present",
+        "beads_sync_commit",
+        "beads_sync_commit_present",
+        "target_test_name",
+        "target_command",
+        "check_command",
+        "first_failure_before",
+        "first_failure_after",
+        "downstream_test_binary_compiled",
+        "cargo_check_passed",
+        "tests_passed",
+        "tests_failed",
+        "filtered_out",
+        "no_cfg_hide_confirmation",
+        "tests_deleted_confirmation",
+        "frontier_outcome_verdict",
+        "generated_artifact_paths"
+      ]
+    }
+  ]
+}
