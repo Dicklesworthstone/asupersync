@@ -721,6 +721,53 @@ mod tests {
                 "both extraction paths must match the original contiguous source slice",
             );
         }
+
+        #[test]
+        fn bytes_mut_metamorphic_split_recombine_preserves_payload(
+            data in prop::collection::vec(any::<u8>(), 0..192),
+            first_split in 0usize..192,
+            middle_len in 0usize..192,
+        ) {
+            let original = BytesMut::from(data.as_slice());
+            let len = original.len();
+            let first_split = first_split.min(len);
+            let middle_len = middle_len.min(len - first_split);
+
+            let mut middle = original.clone();
+            let prefix = middle.split_to(first_split);
+            let suffix = middle.split_off(middle_len);
+
+            prop_assert_eq!(prefix.len(), first_split);
+            prop_assert_eq!(middle.len(), middle_len);
+            prop_assert_eq!(suffix.len(), len - first_split - middle_len);
+
+            prop_assert_eq!(&prefix[..], &data[..first_split]);
+            prop_assert_eq!(
+                &middle[..],
+                &data[first_split..first_split + middle_len],
+            );
+            prop_assert_eq!(&suffix[..], &data[first_split + middle_len..]);
+
+            let prefix_frozen = prefix.clone().freeze();
+            let middle_frozen = middle.clone().freeze();
+            let suffix_frozen = suffix.clone().freeze();
+
+            let mut recombined = BytesMut::with_capacity(len);
+            recombined.put_slice(&prefix_frozen);
+            recombined.put_slice(&middle_frozen);
+            recombined.put_slice(&suffix_frozen);
+
+            prop_assert_eq!(
+                &recombined[..],
+                data.as_slice(),
+                "split_to/split_off parts must recombine into the original byte order",
+            );
+            prop_assert_eq!(
+                &recombined.freeze()[..],
+                data.as_slice(),
+                "freezing recombined split parts must preserve the original payload",
+            );
+        }
     }
 
     #[test]
