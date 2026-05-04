@@ -6,13 +6,14 @@
 //! Validates flow control window management, increment validation, overflow detection,
 //! and per-stream/connection window separation.
 
-use asupersync::bytes::Bytes;
+use asupersync::bytes::{Bytes, BytesMut};
 use asupersync::http::h2::connection::{Connection, DEFAULT_CONNECTION_WINDOW_SIZE};
 use asupersync::http::h2::error::{ErrorCode, H2Error};
 use asupersync::http::h2::frame::{
     DataFrame, Frame, HeadersFrame, Setting, SettingsFrame, WindowUpdateFrame,
 };
 use asupersync::http::h2::settings::{DEFAULT_INITIAL_WINDOW_SIZE, Settings};
+use asupersync::http::h2::{Header, HpackEncoder};
 
 const DEFAULT_INITIAL_WINDOW_SIZE_I32: i32 = DEFAULT_INITIAL_WINDOW_SIZE as i32;
 
@@ -25,6 +26,28 @@ mod conformance_window_update {
     fn init_test(name: &str) {
         asupersync::test_utils::init_test_logging();
         asupersync::test_phase!(name);
+    }
+
+    fn open_server_connection() -> Connection {
+        let mut conn = Connection::server(Settings::default());
+        conn.process_frame(Frame::Settings(SettingsFrame::new(Vec::new())))
+            .expect("initial SETTINGS frame should open server connection");
+        conn
+    }
+
+    fn request_headers(stream_id: u32) -> Frame {
+        let mut encoder = HpackEncoder::new();
+        let mut encoded = BytesMut::new();
+        encoder.encode(
+            &[
+                Header::new(":method", "GET"),
+                Header::new(":path", "/flow-control"),
+                Header::new(":scheme", "https"),
+                Header::new(":authority", "example.com"),
+            ],
+            &mut encoded,
+        );
+        Frame::Headers(HeadersFrame::new(stream_id, encoded.freeze(), false, true))
     }
 
     /// **MR1**: RFC 9113 §6.9 - Initial connection window is 65535 bytes
@@ -89,7 +112,7 @@ mod conformance_window_update {
     fn mr2_window_update_increment_must_be_positive() {
         init_test("mr2_window_update_increment_must_be_positive");
 
-        let mut conn = Connection::server(Settings::default());
+        let mut conn = open_server_connection();
 
         // MR2a: Zero increment on connection window (stream_id=0) = connection error
         let zero_connection_update = Frame::WindowUpdate(WindowUpdateFrame::new(0, 0));
@@ -111,10 +134,10 @@ mod conformance_window_update {
         );
 
         // Reset connection for next test
-        let mut conn = Connection::server(Settings::default());
+        let mut conn = open_server_connection();
 
         // Create a stream first
-        let headers = Frame::Headers(HeadersFrame::new(1, Bytes::new(), false, true));
+        let headers = request_headers(1);
         conn.process_frame(headers).expect("should process headers");
 
         // MR2b: Zero increment on stream window = stream error
@@ -137,8 +160,8 @@ mod conformance_window_update {
         );
 
         // MR2c: Positive increments must be accepted
-        let mut conn = Connection::server(Settings::default());
-        let headers = Frame::Headers(HeadersFrame::new(1, Bytes::new(), false, true));
+        let mut conn = open_server_connection();
+        let headers = request_headers(1);
         conn.process_frame(headers).expect("should process headers");
 
         let valid_connection_update = Frame::WindowUpdate(WindowUpdateFrame::new(0, 1000));
@@ -168,7 +191,7 @@ mod conformance_window_update {
     fn mr3_window_overflow_triggers_flow_control_error() {
         init_test("mr3_window_overflow_triggers_flow_control_error");
 
-        let mut conn = Connection::server(Settings::default());
+        let mut conn = open_server_connection();
 
         // MR3a: Connection window overflow
         // Set connection send window near maximum
@@ -197,8 +220,8 @@ mod conformance_window_update {
         );
 
         // MR3b: Stream window overflow
-        let mut conn = Connection::server(Settings::default());
-        let headers = Frame::Headers(HeadersFrame::new(1, Bytes::new(), false, true));
+        let mut conn = open_server_connection();
+        let headers = request_headers(1);
         conn.process_frame(headers).expect("should process headers");
 
         // Try to cause stream window overflow
@@ -212,7 +235,7 @@ mod conformance_window_update {
         assert!(result.is_err(), "Stream window overflow should be rejected");
 
         // MR3c: Maximum valid window size should be accepted
-        let mut conn = Connection::server(Settings::default());
+        let mut conn = open_server_connection();
         let max_valid_increment = (i32::MAX - DEFAULT_CONNECTION_WINDOW_SIZE) as u32;
         let max_update = Frame::WindowUpdate(WindowUpdateFrame::new(0, max_valid_increment));
         let result = conn.process_frame(max_update);
@@ -241,11 +264,11 @@ mod conformance_window_update {
     fn mr4_per_stream_and_connection_windows_separate() {
         init_test("mr4_per_stream_and_connection_windows_separate");
 
-        let mut conn = Connection::server(Settings::default());
+        let mut conn = open_server_connection();
 
         // Create multiple streams
-        let headers1 = Frame::Headers(HeadersFrame::new(1, Bytes::new(), false, true));
-        let headers2 = Frame::Headers(HeadersFrame::new(3, Bytes::new(), false, true));
+        let headers1 = request_headers(1);
+        let headers2 = request_headers(3);
         conn.process_frame(headers1)
             .expect("should process headers for stream 1");
         conn.process_frame(headers2)
@@ -342,11 +365,11 @@ mod conformance_window_update {
     fn mr5_settings_initial_window_size_rebalances() {
         init_test("mr5_settings_initial_window_size_rebalances");
 
-        let mut conn = Connection::server(Settings::default());
+        let mut conn = open_server_connection();
 
         // Create streams and consume some window credit
-        let headers1 = Frame::Headers(HeadersFrame::new(1, Bytes::new(), false, true));
-        let headers2 = Frame::Headers(HeadersFrame::new(3, Bytes::new(), false, true));
+        let headers1 = request_headers(1);
+        let headers2 = request_headers(3);
         conn.process_frame(headers1)
             .expect("should process headers for stream 1");
         conn.process_frame(headers2)
@@ -373,7 +396,10 @@ mod conformance_window_update {
             "Stream 3 should have full window"
         );
 
-        // MR5a: Increase SETTINGS_INITIAL_WINDOW_SIZE - streams gain credit
+        let stream1_send_before_increase = conn.stream(1).unwrap().send_window();
+        let stream3_send_before_increase = conn.stream(3).unwrap().send_window();
+
+        // MR5a: Increase SETTINGS_INITIAL_WINDOW_SIZE - outbound stream windows gain credit.
         let new_larger_window = DEFAULT_INITIAL_WINDOW_SIZE + 16384;
         let settings_increase =
             Frame::Settings(SettingsFrame::new(vec![Setting::InitialWindowSize(
@@ -383,23 +409,34 @@ mod conformance_window_update {
         conn.process_frame(settings_increase)
             .expect("should process settings increase");
 
-        // Both streams should have their windows adjusted by the delta
+        // Peer SETTINGS affects our per-stream send windows; receive windows are
+        // governed by our local settings and the DATA already consumed above.
         let delta = new_larger_window as i32 - DEFAULT_INITIAL_WINDOW_SIZE_I32;
-        let stream1_window_after_increase = conn.stream(1).unwrap().recv_window();
-        let stream3_window_after_increase = conn.stream(3).unwrap().recv_window();
+        let stream1_window_after_increase = conn.stream(1).unwrap().send_window();
+        let stream3_window_after_increase = conn.stream(3).unwrap().send_window();
 
         assert_eq!(
             stream1_window_after_increase,
-            expected_after_data + delta,
-            "Stream 1 window should increase by delta"
+            stream1_send_before_increase + delta,
+            "Stream 1 send window should increase by delta"
         );
         assert_eq!(
             stream3_window_after_increase,
-            DEFAULT_INITIAL_WINDOW_SIZE_I32 + delta,
-            "Stream 3 window should increase by delta"
+            stream3_send_before_increase + delta,
+            "Stream 3 send window should increase by delta"
+        );
+        assert_eq!(
+            conn.stream(1).unwrap().recv_window(),
+            expected_after_data,
+            "Stream 1 receive window should remain governed by local settings"
+        );
+        assert_eq!(
+            conn.stream(3).unwrap().recv_window(),
+            DEFAULT_INITIAL_WINDOW_SIZE_I32,
+            "Stream 3 receive window should remain governed by local settings"
         );
 
-        // MR5b: Decrease SETTINGS_INITIAL_WINDOW_SIZE - streams lose credit
+        // MR5b: Decrease SETTINGS_INITIAL_WINDOW_SIZE - outbound stream windows lose credit.
         let new_smaller_window = DEFAULT_INITIAL_WINDOW_SIZE - 8192;
         let settings_decrease =
             Frame::Settings(SettingsFrame::new(vec![Setting::InitialWindowSize(
@@ -409,20 +446,20 @@ mod conformance_window_update {
         conn.process_frame(settings_decrease)
             .expect("should process settings decrease");
 
-        // Windows should be adjusted downward
+        // Send windows should be adjusted downward.
         let decrease_delta = new_smaller_window as i32 - new_larger_window as i32; // negative value
-        let stream1_final = conn.stream(1).unwrap().recv_window();
-        let stream3_final = conn.stream(3).unwrap().recv_window();
+        let stream1_final = conn.stream(1).unwrap().send_window();
+        let stream3_final = conn.stream(3).unwrap().send_window();
 
         assert_eq!(
             stream1_final,
             stream1_window_after_increase + decrease_delta,
-            "Stream 1 window should decrease by delta"
+            "Stream 1 send window should decrease by delta"
         );
         assert_eq!(
             stream3_final,
             stream3_window_after_increase + decrease_delta,
-            "Stream 3 window should decrease by delta"
+            "Stream 3 send window should decrease by delta"
         );
 
         // MR5c: Invalid SETTINGS_INITIAL_WINDOW_SIZE (> 2^31-1) is rejected
@@ -453,10 +490,10 @@ mod conformance_window_update {
     fn integration_combined_flow_control_scenarios() {
         init_test("integration_combined_flow_control_scenarios");
 
-        let mut conn = Connection::server(Settings::default());
+        let mut conn = open_server_connection();
 
         // Create stream
-        let headers = Frame::Headers(HeadersFrame::new(1, Bytes::new(), false, true));
+        let headers = request_headers(1);
         conn.process_frame(headers).expect("should process headers");
 
         // Test sequence: data -> window update -> settings -> more data
@@ -536,8 +573,8 @@ mod conformance_window_update {
         init_test("edge_cases_boundary_conditions");
 
         // Test maximum valid window increment
-        let mut conn = Connection::server(Settings::default());
-        let headers = Frame::Headers(HeadersFrame::new(1, Bytes::new(), false, true));
+        let mut conn = open_server_connection();
+        let headers = request_headers(1);
         conn.process_frame(headers).expect("should process headers");
 
         // Maximum increment value that won't cause overflow
@@ -548,13 +585,22 @@ mod conformance_window_update {
             "Maximum valid increment should be accepted"
         );
 
-        // Test window update on non-existent stream
-        let nonexistent_stream_update = Frame::WindowUpdate(WindowUpdateFrame::new(999, 1000));
-        let result = conn.process_frame(nonexistent_stream_update);
-        // Should be handled gracefully (stream might be closed/pruned)
+        // RFC 9113 §5.1: WINDOW_UPDATE on an idle stream is a connection error.
+        let idle_stream_update = Frame::WindowUpdate(WindowUpdateFrame::new(999, 1000));
+        let result = conn.process_frame(idle_stream_update);
         assert!(
-            result.is_ok(),
-            "Window update on non-existent stream should be handled gracefully"
+            result.is_err(),
+            "Window update on an idle stream should be rejected"
+        );
+        let err = result.unwrap_err();
+        assert_eq!(
+            err.code,
+            ErrorCode::ProtocolError,
+            "Idle-stream WINDOW_UPDATE should cause PROTOCOL_ERROR"
+        );
+        assert!(
+            err.stream_id.is_none(),
+            "Idle-stream WINDOW_UPDATE is a connection error"
         );
 
         // Test multiple rapid window updates
