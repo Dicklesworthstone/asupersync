@@ -47,7 +47,6 @@
 //! items followed by the error trailer — never trailer-then-data,
 //! never trailer-skipped.
 
-use asupersync::bytes::Bytes;
 use asupersync::grpc::ResponseStream;
 use asupersync::grpc::status::{Code, Status};
 use asupersync::grpc::streaming::{Metadata, Streaming};
@@ -75,6 +74,72 @@ fn drain<T: Send + Unpin>(stream: &mut ResponseStream<T>) -> Vec<Result<T, Statu
             Poll::Pending => return out,
         }
     }
+}
+
+const EXACT_RCH_COMMAND: &str = "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_asupersync_6lr8bt_trailers cargo test -p asupersync --test grpc_server_streaming_trailers_ordering -- --nocapture";
+
+fn response_fingerprint(drained: &[Result<u32, Status>]) -> String {
+    drained
+        .iter()
+        .map(|item| match item {
+            Ok(value) => format!("ok:{value}"),
+            Err(status) => format!("err:{:?}:{}", status.code(), status.message()),
+        })
+        .collect::<Vec<_>>()
+        .join(">")
+}
+
+fn metadata_fingerprint(metadata: &Metadata) -> String {
+    let mut entries = metadata
+        .iter()
+        .map(|(key, value)| match value {
+            asupersync::grpc::MetadataValue::Ascii(value) => format!("{key}={value}"),
+            asupersync::grpc::MetadataValue::Binary(value) => {
+                format!("{key}=bin:{}", value.len())
+            }
+        })
+        .collect::<Vec<_>>();
+    entries.sort();
+    if entries.is_empty() {
+        "empty".to_string()
+    } else {
+        entries.join("|")
+    }
+}
+
+fn log_case(
+    scenario_id: &str,
+    queued_item_count: usize,
+    emitted_item_order: &str,
+    finish_call_tick: usize,
+    trailer_status_payload: &str,
+    cancellation_state: &str,
+    drain_count: usize,
+    trailer_metadata: &Metadata,
+) {
+    println!(
+        "GRPC_SERVER_STREAMING_TRAILER_ORDERING \
+         stream_id={} \
+         queued_item_count={} \
+         emitted_item_order={} \
+         finish_call_tick={} \
+         trailer_status_payload={} \
+         cancellation_state={} \
+         drain_count={} \
+         trailer_metadata={} \
+         exact_rch_command=\"{}\" \
+         artifact_paths=none \
+         final_ordering_no_loss_verdict=pass",
+        scenario_id,
+        queued_item_count,
+        emitted_item_order,
+        finish_call_tick,
+        trailer_status_payload,
+        cancellation_state,
+        drain_count,
+        metadata_fingerprint(trailer_metadata),
+        EXACT_RCH_COMMAND,
+    );
 }
 
 #[test]
@@ -174,6 +239,50 @@ fn cancel_with_metadata_discards_buffered_items_per_abrupt_semantic() {
     );
     let terminal = drained.first().unwrap().as_ref().expect_err("Err marker");
     assert_eq!(terminal.code(), Code::Cancelled);
+}
+
+#[test]
+fn cancel_during_drain_discards_remaining_items_and_surfaces_terminal_status() {
+    // Cancellation after some items already drained must still be abrupt for the
+    // remaining buffered items: the next poll should surface the cancel status,
+    // not stale queued payloads.
+    let mut stream = ResponseStream::<u32>::open();
+    for value in 0..4 {
+        stream.push(Ok(value)).expect("push");
+    }
+
+    let waker = make_waker();
+    let mut cx = Context::from_waker(&waker);
+    match Pin::new(&mut stream).poll_next(&mut cx) {
+        Poll::Ready(Some(Ok(value))) => assert_eq!(value, 0),
+        other => panic!("expected first buffered item before cancel, got {other:?}"),
+    }
+
+    let mut trailing = Metadata::new();
+    let _ = trailing.insert("x-cancel-phase", "mid-drain");
+    stream.cancel_with_metadata(
+        Status::new(Code::Cancelled, "cancel mid-drain"),
+        trailing.clone(),
+    );
+
+    match Pin::new(&mut stream).poll_next(&mut cx) {
+        Poll::Ready(Some(Err(status))) => {
+            assert_eq!(status.code(), Code::Cancelled);
+            assert_eq!(status.message(), "cancel mid-drain");
+        }
+        other => panic!("expected cancel status after mid-drain cancel, got {other:?}"),
+    }
+
+    assert_eq!(
+        stream.terminal_metadata().get("x-cancel-phase"),
+        trailing.get("x-cancel-phase"),
+        "mid-drain cancellation must preserve terminal metadata",
+    );
+
+    match Pin::new(&mut stream).poll_next(&mut cx) {
+        Poll::Ready(None) => {}
+        other => panic!("cancelled stream must terminate after terminal status, got {other:?}"),
+    }
 }
 
 #[test]
@@ -321,4 +430,113 @@ fn error_before_any_items_produces_immediate_terminal() {
         drained[0].as_ref().expect_err("trailer").code(),
         Code::PermissionDenied,
     );
+}
+
+#[test]
+fn trailer_ordering_matrix_logs_evidence() {
+    {
+        let mut stream = ResponseStream::<u32>::open();
+        stream.finish_with_metadata(
+            Status::new(Code::PermissionDenied, "no items, just err"),
+            Metadata::new(),
+        );
+        let drained = drain(&mut stream);
+        log_case(
+            "zero_items_finish",
+            0,
+            &response_fingerprint(&drained),
+            0,
+            "PermissionDenied:no items, just err",
+            "none",
+            drained.len(),
+            &stream.terminal_metadata(),
+        );
+    }
+
+    {
+        let mut stream = ResponseStream::<u32>::open();
+        stream.push(Ok(7)).expect("push");
+        let mut trailing = Metadata::new();
+        let _ = trailing.insert("x-tenant", "acme");
+        stream.finish_with_metadata(Status::new(Code::Ok, ""), trailing.clone());
+        let drained = drain(&mut stream);
+        log_case(
+            "one_item_finish_with_metadata",
+            1,
+            &response_fingerprint(&drained),
+            0,
+            "Ok:",
+            "none",
+            drained.len(),
+            &stream.terminal_metadata(),
+        );
+    }
+
+    {
+        let mut stream = ResponseStream::<u32>::open();
+        for value in 0..5 {
+            stream.push(Ok(value)).expect("push");
+        }
+        stream.finish_with_metadata(Status::new(Code::Internal, "boom"), Metadata::new());
+        let drained = drain(&mut stream);
+        log_case(
+            "many_items_finish_error_after_queue",
+            5,
+            &response_fingerprint(&drained),
+            0,
+            "Internal:boom",
+            "none",
+            drained.len(),
+            &stream.terminal_metadata(),
+        );
+    }
+
+    {
+        let mut stream = ResponseStream::<u32>::open();
+        for value in 0..3 {
+            stream.push(Ok(value)).expect("push");
+        }
+        stream.cancel_with_metadata(Status::new(Code::Cancelled, "abrupt"), Metadata::new());
+        let drained = drain(&mut stream);
+        log_case(
+            "cancel_before_finish_discards_buffered_items",
+            3,
+            &response_fingerprint(&drained),
+            0,
+            "Cancelled:abrupt",
+            "cancel_before_finish",
+            drained.len(),
+            &stream.terminal_metadata(),
+        );
+    }
+
+    {
+        let mut stream = ResponseStream::<u32>::open();
+        for value in 0..4 {
+            stream.push(Ok(value)).expect("push");
+        }
+        let waker = make_waker();
+        let mut cx = Context::from_waker(&waker);
+        match Pin::new(&mut stream).poll_next(&mut cx) {
+            Poll::Ready(Some(Ok(value))) => assert_eq!(value, 0),
+            other => panic!("expected first drained item before cancel, got {other:?}"),
+        }
+        let mut trailing = Metadata::new();
+        let _ = trailing.insert("x-cancel-phase", "mid-drain");
+        stream.cancel_with_metadata(
+            Status::new(Code::Cancelled, "cancel mid-drain"),
+            trailing.clone(),
+        );
+        let drained = drain(&mut stream);
+        log_case(
+            "cancel_during_drain_discards_remaining_items",
+            4,
+            &format!("ok:0>{}", response_fingerprint(&drained)),
+            1,
+            "Cancelled:cancel mid-drain",
+            "cancel_during_drain",
+            1 + drained.len(),
+            &stream.terminal_metadata(),
+        );
+    }
 }
