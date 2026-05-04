@@ -795,11 +795,10 @@ pub(crate) fn current_worker_id() -> Option<WorkerId> {
     CURRENT_WORKER_ID.with(|cell| *cell.borrow())
 }
 
-fn has_trapped_scc(adjacency: &[Vec<usize>]) -> bool {
-    has_trapped_scc_with_edge_observer(adjacency, |_, _| {})
-}
-
-fn has_trapped_scc_with_edge_observer<F>(adjacency: &[Vec<usize>], mut observe_edge: F) -> bool
+fn trapped_scc_with_edge_observer<F>(
+    adjacency: &[Vec<usize>],
+    mut observe_edge: F,
+) -> Option<Vec<usize>>
 where
     F: FnMut(usize, usize),
 {
@@ -811,12 +810,12 @@ where
         on_stack: Vec<bool>,
         indices: Vec<Option<usize>>,
         lowlink: Vec<usize>,
-        trapped: bool,
+        trapped: Option<Vec<usize>>,
     }
 
     impl<F: FnMut(usize, usize)> Tarjan<'_, F> {
         fn strongconnect(&mut self, v: usize) {
-            if self.trapped {
+            if self.trapped.is_some() {
                 return;
             }
 
@@ -827,7 +826,7 @@ where
             self.on_stack[v] = true;
 
             for &w in &self.adjacency[v] {
-                if self.trapped {
+                if self.trapped.is_some() {
                     return;
                 }
 
@@ -835,7 +834,7 @@ where
 
                 if self.indices[w].is_none() {
                     self.strongconnect(w);
-                    if self.trapped {
+                    if self.trapped.is_some() {
                         return;
                     }
                     self.lowlink[v] = self.lowlink[v].min(self.lowlink[w]);
@@ -868,7 +867,8 @@ where
                         }
                     }
                     if !has_egress {
-                        self.trapped = true;
+                        component.sort_unstable();
+                        self.trapped = Some(component);
                     }
                 }
             }
@@ -884,25 +884,81 @@ where
         on_stack: vec![false; n],
         indices: vec![None; n],
         lowlink: vec![0; n],
-        trapped: false,
+        trapped: None,
     };
 
     for v in 0..n {
         if tarjan.indices[v].is_none() {
             tarjan.strongconnect(v);
-            if tarjan.trapped {
-                return true;
+            if tarjan.trapped.is_some() {
+                return tarjan.trapped;
             }
         }
     }
 
-    false
+    None
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+// Precise causes are populated as wait-site registration paths are wired up;
+// current production snapshots fall back to Unknown.
+#[allow(dead_code)]
+enum WaitCause {
+    Lock,
+    Channel,
+    Notify,
+    Join,
+    Unknown,
+}
+
+impl Default for WaitCause {
+    fn default() -> Self {
+        Self::Unknown
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, serde::Serialize)]
+struct WaitLocation {
+    file: Option<&'static str>,
+    line: Option<u32>,
+    label: Option<&'static str>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+struct WaitGraphEdgeSnapshot {
+    waiter: TaskId,
+    cause: WaitCause,
+    location: WaitLocation,
 }
 
 #[derive(Debug, Clone)]
 struct WaitGraphTaskSnapshot {
     id: TaskId,
     waiters: Vec<TaskId>,
+    wait_edges: Vec<WaitGraphEdgeSnapshot>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+struct DeadlockWaitEdgeReport {
+    waiter: TaskId,
+    blocked_on: TaskId,
+    cause: WaitCause,
+    location: WaitLocation,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+struct DeadlockCycleReport {
+    tasks: Vec<TaskId>,
+    edges: Vec<DeadlockWaitEdgeReport>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+struct WaitGraphSignalReport {
+    node_count: usize,
+    undirected_edges: Vec<(usize, usize)>,
+    trapped_wait_cycle: bool,
+    trapped_cycle: Option<DeadlockCycleReport>,
 }
 
 fn wait_graph_snapshot_from_state(state: &RuntimeState) -> Vec<WaitGraphTaskSnapshot> {
@@ -912,18 +968,29 @@ fn wait_graph_snapshot_from_state(state: &RuntimeState) -> Vec<WaitGraphTaskSnap
 
     for (_, task) in state.tasks_iter() {
         if !task.state.is_terminal() {
+            let wait_edges = task
+                .waiters
+                .iter()
+                .copied()
+                .map(|waiter| WaitGraphEdgeSnapshot {
+                    waiter,
+                    cause: WaitCause::Unknown,
+                    location: WaitLocation::default(),
+                })
+                .collect();
             snapshots.push(WaitGraphTaskSnapshot {
                 id: task.id,
                 waiters: task.waiters.to_vec(),
+                wait_edges,
             });
         }
     }
     snapshots
 }
 
-fn wait_graph_signals_from_snapshot(
+fn wait_graph_signal_report_from_snapshot(
     tasks: &[WaitGraphTaskSnapshot],
-) -> (usize, Vec<(usize, usize)>, bool) {
+) -> WaitGraphSignalReport {
     let mut live_tasks: Vec<TaskId> = tasks.iter().map(|task| task.id).collect();
     live_tasks.sort();
     let index_by_task: BTreeMap<TaskId, usize> = live_tasks
@@ -938,8 +1005,8 @@ fn wait_graph_signals_from_snapshot(
         let Some(&task_idx) = index_by_task.get(&task.id) else {
             continue;
         };
-        for waiter in &task.waiters {
-            if let Some(&waiter_idx) = index_by_task.get(waiter) {
+        for edge in &task.wait_edges {
+            if let Some(&waiter_idx) = index_by_task.get(&edge.waiter) {
                 adjacency[waiter_idx].push(task_idx);
                 if waiter_idx == task_idx {
                     continue;
@@ -951,18 +1018,94 @@ fn wait_graph_signals_from_snapshot(
                 });
             }
         }
+        if task.wait_edges.is_empty() {
+            for waiter in &task.waiters {
+                if let Some(&waiter_idx) = index_by_task.get(waiter) {
+                    adjacency[waiter_idx].push(task_idx);
+                    if waiter_idx == task_idx {
+                        continue;
+                    }
+                    undirected_edges.insert(if waiter_idx < task_idx {
+                        (waiter_idx, task_idx)
+                    } else {
+                        (task_idx, waiter_idx)
+                    });
+                }
+            }
+        }
     }
 
     for edges in &mut adjacency {
         edges.sort_unstable();
         edges.dedup();
     }
-    let trapped_cycle = has_trapped_scc(&adjacency);
+    let trapped_scc = trapped_scc_with_edge_observer(&adjacency, |_, _| {});
+    let trapped_cycle = trapped_scc.as_ref().map(|component| {
+        let component_set: BTreeSet<usize> = component.iter().copied().collect();
+        let cycle_tasks: Vec<TaskId> = component.iter().map(|idx| live_tasks[*idx]).collect();
+        let mut edges = Vec::new();
 
-    (
-        live_tasks.len(),
-        undirected_edges.into_iter().collect(),
+        for snapshot in tasks {
+            let Some(&task_idx) = index_by_task.get(&snapshot.id) else {
+                continue;
+            };
+            if !component_set.contains(&task_idx) {
+                continue;
+            }
+
+            for edge in &snapshot.wait_edges {
+                let Some(&waiter_idx) = index_by_task.get(&edge.waiter) else {
+                    continue;
+                };
+                if component_set.contains(&waiter_idx) {
+                    edges.push(DeadlockWaitEdgeReport {
+                        waiter: edge.waiter,
+                        blocked_on: snapshot.id,
+                        cause: edge.cause,
+                        location: edge.location,
+                    });
+                }
+            }
+            if snapshot.wait_edges.is_empty() {
+                for waiter in &snapshot.waiters {
+                    let Some(&waiter_idx) = index_by_task.get(waiter) else {
+                        continue;
+                    };
+                    if component_set.contains(&waiter_idx) {
+                        edges.push(DeadlockWaitEdgeReport {
+                            waiter: *waiter,
+                            blocked_on: snapshot.id,
+                            cause: WaitCause::Unknown,
+                            location: WaitLocation::default(),
+                        });
+                    }
+                }
+            }
+        }
+
+        edges.sort_by_key(|edge| (edge.waiter, edge.blocked_on, edge.cause, edge.location));
+        DeadlockCycleReport {
+            tasks: cycle_tasks,
+            edges,
+        }
+    });
+
+    WaitGraphSignalReport {
+        node_count: live_tasks.len(),
+        undirected_edges: undirected_edges.into_iter().collect(),
+        trapped_wait_cycle: trapped_cycle.is_some(),
         trapped_cycle,
+    }
+}
+
+fn wait_graph_signals_from_snapshot(
+    tasks: &[WaitGraphTaskSnapshot],
+) -> (usize, Vec<(usize, usize)>, bool) {
+    let report = wait_graph_signal_report_from_snapshot(tasks);
+    (
+        report.node_count,
+        report.undirected_edges,
+        report.trapped_wait_cycle,
     )
 }
 
@@ -9078,17 +9221,146 @@ mod tests {
     }
 
     #[test]
+    fn wait_graph_report_exposes_stable_trapped_cycle_task_ids_and_edges() {
+        let task_a = TaskId::new_for_test(10, 0);
+        let task_b = TaskId::new_for_test(20, 0);
+        let task_c = TaskId::new_for_test(30, 0);
+
+        let report = wait_graph_signal_report_from_snapshot(&[
+            WaitGraphTaskSnapshot {
+                id: task_a,
+                waiters: vec![task_b],
+                wait_edges: vec![WaitGraphEdgeSnapshot {
+                    waiter: task_b,
+                    cause: WaitCause::Lock,
+                    location: WaitLocation {
+                        file: Some("src/sync/mutex.rs"),
+                        line: Some(42),
+                        label: Some("mutex.lock"),
+                    },
+                }],
+            },
+            WaitGraphTaskSnapshot {
+                id: task_b,
+                waiters: vec![task_a],
+                wait_edges: vec![WaitGraphEdgeSnapshot {
+                    waiter: task_a,
+                    cause: WaitCause::Channel,
+                    location: WaitLocation {
+                        file: Some("src/channel/mpsc.rs"),
+                        line: Some(77),
+                        label: Some("recv"),
+                    },
+                }],
+            },
+            WaitGraphTaskSnapshot {
+                id: task_c,
+                waiters: vec![task_c],
+                wait_edges: vec![WaitGraphEdgeSnapshot {
+                    waiter: task_c,
+                    cause: WaitCause::Notify,
+                    location: WaitLocation {
+                        file: Some("src/sync/notify.rs"),
+                        line: Some(13),
+                        label: Some("notified"),
+                    },
+                }],
+            },
+        ]);
+
+        assert!(report.trapped_wait_cycle);
+        let cycle = report.trapped_cycle.expect("cycle report");
+        assert_eq!(
+            cycle.tasks,
+            vec![task_a, task_b],
+            "the first trapped SCC should expose stable sorted TaskIds"
+        );
+        assert_eq!(cycle.edges.len(), 2);
+        assert_eq!(cycle.edges[0].waiter, task_a);
+        assert_eq!(cycle.edges[0].blocked_on, task_b);
+        assert_eq!(cycle.edges[0].cause, WaitCause::Channel);
+        assert_eq!(cycle.edges[1].waiter, task_b);
+        assert_eq!(cycle.edges[1].blocked_on, task_a);
+        assert_eq!(cycle.edges[1].cause, WaitCause::Lock);
+
+        let serialized = serde_json::to_value(&cycle).expect("cycle report serializes");
+        assert!(serialized.get("tasks").is_some());
+        assert!(serialized.get("edges").is_some());
+    }
+
+    #[test]
+    fn wait_graph_report_covers_wait_cause_variants_and_missing_cause_fallback() {
+        for cause in [
+            WaitCause::Lock,
+            WaitCause::Channel,
+            WaitCause::Notify,
+            WaitCause::Join,
+        ] {
+            let task = TaskId::new_for_test(cause as u32 + 1, 0);
+            let report = wait_graph_signal_report_from_snapshot(&[WaitGraphTaskSnapshot {
+                id: task,
+                waiters: vec![task],
+                wait_edges: vec![WaitGraphEdgeSnapshot {
+                    waiter: task,
+                    cause,
+                    location: WaitLocation {
+                        file: Some("synthetic.rs"),
+                        line: Some(1),
+                        label: Some("test-wait"),
+                    },
+                }],
+            }]);
+            let cycle = report.trapped_cycle.expect("self cycle report");
+            assert_eq!(cycle.tasks, vec![task]);
+            assert_eq!(cycle.edges[0].cause, cause);
+        }
+
+        let fallback_task = TaskId::new_for_test(99, 0);
+        let fallback = wait_graph_signal_report_from_snapshot(&[WaitGraphTaskSnapshot {
+            id: fallback_task,
+            waiters: vec![fallback_task],
+            wait_edges: Vec::new(),
+        }]);
+        let fallback_cycle = fallback.trapped_cycle.expect("fallback self cycle report");
+        assert_eq!(fallback_cycle.edges[0].cause, WaitCause::Unknown);
+        assert_eq!(fallback_cycle.edges[0].location, WaitLocation::default());
+
+        let no_cycle_a = TaskId::new_for_test(100, 0);
+        let no_cycle_b = TaskId::new_for_test(101, 0);
+        let no_cycle = wait_graph_signal_report_from_snapshot(&[
+            WaitGraphTaskSnapshot {
+                id: no_cycle_a,
+                waiters: Vec::new(),
+                wait_edges: Vec::new(),
+            },
+            WaitGraphTaskSnapshot {
+                id: no_cycle_b,
+                waiters: vec![no_cycle_a],
+                wait_edges: Vec::new(),
+            },
+        ]);
+        assert!(!no_cycle.trapped_wait_cycle);
+        assert!(no_cycle.trapped_cycle.is_none());
+        assert_eq!(no_cycle.undirected_edges.len(), 1);
+    }
+
+    #[test]
     fn trapped_scc_detection_short_circuits_remaining_sibling_branches() {
         let adjacency = vec![vec![1, 3, 4], vec![2], vec![1], vec![5], vec![], vec![]];
         let mut visited_edges = Vec::new();
 
-        let trapped = has_trapped_scc_with_edge_observer(&adjacency, |from, to| {
+        let trapped = trapped_scc_with_edge_observer(&adjacency, |from, to| {
             visited_edges.push((from, to));
         });
 
         assert!(
-            trapped,
+            trapped.is_some(),
             "the cycle rooted under the first child should still be detected as trapped"
+        );
+        assert_eq!(
+            trapped.expect("trapped component"),
+            vec![1, 2],
+            "the trapped SCC report should preserve stable node identities"
         );
         assert_eq!(
             visited_edges,
