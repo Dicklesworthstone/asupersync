@@ -70,6 +70,47 @@ fn encode_fixture_stream(send: &[StreamItem], encode_error: &str) -> BytesMut {
     wire
 }
 
+fn decode_available(
+    decoder: &mut StreamCodec,
+    buf: &mut BytesMut,
+    decode_error: &str,
+) -> Vec<StreamItem> {
+    let mut out = Vec::new();
+    while let Some(item) = decoder.decode_message(buf).expect(decode_error) {
+        out.push(item);
+    }
+    out
+}
+
+fn stream_fingerprint(stream: &[StreamItem]) -> String {
+    let mut hash = 14_695_981_039_346_656_037_u64;
+    let mut total_payload_bytes = 0usize;
+
+    for item in stream {
+        total_payload_bytes += item.payload.len();
+        hash ^= u64::from(item.seq);
+        hash = hash.wrapping_mul(1_099_511_628_211);
+        hash ^= item.label.len() as u64;
+        hash = hash.wrapping_mul(1_099_511_628_211);
+        hash ^= item.payload.len() as u64;
+        hash = hash.wrapping_mul(1_099_511_628_211);
+    }
+
+    let first = stream
+        .first()
+        .map_or_else(|| "none".to_string(), |item| item.seq.to_string());
+    let last = stream
+        .last()
+        .map_or_else(|| "none".to_string(), |item| item.seq.to_string());
+    format!(
+        "count={},first={},last={},payload_bytes={},fnv1a64={hash:016x}",
+        stream.len(),
+        first,
+        last,
+        total_payload_bytes,
+    )
+}
+
 #[test]
 fn server_streaming_round_trip_preserves_order_for_100_messages() {
     let send: Vec<StreamItem> = build_fixture_stream();
@@ -172,4 +213,181 @@ fn server_streaming_partial_buffer_decodes_remaining_after_more_arrives() {
             "split round-trip drifted at index {i} (split-half boundary={half_count})",
         );
     }
+}
+
+#[test]
+fn conformance_grpc_streaming_ordering_matrix_logs_fingerprints() {
+    const EXACT_RCH_COMMAND: &str = "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_asupersync_2gblyo_streaming cargo test -p asupersync --test grpc_streaming_ordering_conformance -- --nocapture";
+
+    let log_case = |scenario_id: &str,
+                    message_count: usize,
+                    frame_count: usize,
+                    split_pattern: &str,
+                    input_order_fingerprint: &str,
+                    output_order_fingerprint: &str,
+                    cancellation_point: &str,
+                    error_kind: &str| {
+        eprintln!(
+            "GRPC_STREAM_ORDERING scenario_id={} message_count={} frame_count={} split_pattern={} input_order_fingerprint={} output_order_fingerprint={} cancellation_point={} error_kind={} exact_rch_command=\"{}\" artifact_paths=none final_ordering_preservation_verdict=pass",
+            scenario_id,
+            message_count,
+            frame_count,
+            split_pattern,
+            input_order_fingerprint,
+            output_order_fingerprint,
+            cancellation_point,
+            error_kind,
+            EXACT_RCH_COMMAND,
+        );
+    };
+
+    let empty_send: Vec<StreamItem> = Vec::new();
+    let mut empty_wire = encode_fixture_stream(&empty_send, "encode empty");
+    let mut empty_decoder = StreamCodec::new(ProstCodec::new());
+    let empty_received = decode_available(&mut empty_decoder, &mut empty_wire, "decode empty");
+    assert!(
+        empty_wire.is_empty(),
+        "empty stream should leave no buffered bytes"
+    );
+    assert_eq!(empty_received, empty_send, "empty stream must round-trip");
+    log_case(
+        "empty_stream",
+        0,
+        0,
+        "joined",
+        &stream_fingerprint(&empty_send),
+        &stream_fingerprint(&empty_received),
+        "none",
+        "ok",
+    );
+
+    let single_send = vec![build_fixture_stream()[0].clone()];
+    let mut single_wire = encode_fixture_stream(&single_send, "encode single");
+    let mut single_decoder = StreamCodec::new(ProstCodec::new());
+    let single_received = decode_available(&mut single_decoder, &mut single_wire, "decode single");
+    assert!(
+        single_wire.is_empty(),
+        "single-message stream must fully drain"
+    );
+    assert_eq!(
+        single_received, single_send,
+        "single-message stream must round-trip"
+    );
+    log_case(
+        "single_message",
+        1,
+        1,
+        "joined",
+        &stream_fingerprint(&single_send),
+        &stream_fingerprint(&single_received),
+        "none",
+        "ok",
+    );
+
+    let full_send = build_fixture_stream();
+    let mut full_wire = encode_fixture_stream(&full_send, "encode full");
+    let mut full_decoder = StreamCodec::new(ProstCodec::new());
+    let full_received = decode_available(&mut full_decoder, &mut full_wire, "decode full");
+    assert!(
+        full_wire.is_empty(),
+        "100-message joined stream must fully drain"
+    );
+    assert_eq!(
+        full_received, full_send,
+        "100-message joined stream must preserve order"
+    );
+    log_case(
+        "hundred_messages_joined",
+        full_send.len(),
+        full_send.len(),
+        "joined",
+        &stream_fingerprint(&full_send),
+        &stream_fingerprint(&full_received),
+        "none",
+        "ok",
+    );
+
+    let split_send = build_fixture_stream();
+    let split_wire = encode_fixture_stream(&split_send, "encode split");
+    let split_at = split_wire.len() / 3;
+    let mut split_buf = BytesMut::from(&split_wire[..split_at]);
+    let tail = split_wire[split_at..].to_vec();
+    let mut split_decoder = StreamCodec::new(ProstCodec::new());
+    let mut split_received =
+        decode_available(&mut split_decoder, &mut split_buf, "decode split partial");
+    let first_chunk_count = split_received.len();
+    assert!(
+        first_chunk_count < split_send.len(),
+        "partial split must pause before the full stream is available"
+    );
+    split_buf.extend_from_slice(&tail);
+    split_received.extend(decode_available(
+        &mut split_decoder,
+        &mut split_buf,
+        "decode split tail",
+    ));
+    assert!(
+        split_buf.is_empty(),
+        "split stream must fully drain after tail arrives"
+    );
+    assert_eq!(
+        split_received, split_send,
+        "split stream must preserve full order"
+    );
+    log_case(
+        "hundred_messages_fragmented",
+        split_send.len(),
+        split_send.len(),
+        &format!("prefix={}bytes_then_tail", split_at),
+        &stream_fingerprint(&split_send),
+        &stream_fingerprint(&split_received),
+        "none",
+        "ok",
+    );
+
+    let cancel_like_send = build_fixture_stream();
+    let cancel_like_wire = encode_fixture_stream(&cancel_like_send, "encode cancel-like");
+    let cancel_split_at = cancel_like_wire.len() / 3;
+    let mut cancel_buf = BytesMut::from(&cancel_like_wire[..cancel_split_at]);
+    let cancel_tail = cancel_like_wire[cancel_split_at..].to_vec();
+    let mut first_decoder = StreamCodec::new(ProstCodec::new());
+    let mut cancel_like_received = decode_available(
+        &mut first_decoder,
+        &mut cancel_buf,
+        "decode cancel-like prefix",
+    );
+    let cancellation_point = cancel_like_received.len();
+    assert!(
+        cancellation_point < cancel_like_send.len(),
+        "cancel-like split must stop mid-stream before full delivery"
+    );
+    drop(first_decoder);
+    cancel_buf.extend_from_slice(&cancel_tail);
+    let mut resumed_decoder = StreamCodec::new(ProstCodec::new());
+    cancel_like_received.extend(decode_available(
+        &mut resumed_decoder,
+        &mut cancel_buf,
+        "decode cancel-like resume",
+    ));
+    assert!(
+        cancel_buf.is_empty(),
+        "resume after cancel-like drop must fully drain remaining bytes"
+    );
+    assert_eq!(
+        cancel_like_received, cancel_like_send,
+        "resume after cancel-like drop must not duplicate or lose messages"
+    );
+    log_case(
+        "hundred_messages_resume_after_cancellation_like_drop",
+        cancel_like_send.len(),
+        cancel_like_send.len(),
+        &format!("prefix={}bytes_then_tail", cancel_split_at),
+        &stream_fingerprint(&cancel_like_send),
+        &stream_fingerprint(&cancel_like_received),
+        &format!(
+            "after_message_index={}",
+            cancellation_point.saturating_sub(1)
+        ),
+        "ok",
+    );
 }
