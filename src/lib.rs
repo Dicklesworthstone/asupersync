@@ -212,7 +212,6 @@ mod task_inspector_wire_conformance;
 pub mod cli;
 #[cfg(any(feature = "sqlite", feature = "postgres", feature = "mysql"))]
 pub mod database;
-#[cfg(feature = "tls")]
 pub mod tls;
 
 // ── Platform-specific modules (excluded from wasm32 browser builds) ─────

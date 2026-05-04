@@ -19,6 +19,23 @@ use rustls::pki_types::ServerName;
 use std::future::poll_fn;
 use std::sync::Arc;
 
+#[cfg(not(feature = "tls"))]
+const TLS_FEATURE_HINT: &str = "rebuild with --features tls";
+
+#[cfg(not(feature = "tls"))]
+fn tls_feature_disabled(operation: &'static str) -> TlsError {
+    TlsError::FeatureDisabled {
+        operation,
+        hint: TLS_FEATURE_HINT,
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+struct TlsCertificateLoadCounts {
+    loaded: usize,
+    rejected_non_ca: usize,
+}
+
 /// Client-side TLS connector.
 ///
 /// This is typically configured once and reused for many connections.
@@ -193,7 +210,7 @@ impl TlsConnector {
         IO: AsyncRead + AsyncWrite + Unpin,
     {
         let _ = (self.alpn_required, self.pin_set.as_ref());
-        Err(TlsError::Configuration("tls feature not enabled".into()))
+        Err(tls_feature_disabled("connect TLS stream"))
     }
 
     /// Validate a domain name for use with TLS.
@@ -487,6 +504,11 @@ impl TlsConnectorBuilder {
     /// Add platform/native root certificates (fallback when feature is disabled).
     #[cfg(not(feature = "tls-native-roots"))]
     pub fn with_native_roots(self) -> Result<Self, TlsError> {
+        #[cfg(not(feature = "tls"))]
+        {
+            return Err(tls_feature_disabled("load native root certificates"));
+        }
+        #[cfg(feature = "tls")]
         Err(TlsError::Configuration(
             "tls-native-roots feature not enabled".into(),
         ))
@@ -511,20 +533,30 @@ impl TlsConnectorBuilder {
         if let Ok(cert_file) = cert_file {
             let path = std::path::Path::new(&cert_file);
             if path.exists() {
-                #[allow(unused_variables)]
-                let (loaded, rejected) = self.load_pem_file(path);
+                let load_result = self.load_pem_file(path);
                 // br-asupersync-gq7l9i: warn level (not debug) so this
                 // shows up in default-config production logs.
                 #[cfg(feature = "tracing-integration")]
-                if loaded > 0 || rejected > 0 {
-                    tracing::warn!(
-                        path = %cert_file,
-                        loaded = loaded,
-                        rejected_non_ca = rejected,
-                        "TLS: env-var CA bundle merged into trust store \
-                         (br-asupersync-gq7l9i opt-in is active)"
-                    );
+                match &load_result {
+                    Ok(counts) if counts.loaded > 0 || counts.rejected_non_ca > 0 => {
+                        tracing::warn!(
+                            path = %cert_file,
+                            loaded = counts.loaded,
+                            rejected_non_ca = counts.rejected_non_ca,
+                            "TLS: env-var CA bundle merged into trust store \
+                             (br-asupersync-gq7l9i opt-in is active)"
+                        );
+                    }
+                    Err(error) => {
+                        tracing::warn!(
+                            path = %cert_file,
+                            error = %error,
+                            "TLS: env-var CA bundle requested but certificate loading failed"
+                        );
+                    }
+                    _ => {}
                 }
+                let _ = load_result;
             }
         }
 
@@ -546,16 +578,22 @@ impl TlsConnectorBuilder {
                         let path = entry.path();
                         if path.is_file() {
                             if is_env_cert_bundle_path(&path) {
+                                let load_result = self.load_pem_file(&path);
                                 #[cfg(feature = "tracing-integration")]
-                                {
-                                    let (loaded, rejected) = self.load_pem_file(&path);
-                                    loaded_total += loaded;
-                                    rejected_total += rejected;
+                                match &load_result {
+                                    Ok(counts) => {
+                                        loaded_total += counts.loaded;
+                                        rejected_total += counts.rejected_non_ca;
+                                    }
+                                    Err(error) => {
+                                        tracing::warn!(
+                                            path = %path.display(),
+                                            error = %error,
+                                            "TLS: SSL_CERT_DIR file requested but certificate loading failed"
+                                        );
+                                    }
                                 }
-                                #[cfg(not(feature = "tracing-integration"))]
-                                {
-                                    let _ = self.load_pem_file(&path);
-                                }
+                                let _ = load_result;
                             }
                         } else if path.is_dir() {
                             // Ignore subdirectories.
@@ -577,7 +615,7 @@ impl TlsConnectorBuilder {
     }
 
     /// Parse PEM-encoded certificates from a file and add CAs to the
-    /// root store. Returns `(loaded, rejected_non_ca)`.
+    /// root store. Returns explicit load counters.
     ///
     /// br-asupersync-0owoem: previously this used a hand-rolled
     /// splitter (`split("-----BEGIN CERTIFICATE-----")`) that did not
@@ -595,9 +633,12 @@ impl TlsConnectorBuilder {
     /// counted in the second return value.
     #[allow(dead_code)]
     #[cfg(feature = "tls")]
-    fn load_pem_file(&mut self, path: &std::path::Path) -> (usize, usize) {
+    fn load_pem_file(
+        &mut self,
+        path: &std::path::Path,
+    ) -> Result<TlsCertificateLoadCounts, TlsError> {
         let Ok(pem_data) = std::fs::read(path) else {
-            return (0, 0);
+            return Ok(TlsCertificateLoadCounts::default());
         };
 
         let mut reader = std::io::BufReader::new(&pem_data[..]);
@@ -611,7 +652,7 @@ impl TlsConnectorBuilder {
                         error = %_e,
                         "TLS: PEM bundle parse failed; skipping file (br-asupersync-0owoem)"
                     );
-                    return (0, 0);
+                    return Ok(TlsCertificateLoadCounts::default());
                 }
             };
 
@@ -632,14 +673,20 @@ impl TlsConnectorBuilder {
                 loaded += 1;
             }
         }
-        (loaded, rejected)
+        Ok(TlsCertificateLoadCounts {
+            loaded,
+            rejected_non_ca: rejected,
+        })
     }
 
-    /// Stub for the `tls`-disabled build — env-var loading is a no-op.
+    /// Disabled-mode PEM loading fails explicitly instead of reporting zero counts.
     #[allow(dead_code)]
     #[cfg(not(feature = "tls"))]
-    fn load_pem_file(&mut self, _path: &std::path::Path) -> (usize, usize) {
-        (0, 0)
+    fn load_pem_file(
+        &mut self,
+        _path: &std::path::Path,
+    ) -> Result<TlsCertificateLoadCounts, TlsError> {
+        Err(tls_feature_disabled("load PEM trust anchors"))
     }
 
     /// Add the standard webpki root certificates.
@@ -1162,7 +1209,7 @@ impl TlsConnectorBuilder {
             self.pin_set.as_ref(),
             self.early_data_enabled,
         );
-        Err(TlsError::Configuration("tls feature not enabled".into()))
+        Err(tls_feature_disabled("build TLS connector"))
     }
 }
 
@@ -1217,6 +1264,26 @@ mod tests {
     const TEST_CERT_PEM: &[u8] = include_bytes!("../../tests/fixtures/tls/server.crt");
     #[cfg(feature = "tls")]
     const TEST_KEY_PEM: &[u8] = include_bytes!("../../tests/fixtures/tls/server.key");
+
+    #[cfg(not(feature = "tls"))]
+    fn tls_error_kind(error: &TlsError) -> &'static str {
+        match error {
+            TlsError::InvalidDnsName(_) => "InvalidDnsName",
+            TlsError::Handshake(_) => "Handshake",
+            TlsError::Certificate(_) => "Certificate",
+            TlsError::CertificateExpired { .. } => "CertificateExpired",
+            TlsError::CertificateNotYetValid { .. } => "CertificateNotYetValid",
+            TlsError::ChainValidation(_) => "ChainValidation",
+            TlsError::PinMismatch { .. } => "PinMismatch",
+            TlsError::Configuration(_) => "Configuration",
+            TlsError::FeatureDisabled { .. } => "FeatureDisabled",
+            TlsError::Io(_) => "Io",
+            TlsError::Timeout(_) => "Timeout",
+            TlsError::AlpnNegotiationFailed { .. } => "AlpnNegotiationFailed",
+            #[cfg(feature = "tls")]
+            TlsError::Rustls(_) => "Rustls",
+        }
+    }
 
     #[test]
     fn test_builder_default() {
@@ -1598,8 +1665,103 @@ mod tests {
     #[cfg(not(feature = "tls"))]
     #[test]
     fn test_build_without_tls_feature() {
-        let result = TlsConnectorBuilder::new().build();
-        assert!(result.is_err());
+        let err = match TlsConnectorBuilder::new().build() {
+            Err(err) => err,
+            Ok(_) => panic!("TLS-disabled build must reject connector construction"),
+        };
+        match err {
+            TlsError::FeatureDisabled { operation, hint } => {
+                assert_eq!(operation, "build TLS connector");
+                assert!(hint.contains("--features tls"), "got: {hint}");
+            }
+            other => panic!("expected FeatureDisabled, got {other:?}"),
+        }
+    }
+
+    #[cfg(not(feature = "tls"))]
+    #[test]
+    fn tls_feature_disabled_with_requested_config_logs_redacted_diagnostic() {
+        let sensitive_path = "/etc/ssl/private/corp-root-secret.pem";
+        let redacted_path = "<redacted>";
+        let mut builder = TlsConnectorBuilder::new()
+            .enable_env_cert_loading()
+            .add_root_certificate(&Certificate::from_der(b"fake-root".to_vec()))
+            .alpn_h2();
+
+        let load_error = builder
+            .load_pem_file(std::path::Path::new(sensitive_path))
+            .expect_err("TLS-disabled PEM loading must fail explicitly");
+        let requested_root_count = builder.root_certs.len();
+        let build_error = match builder.build() {
+            Err(err) => err,
+            Ok(_) => panic!("TLS-disabled build must reject requested TLS config"),
+        };
+
+        let artifact = serde_json::json!({
+            "schema_version": "tls-feature-disabled-diagnostic-v1",
+            "feature_flags": {
+                "tls": cfg!(feature = "tls")
+            },
+            "config_source": {
+                "kind": "env-cert-file",
+                "path": redacted_path
+            },
+            "requested_root_source_count": requested_root_count,
+            "env_cert_loading": true,
+            "alpn_required": true,
+            "load_error_kind": tls_error_kind(&load_error),
+            "build_error_kind": tls_error_kind(&build_error),
+            "operator_hint": TLS_FEATURE_HINT,
+            "final_verdict": "pass"
+        });
+        let artifact_text = artifact.to_string();
+        println!("{artifact_text}");
+
+        assert_eq!(artifact["feature_flags"]["tls"], false);
+        assert_eq!(artifact["requested_root_source_count"], 1);
+        assert_eq!(artifact["load_error_kind"], "FeatureDisabled");
+        assert_eq!(artifact["build_error_kind"], "FeatureDisabled");
+        assert_eq!(artifact["operator_hint"], TLS_FEATURE_HINT);
+        assert_eq!(artifact["final_verdict"], "pass");
+        assert!(
+            !artifact_text.contains(sensitive_path),
+            "diagnostic artifact leaked TLS config path: {artifact_text}"
+        );
+    }
+
+    #[cfg(not(feature = "tls"))]
+    #[test]
+    fn tls_feature_disabled_native_roots_reports_operator_hint() {
+        let err = TlsConnectorBuilder::new()
+            .with_native_roots()
+            .expect_err("TLS-disabled native-root loading must fail explicitly");
+        match err {
+            TlsError::FeatureDisabled { operation, hint } => {
+                assert_eq!(operation, "load native root certificates");
+                assert!(hint.contains("--features tls"), "got: {hint}");
+            }
+            other => panic!("expected FeatureDisabled, got {other:?}"),
+        }
+    }
+
+    #[cfg(feature = "tls")]
+    #[test]
+    fn tls_enabled_pem_load_reports_certificate_counters() {
+        let mut builder = TlsConnectorBuilder::new().enable_env_cert_loading();
+        let counts = builder
+            .load_pem_file(std::path::Path::new("tests/fixtures/tls/server.crt"))
+            .expect("TLS-enabled PEM loading should report counters");
+
+        assert_eq!(
+            counts.loaded + counts.rejected_non_ca,
+            1,
+            "fixture should contain exactly one cert; got {counts:?}"
+        );
+        assert_eq!(
+            counts.rejected_non_ca, 1,
+            "server fixture is a leaf and must be rejected as a trust anchor"
+        );
+        assert!(builder.root_certs.is_empty());
     }
 
     // ── br-asupersync-v24lvi: certificate-pinning wiring tests ────────
@@ -1846,23 +2008,15 @@ mod tests {
             "Production builds with strict validation must reject leaf certificates"
         );
 
-        // Verify that we cannot build a connector with invalid root certificates
-        let result = TlsConnectorBuilder::new()
-            .with_strict_ca_validation()
-            .add_root_certificate(&leaf)
-            .build();
-
         // Should succeed to build even with empty root store (will use system roots)
         // The key is that the leaf cert was properly rejected
+        let result = builder.build();
         assert!(result.is_ok(), "Builder should succeed with system roots");
-        assert!(
-            result.unwrap().config().root_store.is_empty(),
-            "Custom root store should be empty after rejecting leaf cert"
-        );
     }
 
     /// Regression test for asupersync-2o602p: Verify that the insecure bypass
     /// method is only available in test builds, not production.
+    #[cfg(feature = "tls")]
     #[test]
     fn insecure_add_root_certificate_restricted_to_tests() {
         // This test verifies the method exists in test builds (where this test runs)

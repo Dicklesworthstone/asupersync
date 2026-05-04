@@ -86,6 +86,13 @@ pub enum TlsError {
     },
     /// Configuration error.
     Configuration(String),
+    /// TLS support was requested from a build compiled without the `tls` feature.
+    FeatureDisabled {
+        /// Operation that required TLS support.
+        operation: &'static str,
+        /// Operator-facing rebuild hint.
+        hint: &'static str,
+    },
     /// I/O error during TLS operations.
     Io(io::Error),
     /// TLS operation timed out.
@@ -158,6 +165,9 @@ impl fmt::Display for TlsError {
                 )
             }
             Self::Configuration(msg) => write!(f, "TLS configuration error: {msg}"),
+            Self::FeatureDisabled { operation, hint } => {
+                write!(f, "TLS feature disabled for {operation}: {hint}")
+            }
             Self::Io(err) => {
                 // io::Error Display can include peer-controlled paths
                 // (e.g., file-not-found with attacker-supplied filename).
@@ -368,6 +378,18 @@ mod tests {
         let msg = err.to_string();
         assert!(msg.contains("configuration error"), "{msg}");
         assert!(msg.contains("no cipher suites"), "{msg}");
+    }
+
+    #[test]
+    fn display_feature_disabled_includes_operation_and_hint() {
+        let err = TlsError::FeatureDisabled {
+            operation: "build TLS connector",
+            hint: "rebuild with --features tls",
+        };
+        let msg = err.to_string();
+        assert!(msg.contains("TLS feature disabled"), "{msg}");
+        assert!(msg.contains("build TLS connector"), "{msg}");
+        assert!(msg.contains("--features tls"), "{msg}");
     }
 
     #[test]

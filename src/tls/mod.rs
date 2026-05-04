@@ -35,7 +35,9 @@
 //! handshake completes, read/write operations follow the cancel-safety
 //! properties of the underlying I/O traits.
 
+#[cfg(any(test, feature = "tls"))]
 use crate::cx::Cx;
+#[cfg(any(test, feature = "tls"))]
 use crate::types::Time;
 
 mod acceptor;
