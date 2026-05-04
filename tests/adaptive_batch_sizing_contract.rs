@@ -704,7 +704,8 @@ fn adaptive_batch_cancel_floor_records_conservative_reason() {
         AdaptiveBatchDecisionReason::CancelDebtFloor
     );
     assert_eq!(adaptive.cancel_floor_hits, 1);
-    assert!(adaptive.cancel_debt >= 1);
+    assert_eq!(projection.adaptive.batch_reason, "cancel_debt_floor");
+    assert_eq!(projection.adaptive.cancel_floor_hits, 1);
     assert_eq!(projection.comparison.winner_profile, "fixed");
     assert!(projection.comparison.no_win_trigger);
 }
