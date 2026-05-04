@@ -113,6 +113,7 @@ mod tests {
         clippy::future_not_send
     )]
     use super::*;
+    use proptest::prelude::*;
 
     fn init_test(name: &str) {
         crate::test_utils::init_test_logging();
@@ -180,6 +181,77 @@ mod tests {
         let ok = dst == [1, 2, 3, 4, 5, 6];
         crate::assert_with_log!(ok, "dst", [1, 2, 3, 4, 5, 6], dst);
         crate::test_complete!("test_chain_copy_to_slice");
+    }
+
+    proptest! {
+        #[test]
+        fn chain_metamorphic_nested_associativity_matches_flat_bytes(
+            a in prop::collection::vec(any::<u8>(), 0..33),
+            b in prop::collection::vec(any::<u8>(), 0..33),
+            c in prop::collection::vec(any::<u8>(), 0..33),
+            read_steps in prop::collection::vec(0usize..64, 0..64),
+        ) {
+            let mut expected = Vec::with_capacity(a.len() + b.len() + c.len());
+            expected.extend_from_slice(&a);
+            expected.extend_from_slice(&b);
+            expected.extend_from_slice(&c);
+
+            let mut left_nested = Chain::new(
+                Chain::new(a.as_slice(), b.as_slice()),
+                c.as_slice(),
+            );
+            let mut right_nested = Chain::new(
+                a.as_slice(),
+                Chain::new(b.as_slice(), c.as_slice()),
+            );
+            let mut observed = Vec::with_capacity(expected.len());
+
+            prop_assert_eq!(left_nested.remaining(), expected.len());
+            prop_assert_eq!(right_nested.remaining(), expected.len());
+
+            for raw_step in read_steps {
+                if !left_nested.has_remaining() {
+                    break;
+                }
+
+                prop_assert_eq!(left_nested.remaining(), right_nested.remaining());
+                let read_len = 1 + raw_step % left_nested.remaining();
+
+                let mut left_bytes = vec![0u8; read_len];
+                left_nested.copy_to_slice(&mut left_bytes);
+
+                let mut right_bytes = vec![0u8; read_len];
+                right_nested.copy_to_slice(&mut right_bytes);
+
+                prop_assert_eq!(
+                    left_bytes.as_slice(),
+                    right_bytes.as_slice(),
+                    "nested Chain shapes must emit identical segmented reads",
+                );
+                observed.extend_from_slice(&left_bytes);
+                prop_assert_eq!(left_nested.remaining(), right_nested.remaining());
+                prop_assert_eq!(&expected[..observed.len()], observed.as_slice());
+            }
+
+            let final_len = left_nested.remaining();
+            prop_assert_eq!(final_len, right_nested.remaining());
+
+            let mut left_tail = vec![0u8; final_len];
+            left_nested.copy_to_slice(&mut left_tail);
+
+            let mut right_tail = vec![0u8; final_len];
+            right_nested.copy_to_slice(&mut right_tail);
+
+            prop_assert_eq!(
+                left_tail.as_slice(),
+                right_tail.as_slice(),
+                "nested Chain shapes must emit identical tails",
+            );
+            observed.extend_from_slice(&left_tail);
+            prop_assert_eq!(observed.as_slice(), expected.as_slice());
+            prop_assert_eq!(left_nested.remaining(), 0);
+            prop_assert_eq!(right_nested.remaining(), 0);
+        }
     }
 
     #[test]
