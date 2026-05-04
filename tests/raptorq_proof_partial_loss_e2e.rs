@@ -172,10 +172,7 @@ fn raptorq_proof_partial_loss_recovers_original_and_replays() {
         &[
             ("phase", "replay"),
             ("ok", if replay.is_ok() { "true" } else { "false" }),
-            (
-                "content_hash_hex",
-                &format!("{:016x}", proof.content_hash()),
-            ),
+            ("content_hash_hex", &proof.content_hash().to_hex()),
         ],
     );
     replay.expect("replay_and_verify must succeed on the originating symbol set");
