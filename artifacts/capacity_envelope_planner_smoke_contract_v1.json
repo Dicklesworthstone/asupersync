@@ -231,18 +231,18 @@
         "host_cpu_cores": 64,
         "host_memory_gib": 256,
         "min_sample_count": 32,
-        "projection_hash": 6971661584632454468,
+        "projection_hash": 6593904560630870618,
         "proof_artifact_count": 6,
-        "refusal_count": 0,
-        "refused_agent_min": 512,
+        "refusal_count": 1,
+        "refused_agent_min": 256,
         "refused_worker_min": 48,
-        "safe_agent_max": 512,
-        "safe_worker_max": 64,
+        "safe_agent_max": 0,
+        "safe_worker_max": 0,
         "sample_count": 96,
-        "selected_profile": "locality_first_64c_256g",
-        "target_cancel_debt_units": 130,
-        "target_p99_ns": 1300000,
-        "used_safe_fallback": false
+        "selected_profile": "conservative_baseline",
+        "target_cancel_debt_units": 120,
+        "target_p99_ns": 1200000,
+        "used_safe_fallback": true
       }
     },
     {
