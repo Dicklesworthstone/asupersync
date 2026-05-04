@@ -58,14 +58,14 @@ fn validate_matrix_entry(entry: &Value, required_fields: &[String]) -> Result<()
     let artifact_path = entry["artifact_path"]
         .as_str()
         .ok_or_else(|| "artifact_path must be string".to_string())?;
-    if !Path::new(artifact_path).exists() {
-        return Err(format!("artifact path missing: {artifact_path}"));
+    if proof_status == "trusted" && !Path::new(artifact_path).exists() {
+        return Err(format!("trusted artifact path missing: {artifact_path}"));
     }
     let runner_path = entry["runner_path"]
         .as_str()
         .ok_or_else(|| "runner_path must be string".to_string())?;
-    if !Path::new(runner_path).exists() {
-        return Err(format!("runner path missing: {runner_path}"));
+    if proof_status == "trusted" && !Path::new(runner_path).exists() {
+        return Err(format!("trusted runner path missing: {runner_path}"));
     }
 
     let operator_fields = entry["operator_fields"]
@@ -706,6 +706,73 @@ fn missing_matrix_field_is_rejected() {
         validate_artifact(&artifact)
             .expect_err("missing config_gate should fail")
             .contains("config_gate")
+    );
+}
+
+#[test]
+fn trusted_entry_with_missing_paths_is_rejected() {
+    let mut artifact = load_artifact();
+    let entry = artifact["signoff_matrix"][0]
+        .as_object_mut()
+        .expect("entry object");
+    entry.insert(
+        "artifact_path".to_string(),
+        Value::String("artifacts/does-not-exist.json".to_string()),
+    );
+    assert!(
+        validate_artifact(&artifact)
+            .expect_err("trusted row with missing artifact should fail")
+            .contains("trusted artifact path missing")
+    );
+}
+
+#[test]
+fn fail_closed_entry_with_missing_paths_is_accepted() {
+    let mut artifact = load_artifact();
+    let entry = artifact["signoff_matrix"][0]
+        .as_object_mut()
+        .expect("entry object");
+    entry.insert(
+        "proof_status".to_string(),
+        Value::String("fail_closed".to_string()),
+    );
+    entry.insert(
+        "tracker_status".to_string(),
+        Value::String("open".to_string()),
+    );
+    entry.insert(
+        "blocker_reason".to_string(),
+        Value::String("missing committed artifact/runner pair".to_string()),
+    );
+    entry.insert(
+        "artifact_path".to_string(),
+        Value::String("artifacts/does-not-exist.json".to_string()),
+    );
+    entry.insert(
+        "runner_path".to_string(),
+        Value::String("scripts/run-does-not-exist.sh".to_string()),
+    );
+    validate_artifact(&artifact)
+        .expect("fail_closed rows may point at missing committed artifact/runner paths");
+}
+
+#[test]
+fn signoff_matrix_covers_dependency_rows_called_out_by_wqsael() {
+    let artifact = load_artifact();
+    let control_ids: BTreeSet<String> = artifact["signoff_matrix"]
+        .as_array()
+        .expect("signoff_matrix must be array")
+        .iter()
+        .filter_map(|entry| entry["control_id"].as_str())
+        .map(ToOwned::to_owned)
+        .collect();
+    assert!(
+        control_ids.contains("jetstream_publish_backpressure"),
+        "signoff matrix must cover dpdmsy JetStream publish backpressure"
+    );
+    assert!(
+        control_ids.contains("compile_frontier_movement"),
+        "signoff matrix must cover i1vce6 compile-frontier movement proof"
     );
 }
 

@@ -26,8 +26,8 @@
   ],
   "tracked_dirty_blocker_fixture_paths": [
     ".beads/issues.jsonl",
+    "src/grpc/health.rs",
     "src/lib.rs",
-    "src/supervision.rs",
     "src/tls/connector.rs",
     "src/tls/error.rs"
   ],
@@ -316,6 +316,65 @@
       "blocker_reason": "shadow-run gate is shipped on main but the tracker bead remains open, so signoff must still fail closed on rollout status",
       "report_glob": "target/signed-profile-bundle-smoke/run_*/AA-SIGNED-PROFILE-BUNDLE-SHADOW-RUN-*/run_report.json",
       "reproduction_command": "scripts/run_signed_profile_bundle_smoke.sh --scenario AA-SIGNED-PROFILE-BUNDLE-SHADOW-RUN-HOLD-64C-256G --execute"
+    },
+    {
+      "control_id": "jetstream_publish_backpressure",
+      "tracker_bead_id": "asupersync-dpdmsy",
+      "tracker_status": "open",
+      "artifact_path": "artifacts/jetstream_publish_backpressure_smoke_contract_v1.json",
+      "contract_version": "jetstream-publish-backpressure-smoke-contract-v1",
+      "runner_path": "scripts/run_jetstream_publish_backpressure_smoke.sh",
+      "scenario_ids": [
+        "AA-JETSTREAM-PUBLISH-BACKPRESSURE-SLOW-ACKS",
+        "AA-JETSTREAM-PUBLISH-BACKPRESSURE-NO-WIN-FALLBACK"
+      ],
+      "config_gate": "publish in-flight bounds, waiter bounds, and pressure telemetry must stay explicit, deterministic, and operator-visible",
+      "fallback_mode": "retain the conservative TCP-only publish path and fail closed until bounded publish pressure proves stable under delayed or missing ACKs",
+      "unit_proof_ref": "src/messaging/jetstream_flow_control_audit.rs, tests/jetstream_flow_control_audit.rs",
+      "e2e_proof_ref": "rch exec -- cargo test -p asupersync --lib jetstream --features test-internals -- --nocapture",
+      "operator_fields": [
+        "configured_in_flight_bound",
+        "max_waiter_count",
+        "pressure_event_count",
+        "ack_release_count",
+        "max_resident_publish_bytes",
+        "publish_wait_latency_p99_us",
+        "publish_wait_latency_p999_us",
+        "overflow_refusal_reason"
+      ],
+      "rollback_surface": "retain_conservative_publish_path",
+      "proof_status": "fail_closed",
+      "blocker_reason": "only audit and consumer-side flow-control proofs exist on main; the committed publish-backpressure artifact/runner pair and bounded waiter or p999 evidence are still missing",
+      "report_glob": "target/jetstream-publish-backpressure-smoke/run_*/AA-JETSTREAM-PUBLISH-BACKPRESSURE-*/run_report.json",
+      "reproduction_command": "rch exec -- cargo test -p asupersync --lib jetstream --features test-internals -- --nocapture"
+    },
+    {
+      "control_id": "compile_frontier_movement",
+      "tracker_bead_id": "asupersync-i1vce6",
+      "tracker_status": "closed",
+      "artifact_path": "artifacts/compile_frontier_movement_proof_v1.json",
+      "contract_version": "compile-frontier-movement-proof-v1",
+      "runner_path": "scripts/run_compile_frontier_movement_smoke.sh",
+      "scenario_ids": [
+        "AA-COMPILE-FRONTIER-MOVEMENT-AUDIT-NOTIFY"
+      ],
+      "config_gate": "targeted downstream proofs must reach their intended module without deleting tests or hiding failures behind broad cfg gates",
+      "fallback_mode": "keep final signoff fail closed until compile-frontier movement is materialized as a committed artifact and runner bundle with first-failure evidence",
+      "unit_proof_ref": "src/sync/notify.rs::audit_notify_send_sync_bounds",
+      "e2e_proof_ref": "rch exec -- cargo test -p asupersync --lib audit_notify_send_sync_bounds --features test-internals -- --nocapture",
+      "operator_fields": [
+        "target_command",
+        "first_failure_before",
+        "first_failure_after",
+        "downstream_test_binary_compiled",
+        "no_cfg_hide_confirmation",
+        "frontier_outcome_verdict"
+      ],
+      "rollback_surface": "not_applicable",
+      "proof_status": "fail_closed",
+      "blocker_reason": "the compile-debt umbrella is closed and the downstream notify proof now runs, but signoff still lacks a committed compile-frontier artifact/runner pair with checksums and first-failure movement evidence",
+      "report_glob": "target/compile-frontier-movement-smoke/run_*/AA-COMPILE-FRONTIER-MOVEMENT-*/run_report.json",
+      "reproduction_command": "rch exec -- cargo test -p asupersync --lib audit_notify_send_sync_bounds --features test-internals -- --nocapture"
     }
   ],
   "smoke_scenarios": [
@@ -326,10 +385,10 @@
       "expected_report_projection": {
         "signoff_verdict": "fail_closed",
         "host_template_mode": false,
-        "child_artifact_count": 9,
+        "child_artifact_count": 11,
       "trusted_child_count": 1,
-      "fail_closed_child_count": 8,
-      "open_tracker_blocker_count": 7,
+      "fail_closed_child_count": 10,
+      "open_tracker_blocker_count": 8,
       "dirty_cluster_fail_closed_count": 1,
       "tracked_dirty_blocker_count": 5,
       "source_skill_count": 4,
@@ -344,11 +403,11 @@
       "missing_required_objective_requirement_count": 0,
       "unmapped_objective_requirement_count": 0,
       "selected_bead_mapping_count": 17,
-      "missing_artifact_path_count": 0,
-      "missing_runner_path_count": 0,
+      "missing_artifact_path_count": 2,
+      "missing_runner_path_count": 2,
       "objective_checklist_complete": true,
       "no_unexplained_artifacts": false,
-      "projection_hash": "d651896e39107688afea937a8ea077e7a22e1d7823359be93e4429aac5a3a374"
+      "projection_hash": "a968b897afc94b8afc2bd840d25bec4fbc088eb452606869857fe96ccea08888"
     },
     "required_log_fields": [
       "scenario_id",
@@ -393,10 +452,10 @@
       "expected_report_projection": {
         "signoff_verdict": "template_only",
         "host_template_mode": true,
-        "child_artifact_count": 9,
+        "child_artifact_count": 11,
       "trusted_child_count": 1,
-      "fail_closed_child_count": 8,
-      "open_tracker_blocker_count": 7,
+      "fail_closed_child_count": 10,
+      "open_tracker_blocker_count": 8,
       "dirty_cluster_fail_closed_count": 1,
       "tracked_dirty_blocker_count": 5,
       "source_skill_count": 4,
@@ -411,11 +470,11 @@
       "missing_required_objective_requirement_count": 0,
       "unmapped_objective_requirement_count": 0,
       "selected_bead_mapping_count": 17,
-      "missing_artifact_path_count": 0,
-      "missing_runner_path_count": 0,
+      "missing_artifact_path_count": 2,
+      "missing_runner_path_count": 2,
       "objective_checklist_complete": true,
       "no_unexplained_artifacts": false,
-      "projection_hash": "ab59d830a0031c56e07ac5982f3fa3dd9a3a8e52c21e6c005700e54e5371c085"
+      "projection_hash": "71f6f8654ed27c04bfaca633dada0f8aa86b77c62a2fb0825e6c03470c1423f1"
     },
     "required_log_fields": [
       "scenario_id",
