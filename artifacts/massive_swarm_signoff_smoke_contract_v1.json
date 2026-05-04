@@ -5,10 +5,17 @@
   "runner_script": "scripts/run_massive_swarm_signoff_smoke.sh",
   "runner_bundle_schema_version": "massive-swarm-signoff-smoke-bundle-v1",
   "runner_report_schema_version": "massive-swarm-signoff-smoke-run-report-v1",
+  "tracked_dirty_blocker_fixture_paths": [
+    ".beads/issues.jsonl",
+    "src/actor.rs",
+    "src/tls/connector.rs",
+    "src/tls/error.rs"
+  ],
   "blocked_dependency_policy": {
     "fail_closed_conditions": [
       "open tracker bead on a required operator-chain control",
       "generated artifact inventory still reports fail_closed clusters",
+      "tracked dirty files remain in the shared worktree",
       "missing artifact path or runner path",
       "missing fallback explanation",
       "missing rollback-safe surface where required"
@@ -304,10 +311,11 @@
         "fail_closed_child_count": 8,
         "open_tracker_blocker_count": 7,
         "dirty_cluster_fail_closed_count": 1,
+        "tracked_dirty_blocker_count": 4,
         "missing_artifact_path_count": 0,
         "missing_runner_path_count": 0,
         "no_unexplained_artifacts": false,
-        "projection_hash": "138327ae093313c78ee002a1bfeb4588a427b2be44075dfc07241ae0e13201e2"
+        "projection_hash": "734b91583d07a74d92f9bdca568ed8aa50fb72a809c852a81c1902126fa74063"
       },
       "required_log_fields": [
         "scenario_id",
@@ -318,9 +326,11 @@
         "fail_closed_child_count",
         "open_tracker_blocker_count",
         "dirty_cluster_fail_closed_count",
+        "tracked_dirty_blocker_count",
         "missing_artifact_path_count",
         "missing_runner_path_count",
         "no_unexplained_artifacts",
+        "tracked_dirty_paths",
         "signoff_verdict",
         "generated_artifact_paths",
         "final_verdict"
@@ -338,10 +348,11 @@
         "fail_closed_child_count": 8,
         "open_tracker_blocker_count": 7,
         "dirty_cluster_fail_closed_count": 1,
+        "tracked_dirty_blocker_count": 4,
         "missing_artifact_path_count": 0,
         "missing_runner_path_count": 0,
         "no_unexplained_artifacts": false,
-        "projection_hash": "0c3ba09d9ad47a712a72d4ae1dbc39c7030d0d2797caf99ec3ce48b21a04e2e6"
+        "projection_hash": "d5d0ad2c3ab2fc3c1898c976e3dcb91dfa6e73560629f2375645eb23136c3064"
       },
       "required_log_fields": [
         "scenario_id",
@@ -352,9 +363,11 @@
         "fail_closed_child_count",
         "open_tracker_blocker_count",
         "dirty_cluster_fail_closed_count",
+        "tracked_dirty_blocker_count",
         "missing_artifact_path_count",
         "missing_runner_path_count",
         "no_unexplained_artifacts",
+        "tracked_dirty_paths",
         "signoff_verdict",
         "generated_artifact_paths",
         "final_verdict"

@@ -153,12 +153,43 @@ dirty_cluster_fail_closed_count() {
     jq '[.clusters[] | select(((.signoff_status // "") | startswith("fail_closed")))] | length' "${PROJECT_ROOT}/${inventory_path}"
 }
 
+is_signoff_owned_dirty_path() {
+    local path="$1"
+    case "$path" in
+        "artifacts/massive_swarm_signoff_smoke_contract_v1.json" \
+        | "scripts/run_massive_swarm_signoff_smoke.sh" \
+        | "tests/massive_swarm_signoff_contract.rs")
+            return 0
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+}
+
+tracked_dirty_paths_json() {
+    local statuses path paths='[]'
+    statuses="$(git -C "$PROJECT_ROOT" status --short --untracked-files=no 2>/dev/null || true)"
+    while IFS= read -r line; do
+        if [ -z "$line" ]; then
+            continue
+        fi
+        path="$(printf '%s' "$line" | cut -c4- | sed 's/^ *//')"
+        if [ -z "$path" ] || is_signoff_owned_dirty_path "$path"; then
+            continue
+        fi
+        paths="$(jq -cn --argjson paths "$paths" --arg path "$path" '$paths + [$path]')"
+    done <<<"$statuses"
+    printf '%s' "$paths"
+}
+
 build_projection_json() {
     local scenario_json="$1"
     local child_statuses="$2"
     local host_template_mode child_artifact_count trusted_child_count fail_closed_child_count
     local open_tracker_blocker_count missing_artifact_path_count missing_runner_path_count
-    local dirty_fail_closed_count no_unexplained_artifacts signoff_verdict
+    local dirty_fail_closed_count tracked_dirty_blocker_count no_unexplained_artifacts signoff_verdict
+    local tracked_dirty_paths_json_value
 
     host_template_mode="$(jq -r '.host_template_mode' <<<"$scenario_json")"
     child_artifact_count="$(jq 'length' <<<"$child_statuses")"
@@ -168,6 +199,8 @@ build_projection_json() {
     missing_artifact_path_count="$(jq '[.[] | select(.artifact_exists == false)] | length' <<<"$child_statuses")"
     missing_runner_path_count="$(jq '[.[] | select(.runner_exists == false)] | length' <<<"$child_statuses")"
     dirty_fail_closed_count="$(dirty_cluster_fail_closed_count)"
+    tracked_dirty_paths_json_value="$(tracked_dirty_paths_json)"
+    tracked_dirty_blocker_count="$(jq 'length' <<<"$tracked_dirty_paths_json_value")"
     if [ "$dirty_fail_closed_count" -eq 0 ]; then
         no_unexplained_artifacts=true
     else
@@ -178,7 +211,7 @@ build_projection_json() {
         signoff_verdict="template_only"
     elif [ "$fail_closed_child_count" -gt 0 ] || [ "$open_tracker_blocker_count" -gt 0 ] \
         || [ "$missing_artifact_path_count" -gt 0 ] || [ "$missing_runner_path_count" -gt 0 ] \
-        || [ "$dirty_fail_closed_count" -gt 0 ]; then
+        || [ "$dirty_fail_closed_count" -gt 0 ] || [ "$tracked_dirty_blocker_count" -gt 0 ]; then
         signoff_verdict="fail_closed"
     else
         signoff_verdict="ready_for_signoff"
@@ -193,6 +226,7 @@ build_projection_json() {
         --argjson fail_closed_child_count "$fail_closed_child_count" \
         --argjson open_tracker_blocker_count "$open_tracker_blocker_count" \
         --argjson dirty_cluster_fail_closed_count "$dirty_fail_closed_count" \
+        --argjson tracked_dirty_blocker_count "$tracked_dirty_blocker_count" \
         --argjson missing_artifact_path_count "$missing_artifact_path_count" \
         --argjson missing_runner_path_count "$missing_runner_path_count" \
         --argjson no_unexplained_artifacts "$no_unexplained_artifacts" \
@@ -204,6 +238,7 @@ build_projection_json() {
             fail_closed_child_count: $fail_closed_child_count,
             open_tracker_blocker_count: $open_tracker_blocker_count,
             dirty_cluster_fail_closed_count: $dirty_cluster_fail_closed_count,
+            tracked_dirty_blocker_count: $tracked_dirty_blocker_count,
             missing_artifact_path_count: $missing_artifact_path_count,
             missing_runner_path_count: $missing_runner_path_count,
             no_unexplained_artifacts: $no_unexplained_artifacts
@@ -231,11 +266,12 @@ run_scenario() {
     mkdir -p "$(dirname "$scenario_report_path")"
 
     local child_statuses projection_json expected_projection_json validation_passed status message script_exit_code
-    local host_template_mode started_ts ended_ts generated_artifact_paths
+    local host_template_mode started_ts ended_ts generated_artifact_paths tracked_dirty_paths
     child_statuses="$(build_child_status_json)"
     projection_json="$(build_projection_json "$scenario_json" "$child_statuses")"
     expected_projection_json="$(jq -c '.expected_report_projection' <<<"$scenario_json")"
     host_template_mode="$(jq -r '.host_template_mode' <<<"$scenario_json")"
+    tracked_dirty_paths="$(tracked_dirty_paths_json)"
     generated_artifact_paths="$(jq -cn \
         --arg bundle_manifest_path "$bundle_manifest_path" \
         --arg run_report_path "$run_report_path" \
@@ -280,6 +316,7 @@ run_scenario() {
         --arg host_template_mode "$host_template_mode" \
         --argjson validation_passed "$validation_passed" \
         --argjson child_statuses "$child_statuses" \
+        --argjson tracked_dirty_paths "$tracked_dirty_paths" \
         --argjson report_projection "$projection_json" \
         --argjson generated_artifact_paths "$generated_artifact_paths" \
         '{
@@ -295,6 +332,7 @@ run_scenario() {
             host_template_mode: ($host_template_mode == "true"),
             validation_passed: $validation_passed,
             child_artifacts: $child_statuses,
+            tracked_dirty_paths: $tracked_dirty_paths,
             generated_artifact_paths: $generated_artifact_paths,
             report_projection: $report_projection
         }')"
@@ -313,6 +351,7 @@ run_scenario() {
         --arg ended_ts "$ended_ts" \
         --arg source_repo_hash "$(git -C "$PROJECT_ROOT" rev-parse --short=12 HEAD 2>/dev/null || printf unknown)" \
         --argjson validation_passed "$validation_passed" \
+        --argjson tracked_dirty_paths "$tracked_dirty_paths" \
         --argjson report_projection "$projection_json" \
         --argjson generated_artifact_paths "$generated_artifact_paths" \
         '{
@@ -327,6 +366,7 @@ run_scenario() {
             ended_ts: $ended_ts,
             source_repo_hash: $source_repo_hash,
             validation_passed: $validation_passed,
+            tracked_dirty_paths: $tracked_dirty_paths,
             report_projection: $report_projection,
             generated_artifact_paths: $generated_artifact_paths
         }' >"$bundle_manifest_path"
@@ -344,6 +384,7 @@ run_scenario() {
         --arg message "$message" \
         --argjson validation_passed "$validation_passed" \
         --argjson script_exit_code "$script_exit_code" \
+        --argjson tracked_dirty_paths "$tracked_dirty_paths" \
         --argjson report_projection "$projection_json" \
         --argjson generated_artifact_paths "$generated_artifact_paths" \
         '{
@@ -359,6 +400,7 @@ run_scenario() {
             message: $message,
             validation_passed: $validation_passed,
             script_exit_code: $script_exit_code,
+            tracked_dirty_paths: $tracked_dirty_paths,
             report_projection: $report_projection,
             generated_artifact_paths: $generated_artifact_paths
         }' >"$run_report_path"
@@ -372,9 +414,11 @@ run_scenario() {
         printf 'fail_closed_child_count=%s\n' "$(jq -r '.fail_closed_child_count' <<<"$projection_json")"
         printf 'open_tracker_blocker_count=%s\n' "$(jq -r '.open_tracker_blocker_count' <<<"$projection_json")"
         printf 'dirty_cluster_fail_closed_count=%s\n' "$(jq -r '.dirty_cluster_fail_closed_count' <<<"$projection_json")"
+        printf 'tracked_dirty_blocker_count=%s\n' "$(jq -r '.tracked_dirty_blocker_count' <<<"$projection_json")"
         printf 'missing_artifact_path_count=%s\n' "$(jq -r '.missing_artifact_path_count' <<<"$projection_json")"
         printf 'missing_runner_path_count=%s\n' "$(jq -r '.missing_runner_path_count' <<<"$projection_json")"
         printf 'no_unexplained_artifacts=%s\n' "$(jq -r '.no_unexplained_artifacts' <<<"$projection_json")"
+        printf 'tracked_dirty_paths=%s\n' "$(jq -r 'join("|")' <<<"$tracked_dirty_paths")"
         printf 'signoff_verdict=%s\n' "$(jq -r '.signoff_verdict' <<<"$projection_json")"
         printf 'generated_artifact_paths=%s\n' "$(jq -r 'join("|")' <<<"$generated_artifact_paths")"
         printf 'final_verdict=%s\n' "$(jq -r '.signoff_verdict' <<<"$projection_json")"

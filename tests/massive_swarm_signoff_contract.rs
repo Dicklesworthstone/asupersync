@@ -5,9 +5,15 @@
 use serde_json::{Map, Value};
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 
 const ARTIFACT_PATH: &str = "artifacts/massive_swarm_signoff_smoke_contract_v1.json";
 const RUNNER_SCRIPT_PATH: &str = "scripts/run_massive_swarm_signoff_smoke.sh";
+const SIGNOFF_OWNED_DIRTY_PATHS: &[&str] = &[
+    ARTIFACT_PATH,
+    RUNNER_SCRIPT_PATH,
+    "tests/massive_swarm_signoff_contract.rs",
+];
 
 fn repo_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -80,6 +86,7 @@ fn validate_artifact(artifact: &Value) -> Result<(), String> {
         "runner_script",
         "runner_bundle_schema_version",
         "runner_report_schema_version",
+        "tracked_dirty_blocker_fixture_paths",
         "blocked_dependency_policy",
         "required_matrix_fields",
         "signoff_matrix",
@@ -199,6 +206,37 @@ fn dirty_cluster_fail_closed_count(artifact: &Value) -> usize {
         .count()
 }
 
+fn tracked_dirty_paths() -> Vec<String> {
+    let output = Command::new("git")
+        .args(["status", "--short", "--untracked-files=no"])
+        .current_dir(repo_root())
+        .output();
+    if let Ok(output) = output
+        && output.status.success()
+    {
+        return String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .filter_map(|line| line.get(3..).map(str::trim))
+            .filter(|path| !path.is_empty())
+            .filter(|path| !SIGNOFF_OWNED_DIRTY_PATHS.contains(path))
+            .map(ToOwned::to_owned)
+            .collect();
+    }
+
+    let artifact = load_artifact();
+    artifact["tracked_dirty_blocker_fixture_paths"]
+        .as_array()
+        .expect("tracked_dirty_blocker_fixture_paths must be array")
+        .iter()
+        .map(|value| {
+            value
+                .as_str()
+                .expect("tracked dirty fixture paths must be strings")
+                .to_string()
+        })
+        .collect()
+}
+
 fn is_hex_digest(value: &str) -> bool {
     value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_hexdigit())
 }
@@ -241,6 +279,7 @@ fn build_projection(artifact: &Value, scenario_id: &str) -> Value {
         .filter(|entry| entry["runner_exists"].as_bool() == Some(false))
         .count();
     let dirty_cluster_fail_closed_count = dirty_cluster_fail_closed_count(artifact);
+    let tracked_dirty_blocker_count = tracked_dirty_paths().len();
     let host_template_mode = scenario["host_template_mode"]
         .as_bool()
         .expect("host_template_mode must be bool");
@@ -253,6 +292,7 @@ fn build_projection(artifact: &Value, scenario_id: &str) -> Value {
         || missing_artifact_path_count > 0
         || missing_runner_path_count > 0
         || dirty_cluster_fail_closed_count > 0
+        || tracked_dirty_blocker_count > 0
     {
         "fail_closed"
     } else {
@@ -287,6 +327,10 @@ fn build_projection(artifact: &Value, scenario_id: &str) -> Value {
     object.insert(
         "dirty_cluster_fail_closed_count".to_string(),
         Value::from(dirty_cluster_fail_closed_count),
+    );
+    object.insert(
+        "tracked_dirty_blocker_count".to_string(),
+        Value::from(tracked_dirty_blocker_count),
     );
     object.insert(
         "missing_artifact_path_count".to_string(),
