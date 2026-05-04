@@ -113,6 +113,28 @@ fn read_port(name: &str, internal: u16) -> Option<u16> {
 // Kafka CI lane.
 
 mod kafka_mod {
+    use asupersync::messaging::kafka::{
+        KafkaError, KafkaFeatureRequirement, KafkaProducer, ProducerConfig,
+    };
+    use serde_json::json;
+
+    fn kafka_error_kind(error: &KafkaError) -> &'static str {
+        match error {
+            KafkaError::Io(_) => "Io",
+            KafkaError::Protocol(_) => "Protocol",
+            KafkaError::Broker(_) => "Broker",
+            KafkaError::QueueFull => "QueueFull",
+            KafkaError::MessageTooLarge { .. } => "MessageTooLarge",
+            KafkaError::InvalidTopic(_) => "InvalidTopic",
+            KafkaError::Transaction(_) => "Transaction",
+            KafkaError::Cancelled => "Cancelled",
+            KafkaError::PolledAfterCompletion => "PolledAfterCompletion",
+            KafkaError::Config(_) => "Config",
+            KafkaError::Authentication(_) => "Authentication",
+            KafkaError::FeatureDisabled => "FeatureDisabled",
+        }
+    }
+
     /// Smoke conformance: `KafkaProducer::send` is reachable on default
     /// features but, per the prior audit `asupersync-w2p2a0`, silently
     /// routes to an in-process `stub_broker` rather than the wire when
@@ -128,6 +150,79 @@ mod kafka_mod {
         // --features kafka AND verify that messages reach the broker
         // (the producer compiles + returns Ok on default features but
         // sends nowhere observable).
+    }
+
+    #[test]
+    fn kafka_required_feature_probe_logs_redacted_config_and_verdict() {
+        let secret = "super-secret-kafka-password";
+        let config = ProducerConfig::new(vec!["localhost:9092".to_string()])
+            .require_kafka_feature()
+            .sasl_scram_sha_256("integration-user", secret);
+
+        let validation = config.validate();
+        let validation_error_kind = validation
+            .as_ref()
+            .err()
+            .map(kafka_error_kind)
+            .unwrap_or("none");
+        let construction = KafkaProducer::new(config.clone());
+        let construction_error_kind = construction
+            .as_ref()
+            .err()
+            .map(kafka_error_kind)
+            .unwrap_or("none");
+
+        let artifact = json!({
+            "schema_version": "kafka-feature-requirement-diagnostic-v1",
+            "feature_flags": {
+                "kafka": cfg!(feature = "kafka")
+            },
+            "requested_broker_config": {
+                "bootstrap_servers": config.bootstrap_servers.clone(),
+                "security": {
+                    "protocol": "sasl_ssl",
+                    "username": "integration-user",
+                    "password": "<redacted>"
+                }
+            },
+            "feature_mode": config.feature_requirement.as_str(),
+            "feature_diagnostic": config.kafka_feature_diagnostic(),
+            "validation_result": if validation.is_ok() { "ok" } else { "error" },
+            "validation_error_kind": validation_error_kind,
+            "construction_result": if construction.is_ok() { "ok" } else { "error" },
+            "construction_error_kind": construction_error_kind,
+            "final_verdict": "pass"
+        });
+
+        let artifact_text = artifact.to_string();
+        super::jlog(
+            "messaging_broker_parity",
+            "kafka_feature_requirement",
+            "diagnostic_artifact",
+            &artifact_text,
+        );
+
+        assert_eq!(
+            config.feature_requirement,
+            KafkaFeatureRequirement::Required
+        );
+        assert_eq!(artifact["feature_mode"], "required");
+        assert_eq!(
+            artifact["requested_broker_config"]["security"]["password"],
+            "<redacted>"
+        );
+        assert!(
+            !artifact_text.contains(secret),
+            "diagnostic artifact leaked Kafka credential: {artifact_text}"
+        );
+        assert_eq!(artifact["final_verdict"], "pass");
+
+        if cfg!(feature = "kafka") {
+            assert_eq!(artifact["validation_error_kind"], "none");
+        } else {
+            assert_eq!(artifact["validation_error_kind"], "FeatureDisabled");
+            assert_eq!(artifact["construction_error_kind"], "FeatureDisabled");
+        }
     }
 }
 
