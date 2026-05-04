@@ -2129,18 +2129,22 @@ impl MySqlConnection {
 
     /// Validate that the server's charset is compatible with the requested charset.
     /// Fails fast with clear error instead of silently accepting data corruption.
-    fn validate_charset_compatibility(requested: &str, server_charset_id: u8) -> Result<(), MySqlError> {
+    fn validate_charset_compatibility(
+        requested: &str,
+        server_charset_id: u8,
+    ) -> Result<(), MySqlError> {
         // MySQL charset ID mappings (common ones)
         // See: https://dev.mysql.com/doc/refman/8.0/en/charset-charsets.html
         let server_charset_name = match server_charset_id {
-            33 => "utf8",      // utf8mb3 (legacy, 3-byte max)
-            45 => "utf8mb4",   // utf8mb4 (modern, 4-byte support)
-            8 => "latin1",     // latin1
-            _ => "unknown",    // Other charsets
+            33 => "utf8",    // utf8mb3 (legacy, 3-byte max)
+            45 => "utf8mb4", // utf8mb4 (modern, 4-byte support)
+            8 => "latin1",   // latin1
+            _ => "unknown",  // Other charsets
         };
 
         // Requested charset normalization (handle common aliases)
-        let normalized_requested = match requested.to_lowercase().as_str() {
+        let requested_lowercase = requested.to_lowercase();
+        let normalized_requested = match requested_lowercase.as_str() {
             "utf8mb4" => "utf8mb4",
             "utf8" => "utf8",  // Ambiguous - could mean utf8mb3 or utf8mb4
             "utf8mb3" => "utf8",
