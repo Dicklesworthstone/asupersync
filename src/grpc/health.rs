@@ -30,7 +30,7 @@ use std::task::{Context, Poll, Waker};
 
 use super::service::{NamedService, ServiceDescriptor, ServiceHandler};
 use super::status::Status;
-use super::streaming::{Request, Response, Streaming};
+use super::streaming::{Metadata, Request, Response, Streaming};
 
 /// Maximum permitted byte length of a gRPC service name passed to
 /// [`HealthService::set_status`] / [`HealthService::try_set_status`].
@@ -153,6 +153,46 @@ impl HealthCheckResponse {
     }
 }
 
+/// Validator for transport-level gRPC health authentication.
+pub trait HealthAuthValidator: Send + Sync {
+    /// Validate request metadata for the named RPC method.
+    fn validate(&self, metadata: &Metadata, method: &str) -> Result<(), Status>;
+}
+
+impl<F> HealthAuthValidator for F
+where
+    F: Fn(&Metadata, &str) -> Result<(), Status> + Send + Sync,
+{
+    fn validate(&self, metadata: &Metadata, method: &str) -> Result<(), Status> {
+        self(metadata, method)
+    }
+}
+
+/// Shared callback type for custom gRPC health authentication.
+pub type HealthAuthCallback = Arc<dyn HealthAuthValidator>;
+
+/// Transport-level authentication mode for gRPC health RPCs.
+#[derive(Clone, Default)]
+pub enum HealthAuthMode {
+    /// Explicit opt-in to unauthenticated health checks.
+    None,
+    /// Require a bearer-style authorization header.
+    #[default]
+    RequireAuth,
+    /// Delegate to a caller-provided validator.
+    Custom(HealthAuthCallback),
+}
+
+impl std::fmt::Debug for HealthAuthMode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::None => f.write_str("HealthAuthMode::None"),
+            Self::RequireAuth => f.write_str("HealthAuthMode::RequireAuth"),
+            Self::Custom(_) => f.write_str("HealthAuthMode::Custom(<validator>)"),
+        }
+    }
+}
+
 /// Health checking service.
 ///
 /// This service implements the gRPC Health Checking Protocol, allowing
@@ -175,6 +215,8 @@ pub struct HealthService {
     next_waiter_id: Arc<AtomicU64>,
     /// Monotonic version counter, bumped on every status change.
     version: Arc<AtomicU64>,
+    /// Transport auth mode for async gRPC health entrypoints.
+    auth_mode: HealthAuthMode,
 }
 
 impl HealthService {
@@ -188,6 +230,16 @@ impl HealthService {
             watch_waiters: Arc::new(Mutex::new(HashMap::new())),
             next_waiter_id: Arc::new(AtomicU64::new(1)),
             version: Arc::new(AtomicU64::new(0)),
+            auth_mode: HealthAuthMode::RequireAuth,
+        }
+    }
+
+    /// Create a health service with an explicit transport auth mode.
+    #[must_use]
+    pub fn with_auth_mode(auth_mode: HealthAuthMode) -> Self {
+        Self {
+            auth_mode,
+            ..Self::new()
         }
     }
 
@@ -197,13 +249,8 @@ impl HealthService {
         self.version.load(Ordering::Acquire)
     }
 
-    /// Validate authentication metadata from gRPC request.
-    ///
-    /// Security fix (br-asupersync-n7w3l1): Strengthen authentication validation
-    /// by checking both presence and basic format of authorization header.
-    /// Note: This is a simplified implementation that checks header presence and format.
-    /// Production deployments should integrate with proper auth token validation.
-    fn validate_auth_metadata(&self, metadata: &super::streaming::Metadata) -> Result<(), Status> {
+    /// Validate required bearer authentication metadata from a gRPC request.
+    fn validate_required_auth_metadata(metadata: &Metadata) -> Result<(), Status> {
         let auth_header = metadata.get("authorization").ok_or_else(|| {
             Status::unauthenticated("health check endpoint requires authentication")
         })?;
@@ -233,9 +280,42 @@ impl HealthService {
             return Err(Status::unauthenticated("empty bearer token"));
         }
 
-        tracing::info!(auth_scheme = "Bearer", "Health check authenticated");
-
         Ok(())
+    }
+
+    /// Validate transport authentication for a health RPC.
+    fn validate_auth_metadata(&self, metadata: &Metadata, method: &str) -> Result<(), Status> {
+        match &self.auth_mode {
+            HealthAuthMode::None => {
+                crate::tracing_compat::warn!(
+                    method,
+                    auth_mode = "None",
+                    metadata_count = metadata.len(),
+                    "gRPC health authentication disabled"
+                );
+                Ok(())
+            }
+            HealthAuthMode::RequireAuth => {
+                Self::validate_required_auth_metadata(metadata)?;
+                crate::tracing_compat::debug!(
+                    method,
+                    auth_mode = "RequireAuth",
+                    metadata_count = metadata.len(),
+                    "gRPC health authentication accepted"
+                );
+                Ok(())
+            }
+            HealthAuthMode::Custom(validator) => {
+                validator.validate(metadata, method)?;
+                crate::tracing_compat::debug!(
+                    method,
+                    auth_mode = "Custom",
+                    metadata_count = metadata.len(),
+                    "gRPC health custom authentication accepted"
+                );
+                Ok(())
+            }
+        }
     }
 
     /// Set the status of a service.
@@ -464,21 +544,11 @@ impl HealthService {
 
     /// Handle a health check request.
     ///
-    /// Security fix (br-asupersync-n7w3l1): This method now implements proper authentication
-    /// validation. In production deployments, consider configuring authentication at the
-    /// interceptor level for centralized auth handling across all gRPC services.
+    /// This direct in-process API does not inspect transport metadata.
+    ///
+    /// Use [`Self::check_async`] / [`Self::watch_async`] for RPC-facing
+    /// entrypoints that enforce [`HealthAuthMode`].
     pub fn check(&self, request: &HealthCheckRequest) -> Result<HealthCheckResponse, Status> {
-        // Security: Validate authentication for health check access
-        // For this implementation, we check for the presence of any authentication context.
-        // In production, this should be replaced with proper token validation.
-        // For now, we allow internal health checks but log the access for audit purposes.
-
-        // TODO: Implement configurable authentication mode (None/RequireAuth/Custom)
-        // For now, allowing internal health checks but with security warning
-        tracing::warn!(
-            "Health check accessed without authentication validation - ensure this is from authorized internal probe"
-        );
-
         let statuses = self.statuses.read();
 
         if let Some(&status) = statuses.get(&request.service) {
@@ -516,9 +586,7 @@ impl HealthService {
         &self,
         request: &Request<HealthCheckRequest>,
     ) -> Pin<Box<dyn Future<Output = Result<Response<HealthCheckResponse>, Status>> + Send>> {
-        // Security fix (br-asupersync-n7w3l1): Validate authentication before processing
-        // health check requests. Check both presence and basic format of auth header.
-        let auth_result = self.validate_auth_metadata(request.metadata());
+        let auth_result = self.validate_auth_metadata(request.metadata(), "Check");
         if let Err(error) = auth_result {
             return Box::pin(async move { Err(error) });
         }
@@ -536,10 +604,7 @@ impl HealthService {
         &self,
         request: &Request<HealthCheckRequest>,
     ) -> Pin<Box<dyn Future<Output = Result<Response<HealthWatchStream>, Status>> + Send>> {
-        // Security fix (br-asupersync-n7w3l1): Health watch streaming must require authentication.
-        // This completes the auth hardening by applying the same check to server-streaming
-        // endpoints that was previously only applied to unary check_async().
-        let auth_result = self.validate_auth_metadata(request.metadata());
+        let auth_result = self.validate_auth_metadata(request.metadata(), "Watch");
         if let Err(error) = auth_result {
             return Box::pin(async move { Err(error) });
         }
@@ -836,6 +901,7 @@ impl Drop for HealthReporter {
 #[derive(Debug, Default)]
 pub struct HealthServiceBuilder {
     statuses: HashMap<String, ServingStatus>,
+    auth_mode: HealthAuthMode,
 }
 
 impl HealthServiceBuilder {
@@ -861,10 +927,17 @@ impl HealthServiceBuilder {
         self
     }
 
+    /// Configure transport auth mode for async health RPC entrypoints.
+    #[must_use]
+    pub fn auth_mode(mut self, auth_mode: HealthAuthMode) -> Self {
+        self.auth_mode = auth_mode;
+        self
+    }
+
     /// Build the health service.
     #[must_use]
     pub fn build(self) -> HealthService {
-        let service = HealthService::new();
+        let service = HealthService::with_auth_mode(self.auth_mode);
         for (name, status) in self.statuses {
             service.set_status(name, status);
         }
@@ -936,6 +1009,17 @@ mod tests {
         let inserted = request
             .metadata_mut()
             .insert("authorization", "Bearer test-token");
+        crate::assert_with_log!(inserted, "test auth metadata inserted", true, inserted);
+        request
+    }
+
+    fn health_auth_token_request(
+        service: &str,
+        key: &str,
+        value: &str,
+    ) -> Request<HealthCheckRequest> {
+        let mut request = Request::new(HealthCheckRequest::new(service));
+        let inserted = request.metadata_mut().insert(key, value);
         crate::assert_with_log!(inserted, "test auth metadata inserted", true, inserted);
         request
     }
@@ -1162,6 +1246,163 @@ mod tests {
         let b_none = service.get_status("b").is_none();
         crate::assert_with_log!(b_none, "b cleared", true, b_none);
         crate::test_complete!("health_service_clear");
+    }
+
+    #[test]
+    fn health_auth_mode_default_requires_auth_for_async_endpoints() {
+        init_test("health_auth_mode_default_requires_auth_for_async_endpoints");
+        let service = HealthService::new();
+        service.set_status("svc", ServingStatus::Serving);
+
+        let request = Request::new(HealthCheckRequest::new("svc"));
+        let check_err = futures_lite::future::block_on(service.check_async(&request))
+            .expect_err("default auth mode must reject unauthenticated Check");
+        let watch_err = futures_lite::future::block_on(service.watch_async(&request))
+            .expect_err("default auth mode must reject unauthenticated Watch");
+
+        crate::assert_with_log!(
+            check_err.code() == super::super::status::Code::Unauthenticated,
+            "default check code",
+            super::super::status::Code::Unauthenticated,
+            check_err.code()
+        );
+        crate::assert_with_log!(
+            watch_err.code() == super::super::status::Code::Unauthenticated,
+            "default watch code",
+            super::super::status::Code::Unauthenticated,
+            watch_err.code()
+        );
+        crate::assert_with_log!(
+            check_err.message() == "health check endpoint requires authentication",
+            "default check message",
+            "health check endpoint requires authentication",
+            check_err.message()
+        );
+        crate::assert_with_log!(
+            watch_err.message() == "health check endpoint requires authentication",
+            "default watch message",
+            "health check endpoint requires authentication",
+            watch_err.message()
+        );
+        crate::test_complete!("health_auth_mode_default_requires_auth_for_async_endpoints");
+    }
+
+    #[test]
+    fn health_auth_mode_none_allows_async_check_and_watch_without_metadata() {
+        init_test("health_auth_mode_none_allows_async_check_and_watch_without_metadata");
+        let service = HealthService::with_auth_mode(HealthAuthMode::None);
+        service.set_status("svc", ServingStatus::Serving);
+
+        let request = Request::new(HealthCheckRequest::new("svc"));
+        let check = futures_lite::future::block_on(service.check_async(&request))
+            .expect("auth mode None must allow Check without metadata");
+        let check_status = check.into_inner().status;
+        crate::assert_with_log!(
+            check_status == ServingStatus::Serving,
+            "none auth check status",
+            ServingStatus::Serving,
+            check_status
+        );
+
+        let response = futures_lite::future::block_on(service.watch_async(&request))
+            .expect("auth mode None must allow Watch without metadata");
+        let mut stream = response.into_inner();
+        let first = futures_lite::future::block_on(futures_lite::future::poll_fn(|cx| {
+            Streaming::poll_next(Pin::new(&mut stream), cx)
+        }));
+        let first_ok = matches!(
+            first,
+            Some(Ok(HealthCheckResponse {
+                status: ServingStatus::Serving
+            }))
+        );
+        crate::assert_with_log!(
+            first_ok,
+            "none auth watch first item",
+            true,
+            format!("{first:?}")
+        );
+        crate::test_complete!(
+            "health_auth_mode_none_allows_async_check_and_watch_without_metadata"
+        );
+    }
+
+    #[test]
+    fn health_auth_mode_custom_validator_controls_check_and_watch() {
+        init_test("health_auth_mode_custom_validator_controls_check_and_watch");
+        let validator_calls = Arc::new(AtomicUsize::new(0));
+        let validator_calls_for_closure = Arc::clone(&validator_calls);
+        let service = HealthService::with_auth_mode(HealthAuthMode::Custom(Arc::new(
+            move |metadata: &Metadata, method: &str| {
+                validator_calls_for_closure.fetch_add(1, Ordering::SeqCst);
+                let Some(super::super::streaming::MetadataValue::Ascii(token)) =
+                    metadata.get("x-health-token")
+                else {
+                    return Err(Status::permission_denied(format!("{method} denied")));
+                };
+                if token == "allow" {
+                    Ok(())
+                } else {
+                    Err(Status::permission_denied(format!("{method} denied")))
+                }
+            },
+        )));
+        service.set_status("svc", ServingStatus::Serving);
+
+        let allowed = health_auth_token_request("svc", "x-health-token", "allow");
+        let check = futures_lite::future::block_on(service.check_async(&allowed))
+            .expect("custom validator must allow matching Check metadata");
+        let check_status = check.into_inner().status;
+        crate::assert_with_log!(
+            check_status == ServingStatus::Serving,
+            "custom auth check status",
+            ServingStatus::Serving,
+            check_status
+        );
+
+        let denied = health_auth_token_request("svc", "x-health-token", "deny");
+        let watch_err = futures_lite::future::block_on(service.watch_async(&denied))
+            .expect_err("custom validator must reject denied Watch metadata");
+        crate::assert_with_log!(
+            watch_err.code() == super::super::status::Code::PermissionDenied,
+            "custom watch code",
+            super::super::status::Code::PermissionDenied,
+            watch_err.code()
+        );
+        crate::assert_with_log!(
+            watch_err.message() == "Watch denied",
+            "custom watch message",
+            "Watch denied",
+            watch_err.message()
+        );
+        crate::assert_with_log!(
+            validator_calls.load(Ordering::SeqCst) == 2,
+            "custom validator called once per async endpoint",
+            2,
+            validator_calls.load(Ordering::SeqCst)
+        );
+        crate::test_complete!("health_auth_mode_custom_validator_controls_check_and_watch");
+    }
+
+    #[test]
+    fn health_auth_mode_builder_propagates_configured_mode() {
+        init_test("health_auth_mode_builder_propagates_configured_mode");
+        let service = HealthServiceBuilder::new()
+            .auth_mode(HealthAuthMode::None)
+            .add("svc", ServingStatus::Serving)
+            .build();
+
+        let request = Request::new(HealthCheckRequest::new("svc"));
+        let check = futures_lite::future::block_on(service.check_async(&request))
+            .expect("builder auth mode None must allow Check without metadata");
+        let check_status = check.into_inner().status;
+        crate::assert_with_log!(
+            check_status == ServingStatus::Serving,
+            "builder none auth check status",
+            ServingStatus::Serving,
+            check_status
+        );
+        crate::test_complete!("health_auth_mode_builder_propagates_configured_mode");
     }
 
     #[test]
