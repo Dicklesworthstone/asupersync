@@ -1,0 +1,160 @@
+{
+  "contract_version": "runtime-capacity-hints-smoke-contract-v1",
+  "runner_bundle_schema_version": "runtime-capacity-hints-smoke-bundle-v1",
+  "runner_report_schema_version": "runtime-capacity-hints-smoke-run-report-v1",
+  "runner_script": "scripts/run_runtime_capacity_hints_smoke.sh",
+  "report_artifacts": [
+    {
+      "schema_version": "asupersync.runtime-capacity-hints-report.v1",
+      "path_glob": ".runtime-capacity-hints-smoke-artifacts/run_*/AA-RUNTIME-CAPACITY-HINTS-*/runtime_capacity_hints_report.json"
+    }
+  ],
+  "smoke_scenarios": [
+    {
+      "scenario_id": "AA-RUNTIME-CAPACITY-HINTS-BURST-4096",
+      "description": "Expected-concurrent-task hints pre-size the runtime tables so a 4096-task burst avoids allocator growth churn.",
+      "hint_mode": "expected_concurrent_tasks",
+      "worker_threads": 4,
+      "expected_concurrent_tasks": 4096,
+      "burst_profile": {
+        "task_inserts": 4096,
+        "region_inserts": 1024,
+        "obligation_inserts": 2048
+      },
+      "operator_notes": {
+        "safe_fallback_profile": "historical_defaults",
+        "rationale": "50 percent headroom on the task estimate should absorb the burst while preserving the existing default profile when hints are absent."
+      },
+      "expected_report_projection": {
+        "baseline_capacity_variance_total": 2663262.8533,
+        "baseline_growth_events_total": 9,
+        "baseline_reserved_total_mib": 0.1094,
+        "fallback_reason": null,
+        "growth_event_reduction_ratio": 1.0,
+        "hint_mode": "expected_concurrent_tasks",
+        "hinted_capacity_variance_total": 0.0,
+        "hinted_growth_events_total": 0,
+        "no_win_trigger": false,
+        "obligation_growth_events_baseline": 3,
+        "obligation_growth_events_hinted": 0,
+        "operator_verdict": "ready_for_rch",
+        "projection_hash": 11094369126560141287,
+        "region_growth_events_baseline": 3,
+        "region_growth_events_hinted": 0,
+        "reserved_mib_delta": 0.0313,
+        "residual_realloc_count": 0,
+        "runtime_trace_capacity": 4096,
+        "safe_fallback_profile": "historical_defaults",
+        "scenario_id": "AA-RUNTIME-CAPACITY-HINTS-BURST-4096",
+        "selected_obligation_capacity": 2048,
+        "selected_region_capacity": 1024,
+        "selected_task_capacity": 6144,
+        "task_growth_events_baseline": 3,
+        "task_growth_events_hinted": 0,
+        "used_safe_fallback": false,
+        "worker_threads": 4,
+        "hinted_reserved_total_mib": 0.1406
+      },
+      "operator_verdict": "ready_for_rch"
+    },
+    {
+      "scenario_id": "AA-RUNTIME-CAPACITY-HINTS-AUTO-SCALE-64W",
+      "description": "Worker-thread auto-scaling widens runtime tables for a 64-worker swarm host without needing a separate sizing knob.",
+      "hint_mode": "worker_threads_auto_scale",
+      "worker_threads": 64,
+      "expected_concurrent_tasks": null,
+      "burst_profile": {
+        "task_inserts": 8192,
+        "region_inserts": 2048,
+        "obligation_inserts": 4096
+      },
+      "operator_notes": {
+        "safe_fallback_profile": "historical_defaults",
+        "rationale": "Large-worker hosts should derive wider initial table capacities from the existing worker-thread count when no explicit hint is provided."
+      },
+      "expected_report_projection": {
+        "baseline_capacity_variance_total": 11046214.3693,
+        "baseline_growth_events_total": 12,
+        "baseline_reserved_total_mib": 0.2188,
+        "fallback_reason": null,
+        "growth_event_reduction_ratio": 1.0,
+        "hint_mode": "worker_threads_auto_scale",
+        "hinted_capacity_variance_total": 0.0,
+        "hinted_growth_events_total": 0,
+        "hinted_reserved_total_mib": 0.2188,
+        "no_win_trigger": false,
+        "obligation_growth_events_baseline": 4,
+        "obligation_growth_events_hinted": 0,
+        "operator_verdict": "ready_for_rch",
+        "projection_hash": 17039048960399439829,
+        "region_growth_events_baseline": 4,
+        "region_growth_events_hinted": 0,
+        "reserved_mib_delta": 0.0,
+        "residual_realloc_count": 0,
+        "runtime_trace_capacity": 4096,
+        "safe_fallback_profile": "historical_defaults",
+        "scenario_id": "AA-RUNTIME-CAPACITY-HINTS-AUTO-SCALE-64W",
+        "selected_obligation_capacity": 4096,
+        "selected_region_capacity": 2048,
+        "selected_task_capacity": 8192,
+        "task_growth_events_baseline": 4,
+        "task_growth_events_hinted": 0,
+        "used_safe_fallback": false,
+        "worker_threads": 64
+      },
+      "operator_verdict": "ready_for_rch"
+    },
+    {
+      "scenario_id": "AA-RUNTIME-CAPACITY-HINTS-ZERO-HINT-FALLBACK",
+      "description": "Zeroed manual hints normalize back to the historical defaults and preserve the baseline allocation surface.",
+      "hint_mode": "explicit_zero_fallback",
+      "worker_threads": 4,
+      "explicit_capacity_hints": {
+        "task_capacity": 0,
+        "region_capacity": 0,
+        "obligation_capacity": 0
+      },
+      "burst_profile": {
+        "task_inserts": 512,
+        "region_inserts": 128,
+        "obligation_inserts": 256
+      },
+      "operator_notes": {
+        "safe_fallback_profile": "historical_defaults",
+        "fallback_reason": "zero_hints_normalized_to_safe_defaults",
+        "rationale": "Invalid zero hints must fail closed to the existing default capacities rather than shrinking the runtime tables."
+      },
+      "expected_report_projection": {
+        "baseline_capacity_variance_total": 0.0,
+        "baseline_growth_events_total": 0,
+        "baseline_reserved_total_mib": 0.0137,
+        "fallback_reason": "zero_hints_normalized_to_safe_defaults",
+        "growth_event_reduction_ratio": 0.0,
+        "hint_mode": "explicit_zero_fallback",
+        "hinted_capacity_variance_total": 0.0,
+        "hinted_growth_events_total": 0,
+        "hinted_reserved_total_mib": 0.0137,
+        "no_win_trigger": true,
+        "obligation_growth_events_baseline": 0,
+        "obligation_growth_events_hinted": 0,
+        "operator_verdict": "fallback_only",
+        "projection_hash": 13750649859609574471,
+        "region_growth_events_baseline": 0,
+        "region_growth_events_hinted": 0,
+        "reserved_mib_delta": 0.0,
+        "residual_realloc_count": 0,
+        "runtime_trace_capacity": 4096,
+        "safe_fallback_profile": "historical_defaults",
+        "scenario_id": "AA-RUNTIME-CAPACITY-HINTS-ZERO-HINT-FALLBACK",
+        "selected_obligation_capacity": 256,
+        "selected_region_capacity": 128,
+        "selected_task_capacity": 512,
+        "task_growth_events_baseline": 0,
+        "task_growth_events_hinted": 0,
+        "used_safe_fallback": true,
+        "worker_threads": 4
+      },
+      "operator_verdict": "fallback_only"
+    }
+  ]
+}
