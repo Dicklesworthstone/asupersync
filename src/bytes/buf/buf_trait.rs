@@ -442,6 +442,7 @@ mod tests {
         clippy::future_not_send
     )]
     use super::*;
+    use proptest::prelude::*;
 
     fn init_test(name: &str) {
         crate::test_utils::init_test_logging();
@@ -509,6 +510,46 @@ mod tests {
             v
         );
         crate::test_complete!("test_buf_get_u64");
+    }
+
+    proptest! {
+        #[test]
+        fn buf_metamorphic_fragmented_numeric_reads_match_contiguous(
+            bytes in any::<[u8; 8]>(),
+            split_at in 0usize..9,
+        ) {
+            let split_at = split_at.min(bytes.len());
+
+            let mut contiguous: &[u8] = &bytes;
+            let mut fragmented = bytes[..split_at].chain(&bytes[split_at..]);
+            prop_assert_eq!(fragmented.get_u16(), contiguous.get_u16());
+            prop_assert_eq!(fragmented.remaining(), contiguous.remaining());
+
+            let mut contiguous: &[u8] = &bytes;
+            let mut fragmented = bytes[..split_at].chain(&bytes[split_at..]);
+            prop_assert_eq!(fragmented.get_u16_le(), contiguous.get_u16_le());
+            prop_assert_eq!(fragmented.remaining(), contiguous.remaining());
+
+            let mut contiguous: &[u8] = &bytes;
+            let mut fragmented = bytes[..split_at].chain(&bytes[split_at..]);
+            prop_assert_eq!(fragmented.get_u32(), contiguous.get_u32());
+            prop_assert_eq!(fragmented.remaining(), contiguous.remaining());
+
+            let mut contiguous: &[u8] = &bytes;
+            let mut fragmented = bytes[..split_at].chain(&bytes[split_at..]);
+            prop_assert_eq!(fragmented.get_u32_le(), contiguous.get_u32_le());
+            prop_assert_eq!(fragmented.remaining(), contiguous.remaining());
+
+            let mut contiguous: &[u8] = &bytes;
+            let mut fragmented = bytes[..split_at].chain(&bytes[split_at..]);
+            prop_assert_eq!(fragmented.get_u64(), contiguous.get_u64());
+            prop_assert_eq!(fragmented.remaining(), contiguous.remaining());
+
+            let mut contiguous: &[u8] = &bytes;
+            let mut fragmented = bytes[..split_at].chain(&bytes[split_at..]);
+            prop_assert_eq!(fragmented.get_u64_le(), contiguous.get_u64_le());
+            prop_assert_eq!(fragmented.remaining(), contiguous.remaining());
+        }
     }
 
     #[test]
