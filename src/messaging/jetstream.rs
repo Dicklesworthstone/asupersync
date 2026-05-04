@@ -1912,6 +1912,34 @@ pub struct FuzzJetStreamPublishBackpressureSnapshot {
     pub error: Option<String>,
 }
 
+#[cfg(feature = "test-internals")]
+fn quantile_from_sorted_micros(samples: &[u64], numerator: usize, denominator: usize) -> u64 {
+    if samples.is_empty() {
+        return 0;
+    }
+    let span = samples.len().saturating_sub(1);
+    let rank = (span.saturating_mul(numerator) + denominator.saturating_sub(1)) / denominator;
+    samples[rank]
+}
+
+/// Deterministic tail-evidence snapshot for the current refusal-only publish
+/// policy. The modeled wait is exact because this controller never parks
+/// waiters: each attempt either acquires immediately or is refused immediately.
+#[cfg(feature = "test-internals")]
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[doc(hidden)]
+pub struct FuzzJetStreamPublishBackpressureTailSnapshot {
+    pub tail_sample_count: usize,
+    pub accepted_count: usize,
+    pub refused_count: usize,
+    pub refusal_only_policy: bool,
+    pub tail_evidence_mode: String,
+    pub pressure_level: Option<String>,
+    pub publish_wait_latency_p95_micros: u64,
+    pub publish_wait_latency_p99_micros: u64,
+    pub publish_wait_latency_p999_micros: u64,
+}
+
 /// Test-internals probe for the publish-side backpressure controller.
 #[cfg(feature = "test-internals")]
 #[doc(hidden)]
@@ -1955,6 +1983,67 @@ pub fn fuzz_probe_publish_backpressure(
         refused_publishes: gate.refused_publishes.load(Ordering::Relaxed),
         pressure_level,
         error,
+    }
+}
+
+/// Deterministic tail-evidence probe for the current publish-side refusal
+/// controller.
+#[cfg(feature = "test-internals")]
+#[doc(hidden)]
+pub fn fuzz_probe_publish_backpressure_tail_evidence(
+    pressure_headroom: Option<f32>,
+    preexisting_in_flight_publishes: usize,
+    attempts: usize,
+) -> FuzzJetStreamPublishBackpressureTailSnapshot {
+    let gate = JetStreamPublishBackpressureGate::new(Default::default());
+    gate.in_flight_publishes
+        .store(preexisting_in_flight_publishes, Ordering::Relaxed);
+
+    let mut cx = Cx::new(
+        crate::types::RegionId::testing_default(),
+        crate::types::TaskId::testing_default(),
+        crate::types::Budget::INFINITE,
+    );
+    let pressure_level = if let Some(headroom) = pressure_headroom {
+        let pressure = Arc::new(crate::types::SystemPressure::with_headroom(headroom));
+        let label = pressure.level_label().to_string();
+        cx = cx.with_pressure(pressure);
+        Some(label)
+    } else {
+        None
+    };
+
+    let attempts = attempts.max(1);
+    let mut accepted_count = 0usize;
+    let mut wait_samples_micros = Vec::with_capacity(attempts);
+    for _ in 0..attempts {
+        match gate.begin_publish(&cx, "audit.subject") {
+            Ok(permit) => {
+                accepted_count += 1;
+                wait_samples_micros.push(0);
+                drop(permit);
+            }
+            Err(_) => {
+                wait_samples_micros.push(0);
+            }
+        }
+    }
+    wait_samples_micros.sort_unstable();
+
+    FuzzJetStreamPublishBackpressureTailSnapshot {
+        tail_sample_count: wait_samples_micros.len(),
+        accepted_count,
+        refused_count: gate.refused_publishes.load(Ordering::Relaxed),
+        refusal_only_policy: DEFAULT_MAX_PUBLISH_WAITERS == 0,
+        tail_evidence_mode: "zero_wait_refusal_only".to_string(),
+        pressure_level,
+        publish_wait_latency_p95_micros: quantile_from_sorted_micros(&wait_samples_micros, 95, 100),
+        publish_wait_latency_p99_micros: quantile_from_sorted_micros(&wait_samples_micros, 99, 100),
+        publish_wait_latency_p999_micros: quantile_from_sorted_micros(
+            &wait_samples_micros,
+            999,
+            1000,
+        ),
     }
 }
 

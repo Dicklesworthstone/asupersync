@@ -150,8 +150,10 @@ build_projection_json() {
     local scenario_json="$1"
     local audit_module_path consumer_flow_test_path target_source_path no_win_fallback
     local audit_should_panic_count consumer_flow_test_count explicit_pressure_signal_site_count
-    local bounded_waiter_policy_present publish_wait_latency_p99_present publish_wait_latency_p999_present
-    local missing_evidence_requirement_count scenario_mode operator_verdict
+    local bounded_waiter_policy_present refusal_only_policy_present
+    local publish_wait_latency_p95_present publish_wait_latency_p99_present publish_wait_latency_p999_present
+    local publish_wait_latency_p95_micros publish_wait_latency_p99_micros publish_wait_latency_p999_micros
+    local missing_evidence_requirement_count scenario_mode operator_verdict tail_evidence_mode
 
     audit_module_path="$(jq -r '.audit_module_path' "$CONTRACT_ARTIFACT")"
     consumer_flow_test_path="$(jq -r '.consumer_flow_test_path' "$CONTRACT_ARTIFACT")"
@@ -168,6 +170,16 @@ build_projection_json() {
     else
         bounded_waiter_policy_present=false
     fi
+    if rg -q -e 'DEFAULT_MAX_PUBLISH_WAITERS: usize = 0;' "${PROJECT_ROOT}/${target_source_path}"; then
+        refusal_only_policy_present=true
+    else
+        refusal_only_policy_present=false
+    fi
+    if rg -q -e 'publish_wait_latency_p95' "${PROJECT_ROOT}/${target_source_path}" "${PROJECT_ROOT}/${audit_module_path}" "${PROJECT_ROOT}/${consumer_flow_test_path}"; then
+        publish_wait_latency_p95_present=true
+    else
+        publish_wait_latency_p95_present=false
+    fi
     if rg -q -e 'publish_wait_latency_p99' "${PROJECT_ROOT}/${target_source_path}" "${PROJECT_ROOT}/${audit_module_path}" "${PROJECT_ROOT}/${consumer_flow_test_path}"; then
         publish_wait_latency_p99_present=true
     else
@@ -179,12 +191,25 @@ build_projection_json() {
         publish_wait_latency_p999_present=false
     fi
 
+    tail_evidence_mode="absent"
+    publish_wait_latency_p95_micros=0
+    publish_wait_latency_p99_micros=0
+    publish_wait_latency_p999_micros=0
+    if [ "$refusal_only_policy_present" = "true" ] \
+        && [ "$publish_wait_latency_p95_present" = "true" ] \
+        && [ "$publish_wait_latency_p99_present" = "true" ] \
+        && [ "$publish_wait_latency_p999_present" = "true" ]; then
+        tail_evidence_mode="zero_wait_refusal_only"
+    fi
+
     operator_verdict="fail_closed"
     if [ "$audit_should_panic_count" -eq 0 ] \
         && [ "$explicit_pressure_signal_site_count" -gt 0 ] \
         && [ "$bounded_waiter_policy_present" = "true" ] \
+        && [ "$publish_wait_latency_p95_present" = "true" ] \
         && [ "$publish_wait_latency_p99_present" = "true" ] \
-        && [ "$publish_wait_latency_p999_present" = "true" ]; then
+        && [ "$publish_wait_latency_p999_present" = "true" ] \
+        && [ "$missing_evidence_requirement_count" -eq 0 ]; then
         operator_verdict="ready_for_rch"
     fi
 
@@ -195,8 +220,14 @@ build_projection_json() {
         --argjson consumer_flow_test_count "$consumer_flow_test_count" \
         --argjson explicit_pressure_signal_site_count "$explicit_pressure_signal_site_count" \
         --argjson bounded_waiter_policy_present "$bounded_waiter_policy_present" \
+        --argjson refusal_only_policy_present "$refusal_only_policy_present" \
+        --arg tail_evidence_mode "$tail_evidence_mode" \
+        --argjson publish_wait_latency_p95_present "$publish_wait_latency_p95_present" \
         --argjson publish_wait_latency_p99_present "$publish_wait_latency_p99_present" \
         --argjson publish_wait_latency_p999_present "$publish_wait_latency_p999_present" \
+        --argjson publish_wait_latency_p95_micros "$publish_wait_latency_p95_micros" \
+        --argjson publish_wait_latency_p99_micros "$publish_wait_latency_p99_micros" \
+        --argjson publish_wait_latency_p999_micros "$publish_wait_latency_p999_micros" \
         --argjson missing_evidence_requirement_count "$missing_evidence_requirement_count" \
         --arg no_win_fallback "$no_win_fallback" \
         --arg operator_verdict "$operator_verdict" \
@@ -206,8 +237,14 @@ build_projection_json() {
             consumer_flow_test_count: $consumer_flow_test_count,
             explicit_pressure_signal_site_count: $explicit_pressure_signal_site_count,
             bounded_waiter_policy_present: $bounded_waiter_policy_present,
+            refusal_only_policy_present: $refusal_only_policy_present,
+            tail_evidence_mode: $tail_evidence_mode,
+            publish_wait_latency_p95_present: $publish_wait_latency_p95_present,
             publish_wait_latency_p99_present: $publish_wait_latency_p99_present,
             publish_wait_latency_p999_present: $publish_wait_latency_p999_present,
+            publish_wait_latency_p95_micros: $publish_wait_latency_p95_micros,
+            publish_wait_latency_p99_micros: $publish_wait_latency_p99_micros,
+            publish_wait_latency_p999_micros: $publish_wait_latency_p999_micros,
             missing_evidence_requirement_count: $missing_evidence_requirement_count,
             no_win_fallback: $no_win_fallback,
             operator_verdict: $operator_verdict
@@ -377,8 +414,14 @@ run_scenario() {
         printf 'consumer_flow_test_count=%s\n' "$(jq -r '.consumer_flow_test_count' <<<"$projection_json")"
         printf 'explicit_pressure_signal_site_count=%s\n' "$(jq -r '.explicit_pressure_signal_site_count' <<<"$projection_json")"
         printf 'bounded_waiter_policy_present=%s\n' "$(jq -r '.bounded_waiter_policy_present' <<<"$projection_json")"
+        printf 'refusal_only_policy_present=%s\n' "$(jq -r '.refusal_only_policy_present' <<<"$projection_json")"
+        printf 'tail_evidence_mode=%s\n' "$(jq -r '.tail_evidence_mode' <<<"$projection_json")"
+        printf 'publish_wait_latency_p95_present=%s\n' "$(jq -r '.publish_wait_latency_p95_present' <<<"$projection_json")"
         printf 'publish_wait_latency_p99_present=%s\n' "$(jq -r '.publish_wait_latency_p99_present' <<<"$projection_json")"
         printf 'publish_wait_latency_p999_present=%s\n' "$(jq -r '.publish_wait_latency_p999_present' <<<"$projection_json")"
+        printf 'publish_wait_latency_p95_micros=%s\n' "$(jq -r '.publish_wait_latency_p95_micros' <<<"$projection_json")"
+        printf 'publish_wait_latency_p99_micros=%s\n' "$(jq -r '.publish_wait_latency_p99_micros' <<<"$projection_json")"
+        printf 'publish_wait_latency_p999_micros=%s\n' "$(jq -r '.publish_wait_latency_p999_micros' <<<"$projection_json")"
         printf 'missing_evidence_requirement_count=%s\n' "$(jq -r '.missing_evidence_requirement_count' <<<"$projection_json")"
         printf 'no_win_fallback=%s\n' "$(jq -r '.no_win_fallback' <<<"$projection_json")"
         printf 'operator_verdict=%s\n' "$(jq -r '.operator_verdict' <<<"$projection_json")"

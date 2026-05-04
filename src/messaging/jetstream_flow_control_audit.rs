@@ -1,21 +1,24 @@
 //! JetStream publish flow control audit test.
 //!
 //! AUDIT FINDING: FOUNDATION - per-context publish backpressure is now explicit,
-//! but tail-latency evidence is still missing so the operator surface remains
-//! fail-closed.
+//! and the conservative refusal-only policy now has deterministic zero-wait
+//! tail evidence, but the operator surface remains fail-closed until shared
+//! multi-publisher evidence exists.
 //!
 //! When client publishes faster than server can ack, the implementation:
 //! - Current foundation: bound the per-context outstanding publish seam and
 //!   refuse immediately when the slot is occupied or `Cx::pressure()` is in
 //!   the emergency band
-//! - Remaining gap: no p99/p999 publish-wait evidence yet
+//! - Remaining gap: no shared multi-publisher publish-wait evidence yet
 //!
 //! Per JetStream client backpressure best practices, high publish rate should
 //! trigger explicit pressure-aware refusal rather than relying solely on TCP flow control.
 
 #![cfg(test)]
 
-use crate::messaging::jetstream::fuzz_probe_publish_backpressure;
+use crate::messaging::jetstream::{
+    fuzz_probe_publish_backpressure, fuzz_probe_publish_backpressure_tail_evidence,
+};
 
 fn init_test(name: &str) {
     println!("[jetstream-flow-control] START {name}");
@@ -114,11 +117,12 @@ fn audit_current_tcp_flow_control_behavior() {
     // ✅ Emergency `Cx::pressure()` state can refuse a new publish before wire I/O
     //
     // Remaining issues:
-    // ❌ Wait-tail p99 evidence is still absent
-    // ❌ Wait-tail p999 evidence is still absent
-    // ❌ Zero-waiter refusal is the only foundation policy today
+    // ❌ Shared multi-publisher wait-tail evidence is still absent
+    // ❌ Nonzero-wait bounded waiter fairness is still unproven
+    // ❌ Zero-waiter refusal is still the only foundation policy today
     //
-    // Recommendation: keep fail-closed signoff until p99/p999 wait evidence lands.
+    // Recommendation: keep fail-closed signoff until shared multi-publisher
+    // evidence lands.
 
     test_complete("audit_current_tcp_flow_control_behavior");
 }
@@ -158,9 +162,29 @@ fn audit_reference_backpressure_pattern() {
     // - Zero hidden waiters in the current foundation slice
     //
     // Still missing for closeout:
-    // - bounded waiter policy beyond zero-wait refusal
-    // - publish wait latency p99 evidence
-    // - publish wait latency p999 evidence
+    // - shared multi-publisher waiter evidence
+    // - bounded waiter fairness beyond zero-wait refusal
+    // - a shared-controller surface that can compare zero-wait refusal against
+    //   nonzero-wait alternatives without hiding memory growth
 
     test_complete("audit_reference_backpressure_pattern");
+}
+
+/// AUDIT: Zero-wait tail evidence for the conservative refusal-only policy.
+#[test]
+fn audit_publish_wait_tail_zero_for_refusal_only_policy() {
+    init_test("audit_publish_wait_tail_zero_for_refusal_only_policy");
+
+    let snapshot = fuzz_probe_publish_backpressure_tail_evidence(None, 1, 64);
+
+    assert_eq!(snapshot.tail_sample_count, 64);
+    assert_eq!(snapshot.accepted_count, 0);
+    assert_eq!(snapshot.refused_count, 64);
+    assert!(snapshot.refusal_only_policy);
+    assert_eq!(snapshot.tail_evidence_mode, "zero_wait_refusal_only");
+    assert_eq!(snapshot.publish_wait_latency_p95_micros, 0);
+    assert_eq!(snapshot.publish_wait_latency_p99_micros, 0);
+    assert_eq!(snapshot.publish_wait_latency_p999_micros, 0);
+
+    test_complete("audit_publish_wait_tail_zero_for_refusal_only_policy");
 }
