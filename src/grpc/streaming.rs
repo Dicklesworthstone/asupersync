@@ -922,6 +922,7 @@ mod tests {
     }
 
     const EXACT_CLIENT_HALF_CLOSE_RCH_COMMAND: &str = "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_asupersync_dl5tdd_half_close cargo test -p asupersync --lib conformance_client_streaming_half_close -- --nocapture";
+    const EXACT_SERVER_STREAM_CANCEL_TIMING_RCH_COMMAND: &str = "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_asupersync_gtqoxm_cancel cargo test -p asupersync --lib conformance_server_streaming_cancel_timing -- --nocapture";
 
     fn collect_streaming_request_events(stream: &mut StreamingRequest<u32>) -> Vec<String> {
         let waker = noop_waker();
@@ -973,6 +974,94 @@ mod tests {
             cancellation_state,
             observed_events.len(),
             EXACT_CLIENT_HALF_CLOSE_RCH_COMMAND,
+        );
+    }
+
+    fn collect_response_stream_events(stream: &mut ResponseStream<u32>) -> Vec<String> {
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+        let mut pinned = Pin::new(stream);
+        let mut events = Vec::new();
+        loop {
+            match pinned.as_mut().poll_next(&mut cx) {
+                Poll::Ready(Some(Ok(value))) => events.push(format!("ok:{value}")),
+                Poll::Ready(Some(Err(status))) => {
+                    events.push(format!("err:{:?}:{}", status.code(), status.message()));
+                    break;
+                }
+                Poll::Ready(None) => {
+                    events.push("none".to_string());
+                    break;
+                }
+                Poll::Pending => {
+                    events.push("pending".to_string());
+                    break;
+                }
+            }
+        }
+        events
+    }
+
+    fn log_server_stream_cancel_timing_case(
+        scenario_id: &str,
+        cancel_timing_class: &str,
+        queued_message_count: usize,
+        observed_events: &[String],
+        pending_poll_state: &str,
+        trailer_presence: &str,
+    ) {
+        let emitted_message_count = observed_events
+            .iter()
+            .filter(|event| event.starts_with("ok:"))
+            .count();
+        let terminal_status = observed_events
+            .iter()
+            .find_map(|event| {
+                event
+                    .strip_prefix("err:")
+                    .and_then(|rest| rest.split_once(':'))
+                    .map(|(code, _)| code.to_string())
+            })
+            .unwrap_or_else(|| "EOF".to_string());
+        let drain_result = if observed_events.len() > 12 {
+            let mut summarized = observed_events.iter().take(5).cloned().collect::<Vec<_>>();
+            summarized.push("...".to_string());
+            summarized.extend(observed_events.iter().rev().take(2).rev().cloned());
+            summarized.join(">")
+        } else {
+            observed_events.join(">")
+        };
+        let final_verdict = if terminal_status == "Cancelled"
+            || (cancel_timing_class == "late_cancel_after_graceful_close"
+                && terminal_status == "EOF")
+        {
+            "pass"
+        } else {
+            "fail"
+        };
+        println!(
+            "GRPC_SERVER_STREAM_CANCEL \
+             stream_id={} \
+             cancel_timing_class={} \
+             queued_message_count={} \
+             emitted_message_count={} \
+             pending_poll_state={} \
+             drain_result={} \
+             terminal_status={} \
+             trailer_presence={} \
+             exact_rch_command=\"{}\" \
+             artifact_paths=none \
+             final_no_data_loss_cancelled_verdict={}",
+            scenario_id,
+            cancel_timing_class,
+            queued_message_count,
+            emitted_message_count,
+            pending_poll_state,
+            drain_result,
+            terminal_status,
+            trailer_presence,
+            EXACT_SERVER_STREAM_CANCEL_TIMING_RCH_COMMAND,
+            final_verdict,
         );
     }
 
@@ -2066,6 +2155,173 @@ mod tests {
         }
 
         crate::test_complete!("conformance_server_streaming_completion_idempotence");
+    }
+
+    #[test]
+    fn conformance_server_streaming_cancel_timing_before_first_send_surfaces_cancelled() {
+        init_test(
+            "conformance_server_streaming_cancel_timing_before_first_send_surfaces_cancelled",
+        );
+        let mut stream = ResponseStream::<u32>::open();
+        stream.cancel_with_error(Status::cancelled("server cancelled before first send"));
+
+        let events = collect_response_stream_events(&mut stream);
+        assert_eq!(
+            events,
+            vec!["err:Cancelled:server cancelled before first send".to_string()],
+            "cancel before first send should surface CANCELLED immediately"
+        );
+
+        crate::test_complete!(
+            "conformance_server_streaming_cancel_timing_before_first_send_surfaces_cancelled"
+        );
+    }
+
+    #[test]
+    fn conformance_server_streaming_cancel_timing_after_buffered_messages_drains_then_cancelled() {
+        init_test(
+            "conformance_server_streaming_cancel_timing_after_buffered_messages_drains_then_cancelled",
+        );
+        let mut stream = ResponseStream::<u32>::open();
+        stream.push(Ok(10)).expect("first buffered response");
+        stream.push(Ok(20)).expect("second buffered response");
+        stream.push(Ok(30)).expect("third buffered response");
+        stream.cancel_with_error(Status::cancelled(
+            "server cancelled after queueing responses",
+        ));
+
+        let events = collect_response_stream_events(&mut stream);
+        assert_eq!(
+            events,
+            vec![
+                "ok:10".to_string(),
+                "ok:20".to_string(),
+                "ok:30".to_string(),
+                "err:Cancelled:server cancelled after queueing responses".to_string(),
+            ],
+            "buffered responses must drain before the terminal CANCELLED status"
+        );
+
+        crate::test_complete!(
+            "conformance_server_streaming_cancel_timing_after_buffered_messages_drains_then_cancelled"
+        );
+    }
+
+    #[test]
+    fn conformance_server_streaming_cancel_timing_graceful_close_beats_late_cancel() {
+        init_test("conformance_server_streaming_cancel_timing_graceful_close_beats_late_cancel");
+        let mut stream = ResponseStream::<u32>::open();
+        stream.push(Ok(44)).expect("buffered response");
+        stream.close();
+        stream.cancel_with_error(Status::cancelled(
+            "late transport cancel after graceful close",
+        ));
+
+        let events = collect_response_stream_events(&mut stream);
+        assert_eq!(
+            events,
+            vec!["ok:44".to_string(), "none".to_string()],
+            "graceful close must preserve EOF even if a late cancel arrives"
+        );
+
+        crate::test_complete!(
+            "conformance_server_streaming_cancel_timing_graceful_close_beats_late_cancel"
+        );
+    }
+
+    #[test]
+    fn conformance_server_streaming_cancel_timing_matrix_logs_evidence() {
+        init_test("conformance_server_streaming_cancel_timing_matrix_logs_evidence");
+
+        {
+            let mut stream = ResponseStream::<u32>::open();
+            stream.cancel_with_error(Status::cancelled("server cancelled before first send"));
+            let events = collect_response_stream_events(&mut stream);
+            log_server_stream_cancel_timing_case(
+                "before_first_send",
+                "before_first_send",
+                0,
+                &events,
+                "ready_terminal_status",
+                "implicit_status_only",
+            );
+        }
+
+        {
+            let mut stream = ResponseStream::<u32>::open();
+            stream.push(Ok(10)).expect("buffered response");
+            stream.push(Ok(20)).expect("buffered response");
+            stream.push(Ok(30)).expect("buffered response");
+            stream.cancel_with_error(Status::cancelled(
+                "server cancelled after queueing responses",
+            ));
+            let events = collect_response_stream_events(&mut stream);
+            log_server_stream_cancel_timing_case(
+                "after_buffered_messages",
+                "after_buffered_messages",
+                3,
+                &events,
+                "ready_buffered_then_terminal_status",
+                "implicit_status_only",
+            );
+        }
+
+        {
+            let mut stream = ResponseStream::<u32>::open();
+            for value in 0..MAX_STREAM_BUFFERED as u32 {
+                stream.push(Ok(value)).expect("buffer before saturation");
+            }
+            let overflow = stream
+                .push(Ok(MAX_STREAM_BUFFERED as u32))
+                .expect_err("overflow push must fail");
+            assert_eq!(
+                overflow.code(),
+                Code::ResourceExhausted,
+                "buffer-cap overflow should fail closed before cancellation"
+            );
+            stream.cancel_with_error(Status::cancelled(
+                "server cancelled while producer observed full response buffer",
+            ));
+            let events = collect_response_stream_events(&mut stream);
+            assert_eq!(
+                events
+                    .iter()
+                    .filter(|event| event.starts_with("ok:"))
+                    .count(),
+                MAX_STREAM_BUFFERED,
+                "all buffered responses must still drain after saturation-triggered cancellation"
+            );
+            assert!(
+                matches!(events.last(), Some(last) if last.starts_with("err:Cancelled:")),
+                "saturation-triggered cancellation must end with CANCELLED"
+            );
+            log_server_stream_cancel_timing_case(
+                "buffer_saturated_then_cancelled",
+                "producer_observed_full_buffer_then_cancelled",
+                MAX_STREAM_BUFFERED,
+                &events,
+                "buffer_cap_rejected_new_send",
+                "implicit_status_only",
+            );
+        }
+
+        {
+            let mut stream = ResponseStream::<u32>::open();
+            stream.push(Ok(44)).expect("buffered response");
+            stream.close();
+            stream.cancel_with_error(Status::cancelled(
+                "late transport cancel after graceful close",
+            ));
+            let events = collect_response_stream_events(&mut stream);
+            log_server_stream_cancel_timing_case(
+                "late_cancel_after_graceful_close",
+                "late_cancel_after_graceful_close",
+                1,
+                &events,
+                "ready_buffered_then_eof",
+                "graceful_eof_only",
+            );
+        }
     }
 
     /// GRPC-DIFF-GRACEFUL-STOP: grpc-go GracefulStop lets already-buffered
