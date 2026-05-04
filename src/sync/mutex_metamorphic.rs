@@ -453,6 +453,7 @@ fn mr4_concurrent_poison_consistency() {
         let mut poison_count = 0;
         let mut success_count = 0;
         let mut cancel_count = 0;
+        let mut timeout_count = 0;
         let mut other_count = 0;
 
         for (_waiter_id, result) in results.iter() {
@@ -460,6 +461,7 @@ fn mr4_concurrent_poison_consistency() {
                 Err(LockError::Poisoned) => poison_count += 1,
                 Ok(_) => success_count += 1,
                 Err(LockError::Cancelled) => cancel_count += 1,
+                Err(LockError::TimedOut(_)) => timeout_count += 1,
                 Err(LockError::PolledAfterCompletion) => other_count += 1,
             }
         }
@@ -482,8 +484,9 @@ fn mr4_concurrent_poison_consistency() {
         }
 
         // MR4.4: No inconsistent states (cancellation should not occur in this test)
-        prop_assert!(cancel_count == 0 && other_count == 0,
-            "no unexpected states: {} cancels, {} others", cancel_count, other_count);
+        prop_assert!(cancel_count == 0 && timeout_count == 0 && other_count == 0,
+            "no unexpected states: {} cancels, {} timeouts, {} others",
+            cancel_count, timeout_count, other_count);
 
         // MR4.5: Final state should be poisoned
         prop_assert!(mutex.is_poisoned(), "mutex should be poisoned at end");

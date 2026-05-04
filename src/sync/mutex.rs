@@ -37,6 +37,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::task::{Context, Poll, Waker};
 
 use crate::cx::Cx;
+use crate::time::Sleep;
+use crate::types::Time;
 
 /// Error returned when mutex locking fails.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -45,6 +47,8 @@ pub enum LockError {
     Poisoned,
     /// Cancelled while waiting for the lock.
     Cancelled,
+    /// The requested deadline elapsed before the lock could be acquired.
+    TimedOut(Time),
     /// The future was polled after it had already completed.
     PolledAfterCompletion,
 }
@@ -55,6 +59,7 @@ impl std::fmt::Display for LockError {
         match self {
             Self::Poisoned => write!(f, "mutex poisoned"),
             Self::Cancelled => write!(f, "mutex lock cancelled"),
+            Self::TimedOut(deadline) => write!(f, "mutex lock timed out at {deadline:?}"),
             Self::PolledAfterCompletion => write!(f, "mutex future polled after completion"),
         }
     }
@@ -301,10 +306,34 @@ impl<T> Mutex<T> {
     /// Acquires the mutex asynchronously.
     #[inline]
     pub fn lock<'a, 'b>(&'a self, cx: &'b Cx) -> LockFuture<'a, 'b, T> {
+        Self::lock_future(self, cx, None)
+    }
+
+    /// Acquires the mutex asynchronously until the given deadline.
+    ///
+    /// Returns [`LockError::TimedOut`] if the deadline elapses before the lock
+    /// can be acquired.
+    #[inline]
+    pub fn lock_until<'a, 'b>(&'a self, cx: &'b Cx, deadline: Time) -> LockFuture<'a, 'b, T> {
+        Self::lock_future(self, cx, Some(deadline))
+    }
+
+    #[inline]
+    fn lock_future<'a, 'b>(
+        mutex: &'a Self,
+        cx: &'b Cx,
+        deadline: Option<Time>,
+    ) -> LockFuture<'a, 'b, T> {
         LockFuture {
-            mutex: self,
+            mutex,
             cx,
             waiter_id: None,
+            deadline_sleep: deadline.map(|deadline| {
+                cx.timer_driver().map_or_else(
+                    || Sleep::new(deadline),
+                    |timer| Sleep::with_timer_driver(deadline, timer),
+                )
+            }),
             completed: false,
         }
     }
@@ -431,10 +460,28 @@ pub struct LockFuture<'a, 'b, T> {
     /// previous `u64` because slab indices are stable allocations
     /// owned by the chain itself.
     waiter_id: Option<usize>,
+    deadline_sleep: Option<Sleep>,
     completed: bool,
 }
 
 impl<T> LockFuture<'_, '_, T> {
+    #[inline]
+    fn deadline_elapsed(&self) -> Option<Time> {
+        let sleep = self.deadline_sleep.as_ref()?;
+        let now = self.cx.now();
+        sleep.is_elapsed(now).then(|| sleep.deadline())
+    }
+
+    #[inline]
+    fn poll_deadline_sleep(&mut self, context: &mut Context<'_>) -> Option<Time> {
+        let sleep = self.deadline_sleep.as_mut()?;
+        let deadline = sleep.deadline();
+        match Pin::new(&mut *sleep).poll(context) {
+            Poll::Ready(()) => Some(deadline),
+            Poll::Pending => None,
+        }
+    }
+
     #[inline]
     fn grant_next_waiter(state: &mut MutexState) -> Option<Waker> {
         // br-asupersync-wlf0xh: O(1) FIFO take via slab pop_front.
@@ -503,6 +550,12 @@ impl<'a, T> Future for LockFuture<'a, '_, T> {
             return Poll::Ready(Err(LockError::Cancelled));
         }
 
+        if let Some(deadline) = self.deadline_elapsed() {
+            self.completed = true;
+            self.cleanup_waiter();
+            return Poll::Ready(Err(LockError::TimedOut(deadline)));
+        }
+
         let mut state = self.mutex.state.lock();
 
         if self.mutex.is_poisoned() {
@@ -565,6 +618,12 @@ impl<'a, T> Future for LockFuture<'a, '_, T> {
             return Poll::Pending;
         }
         drop(state);
+
+        if let Some(deadline) = self.poll_deadline_sleep(context) {
+            self.completed = true;
+            self.cleanup_waiter();
+            return Poll::Ready(Err(LockError::TimedOut(deadline)));
+        }
 
         Poll::Pending
     }
@@ -935,6 +994,7 @@ mod tests {
     use crate::conformance::{ConformanceTarget, LabRuntimeTarget, TestConfig};
     use crate::runtime::yield_now;
     use crate::test_utils::init_test_logging;
+    use crate::time::{TimerDriverHandle, VirtualClock};
     use crate::types::Budget;
     use crate::util::ArenaIndex;
     use crate::{RegionId, TaskId};
@@ -950,6 +1010,19 @@ mod tests {
             RegionId::from_arena(ArenaIndex::new(0, 0)),
             TaskId::from_arena(ArenaIndex::new(0, 0)),
             Budget::INFINITE,
+        )
+    }
+
+    fn test_cx_with_timer(timer: TimerDriverHandle) -> Cx {
+        Cx::new_with_drivers(
+            RegionId::from_arena(ArenaIndex::new(0, 0)),
+            TaskId::from_arena(ArenaIndex::new(0, 0)),
+            Budget::INFINITE,
+            None,
+            None,
+            None,
+            Some(timer),
+            None,
         )
     }
 
@@ -1078,6 +1151,173 @@ mod tests {
         let cancelled = matches!(result, Some(Err(LockError::Cancelled)));
         crate::assert_with_log!(cancelled, "should be cancelled", true, cancelled);
         crate::test_complete!("test_mutex_cancel_waiting");
+    }
+
+    #[test]
+    fn mutex_lock_until_acquires_before_deadline() {
+        init_test("mutex_lock_until_acquires_before_deadline");
+        let clock = Arc::new(VirtualClock::starting_at(Time::ZERO));
+        let timer = TimerDriverHandle::with_virtual_clock(clock);
+        let cx = test_cx_with_timer(timer);
+        let mutex = Mutex::new(42);
+
+        let mut fut = mutex.lock_until(&cx, Time::from_millis(10));
+        let result = poll_once(&mut fut);
+        crate::assert_with_log!(
+            matches!(result, Some(Ok(_))),
+            "lock_until should acquire when deadline is still in the future",
+            "Some(Ok(_))",
+            format!("{result:?}")
+        );
+        crate::assert_with_log!(
+            mutex.waiters() == 0,
+            "no queued waiters",
+            0usize,
+            mutex.waiters()
+        );
+        crate::test_complete!("mutex_lock_until_acquires_before_deadline");
+    }
+
+    #[test]
+    fn mutex_lock_until_rejects_already_elapsed_deadline() {
+        init_test("mutex_lock_until_rejects_already_elapsed_deadline");
+        let clock = Arc::new(VirtualClock::starting_at(Time::from_millis(10)));
+        let timer = TimerDriverHandle::with_virtual_clock(clock);
+        let cx = test_cx_with_timer(timer);
+        let mutex = Mutex::new(42);
+
+        let mut fut = mutex.lock_until(&cx, Time::from_millis(5));
+        let result = poll_once(&mut fut);
+        crate::assert_with_log!(
+            matches!(result, Some(Err(LockError::TimedOut(deadline))) if deadline == Time::from_millis(5)),
+            "already elapsed deadline should fail closed without acquiring",
+            "Some(Err(TimedOut(Time::from_millis(5))))",
+            format!("{result:?}")
+        );
+        crate::assert_with_log!(
+            mutex.waiters() == 0,
+            "no leaked waiters",
+            0usize,
+            mutex.waiters()
+        );
+        crate::assert_with_log!(
+            !mutex.is_locked(),
+            "timeout must not lock the mutex",
+            false,
+            mutex.is_locked()
+        );
+        crate::test_complete!("mutex_lock_until_rejects_already_elapsed_deadline");
+    }
+
+    #[test]
+    fn mutex_lock_until_timeout_cleans_waiter_state() {
+        init_test("mutex_lock_until_timeout_cleans_waiter_state");
+        let clock = Arc::new(VirtualClock::starting_at(Time::ZERO));
+        let timer = TimerDriverHandle::with_virtual_clock(clock.clone());
+        let cx = test_cx_with_timer(timer.clone());
+        let mutex = Mutex::new(42);
+
+        let holder = mutex.try_lock().expect("holder lock");
+        let mut fut = mutex.lock_until(&cx, Time::from_millis(10));
+
+        let first = poll_once(&mut fut);
+        crate::assert_with_log!(
+            first.is_none(),
+            "deadline-bound waiter should queue while lock is held",
+            true,
+            first.is_none()
+        );
+        crate::assert_with_log!(
+            mutex.waiters() == 1,
+            "one waiter queued",
+            1usize,
+            mutex.waiters()
+        );
+
+        clock.advance(Time::from_millis(10).as_nanos());
+        let _ = timer.process_timers();
+
+        let second = poll_once(&mut fut);
+        crate::assert_with_log!(
+            matches!(second, Some(Err(LockError::TimedOut(deadline))) if deadline == Time::from_millis(10)),
+            "deadline expiry should return TimedOut",
+            "Some(Err(TimedOut(Time::from_millis(10))))",
+            format!("{second:?}")
+        );
+        crate::assert_with_log!(
+            mutex.waiters() == 0,
+            "timed out waiter removed",
+            0usize,
+            mutex.waiters()
+        );
+
+        drop(holder);
+        crate::test_complete!("mutex_lock_until_timeout_cleans_waiter_state");
+    }
+
+    #[test]
+    fn mutex_lock_until_expired_granted_waiter_hands_off_fifo_turn() {
+        init_test("mutex_lock_until_expired_granted_waiter_hands_off_fifo_turn");
+        let clock = Arc::new(VirtualClock::starting_at(Time::ZERO));
+        let timer = TimerDriverHandle::with_virtual_clock(clock.clone());
+        let cx = test_cx_with_timer(timer.clone());
+        let mutex = Mutex::new(7u32);
+
+        let holder = mutex.try_lock().expect("holder lock");
+        let mut timed_out = mutex.lock_until(&cx, Time::from_millis(10));
+        let mut follower = mutex.lock(&cx);
+
+        let first_waiter = poll_once(&mut timed_out);
+        let second_waiter = poll_once(&mut follower);
+        crate::assert_with_log!(
+            first_waiter.is_none(),
+            "timed waiter queued",
+            true,
+            first_waiter.is_none()
+        );
+        crate::assert_with_log!(
+            second_waiter.is_none(),
+            "follower queued",
+            true,
+            second_waiter.is_none()
+        );
+        crate::assert_with_log!(
+            mutex.waiters() == 2,
+            "two waiters queued",
+            2usize,
+            mutex.waiters()
+        );
+
+        clock.advance(Time::from_millis(10).as_nanos());
+        let _ = timer.process_timers();
+        drop(holder);
+
+        let timed_out_result = poll_once(&mut timed_out);
+        crate::assert_with_log!(
+            matches!(timed_out_result, Some(Err(LockError::TimedOut(deadline))) if deadline == Time::from_millis(10)),
+            "expired granted waiter should observe timeout",
+            "Some(Err(TimedOut(Time::from_millis(10))))",
+            format!("{timed_out_result:?}")
+        );
+        crate::assert_with_log!(
+            mutex.waiters() == 0,
+            "handoff should drain timed-out waiter slot",
+            0usize,
+            mutex.waiters()
+        );
+
+        let follower_guard = poll_once(&mut follower)
+            .expect("follower should be woken after expired handoff")
+            .expect("follower lock should succeed");
+        crate::assert_with_log!(
+            *follower_guard == 7,
+            "follower acquires original value",
+            7u32,
+            *follower_guard
+        );
+
+        drop(follower_guard);
+        crate::test_complete!("mutex_lock_until_expired_granted_waiter_hands_off_fifo_turn");
     }
 
     #[test]
