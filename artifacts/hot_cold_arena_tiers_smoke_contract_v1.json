@@ -1,0 +1,189 @@
+{
+  "contract_version": "hot-cold-arena-tiers-smoke-contract-v1",
+  "bead_id": "asupersync-hhlhjv",
+  "description": "Contract-backed smoke proof for operator-visible hot/cold arena temperature accounting and conservative fallback behavior.",
+  "runner_script": "scripts/run_hot_cold_arena_tiers_smoke.sh",
+  "runner_bundle_schema_version": "hot-cold-arena-tiers-smoke-bundle-v1",
+  "runner_report_schema_version": "hot-cold-arena-tiers-smoke-run-report-v1",
+  "required_bundle_fields": [
+    "schema_version",
+    "contract_version",
+    "scenario_id",
+    "description",
+    "run_id",
+    "mode",
+    "artifact_path",
+    "report_path",
+    "run_log_path",
+    "command",
+    "host_requirements",
+    "workload_model",
+    "operator_notes",
+    "host_fingerprint",
+    "expected_report_projection",
+    "actual_report_projection",
+    "verdict_summary",
+    "command_exit_code",
+    "script_exit_code",
+    "validation_passed",
+    "status",
+    "started_ts",
+    "ended_ts"
+  ],
+  "required_run_report_fields": [
+    "schema_version",
+    "contract_version",
+    "artifact_path",
+    "bundle_manifest_path",
+    "run_id",
+    "scenario_id",
+    "mode",
+    "command_exit_code",
+    "script_exit_code",
+    "validation_passed",
+    "status",
+    "message",
+    "host_requirements",
+    "workload_model",
+    "operator_notes",
+    "host_fingerprint",
+    "expected_report_projection",
+    "actual_report_projection"
+  ],
+  "required_execute_output_files": [
+    "bundle_manifest.json",
+    "run_report.json",
+    "hot_cold_arena_tiers_report.json",
+    "run.log"
+  ],
+  "required_dry_run_output_files": [
+    "bundle_manifest.json",
+    "run_report.json",
+    "run.log"
+  ],
+  "smoke_scenarios": [
+    {
+      "scenario_id": "AA-HOT-COLD-ARENA-TIERED-RETENTION-64C-256G",
+      "description": "Compare unified and tiered-cold-evidence temperature policies for a 64-core / 256 GiB host using large-memory trace retention inputs.",
+      "output_root": "target/hot-cold-arena-tiers-smoke",
+      "execution_policy": "execute_or_dry_run",
+      "host_requirements": {
+        "min_worker_threads": 64,
+        "min_memory_gib": 256,
+        "notes": [
+          "The proof is deterministic because it freezes capacity hints and trace-budget math instead of probing allocator timing.",
+          "The host memory class is operator context for the policy, not a hard minimum for dry-run validation."
+        ]
+      },
+      "template_env": {
+        "HOT_COLD_ARENA_TIERS_SMOKE_OUTPUT_DIR": "Override the bundle/report output root.",
+        "HOT_COLD_ARENA_TIERS_SMOKE_ARTIFACT_ROOT": "Override the retrieved comparison artifact root."
+      },
+      "workload_model": {
+        "capacity_hints": {
+          "task_capacity": 32768,
+          "region_capacity": 8192,
+          "obligation_capacity": 16384
+        },
+        "locality_profile_input": "pending_numa_locality_profile",
+        "large_page_cold_slabs_supported": false,
+        "default_safe_fallback_profile": "unified"
+      },
+      "trace_storage_profile": "large_memory_256g",
+      "requested_policy": "tiered_cold_evidence",
+      "operator_notes": {
+        "recommended_for": [
+          "64+ core / 256GiB hosts that want retained evidence off the hot allocator path",
+          "Operator dry-runs that need explicit fallback accounting before NUMA placement lands"
+        ],
+        "avoid_when": [
+          "Hosts where default unified allocation is still the only approved policy"
+        ],
+        "fallback_policy": "unified"
+      },
+      "expected_report_projection": {
+        "candidate_cold_evidence_bytes": 716800000,
+        "candidate_estimated_hot_bytes": 91357184,
+        "cold_allocation_source": "cold_tier",
+        "cold_tier_retention_ratio": 1.0,
+        "default_estimated_hot_bytes": 91357184,
+        "effective_policy": "tiered-cold-evidence",
+        "fallback_reason": null,
+        "hot_bytes_preserved": true,
+        "hot_share_of_total_bytes": 0.113,
+        "large_page_cold_slabs_active": false,
+        "locality_profile_input": "pending_numa_locality_profile",
+        "no_win_trigger": "none",
+        "operator_verdict": "tiered_retention_active",
+        "projection_hash": 16111168468805334784,
+        "requested_policy": "tiered-cold-evidence",
+        "retained_evidence_bytes": 716800000,
+        "retained_evidence_preserved": true,
+        "safe_fallback_profile": "unified",
+        "scenario_id": "AA-HOT-COLD-ARENA-TIERED-RETENTION-64C-256G",
+        "schema_version": "hot-cold-arena-tiers-smoke-projection-v1"
+      }
+    },
+    {
+      "scenario_id": "AA-HOT-COLD-ARENA-LARGE-PAGE-FALLBACK-64C-256G",
+      "description": "Request large-page cold slabs on the same host class but force the support probe false to freeze the conservative fallback projection.",
+      "output_root": "target/hot-cold-arena-tiers-smoke",
+      "execution_policy": "execute_or_dry_run",
+      "host_requirements": {
+        "min_worker_threads": 64,
+        "min_memory_gib": 256,
+        "notes": [
+          "This scenario proves the operator-visible fallback path when large-page cold slabs are unavailable.",
+          "It deliberately keeps the retained evidence budget identical to the non-large-page tiered path."
+        ]
+      },
+      "template_env": {
+        "HOT_COLD_ARENA_TIERS_SMOKE_OUTPUT_DIR": "Override the bundle/report output root.",
+        "HOT_COLD_ARENA_TIERS_SMOKE_ARTIFACT_ROOT": "Override the retrieved comparison artifact root."
+      },
+      "workload_model": {
+        "capacity_hints": {
+          "task_capacity": 32768,
+          "region_capacity": 8192,
+          "obligation_capacity": 16384
+        },
+        "locality_profile_input": "pending_numa_locality_profile",
+        "large_page_cold_slabs_supported": false,
+        "default_safe_fallback_profile": "unified"
+      },
+      "trace_storage_profile": "large_memory_256g",
+      "requested_policy": "tiered_cold_evidence_large_pages",
+      "operator_notes": {
+        "recommended_for": [
+          "Operators who want explicit proof that unsupported large-page assumptions fail closed"
+        ],
+        "avoid_when": [
+          "The deployment requires large-page cold slabs as a hard prerequisite"
+        ],
+        "fallback_policy": "unified"
+      },
+      "expected_report_projection": {
+        "candidate_cold_evidence_bytes": 716800000,
+        "candidate_estimated_hot_bytes": 91357184,
+        "cold_allocation_source": "cold_tier",
+        "cold_tier_retention_ratio": 1.0,
+        "default_estimated_hot_bytes": 91357184,
+        "effective_policy": "tiered-cold-evidence",
+        "fallback_reason": "large_pages_unsupported",
+        "hot_bytes_preserved": true,
+        "hot_share_of_total_bytes": 0.113,
+        "large_page_cold_slabs_active": false,
+        "locality_profile_input": "pending_numa_locality_profile",
+        "no_win_trigger": "large_pages_unsupported",
+        "operator_verdict": "fallback_without_large_pages",
+        "projection_hash": 10577453242932115799,
+        "requested_policy": "tiered-cold-evidence-large-pages",
+        "retained_evidence_bytes": 716800000,
+        "retained_evidence_preserved": true,
+        "safe_fallback_profile": "unified",
+        "scenario_id": "AA-HOT-COLD-ARENA-LARGE-PAGE-FALLBACK-64C-256G",
+        "schema_version": "hot-cold-arena-tiers-smoke-projection-v1"
+      }
+    }
+  ]
+}
