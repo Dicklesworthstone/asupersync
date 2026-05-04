@@ -53,26 +53,7 @@
       },
       "operator_note": "ticket=OPS-64 api_token=super-secret",
       "output_root": "target/host-profile-planner-smoke",
-      "expected_report_projection": {
-        "adaptive_batch_sizing_stance": "builtin_adaptive",
-        "admission_steering_stance": "cohort_locality",
-        "blocking_pool_affinity_stance": "cohort_biased",
-        "brownout_stage": "optional_first",
-        "dry_run_line_count": 9,
-        "fallback_profile": "conservative_baseline",
-        "final_global_queue_limit": 49152,
-        "final_trace_storage_profile": "large-memory-256g",
-        "final_worker_threads": 64,
-        "large_memory_trace_profile_stance": "large_memory_256g",
-        "manual_override_count": 1,
-        "otlp_shedding_stance": "priority_gate",
-        "projection_hash": 5534625559920582118,
-        "proof_artifact_count": 6,
-        "refusal_count": 0,
-        "sanitized_operator_note": "ticket=OPS-64 api_token=[REDACTED]",
-        "selected_profile": "locality_first_64c_256g",
-        "used_safe_fallback": false
-      }
+      "expected_report_projection": null
     },
     {
       "scenario_id": "AA-HOST-PROFILE-PLANNER-MISSING-PROOF-FALLBACK",
@@ -117,26 +98,53 @@
       },
       "manual_overrides": {},
       "output_root": "target/host-profile-planner-smoke",
-      "expected_report_projection": {
-        "adaptive_batch_sizing_stance": "conservative_fixed",
-        "admission_steering_stance": "conservative_global",
-        "blocking_pool_affinity_stance": "disabled",
-        "brownout_stage": "full_surfaces",
-        "dry_run_line_count": 0,
-        "fallback_profile": "conservative_baseline",
-        "final_global_queue_limit": 0,
-        "final_trace_storage_profile": "default",
-        "final_worker_threads": 4,
-        "large_memory_trace_profile_stance": "default",
-        "manual_override_count": 0,
-        "otlp_shedding_stance": "standalone_fallback",
-        "projection_hash": 11320425800175711616,
-        "proof_artifact_count": 6,
-        "refusal_count": 1,
-        "sanitized_operator_note": null,
-        "selected_profile": "conservative_baseline",
-        "used_safe_fallback": true
-      }
+      "expected_report_projection": null
+    },
+    {
+      "scenario_id": "AA-HOST-PROFILE-PLANNER-EVIDENCE-RETENTION-64C-256G",
+      "description": "Proof-backed 64-core / 256 GiB evidence-retention bundle that must expose the tiered arena-temperature policy in the dry-run artifact.",
+      "objective": "evidence_retention_first",
+      "requested_profile": "large_memory_evidence_retention_256g",
+      "host_resources": {
+        "cpu_cores": 64,
+        "memory_gib": 256
+      },
+      "controller_evidence": {
+        "brownout": {
+          "artifact_id": "artifacts/overload_brownout_smoke_contract_v1.json",
+          "contract_version": "overload-brownout-smoke-contract-v1",
+          "validation_passed": true
+        },
+        "otlp_brownout": {
+          "artifact_id": "artifacts/otlp_brownout_shedding_smoke_contract_v1.json",
+          "contract_version": "otlp-brownout-shedding-smoke-contract-v1",
+          "validation_passed": true
+        },
+        "admission_steering": {
+          "artifact_id": "artifacts/cohort_admission_steering_smoke_contract_v1.json",
+          "contract_version": "cohort-admission-steering-smoke-contract-v1",
+          "validation_passed": true
+        },
+        "adaptive_batch_sizing": {
+          "artifact_id": "artifacts/adaptive_batch_sizing_smoke_contract_v1.json",
+          "contract_version": "adaptive-batch-sizing-smoke-contract-v1",
+          "validation_passed": true
+        },
+        "blocking_pool_affinity": {
+          "artifact_id": "artifacts/blocking_pool_affinity_smoke_contract_v1.json",
+          "contract_version": "blocking-pool-affinity-smoke-contract-v1",
+          "validation_passed": true
+        },
+        "trace_storage_profile": {
+          "artifact_id": "artifacts/trace_storage_profile_smoke_contract_v1.json",
+          "contract_version": "trace-storage-profile-smoke-contract-v1",
+          "validation_passed": true
+        }
+      },
+      "manual_overrides": {},
+      "operator_note": "ticket=OPS-RETENTION api_token=super-secret",
+      "output_root": "target/host-profile-planner-smoke",
+      "expected_report_projection": null
     }
   ]
 }

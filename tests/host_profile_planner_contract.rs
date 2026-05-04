@@ -328,6 +328,7 @@ fn report_projection(report: &Value) -> Value {
         "final_worker_threads": report["final_bundle"]["worker_threads"],
         "final_global_queue_limit": report["final_bundle"]["global_queue_limit"],
         "final_trace_storage_profile": report["final_bundle"]["trace_storage_profile"],
+        "final_arena_temperature_policy": report["final_bundle"]["arena_temperature_policy"],
         "sanitized_operator_note": report["sanitized_operator_note"],
         "dry_run_line_count": report["dry_run_config_diff"].as_array().expect("dry run lines array").len(),
     });
