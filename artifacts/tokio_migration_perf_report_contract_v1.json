@@ -1,0 +1,225 @@
+{
+  "contract_version": "tokio-migration-perf-report-v1",
+  "schema_version": "tokio-migration-perf-report-schema-v1",
+  "generated_for_bead": "asupersync-miglat",
+  "shadow_runner": "scripts/run_tokio_migration_shadow_workload_smoke.sh",
+  "source_workload_contract": "artifacts/tokio_migration_shadow_workload_contract_v1.json",
+  "purpose": "Define deterministic migration performance report cards that separate small-mode proxy evidence from real-host template requirements.",
+  "evidence_freshness_policy": {
+    "missing_evidence": "refuse",
+    "stale_evidence": "refuse",
+    "max_age_seconds": 3600
+  },
+  "percentile_policy": {
+    "algorithm": "nearest_rank_sorted_samples",
+    "small_sample_p999_policy": "max_sample"
+  },
+  "required_report_fields": [
+    "report_id",
+    "source_shadow_scenario_id",
+    "scale_mode",
+    "workload_seed",
+    "sample_count",
+    "percentiles_micros",
+    "throughput_ops_per_sec",
+    "queue_depth_summary",
+    "cancellation_debt_units",
+    "memory_pressure",
+    "verdict",
+    "classification",
+    "operator_override_text",
+    "artifact_paths",
+    "exact_command",
+    "projection_hash"
+  ],
+  "required_log_fields": [
+    "exact_command",
+    "scale_mode",
+    "host_fingerprint",
+    "cpu_threads",
+    "memory_gib",
+    "workload_seed",
+    "sample_count",
+    "p50_micros",
+    "p95_micros",
+    "p99_micros",
+    "p999_micros",
+    "throughput_ops_per_sec",
+    "queue_depth_max",
+    "cancellation_debt_delta",
+    "memory_pressure_peak_bytes",
+    "verdict"
+  ],
+  "validation_commands": [
+    "rch exec -- rustfmt --edition 2024 --check tests/tokio_migration_perf_report_contract.rs",
+    "rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_asupersync_miglat cargo test -p asupersync --test tokio_migration_perf_report_contract --features test-internals -- --nocapture",
+    "scripts/run_tokio_migration_shadow_workload_smoke.sh --dry-run --scenario TM-SHADOW-001-MPSC-BACKPRESSURE --output-root /tmp/asupersync-miglat-shadow-dry-run",
+    "scripts/run_tokio_migration_shadow_workload_smoke.sh --execute --scenario TM-SHADOW-001-MPSC-BACKPRESSURE --output-root /tmp/asupersync-miglat-shadow-execute"
+  ],
+  "report_cards": [
+    {
+      "report_id": "TM-PERF-001-MPSC-BACKPRESSURE-SMALL",
+      "source_shadow_scenario_id": "TM-SHADOW-001-MPSC-BACKPRESSURE",
+      "scale_mode": "small-deterministic-proxy",
+      "host_fingerprint": {
+        "kind": "deterministic_fixture",
+        "hostname": "small-mode-fixture",
+        "cpu_threads": 8,
+        "memory_gib": 16
+      },
+      "workload_seed": "0xA55A000000000001",
+      "sample_count": 8,
+      "measurement_window_nanos": 1000000000,
+      "completed_operations": 40000,
+      "latency_samples_micros": [
+        120,
+        100,
+        160,
+        130,
+        110,
+        115,
+        150,
+        125
+      ],
+      "percentiles_micros": {
+        "p50": 120,
+        "p95": 160,
+        "p99": 160,
+        "p999": 160
+      },
+      "throughput_ops_per_sec": 40000,
+      "queue_depth_samples": [
+        0,
+        2,
+        4,
+        8,
+        4,
+        2,
+        1,
+        0
+      ],
+      "queue_depth_summary": {
+        "max": 8,
+        "mean_milli": 2625
+      },
+      "cancellation_debt_units": {
+        "tokio_reference": 3,
+        "asupersync": 0,
+        "delta": 3
+      },
+      "memory_pressure": {
+        "peak_bytes": 1048576,
+        "steady_bytes": 786432,
+        "verdict": "bounded"
+      },
+      "verdict": "small_proxy_asupersync_win",
+      "classification": "win",
+      "operator_override_text": "Treat this as deterministic proxy evidence only; require a real-host template run before rollout.",
+      "artifact_paths": {
+        "report_jsonl": "/tmp/asupersync-miglat-shadow-execute/TM-SHADOW-001-MPSC-BACKPRESSURE/shadow_workload_report.jsonl",
+        "summary_json": "/tmp/asupersync-miglat-shadow-execute/TM-SHADOW-001-MPSC-BACKPRESSURE/shadow_workload_summary.json"
+      },
+      "exact_command": "scripts/run_tokio_migration_shadow_workload_smoke.sh --execute --scenario TM-SHADOW-001-MPSC-BACKPRESSURE --output-root /tmp/asupersync-miglat-shadow-execute",
+      "projection_hash": 8561592428857683231
+    },
+    {
+      "report_id": "TM-PERF-002-SELECT-TIMEOUT-NO-WIN",
+      "source_shadow_scenario_id": "TM-SHADOW-002-SELECT-TIMEOUT-RACE",
+      "scale_mode": "small-deterministic-proxy",
+      "host_fingerprint": {
+        "kind": "deterministic_fixture",
+        "hostname": "small-mode-fixture",
+        "cpu_threads": 8,
+        "memory_gib": 16
+      },
+      "workload_seed": "0xA55A000000000002",
+      "sample_count": 5,
+      "measurement_window_nanos": 500000000,
+      "completed_operations": 15000,
+      "latency_samples_micros": [
+        200,
+        205,
+        210,
+        220,
+        230
+      ],
+      "percentiles_micros": {
+        "p50": 210,
+        "p95": 230,
+        "p99": 230,
+        "p999": 230
+      },
+      "throughput_ops_per_sec": 30000,
+      "queue_depth_samples": [
+        1,
+        1,
+        2,
+        2,
+        1
+      ],
+      "queue_depth_summary": {
+        "max": 2,
+        "mean_milli": 1400
+      },
+      "cancellation_debt_units": {
+        "tokio_reference": 1,
+        "asupersync": 1,
+        "delta": 0
+      },
+      "memory_pressure": {
+        "peak_bytes": 2097152,
+        "steady_bytes": 1835008,
+        "verdict": "bounded"
+      },
+      "verdict": "hold_conservative_no_win",
+      "classification": "no_win",
+      "operator_override_text": "No migration win is certified by this small proxy; keep the conservative plan unless real-host evidence beats the hold margin.",
+      "artifact_paths": {
+        "report_jsonl": "/tmp/asupersync-miglat-shadow-execute/TM-SHADOW-002-SELECT-TIMEOUT-RACE/shadow_workload_report.jsonl",
+        "summary_json": "/tmp/asupersync-miglat-shadow-execute/TM-SHADOW-002-SELECT-TIMEOUT-RACE/shadow_workload_summary.json"
+      },
+      "exact_command": "scripts/run_tokio_migration_shadow_workload_smoke.sh --execute --scenario TM-SHADOW-002-SELECT-TIMEOUT-RACE --output-root /tmp/asupersync-miglat-shadow-execute",
+      "projection_hash": 18233413756100688206
+    }
+  ],
+  "real_host_templates": [
+    {
+      "template_id": "TM-PERF-REALHOST-64C-256G",
+      "scale_mode": "real-host-template",
+      "min_cpu_cores": 64,
+      "min_memory_gib": 256,
+      "required_fields": [
+        "host_fingerprint",
+        "cpu_threads",
+        "memory_gib",
+        "sample_count",
+        "p95_micros",
+        "p99_micros",
+        "p999_micros",
+        "throughput_ops_per_sec",
+        "queue_depth_max",
+        "cancellation_debt_delta",
+        "memory_pressure_peak_bytes",
+        "artifact_paths"
+      ],
+      "operator_verdict": "template_only_not_ci_evidence"
+    }
+  ],
+  "refusal_cases": [
+    {
+      "case_id": "TM-PERF-REFUSE-MISSING-EVIDENCE",
+      "source_shadow_scenario_id": "TM-SHADOW-001-MPSC-BACKPRESSURE",
+      "reason": "missing_performance_evidence",
+      "verdict": "refuse_missing_evidence",
+      "operator_next_step": "Run the shadow workload runner and attach report_jsonl plus summary_json before generating a migration recommendation."
+    },
+    {
+      "case_id": "TM-PERF-REFUSE-STALE-EVIDENCE",
+      "source_shadow_scenario_id": "TM-SHADOW-002-SELECT-TIMEOUT-RACE",
+      "reason": "stale_performance_evidence",
+      "max_age_seconds": 3600,
+      "verdict": "refuse_stale_evidence",
+      "operator_next_step": "Regenerate the report on the current main commit and keep the conservative fallback until freshness is restored."
+    }
+  ]
+}
