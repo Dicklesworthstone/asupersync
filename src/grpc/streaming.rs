@@ -924,6 +924,7 @@ mod tests {
     const EXACT_CLIENT_HALF_CLOSE_RCH_COMMAND: &str = "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_asupersync_dl5tdd_half_close cargo test -p asupersync --lib conformance_client_streaming_half_close -- --nocapture";
     const EXACT_SERVER_STREAM_CANCEL_TIMING_RCH_COMMAND: &str = "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_asupersync_gtqoxm_cancel cargo test -p asupersync --lib conformance_server_streaming_cancel_timing -- --nocapture";
     const EXACT_BIDI_CANCELLATION_RCH_COMMAND: &str = "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_asupersync_ftbe7b_bidi cargo test -p asupersync --lib conformance_bidirectional_cancellation -- --nocapture";
+    const EXACT_STREAMING_FLOW_CONTROL_RCH_COMMAND: &str = "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_asupersync_eg4r9o_flow cargo test -p asupersync --lib conformance_grpc_streaming_flow_control -- --nocapture";
 
     fn collect_streaming_request_events<T: std::fmt::Display + Send + std::marker::Unpin>(
         stream: &mut StreamingRequest<T>,
@@ -1149,6 +1150,74 @@ mod tests {
             summarize_events(server_events),
             EXACT_BIDI_CANCELLATION_RCH_COMMAND,
             verdict,
+        );
+    }
+
+    fn summarize_usize_trace(trace: &[usize]) -> String {
+        if trace.len() > 10 {
+            let mut summarized = trace.iter().take(4).copied().collect::<Vec<_>>();
+            summarized.push(usize::MAX);
+            summarized.extend(trace.iter().rev().take(2).rev().copied());
+            summarized
+                .into_iter()
+                .map(|value| {
+                    if value == usize::MAX {
+                        "...".to_string()
+                    } else {
+                        value.to_string()
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join(">")
+        } else {
+            trace
+                .iter()
+                .map(|value| value.to_string())
+                .collect::<Vec<_>>()
+                .join(">")
+        }
+    }
+
+    fn log_grpc_streaming_flow_control_case(
+        stream_id: &str,
+        client_behavior_profile: &str,
+        configured_flow_control_cap: usize,
+        queue_depth_trace: &[usize],
+        bytes_buffered_trace: &[usize],
+        send_poll_state: &str,
+        receive_poll_state: &str,
+        backpressure_event: &str,
+        cancellation_drain_event: &str,
+        status_trailers: &str,
+        final_verdict: &str,
+    ) {
+        println!(
+            "GRPC_STREAM_FLOW_CONTROL \
+             stream_id={} \
+             client_behavior_profile={} \
+             configured_flow_control_cap={} \
+             queue_depth_trace={} \
+             bytes_buffered_trace={} \
+             send_poll_state={} \
+             receive_poll_state={} \
+             backpressure_events={} \
+             cancellation_drain_events={} \
+             status_trailers={} \
+             exact_rch_command=\"{}\" \
+             artifact_paths=none \
+             final_bounded_memory_no_leak_verdict={}",
+            stream_id,
+            client_behavior_profile,
+            configured_flow_control_cap,
+            summarize_usize_trace(queue_depth_trace),
+            summarize_usize_trace(bytes_buffered_trace),
+            send_poll_state,
+            receive_poll_state,
+            backpressure_event,
+            cancellation_drain_event,
+            status_trailers,
+            EXACT_STREAMING_FLOW_CONTROL_RCH_COMMAND,
+            final_verdict,
         );
     }
 
@@ -2062,6 +2131,253 @@ mod tests {
             .expect("push after drain should succeed due to available buffer space");
 
         crate::test_complete!("conformance_server_streaming_backpressure");
+    }
+
+    #[test]
+    fn conformance_grpc_streaming_non_reader_cancellation_drains_buffered_responses() {
+        init_test("conformance_grpc_streaming_non_reader_cancellation_drains_buffered_responses");
+        let mut stream = ResponseStream::<u32>::open();
+        stream.push(Ok(10)).expect("first buffered response");
+        stream.push(Ok(20)).expect("second buffered response");
+        stream.push(Ok(30)).expect("third buffered response");
+        stream.cancel_with_error(Status::cancelled(
+            "server cancelled after client stopped reading buffered responses",
+        ));
+
+        let events = collect_response_stream_events(&mut stream);
+        assert_eq!(
+            events,
+            vec![
+                "ok:10".to_string(),
+                "ok:20".to_string(),
+                "ok:30".to_string(),
+                "err:Cancelled:server cancelled after client stopped reading buffered responses"
+                    .to_string(),
+            ],
+            "non-reader cancellation must still drain buffered responses before CANCELLED"
+        );
+        assert!(
+            stream.push(Ok(40)).is_err(),
+            "cancelled non-reader stream must reject new responses"
+        );
+
+        crate::test_complete!(
+            "conformance_grpc_streaming_non_reader_cancellation_drains_buffered_responses"
+        );
+    }
+
+    #[test]
+    fn conformance_grpc_streaming_flow_control_matrix_logs_evidence() {
+        init_test("conformance_grpc_streaming_flow_control_matrix_logs_evidence");
+
+        {
+            let mut stream = ResponseStream::<u32>::open();
+            let mut queue_depth_trace = vec![stream.items.len()];
+            stream.push(Ok(1)).expect("buffer first response");
+            queue_depth_trace.push(stream.items.len());
+            stream.push(Ok(2)).expect("buffer second response");
+            queue_depth_trace.push(stream.items.len());
+            stream.push(Ok(3)).expect("buffer third response");
+            queue_depth_trace.push(stream.items.len());
+            stream.close();
+            queue_depth_trace.push(stream.items.len());
+            let events = collect_response_stream_events(&mut stream);
+            queue_depth_trace.push(stream.items.len());
+            let bytes_buffered_trace = queue_depth_trace
+                .iter()
+                .map(|depth| depth * std::mem::size_of::<u32>())
+                .collect::<Vec<_>>();
+            assert_eq!(
+                events,
+                vec![
+                    "ok:1".to_string(),
+                    "ok:2".to_string(),
+                    "ok:3".to_string(),
+                    "none".to_string(),
+                ],
+                "normal many-small-frame streaming should preserve order and EOF"
+            );
+            log_grpc_streaming_flow_control_case(
+                "many_small_frames_ordered_drain",
+                "normal_reader",
+                MAX_STREAM_BUFFERED,
+                &queue_depth_trace,
+                &bytes_buffered_trace,
+                "push_ok",
+                "ready_items_then_eof",
+                "none",
+                "none",
+                "eof_no_trailer",
+                "pass",
+            );
+        }
+
+        {
+            let mut stream = ResponseStream::<u32>::open();
+            let mut queue_depth_trace = vec![stream.items.len()];
+            for value in 0..MAX_STREAM_BUFFERED as u32 {
+                stream.push(Ok(value)).expect("fill response buffer");
+            }
+            queue_depth_trace.push(stream.items.len());
+            let overflow = stream
+                .push(Ok(MAX_STREAM_BUFFERED as u32))
+                .expect_err("overflow should backpressure");
+            queue_depth_trace.push(stream.items.len());
+            assert_eq!(
+                overflow.code(),
+                Code::ResourceExhausted,
+                "slow-reader backpressure must reject sends at the configured cap"
+            );
+            let waker = noop_waker();
+            let mut cx = Context::from_waker(&waker);
+            assert!(matches!(
+                Pin::new(&mut stream).poll_next(&mut cx),
+                Poll::Ready(Some(Ok(0)))
+            ));
+            queue_depth_trace.push(stream.items.len());
+            stream
+                .push(Ok(MAX_STREAM_BUFFERED as u32))
+                .expect("backpressure should clear after one drain");
+            queue_depth_trace.push(stream.items.len());
+            let bytes_buffered_trace = queue_depth_trace
+                .iter()
+                .map(|depth| depth * std::mem::size_of::<u32>())
+                .collect::<Vec<_>>();
+            log_grpc_streaming_flow_control_case(
+                "slow_reader_backpressure_cap",
+                "slow_reader",
+                MAX_STREAM_BUFFERED,
+                &queue_depth_trace,
+                &bytes_buffered_trace,
+                "overflow_resource_exhausted_then_resumed",
+                "single_drain_then_buffer_refill",
+                "resource_exhausted_at_cap",
+                "none",
+                "not_closed_yet",
+                "pass",
+            );
+        }
+
+        {
+            let mut stream = ResponseStream::<u32>::open();
+            let mut queue_depth_trace = vec![stream.items.len()];
+            stream.push(Ok(10)).expect("buffer first response");
+            stream.push(Ok(20)).expect("buffer second response");
+            stream.push(Ok(30)).expect("buffer third response");
+            queue_depth_trace.push(stream.items.len());
+            stream.cancel_with_error(Status::cancelled(
+                "server cancelled after client stopped reading buffered responses",
+            ));
+            queue_depth_trace.push(stream.items.len());
+            let events = collect_response_stream_events(&mut stream);
+            queue_depth_trace.push(stream.items.len());
+            let bytes_buffered_trace = queue_depth_trace
+                .iter()
+                .map(|depth| depth * std::mem::size_of::<u32>())
+                .collect::<Vec<_>>();
+            assert!(
+                matches!(events.last(), Some(last) if last.starts_with("err:Cancelled:")),
+                "non-reader scenario must terminate with CANCELLED after draining buffered responses"
+            );
+            log_grpc_streaming_flow_control_case(
+                "non_reader_cancel_after_buffering",
+                "non_reader",
+                MAX_STREAM_BUFFERED,
+                &queue_depth_trace,
+                &bytes_buffered_trace,
+                "push_ok",
+                "not_polled_until_cancel_then_drain",
+                "none",
+                "cancelled_after_buffered_drain",
+                "cancelled_implicit_status",
+                "pass",
+            );
+        }
+
+        {
+            let mut stream = StreamingRequest::<u32>::open();
+            let mut queue_depth_trace = vec![stream.items.len()];
+            stream.push(7).expect("buffer first request");
+            stream.push(8).expect("buffer second request");
+            stream.push(9).expect("buffer third request");
+            queue_depth_trace.push(stream.items.len());
+            stream.close();
+            queue_depth_trace.push(stream.items.len());
+            let events = collect_streaming_request_events(&mut stream);
+            queue_depth_trace.push(stream.items.len());
+            let bytes_buffered_trace = queue_depth_trace
+                .iter()
+                .map(|depth| depth * std::mem::size_of::<u32>())
+                .collect::<Vec<_>>();
+            assert_eq!(
+                events,
+                vec![
+                    "ok:7".to_string(),
+                    "ok:8".to_string(),
+                    "ok:9".to_string(),
+                    "none".to_string(),
+                ],
+                "buffered client half-close must drain all requests before EOF"
+            );
+            log_grpc_streaming_flow_control_case(
+                "client_half_close_with_buffered_requests",
+                "half_close_buffered",
+                MAX_STREAM_BUFFERED,
+                &queue_depth_trace,
+                &bytes_buffered_trace,
+                "push_ok_then_close",
+                "ready_items_then_eof",
+                "none",
+                "graceful_half_close_after_buffered_drain",
+                "eof_no_trailer",
+                "pass",
+            );
+        }
+
+        {
+            let mut stream = ResponseStream::<u32>::open();
+            let mut queue_depth_trace = vec![stream.items.len()];
+            for value in 0..MAX_STREAM_BUFFERED as u32 {
+                stream.push(Ok(value)).expect("fill response buffer");
+            }
+            queue_depth_trace.push(stream.items.len());
+            let overflow = stream
+                .push(Ok(MAX_STREAM_BUFFERED as u32))
+                .expect_err("overflow should fail while send is backpressured");
+            queue_depth_trace.push(stream.items.len());
+            assert_eq!(overflow.code(), Code::ResourceExhausted);
+            stream.cancel_with_error(Status::cancelled(
+                "server cancelled while send remained backpressured",
+            ));
+            queue_depth_trace.push(stream.items.len());
+            let events = collect_response_stream_events(&mut stream);
+            queue_depth_trace.push(stream.items.len());
+            let bytes_buffered_trace = queue_depth_trace
+                .iter()
+                .map(|depth| depth * std::mem::size_of::<u32>())
+                .collect::<Vec<_>>();
+            assert_eq!(
+                events
+                    .iter()
+                    .filter(|event| event.starts_with("ok:"))
+                    .count(),
+                MAX_STREAM_BUFFERED,
+                "server-cancelled blocked-send case must still drain the bounded buffer"
+            );
+            log_grpc_streaming_flow_control_case(
+                "server_cancel_while_send_blocked",
+                "slow_reader_non_drain",
+                MAX_STREAM_BUFFERED,
+                &queue_depth_trace,
+                &bytes_buffered_trace,
+                "overflow_resource_exhausted_then_cancelled",
+                "drain_after_cancel",
+                "resource_exhausted_at_cap",
+                "cancelled_after_backpressured_drain",
+                "cancelled_implicit_status",
+                "pass",
+            );
+        }
     }
 
     /// GRPC-CONF-004: Stream must not accept new messages after close()
