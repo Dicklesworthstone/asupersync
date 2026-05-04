@@ -9,14 +9,14 @@
     "run_report.json"
   ],
   "trust_model": {
-    "active_integrity_mode": "digest_only_sha256",
-    "true_signature_status": "not_wired",
-    "follow_up_blocker_required": true,
-    "follow_up_blocker_title": "Wire asymmetric signature verification for signed profile bundles before signed-mode rollout",
+    "active_integrity_mode": "digest_only_sha256+nkey_ed25519",
+    "true_signature_status": "wired_nkey_ed25519",
+    "follow_up_blocker_required": false,
+    "follow_up_blocker_title": "True NKey Ed25519 signature verification is wired; keep signed-mode rollout gated by signed scenarios",
     "digest_only_limitations": [
-      "Digest-only mode detects tampering in the committed manifest bytes but does not authenticate an operator identity.",
-      "Digest-only mode must not be upgraded to a signed-mode recommendation unless key, domain, epoch, and revocation checks are implemented.",
-      "Digest-only artifacts remain review and rollback evidence only; they never auto-apply a runtime profile."
+      "digest-only mode does not authenticate signer identity and remains review-only",
+      "digest-only bundles must never auto-apply and must fail when signed_mode_required is true",
+      "nkey_ed25519 mode authenticates signing domain, key ID, epoch, time window, certificate digest locks, proof graph root, and rollback chain digest"
     ],
     "fail_closed_cases": [
       {
@@ -282,6 +282,226 @@
         "selected_profile": "locality_first_64c_256g",
         "supported_controller_version_count": 6,
         "tamper_field": null,
+        "verification_refusal_count": 0
+      }
+    },
+    {
+      "scenario_id": "AA-SIGNED-PROFILE-BUNDLE-NKEY-ACCEPT-64C-256G",
+      "description": "Signed NKey Ed25519 locality-first profile bundle for a 64-core / 256 GiB host, verifying signing domain, key ID, epoch, time window, certificate locks, proof graph root, and rollback chain digest.",
+      "objective": "locality_first",
+      "requested_profile": "locality_first_64c_256g",
+      "host_resources": {
+        "cpu_cores": 64,
+        "memory_gib": 256
+      },
+      "host_fingerprint": {
+        "hostname": "lab-64c-256g-a",
+        "arch": "x86_64",
+        "cpu_cores": 64,
+        "memory_gib": 256
+      },
+      "controller_evidence": {
+        "brownout": {
+          "artifact_id": "artifacts/overload_brownout_smoke_contract_v1.json",
+          "contract_version": "overload-brownout-smoke-contract-v1",
+          "validation_passed": true
+        },
+        "otlp_brownout": {
+          "artifact_id": "artifacts/otlp_brownout_shedding_smoke_contract_v1.json",
+          "contract_version": "otlp-brownout-shedding-smoke-contract-v1",
+          "validation_passed": true
+        },
+        "admission_steering": {
+          "artifact_id": "artifacts/cohort_admission_steering_smoke_contract_v1.json",
+          "contract_version": "cohort-admission-steering-smoke-contract-v1",
+          "validation_passed": true
+        },
+        "adaptive_batch_sizing": {
+          "artifact_id": "artifacts/adaptive_batch_sizing_smoke_contract_v1.json",
+          "contract_version": "adaptive-batch-sizing-smoke-contract-v1",
+          "validation_passed": true
+        },
+        "blocking_pool_affinity": {
+          "artifact_id": "artifacts/blocking_pool_affinity_smoke_contract_v1.json",
+          "contract_version": "blocking-pool-affinity-smoke-contract-v1",
+          "validation_passed": true
+        },
+        "trace_storage_profile": {
+          "artifact_id": "artifacts/trace_storage_profile_smoke_contract_v1.json",
+          "contract_version": "trace-storage-profile-smoke-contract-v1",
+          "validation_passed": true
+        }
+      },
+      "manual_overrides": {
+        "global_queue_limit": 49152
+      },
+      "evidence_snapshot": {
+        "scenario_artifact_id": "artifacts/swarm_scenario_locality_64c_256g.json",
+        "scenario_artifact_hash": "a74fd668c2b7d26ef6f7872f0d1048349f8d618fc79a4f8a01273f93be1f7b21",
+        "scenario_contract_version": "swarm-scenario-evidence-v1",
+        "sample_count": 96,
+        "calibration_status": "calibrated",
+        "host_fingerprint": {
+          "hostname": "lab-64c-256g-a",
+          "arch": "x86_64",
+          "cpu_cores": 64,
+          "memory_gib": 256
+        },
+        "artifact_age_hours": 12,
+        "measured_worker_count": 64,
+        "measured_agent_count": 384,
+        "measured_queue_depth": 28000,
+        "throughput_ops_per_sec": 248000,
+        "wake_to_run_p50_ns": 220000,
+        "wake_to_run_p95_ns": 640000,
+        "wake_to_run_p99_ns": 900000,
+        "cancellation_debt_units": 96,
+        "memory_pressure_basis_points": 5100,
+        "brownout_stage": "optional_first",
+        "brownout_risk_basis_points": 550,
+        "retention_budget_gib": 2
+      },
+      "capacity_budget": {
+        "target_p99_ns": 1300000,
+        "target_cancel_debt_units": 130,
+        "max_memory_pressure_basis_points": 7000,
+        "max_brownout_risk_basis_points": 1400,
+        "max_queue_depth": 45000,
+        "max_artifact_age_hours": 48,
+        "min_sample_count": 32
+      },
+      "worker_count_sweep": [
+        48,
+        56,
+        64
+      ],
+      "agent_count_sweep": [
+        256,
+        384,
+        512,
+        640
+      ],
+      "bundle_id": "swarm-profile-locality-first-nkey-signed-64c-256g-v1",
+      "integrity_mode": "nkey_ed25519",
+      "proof_command_classes": [
+        "rch_cargo_test",
+        "smoke_runner",
+        "nkey_signature"
+      ],
+      "controller_versions": [
+        {
+          "controller": "brownout",
+          "contract_version": "overload-brownout-smoke-contract-v1"
+        },
+        {
+          "controller": "otlp_brownout",
+          "contract_version": "otlp-brownout-shedding-smoke-contract-v1"
+        },
+        {
+          "controller": "admission_steering",
+          "contract_version": "cohort-admission-steering-smoke-contract-v1"
+        },
+        {
+          "controller": "adaptive_batch_sizing",
+          "contract_version": "adaptive-batch-sizing-smoke-contract-v1"
+        },
+        {
+          "controller": "blocking_pool_affinity",
+          "contract_version": "blocking-pool-affinity-smoke-contract-v1"
+        },
+        {
+          "controller": "trace_storage_profile",
+          "contract_version": "trace-storage-profile-smoke-contract-v1"
+        }
+      ],
+      "supported_controller_versions": [
+        {
+          "controller": "brownout",
+          "contract_version": "overload-brownout-smoke-contract-v1"
+        },
+        {
+          "controller": "otlp_brownout",
+          "contract_version": "otlp-brownout-shedding-smoke-contract-v1"
+        },
+        {
+          "controller": "admission_steering",
+          "contract_version": "cohort-admission-steering-smoke-contract-v1"
+        },
+        {
+          "controller": "adaptive_batch_sizing",
+          "contract_version": "adaptive-batch-sizing-smoke-contract-v1"
+        },
+        {
+          "controller": "blocking_pool_affinity",
+          "contract_version": "blocking-pool-affinity-smoke-contract-v1"
+        },
+        {
+          "controller": "trace_storage_profile",
+          "contract_version": "trace-storage-profile-smoke-contract-v1"
+        }
+      ],
+      "capacity_certificate_reference": {
+        "artifact_id": "artifacts/capacity_envelope_planner_smoke_contract_v1.json",
+        "contract_version": "capacity-envelope-planner-smoke-contract-v1",
+        "scenario_id": "AA-CAPACITY-ENVELOPE-LOCALITY-CERT-64C-256G"
+      },
+      "previous_config_digest": "64a911f5b81c3320cceeb7f85ad6d7164bc17c42ddf5c8a5d44236b00453498a",
+      "rollback_command_template": "offline_tuner apply-profile --profile conservative_baseline --host-fingerprint lab-64c-256g-a --verify-only",
+      "operator_note": "ticket=OPS-SIGNED api_token=super-secret",
+      "validation_command": "run_id=BUNDLE-SIGNED token=secret",
+      "require_operator_confirmation": true,
+      "execute_mode": "verify",
+      "tamper_field": null,
+      "output_root": "target/signed-profile-bundle-smoke",
+      "signature_policy": {
+        "signing_domain": "asupersync.signed-profile-bundle.v1",
+        "key_id": "bundle-signing-key-1",
+        "algorithm": "nkey_ed25519",
+        "signing_seed_byte": 42,
+        "issued_at_unix_seconds": 1700000000,
+        "expires_at_unix_seconds": 1800000000,
+        "verification_time_unix_seconds": 1750000000,
+        "bundle_epoch": 7,
+        "minimum_bundle_epoch": 7,
+        "signed_mode_required": true,
+        "trusted_keys": [
+          {
+            "key_id": "bundle-signing-key-1",
+            "public_key_seed_byte": 42,
+            "revoked": false
+          }
+        ]
+      },
+      "expected_report_projection": {
+        "accepted": true,
+        "artifact_path_count": 10,
+        "bundle_epoch": 7,
+        "capacity_certificate_digest_sha256": "a7f0b9d16c26da9b93e9244f9c45ac692211aecca63e6d0bb6478966eba00dff",
+        "child_evidence_count": 6,
+        "child_proof_graph_root_sha256": "abe4acec3f364ab06489b34e31b18d5a1ca70daa20175e4cc1c389c1fed7564a",
+        "controller_version_count": 6,
+        "execute_mode": "verify",
+        "fallback_profile": "conservative_baseline",
+        "feature_gate_count": 6,
+        "integrity_limitation_count": 0,
+        "integrity_mode": "nkey_ed25519",
+        "manual_override_count": 1,
+        "planning_refusal_count": 0,
+        "projection_hash": 779672745973237867,
+        "proof_command_class_count": 3,
+        "require_operator_confirmation": true,
+        "rollback_chain_digest_sha256": "258d6bc702c2731121a1079769469c586e2b0ce52f5290f52ebcbf839a417b37",
+        "sanitized_operator_note": "ticket=OPS-SIGNED api_token=[REDACTED]",
+        "sanitized_validation_command": "run_id=BUNDLE-SIGNED token=[REDACTED]",
+        "selected_profile": "locality_first_64c_256g",
+        "signature_algorithm": "nkey_ed25519",
+        "signature_len": 86,
+        "signed_mode_required": true,
+        "signing_domain": "asupersync.signed-profile-bundle.v1",
+        "signing_key_id": "bundle-signing-key-1",
+        "supported_controller_version_count": 6,
+        "tamper_field": null,
+        "trusted_signing_key_count": 1,
         "verification_refusal_count": 0
       }
     },

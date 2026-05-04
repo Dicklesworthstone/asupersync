@@ -9,8 +9,10 @@ use asupersync::runtime::config::{
     HostProfilePlannerRequest, RuntimeCapacityHints,
     SignedProfileBundleCapacityCertificateReference, SignedProfileBundleControllerVersion,
     SignedProfileBundleExecutionMode, SignedProfileBundleIntegrityMode,
-    SignedProfileBundleManifestRequest, TraceStorageProfile,
+    SignedProfileBundleManifestRequest, SignedProfileBundleSignaturePolicy,
+    SignedProfileBundleTrustedSigningKey, TraceStorageProfile,
 };
+use nkeys::{KeyPair, KeyPairType};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use std::collections::{BTreeSet, hash_map::DefaultHasher};
@@ -62,6 +64,7 @@ struct SignedProfileBundleScenario {
     agent_count_sweep: Vec<usize>,
     bundle_id: String,
     integrity_mode: String,
+    signature_policy: Option<SignaturePolicyFixture>,
     proof_command_classes: Vec<String>,
     controller_versions: Vec<ControllerVersionFixture>,
     supported_controller_versions: Vec<ControllerVersionFixture>,
@@ -189,6 +192,29 @@ struct CapacityCertificateReferenceFixture {
     artifact_id: String,
     contract_version: String,
     scenario_id: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct SignaturePolicyFixture {
+    signing_domain: String,
+    key_id: String,
+    algorithm: String,
+    signing_seed_byte: u8,
+    issued_at_unix_seconds: i64,
+    expires_at_unix_seconds: i64,
+    verification_time_unix_seconds: i64,
+    bundle_epoch: u64,
+    minimum_bundle_epoch: u64,
+    signed_mode_required: bool,
+    #[serde(default)]
+    trusted_keys: Vec<TrustedSigningKeyFixture>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct TrustedSigningKeyFixture {
+    key_id: String,
+    public_key_seed_byte: u8,
+    revoked: bool,
 }
 
 impl From<HostProfileEvidenceArtifactFixture> for HostProfileEvidenceArtifact {
@@ -334,6 +360,54 @@ impl From<CapacityCertificateReferenceFixture> for SignedProfileBundleCapacityCe
     }
 }
 
+fn deterministic_user_seed(byte: u8) -> String {
+    KeyPair::new_from_raw(KeyPairType::User, [byte; 32])
+        .expect("deterministic signing seed")
+        .seed()
+        .expect("seed encoding")
+}
+
+fn deterministic_user_public_key(byte: u8) -> String {
+    KeyPair::new_from_raw(KeyPairType::User, [byte; 32])
+        .expect("deterministic signing key")
+        .public_key()
+}
+
+fn build_signature_policy(fixture: &SignaturePolicyFixture) -> SignedProfileBundleSignaturePolicy {
+    let public_key = deterministic_user_public_key(fixture.signing_seed_byte);
+    let trusted_keys = if fixture.trusted_keys.is_empty() {
+        vec![SignedProfileBundleTrustedSigningKey {
+            key_id: fixture.key_id.clone(),
+            public_key: public_key.clone(),
+            revoked: false,
+        }]
+    } else {
+        fixture
+            .trusted_keys
+            .iter()
+            .map(|key| SignedProfileBundleTrustedSigningKey {
+                key_id: key.key_id.clone(),
+                public_key: deterministic_user_public_key(key.public_key_seed_byte),
+                revoked: key.revoked,
+            })
+            .collect()
+    };
+    SignedProfileBundleSignaturePolicy {
+        signing_domain: fixture.signing_domain.clone(),
+        key_id: fixture.key_id.clone(),
+        public_key,
+        algorithm: fixture.algorithm.clone(),
+        signing_seed: Some(deterministic_user_seed(fixture.signing_seed_byte)),
+        issued_at_unix_seconds: fixture.issued_at_unix_seconds,
+        expires_at_unix_seconds: fixture.expires_at_unix_seconds,
+        verification_time_unix_seconds: fixture.verification_time_unix_seconds,
+        bundle_epoch: fixture.bundle_epoch,
+        minimum_bundle_epoch: fixture.minimum_bundle_epoch,
+        signed_mode_required: fixture.signed_mode_required,
+        trusted_keys,
+    }
+}
+
 fn parse_objective(value: &str) -> HostProfilePlannerObjective {
     match value {
         "locality_first" => HostProfilePlannerObjective::LocalityFirst,
@@ -402,6 +476,7 @@ fn parse_arena_temperature_policy(value: &str) -> ArenaTemperaturePolicy {
 fn parse_integrity_mode(value: &str) -> SignedProfileBundleIntegrityMode {
     match value {
         "digest_only_sha256" => SignedProfileBundleIntegrityMode::DigestOnlySha256,
+        "nkey_ed25519" => SignedProfileBundleIntegrityMode::NkeyEd25519,
         other => panic!("unsupported signed profile bundle integrity mode {other}"),
     }
 }
@@ -460,6 +535,10 @@ fn build_request(scenario: &SignedProfileBundleScenario) -> SignedProfileBundleM
         candidate_agent_counts: scenario.agent_count_sweep.clone(),
         bundle_id: scenario.bundle_id.clone(),
         integrity_mode: parse_integrity_mode(&scenario.integrity_mode),
+        signature_policy: scenario
+            .signature_policy
+            .as_ref()
+            .map(build_signature_policy),
         proof_command_classes: scenario.proof_command_classes.clone(),
         controller_versions: scenario
             .controller_versions
@@ -582,6 +661,56 @@ fn report_projection(report: &Value) -> Value {
             ),
         ]);
     }
+    if report["signed_profile_bundle_manifest"]["signature"].is_object() {
+        object.as_object_mut().expect("projection object").extend([
+            (
+                "signed_mode_required".to_string(),
+                report["signed_profile_bundle_manifest"]["signed_mode_required"].clone(),
+            ),
+            (
+                "trusted_signing_key_count".to_string(),
+                report["signed_profile_bundle_manifest"]["trusted_signing_key_count"].clone(),
+            ),
+            (
+                "signing_domain".to_string(),
+                report["signed_profile_bundle_manifest"]["signature"]["signing_domain"].clone(),
+            ),
+            (
+                "signing_key_id".to_string(),
+                report["signed_profile_bundle_manifest"]["signature"]["key_id"].clone(),
+            ),
+            (
+                "signature_algorithm".to_string(),
+                report["signed_profile_bundle_manifest"]["signature"]["algorithm"].clone(),
+            ),
+            (
+                "bundle_epoch".to_string(),
+                report["signed_profile_bundle_manifest"]["signature"]["bundle_epoch"].clone(),
+            ),
+            (
+                "signature_len".to_string(),
+                report["signed_profile_bundle_manifest"]["signature"]["signature_len"].clone(),
+            ),
+            (
+                "capacity_certificate_digest_sha256".to_string(),
+                report["signed_profile_bundle_manifest"]["signature"]
+                    ["capacity_certificate_digest_sha256"]
+                    .clone(),
+            ),
+            (
+                "child_proof_graph_root_sha256".to_string(),
+                report["signed_profile_bundle_manifest"]["signature"]
+                    ["child_proof_graph_root_sha256"]
+                    .clone(),
+            ),
+            (
+                "rollback_chain_digest_sha256".to_string(),
+                report["signed_profile_bundle_manifest"]["signature"]
+                    ["rollback_chain_digest_sha256"]
+                    .clone(),
+            ),
+        ]);
+    }
     let hash = projection_hash(&object);
     object
         .as_object_mut()
@@ -625,6 +754,23 @@ fn build_report(
             },
             "integrity_mode": manifest.integrity_mode.as_str(),
             "integrity_limitations": manifest.integrity_limitations.clone(),
+            "signed_mode_required": manifest.signed_mode_required,
+            "verification_time_unix_seconds": manifest.verification_time_unix_seconds,
+            "minimum_bundle_epoch": manifest.minimum_bundle_epoch,
+            "trusted_signing_key_count": manifest.trusted_signing_keys.len(),
+            "signature": manifest.signature.as_ref().map(|signature| json!({
+                "signing_domain": signature.signing_domain.clone(),
+                "key_id": signature.key_id.clone(),
+                "public_key": signature.public_key.clone(),
+                "algorithm": signature.algorithm.clone(),
+                "issued_at_unix_seconds": signature.issued_at_unix_seconds,
+                "expires_at_unix_seconds": signature.expires_at_unix_seconds,
+                "bundle_epoch": signature.bundle_epoch,
+                "capacity_certificate_digest_sha256": signature.capacity_certificate_digest_sha256.clone(),
+                "child_proof_graph_root_sha256": signature.child_proof_graph_root_sha256.clone(),
+                "rollback_chain_digest_sha256": signature.rollback_chain_digest_sha256.clone(),
+                "signature_len": signature.signature_base64.len(),
+            })),
             "proof_command_classes": manifest.proof_command_classes.clone(),
             "feature_gates": manifest.feature_gates.clone(),
             "manual_override_fields": manifest.manual_override_fields.clone(),
@@ -743,6 +889,27 @@ fn request_for_scenario(scenario_id: &str) -> SignedProfileBundleManifestRequest
     build_request(scenario)
 }
 
+fn signed_request() -> SignedProfileBundleManifestRequest {
+    request_for_scenario("AA-SIGNED-PROFILE-BUNDLE-NKEY-ACCEPT-64C-256G")
+}
+
+fn assert_signed_request_rejects(request: SignedProfileBundleManifestRequest, needle: &str) {
+    let bundle = request.plan();
+    assert!(
+        !bundle.verification.accepted,
+        "request unexpectedly accepted; expected refusal containing {needle}"
+    );
+    assert!(
+        bundle
+            .verification
+            .refusal_reasons
+            .iter()
+            .any(|reason| reason.contains(needle)),
+        "expected refusal containing {needle}; got {:?}",
+        bundle.verification.refusal_reasons
+    );
+}
+
 #[test]
 fn signed_profile_bundle_accepts_valid_digest_only_manifest() {
     let bundle = sample_request().plan();
@@ -763,17 +930,141 @@ fn signed_profile_bundle_accepts_valid_digest_only_manifest() {
 }
 
 #[test]
+fn signed_profile_bundle_accepts_valid_nkey_signature() {
+    let request = signed_request();
+    let bundle = request.plan();
+    let signature = bundle
+        .manifest
+        .signature
+        .as_ref()
+        .expect("signed scenario must emit signature metadata");
+
+    assert!(bundle.verification.accepted);
+    assert_eq!(
+        bundle.manifest.integrity_mode,
+        SignedProfileBundleIntegrityMode::NkeyEd25519
+    );
+    assert_eq!(signature.algorithm, "nkey_ed25519");
+    assert_eq!(
+        signature.signing_domain,
+        "asupersync.signed-profile-bundle.v1"
+    );
+    assert_eq!(signature.bundle_epoch, 7);
+    assert_eq!(signature.signature_base64.len(), 86);
+    assert!(bundle.manifest.integrity_limitations.is_empty());
+}
+
+#[test]
+fn signed_profile_bundle_signature_policy_failures_are_closed() {
+    let mut domain = signed_request();
+    domain
+        .signature_policy
+        .as_mut()
+        .expect("policy")
+        .signing_domain = "wrong.domain".to_string();
+    assert_signed_request_rejects(domain, "signing domain");
+
+    let mut key_id = signed_request();
+    key_id.signature_policy.as_mut().expect("policy").key_id = "unknown-key".to_string();
+    assert_signed_request_rejects(key_id, "trusted key set");
+
+    let mut key_mismatch = signed_request();
+    key_mismatch
+        .signature_policy
+        .as_mut()
+        .expect("policy")
+        .trusted_keys[0]
+        .public_key = deterministic_user_public_key(43);
+    assert_signed_request_rejects(key_mismatch, "bound to public key");
+
+    let mut algorithm = signed_request();
+    algorithm
+        .signature_policy
+        .as_mut()
+        .expect("policy")
+        .algorithm = "ed25519-test-only".to_string();
+    assert_signed_request_rejects(algorithm, "unsupported");
+
+    let mut empty_signature = signed_request();
+    empty_signature
+        .signature_policy
+        .as_mut()
+        .expect("policy")
+        .signing_seed = None;
+    assert_signed_request_rejects(empty_signature, "signature_base64");
+
+    let mut unknown_key = signed_request();
+    unknown_key
+        .signature_policy
+        .as_mut()
+        .expect("policy")
+        .trusted_keys
+        .clear();
+    assert_signed_request_rejects(unknown_key, "trusted key set");
+
+    let mut revoked = signed_request();
+    revoked
+        .signature_policy
+        .as_mut()
+        .expect("policy")
+        .trusted_keys[0]
+        .revoked = true;
+    assert_signed_request_rejects(revoked, "revoked");
+
+    let mut expired = signed_request();
+    expired
+        .signature_policy
+        .as_mut()
+        .expect("policy")
+        .verification_time_unix_seconds = 1_800_000_000;
+    assert_signed_request_rejects(expired, "expired");
+
+    let mut not_yet_valid = signed_request();
+    not_yet_valid
+        .signature_policy
+        .as_mut()
+        .expect("policy")
+        .verification_time_unix_seconds = 1_699_999_999;
+    assert_signed_request_rejects(not_yet_valid, "issued_at");
+
+    let mut replay = signed_request();
+    replay
+        .signature_policy
+        .as_mut()
+        .expect("policy")
+        .minimum_bundle_epoch = 8;
+    assert_signed_request_rejects(replay, "minimum accepted epoch");
+
+    let mut downgrade = signed_request();
+    downgrade.integrity_mode = SignedProfileBundleIntegrityMode::DigestOnlySha256;
+    assert_signed_request_rejects(downgrade, "downgrade");
+
+    let mut capacity_lock = signed_request();
+    capacity_lock.tamper_field = Some("signature.capacity_certificate_digest_sha256".to_string());
+    assert_signed_request_rejects(capacity_lock, "capacity certificate digest lock");
+
+    let mut proof_root = signed_request();
+    proof_root.tamper_field = Some("signature.child_proof_graph_root_sha256".to_string());
+    assert_signed_request_rejects(proof_root, "child proof graph root");
+
+    let mut rollback_chain = signed_request();
+    rollback_chain.tamper_field = Some("signature.rollback_chain_digest_sha256".to_string());
+    assert_signed_request_rejects(rollback_chain, "rollback chain digest");
+}
+
+#[test]
 fn signed_profile_bundle_trust_model_declares_digest_only_boundary() {
     let contract = default_contract();
     let trust = &contract.trust_model;
 
-    assert_eq!(trust.active_integrity_mode, "digest_only_sha256");
-    assert_eq!(trust.true_signature_status, "not_wired");
-    assert!(trust.follow_up_blocker_required);
+    assert!(trust.active_integrity_mode.contains("digest_only_sha256"));
+    assert!(trust.active_integrity_mode.contains("nkey_ed25519"));
+    assert_eq!(trust.true_signature_status, "wired_nkey_ed25519");
+    assert!(!trust.follow_up_blocker_required);
     assert!(
         trust
             .follow_up_blocker_title
-            .contains("asymmetric signature verification")
+            .contains("NKey Ed25519 signature verification")
     );
     assert!(
         trust

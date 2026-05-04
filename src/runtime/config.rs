@@ -36,6 +36,8 @@ use crate::runtime::deadline_monitor::{DeadlineWarning, MonitorConfig};
 use crate::trace::distributed::LogicalClockMode;
 use crate::types::CancelAttributionConfig;
 use crate::util::Arena;
+use base64::{Engine as _, engine::general_purpose::STANDARD_NO_PAD};
+use nkeys::KeyPair;
 use sha2::{Digest, Sha256};
 use std::fmt;
 use std::str::FromStr;
@@ -3747,8 +3749,10 @@ impl CapacityEnvelopeCertificate {
 /// Integrity mode for operator-facing profile bundles.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SignedProfileBundleIntegrityMode {
-    /// Digest-only integrity; no asymmetric signing primitive is wired yet.
+    /// Digest-only integrity for explicit review-only bundle posture.
     DigestOnlySha256,
+    /// Ed25519 signatures using the existing NKey signing primitive.
+    NkeyEd25519,
 }
 
 impl SignedProfileBundleIntegrityMode {
@@ -3756,6 +3760,7 @@ impl SignedProfileBundleIntegrityMode {
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::DigestOnlySha256 => "digest_only_sha256",
+            Self::NkeyEd25519 => "nkey_ed25519",
         }
     }
 }
@@ -3862,6 +3867,94 @@ impl SignedProfileBundleCapacityCertificateReference {
     }
 }
 
+const SIGNED_PROFILE_BUNDLE_SIGNATURE_DOMAIN: &str = "asupersync.signed-profile-bundle.v1";
+const SIGNED_PROFILE_BUNDLE_SIGNATURE_ALGORITHM: &str = "nkey_ed25519";
+
+/// Trusted signing key metadata for signed profile bundles.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SignedProfileBundleTrustedSigningKey {
+    /// Stable operator-facing key identifier.
+    pub key_id: String,
+    /// NKey public key used for Ed25519 verification.
+    pub public_key: String,
+    /// Whether this key is revoked and must fail closed.
+    pub revoked: bool,
+}
+
+/// Request-time signing policy used to emit a signed bundle.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SignedProfileBundleSignaturePolicy {
+    /// Required signing domain.
+    pub signing_domain: String,
+    /// Stable operator-facing key identifier.
+    pub key_id: String,
+    /// NKey public key expected to verify the signature.
+    pub public_key: String,
+    /// Signature algorithm identifier.
+    pub algorithm: String,
+    /// Optional NKey seed used by tests/offline tooling to emit the signature.
+    pub signing_seed: Option<String>,
+    /// Inclusive issuance timestamp in Unix seconds.
+    pub issued_at_unix_seconds: i64,
+    /// Exclusive expiry timestamp in Unix seconds.
+    pub expires_at_unix_seconds: i64,
+    /// Verification time in Unix seconds.
+    pub verification_time_unix_seconds: i64,
+    /// Monotone bundle epoch.
+    pub bundle_epoch: u64,
+    /// Lowest acceptable bundle epoch.
+    pub minimum_bundle_epoch: u64,
+    /// Whether signed mode is required and digest-only must be rejected.
+    pub signed_mode_required: bool,
+    /// Explicit trust store for verification.
+    pub trusted_keys: Vec<SignedProfileBundleTrustedSigningKey>,
+}
+
+/// Signature metadata embedded in a signed profile bundle manifest.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SignedProfileBundleSignature {
+    /// Required signing domain.
+    pub signing_domain: String,
+    /// Stable operator-facing key identifier.
+    pub key_id: String,
+    /// NKey public key used for Ed25519 verification.
+    pub public_key: String,
+    /// Signature algorithm identifier.
+    pub algorithm: String,
+    /// Inclusive issuance timestamp in Unix seconds.
+    pub issued_at_unix_seconds: i64,
+    /// Exclusive expiry timestamp in Unix seconds.
+    pub expires_at_unix_seconds: i64,
+    /// Monotone bundle epoch.
+    pub bundle_epoch: u64,
+    /// Digest lock for the referenced capacity certificate.
+    pub capacity_certificate_digest_sha256: String,
+    /// Root digest for all child proof hashes.
+    pub child_proof_graph_root_sha256: String,
+    /// Digest lock for rollback receipt chain inputs.
+    pub rollback_chain_digest_sha256: String,
+    /// Base64 no-pad encoded Ed25519 signature.
+    pub signature_base64: String,
+}
+
+impl SignedProfileBundleSignature {
+    fn digest_material(&self) -> String {
+        vec![
+            self.signing_domain.clone(),
+            self.key_id.clone(),
+            self.public_key.clone(),
+            self.algorithm.clone(),
+            self.issued_at_unix_seconds.to_string(),
+            self.expires_at_unix_seconds.to_string(),
+            self.bundle_epoch.to_string(),
+            self.capacity_certificate_digest_sha256.clone(),
+            self.child_proof_graph_root_sha256.clone(),
+            self.rollback_chain_digest_sha256.clone(),
+        ]
+        .join("|")
+    }
+}
+
 /// Canonical request for a profile-bundle manifest and rollback receipt.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SignedProfileBundleManifestRequest {
@@ -3889,6 +3982,8 @@ pub struct SignedProfileBundleManifestRequest {
     pub bundle_id: String,
     /// Integrity mode exposed to operators.
     pub integrity_mode: SignedProfileBundleIntegrityMode,
+    /// Optional signed-mode policy.
+    pub signature_policy: Option<SignedProfileBundleSignaturePolicy>,
     /// Classes of proof commands that justified the bundle.
     pub proof_command_classes: Vec<String>,
     /// Claimed controller versions for the manifest.
@@ -3962,10 +4057,41 @@ impl SignedProfileBundleManifestRequest {
         let child_evidence_hashes =
             build_signed_profile_bundle_child_evidence_hashes(&self.controller_evidence);
         let feature_gates = build_signed_profile_bundle_feature_gates(&bundle_plan.final_bundle);
-        let integrity_limitations = vec![
-            "digest-only mode; no asymmetric signature primitive is currently wired for profile bundles"
-                .to_string(),
-        ];
+        let integrity_limitations = match self.integrity_mode {
+            SignedProfileBundleIntegrityMode::DigestOnlySha256 => vec![
+                "digest-only mode; review-only integrity without asymmetric authentication"
+                    .to_string(),
+            ],
+            SignedProfileBundleIntegrityMode::NkeyEd25519 => Vec::new(),
+        };
+        let signature = self.signature_policy.as_ref().map(|policy| {
+            let capacity_certificate_digest_sha256 =
+                signed_profile_bundle_capacity_certificate_digest(
+                    &self.capacity_certificate_reference,
+                );
+            let child_proof_graph_root_sha256 =
+                signed_profile_bundle_child_proof_graph_root(&child_evidence_hashes);
+            let rollback_chain_digest_sha256 = signed_profile_bundle_rollback_chain_digest(
+                &self.previous_config_digest,
+                &self.rollback_command_template,
+                capacity_certificate.fallback_profile,
+                &capacity_certificate_digest_sha256,
+                &child_proof_graph_root_sha256,
+            );
+            SignedProfileBundleSignature {
+                signing_domain: policy.signing_domain.clone(),
+                key_id: policy.key_id.clone(),
+                public_key: policy.public_key.clone(),
+                algorithm: policy.algorithm.clone(),
+                issued_at_unix_seconds: policy.issued_at_unix_seconds,
+                expires_at_unix_seconds: policy.expires_at_unix_seconds,
+                bundle_epoch: policy.bundle_epoch,
+                capacity_certificate_digest_sha256,
+                child_proof_graph_root_sha256,
+                rollback_chain_digest_sha256,
+                signature_base64: String::new(),
+            }
+        });
 
         let mut manifest = SignedProfileBundleManifest {
             bundle_id: self.bundle_id.clone(),
@@ -3979,6 +4105,23 @@ impl SignedProfileBundleManifestRequest {
             host_fingerprint: self.host_fingerprint.clone(),
             integrity_mode: self.integrity_mode,
             integrity_limitations,
+            signed_mode_required: self
+                .signature_policy
+                .as_ref()
+                .is_some_and(|policy| policy.signed_mode_required),
+            verification_time_unix_seconds: self
+                .signature_policy
+                .as_ref()
+                .map(|policy| policy.verification_time_unix_seconds),
+            minimum_bundle_epoch: self
+                .signature_policy
+                .as_ref()
+                .map(|policy| policy.minimum_bundle_epoch),
+            trusted_signing_keys: self
+                .signature_policy
+                .as_ref()
+                .map_or_else(Vec::new, |policy| policy.trusted_keys.clone()),
+            signature,
             proof_command_classes: self.proof_command_classes.clone(),
             feature_gates,
             manual_override_fields: bundle_plan.manual_overrides_applied.clone(),
@@ -4000,6 +4143,21 @@ impl SignedProfileBundleManifestRequest {
             child_evidence_hashes,
         };
         manifest.manifest_digest_sha256 = manifest.compute_manifest_digest();
+        if let (Some(policy), Some(signature)) =
+            (self.signature_policy.as_ref(), manifest.signature.as_mut())
+        {
+            if let Some(seed) = policy.signing_seed.as_deref() {
+                if let Ok(key_pair) = KeyPair::from_seed(seed) {
+                    let payload = signed_profile_bundle_signature_payload(
+                        &manifest.manifest_digest_sha256,
+                        signature,
+                    );
+                    if let Ok(signature_bytes) = key_pair.sign(&payload) {
+                        signature.signature_base64 = STANDARD_NO_PAD.encode(signature_bytes);
+                    }
+                }
+            }
+        }
         if let Some(field) = self.tamper_field.as_deref() {
             tamper_signed_profile_bundle_manifest(&mut manifest, field);
         }
@@ -4050,6 +4208,16 @@ pub struct SignedProfileBundleManifest {
     pub integrity_mode: SignedProfileBundleIntegrityMode,
     /// Explicit integrity limitations for the selected mode.
     pub integrity_limitations: Vec<String>,
+    /// Whether signed mode is mandatory and digest-only must fail closed.
+    pub signed_mode_required: bool,
+    /// Verification time used for deterministic signed-mode checks.
+    pub verification_time_unix_seconds: Option<i64>,
+    /// Lowest accepted bundle epoch for replay protection.
+    pub minimum_bundle_epoch: Option<u64>,
+    /// Trusted signing keys for signed-mode verification.
+    pub trusted_signing_keys: Vec<SignedProfileBundleTrustedSigningKey>,
+    /// Optional signed-mode metadata and signature.
+    pub signature: Option<SignedProfileBundleSignature>,
     /// Proof command classes that justified the bundle.
     pub proof_command_classes: Vec<String>,
     /// Enabled runtime feature gates captured by the bundle.
@@ -4131,6 +4299,41 @@ impl SignedProfileBundleManifest {
             (
                 "integrity_limitations",
                 self.integrity_limitations.join("|"),
+            ),
+            (
+                "signed_mode_required",
+                format_bool(self.signed_mode_required),
+            ),
+            (
+                "verification_time_unix_seconds",
+                self.verification_time_unix_seconds
+                    .map_or_else(|| "none".to_string(), |value| value.to_string()),
+            ),
+            (
+                "minimum_bundle_epoch",
+                self.minimum_bundle_epoch
+                    .map_or_else(|| "none".to_string(), |value| value.to_string()),
+            ),
+            (
+                "trusted_signing_keys",
+                self.trusted_signing_keys
+                    .iter()
+                    .map(|key| {
+                        format!(
+                            "{}|{}|{}",
+                            key.key_id,
+                            key.public_key,
+                            format_bool(key.revoked)
+                        )
+                    })
+                    .collect::<Vec<_>>()
+                    .join(";"),
+            ),
+            (
+                "signature_metadata",
+                self.signature
+                    .as_ref()
+                    .map_or_else(String::new, SignedProfileBundleSignature::digest_material),
             ),
             (
                 "proof_command_classes",
@@ -4225,11 +4428,31 @@ impl SignedProfileBundleManifest {
         {
             refusal_reasons.push(reason);
         }
-        if self.integrity_limitations.is_empty() {
-            refusal_reasons.push(
-                "integrity_limitations must describe the explicit limitation of digest-only mode"
-                    .to_string(),
-            );
+        match self.integrity_mode {
+            SignedProfileBundleIntegrityMode::DigestOnlySha256 => {
+                if self.integrity_limitations.is_empty() {
+                    refusal_reasons.push(
+                        "integrity_limitations must describe the explicit limitation of digest-only mode"
+                            .to_string(),
+                    );
+                }
+                if self.signed_mode_required {
+                    refusal_reasons.push(
+                        "signed mode is required; digest-only bundle is a downgrade".to_string(),
+                    );
+                }
+            }
+            SignedProfileBundleIntegrityMode::NkeyEd25519 => {
+                if self
+                    .integrity_limitations
+                    .iter()
+                    .any(|limitation| limitation.contains("digest-only"))
+                {
+                    refusal_reasons.push(
+                        "signed mode must not hide behind digest-only limitation text".to_string(),
+                    );
+                }
+            }
         }
         if let Err(reason) =
             validate_token_list(&self.proof_command_classes, "proof_command_classes", false)
@@ -4340,6 +4563,9 @@ impl SignedProfileBundleManifest {
                 self.manifest_digest_sha256, observed_manifest_digest_sha256
             ));
         }
+        if self.integrity_mode == SignedProfileBundleIntegrityMode::NkeyEd25519 {
+            refusal_reasons.extend(self.verify_nkey_signature());
+        }
         SignedProfileBundleVerificationResult {
             accepted: refusal_reasons.is_empty(),
             refusal_reasons,
@@ -4348,6 +4574,138 @@ impl SignedProfileBundleManifest {
             expected_manifest_digest_sha256: self.manifest_digest_sha256.clone(),
             observed_manifest_digest_sha256,
         }
+    }
+
+    fn verify_nkey_signature(&self) -> Vec<String> {
+        let mut refusal_reasons = Vec::new();
+        let Some(signature) = self.signature.as_ref() else {
+            return vec!["nkey_ed25519 integrity requires a signature block".to_string()];
+        };
+        if signature.signing_domain != SIGNED_PROFILE_BUNDLE_SIGNATURE_DOMAIN {
+            refusal_reasons.push(format!(
+                "signing domain {} did not match required {}",
+                signature.signing_domain, SIGNED_PROFILE_BUNDLE_SIGNATURE_DOMAIN
+            ));
+        }
+        if signature.algorithm != SIGNED_PROFILE_BUNDLE_SIGNATURE_ALGORITHM {
+            refusal_reasons.push(format!(
+                "signature algorithm {} is unsupported; expected {}",
+                signature.algorithm, SIGNED_PROFILE_BUNDLE_SIGNATURE_ALGORITHM
+            ));
+        }
+        if signature.key_id.trim().is_empty() {
+            refusal_reasons.push("signature key_id must not be empty".to_string());
+        }
+        if signature.public_key.trim().is_empty() {
+            refusal_reasons.push("signature public_key must not be empty".to_string());
+        }
+        match self.verification_time_unix_seconds {
+            Some(verification_time) => {
+                if signature.issued_at_unix_seconds > verification_time {
+                    refusal_reasons.push(format!(
+                        "signature issued_at {} is after verification time {}",
+                        signature.issued_at_unix_seconds, verification_time
+                    ));
+                }
+                if verification_time >= signature.expires_at_unix_seconds {
+                    refusal_reasons.push(format!(
+                        "signature expired at {} before verification time {}",
+                        signature.expires_at_unix_seconds, verification_time
+                    ));
+                }
+            }
+            None => refusal_reasons
+                .push("verification_time_unix_seconds is required for signed mode".to_string()),
+        }
+        if signature.issued_at_unix_seconds >= signature.expires_at_unix_seconds {
+            refusal_reasons.push("signature issued_at must be before expires_at".to_string());
+        }
+        match self.minimum_bundle_epoch {
+            Some(minimum_epoch) if signature.bundle_epoch < minimum_epoch => {
+                refusal_reasons.push(format!(
+                    "bundle epoch {} is below minimum accepted epoch {}",
+                    signature.bundle_epoch, minimum_epoch
+                ));
+            }
+            Some(_) => {}
+            None => {
+                refusal_reasons
+                    .push("minimum_bundle_epoch is required for signed mode".to_string());
+            }
+        }
+        if signature.signature_base64.trim().is_empty() {
+            refusal_reasons.push("signature_base64 must not be empty".to_string());
+        }
+        match self
+            .trusted_signing_keys
+            .iter()
+            .find(|key| key.key_id == signature.key_id)
+        {
+            Some(key) if key.public_key != signature.public_key => {
+                refusal_reasons.push(format!(
+                    "key_id {} was bound to public key {}, not {}",
+                    signature.key_id, key.public_key, signature.public_key
+                ));
+            }
+            Some(key) if key.revoked => {
+                refusal_reasons.push(format!("signing key {} is revoked", signature.key_id));
+            }
+            Some(_) => {}
+            None => refusal_reasons.push(format!(
+                "signing key {} is not present in the trusted key set",
+                signature.key_id
+            )),
+        }
+        let expected_capacity_digest =
+            signed_profile_bundle_capacity_certificate_digest(&self.capacity_certificate_reference);
+        if signature.capacity_certificate_digest_sha256 != expected_capacity_digest {
+            refusal_reasons.push(format!(
+                "capacity certificate digest lock {} did not match recomputed {}",
+                signature.capacity_certificate_digest_sha256, expected_capacity_digest
+            ));
+        }
+        let expected_child_root =
+            signed_profile_bundle_child_proof_graph_root(&self.child_evidence_hashes);
+        if signature.child_proof_graph_root_sha256 != expected_child_root {
+            refusal_reasons.push(format!(
+                "child proof graph root {} did not match recomputed {}",
+                signature.child_proof_graph_root_sha256, expected_child_root
+            ));
+        }
+        let expected_rollback_chain = signed_profile_bundle_rollback_chain_digest(
+            &self.previous_config_digest,
+            &self.rollback_command_template,
+            self.fallback_profile,
+            &expected_capacity_digest,
+            &expected_child_root,
+        );
+        if signature.rollback_chain_digest_sha256 != expected_rollback_chain {
+            refusal_reasons.push(format!(
+                "rollback chain digest {} did not match recomputed {}",
+                signature.rollback_chain_digest_sha256, expected_rollback_chain
+            ));
+        }
+        let signature_bytes = match STANDARD_NO_PAD.decode(&signature.signature_base64) {
+            Ok(bytes) => bytes,
+            Err(err) => {
+                refusal_reasons.push(format!("signature_base64 did not decode: {err}"));
+                Vec::new()
+            }
+        };
+        match KeyPair::from_public_key(&signature.public_key) {
+            Ok(key_pair) if !signature_bytes.is_empty() => {
+                let payload = signed_profile_bundle_signature_payload(
+                    &self.manifest_digest_sha256,
+                    signature,
+                );
+                if let Err(err) = key_pair.verify(&payload, &signature_bytes) {
+                    refusal_reasons.push(format!("signature verification failed: {err}"));
+                }
+            }
+            Ok(_) => {}
+            Err(err) => refusal_reasons.push(format!("signature public_key is invalid: {err}")),
+        }
+        refusal_reasons
     }
 }
 
@@ -4898,10 +5256,108 @@ fn tamper_signed_profile_bundle_manifest(manifest: &mut SignedProfileBundleManif
                 .artifact_id
                 .push_str(".tampered");
         }
+        "signature.signature_base64" => {
+            if let Some(signature) = manifest.signature.as_mut() {
+                signature.signature_base64.push_str("tampered");
+            }
+        }
+        "signature.capacity_certificate_digest_sha256" => {
+            if let Some(signature) = manifest.signature.as_mut() {
+                signature.capacity_certificate_digest_sha256 =
+                    tamper_hex_digest(&signature.capacity_certificate_digest_sha256);
+            }
+        }
+        "signature.child_proof_graph_root_sha256" => {
+            if let Some(signature) = manifest.signature.as_mut() {
+                signature.child_proof_graph_root_sha256 =
+                    tamper_hex_digest(&signature.child_proof_graph_root_sha256);
+            }
+        }
+        "signature.rollback_chain_digest_sha256" => {
+            if let Some(signature) = manifest.signature.as_mut() {
+                signature.rollback_chain_digest_sha256 =
+                    tamper_hex_digest(&signature.rollback_chain_digest_sha256);
+            }
+        }
         _ => {
             manifest.bundle_id.push_str("-tampered");
         }
     }
+}
+
+fn signed_profile_bundle_signature_payload(
+    manifest_digest_sha256: &str,
+    signature: &SignedProfileBundleSignature,
+) -> Vec<u8> {
+    [
+        SIGNED_PROFILE_BUNDLE_SIGNATURE_DOMAIN.to_string(),
+        signature.signing_domain.clone(),
+        signature.key_id.clone(),
+        signature.public_key.clone(),
+        signature.algorithm.clone(),
+        signature.issued_at_unix_seconds.to_string(),
+        signature.expires_at_unix_seconds.to_string(),
+        signature.bundle_epoch.to_string(),
+        signature.capacity_certificate_digest_sha256.clone(),
+        signature.child_proof_graph_root_sha256.clone(),
+        signature.rollback_chain_digest_sha256.clone(),
+        manifest_digest_sha256.to_string(),
+    ]
+    .join("\n")
+    .into_bytes()
+}
+
+fn signed_profile_bundle_capacity_certificate_digest(
+    reference: &SignedProfileBundleCapacityCertificateReference,
+) -> String {
+    stable_sha256_hex(&[
+        ("artifact_id", reference.artifact_id.clone()),
+        ("contract_version", reference.contract_version.clone()),
+        ("scenario_id", reference.scenario_id.clone()),
+    ])
+}
+
+fn signed_profile_bundle_child_proof_graph_root(
+    hashes: &[SignedProfileBundleChildEvidenceHash],
+) -> String {
+    stable_sha256_hex(&[(
+        "child_proof_graph",
+        hashes
+            .iter()
+            .map(|entry| {
+                format!(
+                    "{}|{}|{}",
+                    entry.controller, entry.artifact_id, entry.digest_sha256
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(";"),
+    )])
+}
+
+fn signed_profile_bundle_rollback_chain_digest(
+    previous_config_digest: &str,
+    rollback_command_template: &str,
+    fallback_profile: HostProfileId,
+    capacity_certificate_digest_sha256: &str,
+    child_proof_graph_root_sha256: &str,
+) -> String {
+    stable_sha256_hex(&[
+        ("previous_config_digest", previous_config_digest.to_string()),
+        (
+            "rollback_command_template",
+            rollback_command_template.to_string(),
+        ),
+        ("fallback_profile", fallback_profile.as_str().to_string()),
+        (
+            "capacity_certificate_digest_sha256",
+            capacity_certificate_digest_sha256.to_string(),
+        ),
+        (
+            "child_proof_graph_root_sha256",
+            child_proof_graph_root_sha256.to_string(),
+        ),
+    ])
 }
 
 fn stable_sha256_hex(fields: &[(&str, String)]) -> String {
