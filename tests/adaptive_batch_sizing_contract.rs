@@ -106,6 +106,7 @@ struct AdaptiveBatchSizingRunMetrics {
     wake_to_run_p50_ns: u64,
     wake_to_run_p95_ns: u64,
     wake_to_run_p99_ns: u64,
+    wake_to_run_p999_ns: u64,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -142,6 +143,7 @@ struct AdaptiveBatchSizingSummary {
     wake_to_run_p50_ns: u64,
     wake_to_run_p95_ns: u64,
     wake_to_run_p99_ns: u64,
+    wake_to_run_p999_ns: u64,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -175,12 +177,14 @@ struct AdaptiveBatchSizingProjectionSummary {
     cooldown_holds: u64,
     batch_reason: String,
     wake_to_run_p99_ns: u64,
+    wake_to_run_p999_ns: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
 struct AdaptiveBatchSizingProjectionComparison {
     shared_ready_touches_delta: i64,
     wake_to_run_p99_improvement_ns: u64,
+    wake_to_run_p999_improvement_ns: u64,
     winner_profile: String,
     no_win_trigger: bool,
 }
@@ -255,7 +259,7 @@ fn synthetic_latency_ns(
     selected_batch_size: usize,
     producer_count: usize,
     tasks_per_producer: usize,
-) -> (u64, u64, u64) {
+) -> (u64, u64, u64, u64) {
     let p50 = 40_000
         + shared_ready_touches.saturating_mul(450)
         + (producer_count as u64).saturating_mul(400);
@@ -273,7 +277,17 @@ fn synthetic_latency_ns(
         .saturating_mul(150))
     .min(p99_tail.saturating_sub(1));
     let p99 = p95 + p99_tail.saturating_sub(p99_contention_credit);
-    (p50, p95, p99)
+    let p999_tail =
+        shared_ready_touches.saturating_mul(180) + (selected_batch_size as u64).saturating_mul(800);
+    let p999_contention_credit = ((producer_count as u64)
+        .saturating_mul(selected_batch_size.saturating_sub(1) as u64)
+        .saturating_mul(180))
+    .min(p999_tail.saturating_sub(1));
+    let p999_saturation_penalty = (producer_count.saturating_sub(32) as u64)
+        .saturating_mul(selected_batch_size as u64)
+        .saturating_mul(1_000);
+    let p999 = p99 + p999_tail.saturating_sub(p999_contention_credit) + p999_saturation_penalty;
+    (p50, p95, p99, p999)
 }
 
 fn execute_scenario(
@@ -362,12 +376,13 @@ fn execute_scenario(
     } else {
         decision.reason
     };
-    let (wake_to_run_p50_ns, wake_to_run_p95_ns, wake_to_run_p99_ns) = synthetic_latency_ns(
-        shared_ready_touches,
-        selected_batch_size,
-        fixture.producer_count,
-        fixture.tasks_per_producer,
-    );
+    let (wake_to_run_p50_ns, wake_to_run_p95_ns, wake_to_run_p99_ns, wake_to_run_p999_ns) =
+        synthetic_latency_ns(
+            shared_ready_touches,
+            selected_batch_size,
+            fixture.producer_count,
+            fixture.tasks_per_producer,
+        );
 
     AdaptiveBatchSizingRunMetrics {
         total_injected,
@@ -390,6 +405,7 @@ fn execute_scenario(
         wake_to_run_p50_ns,
         wake_to_run_p95_ns,
         wake_to_run_p99_ns,
+        wake_to_run_p999_ns,
     }
 }
 
@@ -411,6 +427,7 @@ fn summarize_run(metrics: &AdaptiveBatchSizingRunMetrics) -> AdaptiveBatchSizing
         wake_to_run_p50_ns: metrics.wake_to_run_p50_ns,
         wake_to_run_p95_ns: metrics.wake_to_run_p95_ns,
         wake_to_run_p99_ns: metrics.wake_to_run_p99_ns,
+        wake_to_run_p999_ns: metrics.wake_to_run_p999_ns,
     }
 }
 
@@ -422,9 +439,14 @@ fn build_projection(
     let wake_to_run_p99_improvement_ns = fixed
         .wake_to_run_p99_ns
         .saturating_sub(adaptive.wake_to_run_p99_ns);
+    let wake_to_run_p999_improvement_ns = fixed
+        .wake_to_run_p999_ns
+        .saturating_sub(adaptive.wake_to_run_p999_ns);
     let shared_ready_touches_delta =
         fixed.shared_ready_touches as i64 - adaptive.shared_ready_touches as i64;
-    let no_win_trigger = wake_to_run_p99_improvement_ns < 20_000 || shared_ready_touches_delta <= 0;
+    let no_win_trigger = wake_to_run_p99_improvement_ns < 20_000
+        || wake_to_run_p999_improvement_ns < 20_000
+        || shared_ready_touches_delta <= 0;
     let winner_profile = if no_win_trigger { "fixed" } else { "adaptive" };
 
     AdaptiveBatchSizingProjection {
@@ -443,6 +465,7 @@ fn build_projection(
             cooldown_holds: fixed.cooldown_holds,
             batch_reason: reason_label(fixed.batch_reason).to_string(),
             wake_to_run_p99_ns: fixed.wake_to_run_p99_ns,
+            wake_to_run_p999_ns: fixed.wake_to_run_p999_ns,
         },
         adaptive: AdaptiveBatchSizingProjectionSummary {
             selected_batch_size: adaptive.selected_batch_size,
@@ -453,10 +476,12 @@ fn build_projection(
             cooldown_holds: adaptive.cooldown_holds,
             batch_reason: reason_label(adaptive.batch_reason).to_string(),
             wake_to_run_p99_ns: adaptive.wake_to_run_p99_ns,
+            wake_to_run_p999_ns: adaptive.wake_to_run_p999_ns,
         },
         comparison: AdaptiveBatchSizingProjectionComparison {
             shared_ready_touches_delta,
             wake_to_run_p99_improvement_ns,
+            wake_to_run_p999_improvement_ns,
             winner_profile: winner_profile.to_string(),
             no_win_trigger,
         },
@@ -608,6 +633,10 @@ fn adaptive_batch_sizing_projection_has_expected_shape() {
         "adaptive projection should encode a non-trivial latency envelope"
     );
     assert!(
+        projection.adaptive.wake_to_run_p999_ns >= projection.adaptive.wake_to_run_p99_ns,
+        "p999 latency envelope should dominate p99"
+    );
+    assert!(
         serde_json::to_value(json!({
             "fixed": projection.fixed,
             "adaptive": projection.adaptive,
@@ -650,6 +679,7 @@ fn adaptive_batch_disabled_profile_matches_fixed_path() {
     assert_eq!(adaptive.cooldown_holds, 0);
     assert_eq!(adaptive.shared_ready_touches, fixed.shared_ready_touches);
     assert_eq!(adaptive.wake_to_run_p99_ns, fixed.wake_to_run_p99_ns);
+    assert_eq!(adaptive.wake_to_run_p999_ns, fixed.wake_to_run_p999_ns);
 }
 
 #[test]

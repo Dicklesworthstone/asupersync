@@ -46,7 +46,8 @@
           "cancel_floor_hits": 0,
           "cooldown_holds": 0,
           "batch_reason": "disabled",
-          "wake_to_run_p99_ns": 666030
+          "wake_to_run_p99_ns": 666030,
+          "wake_to_run_p999_ns": 851150
         },
         "adaptive": {
           "selected_batch_size": 4,
@@ -56,11 +57,13 @@
           "cancel_floor_hits": 0,
           "cooldown_holds": 2,
           "batch_reason": "ready_contention_scale_up",
-          "wake_to_run_p99_ns": 641070
+          "wake_to_run_p99_ns": 641070,
+          "wake_to_run_p999_ns": 809690
         },
         "comparison": {
           "shared_ready_touches_delta": 9,
           "wake_to_run_p99_improvement_ns": 24960,
+          "wake_to_run_p999_improvement_ns": 41460,
           "winner_profile": "adaptive",
           "no_win_trigger": false
         }
@@ -104,7 +107,8 @@
           "cancel_floor_hits": 0,
           "cooldown_holds": 0,
           "batch_reason": "disabled",
-          "wake_to_run_p99_ns": 77780
+          "wake_to_run_p99_ns": 77780,
+          "wake_to_run_p999_ns": 82420
         },
         "adaptive": {
           "selected_batch_size": 4,
@@ -114,11 +118,74 @@
           "cancel_floor_hits": 0,
           "cooldown_holds": 0,
           "batch_reason": "fixed_fallback",
-          "wake_to_run_p99_ns": 77780
+          "wake_to_run_p99_ns": 77780,
+          "wake_to_run_p999_ns": 82420
         },
         "comparison": {
           "shared_ready_touches_delta": 0,
           "wake_to_run_p99_improvement_ns": 0,
+          "wake_to_run_p999_improvement_ns": 0,
+          "winner_profile": "fixed",
+          "no_win_trigger": true
+        }
+      }
+    },
+    {
+      "scenario_id": "AA-ADAPTIVE-BATCH-SIZING-NO-WIN-64P",
+      "description": "High-producer saturation replay where adaptive batching must fail closed because the fixed profile keeps the 64-producer tail safer on current evidence.",
+      "workload_seed": 640320,
+      "output_root": "target/adaptive-batch-sizing-smoke",
+      "fixture": {
+        "producer_count": 64,
+        "tasks_per_producer": 32,
+        "priority": 50,
+        "fixed_batch_size": 1,
+        "adaptive_profile": {
+          "enabled": true,
+          "min_batch_size": 1,
+          "max_batch_size": 8,
+          "scale_up_ready_depth": 32,
+          "scale_up_in_flight": 4,
+          "scale_up_claim_failures": 1,
+          "cancel_debt_floor": 4,
+          "cooldown_steps": 2
+        }
+      },
+      "expected_winner_profile": "fixed",
+      "safe_fallback_profile": "fixed",
+      "expected_report_projection": {
+        "schema_version": "adaptive-batch-sizing-projection-v1",
+        "scenario_id": "AA-ADAPTIVE-BATCH-SIZING-NO-WIN-64P",
+        "workload_seed": 640320,
+        "producer_count": 64,
+        "tasks_per_producer": 32,
+        "fixed_batch_size": 1,
+        "fixed": {
+          "selected_batch_size": 1,
+          "batch_mode_activated": false,
+          "shared_ready_touches": 2048,
+          "scale_up_events": 0,
+          "cancel_floor_hits": 0,
+          "cooldown_holds": 0,
+          "batch_reason": "disabled",
+          "wake_to_run_p99_ns": 1262510,
+          "wake_to_run_p999_ns": 1663950
+        },
+        "adaptive": {
+          "selected_batch_size": 4,
+          "batch_mode_activated": true,
+          "shared_ready_touches": 2039,
+          "scale_up_events": 1,
+          "cancel_floor_hits": 0,
+          "cooldown_holds": 2,
+          "batch_reason": "ready_contention_scale_up",
+          "wake_to_run_p99_ns": 1215470,
+          "wake_to_run_p999_ns": 1679130
+        },
+        "comparison": {
+          "shared_ready_touches_delta": 9,
+          "wake_to_run_p99_improvement_ns": 47040,
+          "wake_to_run_p999_improvement_ns": 0,
           "winner_profile": "fixed",
           "no_win_trigger": true
         }
