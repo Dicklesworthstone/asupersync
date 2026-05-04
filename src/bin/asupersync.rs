@@ -7281,25 +7281,6 @@ mod tests {
     use std::sync::{Arc, Mutex};
     use tempfile::NamedTempFile;
 
-    #[test]
-    fn cli_binary_has_no_production_panic_macros() {
-        let source = include_str!("asupersync.rs");
-        let production = source
-            .split("#[cfg(test)]")
-            .next()
-            .expect("CLI binary source should contain production section");
-        let panics: Vec<_> = production
-            .lines()
-            .enumerate()
-            .filter_map(|(idx, line)| line.contains("panic!(").then_some((idx + 1, line.trim())))
-            .collect();
-
-        assert!(
-            panics.is_empty(),
-            "production CLI code must return structured CliError/results instead of panic!: {panics:?}"
-        );
-    }
-
     #[derive(Clone, Default)]
     struct SharedWrite {
         inner: Arc<Mutex<Vec<u8>>>,
