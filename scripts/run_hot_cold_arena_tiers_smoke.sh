@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_ROOT="$(cd -- "${SCRIPT_DIR}/.." && pwd)"
 ARTIFACT="${PROJECT_ROOT}/artifacts/hot_cold_arena_tiers_smoke_contract_v1.json"
+
 MODE="execute"
 SCENARIO=""
 LIST_ONLY=0
@@ -20,18 +21,24 @@ Options:
   --scenario <id>         Run one scenario (defaults to the first artifact scenario)
   --output-root <dir>     Override output root
   --dry-run               Emit manifests without executing the hot/cold arena proof
-  --execute               Execute the hot/cold arena proof (default)
+  --execute               Execute the hot/cold arena proof twice and validate repeat stability
   -h, --help              Show help
 USAGE
 }
 
 require_tools() {
-    if ! command -v jq >/dev/null 2>&1; then
-        echo "FATAL: jq is required for hot/cold arena smoke runner" >&2
-        exit 1
-    fi
+    local missing=0
+    for tool in jq awk date uname rch; do
+        if ! command -v "$tool" >/dev/null 2>&1; then
+            echo "FATAL: missing required tool: $tool" >&2
+            missing=1
+        fi
+    done
     if [ ! -f "$ARTIFACT" ]; then
         echo "FATAL: contract artifact missing at ${ARTIFACT}" >&2
+        missing=1
+    fi
+    if [ "$missing" -ne 0 ]; then
         exit 1
     fi
 }
@@ -87,17 +94,30 @@ host_fingerprint_json() {
         }'
 }
 
+extract_report_from_log() {
+    local log_path="$1"
+    local output_path="$2"
+    local output_dir
+    output_dir="$(dirname "$output_path")"
+    mkdir -p "$output_dir"
+    awk '
+        /HOT_COLD_ARENA_REPORT_JSON_BEGIN/ { armed=1; next }
+        /HOT_COLD_ARENA_REPORT_JSON_END/ { capture=0; exit }
+        armed && /^\{/ { capture=1; armed=0 }
+        capture { print }
+    ' "$log_path" >"$output_path"
+    [ -s "$output_path" ]
+}
+
 write_bundle_manifest() {
     local bundle_path="$1"
-    local report_path="$2"
-    local run_log_path="$3"
-    local command="$4"
-    local command_exit_code="$5"
-    local script_exit_code="$6"
-    local validation_passed="$7"
-    local status="$8"
-    local started_ts="$9"
-    local ended_ts="${10}"
+    local command="$2"
+    local command_exit_code="$3"
+    local script_exit_code="$4"
+    local validation_passed="$5"
+    local status="$6"
+    local started_ts="$7"
+    local ended_ts="$8"
 
     jq -n \
         --arg schema_version "$(artifact_value '.runner_bundle_schema_version')" \
@@ -106,17 +126,21 @@ write_bundle_manifest() {
         --arg description "$DESCRIPTION" \
         --arg run_id "$RUN_ID" \
         --arg mode "$MODE" \
-        --arg artifact_path "$bundle_path" \
-        --arg report_path "$report_path" \
-        --arg run_log_path "$run_log_path" \
+        --arg report_path "$REPORT_PATH" \
+        --arg report_path_repeat_2 "$REPORT_PATH_REPEAT_2" \
+        --arg run_log_path "$RUN_LOG_PATH" \
+        --arg run_log_path_repeat_2 "$RUN_LOG_PATH_REPEAT_2" \
         --arg command "$command" \
         --argjson host_requirements "$HOST_REQUIREMENTS_JSON" \
         --argjson workload_model "$WORKLOAD_MODEL_JSON" \
         --argjson operator_notes "$OPERATOR_NOTES_JSON" \
         --argjson host_fingerprint "$HOST_FINGERPRINT_JSON" \
+        --argjson scenario_contract "$SCENARIO_JSON" \
         --argjson expected_report_projection "$EXPECTED_REPORT_PROJECTION_JSON" \
         --argjson actual_report_projection "$ACTUAL_REPORT_PROJECTION_JSON" \
+        --argjson actual_report_projection_repeat_2 "$ACTUAL_REPORT_PROJECTION_REPEAT_2_JSON" \
         --argjson verdict_summary "$VERDICT_SUMMARY_JSON" \
+        --argjson verdict_summary_repeat_2 "$VERDICT_SUMMARY_REPEAT_2_JSON" \
         --argjson command_exit_code "$command_exit_code" \
         --argjson script_exit_code "$script_exit_code" \
         --argjson validation_passed "$validation_passed" \
@@ -130,17 +154,21 @@ write_bundle_manifest() {
             description: $description,
             run_id: $run_id,
             mode: $mode,
-            artifact_path: $artifact_path,
             report_path: $report_path,
+            report_path_repeat_2: $report_path_repeat_2,
             run_log_path: $run_log_path,
+            run_log_path_repeat_2: $run_log_path_repeat_2,
             command: $command,
             host_requirements: $host_requirements,
             workload_model: $workload_model,
             operator_notes: $operator_notes,
             host_fingerprint: $host_fingerprint,
+            scenario_contract: $scenario_contract,
             expected_report_projection: $expected_report_projection,
             actual_report_projection: $actual_report_projection,
+            actual_report_projection_repeat_2: $actual_report_projection_repeat_2,
             verdict_summary: $verdict_summary,
+            verdict_summary_repeat_2: $verdict_summary_repeat_2,
             command_exit_code: $command_exit_code,
             script_exit_code: $script_exit_code,
             validation_passed: $validation_passed,
@@ -153,12 +181,11 @@ write_bundle_manifest() {
 write_run_report() {
     local report_path="$1"
     local bundle_manifest_path="$2"
-    local comparison_report_path="$3"
-    local command_exit_code="$4"
-    local script_exit_code="$5"
-    local validation_passed="$6"
-    local status="$7"
-    local message="$8"
+    local command_exit_code="$3"
+    local script_exit_code="$4"
+    local validation_passed="$5"
+    local status="$6"
+    local message="$7"
 
     jq -n \
         --arg schema_version "$(artifact_value '.runner_report_schema_version')" \
@@ -176,6 +203,7 @@ write_run_report() {
         --argjson host_fingerprint "$HOST_FINGERPRINT_JSON" \
         --argjson expected_report_projection "$EXPECTED_REPORT_PROJECTION_JSON" \
         --argjson actual_report_projection "$ACTUAL_REPORT_PROJECTION_JSON" \
+        --argjson actual_report_projection_repeat_2 "$ACTUAL_REPORT_PROJECTION_REPEAT_2_JSON" \
         --argjson command_exit_code "$command_exit_code" \
         --argjson script_exit_code "$script_exit_code" \
         --argjson validation_passed "$validation_passed" \
@@ -197,22 +225,88 @@ write_run_report() {
             operator_notes: $operator_notes,
             host_fingerprint: $host_fingerprint,
             expected_report_projection: $expected_report_projection,
-            actual_report_projection: $actual_report_projection
+            actual_report_projection: $actual_report_projection,
+            actual_report_projection_repeat_2: $actual_report_projection_repeat_2
         }' >"$report_path"
 }
 
-extract_report_from_log() {
-    local log_path="$1"
-    local output_path="$2"
-    local output_dir
-    output_dir="$(dirname "$output_path")"
-    mkdir -p "$output_dir"
-    awk '
-        /HOT_COLD_ARENA_REPORT_JSON_BEGIN/ { capture=1; next }
-        /HOT_COLD_ARENA_REPORT_JSON_END/ { capture=0; exit }
-        capture { print }
-    ' "$log_path" >"$output_path"
-    [ -s "$output_path" ]
+run_once() {
+    local run_label="$1"
+    local report_path="$2"
+    local log_path="$3"
+    local target_dir="${TMPDIR:-/tmp}/rch_target_hot_cold_arena_${run_label}"
+    local tail_timeout_seconds="${HOT_COLD_ARENA_TIERS_RCH_TIMEOUT_SECONDS:-300}"
+    local poll_seconds=0
+    local command_exit_code=-1
+    local had_errexit=0
+
+    case $- in
+        *e*) had_errexit=1 ;;
+    esac
+
+    local command="
+        rch exec -- env \
+        CARGO_INCREMENTAL=0 \
+        CARGO_TARGET_DIR=${target_dir} \
+        ASUPERSYNC_HOT_COLD_ARENA_CONTRACT_PATH=${ARTIFACT} \
+        ASUPERSYNC_HOT_COLD_ARENA_SCENARIO=${SCENARIO} \
+        ASUPERSYNC_HOT_COLD_ARENA_REPORT_PATH=${report_path} \
+        cargo test -p asupersync --test hot_cold_arena_tiers hot_cold_arena_tiers_smoke_contract_emits_operator_report --features test-internals -- --nocapture
+    "
+
+    RUN_ONCE_EARLY_SUCCESS=0
+    (
+        cd "$PROJECT_ROOT"
+        bash -lc "$command"
+    ) >"$log_path" 2>&1 &
+    local command_pid=$!
+
+    while kill -0 "$command_pid" 2>/dev/null; do
+        if grep -q 'HOT_COLD_ARENA_REPORT_JSON_END' "$log_path" 2>/dev/null \
+            && grep -q 'Remote command finished: exit=0' "$log_path" 2>/dev/null; then
+            kill "$command_pid" 2>/dev/null || true
+            wait "$command_pid" 2>/dev/null || true
+            command_exit_code=0
+            RUN_ONCE_EARLY_SUCCESS=1
+            break
+        fi
+        if grep -Eq 'Remote command finished: exit=[1-9][0-9]*' "$log_path" 2>/dev/null; then
+            break
+        fi
+        sleep 1
+        poll_seconds=$((poll_seconds + 1))
+        if [ "$poll_seconds" -ge "$tail_timeout_seconds" ]; then
+            kill "$command_pid" 2>/dev/null || true
+            wait "$command_pid" 2>/dev/null || true
+            command_exit_code=124
+            printf 'FATAL: timed out waiting for hot/cold arena proof markers\n' >>"$log_path"
+            break
+        fi
+    done
+
+    if [ "$command_exit_code" -eq -1 ]; then
+        set +e
+        wait "$command_pid"
+        command_exit_code=$?
+        if [ "$had_errexit" -eq 1 ]; then
+            set -e
+        else
+            set +e
+        fi
+    fi
+
+    if [ ! -s "$report_path" ]; then
+        extract_report_from_log "$log_path" "$report_path" || true
+    fi
+
+    if [ "$command_exit_code" -eq 124 ] \
+        && grep -q 'HOT_COLD_ARENA_REPORT_JSON_END' "$log_path" 2>/dev/null \
+        && grep -q 'Remote command finished: exit=0' "$log_path" 2>/dev/null; then
+        RUN_ONCE_EARLY_SUCCESS=1
+        return 0
+    fi
+
+    return "$command_exit_code"
 }
 
 while [ $# -gt 0 ]; do
@@ -280,84 +374,107 @@ else
 fi
 
 RUN_DIR="${OUTPUT_ROOT}/run_${RUN_ID}/${SCENARIO}"
-ARTIFACT_ROOT="${ARTIFACT_ROOT_OVERRIDE:-${PROJECT_ROOT}/.hot-cold-arena-tiers-smoke-artifacts/run_${RUN_ID}/${SCENARIO}}"
+ARTIFACT_DIR="${ARTIFACT_ROOT_OVERRIDE:-${PROJECT_ROOT}/.hot-cold-arena-tiers-smoke-artifacts/run_${RUN_ID}/${SCENARIO}}"
 RUN_LOG_PATH="${RUN_DIR}/run.log"
+RUN_LOG_PATH_REPEAT_2="${RUN_DIR}/run_repeat_2.log"
 BUNDLE_MANIFEST_PATH="${RUN_DIR}/bundle_manifest.json"
 RUN_REPORT_PATH="${RUN_DIR}/run_report.json"
-SCENARIO_REPORT_PATH="${ARTIFACT_ROOT}/hot_cold_arena_tiers_report.json"
-RCH_TAIL_TIMEOUT_SECONDS="${HOT_COLD_ARENA_TIERS_RCH_TIMEOUT_SECONDS:-300}"
+REPORT_PATH="${ARTIFACT_DIR}/hot_cold_arena_tiers_report.json"
+REPORT_PATH_REPEAT_2="${ARTIFACT_DIR}/hot_cold_arena_tiers_report_repeat_2.json"
 
-mkdir -p "$RUN_DIR"
+mkdir -p "$RUN_DIR" "$ARTIFACT_DIR"
 HOST_FINGERPRINT_JSON="$(host_fingerprint_json)"
-STARTED_TS="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 
-COMMAND="rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=\${TMPDIR:-/tmp}/rch_target_hot_cold_arena ASUPERSYNC_HOT_COLD_ARENA_CONTRACT_PATH=${ARTIFACT} ASUPERSYNC_HOT_COLD_ARENA_SCENARIO=${SCENARIO} ASUPERSYNC_HOT_COLD_ARENA_REPORT_PATH=${SCENARIO_REPORT_PATH} cargo test -p asupersync --test hot_cold_arena_tiers hot_cold_arena_tiers_smoke_contract_emits_operator_report --features test-internals -- --nocapture"
+COMMAND_STRING="rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=\${TMPDIR:-/tmp}/rch_target_hot_cold_arena_<run> ASUPERSYNC_HOT_COLD_ARENA_CONTRACT_PATH=${ARTIFACT} ASUPERSYNC_HOT_COLD_ARENA_SCENARIO=${SCENARIO} ASUPERSYNC_HOT_COLD_ARENA_REPORT_PATH=<report> cargo test -p asupersync --test hot_cold_arena_tiers hot_cold_arena_tiers_smoke_contract_emits_operator_report --features test-internals -- --nocapture"
 
-COMMAND_EXIT_CODE=0
-SCRIPT_EXIT_CODE=0
-STATUS="passed"
-VALIDATION_PASSED=false
-MESSAGE="runner completed"
-ACTUAL_REPORT_PROJECTION_JSON="null"
+ACTUAL_REPORT_PROJECTION_JSON='null'
+ACTUAL_REPORT_PROJECTION_REPEAT_2_JSON='null'
 VERDICT_SUMMARY_JSON='{}'
+VERDICT_SUMMARY_REPEAT_2_JSON='{}'
+
+STARTED_TS="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 
 if [ "$MODE" = "dry-run" ]; then
     printf 'DRY_RUN scenario=%s\n' "$SCENARIO" >"$RUN_LOG_PATH"
-    STATUS="dry_run"
-    VALIDATION_PASSED=true
-    MESSAGE="dry run emitted manifests only"
-else
-    if timeout "${RCH_TAIL_TIMEOUT_SECONDS}s" bash -lc "$COMMAND" >"$RUN_LOG_PATH" 2>&1; then
-        COMMAND_EXIT_CODE=0
-        MESSAGE="rch proof command completed"
-    else
-        COMMAND_EXIT_CODE=$?
-        if [ "$COMMAND_EXIT_CODE" -eq 124 ] && grep -q 'Remote command finished: exit=0' "$RUN_LOG_PATH"; then
-            COMMAND_EXIT_CODE=0
-            MESSAGE="rch proof passed before retrieval tail timeout"
-        else
-            SCRIPT_EXIT_CODE=$COMMAND_EXIT_CODE
-            STATUS="failed"
-            MESSAGE="rch proof command failed"
-        fi
-    fi
+    write_bundle_manifest \
+        "$BUNDLE_MANIFEST_PATH" \
+        "dry-run" \
+        0 \
+        0 \
+        true \
+        "dry_run" \
+        "$STARTED_TS" \
+        "$STARTED_TS"
+    write_run_report \
+        "$RUN_REPORT_PATH" \
+        "$BUNDLE_MANIFEST_PATH" \
+        0 \
+        0 \
+        true \
+        "dry_run" \
+        "dry run emitted manifests only"
+    cat "$RUN_REPORT_PATH"
+    exit 0
+fi
 
-    if [ "$STATUS" = "passed" ]; then
-        if ! extract_report_from_log "$RUN_LOG_PATH" "$SCENARIO_REPORT_PATH"; then
-            SCRIPT_EXIT_CODE=1
-            STATUS="failed"
-            MESSAGE="hot/cold arena report JSON markers missing from run.log"
-        else
-            ACTUAL_REPORT_PROJECTION_JSON="$(jq -c '.report_projection' "$SCENARIO_REPORT_PATH")"
-            VERDICT_SUMMARY_JSON="$(jq -c '.comparison' "$SCENARIO_REPORT_PATH")"
-            if [ "$EXPECTED_REPORT_PROJECTION_JSON" = "null" ] || jq -en \
-                --argjson expected "$EXPECTED_REPORT_PROJECTION_JSON" \
-                --argjson actual "$ACTUAL_REPORT_PROJECTION_JSON" \
-                '$expected == $actual' >/dev/null; then
-                VALIDATION_PASSED=true
-                if [ "$EXPECTED_REPORT_PROJECTION_JSON" = "null" ]; then
-                    MESSAGE="report projection emitted for contract freeze"
-                elif [ "$MESSAGE" = "rch proof command completed" ]; then
-                    MESSAGE="report projection matched the contract"
-                else
-                    MESSAGE="report projection matched the contract after retrieval tail timeout"
-                fi
-            else
-                SCRIPT_EXIT_CODE=1
-                STATUS="failed"
-                MESSAGE="report projection diverged from the contract"
-            fi
-        fi
+set +e
+run_once "run1" "$REPORT_PATH" "$RUN_LOG_PATH"
+COMMAND_EXIT_CODE=$?
+RUN1_EARLY_SUCCESS=$RUN_ONCE_EARLY_SUCCESS
+if [ "$COMMAND_EXIT_CODE" -eq 0 ]; then
+    run_once "run2" "$REPORT_PATH_REPEAT_2" "$RUN_LOG_PATH_REPEAT_2"
+    COMMAND_EXIT_CODE=$?
+    RUN2_EARLY_SUCCESS=$RUN_ONCE_EARLY_SUCCESS
+else
+    RUN2_EARLY_SUCCESS=0
+fi
+set -e
+
+STATUS="passed"
+MESSAGE="report projection matched the contract across repeated runs"
+VALIDATION_PASSED=true
+
+if [ "$COMMAND_EXIT_CODE" -ne 0 ]; then
+    STATUS="failed"
+    MESSAGE="rch proof command failed"
+    VALIDATION_PASSED=false
+elif [ ! -s "$REPORT_PATH" ] || [ ! -s "$REPORT_PATH_REPEAT_2" ]; then
+    STATUS="failed"
+    MESSAGE="report markers were not recoverable from rch output"
+    VALIDATION_PASSED=false
+else
+    ACTUAL_REPORT_PROJECTION_JSON="$(jq -c '.report_projection' "$REPORT_PATH")"
+    ACTUAL_REPORT_PROJECTION_REPEAT_2_JSON="$(jq -c '.report_projection' "$REPORT_PATH_REPEAT_2")"
+    VERDICT_SUMMARY_JSON="$(jq -c '.comparison' "$REPORT_PATH")"
+    VERDICT_SUMMARY_REPEAT_2_JSON="$(jq -c '.comparison' "$REPORT_PATH_REPEAT_2")"
+    if [ "$ACTUAL_REPORT_PROJECTION_JSON" != "$ACTUAL_REPORT_PROJECTION_REPEAT_2_JSON" ]; then
+        STATUS="repeat_mismatch"
+        MESSAGE="repeated run projection mismatch"
+        VALIDATION_PASSED=false
+    elif [ "$EXPECTED_REPORT_PROJECTION_JSON" = "null" ]; then
+        MESSAGE="report projection emitted for contract freeze"
+    elif [ "$ACTUAL_REPORT_PROJECTION_JSON" != "$EXPECTED_REPORT_PROJECTION_JSON" ]; then
+        STATUS="projection_mismatch"
+        MESSAGE="first run projection diverged from the contract"
+        VALIDATION_PASSED=false
+    elif [ "$ACTUAL_REPORT_PROJECTION_REPEAT_2_JSON" != "$EXPECTED_REPORT_PROJECTION_JSON" ]; then
+        STATUS="projection_mismatch"
+        MESSAGE="second run projection diverged from the contract"
+        VALIDATION_PASSED=false
+    elif [ "$RUN1_EARLY_SUCCESS" -eq 1 ] || [ "$RUN2_EARLY_SUCCESS" -eq 1 ]; then
+        MESSAGE="report projection matched the contract after marker completion"
     fi
 fi
 
 ENDED_TS="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+SCRIPT_EXIT_CODE=0
+if [ "$VALIDATION_PASSED" != true ]; then
+    SCRIPT_EXIT_CODE=1
+fi
 
 write_bundle_manifest \
     "$BUNDLE_MANIFEST_PATH" \
-    "$SCENARIO_REPORT_PATH" \
-    "$RUN_LOG_PATH" \
-    "$COMMAND" \
+    "$COMMAND_STRING" \
     "$COMMAND_EXIT_CODE" \
     "$SCRIPT_EXIT_CODE" \
     "$VALIDATION_PASSED" \
@@ -368,7 +485,6 @@ write_bundle_manifest \
 write_run_report \
     "$RUN_REPORT_PATH" \
     "$BUNDLE_MANIFEST_PATH" \
-    "$SCENARIO_REPORT_PATH" \
     "$COMMAND_EXIT_CODE" \
     "$SCRIPT_EXIT_CODE" \
     "$VALIDATION_PASSED" \

@@ -1,10 +1,16 @@
 {
   "contract_version": "hot-cold-arena-tiers-smoke-contract-v1",
   "bead_id": "asupersync-hhlhjv",
-  "description": "Contract-backed smoke proof for operator-visible hot/cold arena temperature accounting and conservative fallback behavior.",
+  "description": "Contract-backed smoke proof for operator-visible hot/cold arena temperature accounting, NUMA-locality composition, and conservative fallback behavior.",
   "runner_script": "scripts/run_hot_cold_arena_tiers_smoke.sh",
   "runner_bundle_schema_version": "hot-cold-arena-tiers-smoke-bundle-v1",
   "runner_report_schema_version": "hot-cold-arena-tiers-smoke-run-report-v1",
+  "report_artifacts": [
+    {
+      "schema_version": "asupersync.hot-cold-arena-tier-comparison.v2",
+      "path_glob": ".hot-cold-arena-tiers-smoke-artifacts/run_*/AA-HOT-COLD-ARENA-*/hot_cold_arena_tiers_report.json"
+    }
+  ],
   "required_bundle_fields": [
     "schema_version",
     "contract_version",
@@ -12,17 +18,21 @@
     "description",
     "run_id",
     "mode",
-    "artifact_path",
     "report_path",
+    "report_path_repeat_2",
     "run_log_path",
+    "run_log_path_repeat_2",
     "command",
     "host_requirements",
     "workload_model",
     "operator_notes",
     "host_fingerprint",
+    "scenario_contract",
     "expected_report_projection",
     "actual_report_projection",
+    "actual_report_projection_repeat_2",
     "verdict_summary",
+    "verdict_summary_repeat_2",
     "command_exit_code",
     "script_exit_code",
     "validation_passed",
@@ -48,13 +58,16 @@
     "operator_notes",
     "host_fingerprint",
     "expected_report_projection",
-    "actual_report_projection"
+    "actual_report_projection",
+    "actual_report_projection_repeat_2"
   ],
   "required_execute_output_files": [
     "bundle_manifest.json",
     "run_report.json",
     "hot_cold_arena_tiers_report.json",
-    "run.log"
+    "hot_cold_arena_tiers_report_repeat_2.json",
+    "run.log",
+    "run_repeat_2.log"
   ],
   "required_dry_run_output_files": [
     "bundle_manifest.json",
@@ -64,14 +77,14 @@
   "smoke_scenarios": [
     {
       "scenario_id": "AA-HOT-COLD-ARENA-TIERED-RETENTION-64C-256G",
-      "description": "Compare unified and tiered-cold-evidence temperature policies for a 64-core / 256 GiB host using large-memory trace retention inputs.",
+      "description": "Fresh locality evidence on a 64-core / 256 GiB host keeps hot bytes fixed while tiering retained evidence out of the hot allocator path.",
       "output_root": "target/hot-cold-arena-tiers-smoke",
       "execution_policy": "execute_or_dry_run",
       "host_requirements": {
         "min_worker_threads": 64,
         "min_memory_gib": 256,
         "notes": [
-          "The proof is deterministic because it freezes capacity hints and trace-budget math instead of probing allocator timing.",
+          "The proof is deterministic because it freezes capacity hints, locality accounting, and trace-budget math instead of probing allocator timing.",
           "The host memory class is operator context for the policy, not a hard minimum for dry-run validation."
         ]
       },
@@ -85,7 +98,22 @@
           "region_capacity": 8192,
           "obligation_capacity": 16384
         },
-        "locality_profile_input": "pending_numa_locality_profile",
+        "locality_profile_input": {
+          "requested_policy": {
+            "mode": "cohort_pinned",
+            "min_topology_confidence_percent": 80,
+            "remote_touch_budget_bps": 6500,
+            "accounting_epoch": 11
+          },
+          "topology_confidence_percent": 91,
+          "topology_fixture_hash": 11240820598888380677,
+          "worker_to_cohort_map": [0,0,0,0,0,0,0,0,1,1,1,1,1,1,1,1,2,2,2,2,2,2,2,2,3,3,3,3,3,3,3,3,4,4,4,4,4,4,4,4,5,5,5,5,5,5,5,5,6,6,6,6,6,6,6,6,7,7,7,7,7,7,7,7],
+          "task_arena_touches_by_cohort": [3200,640,640,640,640,640,640,640],
+          "region_arena_touches_by_cohort": [1024,128,128,128,128,128,128,128],
+          "obligation_arena_touches_by_cohort": [768,768,128,128,128,128,128,128],
+          "task_record_pool_touches_by_cohort": [3200,640,640,640,640,640,640,640],
+          "stale_profile": false
+        },
         "large_page_cold_slabs_supported": false,
         "default_safe_fallback_profile": "unified"
       },
@@ -94,39 +122,18 @@
       "operator_notes": {
         "recommended_for": [
           "64+ core / 256GiB hosts that want retained evidence off the hot allocator path",
-          "Operator dry-runs that need explicit fallback accounting before NUMA placement lands"
+          "Operator dry-runs that need explicit fallback accounting after NUMA evidence is ready"
         ],
         "avoid_when": [
           "Hosts where default unified allocation is still the only approved policy"
         ],
         "fallback_policy": "unified"
       },
-      "expected_report_projection": {
-        "candidate_cold_evidence_bytes": 716800000,
-        "candidate_estimated_hot_bytes": 91357184,
-        "cold_allocation_source": "cold_tier",
-        "cold_tier_retention_ratio": 1.0,
-        "default_estimated_hot_bytes": 91357184,
-        "effective_policy": "tiered-cold-evidence",
-        "fallback_reason": null,
-        "hot_bytes_preserved": true,
-        "hot_share_of_total_bytes": 0.113,
-        "large_page_cold_slabs_active": false,
-        "locality_profile_input": "pending_numa_locality_profile",
-        "no_win_trigger": "none",
-        "operator_verdict": "tiered_retention_active",
-        "projection_hash": 16111168468805334784,
-        "requested_policy": "tiered-cold-evidence",
-        "retained_evidence_bytes": 716800000,
-        "retained_evidence_preserved": true,
-        "safe_fallback_profile": "unified",
-        "scenario_id": "AA-HOT-COLD-ARENA-TIERED-RETENTION-64C-256G",
-        "schema_version": "hot-cold-arena-tiers-smoke-projection-v1"
-      }
+      "expected_report_projection": null
     },
     {
       "scenario_id": "AA-HOT-COLD-ARENA-LARGE-PAGE-FALLBACK-64C-256G",
-      "description": "Request large-page cold slabs on the same host class but force the support probe false to freeze the conservative fallback projection.",
+      "description": "Fresh locality evidence exists, but the large-page cold-slab request must fail closed to tiered cold evidence when the support probe is false.",
       "output_root": "target/hot-cold-arena-tiers-smoke",
       "execution_policy": "execute_or_dry_run",
       "host_requirements": {
@@ -147,7 +154,22 @@
           "region_capacity": 8192,
           "obligation_capacity": 16384
         },
-        "locality_profile_input": "pending_numa_locality_profile",
+        "locality_profile_input": {
+          "requested_policy": {
+            "mode": "cohort_pinned",
+            "min_topology_confidence_percent": 80,
+            "remote_touch_budget_bps": 6500,
+            "accounting_epoch": 11
+          },
+          "topology_confidence_percent": 91,
+          "topology_fixture_hash": 11240820598888380677,
+          "worker_to_cohort_map": [0,0,0,0,0,0,0,0,1,1,1,1,1,1,1,1,2,2,2,2,2,2,2,2,3,3,3,3,3,3,3,3,4,4,4,4,4,4,4,4,5,5,5,5,5,5,5,5,6,6,6,6,6,6,6,6,7,7,7,7,7,7,7,7],
+          "task_arena_touches_by_cohort": [3200,640,640,640,640,640,640,640],
+          "region_arena_touches_by_cohort": [1024,128,128,128,128,128,128,128],
+          "obligation_arena_touches_by_cohort": [768,768,128,128,128,128,128,128],
+          "task_record_pool_touches_by_cohort": [3200,640,640,640,640,640,640,640],
+          "stale_profile": false
+        },
         "large_page_cold_slabs_supported": false,
         "default_safe_fallback_profile": "unified"
       },
@@ -162,28 +184,117 @@
         ],
         "fallback_policy": "unified"
       },
-      "expected_report_projection": {
-        "candidate_cold_evidence_bytes": 716800000,
-        "candidate_estimated_hot_bytes": 91357184,
-        "cold_allocation_source": "cold_tier",
-        "cold_tier_retention_ratio": 1.0,
-        "default_estimated_hot_bytes": 91357184,
-        "effective_policy": "tiered-cold-evidence",
-        "fallback_reason": "large_pages_unsupported",
-        "hot_bytes_preserved": true,
-        "hot_share_of_total_bytes": 0.113,
-        "large_page_cold_slabs_active": false,
-        "locality_profile_input": "pending_numa_locality_profile",
-        "no_win_trigger": "large_pages_unsupported",
-        "operator_verdict": "fallback_without_large_pages",
-        "projection_hash": 10577453242932115799,
-        "requested_policy": "tiered-cold-evidence-large-pages",
-        "retained_evidence_bytes": 716800000,
-        "retained_evidence_preserved": true,
-        "safe_fallback_profile": "unified",
-        "scenario_id": "AA-HOT-COLD-ARENA-LARGE-PAGE-FALLBACK-64C-256G",
-        "schema_version": "hot-cold-arena-tiers-smoke-projection-v1"
-      }
+      "expected_report_projection": null
+    },
+    {
+      "scenario_id": "AA-HOT-COLD-ARENA-LOCALITY-NO-WIN-FALLBACK-64C-256G",
+      "description": "Balanced cohort touches produce no locality win, so the runtime stays on unified allocation even though the host class and trace profile are otherwise tiering-capable.",
+      "output_root": "target/hot-cold-arena-tiers-smoke",
+      "execution_policy": "execute_or_dry_run",
+      "host_requirements": {
+        "min_worker_threads": 64,
+        "min_memory_gib": 256,
+        "notes": [
+          "This scenario proves the no-win operator path instead of silently pretending locality evidence is always useful.",
+          "It documents the safe fallback operators should expect when remote-touch reduction does not materialize."
+        ]
+      },
+      "template_env": {
+        "HOT_COLD_ARENA_TIERS_SMOKE_OUTPUT_DIR": "Override the bundle/report output root.",
+        "HOT_COLD_ARENA_TIERS_SMOKE_ARTIFACT_ROOT": "Override the retrieved comparison artifact root."
+      },
+      "workload_model": {
+        "capacity_hints": {
+          "task_capacity": 32768,
+          "region_capacity": 8192,
+          "obligation_capacity": 16384
+        },
+        "locality_profile_input": {
+          "requested_policy": {
+            "mode": "cohort_pinned",
+            "min_topology_confidence_percent": 80,
+            "remote_touch_budget_bps": 9000,
+            "accounting_epoch": 13
+          },
+          "topology_confidence_percent": 95,
+          "topology_fixture_hash": 11861930782471893701,
+          "worker_to_cohort_map": [0,0,0,0,0,0,0,0,1,1,1,1,1,1,1,1,2,2,2,2,2,2,2,2,3,3,3,3,3,3,3,3,4,4,4,4,4,4,4,4,5,5,5,5,5,5,5,5,6,6,6,6,6,6,6,6,7,7,7,7,7,7,7,7],
+          "task_arena_touches_by_cohort": [1024,1024,1024,1024,1024,1024,1024,1024],
+          "region_arena_touches_by_cohort": [256,256,256,256,256,256,256,256],
+          "obligation_arena_touches_by_cohort": [512,512,512,512,512,512,512,512],
+          "task_record_pool_touches_by_cohort": [1024,1024,1024,1024,1024,1024,1024,1024],
+          "stale_profile": false
+        },
+        "large_page_cold_slabs_supported": false,
+        "default_safe_fallback_profile": "unified"
+      },
+      "trace_storage_profile": "large_memory_256g",
+      "requested_policy": "tiered_cold_evidence",
+      "operator_notes": {
+        "recommended_for": [
+          "Operators who need an explicit no-win artifact before enabling tiered retained evidence on a new locality topology"
+        ],
+        "avoid_when": [
+          "The deployment requires tiered cold evidence unconditionally"
+        ],
+        "fallback_policy": "unified"
+      },
+      "expected_report_projection": null
+    },
+    {
+      "scenario_id": "AA-HOT-COLD-ARENA-REAL-HOST-TEMPLATE",
+      "description": "Template-only scenario that documents the required locality evidence for real-host hot/cold validation without pretending NUMA placement exists on every machine.",
+      "output_root": "target/hot-cold-arena-tiers-smoke",
+      "execution_policy": "execute_or_dry_run",
+      "host_requirements": {
+        "min_worker_threads": 64,
+        "min_memory_gib": 256,
+        "notes": [
+          "Real-host validation must supply a fresh worker-to-cohort map and per-arena touch evidence before tiered retained evidence can be certified.",
+          "The template path should remain operator-visible and conservative instead of manufacturing a synthetic win."
+        ]
+      },
+      "template_env": {
+        "HOT_COLD_ARENA_TIERS_SMOKE_OUTPUT_DIR": "Override the bundle/report output root.",
+        "HOT_COLD_ARENA_TIERS_SMOKE_ARTIFACT_ROOT": "Override the retrieved comparison artifact root."
+      },
+      "workload_model": {
+        "capacity_hints": {
+          "task_capacity": 32768,
+          "region_capacity": 8192,
+          "obligation_capacity": 16384
+        },
+        "locality_profile_input": {
+          "requested_policy": {
+            "mode": "cohort_pinned",
+            "min_topology_confidence_percent": 80,
+            "remote_touch_budget_bps": 6500,
+            "accounting_epoch": 14
+          },
+          "topology_confidence_percent": null,
+          "topology_fixture_hash": null,
+          "worker_to_cohort_map": null,
+          "task_arena_touches_by_cohort": [],
+          "region_arena_touches_by_cohort": [],
+          "obligation_arena_touches_by_cohort": [],
+          "task_record_pool_touches_by_cohort": [],
+          "stale_profile": false
+        },
+        "large_page_cold_slabs_supported": false,
+        "default_safe_fallback_profile": "unified"
+      },
+      "trace_storage_profile": "large_memory_256g",
+      "requested_policy": "tiered_cold_evidence",
+      "operator_notes": {
+        "recommended_for": [
+          "Template-only operator guidance for 64+ core / 256GiB hosts that have not yet collected locality evidence"
+        ],
+        "avoid_when": [
+          "The deployment needs a certified non-template retained-evidence verdict"
+        ],
+        "fallback_policy": "unified"
+      },
+      "expected_report_projection": null
     }
   ]
 }

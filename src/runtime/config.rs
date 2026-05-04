@@ -307,6 +307,12 @@ impl ArenaColdAllocationSource {
 pub enum ArenaTemperatureFallbackReason {
     /// Large-page cold slabs were requested but are unavailable.
     LargePagesUnsupported,
+    /// Hot/cold tiering was requested without a locality proof surface.
+    LocalityProfileMissing,
+    /// The supplied locality proof was stale and must be rejected.
+    StaleLocalityProfile,
+    /// The supplied locality proof stayed on the conservative baseline.
+    LocalityProfileFallback,
 }
 
 impl ArenaTemperatureFallbackReason {
@@ -315,6 +321,9 @@ impl ArenaTemperatureFallbackReason {
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::LargePagesUnsupported => "large_pages_unsupported",
+            Self::LocalityProfileMissing => "locality_profile_missing",
+            Self::StaleLocalityProfile => "stale_locality_profile",
+            Self::LocalityProfileFallback => "locality_profile_fallback",
         }
     }
 }
@@ -332,6 +341,16 @@ pub struct ArenaTemperatureReport {
     pub cold_allocation_source: ArenaColdAllocationSource,
     /// Whether large-page cold slabs are active for retained evidence.
     pub large_page_cold_slabs_active: bool,
+    /// Whether a locality proof surface was supplied.
+    pub locality_profile_present: bool,
+    /// Whether the supplied locality proof was rejected as stale.
+    pub locality_profile_stale: bool,
+    /// Whether the supplied locality proof stayed on the conservative baseline.
+    pub locality_safe_fallback: bool,
+    /// Selected remote-touch ratio from the locality proof surface.
+    pub locality_selected_remote_touch_ratio_bps: u16,
+    /// Whether the locality proof's own no-win trigger fired.
+    pub locality_no_win_trigger: bool,
     /// Estimated hot bytes reserved for the task table.
     pub hot_task_table_bytes: usize,
     /// Estimated hot bytes reserved for the region table.
@@ -381,6 +400,26 @@ impl ArenaTemperatureReport {
             (
                 "large_page_cold_slabs_active",
                 format_bool(self.large_page_cold_slabs_active),
+            ),
+            (
+                "locality_profile_present",
+                format_bool(self.locality_profile_present),
+            ),
+            (
+                "locality_profile_stale",
+                format_bool(self.locality_profile_stale),
+            ),
+            (
+                "locality_safe_fallback",
+                format_bool(self.locality_safe_fallback),
+            ),
+            (
+                "locality_selected_remote_touch_ratio_bps",
+                self.locality_selected_remote_touch_ratio_bps.to_string(),
+            ),
+            (
+                "locality_no_win_trigger",
+                format_bool(self.locality_no_win_trigger),
             ),
             (
                 "hot_task_table_bytes",
@@ -794,6 +833,8 @@ fn build_arena_temperature_report(
     trace_storage_budget: TraceStorageBudget,
     requested_policy: ArenaTemperaturePolicy,
     large_page_cold_slabs_supported: bool,
+    locality_report: Option<&ArenaLocalityReport>,
+    locality_profile_stale: bool,
 ) -> ArenaTemperatureReport {
     let hot_task_table_bytes =
         Arena::<TaskRecord>::estimated_bytes_for_capacity(capacity_hints.task_capacity);
@@ -802,36 +843,63 @@ fn build_arena_temperature_report(
     let hot_obligation_table_bytes =
         Arena::<ObligationRecord>::estimated_bytes_for_capacity(capacity_hints.obligation_capacity);
     let retained_evidence_bytes = trace_storage_budget.estimated_cold_bytes();
+    let locality_profile_present = locality_report.is_some();
+    let locality_safe_fallback =
+        locality_report.is_some_and(ArenaLocalityReport::used_safe_fallback);
+    let locality_selected_remote_touch_ratio_bps =
+        locality_report.map_or(0, |report| report.selected.remote_touch_ratio_bps());
+    let locality_no_win_trigger = locality_report.is_some_and(|report| report.no_win_trigger);
+
+    let locality_gate_fallback = if matches!(requested_policy, ArenaTemperaturePolicy::Unified) {
+        None
+    } else if locality_profile_stale {
+        Some(ArenaTemperatureFallbackReason::StaleLocalityProfile)
+    } else if !locality_profile_present {
+        Some(ArenaTemperatureFallbackReason::LocalityProfileMissing)
+    } else if locality_safe_fallback || locality_no_win_trigger {
+        Some(ArenaTemperatureFallbackReason::LocalityProfileFallback)
+    } else {
+        None
+    };
 
     let (effective_policy, fallback_reason, cold_allocation_source, large_page_cold_slabs_active) =
-        match requested_policy {
-            ArenaTemperaturePolicy::Unified => (
+        if let Some(reason) = locality_gate_fallback {
+            (
                 ArenaTemperaturePolicy::Unified,
-                None,
+                Some(reason),
                 ArenaColdAllocationSource::UnifiedAllocator,
                 false,
-            ),
-            ArenaTemperaturePolicy::TieredColdEvidence => (
-                ArenaTemperaturePolicy::TieredColdEvidence,
-                None,
-                ArenaColdAllocationSource::ColdTier,
-                false,
-            ),
-            ArenaTemperaturePolicy::TieredColdEvidenceLargePages => {
-                if large_page_cold_slabs_supported {
-                    (
-                        ArenaTemperaturePolicy::TieredColdEvidenceLargePages,
-                        None,
-                        ArenaColdAllocationSource::ColdTierLargePages,
-                        true,
-                    )
-                } else {
-                    (
-                        ArenaTemperaturePolicy::TieredColdEvidence,
-                        Some(ArenaTemperatureFallbackReason::LargePagesUnsupported),
-                        ArenaColdAllocationSource::ColdTier,
-                        false,
-                    )
+            )
+        } else {
+            match requested_policy {
+                ArenaTemperaturePolicy::Unified => (
+                    ArenaTemperaturePolicy::Unified,
+                    None,
+                    ArenaColdAllocationSource::UnifiedAllocator,
+                    false,
+                ),
+                ArenaTemperaturePolicy::TieredColdEvidence => (
+                    ArenaTemperaturePolicy::TieredColdEvidence,
+                    None,
+                    ArenaColdAllocationSource::ColdTier,
+                    false,
+                ),
+                ArenaTemperaturePolicy::TieredColdEvidenceLargePages => {
+                    if large_page_cold_slabs_supported {
+                        (
+                            ArenaTemperaturePolicy::TieredColdEvidenceLargePages,
+                            None,
+                            ArenaColdAllocationSource::ColdTierLargePages,
+                            true,
+                        )
+                    } else {
+                        (
+                            ArenaTemperaturePolicy::TieredColdEvidence,
+                            Some(ArenaTemperatureFallbackReason::LargePagesUnsupported),
+                            ArenaColdAllocationSource::ColdTier,
+                            false,
+                        )
+                    }
                 }
             }
         };
@@ -848,6 +916,11 @@ fn build_arena_temperature_report(
         fallback_reason,
         cold_allocation_source,
         large_page_cold_slabs_active,
+        locality_profile_present,
+        locality_profile_stale,
+        locality_safe_fallback,
+        locality_selected_remote_touch_ratio_bps,
+        locality_no_win_trigger,
         hot_task_table_bytes,
         hot_region_table_bytes,
         hot_obligation_table_bytes,
@@ -1608,11 +1681,28 @@ impl RuntimeConfig {
         &self,
         large_page_cold_slabs_supported: bool,
     ) -> ArenaTemperatureReport {
+        self.arena_temperature_report_with_locality(large_page_cold_slabs_supported, None, false)
+    }
+
+    /// Returns the operator-facing arena temperature report composed with locality evidence.
+    ///
+    /// Hot/cold tiering is conservative: any non-unified policy requires a
+    /// present, fresh, non-fallback locality proof before the cold tier may
+    /// activate.
+    #[must_use]
+    pub fn arena_temperature_report_with_locality(
+        &self,
+        large_page_cold_slabs_supported: bool,
+        locality_report: Option<&ArenaLocalityReport>,
+        locality_profile_stale: bool,
+    ) -> ArenaTemperatureReport {
         build_arena_temperature_report(
             self.resolved_capacity_hints(),
             self.trace_storage_budget(),
             self.arena_temperature_policy,
             large_page_cold_slabs_supported,
+            locality_report,
+            locality_profile_stale,
         )
     }
 
@@ -5976,14 +6066,40 @@ mod tests {
     fn arena_temperature_report_keeps_hot_metadata_out_of_cold_tier() {
         init_test("arena_temperature_report_keeps_hot_metadata_out_of_cold_tier");
 
+        let capacity_hints = RuntimeCapacityHints::new(4096, 1024, 2048);
+        let locality = RuntimeConfig {
+            worker_threads: 64,
+            worker_cohort_map: Some(WorkerCohortMapping::new(vec![
+                0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 1, 1, 1, 1, 2, 2, 2, 2, 2, 2, 2, 2, 3, 3, 3, 3,
+                3, 3, 3, 3, 4, 4, 4, 4, 4, 4, 4, 4, 5, 5, 5, 5, 5, 5, 5, 5, 6, 6, 6, 6, 6, 6, 6, 6,
+                7, 7, 7, 7, 7, 7, 7, 7,
+            ])),
+            capacity_hints: Some(capacity_hints),
+            ..RuntimeConfig::default()
+        }
+        .arena_locality_report(
+            ArenaLocalityPolicy::CohortPinned {
+                min_topology_confidence_percent: 80,
+                remote_touch_budget_bps: 6500,
+                accounting_epoch: 11,
+            },
+            Some(91),
+            &ArenaLocalityAccessModel {
+                task_arena_touches_by_cohort: vec![3200, 640, 640, 640, 640, 640, 640, 640],
+                region_arena_touches_by_cohort: vec![1024, 128, 128, 128, 128, 128, 128, 128],
+                obligation_arena_touches_by_cohort: vec![768, 768, 128, 128, 128, 128, 128, 128],
+                task_record_pool_touches_by_cohort: vec![3200, 640, 640, 640, 640, 640, 640, 640],
+            },
+        );
+
         let config = RuntimeConfig {
             worker_threads: 64,
-            capacity_hints: Some(RuntimeCapacityHints::new(4096, 1024, 2048)),
+            capacity_hints: Some(capacity_hints),
             arena_temperature_policy: ArenaTemperaturePolicy::TieredColdEvidence,
             trace_storage_profile: TraceStorageProfile::LargeMemory256G,
             ..RuntimeConfig::default()
         };
-        let report = config.arena_temperature_report(false);
+        let report = config.arena_temperature_report_with_locality(false, Some(&locality), false);
 
         assert_eq!(
             report.requested_policy,
@@ -5999,6 +6115,14 @@ mod tests {
             ArenaColdAllocationSource::ColdTier
         );
         assert!(!report.large_page_cold_slabs_active);
+        assert!(report.locality_profile_present);
+        assert!(!report.locality_profile_stale);
+        assert!(!report.locality_safe_fallback);
+        assert!(!report.locality_no_win_trigger);
+        assert_eq!(
+            report.locality_selected_remote_touch_ratio_bps,
+            locality.selected.remote_touch_ratio_bps()
+        );
         assert!(report.hot_task_table_bytes > 0);
         assert!(report.hot_region_table_bytes > 0);
         assert!(report.hot_obligation_table_bytes > 0);
@@ -6019,12 +6143,37 @@ mod tests {
     fn arena_temperature_report_falls_back_when_large_pages_are_unavailable() {
         init_test("arena_temperature_report_falls_back_when_large_pages_are_unavailable");
 
+        let locality = RuntimeConfig {
+            worker_threads: 64,
+            worker_cohort_map: Some(WorkerCohortMapping::new(vec![
+                0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 1, 1, 1, 1, 2, 2, 2, 2, 2, 2, 2, 2, 3, 3, 3, 3,
+                3, 3, 3, 3, 4, 4, 4, 4, 4, 4, 4, 4, 5, 5, 5, 5, 5, 5, 5, 5, 6, 6, 6, 6, 6, 6, 6, 6,
+                7, 7, 7, 7, 7, 7, 7, 7,
+            ])),
+            capacity_hints: Some(RuntimeCapacityHints::new(4096, 1024, 2048)),
+            ..RuntimeConfig::default()
+        }
+        .arena_locality_report(
+            ArenaLocalityPolicy::CohortPinned {
+                min_topology_confidence_percent: 80,
+                remote_touch_budget_bps: 6500,
+                accounting_epoch: 11,
+            },
+            Some(91),
+            &ArenaLocalityAccessModel {
+                task_arena_touches_by_cohort: vec![3200, 640, 640, 640, 640, 640, 640, 640],
+                region_arena_touches_by_cohort: vec![1024, 128, 128, 128, 128, 128, 128, 128],
+                obligation_arena_touches_by_cohort: vec![768, 768, 128, 128, 128, 128, 128, 128],
+                task_record_pool_touches_by_cohort: vec![3200, 640, 640, 640, 640, 640, 640, 640],
+            },
+        );
+
         let config = RuntimeConfig {
             arena_temperature_policy: ArenaTemperaturePolicy::TieredColdEvidenceLargePages,
             trace_storage_profile: TraceStorageProfile::LargeMemory256G,
             ..RuntimeConfig::default()
         };
-        let report = config.arena_temperature_report(false);
+        let report = config.arena_temperature_report_with_locality(false, Some(&locality), false);
 
         assert_eq!(
             report.requested_policy,
@@ -6056,18 +6205,46 @@ mod tests {
     fn arena_temperature_report_restores_unified_mode_when_disabled_again() {
         init_test("arena_temperature_report_restores_unified_mode_when_disabled_again");
 
+        let capacity_hints = RuntimeCapacityHints::new(4096, 1024, 2048);
+        let locality = RuntimeConfig {
+            worker_threads: 64,
+            worker_cohort_map: Some(WorkerCohortMapping::new(vec![
+                0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 1, 1, 1, 1, 2, 2, 2, 2, 2, 2, 2, 2, 3, 3, 3, 3,
+                3, 3, 3, 3, 4, 4, 4, 4, 4, 4, 4, 4, 5, 5, 5, 5, 5, 5, 5, 5, 6, 6, 6, 6, 6, 6, 6, 6,
+                7, 7, 7, 7, 7, 7, 7, 7,
+            ])),
+            capacity_hints: Some(capacity_hints),
+            ..RuntimeConfig::default()
+        }
+        .arena_locality_report(
+            ArenaLocalityPolicy::CohortPinned {
+                min_topology_confidence_percent: 80,
+                remote_touch_budget_bps: 6500,
+                accounting_epoch: 11,
+            },
+            Some(91),
+            &ArenaLocalityAccessModel {
+                task_arena_touches_by_cohort: vec![3200, 640, 640, 640, 640, 640, 640, 640],
+                region_arena_touches_by_cohort: vec![1024, 128, 128, 128, 128, 128, 128, 128],
+                obligation_arena_touches_by_cohort: vec![768, 768, 128, 128, 128, 128, 128, 128],
+                task_record_pool_touches_by_cohort: vec![3200, 640, 640, 640, 640, 640, 640, 640],
+            },
+        );
+
         let tiered = RuntimeConfig {
             arena_temperature_policy: ArenaTemperaturePolicy::TieredColdEvidence,
             trace_storage_profile: TraceStorageProfile::LargeMemory256G,
+            capacity_hints: Some(capacity_hints),
             ..RuntimeConfig::default()
         }
-        .arena_temperature_report(false);
+        .arena_temperature_report_with_locality(false, Some(&locality), false);
         let unified = RuntimeConfig {
             arena_temperature_policy: ArenaTemperaturePolicy::Unified,
             trace_storage_profile: TraceStorageProfile::LargeMemory256G,
+            capacity_hints: Some(capacity_hints),
             ..RuntimeConfig::default()
         }
-        .arena_temperature_report(false);
+        .arena_temperature_report_with_locality(false, Some(&locality), false);
 
         assert_eq!(unified.effective_policy, ArenaTemperaturePolicy::Unified);
         assert_eq!(unified.cold_evidence_bytes, 0);
@@ -6084,6 +6261,117 @@ mod tests {
             unified.hot_obligation_table_bytes,
             tiered.hot_obligation_table_bytes
         );
+    }
+
+    #[test]
+    fn arena_temperature_report_requires_ready_locality_profile() {
+        init_test("arena_temperature_report_requires_ready_locality_profile");
+
+        let report = RuntimeConfig {
+            arena_temperature_policy: ArenaTemperaturePolicy::TieredColdEvidence,
+            trace_storage_profile: TraceStorageProfile::LargeMemory256G,
+            ..RuntimeConfig::default()
+        }
+        .arena_temperature_report_with_locality(false, None, false);
+
+        assert_eq!(report.effective_policy, ArenaTemperaturePolicy::Unified);
+        assert_eq!(
+            report.fallback_reason,
+            Some(ArenaTemperatureFallbackReason::LocalityProfileMissing)
+        );
+        assert_eq!(report.cold_evidence_bytes, 0);
+        assert!(!report.locality_profile_present);
+    }
+
+    #[test]
+    fn arena_temperature_report_rejects_stale_locality_profile() {
+        init_test("arena_temperature_report_rejects_stale_locality_profile");
+
+        let locality = RuntimeConfig {
+            worker_threads: 64,
+            worker_cohort_map: Some(WorkerCohortMapping::new(vec![
+                0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 1, 1, 1, 1, 2, 2, 2, 2, 2, 2, 2, 2, 3, 3, 3, 3,
+                3, 3, 3, 3, 4, 4, 4, 4, 4, 4, 4, 4, 5, 5, 5, 5, 5, 5, 5, 5, 6, 6, 6, 6, 6, 6, 6, 6,
+                7, 7, 7, 7, 7, 7, 7, 7,
+            ])),
+            capacity_hints: Some(RuntimeCapacityHints::new(4096, 1024, 2048)),
+            ..RuntimeConfig::default()
+        }
+        .arena_locality_report(
+            ArenaLocalityPolicy::CohortPinned {
+                min_topology_confidence_percent: 80,
+                remote_touch_budget_bps: 6500,
+                accounting_epoch: 11,
+            },
+            Some(91),
+            &ArenaLocalityAccessModel {
+                task_arena_touches_by_cohort: vec![3200, 640, 640, 640, 640, 640, 640, 640],
+                region_arena_touches_by_cohort: vec![1024, 128, 128, 128, 128, 128, 128, 128],
+                obligation_arena_touches_by_cohort: vec![768, 768, 128, 128, 128, 128, 128, 128],
+                task_record_pool_touches_by_cohort: vec![3200, 640, 640, 640, 640, 640, 640, 640],
+            },
+        );
+
+        let report = RuntimeConfig {
+            arena_temperature_policy: ArenaTemperaturePolicy::TieredColdEvidence,
+            trace_storage_profile: TraceStorageProfile::LargeMemory256G,
+            ..RuntimeConfig::default()
+        }
+        .arena_temperature_report_with_locality(false, Some(&locality), true);
+
+        assert_eq!(report.effective_policy, ArenaTemperaturePolicy::Unified);
+        assert_eq!(
+            report.fallback_reason,
+            Some(ArenaTemperatureFallbackReason::StaleLocalityProfile)
+        );
+        assert!(report.locality_profile_stale);
+    }
+
+    #[test]
+    fn arena_temperature_report_falls_back_when_locality_no_win_triggers() {
+        init_test("arena_temperature_report_falls_back_when_locality_no_win_triggers");
+
+        let locality = RuntimeConfig {
+            worker_threads: 64,
+            worker_cohort_map: Some(WorkerCohortMapping::new(vec![
+                0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 1, 1, 1, 1, 2, 2, 2, 2, 2, 2, 2, 2, 3, 3, 3, 3,
+                3, 3, 3, 3, 4, 4, 4, 4, 4, 4, 4, 4, 5, 5, 5, 5, 5, 5, 5, 5, 6, 6, 6, 6, 6, 6, 6, 6,
+                7, 7, 7, 7, 7, 7, 7, 7,
+            ])),
+            capacity_hints: Some(RuntimeCapacityHints::new(4096, 1024, 2048)),
+            ..RuntimeConfig::default()
+        }
+        .arena_locality_report(
+            ArenaLocalityPolicy::CohortPinned {
+                min_topology_confidence_percent: 80,
+                remote_touch_budget_bps: 9000,
+                accounting_epoch: 13,
+            },
+            Some(95),
+            &ArenaLocalityAccessModel {
+                task_arena_touches_by_cohort: vec![1024, 1024, 1024, 1024, 1024, 1024, 1024, 1024],
+                region_arena_touches_by_cohort: vec![256, 256, 256, 256, 256, 256, 256, 256],
+                obligation_arena_touches_by_cohort: vec![512, 512, 512, 512, 512, 512, 512, 512],
+                task_record_pool_touches_by_cohort: vec![
+                    1024, 1024, 1024, 1024, 1024, 1024, 1024, 1024,
+                ],
+            },
+        );
+
+        let report = RuntimeConfig {
+            arena_temperature_policy: ArenaTemperaturePolicy::TieredColdEvidence,
+            trace_storage_profile: TraceStorageProfile::LargeMemory256G,
+            ..RuntimeConfig::default()
+        }
+        .arena_temperature_report_with_locality(false, Some(&locality), false);
+
+        assert_eq!(report.effective_policy, ArenaTemperaturePolicy::Unified);
+        assert_eq!(
+            report.fallback_reason,
+            Some(ArenaTemperatureFallbackReason::LocalityProfileFallback)
+        );
+        assert!(report.locality_safe_fallback);
+        assert!(report.locality_no_win_trigger);
     }
 
     #[test]
