@@ -389,7 +389,7 @@
       "fail_closed_child_count": 9,
       "open_tracker_blocker_count": 8,
       "dirty_cluster_fail_closed_count": 1,
-      "tracked_dirty_blocker_count": 2,
+      "tracked_dirty_blocker_count": 3,
       "source_skill_count": 4,
       "required_source_skill_count": 4,
       "missing_required_source_skill_count": 0,
@@ -406,7 +406,7 @@
       "missing_runner_path_count": 0,
       "objective_checklist_complete": true,
       "no_unexplained_artifacts": false,
-      "projection_hash": "16b763ad0d874ad7ac4452c8a585ff270bacb1cf0ff5a3f0d7c4b156134fa2e9"
+      "projection_hash": "f3d29af8e2db9a417e622475fc179a210d7e95fe319f334a4aabe5091a121978"
     },
     "required_log_fields": [
       "scenario_id",
@@ -456,7 +456,7 @@
       "fail_closed_child_count": 9,
       "open_tracker_blocker_count": 8,
       "dirty_cluster_fail_closed_count": 1,
-      "tracked_dirty_blocker_count": 2,
+      "tracked_dirty_blocker_count": 3,
       "source_skill_count": 4,
       "required_source_skill_count": 4,
       "missing_required_source_skill_count": 0,
@@ -473,7 +473,7 @@
       "missing_runner_path_count": 0,
       "objective_checklist_complete": true,
       "no_unexplained_artifacts": false,
-      "projection_hash": "f197a1a5e163f2471fc93b41e9862734139db29a1fd2cc7ba80906977cd79b4c"
+      "projection_hash": "b522c69fb5b333bedf7b59d29d9dfcd653b3cfb1f85a4f21b81eaa1e377bc0b6"
     },
     "required_log_fields": [
       "scenario_id",
