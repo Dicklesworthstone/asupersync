@@ -101,7 +101,7 @@ fuzz_target!(|scenario: Scenario| {
                 }
             }
             Op::UpdateActivity { stream_id } => {
-                state.update_activity(stream_id);
+                state.update_stream_activity(stream_id);
                 // No state change to active_streams; just refreshes
                 // last_activity.
             }
