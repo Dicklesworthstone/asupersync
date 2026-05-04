@@ -4,7 +4,7 @@ use asupersync::runtime::config::{
     BlockingPoolAffinityProfile, CapacityEnvelopeBrownoutStage, CapacityEnvelopeBudget,
     CapacityEnvelopeEvidenceSnapshot, CapacityEnvelopeHostFingerprint, HostProfileEvidenceArtifact,
     HostProfileEvidenceSet, HostProfileHostResources, HostProfileId, HostProfileManualOverrides,
-    HostProfilePlannerObjective, RuntimeCapacityHints,
+    HostProfilePlannerObjective, HostProfilePlannerRequest, RuntimeCapacityHints,
     SignedProfileBundleCapacityCertificateReference, SignedProfileBundleControllerVersion,
     SignedProfileBundleExecutionMode, SignedProfileBundleIntegrityMode,
     SignedProfileBundleManifestRequest, TraceStorageProfile,
@@ -795,6 +795,120 @@ fn signed_profile_bundle_rejects_missing_child_proof_hash() {
     assert!(bundle.verification.refusal_reasons.iter().any(|reason| {
         reason.contains("child evidence") || reason.contains("trace_storage_profile")
     }));
+}
+
+#[test]
+fn signed_profile_bundle_manual_overrides_take_precedence_and_are_recorded() {
+    let mut request = sample_request();
+    request.manual_overrides.worker_threads = Some(17);
+
+    let host_plan = HostProfilePlannerRequest {
+        objective: request.objective,
+        requested_profile: request.requested_profile,
+        host_resources: request.host_resources,
+        controller_evidence: request.controller_evidence.clone(),
+        manual_overrides: request.manual_overrides.clone(),
+        operator_note: request.operator_note.clone(),
+    }
+    .plan();
+    assert_ne!(host_plan.profile_bundle.worker_threads, 17);
+    assert_eq!(host_plan.final_bundle.worker_threads, 17);
+    assert!(
+        host_plan
+            .manual_overrides_applied
+            .contains(&"worker_threads".to_string())
+    );
+
+    let bundle = request.plan();
+    assert_ne!(
+        bundle.manifest.profile_bundle_digest,
+        bundle.manifest.final_bundle_digest
+    );
+    assert!(
+        bundle
+            .manifest
+            .manual_override_fields
+            .contains(&"worker_threads".to_string())
+    );
+}
+
+#[test]
+fn signed_profile_bundle_redacts_operator_secrets_and_links_rollback_receipt() {
+    let bundle = sample_request().plan();
+    let manifest = &bundle.manifest;
+    let rollback = &bundle.rollback_receipt;
+
+    let sanitized_note = manifest
+        .sanitized_operator_note
+        .as_deref()
+        .expect("operator note should be preserved in scrubbed form");
+    assert!(sanitized_note.contains("[REDACTED]"));
+    assert!(!sanitized_note.contains("super-secret"));
+    let sanitized_validation = manifest
+        .sanitized_validation_command
+        .as_deref()
+        .expect("validation command should be preserved in scrubbed form");
+    assert!(sanitized_validation.contains("[REDACTED]"));
+    assert!(!sanitized_validation.contains("token=secret"));
+
+    assert_eq!(
+        rollback.applied_bundle_digest,
+        manifest.manifest_digest_sha256
+    );
+    assert_eq!(rollback.fallback_profile, manifest.fallback_profile);
+    assert_eq!(rollback.host_fingerprint, manifest.host_fingerprint);
+    assert_eq!(
+        rollback.rollback_command_template,
+        manifest.rollback_command_template
+    );
+    assert!(
+        rollback
+            .artifact_paths
+            .iter()
+            .any(|path| path == "rollback_receipt.json")
+    );
+}
+
+#[test]
+fn signed_profile_bundle_non_shadow_modes_preserve_existing_behavior() {
+    let dry_run = sample_request().plan();
+    assert_eq!(dry_run.verification.execute_mode.as_str(), "dry_run");
+    assert!(dry_run.shadow_run_evaluation.is_none());
+
+    let mut verify_request =
+        request_for_scenario("AA-SIGNED-PROFILE-BUNDLE-TAMPER-REJECT-64C-256G");
+    verify_request.tamper_field = None;
+    let verify = verify_request.plan();
+    assert_eq!(verify.verification.execute_mode.as_str(), "verify");
+    assert!(verify.shadow_run_evaluation.is_none());
+}
+
+#[test]
+fn signed_profile_bundle_shadow_run_reports_are_deterministic() {
+    let contract = default_contract();
+    let scenario = contract
+        .smoke_scenarios
+        .iter()
+        .find(|scenario| {
+            scenario.scenario_id == "AA-SIGNED-PROFILE-BUNDLE-SHADOW-RUN-HOLD-64C-256G"
+        })
+        .expect("hold scenario must exist");
+    let request = build_request(scenario);
+    let first_report = build_report(&contract.contract_version, scenario, &request);
+    let second_report = build_report(&contract.contract_version, scenario, &request);
+
+    assert_eq!(
+        first_report["shadow_run_evaluation"]["dominant_reasons"],
+        second_report["shadow_run_evaluation"]["dominant_reasons"]
+    );
+    assert_eq!(
+        first_report["report_projection"]["projection_hash"],
+        second_report["report_projection"]["projection_hash"]
+    );
+    assert_eq!(
+        first_report["shadow_run_evaluation"]["decision"],
+        json!("hold")
+    );
 }
 
 #[test]
