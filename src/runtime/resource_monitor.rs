@@ -33,6 +33,12 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 use thiserror::Error;
 
+/// Stable schema for operator-facing platform probe reports.
+pub const RESOURCE_MONITOR_PLATFORM_GAP_REPORT_SCHEMA_VERSION: &str =
+    "asupersync.resource-monitor-platform-gaps.v1";
+
+const RESOURCE_PROBE_WARNING_THROTTLE_EVERY: u64 = 8;
+
 /// Errors that can occur during resource monitoring.
 #[derive(Debug, Error)]
 pub enum ResourceMonitorError {
@@ -85,6 +91,325 @@ impl std::fmt::Display for ResourceType {
             Self::Custom(name) => write!(f, "custom:{name}"),
         }
     }
+}
+
+/// Built-in platform probes used by the system resource collector.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ResourceProbe {
+    ProcessRssBytes,
+    MemoryMaxBytes,
+    ProcessFdCount,
+    FileDescriptorLimit,
+    #[serde(rename = "load_avg_1min_scaled")]
+    LoadAvg1MinScaled,
+    ProcessConnectionCount,
+    NetworkConnectionLimit,
+}
+
+impl ResourceProbe {
+    #[must_use]
+    pub fn resource_type(self) -> ResourceType {
+        match self {
+            Self::ProcessRssBytes | Self::MemoryMaxBytes => ResourceType::Memory,
+            Self::ProcessFdCount | Self::FileDescriptorLimit => ResourceType::FileDescriptors,
+            Self::LoadAvg1MinScaled => ResourceType::CpuLoad,
+            Self::ProcessConnectionCount | Self::NetworkConnectionLimit => {
+                ResourceType::NetworkConnections
+            }
+        }
+    }
+
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::ProcessRssBytes => "process_rss_bytes",
+            Self::MemoryMaxBytes => "memory_max_bytes",
+            Self::ProcessFdCount => "process_fd_count",
+            Self::FileDescriptorLimit => "file_descriptor_limit",
+            Self::LoadAvg1MinScaled => "load_avg_1min_scaled",
+            Self::ProcessConnectionCount => "process_connection_count",
+            Self::NetworkConnectionLimit => "network_connection_limit",
+        }
+    }
+}
+
+impl std::fmt::Display for ResourceProbe {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// Availability state for a platform resource probe.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ResourceProbeStatus {
+    Supported,
+    Unavailable,
+    Fallback,
+    Disabled,
+}
+
+/// Operator-safe fallback semantics for a failed or disabled probe.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ResourceProbeFallback {
+    None,
+    OmitMeasurement,
+    ConservativeDefault,
+    CustomCollectorRequired,
+    MonitorDisabled,
+}
+
+impl std::fmt::Display for ResourceProbeFallback {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let label = match self {
+            Self::None => "none",
+            Self::OmitMeasurement => "omit_measurement",
+            Self::ConservativeDefault => "conservative_default",
+            Self::CustomCollectorRequired => "custom_collector_required",
+            Self::MonitorDisabled => "monitor_disabled",
+        };
+        f.write_str(label)
+    }
+}
+
+/// Aggregate verdict for operator-facing platform probe reports.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ResourceProbeOperatorVerdict {
+    Complete,
+    DegradedWithUnavailableProbes,
+    DegradedWithFallbacks,
+    Disabled,
+}
+
+/// Serializable snapshot for one platform resource probe.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ResourceProbeSnapshot {
+    pub platform: String,
+    pub resource_type: ResourceType,
+    pub probe: ResourceProbe,
+    pub status: ResourceProbeStatus,
+    pub fallback: ResourceProbeFallback,
+    pub sampled_value: Option<u64>,
+    pub error_message: Option<String>,
+    pub warning_count: u64,
+    pub warning_suppressed_count: u64,
+}
+
+/// Serializable platform probe inventory for the resource monitor.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ResourcePlatformProbeReport {
+    pub schema_version: String,
+    pub platform: String,
+    pub probes: Vec<ResourceProbeSnapshot>,
+    pub supported_count: u64,
+    pub unavailable_count: u64,
+    pub fallback_count: u64,
+    pub disabled_count: u64,
+    pub warning_emitted_count: u64,
+    pub warning_suppressed_count: u64,
+    pub operator_verdict: ResourceProbeOperatorVerdict,
+}
+
+impl ResourcePlatformProbeReport {
+    fn from_snapshots(platform: String, mut probes: Vec<ResourceProbeSnapshot>) -> Self {
+        probes.sort_by_key(|snapshot| snapshot.probe);
+
+        let supported_count = probes
+            .iter()
+            .filter(|snapshot| snapshot.status == ResourceProbeStatus::Supported)
+            .count() as u64;
+        let unavailable_count = probes
+            .iter()
+            .filter(|snapshot| snapshot.status == ResourceProbeStatus::Unavailable)
+            .count() as u64;
+        let fallback_count = probes
+            .iter()
+            .filter(|snapshot| snapshot.status == ResourceProbeStatus::Fallback)
+            .count() as u64;
+        let disabled_count = probes
+            .iter()
+            .filter(|snapshot| snapshot.status == ResourceProbeStatus::Disabled)
+            .count() as u64;
+        let warning_suppressed_count = probes
+            .iter()
+            .map(|snapshot| snapshot.warning_suppressed_count)
+            .sum();
+        let warning_emitted_count = probes
+            .iter()
+            .map(|snapshot| snapshot.warning_count - snapshot.warning_suppressed_count)
+            .sum();
+
+        let operator_verdict = if !probes.is_empty() && disabled_count == probes.len() as u64 {
+            ResourceProbeOperatorVerdict::Disabled
+        } else if unavailable_count > 0 {
+            ResourceProbeOperatorVerdict::DegradedWithUnavailableProbes
+        } else if fallback_count > 0 {
+            ResourceProbeOperatorVerdict::DegradedWithFallbacks
+        } else {
+            ResourceProbeOperatorVerdict::Complete
+        };
+
+        Self {
+            schema_version: RESOURCE_MONITOR_PLATFORM_GAP_REPORT_SCHEMA_VERSION.to_string(),
+            platform,
+            probes,
+            supported_count,
+            unavailable_count,
+            fallback_count,
+            disabled_count,
+            warning_emitted_count,
+            warning_suppressed_count,
+            operator_verdict,
+        }
+    }
+}
+
+#[derive(Debug)]
+struct ResourceProbeState {
+    platform: String,
+    probes: RwLock<HashMap<ResourceProbe, ResourceProbeSnapshot>>,
+    warning_counts: RwLock<HashMap<ResourceProbe, u64>>,
+}
+
+impl ResourceProbeState {
+    fn new(platform: impl Into<String>) -> Self {
+        Self {
+            platform: platform.into(),
+            probes: RwLock::new(HashMap::new()),
+            warning_counts: RwLock::new(HashMap::new()),
+        }
+    }
+
+    fn report(&self) -> ResourcePlatformProbeReport {
+        ResourcePlatformProbeReport::from_snapshots(
+            self.platform.clone(),
+            self.probes.read().values().cloned().collect(),
+        )
+    }
+
+    fn record_supported(&self, probe: ResourceProbe, sampled_value: Option<u64>) {
+        self.probes.write().insert(
+            probe,
+            self.snapshot(
+                probe,
+                ResourceProbeStatus::Supported,
+                ResourceProbeFallback::None,
+                sampled_value,
+                None,
+                0,
+                0,
+            ),
+        );
+    }
+
+    fn record_probe_failure(
+        &self,
+        probe: ResourceProbe,
+        requested_fallback: ResourceProbeFallback,
+        error: &std::io::Error,
+    ) {
+        let fallback = if error.kind() == std::io::ErrorKind::Unsupported {
+            ResourceProbeFallback::CustomCollectorRequired
+        } else {
+            requested_fallback
+        };
+        let status = if fallback == ResourceProbeFallback::ConservativeDefault {
+            ResourceProbeStatus::Fallback
+        } else {
+            ResourceProbeStatus::Unavailable
+        };
+
+        let warning_count = {
+            let mut counts = self.warning_counts.write();
+            let count = counts.entry(probe).or_insert(0);
+            *count += 1;
+            *count
+        };
+        let should_emit_warning = should_emit_probe_warning(warning_count);
+        let warning_suppressed_count = warning_count - probe_warning_emitted_count(warning_count);
+
+        if should_emit_warning {
+            crate::tracing_compat::warn!(
+                platform = self.platform.as_str(),
+                probe = probe.as_str(),
+                resource_type = probe.resource_type().to_string(),
+                fallback = fallback.to_string(),
+                error = error.to_string(),
+                "resource monitor platform probe unavailable"
+            );
+        }
+
+        self.probes.write().insert(
+            probe,
+            self.snapshot(
+                probe,
+                status,
+                fallback,
+                None,
+                Some(error.to_string()),
+                warning_count,
+                warning_suppressed_count,
+            ),
+        );
+    }
+
+    #[cfg(test)]
+    fn record_disabled(&self, probe: ResourceProbe) {
+        self.probes.write().insert(
+            probe,
+            self.snapshot(
+                probe,
+                ResourceProbeStatus::Disabled,
+                ResourceProbeFallback::MonitorDisabled,
+                None,
+                None,
+                0,
+                0,
+            ),
+        );
+    }
+
+    fn snapshot(
+        &self,
+        probe: ResourceProbe,
+        status: ResourceProbeStatus,
+        fallback: ResourceProbeFallback,
+        sampled_value: Option<u64>,
+        error_message: Option<String>,
+        warning_count: u64,
+        warning_suppressed_count: u64,
+    ) -> ResourceProbeSnapshot {
+        ResourceProbeSnapshot {
+            platform: self.platform.clone(),
+            resource_type: probe.resource_type(),
+            probe,
+            status,
+            fallback,
+            sampled_value,
+            error_message,
+            warning_count,
+            warning_suppressed_count,
+        }
+    }
+}
+
+fn should_emit_probe_warning(warning_count: u64) -> bool {
+    warning_count == 1 || warning_count.is_multiple_of(RESOURCE_PROBE_WARNING_THROTTLE_EVERY)
+}
+
+fn probe_warning_emitted_count(warning_count: u64) -> u64 {
+    if warning_count == 0 {
+        0
+    } else {
+        1 + warning_count / RESOURCE_PROBE_WARNING_THROTTLE_EVERY
+    }
+}
+
+fn current_platform_fingerprint() -> String {
+    format!("{}/{}", std::env::consts::OS, std::env::consts::ARCH)
 }
 
 /// Resource usage measurement with limits.
@@ -2311,6 +2636,8 @@ pub struct SystemResourceCollector {
     interval: Duration,
     /// Collected data.
     pressure: Arc<ResourcePressure>,
+    /// Operator-facing platform probe state.
+    probe_state: Arc<ResourceProbeState>,
 }
 
 impl SystemResourceCollector {
@@ -2320,6 +2647,7 @@ impl SystemResourceCollector {
             active: AtomicBool::new(false),
             interval,
             pressure,
+            probe_state: Arc::new(ResourceProbeState::new(current_platform_fingerprint())),
         }
     }
 
@@ -2374,6 +2702,32 @@ impl SystemResourceCollector {
         Ok(())
     }
 
+    /// Report platform probe availability and fallback state for operators.
+    pub fn platform_probe_report(&self) -> ResourcePlatformProbeReport {
+        self.probe_state.report()
+    }
+
+    fn observe_probe<T>(
+        &self,
+        probe: ResourceProbe,
+        fallback: ResourceProbeFallback,
+        result: std::io::Result<T>,
+        sampled_value: impl FnOnce(&T) -> Option<u64>,
+    ) -> std::io::Result<T> {
+        match result {
+            Ok(value) => {
+                self.probe_state
+                    .record_supported(probe, sampled_value(&value));
+                Ok(value)
+            }
+            Err(error) => {
+                self.probe_state
+                    .record_probe_failure(probe, fallback, &error);
+                Err(error)
+            }
+        }
+    }
+
     /// Collect memory usage measurement.
     ///
     /// br-asupersync-thfiyk: real platform read.
@@ -2386,15 +2740,26 @@ impl SystemResourceCollector {
     ///   `if let Ok(..)` in `collect_now` cleanly skips the
     ///   measurement update so existing pressure values are preserved.
     fn collect_memory_usage(&self) -> Result<ResourceMeasurement, ResourceMonitorError> {
-        let current_bytes = platform::process_rss_bytes().map_err(|e| {
-            ResourceMonitorError::SystemAccessFailed {
+        let current_bytes_result = self.observe_probe(
+            ResourceProbe::ProcessRssBytes,
+            ResourceProbeFallback::OmitMeasurement,
+            platform::process_rss_bytes(),
+            |value| Some(*value),
+        );
+        let max_limit_result = self.observe_probe(
+            ResourceProbe::MemoryMaxBytes,
+            ResourceProbeFallback::OmitMeasurement,
+            platform::memory_max_bytes(),
+            |value| Some(*value),
+        );
+
+        let current_bytes =
+            current_bytes_result.map_err(|e| ResourceMonitorError::SystemAccessFailed {
                 reason: format!("memory rss: {e}"),
-            }
-        })?;
-        let max_limit =
-            platform::memory_max_bytes().map_err(|e| ResourceMonitorError::SystemAccessFailed {
-                reason: format!("memory max: {e}"),
             })?;
+        let max_limit = max_limit_result.map_err(|e| ResourceMonitorError::SystemAccessFailed {
+            reason: format!("memory max: {e}"),
+        })?;
         let (soft_limit, hard_limit) = derive_thresholds(max_limit, 75, 90);
         Ok(ResourceMeasurement::new(
             current_bytes,
@@ -2412,12 +2777,25 @@ impl SystemResourceCollector {
     ///   symlink directory exposed by `fdescfs`).
     /// - All Unix: max from `getrlimit(RLIMIT_NOFILE)`.
     fn collect_fd_usage(&self) -> Result<ResourceMeasurement, ResourceMonitorError> {
+        let current_fds_result = self.observe_probe(
+            ResourceProbe::ProcessFdCount,
+            ResourceProbeFallback::OmitMeasurement,
+            platform::process_fd_count(),
+            |value| Some(*value),
+        );
+        let fd_limit_result = self.observe_probe(
+            ResourceProbe::FileDescriptorLimit,
+            ResourceProbeFallback::OmitMeasurement,
+            platform::fd_rlimit(),
+            |(_, hard)| Some(*hard),
+        );
+
         let current_fds =
-            platform::process_fd_count().map_err(|e| ResourceMonitorError::SystemAccessFailed {
+            current_fds_result.map_err(|e| ResourceMonitorError::SystemAccessFailed {
                 reason: format!("fd count: {e}"),
             })?;
         let (_, hard_max) =
-            platform::fd_rlimit().map_err(|e| ResourceMonitorError::SystemAccessFailed {
+            fd_limit_result.map_err(|e| ResourceMonitorError::SystemAccessFailed {
                 reason: format!("fd rlimit: {e}"),
             })?;
         let max_limit = if hard_max == 0 { 1024 } else { hard_max };
@@ -2438,11 +2816,16 @@ impl SystemResourceCollector {
     /// - macOS/BSD: `getloadavg(3)`, same normalization.
     /// - Windows / other: `SystemAccessFailed`.
     fn collect_cpu_load(&self) -> Result<ResourceMeasurement, ResourceMonitorError> {
-        let load_avg_1min = platform::load_avg_1min_scaled().map_err(|e| {
-            ResourceMonitorError::SystemAccessFailed {
+        let load_avg_1min = self
+            .observe_probe(
+                ResourceProbe::LoadAvg1MinScaled,
+                ResourceProbeFallback::OmitMeasurement,
+                platform::load_avg_1min_scaled(),
+                |value| Some(*value),
+            )
+            .map_err(|e| ResourceMonitorError::SystemAccessFailed {
                 reason: format!("loadavg: {e}"),
-            }
-        })?;
+            })?;
         // CPU load is intrinsically a 0..100 scale; thresholds are
         // absolute rather than derived from a per-process rlimit.
         Ok(ResourceMeasurement::new(load_avg_1min, 80, 95, 100))
@@ -2457,15 +2840,27 @@ impl SystemResourceCollector {
     ///   give an exact answer but pulls in a transitive `mach2` dep
     ///   the project doesn't otherwise need).
     fn collect_network_usage(&self) -> Result<ResourceMeasurement, ResourceMonitorError> {
-        let current_connections = platform::process_connection_count().map_err(|e| {
-            ResourceMonitorError::SystemAccessFailed {
+        let current_connections_result = self.observe_probe(
+            ResourceProbe::ProcessConnectionCount,
+            ResourceProbeFallback::OmitMeasurement,
+            platform::process_connection_count(),
+            |value| Some(*value),
+        );
+        let fd_limit_result = self.observe_probe(
+            ResourceProbe::NetworkConnectionLimit,
+            ResourceProbeFallback::ConservativeDefault,
+            platform::fd_rlimit(),
+            |(_, hard)| Some(*hard),
+        );
+
+        let current_connections =
+            current_connections_result.map_err(|e| ResourceMonitorError::SystemAccessFailed {
                 reason: format!("connection count: {e}"),
-            }
-        })?;
+            })?;
         // Sockets share the FD table, so the connection ceiling is at
         // most RLIMIT_NOFILE. Use a reasonable fallback when the
         // rlimit is unavailable.
-        let (_, hard_max) = platform::fd_rlimit().unwrap_or((512, 1024));
+        let (_, hard_max) = fd_limit_result.unwrap_or((512, 1024));
         let max_limit = if hard_max == 0 { 1024 } else { hard_max };
         let (soft_limit, hard_limit) = derive_thresholds(max_limit, 70, 85);
         Ok(ResourceMeasurement::new(
@@ -2602,6 +2997,7 @@ impl ResourceMonitor {
             composite_degradation_level: self.pressure.composite_degradation_level(),
             measurements,
             degradation_levels,
+            platform_probe_report: self.collector.platform_probe_report(),
             stats: self.engine.stats(),
             config: self.config.read().clone(),
         }
@@ -2615,6 +3011,7 @@ pub struct ResourceMonitorStatus {
     pub composite_degradation_level: DegradationLevel,
     pub measurements: HashMap<ResourceType, ResourceMeasurement>,
     pub degradation_levels: HashMap<ResourceType, DegradationLevel>,
+    pub platform_probe_report: ResourcePlatformProbeReport,
     pub stats: DegradationStatsSnapshot,
     pub config: MonitorConfig,
 }
@@ -2767,6 +3164,258 @@ mod tests {
             cycle_overhead_percentage(Duration::from_millis(25), Duration::ZERO),
             0.0
         );
+    }
+
+    #[test]
+    fn m4oxsk_supported_probe_reporting_records_sampled_value() {
+        let state = ResourceProbeState::new("fake-linux/x86_64");
+
+        state.record_supported(ResourceProbe::ProcessRssBytes, Some(4096));
+
+        let report = state.report();
+        assert_eq!(report.supported_count, 1);
+        assert_eq!(report.unavailable_count, 0);
+        assert_eq!(report.fallback_count, 0);
+        assert_eq!(
+            report.operator_verdict,
+            ResourceProbeOperatorVerdict::Complete
+        );
+        assert_eq!(report.probes[0].sampled_value, Some(4096));
+        assert_eq!(report.probes[0].resource_type, ResourceType::Memory);
+    }
+
+    #[test]
+    fn m4oxsk_unsupported_probe_reporting_is_typed() {
+        let state = ResourceProbeState::new("fake-unsupported/wasm32");
+        let error = std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            "not implemented on fake platform",
+        );
+
+        state.record_probe_failure(
+            ResourceProbe::ProcessFdCount,
+            ResourceProbeFallback::OmitMeasurement,
+            &error,
+        );
+
+        let report = state.report();
+        let probe = &report.probes[0];
+        assert_eq!(report.unavailable_count, 1);
+        assert_eq!(report.warning_emitted_count, 1);
+        assert_eq!(
+            report.operator_verdict,
+            ResourceProbeOperatorVerdict::DegradedWithUnavailableProbes
+        );
+        assert_eq!(probe.status, ResourceProbeStatus::Unavailable);
+        assert_eq!(
+            probe.fallback,
+            ResourceProbeFallback::CustomCollectorRequired
+        );
+        assert_eq!(probe.probe, ResourceProbe::ProcessFdCount);
+        assert!(probe.error_message.as_deref().unwrap().contains("fake"));
+    }
+
+    #[test]
+    fn m4oxsk_fallback_aggregation_preserves_operator_semantics() {
+        let state = ResourceProbeState::new("fake-bsd/aarch64");
+        let error = std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "fd rlimit inaccessible",
+        );
+
+        state.record_probe_failure(
+            ResourceProbe::NetworkConnectionLimit,
+            ResourceProbeFallback::ConservativeDefault,
+            &error,
+        );
+
+        let report = state.report();
+        assert_eq!(report.fallback_count, 1);
+        assert_eq!(report.unavailable_count, 0);
+        assert_eq!(
+            report.operator_verdict,
+            ResourceProbeOperatorVerdict::DegradedWithFallbacks
+        );
+        assert_eq!(report.probes[0].status, ResourceProbeStatus::Fallback);
+        assert_eq!(
+            report.probes[0].fallback,
+            ResourceProbeFallback::ConservativeDefault
+        );
+    }
+
+    #[test]
+    fn m4oxsk_warning_throttling_suppresses_repeated_probe_failures() {
+        let state = ResourceProbeState::new("fake-linux/x86_64");
+
+        for attempt in 0..9 {
+            let error = std::io::Error::new(
+                std::io::ErrorKind::Other,
+                format!("transient probe failure {attempt}"),
+            );
+            state.record_probe_failure(
+                ResourceProbe::LoadAvg1MinScaled,
+                ResourceProbeFallback::OmitMeasurement,
+                &error,
+            );
+        }
+
+        let report = state.report();
+        assert_eq!(report.warning_emitted_count, 2);
+        assert_eq!(report.warning_suppressed_count, 7);
+        assert_eq!(report.probes[0].warning_count, 9);
+        assert_eq!(report.probes[0].warning_suppressed_count, 7);
+    }
+
+    #[test]
+    fn m4oxsk_unavailable_probe_report_serializes_operator_fields() {
+        let state = ResourceProbeState::new("fake-windows/x86_64");
+        let error =
+            std::io::Error::new(std::io::ErrorKind::Unsupported, "load average unavailable");
+
+        state.record_probe_failure(
+            ResourceProbe::LoadAvg1MinScaled,
+            ResourceProbeFallback::OmitMeasurement,
+            &error,
+        );
+
+        let report = state.report();
+        let json = serde_json::to_string_pretty(&report).expect("serialize report");
+        let value: Value = serde_json::from_str(&json).expect("parse report json");
+
+        assert_eq!(
+            value["schema_version"],
+            RESOURCE_MONITOR_PLATFORM_GAP_REPORT_SCHEMA_VERSION
+        );
+        assert_eq!(value["probes"][0]["probe"], "load_avg_1min_scaled");
+        assert_eq!(value["probes"][0]["status"], "unavailable");
+        assert_eq!(value["probes"][0]["fallback"], "custom_collector_required");
+        assert_eq!(
+            value["operator_verdict"],
+            "degraded_with_unavailable_probes"
+        );
+    }
+
+    #[test]
+    fn m4oxsk_disabled_monitor_probe_report_is_explicit() {
+        let state = ResourceProbeState::new("fake-disabled/noarch");
+
+        state.record_disabled(ResourceProbe::ProcessRssBytes);
+        state.record_disabled(ResourceProbe::LoadAvg1MinScaled);
+
+        let report = state.report();
+        assert_eq!(report.disabled_count, 2);
+        assert_eq!(report.warning_emitted_count, 0);
+        assert_eq!(report.warning_suppressed_count, 0);
+        assert_eq!(
+            report.operator_verdict,
+            ResourceProbeOperatorVerdict::Disabled
+        );
+        assert!(report.probes.iter().all(|probe| {
+            probe.status == ResourceProbeStatus::Disabled
+                && probe.fallback == ResourceProbeFallback::MonitorDisabled
+        }));
+    }
+
+    #[test]
+    fn m4oxsk_status_report_carries_platform_probe_inventory() {
+        let monitor = ResourceMonitor::new(MonitorConfig::default());
+
+        let status = monitor.status_report();
+
+        assert!(!status.is_active);
+        assert_eq!(
+            status.platform_probe_report.schema_version,
+            RESOURCE_MONITOR_PLATFORM_GAP_REPORT_SCHEMA_VERSION
+        );
+        assert_eq!(
+            status.platform_probe_report.platform,
+            current_platform_fingerprint()
+        );
+    }
+
+    #[test]
+    fn m4oxsk_resource_monitor_platform_gap_smoke_emits_operator_report() {
+        let state = ResourceProbeState::new("host-template/linux-or-fallback");
+        let unsupported = std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            "template host lacks process fd probe",
+        );
+        let fallback = std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "template host hides connection limit",
+        );
+
+        state.record_supported(ResourceProbe::ProcessRssBytes, Some(12_288));
+        state.record_probe_failure(
+            ResourceProbe::ProcessFdCount,
+            ResourceProbeFallback::OmitMeasurement,
+            &unsupported,
+        );
+        state.record_probe_failure(
+            ResourceProbe::NetworkConnectionLimit,
+            ResourceProbeFallback::ConservativeDefault,
+            &fallback,
+        );
+        state.record_disabled(ResourceProbe::MemoryMaxBytes);
+
+        let report = state.report();
+        let probe_list: Vec<Value> = report
+            .probes
+            .iter()
+            .map(|probe| {
+                json!({
+                    "probe": probe.probe,
+                    "resource_type": probe.resource_type,
+                    "status": probe.status,
+                    "fallback": probe.fallback,
+                    "sampled_value": probe.sampled_value,
+                    "error_message": probe.error_message,
+                })
+            })
+            .collect();
+        let smoke_report = json!({
+            "schema_version": report.schema_version,
+            "platform_fingerprint": report.platform,
+            "probe_list": probe_list,
+            "supported_count": report.supported_count,
+            "unavailable_count": report.unavailable_count,
+            "fallback_count": report.fallback_count,
+            "disabled_count": report.disabled_count,
+            "warning_emitted_count": report.warning_emitted_count,
+            "warning_suppressed_count": report.warning_suppressed_count,
+            "sampled_values": report.probes.iter().filter_map(|probe| {
+                probe.sampled_value.map(|value| json!({
+                    "probe": probe.probe,
+                    "value": value,
+                }))
+            }).collect::<Vec<_>>(),
+            "error_messages": report.probes.iter().filter_map(|probe| {
+                probe.error_message.as_ref().map(|message| json!({
+                    "probe": probe.probe,
+                    "message": message,
+                    "fallback": probe.fallback,
+                }))
+            }).collect::<Vec<_>>(),
+            "final_operator_verdict": report.operator_verdict,
+        });
+
+        assert_eq!(smoke_report["supported_count"], 1);
+        assert_eq!(smoke_report["unavailable_count"], 1);
+        assert_eq!(smoke_report["fallback_count"], 1);
+        assert_eq!(smoke_report["disabled_count"], 1);
+        assert_eq!(
+            smoke_report["final_operator_verdict"],
+            "degraded_with_unavailable_probes"
+        );
+
+        if std::env::var_os("ASUPERSYNC_RESOURCE_MONITOR_PLATFORM_GAP_REPORT").is_some() {
+            println!("RESOURCE_MONITOR_PLATFORM_GAP_REPORT_JSON_BEGIN");
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&smoke_report).expect("serialize smoke report")
+            );
+            println!("RESOURCE_MONITOR_PLATFORM_GAP_REPORT_JSON_END");
+        }
     }
 
     // ===================================================================
