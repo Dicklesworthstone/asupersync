@@ -42,13 +42,6 @@ const U32_LEN: usize = 4;
 const U64_LEN: usize = 8;
 const TASK_ENTRY_LEN: usize = TASK_ID_LEN + 2;
 const MAX_STRING_BYTES: usize = 256;
-const REGION_ID_OFFSET: usize = SNAP_MAGIC_LEN + SNAP_VERSION_LEN;
-const REGION_STATE_OFFSET: usize = REGION_ID_OFFSET + REGION_ID_LEN;
-const TIMESTAMP_OFFSET: usize = REGION_STATE_OFFSET + REGION_STATE_LEN;
-const SEQUENCE_OFFSET: usize = TIMESTAMP_OFFSET + U64_LEN;
-const ORIGIN_ID_OFFSET: usize = SEQUENCE_OFFSET + U64_LEN;
-const EPOCH_OFFSET: usize = ORIGIN_ID_OFFSET + U64_LEN;
-const TASK_COUNT_OFFSET: usize = EPOCH_OFFSET + U64_LEN;
 
 /// Snapshot fuzzing configuration
 #[derive(Arbitrary, Debug)]
@@ -450,7 +443,7 @@ fn apply_operation(
             state_byte,
         } => {
             let offset = match position {
-                StatePosition::RegionState => Some(13), // After magic(4) + version(1) + region_id(8)
+                StatePosition::RegionState => find_region_state_offset(snapshot_bytes),
                 StatePosition::TaskState => find_task_state_offset(snapshot_bytes),
             };
             if let Some(offset) = offset
@@ -476,7 +469,7 @@ fn apply_operation(
             metadata_len,
         } => {
             // Find and corrupt the task count field (after sequence field)
-            if let Some(task_count_offset) = find_task_count_offset()
+            if let Some(task_count_offset) = find_task_count_offset(snapshot_bytes)
                 && snapshot_bytes.len() >= task_count_offset + 4
             {
                 let bytes = task_count.to_le_bytes();
@@ -526,7 +519,7 @@ fn apply_operation(
         SnapshotOperation::OverlargeCount { count_type, count } => {
             match count_type {
                 CountType::TaskCount => {
-                    if let Some(offset) = find_task_count_offset() {
+                    if let Some(offset) = find_task_count_offset(snapshot_bytes) {
                         write_u32_at(snapshot_bytes, offset, *count);
                     }
                 }
@@ -562,20 +555,28 @@ fn apply_operation(
             };
 
             // Inject boundary values into various numeric fields
-            inject_boundary_value_at_offset(snapshot_bytes, TIMESTAMP_OFFSET, value); // timestamp
-            inject_boundary_value_at_offset(snapshot_bytes, SEQUENCE_OFFSET, value); // sequence
-            inject_boundary_value_at_offset(snapshot_bytes, ORIGIN_ID_OFFSET, value); // origin_id
-            inject_boundary_value_at_offset(snapshot_bytes, EPOCH_OFFSET, value); // epoch
+            if let Some(offset) = find_timestamp_offset(snapshot_bytes) {
+                inject_boundary_value_at_offset(snapshot_bytes, offset, value);
+            }
+            if let Some(offset) = find_sequence_offset(snapshot_bytes) {
+                inject_boundary_value_at_offset(snapshot_bytes, offset, value);
+            }
+            if let Some(offset) = find_origin_id_offset(snapshot_bytes) {
+                inject_boundary_value_at_offset(snapshot_bytes, offset, value);
+            }
+            if let Some(offset) = find_epoch_offset(snapshot_bytes) {
+                inject_boundary_value_at_offset(snapshot_bytes, offset, value);
+            }
         }
 
         SnapshotOperation::PartialFieldCorruption { field, corruption } => {
             let offset = match field {
-                FieldType::RegionId => Some(REGION_ID_OFFSET),
+                FieldType::RegionId => find_region_id_offset(snapshot_bytes),
                 FieldType::TaskId => find_task_id_offset(snapshot_bytes),
-                FieldType::Timestamp => Some(TIMESTAMP_OFFSET),
-                FieldType::Sequence => Some(SEQUENCE_OFFSET),
-                FieldType::OriginId => Some(ORIGIN_ID_OFFSET),
-                FieldType::Epoch => Some(EPOCH_OFFSET),
+                FieldType::Timestamp => find_timestamp_offset(snapshot_bytes),
+                FieldType::Sequence => find_sequence_offset(snapshot_bytes),
+                FieldType::OriginId => find_origin_id_offset(snapshot_bytes),
+                FieldType::Epoch => find_epoch_offset(snapshot_bytes),
                 FieldType::Priority => find_task_priority_offset(snapshot_bytes),
                 FieldType::FinalizerCount => find_finalizer_count_offset(snapshot_bytes),
             };
@@ -621,6 +622,13 @@ fn test_snapshot_deserializer(data: &[u8], _config: &ParserConfig) {
 
 #[derive(Debug, Clone, Copy)]
 struct SnapshotLayout {
+    region_id_offset: usize,
+    region_state_offset: usize,
+    timestamp_offset: usize,
+    sequence_offset: usize,
+    origin_id_offset: usize,
+    epoch_offset: usize,
+    task_count_offset: usize,
     task_count: u32,
     first_task_offset: usize,
     children_count_offset: usize,
@@ -733,8 +741,19 @@ fn advance_optional_parent(data: &[u8], flag_offset: usize) -> Option<usize> {
 }
 
 fn derive_snapshot_layout(data: &[u8]) -> Option<SnapshotLayout> {
-    let task_count = read_u32_at(data, TASK_COUNT_OFFSET)?;
-    let first_task_offset = TASK_COUNT_OFFSET.checked_add(U32_LEN)?;
+    let region_id_offset = SNAP_MAGIC_LEN.checked_add(SNAP_VERSION_LEN)?;
+    let region_state_offset = region_id_offset.checked_add(REGION_ID_LEN)?;
+    let timestamp_offset = region_state_offset.checked_add(REGION_STATE_LEN)?;
+    let sequence_offset = timestamp_offset.checked_add(U64_LEN)?;
+    let origin_id_offset = sequence_offset.checked_add(U64_LEN)?;
+    let epoch_offset = origin_id_offset.checked_add(U64_LEN)?;
+    let task_count_offset = epoch_offset.checked_add(U64_LEN)?;
+    if data.len() < task_count_offset.checked_add(U32_LEN)? {
+        return None;
+    }
+
+    let task_count = read_u32_at(data, task_count_offset)?;
+    let first_task_offset = task_count_offset.checked_add(U32_LEN)?;
     let task_bytes = usize::try_from(task_count)
         .ok()?
         .checked_mul(TASK_ENTRY_LEN)?;
@@ -761,6 +780,13 @@ fn derive_snapshot_layout(data: &[u8]) -> Option<SnapshotLayout> {
     }
 
     Some(SnapshotLayout {
+        region_id_offset,
+        region_state_offset,
+        timestamp_offset,
+        sequence_offset,
+        origin_id_offset,
+        epoch_offset,
+        task_count_offset,
         task_count,
         first_task_offset,
         children_count_offset,
@@ -776,6 +802,30 @@ fn derive_snapshot_layout(data: &[u8]) -> Option<SnapshotLayout> {
     })
 }
 
+fn find_region_id_offset(data: &[u8]) -> Option<usize> {
+    derive_snapshot_layout(data).map(|layout| layout.region_id_offset)
+}
+
+fn find_region_state_offset(data: &[u8]) -> Option<usize> {
+    derive_snapshot_layout(data).map(|layout| layout.region_state_offset)
+}
+
+fn find_timestamp_offset(data: &[u8]) -> Option<usize> {
+    derive_snapshot_layout(data).map(|layout| layout.timestamp_offset)
+}
+
+fn find_sequence_offset(data: &[u8]) -> Option<usize> {
+    derive_snapshot_layout(data).map(|layout| layout.sequence_offset)
+}
+
+fn find_origin_id_offset(data: &[u8]) -> Option<usize> {
+    derive_snapshot_layout(data).map(|layout| layout.origin_id_offset)
+}
+
+fn find_epoch_offset(data: &[u8]) -> Option<usize> {
+    derive_snapshot_layout(data).map(|layout| layout.epoch_offset)
+}
+
 fn find_task_state_offset(data: &[u8]) -> Option<usize> {
     let layout = derive_snapshot_layout(data)?;
     if layout.task_count == 0 {
@@ -784,8 +834,8 @@ fn find_task_state_offset(data: &[u8]) -> Option<usize> {
     layout.first_task_offset.checked_add(TASK_ID_LEN)
 }
 
-fn find_task_count_offset() -> Option<usize> {
-    Some(TASK_COUNT_OFFSET)
+fn find_task_count_offset(data: &[u8]) -> Option<usize> {
+    derive_snapshot_layout(data).map(|layout| layout.task_count_offset)
 }
 
 fn find_children_count_offset(data: &[u8]) -> Option<usize> {
