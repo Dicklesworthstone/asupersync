@@ -3230,7 +3230,7 @@ mod tests {
             fn check_send_result<T>() -> Result<(), SendError<T>> {
                 // This enforces that send methods return Result<(), SendError<T>>
                 // where SendError<T> contains the value T, not ()
-                unimplemented!("This is just a type check")
+                Ok(())
             }
 
             let _: fn() -> Result<(), SendError<T>> = check_send_result;
