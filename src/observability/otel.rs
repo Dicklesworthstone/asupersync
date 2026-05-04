@@ -476,6 +476,756 @@ impl std::fmt::Display for ExportError {
 
 impl std::error::Error for ExportError {}
 
+/// Default OTLP schema URL used by logs snapshots.
+pub const OTLP_LOGS_SCHEMA_URL: &str = "https://opentelemetry.io/schemas/1.37.0";
+/// Default instrumentation scope name for Asupersync logs exports.
+pub const OTLP_LOGS_SCOPE_NAME: &str = "asupersync.observability.otel";
+/// Maximum number of attributes retained on a single OTLP log record.
+pub const OTLP_LOGS_MAX_ATTRIBUTES: usize = 128;
+/// Maximum UTF-8 byte length retained for each OTLP log attribute value.
+pub const OTLP_LOGS_MAX_ATTRIBUTE_VALUE_BYTES: usize = 4096;
+
+const OTLP_LOGS_TRACE_FLAGS_MASK: u32 = 0xff;
+
+/// String key/value attributes attached to an OTLP log record.
+pub type LogAttributes = Vec<(String, String)>;
+
+/// Map an Asupersync log level to OTLP severity number and text.
+#[must_use]
+pub const fn log_level_to_otlp_severity(level: LogLevel) -> (i32, &'static str) {
+    match level {
+        LogLevel::Trace => (1, "TRACE"),
+        LogLevel::Debug => (5, "DEBUG"),
+        LogLevel::Info => (9, "INFO"),
+        LogLevel::Warn => (13, "WARN"),
+        LogLevel::Error => (17, "ERROR"),
+    }
+}
+
+fn truncate_log_attribute_value(value: &str) -> String {
+    if value.len() <= OTLP_LOGS_MAX_ATTRIBUTE_VALUE_BYTES {
+        return value.to_string();
+    }
+
+    let mut end = OTLP_LOGS_MAX_ATTRIBUTE_VALUE_BYTES;
+    while end > 0 && !value.is_char_boundary(end) {
+        end -= 1;
+    }
+    value[..end].to_string()
+}
+
+fn insert_log_attribute_bounded(
+    attributes: &mut LogAttributes,
+    dropped_attributes_count: &mut u32,
+    key: String,
+    value: String,
+) {
+    if key.is_empty() {
+        *dropped_attributes_count = dropped_attributes_count.saturating_add(1);
+        return;
+    }
+
+    let value = truncate_log_attribute_value(&value);
+    if let Some((_, existing_value)) = attributes
+        .iter_mut()
+        .find(|(existing_key, _)| existing_key == &key)
+    {
+        *existing_value = value;
+        *dropped_attributes_count = dropped_attributes_count.saturating_add(1);
+        return;
+    }
+
+    if attributes.len() >= OTLP_LOGS_MAX_ATTRIBUTES {
+        *dropped_attributes_count = dropped_attributes_count.saturating_add(1);
+        return;
+    }
+
+    attributes.push((key, value));
+}
+
+fn normalized_log_attributes(
+    attributes: &[(String, String)],
+    dropped_attributes_count: u32,
+) -> (LogAttributes, u32) {
+    let mut dropped = dropped_attributes_count;
+    let mut normalized = BTreeMap::new();
+
+    for (key, value) in attributes {
+        if key.is_empty() {
+            dropped = dropped.saturating_add(1);
+            continue;
+        }
+        if normalized.insert(key.clone(), truncate_log_attribute_value(value)).is_some() {
+            dropped = dropped.saturating_add(1);
+        }
+    }
+
+    let mut retained = Vec::with_capacity(normalized.len().min(OTLP_LOGS_MAX_ATTRIBUTES));
+    for (key, value) in normalized {
+        if retained.len() >= OTLP_LOGS_MAX_ATTRIBUTES {
+            dropped = dropped.saturating_add(1);
+            continue;
+        }
+        retained.push((key, value));
+    }
+
+    (retained, dropped)
+}
+
+fn valid_trace_id(trace_id: Vec<u8>) -> Vec<u8> {
+    if trace_id.len() == 16 {
+        trace_id
+    } else {
+        Vec::new()
+    }
+}
+
+fn valid_span_id(span_id: Vec<u8>) -> Vec<u8> {
+    if span_id.len() == 8 {
+        span_id
+    } else {
+        Vec::new()
+    }
+}
+
+/// A normalized OTLP log record ready for export.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OtlpLogRecord {
+    /// Event timestamp in Unix nanoseconds. A value of zero means unknown.
+    pub time_unix_nano: u64,
+    /// Observation timestamp in Unix nanoseconds. A value of zero means unknown.
+    pub observed_time_unix_nano: u64,
+    /// OTLP severity number.
+    pub severity_number: i32,
+    /// OTLP severity text.
+    pub severity_text: String,
+    /// Log body payload. Empty bodies are preserved as empty string values.
+    pub body: String,
+    /// Attributes attached to the record.
+    pub attributes: LogAttributes,
+    /// Count of attributes dropped because of invalid keys, duplicates, or caps.
+    pub dropped_attributes_count: u32,
+    /// W3C trace flags; only the low eight bits are exported.
+    pub flags: u32,
+    /// Optional 16-byte trace identifier.
+    pub trace_id: Vec<u8>,
+    /// Optional 8-byte span identifier.
+    pub span_id: Vec<u8>,
+    /// Optional event name for event-style log records.
+    pub event_name: String,
+}
+
+impl OtlpLogRecord {
+    /// Create a log record from level, body, and event timestamp.
+    #[must_use]
+    pub fn new(level: LogLevel, body: impl Into<String>, time_unix_nano: u64) -> Self {
+        let (severity_number, severity_text) = log_level_to_otlp_severity(level);
+        Self {
+            time_unix_nano,
+            observed_time_unix_nano: time_unix_nano,
+            severity_number,
+            severity_text: severity_text.to_string(),
+            body: body.into(),
+            attributes: Vec::new(),
+            dropped_attributes_count: 0,
+            flags: 0,
+            trace_id: Vec::new(),
+            span_id: Vec::new(),
+            event_name: String::new(),
+        }
+    }
+
+    /// Build an OTLP log record from an Asupersync structured log entry.
+    #[must_use]
+    pub fn from_log_entry(entry: &LogEntry, observed_time_unix_nano: u64) -> Self {
+        let mut record = Self::new(entry.level(), entry.message(), entry.timestamp().as_nanos())
+            .with_observed_time_unix_nano(observed_time_unix_nano);
+
+        if let Some(target) = entry.target() {
+            record = record.with_attribute("target", target);
+        }
+        for (key, value) in entry.fields() {
+            record = record.with_attribute(key, value);
+        }
+
+        record
+    }
+
+    /// Set the observation timestamp.
+    #[must_use]
+    pub const fn with_observed_time_unix_nano(mut self, observed_time_unix_nano: u64) -> Self {
+        self.observed_time_unix_nano = observed_time_unix_nano;
+        self
+    }
+
+    /// Add or replace an attribute while enforcing record-local bounds.
+    #[must_use]
+    pub fn with_attribute(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
+        insert_log_attribute_bounded(
+            &mut self.attributes,
+            &mut self.dropped_attributes_count,
+            key.into(),
+            value.into(),
+        );
+        self
+    }
+
+    /// Attach a W3C trace/span correlation context.
+    #[must_use]
+    pub fn with_trace_context(
+        mut self,
+        trace_id: impl Into<Vec<u8>>,
+        span_id: impl Into<Vec<u8>>,
+        flags: u32,
+    ) -> Self {
+        self.trace_id = valid_trace_id(trace_id.into());
+        self.span_id = valid_span_id(span_id.into());
+        self.flags = flags & OTLP_LOGS_TRACE_FLAGS_MASK;
+        self
+    }
+
+    /// Attach an OTLP event name.
+    #[must_use]
+    pub fn with_event_name(mut self, event_name: impl Into<String>) -> Self {
+        self.event_name = event_name.into();
+        self
+    }
+}
+
+/// A single-resource, single-scope OTLP logs export snapshot.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LogsSnapshot {
+    /// OTLP resource attributes.
+    pub resource_attributes: LogAttributes,
+    /// Instrumentation scope name.
+    pub scope_name: String,
+    /// Instrumentation scope version.
+    pub scope_version: String,
+    /// OTLP schema URL attached to resource and scope blocks.
+    pub schema_url: String,
+    /// Log records in this export snapshot.
+    pub records: Vec<OtlpLogRecord>,
+}
+
+impl LogsSnapshot {
+    /// Create an empty logs snapshot for a service.
+    #[must_use]
+    pub fn new(service_name: impl Into<String>) -> Self {
+        Self {
+            resource_attributes: vec![
+                ("service.name".to_string(), service_name.into()),
+                ("telemetry.sdk.name".to_string(), "asupersync".to_string()),
+                (
+                    "telemetry.sdk.version".to_string(),
+                    env!("CARGO_PKG_VERSION").to_string(),
+                ),
+            ],
+            scope_name: OTLP_LOGS_SCOPE_NAME.to_string(),
+            scope_version: env!("CARGO_PKG_VERSION").to_string(),
+            schema_url: OTLP_LOGS_SCHEMA_URL.to_string(),
+            records: Vec::new(),
+        }
+    }
+
+    /// Set the instrumentation scope name and version.
+    #[must_use]
+    pub fn with_scope(
+        mut self,
+        scope_name: impl Into<String>,
+        scope_version: impl Into<String>,
+    ) -> Self {
+        self.scope_name = scope_name.into();
+        self.scope_version = scope_version.into();
+        self
+    }
+
+    /// Set the schema URL.
+    #[must_use]
+    pub fn with_schema_url(mut self, schema_url: impl Into<String>) -> Self {
+        self.schema_url = schema_url.into();
+        self
+    }
+
+    /// Add or replace a resource attribute.
+    #[must_use]
+    pub fn with_resource_attribute(
+        mut self,
+        key: impl Into<String>,
+        value: impl Into<String>,
+    ) -> Self {
+        let key = key.into();
+        let value = value.into();
+        if let Some((_, existing_value)) = self
+            .resource_attributes
+            .iter_mut()
+            .find(|(existing_key, _)| existing_key == &key)
+        {
+            *existing_value = value;
+        } else if !key.is_empty() {
+            self.resource_attributes
+                .push((key, truncate_log_attribute_value(&value)));
+        }
+        self
+    }
+
+    /// Add a log record.
+    pub fn add_record(&mut self, record: OtlpLogRecord) {
+        self.records.push(record);
+    }
+
+    /// Add a log record and return the updated snapshot.
+    #[must_use]
+    pub fn with_record(mut self, record: OtlpLogRecord) -> Self {
+        self.add_record(record);
+        self
+    }
+
+    /// Number of records in the snapshot.
+    #[must_use]
+    pub fn record_count(&self) -> usize {
+        self.records.len()
+    }
+
+    /// Serialize this snapshot as an OTLP `ExportLogsServiceRequest`.
+    #[must_use]
+    pub fn to_otlp_protobuf(&self) -> Vec<u8> {
+        use prost::Message;
+        otlp_logs_proto::logs_request_from_snapshot(self).encode_to_vec()
+    }
+}
+
+mod otlp_logs_proto {
+    use super::{LogsSnapshot, normalized_log_attributes};
+
+    #[derive(Clone, PartialEq, prost::Message)]
+    pub(super) struct ExportLogsServiceRequest {
+        #[prost(message, repeated, tag = "1")]
+        pub resource_logs: Vec<ResourceLogs>,
+    }
+
+    #[derive(Clone, PartialEq, prost::Message)]
+    pub(super) struct ResourceLogs {
+        #[prost(message, optional, tag = "1")]
+        pub resource: Option<Resource>,
+        #[prost(message, repeated, tag = "2")]
+        pub scope_logs: Vec<ScopeLogs>,
+        #[prost(string, tag = "3")]
+        pub schema_url: String,
+    }
+
+    #[derive(Clone, PartialEq, prost::Message)]
+    pub(super) struct ScopeLogs {
+        #[prost(message, optional, tag = "1")]
+        pub scope: Option<InstrumentationScope>,
+        #[prost(message, repeated, tag = "2")]
+        pub log_records: Vec<LogRecord>,
+        #[prost(string, tag = "3")]
+        pub schema_url: String,
+    }
+
+    #[derive(Clone, PartialEq, prost::Message)]
+    pub(super) struct Resource {
+        #[prost(message, repeated, tag = "1")]
+        pub attributes: Vec<KeyValue>,
+    }
+
+    #[derive(Clone, PartialEq, Eq, prost::Message)]
+    pub(super) struct InstrumentationScope {
+        #[prost(string, tag = "1")]
+        pub name: String,
+        #[prost(string, tag = "2")]
+        pub version: String,
+    }
+
+    #[derive(Clone, PartialEq, prost::Message)]
+    pub(super) struct LogRecord {
+        #[prost(fixed64, tag = "1")]
+        pub time_unix_nano: u64,
+        #[prost(fixed64, tag = "11")]
+        pub observed_time_unix_nano: u64,
+        #[prost(int32, tag = "2")]
+        pub severity_number: i32,
+        #[prost(string, tag = "3")]
+        pub severity_text: String,
+        #[prost(message, optional, tag = "5")]
+        pub body: Option<AnyValue>,
+        #[prost(message, repeated, tag = "6")]
+        pub attributes: Vec<KeyValue>,
+        #[prost(uint32, tag = "7")]
+        pub dropped_attributes_count: u32,
+        #[prost(fixed32, tag = "8")]
+        pub flags: u32,
+        #[prost(bytes = "vec", tag = "9")]
+        pub trace_id: Vec<u8>,
+        #[prost(bytes = "vec", tag = "10")]
+        pub span_id: Vec<u8>,
+        #[prost(string, tag = "12")]
+        pub event_name: String,
+    }
+
+    #[derive(Clone, PartialEq, prost::Message)]
+    pub(super) struct KeyValue {
+        #[prost(string, tag = "1")]
+        pub key: String,
+        #[prost(message, optional, tag = "2")]
+        pub value: Option<AnyValue>,
+    }
+
+    #[derive(Clone, PartialEq, prost::Message)]
+    pub(super) struct AnyValue {
+        #[prost(oneof = "any_value::Value", tags = "1")]
+        pub value: Option<any_value::Value>,
+    }
+
+    pub(super) mod any_value {
+        #[derive(Clone, PartialEq, prost::Oneof)]
+        pub(super) enum Value {
+            #[prost(string, tag = "1")]
+            StringValue(String),
+        }
+    }
+
+    fn string_value(value: impl Into<String>) -> AnyValue {
+        AnyValue {
+            value: Some(any_value::Value::StringValue(value.into())),
+        }
+    }
+
+    fn key_value((key, value): (String, String)) -> KeyValue {
+        KeyValue {
+            key,
+            value: Some(string_value(value)),
+        }
+    }
+
+    pub(super) fn logs_request_from_snapshot(snapshot: &LogsSnapshot) -> ExportLogsServiceRequest {
+        let (resource_attributes, _) = normalized_log_attributes(&snapshot.resource_attributes, 0);
+        let records = snapshot
+            .records
+            .iter()
+            .map(|record| {
+                let (attributes, dropped_attributes_count) =
+                    normalized_log_attributes(&record.attributes, record.dropped_attributes_count);
+                LogRecord {
+                    time_unix_nano: record.time_unix_nano,
+                    observed_time_unix_nano: record.observed_time_unix_nano,
+                    severity_number: record.severity_number,
+                    severity_text: record.severity_text.clone(),
+                    body: Some(string_value(record.body.clone())),
+                    attributes: attributes.into_iter().map(key_value).collect(),
+                    dropped_attributes_count,
+                    flags: record.flags,
+                    trace_id: record.trace_id.clone(),
+                    span_id: record.span_id.clone(),
+                    event_name: record.event_name.clone(),
+                }
+            })
+            .collect();
+
+        ExportLogsServiceRequest {
+            resource_logs: vec![ResourceLogs {
+                resource: Some(Resource {
+                    attributes: resource_attributes.into_iter().map(key_value).collect(),
+                }),
+                scope_logs: vec![ScopeLogs {
+                    scope: Some(InstrumentationScope {
+                        name: snapshot.scope_name.clone(),
+                        version: snapshot.scope_version.clone(),
+                    }),
+                    log_records: records,
+                    schema_url: snapshot.schema_url.clone(),
+                }],
+                schema_url: snapshot.schema_url.clone(),
+            }],
+        }
+    }
+}
+
+/// Trait for custom logs exporters.
+pub trait LogsExporter: Send + Sync {
+    /// Export a logs snapshot.
+    fn export(&self, logs: &LogsSnapshot) -> Result<(), ExportError>;
+
+    /// Flush any buffered log data.
+    fn flush(&self) -> Result<(), ExportError>;
+}
+
+/// Logs exporter that drops all records.
+#[derive(Debug, Default)]
+pub struct NullLogsExporter;
+
+impl NullLogsExporter {
+    /// Create a new null logs exporter.
+    #[must_use]
+    pub fn new() -> Self {
+        Self
+    }
+}
+
+impl LogsExporter for NullLogsExporter {
+    fn export(&self, _logs: &LogsSnapshot) -> Result<(), ExportError> {
+        Ok(())
+    }
+
+    fn flush(&self) -> Result<(), ExportError> {
+        Ok(())
+    }
+}
+
+/// Logs exporter that collects snapshots in memory for tests.
+#[derive(Debug, Default)]
+pub struct InMemoryLogsExporter {
+    snapshots: Mutex<Vec<LogsSnapshot>>,
+}
+
+impl InMemoryLogsExporter {
+    /// Create a new in-memory logs exporter.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Return all collected snapshots.
+    #[must_use]
+    pub fn snapshots(&self) -> Vec<LogsSnapshot> {
+        self.snapshots.lock().clone()
+    }
+
+    /// Clear collected snapshots.
+    pub fn clear(&self) {
+        self.snapshots.lock().clear();
+    }
+
+    /// Total number of log records collected across snapshots.
+    #[must_use]
+    pub fn total_records(&self) -> usize {
+        self.snapshots
+            .lock()
+            .iter()
+            .map(LogsSnapshot::record_count)
+            .sum()
+    }
+}
+
+impl LogsExporter for InMemoryLogsExporter {
+    fn export(&self, logs: &LogsSnapshot) -> Result<(), ExportError> {
+        self.snapshots.lock().push(logs.clone());
+        Ok(())
+    }
+
+    fn flush(&self) -> Result<(), ExportError> {
+        Ok(())
+    }
+}
+
+/// Logs exporter that fans out to multiple exporters.
+#[derive(Default)]
+pub struct MultiLogsExporter {
+    exporters: Vec<Box<dyn LogsExporter>>,
+}
+
+impl MultiLogsExporter {
+    /// Create a new multi-exporter for logs.
+    #[must_use]
+    pub fn new(exporters: Vec<Box<dyn LogsExporter>>) -> Self {
+        Self { exporters }
+    }
+
+    /// Add a logs exporter.
+    pub fn add(&mut self, exporter: Box<dyn LogsExporter>) {
+        self.exporters.push(exporter);
+    }
+
+    /// Number of child exporters.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.exporters.len()
+    }
+
+    /// Whether this exporter has no children.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.exporters.is_empty()
+    }
+}
+
+impl std::fmt::Debug for MultiLogsExporter {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("MultiLogsExporter")
+            .field("exporters_count", &self.exporters.len())
+            .finish()
+    }
+}
+
+impl LogsExporter for MultiLogsExporter {
+    fn export(&self, logs: &LogsSnapshot) -> Result<(), ExportError> {
+        let mut errors = Vec::new();
+        for exporter in &self.exporters {
+            if let Err(err) = exporter.export(logs) {
+                errors.push(err.message);
+            }
+        }
+        if errors.is_empty() {
+            Ok(())
+        } else {
+            Err(ExportError::new(errors.join("; ")))
+        }
+    }
+
+    fn flush(&self) -> Result<(), ExportError> {
+        let mut errors = Vec::new();
+        for exporter in &self.exporters {
+            if let Err(err) = exporter.flush() {
+                errors.push(err.message);
+            }
+        }
+        if errors.is_empty() {
+            Ok(())
+        } else {
+            Err(ExportError::new(errors.join("; ")))
+        }
+    }
+}
+
+/// Bounded logs exporter with oldest-drop load shedding.
+pub struct LoadSheddingLogsExporter {
+    inner: Box<dyn LogsExporter>,
+    export_queue: BoundedExportQueue<LogsSnapshot>,
+}
+
+impl std::fmt::Debug for LoadSheddingLogsExporter {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("LoadSheddingLogsExporter")
+            .field("export_queue", &self.export_queue)
+            .finish_non_exhaustive()
+    }
+}
+
+impl LoadSheddingLogsExporter {
+    /// Create a new logs exporter with bounded oldest-drop queueing.
+    #[must_use]
+    pub fn new(inner: Box<dyn LogsExporter>, queue_capacity: usize) -> Self {
+        Self {
+            inner,
+            export_queue: BoundedExportQueue::new(queue_capacity),
+        }
+    }
+
+    /// Return load shedding statistics.
+    #[must_use]
+    pub fn load_shedding_stats(&self) -> LoadSheddingStats {
+        LoadSheddingStats {
+            queue_depth: self.export_queue.len(),
+            queue_capacity: self.export_queue.capacity(),
+            dropped_batches: self.export_queue.dropped_count(),
+        }
+    }
+
+    /// Process all queued logs snapshots.
+    pub fn process_queue(&self) -> Result<usize, ExportError> {
+        let mut processed = 0;
+        while let Some(batch) = self.export_queue.dequeue() {
+            self.inner.export(&batch)?;
+            processed += 1;
+        }
+        Ok(processed)
+    }
+}
+
+impl LogsExporter for LoadSheddingLogsExporter {
+    fn export(&self, logs: &LogsSnapshot) -> Result<(), ExportError> {
+        let dropped = self.export_queue.enqueue(logs.clone());
+        if dropped {
+            #[cfg(feature = "tracing-integration")]
+            crate::tracing_compat::warn!(
+                target: "asupersync::observability::otel",
+                "OTLP logs export queue full: dropped oldest batch. Queue capacity: {}, dropped total: {}",
+                self.export_queue.capacity(),
+                self.export_queue.dropped_count()
+            );
+        }
+        Ok(())
+    }
+
+    fn flush(&self) -> Result<(), ExportError> {
+        self.process_queue()?;
+        self.inner.flush()
+    }
+}
+
+/// OTLP HTTP logs exporter.
+#[derive(Debug, Clone)]
+pub struct OtlpLogsHttpExporter {
+    http: OtlpHttpExporter,
+}
+
+impl OtlpLogsHttpExporter {
+    /// Create a new OTLP HTTP logs exporter.
+    #[must_use]
+    pub fn new(endpoint: impl Into<String>) -> Self {
+        Self {
+            http: OtlpHttpExporter::new(endpoint),
+        }
+    }
+
+    /// Set request timeout.
+    #[must_use]
+    pub fn with_timeout(mut self, timeout: Duration) -> Self {
+        self.http = self.http.with_timeout(timeout);
+        self
+    }
+
+    /// Set retry configuration.
+    #[must_use]
+    pub fn with_retry_config(
+        mut self,
+        max_retries: u32,
+        initial_delay: Duration,
+        max_delay: Duration,
+    ) -> Self {
+        self.http = self
+            .http
+            .with_retry_config(max_retries, initial_delay, max_delay);
+        self
+    }
+
+    /// Enable gzip compression for request bodies.
+    #[must_use]
+    pub fn with_compression(mut self, compression: bool) -> Self {
+        self.http = self.http.with_compression(compression);
+        self
+    }
+
+    /// Export logs through the async OTLP HTTP path.
+    pub async fn export_async(
+        &self,
+        cx: &crate::cx::Cx,
+        logs: &LogsSnapshot,
+    ) -> Result<(), ExportError> {
+        self.http
+            .send_otlp_protobuf(cx, logs.to_otlp_protobuf())
+            .await
+    }
+
+    /// Return the configured endpoint.
+    #[must_use]
+    pub fn endpoint(&self) -> &str {
+        &self.http.endpoint
+    }
+}
+
+impl LogsExporter for OtlpLogsHttpExporter {
+    fn export(&self, _logs: &LogsSnapshot) -> Result<(), ExportError> {
+        Err(ExportError::new(
+            "OTLP HTTP logs export requires async context - use export_async()",
+        ))
+    }
+
+    fn flush(&self) -> Result<(), ExportError> {
+        Ok(())
+    }
+}
+
 /// Trait for custom metrics exporters.
 pub trait MetricsExporter: Send + Sync {
     /// Export a snapshot of metrics.

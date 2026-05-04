@@ -194,8 +194,11 @@ pub use obligation_tracker::{
 };
 #[cfg(feature = "metrics")]
 pub use otel::{
-    CardinalityOverflow, ExportError, InMemoryExporter, MetricsConfig, MetricsExporter,
-    MetricsSnapshot, MultiExporter, NullExporter, OtelMetrics, SamplingConfig, StdoutExporter,
+    CardinalityOverflow, ExportError, InMemoryExporter, InMemoryLogsExporter, LoadSheddingLogsExporter,
+    LogAttributes, LogsExporter, LogsSnapshot, MetricsConfig, MetricsExporter, MetricsSnapshot,
+    MultiExporter, MultiLogsExporter, NullExporter, NullLogsExporter, OTLP_LOGS_MAX_ATTRIBUTE_VALUE_BYTES,
+    OTLP_LOGS_MAX_ATTRIBUTES, OTLP_LOGS_SCHEMA_URL, OTLP_LOGS_SCOPE_NAME, OtlpLogRecord,
+    OtlpLogsHttpExporter, OtelMetrics, SamplingConfig, StdoutExporter, log_level_to_otlp_severity,
 };
 pub use otel_structured_concurrency::{
     EntityId, OtelStructuredConcurrencyConfig, SpanStorage, SpanType,
