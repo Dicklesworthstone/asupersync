@@ -9,6 +9,7 @@ use std::fs;
 use std::path::Path;
 
 const TRACE_STORAGE_SCENARIO_ID: &str = "AA-TRACE-STORAGE-LARGE-MEMORY-256G";
+const TRACE_STORAGE_TEMPLATE_SCENARIO_ID: &str = "AA-TRACE-STORAGE-REAL-HOST-TEMPLATE";
 
 #[derive(Debug, Clone, Copy)]
 struct TraceStorageWorkload {
@@ -18,6 +19,17 @@ struct TraceStorageWorkload {
     distributed_traces: usize,
 }
 
+#[derive(Debug, Clone)]
+struct ContractScenario {
+    scenario_id: String,
+    description: String,
+    workload: TraceStorageWorkload,
+    operator_notes: serde_json::Value,
+    expected_projection: serde_json::Value,
+    host_memory_evidence: serde_json::Value,
+    operator_verdict: String,
+}
+
 fn default_trace_storage_workload() -> TraceStorageWorkload {
     TraceStorageWorkload {
         time_window_seconds: 24 * 60 * 60,
@@ -25,6 +37,17 @@ fn default_trace_storage_workload() -> TraceStorageWorkload {
         cancellation_traces: 120_000,
         distributed_traces: 80_000,
     }
+}
+
+fn deterministic_host_memory_evidence() -> serde_json::Value {
+    json!({
+        "source": "deterministic_contract_fixture",
+        "freshness_seconds": 0,
+        "confidence": 1.0,
+        "required_min_memory_gib": 256,
+        "assumed_host_memory_gib": 256,
+        "requirement_satisfied": true,
+    })
 }
 
 fn round4(value: f64) -> f64 {
@@ -204,9 +227,10 @@ fn comparison_projection(report: &serde_json::Value) -> serde_json::Value {
         "default_overflow_interference_bps": default_overflow_interference_bps,
         "large_overflow_interference_bps": large_overflow_interference_bps,
         "p999_non_regression_passed": large_overflow_interference_bps <= default_overflow_interference_bps,
-        "retention_policy_confidence": 1.0,
-        "host_memory_requirement_satisfied": true,
-        "pressure_handoff_triggered": false,
+        "retention_policy_confidence": report["retention_policy_confidence"]["score"].clone(),
+        "host_memory_requirement_satisfied": report["host_memory_evidence"]["requirement_satisfied"].clone(),
+        "pressure_handoff_triggered": report["pressure_handoff"]["triggered"].clone(),
+        "operator_verdict": report["operator_verdict"].clone(),
     })
 }
 
@@ -215,6 +239,8 @@ fn trace_storage_report(
     description: &str,
     workload: TraceStorageWorkload,
     operator_notes: &serde_json::Value,
+    host_memory_evidence: &serde_json::Value,
+    operator_verdict: &str,
 ) -> serde_json::Value {
     let default_profile = retention_report(TraceStorageProfile::Default, workload);
     let large_memory_profile = retention_report(TraceStorageProfile::LargeMemory256G, workload);
@@ -286,23 +312,21 @@ fn trace_storage_report(
                 },
             },
         },
-        "host_memory_evidence": {
-            "source": "deterministic_contract_fixture",
-            "freshness_seconds": 0,
-            "confidence": 1.0,
-            "required_min_memory_gib": 256,
-            "assumed_host_memory_gib": 256,
-            "requirement_satisfied": true,
-        },
+        "host_memory_evidence": host_memory_evidence.clone(),
         "retention_policy_confidence": {
-            "score": 1.0,
-            "basis": "fixed workload counts plus static profile budget math",
+            "score": host_memory_evidence["confidence"].clone(),
+            "basis": if operator_verdict == "template_only" {
+                json!("real-host template replay keeps the 256GiB retention assumptions optional until production-class host evidence is supplied")
+            } else {
+                json!("fixed workload counts plus static profile budget math")
+            },
         },
         "pressure_handoff": {
             "triggered": false,
             "safe_fallback_profile": operator_notes["fallback_profile"].clone(),
             "reason": "deterministic comparison remained within the selected profile budgets; no backpressure or brownout handoff was required",
         },
+        "operator_verdict": operator_verdict,
         "operator_notes": operator_notes.clone(),
         "validation_verdict": {
             "status": "passed",
@@ -324,12 +348,41 @@ fn trace_storage_report(
     serde_json::Value::Object(report_object)
 }
 
-fn load_contract_scenario() -> Option<(
-    String,
-    TraceStorageWorkload,
-    serde_json::Value,
-    serde_json::Value,
-)> {
+fn parse_contract_scenario(scenario: &serde_json::Value) -> ContractScenario {
+    ContractScenario {
+        scenario_id: scenario["scenario_id"]
+            .as_str()
+            .expect("scenario_id")
+            .to_string(),
+        description: scenario["description"]
+            .as_str()
+            .expect("scenario description")
+            .to_string(),
+        workload: TraceStorageWorkload {
+            time_window_seconds: scenario["workload_model"]["time_window_seconds"]
+                .as_u64()
+                .expect("time_window_seconds"),
+            hot_trace_events: scenario["workload_model"]["hot_trace_events"]
+                .as_u64()
+                .expect("hot_trace_events") as usize,
+            cancellation_traces: scenario["workload_model"]["cancellation_traces"]
+                .as_u64()
+                .expect("cancellation_traces") as usize,
+            distributed_traces: scenario["workload_model"]["distributed_traces"]
+                .as_u64()
+                .expect("distributed_traces") as usize,
+        },
+        operator_notes: scenario["operator_notes"].clone(),
+        expected_projection: scenario["expected_report_projection"].clone(),
+        host_memory_evidence: scenario["host_memory_evidence"].clone(),
+        operator_verdict: scenario["operator_verdict"]
+            .as_str()
+            .expect("operator_verdict")
+            .to_string(),
+    }
+}
+
+fn load_contract_scenario() -> Option<ContractScenario> {
     let contract_path = std::env::var("ASUPERSYNC_TRACE_STORAGE_CONTRACT_PATH").ok()?;
     let scenario_id = std::env::var("ASUPERSYNC_TRACE_STORAGE_SCENARIO_ID")
         .unwrap_or_else(|_| TRACE_STORAGE_SCENARIO_ID.to_string());
@@ -344,29 +397,7 @@ fn load_contract_scenario() -> Option<(
         .find(|candidate| candidate["scenario_id"].as_str() == Some(scenario_id.as_str()))
         .cloned()
         .expect("scenario present in trace storage contract");
-    let workload = TraceStorageWorkload {
-        time_window_seconds: scenario["workload_model"]["time_window_seconds"]
-            .as_u64()
-            .expect("time_window_seconds"),
-        hot_trace_events: scenario["workload_model"]["hot_trace_events"]
-            .as_u64()
-            .expect("hot_trace_events") as usize,
-        cancellation_traces: scenario["workload_model"]["cancellation_traces"]
-            .as_u64()
-            .expect("cancellation_traces") as usize,
-        distributed_traces: scenario["workload_model"]["distributed_traces"]
-            .as_u64()
-            .expect("distributed_traces") as usize,
-    };
-    Some((
-        scenario["description"]
-            .as_str()
-            .expect("scenario description")
-            .to_string(),
-        workload,
-        scenario["operator_notes"].clone(),
-        scenario["expected_report_projection"].clone(),
-    ))
+    Some(parse_contract_scenario(&scenario))
 }
 
 fn maybe_write_report(path: &str, report: &serde_json::Value) {
@@ -484,6 +515,8 @@ fn large_memory_trace_profile_budget_utilization_curve_shows_more_headroom() {
         "Deterministic storage-profile comparison for a 24h evidence-retention workload.",
         default_trace_storage_workload(),
         &json!({ "fallback_profile": "default" }),
+        &deterministic_host_memory_evidence(),
+        "ready_for_rch",
     );
 
     let default_cold_budget_ratio =
@@ -507,6 +540,8 @@ fn large_memory_trace_profile_keeps_p999_tail_proxy_non_regressive() {
         "Deterministic storage-profile comparison for a 24h evidence-retention workload.",
         default_trace_storage_workload(),
         &json!({ "fallback_profile": "default" }),
+        &deterministic_host_memory_evidence(),
+        "ready_for_rch",
     );
 
     assert_eq!(
@@ -533,6 +568,8 @@ fn trace_storage_profile_report_exposes_confidence_and_handoff_metadata() {
         "Deterministic storage-profile comparison for a 24h evidence-retention workload.",
         default_trace_storage_workload(),
         &json!({ "fallback_profile": "default" }),
+        &deterministic_host_memory_evidence(),
+        "ready_for_rch",
     );
 
     assert_eq!(
@@ -549,17 +586,57 @@ fn trace_storage_profile_report_exposes_confidence_and_handoff_metadata() {
         report["pressure_handoff"]["safe_fallback_profile"],
         json!("default")
     );
+    assert_eq!(report["operator_verdict"], json!("ready_for_rch"));
+}
+
+#[test]
+fn trace_storage_profile_real_host_template_marks_large_memory_assumptions_optional() {
+    let artifact_path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("artifacts/trace_storage_profile_smoke_contract_v1.json");
+    let artifact: serde_json::Value = serde_json::from_str(
+        &fs::read_to_string(&artifact_path).expect("read trace storage profile contract"),
+    )
+    .expect("parse trace storage profile contract");
+    let scenario = artifact["smoke_scenarios"]
+        .as_array()
+        .expect("smoke_scenarios array")
+        .iter()
+        .find(|candidate| {
+            candidate["scenario_id"].as_str() == Some(TRACE_STORAGE_TEMPLATE_SCENARIO_ID)
+        })
+        .cloned()
+        .expect("template scenario present in trace storage contract");
+    let scenario = parse_contract_scenario(&scenario);
+
+    let report = trace_storage_report(
+        &scenario.scenario_id,
+        &scenario.description,
+        scenario.workload,
+        &scenario.operator_notes,
+        &scenario.host_memory_evidence,
+        &scenario.operator_verdict,
+    );
+
+    assert_eq!(report["report_projection"], scenario.expected_projection);
+    assert_eq!(
+        report["host_memory_evidence"]["requirement_satisfied"],
+        json!(false)
+    );
+    assert_eq!(report["retention_policy_confidence"]["score"], json!(0.5));
+    assert_eq!(report["operator_verdict"], json!("template_only"));
 }
 
 #[test]
 fn trace_storage_profile_smoke_contract_emits_operator_cost_report() {
-    let (description, workload, operator_notes, expected_projection) =
+    let scenario =
         load_contract_scenario().unwrap_or_else(|| {
-            (
-                "Deterministic storage-profile comparison for a 24h evidence-retention workload."
-                    .to_string(),
-                default_trace_storage_workload(),
-                json!({
+            ContractScenario {
+                scenario_id: TRACE_STORAGE_SCENARIO_ID.to_string(),
+                description:
+                    "Deterministic storage-profile comparison for a 24h evidence-retention workload."
+                        .to_string(),
+                workload: default_trace_storage_workload(),
+                operator_notes: json!({
                     "recommended_for": [
                         "64+ core / 256GiB hosts that need richer postmortem evidence retention",
                         "bursty cancellation and distributed-trace workloads where the default profile drops too much cold evidence"
@@ -570,7 +647,7 @@ fn trace_storage_profile_smoke_contract_emits_operator_cost_report() {
                     ],
                     "fallback_profile": "default"
                 }),
-                json!({
+                expected_projection: json!({
                     "schema_version": "trace-storage-profile-smoke-projection-v1",
                     "scenario_id": TRACE_STORAGE_SCENARIO_ID,
                     "default_budget_total_mib": 35.1797,
@@ -594,19 +671,24 @@ fn trace_storage_profile_smoke_contract_emits_operator_cost_report() {
                     "p999_non_regression_passed": true,
                     "retention_policy_confidence": 1.0,
                     "host_memory_requirement_satisfied": true,
-                    "pressure_handoff_triggered": false
+                    "pressure_handoff_triggered": false,
+                    "operator_verdict": "ready_for_rch"
                 }),
-            )
+                host_memory_evidence: deterministic_host_memory_evidence(),
+                operator_verdict: "ready_for_rch".to_string(),
+            }
         });
     let report = trace_storage_report(
-        TRACE_STORAGE_SCENARIO_ID,
-        &description,
-        workload,
-        &operator_notes,
+        &scenario.scenario_id,
+        &scenario.description,
+        scenario.workload,
+        &scenario.operator_notes,
+        &scenario.host_memory_evidence,
+        &scenario.operator_verdict,
     );
     let actual_projection = report["report_projection"].clone();
     assert_eq!(
-        actual_projection, expected_projection,
+        actual_projection, scenario.expected_projection,
         "trace storage comparison report projection should remain stable"
     );
     assert!(
