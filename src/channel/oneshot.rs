@@ -285,6 +285,34 @@ impl<T> Sender<T> {
         }
     }
 
+    /// Synchronously sends a value without requiring an async [`Cx`].
+    ///
+    /// This is a sync bridge for non-async callers. It does not park the
+    /// current thread, wait for a receiver poll, or run the runtime; it only
+    /// commits the value into the existing oneshot state machine and wakes any
+    /// registered receiver. Because the operation is immediate, calling it from
+    /// an asupersync runtime worker cannot deadlock that worker.
+    ///
+    /// # Errors
+    ///
+    /// Returns `Err(SendError::Disconnected(value))` if the receiver was
+    /// dropped. This method never returns `SendError::Cancelled` because it has
+    /// no [`Cx`] to observe.
+    #[inline]
+    pub fn send_blocking(self, value: T) -> Result<(), SendError<T>> {
+        let permit = {
+            let mut inner = self.inner.lock();
+            inner.sender_consumed = true;
+            inner.permit_outstanding = true;
+            SendPermit {
+                inner: Arc::clone(&self.inner),
+                sent: false,
+            }
+        };
+
+        permit.send(value)
+    }
+
     /// Checks if the receiver has been dropped.
     #[inline]
     #[must_use]
@@ -963,6 +991,153 @@ mod tests {
         let value = block_on(rx.recv(&cx)).expect("recv should succeed");
         crate::assert_with_log!(value == 42, "recv value", 42, value);
         crate::test_complete!("basic_send_recv");
+    }
+
+    #[test]
+    fn send_blocking_from_sync_thread_delivers_non_clone_payload_z3ybh7() {
+        init_test("send_blocking_from_sync_thread_delivers_non_clone_payload_z3ybh7");
+        let cx = test_cx();
+        let (tx, mut rx) = channel::<NonClone>();
+
+        let handle = std::thread::spawn(move || {
+            let result = tx.send_blocking(NonClone(73));
+            println!(
+                "ONESHOT_SEND_BLOCKING scenario_id=sync_thread_non_clone sender_context=std_thread payload_id=73 receiver_state=live send_blocking_result={:?} blocking_policy=immediate_no_wait cancellation_state=not_observed verdict={}",
+                result,
+                if result.is_ok() { "pass" } else { "fail" }
+            );
+            result
+        });
+
+        handle
+            .join()
+            .expect("sync sender thread must not panic")
+            .expect("send_blocking should succeed with a live receiver");
+
+        let NonClone(value) = block_on(rx.recv(&cx)).expect("recv should observe sent value");
+        crate::assert_with_log!(value == 73, "recv value", 73, value);
+
+        let terminal = rx.try_recv();
+        crate::assert_with_log!(
+            matches!(terminal, Err(TryRecvError::Closed)),
+            "oneshot remains single-use after send_blocking",
+            "Err(Closed)",
+            format!("{:?}", terminal)
+        );
+        crate::test_complete!("send_blocking_from_sync_thread_delivers_non_clone_payload_z3ybh7");
+    }
+
+    #[test]
+    fn send_blocking_returns_payload_when_receiver_closed_z3ybh7() {
+        init_test("send_blocking_returns_payload_when_receiver_closed_z3ybh7");
+        let (tx, rx) = channel::<NonClone>();
+        drop(rx);
+
+        let result = tx.send_blocking(NonClone(91));
+        let verdict = match &result {
+            Err(SendError::Disconnected(value)) if value.0 == 91 => "pass",
+            _ => "fail",
+        };
+        println!(
+            "ONESHOT_SEND_BLOCKING scenario_id=receiver_closed sender_context=sync payload_id=91 receiver_state=dropped send_blocking_result={:?} blocking_policy=immediate_no_wait cancellation_state=not_observed verdict={}",
+            result, verdict
+        );
+
+        match result {
+            Err(SendError::Disconnected(NonClone(value))) => {
+                crate::assert_with_log!(value == 91, "returned payload", 91, value);
+            }
+            other => panic!("send_blocking must return disconnected payload, got {other:?}"),
+        }
+        crate::test_complete!("send_blocking_returns_payload_when_receiver_closed_z3ybh7");
+    }
+
+    #[test]
+    fn send_blocking_wakes_pending_receiver_once_z3ybh7() {
+        init_test("send_blocking_wakes_pending_receiver_once_z3ybh7");
+        let cx = test_cx();
+        let (tx, mut rx) = channel::<i32>();
+        let wake_counter = Arc::new(AtomicUsize::new(0));
+        let recv_waker = counting_waker(Arc::clone(&wake_counter));
+        let mut task_cx = Context::from_waker(&recv_waker);
+        let mut fut = Box::pin(rx.recv(&cx));
+
+        crate::assert_with_log!(
+            matches!(fut.as_mut().poll(&mut task_cx), Poll::Pending),
+            "receiver waits before sync send",
+            "Poll::Pending",
+            "Poll::Pending"
+        );
+
+        let result = tx.send_blocking(123);
+        println!(
+            "ONESHOT_SEND_BLOCKING scenario_id=pending_receiver sender_context=sync payload_id=123 receiver_state=pending send_blocking_result={:?} wake_count={} blocking_policy=immediate_no_wait cancellation_state=active verdict={}",
+            result,
+            wake_counter.load(Ordering::SeqCst),
+            if result.is_ok() && wake_counter.load(Ordering::SeqCst) == 1 {
+                "pass"
+            } else {
+                "fail"
+            }
+        );
+        result.expect("send_blocking should commit to pending receiver");
+        crate::assert_with_log!(
+            wake_counter.load(Ordering::SeqCst) == 1,
+            "pending receiver wake count",
+            1,
+            wake_counter.load(Ordering::SeqCst)
+        );
+
+        let received = fut
+            .as_mut()
+            .poll(&mut task_cx)
+            .map(|result| result.expect("receiver should get sent value"));
+        crate::assert_with_log!(
+            matches!(received, Poll::Ready(123)),
+            "pending receiver observes value",
+            "Poll::Ready(123)",
+            format!("{:?}", received)
+        );
+        crate::test_complete!("send_blocking_wakes_pending_receiver_once_z3ybh7");
+    }
+
+    #[test]
+    fn send_blocking_is_immediate_and_cx_independent_z3ybh7() {
+        init_test("send_blocking_is_immediate_and_cx_independent_z3ybh7");
+        let cancelled_cx = test_cx();
+        cancelled_cx.cancel_with(crate::types::CancelKind::User, Some("z3ybh7"));
+
+        let (async_tx, _async_rx) = channel::<i32>();
+        let async_result = async_tx.send(&cancelled_cx, 5);
+        crate::assert_with_log!(
+            matches!(async_result, Err(SendError::Cancelled(5))),
+            "async send observes cancelled Cx",
+            "Err(Cancelled(5))",
+            format!("{:?}", async_result)
+        );
+
+        let (blocking_tx, mut blocking_rx) = channel::<i32>();
+        let blocking_result = blocking_tx.send_blocking(6);
+        println!(
+            "ONESHOT_SEND_BLOCKING scenario_id=cx_independent sender_context=sync payload_id=6 receiver_state=live send_blocking_result={:?} async_cancelled_reference={:?} blocking_policy=immediate_no_wait cancellation_state=not_observed verdict={}",
+            blocking_result,
+            async_result,
+            if blocking_result.is_ok() {
+                "pass"
+            } else {
+                "fail"
+            }
+        );
+        blocking_result.expect("send_blocking should not require or observe Cx");
+
+        let received = blocking_rx.try_recv();
+        crate::assert_with_log!(
+            matches!(received, Ok(6)),
+            "send_blocking delivers without Cx",
+            "Ok(6)",
+            format!("{:?}", received)
+        );
+        crate::test_complete!("send_blocking_is_immediate_and_cx_independent_z3ybh7");
     }
 
     proptest! {
