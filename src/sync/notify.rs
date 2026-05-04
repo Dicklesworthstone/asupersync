@@ -278,6 +278,53 @@ impl Notify {
         }
     }
 
+    /// Waits until `predicate` returns `true`, re-checking it after every wake.
+    ///
+    /// The predicate is evaluated before parking and again after each
+    /// notification, so callers can pair a state transition with
+    /// `notify_one()` / `notify_waiters()` without a separate check-then-park
+    /// race window.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use asupersync::sync::Notify;
+    /// use std::sync::{
+    ///     Arc,
+    ///     atomic::{AtomicBool, Ordering},
+    /// };
+    ///
+    /// # futures_lite::future::block_on(async {
+    /// let notify = Arc::new(Notify::new());
+    /// let ready = Arc::new(AtomicBool::new(false));
+    ///
+    /// let signaler = {
+    ///     let notify = Arc::clone(&notify);
+    ///     let ready = Arc::clone(&ready);
+    ///
+    ///     std::thread::spawn(move || {
+    ///         ready.store(true, Ordering::Release);
+    ///         notify.notify_one();
+    ///     })
+    /// };
+    ///
+    /// notify
+    ///     .wait_until(|| ready.load(Ordering::Acquire))
+    ///     .await;
+    /// assert!(ready.load(Ordering::Acquire));
+    /// signaler.join().expect("signaler thread panicked");
+    /// # });
+    /// ```
+    #[inline]
+    pub async fn wait_until<F>(&self, mut predicate: F)
+    where
+        F: FnMut() -> bool,
+    {
+        while !predicate() {
+            self.notified().await;
+        }
+    }
+
     /// Notifies one waiting task.
     ///
     /// If no task is currently waiting, the notification is stored and
@@ -1391,6 +1438,259 @@ mod tests {
         let count2 = notify.waiter_count();
         crate::assert_with_log!(count2 == 0, "no waiters after", 0usize, count2);
         crate::test_complete!("test_notify_waiter_count");
+    }
+
+    #[test]
+    fn wait_until_returns_immediately_when_predicate_is_already_true() {
+        init_test("wait_until_returns_immediately_when_predicate_is_already_true");
+        let notify = Notify::new();
+        let evaluations = AtomicUsize::new(0);
+
+        block_on(async {
+            notify
+                .wait_until(|| {
+                    evaluations.fetch_add(1, Ordering::SeqCst);
+                    true
+                })
+                .await;
+        });
+
+        let eval_count = evaluations.load(Ordering::SeqCst);
+        crate::assert_with_log!(
+            eval_count == 1,
+            "predicate evaluated once",
+            1usize,
+            eval_count
+        );
+        let waiter_count = notify.waiter_count();
+        crate::assert_with_log!(
+            waiter_count == 0,
+            "no waiter registered",
+            0usize,
+            waiter_count
+        );
+        crate::test_complete!("wait_until_returns_immediately_when_predicate_is_already_true");
+    }
+
+    #[test]
+    fn wait_until_rechecks_after_stored_and_spurious_notifications() {
+        init_test("wait_until_rechecks_after_stored_and_spurious_notifications");
+        let notify = Notify::new();
+        let state = AtomicUsize::new(0);
+        let evaluations = AtomicUsize::new(0);
+
+        notify.notify_one();
+
+        let mut fut = Box::pin(notify.wait_until(|| {
+            evaluations.fetch_add(1, Ordering::SeqCst);
+            state.load(Ordering::Acquire) == 2
+        }));
+
+        let first_pending = poll_once(&mut fut).is_pending();
+        crate::assert_with_log!(first_pending, "first poll pending", true, first_pending);
+
+        let waiters_after_first_poll = notify.waiter_count();
+        crate::assert_with_log!(
+            waiters_after_first_poll == 1,
+            "re-registered waiter after stored notify",
+            1usize,
+            waiters_after_first_poll
+        );
+
+        state.store(1, Ordering::Release);
+        notify.notify_one();
+
+        let second_pending = poll_once(&mut fut).is_pending();
+        crate::assert_with_log!(
+            second_pending,
+            "spurious wake keeps waiting",
+            true,
+            second_pending
+        );
+
+        let waiters_after_spurious = notify.waiter_count();
+        crate::assert_with_log!(
+            waiters_after_spurious == 1,
+            "waiter remains registered after false predicate recheck",
+            1usize,
+            waiters_after_spurious
+        );
+
+        state.store(2, Ordering::Release);
+        notify.notify_one();
+
+        let third_ready = poll_once(&mut fut).is_ready();
+        crate::assert_with_log!(
+            third_ready,
+            "ready after predicate turns true",
+            true,
+            third_ready
+        );
+
+        let eval_count = evaluations.load(Ordering::SeqCst);
+        crate::assert_with_log!(
+            eval_count == 4,
+            "predicate evaluated across stored and spurious wakes",
+            4usize,
+            eval_count
+        );
+
+        drop(fut);
+        let final_waiter_count = notify.waiter_count();
+        crate::assert_with_log!(
+            final_waiter_count == 0,
+            "no waiter leak after completion",
+            0usize,
+            final_waiter_count
+        );
+        crate::test_complete!("wait_until_rechecks_after_stored_and_spurious_notifications");
+    }
+
+    #[test]
+    fn wait_until_supports_multiple_waiters_with_distinct_predicates() {
+        init_test("wait_until_supports_multiple_waiters_with_distinct_predicates");
+        let notify = Notify::new();
+        let ready_a = AtomicBool::new(false);
+        let ready_b = AtomicBool::new(false);
+
+        let mut fut_a = Box::pin(notify.wait_until(|| ready_a.load(Ordering::Acquire)));
+        let mut fut_b = Box::pin(notify.wait_until(|| ready_b.load(Ordering::Acquire)));
+
+        let a_pending = poll_once(&mut fut_a).is_pending();
+        let b_pending = poll_once(&mut fut_b).is_pending();
+        crate::assert_with_log!(a_pending, "waiter A pending initially", true, a_pending);
+        crate::assert_with_log!(b_pending, "waiter B pending initially", true, b_pending);
+
+        let initial_waiters = notify.waiter_count();
+        crate::assert_with_log!(
+            initial_waiters == 2,
+            "two waiters registered",
+            2usize,
+            initial_waiters
+        );
+
+        ready_a.store(true, Ordering::Release);
+        notify.notify_waiters();
+
+        let a_ready = poll_once(&mut fut_a).is_ready();
+        let b_still_pending = poll_once(&mut fut_b).is_pending();
+        crate::assert_with_log!(a_ready, "waiter A completes first", true, a_ready);
+        crate::assert_with_log!(
+            b_still_pending,
+            "waiter B re-registers while predicate false",
+            true,
+            b_still_pending
+        );
+
+        let middle_waiters = notify.waiter_count();
+        crate::assert_with_log!(
+            middle_waiters == 1,
+            "one waiter remains",
+            1usize,
+            middle_waiters
+        );
+
+        ready_b.store(true, Ordering::Release);
+        notify.notify_one();
+
+        let b_ready = poll_once(&mut fut_b).is_ready();
+        crate::assert_with_log!(b_ready, "waiter B completes second", true, b_ready);
+
+        drop(fut_a);
+        drop(fut_b);
+        let final_waiters = notify.waiter_count();
+        crate::assert_with_log!(
+            final_waiters == 0,
+            "all waiters drained",
+            0usize,
+            final_waiters
+        );
+        crate::test_complete!("wait_until_supports_multiple_waiters_with_distinct_predicates");
+    }
+
+    #[test]
+    fn wait_until_cancellation_removes_registered_waiter() {
+        init_test("wait_until_cancellation_removes_registered_waiter");
+        let notify = Notify::new();
+        let ready = AtomicBool::new(false);
+
+        let mut fut = Box::pin(notify.wait_until(|| ready.load(Ordering::Acquire)));
+        let first_pending = poll_once(&mut fut).is_pending();
+        crate::assert_with_log!(
+            first_pending,
+            "future pending before cancellation",
+            true,
+            first_pending
+        );
+
+        let waiters_before_drop = notify.waiter_count();
+        crate::assert_with_log!(
+            waiters_before_drop == 1,
+            "wait_until registers exactly one waiter",
+            1usize,
+            waiters_before_drop
+        );
+
+        drop(fut);
+
+        let waiters_after_drop = notify.waiter_count();
+        crate::assert_with_log!(
+            waiters_after_drop == 0,
+            "cancellation removes waiter",
+            0usize,
+            waiters_after_drop
+        );
+        let entries_len = notify.waiters.lock().entries.len();
+        crate::assert_with_log!(
+            entries_len == 0,
+            "slab cleaned after cancellation",
+            0usize,
+            entries_len
+        );
+        crate::test_complete!("wait_until_cancellation_removes_registered_waiter");
+    }
+
+    #[test]
+    fn wait_until_predicate_panic_after_wake_does_not_leak_waiter() {
+        init_test("wait_until_predicate_panic_after_wake_does_not_leak_waiter");
+        let notify = Notify::new();
+        let evaluations = AtomicUsize::new(0);
+
+        let mut fut = Box::pin(notify.wait_until(|| {
+            let eval = evaluations.fetch_add(1, Ordering::SeqCst);
+            if eval == 0 {
+                false
+            } else {
+                panic!("predicate panic after wake");
+            }
+        }));
+
+        let first_pending = poll_once(&mut fut).is_pending();
+        crate::assert_with_log!(
+            first_pending,
+            "future pending before panic wake",
+            true,
+            first_pending
+        );
+
+        notify.notify_one();
+
+        let panicked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _ = poll_once(&mut fut);
+        }))
+        .is_err();
+        crate::assert_with_log!(panicked, "predicate panic propagated", true, panicked);
+
+        let waiters_after_panic = notify.waiter_count();
+        crate::assert_with_log!(
+            waiters_after_panic == 0,
+            "panic leaves no waiter behind",
+            0usize,
+            waiters_after_panic
+        );
+
+        drop(fut);
+        crate::test_complete!("wait_until_predicate_panic_after_wake_does_not_leak_waiter");
     }
 
     #[test]
