@@ -50,6 +50,14 @@ pub enum RedisError {
         /// was returned by `next_event` on this subscriber.
         dropped: u64,
     },
+    /// Regular command-client RESP3 push backlog overflowed. Carries
+    /// the number of pushes dropped since the previous
+    /// [`RedisClient::try_next_resp3_push`] lag report.
+    Resp3PushLag {
+        /// Number of RESP3 pushes dropped since the previous lag
+        /// report surfaced through [`RedisClient::try_next_resp3_push`].
+        dropped: u64,
+    },
 }
 
 impl fmt::Display for RedisError {
@@ -68,6 +76,12 @@ impl fmt::Display for RedisError {
                 "Redis pub/sub subscriber lag: {dropped} event(s) dropped since last \
                  report (backlog cap reached; raise RedisConfig.pubsub_max_backlog \
                  or drain next_event faster)"
+            ),
+            Self::Resp3PushLag { dropped } => write!(
+                f,
+                "Redis RESP3 push backlog lag: {dropped} push frame(s) dropped since last \
+                 report (backlog cap reached; raise RedisConfig.resp3_push_max_backlog \
+                 or drain try_next_resp3_push faster)"
             ),
         }
     }
@@ -123,7 +137,10 @@ impl RedisError {
     /// Whether this error indicates resource/capacity exhaustion.
     #[must_use]
     pub fn is_capacity_error(&self) -> bool {
-        matches!(self, Self::PoolExhausted)
+        matches!(
+            self,
+            Self::PoolExhausted | Self::SubscriberLag { .. } | Self::Resp3PushLag { .. }
+        )
     }
 
     /// Whether this error is a timeout.
@@ -1306,23 +1323,87 @@ pub enum PubSubEvent {
     Pong(Option<Vec<u8>>),
 }
 
-#[cfg(any(test, feature = "test-internals"))]
 #[derive(Debug, Clone, PartialEq, Eq)]
-#[doc(hidden)]
+/// RESP3 client-tracking push surfaced to a regular command client.
 pub enum RedisClientTrackingPush {
-    Invalidate { keys: Option<Vec<Vec<u8>>> },
+    /// `invalidate` notification carrying zero or more keys. `None`
+    /// represents Redis' `null` payload (flush whole cache).
+    Invalidate {
+        /// Keys invalidated by Redis. `None` means flush the entire
+        /// tracked client-side cache.
+        keys: Option<Vec<Vec<u8>>>,
+    },
+    /// `tracking-redir-broken` notification indicating the redirect
+    /// target is no longer valid.
     RedirectBroken,
 }
 
-#[cfg(any(test, feature = "test-internals"))]
 #[derive(Debug, Clone, PartialEq, Eq)]
-#[doc(hidden)]
+/// RESP3 push surfaced to a regular command client.
+///
+/// Pub/Sub push kinds are intentionally excluded: callers should use
+/// [`RedisPubSub`] for subscribe/psubscribe traffic. This queue exists
+/// for other server-initiated RESP3 pushes such as client-tracking
+/// invalidations or monitoring-style events that can arrive while a
+/// normal command response is in flight.
 pub enum RedisResp3NonPubSubPush {
+    /// Structured client-tracking notification.
     ClientTracking(RedisClientTrackingPush),
+    /// Any other non-pubsub RESP3 push, preserving the textual kind
+    /// plus the raw payload values.
     Other {
+        /// Textual RESP3 push kind as sent by Redis.
         kind: String,
+        /// Remaining RESP values after the leading kind field.
         payload: Vec<RespValue>,
     },
+}
+
+impl RedisResp3NonPubSubPush {
+    #[must_use]
+    fn kind_name(&self) -> &str {
+        match self {
+            Self::ClientTracking(RedisClientTrackingPush::Invalidate { .. }) => "invalidate",
+            Self::ClientTracking(RedisClientTrackingPush::RedirectBroken) => {
+                "tracking-redir-broken"
+            }
+            Self::Other { kind, .. } => kind.as_str(),
+        }
+    }
+}
+
+#[derive(Debug, Default)]
+struct RedisResp3PushBacklog {
+    pending: VecDeque<RedisResp3NonPubSubPush>,
+    dropped: u64,
+    lag_reported: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RedisResp3PushEnqueueOutcome {
+    Enqueued { queue_len: usize },
+    Dropped { queue_len: usize, dropped: u64 },
+}
+
+impl RedisResp3PushBacklog {
+    fn enqueue(
+        &mut self,
+        push: RedisResp3NonPubSubPush,
+        cap: usize,
+    ) -> RedisResp3PushEnqueueOutcome {
+        if self.pending.len() >= cap {
+            self.dropped = self.dropped.saturating_add(1);
+            return RedisResp3PushEnqueueOutcome::Dropped {
+                queue_len: self.pending.len(),
+                dropped: self.dropped,
+            };
+        }
+
+        self.pending.push_back(push);
+        RedisResp3PushEnqueueOutcome::Enqueued {
+            queue_len: self.pending.len(),
+        }
+    }
 }
 
 fn expect_ok_response(resp: &RespValue, command: &str) -> Result<(), RedisError> {
@@ -1495,6 +1576,15 @@ pub struct RedisConfig {
     /// surfaced via [`RedisPubSub::pubsub_dropped_events`] for metrics.
     /// Default: 4096 (br-asupersync-697arj).
     pub pubsub_max_backlog: usize,
+    /// Maximum number of non-pubsub RESP3 push frames buffered for a
+    /// regular command client while the caller is between
+    /// [`RedisClient::try_next_resp3_push`] polls. When the backlog
+    /// reaches this size, newly-arriving push frames are dropped to
+    /// bound memory, and the next `try_next_resp3_push` call returns
+    /// [`RedisError::Resp3PushLag`] with the number dropped since the
+    /// last lag report. Default: 4096
+    /// (br-asupersync-iikmjh).
+    pub resp3_push_max_backlog: usize,
 }
 
 impl std::fmt::Debug for RedisConfig {
@@ -1520,6 +1610,7 @@ impl std::fmt::Debug for RedisConfig {
             )
             .field("protocol_limits", &self.protocol_limits)
             .field("pubsub_max_backlog", &self.pubsub_max_backlog)
+            .field("resp3_push_max_backlog", &self.resp3_push_max_backlog)
             .finish()
     }
 }
@@ -1540,6 +1631,11 @@ impl Default for RedisConfig {
             // RedisError::SubscriberLag and pubsub_dropped_events
             // (br-asupersync-697arj).
             pubsub_max_backlog: 4096,
+            // Default RESP3 push backlog cap for regular command
+            // clients; overflow surfaces via
+            // RedisError::Resp3PushLag and resp3_dropped_pushes
+            // (br-asupersync-iikmjh).
+            resp3_push_max_backlog: 4096,
         }
     }
 }
@@ -1698,10 +1794,14 @@ struct RedisConnection {
     read_buf: RespReadBuffer,
     config: RedisConfig,
     initialized: bool,
+    resp3_push_backlog: Option<Arc<parking_lot::Mutex<RedisResp3PushBacklog>>>,
 }
 
 impl RedisConnection {
-    async fn connect(config: RedisConfig) -> Result<Self, RedisError> {
+    async fn connect(
+        config: RedisConfig,
+        resp3_push_backlog: Option<Arc<parking_lot::Mutex<RedisResp3PushBacklog>>>,
+    ) -> Result<Self, RedisError> {
         let addr = format!("{}:{}", config.host, config.port);
         let tcp_stream = TcpStream::connect(addr).await?;
 
@@ -1734,6 +1834,7 @@ impl RedisConnection {
             read_buf: RespReadBuffer::new(),
             config,
             initialized: false,
+            resp3_push_backlog,
         })
     }
 
@@ -1833,6 +1934,43 @@ impl RedisConnection {
         Ok(())
     }
 
+    fn record_resp3_push(
+        &self,
+        cx: &Cx,
+        push_value: RespValue,
+        consumed: usize,
+    ) -> Result<(), RedisError> {
+        let push = parse_resp3_non_pubsub_push(push_value)?;
+        let kind = push.kind_name().to_string();
+
+        let Some(backlog) = &self.resp3_push_backlog else {
+            cx.trace(&format!(
+                "redis: received RESP3 push frame without regular-client backlog; discarding kind={kind} consumed={consumed}"
+            ));
+            return Ok(());
+        };
+
+        let outcome = {
+            let mut backlog = backlog.lock();
+            backlog.enqueue(push, self.config.resp3_push_max_backlog)
+        };
+
+        match outcome {
+            RedisResp3PushEnqueueOutcome::Enqueued { queue_len } => {
+                cx.trace(&format!(
+                    "redis: queued RESP3 push frame kind={kind} consumed={consumed} queue_len={queue_len}"
+                ));
+            }
+            RedisResp3PushEnqueueOutcome::Dropped { queue_len, dropped } => {
+                cx.trace(&format!(
+                    "redis: dropping RESP3 push frame kind={kind} consumed={consumed} queue_len={queue_len} cap={} dropped_total={dropped}",
+                    self.config.resp3_push_max_backlog
+                ));
+            }
+        }
+        Ok(())
+    }
+
     async fn read_response(&mut self, cx: &Cx) -> Result<RespValue, RedisError> {
         loop {
             cx.checkpoint().map_err(|_| RedisError::Cancelled)?;
@@ -1849,24 +1987,14 @@ impl RedisConnection {
                         // responses or left queued to desynchronize the socket.
                         continue;
                     }
-                    RespValue::Push(push_items) => {
-                        // RESP3 push frames (server-initiated messages like cache
-                        // invalidations, monitoring events) must not be returned as
-                        // command responses. They should be handled separately or
-                        // buffered. For now, we log and discard them to prevent
-                        // protocol desynchronization. A full implementation would
-                        // buffer these for client tracking or monitoring APIs.
-                        cx.trace(&format!(
-                            "redis: received RESP3 push frame during command response, discarding: {:?}",
-                            push_items.first()
-                                .and_then(|v| match v {
-                                    RespValue::BulkString(Some(bytes)) =>
-                                        std::str::from_utf8(bytes).ok(),
-                                    RespValue::SimpleString(s) => Some(s),
-                                    _ => None
-                                })
-                                .unwrap_or("unknown")
-                        ));
+                    push_value @ RespValue::Push(_) => {
+                        // RESP3 push frames (server-initiated messages like
+                        // client-tracking invalidations or monitoring events)
+                        // must never be returned as synchronous command
+                        // responses. Route them into the regular-client
+                        // backlog in arrival order, then continue reading for
+                        // the actual reply.
+                        self.record_resp3_push(cx, push_value, consumed)?;
                         continue;
                     }
                     other => {
@@ -2139,6 +2267,7 @@ pub struct RedisClient {
     /// record. Read for diagnostics today; future proactive cluster-
     /// aware routing can use it. (br-asupersync-hzgugy)
     slot_map: Arc<parking_lot::Mutex<HashMap<u16, String>>>,
+    resp3_push_backlog: Arc<parking_lot::Mutex<RedisResp3PushBacklog>>,
 }
 
 impl fmt::Debug for RedisClient {
@@ -2149,6 +2278,14 @@ impl fmt::Debug for RedisClient {
             .field("database", &self.config.database)
             .field("has_password", &self.config.password.is_some())
             .field("known_slot_mappings", &self.slot_map.lock().len())
+            .field(
+                "pending_resp3_pushes",
+                &self.resp3_push_backlog.lock().pending.len(),
+            )
+            .field(
+                "resp3_push_dropped",
+                &self.resp3_push_backlog.lock().dropped,
+            )
             .finish_non_exhaustive()
     }
 }
@@ -2160,10 +2297,14 @@ impl RedisClient {
         cx.checkpoint().map_err(|_| RedisError::Cancelled)?;
         let config = RedisConfig::from_url(url)?;
         let config_for_factory = config.clone();
+        let resp3_push_backlog =
+            Arc::new(parking_lot::Mutex::new(RedisResp3PushBacklog::default()));
+        let backlog_for_factory = Arc::clone(&resp3_push_backlog);
 
         let factory: RedisFactory = Box::new(move || {
             let config = config_for_factory.clone();
-            Box::pin(async move { RedisConnection::connect(config).await })
+            let backlog = Arc::clone(&backlog_for_factory);
+            Box::pin(async move { RedisConnection::connect(config, Some(backlog)).await })
         });
 
         let pool = GenericPool::new(factory, PoolConfig::with_max_size(10));
@@ -2172,6 +2313,7 @@ impl RedisClient {
             config,
             pool,
             slot_map: Arc::new(parking_lot::Mutex::new(HashMap::new())),
+            resp3_push_backlog,
         })
     }
 
@@ -2183,6 +2325,37 @@ impl RedisClient {
     #[must_use]
     pub fn slot_map_snapshot(&self) -> HashMap<u16, String> {
         self.slot_map.lock().clone()
+    }
+
+    /// Receive the next buffered non-pubsub RESP3 push, if any.
+    ///
+    /// If the configured backlog cap
+    /// [`RedisConfig::resp3_push_max_backlog`] was exceeded since the
+    /// previous successful poll, returns
+    /// [`RedisError::Resp3PushLag`] before any further queued push is
+    /// delivered so the caller can observe the gap deterministically.
+    pub fn try_next_resp3_push(&self) -> Result<Option<RedisResp3NonPubSubPush>, RedisError> {
+        let mut backlog = self.resp3_push_backlog.lock();
+        let new_drops = backlog.dropped.saturating_sub(backlog.lag_reported);
+        if new_drops > 0 {
+            backlog.lag_reported = backlog.dropped;
+            return Err(RedisError::Resp3PushLag { dropped: new_drops });
+        }
+        Ok(backlog.pending.pop_front())
+    }
+
+    /// Returns the number of buffered RESP3 pushes currently queued for
+    /// this regular command client.
+    #[must_use]
+    pub fn resp3_pending_pushes(&self) -> usize {
+        self.resp3_push_backlog.lock().pending.len()
+    }
+
+    /// Returns the cumulative count of RESP3 pushes dropped because
+    /// [`RedisConfig::resp3_push_max_backlog`] was reached.
+    #[must_use]
+    pub fn resp3_dropped_pushes(&self) -> u64 {
+        self.resp3_push_backlog.lock().dropped
     }
 
     fn map_pool_error(err: PoolError) -> RedisError {
@@ -2236,7 +2409,9 @@ impl RedisClient {
         redirect_config.host = host.to_string();
         redirect_config.port = port;
 
-        let mut conn = RedisConnection::connect(redirect_config).await?;
+        let mut conn =
+            RedisConnection::connect(redirect_config, Some(Arc::clone(&self.resp3_push_backlog)))
+                .await?;
         conn.ensure_initialized(cx).await?;
         Ok(conn)
     }
@@ -2957,7 +3132,7 @@ impl Drop for PubSubControlGuard<'_> {
 
 impl RedisPubSub {
     async fn connect(cx: &Cx, config: RedisConfig) -> Result<Self, RedisError> {
-        let mut conn = RedisConnection::connect(config.clone()).await?;
+        let mut conn = RedisConnection::connect(config.clone(), None).await?;
         conn.ensure_initialized(cx).await?;
         Ok(Self {
             conn,
@@ -3462,7 +3637,7 @@ impl RedisPubSub {
         let channels = self.channels.clone();
         let patterns = self.patterns.clone();
 
-        let mut conn = RedisConnection::connect(self.config.clone()).await?;
+        let mut conn = RedisConnection::connect(self.config.clone(), None).await?;
         conn.ensure_initialized(cx).await?;
         self.conn = conn;
         self.channels.clone_from(&channels);
@@ -3504,7 +3679,6 @@ pub fn parse_pubsub_event_for_fuzz(value: RespValue) -> Result<PubSubEvent, Redi
     RedisPubSub::parse_event(value)
 }
 
-#[cfg(any(test, feature = "test-internals"))]
 fn decode_tracking_invalidation_keys(value: RespValue) -> Result<Option<Vec<Vec<u8>>>, RedisError> {
     match value {
         RespValue::Null | RespValue::Array(None) | RespValue::BulkString(None) => Ok(None),
@@ -3519,12 +3693,7 @@ fn decode_tracking_invalidation_keys(value: RespValue) -> Result<Option<Vec<Vec<
     }
 }
 
-#[cfg(any(test, feature = "test-internals"))]
-#[allow(dead_code)]
-#[doc(hidden)]
-pub fn parse_client_tracking_push_for_fuzz(
-    value: RespValue,
-) -> Result<RedisClientTrackingPush, RedisError> {
+fn parse_client_tracking_push(value: RespValue) -> Result<RedisClientTrackingPush, RedisError> {
     let items = match value {
         RespValue::Push(items) => items,
         other => {
@@ -3563,7 +3732,6 @@ pub fn parse_client_tracking_push_for_fuzz(
     }
 }
 
-#[cfg(any(test, feature = "test-internals"))]
 fn is_pubsub_push_kind(kind: &str) -> bool {
     kind.eq_ignore_ascii_case("message")
         || kind.eq_ignore_ascii_case("pmessage")
@@ -3574,12 +3742,7 @@ fn is_pubsub_push_kind(kind: &str) -> bool {
         || kind.eq_ignore_ascii_case("pong")
 }
 
-#[cfg(any(test, feature = "test-internals"))]
-#[allow(dead_code)]
-#[doc(hidden)]
-pub fn parse_resp3_non_pubsub_push_for_fuzz(
-    value: RespValue,
-) -> Result<RedisResp3NonPubSubPush, RedisError> {
+fn parse_resp3_non_pubsub_push(value: RespValue) -> Result<RedisResp3NonPubSubPush, RedisError> {
     let items = match value {
         RespValue::Push(items) => items,
         other => {
@@ -3609,6 +3772,24 @@ pub fn parse_resp3_non_pubsub_push_for_fuzz(
 
     let payload = items.into_iter().skip(1).collect();
     Ok(RedisResp3NonPubSubPush::Other { kind, payload })
+}
+
+#[cfg(any(test, feature = "test-internals"))]
+#[allow(dead_code)]
+#[doc(hidden)]
+pub fn parse_client_tracking_push_for_fuzz(
+    value: RespValue,
+) -> Result<RedisClientTrackingPush, RedisError> {
+    parse_client_tracking_push(value)
+}
+
+#[cfg(any(test, feature = "test-internals"))]
+#[allow(dead_code)]
+#[doc(hidden)]
+pub fn parse_resp3_non_pubsub_push_for_fuzz(
+    value: RespValue,
+) -> Result<RedisResp3NonPubSubPush, RedisError> {
+    parse_resp3_non_pubsub_push(value)
 }
 
 #[cfg(any(test, feature = "test-internals"))]
@@ -5660,6 +5841,59 @@ mod tests {
             config: RedisConfig::default(),
             pool: GenericPool::new(factory, PoolConfig::with_max_size(1)),
             slot_map: Arc::new(parking_lot::Mutex::new(HashMap::new())),
+            resp3_push_backlog: Arc::new(parking_lot::Mutex::new(RedisResp3PushBacklog::default())),
+        }
+    }
+
+    fn client_with_config(config: RedisConfig) -> RedisClient {
+        let config_for_factory = config.clone();
+        let resp3_push_backlog =
+            Arc::new(parking_lot::Mutex::new(RedisResp3PushBacklog::default()));
+        let backlog_for_factory = Arc::clone(&resp3_push_backlog);
+
+        let factory: RedisFactory = Box::new(move || {
+            let config = config_for_factory.clone();
+            let backlog = Arc::clone(&backlog_for_factory);
+            Box::pin(async move { RedisConnection::connect(config, Some(backlog)).await })
+        });
+
+        RedisClient {
+            config,
+            pool: GenericPool::new(factory, PoolConfig::with_max_size(10)),
+            slot_map: Arc::new(parking_lot::Mutex::new(HashMap::new())),
+            resp3_push_backlog,
+        }
+    }
+
+    fn write_hello3_ok(stream: &mut std::net::TcpStream) {
+        let hello = read_resp_frame(stream);
+        assert_resp_command(hello, &[b"HELLO", b"3"]);
+        let hello_reply = RespValue::Map(vec![(
+            RespValue::SimpleString("proto".to_string()),
+            RespValue::Integer(3),
+        )])
+        .encode();
+        stream.write_all(&hello_reply).expect("write HELLO reply");
+        stream.flush().expect("flush HELLO reply");
+    }
+
+    fn buffer_fingerprint(bytes: &[u8]) -> String {
+        let mut acc = 0xcbf2_9ce4_8422_2325u64;
+        for &byte in bytes {
+            acc ^= u64::from(byte);
+            acc = acc.wrapping_mul(0x100_0000_01b3);
+        }
+        format!("{acc:016x}")
+    }
+
+    fn collect_resp3_pushes(client: &RedisClient) -> Vec<RedisResp3NonPubSubPush> {
+        let mut pushes = Vec::new();
+        loop {
+            match client.try_next_resp3_push() {
+                Ok(Some(push)) => pushes.push(push),
+                Ok(None) => return pushes,
+                Err(err) => panic!("expected buffered RESP3 pushes without lag, got {err:?}"),
+            }
         }
     }
 
@@ -7596,6 +7830,432 @@ mod tests {
 
         let empty = parse_resp3_non_pubsub_push_for_fuzz(RespValue::Push(vec![]));
         assert!(empty.is_err(), "empty RESP3 pushes must be rejected");
+    }
+
+    #[test]
+    fn redis_resp3_push_single_push_before_integer_response_is_buffered() {
+        let listener = StdTcpListener::bind("127.0.0.1:0").expect("bind test listener");
+        let addr = listener.local_addr().expect("listener addr");
+        let combined_buffer = {
+            let mut bytes = Vec::new();
+            RespValue::Push(vec![
+                RespValue::BulkString(Some(b"invalidate".to_vec())),
+                RespValue::Array(Some(vec![
+                    RespValue::BulkString(Some(b"alpha".to_vec())),
+                    RespValue::BulkString(Some(b"beta".to_vec())),
+                ])),
+            ])
+            .encode_into(&mut bytes);
+            RespValue::Integer(7).encode_into(&mut bytes);
+            bytes
+        };
+        let combined_fingerprint = buffer_fingerprint(&combined_buffer);
+        let push_frame_len = RespValue::Push(vec![
+            RespValue::BulkString(Some(b"invalidate".to_vec())),
+            RespValue::Array(Some(vec![
+                RespValue::BulkString(Some(b"alpha".to_vec())),
+                RespValue::BulkString(Some(b"beta".to_vec())),
+            ])),
+        ])
+        .encode()
+        .len();
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept redis client");
+            stream
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .expect("set read timeout");
+            write_hello3_ok(&mut stream);
+
+            let ping = read_resp_frame(&mut stream);
+            assert_resp_command(ping, &[b"PING"]);
+            stream
+                .write_all(&combined_buffer)
+                .expect("write RESP3 push + integer reply");
+            stream.flush().expect("flush RESP3 push + integer reply");
+        });
+
+        run_test_with_cx(|cx| async move {
+            let url = format!("redis://{}:{}/0", addr.ip(), addr.port());
+            let client = RedisClient::connect(&cx, &url)
+                .await
+                .expect("connect redis client");
+
+            let response = client.cmd(&cx, &["PING"]).await.expect("PING response");
+            assert_eq!(response, RespValue::Integer(7));
+
+            tracing::info!(
+                frame_kind = "invalidate",
+                consumed_bytes = push_frame_len,
+                response_count = 1usize,
+                push_count = client.resp3_pending_pushes(),
+                queue_len = client.resp3_pending_pushes(),
+                buffer_fingerprint = %combined_fingerprint,
+                "redis RESP3 single push buffered before integer response"
+            );
+
+            let pushes = collect_resp3_pushes(&client);
+            assert_eq!(
+                pushes,
+                vec![RedisResp3NonPubSubPush::ClientTracking(
+                    RedisClientTrackingPush::Invalidate {
+                        keys: Some(vec![b"alpha".to_vec(), b"beta".to_vec()]),
+                    },
+                )]
+            );
+            assert_eq!(client.resp3_dropped_pushes(), 0);
+        });
+
+        server.join().expect("server join");
+    }
+
+    #[test]
+    fn redis_resp3_push_pipeline_preserves_response_and_push_order() {
+        let listener = StdTcpListener::bind("127.0.0.1:0").expect("bind test listener");
+        let addr = listener.local_addr().expect("listener addr");
+        let combined_buffer = {
+            let mut bytes = Vec::new();
+            RespValue::Push(vec![
+                RespValue::BulkString(Some(b"monitor".to_vec())),
+                RespValue::BulkString(Some(b"first".to_vec())),
+            ])
+            .encode_into(&mut bytes);
+            RespValue::SimpleString("ONE".to_string()).encode_into(&mut bytes);
+            RespValue::Push(vec![
+                RespValue::BulkString(Some(b"invalidate".to_vec())),
+                RespValue::Array(Some(vec![RespValue::BulkString(Some(
+                    b"cache-key".to_vec(),
+                ))])),
+            ])
+            .encode_into(&mut bytes);
+            RespValue::SimpleString("TWO".to_string()).encode_into(&mut bytes);
+            bytes
+        };
+        let combined_len = combined_buffer.len();
+        let combined_fingerprint = buffer_fingerprint(&combined_buffer);
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept redis client");
+            stream
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .expect("set read timeout");
+            write_hello3_ok(&mut stream);
+
+            let first = read_resp_frame(&mut stream);
+            assert_resp_command(first, &[b"PING"]);
+            let second = read_resp_frame(&mut stream);
+            assert_resp_command(second, &[b"PING"]);
+            stream
+                .write_all(&combined_buffer)
+                .expect("write pipelined replies");
+            stream.flush().expect("flush pipelined replies");
+        });
+
+        run_test_with_cx(|cx| async move {
+            let url = format!("redis://{}:{}/0", addr.ip(), addr.port());
+            let client = RedisClient::connect(&cx, &url)
+                .await
+                .expect("connect redis client");
+
+            let mut pipeline = client.pipeline();
+            pipeline.cmd(&["PING"]);
+            pipeline.cmd(&["PING"]);
+            let results = pipeline.exec(&cx).await.expect("pipeline exec");
+
+            assert_eq!(
+                results,
+                vec![
+                    Ok(RespValue::SimpleString("ONE".to_string())),
+                    Ok(RespValue::SimpleString("TWO".to_string())),
+                ]
+            );
+
+            tracing::info!(
+                frame_kind = "monitor+invalidate",
+                consumed_bytes = combined_len,
+                response_count = results.len(),
+                push_count = client.resp3_pending_pushes(),
+                queue_len = client.resp3_pending_pushes(),
+                buffer_fingerprint = %combined_fingerprint,
+                "redis RESP3 pipeline preserves response and push order"
+            );
+
+            let pushes = collect_resp3_pushes(&client);
+            assert_eq!(
+                pushes,
+                vec![
+                    RedisResp3NonPubSubPush::Other {
+                        kind: "monitor".to_string(),
+                        payload: vec![RespValue::BulkString(Some(b"first".to_vec()))],
+                    },
+                    RedisResp3NonPubSubPush::ClientTracking(RedisClientTrackingPush::Invalidate {
+                        keys: Some(vec![b"cache-key".to_vec()]),
+                    },),
+                ]
+            );
+        });
+
+        server.join().expect("server join");
+    }
+
+    #[test]
+    fn redis_resp3_push_attribute_interleaving_still_returns_response() {
+        let listener = StdTcpListener::bind("127.0.0.1:0").expect("bind test listener");
+        let addr = listener.local_addr().expect("listener addr");
+        let combined_buffer = {
+            let mut bytes = Vec::new();
+            RespValue::Attribute(vec![(
+                RespValue::SimpleString("meta".to_string()),
+                RespValue::SimpleString("before-push".to_string()),
+            )])
+            .encode_into(&mut bytes);
+            RespValue::Push(vec![RespValue::BulkString(Some(
+                b"tracking-redir-broken".to_vec(),
+            ))])
+            .encode_into(&mut bytes);
+            RespValue::SimpleString("OK".to_string()).encode_into(&mut bytes);
+            bytes
+        };
+        let combined_len = combined_buffer.len();
+        let combined_fingerprint = buffer_fingerprint(&combined_buffer);
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept redis client");
+            stream
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .expect("set read timeout");
+            write_hello3_ok(&mut stream);
+
+            let ping = read_resp_frame(&mut stream);
+            assert_resp_command(ping, &[b"PING"]);
+            stream
+                .write_all(&combined_buffer)
+                .expect("write attribute + push + response");
+            stream.flush().expect("flush attribute + push + response");
+        });
+
+        run_test_with_cx(|cx| async move {
+            let url = format!("redis://{}:{}/0", addr.ip(), addr.port());
+            let client = RedisClient::connect(&cx, &url)
+                .await
+                .expect("connect redis client");
+
+            let response = client.cmd(&cx, &["PING"]).await.expect("PING response");
+            assert_eq!(response, RespValue::SimpleString("OK".to_string()));
+
+            tracing::info!(
+                frame_kind = "attribute+tracking-redir-broken",
+                consumed_bytes = combined_len,
+                response_count = 1usize,
+                push_count = client.resp3_pending_pushes(),
+                queue_len = client.resp3_pending_pushes(),
+                buffer_fingerprint = %combined_fingerprint,
+                "redis RESP3 attribute and push interleaving preserves command response"
+            );
+
+            let pushes = collect_resp3_pushes(&client);
+            assert_eq!(
+                pushes,
+                vec![RedisResp3NonPubSubPush::ClientTracking(
+                    RedisClientTrackingPush::RedirectBroken,
+                )]
+            );
+        });
+
+        server.join().expect("server join");
+    }
+
+    #[test]
+    fn redis_resp3_push_cancellation_after_decoded_push_preserves_backlog() {
+        let listener = StdTcpListener::bind("127.0.0.1:0").expect("bind test listener");
+        let addr = listener.local_addr().expect("listener addr");
+        let (push_written_tx, push_written_rx) = mpsc::channel();
+        let (closed_tx, closed_rx) = mpsc::channel();
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept redis client");
+            stream
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .expect("set read timeout");
+            write_hello3_ok(&mut stream);
+
+            let ping = read_resp_frame(&mut stream);
+            assert_resp_command(ping, &[b"PING"]);
+            let push = RespValue::Push(vec![
+                RespValue::BulkString(Some(b"monitor".to_vec())),
+                RespValue::BulkString(Some(b"cancelled-flight".to_vec())),
+            ])
+            .encode();
+            stream.write_all(&push).expect("write RESP3 push");
+            stream.flush().expect("flush RESP3 push");
+            push_written_tx.send(()).expect("signal push written");
+
+            let mut probe = [0u8; 1];
+            match stream.read(&mut probe) {
+                Ok(0) => closed_tx.send(()).expect("signal close observed"),
+                Ok(n) => panic!("expected cancelled client to close transport, read {n} bytes"),
+                Err(e)
+                    if matches!(
+                        e.kind(),
+                        io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
+                    ) =>
+                {
+                    panic!("cancelled client left the socket open after push delivery")
+                }
+                Err(e) => panic!("probe cancelled socket: {e}"),
+            }
+        });
+
+        run_test_with_cx(|cx| async move {
+            let url = format!("redis://{}:{}/0", addr.ip(), addr.port());
+            let client = RedisClient::connect(&cx, &url)
+                .await
+                .expect("connect redis client");
+
+            let worker_cx = cx.clone();
+            let mut command = Box::pin(client.cmd(&worker_cx, &["PING"]));
+            drive_until_signal(
+                command.as_mut(),
+                &push_written_rx,
+                "redis RESP3 push cancellation command",
+            );
+
+            for _ in 0..200 {
+                if client.resp3_pending_pushes() == 1 {
+                    break;
+                }
+                match poll_once(command.as_mut()) {
+                    Poll::Pending => std::thread::sleep(Duration::from_millis(10)),
+                    Poll::Ready(result) => {
+                        panic!(
+                            "command completed before cancellation after push delivery: {result:?}"
+                        )
+                    }
+                }
+            }
+            assert_eq!(
+                client.resp3_pending_pushes(),
+                1,
+                "decoded RESP3 push must be queued before cancellation"
+            );
+
+            tracing::info!(
+                frame_kind = "monitor",
+                consumed_bytes = 0usize,
+                response_count = 0usize,
+                push_count = client.resp3_pending_pushes(),
+                queue_len = client.resp3_pending_pushes(),
+                "redis RESP3 cancellation preserves decoded push backlog"
+            );
+
+            worker_cx.cancel_fast(crate::types::CancelKind::User);
+            let result = future::poll_fn(|poll_cx| command.as_mut().poll(poll_cx)).await;
+            assert!(
+                matches!(result, Err(RedisError::Cancelled)),
+                "expected cancellation after push delivery, got {result:?}"
+            );
+
+            closed_rx
+                .recv_timeout(Duration::from_secs(2))
+                .expect("cancelled connection should close");
+
+            let pushes = collect_resp3_pushes(&client);
+            assert_eq!(
+                pushes,
+                vec![RedisResp3NonPubSubPush::Other {
+                    kind: "monitor".to_string(),
+                    payload: vec![RespValue::BulkString(Some(b"cancelled-flight".to_vec(),))],
+                }]
+            );
+        });
+
+        server.join().expect("server join");
+    }
+
+    #[test]
+    fn redis_resp3_push_backlog_overflow_reports_lag_deterministically() {
+        let listener = StdTcpListener::bind("127.0.0.1:0").expect("bind test listener");
+        let addr = listener.local_addr().expect("listener addr");
+        let combined_buffer = {
+            let mut bytes = Vec::new();
+            RespValue::Push(vec![
+                RespValue::BulkString(Some(b"monitor".to_vec())),
+                RespValue::BulkString(Some(b"first".to_vec())),
+            ])
+            .encode_into(&mut bytes);
+            RespValue::Push(vec![
+                RespValue::BulkString(Some(b"monitor".to_vec())),
+                RespValue::BulkString(Some(b"second".to_vec())),
+            ])
+            .encode_into(&mut bytes);
+            RespValue::SimpleString("OK".to_string()).encode_into(&mut bytes);
+            bytes
+        };
+        let combined_len = combined_buffer.len();
+        let combined_fingerprint = buffer_fingerprint(&combined_buffer);
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept redis client");
+            stream
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .expect("set read timeout");
+            write_hello3_ok(&mut stream);
+
+            let ping = read_resp_frame(&mut stream);
+            assert_resp_command(ping, &[b"PING"]);
+            stream
+                .write_all(&combined_buffer)
+                .expect("write overflow push sequence");
+            stream.flush().expect("flush overflow push sequence");
+        });
+
+        run_test_with_cx(|cx| async move {
+            let mut config = RedisConfig {
+                host: addr.ip().to_string(),
+                port: addr.port(),
+                ..Default::default()
+            };
+            config.resp3_push_max_backlog = 1;
+            let client = client_with_config(config);
+
+            let response = client.cmd(&cx, &["PING"]).await.expect("PING response");
+            assert_eq!(response, RespValue::SimpleString("OK".to_string()));
+
+            tracing::info!(
+                frame_kind = "monitor-overflow",
+                consumed_bytes = combined_len,
+                response_count = 1usize,
+                push_count = 2usize,
+                queue_len = client.resp3_pending_pushes(),
+                capacity = 1usize,
+                dropped_or_rejected_count = client.resp3_dropped_pushes(),
+                reason = "drop newest when regular-client RESP3 push backlog reaches cap",
+                buffer_fingerprint = %combined_fingerprint,
+                "redis RESP3 push backlog overflow reports lag deterministically"
+            );
+
+            let lag = client
+                .try_next_resp3_push()
+                .expect_err("overflow must surface lag before queued push");
+            assert!(
+                matches!(lag, RedisError::Resp3PushLag { dropped: 1 }),
+                "unexpected lag result: {lag:?}"
+            );
+
+            let next = client
+                .try_next_resp3_push()
+                .expect("lag should be one-shot")
+                .expect("first push remains queued");
+            assert_eq!(
+                next,
+                RedisResp3NonPubSubPush::Other {
+                    kind: "monitor".to_string(),
+                    payload: vec![RespValue::BulkString(Some(b"first".to_vec()))],
+                }
+            );
+            assert_eq!(
+                client.try_next_resp3_push().expect("queue drained"),
+                None,
+                "only the oldest push should remain after drop-newest overflow"
+            );
+        });
+
+        server.join().expect("server join");
     }
 
     #[test]
