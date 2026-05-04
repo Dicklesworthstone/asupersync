@@ -342,6 +342,33 @@ impl<T> Mutex<T> {
         Ok(MutexGuard { mutex: self })
     }
 
+    /// Tries to acquire the mutex without waiting, returning an owned guard.
+    ///
+    /// The returned guard keeps an [`Arc`] to the mutex so it can move across
+    /// scopes without borrowing the original handle.
+    ///
+    /// ```
+    /// use asupersync::sync::Mutex;
+    /// use std::sync::Arc;
+    ///
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// let mutex = Arc::new(Mutex::new(String::from("ready")));
+    ///
+    /// {
+    ///     let mut guard = mutex.try_lock_owned()?;
+    ///     guard.push_str("!");
+    /// }
+    ///
+    /// let guard = mutex.try_lock_owned()?;
+    /// assert_eq!(guard.as_str(), "ready!");
+    /// # Ok(())
+    /// # }
+    /// ```
+    #[inline]
+    pub fn try_lock_owned(self: &Arc<Self>) -> Result<OwnedMutexGuard<T>, TryLockError> {
+        OwnedMutexGuard::try_lock(Arc::clone(self))
+    }
+
     /// Returns a mutable reference to the underlying data.
     #[inline]
     pub fn get_mut(&mut self) -> &mut T {
@@ -1385,8 +1412,7 @@ mod tests {
             let mutex = Arc::new(Mutex::new(5u32));
 
             let initial_seen = if use_owned {
-                let mut guard =
-                    OwnedMutexGuard::try_lock(Arc::clone(&mutex)).expect("owned try_lock succeeds");
+                let mut guard = mutex.try_lock_owned().expect("owned try_lock succeeds");
                 let seen = *guard;
                 *guard += 1;
                 drop(guard);
@@ -1413,10 +1439,7 @@ mod tests {
             drop(hold_guard);
 
             let blocked_while_granted = if use_owned {
-                matches!(
-                    OwnedMutexGuard::try_lock(Arc::clone(&mutex)),
-                    Err(TryLockError::Locked)
-                )
+                matches!(mutex.try_lock_owned(), Err(TryLockError::Locked))
             } else {
                 matches!(mutex.as_ref().try_lock(), Err(TryLockError::Locked))
             };
@@ -1429,7 +1452,8 @@ mod tests {
             drop(waiter_guard);
 
             let final_seen = if use_owned {
-                let guard = OwnedMutexGuard::try_lock(Arc::clone(&mutex))
+                let guard = mutex
+                    .try_lock_owned()
                     .expect("owned try_lock succeeds after waiter release");
                 let seen = *guard;
                 drop(guard);
@@ -1725,20 +1749,19 @@ mod tests {
         let mutex = Arc::new(Mutex::new(42_u32));
 
         // try_lock should succeed on an unlocked mutex.
-        let mut guard =
-            OwnedMutexGuard::try_lock(Arc::clone(&mutex)).expect("try_lock should succeed");
+        let mut guard = mutex.try_lock_owned().expect("try_lock should succeed");
         crate::assert_with_log!(*guard == 42, "owned guard reads value", 42u32, *guard);
 
         *guard = 100;
         crate::assert_with_log!(*guard == 100, "owned guard writes value", 100u32, *guard);
 
         // try_lock should fail while held.
-        let locked = OwnedMutexGuard::try_lock(Arc::clone(&mutex)).is_err();
+        let locked = mutex.try_lock_owned().is_err();
         crate::assert_with_log!(locked, "try_lock fails while held", true, locked);
 
         // After drop, another lock should succeed and see the mutation.
         drop(guard);
-        let guard2 = OwnedMutexGuard::try_lock(Arc::clone(&mutex)).expect("try_lock after drop");
+        let guard2 = mutex.try_lock_owned().expect("try_lock after drop");
         crate::assert_with_log!(*guard2 == 100, "mutation persisted", 100u32, *guard2);
         crate::test_complete!("test_owned_mutex_guard_try_lock");
     }
@@ -1936,7 +1959,7 @@ mod tests {
         crate::test_complete!("mutex_queued_waiter_sees_poison_after_holder_panics");
     }
 
-    /// Invariant: `OwnedMutexGuard::try_lock` returns `Poisoned` on a
+    /// Invariant: `Mutex::try_lock_owned` returns `Poisoned` on a
     /// poisoned mutex.
     #[test]
     fn owned_mutex_try_lock_returns_poisoned() {
@@ -1951,11 +1974,11 @@ mod tests {
         });
         let _ = handle.join();
 
-        let result = OwnedMutexGuard::try_lock(Arc::clone(&mutex));
+        let result = mutex.try_lock_owned();
         let is_poisoned = matches!(result, Err(TryLockError::Poisoned));
         crate::assert_with_log!(
             is_poisoned,
-            "OwnedMutexGuard::try_lock Poisoned",
+            "Mutex::try_lock_owned Poisoned",
             true,
             is_poisoned
         );
@@ -2161,7 +2184,7 @@ mod tests {
 
         // Phase 4: Verify owned try_lock has identical behavior
         let mutex_arc = Arc::new(Mutex::new(99u32));
-        let owned_success = OwnedMutexGuard::try_lock(Arc::clone(&mutex_arc));
+        let owned_success = mutex_arc.try_lock_owned();
         crate::assert_with_log!(
             owned_success.is_ok(),
             "owned try_lock succeeds when free",
@@ -2169,7 +2192,7 @@ mod tests {
             owned_success.is_ok()
         );
 
-        let owned_contended = OwnedMutexGuard::try_lock(Arc::clone(&mutex_arc));
+        let owned_contended = mutex_arc.try_lock_owned();
         let owned_locked = matches!(owned_contended, Err(TryLockError::Locked));
         crate::assert_with_log!(
             owned_locked,
@@ -3920,12 +3943,10 @@ mod tests {
         //! Audit src/sync/mutex.rs Mutex::try_lock_owned():
         //! is this exposed (returns OwnedGuard, separable from MutexGuard's lifetime)?
         //! If yes, verify it correctly handles ownership transfer.
-        //! If not exposed, file feature bead.
         //!
-        //! FINDING: ✅ FUNCTIONAL but ❌ API GAP - OwnedMutexGuard exists, try_lock_owned() missing
-        //!
-        //! OwnedMutexGuard::try_lock(Arc<Mutex<T>>) works correctly but requires verbose static method.
-        //! Missing convenience method Mutex::try_lock_owned() -> OwnedMutexGuard<T>.
+        //! FINDING: ✅ API PRESENT - `Mutex::try_lock_owned()` exposes the owned
+        //! guard path directly and delegates to the existing owned guard state
+        //! machine without changing borrowed `try_lock()` behavior.
 
         init_test("audit_mutex_try_lock_owned_api_coverage_and_ownership_transfer");
 
@@ -3945,12 +3966,7 @@ mod tests {
         // Test what's currently available
         println!("  Current API methods on Mutex:");
         println!("    - Mutex::try_lock(&self) -> MutexGuard<'_, T> ✅");
-
-        // Check if try_lock_owned exists on Mutex directly
-        // This should be a compilation error if it doesn't exist
-        // let owned_direct = mutex.try_lock_owned(); // Would fail if not exposed
-
-        println!("    - Mutex::try_lock_owned(&self) -> OwnedMutexGuard<T> ❌ NOT FOUND");
+        println!("    - Mutex::try_lock_owned(self: &Arc<Self>) -> OwnedMutexGuard<T> ✅");
 
         println!("  Available workaround via static method:");
         println!(
@@ -3961,11 +3977,11 @@ mod tests {
         println!("🚀 Phase 2: Verify OwnedMutexGuard functionality");
 
         // Test the actual owned guard functionality
-        let owned_result = OwnedMutexGuard::try_lock(Arc::clone(&mutex));
+        let owned_result = mutex.try_lock_owned();
 
         match owned_result {
             Ok(owned_guard) => {
-                println!("  ✅ OwnedMutexGuard::try_lock() succeeds");
+                println!("  ✅ Mutex::try_lock_owned() succeeds");
 
                 // Verify data access
                 assert_eq!(
@@ -4055,35 +4071,35 @@ mod tests {
 
         println!("  Current asupersync pattern:");
         println!("    - mutex.try_lock() -> Result<MutexGuard<T>, TryLockError> ✅");
-        println!("    - mutex.try_lock_owned() -> ... ❌ MISSING");
+        println!("    - mutex.try_lock_owned() -> Result<OwnedMutexGuard<T>, TryLockError> ✅");
         println!(
             "    - OwnedMutexGuard::try_lock(arc) -> Result<OwnedMutexGuard<T>, TryLockError> ✅"
         );
 
         println!();
-        println!("❌ API GAP IDENTIFIED:");
-        println!("  Missing convenience method: Mutex::try_lock_owned()");
+        println!("✅ API SURFACE VERIFIED:");
+        println!("  Convenience method: Mutex::try_lock_owned()");
         println!(
-            "  - Expected signature: fn try_lock_owned(self: &Arc<Self>) -> Result<OwnedMutexGuard<T>, TryLockError>"
+            "  - Signature: fn try_lock_owned(self: &Arc<Self>) -> Result<OwnedMutexGuard<T>, TryLockError>"
         );
-        println!("  - Current workaround: OwnedMutexGuard::try_lock(Arc<Mutex<T>>)");
-        println!("  - Impact: Verbose, non-ergonomic API compared to tokio");
+        println!("  - Implementation delegates to OwnedMutexGuard::try_lock(Arc<Mutex<T>>)");
+        println!("  - Impact: ergonomic parity with tokio-style owned guards");
 
         println!();
         println!("🏆 FUNCTIONAL VERIFICATION:");
         println!("  - OwnedMutexGuard exists and works correctly ✅");
+        println!("  - Mutex::try_lock_owned() exposes the owned path directly ✅");
         println!("  - Ownership transfer functions properly ✅");
         println!("  - Thread boundary crossing works (Send) ✅");
         println!("  - Lock/unlock semantics identical to borrowed guard ✅");
         println!("  - No lifetime dependencies ✅");
 
         println!();
-        println!("📝 RECOMMENDATION:");
-        println!("  File feature bead for Mutex::try_lock_owned() convenience method");
-        println!("  - Priority: P2-Medium (ergonomic improvement)");
-        println!("  - Implementation: delegate to OwnedMutexGuard::try_lock()");
-        println!("  - Benefits: API parity with tokio, improved ergonomics");
-        println!("  - Risk: Low (wrapper around existing functionality)");
+        println!("📝 RESULT:");
+        println!("  try_lock_owned convenience API is present and delegates correctly");
+        println!("  - API parity with tokio-style owned try_lock ✅");
+        println!("  - No parallel lock path introduced ✅");
+        println!("  - Low-risk wrapper over existing functionality ✅");
 
         crate::test_complete!("audit_mutex_try_lock_owned_api_coverage_and_ownership_transfer");
     }
