@@ -318,7 +318,7 @@
     {
       "control_id": "jetstream_publish_backpressure",
       "tracker_bead_id": "asupersync-dpdmsy",
-      "tracker_status": "open",
+      "tracker_status": "closed",
       "artifact_path": "artifacts/jetstream_publish_backpressure_smoke_contract_v1.json",
       "contract_version": "jetstream-publish-backpressure-smoke-contract-v1",
       "runner_path": "scripts/run_jetstream_publish_backpressure_smoke.sh",
@@ -346,8 +346,8 @@
         "operator_verdict"
       ],
       "rollback_surface": "retain_conservative_publish_path",
-      "proof_status": "fail_closed",
-      "blocker_reason": "publish backpressure proof pack now certifies zero-wait fairness for the live refusal-only controller and reports ready_for_rch, but the tracker bead remains open until the broad lib jetstream acceptance proof returns a clean pass",
+      "proof_status": "trusted",
+      "blocker_reason": "",
       "report_glob": "target/jetstream-publish-backpressure-smoke/run_*/AA-JETSTREAM-PUBLISH-BACKPRESSURE-*/run_report.json",
       "reproduction_command": "scripts/run_jetstream_publish_backpressure_smoke.sh --scenario AA-JETSTREAM-PUBLISH-BACKPRESSURE-SLOW-ACKS --execute"
     },
@@ -389,9 +389,9 @@
         "signoff_verdict": "fail_closed",
         "host_template_mode": false,
         "child_artifact_count": 11,
-      "trusted_child_count": 2,
-      "fail_closed_child_count": 9,
-      "open_tracker_blocker_count": 8,
+      "trusted_child_count": 3,
+      "fail_closed_child_count": 8,
+      "open_tracker_blocker_count": 7,
       "dirty_cluster_fail_closed_count": 1,
       "tracked_dirty_blocker_count": 1,
       "source_skill_count": 4,
@@ -410,7 +410,7 @@
       "missing_runner_path_count": 0,
       "objective_checklist_complete": true,
       "no_unexplained_artifacts": false,
-      "projection_hash": "003a56e6399fbad8b7daa0e0f3284303324a635f57f1e08508aaa32452afd218"
+      "projection_hash": "3bd737b9cc6b4c754c5d81f386e7fa5ec00ccdf8b9f8bd9e129bf98d1b29b3fb"
     },
     "required_log_fields": [
       "scenario_id",
@@ -456,9 +456,9 @@
         "signoff_verdict": "template_only",
         "host_template_mode": true,
         "child_artifact_count": 11,
-      "trusted_child_count": 2,
-      "fail_closed_child_count": 9,
-      "open_tracker_blocker_count": 8,
+      "trusted_child_count": 3,
+      "fail_closed_child_count": 8,
+      "open_tracker_blocker_count": 7,
       "dirty_cluster_fail_closed_count": 1,
       "tracked_dirty_blocker_count": 1,
       "source_skill_count": 4,
@@ -477,7 +477,7 @@
       "missing_runner_path_count": 0,
       "objective_checklist_complete": true,
       "no_unexplained_artifacts": false,
-      "projection_hash": "d629d49db06671586f4edf2985ad4bbb7465be6a570c6171c03d2653ff6a82d2"
+      "projection_hash": "9c27f1683a43ff8e0a948e6c8499abade4539a59e22d51498af4338d50c5e092"
     },
     "required_log_fields": [
       "scenario_id",

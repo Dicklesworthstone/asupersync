@@ -815,11 +815,9 @@ fn jetstream_signoff_row_tracks_zero_wait_tail_evidence() {
             "retain the conservative refusal-only publish path; the live zero-wait controller is certified, and any future nonzero-wait policy must ship its own bounded-waiter fairness proof before adoption"
         )
     );
-    assert!(
-        jetstream_row["blocker_reason"]
-            .as_str()
-            .is_some_and(|reason| reason.contains("certifies zero-wait fairness"))
-    );
+    assert_eq!(jetstream_row["tracker_status"].as_str(), Some("closed"));
+    assert_eq!(jetstream_row["proof_status"].as_str(), Some("trusted"));
+    assert_eq!(jetstream_row["blocker_reason"].as_str(), Some(""));
 }
 
 #[test]
