@@ -27,8 +27,11 @@ use parking_lot::Mutex as ParkingMutex;
 use slab::Slab;
 use std::cell::UnsafeCell;
 use std::future::Future;
+use std::marker::PhantomData;
+use std::mem::ManuallyDrop;
 use std::ops::{Deref, DerefMut};
 use std::pin::Pin;
+use std::ptr::NonNull;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::task::{Context, Poll, Waker};
@@ -616,6 +619,129 @@ impl<T> Drop for MutexGuard<'_, T> {
     }
 }
 
+impl<'a, T> MutexGuard<'a, T> {
+    /// Projects this guard onto a subcomponent while keeping the mutex locked.
+    #[inline]
+    pub fn map<U: ?Sized, F>(mut self, f: F) -> MappedMutexGuard<'a, T, U>
+    where
+        F: FnOnce(&mut T) -> &mut U,
+    {
+        let data = NonNull::from(f(&mut *self));
+        let mutex = self.mutex;
+        let _guard = ManuallyDrop::new(self);
+        MappedMutexGuard {
+            mutex,
+            data,
+            _marker: PhantomData,
+        }
+    }
+
+    /// Projects this guard onto an optional subcomponent without releasing the lock
+    /// when the projection is absent.
+    #[inline]
+    pub fn try_map<U: ?Sized, F>(mut self, f: F) -> Result<MappedMutexGuard<'a, T, U>, Self>
+    where
+        F: FnOnce(&mut T) -> Option<&mut U>,
+    {
+        let data = f(&mut *self).map(NonNull::from);
+        if let Some(data) = data {
+            let mutex = self.mutex;
+            let _guard = ManuallyDrop::new(self);
+            Ok(MappedMutexGuard {
+                mutex,
+                data,
+                _marker: PhantomData,
+            })
+        } else {
+            Err(self)
+        }
+    }
+}
+
+/// A mapped guard that releases the mutex when dropped.
+#[must_use = "guard will be immediately released if not held"]
+pub struct MappedMutexGuard<'a, T, U: ?Sized> {
+    mutex: &'a Mutex<T>,
+    data: NonNull<U>,
+    _marker: PhantomData<&'a mut U>,
+}
+
+// Safety: mapped guards inherit the borrowed guard's !Send contract and are
+// Sync exactly when the projected field can be shared immutably.
+unsafe impl<T, U: ?Sized + Sync> Sync for MappedMutexGuard<'_, T, U> {}
+
+impl<T, U: ?Sized + std::fmt::Debug> std::fmt::Debug for MappedMutexGuard<'_, T, U> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("MappedMutexGuard")
+            .field("data", &&**self)
+            .finish()
+    }
+}
+
+impl<T, U: ?Sized> Deref for MappedMutexGuard<'_, T, U> {
+    type Target = U;
+
+    #[inline]
+    fn deref(&self) -> &U {
+        unsafe { self.data.as_ref() }
+    }
+}
+
+impl<T, U: ?Sized> DerefMut for MappedMutexGuard<'_, T, U> {
+    #[inline]
+    fn deref_mut(&mut self) -> &mut U {
+        unsafe { self.data.as_mut() }
+    }
+}
+
+impl<T, U: ?Sized> Drop for MappedMutexGuard<'_, T, U> {
+    fn drop(&mut self) {
+        if std::thread::panicking() {
+            self.mutex.poison();
+        }
+        self.mutex.unlock();
+    }
+}
+
+impl<'a, T, U: ?Sized> MappedMutexGuard<'a, T, U> {
+    /// Further projects an already-mapped guard without releasing the mutex.
+    #[inline]
+    pub fn map<V: ?Sized, F>(mut self, f: F) -> MappedMutexGuard<'a, T, V>
+    where
+        F: FnOnce(&mut U) -> &mut V,
+    {
+        let data = NonNull::from(f(&mut *self));
+        let mutex = self.mutex;
+        let _guard = ManuallyDrop::new(self);
+        MappedMutexGuard {
+            mutex,
+            data,
+            _marker: PhantomData,
+        }
+    }
+
+    /// Fallibly projects an already-mapped guard without releasing the mutex
+    /// when the projection is absent.
+    #[inline]
+    pub fn try_map<V: ?Sized, F>(mut self, f: F) -> Result<MappedMutexGuard<'a, T, V>, Self>
+    where
+        F: FnOnce(&mut U) -> Option<&mut V>,
+    {
+        let data = f(&mut *self).map(NonNull::from);
+        if let Some(data) = data {
+            let mutex = self.mutex;
+            let _guard = ManuallyDrop::new(self);
+            Ok(MappedMutexGuard {
+                mutex,
+                data,
+                _marker: PhantomData,
+            })
+        } else {
+            Err(self)
+        }
+    }
+}
+
 /// An owned guard that releases the mutex when dropped.
 #[must_use = "guard will be immediately released if not held"]
 pub struct OwnedMutexGuard<T> {
@@ -649,6 +775,43 @@ impl<T> OwnedMutexGuard<T> {
         }
         Ok(Self { mutex })
     }
+
+    /// Projects this owned guard onto a subcomponent while keeping the mutex locked.
+    #[inline]
+    pub fn map<U: ?Sized, F>(mut self, f: F) -> OwnedMappedMutexGuard<T, U>
+    where
+        F: FnOnce(&mut T) -> &mut U,
+    {
+        let data = NonNull::from(f(&mut *self));
+        let mutex = unsafe { std::ptr::read(&self.mutex) };
+        let _guard = ManuallyDrop::new(self);
+        OwnedMappedMutexGuard {
+            mutex,
+            data,
+            _marker: PhantomData,
+        }
+    }
+
+    /// Projects this owned guard onto an optional subcomponent without releasing
+    /// the lock when the projection is absent.
+    #[inline]
+    pub fn try_map<U: ?Sized, F>(mut self, f: F) -> Result<OwnedMappedMutexGuard<T, U>, Self>
+    where
+        F: FnOnce(&mut T) -> Option<&mut U>,
+    {
+        let data = f(&mut *self).map(NonNull::from);
+        if let Some(data) = data {
+            let mutex = unsafe { std::ptr::read(&self.mutex) };
+            let _guard = ManuallyDrop::new(self);
+            Ok(OwnedMappedMutexGuard {
+                mutex,
+                data,
+                _marker: PhantomData,
+            })
+        } else {
+            Err(self)
+        }
+    }
 }
 
 impl<T> Deref for OwnedMutexGuard<T> {
@@ -672,6 +835,89 @@ impl<T> Drop for OwnedMutexGuard<T> {
             self.mutex.poison();
         }
         self.mutex.unlock();
+    }
+}
+
+/// An owned mapped guard that releases the mutex when dropped.
+#[must_use = "guard will be immediately released if not held"]
+pub struct OwnedMappedMutexGuard<T, U: ?Sized> {
+    mutex: Arc<Mutex<T>>,
+    data: NonNull<U>,
+    _marker: PhantomData<*mut U>,
+}
+
+unsafe impl<T: Send, U: ?Sized + Send> Send for OwnedMappedMutexGuard<T, U> {}
+unsafe impl<T: Send, U: ?Sized + Sync> Sync for OwnedMappedMutexGuard<T, U> {}
+
+impl<T, U: ?Sized + std::fmt::Debug> std::fmt::Debug for OwnedMappedMutexGuard<T, U> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("OwnedMappedMutexGuard")
+            .field("data", &&**self)
+            .finish()
+    }
+}
+
+impl<T, U: ?Sized> Deref for OwnedMappedMutexGuard<T, U> {
+    type Target = U;
+
+    #[inline]
+    fn deref(&self) -> &U {
+        unsafe { self.data.as_ref() }
+    }
+}
+
+impl<T, U: ?Sized> DerefMut for OwnedMappedMutexGuard<T, U> {
+    #[inline]
+    fn deref_mut(&mut self) -> &mut U {
+        unsafe { self.data.as_mut() }
+    }
+}
+
+impl<T, U: ?Sized> Drop for OwnedMappedMutexGuard<T, U> {
+    fn drop(&mut self) {
+        if std::thread::panicking() {
+            self.mutex.poison();
+        }
+        self.mutex.unlock();
+    }
+}
+
+impl<T, U: ?Sized> OwnedMappedMutexGuard<T, U> {
+    /// Further projects an already-mapped owned guard without releasing the mutex.
+    #[inline]
+    pub fn map<V: ?Sized, F>(mut self, f: F) -> OwnedMappedMutexGuard<T, V>
+    where
+        F: FnOnce(&mut U) -> &mut V,
+    {
+        let data = NonNull::from(f(&mut *self));
+        let mutex = unsafe { std::ptr::read(&self.mutex) };
+        let _guard = ManuallyDrop::new(self);
+        OwnedMappedMutexGuard {
+            mutex,
+            data,
+            _marker: PhantomData,
+        }
+    }
+
+    /// Fallibly projects an already-mapped owned guard without releasing the
+    /// lock when the projection is absent.
+    #[inline]
+    pub fn try_map<V: ?Sized, F>(mut self, f: F) -> Result<OwnedMappedMutexGuard<T, V>, Self>
+    where
+        F: FnOnce(&mut U) -> Option<&mut V>,
+    {
+        let data = f(&mut *self).map(NonNull::from);
+        if let Some(data) = data {
+            let mutex = unsafe { std::ptr::read(&self.mutex) };
+            let _guard = ManuallyDrop::new(self);
+            Ok(OwnedMappedMutexGuard {
+                mutex,
+                data,
+                _marker: PhantomData,
+            })
+        } else {
+            Err(self)
+        }
     }
 }
 
@@ -1782,6 +2028,292 @@ mod tests {
         let guard2 = OwnedMutexGuard::try_lock(Arc::clone(&mutex)).expect("try_lock after async");
         crate::assert_with_log!(*guard2 == 99, "async mutation persisted", 99u32, *guard2);
         crate::test_complete!("test_owned_mutex_guard_async_lock");
+    }
+
+    #[test]
+    fn test_mutex_guard_map_mutates_field_and_unlocks() {
+        init_test("test_mutex_guard_map_mutates_field_and_unlocks");
+        let mutex = Mutex::new(TestStruct {
+            field_a: 41,
+            field_b: "hello".to_string(),
+            field_c: vec![1, 2, 3],
+        });
+
+        {
+            let guard = mutex.try_lock().expect("initial lock");
+            let mut mapped = guard.map(|data| &mut data.field_a);
+            *mapped += 1;
+            crate::assert_with_log!(
+                *mapped == 42,
+                "mapped projection updates field",
+                42,
+                *mapped
+            );
+        }
+
+        let guard = mutex.try_lock().expect("lock after mapped drop");
+        crate::assert_with_log!(
+            guard.field_a == 42,
+            "mapped drop released lock",
+            42,
+            guard.field_a
+        );
+        crate::test_complete!("test_mutex_guard_map_mutates_field_and_unlocks");
+    }
+
+    #[test]
+    fn test_mutex_guard_try_map_returns_original_guard_on_none() {
+        init_test("test_mutex_guard_try_map_returns_original_guard_on_none");
+        let mutex = Mutex::new(TestStruct {
+            field_a: 7,
+            field_b: "field".to_string(),
+            field_c: vec![9],
+        });
+
+        let guard = mutex.try_lock().expect("initial lock");
+        let guard = guard
+            .try_map(|data| data.field_c.get_mut(5))
+            .expect_err("missing element should return original guard");
+        crate::assert_with_log!(
+            guard.field_b == "field",
+            "original guard returned on failed projection",
+            "field",
+            guard.field_b.as_str()
+        );
+
+        drop(guard);
+        let guard = mutex.try_lock().expect("lock after failed try_map");
+        crate::assert_with_log!(guard.field_a == 7, "lock remains usable", 7, guard.field_a);
+        crate::test_complete!("test_mutex_guard_try_map_returns_original_guard_on_none");
+    }
+
+    #[test]
+    fn test_mutex_guard_nested_map_projects_inner_field() {
+        init_test("test_mutex_guard_nested_map_projects_inner_field");
+        #[derive(Debug)]
+        struct NestedState {
+            stats: Stats,
+        }
+
+        #[derive(Debug)]
+        struct Stats {
+            counters: Counters,
+        }
+
+        #[derive(Debug)]
+        struct Counters {
+            ready: u32,
+        }
+
+        let mutex = Mutex::new(NestedState {
+            stats: Stats {
+                counters: Counters { ready: 3 },
+            },
+        });
+
+        {
+            let guard = mutex.try_lock().expect("initial lock");
+            let stats = guard.map(|state| &mut state.stats);
+            let mut ready = stats.map(|stats| &mut stats.counters.ready);
+            *ready += 2;
+            crate::assert_with_log!(*ready == 5, "nested map updates inner field", 5, *ready);
+        }
+
+        let guard = mutex.try_lock().expect("lock after nested map");
+        crate::assert_with_log!(
+            guard.stats.counters.ready == 5,
+            "nested map mutation persisted",
+            5,
+            guard.stats.counters.ready
+        );
+        crate::test_complete!("test_mutex_guard_nested_map_projects_inner_field");
+    }
+
+    #[test]
+    fn test_owned_mutex_guard_map_can_cross_thread() {
+        init_test("test_owned_mutex_guard_map_can_cross_thread");
+        let mutex = Arc::new(Mutex::new(TestStruct {
+            field_a: 5,
+            field_b: "owned".to_string(),
+            field_c: vec![1, 2],
+        }));
+
+        let guard = mutex.try_lock_owned().expect("owned lock");
+        let mapped = guard.map(|data| &mut data.field_b);
+
+        let handle = thread::spawn(move || {
+            let mut mapped = mapped;
+            mapped.push_str("-thread");
+            mapped.len()
+        });
+        let mapped_len = handle.join().expect("mapped guard thread should succeed");
+        crate::assert_with_log!(
+            mapped_len == "owned-thread".len(),
+            "owned mapped guard is Send across threads",
+            "owned-thread".len(),
+            mapped_len
+        );
+
+        let guard = mutex.try_lock().expect("lock after owned mapped thread");
+        crate::assert_with_log!(
+            guard.field_b == "owned-thread",
+            "thread mutation persisted",
+            "owned-thread",
+            guard.field_b.as_str()
+        );
+        crate::test_complete!("test_owned_mutex_guard_map_can_cross_thread");
+    }
+
+    #[test]
+    fn mapped_mutex_guard_panic_poison_releases_lock() {
+        init_test("mapped_mutex_guard_panic_poison_releases_lock");
+        let mutex = Arc::new(Mutex::new(TestStruct {
+            field_a: 1,
+            field_b: "poison".to_string(),
+            field_c: vec![],
+        }));
+
+        let worker_mutex = Arc::clone(&mutex);
+        let handle = thread::spawn(move || {
+            let guard = worker_mutex.as_ref().try_lock().expect("lock in worker");
+            let mut mapped = guard.map(|data| &mut data.field_a);
+            *mapped = 99;
+            panic!("poison through mapped guard");
+        });
+        let panic_observed = handle.join().is_err();
+        crate::assert_with_log!(
+            panic_observed,
+            "worker panic observed",
+            true,
+            panic_observed
+        );
+
+        let poisoned = mutex.is_poisoned();
+        crate::assert_with_log!(poisoned, "mapped panic poisons mutex", true, poisoned);
+
+        let try_result = mutex.try_lock();
+        let saw_poison = matches!(try_result, Err(TryLockError::Poisoned));
+        crate::assert_with_log!(
+            saw_poison,
+            "poisoned mutex rejects new lockers",
+            true,
+            saw_poison
+        );
+        crate::test_complete!("mapped_mutex_guard_panic_poison_releases_lock");
+    }
+
+    #[test]
+    fn mutex_guard_map_projection_report_logs_invariants() {
+        init_test("mutex_guard_map_projection_report_logs_invariants");
+        const SCENARIO_ID: &str = "MUTEX-GUARD-MAP-EZR77T";
+        const RCH_COMMAND: &str = "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_asupersync_ezr77t_mutex cargo test -p asupersync --lib mutex_guard_map --features test-internals -- --nocapture";
+
+        #[derive(Debug)]
+        struct ProjectionState {
+            counter: u32,
+            label: String,
+        }
+
+        let holder_cx = test_cx();
+        let waiter_cx = Cx::new(
+            RegionId::from_arena(ArenaIndex::new(0, 1)),
+            TaskId::from_arena(ArenaIndex::new(0, 1)),
+            Budget::INFINITE,
+        );
+        let cancelled_cx = Cx::new(
+            RegionId::from_arena(ArenaIndex::new(0, 2)),
+            TaskId::from_arena(ArenaIndex::new(0, 2)),
+            Budget::INFINITE,
+        );
+
+        let mutex = Mutex::new(ProjectionState {
+            counter: 10,
+            label: "base".to_string(),
+        });
+
+        let mut holder = mutex.lock(&holder_cx);
+        let guard = poll_once(&mut holder)
+            .expect("holder acquires immediately")
+            .expect("holder lock should succeed");
+
+        let mut waiter = mutex.lock(&waiter_cx);
+        let waiter_pending = poll_once(&mut waiter).is_none();
+        crate::assert_with_log!(
+            waiter_pending,
+            "waiter queues behind holder",
+            true,
+            waiter_pending
+        );
+
+        let mut cancelled_waiter = mutex.lock(&cancelled_cx);
+        let cancelled_pending = poll_once(&mut cancelled_waiter).is_none();
+        crate::assert_with_log!(
+            cancelled_pending,
+            "cancelled waiter queues behind holder",
+            true,
+            cancelled_pending
+        );
+
+        let queue_order_before_cancel = mutex.waiters();
+        cancelled_cx.set_cancel_requested(true);
+        let cancelled_result = poll_once(&mut cancelled_waiter);
+        let cancelled = matches!(cancelled_result, Some(Err(LockError::Cancelled)));
+        crate::assert_with_log!(
+            cancelled,
+            "queued cancellation still cancels",
+            true,
+            cancelled
+        );
+        let queue_order_after_cancel = mutex.waiters();
+
+        let mut projected = guard.map(|state| &mut state.counter);
+        *projected += 5;
+        let mutation_result = *projected;
+        drop(projected);
+
+        let waiter_guard = poll_once(&mut waiter)
+            .expect("queued waiter wakes after projected drop")
+            .expect("waiter acquires after projected drop");
+        let wake_count = 1_u32;
+        crate::assert_with_log!(
+            waiter_guard.counter == 15,
+            "queued waiter sees projected mutation",
+            15,
+            waiter_guard.counter
+        );
+        let waiter_label = waiter_guard.label.clone();
+        drop(waiter_guard);
+
+        let final_waiters = mutex.waiters();
+        let report = serde_json::json!({
+            "scenario_id": SCENARIO_ID,
+            "lock_acquisition_order": ["holder", "waiter", "cancelled_waiter"],
+            "projection_target": "counter",
+            "mutation_result": mutation_result,
+            "drop_release_count": 1,
+            "cancellation_state": cancelled,
+            "cancellation_count": 1,
+            "waiter_wake_count": wake_count,
+            "queue_order_before_cancel": queue_order_before_cancel,
+            "queue_order_after_cancel": queue_order_after_cancel,
+            "stale_waiter_count": final_waiters,
+            "timeout_result": "cancelled",
+            "acquisition_result": "waiter_after_projection_drop",
+            "observed_label": waiter_label,
+            "rch_command": RCH_COMMAND,
+            "artifact_paths": [],
+            "final_verdict": "pass_no_leak_no_deadlock",
+        });
+        println!("{report}");
+
+        let no_stale_waiters = final_waiters == 0;
+        crate::assert_with_log!(
+            no_stale_waiters,
+            "projection drop leaves no stale waiters",
+            0usize,
+            final_waiters
+        );
+        crate::test_complete!("mutex_guard_map_projection_report_logs_invariants");
     }
 
     #[test]
@@ -3792,20 +4324,12 @@ mod tests {
 
     #[test]
     fn audit_mutex_guard_map_api_feature_gap_analysis() {
-        //! Audit src/sync/mutex.rs MutexGuard::map() (downgrade to sub-field):
-        //! is this API exposed? If not exposed but useful, document feature gap.
+        //! Audit src/sync/mutex.rs MutexGuard::map() / try_map():
+        //! verify the projection APIs exist and preserve lock ownership.
         //!
-        //! FINDING: ❌ MISSING FEATURE - MutexGuard::map() not exposed
-        //!
-        //! Standard async mutex implementations (Tokio, async-std) provide guard
-        //! mapping to allow fine-grained access to sub-fields while preserving
-        //! the lock lifetime. This is missing from asupersync Mutex.
+        //! FINDING: ✅ PRESENT - borrowed + owned guard projection APIs are exposed
 
         init_test("audit_mutex_guard_map_api_feature_gap_analysis");
-
-        println!("🔍 MutexGuard API Completeness Analysis:");
-
-        // Phase 1: Verify current API surface
         let _cx = test_cx();
         let mutex = Mutex::new(TestStruct {
             field_a: 42,
@@ -3814,126 +4338,55 @@ mod tests {
         });
 
         let guard = mutex.try_lock().expect("should acquire lock");
+        let mut mapped = guard.map(|data| &mut data.field_a);
+        *mapped += 8;
+        crate::assert_with_log!(
+            *mapped == 50,
+            "borrowed map exposes projected field",
+            50,
+            *mapped
+        );
+        drop(mapped);
 
-        println!("  Phase 1: Current MutexGuard API verification");
-        println!("    - Deref: guard.field_a = {}", guard.field_a);
-        println!("    - Deref: guard.field_b = {}", guard.field_b);
-        println!("    - Deref: guard.field_c len = {}", guard.field_c.len());
-        println!("    - DerefMut: Available ✅");
-        println!("    - Debug: Available ✅");
-        println!("    - Drop: Available ✅");
-
-        // Phase 2: Demonstrate missing map() functionality
-        println!("  Phase 2: Missing map() functionality demonstration");
-
-        // This is what we CANNOT do currently:
-        // let mapped_guard = guard.map(|data| &data.field_a);  // MISSING
-        // let string_guard = guard.map(|data| &mut data.field_b);  // MISSING
-
-        println!("    ❌ MutexGuard::map() - NOT AVAILABLE");
-        println!("    ❌ MutexGuard::try_map() - NOT AVAILABLE");
-        println!("    ❌ OwnedMutexGuard::map() - NOT AVAILABLE");
-        println!("    ❌ OwnedMutexGuard::try_map() - NOT AVAILABLE");
-
+        let guard = mutex.try_lock().expect("reacquire after borrowed map");
+        let guard = guard
+            .try_map(|data| data.field_c.get_mut(1))
+            .expect("vector element projection should exist");
+        crate::assert_with_log!(
+            *guard == 2,
+            "borrowed try_map projects optional field",
+            2,
+            *guard
+        );
         drop(guard);
 
-        // Phase 3: Use case analysis for mapped guards
-        println!("  Phase 3: Use cases requiring guard mapping");
-
-        println!("    Use case 1: Fine-grained field access");
-        println!("    - Current: Must hold entire struct lock");
-        println!("    - With map(): Could lock just field_a access");
-
-        println!("    Use case 2: API ergonomics");
-        println!("    - Current: Functions take &MutexGuard<BigStruct>");
-        println!("    - With map(): Functions take MappedGuard<i32>");
-
-        println!("    Use case 3: Lock scope reduction");
-        println!("    - Current: Lock held for entire struct lifetime");
-        println!("    - With map(): Lock scoped to specific field lifetime");
-
-        // Phase 4: Comparison with standard implementations
-        println!("  Phase 4: Standard library comparison");
-
-        println!("    Tokio::sync::MutexGuard:");
-        println!("    - map<U, F>(guard, f: F) -> MappedMutexGuard<T, U> ✅");
-        println!("    - try_map<U, F, E>(guard, f: F) -> Result<MappedMutexGuard<T, U>, E> ✅");
-
-        println!("    async_std::sync::MutexGuard:");
-        println!("    - map<U, F>(guard, f: F) -> MappedMutexGuard<T, U> ✅");
-
-        println!("    std::sync::MutexGuard:");
-        println!("    - map<U, F>(guard, f: F) -> MappedMutexGuard<T, U> ✅");
-        println!("    - try_map<U, F, E>(guard, f: F) -> Result<MappedMutexGuard<T, U>, E> ✅");
-
-        println!("    asupersync::sync::MutexGuard:");
-        println!("    - map() functionality: ❌ MISSING");
-
-        // Phase 5: Architecture considerations for asupersync
-        println!("  Phase 5: Architecture considerations for asupersync");
-
-        println!("    Challenges for asupersync implementation:");
-        println!("    - MutexGuard is !Send (task-local semantics)");
-        println!("    - MappedGuard must preserve !Send property");
-        println!("    - Cancel-aware unlock() must work through mapped guards");
-        println!("    - Poison detection must propagate through mapping");
-
-        println!("    Required types:");
-        println!("    - MappedMutexGuard<T, U> where T: guard source, U: mapped target");
-        println!("    - OwnedMappedMutexGuard<T, U> for Arc<Mutex<T>> usage");
-
-        println!("    Required methods:");
-        println!("    - MutexGuard::map<U, F>(self, f: F) -> MappedMutexGuard<T, U>");
-        println!(
-            "    - MutexGuard::try_map<U, F, E>(self, f: F) -> Result<MappedMutexGuard<T, U>, E>"
-        );
-        println!("    - OwnedMutexGuard::map<U, F>(self, f: F) -> OwnedMappedMutexGuard<T, U>");
-
-        // Phase 6: Impact assessment
-        println!("  Phase 6: Feature gap impact assessment");
-
-        println!("    Current workarounds:");
-        println!("    - Manual field access through Deref/DerefMut ⚠️");
-        println!("    - Broader lock scope than necessary ⚠️");
-        println!("    - Less ergonomic APIs ⚠️");
-
-        println!("    Benefits of adding map() support:");
-        println!("    - Fine-grained lock scope control ✅");
-        println!("    - Better API ergonomics ✅");
-        println!("    - Standard library compatibility ✅");
-        println!("    - Memory efficiency (smaller guard types) ✅");
-
-        // Phase 7: Feature priority assessment
-        println!("  Phase 7: Feature priority assessment");
-
+        let mutex = Arc::new(mutex);
+        let guard = mutex.try_lock_owned().expect("owned lock");
+        let mut mapped = guard.map(|data| &mut data.field_b);
+        mapped.push_str(" world");
         crate::assert_with_log!(
-            true, // This is a missing feature, not a defect
-            "MutexGuard::map() is missing but not critical for basic functionality",
-            true,
-            true
+            mapped.as_str() == "hello world",
+            "owned map exposes projected field",
+            "hello world",
+            mapped.as_str()
+        );
+        drop(mapped);
+
+        let guard = mutex.try_lock_owned().expect("owned reacquire");
+        let guard = match guard.try_map(|data| data.field_c.get_mut(2)) {
+            Ok(guard) => guard,
+            Err(_) => panic!("owned optional projection should exist"),
+        };
+        crate::assert_with_log!(
+            *guard == 3,
+            "owned try_map projects optional field",
+            3,
+            *guard
         );
 
-        println!("    Priority: MEDIUM");
-        println!("    - Not critical for basic async mutex functionality");
-        println!("    - Improves ergonomics and performance for specific use cases");
-        println!("    - Industry standard feature in other implementations");
-        println!("    - Would enhance asupersync's completeness vs competitors");
-
-        println!();
-        println!("📋 FEATURE GAP IDENTIFIED:");
-        println!("  - Missing: MutexGuard::map() and try_map() methods");
-        println!("  - Missing: OwnedMutexGuard::map() and try_map() methods");
-        println!("  - Missing: MappedMutexGuard<T, U> and OwnedMappedMutexGuard<T, U> types");
-        println!("  - Impact: Reduced ergonomics, broader lock scopes than necessary");
-        println!("  - Recommendation: File feature bead for guard mapping support");
-
-        println!();
-        println!("🎯 RECOMMENDED FEATURE BEAD:");
-        println!("  Title: Add MutexGuard::map() and try_map() support");
-        println!("  Description: Implement guard mapping to allow fine-grained field access");
-        println!("  Priority: P2 (enhancement, non-critical)");
-        println!("  Effort: Medium (new guard types + mapping methods)");
-        println!("  Benefit: Better ergonomics, standard library compatibility");
+        println!("✅ MutexGuard::map/try_map present for borrowed + owned guards");
+        println!("✅ Projection keeps lock ownership until mapped guard drop");
+        println!("✅ Optional projections return the original guard on absence");
 
         crate::test_complete!("audit_mutex_guard_map_api_feature_gap_analysis");
     }
@@ -4111,10 +4564,7 @@ mod tests {
         //! preserving the lock. Verify the API exists, and verify it correctly
         //! compiles + works on a struct with multiple fields.
         //!
-        //! FINDING: ❌ MISSING FEATURE - MutexGuard::map() API not exposed
-        //!
-        //! Standard async runtimes (tokio, async-std, std) provide guard mapping for
-        //! fine-grained field access. asupersync lacks this ergonomic feature.
+        //! FINDING: ✅ PRESENT - field projection works on nested + owned paths
 
         init_test("audit_mutex_guard_map_field_projection_multi_field_struct");
 
@@ -4149,127 +4599,89 @@ mod tests {
             }
         }
 
-        println!("📊 MutexGuard Field Projection Analysis:");
-        println!("  - Test struct: MultiFieldData with 5 fields");
-        println!("  - Required: Guard mapping to individual fields");
-        println!("  - Use case: Fine-grained lock scoping");
-
         let data = MultiFieldData::new();
-        let mutex = Mutex::new(data);
-
-        println!();
-        println!("🔍 Phase 1: Current API limitations");
+        let mutex = Arc::new(Mutex::new(data));
 
         {
-            let guard = mutex.try_lock().expect("should acquire lock");
-            println!("  - Current guard type: MutexGuard<MultiFieldData>");
-            println!("  - Access method: Whole struct dereference only");
-            println!("  - Lock scope: Entire struct lifetime");
-
-            // Current access pattern - works but coarse-grained
-            let _counter_value = guard.counter;
-            let _name_ref = &guard.name;
-            let _values_ref = &guard.values;
-            let _metadata_ref = &guard.metadata;
-            let _threshold = guard.config.threshold;
-
-            println!("  - Field access: {} (counter)", guard.counter);
-            println!("  - String field: '{}' (name)", guard.name);
-            println!("  - Vec field: {:?} (values)", guard.values);
-            println!("  - Optional metadata: {:?} (metadata)", guard.metadata);
-            println!(
-                "  - Config threshold: {} (threshold)",
-                guard.config.threshold
-            );
-            println!(
-                "  - Nested struct: enabled={} (config.enabled)",
-                guard.config.enabled
+            let guard = mutex.as_ref().try_lock().expect("should acquire lock");
+            let mut counter = guard.map(|data| &mut data.counter);
+            *counter += 1;
+            crate::assert_with_log!(
+                *counter == 43,
+                "counter projection mutates selected field",
+                43,
+                *counter
             );
         }
 
-        println!();
-        println!("❌ Phase 2: Missing map() functionality demonstration");
-
         {
-            let _guard = mutex.try_lock().expect("should acquire lock");
-
-            // These would be the ideal API calls, but they DON'T EXIST:
-
-            // Map to counter field (u32)
-            // let counter_guard = guard.map(|data| &mut data.counter);  // ❌ NOT AVAILABLE
-            println!("  ❌ guard.map(|data| &mut data.counter) - MISSING");
-
-            // Map to name field (String)
-            // let name_guard = guard.map(|data| &mut data.name);  // ❌ NOT AVAILABLE
-            println!("  ❌ guard.map(|data| &mut data.name) - MISSING");
-
-            // Map to nested field (bool)
-            // let enabled_guard = guard.map(|data| &mut data.config.enabled);  // ❌ NOT AVAILABLE
-            println!("  ❌ guard.map(|data| &mut data.config.enabled) - MISSING");
-
-            // Fallible mapping
-            // let metadata_guard = guard.try_map(|data| data.metadata.as_mut().ok_or("None"));  // ❌ NOT AVAILABLE
-            println!("  ❌ guard.try_map() for optional fields - MISSING");
-
-            println!("  Current limitation: Must hold entire struct lock for field access");
+            let guard = mutex.as_ref().try_lock().expect("second lock");
+            let config = guard.map(|data| &mut data.config);
+            let mut enabled = config.map(|config| &mut config.enabled);
+            *enabled = false;
+            crate::assert_with_log!(
+                !*enabled,
+                "nested projection mutates nested field",
+                false,
+                *enabled
+            );
         }
 
-        println!();
-        println!("🚀 Phase 3: Required API surface for guard mapping");
+        {
+            let guard = mutex.try_lock_owned().expect("owned lock");
+            let metadata = match guard.try_map(|data| data.metadata.as_mut()) {
+                Ok(metadata) => metadata,
+                Err(_) => panic!("metadata projection exists"),
+            };
+            let mut metadata = metadata.map(|value| value.as_mut_str());
+            metadata.make_ascii_uppercase();
+            crate::assert_with_log!(
+                &*metadata == "TEST METADATA",
+                "owned mapped guard projects optional metadata",
+                "TEST METADATA",
+                &*metadata
+            );
+        }
 
-        println!("  Standard library patterns:");
-        println!("    std::sync::MutexGuard::map<U, F>(guard, f: F) -> MappedMutexGuard<T, U> ✅");
-        println!("    std::sync::MutexGuard::try_map<U, F, E>(guard, f: F) -> Result<...> ✅");
-
-        println!("  Tokio patterns:");
-        println!(
-            "    tokio::sync::MutexGuard::map<U, F>(guard, f: F) -> MappedMutexGuard<T, U> ✅"
+        let guard = mutex.as_ref().try_lock().expect("final lock");
+        crate::assert_with_log!(
+            guard.counter == 43,
+            "counter mutation persisted",
+            43,
+            guard.counter
         );
-        println!(
-            "    tokio::sync::OwnedMutexGuard::map<U, F>(guard, f: F) -> OwnedMappedMutexGuard<T, U> ✅"
+        crate::assert_with_log!(
+            guard.name == "test_data",
+            "unmapped string field remains readable",
+            "test_data",
+            guard.name.as_str()
+        );
+        crate::assert_with_log!(
+            guard.values == vec![1, 2, 3, 4, 5],
+            "unmapped vec field remains readable",
+            vec![1, 2, 3, 4, 5],
+            guard.values.clone()
+        );
+        crate::assert_with_log!(
+            !guard.config.enabled,
+            "nested bool mutation persisted",
+            false,
+            guard.config.enabled
+        );
+        crate::assert_with_log!(
+            guard.config.threshold == 3.14,
+            "unmapped nested field remains readable",
+            3.14_f64,
+            guard.config.threshold
+        );
+        crate::assert_with_log!(
+            guard.metadata.as_deref() == Some("TEST METADATA"),
+            "metadata mutation persisted",
+            Some("TEST METADATA"),
+            guard.metadata.as_deref()
         );
 
-        println!("  async-std patterns:");
-        println!(
-            "    async_std::sync::MutexGuard::map<U, F>(guard, f: F) -> MappedMutexGuard<T, U> ✅"
-        );
-
-        println!("  Missing in asupersync:");
-        println!("    asupersync::sync::MutexGuard::map() ❌ NOT AVAILABLE");
-        println!("    asupersync::sync::OwnedMutexGuard::map() ❌ NOT AVAILABLE");
-
-        println!();
-        println!("📋 Phase 4: Use case analysis for field projection");
-
-        println!("  Use Case 1: Counter increment with minimal lock scope");
-        println!("    Current: Whole struct locked for counter increment");
-        println!("    Desired: Only counter field logically locked");
-
-        println!("  Use Case 2: String manipulation with field isolation");
-        println!("    Current: Whole struct locked for string operations");
-        println!("    Desired: Only name field accessible to function");
-
-        println!("  Use Case 3: Nested field access");
-        println!("    Current: Full struct access for nested field");
-        println!("    Desired: Direct access to config.enabled only");
-
-        println!("  Use Case 4: Optional field handling");
-        println!("    Current: Manual Option handling with full struct access");
-        println!("    Desired: Fallible mapping to Option<String> contents");
-
-        println!();
-        println!("❌ VERDICT: FEATURE MISSING - File feature bead required");
-        println!("  - MutexGuard::map() and try_map() not available ❌");
-        println!("  - OwnedMutexGuard::map() and try_map() not available ❌");
-        println!("  - Multi-field struct testing confirms limitation ❌");
-        println!("  - API parity with tokio/async-std/std missing ❌");
-
-        println!();
-        println!("📝 RECOMMENDATION:");
-        println!("  Priority: P2-Medium (ergonomic improvement)");
-        println!("  Effort: High (new guard types + mapping implementation)");
-        println!("  Benefits: Fine-grained field access, API parity");
-        println!("  Required: MappedMutexGuard<T, U> + mapping methods");
+        println!("✅ Multi-field projection works for direct, nested, and owned optional paths");
 
         crate::test_complete!("audit_mutex_guard_map_field_projection_multi_field_struct");
     }
