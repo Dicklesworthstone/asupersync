@@ -164,7 +164,7 @@ RUN_LOG_PATH="${RUN_DIR}/run.log"
 BUNDLE_MANIFEST_PATH="${RUN_DIR}/bundle_manifest.json"
 RUN_REPORT_PATH="${RUN_DIR}/run_report.json"
 SCENARIO_REPORT_PATH="${ARTIFACT_ROOT}/adaptive_batch_sizing_report.json"
-RCH_TAIL_TIMEOUT_SECONDS="${ADAPTIVE_BATCH_SIZING_RCH_TIMEOUT_SECONDS:-120}"
+RCH_TAIL_TIMEOUT_SECONDS="${ADAPTIVE_BATCH_SIZING_RCH_TIMEOUT_SECONDS:-300}"
 
 mkdir -p "$RUN_DIR"
 HOST_FINGERPRINT_JSON="$(host_fingerprint_json)"
@@ -185,19 +185,56 @@ if [ "$MODE" = "dry-run" ]; then
     VALIDATION_PASSED=true
     MESSAGE="dry run emitted manifests only"
 else
-    if timeout "${RCH_TAIL_TIMEOUT_SECONDS}s" bash -lc "$COMMAND" >"$RUN_LOG_PATH" 2>&1; then
-        COMMAND_EXIT_CODE=0
-        MESSAGE="rch proof command completed"
-    else
-        COMMAND_EXIT_CODE=$?
-        if [ "$COMMAND_EXIT_CODE" -eq 124 ] && grep -q 'Remote command finished: exit=0' "$RUN_LOG_PATH"; then
+    COMMAND_EXIT_CODE=-1
+    EARLY_SUCCESS=0
+    set +e
+    bash -lc "$COMMAND" >"$RUN_LOG_PATH" 2>&1 &
+    COMMAND_PID=$!
+    set -e
+
+    POLL_SECONDS=0
+    MAX_POLL_SECONDS="$RCH_TAIL_TIMEOUT_SECONDS"
+
+    while kill -0 "$COMMAND_PID" 2>/dev/null; do
+        if grep -q 'ADAPTIVE_BATCH_SIZING_REPORT_JSON_END' "$RUN_LOG_PATH" 2>/dev/null \
+            && grep -q 'Remote command finished: exit=0' "$RUN_LOG_PATH" 2>/dev/null; then
+            kill "$COMMAND_PID" 2>/dev/null || true
+            wait "$COMMAND_PID" 2>/dev/null || true
             COMMAND_EXIT_CODE=0
+            EARLY_SUCCESS=1
+            break
+        fi
+        if grep -Eq 'Remote command finished: exit=[1-9][0-9]*' "$RUN_LOG_PATH" 2>/dev/null; then
+            break
+        fi
+        sleep 1
+        POLL_SECONDS=$((POLL_SECONDS + 1))
+        if [ "$POLL_SECONDS" -ge "$MAX_POLL_SECONDS" ]; then
+            kill "$COMMAND_PID" 2>/dev/null || true
+            wait "$COMMAND_PID" 2>/dev/null || true
+            COMMAND_EXIT_CODE=124
+            printf 'FATAL: timed out waiting for adaptive batch sizing proof markers\n' >>"$RUN_LOG_PATH"
+            break
+        fi
+    done
+
+    if [ "$COMMAND_EXIT_CODE" -eq -1 ]; then
+        set +e
+        wait "$COMMAND_PID"
+        COMMAND_EXIT_CODE=$?
+        set -e
+    fi
+
+    if [ "$COMMAND_EXIT_CODE" -eq 0 ]; then
+        if [ "$EARLY_SUCCESS" -eq 1 ]; then
             MESSAGE="rch proof passed before retrieval tail timeout"
         else
-            SCRIPT_EXIT_CODE=$COMMAND_EXIT_CODE
-            STATUS="failed"
-            MESSAGE="rch proof command failed"
+            MESSAGE="rch proof command completed"
         fi
+    else
+        SCRIPT_EXIT_CODE=$COMMAND_EXIT_CODE
+        STATUS="failed"
+        MESSAGE="rch proof command failed"
     fi
 
     if [ "$STATUS" = "passed" ]; then
@@ -212,10 +249,10 @@ else
                 --argjson actual "$ACTUAL_REPORT_PROJECTION_JSON" \
                 '$expected == $actual' >/dev/null; then
                 VALIDATION_PASSED=true
-                if [ "$MESSAGE" = "rch proof command completed" ]; then
-                    MESSAGE="report projection matched the contract"
+                if [ "$EARLY_SUCCESS" -eq 1 ]; then
+                    MESSAGE="report projection matched the contract after marker completion"
                 else
-                    MESSAGE="report projection matched the contract after retrieval tail timeout"
+                    MESSAGE="report projection matched the contract"
                 fi
             else
                 SCRIPT_EXIT_CODE=1
