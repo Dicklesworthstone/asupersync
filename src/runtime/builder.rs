@@ -2337,6 +2337,16 @@ impl RuntimeBuilder {
         self
     }
 
+    /// Select a storage-temperature policy for runtime metadata and retained evidence.
+    #[must_use]
+    pub fn arena_temperature_policy(
+        mut self,
+        policy: crate::runtime::config::ArenaTemperaturePolicy,
+    ) -> Self {
+        self.config.arena_temperature_policy = policy;
+        self
+    }
+
     /// Select a trace and diagnostic retention profile.
     ///
     /// This changes only storage envelopes and retention limits. Scheduling
@@ -6255,6 +6265,20 @@ worker_threads = 16
                 local_queue_soft_limit: 4,
                 spill_check_interval: 1,
             }
+        );
+    }
+
+    #[test]
+    fn runtime_builder_preserves_arena_temperature_policy() {
+        init_test_logging();
+
+        let builder = RuntimeBuilder::new().arena_temperature_policy(
+            crate::runtime::config::ArenaTemperaturePolicy::TieredColdEvidenceLargePages,
+        );
+
+        assert_eq!(
+            builder.config.arena_temperature_policy,
+            crate::runtime::config::ArenaTemperaturePolicy::TieredColdEvidenceLargePages,
         );
     }
 

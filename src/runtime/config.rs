@@ -16,6 +16,7 @@
 //! | `enable_parking` | true |
 //! | `poll_budget` | 128 |
 //! | `capacity_hints` | `None` (auto from `worker_threads`) |
+//! | `arena_temperature_policy` | `ArenaTemperaturePolicy::Unified` |
 //! | `trace_storage_profile` | `TraceStorageProfile::Default` |
 //! | `browser_ready_handoff_limit` | 0 (disabled) |
 //! | `browser_worker_offload` | disabled, min cost 1024, max in-flight 16 |
@@ -29,10 +30,11 @@
 
 use crate::observability::ObservabilityConfig;
 use crate::observability::metrics::{MetricsProvider, NoOpMetrics};
-use crate::record::RegionLimits;
+use crate::record::{ObligationRecord, RegionLimits, RegionRecord, TaskRecord};
 use crate::runtime::deadline_monitor::{DeadlineWarning, MonitorConfig};
 use crate::trace::distributed::LogicalClockMode;
 use crate::types::CancelAttributionConfig;
+use crate::util::Arena;
 use sha2::{Digest, Sha256};
 use std::fmt;
 use std::str::FromStr;
@@ -214,6 +216,204 @@ impl Default for RuntimeCapacityHints {
     }
 }
 
+/// Storage-temperature policy for runtime metadata and retained evidence.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ArenaTemperaturePolicy {
+    /// Keep hot metadata and retained evidence on the unified allocator path.
+    Unified,
+    /// Separate retained evidence into a colder tier while keeping runtime metadata hot.
+    TieredColdEvidence,
+    /// Prefer large-page cold slabs for retained evidence when the host supports them.
+    TieredColdEvidenceLargePages,
+}
+
+impl ArenaTemperaturePolicy {
+    /// Returns the stable operator-facing name for the policy.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Unified => "unified",
+            Self::TieredColdEvidence => "tiered-cold-evidence",
+            Self::TieredColdEvidenceLargePages => "tiered-cold-evidence-large-pages",
+        }
+    }
+}
+
+impl Default for ArenaTemperaturePolicy {
+    fn default() -> Self {
+        Self::Unified
+    }
+}
+
+impl fmt::Display for ArenaTemperaturePolicy {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// Parse error for [`ArenaTemperaturePolicy`] text values.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ParseArenaTemperaturePolicyError;
+
+impl fmt::Display for ParseArenaTemperaturePolicyError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("unknown arena temperature policy")
+    }
+}
+
+impl std::error::Error for ParseArenaTemperaturePolicyError {}
+
+impl FromStr for ArenaTemperaturePolicy {
+    type Err = ParseArenaTemperaturePolicyError;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "unified" => Ok(Self::Unified),
+            "tiered-cold-evidence" | "tiered_cold_evidence" => Ok(Self::TieredColdEvidence),
+            "tiered-cold-evidence-large-pages" | "tiered_cold_evidence_large_pages" => {
+                Ok(Self::TieredColdEvidenceLargePages)
+            }
+            _ => Err(ParseArenaTemperaturePolicyError),
+        }
+    }
+}
+
+/// Operator-visible cold-tier allocation source.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ArenaColdAllocationSource {
+    /// All bytes stay on the unified allocator path.
+    UnifiedAllocator,
+    /// Retained evidence is routed to a colder allocator tier.
+    ColdTier,
+    /// Retained evidence is routed to a colder allocator tier using large pages.
+    ColdTierLargePages,
+}
+
+impl ArenaColdAllocationSource {
+    /// Returns the stable operator-facing name for the allocation source.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::UnifiedAllocator => "unified_allocator",
+            Self::ColdTier => "cold_tier",
+            Self::ColdTierLargePages => "cold_tier_large_pages",
+        }
+    }
+}
+
+/// Conservative fallback reasons for arena-temperature planning.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ArenaTemperatureFallbackReason {
+    /// Large-page cold slabs were requested but are unavailable.
+    LargePagesUnsupported,
+}
+
+impl ArenaTemperatureFallbackReason {
+    /// Returns the stable operator-facing name for the fallback.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::LargePagesUnsupported => "large_pages_unsupported",
+        }
+    }
+}
+
+/// Operator-facing accounting report for arena temperature planning.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ArenaTemperatureReport {
+    /// Requested runtime policy.
+    pub requested_policy: ArenaTemperaturePolicy,
+    /// Effective runtime policy after conservative fallback handling.
+    pub effective_policy: ArenaTemperaturePolicy,
+    /// Optional fallback reason if the effective policy differs from the requested policy.
+    pub fallback_reason: Option<ArenaTemperatureFallbackReason>,
+    /// Allocation source selected for retained evidence.
+    pub cold_allocation_source: ArenaColdAllocationSource,
+    /// Whether large-page cold slabs are active for retained evidence.
+    pub large_page_cold_slabs_active: bool,
+    /// Estimated hot bytes reserved for the task table.
+    pub hot_task_table_bytes: usize,
+    /// Estimated hot bytes reserved for the region table.
+    pub hot_region_table_bytes: usize,
+    /// Estimated hot bytes reserved for the obligation table.
+    pub hot_obligation_table_bytes: usize,
+    /// Estimated bytes reserved for the hot trace ring.
+    pub hot_trace_ring_bytes: usize,
+    /// Estimated retained evidence bytes across cancellation/distributed traces.
+    pub retained_evidence_bytes: usize,
+    /// Estimated retained evidence bytes explicitly routed into the cold tier.
+    pub cold_evidence_bytes: usize,
+}
+
+impl ArenaTemperatureReport {
+    /// Estimated bytes intentionally kept on the hot path.
+    #[must_use]
+    pub const fn estimated_hot_bytes(&self) -> usize {
+        self.hot_task_table_bytes
+            .saturating_add(self.hot_region_table_bytes)
+            .saturating_add(self.hot_obligation_table_bytes)
+            .saturating_add(self.hot_trace_ring_bytes)
+    }
+
+    /// Estimated total bytes across hot metadata and retained evidence.
+    #[must_use]
+    pub const fn estimated_total_bytes(&self) -> usize {
+        self.estimated_hot_bytes()
+            .saturating_add(self.retained_evidence_bytes)
+    }
+
+    /// Render the stable operator-facing report fields.
+    #[must_use]
+    pub fn render_report_fields(&self) -> Vec<(&'static str, String)> {
+        vec![
+            ("requested_policy", self.requested_policy.to_string()),
+            ("effective_policy", self.effective_policy.to_string()),
+            (
+                "fallback_reason",
+                self.fallback_reason
+                    .map_or_else(|| "none".to_string(), |reason| reason.as_str().to_string()),
+            ),
+            (
+                "cold_allocation_source",
+                self.cold_allocation_source.as_str().to_string(),
+            ),
+            (
+                "large_page_cold_slabs_active",
+                format_bool(self.large_page_cold_slabs_active),
+            ),
+            (
+                "hot_task_table_bytes",
+                self.hot_task_table_bytes.to_string(),
+            ),
+            (
+                "hot_region_table_bytes",
+                self.hot_region_table_bytes.to_string(),
+            ),
+            (
+                "hot_obligation_table_bytes",
+                self.hot_obligation_table_bytes.to_string(),
+            ),
+            (
+                "hot_trace_ring_bytes",
+                self.hot_trace_ring_bytes.to_string(),
+            ),
+            (
+                "retained_evidence_bytes",
+                self.retained_evidence_bytes.to_string(),
+            ),
+            ("cold_evidence_bytes", self.cold_evidence_bytes.to_string()),
+            (
+                "estimated_hot_bytes",
+                self.estimated_hot_bytes().to_string(),
+            ),
+            (
+                "estimated_total_bytes",
+                self.estimated_total_bytes().to_string(),
+            ),
+        ]
+    }
+}
+
 /// Readable storage profiles for runtime trace and diagnostic retention.
 ///
 /// These profiles are deliberately policy-only: they scale hot/cold trace
@@ -387,6 +587,74 @@ impl FromStr for TraceStorageProfile {
             "large-memory-256g" | "large_memory_256g" => Ok(Self::LargeMemory256G),
             _ => Err(ParseTraceStorageProfileError),
         }
+    }
+}
+
+fn build_arena_temperature_report(
+    capacity_hints: RuntimeCapacityHints,
+    trace_storage_budget: TraceStorageBudget,
+    requested_policy: ArenaTemperaturePolicy,
+    large_page_cold_slabs_supported: bool,
+) -> ArenaTemperatureReport {
+    let hot_task_table_bytes =
+        Arena::<TaskRecord>::estimated_bytes_for_capacity(capacity_hints.task_capacity);
+    let hot_region_table_bytes =
+        Arena::<RegionRecord>::estimated_bytes_for_capacity(capacity_hints.region_capacity);
+    let hot_obligation_table_bytes =
+        Arena::<ObligationRecord>::estimated_bytes_for_capacity(capacity_hints.obligation_capacity);
+    let retained_evidence_bytes = trace_storage_budget.estimated_cold_bytes();
+
+    let (effective_policy, fallback_reason, cold_allocation_source, large_page_cold_slabs_active) =
+        match requested_policy {
+            ArenaTemperaturePolicy::Unified => (
+                ArenaTemperaturePolicy::Unified,
+                None,
+                ArenaColdAllocationSource::UnifiedAllocator,
+                false,
+            ),
+            ArenaTemperaturePolicy::TieredColdEvidence => (
+                ArenaTemperaturePolicy::TieredColdEvidence,
+                None,
+                ArenaColdAllocationSource::ColdTier,
+                false,
+            ),
+            ArenaTemperaturePolicy::TieredColdEvidenceLargePages => {
+                if large_page_cold_slabs_supported {
+                    (
+                        ArenaTemperaturePolicy::TieredColdEvidenceLargePages,
+                        None,
+                        ArenaColdAllocationSource::ColdTierLargePages,
+                        true,
+                    )
+                } else {
+                    (
+                        ArenaTemperaturePolicy::TieredColdEvidence,
+                        Some(ArenaTemperatureFallbackReason::LargePagesUnsupported),
+                        ArenaColdAllocationSource::ColdTier,
+                        false,
+                    )
+                }
+            }
+        };
+
+    let cold_evidence_bytes = if matches!(effective_policy, ArenaTemperaturePolicy::Unified) {
+        0
+    } else {
+        retained_evidence_bytes
+    };
+
+    ArenaTemperatureReport {
+        requested_policy,
+        effective_policy,
+        fallback_reason,
+        cold_allocation_source,
+        large_page_cold_slabs_active,
+        hot_task_table_bytes,
+        hot_region_table_bytes,
+        hot_obligation_table_bytes,
+        hot_trace_ring_bytes: trace_storage_budget.estimated_hot_bytes(),
+        retained_evidence_bytes,
+        cold_evidence_bytes,
     }
 }
 
@@ -564,6 +832,8 @@ pub struct RuntimeConfig {
     /// When `None`, capacities auto-scale from `worker_threads` using the
     /// historical 4-worker baseline (512 tasks / 128 regions / 256 obligations).
     pub capacity_hints: Option<RuntimeCapacityHints>,
+    /// Storage-temperature policy for hot runtime metadata and retained evidence.
+    pub arena_temperature_policy: ArenaTemperaturePolicy,
     /// Trace and diagnostic retention policy for the runtime.
     pub trace_storage_profile: TraceStorageProfile,
     /// Browser pump fairness bound for consecutive ready dispatches.
@@ -688,6 +958,25 @@ impl RuntimeConfig {
             .unwrap_or_else(|| RuntimeCapacityHints::for_worker_threads(self.worker_threads))
     }
 
+    /// Returns the operator-facing arena temperature report for the selected policy.
+    ///
+    /// The `large_page_cold_slabs_supported` flag lets callers fail closed on
+    /// hosts where large-page cold slabs are unavailable. The default runtime
+    /// path should pass real host support when that probe exists; until then
+    /// tests and dry-run planners can drive the conservative branch explicitly.
+    #[must_use]
+    pub fn arena_temperature_report(
+        &self,
+        large_page_cold_slabs_supported: bool,
+    ) -> ArenaTemperatureReport {
+        build_arena_temperature_report(
+            self.resolved_capacity_hints(),
+            self.trace_storage_budget(),
+            self.arena_temperature_policy,
+            large_page_cold_slabs_supported,
+        )
+    }
+
     /// Returns the operator-facing trace storage budget for the selected profile.
     #[must_use]
     pub const fn trace_storage_budget(&self) -> TraceStorageBudget {
@@ -756,6 +1045,7 @@ impl Default for RuntimeConfig {
             enable_parking: true,
             poll_budget: 128,
             capacity_hints: None,
+            arena_temperature_policy: ArenaTemperaturePolicy::Unified,
             trace_storage_profile: TraceStorageProfile::Default,
             browser_ready_handoff_limit: 0,
             browser_worker_offload: BrowserWorkerOffloadConfig::default(),
@@ -4070,7 +4360,69 @@ mod tests {
             CancelAttributionConfig::default(),
             config.cancel_attribution
         );
+        crate::assert_with_log!(
+            config.arena_temperature_policy == ArenaTemperaturePolicy::Unified,
+            "arena_temperature_policy",
+            ArenaTemperaturePolicy::Unified,
+            config.arena_temperature_policy
+        );
         crate::test_complete!("test_default_config_sane");
+    }
+
+    #[test]
+    fn arena_temperature_policy_text_roundtrip_is_stable() {
+        init_test("arena_temperature_policy_text_roundtrip_is_stable");
+        crate::assert_with_log!(
+            ArenaTemperaturePolicy::Unified.as_str() == "unified",
+            "unified as_str",
+            "unified",
+            ArenaTemperaturePolicy::Unified.as_str()
+        );
+        crate::assert_with_log!(
+            ArenaTemperaturePolicy::TieredColdEvidence.as_str() == "tiered-cold-evidence",
+            "tiered-cold-evidence as_str",
+            "tiered-cold-evidence",
+            ArenaTemperaturePolicy::TieredColdEvidence.as_str()
+        );
+        crate::assert_with_log!(
+            ArenaTemperaturePolicy::TieredColdEvidenceLargePages.as_str()
+                == "tiered-cold-evidence-large-pages",
+            "tiered-cold-evidence-large-pages as_str",
+            "tiered-cold-evidence-large-pages",
+            ArenaTemperaturePolicy::TieredColdEvidenceLargePages.as_str()
+        );
+        crate::assert_with_log!(
+            ArenaTemperaturePolicy::from_str("unified").expect("parse unified")
+                == ArenaTemperaturePolicy::Unified,
+            "parse unified",
+            ArenaTemperaturePolicy::Unified,
+            ArenaTemperaturePolicy::from_str("unified").expect("parse unified")
+        );
+        crate::assert_with_log!(
+            ArenaTemperaturePolicy::from_str("tiered-cold-evidence")
+                .expect("parse tiered-cold-evidence")
+                == ArenaTemperaturePolicy::TieredColdEvidence,
+            "parse tiered-cold-evidence",
+            ArenaTemperaturePolicy::TieredColdEvidence,
+            ArenaTemperaturePolicy::from_str("tiered-cold-evidence")
+                .expect("parse tiered-cold-evidence")
+        );
+        crate::assert_with_log!(
+            ArenaTemperaturePolicy::from_str("tiered_cold_evidence_large_pages")
+                .expect("parse tiered_cold_evidence_large_pages")
+                == ArenaTemperaturePolicy::TieredColdEvidenceLargePages,
+            "parse tiered_cold_evidence_large_pages",
+            ArenaTemperaturePolicy::TieredColdEvidenceLargePages,
+            ArenaTemperaturePolicy::from_str("tiered_cold_evidence_large_pages")
+                .expect("parse tiered_cold_evidence_large_pages")
+        );
+        crate::assert_with_log!(
+            ArenaTemperaturePolicy::from_str("nope").is_err(),
+            "invalid parse rejected",
+            true,
+            ArenaTemperaturePolicy::from_str("nope").is_err()
+        );
+        crate::test_complete!("arena_temperature_policy_text_roundtrip_is_stable");
     }
 
     #[test]
@@ -4146,6 +4498,7 @@ mod tests {
             enable_parking: true,
             poll_budget: 0,
             capacity_hints: Some(RuntimeCapacityHints::new(0, 0, 0)),
+            arena_temperature_policy: ArenaTemperaturePolicy::Unified,
             trace_storage_profile: TraceStorageProfile::Default,
             browser_ready_handoff_limit: 0,
             browser_worker_offload: BrowserWorkerOffloadConfig {
@@ -4221,6 +4574,12 @@ mod tests {
             "capacity_hints.obligation_capacity",
             RuntimeCapacityHints::DEFAULT_OBLIGATION_CAPACITY,
             capacity_hints.obligation_capacity
+        );
+        crate::assert_with_log!(
+            config.arena_temperature_policy == ArenaTemperaturePolicy::Unified,
+            "arena_temperature_policy",
+            ArenaTemperaturePolicy::Unified,
+            config.arena_temperature_policy
         );
         crate::assert_with_log!(
             config.browser_ready_handoff_limit == 0,
@@ -4428,6 +4787,7 @@ mod tests {
             enable_parking: false,
             poll_budget: 32,
             capacity_hints: Some(RuntimeCapacityHints::new(4096, 1024, 2048)),
+            arena_temperature_policy: ArenaTemperaturePolicy::TieredColdEvidenceLargePages,
             trace_storage_profile: TraceStorageProfile::LargeMemory256G,
             browser_ready_handoff_limit: 64,
             browser_worker_offload: BrowserWorkerOffloadConfig {
@@ -4844,12 +5204,127 @@ mod tests {
     }
 
     #[test]
+    fn arena_temperature_report_keeps_hot_metadata_out_of_cold_tier() {
+        init_test("arena_temperature_report_keeps_hot_metadata_out_of_cold_tier");
+
+        let config = RuntimeConfig {
+            worker_threads: 64,
+            capacity_hints: Some(RuntimeCapacityHints::new(4096, 1024, 2048)),
+            arena_temperature_policy: ArenaTemperaturePolicy::TieredColdEvidence,
+            trace_storage_profile: TraceStorageProfile::LargeMemory256G,
+            ..RuntimeConfig::default()
+        };
+        let report = config.arena_temperature_report(false);
+
+        assert_eq!(
+            report.requested_policy,
+            ArenaTemperaturePolicy::TieredColdEvidence
+        );
+        assert_eq!(
+            report.effective_policy,
+            ArenaTemperaturePolicy::TieredColdEvidence
+        );
+        assert_eq!(report.fallback_reason, None);
+        assert_eq!(
+            report.cold_allocation_source,
+            ArenaColdAllocationSource::ColdTier
+        );
+        assert!(!report.large_page_cold_slabs_active);
+        assert!(report.hot_task_table_bytes > 0);
+        assert!(report.hot_region_table_bytes > 0);
+        assert!(report.hot_obligation_table_bytes > 0);
+        assert_eq!(
+            report.retained_evidence_bytes,
+            config.trace_storage_budget().estimated_cold_bytes()
+        );
+        assert_eq!(report.cold_evidence_bytes, report.retained_evidence_bytes);
+        assert_eq!(
+            report.estimated_total_bytes(),
+            report
+                .estimated_hot_bytes()
+                .saturating_add(report.retained_evidence_bytes)
+        );
+    }
+
+    #[test]
+    fn arena_temperature_report_falls_back_when_large_pages_are_unavailable() {
+        init_test("arena_temperature_report_falls_back_when_large_pages_are_unavailable");
+
+        let config = RuntimeConfig {
+            arena_temperature_policy: ArenaTemperaturePolicy::TieredColdEvidenceLargePages,
+            trace_storage_profile: TraceStorageProfile::LargeMemory256G,
+            ..RuntimeConfig::default()
+        };
+        let report = config.arena_temperature_report(false);
+
+        assert_eq!(
+            report.requested_policy,
+            ArenaTemperaturePolicy::TieredColdEvidenceLargePages
+        );
+        assert_eq!(
+            report.effective_policy,
+            ArenaTemperaturePolicy::TieredColdEvidence
+        );
+        assert_eq!(
+            report.fallback_reason,
+            Some(ArenaTemperatureFallbackReason::LargePagesUnsupported)
+        );
+        assert_eq!(
+            report.cold_allocation_source,
+            ArenaColdAllocationSource::ColdTier
+        );
+        assert!(!report.large_page_cold_slabs_active);
+
+        let rendered = report.render_report_fields();
+        assert!(
+            rendered.iter().any(|(key, value)| *key == "fallback_reason"
+                && value == ArenaTemperatureFallbackReason::LargePagesUnsupported.as_str()),
+            "rendered report should expose the conservative fallback reason"
+        );
+    }
+
+    #[test]
+    fn arena_temperature_report_restores_unified_mode_when_disabled_again() {
+        init_test("arena_temperature_report_restores_unified_mode_when_disabled_again");
+
+        let tiered = RuntimeConfig {
+            arena_temperature_policy: ArenaTemperaturePolicy::TieredColdEvidence,
+            trace_storage_profile: TraceStorageProfile::LargeMemory256G,
+            ..RuntimeConfig::default()
+        }
+        .arena_temperature_report(false);
+        let unified = RuntimeConfig {
+            arena_temperature_policy: ArenaTemperaturePolicy::Unified,
+            trace_storage_profile: TraceStorageProfile::LargeMemory256G,
+            ..RuntimeConfig::default()
+        }
+        .arena_temperature_report(false);
+
+        assert_eq!(unified.effective_policy, ArenaTemperaturePolicy::Unified);
+        assert_eq!(unified.cold_evidence_bytes, 0);
+        assert_eq!(
+            unified.retained_evidence_bytes,
+            tiered.retained_evidence_bytes
+        );
+        assert_eq!(unified.hot_task_table_bytes, tiered.hot_task_table_bytes);
+        assert_eq!(
+            unified.hot_region_table_bytes,
+            tiered.hot_region_table_bytes
+        );
+        assert_eq!(
+            unified.hot_obligation_table_bytes,
+            tiered.hot_obligation_table_bytes
+        );
+    }
+
+    #[test]
     fn resolved_capacity_hints_prefers_explicit_values_over_worker_scaling() {
         init_test("resolved_capacity_hints_prefers_explicit_values_over_worker_scaling");
 
         let mut config = RuntimeConfig {
             worker_threads: 64,
             capacity_hints: Some(RuntimeCapacityHints::new(900, 200, 600)),
+            arena_temperature_policy: ArenaTemperaturePolicy::Unified,
             ..RuntimeConfig::default()
         };
         config.normalize();

@@ -125,6 +125,20 @@ impl<T> Arena<T> {
         self.slots.capacity()
     }
 
+    /// Returns the estimated bytes reserved by the arena backing slots.
+    #[inline]
+    #[must_use]
+    pub fn reserved_bytes(&self) -> usize {
+        Self::estimated_bytes_for_capacity(self.capacity())
+    }
+
+    /// Returns the estimated bytes required to reserve `capacity` arena slots.
+    #[inline]
+    #[must_use]
+    pub fn estimated_bytes_for_capacity(capacity: usize) -> usize {
+        capacity.saturating_mul(core::mem::size_of::<Slot<T>>())
+    }
+
     /// Returns true if the arena has no occupied slots.
     #[inline]
     #[must_use]
@@ -755,6 +769,16 @@ mod tests {
         let arena: Arena<i32> = Arena::with_capacity(16);
         assert!(arena.is_empty());
         assert_eq!(arena.len(), 0);
+    }
+
+    #[test]
+    fn arena_reserved_bytes_track_slot_capacity() {
+        let arena: Arena<i32> = Arena::with_capacity(16);
+        assert_eq!(arena.capacity(), 16);
+        assert_eq!(
+            arena.reserved_bytes(),
+            Arena::<i32>::estimated_bytes_for_capacity(16)
+        );
     }
 
     #[test]
