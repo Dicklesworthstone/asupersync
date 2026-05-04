@@ -33,6 +33,7 @@
 //!
 //! [`Cx`]: crate::cx::Cx
 
+use crate::channel::mpsc;
 use crate::cx::Cx;
 use crate::runtime::blocking_pool::{BlockingPool, BlockingPoolHandle};
 use crate::types::{CancelReason, Outcome};
@@ -40,7 +41,7 @@ use parking_lot::Mutex;
 use std::collections::BTreeMap;
 use std::fmt;
 use std::path::{Component, Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
@@ -52,6 +53,8 @@ use std::time::Duration;
 static SQLITE_POOL: OnceLock<BlockingPool> = OnceLock::new();
 const DEFAULT_BUSY_TIMEOUT: Duration = Duration::from_millis(250);
 const DEFAULT_STATEMENT_CACHE_CAPACITY: usize = 64;
+const SQLITE_ROW_STREAM_CHANNEL_CAPACITY: usize = 1;
+const SQLITE_ROW_STREAM_FULL_BACKOFF: Duration = Duration::from_millis(1);
 
 fn get_sqlite_pool() -> BlockingPoolHandle {
     SQLITE_POOL.get_or_init(|| BlockingPool::new(1, 4)).handle()
@@ -715,6 +718,200 @@ impl SqliteRow {
     }
 }
 
+#[derive(Debug, Default)]
+struct SqliteRowStreamCounters {
+    rows_stepped: AtomicUsize,
+    rows_yielded: AtomicUsize,
+    buffered_rows: AtomicUsize,
+    peak_buffered_rows: AtomicUsize,
+}
+
+impl SqliteRowStreamCounters {
+    fn record_buffered_row(&self) {
+        let buffered = self.buffered_rows.fetch_add(1, Ordering::AcqRel) + 1;
+        let mut peak = self.peak_buffered_rows.load(Ordering::Acquire);
+        while buffered > peak {
+            match self.peak_buffered_rows.compare_exchange_weak(
+                peak,
+                buffered,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => break,
+                Err(current) => peak = current,
+            }
+        }
+    }
+
+    fn record_yielded_row(&self) {
+        self.rows_yielded.fetch_add(1, Ordering::AcqRel);
+        self.buffered_rows.fetch_sub(1, Ordering::AcqRel);
+    }
+
+    fn snapshot(&self) -> SqliteRowStreamStats {
+        SqliteRowStreamStats {
+            rows_stepped: self.rows_stepped.load(Ordering::Acquire),
+            rows_yielded: self.rows_yielded.load(Ordering::Acquire),
+            buffered_rows: self.buffered_rows.load(Ordering::Acquire),
+            peak_buffered_rows: self.peak_buffered_rows.load(Ordering::Acquire),
+            channel_capacity: SQLITE_ROW_STREAM_CHANNEL_CAPACITY,
+        }
+    }
+}
+
+/// Bounded-memory progress counters for a SQLite row stream.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SqliteRowStreamStats {
+    /// Rows stepped by the blocking SQLite worker.
+    pub rows_stepped: usize,
+    /// Rows yielded to the async caller.
+    pub rows_yielded: usize,
+    /// Rows currently buffered between the blocking worker and async caller.
+    pub buffered_rows: usize,
+    /// Highest observed buffered row count for this stream.
+    pub peak_buffered_rows: usize,
+    /// Fixed channel capacity used by the stream.
+    pub channel_capacity: usize,
+}
+
+type SqliteRowStreamMessage = Result<SqliteRow, SqliteError>;
+
+fn send_sqlite_stream_message(
+    sender: &mpsc::Sender<SqliteRowStreamMessage>,
+    counters: &SqliteRowStreamCounters,
+    mut message: SqliteRowStreamMessage,
+) -> bool {
+    let is_row = message.is_ok();
+    loop {
+        match sender.try_reserve() {
+            Ok(permit) => {
+                if is_row {
+                    counters.record_buffered_row();
+                }
+                match permit.send(message) {
+                    Outcome::Ok(()) => return true,
+                    Outcome::Err(mpsc::SendError::Disconnected(_))
+                    | Outcome::Err(mpsc::SendError::Cancelled(_)) => {
+                        if is_row {
+                            counters.buffered_rows.fetch_sub(1, Ordering::AcqRel);
+                        }
+                        return false;
+                    }
+                    Outcome::Err(mpsc::SendError::Full(value)) => {
+                        if is_row {
+                            counters.buffered_rows.fetch_sub(1, Ordering::AcqRel);
+                        }
+                        message = value;
+                    }
+                    Outcome::Cancelled(_) | Outcome::Panicked(_) => return false,
+                }
+            }
+            Err(mpsc::SendError::Disconnected(())) | Err(mpsc::SendError::Cancelled(())) => {
+                return false;
+            }
+            Err(mpsc::SendError::Full(())) => {
+                std::thread::sleep(SQLITE_ROW_STREAM_FULL_BACKOFF);
+            }
+        }
+    }
+}
+
+fn sqlite_row_from_rusqlite_row(
+    row: &rusqlite::Row<'_>,
+    column_count: usize,
+    column_names: &[String],
+    columns: &Arc<BTreeMap<String, usize>>,
+) -> Result<SqliteRow, SqliteError> {
+    let mut values = Vec::with_capacity(column_count);
+    for i in 0..column_count {
+        let value = row
+            .get_ref(i)
+            .map_err(|e| SqliteError::Sqlite(e.to_string()))?;
+        let column = column_name_or_index(column_names, i);
+        values.push(convert_value(value, &column)?);
+    }
+    Ok(SqliteRow::new(Arc::clone(columns), values))
+}
+
+/// Streaming SQLite query result with bounded row buffering.
+pub struct SqliteRowStream {
+    receiver: mpsc::Receiver<SqliteRowStreamMessage>,
+    handle: crate::runtime::blocking_pool::BlockingTaskHandle,
+    counters: Arc<SqliteRowStreamCounters>,
+    finished: bool,
+}
+
+impl fmt::Debug for SqliteRowStream {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("SqliteRowStream")
+            .field("stats", &self.stats())
+            .field("finished", &self.finished)
+            .finish()
+    }
+}
+
+impl SqliteRowStream {
+    /// Returns the next row, or `None` once the SQLite statement is exhausted.
+    pub async fn next(&mut self, cx: &Cx) -> Outcome<Option<SqliteRow>, SqliteError> {
+        if self.finished {
+            return Outcome::Ok(None);
+        }
+
+        if cx.checkpoint().is_err() {
+            self.finish();
+            return Outcome::Cancelled(
+                cx.cancel_reason()
+                    .unwrap_or_else(|| CancelReason::user("cancelled")),
+            );
+        }
+
+        match self.receiver.recv(cx).await {
+            Ok(Ok(row)) => {
+                self.counters.record_yielded_row();
+                Outcome::Ok(Some(row))
+            }
+            Ok(Err(err)) => {
+                self.finish();
+                Outcome::Err(err)
+            }
+            Err(mpsc::RecvError::Disconnected) => {
+                self.finished = true;
+                Outcome::Ok(None)
+            }
+            Err(mpsc::RecvError::Cancelled) => {
+                self.finish();
+                Outcome::Cancelled(
+                    cx.cancel_reason()
+                        .unwrap_or_else(|| CancelReason::user("cancelled")),
+                )
+            }
+            Err(mpsc::RecvError::Empty) => Outcome::Err(SqliteError::Sqlite(
+                "sqlite row stream receive unexpectedly returned empty".to_string(),
+            )),
+        }
+    }
+
+    /// Returns bounded-memory counters for this stream.
+    #[must_use]
+    pub fn stats(&self) -> SqliteRowStreamStats {
+        self.counters.snapshot()
+    }
+
+    fn finish(&mut self) {
+        if !self.finished {
+            self.finished = true;
+            self.receiver.close();
+            self.handle.cancel();
+        }
+    }
+}
+
+impl Drop for SqliteRowStream {
+    fn drop(&mut self) {
+        self.finish();
+    }
+}
+
 /// Inner connection state.
 struct SqliteConnectionInner {
     /// The actual SQLite connection. None if closed.
@@ -1136,21 +1333,130 @@ impl SqliteConnection {
                 .next()
                 .map_err(|e| SqliteError::Sqlite(e.to_string()))?
             {
-                let mut values = Vec::with_capacity(column_count);
-                for i in 0..column_count {
-                    let value = row
-                        .get_ref(i)
-                        .map_err(|e| SqliteError::Sqlite(e.to_string()))?;
-                    let column = column_name_or_index(&column_names, i);
-                    values.push(convert_value(value, &column)?);
-                }
-                result.push(SqliteRow::new(Arc::clone(&columns), values));
+                result.push(sqlite_row_from_rusqlite_row(
+                    row,
+                    column_count,
+                    &column_names,
+                    &columns,
+                )?);
             }
             drop(rows);
             drop(stmt);
             Ok(result)
         })
         .await
+    }
+
+    /// Executes a query and streams rows through a bounded async receiver.
+    ///
+    /// This API preserves SQLite's native `sqlite3_step()` row-at-a-time
+    /// behavior across the blocking-pool boundary. At most one converted row is
+    /// buffered between the blocking worker and the async caller.
+    pub async fn query_stream(
+        &self,
+        cx: &Cx,
+        sql: &str,
+        params: &[SqliteValue],
+    ) -> Outcome<SqliteRowStream, SqliteError> {
+        if let Err(err) = ensure_checked_sql_surface(sql) {
+            return Outcome::Err(err);
+        }
+        self.query_stream_unchecked(cx, sql, params).await
+    }
+
+    /// Execute a trusted raw SQL query and stream rows through a bounded
+    /// async receiver.
+    pub async fn query_stream_unchecked(
+        &self,
+        cx: &Cx,
+        sql: &str,
+        params: &[SqliteValue],
+    ) -> Outcome<SqliteRowStream, SqliteError> {
+        if let Err(err) = ensure_unchecked_sql_surface(sql) {
+            return Outcome::Err(err);
+        }
+        if cx.checkpoint().is_err() {
+            return Outcome::Cancelled(
+                cx.cancel_reason()
+                    .unwrap_or_else(|| CancelReason::user("cancelled")),
+            );
+        }
+        match self.drain_orphaned_transaction(cx).await {
+            Outcome::Ok(()) => {}
+            Outcome::Err(e) => return Outcome::Err(e),
+            Outcome::Cancelled(r) => return Outcome::Cancelled(r),
+            Outcome::Panicked(p) => return Outcome::Panicked(p),
+        }
+        if cx.checkpoint().is_err() {
+            return Outcome::Cancelled(
+                cx.cancel_reason()
+                    .unwrap_or_else(|| CancelReason::user("cancelled")),
+            );
+        }
+
+        let sql = sql.to_string();
+        let params: Vec<SqliteValue> = params.to_vec();
+        let inner = Arc::clone(&self.inner);
+        let counters = Arc::new(SqliteRowStreamCounters::default());
+        let worker_counters = Arc::clone(&counters);
+        let (sender, receiver) = mpsc::channel(SQLITE_ROW_STREAM_CHANNEL_CAPACITY);
+
+        let handle = self.pool.spawn(move || {
+            let result = (|| {
+                let guard = inner.lock();
+                let conn = guard.get()?;
+                let params_refs: Vec<&dyn rusqlite::ToSql> =
+                    params.iter().map(|v| v as &dyn rusqlite::ToSql).collect();
+
+                let mut stmt = conn
+                    .prepare_cached(&sql)
+                    .map_err(|e| SqliteError::Sqlite(e.to_string()))?;
+
+                let column_names: Vec<String> = stmt
+                    .column_names()
+                    .iter()
+                    .map(std::string::ToString::to_string)
+                    .collect();
+                let columns: BTreeMap<String, usize> = column_names
+                    .iter()
+                    .enumerate()
+                    .map(|(i, name)| (name.clone(), i))
+                    .collect();
+                let columns = Arc::new(columns);
+                let column_count = stmt.column_count();
+
+                let mut rows = stmt
+                    .query(params_refs.as_slice())
+                    .map_err(|e| SqliteError::Sqlite(e.to_string()))?;
+
+                while let Some(row) = rows
+                    .next()
+                    .map_err(|e| SqliteError::Sqlite(e.to_string()))?
+                {
+                    worker_counters.rows_stepped.fetch_add(1, Ordering::AcqRel);
+                    let row =
+                        sqlite_row_from_rusqlite_row(row, column_count, &column_names, &columns)?;
+                    if !send_sqlite_stream_message(&sender, &worker_counters, Ok(row)) {
+                        break;
+                    }
+                }
+                drop(rows);
+                drop(stmt);
+                drop(guard);
+                Ok(())
+            })();
+
+            if let Err(err) = result {
+                let _ = send_sqlite_stream_message(&sender, &worker_counters, Err(err));
+            }
+        });
+
+        Outcome::Ok(SqliteRowStream {
+            receiver,
+            handle,
+            counters,
+            finished: false,
+        })
     }
 
     /// Executes a query and returns the first row, if any.
@@ -1723,9 +2029,10 @@ mod tests {
 
     #[test]
     fn sqlite_error_display_invalid_text_encoding() {
+        let invalid_utf8 = vec![0x80_u8];
         let err = SqliteError::InvalidTextEncoding {
             column: "payload".into(),
-            source: std::str::from_utf8(&[0x80]).unwrap_err(),
+            source: std::str::from_utf8(&invalid_utf8).unwrap_err(),
         };
         assert!(
             err.to_string()
@@ -1757,9 +2064,10 @@ mod tests {
     #[test]
     fn sqlite_error_source_invalid_text_encoding_returns_some() {
         use std::error::Error;
+        let invalid_utf8 = vec![0x80_u8];
         let err = SqliteError::InvalidTextEncoding {
             column: "payload".into(),
-            source: std::str::from_utf8(&[0x80]).unwrap_err(),
+            source: std::str::from_utf8(&invalid_utf8).unwrap_err(),
         };
         assert!(err.source().is_some());
     }
@@ -1818,7 +2126,7 @@ mod tests {
         for raw in ["~/tenant.db", "~alice/tenant.db"] {
             let err = validate_sqlite_open_path(Path::new(raw)).unwrap_err();
             assert!(
-                matches!(err, SqliteError::UnsafePath(msg) if msg.contains("tilde-prefixed")),
+                matches!(err, SqliteError::UnsafePath(ref msg) if msg.contains("tilde-prefixed")),
                 "expected tilde rejection for {raw:?}, got {err:?}"
             );
         }
@@ -1828,7 +2136,7 @@ mod tests {
     fn validate_sqlite_open_path_rejects_restricted_system_directory() {
         let err = validate_sqlite_open_path(Path::new("/etc/asupersync-test.sqlite")).unwrap_err();
         assert!(
-            matches!(err, SqliteError::UnsafePath(msg) if msg.contains("/etc")),
+            matches!(err, SqliteError::UnsafePath(ref msg) if msg.contains("/etc")),
             "expected /etc rejection, got {err:?}"
         );
     }
@@ -1838,7 +2146,7 @@ mod tests {
         for raw in ["../tenant.db", "nested/../../tenant.db"] {
             let err = validate_sqlite_open_path(Path::new(raw)).unwrap_err();
             assert!(
-                matches!(err, SqliteError::UnsafePath(msg) if msg.contains("parent-directory traversal")),
+                matches!(err, SqliteError::UnsafePath(ref msg) if msg.contains("parent-directory traversal")),
                 "expected traversal rejection for {raw:?}, got {err:?}"
             );
         }
@@ -2086,6 +2394,194 @@ mod tests {
 
             assert_eq!(rows.len(), 1);
             assert_eq!(rows[0].get_str("name").unwrap(), "alice");
+        });
+    }
+
+    #[test]
+    fn sqlite_query_stream_yields_many_rows_with_single_row_buffer() {
+        let cx = create_test_cx();
+
+        block_on(async {
+            let conn = match SqliteConnection::open_in_memory(&cx).await {
+                Outcome::Ok(conn) => conn,
+                other => panic!("open_in_memory failed: {other:?}"),
+            };
+
+            match conn
+                .execute_batch(
+                    &cx,
+                    "CREATE TABLE streamed (id INTEGER PRIMARY KEY, payload TEXT);",
+                )
+                .await
+            {
+                Outcome::Ok(()) => {}
+                other => panic!("create streamed table failed: {other:?}"),
+            }
+
+            for id in 0..64 {
+                let payload = format!("payload-{id:03}-{}", "x".repeat(1024));
+                match conn
+                    .execute(
+                        &cx,
+                        "INSERT INTO streamed(id, payload) VALUES (?1, ?2)",
+                        &[SqliteValue::Integer(id), SqliteValue::Text(payload)],
+                    )
+                    .await
+                {
+                    Outcome::Ok(1) => {}
+                    other => panic!("streamed insert {id} failed: {other:?}"),
+                }
+            }
+
+            let mut stream = match conn
+                .query_stream(&cx, "SELECT id, payload FROM streamed ORDER BY id", &[])
+                .await
+            {
+                Outcome::Ok(stream) => stream,
+                other => panic!("query_stream failed to start: {other:?}"),
+            };
+
+            let mut ids = Vec::new();
+            while let Outcome::Ok(Some(row)) = stream.next(&cx).await {
+                ids.push(row.get_i64("id").unwrap());
+                assert_eq!(
+                    row.get_str("payload").unwrap().len(),
+                    "payload-000-".len() + 1024
+                );
+            }
+
+            let stats = stream.stats();
+            assert_eq!(ids, (0..64).collect::<Vec<_>>());
+            assert_eq!(stats.rows_yielded, 64);
+            assert_eq!(stats.rows_stepped, 64);
+            assert_eq!(stats.buffered_rows, 0);
+            assert_eq!(stats.channel_capacity, SQLITE_ROW_STREAM_CHANNEL_CAPACITY);
+            assert!(
+                stats.peak_buffered_rows <= SQLITE_ROW_STREAM_CHANNEL_CAPACITY,
+                "SQLite row stream must not buffer more than one row: {stats:?}"
+            );
+        });
+    }
+
+    #[test]
+    fn sqlite_query_stream_drop_finalizes_statement_and_returns_connection() {
+        let cx = create_test_cx();
+
+        block_on(async {
+            let conn = match SqliteConnection::open_in_memory(&cx).await {
+                Outcome::Ok(conn) => conn,
+                other => panic!("open_in_memory failed: {other:?}"),
+            };
+
+            match conn
+                .execute_batch(
+                    &cx,
+                    "CREATE TABLE streamed_drop (id INTEGER PRIMARY KEY);
+                     INSERT INTO streamed_drop(id) VALUES (1), (2), (3), (4);",
+                )
+                .await
+            {
+                Outcome::Ok(()) => {}
+                other => panic!("create streamed_drop table failed: {other:?}"),
+            }
+
+            let mut stream = match conn
+                .query_stream(&cx, "SELECT id FROM streamed_drop ORDER BY id", &[])
+                .await
+            {
+                Outcome::Ok(stream) => stream,
+                other => panic!("query_stream failed to start: {other:?}"),
+            };
+            match stream.next(&cx).await {
+                Outcome::Ok(Some(row)) => assert_eq!(row.get_i64("id").unwrap(), 1),
+                other => panic!("first stream row failed: {other:?}"),
+            }
+            drop(stream);
+
+            let rows = match conn
+                .query(&cx, "SELECT COUNT(*) AS count FROM streamed_drop", &[])
+                .await
+            {
+                Outcome::Ok(rows) => rows,
+                other => panic!("connection was not returned after stream drop: {other:?}"),
+            };
+            assert_eq!(rows[0].get_i64("count").unwrap(), 4);
+        });
+    }
+
+    #[test]
+    fn sqlite_query_stream_surfaces_query_error_on_next() {
+        let cx = create_test_cx();
+
+        block_on(async {
+            let conn = match SqliteConnection::open_in_memory(&cx).await {
+                Outcome::Ok(conn) => conn,
+                other => panic!("open_in_memory failed: {other:?}"),
+            };
+            let mut stream = match conn
+                .query_stream(&cx, "SELECT value FROM missing_table", &[])
+                .await
+            {
+                Outcome::Ok(stream) => stream,
+                other => panic!("query_stream should defer SQLite prepare errors: {other:?}"),
+            };
+
+            match stream.next(&cx).await {
+                Outcome::Err(SqliteError::Sqlite(message)) => {
+                    assert!(
+                        message.contains("missing_table") || message.contains("no such table"),
+                        "unexpected SQLite error: {message}"
+                    );
+                }
+                other => panic!("missing table should surface through stream next: {other:?}"),
+            }
+        });
+    }
+
+    #[test]
+    fn sqlite_query_stream_cancelled_next_closes_stream_and_connection_recovers() {
+        let cx = create_test_cx();
+        let cancel_cx = create_test_cx();
+
+        block_on(async {
+            let conn = match SqliteConnection::open_in_memory(&cx).await {
+                Outcome::Ok(conn) => conn,
+                other => panic!("open_in_memory failed: {other:?}"),
+            };
+
+            match conn
+                .execute_batch(
+                    &cx,
+                    "CREATE TABLE streamed_cancel (id INTEGER PRIMARY KEY);
+                     INSERT INTO streamed_cancel(id) VALUES (1), (2), (3);",
+                )
+                .await
+            {
+                Outcome::Ok(()) => {}
+                other => panic!("create streamed_cancel table failed: {other:?}"),
+            }
+
+            let mut stream = match conn
+                .query_stream(&cx, "SELECT id FROM streamed_cancel ORDER BY id", &[])
+                .await
+            {
+                Outcome::Ok(stream) => stream,
+                other => panic!("query_stream failed to start: {other:?}"),
+            };
+            cancel_cx.set_cancel_requested(true);
+            match stream.next(&cancel_cx).await {
+                Outcome::Cancelled(_) => {}
+                other => panic!("cancelled stream next should return Cancelled: {other:?}"),
+            }
+
+            let rows = match conn
+                .query(&cx, "SELECT COUNT(*) AS count FROM streamed_cancel", &[])
+                .await
+            {
+                Outcome::Ok(rows) => rows,
+                other => panic!("connection was not returned after stream cancel: {other:?}"),
+            };
+            assert_eq!(rows[0].get_i64("count").unwrap(), 3);
         });
     }
 
@@ -3987,7 +4483,7 @@ mod tests {
         /// Test SQLite concurrent access patterns with real database
         #[test]
         fn test_real_sqlite_concurrent_access_patterns() {
-            let Some(config) = require_real_sqlite() else {
+            let Some(_config) = require_real_sqlite() else {
                 return;
             };
 
@@ -4014,8 +4510,6 @@ mod tests {
                 }
 
                 log.phase("schema_setup");
-
-                let factory = SqliteDataFactory::new();
 
                 // Begin transaction for isolation
                 match conn.execute_unchecked(&cx, "BEGIN TRANSACTION", &[]).await {
@@ -4236,7 +4730,13 @@ mod tests {
                 };
 
                 // Create test table
-                match conn.execute_batch(&cx, "CREATE TABLE reset_test (id INTEGER PRIMARY KEY, value TEXT);").await {
+                match conn
+                    .execute_batch(
+                        &cx,
+                        "CREATE TABLE reset_test (id INTEGER PRIMARY KEY, value TEXT);",
+                    )
+                    .await
+                {
                     Outcome::Ok(()) => {}
                     other => panic!("create table failed: {other:?}"),
                 }
@@ -4245,7 +4745,14 @@ mod tests {
                 // which internally prepares, steps, and resets automatically
                 for i in 1..=5 {
                     let value = format!("test-value-{i}");
-                    match conn.execute(&cx, "INSERT INTO reset_test (value) VALUES (?1)", &[SqliteValue::Text(value)]).await {
+                    match conn
+                        .execute(
+                            &cx,
+                            "INSERT INTO reset_test (value) VALUES (?1)",
+                            &[SqliteValue::Text(value)],
+                        )
+                        .await
+                    {
                         Outcome::Ok(rows) => {
                             crate::assert_with_log!(
                                 rows == 1,
@@ -4262,7 +4769,14 @@ mod tests {
                 // which manages statement lifecycle and automatic reset via Rows iterator
                 for i in 1..=5 {
                     let expected_value = format!("test-value-{i}");
-                    match conn.query(&cx, "SELECT value FROM reset_test WHERE id = ?1", &[SqliteValue::Integer(i)]).await {
+                    match conn
+                        .query(
+                            &cx,
+                            "SELECT value FROM reset_test WHERE id = ?1",
+                            &[SqliteValue::Integer(i)],
+                        )
+                        .await
+                    {
                         Outcome::Ok(rows) => {
                             crate::assert_with_log!(
                                 rows.len() == 1,
@@ -4306,7 +4820,13 @@ mod tests {
                 };
 
                 // Create test table
-                match conn.execute_batch(&cx, "CREATE TABLE cached_test (id INTEGER PRIMARY KEY, data TEXT);").await {
+                match conn
+                    .execute_batch(
+                        &cx,
+                        "CREATE TABLE cached_test (id INTEGER PRIMARY KEY, data TEXT);",
+                    )
+                    .await
+                {
                     Outcome::Ok(()) => {}
                     other => panic!("create table failed: {other:?}"),
                 }
@@ -4319,7 +4839,10 @@ mod tests {
                 }
 
                 // Insert test data
-                match conn.execute(&cx, "INSERT INTO cached_test (data) VALUES ('first')", &[]).await {
+                match conn
+                    .execute(&cx, "INSERT INTO cached_test (data) VALUES ('first')", &[])
+                    .await
+                {
                     Outcome::Ok(_) => {}
                     other => panic!("insert first failed: {other:?}"),
                 }
@@ -4354,7 +4877,10 @@ mod tests {
                 }
 
                 // Query with different parameter (cached statement reset with new binding)
-                match conn.execute(&cx, "INSERT INTO cached_test (data) VALUES ('second')", &[]).await {
+                match conn
+                    .execute(&cx, "INSERT INTO cached_test (data) VALUES ('second')", &[])
+                    .await
+                {
                     Outcome::Ok(_) => {}
                     other => panic!("insert second failed: {other:?}"),
                 }
@@ -4395,13 +4921,26 @@ mod tests {
                 };
 
                 // Create test table with multiple rows
-                match conn.execute_batch(&cx, "CREATE TABLE iterator_test (id INTEGER PRIMARY KEY, value INTEGER);").await {
+                match conn
+                    .execute_batch(
+                        &cx,
+                        "CREATE TABLE iterator_test (id INTEGER PRIMARY KEY, value INTEGER);",
+                    )
+                    .await
+                {
                     Outcome::Ok(()) => {}
                     other => panic!("create table failed: {other:?}"),
                 }
 
                 for i in 1..=10 {
-                    match conn.execute(&cx, "INSERT INTO iterator_test (value) VALUES (?1)", &[SqliteValue::Integer(i * 10)]).await {
+                    match conn
+                        .execute(
+                            &cx,
+                            "INSERT INTO iterator_test (value) VALUES (?1)",
+                            &[SqliteValue::Integer(i * 10)],
+                        )
+                        .await
+                    {
                         Outcome::Ok(_) => {}
                         other => panic!("insert {i} failed: {other:?}"),
                     }
@@ -4411,18 +4950,27 @@ mod tests {
                 // Each query() call should work correctly despite previous iterator usage
                 let query_sql = "SELECT COUNT(*) as count FROM iterator_test WHERE value > ?1";
 
-                let count_gt_0 = match conn.query_row(&cx, query_sql, &[SqliteValue::Integer(0)]).await {
-                    Outcome::Ok(row) => row.get_i32("count").unwrap(),
+                let count_gt_0 = match conn
+                    .query_row(&cx, query_sql, &[SqliteValue::Integer(0)])
+                    .await
+                {
+                    Outcome::Ok(Some(row)) => row.get_i64("count").unwrap(),
                     other => panic!("count_gt_0 query failed: {other:?}"),
                 };
 
-                let count_gt_50 = match conn.query_row(&cx, query_sql, &[SqliteValue::Integer(50)]).await {
-                    Outcome::Ok(row) => row.get_i32("count").unwrap(),
+                let count_gt_50 = match conn
+                    .query_row(&cx, query_sql, &[SqliteValue::Integer(50)])
+                    .await
+                {
+                    Outcome::Ok(Some(row)) => row.get_i64("count").unwrap(),
                     other => panic!("count_gt_50 query failed: {other:?}"),
                 };
 
-                let count_gt_100 = match conn.query_row(&cx, query_sql, &[SqliteValue::Integer(100)]).await {
-                    Outcome::Ok(row) => row.get_i32("count").unwrap(),
+                let count_gt_100 = match conn
+                    .query_row(&cx, query_sql, &[SqliteValue::Integer(100)])
+                    .await
+                {
+                    Outcome::Ok(Some(row)) => row.get_i64("count").unwrap(),
                     other => panic!("count_gt_100 query failed: {other:?}"),
                 };
 
