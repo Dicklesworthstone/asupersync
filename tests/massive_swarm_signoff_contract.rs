@@ -800,22 +800,67 @@ fn jetstream_signoff_row_tracks_zero_wait_tail_evidence() {
         .filter_map(Value::as_str)
         .collect();
     assert!(operator_fields.contains("tail_evidence_mode"));
+    assert!(operator_fields.contains("waiter_queue_absent"));
+    assert!(operator_fields.contains("waiter_fairness_mode"));
     assert!(operator_fields.contains("multi_publisher_tail_evidence_present"));
     assert!(operator_fields.contains("queueing_model"));
     assert!(operator_fields.contains("publish_wait_latency_p95_micros"));
     assert!(operator_fields.contains("publish_wait_latency_p99_micros"));
     assert!(operator_fields.contains("publish_wait_latency_p999_micros"));
     assert!(operator_fields.contains("missing_evidence_requirement_count"));
+    assert!(operator_fields.contains("operator_verdict"));
     assert_eq!(
         jetstream_row["fallback_mode"].as_str(),
         Some(
-            "retain the conservative refusal-only publish path and fail closed until any future nonzero-wait policy proves bounded-waiter fairness"
+            "retain the conservative refusal-only publish path; the live zero-wait controller is certified, and any future nonzero-wait policy must ship its own bounded-waiter fairness proof before adoption"
         )
     );
     assert!(
         jetstream_row["blocker_reason"]
             .as_str()
-            .is_some_and(|reason| reason.contains("multi-publisher zero-wait tail evidence"))
+            .is_some_and(|reason| reason.contains("certifies zero-wait fairness"))
+    );
+}
+
+#[test]
+fn adaptive_batch_signoff_row_tracks_p999_no_win_evidence() {
+    let artifact = load_artifact();
+    let adaptive_row = artifact["signoff_matrix"]
+        .as_array()
+        .expect("signoff_matrix must be array")
+        .iter()
+        .find(|entry| entry["control_id"].as_str() == Some("adaptive_batch_sizing"))
+        .expect("adaptive batch sizing row must exist");
+
+    let scenarios: BTreeSet<&str> = adaptive_row["scenario_ids"]
+        .as_array()
+        .expect("scenario_ids must be an array")
+        .iter()
+        .filter_map(Value::as_str)
+        .collect();
+    assert!(scenarios.contains("AA-ADAPTIVE-BATCH-SIZING-CONTENTION-WIN-32P"));
+    assert!(scenarios.contains("AA-ADAPTIVE-BATCH-SIZING-KEEP-FIXED-1P"));
+    assert!(scenarios.contains("AA-ADAPTIVE-BATCH-SIZING-NO-WIN-64P"));
+
+    let operator_fields: BTreeSet<&str> = adaptive_row["operator_fields"]
+        .as_array()
+        .expect("operator_fields must be an array")
+        .iter()
+        .filter_map(Value::as_str)
+        .collect();
+    assert!(operator_fields.contains("wake_to_run_p99_improvement_ns"));
+    assert!(operator_fields.contains("wake_to_run_p999_improvement_ns"));
+    assert!(operator_fields.contains("no_win_trigger"));
+    assert_eq!(
+        adaptive_row["reproduction_command"].as_str(),
+        Some(
+            "scripts/run_adaptive_batch_sizing_smoke.sh --scenario AA-ADAPTIVE-BATCH-SIZING-NO-WIN-64P --execute"
+        )
+    );
+    assert!(
+        adaptive_row["blocker_reason"]
+            .as_str()
+            .is_some_and(|reason| reason.contains("64-producer no-win p999 comparator"))
     );
 }
 

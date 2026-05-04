@@ -25,8 +25,7 @@
     "REQ-OPERATOR-EVIDENCE"
   ],
   "tracked_dirty_blocker_fixture_paths": [
-    ".beads/issues.jsonl",
-    "src/runtime/state.rs"
+    ".beads/issues.jsonl"
   ],
   "blocked_dependency_policy": {
     "fail_closed_conditions": [
@@ -154,24 +153,26 @@
       "runner_path": "scripts/run_adaptive_batch_sizing_smoke.sh",
       "scenario_ids": [
         "AA-ADAPTIVE-BATCH-SIZING-CONTENTION-WIN-32P",
-        "AA-ADAPTIVE-BATCH-SIZING-KEEP-FIXED-1P"
+        "AA-ADAPTIVE-BATCH-SIZING-KEEP-FIXED-1P",
+        "AA-ADAPTIVE-BATCH-SIZING-NO-WIN-64P"
       ],
       "config_gate": "adaptive batch sizing must remain bounded, observable, and safe to pin back to fixed profiles at any time",
-      "fallback_mode": "keep the fixed batch profile pinned whenever the adaptive controller loses, oscillates, or lacks sufficient evidence",
+      "fallback_mode": "keep the fixed batch profile pinned whenever the adaptive controller loses, oscillates, lacks sufficient evidence, or improves p99 while regressing the p999 tail comparator",
       "unit_proof_ref": "tests/adaptive_batch_sizing_contract.rs",
-      "e2e_proof_ref": "scripts/run_adaptive_batch_sizing_smoke.sh --scenario AA-ADAPTIVE-BATCH-SIZING-KEEP-FIXED-1P --execute",
+      "e2e_proof_ref": "scripts/run_adaptive_batch_sizing_smoke.sh --scenario AA-ADAPTIVE-BATCH-SIZING-NO-WIN-64P --execute",
       "operator_fields": [
         "winner_profile",
         "shared_ready_touches_delta",
         "wake_to_run_p99_improvement_ns",
+        "wake_to_run_p999_improvement_ns",
         "no_win_trigger",
         "safe_fallback_profile"
       ],
       "rollback_surface": "fixed_profile_fallback",
       "proof_status": "fail_closed",
-      "blocker_reason": "adaptive batch sizing proof exists on main but the tracker bead remains open, so signoff must still hold the scheduler batch controller closed",
+      "blocker_reason": "adaptive batch sizing proof exists on main and now includes a 64-producer no-win p999 comparator where fixed remains safer, but the tracker bead remains open so signoff must still hold the scheduler batch controller closed",
       "report_glob": "target/adaptive-batch-sizing-smoke/run_*/AA-ADAPTIVE-BATCH-SIZING-*/run_report.json",
-      "reproduction_command": "scripts/run_adaptive_batch_sizing_smoke.sh --scenario AA-ADAPTIVE-BATCH-SIZING-KEEP-FIXED-1P --execute"
+      "reproduction_command": "scripts/run_adaptive_batch_sizing_smoke.sh --scenario AA-ADAPTIVE-BATCH-SIZING-NO-WIN-64P --execute"
     },
     {
       "control_id": "hot_cold_arena_tiers",
@@ -326,24 +327,27 @@
         "AA-JETSTREAM-PUBLISH-BACKPRESSURE-NO-WIN-FALLBACK"
       ],
       "config_gate": "publish in-flight bounds, waiter bounds, and pressure telemetry must stay explicit, deterministic, and operator-visible",
-      "fallback_mode": "retain the conservative refusal-only publish path and fail closed until any future nonzero-wait policy proves bounded-waiter fairness",
+      "fallback_mode": "retain the conservative refusal-only publish path; the live zero-wait controller is certified, and any future nonzero-wait policy must ship its own bounded-waiter fairness proof before adoption",
       "unit_proof_ref": "src/messaging/jetstream_flow_control_audit.rs, tests/jetstream_flow_control_audit.rs",
       "e2e_proof_ref": "scripts/run_jetstream_publish_backpressure_smoke.sh --scenario AA-JETSTREAM-PUBLISH-BACKPRESSURE-SLOW-ACKS --execute",
       "operator_fields": [
         "explicit_pressure_signal_site_count",
         "bounded_waiter_policy_present",
         "refusal_only_policy_present",
+        "waiter_queue_absent",
+        "waiter_fairness_mode",
         "multi_publisher_tail_evidence_present",
         "queueing_model",
         "tail_evidence_mode",
         "publish_wait_latency_p95_micros",
         "publish_wait_latency_p99_micros",
         "publish_wait_latency_p999_micros",
-        "missing_evidence_requirement_count"
+        "missing_evidence_requirement_count",
+        "operator_verdict"
       ],
       "rollback_surface": "retain_conservative_publish_path",
       "proof_status": "fail_closed",
-      "blocker_reason": "publish backpressure proof pack now shows explicit pressure sites plus single- and multi-publisher zero-wait tail evidence, but it still lacks bounded-waiter fairness proof for any future nonzero-wait policy",
+      "blocker_reason": "publish backpressure proof pack now certifies zero-wait fairness for the live refusal-only controller and reports ready_for_rch, but the tracker bead remains open until the broad lib jetstream acceptance proof returns a clean pass",
       "report_glob": "target/jetstream-publish-backpressure-smoke/run_*/AA-JETSTREAM-PUBLISH-BACKPRESSURE-*/run_report.json",
       "reproduction_command": "scripts/run_jetstream_publish_backpressure_smoke.sh --scenario AA-JETSTREAM-PUBLISH-BACKPRESSURE-SLOW-ACKS --execute"
     },
@@ -389,7 +393,7 @@
       "fail_closed_child_count": 9,
       "open_tracker_blocker_count": 8,
       "dirty_cluster_fail_closed_count": 1,
-      "tracked_dirty_blocker_count": 3,
+      "tracked_dirty_blocker_count": 1,
       "source_skill_count": 4,
       "required_source_skill_count": 4,
       "missing_required_source_skill_count": 0,
@@ -406,7 +410,7 @@
       "missing_runner_path_count": 0,
       "objective_checklist_complete": true,
       "no_unexplained_artifacts": false,
-      "projection_hash": "f3d29af8e2db9a417e622475fc179a210d7e95fe319f334a4aabe5091a121978"
+      "projection_hash": "003a56e6399fbad8b7daa0e0f3284303324a635f57f1e08508aaa32452afd218"
     },
     "required_log_fields": [
       "scenario_id",
@@ -456,7 +460,7 @@
       "fail_closed_child_count": 9,
       "open_tracker_blocker_count": 8,
       "dirty_cluster_fail_closed_count": 1,
-      "tracked_dirty_blocker_count": 3,
+      "tracked_dirty_blocker_count": 1,
       "source_skill_count": 4,
       "required_source_skill_count": 4,
       "missing_required_source_skill_count": 0,
@@ -473,7 +477,7 @@
       "missing_runner_path_count": 0,
       "objective_checklist_complete": true,
       "no_unexplained_artifacts": false,
-      "projection_hash": "b522c69fb5b333bedf7b59d29d9dfcd653b3cfb1f85a4f21b81eaa1e377bc0b6"
+      "projection_hash": "d629d49db06671586f4edf2985ad4bbb7465be6a570c6171c03d2653ff6a82d2"
     },
     "required_log_fields": [
       "scenario_id",
