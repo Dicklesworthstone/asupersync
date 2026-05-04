@@ -32,6 +32,7 @@ use asupersync_conformance::raptorq_rfc6330::{
     ConformanceContext, ConformanceResult, ConformanceRunner, ConformanceStatus, CoverageMatrix,
     RequirementLevel, TestCategory, TestExecution, generate_jsonl_logs,
 };
+use asupersync_conformance::rfc6330_tests;
 
 // All conformance types are now imported from the main module
 
@@ -257,21 +258,7 @@ fn main() {
 
 /// Register all available RFC 6330 conformance tests
 fn register_all_tests(runner: &mut ConformanceRunner) {
-    // TODO: Register actual conformance test implementations
-    // This is where we'll add all the P0, P1, P2, P3 priority tests
-    // from the test priority matrix
-
-    // Example test registrations (these would be real implementations):
-    // runner.register_test(LookupTableV0Test);
-    // runner.register_test(LookupTableV1Test);
-    // runner.register_test(SystematicIndexTest);
-    // runner.register_test(TupleGenerationTest);
-    // ... etc
-
-    if runner.test_count() == 0 {
-        eprintln!("Warning: No conformance tests registered yet");
-        eprintln!("This CLI framework is ready - tests need to be implemented");
-    }
+    rfc6330_tests::register_all_tests(runner);
 }
 
 /// Print test execution results in human-readable format
@@ -427,6 +414,24 @@ fn generate_detailed_report(coverage: &CoverageMatrix, executions: &[TestExecuti
             }
         }
     }
+
+    println!("## Registered Test Executions");
+    println!();
+    println!("| RFC Clause | Section | Level | Category | Status | Description |");
+    println!("|------------|---------|-------|----------|--------|-------------|");
+
+    for test in executions {
+        println!(
+            "| {} | {} | {} | {:?} | {} | {} |",
+            test.rfc_clause,
+            test.section,
+            test.level,
+            test.category,
+            test.result.description(),
+            test.description.replace('|', "\\|")
+        );
+    }
+    println!();
 
     // Conformance recommendations
     println!("## Conformance Recommendations");

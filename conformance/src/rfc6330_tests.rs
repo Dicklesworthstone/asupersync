@@ -4,7 +4,8 @@
 //! implementation against RFC 6330 requirements using reference fixtures.
 
 use crate::raptorq_rfc6330::{
-    ConformanceContext, ConformanceResult, ConformanceTest, RequirementLevel, TestCategory,
+    ConformanceContext, ConformanceResult, ConformanceRunner, ConformanceTest, RequirementLevel,
+    TestCategory,
 };
 use crate::rfc6330_fixtures::*;
 
@@ -568,6 +569,16 @@ pub fn get_all_example_tests() -> Vec<Box<dyn ConformanceTest>> {
     ]
 }
 
+/// Register every RFC 6330 conformance test exposed by this module.
+pub fn register_all_tests(runner: &mut ConformanceRunner) {
+    runner.register_test(LookupTableV0Test);
+    runner.register_test(LookupTableV1Test);
+    runner.register_test(LookupTableV2Test);
+    runner.register_test(LookupTableV3Test);
+    runner.register_test(SystematicIndexTest);
+    runner.register_test(SystematicTupleGenerationTest);
+}
+
 /// Get P0 priority tests only (critical requirements)
 pub fn get_p0_tests() -> Vec<Box<dyn ConformanceTest>> {
     vec![
@@ -596,4 +607,40 @@ pub fn get_level_tests(level: RequirementLevel) -> Vec<Box<dyn ConformanceTest>>
         .into_iter()
         .filter(|test| test.requirement_level() == level)
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rfc6330_registry_exposes_real_tests() {
+        let registry = get_all_example_tests();
+        assert_eq!(registry.len(), 6);
+        assert!(registry.iter().all(|test| !test.rfc_clause().is_empty()));
+        assert!(registry.iter().all(|test| !test.description().is_empty()));
+    }
+
+    #[test]
+    fn rfc6330_register_all_tests_matches_registry() {
+        let mut runner = ConformanceRunner::new();
+        register_all_tests(&mut runner);
+
+        let registry = get_all_example_tests();
+        let registry_names: Vec<_> = registry.iter().map(|test| test.name()).collect();
+
+        assert_eq!(runner.test_count(), registry.len());
+        assert_eq!(runner.test_names(), registry_names);
+        assert_eq!(runner.test_count_by_level(RequirementLevel::Must), 6);
+    }
+
+    #[test]
+    fn rfc6330_registry_filters_select_expected_subsets() {
+        assert_eq!(get_section_tests("5.5").len(), 4);
+        assert_eq!(get_section_tests("5.1").len(), 1);
+        assert_eq!(get_section_tests("5.3").len(), 1);
+        assert_eq!(get_level_tests(RequirementLevel::Must).len(), 6);
+        assert!(get_level_tests(RequirementLevel::Should).is_empty());
+        assert_eq!(get_p0_tests().len(), 6);
+    }
 }
