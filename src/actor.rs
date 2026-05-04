@@ -388,13 +388,17 @@ impl<A: Actor> std::future::Future for ActorJoinFuture<'_, A> {
                 std::task::Poll::Ready(Err(JoinError::Cancelled(reason)))
             }
             std::task::Poll::Ready(Err(crate::channel::oneshot::RecvError::Cancelled)) => {
-                unreachable!("RecvUninterruptibleFuture cannot return Cancelled");
+                unreachable!(
+                    "RecvUninterruptibleFuture does not consult Cx cancellation and only resolves \
+                     to Ok(value), Closed, or PolledAfterCompletion"
+                );
             }
             std::task::Poll::Ready(Err(
                 crate::channel::oneshot::RecvError::PolledAfterCompletion,
             )) => {
                 unreachable!(
-                    "JoinFuture guards repolls before polling the inner oneshot recv future"
+                    "ActorJoinFuture sets terminal_state before returning Ready, so a repoll \
+                     fails closed before the inner oneshot future can be polled again"
                 )
             }
             std::task::Poll::Pending => std::task::Poll::Pending,
@@ -1304,6 +1308,21 @@ mod tests {
     fn init_test(name: &str) {
         crate::test_utils::init_test_logging();
         crate::test_phase!(name);
+    }
+
+    fn actor_join_future_from_receiver<'a, A: Actor>(
+        receiver: &'a mut crate::channel::oneshot::Receiver<Result<A, JoinError>>,
+        terminal_state: &'a mut bool,
+    ) -> ActorJoinFuture<'a, A> {
+        let (sender, _mailbox_rx) = mpsc::channel::<A::Message>(4);
+        ActorJoinFuture {
+            inner: receiver.recv_uninterruptible(),
+            cx_inner: std::sync::Weak::new(),
+            sender,
+            state: Arc::new(ActorStateCell::new(ActorState::Running)),
+            terminal_state,
+            drop_abort_defused: false,
+        }
     }
 
     fn counting_waker(counter: Arc<std::sync::atomic::AtomicUsize>) -> Waker {
@@ -3087,6 +3106,87 @@ mod tests {
         );
 
         crate::test_complete!("actor_handle_second_join_fails_closed");
+    }
+
+    #[test]
+    fn actor_join_future_closed_inner_maps_to_cancelled_reason() {
+        init_test("actor_join_future_closed_inner_maps_to_cancelled_reason");
+
+        let (result_tx, mut result_rx) =
+            crate::channel::oneshot::channel::<Result<Counter, JoinError>>();
+        drop(result_tx);
+        let mut terminal_state = false;
+        let poll_result = {
+            let mut join = std::pin::pin!(actor_join_future_from_receiver::<Counter>(
+                &mut result_rx,
+                &mut terminal_state,
+            ));
+            let waker = counting_waker(Arc::new(std::sync::atomic::AtomicUsize::new(0)));
+            let mut poll_cx = Context::from_waker(&waker);
+            join.as_mut().poll(&mut poll_cx)
+        };
+
+        match poll_result {
+            Poll::Ready(Err(JoinError::Cancelled(reason))) => {
+                assert_eq!(reason.kind, crate::types::CancelKind::User);
+                assert_eq!(
+                    reason.message.as_deref(),
+                    Some("join channel closed"),
+                    "closed inner oneshot should surface the explicit join-channel reason"
+                );
+            }
+            other => panic!("closed inner join future must map to Cancelled, got {other:?}"),
+        }
+
+        assert!(
+            terminal_state,
+            "closed join future should mark terminal state"
+        );
+        crate::test_complete!("actor_join_future_closed_inner_maps_to_cancelled_reason");
+    }
+
+    #[test]
+    fn actor_join_future_repoll_fails_before_inner_polled_after_completion() {
+        init_test("actor_join_future_repoll_fails_before_inner_polled_after_completion");
+
+        let (result_tx, mut result_rx) =
+            crate::channel::oneshot::channel::<Result<Counter, JoinError>>();
+        let cx: Cx = Cx::for_testing();
+        result_tx
+            .send(&cx, Ok(Counter::new()))
+            .expect("seed join result");
+        let mut terminal_state = false;
+        let (first_poll, second_poll) = {
+            let mut join = std::pin::pin!(actor_join_future_from_receiver::<Counter>(
+                &mut result_rx,
+                &mut terminal_state,
+            ));
+            let waker = counting_waker(Arc::new(std::sync::atomic::AtomicUsize::new(0)));
+            let mut poll_cx = Context::from_waker(&waker);
+            let first_poll = join.as_mut().poll(&mut poll_cx);
+            let second_poll = join.as_mut().poll(&mut poll_cx);
+            (first_poll, second_poll)
+        };
+
+        match first_poll {
+            Poll::Ready(Ok(actor)) => {
+                assert_eq!(actor.count, 0, "seeded actor state should round-trip");
+            }
+            other => panic!("first poll should return actor state, got {other:?}"),
+        }
+
+        assert!(terminal_state, "successful join should mark terminal state");
+
+        match second_poll {
+            Poll::Ready(Err(JoinError::PolledAfterCompletion)) => {}
+            other => panic!(
+                "re-poll should fail closed before the inner oneshot can return PolledAfterCompletion, got {other:?}"
+            ),
+        }
+
+        crate::test_complete!(
+            "actor_join_future_repoll_fails_before_inner_polled_after_completion"
+        );
     }
 
     #[test]
