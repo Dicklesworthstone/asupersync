@@ -98,19 +98,19 @@ fn grpc_codec_waits_for_full_invalid_flag_frame_like_grpc_go() {
 }
 
 #[test]
-fn framed_codec_identity_compression_round_trips_when_enabled() {
-    let payload = Bytes::from_static(b"identity-compressed");
+fn framed_codec_identity_hooks_emit_bare_noop_wire() {
+    let payload = Bytes::from_static(b"identity-noop");
     let mut encoder = FramedCodec::new(IdentityCodec).with_identity_frame_codec();
-    let mut decoder = FramedCodec::new(IdentityCodec).with_identity_frame_codec();
+    let mut decoder = FramedCodec::new(IdentityCodec);
     let mut wire = BytesMut::new();
 
     encoder
         .encode_message(&payload, &mut wire)
-        .expect("identity-compressed frame must encode");
+        .expect("identity no-op frame must encode");
 
     assert_eq!(
-        wire[0], 1,
-        "identity frame codec must still set the compressed flag"
+        wire[0], 0,
+        "identity frame codec is a no-op and must clear the compressed flag"
     );
 
     let decoded = decoder
@@ -124,13 +124,16 @@ fn framed_codec_identity_compression_round_trips_when_enabled() {
 #[test]
 fn framed_codec_rejects_compressed_frames_without_decompressor() {
     let payload = Bytes::from_static(b"negotiation required");
-    let mut encoder = FramedCodec::new(IdentityCodec).with_identity_frame_codec();
     let mut decoder = FramedCodec::new(IdentityCodec);
     let mut wire = BytesMut::new();
 
-    encoder
-        .encode_message(&payload, &mut wire)
-        .expect("identity-compressed frame must encode");
+    wire.extend_from_slice(&[0x01]);
+    wire.extend_from_slice(
+        &u32::try_from(payload.len())
+            .expect("fixture length fits u32")
+            .to_be_bytes(),
+    );
+    wire.extend_from_slice(&payload);
 
     let err = decoder
         .decode_message(&mut wire)

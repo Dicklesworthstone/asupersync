@@ -201,15 +201,15 @@ mod compression {
     }
 
     #[test]
-    fn test_identity_frame_codec_sets_compressed_flag() {
+    fn test_identity_frame_codec_emits_noop_flag() {
         let mut codec = FramedCodec::new(IdentityCodec).with_identity_frame_codec();
         let mut buf = BytesMut::new();
-        let data = Bytes::from_static(b"identity-compressed");
+        let data = Bytes::from_static(b"identity-noop");
 
         codec.encode_message(&data, &mut buf).unwrap();
 
-        // Flag byte should be 1 (compressed frame via identity codec).
-        assert_eq!(buf[0], 1, "compressed flag set with identity frame codec");
+        // Identity is a no-op encoding, so the wire frame stays uncompressed.
+        assert_eq!(buf[0], 0, "identity frame codec clears compressed flag");
 
         let decoded = codec.decode_message(&mut buf).unwrap().unwrap();
         assert_eq!(decoded, data);

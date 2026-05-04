@@ -2,7 +2,7 @@
 source: src/grpc/codec.rs
 expression: render_grpc_frame_for_snapshot_test(buf.as_ref())
 ---
-compressed_flag: 01
+compressed_flag: 00
 message_length_be: 00 00 00 16
 message_length: 22
 payload_utf8: "compressed-passthrough"

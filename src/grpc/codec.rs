@@ -437,11 +437,17 @@ impl<C: Codec> FramedCodec<C> {
 
     /// Configure identity frame hooks.
     ///
-    /// Useful for integration tests that require handling of the compressed flag
-    /// without introducing a specific wire compression algorithm.
+    /// Identity is the gRPC no-op encoding. Outbound frames stay byte-for-byte
+    /// equivalent to the bare codec path and therefore keep compressed-flag=0.
+    /// The identity decompressor is still installed so tests and interop paths
+    /// can explicitly accept compressed-flag=1 frames when no grpc-encoding
+    /// header is supplied.
     #[must_use]
-    pub fn with_identity_frame_codec(self) -> Self {
-        self.with_frame_codec(identity_frame_compress, identity_frame_decompress)
+    pub fn with_identity_frame_codec(mut self) -> Self {
+        self.compressor = Some(identity_frame_compress);
+        self.decompressor = Some(identity_frame_decompress);
+        self.use_compression = false;
+        self
     }
 
     /// Get a reference to the inner codec.
@@ -1095,11 +1101,12 @@ mod tests {
             .encode_message(&original, &mut buf)
             .expect("encode must succeed");
 
-        // Ensure compressed flag is set when frame compression is enabled.
+        // Identity is a no-op encoding, so it must emit the same wire flag as
+        // the bare codec path.
         crate::assert_with_log!(
-            buf.first().copied() == Some(1),
-            "compressed flag set",
-            Some(1u8),
+            buf.first().copied() == Some(0),
+            "identity flag clear",
+            Some(0u8),
             buf.first().copied()
         );
         insta::assert_snapshot!(
@@ -1113,6 +1120,28 @@ mod tests {
             .expect("frame must decode");
         crate::assert_with_log!(decoded == original, "decoded", original, decoded);
         crate::test_complete!("test_framed_codec_identity_frame_codec_roundtrip");
+    }
+
+    #[test]
+    fn test_framed_codec_identity_frame_codec_accepts_explicit_flagged_input() {
+        init_test("test_framed_codec_identity_frame_codec_accepts_explicit_flagged_input");
+        let mut codec = FramedCodec::new(IdentityCodec).with_identity_frame_codec();
+        let mut buf = BytesMut::new();
+        let original = Bytes::from_static(b"explicit-identity-flag");
+
+        buf.put_u8(1);
+        buf.put_u32(u32::try_from(original.len()).expect("fixture length fits u32"));
+        buf.extend_from_slice(&original);
+
+        let decoded = codec
+            .decode_message(&mut buf)
+            .expect("identity decompressor accepts explicit flagged input")
+            .expect("frame must decode");
+        crate::assert_with_log!(decoded == original, "decoded", original, decoded);
+        crate::assert_with_log!(buf.is_empty(), "buffer drained", true, buf.is_empty());
+        crate::test_complete!(
+            "test_framed_codec_identity_frame_codec_accepts_explicit_flagged_input"
+        );
     }
 
     #[test]

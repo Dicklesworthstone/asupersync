@@ -37,7 +37,7 @@
 //! mutating bytes it should be passing through.
 
 use asupersync::bytes::BytesMut;
-use asupersync::grpc::{FramedCodec, ProstCodec};
+use asupersync::grpc::{FramedCodec, GrpcError, ProstCodec};
 use prost::Message;
 
 #[derive(Clone, PartialEq, prost::Message)]
@@ -163,52 +163,118 @@ fn identity_decoder_decodes_bare_codec_output() {
 }
 
 #[test]
-fn identity_codec_sets_compressed_flag_and_bare_decoder_rejects() {
-    // Pinned current behavior: when `with_identity_frame_codec` is
-    // wired, FramedCodec sets `use_compression = true` and the
-    // emitted wire frame carries compressed-flag = 0x01 (even
-    // though identity is a no-op). A bare decoder (no decompressor
-    // configured) will see flag=1 and reject with a typed
-    // GrpcError::Compression error.
-    //
-    // This is a documented gRPC-spec divergence: the spec text
-    // suggests `grpc-encoding: identity` on the HEADERS line but
-    // compressed-flag=0 on the wire, since "identity" is a no-op.
-    // asupersync's current FramedCodec implementation treats any
-    // configured frame codec — including identity — as "compressed,
-    // peer needs the same algorithm to decode." The test pins the
-    // current behavior so a future spec-compliance fix that flipped
-    // identity to flag=0 trips here and forces an intentional
-    // re-baseline.
+fn identity_codec_emits_bare_prost_wire_and_bare_decoder_accepts() {
+    // gRPC identity is a no-op encoding. Wiring explicit identity
+    // hooks must not change the wire bytes versus the bare prost
+    // path: compressed-flag=0, same LPM length, same prost payload.
+    // A bare decoder must therefore accept identity-encoded output.
     for (i, msg) in fixtures().iter().enumerate() {
-        let mut wire = BytesMut::new();
+        let mut identity_wire = BytesMut::new();
         let mut identity_encoder =
             FramedCodec::<ProstCodec<IdentityFixture, IdentityFixture>>::new(ProstCodec::new())
                 .with_identity_frame_codec();
         identity_encoder
-            .encode_message(msg, &mut wire)
+            .encode_message(msg, &mut identity_wire)
             .expect("identity encode");
 
+        let mut bare_wire = BytesMut::new();
+        let mut bare_encoder =
+            FramedCodec::<ProstCodec<IdentityFixture, IdentityFixture>>::new(ProstCodec::new());
+        bare_encoder
+            .encode_message(msg, &mut bare_wire)
+            .expect("bare encode");
+
         assert_eq!(
-            wire[0], 0x01,
-            "fixture {i}: with_identity_frame_codec sets compressed-flag=1 \
-             today; if a spec-compliance change flips this to 0, also flip \
-             the bare-decoder branch below",
+            identity_wire[0], 0x00,
+            "fixture {i}: identity Content-Encoding is a no-op and must clear \
+             compressed-flag on outbound frames",
+        );
+        assert_eq!(
+            identity_wire, bare_wire,
+            "fixture {i}: identity-encoded wire must match the bare prost wire \
+             byte-for-byte",
         );
 
         let mut bare_decoder =
             FramedCodec::<ProstCodec<IdentityFixture, IdentityFixture>>::new(ProstCodec::new());
-        let err = bare_decoder.decode_message(&mut wire).expect_err(
-            "bare decoder must reject an identity-encoded frame today (flag=1, \
-                 no decompressor configured)",
-        );
-        // Sanity that the rejection is typed; not panic, not silent corruption.
-        assert!(
-            format!("{err}").contains("compressed frame received"),
-            "fixture {i}: rejection must mention the missing-decompressor reason; \
-             got {err:?}",
-        );
+        let decoded = bare_decoder
+            .decode_message(&mut identity_wire)
+            .expect("bare decoder accepts identity no-op output")
+            .expect("message");
+        assert_eq!(decoded, *msg, "fixture {i}: bare decoder parity");
     }
+}
+
+#[test]
+fn identity_header_rejects_compressed_flag_true() {
+    // grpc-encoding: identity means no compression was applied, so
+    // compressed-flag=1 is a protocol error even if the receiver has
+    // the identity hooks available. The header/flag consistency check
+    // must run before identity passthrough could mask the malformed
+    // frame.
+    let msg = IdentityFixture {
+        name: "malformed-header".into(),
+        count: 11,
+        payload: vec![0xA5; 8],
+    };
+    let prost_bytes = msg.encode_to_vec();
+
+    let mut wire = BytesMut::new();
+    wire.extend_from_slice(&[0x01]);
+    wire.extend_from_slice(
+        &u32::try_from(prost_bytes.len())
+            .expect("fixture length fits u32")
+            .to_be_bytes(),
+    );
+    wire.extend_from_slice(&prost_bytes);
+
+    let mut decoder =
+        FramedCodec::<ProstCodec<IdentityFixture, IdentityFixture>>::new(ProstCodec::new())
+            .with_identity_frame_codec();
+    let err = decoder
+        .decode_message_with_encoding(&mut wire, Some("identity"))
+        .expect_err("identity header must reject compressed-flag=1");
+    assert!(
+        matches!(err, GrpcError::Protocol(_)),
+        "identity flag/header mismatch must be a protocol error, got {err:?}",
+    );
+    assert!(
+        wire.is_empty(),
+        "malformed identity-header frame must be consumed and stream-poisoned",
+    );
+}
+
+#[test]
+fn identity_header_flag_false_preserves_prost_metadata_fields() {
+    // Codec framing does not own HTTP metadata, but it must preserve
+    // every protobuf field that callers commonly use to carry logical
+    // metadata. This pins the identity/no-op path against accidental
+    // payload rewrites while decoding under grpc-encoding: identity.
+    let msg = IdentityFixture {
+        name: "metadata-name".into(),
+        count: 42,
+        payload: b"metadata-payload".to_vec(),
+    };
+
+    let mut wire = BytesMut::new();
+    let mut encoder =
+        FramedCodec::<ProstCodec<IdentityFixture, IdentityFixture>>::new(ProstCodec::new())
+            .with_identity_frame_codec();
+    encoder.encode_message(&msg, &mut wire).expect("encode");
+
+    let mut decoder =
+        FramedCodec::<ProstCodec<IdentityFixture, IdentityFixture>>::new(ProstCodec::new())
+            .with_identity_frame_codec();
+    let decoded = decoder
+        .decode_message_with_encoding(&mut wire, Some("identity"))
+        .expect("identity header flag=false decodes")
+        .expect("message");
+    assert_eq!(decoded.name, msg.name, "logical metadata name preserved");
+    assert_eq!(decoded.count, msg.count, "logical metadata count preserved");
+    assert_eq!(
+        decoded.payload, msg.payload,
+        "logical metadata payload bytes preserved",
+    );
 }
 
 #[test]

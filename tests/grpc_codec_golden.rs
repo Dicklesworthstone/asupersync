@@ -65,14 +65,14 @@ fn golden_grpc_codec_length_prefixed_messages() {
 }
 
 #[test]
-fn golden_grpc_codec_identity_compression_wire_layout() {
+fn golden_grpc_codec_identity_noop_wire_layout() {
     let mut codec = FramedCodec::new(IdentityCodec).with_identity_frame_codec();
     let mut wire = BytesMut::new();
     let payload = Bytes::from_static(b"identity-codec");
 
     codec
         .encode_message(&payload, &mut wire)
-        .expect("identity compression framing must succeed");
+        .expect("identity no-op framing must succeed");
 
     assert_json_snapshot!(
         "grpc_codec_identity_compression_wire_layout",
