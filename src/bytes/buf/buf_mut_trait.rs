@@ -355,6 +355,61 @@ mod tests {
     )]
     use super::super::Buf;
     use super::*;
+    use proptest::prelude::*;
+
+    struct FragmentedBufMut {
+        bytes: Vec<u8>,
+        written: usize,
+        max_chunk: usize,
+    }
+
+    impl FragmentedBufMut {
+        fn new(capacity: usize, max_chunk: usize) -> Self {
+            Self {
+                bytes: vec![0; capacity],
+                written: 0,
+                max_chunk: max_chunk.max(1),
+            }
+        }
+
+        fn written(&self) -> &[u8] {
+            &self.bytes[..self.written]
+        }
+    }
+
+    impl BufMut for FragmentedBufMut {
+        fn remaining_mut(&self) -> usize {
+            self.bytes.len() - self.written
+        }
+
+        fn chunk_mut(&mut self) -> &mut [u8] {
+            let start = self.written;
+            let end = start + self.remaining_mut().min(self.max_chunk);
+            &mut self.bytes[start..end]
+        }
+
+        fn advance_mut(&mut self, cnt: usize) {
+            assert!(
+                cnt <= self.remaining_mut(),
+                "advance_mut out of bounds: cnt={cnt}, remaining={}",
+                self.remaining_mut()
+            );
+            self.written += cnt;
+        }
+    }
+
+    fn write_numeric_sequence(buf: &mut impl BufMut, values: &[u64]) {
+        for &value in values {
+            let value16 = value as u16;
+            let value32 = value as u32;
+            buf.put_u16(value16);
+            buf.put_u16_le(value16);
+            buf.put_u32(value32);
+            buf.put_u32_le(value32);
+            buf.put_u64(value);
+            buf.put_u64_le(value);
+        }
+    }
 
     fn init_test(name: &str) {
         crate::test_utils::init_test_logging();
@@ -513,5 +568,30 @@ mod tests {
         let ok = (read.get_f64() - expected).abs() < 1e-9;
         crate::assert_with_log!(ok, "f64", true, ok);
         crate::test_complete!("test_roundtrip_all_types");
+    }
+
+    proptest! {
+        #[test]
+        fn buf_mut_metamorphic_fragmented_numeric_writes_match_vec(
+            values in proptest::collection::vec(any::<u64>(), 0..64),
+            max_chunk in 1usize..=8,
+        ) {
+            let bytes_per_value = 2 + 2 + 4 + 4 + 8 + 8;
+            let capacity = values.len() * bytes_per_value;
+
+            let mut vec_writer = Vec::new();
+            write_numeric_sequence(&mut vec_writer, &values);
+
+            let mut fragmented = FragmentedBufMut::new(capacity, max_chunk);
+            write_numeric_sequence(&mut fragmented, &values);
+
+            prop_assert_eq!(
+                fragmented.written(),
+                vec_writer.as_slice(),
+                "fragmented BufMut with max_chunk={} must match Vec output",
+                max_chunk
+            );
+            prop_assert_eq!(fragmented.remaining_mut(), 0);
+        }
     }
 }
