@@ -7424,8 +7424,10 @@ pub fn fuzz_parse_bind_message(frame: &[u8]) -> Result<FuzzBindMessage, PgError>
         )));
     }
     let mut param_format_codes = Vec::with_capacity(format_count as usize);
-    for _ in 0..format_count {
-        param_format_codes.push(reader.read_i16()?);
+    for index in 0..format_count as usize {
+        let code = reader.read_i16()?;
+        validate_bind_format_code("parameter", index, code)?;
+        param_format_codes.push(code);
     }
 
     let value_count = reader.read_i16()?;
@@ -7461,8 +7463,10 @@ pub fn fuzz_parse_bind_message(frame: &[u8]) -> Result<FuzzBindMessage, PgError>
         )));
     }
     let mut result_format_codes = Vec::with_capacity(result_count as usize);
-    for _ in 0..result_count {
-        result_format_codes.push(reader.read_i16()?);
+    for index in 0..result_count as usize {
+        let code = reader.read_i16()?;
+        validate_bind_format_code("result", index, code)?;
+        result_format_codes.push(code);
     }
     reader.ensure_consumed("Bind")?;
 
@@ -7473,6 +7477,16 @@ pub fn fuzz_parse_bind_message(frame: &[u8]) -> Result<FuzzBindMessage, PgError>
         parameter_values,
         result_format_codes,
     })
+}
+
+#[cfg(feature = "test-internals")]
+fn validate_bind_format_code(role: &str, index: usize, code: i16) -> Result<(), PgError> {
+    match code {
+        0 | 1 => Ok(()),
+        _ => Err(PgError::Protocol(format!(
+            "invalid bind {role} format code at index {index}: {code} (expected 0 text or 1 binary)"
+        ))),
+    }
 }
 
 #[cfg(test)]
@@ -10365,6 +10379,35 @@ mod tests {
         assert_eq!(msg[0], b'B');
     }
 
+    fn build_bind_frame_for_test(
+        param_format_codes: &[i16],
+        values: &[Option<Vec<u8>>],
+        result_format_codes: &[i16],
+    ) -> Vec<u8> {
+        let mut buf = MessageBuffer::new();
+        buf.write_cstring("");
+        buf.write_cstring("");
+        buf.write_i16(param_format_codes.len() as i16);
+        for &code in param_format_codes {
+            buf.write_i16(code);
+        }
+        buf.write_i16(values.len() as i16);
+        for value in values {
+            if let Some(bytes) = value {
+                let len = i32::try_from(bytes.len()).unwrap();
+                buf.write_i32(len);
+                buf.write_bytes(bytes);
+            } else {
+                buf.write_i32(-1);
+            }
+        }
+        buf.write_i16(result_format_codes.len() as i16);
+        for &code in result_format_codes {
+            buf.write_i16(code);
+        }
+        buf.build_message(FrontendMessage::Bind as u8).unwrap()
+    }
+
     #[test]
     fn build_bind_msg_with_params() {
         let params: Vec<&dyn ToSql> = vec![&42i32, &true];
@@ -10404,6 +10447,70 @@ mod tests {
     }
 
     #[test]
+    fn build_bind_msg_encodes_global_default_text_format_count_zero() {
+        let left = String::from("alpha");
+        let right = String::from("beta");
+        let params: Vec<&dyn ToSql> = vec![&left, &right];
+        let msg = build_bind_msg("", "", &params, Format::Text).unwrap();
+        let parsed = fuzz_parse_bind_message(&msg).unwrap();
+
+        assert_eq!(
+            parsed.param_format_codes,
+            Vec::<i16>::new(),
+            "all-text parameters should use PostgreSQL's default count=0 encoding"
+        );
+        assert_eq!(
+            parsed.parameter_values,
+            vec![Some(b"alpha".to_vec()), Some(b"beta".to_vec())]
+        );
+        assert_eq!(parsed.result_format_codes, vec![0]);
+    }
+
+    #[test]
+    fn build_bind_msg_encodes_single_global_binary_format_count() {
+        let number = 42i32;
+        let flag = true;
+        let params: Vec<&dyn ToSql> = vec![&number, &flag];
+        let msg = build_bind_msg("", "", &params, Format::Text).unwrap();
+        let parsed = fuzz_parse_bind_message(&msg).unwrap();
+
+        assert_eq!(
+            parsed.param_format_codes,
+            vec![1],
+            "uniform binary parameters should use count=1 global binary encoding"
+        );
+        assert_eq!(
+            parsed.parameter_values,
+            vec![Some(42i32.to_be_bytes().to_vec()), Some(vec![1])]
+        );
+        assert_eq!(parsed.result_format_codes, vec![0]);
+    }
+
+    #[test]
+    fn build_bind_msg_encodes_per_parameter_mixed_formats() {
+        let left = String::from("left");
+        let number = 7i32;
+        let right = String::from("right");
+        let params: Vec<&dyn ToSql> = vec![&left, &number, &right];
+        let msg = build_bind_msg("", "", &params, Format::Text).unwrap();
+        let parsed = fuzz_parse_bind_message(&msg).unwrap();
+
+        assert_eq!(
+            parsed.param_format_codes,
+            vec![0, 1, 0],
+            "mixed text/binary parameters must preserve per-parameter format codes"
+        );
+        assert_eq!(
+            parsed.parameter_values,
+            vec![
+                Some(b"left".to_vec()),
+                Some(7i32.to_be_bytes().to_vec()),
+                Some(b"right".to_vec())
+            ]
+        );
+    }
+
+    #[test]
     fn build_bind_msg_with_null() {
         let val: Option<i32> = None;
         let params: Vec<&dyn ToSql> = vec![&val];
@@ -10417,6 +10524,34 @@ mod tests {
             has_null_marker,
             "bind message should contain NULL marker (-1)"
         );
+    }
+
+    #[test]
+    fn fuzz_parse_bind_message_decodes_zero_parameters() {
+        let frame = build_bind_frame_for_test(&[], &[], &[0]);
+        let parsed = fuzz_parse_bind_message(&frame).unwrap();
+
+        assert!(parsed.param_format_codes.is_empty());
+        assert!(parsed.parameter_values.is_empty());
+        assert_eq!(parsed.result_format_codes, vec![0]);
+    }
+
+    #[test]
+    fn fuzz_parse_bind_message_decodes_max_bounded_parameter_count() {
+        const MAX_BOUND_PARAMS: usize = 16;
+
+        let param_format_codes = (0..MAX_BOUND_PARAMS)
+            .map(|index| (index % 2) as i16)
+            .collect::<Vec<_>>();
+        let values = (0..MAX_BOUND_PARAMS)
+            .map(|index| Some(vec![index as u8; (index % 3) + 1]))
+            .collect::<Vec<_>>();
+        let frame = build_bind_frame_for_test(&param_format_codes, &values, &[1]);
+        let parsed = fuzz_parse_bind_message(&frame).unwrap();
+
+        assert_eq!(parsed.param_format_codes, param_format_codes);
+        assert_eq!(parsed.parameter_values, values);
+        assert_eq!(parsed.result_format_codes, vec![1]);
     }
 
     #[test]
@@ -10442,6 +10577,66 @@ mod tests {
     }
 
     #[test]
+    fn fuzz_parse_bind_message_rejects_truncated_format_code_list() {
+        let mut buf = MessageBuffer::new();
+        buf.write_cstring("");
+        buf.write_cstring("");
+        buf.write_i16(1);
+        buf.write_byte(0);
+
+        let frame = buf.build_message(FrontendMessage::Bind as u8).unwrap();
+        match fuzz_parse_bind_message(&frame) {
+            Err(PgError::Protocol(msg)) => {
+                assert!(msg.contains("unexpected end of message"), "got: {msg}");
+            }
+            other => panic!("expected truncated bind format-code error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn fuzz_parse_bind_message_rejects_invalid_format_codes() {
+        let invalid_param = build_bind_frame_for_test(&[2], &[Some(b"x".to_vec())], &[0]);
+        match fuzz_parse_bind_message(&invalid_param) {
+            Err(PgError::Protocol(msg)) => {
+                assert!(
+                    msg.contains("invalid bind parameter format code at index 0: 2"),
+                    "got: {msg}"
+                );
+            }
+            other => panic!("expected invalid parameter format-code error, got {other:?}"),
+        }
+
+        let invalid_result = build_bind_frame_for_test(&[], &[], &[-1]);
+        match fuzz_parse_bind_message(&invalid_result) {
+            Err(PgError::Protocol(msg)) => {
+                assert!(
+                    msg.contains("invalid bind result format code at index 0: -1"),
+                    "got: {msg}"
+                );
+            }
+            other => panic!("expected invalid result format-code error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn fuzz_parse_bind_message_rejects_malformed_parameter_length() {
+        let mut buf = MessageBuffer::new();
+        buf.write_cstring("");
+        buf.write_cstring("");
+        buf.write_i16(0);
+        buf.write_i16(1);
+        buf.write_i32(-2);
+
+        let frame = buf.build_message(FrontendMessage::Bind as u8).unwrap();
+        match fuzz_parse_bind_message(&frame) {
+            Err(PgError::Protocol(msg)) => {
+                assert!(msg.contains("invalid bind value length: -2"), "got: {msg}");
+            }
+            other => panic!("expected malformed bind value-length error, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn fuzz_parse_bind_message_rejects_truncated_parameter_payload() {
         let mut buf = MessageBuffer::new();
         buf.write_cstring("");
@@ -10457,6 +10652,23 @@ mod tests {
                 assert!(msg.contains("unexpected end of message"), "got: {msg}");
             }
             other => panic!("expected truncated bind payload error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn fuzz_parse_bind_message_is_panic_free_for_small_arbitrary_bytes() {
+        let frames = vec![
+            Vec::new(),
+            vec![b'B'],
+            vec![b'B', 0, 0, 0, 0],
+            vec![b'B', 0, 0, 0, 4],
+            vec![b'B', 0, 0, 0, 6, 0],
+            vec![b'X', 0, 0, 0, 4],
+            vec![b'B', 0, 0, 0, 12, 0, 0, 0, 0, 0, 0, 0, 0],
+        ];
+
+        for frame in frames {
+            let _ = fuzz_parse_bind_message(&frame);
         }
     }
 

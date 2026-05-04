@@ -5,6 +5,7 @@ use asupersync::database::postgres::{
     FuzzBindMessage, PgError, fuzz_parse_bind_message, fuzz_parse_parameter_description, oid,
 };
 use libfuzzer_sys::fuzz_target;
+use std::hint::black_box;
 
 const MAX_NAME_BYTES: usize = 48;
 const MAX_PARAMS: usize = 16;
@@ -25,7 +26,11 @@ struct FuzzInput {
 #[derive(Arbitrary, Debug, Clone, Copy, PartialEq, Eq)]
 enum Scenario {
     BinaryClientTextOid,
+    DefaultTextFormatCountZero,
+    GlobalBinaryFormatCountOne,
+    PerParameterMixedFormats,
     FormatCountMismatch,
+    InvalidFormatCode,
     MessageLengthOverflow,
     ValueLengthOverflow,
     NullMarkers,
@@ -86,6 +91,35 @@ struct BindCase {
 }
 
 #[derive(Debug)]
+struct BindLabels {
+    corpus_label: &'static str,
+    parameter_count: usize,
+    format_code_count: usize,
+    per_parameter_code_vector: Vec<i16>,
+    payload_lengths: Vec<i32>,
+    offending_index: Option<usize>,
+    parser_outcome: &'static str,
+    error_kind: &'static str,
+    round_trip_verdict: &'static str,
+}
+
+impl BindLabels {
+    fn expose(self) {
+        black_box((
+            self.corpus_label,
+            self.parameter_count,
+            self.format_code_count,
+            self.per_parameter_code_vector,
+            self.payload_lengths,
+            self.offending_index,
+            self.parser_outcome,
+            self.error_kind,
+            self.round_trip_verdict,
+        ));
+    }
+}
+
+#[derive(Debug)]
 enum EncodedValue {
     Null,
     Bytes(Vec<u8>),
@@ -118,6 +152,11 @@ impl FuzzInput {
             _ => params.iter().map(|param| param.oid.to_oid()).collect(),
         };
         let format_codes = match scenario {
+            Scenario::DefaultTextFormatCountZero => Vec::new(),
+            Scenario::GlobalBinaryFormatCountOne => vec![1],
+            Scenario::PerParameterMixedFormats => {
+                (0..params.len()).map(|index| (index % 2) as i16).collect()
+            }
             Scenario::BinaryClientTextOid => vec![1; params.len()],
             Scenario::FormatCountMismatch => {
                 let count = if params.len() == 1 {
@@ -127,7 +166,21 @@ impl FuzzInput {
                 };
                 vec![1; count.min(MAX_PARAMS + 1)]
             }
-            _ => params.iter().map(|param| param.format.to_i16()).collect(),
+            Scenario::InvalidFormatCode => {
+                let mut codes = params
+                    .iter()
+                    .enumerate()
+                    .map(|(index, param)| param.format.to_valid_i16(index))
+                    .collect::<Vec<_>>();
+                let offending_index = codes.len() / 2;
+                codes[offending_index] = params[offending_index].format.to_invalid_i16();
+                codes
+            }
+            _ => params
+                .iter()
+                .enumerate()
+                .map(|(index, param)| param.format.to_valid_i16(index))
+                .collect(),
         };
         let values = params
             .into_iter()
@@ -148,7 +201,8 @@ impl FuzzInput {
             .result_formats
             .into_iter()
             .take(MAX_RESULT_FORMATS)
-            .map(|format| format.to_i16())
+            .enumerate()
+            .map(|(index, format)| format.to_valid_i16(index))
             .collect();
 
         BindCase {
@@ -177,11 +231,18 @@ impl OidInput {
 }
 
 impl FormatCode {
-    fn to_i16(self) -> i16 {
+    fn to_valid_i16(self, index: usize) -> i16 {
         match self {
             Self::Text => 0,
             Self::Binary => 1,
-            Self::Other(code) => code,
+            Self::Other(_) => (index % 2) as i16,
+        }
+    }
+
+    fn to_invalid_i16(self) -> i16 {
+        match self {
+            Self::Other(code) if code != 0 && code != 1 => code,
+            Self::Text | Self::Binary | Self::Other(_) => 2,
         }
     }
 }
@@ -306,6 +367,71 @@ fn expected_valid_bind(case: &BindCase) -> FuzzBindMessage {
     }
 }
 
+fn bind_labels(case: &BindCase, result: &Result<FuzzBindMessage, PgError>) -> BindLabels {
+    BindLabels {
+        corpus_label: case.scenario.label(),
+        parameter_count: case.values.len(),
+        format_code_count: case.format_codes.len(),
+        per_parameter_code_vector: case.format_codes.clone(),
+        payload_lengths: case
+            .values
+            .iter()
+            .map(|value| match value {
+                EncodedValue::Null => -1,
+                EncodedValue::Bytes(bytes) => i32::try_from(bytes.len()).unwrap_or(i32::MAX),
+                EncodedValue::LenOnly(len) => *len,
+            })
+            .collect(),
+        offending_index: case
+            .format_codes
+            .iter()
+            .position(|code| *code != 0 && *code != 1),
+        parser_outcome: if result.is_ok() { "ok" } else { "err" },
+        error_kind: match result {
+            Ok(_) => "none",
+            Err(PgError::Protocol(message)) if message.contains("format code") => "format_code",
+            Err(PgError::Protocol(message)) if message.contains("format count") => "format_count",
+            Err(PgError::Protocol(message)) if message.contains("length") => "length",
+            Err(PgError::Protocol(_)) => "protocol",
+            Err(PgError::Io(_)) => "io",
+            Err(PgError::AuthenticationFailed(_)) => "authentication",
+            Err(PgError::Server { .. }) => "server",
+            Err(PgError::Cancelled(_)) => "cancelled",
+            Err(PgError::ConnectionClosed) => "connection_closed",
+            Err(PgError::ColumnNotFound(_)) => "column_not_found",
+            Err(PgError::TypeConversion { .. }) => "type_conversion",
+            Err(PgError::InvalidUrl(_)) => "invalid_url",
+            Err(PgError::TlsRequired) => "tls_required",
+            Err(PgError::Tls(_)) => "tls",
+            Err(PgError::TransactionFinished) => "transaction_finished",
+            Err(PgError::UnsupportedAuth(_)) => "unsupported_auth",
+            Err(PgError::IsolationLevelMismatch { .. }) => "isolation_mismatch",
+        },
+        round_trip_verdict: match result {
+            Ok(parsed) if parsed == &expected_valid_bind(case) => "match",
+            Ok(_) => "mismatch",
+            Err(_) => "not_applicable",
+        },
+    }
+}
+
+impl Scenario {
+    fn label(self) -> &'static str {
+        match self {
+            Self::BinaryClientTextOid => "binary-client-text-oid",
+            Self::DefaultTextFormatCountZero => "default-text-format-count-zero",
+            Self::GlobalBinaryFormatCountOne => "global-binary-format-count-one",
+            Self::PerParameterMixedFormats => "per-parameter-mixed-formats",
+            Self::FormatCountMismatch => "format-count-mismatch",
+            Self::InvalidFormatCode => "invalid-format-code",
+            Self::MessageLengthOverflow => "message-length-overflow",
+            Self::ValueLengthOverflow => "value-length-overflow",
+            Self::NullMarkers => "null-markers",
+            Self::GeneralValid => "general-valid",
+        }
+    }
+}
+
 fn exercise_binary_text_oid_case(case: &BindCase, frame: &[u8]) {
     assert!(case.oids.iter().all(|&oid| oid == oid::TEXT));
     assert!(case.format_codes.iter().all(|&format| format == 1));
@@ -328,6 +454,18 @@ fn exercise_format_count_mismatch(frame: &[u8]) {
     }
 }
 
+fn exercise_invalid_format_code(frame: &[u8]) {
+    match fuzz_parse_bind_message(frame) {
+        Err(PgError::Protocol(message)) => {
+            assert!(
+                message.contains("format code"),
+                "unexpected invalid-format error: {message}"
+            );
+        }
+        other => panic!("invalid format code should fail cleanly, got {other:?}"),
+    }
+}
+
 fn exercise_null_marker_case(case: &BindCase, frame: &[u8]) {
     assert_parameter_description_round_trip(&case.oids);
     let parsed = fuzz_parse_bind_message(frame).expect("Bind with NULL markers should decode");
@@ -342,19 +480,25 @@ fn exercise_case(input: FuzzInput) {
     let case = input.into_case();
     let frame = build_bind_frame(&case);
     assert_stable_bind_parse(&frame);
+    let parse_result = fuzz_parse_bind_message(&frame);
+    bind_labels(&case, &parse_result).expose();
 
     match case.scenario {
         Scenario::BinaryClientTextOid => exercise_binary_text_oid_case(&case, &frame),
-        Scenario::FormatCountMismatch => exercise_format_count_mismatch(&frame),
-        Scenario::MessageLengthOverflow | Scenario::ValueLengthOverflow => {}
-        Scenario::NullMarkers => exercise_null_marker_case(&case, &frame),
-        Scenario::GeneralValid => {
+        Scenario::DefaultTextFormatCountZero
+        | Scenario::GlobalBinaryFormatCountOne
+        | Scenario::PerParameterMixedFormats
+        | Scenario::GeneralValid => {
             assert_parameter_description_round_trip(&case.oids);
             assert_eq!(
-                fuzz_parse_bind_message(&frame).expect("generated Bind should decode"),
+                parse_result.expect("generated Bind should decode"),
                 expected_valid_bind(&case)
             );
         }
+        Scenario::FormatCountMismatch => exercise_format_count_mismatch(&frame),
+        Scenario::InvalidFormatCode => exercise_invalid_format_code(&frame),
+        Scenario::MessageLengthOverflow | Scenario::ValueLengthOverflow => {}
+        Scenario::NullMarkers => exercise_null_marker_case(&case, &frame),
     }
 }
 
