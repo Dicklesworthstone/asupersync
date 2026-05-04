@@ -1114,26 +1114,48 @@ impl OtlpHttpExporter {
             .map_err(|_| OtlpError::non_retryable("OTLP request timeout"))?
             .map_err(|e| OtlpError::non_retryable(format!("OTLP request failed: {}", e)))?;
 
+            // Helper function to parse Retry-After header per RFC 9110
+            let parse_retry_after = |headers: &[(String, String)]| -> Option<Duration> {
+                headers
+                    .iter()
+                    .find(|(name, _)| name.eq_ignore_ascii_case("retry-after"))
+                    .and_then(|(_, value)| value.parse::<u64>().ok())
+                    .map(Duration::from_secs)
+            };
+
             // Handle response per OTLP spec
             match response.status {
                 200..=299 => Ok(()),
                 429 => {
-                    // Rate limited - check for Retry-After header
-                    let retry_after = response
-                        .headers
-                        .iter()
-                        .find(|(name, _)| name.eq_ignore_ascii_case("retry-after"))
-                        .and_then(|(_, value)| value.parse::<u64>().ok())
-                        .map(Duration::from_secs);
+                    // Rate limited - honor Retry-After header per OTLP spec
+                    let retry_after = parse_retry_after(&response.headers);
                     Err(OtlpError::retryable(response.status, retry_after))
                 }
                 408 => {
                     // Request Timeout - retryable per RFC 9110 (server-side timeout)
-                    Err(OtlpError::retryable(response.status, None))
+                    // OTLP spec: honor Retry-After header for ALL retryable responses
+                    let retry_after = parse_retry_after(&response.headers);
+                    Err(OtlpError::retryable(response.status, retry_after))
                 }
                 502 | 503 | 504 => {
                     // Retryable server errors per OTLP spec
-                    Err(OtlpError::retryable(response.status, None))
+                    // FIXED: Honor Retry-After header for all retryable responses (not just 429)
+                    let retry_after = parse_retry_after(&response.headers);
+                    Err(OtlpError::retryable(response.status, retry_after))
+                }
+                405 => {
+                    // Method Not Allowed - configuration error per OTLP spec
+                    // Extract Allow header for debugging (shows supported methods)
+                    let allowed_methods = response.headers
+                        .iter()
+                        .find(|(name, _)| name.eq_ignore_ascii_case("allow"))
+                        .map(|(_, value)| value.clone())
+                        .unwrap_or_else(|| "unknown".to_string());
+
+                    Err(OtlpError::non_retryable(format!(
+                        "OTLP Method Not Allowed (405) - configuration error. Allowed methods: {} - batch dropped",
+                        allowed_methods
+                    )))
                 }
                 415 => {
                     // Unsupported Media Type - special case for compression fallback
@@ -3516,20 +3538,16 @@ pub mod span_semantics {
         }
 
         /// Set span status.
+        ///
+        /// Per OTLP specification, span status updates follow last-write-wins semantics.
+        /// Any status can overwrite any other status - the most recent set_status() call
+        /// determines the final span status, regardless of the previous value.
+        ///
+        /// br-asupersync-8ru8uc — Fixed OTLP spec violation where Error status could not
+        /// be overwritten by Ok status. Now implements proper last-write-wins.
         pub fn set_status(&mut self, status: Status) {
-            match status {
-                Status::Error { .. } => self.status = status,
-                Status::Ok => {
-                    if !matches!(self.status, Status::Error { .. }) {
-                        self.status = Status::Ok;
-                    }
-                }
-                Status::Unset => {
-                    if matches!(self.status, Status::Unset) {
-                        self.status = Status::Unset;
-                    }
-                }
-            }
+            // OTLP spec: last-write-wins for all status transitions
+            self.status = status;
         }
 
         /// End the span.
