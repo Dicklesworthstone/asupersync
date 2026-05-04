@@ -3,9 +3,10 @@
 use asupersync::runtime::config::{
     ArenaTemperaturePolicy, BlockingPoolAffinityProfile, CapacityEnvelopeBrownoutStage,
     CapacityEnvelopeBudget, CapacityEnvelopeCalibrationStatus, CapacityEnvelopeEvidenceSnapshot,
-    CapacityEnvelopeHostFingerprint, HostProfileEvidenceArtifact, HostProfileEvidenceSet,
-    HostProfileHostResources, HostProfileId, HostProfileManualOverrides,
-    HostProfilePlannerObjective, HostProfilePlannerRequest, RuntimeCapacityHints,
+    CapacityEnvelopeHostFingerprint, HostProfileEvidenceArtifact,
+    HostProfileEvidenceCalibrationStatus, HostProfileEvidenceSet, HostProfileHostResources,
+    HostProfileId, HostProfileManualOverrides, HostProfilePlannerObjective,
+    HostProfilePlannerRequest, RuntimeCapacityHints,
     SignedProfileBundleCapacityCertificateReference, SignedProfileBundleControllerVersion,
     SignedProfileBundleExecutionMode, SignedProfileBundleIntegrityMode,
     SignedProfileBundleManifestRequest, TraceStorageProfile,
@@ -77,6 +78,10 @@ struct HostProfileEvidenceArtifactFixture {
     artifact_id: String,
     contract_version: String,
     validation_passed: bool,
+    #[serde(default = "default_host_profile_confidence_percent")]
+    confidence_percent: u8,
+    #[serde(default = "default_host_profile_calibration_status")]
+    calibration_status: String,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -173,6 +178,8 @@ impl From<HostProfileEvidenceArtifactFixture> for HostProfileEvidenceArtifact {
             artifact_id: value.artifact_id,
             contract_version: value.contract_version,
             validation_passed: value.validation_passed,
+            confidence_percent: value.confidence_percent,
+            calibration_status: parse_host_profile_calibration_status(&value.calibration_status),
         }
     }
 }
@@ -342,6 +349,22 @@ fn parse_calibration_status(value: &str) -> CapacityEnvelopeCalibrationStatus {
         "calibrated" => CapacityEnvelopeCalibrationStatus::Calibrated,
         "drifted" => CapacityEnvelopeCalibrationStatus::Drifted,
         other => panic!("unsupported calibration status {other}"),
+    }
+}
+
+fn default_host_profile_confidence_percent() -> u8 {
+    100
+}
+
+fn default_host_profile_calibration_status() -> String {
+    "current".to_string()
+}
+
+fn parse_host_profile_calibration_status(value: &str) -> HostProfileEvidenceCalibrationStatus {
+    match value {
+        "current" => HostProfileEvidenceCalibrationStatus::Current,
+        "stale" => HostProfileEvidenceCalibrationStatus::Stale,
+        other => panic!("unsupported host profile evidence calibration status {other}"),
     }
 }
 

@@ -1,10 +1,13 @@
+#![recursion_limit = "256"]
+
 //! Contract-backed proofs for the explainable host-profile planner.
 
 use asupersync::runtime::config::{
     ArenaTemperaturePolicy, BlockingPoolAffinityProfile, HostProfileConfigDiffSource,
-    HostProfileEvidenceArtifact, HostProfileEvidenceSet, HostProfileHostResources, HostProfileId,
-    HostProfileManualOverrides, HostProfilePlannerObjective, HostProfilePlannerRequest,
-    RuntimeCapacityHints, RuntimeConfig, TraceStorageProfile,
+    HostProfileEvidenceArtifact, HostProfileEvidenceCalibrationStatus, HostProfileEvidenceSet,
+    HostProfileHostResources, HostProfileId, HostProfileManualOverrides,
+    HostProfilePlannerObjective, HostProfilePlannerRequest, RuntimeCapacityHints, RuntimeConfig,
+    TraceStorageProfile,
 };
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -55,6 +58,10 @@ struct HostProfileEvidenceArtifactFixture {
     artifact_id: String,
     contract_version: String,
     validation_passed: bool,
+    #[serde(default = "default_confidence_percent")]
+    confidence_percent: u8,
+    #[serde(default = "default_calibration_status")]
+    calibration_status: String,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -96,6 +103,8 @@ impl From<HostProfileEvidenceArtifactFixture> for HostProfileEvidenceArtifact {
             artifact_id: value.artifact_id,
             contract_version: value.contract_version,
             validation_passed: value.validation_passed,
+            confidence_percent: value.confidence_percent,
+            calibration_status: parse_evidence_calibration_status(&value.calibration_status),
         }
     }
 }
@@ -208,6 +217,22 @@ fn parse_profile_id(value: &str) -> HostProfileId {
     }
 }
 
+fn default_confidence_percent() -> u8 {
+    100
+}
+
+fn default_calibration_status() -> String {
+    "current".to_string()
+}
+
+fn parse_evidence_calibration_status(value: &str) -> HostProfileEvidenceCalibrationStatus {
+    match value {
+        "current" => HostProfileEvidenceCalibrationStatus::Current,
+        "stale" => HostProfileEvidenceCalibrationStatus::Stale,
+        other => panic!("unsupported host profile evidence calibration status {other}"),
+    }
+}
+
 fn parse_trace_storage_profile(value: &str) -> TraceStorageProfile {
     value.parse().unwrap_or_else(|_| {
         panic!("unsupported trace storage profile override {value}");
@@ -316,6 +341,12 @@ fn report_projection(report: &Value) -> Value {
         "selected_profile": report["selected_profile"],
         "fallback_profile": report["fallback_profile"],
         "used_safe_fallback": report["used_safe_fallback"],
+        "evidence_sufficiency_score_percent": report["evidence_sufficiency_score_percent"],
+        "evidence_confidence_status": report["evidence_confidence_status"],
+        "unresolved_child_proof_count": report["unresolved_child_proof_ids"].as_array().expect("unresolved child proof ids").len(),
+        "conflict_row_count": report["profile_conflict_matrix"].as_array().expect("conflict matrix rows").len(),
+        "dominant_risk_count": report["dominant_risk_contributors"].as_array().expect("dominant risk contributors").len(),
+        "estimated_impact_metric_count": report["expected_impact_estimates"].as_array().expect("expected impact estimates").len(),
         "proof_artifact_count": report["input_evidence_artifact_ids"].as_array().expect("artifact ids array").len(),
         "manual_override_count": report["manual_overrides_applied"].as_array().expect("manual overrides array").len(),
         "refusal_count": report["refusal_reasons"].as_array().expect("refusal reasons array").len(),
@@ -339,6 +370,34 @@ fn report_projection(report: &Value) -> Value {
         .clone();
     object.insert("projection_hash".to_string(), json!(hash));
     Value::Object(object)
+}
+
+fn format_conflict_matrix(plan: &asupersync::runtime::config::HostProfilePlan) -> Vec<Value> {
+    plan.conflict_matrix
+        .iter()
+        .map(|row| {
+            json!({
+                "profile": row.profile.to_string(),
+                "verdict": row.verdict,
+                "reason": row.reason,
+            })
+        })
+        .collect()
+}
+
+fn format_expected_impact_estimates(
+    plan: &asupersync::runtime::config::HostProfilePlan,
+) -> Vec<Value> {
+    plan.expected_impact_estimates
+        .iter()
+        .map(|estimate| {
+            json!({
+                "metric": estimate.metric,
+                "label": estimate.label,
+                "estimate": estimate.estimate,
+            })
+        })
+        .collect()
 }
 
 fn build_report(
@@ -390,6 +449,14 @@ fn build_report(
         "manual_overrides_applied": plan.manual_overrides_applied,
         "config_diff": config_diff,
         "dry_run_config_diff": plan.config_diff.iter().map(|entry| entry.render()).collect::<Vec<_>>(),
+        "evidence_sufficiency_score_percent": plan.evidence_sufficiency_score_percent,
+        "evidence_confidence_status": plan.evidence_confidence_status,
+        "unresolved_child_proof_ids": plan.unresolved_child_proof_ids,
+        "dominant_risk_contributors": plan.dominant_risk_contributors,
+        "profile_conflict_matrix": format_conflict_matrix(&plan),
+        "expected_impact_estimates": format_expected_impact_estimates(&plan),
+        "planner_scope": "reviewable_profile_candidates_and_dry_run_diffs_only",
+        "capacity_certificate_boundary": "capacity certification remains asupersync-tdgqjy; p95/p99/p999 fields here are estimates, not certificates",
         "rationale": plan.rationale,
         "refusal_reasons": plan.refusal_reasons,
         "when_not_to_use": plan.when_not_to_use,
@@ -408,6 +475,8 @@ fn build_report(
                 "named profile bundles remain explicit and reviewable",
                 "manual overrides win over the profile bundle without mutating hidden runtime state",
                 "missing or invalid child proofs force a conservative fallback",
+                "low-confidence or stale child proofs force a conservative fallback",
+                "expected p95/p99/p999 impact fields are labelled as estimates, not capacity certificates",
                 "dry-run config diffs stay deterministic and operator-readable",
                 "operator notes are secret-scrubbed before they reach the report surface",
             ]
@@ -441,31 +510,43 @@ fn full_proof_fixture() -> HostProfileEvidenceSet {
             artifact_id: "artifacts/overload_brownout_smoke_contract_v1.json".to_string(),
             contract_version: "overload-brownout-smoke-contract-v1".to_string(),
             validation_passed: true,
+            confidence_percent: 100,
+            calibration_status: "current".to_string(),
         }),
         otlp_brownout: Some(HostProfileEvidenceArtifactFixture {
             artifact_id: "artifacts/otlp_brownout_shedding_smoke_contract_v1.json".to_string(),
             contract_version: "otlp-brownout-shedding-smoke-contract-v1".to_string(),
             validation_passed: true,
+            confidence_percent: 100,
+            calibration_status: "current".to_string(),
         }),
         admission_steering: Some(HostProfileEvidenceArtifactFixture {
             artifact_id: "artifacts/cohort_admission_steering_smoke_contract_v1.json".to_string(),
             contract_version: "cohort-admission-steering-smoke-contract-v1".to_string(),
             validation_passed: true,
+            confidence_percent: 100,
+            calibration_status: "current".to_string(),
         }),
         adaptive_batch_sizing: Some(HostProfileEvidenceArtifactFixture {
             artifact_id: "artifacts/adaptive_batch_sizing_smoke_contract_v1.json".to_string(),
             contract_version: "adaptive-batch-sizing-smoke-contract-v1".to_string(),
             validation_passed: true,
+            confidence_percent: 100,
+            calibration_status: "current".to_string(),
         }),
         blocking_pool_affinity: Some(HostProfileEvidenceArtifactFixture {
             artifact_id: "artifacts/blocking_pool_affinity_smoke_contract_v1.json".to_string(),
             contract_version: "blocking-pool-affinity-smoke-contract-v1".to_string(),
             validation_passed: true,
+            confidence_percent: 100,
+            calibration_status: "current".to_string(),
         }),
         trace_storage_profile: Some(HostProfileEvidenceArtifactFixture {
             artifact_id: "artifacts/trace_storage_profile_smoke_contract_v1.json".to_string(),
             contract_version: "trace-storage-profile-smoke-contract-v1".to_string(),
             validation_passed: true,
+            confidence_percent: 100,
+            calibration_status: "current".to_string(),
         }),
     }
     .into()
@@ -631,6 +712,71 @@ fn host_profile_invalid_evidence_is_rejected() {
             .iter()
             .any(|reason| reason.contains("otlp_brownout proof rejected"))
     );
+}
+
+#[test]
+fn host_profile_low_confidence_evidence_falls_back_with_score() {
+    let mut request = sample_request(
+        HostProfilePlannerObjective::LocalityFirst,
+        Some(HostProfileId::LocalityFirst64C256G),
+    );
+    request
+        .controller_evidence
+        .admission_steering
+        .as_mut()
+        .expect("admission steering proof")
+        .confidence_percent = 79;
+    let plan = request.plan();
+    assert_eq!(plan.selected_profile, HostProfileId::ConservativeBaseline);
+    assert_eq!(plan.evidence_sufficiency_score_percent, 83);
+    assert_eq!(plan.evidence_confidence_status, "low-confidence");
+    assert!(
+        plan.unresolved_child_proof_ids
+            .iter()
+            .any(|proof| proof.starts_with("admission_steering:"))
+    );
+    assert!(
+        plan.dominant_risk_contributors
+            .iter()
+            .any(|risk| risk.contains("confidence_percent 79"))
+    );
+}
+
+#[test]
+fn host_profile_stale_evidence_is_reported_separately_from_missing_proofs() {
+    let mut request = sample_request(
+        HostProfilePlannerObjective::EvidenceRetentionFirst,
+        Some(HostProfileId::LargeMemoryEvidenceRetention256G),
+    );
+    request
+        .controller_evidence
+        .trace_storage_profile
+        .as_mut()
+        .expect("trace storage proof")
+        .calibration_status = HostProfileEvidenceCalibrationStatus::Stale;
+    let plan = request.plan();
+    assert_eq!(plan.selected_profile, HostProfileId::ConservativeBaseline);
+    assert_eq!(plan.evidence_confidence_status, "stale-evidence");
+    assert!(
+        plan.refusal_reasons
+            .iter()
+            .any(|reason| reason.contains("calibration_status stale"))
+    );
+}
+
+#[test]
+fn host_profile_conflict_rows_and_estimates_are_labelled() {
+    let request = sample_request(HostProfilePlannerObjective::LocalityFirst, None);
+    let plan = request.plan();
+    assert_eq!(plan.conflict_matrix.len(), 4);
+    assert!(plan.conflict_matrix.iter().any(|row| row.profile
+        == HostProfileId::LargeMemoryEvidenceRetention256G
+        && row.verdict == "conflicting_goal"));
+    assert_eq!(plan.expected_impact_estimates.len(), 3);
+    for estimate in &plan.expected_impact_estimates {
+        assert_eq!(estimate.label, "estimate_not_capacity_certificate");
+        assert!(estimate.metric.starts_with("p9"));
+    }
 }
 
 #[test]

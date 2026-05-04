@@ -2029,6 +2029,34 @@ impl fmt::Display for HostProfileEvidenceKind {
     }
 }
 
+const HOST_PROFILE_MIN_EVIDENCE_CONFIDENCE_PERCENT: u8 = 80;
+
+/// Freshness posture for host-profile child proof evidence.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HostProfileEvidenceCalibrationStatus {
+    /// The child proof is current enough to justify profile planning.
+    Current,
+    /// The child proof is stale and must force a conservative refusal.
+    Stale,
+}
+
+impl HostProfileEvidenceCalibrationStatus {
+    /// Stable operator-facing status string.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Current => "current",
+            Self::Stale => "stale",
+        }
+    }
+}
+
+impl fmt::Display for HostProfileEvidenceCalibrationStatus {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
 /// Proof artifact reference for one controller surface.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HostProfileEvidenceArtifact {
@@ -2038,6 +2066,10 @@ pub struct HostProfileEvidenceArtifact {
     pub contract_version: String,
     /// Whether the proof was validated successfully.
     pub validation_passed: bool,
+    /// Confidence score from the child proof, in percent.
+    pub confidence_percent: u8,
+    /// Freshness/calibration posture for the child proof.
+    pub calibration_status: HostProfileEvidenceCalibrationStatus,
 }
 
 impl HostProfileEvidenceArtifact {
@@ -2063,6 +2095,18 @@ impl HostProfileEvidenceArtifact {
         }
         if !self.validation_passed {
             return Err("validation_passed is false".to_string());
+        }
+        if self.confidence_percent < HOST_PROFILE_MIN_EVIDENCE_CONFIDENCE_PERCENT {
+            return Err(format!(
+                "confidence_percent {} is below required {}",
+                self.confidence_percent, HOST_PROFILE_MIN_EVIDENCE_CONFIDENCE_PERCENT
+            ));
+        }
+        if self.calibration_status != HostProfileEvidenceCalibrationStatus::Current {
+            return Err(format!(
+                "calibration_status {} requires conservative fallback",
+                self.calibration_status
+            ));
         }
         Ok(())
     }
@@ -2289,6 +2333,11 @@ impl HostProfilePlannerRequest {
                         &candidate.profile_bundle,
                         &final_bundle,
                     );
+                    let conflict_matrix = build_host_profile_conflict_rows(
+                        self.objective,
+                        profile,
+                        self.requested_profile,
+                    );
                     return HostProfilePlan {
                         objective: self.objective,
                         requested_profile: self.requested_profile,
@@ -2304,6 +2353,18 @@ impl HostProfilePlannerRequest {
                         manual_overrides_applied,
                         config_diff,
                         sanitized_operator_note,
+                        evidence_sufficiency_score_percent: candidate
+                            .evidence_evaluation
+                            .score_percent,
+                        evidence_confidence_status: candidate.evidence_evaluation.confidence_status,
+                        unresolved_child_proof_ids: candidate
+                            .evidence_evaluation
+                            .unresolved_child_proof_ids,
+                        dominant_risk_contributors: candidate
+                            .evidence_evaluation
+                            .dominant_risk_contributors,
+                        conflict_matrix,
+                        expected_impact_estimates: host_profile_expected_impact_estimates(profile),
                     };
                 }
                 Err(mut reasons) => refusal_reasons.append(&mut reasons),
@@ -2315,6 +2376,16 @@ impl HostProfilePlannerRequest {
         final_bundle.normalize();
         let profile_bundle = host_profile_bundle(fallback_profile);
         let config_diff = build_host_profile_config_diff(&baseline, &profile_bundle, &final_bundle);
+        let report_profile = self
+            .requested_profile
+            .unwrap_or_else(|| self.objective.candidate_order()[0]);
+        let evidence_evaluation =
+            evaluate_host_profile_evidence(report_profile, &self.controller_evidence);
+        let conflict_matrix = build_host_profile_conflict_rows(
+            self.objective,
+            fallback_profile,
+            self.requested_profile,
+        );
         HostProfilePlan {
             objective: self.objective,
             requested_profile: self.requested_profile,
@@ -2343,6 +2414,12 @@ impl HostProfilePlannerRequest {
             manual_overrides_applied,
             config_diff,
             sanitized_operator_note,
+            evidence_sufficiency_score_percent: evidence_evaluation.score_percent,
+            evidence_confidence_status: evidence_evaluation.confidence_status,
+            unresolved_child_proof_ids: evidence_evaluation.unresolved_child_proof_ids,
+            dominant_risk_contributors: evidence_evaluation.dominant_risk_contributors,
+            conflict_matrix,
+            expected_impact_estimates: host_profile_expected_impact_estimates(fallback_profile),
         }
     }
 
@@ -2367,16 +2444,9 @@ impl HostProfilePlannerRequest {
                 self.host_resources.memory_gib
             ));
         }
-        for kind in profile.required_evidence() {
-            match self.controller_evidence.for_kind(*kind) {
-                Some(artifact) => {
-                    if let Err(reason) = artifact.validate() {
-                        refusal_reasons.push(format!("{kind} proof rejected: {reason}"));
-                    }
-                }
-                None => refusal_reasons.push(format!("{kind} proof is missing")),
-            }
-        }
+        let evidence_evaluation =
+            evaluate_host_profile_evidence(profile, &self.controller_evidence);
+        refusal_reasons.extend(evidence_evaluation.refusal_reasons.iter().cloned());
         if !refusal_reasons.is_empty() {
             return Err(refusal_reasons);
         }
@@ -2395,6 +2465,7 @@ impl HostProfilePlannerRequest {
                 .map(str::to_string)
                 .collect(),
             controller_ledger_state: controller_ledger_entries(profile, &self.controller_evidence),
+            evidence_evaluation,
         })
     }
 }
@@ -2430,6 +2501,18 @@ pub struct HostProfilePlan {
     pub config_diff: Vec<HostProfileConfigDiffEntry>,
     /// Optional operator note rendered through the secret scrubber.
     pub sanitized_operator_note: Option<String>,
+    /// Percent of required child proofs that were current and high-confidence.
+    pub evidence_sufficiency_score_percent: u8,
+    /// Operator-facing confidence status for the child-proof set.
+    pub evidence_confidence_status: String,
+    /// Proof IDs or proof slots that kept a candidate from being selected.
+    pub unresolved_child_proof_ids: Vec<String>,
+    /// Deterministic dominant risks explaining refusal or conservative posture.
+    pub dominant_risk_contributors: Vec<String>,
+    /// Objective/profile conflict rows rendered for dry-run review.
+    pub conflict_matrix: Vec<HostProfileConflictRow>,
+    /// Estimated profile impact fields; these are not capacity certificates.
+    pub expected_impact_estimates: Vec<HostProfileExpectedImpactEstimate>,
 }
 
 impl HostProfilePlan {
@@ -2451,6 +2534,28 @@ pub struct HostProfileControllerLedgerEntry {
     pub proof_artifact_id: Option<String>,
     /// Whether the proof validated cleanly.
     pub validation_passed: bool,
+}
+
+/// One deterministic row in the host-profile conflict report.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HostProfileConflictRow {
+    /// Candidate profile considered by the planner.
+    pub profile: HostProfileId,
+    /// Planner verdict for this objective/profile pair.
+    pub verdict: String,
+    /// Operator-readable explanation for the verdict.
+    pub reason: String,
+}
+
+/// Estimated impact field emitted by the planner dry run.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HostProfileExpectedImpactEstimate {
+    /// Impact metric name.
+    pub metric: String,
+    /// Explicit label that prevents confusing estimates with certification.
+    pub label: String,
+    /// Deterministic estimate text.
+    pub estimate: String,
 }
 
 /// One line of explainable dry-run config diff.
@@ -2510,6 +2615,185 @@ struct HostProfileCandidate {
     rationale: Vec<String>,
     when_not_to_use: Vec<String>,
     controller_ledger_state: Vec<HostProfileControllerLedgerEntry>,
+    evidence_evaluation: HostProfileEvidenceEvaluation,
+}
+
+#[derive(Clone)]
+struct HostProfileEvidenceEvaluation {
+    score_percent: u8,
+    confidence_status: String,
+    unresolved_child_proof_ids: Vec<String>,
+    dominant_risk_contributors: Vec<String>,
+    refusal_reasons: Vec<String>,
+}
+
+fn evaluate_host_profile_evidence(
+    profile: HostProfileId,
+    evidence: &HostProfileEvidenceSet,
+) -> HostProfileEvidenceEvaluation {
+    let required = profile.required_evidence();
+    if required.is_empty() {
+        return HostProfileEvidenceEvaluation {
+            score_percent: 100,
+            confidence_status: "baseline-no-child-proof-required".to_string(),
+            unresolved_child_proof_ids: Vec::new(),
+            dominant_risk_contributors: vec![
+                "conservative baseline does not require child proof activation".to_string(),
+            ],
+            refusal_reasons: Vec::new(),
+        };
+    }
+
+    let mut valid_count = 0usize;
+    let mut unresolved_child_proof_ids = Vec::new();
+    let mut dominant_risk_contributors = Vec::new();
+    let mut refusal_reasons = Vec::new();
+    let mut saw_low_confidence = false;
+    let mut saw_stale = false;
+
+    for kind in required {
+        match evidence.for_kind(*kind) {
+            Some(artifact) => match artifact.validate() {
+                Ok(()) => valid_count += 1,
+                Err(reason) => {
+                    if artifact.confidence_percent < HOST_PROFILE_MIN_EVIDENCE_CONFIDENCE_PERCENT {
+                        saw_low_confidence = true;
+                    }
+                    if artifact.calibration_status != HostProfileEvidenceCalibrationStatus::Current
+                    {
+                        saw_stale = true;
+                    }
+                    unresolved_child_proof_ids.push(format!(
+                        "{}:{}",
+                        kind.as_str(),
+                        artifact.artifact_id
+                    ));
+                    dominant_risk_contributors
+                        .push(format!("{} proof rejected: {reason}", kind.as_str()));
+                    refusal_reasons.push(format!("{kind} proof rejected: {reason}"));
+                }
+            },
+            None => {
+                unresolved_child_proof_ids.push(format!("{}:missing", kind.as_str()));
+                dominant_risk_contributors.push(format!("{} proof is missing", kind.as_str()));
+                refusal_reasons.push(format!("{kind} proof is missing"));
+            }
+        }
+    }
+
+    let score_percent = ((valid_count * 100) / required.len()) as u8;
+    let confidence_status = if unresolved_child_proof_ids.is_empty() {
+        "high-confidence".to_string()
+    } else if saw_stale {
+        "stale-evidence".to_string()
+    } else if saw_low_confidence {
+        "low-confidence".to_string()
+    } else {
+        "insufficient-evidence".to_string()
+    };
+
+    if dominant_risk_contributors.is_empty() {
+        dominant_risk_contributors
+            .push("all required child proofs are current and high-confidence".to_string());
+    }
+
+    HostProfileEvidenceEvaluation {
+        score_percent,
+        confidence_status,
+        unresolved_child_proof_ids,
+        dominant_risk_contributors,
+        refusal_reasons,
+    }
+}
+
+fn build_host_profile_conflict_rows(
+    objective: HostProfilePlannerObjective,
+    selected_profile: HostProfileId,
+    requested_profile: Option<HostProfileId>,
+) -> Vec<HostProfileConflictRow> {
+    objective
+        .candidate_order()
+        .iter()
+        .copied()
+        .map(|profile| {
+            let (verdict, reason) = if Some(profile) == requested_profile {
+                (
+                    "requested",
+                    "operator explicitly requested this profile before fallback checks",
+                )
+            } else if profile == selected_profile {
+                (
+                    "selected",
+                    "profile matched the objective and passed child-proof gates",
+                )
+            } else if profile == HostProfileId::ConservativeBaseline {
+                (
+                    "safe_fallback",
+                    "conservative fallback remains available when child proof confidence is weak",
+                )
+            } else {
+                (
+                    "conflicting_goal",
+                    match (objective, profile) {
+                        (
+                            HostProfilePlannerObjective::LocalityFirst,
+                            HostProfileId::LargeMemoryEvidenceRetention256G,
+                        ) => "evidence retention keeps larger buffers than the locality-first objective prefers",
+                        (
+                            HostProfilePlannerObjective::EvidenceRetentionFirst,
+                            HostProfileId::TailProtectionFirst64C256G,
+                        ) => "tail protection uses tighter queues than the evidence-retention objective prefers",
+                        (
+                            HostProfilePlannerObjective::TailProtectionFirst,
+                            HostProfileId::LocalityFirst64C256G,
+                        ) => "locality-first keeps more queue headroom than the tail-protection objective prefers",
+                        _ => "profile trades off against the active planner objective",
+                    },
+                )
+            };
+            HostProfileConflictRow {
+                profile,
+                verdict: verdict.to_string(),
+                reason: reason.to_string(),
+            }
+        })
+        .collect()
+}
+
+fn host_profile_expected_impact_estimates(
+    profile: HostProfileId,
+) -> Vec<HostProfileExpectedImpactEstimate> {
+    let estimates = match profile {
+        HostProfileId::ConservativeBaseline => [
+            ("p95_wake_to_run", "baseline"),
+            ("p99_wake_to_run", "baseline"),
+            ("p999_wake_to_run", "baseline"),
+        ],
+        HostProfileId::LocalityFirst64C256G => [
+            ("p95_wake_to_run", "locality-improved"),
+            ("p99_wake_to_run", "cohort-sensitive"),
+            ("p999_wake_to_run", "needs-capacity-certificate"),
+        ],
+        HostProfileId::TailProtectionFirst64C256G => [
+            ("p95_wake_to_run", "queue-limited"),
+            ("p99_wake_to_run", "tail-protected"),
+            ("p999_wake_to_run", "needs-capacity-certificate"),
+        ],
+        HostProfileId::LargeMemoryEvidenceRetention256G => [
+            ("p95_wake_to_run", "retention-neutral"),
+            ("p99_wake_to_run", "retention-observed"),
+            ("p999_wake_to_run", "needs-capacity-certificate"),
+        ],
+    };
+
+    estimates
+        .into_iter()
+        .map(|(metric, estimate)| HostProfileExpectedImpactEstimate {
+            metric: metric.to_string(),
+            label: "estimate_not_capacity_certificate".to_string(),
+            estimate: estimate.to_string(),
+        })
+        .collect()
 }
 
 fn host_profile_bundle(profile: HostProfileId) -> RuntimeConfig {
