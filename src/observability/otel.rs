@@ -3669,6 +3669,72 @@ pub mod span_semantics {
             }
         }
 
+        /// Add a batch of OTLP protobuf key/value attributes.
+        ///
+        /// Batch application mirrors repeated `set_attribute_value` calls for
+        /// duplicate keys: the last occurrence wins. The implementation stages
+        /// normalized keys and values before mutating the span, so filtering and
+        /// capacity decisions cannot leave a partially normalized key/value pair
+        /// in one of the parallel attribute maps.
+        pub fn add_attributes(&mut self, attributes: Vec<KeyValue>) {
+            let mut deduplicated: HashMap<String, (usize, AttributeValue)> = HashMap::new();
+            let mut dropped = 0_u32;
+
+            for (index, attribute) in attributes.into_iter().enumerate() {
+                if attribute.key.is_empty() {
+                    dropped = dropped.saturating_add(1);
+                    continue;
+                }
+
+                let key = truncate_key(&attribute.key);
+                if key.is_empty() {
+                    dropped = dropped.saturating_add(1);
+                    continue;
+                }
+
+                let Some(value) = attribute
+                    .value
+                    .as_ref()
+                    .and_then(attribute_value_from_any_value)
+                else {
+                    dropped = dropped.saturating_add(1);
+                    continue;
+                };
+
+                deduplicated.insert(key, (index, value));
+            }
+
+            let mut staged: Vec<_> = deduplicated
+                .into_iter()
+                .map(|(key, (index, value))| (index, key, value))
+                .collect();
+            staged.sort_by_key(|(index, _, _)| *index);
+
+            let mut remaining_new_capacity =
+                self.max_attributes.saturating_sub(self.attributes.len());
+            let mut accepted = Vec::with_capacity(staged.len());
+
+            for (_, key, value) in staged {
+                if self.attributes.contains_key(&key) {
+                    accepted.push((key, value));
+                } else if remaining_new_capacity > 0 {
+                    remaining_new_capacity -= 1;
+                    accepted.push((key, value));
+                } else {
+                    dropped = dropped.saturating_add(1);
+                }
+            }
+
+            for (key, value) in accepted {
+                let value = self.normalize_attribute_value(value);
+                self.attributes
+                    .insert(key.clone(), attribute_value_text(&value));
+                self.attribute_values.insert(key, value);
+            }
+
+            self.dropped_attributes_count = self.dropped_attributes_count.saturating_add(dropped);
+        }
+
         /// Set a propagated baggage entry.
         pub fn set_baggage_item(&mut self, key: &str, value: &str) {
             self.baggage.insert(key.to_string(), value.to_string());
@@ -3752,6 +3818,74 @@ pub mod span_semantics {
                 other => other,
             }
         }
+    }
+
+    fn attribute_value_from_any_value(value: &AnyValue) -> Option<AttributeValue> {
+        match value.value.as_ref()? {
+            ProtoValue::StringValue(value) => Some(AttributeValue::String(value.clone())),
+            ProtoValue::BoolValue(value) => Some(AttributeValue::Bool(*value)),
+            ProtoValue::IntValue(value) => Some(AttributeValue::Int(*value)),
+            ProtoValue::DoubleValue(value) => Some(AttributeValue::Float(*value)),
+            ProtoValue::ArrayValue(values) => attribute_array_value_from_any_values(&values.values),
+            ProtoValue::KvlistValue(_) | ProtoValue::BytesValue(_) => None,
+        }
+    }
+
+    fn attribute_array_value_from_any_values(values: &[AnyValue]) -> Option<AttributeValue> {
+        if values.is_empty() {
+            return Some(AttributeValue::StringArray(Vec::new()));
+        }
+
+        let mut strings = Vec::with_capacity(values.len());
+        for value in values {
+            match value.value.as_ref()? {
+                ProtoValue::StringValue(value) => strings.push(value.clone()),
+                _ => {
+                    strings.clear();
+                    break;
+                }
+            }
+        }
+        if strings.len() == values.len() {
+            return Some(AttributeValue::StringArray(strings));
+        }
+
+        let mut ints = Vec::with_capacity(values.len());
+        for value in values {
+            match value.value.as_ref()? {
+                ProtoValue::IntValue(value) => ints.push(*value),
+                _ => {
+                    ints.clear();
+                    break;
+                }
+            }
+        }
+        if ints.len() == values.len() {
+            return Some(AttributeValue::IntArray(ints));
+        }
+
+        let mut floats = Vec::with_capacity(values.len());
+        for value in values {
+            match value.value.as_ref()? {
+                ProtoValue::DoubleValue(value) => floats.push(*value),
+                _ => {
+                    floats.clear();
+                    break;
+                }
+            }
+        }
+        if floats.len() == values.len() {
+            return Some(AttributeValue::FloatArray(floats));
+        }
+
+        let mut bools = Vec::with_capacity(values.len());
+        for value in values {
+            match value.value.as_ref()? {
+                ProtoValue::BoolValue(value) => bools.push(*value),
+                _ => return None,
+            }
+        }
+        Some(AttributeValue::BoolArray(bools))
     }
 
     fn attribute_value_text(value: &AttributeValue) -> String {
