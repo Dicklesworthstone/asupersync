@@ -2946,9 +2946,13 @@ mod metamorphic_tests {
 
     /// Create a test context for deterministic scheduling.
     fn test_cx() -> Cx {
+        test_cx_with_slot(0)
+    }
+
+    fn test_cx_with_slot(slot: u32) -> Cx {
         Cx::new(
-            RegionId::from_arena(ArenaIndex::new(0, 0)),
-            TaskId::from_arena(ArenaIndex::new(0, 0)),
+            RegionId::from_arena(ArenaIndex::new(0, slot)),
+            TaskId::from_arena(ArenaIndex::new(0, slot)),
             Budget::INFINITE,
         )
     }
@@ -4107,21 +4111,107 @@ mod metamorphic_tests {
         crate::test_complete!("audit_rwlock_writer_starvation_prevention");
     }
 
-    /// Audit test for read-to-write upgrade prevention.
-    ///
-    /// Verifies that asupersync RwLock does NOT support read-to-write upgrades per spec:
-    /// 1. No upgrade method exists in the API (compile-time prevention)
-    /// 2. Attempting to acquire write while holding read would deadlock (runtime prevention)
-    /// Per asupersync spec: RwLock is one-shot only - must drop read before acquiring write.
     #[test]
-    #[ignore] // TODO: Fix helper function scope issues
     fn audit_rwlock_no_read_to_write_upgrade() {
-        // Test disabled due to compilation errors with helper functions
-        // API surface analysis:
-        // - No upgrade() method exists (compile-time prevention)
-        // - try_write() while holding read returns TryWriteError::Locked
-        // This confirms asupersync RwLock is one-shot only per spec
+        init_test("audit_rwlock_no_read_to_write_upgrade");
+        let cx = test_cx();
+        let lock = RwLock::new(0_u32);
 
-        // crate::test_complete!("audit_rwlock_no_read_to_write_upgrade");
+        let read_guard = block_on(lock.read(&cx)).expect("initial read guard should acquire");
+        assert_eq!(*read_guard, 0);
+        assert!(
+            matches!(lock.try_write(), Err(TryWriteError::Locked)),
+            "RwLock intentionally has no in-place read-to-write upgrade; try_write must fail while a read guard is held"
+        );
+
+        let mut write_fut = lock.write(&cx);
+        assert!(
+            poll_once(&mut write_fut).is_none(),
+            "write acquisition must wait until the read guard is dropped"
+        );
+
+        let state_while_read_held = lock.debug_state();
+        assert_eq!(state_while_read_held.readers, 1);
+        assert_eq!(state_while_read_held.writer_waiters, 1);
+        assert!(
+            !state_while_read_held.writer_active,
+            "writer must not become active while a read guard is held"
+        );
+
+        let mut late_reader_fut = lock.read(&cx);
+        assert!(
+            poll_once(&mut late_reader_fut).is_none(),
+            "late reader must queue behind the pending writer"
+        );
+
+        drop(read_guard);
+
+        let mut write_guard = poll_once(&mut write_fut)
+            .expect("writer should acquire after dropping read guard")
+            .expect("writer acquisition should succeed");
+        *write_guard = 7;
+
+        assert!(
+            poll_once(&mut late_reader_fut).is_none(),
+            "late reader must remain blocked while the writer guard is active"
+        );
+
+        drop(write_guard);
+
+        let late_reader = poll_once(&mut late_reader_fut)
+            .expect("late reader should acquire after writer releases")
+            .expect("late reader acquisition should succeed");
+        assert_eq!(
+            *late_reader, 7,
+            "late reader should observe the write made after the read guard was dropped"
+        );
+
+        let state_with_late_reader = lock.debug_state();
+        assert_eq!(state_with_late_reader.readers, 1);
+        assert_eq!(state_with_late_reader.writer_waiters, 0);
+        assert_eq!(state_with_late_reader.reader_waiters.len(), 0);
+        assert!(!state_with_late_reader.writer_active);
+
+        drop(late_reader);
+        let final_state = lock.debug_state();
+        assert_eq!(final_state.readers, 0);
+        assert_eq!(final_state.writer_waiters, 0);
+        assert_eq!(final_state.reader_waiters.len(), 0);
+        assert!(!final_state.writer_active);
+
+        let cancel_cx = test_cx_with_slot(14);
+        let cancel_lock = RwLock::new(1_u32);
+        let blocking_read =
+            block_on(cancel_lock.read(&cx)).expect("blocking read guard should acquire");
+        let mut cancelled_write_fut = cancel_lock.write(&cancel_cx);
+        assert!(
+            poll_once(&mut cancelled_write_fut).is_none(),
+            "write waiter should queue behind the active read guard before cancellation"
+        );
+
+        cancel_cx.set_cancel_requested(true);
+        assert!(
+            matches!(
+                poll_once(&mut cancelled_write_fut),
+                Some(Err(RwLockError::Cancelled))
+            ),
+            "cancelled write waiter must return a cancellation error without acquiring the lock"
+        );
+
+        let state_after_cancel = cancel_lock.debug_state();
+        assert_eq!(state_after_cancel.readers, 1);
+        assert_eq!(state_after_cancel.writer_waiters, 0);
+        assert_eq!(state_after_cancel.writer_queue.len(), 0);
+        assert!(!state_after_cancel.writer_active);
+
+        drop(blocking_read);
+        let final_cancel_state = cancel_lock.debug_state();
+        assert_eq!(final_cancel_state.readers, 0);
+        assert_eq!(final_cancel_state.writer_waiters, 0);
+        assert_eq!(final_cancel_state.writer_queue.len(), 0);
+        assert_eq!(final_cancel_state.reader_waiters.len(), 0);
+        assert!(!final_cancel_state.writer_active);
+
+        crate::test_complete!("audit_rwlock_no_read_to_write_upgrade");
     }
 }
