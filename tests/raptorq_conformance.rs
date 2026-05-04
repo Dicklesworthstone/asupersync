@@ -1743,10 +1743,14 @@ mod differential_harness {
         PayloadId as RaptorqRsPayloadId,
         extended_source_block_symbols as raptorq_rs_extended_source_block_symbols,
     };
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
 
     const DIFF_REPLAY_REF: &str = "replay:rq-d2-diff-harness-v1";
     const DIFF_ARTIFACT_PATH: &str = "artifacts/raptorq_d2_differential_harness_v1.json";
     const DIFF_REPRO_COMMAND: &str = "rch exec -- cargo test --test raptorq_conformance differential_harness_selected_slice -- --nocapture";
+    const RFC6330_DIFF_LOG_SCHEMA_VERSION: &str = "raptorq-rfc6330-differential-log-v1";
+    const RFC6330_DIFF_REPRO_COMMAND: &str = "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_asupersync_sldd1z_raptorq cargo test --test raptorq_conformance conformance_rfc6330_differential_vector_matrix_logs_evidence -- --nocapture";
 
     #[derive(Clone, Copy)]
     enum RepairBudget {
@@ -1870,6 +1874,47 @@ mod differential_harness {
         indices.truncate(drop_count);
         indices.sort_unstable();
         indices
+    }
+
+    fn payload_fingerprint<T: Hash>(value: &T) -> String {
+        let mut hasher = DefaultHasher::new();
+        value.hash(&mut hasher);
+        format!("{:016x}", hasher.finish())
+    }
+
+    fn received_symbol_ids(received: &[ReceivedSymbol]) -> Vec<u32> {
+        received.iter().map(|symbol| symbol.esi).collect()
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn emit_rfc6330_differential_log(
+        vector_id: &str,
+        k: usize,
+        symbol_size: usize,
+        symbol_ids: &[u32],
+        received_symbol_count: usize,
+        decode_result: &str,
+        reference_fingerprint: Option<&str>,
+        asupersync_fingerprint: Option<&str>,
+        error_kind: Option<&str>,
+        final_verdict: &str,
+    ) {
+        let log = serde_json::json!({
+            "schema_version": RFC6330_DIFF_LOG_SCHEMA_VERSION,
+            "rfc_vector_id": vector_id,
+            "k": k,
+            "t": symbol_size,
+            "symbol_ids": symbol_ids,
+            "received_symbol_count": received_symbol_count,
+            "decode_result": decode_result,
+            "reference_fingerprint": reference_fingerprint,
+            "asupersync_fingerprint": asupersync_fingerprint,
+            "error_kind": error_kind,
+            "exact_rch_command": RFC6330_DIFF_REPRO_COMMAND,
+            "artifact_paths": [DIFF_ARTIFACT_PATH],
+            "final_rfc_differential_verdict": final_verdict,
+        });
+        eprintln!("{log}");
     }
 
     fn reference_decode(
@@ -3266,6 +3311,220 @@ mod differential_harness {
                 );
             }
         }
+    }
+
+    #[test]
+    fn conformance_rfc6330_differential_vector_matrix_logs_evidence() {
+        let success_case = DifferentialCase {
+            scenario_id: "RQ-SLDD1Z-RFC6330-DIFF-K10-SUCCESS",
+            k: 10,
+            symbol_size: 64,
+            seed: 0x6330_0010,
+            drop_modulus: Some(3),
+            drop_remainder: 1,
+            repair_budget: RepairBudget::ByDropped { extra: 4 },
+            expect_success: true,
+            expected_error_kind: None,
+        };
+        let source = make_source_data(
+            success_case.k,
+            success_case.symbol_size,
+            success_case.seed.wrapping_mul(17),
+        );
+        let encoder = SystematicEncoder::new(&source, success_case.symbol_size, success_case.seed)
+            .unwrap_or_else(|| {
+                panic!(
+                    "scenario={} failed to build encoder",
+                    success_case.scenario_id
+                )
+            });
+        let params = encoder.params().clone();
+        assert_eq!(
+            params.k_prime, 10,
+            "scenario={} must pin the RFC 6330 K'=10 source-block row",
+            success_case.scenario_id
+        );
+
+        let systematic = reference_source_packets_with_raptorq_rs(success_case, &source);
+        for (idx, packet) in systematic.iter().take(3).enumerate() {
+            assert_eq!(
+                packet.payload_id().encoding_symbol_id() as usize,
+                idx,
+                "scenario={} reference systematic packet {} must preserve ESI={idx}",
+                success_case.scenario_id,
+                idx
+            );
+        }
+
+        for esi in (success_case.k as u32)..(success_case.k as u32 + 3) {
+            let repair_data = encoder.repair_symbol(esi);
+            let decoder = InactivationDecoder::new(
+                success_case.k,
+                success_case.symbol_size,
+                success_case.seed,
+            );
+            let (columns, coefficients) = repair_equation(&decoder, esi);
+            let mut reconstructed = vec![0u8; success_case.symbol_size];
+            for (&column, &coefficient) in columns.iter().zip(coefficients.iter()) {
+                let intermediate = encoder.intermediate_symbol(column);
+                for (byte, &intermediate_byte) in reconstructed.iter_mut().zip(intermediate.iter())
+                {
+                    *byte ^= (coefficient * Gf256::new(intermediate_byte)).raw();
+                }
+            }
+            assert_eq!(
+                repair_data, reconstructed,
+                "scenario={} repair ESI {esi} must match its RFC repair equation",
+                success_case.scenario_id
+            );
+        }
+
+        let decoder =
+            InactivationDecoder::new(success_case.k, success_case.symbol_size, success_case.seed);
+        let drop_indices = drop_indices_for(success_case);
+        let repair_esi_upper = max_repair_esi(success_case, decoder.params().l, drop_indices.len());
+        let received = build_received_symbols(
+            &encoder,
+            &decoder,
+            &source,
+            &drop_indices,
+            repair_esi_upper,
+            success_case.seed,
+        );
+        let decoder_result = decoder.decode(&received).unwrap_or_else(|err| {
+            panic!(
+                "scenario={} decoder failed: {err:?}",
+                success_case.scenario_id
+            )
+        });
+        let reference_bytes = reference_decode_with_raptorq_rs(
+            success_case,
+            &encoder,
+            &source,
+            &drop_indices,
+            repair_esi_upper,
+        );
+        let asupersync_bytes = flatten_source_bytes(&decoder_result.source);
+        assert_eq!(
+            asupersync_bytes, reference_bytes,
+            "scenario={} asupersync and raptorq-rs must decode identical bytes",
+            success_case.scenario_id
+        );
+        emit_rfc6330_differential_log(
+            success_case.scenario_id,
+            success_case.k,
+            success_case.symbol_size,
+            &received_symbol_ids(&received),
+            received.len(),
+            "success",
+            Some(&payload_fingerprint(&reference_bytes)),
+            Some(&payload_fingerprint(&asupersync_bytes)),
+            None,
+            "pass",
+        );
+
+        let mut permuted = received.clone();
+        let mut perm_rng = DetRng::new(0x51DD_108D);
+        perm_rng.shuffle(&mut permuted);
+        let permuted_result = decoder.decode(&permuted).unwrap_or_else(|err| {
+            panic!(
+                "scenario={} permuted decode failed: {err:?}",
+                success_case.scenario_id
+            )
+        });
+        let permuted_bytes = flatten_source_bytes(&permuted_result.source);
+        assert_eq!(
+            permuted_bytes, reference_bytes,
+            "scenario={} symbol ordering must not affect decode output",
+            success_case.scenario_id
+        );
+        emit_rfc6330_differential_log(
+            "RQ-SLDD1Z-RFC6330-DIFF-K10-PERMUTED",
+            success_case.k,
+            success_case.symbol_size,
+            &received_symbol_ids(&permuted),
+            permuted.len(),
+            "success",
+            Some(&payload_fingerprint(&reference_bytes)),
+            Some(&payload_fingerprint(&permuted_bytes)),
+            None,
+            "pass",
+        );
+
+        let insufficient_scenario = "RQ-SLDD1Z-RFC6330-DIFF-K10-INSUFFICIENT";
+        let insufficient_decoder = InactivationDecoder::new(10, 64, 0x6330_0011);
+        assert_eq!(
+            insufficient_decoder.params().k_prime,
+            10,
+            "scenario={insufficient_scenario} must stay on the K'=10 row"
+        );
+        let one_packet_payload: Vec<u8> = (0..64)
+            .map(|idx| u8::try_from((idx * 17 + 0x42) % 256).expect("payload byte fits u8"))
+            .collect();
+        let (columns, coefficients) = insufficient_decoder.source_equation(0);
+        let insufficient_received = [ReceivedSymbol {
+            esi: 0,
+            is_source: true,
+            columns,
+            coefficients,
+            data: one_packet_payload.clone(),
+        }];
+        let insufficient_err = insufficient_decoder
+            .decode(&insufficient_received)
+            .expect_err("insufficient-symbol differential case must fail");
+        assert_eq!(
+            decoder_error_kind(&insufficient_err),
+            "insufficient_symbols",
+            "scenario={insufficient_scenario} must fail with InsufficientSymbols"
+        );
+        let insufficient_reference_config =
+            RaptorqRsObjectTransmissionInformation::new(640, 64, 1, 1, 1);
+        let mut insufficient_reference = RaptorqRsDecoder::new(insufficient_reference_config);
+        let insufficient_reference_result = insufficient_reference.decode(
+            RaptorqRsEncodingPacket::new(RaptorqRsPayloadId::new(0, 0), one_packet_payload),
+        );
+        assert!(
+            insufficient_reference_result.is_none(),
+            "scenario={insufficient_scenario} raptorq-rs must also fail with one source packet"
+        );
+        emit_rfc6330_differential_log(
+            insufficient_scenario,
+            10,
+            64,
+            &received_symbol_ids(&insufficient_received),
+            insufficient_received.len(),
+            "decode_failure",
+            None,
+            None,
+            Some("insufficient_symbols"),
+            "pass",
+        );
+
+        let malformed_scenario = "RQ-SLDD1Z-RFC6330-DIFF-MALFORMED-PARAMS";
+        let malformed_err =
+            SystematicParams::try_for_source_block(0, 64).expect_err("K=0 must be rejected");
+        assert!(
+            matches!(
+                malformed_err,
+                asupersync::raptorq::systematic::SystematicParamError::UnsupportedSourceBlockSize {
+                    requested: 0,
+                    ..
+                }
+            ),
+            "scenario={malformed_scenario} must reject malformed source-block parameters"
+        );
+        emit_rfc6330_differential_log(
+            malformed_scenario,
+            0,
+            64,
+            &[],
+            0,
+            "parameter_rejected",
+            None,
+            None,
+            Some("unsupported_source_block_size"),
+            "pass",
+        );
     }
 }
 
