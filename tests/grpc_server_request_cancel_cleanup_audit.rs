@@ -49,22 +49,17 @@
 //!       `max_request_deadline` cap force the dispatcher's
 //!       future to be dropped, triggering (a)+(b) cleanup.
 //!
-//!   (d) **⚠️ P3 finding:** `RateLimitLease` has NO `Drop`
-//!       impl (interceptor.rs:765-792). If the dispatcher's
-//!       future is dropped MID-FLIGHT (between
-//!       `intercept_request` and the response/error terminal
-//!       hook), the lease is dropped without `release()`
-//!       being called — the slot LEAKS. Documented as a
-//!       separate audit follow-up; the structural fix is to
-//!       add `impl Drop for RateLimitLease { fn drop(&mut
-//!       self) { self.release(); } }`. Drop-based release
-//!       is safe because `released: AtomicBool` already
+//!   (d) **Fixed:** `RateLimitLease` also releases on `Drop`.
+//!       If the dispatcher's future is dropped MID-FLIGHT
+//!       (between `intercept_request` and the response/error
+//!       terminal hook), dropping the request drops its typed
+//!       extension lease and returns the slot. Drop-based
+//!       release is safe because `released: AtomicBool` already
 //!       makes the call idempotent.
 //!
 //! Regression tests below pin (a)+(b)+(c) at the public API
-//! surface AND structurally verify the (d) gap so a future
-//! commit that adds the `Drop` impl will trip an "expected
-//! gap" assertion that documents the audit baseline.
+//! surface and pin (d) so request-drop cancellation cannot
+//! regress into a slot leak.
 
 use asupersync::bytes::Bytes;
 use asupersync::grpc::status::Code;
@@ -151,6 +146,33 @@ fn rate_limit_release_is_idempotent_double_call_safe() {
         "double-release must not over-decrement (would underflow saturate, \
          but explicit AtomicBool guard stops it)",
     );
+}
+
+#[test]
+fn rate_limit_slot_releases_when_request_drops_mid_flight() {
+    // Pin (d): if cancellation drops the in-flight request
+    // before the response/error terminal hook runs, the
+    // request's typed extension drops its RateLimitLease and
+    // releases the slot. This is the cancellation window that
+    // used to leak.
+    let limiter = RateLimitInterceptor::new(1);
+    let mut request = Request::with_metadata(Bytes::new(), Metadata::new());
+    limiter.intercept_request(&mut request).expect("acquire");
+    assert_eq!(limiter.current_count(), 1, "slot acquired");
+
+    drop(request);
+
+    assert_eq!(
+        limiter.current_count(),
+        0,
+        "dropping an admitted request before terminal interceptor hooks \
+         must release the rate-limit lease",
+    );
+
+    let mut next = Request::with_metadata(Bytes::new(), Metadata::new());
+    limiter
+        .intercept_request(&mut next)
+        .expect("slot reusable after request-drop cleanup");
 }
 
 #[test]

@@ -851,27 +851,49 @@ pub fn metadata_propagator(
 ///
 /// This limiter caps how many requests may be active at the same time. A slot
 /// is acquired during request interception and released once the response path
-/// or error path runs. Without that release step, the counter would
-/// monotonically increase and permanently exhaust after enough failing or
-/// successful calls.
+/// or error path runs. If a request is cancelled before either terminal hook,
+/// dropping the request releases the slot. Without those release steps, the
+/// counter would monotonically increase and permanently exhaust after enough
+/// failing, cancelled, or successful calls.
 #[derive(Debug)]
 pub struct RateLimitInterceptor {
     /// Maximum concurrent requests allowed.
     max_requests: u32,
-    /// Current in-flight request count.
-    current: std::sync::Arc<std::sync::atomic::AtomicU32>,
+    /// Current in-flight request count plus reset generation.
+    state: std::sync::Arc<RateLimitState>,
+}
+
+#[derive(Debug)]
+struct RateLimitState {
+    packed: std::sync::atomic::AtomicU64,
 }
 
 #[derive(Debug)]
 struct RateLimitLease {
-    current: std::sync::Arc<std::sync::atomic::AtomicU32>,
+    state: std::sync::Arc<RateLimitState>,
+    generation: u32,
     released: std::sync::atomic::AtomicBool,
 }
 
+fn rate_limit_pack(generation: u32, count: u32) -> u64 {
+    (u64::from(generation) << 32) | u64::from(count)
+}
+
+fn rate_limit_generation(packed: u64) -> u32 {
+    let bytes = packed.to_be_bytes();
+    u32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]])
+}
+
+fn rate_limit_count(packed: u64) -> u32 {
+    let bytes = packed.to_be_bytes();
+    u32::from_be_bytes([bytes[4], bytes[5], bytes[6], bytes[7]])
+}
+
 impl RateLimitLease {
-    fn new(current: std::sync::Arc<std::sync::atomic::AtomicU32>) -> Self {
+    fn new(state: std::sync::Arc<RateLimitState>, generation: u32) -> Self {
         Self {
-            current,
+            state,
+            generation,
             released: std::sync::atomic::AtomicBool::new(false),
         }
     }
@@ -884,11 +906,31 @@ impl RateLimitLease {
             return;
         }
 
-        let _ = self.current.fetch_update(
-            std::sync::atomic::Ordering::AcqRel,
-            std::sync::atomic::Ordering::Relaxed,
-            |current| current.checked_sub(1),
-        );
+        let mut packed = self.state.packed.load(std::sync::atomic::Ordering::Relaxed);
+        loop {
+            let generation = rate_limit_generation(packed);
+            let count = rate_limit_count(packed);
+            if generation != self.generation || count == 0 {
+                return;
+            }
+
+            let next = rate_limit_pack(generation, count - 1);
+            match self.state.packed.compare_exchange_weak(
+                packed,
+                next,
+                std::sync::atomic::Ordering::AcqRel,
+                std::sync::atomic::Ordering::Relaxed,
+            ) {
+                Ok(_) => return,
+                Err(observed) => packed = observed,
+            }
+        }
+    }
+}
+
+impl Drop for RateLimitLease {
+    fn drop(&mut self) {
+        self.release();
     }
 }
 
@@ -898,24 +940,30 @@ impl RateLimitInterceptor {
     pub fn new(max_requests: u32) -> Self {
         Self {
             max_requests,
-            current: std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0)),
+            state: std::sync::Arc::new(RateLimitState {
+                packed: std::sync::atomic::AtomicU64::new(rate_limit_pack(0, 0)),
+            }),
         }
     }
 
-    fn try_acquire_slot(&self) -> bool {
-        let mut current = self.current.load(std::sync::atomic::Ordering::Relaxed);
+    fn try_acquire_slot(&self) -> Option<u32> {
+        let mut packed = self.state.packed.load(std::sync::atomic::Ordering::Relaxed);
         loop {
-            if current >= self.max_requests {
-                return false;
+            let generation = rate_limit_generation(packed);
+            let count = rate_limit_count(packed);
+            if count >= self.max_requests {
+                return None;
             }
-            match self.current.compare_exchange_weak(
-                current,
-                current + 1,
+
+            let next = rate_limit_pack(generation, count + 1);
+            match self.state.packed.compare_exchange_weak(
+                packed,
+                next,
                 std::sync::atomic::Ordering::AcqRel,
                 std::sync::atomic::Ordering::Relaxed,
             ) {
-                Ok(_) => return true,
-                Err(observed) => current = observed,
+                Ok(_) => return Some(generation),
+                Err(observed) => packed = observed,
             }
         }
     }
@@ -928,22 +976,36 @@ impl RateLimitInterceptor {
 
     /// Reset the request counter.
     pub fn reset(&self) {
-        self.current.store(0, std::sync::atomic::Ordering::Relaxed);
+        let mut packed = self.state.packed.load(std::sync::atomic::Ordering::Relaxed);
+        loop {
+            let next_generation = rate_limit_generation(packed).wrapping_add(1);
+            let next = rate_limit_pack(next_generation, 0);
+            match self.state.packed.compare_exchange_weak(
+                packed,
+                next,
+                std::sync::atomic::Ordering::AcqRel,
+                std::sync::atomic::Ordering::Relaxed,
+            ) {
+                Ok(_) => return,
+                Err(observed) => packed = observed,
+            }
+        }
     }
 
     /// Get the current request count.
     #[must_use]
     pub fn current_count(&self) -> u32 {
-        self.current.load(std::sync::atomic::Ordering::Relaxed)
+        rate_limit_count(self.state.packed.load(std::sync::atomic::Ordering::Relaxed))
     }
 }
 
 impl Interceptor for RateLimitInterceptor {
     fn intercept_request(&self, request: &mut Request<Bytes>) -> Result<(), Status> {
-        if self.try_acquire_slot() {
-            request
-                .extensions_mut()
-                .insert_typed(RateLimitLease::new(std::sync::Arc::clone(&self.current)));
+        if let Some(generation) = self.try_acquire_slot() {
+            request.extensions_mut().insert_typed(RateLimitLease::new(
+                std::sync::Arc::clone(&self.state),
+                generation,
+            ));
             Ok(())
         } else {
             Err(Status::resource_exhausted("rate limit exceeded"))
@@ -1456,15 +1518,21 @@ mod tests {
     fn rate_limiter_allows_under_limit() {
         init_test("rate_limiter_allows_under_limit");
         let interceptor = rate_limiter(10);
+        let mut admitted = Vec::new();
 
         for _ in 0..10 {
             let mut request = Request::new(Bytes::new());
             let ok = interceptor.intercept_request(&mut request).is_ok();
             crate::assert_with_log!(ok, "intercept ok", true, ok);
+            admitted.push(request);
         }
 
         let count = interceptor.current_count();
         crate::assert_with_log!(count == 10, "count", 10, count);
+        drop(admitted);
+
+        let count = interceptor.current_count();
+        crate::assert_with_log!(count == 0, "count after drop", 0, count);
         crate::test_complete!("rate_limiter_allows_under_limit");
     }
 
@@ -1473,16 +1541,18 @@ mod tests {
         init_test("rate_limiter_rejects_over_limit");
         let interceptor = rate_limiter(2);
 
-        let mut request = Request::new(Bytes::new());
-        let ok = interceptor.intercept_request(&mut request).is_ok();
+        let mut first_request = Request::new(Bytes::new());
+        let ok = interceptor.intercept_request(&mut first_request).is_ok();
         crate::assert_with_log!(ok, "first ok", true, ok);
 
-        let mut request = Request::new(Bytes::new());
-        let ok = interceptor.intercept_request(&mut request).is_ok();
+        let mut second_request = Request::new(Bytes::new());
+        let ok = interceptor.intercept_request(&mut second_request).is_ok();
         crate::assert_with_log!(ok, "second ok", true, ok);
 
-        let mut request = Request::new(Bytes::new());
-        let err = interceptor.intercept_request(&mut request).unwrap_err();
+        let mut rejected_request = Request::new(Bytes::new());
+        let err = interceptor
+            .intercept_request(&mut rejected_request)
+            .unwrap_err();
         let code = err.code();
         crate::assert_with_log!(
             code == Code::ResourceExhausted,
@@ -1498,12 +1568,14 @@ mod tests {
         init_test("rate_limiter_reset");
         let interceptor = rate_limiter(1);
 
-        let mut request = Request::new(Bytes::new());
-        let ok = interceptor.intercept_request(&mut request).is_ok();
+        let mut first_request = Request::new(Bytes::new());
+        let ok = interceptor.intercept_request(&mut first_request).is_ok();
         crate::assert_with_log!(ok, "first ok", true, ok);
 
-        let mut request = Request::new(Bytes::new());
-        let err = interceptor.intercept_request(&mut request).is_err();
+        let mut rejected_request = Request::new(Bytes::new());
+        let err = interceptor
+            .intercept_request(&mut rejected_request)
+            .is_err();
         crate::assert_with_log!(err, "second err", true, err);
 
         interceptor.reset();
@@ -1514,6 +1586,36 @@ mod tests {
         let ok = interceptor.intercept_request(&mut request).is_ok();
         crate::assert_with_log!(ok, "after reset ok", true, ok);
         crate::test_complete!("rate_limiter_reset");
+    }
+
+    #[test]
+    fn rate_limiter_reset_ignores_stale_pre_reset_lease_drop() {
+        init_test("rate_limiter_reset_ignores_stale_pre_reset_lease_drop");
+        let interceptor = rate_limiter(2);
+
+        let mut stale_request = Request::new(Bytes::new());
+        let ok = interceptor.intercept_request(&mut stale_request).is_ok();
+        crate::assert_with_log!(ok, "stale request ok", true, ok);
+
+        interceptor.reset();
+
+        let mut fresh_request = Request::new(Bytes::new());
+        let ok = interceptor.intercept_request(&mut fresh_request).is_ok();
+        crate::assert_with_log!(ok, "fresh request ok", true, ok);
+
+        let count = interceptor.current_count();
+        crate::assert_with_log!(count == 1, "fresh count", 1, count);
+
+        drop(stale_request);
+
+        let count = interceptor.current_count();
+        crate::assert_with_log!(count == 1, "count after stale drop", 1, count);
+
+        drop(fresh_request);
+
+        let count = interceptor.current_count();
+        crate::assert_with_log!(count == 0, "count after fresh drop", 0, count);
+        crate::test_complete!("rate_limiter_reset_ignores_stale_pre_reset_lease_drop");
     }
 
     #[test]
