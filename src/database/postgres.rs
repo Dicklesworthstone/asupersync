@@ -3739,11 +3739,7 @@ impl PgConnection {
     }
 
     /// Send cleartext password.
-    async fn send_password(
-        &mut self,
-        _cx: &Cx,
-        _password: &str,
-    ) -> Result<(), PgError> {
+    async fn send_password(&mut self, _cx: &Cx, _password: &str) -> Result<(), PgError> {
         // PostgreSQL cleartext password authentication is vulnerable to downgrade attacks
         // SCRAM-SHA-256 is the recommended secure authentication method
         // For security, we require SCRAM-SHA-256
@@ -7572,6 +7568,12 @@ fn validate_bind_format_code(role: &str, index: usize, code: i16) -> Result<(), 
 }
 
 #[cfg(test)]
+fn init_test(name: &str) {
+    crate::test_utils::init_test_logging();
+    tracing::info!(test = %name, "starting postgres test");
+}
+
+#[cfg(test)]
 #[allow(
     clippy::approx_constant,
     clippy::float_cmp,
@@ -7579,8 +7581,14 @@ fn validate_bind_format_code(role: &str, index: usize, code: i16) -> Result<(), 
 )]
 mod tests {
     use super::*;
+    use crate::test_complete;
     use crate::types::CancelKind;
     use crate::{Budget, Cx, RegionId, TaskId};
+
+    fn init_test(name: &str) {
+        crate::test_utils::init_test_logging();
+        tracing::info!(test = %name, "starting postgres test");
+    }
 
     fn run<F: std::future::Future>(future: F) -> F::Output {
         futures_lite::future::block_on(future)
@@ -7915,7 +7923,7 @@ mod tests {
 
     #[test]
     fn startup_message_parser_rejects_embedded_nul_in_key_shape() {
-        let frame = startup_message_from_parts(&[b"us", b"er", b"testuser"], true);
+        let frame = startup_message_from_parts(&[b"us", b"er", b"testuser", b""], true);
 
         let err = parse_startup_message(&frame).unwrap_err();
 
@@ -9528,22 +9536,32 @@ mod tests {
         data.extend_from_slice(bool_val);
 
         // Parse and verify each column uses correct format
-        let values = conn.parse_data_row(&data, &columns)
+        let values = conn
+            .parse_data_row(&data, &columns)
             .expect("mixed format DataRow should parse successfully");
 
         assert_eq!(values.len(), 3);
 
         // Verify text format INT4 parsed correctly
-        assert_eq!(values[0], PgValue::Int4(123),
-                   "text format column should parse '123' as INT4");
+        assert_eq!(
+            values[0],
+            PgValue::Int4(123),
+            "text format column should parse '123' as INT4"
+        );
 
         // Verify binary format INT4 parsed correctly
-        assert_eq!(values[1], PgValue::Int4(456),
-                   "binary format column should parse 4-byte big-endian as INT4");
+        assert_eq!(
+            values[1],
+            PgValue::Int4(456),
+            "binary format column should parse 4-byte big-endian as INT4"
+        );
 
         // Verify text format BOOL parsed correctly
-        assert_eq!(values[2], PgValue::Bool(true),
-                   "text format column should parse 't' as BOOL");
+        assert_eq!(
+            values[2],
+            PgValue::Bool(true),
+            "text format column should parse 't' as BOOL"
+        );
 
         // AUDIT VERIFICATION: Per-column format codes correctly applied
         // - Column 0: format_code=0 → parse_text_value() → "123" → Int4(123)
@@ -9792,6 +9810,7 @@ mod tests {
                 message,
                 detail,
                 hint,
+                ..
             } => {
                 assert_eq!(code, "42P01");
                 assert_eq!(message, "relation does not exist");
@@ -9817,6 +9836,7 @@ mod tests {
                 message,
                 detail,
                 hint,
+                ..
             } => {
                 assert!(code.is_empty());
                 assert_eq!(message, "syntax error");
@@ -9848,6 +9868,7 @@ mod tests {
                 message,
                 detail,
                 hint,
+                ..
             } => {
                 assert_eq!(code, "00000");
                 assert_eq!(message, "COPY completed with warning");
@@ -11797,7 +11818,13 @@ mod tests {
 
         let mut tx = match run(conn.begin(&cx)) {
             Outcome::Ok(tx) => tx,
-            other => panic!("expected successful BEGIN, got {other:?}"),
+            Outcome::Err(err) => panic!("expected successful BEGIN, got error: {err}"),
+            Outcome::Cancelled(reason) => {
+                panic!("expected successful BEGIN, got cancellation: {reason:?}")
+            }
+            Outcome::Panicked(payload) => {
+                panic!("expected successful BEGIN, got panic: {payload:?}")
+            }
         };
         match run(tx.execute_unchecked(&cx, "SET LOCAL application_name = 'tenant_a'")) {
             Outcome::Ok(affected) => assert_eq!(affected, 0),
@@ -13617,8 +13644,7 @@ mod tests {
             .push_back("__stale_stmt".to_string());
 
         let responder = std::thread::spawn(move || {
-            let close_request = read_until_contains(&mut peer, b"__stale_stmt")
-                .expect("simple query should first flush pending deallocates");
+            let close_request = read_until_contains(&mut peer, b"__stale_stmt");
             assert!(
                 close_request
                     .windows("__stale_stmt".len())
@@ -13630,8 +13656,7 @@ mod tests {
             std::io::Write::write_all(&mut peer, &ready_for_query(b'I'))
                 .expect("close ready should be written");
 
-            let query_request = read_until_contains(&mut peer, b"SELECT 1")
-                .expect("simple query should run after flush");
+            let query_request = read_until_contains(&mut peer, b"SELECT 1");
             assert!(
                 query_request
                     .windows("SELECT 1".len())
@@ -13671,8 +13696,7 @@ mod tests {
             .push_back("__stale_stmt".to_string());
 
         let responder = std::thread::spawn(move || {
-            let close_request = read_until_contains(&mut peer, b"__stale_stmt")
-                .expect("prepare should flush pending deallocates before cache hit");
+            let close_request = read_until_contains(&mut peer, b"__stale_stmt");
             assert!(
                 close_request
                     .windows("__stale_stmt".len())
@@ -13725,8 +13749,7 @@ mod tests {
 
         let responder = std::thread::spawn(move || {
             let request =
-                read_until_contains(&mut peer, b"ALTER TABLE widgets ADD COLUMN extra integer")
-                    .expect("execute should send schema-changing SQL");
+                read_until_contains(&mut peer, b"ALTER TABLE widgets ADD COLUMN extra integer");
             assert!(
                 request
                     .windows("ALTER TABLE widgets ADD COLUMN extra integer".len())
@@ -13840,8 +13863,10 @@ mod tests {
                 .await;
 
             // Should return Cancelled outcome
+            let cancelled = matches!(result, Outcome::Cancelled(_));
+            drop(result);
             assert!(
-                matches!(result, Outcome::Cancelled(_)),
+                cancelled,
                 "begin_with_isolation should return Cancelled with pre-cancelled context"
             );
 
@@ -14428,19 +14453,23 @@ mod tests {
         let conn = make_test_connection();
 
         // Test data representing various PostgreSQL types and edge cases
-        let test_cases = vec![
+        let test_cases: Vec<(u32, &'static [u8], PgValue)> = vec![
             // INT4 with normal value
-            (oid::INT4, b"42", PgValue::Int4(42)),
+            (oid::INT4, b"42".as_slice(), PgValue::Int4(42)),
             // INT4 with zero
-            (oid::INT4, b"0", PgValue::Int4(0)),
+            (oid::INT4, b"0".as_slice(), PgValue::Int4(0)),
             // TEXT with normal string
-            (oid::TEXT, b"hello", PgValue::Text("hello".to_string())),
+            (
+                oid::TEXT,
+                b"hello".as_slice(),
+                PgValue::Text("hello".to_string()),
+            ),
             // TEXT with empty string
-            (oid::TEXT, b"", PgValue::Text("".to_string())),
+            (oid::TEXT, b"".as_slice(), PgValue::Text("".to_string())),
             // BOOL true
-            (oid::BOOL, b"t", PgValue::Bool(true)),
+            (oid::BOOL, b"t".as_slice(), PgValue::Bool(true)),
             // BOOL false
-            (oid::BOOL, b"f", PgValue::Bool(false)),
+            (oid::BOOL, b"f".as_slice(), PgValue::Bool(false)),
         ];
 
         for (type_oid, text_bytes, expected_value) in test_cases {
@@ -14668,7 +14697,13 @@ mod tests {
         let stream_result = run(conn.query_stream(&cx, "SELECT * FROM large_table"));
         let mut stream = match stream_result {
             Outcome::Ok(s) => s,
-            other => panic!("Expected Ok(stream), got {:?}", other),
+            Outcome::Err(err) => panic!("Expected Ok(stream), got error: {err}"),
+            Outcome::Cancelled(reason) => {
+                panic!("Expected Ok(stream), got cancellation: {reason:?}")
+            }
+            Outcome::Panicked(payload) => {
+                panic!("Expected Ok(stream), got panic: {payload:?}")
+            }
         };
 
         // Process rows one at a time - this should use O(1) memory per iteration
@@ -14762,7 +14797,15 @@ mod tests {
 
         let stream = match run(conn.query_stream_params(&cx, "SELECT $1::int4", &params)) {
             Outcome::Ok(stream) => stream,
-            other => panic!("expected streaming params setup to succeed, got {other:?}"),
+            Outcome::Err(err) => {
+                panic!("expected streaming params setup to succeed, got error: {err}")
+            }
+            Outcome::Cancelled(reason) => {
+                panic!("expected streaming params setup to succeed, got cancellation: {reason:?}")
+            }
+            Outcome::Panicked(payload) => {
+                panic!("expected streaming params setup to succeed, got panic: {payload:?}")
+            }
         };
 
         assert!(
@@ -14832,6 +14875,7 @@ mod tests {
             message,
             detail,
             hint,
+            ..
         } = parsed_error
         {
             assert_eq!(code, "23505", "Standard SQLSTATE must be preserved exactly");
@@ -14866,15 +14910,16 @@ mod tests {
             message,
             detail,
             hint,
-        } = parsed_extension_error
+            ..
+        } = &parsed_extension_error
         {
             assert_eq!(
                 code, "99999",
                 "Private/extension SQLSTATE 99999 must be preserved exactly per PostgreSQL protocol §49.7"
             );
             assert_eq!(message, "custom extension error occurred");
-            assert_eq!(detail, Some("Extension xyz failed validation".to_string()));
-            assert_eq!(hint, Some("Check extension configuration".to_string()));
+            assert_eq!(detail.as_deref(), Some("Extension xyz failed validation"));
+            assert_eq!(hint.as_deref(), Some("Check extension configuration"));
         } else {
             panic!(
                 "Expected PgError::Server for extension error, got {:?}",
@@ -15244,7 +15289,7 @@ mod tests {
             let notification_sequence: Vec<Vec<u8>> = (0..150)
                 .map(|i| {
                     let mut data = Vec::new();
-                    data.extend_from_slice(&(1000 + i).to_be_bytes()); // unique process_id
+                    data.extend_from_slice(&(1000i32 + i).to_be_bytes()); // unique process_id
                     data.extend_from_slice(format!("events\0").as_bytes());
                     data.extend_from_slice(format!("event_{}\0", i).as_bytes());
                     data
@@ -15598,10 +15643,10 @@ mod tests {
             let original_options = PgConnectOptions {
                 host: "localhost".to_string(),
                 port: 5432,
-                username: "test_user".to_string(),
+                user: "test_user".to_string(),
                 password: Some("test_pass".into()),
                 database: "test_db".to_string(),
-                sslmode: SslMode::Prefer,
+                ssl_mode: SslMode::Prefer,
                 application_name: Some("test_app".to_string()),
                 connect_timeout: Some(std::time::Duration::from_secs(30)),
             };
@@ -15813,6 +15858,10 @@ mod tests {
                 expected_behavior.subscription_recovery_transparent,
                 "Subscription recovery must be transparent to application"
             );
+            assert!(
+                expected_behavior.handles_partial_resubscribe_failure,
+                "Partial resubscribe failures must be handled without aborting recovery"
+            );
 
             // CURRENT STATE: ✗ NONE OF THESE ARE IMPLEMENTED
             // - No subscription tracking
@@ -15836,10 +15885,11 @@ mod tests {
             init_test("audit_channel_name_validation_is_sound");
 
             // AUDIT VERIFICATION: Channel name validation prevents injection
+            let too_long_channel = "a".repeat(MAX_NOTIFICATION_CHANNEL_NAME_BYTES + 1);
             let malicious_channels = vec![
                 "jobs\";UNLISTEN *;--",
                 "test\0null_injection",
-                &"a".repeat(MAX_NOTIFICATION_CHANNEL_NAME_BYTES + 1),
+                too_long_channel.as_str(),
                 "DROP TABLE users;--",
             ];
 
@@ -15896,6 +15946,8 @@ mod tests {
 }
 
 #[cfg(test)]
-mod postgres_copy_from_error_audit;
-#[cfg(test)]
+#[path = "postgres_auth_downgrade_audit.rs"]
 mod postgres_auth_downgrade_audit;
+#[cfg(test)]
+#[path = "postgres_copy_from_error_audit.rs"]
+mod postgres_copy_from_error_audit;

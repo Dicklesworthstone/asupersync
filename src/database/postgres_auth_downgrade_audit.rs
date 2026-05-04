@@ -8,7 +8,7 @@
 
 #![cfg(test)]
 
-use super::{PgConnection, PgError, PgConnectOptions};
+use super::{PgConnectOptions, PgConnection, PgError};
 use crate::cx::Cx;
 use crate::security::SecretString;
 
@@ -62,7 +62,7 @@ fn audit_auth_method_downgrade_attack_prevention() {
     // ✅ GUIDANCE: Error message directs to secure alternative
     // ✅ CONSISTENCY: Same pattern as MD5 authentication rejection
 
-    super::test_complete!("audit_auth_method_downgrade_attack_prevention");
+    crate::test_complete!("audit_auth_method_downgrade_attack_prevention");
 }
 
 /// AUDIT: Test MD5 authentication rejection (existing behavior)
@@ -91,7 +91,7 @@ fn audit_md5_auth_rejection_reference_pattern() {
     //
     // RECOMMENDATION: Apply the same pattern to cleartext authentication
 
-    super::test_complete!("audit_md5_auth_rejection_reference_pattern");
+    crate::test_complete!("audit_md5_auth_rejection_reference_pattern");
 }
 
 /// AUDIT: Test SCRAM channel binding downgrade protection (existing)
@@ -112,7 +112,7 @@ fn audit_scram_channel_binding_downgrade_protection_existing() {
     // This shows the codebase UNDERSTANDS downgrade attack prevention
     // but only applies it to SCRAM channel binding, not auth method selection.
 
-    super::test_complete!("audit_scram_channel_binding_downgrade_protection_existing");
+    crate::test_complete!("audit_scram_channel_binding_downgrade_protection_existing");
 }
 
 /// AUDIT: Test authentication flow order vulnerability
@@ -162,7 +162,7 @@ fn audit_authentication_flow_order_vulnerability() {
     // ✅ DEFENSE IN DEPTH: Multiple auth methods rejected (MD5 + cleartext)
     // ✅ FAIL SECURE: Client fails closed when offered insecure auth
 
-    super::test_complete!("audit_authentication_flow_order_vulnerability");
+    crate::test_complete!("audit_authentication_flow_order_vulnerability");
 }
 
 /// AUDIT: Reference implementation for secure auth method selection
@@ -202,5 +202,5 @@ fn audit_reference_secure_auth_method_selection() {
     // ✅ Clear error message with guidance
     // ✅ Consistent with MD5 rejection pattern
 
-    super::test_complete!("audit_reference_secure_auth_method_selection");
+    crate::test_complete!("audit_reference_secure_auth_method_selection");
 }

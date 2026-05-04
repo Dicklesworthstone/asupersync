@@ -11,7 +11,7 @@
 
 #![cfg(test)]
 
-use super::{PgConnection, PgError, PgConnectOptions};
+use super::{PgConnectOptions, PgConnection, PgError};
 use crate::cx::Cx;
 use crate::types::Outcome;
 
@@ -52,7 +52,7 @@ fn audit_copy_from_malformed_row_error_handling() {
 
     panic!("CRITICAL: COPY FROM functionality not implemented in PostgreSQL client");
 
-    super::test_complete!("audit_copy_from_malformed_row_error_handling");
+    crate::test_complete!("audit_copy_from_malformed_row_error_handling");
 }
 
 /// AUDIT: Test COPY FROM row position tracking accuracy
@@ -65,7 +65,7 @@ fn audit_copy_from_row_position_accuracy() {
     // AUDIT FINDING: Cannot test - COPY FROM not implemented
     panic!("CRITICAL: COPY FROM functionality not implemented in PostgreSQL client");
 
-    super::test_complete!("audit_copy_from_row_position_accuracy");
+    crate::test_complete!("audit_copy_from_row_position_accuracy");
 }
 
 /// AUDIT: Test COPY FROM column count validation
@@ -78,7 +78,7 @@ fn audit_copy_from_column_count_validation() {
     // AUDIT FINDING: Cannot test - COPY FROM not implemented
     panic!("CRITICAL: COPY FROM functionality not implemented in PostgreSQL client");
 
-    super::test_complete!("audit_copy_from_column_count_validation");
+    crate::test_complete!("audit_copy_from_column_count_validation");
 }
 
 /// AUDIT: Test COPY FROM error message structure
@@ -92,7 +92,7 @@ fn audit_copy_from_error_message_structure() {
     // AUDIT FINDING: Cannot test - COPY FROM not implemented
     panic!("CRITICAL: COPY FROM functionality not implemented in PostgreSQL client");
 
-    super::test_complete!("audit_copy_from_error_message_structure");
+    crate::test_complete!("audit_copy_from_error_message_structure");
 }
 
 /// AUDIT: Reference implementation showing correct COPY FROM error handling
@@ -141,5 +141,5 @@ fn audit_reference_datarow_column_validation_pattern() {
     // }
     // ```
 
-    super::test_complete!("audit_reference_datarow_column_validation_pattern");
+    crate::test_complete!("audit_reference_datarow_column_validation_pattern");
 }
