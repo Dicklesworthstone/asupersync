@@ -422,7 +422,7 @@ impl<P: Policy> Scope<'_, P> {
                         if let Some(region) = self.state.region_mut(self.region_id) {
                             region.remove_task(self.task_id);
                         }
-                        self.state.remove_task(self.task_id);
+                        self.state.recycle_task(self.task_id);
                     }
                 }
             }
@@ -665,7 +665,7 @@ impl<P: Policy> Scope<'_, P> {
                         if let Some(region) = self.state.region_mut(self.region_id) {
                             region.remove_task(self.task_id);
                         }
-                        self.state.remove_task(self.task_id);
+                        self.state.recycle_task(self.task_id);
                     }
                 }
             }
@@ -736,7 +736,7 @@ impl<P: Policy> Scope<'_, P> {
         if let Some(region) = state.region(self.region) {
             region.remove_task(task_id);
         }
-        state.remove_task(task_id);
+        state.recycle_task(task_id);
         Err(SpawnError::LocalSchedulerUnavailable)
     }
 
@@ -928,7 +928,7 @@ impl<P: Policy> Scope<'_, P> {
                     if let Some(region) = state.region(child_region) {
                         region.remove_task(task_id);
                     }
-                    let _ = state.remove_task(task_id);
+                    state.recycle_task(task_id);
                 }
 
                 if let Some(region) = state.region(child_region) {
@@ -1489,8 +1489,9 @@ impl<P: Policy> Scope<'_, P> {
             .timer_driver()
             .map_or(state.now, crate::time::TimerDriverHandle::now);
 
-        let idx = state.insert_task_with(|idx| {
-            TaskRecord::new_with_time(TaskId::from_arena(idx), self.region, self.budget, now)
+        let idx = state.insert_pooled_task_with(|idx, record| {
+            *record =
+                TaskRecord::new_with_time(TaskId::from_arena(idx), self.region, self.budget, now);
         });
         let task_id = TaskId::from_arena(idx);
 
@@ -1498,7 +1499,7 @@ impl<P: Policy> Scope<'_, P> {
         if let Some(region) = state.region(self.region) {
             if let Err(err) = region.add_task(task_id) {
                 // Rollback task creation
-                state.remove_task(task_id);
+                state.recycle_task(task_id);
                 return Err(match err {
                     AdmissionError::Closed => SpawnError::RegionClosed(self.region),
                     AdmissionError::LimitReached { limit, live, .. } => {
@@ -1512,7 +1513,7 @@ impl<P: Policy> Scope<'_, P> {
             }
         } else {
             // Rollback task creation
-            state.remove_task(task_id);
+            state.recycle_task(task_id);
             return Err(SpawnError::RegionNotFound(self.region));
         }
 

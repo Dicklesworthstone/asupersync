@@ -1351,6 +1351,18 @@ impl RuntimeState {
         self.tasks.insert_task_with(f)
     }
 
+    /// Inserts a pooled task record produced by `f` into the arena.
+    ///
+    /// The closure receives the assigned `ArenaIndex` and a recycled
+    /// `TaskRecord` that should be fully initialized for the new task.
+    #[inline]
+    pub fn insert_pooled_task_with<F>(&mut self, f: F) -> ArenaIndex
+    where
+        F: FnOnce(ArenaIndex, &mut TaskRecord),
+    {
+        self.tasks.insert_pooled_task_with(f)
+    }
+
     /// Removes a task record from the arena.
     ///
     /// Returns the removed record if it existed.
@@ -1361,6 +1373,13 @@ impl RuntimeState {
             self.notify_runtime_epoch_advance(super::epoch_tracker::ModuleId::TaskTable);
         }
         removed
+    }
+
+    /// Removes a task record from the arena and recycles it into the pool.
+    #[inline]
+    pub fn recycle_task(&mut self, task_id: TaskId) {
+        self.tasks.remove_and_recycle_task(task_id);
+        self.notify_runtime_epoch_advance(super::epoch_tracker::ModuleId::TaskTable);
     }
 
     /// Returns an iterator over all task records.
@@ -1642,8 +1661,8 @@ impl RuntimeState {
 
         // Create the TaskRecord
         let now = self.current_runtime_time();
-        let idx = self.tasks.insert_task_with(|idx| {
-            TaskRecord::new_with_time(TaskId::from_arena(idx), region, budget, now)
+        let idx = self.insert_pooled_task_with(|idx, record| {
+            *record = TaskRecord::new_with_time(TaskId::from_arena(idx), region, budget, now);
         });
         let task_id = TaskId::from_arena(idx);
 
@@ -1682,7 +1701,7 @@ impl RuntimeState {
             };
             if let Err(err) = admission {
                 // Rollback task creation
-                let _ = self.remove_task(task_id);
+                self.recycle_task(task_id);
                 return Err(match err {
                     AdmissionError::Closed => SpawnError::RegionClosed(region),
                     AdmissionError::LimitReached { limit, live, .. } => {
@@ -1696,7 +1715,7 @@ impl RuntimeState {
             }
         } else {
             // Rollback task creation
-            let _ = self.remove_task(task_id);
+            self.recycle_task(task_id);
             return Err(SpawnError::RegionNotFound(region));
         }
 
@@ -3118,7 +3137,7 @@ impl RuntimeState {
         }
 
         // Remove the task record to prevent memory leaks
-        let _ = self.remove_task(task_id);
+        self.recycle_task(task_id);
 
         // Remove task from owning region to prevent memory leak
         if let Some(region) = self.regions.get(owner.arena_index()) {

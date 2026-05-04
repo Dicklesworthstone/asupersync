@@ -97,6 +97,15 @@ impl TaskTable {
         self.tasks.capacity()
     }
 
+    /// Returns the number of recycled task records currently cached in the pool.
+    #[cfg(any(test, feature = "test-internals"))]
+    #[allow(dead_code)]
+    #[inline]
+    #[must_use]
+    pub(crate) fn recycled_task_record_count(&self) -> usize {
+        self.task_record_pool.len()
+    }
+
     /// Returns a shared reference to a task record by arena index.
     #[inline]
     #[must_use]
@@ -312,6 +321,7 @@ impl TaskTable {
         record.id = task_id;
         record.owner = owner;
         record.created_at = created_at;
+        record.deadline = budget.deadline;
         record.polls_remaining = budget.poll_quota;
         // br-asupersync-1w9aot: route through wall_now() so the lab
         // runtime's virtual clock can intercept on replay; production
@@ -384,8 +394,7 @@ impl TaskTable {
         });
         if let Some(record) = self.tasks.get(idx) {
             let phase = record.phase.load();
-            let deadline = record.cx.as_ref().and_then(|cx| cx.budget().deadline);
-            self.note_task_added(phase, deadline);
+            self.note_task_added(phase, record.deadline);
         }
         idx
     }
@@ -531,7 +540,7 @@ mod tests {
         clippy::future_not_send
     )]
     use super::*;
-    use crate::types::{Budget, RegionId};
+    use crate::types::{Budget, RegionId, Time};
 
     #[inline]
     fn make_task_record(owner: RegionId) -> TaskRecord {
@@ -719,6 +728,123 @@ mod tests {
         assert_eq!(table.live_task_count(), 0);
         assert_eq!(table.stored_future_count(), 0);
         assert!(table.get_stored_future(unknown).is_none());
+    }
+
+    #[test]
+    fn pooled_insert_clears_stale_metadata_before_reuse() {
+        let mut table = TaskTable::with_capacity(256);
+        let owner_a = RegionId::from_arena(ArenaIndex::new(1, 0));
+        let owner_b = RegionId::from_arena(ArenaIndex::new(2, 0));
+
+        let idx = table.insert_pooled_task_with(|idx, record| {
+            *record = TaskRecord::new_with_time(
+                TaskId::from_arena(idx),
+                owner_a,
+                Budget::new()
+                    .with_poll_quota(7)
+                    .with_deadline(Time::from_nanos(99)),
+                Time::from_nanos(5),
+            );
+        });
+        let task_id = TaskId::from_arena(idx);
+
+        let record = table.task_mut(task_id).expect("pooled task exists");
+        record.request_cancel(crate::types::CancelReason::timeout());
+        record
+            .waiters
+            .push(TaskId::from_arena(ArenaIndex::new(88, 0)));
+        record.cached_waker = Some((std::task::Waker::noop().clone(), 3));
+        record.cached_cancel_waker = Some((std::task::Waker::noop().clone(), 4));
+        record.pin_to_worker(7);
+        record.queue_tag = 9;
+        record.heap_index = Some(11);
+        record.sched_priority = 5;
+        record.sched_generation = 44;
+        record.total_polls = 12;
+        record.last_polled_step = 77;
+
+        table.remove_and_recycle_task(task_id);
+        assert_eq!(table.recycled_task_record_count(), 1);
+
+        let reused_idx = table.insert_pooled_task_with(|_idx, record| {
+            record.owner = owner_b;
+            record.created_at = Time::from_nanos(123);
+            record.polls_remaining = 5;
+        });
+        let reused_id = TaskId::from_arena(reused_idx);
+        let reused = table.task(reused_id).expect("reused pooled task exists");
+
+        assert_eq!(table.recycled_task_record_count(), 0);
+        assert_eq!(reused.id, reused_id);
+        assert_eq!(reused.owner, owner_b);
+        assert!(matches!(
+            &reused.state,
+            crate::record::task::TaskState::Created
+        ));
+        assert_eq!(reused.phase(), TaskPhase::Created);
+        assert_eq!(reused.deadline, None);
+        assert_eq!(reused.waiters.len(), 0);
+        assert!(reused.cached_waker.is_none());
+        assert!(reused.cached_cancel_waker.is_none());
+        assert_eq!(reused.cancel_epoch, 0);
+        assert!(!reused.is_local());
+        assert!(reused.pinned_worker.is_none());
+        assert_eq!(reused.queue_tag, 0);
+        assert_eq!(reused.heap_index, None);
+        assert_eq!(reused.sched_priority, 0);
+        assert_eq!(reused.sched_generation, 0);
+        assert_eq!(reused.total_polls, 0);
+        assert_eq!(reused.last_polled_step, 0);
+    }
+
+    #[test]
+    fn pooled_insert_tracks_deadline_without_cx() {
+        let mut table = TaskTable::with_capacity(256);
+        let owner = RegionId::from_arena(ArenaIndex::new(1, 0));
+        let deadline = Time::from_nanos(1_234);
+
+        let idx = table.insert_pooled_task_with(|_idx, record| {
+            record.owner = owner;
+            record.deadline = Some(deadline);
+            record.polls_remaining = 1;
+            record.created_at = Time::from_nanos(7);
+        });
+
+        let task_id = TaskId::from_arena(idx);
+        let record = table.task(task_id).expect("pooled task exists");
+        assert_eq!(record.deadline, Some(deadline));
+        assert_eq!(table.tasks_with_deadline_count(), 1);
+        assert_eq!(table.deadline_sum_ns(), u128::from(deadline.as_nanos()));
+    }
+
+    #[test]
+    fn remove_and_recycle_task_double_return_is_noop() {
+        let mut table = TaskTable::new();
+        let owner = RegionId::from_arena(ArenaIndex::new(1, 0));
+        let idx = table.insert_task(make_task_record(owner));
+        let task_id = TaskId::from_arena(idx);
+
+        table.remove_and_recycle_task(task_id);
+        table.remove_and_recycle_task(task_id);
+
+        assert_eq!(table.recycled_task_record_count(), 1);
+        assert!(table.task(task_id).is_none());
+        assert_eq!(table.live_task_count(), 0);
+    }
+
+    #[test]
+    fn task_record_pool_saturates_at_capacity_hint_bound() {
+        let capacity = 4096usize;
+        let expected_pool_cap = (capacity / 4).clamp(64, 512);
+        let mut table = TaskTable::with_capacity(capacity);
+        let owner = RegionId::from_arena(ArenaIndex::new(1, 0));
+
+        for _ in 0..(expected_pool_cap + 128) {
+            let idx = table.insert_task(make_task_record(owner));
+            table.remove_and_recycle_task(TaskId::from_arena(idx));
+        }
+
+        assert_eq!(table.recycled_task_record_count(), expected_pool_cap);
     }
 
     // === Lock Ordering Conformance Tests ===
@@ -1176,6 +1302,6 @@ mod tests {
 
         // 7. Remove task
         table.remove(idx2);
-        assert_eq!(table.live_task_count(), 0);
+        assert_eq!(table.live_task_count(), 1);
     }
 }

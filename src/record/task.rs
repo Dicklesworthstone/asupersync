@@ -1048,8 +1048,10 @@ impl crate::util::Recyclable for TaskRecord {
     /// task by calling the appropriate initialization methods.
     fn reset(&mut self) {
         // Reset core task state
+        self.id = TaskId::from_arena(crate::util::ArenaIndex::new(0, 0));
+        self.owner = RegionId::from_arena(crate::util::ArenaIndex::new(0, 0));
         self.state = TaskState::Created;
-        self.phase.store(TaskPhase::Created);
+        self.phase = TaskPhaseCell::new(TaskPhase::Created);
 
         // Reset context and waker state
         self.cx_inner = None;
@@ -1057,6 +1059,7 @@ impl crate::util::Recyclable for TaskRecord {
 
         // Reset timing and metrics
         self.created_at = Time::ZERO;
+        self.deadline = None;
         self.polls_remaining = 0;
         self.total_polls = 0;
         // br-asupersync-1w9aot: reset path also routes through
