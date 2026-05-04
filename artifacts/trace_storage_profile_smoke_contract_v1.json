@@ -117,7 +117,15 @@
         "large_retained_distributed_traces": 80000,
         "default_cold_write_amplification_factor": 34.1797,
         "large_cold_write_amplification_factor": 5.4932,
-        "cold_write_amplification_reduction_ratio": 6.2222
+        "cold_write_amplification_reduction_ratio": 6.2222,
+        "default_cold_budget_utilization_ratio": 1.0,
+        "large_cold_budget_utilization_ratio": 0.5143,
+        "default_overflow_interference_bps": 2.4414,
+        "large_overflow_interference_bps": 0.0381,
+        "p999_non_regression_passed": true,
+        "retention_policy_confidence": 1.0,
+        "host_memory_requirement_satisfied": true,
+        "pressure_handoff_triggered": false
       }
     }
   ]
