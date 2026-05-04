@@ -7,8 +7,10 @@
 use rustls_pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer, PrivateSec1KeyDer};
 
 use std::collections::BTreeSet;
+#[cfg(feature = "tls")]
 use std::io::BufReader;
 use std::path::Path;
+#[cfg(feature = "tls")]
 use std::sync::Arc;
 
 use super::error::TlsError;
@@ -714,6 +716,7 @@ impl CertificatePinSet {
 /// accumulator is wrapped in `std::hint::black_box` so an aggressive
 /// optimiser cannot rewrite the loop into an early-exit comparison.
 #[inline]
+#[cfg(any(feature = "tls", test))]
 fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
     if a.len() != b.len() {
         return false;

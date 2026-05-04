@@ -18,6 +18,7 @@ use std::collections::BTreeMap;
 #[cfg(feature = "tls")]
 use std::future::poll_fn;
 use std::path::Path;
+#[cfg(feature = "tls")]
 use std::sync::Arc;
 
 /// Server-side TLS acceptor.
@@ -201,6 +202,7 @@ impl TlsAcceptor {
     where
         IO: AsyncRead + AsyncWrite + Unpin,
     {
+        let _ = (self.alpn_required, self.require_sni);
         Err(TlsError::Configuration("tls feature not enabled".into()))
     }
 }
@@ -725,6 +727,7 @@ impl TlsAcceptorBuilder {
     /// Build the `TlsAcceptor` (disabled-mode fallback when TLS is disabled).
     #[cfg(not(feature = "tls"))]
     pub fn build(self) -> Result<TlsAcceptor, TlsError> {
+        let _ = (&self.cert_chain, &self.key);
         Err(TlsError::Configuration("tls feature not enabled".into()))
     }
 }

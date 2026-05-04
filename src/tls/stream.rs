@@ -3,7 +3,9 @@
 //! This module provides `TlsStream` that wraps an underlying transport stream
 //! and implements `AsyncRead` + `AsyncWrite` with TLS encryption.
 
+#[cfg(feature = "tls")]
 use super::error::TlsError;
+#[cfg(feature = "tls")]
 use crate::io::{AsyncRead, AsyncWrite, ReadBuf};
 
 // When tracing integration is enabled, the `debug!/trace!/error!` macros come from `tracing`.
@@ -14,11 +16,15 @@ use crate::tracing_compat::{debug, error, trace};
 #[cfg(feature = "tls")]
 use rustls::{ClientConnection, ServerConnection};
 
+#[cfg(feature = "tls")]
 use std::io;
+#[cfg(feature = "tls")]
 use std::pin::Pin;
+#[cfg(feature = "tls")]
 use std::task::{Context, Poll};
 
 /// Internal state of the TLS stream.
+#[cfg(any(feature = "tls", test))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum TlsState {
     /// Handshake in progress.
@@ -53,7 +59,7 @@ pub struct TlsStream<IO> {
 #[cfg(not(feature = "tls"))]
 pub struct TlsStream<IO> {
     io: IO,
-    _state: TlsState,
+    _marker: std::marker::PhantomData<()>,
 }
 
 /// Wrapper to handle both client and server connections.

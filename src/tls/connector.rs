@@ -192,6 +192,7 @@ impl TlsConnector {
     where
         IO: AsyncRead + AsyncWrite + Unpin,
     {
+        let _ = (self.alpn_required, self.pin_set.as_ref());
         Err(TlsError::Configuration("tls feature not enabled".into()))
     }
 
@@ -1156,6 +1157,11 @@ impl TlsConnectorBuilder {
     /// Build the `TlsConnector` (disabled-mode fallback when TLS is disabled).
     #[cfg(not(feature = "tls"))]
     pub fn build(self) -> Result<TlsConnector, TlsError> {
+        let _ = (
+            self.alpn_required,
+            self.pin_set.as_ref(),
+            self.early_data_enabled,
+        );
         Err(TlsError::Configuration("tls feature not enabled".into()))
     }
 }
