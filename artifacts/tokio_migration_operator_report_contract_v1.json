@@ -1,0 +1,228 @@
+{
+  "contract_version": "tokio-migration-operator-report-v1",
+  "schema_version": "tokio-migration-operator-report-schema-v1",
+  "generated_for_bead": "asupersync-migrep",
+  "source_workload_contract": "artifacts/tokio_migration_shadow_workload_contract_v1.json",
+  "source_cancel_delta_contract": "artifacts/tokio_migration_cancel_delta_contract_v1.json",
+  "source_perf_report_contract": "artifacts/tokio_migration_perf_report_contract_v1.json",
+  "purpose": "Render conservative operator migration guidance from live shadow-workload, cancellation-delta, performance, and no-Tokio graph evidence without hand-written claims.",
+  "perf_evidence_policy": {
+    "p99_p999_deltas_required_when_present": true,
+    "missing_perf_evidence": "partial_hold",
+    "stale_perf_evidence": "refuse_hold_conservative",
+    "real_host_rollout_requires_real_host_template": true
+  },
+  "report_render_policy": {
+    "state_order": [
+      "ready_to_migrate",
+      "hold_conservative",
+      "partial_evidence",
+      "refuse_stale_evidence"
+    ],
+    "secret_redaction": "operator_notes_must_be_sanitized",
+    "proxy_claim_policy": "small_mode_proxy_must_not_claim_real_host_rollout",
+    "graph_proof_policy": "default_asupersync_normal_graph_must_have_no_tokio"
+  },
+  "required_report_fields": [
+    "report_id",
+    "state",
+    "scenario_id",
+    "source_idiom",
+    "asupersync_rewrite",
+    "required_cx_capability_surface",
+    "invariant_gained",
+    "risk_remaining",
+    "artifact_paths",
+    "command_lines",
+    "performance_delta",
+    "cancellation_loss_verdict",
+    "orphan_task_verdict",
+    "no_tokio_graph_proof",
+    "operator_next_step",
+    "projection_hash"
+  ],
+  "required_states": [
+    "ready_to_migrate",
+    "hold_conservative",
+    "partial_evidence",
+    "refuse_stale_evidence"
+  ],
+  "validation_commands": [
+    "rch exec -- rustfmt --edition 2024 --check tests/tokio_migration_operator_report_contract.rs",
+    "rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_asupersync_migrep cargo test -p asupersync --test tokio_migration_operator_report_contract --features test-internals -- --nocapture",
+    "scripts/run_tokio_migration_shadow_workload_smoke.sh --execute --scenario TM-SHADOW-001-MPSC-BACKPRESSURE --output-root /tmp/asupersync-migrep-shadow-execute",
+    "rch exec -- cargo tree -e normal -p asupersync -i tokio"
+  ],
+  "reports": [
+    {
+      "report_id": "TM-OPERATOR-READY-MPSC",
+      "state": "ready_to_migrate",
+      "scenario_id": "TM-SHADOW-001-MPSC-BACKPRESSURE",
+      "source_idiom": "tokio::sync::mpsc::Sender::reserve + send",
+      "asupersync_rewrite": "channel::mpsc::Sender::reserve(&Cx).await?.send(value)",
+      "required_cx_capability_surface": "Cx plus channel::mpsc::Sender::reserve(&Cx)",
+      "invariant_gained": "two_phase_send_no_loss",
+      "risk_remaining": "small-mode performance evidence is not a 64-core real-host rollout certificate",
+      "artifact_paths": {
+        "workload_contract": "artifacts/tokio_migration_shadow_workload_contract_v1.json",
+        "cancel_delta_contract": "artifacts/tokio_migration_cancel_delta_contract_v1.json",
+        "perf_report_contract": "artifacts/tokio_migration_perf_report_contract_v1.json",
+        "shadow_report_jsonl": "/tmp/asupersync-miglat-shadow-execute/TM-SHADOW-001-MPSC-BACKPRESSURE/shadow_workload_report.jsonl",
+        "operator_report_snapshot": "artifacts/tokio_migration_operator_report_contract_v1.json#reports[0]"
+      },
+      "command_lines": {
+        "shadow_runner": "scripts/run_tokio_migration_shadow_workload_smoke.sh --execute --scenario TM-SHADOW-001-MPSC-BACKPRESSURE --output-root /tmp/asupersync-miglat-shadow-execute",
+        "test": "rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_asupersync_migrep cargo test -p asupersync --test tokio_migration_operator_report_contract --features test-internals -- --nocapture",
+        "graph_proof": "rch exec -- cargo tree -e normal -p asupersync -i tokio"
+      },
+      "performance_delta": {
+        "status": "present",
+        "scale_mode": "small-deterministic-proxy",
+        "p99_delta_micros": -40,
+        "p999_delta_micros": -40,
+        "throughput_delta_ops_per_sec": 10000,
+        "sample_count": 8
+      },
+      "cancellation_loss_verdict": "asupersync_no_loss_tokio_reference_loss_visible",
+      "orphan_task_verdict": "not_applicable",
+      "no_tokio_graph_proof": {
+        "command": "rch exec -- cargo tree -e normal -p asupersync -i tokio",
+        "expected_stdout": "warning: nothing to print.",
+        "proof_ref": "asupersync-shdwrk"
+      },
+      "operator_next_step": "Pilot this rewrite behind the conservative migration gate and rerun real-host performance before rollout.",
+      "projection_hash": 11756154580624650466
+    },
+    {
+      "report_id": "TM-OPERATOR-HOLD-SELECT",
+      "state": "hold_conservative",
+      "scenario_id": "TM-SHADOW-002-SELECT-TIMEOUT-RACE",
+      "source_idiom": "tokio::select! with tokio::time::timeout",
+      "asupersync_rewrite": "Scope::race with loser drain and timeout(now, duration, future)",
+      "required_cx_capability_surface": "Cx plus Scope::race loser-drain capability",
+      "invariant_gained": "losers_drained",
+      "risk_remaining": "small-mode report shows no migration win, so rollout would be an unjustified behavior change",
+      "artifact_paths": {
+        "workload_contract": "artifacts/tokio_migration_shadow_workload_contract_v1.json",
+        "cancel_delta_contract": "artifacts/tokio_migration_cancel_delta_contract_v1.json",
+        "perf_report_contract": "artifacts/tokio_migration_perf_report_contract_v1.json",
+        "shadow_report_jsonl": "/tmp/asupersync-miglat-shadow-execute/TM-SHADOW-002-SELECT-TIMEOUT-RACE/shadow_workload_report.jsonl",
+        "operator_report_snapshot": "artifacts/tokio_migration_operator_report_contract_v1.json#reports[1]"
+      },
+      "command_lines": {
+        "shadow_runner": "scripts/run_tokio_migration_shadow_workload_smoke.sh --execute --scenario TM-SHADOW-002-SELECT-TIMEOUT-RACE --output-root /tmp/asupersync-miglat-shadow-execute",
+        "test": "rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_asupersync_migrep cargo test -p asupersync --test tokio_migration_operator_report_contract --features test-internals -- --nocapture",
+        "graph_proof": "rch exec -- cargo tree -e normal -p asupersync -i tokio"
+      },
+      "performance_delta": {
+        "status": "present_no_win",
+        "scale_mode": "small-deterministic-proxy",
+        "p99_delta_micros": 0,
+        "p999_delta_micros": 0,
+        "throughput_delta_ops_per_sec": 0,
+        "sample_count": 5
+      },
+      "cancellation_loss_verdict": "asupersync_drains_losers_tokio_reference_loss_visible",
+      "orphan_task_verdict": "not_applicable",
+      "no_tokio_graph_proof": {
+        "command": "rch exec -- cargo tree -e normal -p asupersync -i tokio",
+        "expected_stdout": "warning: nothing to print.",
+        "proof_ref": "asupersync-shdwrk"
+      },
+      "operator_next_step": "Hold the conservative plan until a fresh report shows a latency or throughput win with loser-drain evidence.",
+      "projection_hash": 1522752985468510461
+    },
+    {
+      "report_id": "TM-OPERATOR-PARTIAL-SPAWN",
+      "state": "partial_evidence",
+      "scenario_id": "TM-SHADOW-004-SPAWN-JOIN-OWNERSHIP",
+      "source_idiom": "tokio::spawn + JoinHandle",
+      "asupersync_rewrite": "Scope::spawn with region-owned TaskHandle::join(&Cx)",
+      "required_cx_capability_surface": "Cx plus Scope region ownership",
+      "invariant_gained": "region_close_quiescence",
+      "risk_remaining": "correctness evidence exists, but performance evidence is missing",
+      "artifact_paths": {
+        "workload_contract": "artifacts/tokio_migration_shadow_workload_contract_v1.json",
+        "cancel_delta_contract": "artifacts/tokio_migration_cancel_delta_contract_v1.json",
+        "perf_report_contract": "missing",
+        "shadow_report_jsonl": "/tmp/asupersync-shdwrk-shadow-execute/TM-SHADOW-004-SPAWN-JOIN-OWNERSHIP/shadow_workload_report.jsonl",
+        "operator_report_snapshot": "artifacts/tokio_migration_operator_report_contract_v1.json#reports[2]"
+      },
+      "command_lines": {
+        "shadow_runner": "scripts/run_tokio_migration_shadow_workload_smoke.sh --execute --scenario TM-SHADOW-004-SPAWN-JOIN-OWNERSHIP --output-root /tmp/asupersync-shdwrk-shadow-execute",
+        "test": "rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_asupersync_migrep cargo test -p asupersync --test tokio_migration_operator_report_contract --features test-internals -- --nocapture",
+        "graph_proof": "rch exec -- cargo tree -e normal -p asupersync -i tokio"
+      },
+      "performance_delta": {
+        "status": "missing",
+        "scale_mode": "not_reported",
+        "p99_delta_micros": null,
+        "p999_delta_micros": null,
+        "throughput_delta_ops_per_sec": null,
+        "sample_count": 0
+      },
+      "cancellation_loss_verdict": "asupersync_region_close_quiesces_children",
+      "orphan_task_verdict": "asupersync_no_orphan_tasks_tokio_reference_orphan_risk_visible",
+      "no_tokio_graph_proof": {
+        "command": "rch exec -- cargo tree -e normal -p asupersync -i tokio",
+        "expected_stdout": "warning: nothing to print.",
+        "proof_ref": "asupersync-shdwrk"
+      },
+      "operator_next_step": "Generate miglat performance evidence before recommending this rewrite beyond correctness review.",
+      "projection_hash": 6505052651722473426
+    },
+    {
+      "report_id": "TM-OPERATOR-REFUSE-STALE-MUTEX",
+      "state": "refuse_stale_evidence",
+      "scenario_id": "TM-SHADOW-005-MUTEX-CONTENTION",
+      "source_idiom": "tokio::sync::{Mutex, Semaphore}",
+      "asupersync_rewrite": "sync::Mutex::lock(&Cx) and sync::Semaphore::acquire(&Cx, permits)",
+      "required_cx_capability_surface": "Cx plus cancel-aware sync wait queues",
+      "invariant_gained": "no_obligation_leak",
+      "risk_remaining": "stale performance evidence cannot support migration guidance",
+      "artifact_paths": {
+        "workload_contract": "artifacts/tokio_migration_shadow_workload_contract_v1.json",
+        "cancel_delta_contract": "artifacts/tokio_migration_cancel_delta_contract_v1.json",
+        "perf_report_contract": "stale",
+        "shadow_report_jsonl": "/tmp/asupersync-stale/TM-SHADOW-005-MUTEX-CONTENTION/shadow_workload_report.jsonl",
+        "operator_report_snapshot": "artifacts/tokio_migration_operator_report_contract_v1.json#reports[3]"
+      },
+      "command_lines": {
+        "shadow_runner": "scripts/run_tokio_migration_shadow_workload_smoke.sh --execute --scenario TM-SHADOW-005-MUTEX-CONTENTION --output-root /tmp/asupersync-stale",
+        "test": "rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_asupersync_migrep cargo test -p asupersync --test tokio_migration_operator_report_contract --features test-internals -- --nocapture",
+        "graph_proof": "rch exec -- cargo tree -e normal -p asupersync -i tokio"
+      },
+      "performance_delta": {
+        "status": "stale",
+        "scale_mode": "expired-small-deterministic-proxy",
+        "p99_delta_micros": null,
+        "p999_delta_micros": null,
+        "throughput_delta_ops_per_sec": null,
+        "sample_count": 0
+      },
+      "cancellation_loss_verdict": "asupersync_unlinks_cancelled_waiters",
+      "orphan_task_verdict": "not_applicable",
+      "no_tokio_graph_proof": {
+        "command": "rch exec -- cargo tree -e normal -p asupersync -i tokio",
+        "expected_stdout": "warning: nothing to print.",
+        "proof_ref": "asupersync-shdwrk"
+      },
+      "operator_next_step": "Refuse migration guidance until the shadow workload and perf report are regenerated on current main.",
+      "projection_hash": 9883913231647842828
+    }
+  ],
+  "golden_reports": [
+    {
+      "artifact_id": "TM-OPERATOR-GOLDEN-READY-MPSC",
+      "report_id": "TM-OPERATOR-READY-MPSC",
+      "state": "ready_to_migrate",
+      "projection_hash": 11756154580624650466
+    },
+    {
+      "artifact_id": "TM-OPERATOR-GOLDEN-HOLD-SELECT",
+      "report_id": "TM-OPERATOR-HOLD-SELECT",
+      "state": "hold_conservative",
+      "projection_hash": 1522752985468510461
+    }
+  ]
+}
