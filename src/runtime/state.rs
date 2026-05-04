@@ -6511,6 +6511,42 @@ mod tests {
         id
     }
 
+    fn log_quiescence_observation(
+        state: &RuntimeState,
+        region: RegionId,
+        scenario_id: &str,
+        observation_tick: u64,
+        caller_surface: &str,
+    ) -> bool {
+        let snapshot = state.snapshot();
+        let region_id = IdSnapshot::from(region);
+        let close_state = snapshot
+            .regions
+            .iter()
+            .find(|entry| entry.id == region_id)
+            .map_or_else(
+                || "Removed".to_string(),
+                |entry| format!("{:?}", entry.state),
+            );
+        let quiescent = state.is_quiescent();
+        let finalizer_count = if close_state == "Removed" {
+            0
+        } else {
+            state.region_finalizer_count(region)
+        };
+
+        eprintln!(
+            "QUIESCENCE_OBSERVATION scenario_id={scenario_id} observation_tick={observation_tick} caller_surface={caller_surface} region_count={} task_count={} close_state={} finalizer_count={} quiescent={} artifact_paths=none",
+            snapshot.regions.len(),
+            snapshot.tasks.len(),
+            close_state,
+            finalizer_count,
+            quiescent
+        );
+
+        quiescent
+    }
+
     #[test]
     fn cancel_request_marks_region() {
         init_test("cancel_request_marks_region");
@@ -8367,6 +8403,222 @@ mod tests {
             quiescent_after_close
         );
         crate::test_complete!("is_quiescent_waits_for_region_close_completion");
+    }
+
+    #[test]
+    fn quiescence_observation_matrix_has_no_early_true_reports() {
+        init_test("quiescence_observation_matrix_has_no_early_true_reports");
+
+        let mut observation_tick = 0_u64;
+
+        let mut before_close = RuntimeState::new();
+        let before_close_root = before_close.create_root_region(Budget::INFINITE);
+        let before_close_direct = log_quiescence_observation(
+            &before_close,
+            before_close_root,
+            "before_close_start",
+            observation_tick,
+            "RuntimeState::is_quiescent",
+        );
+        observation_tick += 1;
+        let before_close_snapshot = log_quiescence_observation(
+            &before_close,
+            before_close_root,
+            "before_close_start",
+            observation_tick,
+            "RuntimeState::snapshot",
+        );
+        observation_tick += 1;
+        crate::assert_with_log!(
+            before_close_direct,
+            "empty runtime reports quiescent before close starts",
+            true,
+            before_close_direct
+        );
+        crate::assert_with_log!(
+            before_close_snapshot == before_close_direct,
+            "repeated before-close observations stay stable",
+            true,
+            before_close_snapshot == before_close_direct
+        );
+
+        let mut cancel_requested = RuntimeState::new();
+        let cancel_root = cancel_requested.create_root_region(Budget::INFINITE);
+        let cancel_child = create_child_region(&mut cancel_requested, cancel_root);
+        let _cancel_task = insert_task(&mut cancel_requested, cancel_child);
+        let tasks_to_cancel =
+            cancel_requested.cancel_request(cancel_root, &CancelReason::user("stop"), None);
+        crate::assert_with_log!(
+            !tasks_to_cancel.is_empty(),
+            "cancel request schedules live child work",
+            true,
+            !tasks_to_cancel.is_empty()
+        );
+        let cancel_direct = log_quiescence_observation(
+            &cancel_requested,
+            cancel_root,
+            "after_cancel_request",
+            observation_tick,
+            "RuntimeState::is_quiescent",
+        );
+        observation_tick += 1;
+        let cancel_snapshot = log_quiescence_observation(
+            &cancel_requested,
+            cancel_root,
+            "after_cancel_request",
+            observation_tick,
+            "RuntimeState::snapshot",
+        );
+        observation_tick += 1;
+        crate::assert_with_log!(
+            !cancel_direct,
+            "cancel-requested runtime remains non-quiescent",
+            false,
+            cancel_direct
+        );
+        crate::assert_with_log!(
+            cancel_snapshot == cancel_direct,
+            "cancel-requested observations stay stable",
+            true,
+            cancel_snapshot == cancel_direct
+        );
+
+        let mut closing_with_child = RuntimeState::new();
+        let closing_root = closing_with_child.create_root_region(Budget::INFINITE);
+        let _closing_child = create_child_region(&mut closing_with_child, closing_root);
+        let began_close = closing_with_child
+            .regions
+            .get(closing_root.arena_index())
+            .expect("closing root missing")
+            .begin_close(None);
+        crate::assert_with_log!(
+            began_close,
+            "begin close with live child",
+            true,
+            began_close
+        );
+        let closing_direct = log_quiescence_observation(
+            &closing_with_child,
+            closing_root,
+            "during_close_with_live_child",
+            observation_tick,
+            "RuntimeState::is_quiescent",
+        );
+        observation_tick += 1;
+        let closing_snapshot = log_quiescence_observation(
+            &closing_with_child,
+            closing_root,
+            "during_close_with_live_child",
+            observation_tick,
+            "RuntimeState::snapshot",
+        );
+        observation_tick += 1;
+        crate::assert_with_log!(
+            !closing_direct,
+            "closing root with live child remains non-quiescent",
+            false,
+            closing_direct
+        );
+        crate::assert_with_log!(
+            closing_snapshot == closing_direct,
+            "closing observations stay stable",
+            true,
+            closing_snapshot == closing_direct
+        );
+
+        let mut finalizer_drain = RuntimeState::new();
+        let finalizer_root = finalizer_drain.create_root_region(Budget::INFINITE);
+        let finalizer_child = create_child_region(&mut finalizer_drain, finalizer_root);
+        let child_record = finalizer_drain
+            .regions
+            .get(finalizer_child.arena_index())
+            .expect("finalizer child missing");
+        let child_began_close = child_record.begin_close(None);
+        crate::assert_with_log!(
+            child_began_close,
+            "child begin close before parent finalizer drain",
+            true,
+            child_began_close
+        );
+        finalizer_drain.advance_region_state(finalizer_child);
+        let registered = finalizer_drain.register_sync_finalizer(finalizer_root, || {});
+        crate::assert_with_log!(registered, "register sync finalizer", true, registered);
+        let finalizer_root_record = finalizer_drain
+            .regions
+            .get(finalizer_root.arena_index())
+            .expect("finalizer root missing");
+        let root_began_close = finalizer_root_record.begin_close(None);
+        crate::assert_with_log!(
+            root_began_close,
+            "parent begin close before finalizer drain",
+            true,
+            root_began_close
+        );
+        let root_began_finalize = finalizer_root_record.begin_finalize();
+        crate::assert_with_log!(
+            root_began_finalize,
+            "parent begin finalize before finalizer drain",
+            true,
+            root_began_finalize
+        );
+        let finalizer_direct = log_quiescence_observation(
+            &finalizer_drain,
+            finalizer_root,
+            "during_finalizer_drain",
+            observation_tick,
+            "RuntimeState::is_quiescent",
+        );
+        observation_tick += 1;
+        let finalizer_snapshot = log_quiescence_observation(
+            &finalizer_drain,
+            finalizer_root,
+            "during_finalizer_drain",
+            observation_tick,
+            "RuntimeState::snapshot",
+        );
+        observation_tick += 1;
+        crate::assert_with_log!(
+            !finalizer_direct,
+            "finalizer drain remains non-quiescent",
+            false,
+            finalizer_direct
+        );
+        crate::assert_with_log!(
+            finalizer_snapshot == finalizer_direct,
+            "finalizer-drain observations stay stable",
+            true,
+            finalizer_snapshot == finalizer_direct
+        );
+
+        finalizer_drain.advance_region_state(finalizer_root);
+        let closed_direct = log_quiescence_observation(
+            &finalizer_drain,
+            finalizer_root,
+            "after_children_and_finalizers_complete",
+            observation_tick,
+            "RuntimeState::is_quiescent",
+        );
+        observation_tick += 1;
+        let closed_snapshot = log_quiescence_observation(
+            &finalizer_drain,
+            finalizer_root,
+            "after_children_and_finalizers_complete",
+            observation_tick,
+            "RuntimeState::snapshot",
+        );
+        crate::assert_with_log!(
+            closed_direct,
+            "runtime becomes quiescent after children and finalizers complete",
+            true,
+            closed_direct
+        );
+        crate::assert_with_log!(
+            closed_snapshot == closed_direct,
+            "post-close observations stay stable",
+            true,
+            closed_snapshot == closed_direct
+        );
+        crate::test_complete!("quiescence_observation_matrix_has_no_early_true_reports");
     }
 
     // =========================================================================
