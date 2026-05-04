@@ -781,6 +781,14 @@ fn signoff_matrix_covers_dependency_rows_called_out_by_wqsael() {
         control_ids.contains("compile_frontier_movement"),
         "signoff matrix must cover i1vce6 compile-frontier movement proof"
     );
+    assert!(
+        control_ids.contains("runtime_capacity_hints"),
+        "signoff matrix must cover 2b5y3w runtime capacity hints"
+    );
+    assert!(
+        control_ids.contains("task_record_pool"),
+        "signoff matrix must cover 180d5m task record pooling"
+    );
 }
 
 #[test]
@@ -858,6 +866,97 @@ fn adaptive_batch_signoff_row_tracks_p999_no_win_evidence() {
     assert_eq!(adaptive_row["tracker_status"].as_str(), Some("closed"));
     assert_eq!(adaptive_row["proof_status"].as_str(), Some("trusted"));
     assert_eq!(adaptive_row["blocker_reason"].as_str(), Some(""));
+}
+
+#[test]
+fn runtime_capacity_hints_signoff_row_tracks_burst_and_fallback_profiles() {
+    let artifact = load_artifact();
+    let hints_row = artifact["signoff_matrix"]
+        .as_array()
+        .expect("signoff_matrix must be an array")
+        .iter()
+        .find(|entry| entry["control_id"].as_str() == Some("runtime_capacity_hints"))
+        .expect("runtime capacity hints row must exist");
+
+    let scenarios: BTreeSet<&str> = hints_row["scenario_ids"]
+        .as_array()
+        .expect("scenario_ids must be an array")
+        .iter()
+        .filter_map(Value::as_str)
+        .collect();
+    assert!(scenarios.contains("AA-RUNTIME-CAPACITY-HINTS-BURST-4096"));
+    assert!(scenarios.contains("AA-RUNTIME-CAPACITY-HINTS-AUTO-SCALE-64W"));
+    assert!(scenarios.contains("AA-RUNTIME-CAPACITY-HINTS-ZERO-HINT-FALLBACK"));
+
+    let operator_fields: BTreeSet<&str> = hints_row["operator_fields"]
+        .as_array()
+        .expect("operator_fields must be an array")
+        .iter()
+        .filter_map(Value::as_str)
+        .collect();
+    assert!(operator_fields.contains("growth_event_reduction_ratio"));
+    assert!(operator_fields.contains("selected_task_capacity"));
+    assert!(operator_fields.contains("selected_region_capacity"));
+    assert!(operator_fields.contains("selected_obligation_capacity"));
+    assert!(operator_fields.contains("used_safe_fallback"));
+    assert!(operator_fields.contains("fallback_reason"));
+    assert!(operator_fields.contains("operator_verdict"));
+    assert_eq!(
+        hints_row["reproduction_command"].as_str(),
+        Some(
+            "scripts/run_runtime_capacity_hints_smoke.sh --scenario AA-RUNTIME-CAPACITY-HINTS-AUTO-SCALE-64W --execute"
+        )
+    );
+    assert_eq!(hints_row["tracker_status"].as_str(), Some("closed"));
+    assert_eq!(hints_row["proof_status"].as_str(), Some("trusted"));
+    assert_eq!(hints_row["blocker_reason"].as_str(), Some(""));
+}
+
+#[test]
+fn task_record_pool_signoff_row_tracks_heap_fallback_safe_churn_proof() {
+    let artifact = load_artifact();
+    let pool_row = artifact["signoff_matrix"]
+        .as_array()
+        .expect("signoff_matrix must be an array")
+        .iter()
+        .find(|entry| entry["control_id"].as_str() == Some("task_record_pool"))
+        .expect("task record pool row must exist");
+
+    let scenarios: BTreeSet<&str> = pool_row["scenario_ids"]
+        .as_array()
+        .expect("scenario_ids must be an array")
+        .iter()
+        .filter_map(Value::as_str)
+        .collect();
+    assert!(scenarios.contains("AA-TASK-RECORD-POOL-EXPECTED-TASKS-4096"));
+    assert!(scenarios.contains("AA-TASK-RECORD-POOL-DISABLED-HEAP-FALLBACK"));
+    assert!(scenarios.contains("AA-TASK-RECORD-POOL-SATURATION-BOUND-4096"));
+
+    let operator_fields: BTreeSet<&str> = pool_row["operator_fields"]
+        .as_array()
+        .expect("operator_fields must be an array")
+        .iter()
+        .filter_map(Value::as_str)
+        .collect();
+    assert!(operator_fields.contains("selected_pool_capacity"));
+    assert!(operator_fields.contains("configured_hint_source"));
+    assert!(operator_fields.contains("heap_fallback_count"));
+    assert!(operator_fields.contains("recycle_drop_count"));
+    assert!(operator_fields.contains("spawn_latency_p99_ns"));
+    assert!(operator_fields.contains("allocation_count_variance"));
+    assert!(operator_fields.contains("stale_field_invariant_checksum"));
+    assert!(operator_fields.contains("no_win_trigger"));
+    assert!(operator_fields.contains("safe_fallback_profile"));
+    assert!(operator_fields.contains("operator_verdict"));
+    assert_eq!(
+        pool_row["reproduction_command"].as_str(),
+        Some(
+            "scripts/run_task_record_pool_smoke.sh --scenario AA-TASK-RECORD-POOL-SATURATION-BOUND-4096 --execute"
+        )
+    );
+    assert_eq!(pool_row["tracker_status"].as_str(), Some("closed"));
+    assert_eq!(pool_row["proof_status"].as_str(), Some("trusted"));
+    assert_eq!(pool_row["blocker_reason"].as_str(), Some(""));
 }
 
 #[test]

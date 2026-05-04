@@ -26,8 +26,7 @@
   ],
   "tracked_dirty_blocker_fixture_paths": [
     ".beads/issues.jsonl",
-    "src/http/compress.rs",
-    "src/observability/otlp_add_attributes_missing_api_audit_test.rs"
+    "src/obligation/ledger.rs"
   ],
   "blocked_dependency_policy": {
     "fail_closed_conditions": [
@@ -237,6 +236,39 @@
       "reproduction_command": "scripts/run_trace_storage_profile_smoke.sh --scenario AA-TRACE-STORAGE-REAL-HOST-TEMPLATE --execute"
     },
     {
+      "control_id": "runtime_capacity_hints",
+      "tracker_bead_id": "asupersync-2b5y3w",
+      "tracker_status": "closed",
+      "artifact_path": "artifacts/runtime_capacity_hints_smoke_contract_v1.json",
+      "contract_version": "runtime-capacity-hints-smoke-contract-v1",
+      "runner_path": "scripts/run_runtime_capacity_hints_smoke.sh",
+      "scenario_ids": [
+        "AA-RUNTIME-CAPACITY-HINTS-BURST-4096",
+        "AA-RUNTIME-CAPACITY-HINTS-AUTO-SCALE-64W",
+        "AA-RUNTIME-CAPACITY-HINTS-ZERO-HINT-FALLBACK"
+      ],
+      "config_gate": "runtime table sizing hints must stay explicit, deterministic, and fallback-safe across burst, autoscale, and zero-hint profiles",
+      "fallback_mode": "normalize unsafe or zeroed hints back to the historical defaults whenever hint inputs are missing, zeroed, or produce no allocator-growth win",
+      "unit_proof_ref": "tests/runtime_capacity_hints_contract.rs",
+      "e2e_proof_ref": "scripts/run_runtime_capacity_hints_smoke.sh --scenario AA-RUNTIME-CAPACITY-HINTS-AUTO-SCALE-64W --execute",
+      "operator_fields": [
+        "growth_event_reduction_ratio",
+        "selected_task_capacity",
+        "selected_region_capacity",
+        "selected_obligation_capacity",
+        "reserved_mib_delta",
+        "residual_realloc_count",
+        "used_safe_fallback",
+        "fallback_reason",
+        "operator_verdict"
+      ],
+      "rollback_surface": "historical_defaults",
+      "proof_status": "trusted",
+      "blocker_reason": "",
+      "report_glob": "target/runtime-capacity-hints-smoke/run_*/AA-RUNTIME-CAPACITY-HINTS-*/run_report.json",
+      "reproduction_command": "scripts/run_runtime_capacity_hints_smoke.sh --scenario AA-RUNTIME-CAPACITY-HINTS-AUTO-SCALE-64W --execute"
+    },
+    {
       "control_id": "capacity_envelope_planner",
       "tracker_bead_id": "asupersync-tdgqjy",
       "tracker_status": "open",
@@ -263,6 +295,45 @@
       "blocker_reason": "capacity envelope certificates are shipped but the tracker bead remains open, so signoff must hold the operator chain closed",
       "report_glob": "target/capacity-envelope-planner-smoke/run_*/AA-CAPACITY-ENVELOPE-*/run_report.json",
       "reproduction_command": "scripts/run_capacity_envelope_planner_smoke.sh --scenario AA-CAPACITY-ENVELOPE-LOCALITY-CERT-64C-256G --execute"
+    },
+    {
+      "control_id": "task_record_pool",
+      "tracker_bead_id": "asupersync-180d5m",
+      "tracker_status": "closed",
+      "artifact_path": "artifacts/task_record_pool_smoke_contract_v1.json",
+      "contract_version": "task-record-pool-smoke-contract-v1",
+      "runner_path": "scripts/run_task_record_pool_smoke.sh",
+      "scenario_ids": [
+        "AA-TASK-RECORD-POOL-EXPECTED-TASKS-4096",
+        "AA-TASK-RECORD-POOL-DISABLED-HEAP-FALLBACK",
+        "AA-TASK-RECORD-POOL-SATURATION-BOUND-4096"
+      ],
+      "config_gate": "TaskRecord pooling must remain capacity-hint-sized, generation-safe, stale-field-clean, and heap-fallback-safe under bursty churn",
+      "fallback_mode": "disable recycler reuse or fall back to heap allocation whenever the pool is exhausted, explicitly zero-capacity, or loses the spawn-latency win",
+      "unit_proof_ref": "tests/task_record_pool_contract.rs",
+      "e2e_proof_ref": "scripts/run_task_record_pool_smoke.sh --scenario AA-TASK-RECORD-POOL-SATURATION-BOUND-4096 --execute",
+      "operator_fields": [
+        "selected_pool_capacity",
+        "configured_hint_source",
+        "hit_rate",
+        "miss_rate",
+        "heap_fallback_count",
+        "recycle_count",
+        "recycle_drop_count",
+        "queue_depth_peak",
+        "spawn_latency_p99_ns",
+        "allocation_count_total",
+        "allocation_count_variance",
+        "stale_field_invariant_checksum",
+        "no_win_trigger",
+        "safe_fallback_profile",
+        "operator_verdict"
+      ],
+      "rollback_surface": "heap_allocation_only",
+      "proof_status": "trusted",
+      "blocker_reason": "",
+      "report_glob": "target/task-record-pool-smoke/run_*/AA-TASK-RECORD-POOL-*/run_report.json",
+      "reproduction_command": "scripts/run_task_record_pool_smoke.sh --scenario AA-TASK-RECORD-POOL-SATURATION-BOUND-4096 --execute"
     },
     {
       "control_id": "signed_profile_bundle",
@@ -394,12 +465,12 @@
       "expected_report_projection": {
         "signoff_verdict": "fail_closed",
         "host_template_mode": false,
-        "child_artifact_count": 11,
-      "trusted_child_count": 4,
+        "child_artifact_count": 13,
+      "trusted_child_count": 6,
       "fail_closed_child_count": 7,
       "open_tracker_blocker_count": 6,
       "dirty_cluster_fail_closed_count": 1,
-      "tracked_dirty_blocker_count": 3,
+      "tracked_dirty_blocker_count": 2,
       "source_skill_count": 4,
       "required_source_skill_count": 4,
       "missing_required_source_skill_count": 0,
@@ -416,7 +487,7 @@
       "missing_runner_path_count": 0,
       "objective_checklist_complete": true,
       "no_unexplained_artifacts": false,
-      "projection_hash": "1663ef92225d855582dc2a8d75374937745ad4411b88183a51420d417d38dfe7"
+        "projection_hash": "0b064a96e88b2e30b8cb1ecd37f3e6f2afa021e5dd2bc6a630d7a4e8e117a8f5"
     },
     "required_log_fields": [
       "scenario_id",
@@ -461,12 +532,12 @@
       "expected_report_projection": {
         "signoff_verdict": "template_only",
         "host_template_mode": true,
-        "child_artifact_count": 11,
-      "trusted_child_count": 4,
+        "child_artifact_count": 13,
+      "trusted_child_count": 6,
       "fail_closed_child_count": 7,
       "open_tracker_blocker_count": 6,
       "dirty_cluster_fail_closed_count": 1,
-      "tracked_dirty_blocker_count": 3,
+      "tracked_dirty_blocker_count": 2,
       "source_skill_count": 4,
       "required_source_skill_count": 4,
       "missing_required_source_skill_count": 0,
@@ -483,7 +554,7 @@
       "missing_runner_path_count": 0,
       "objective_checklist_complete": true,
       "no_unexplained_artifacts": false,
-      "projection_hash": "aafb0a755358969305e78e5add6b04057c1679baf241b00a9466819274770016"
+        "projection_hash": "62d2f3aa0f493a3763c32941f16ea0911b2f350f1aeb2d4748ec2a7e89b00159"
     },
     "required_log_fields": [
       "scenario_id",
