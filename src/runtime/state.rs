@@ -8621,6 +8621,379 @@ mod tests {
         crate::test_complete!("quiescence_observation_matrix_has_no_early_true_reports");
     }
 
+    #[test]
+    fn redundant_region_close_requests_quiesce_once_without_double_finalize() {
+        init_test("redundant_region_close_requests_quiesce_once_without_double_finalize");
+
+        let mut state = RuntimeState::new();
+        let root = state.create_root_region(Budget::INFINITE);
+        let child = create_child_region(&mut state, root);
+        let root_task = insert_task(&mut state, root);
+        let finalizer_runs = Arc::new(AtomicUsize::new(0));
+        let finalizer_runs_flag = Arc::clone(&finalizer_runs);
+        let close_begin_count_for_root = |state: &RuntimeState| {
+            state
+                .trace
+                .snapshot()
+                .into_iter()
+                .filter(|event| {
+                    event.kind == TraceEventKind::RegionCloseBegin
+                        && matches!(
+                            event.data,
+                            TraceData::Region {
+                                region,
+                                parent: None,
+                            } if region == root
+                        )
+                })
+                .count()
+        };
+        let close_complete_count_for_root = |state: &RuntimeState| {
+            state
+                .trace
+                .snapshot()
+                .into_iter()
+                .filter(|event| {
+                    event.kind == TraceEventKind::RegionCloseComplete
+                        && matches!(
+                            event.data,
+                            TraceData::Region {
+                                region,
+                                parent: None,
+                            } if region == root
+                        )
+                })
+                .count()
+        };
+        let mut state_transition_sequence = Vec::new();
+        let mut quiescence_observations = Vec::new();
+        let mut first_quiescent_tick = None;
+        let observe = |state: &RuntimeState,
+                       scenario_id: &str,
+                       close_attempt_index: usize,
+                       state_transition_sequence: &mut Vec<String>,
+                       quiescence_observations: &mut Vec<bool>,
+                       first_quiescent_tick: &mut Option<usize>| {
+            let snapshot = state.snapshot();
+            let region_id = IdSnapshot::from(root);
+            let close_state = snapshot
+                .regions
+                .iter()
+                .find(|entry| entry.id == region_id)
+                .map_or_else(
+                    || "Removed".to_string(),
+                    |entry| format!("{:?}", entry.state),
+                );
+            state_transition_sequence.push(close_state.clone());
+
+            let pending_child_count = state
+                .regions
+                .get(root.arena_index())
+                .map_or(0, RegionRecord::child_count);
+            let finalizer_count = if close_state == "Removed" {
+                0
+            } else {
+                state.region_finalizer_count(root)
+            };
+            let quiescent = state.is_quiescent();
+            if quiescent && first_quiescent_tick.is_none() {
+                *first_quiescent_tick = Some(close_attempt_index);
+            }
+            quiescence_observations.push(quiescent);
+
+            let quiescence_tick =
+                first_quiescent_tick.map_or_else(|| "pending".to_string(), |tick| tick.to_string());
+            eprintln!(
+                "CLOSE_REENTRY_OBSERVATION scenario_id={scenario_id} close_attempt_index={close_attempt_index} region_id={root:?} pending_child_count={pending_child_count} finalizer_count={finalizer_count} close_state={close_state} state_transition_sequence={} quiescence_tick={quiescence_tick} close_begin_count={} close_complete_count={} artifact_paths=none",
+                state_transition_sequence.join("->"),
+                close_begin_count_for_root(state),
+                close_complete_count_for_root(state)
+            );
+
+            quiescent
+        };
+
+        let registered = state.register_async_finalizer(root, async move {
+            finalizer_runs_flag.fetch_add(1, Ordering::SeqCst);
+        });
+        crate::assert_with_log!(
+            registered,
+            "register async finalizer for redundant-close proof",
+            true,
+            registered
+        );
+
+        let first_attempt = state.cancel_request(root, &CancelReason::user("first close"), None);
+        crate::assert_with_log!(
+            first_attempt.len() == 1,
+            "first close request schedules the live root task",
+            1usize,
+            first_attempt.len()
+        );
+        let pending_close = observe(
+            &state,
+            "close_pending_with_live_root_task",
+            0,
+            &mut state_transition_sequence,
+            &mut quiescence_observations,
+            &mut first_quiescent_tick,
+        );
+        crate::assert_with_log!(
+            !pending_close,
+            "first close attempt keeps runtime non-quiescent while root task is live",
+            false,
+            pending_close
+        );
+
+        let second_attempt = state.cancel_request(root, &CancelReason::timeout(), None);
+        crate::assert_with_log!(
+            first_attempt.len() == 1
+                && second_attempt.len() == 1
+                && first_attempt[0].0 == second_attempt[0].0,
+            "redundant close request reissues only the same live root task",
+            first_attempt
+                .first()
+                .map(|entry| format!("{:?}", entry.0))
+                .unwrap_or_else(|| "none".to_string()),
+            second_attempt
+                .first()
+                .map(|entry| format!("{:?}", entry.0))
+                .unwrap_or_else(|| "none".to_string())
+        );
+        let redundant_pending_close = observe(
+            &state,
+            "after_child_complete",
+            1,
+            &mut state_transition_sequence,
+            &mut quiescence_observations,
+            &mut first_quiescent_tick,
+        );
+        crate::assert_with_log!(
+            !redundant_pending_close,
+            "redundant close attempt while pending stays non-quiescent",
+            false,
+            redundant_pending_close
+        );
+        crate::assert_with_log!(
+            state.regions.get(child.arena_index()).is_none(),
+            "empty child region closes during the first parent close attempt",
+            true,
+            state.regions.get(child.arena_index()).is_none()
+        );
+
+        let root_completed = state.complete_task(
+            root_task,
+            Outcome::Cancelled(CancelReason::user("first close")),
+        );
+        crate::assert_with_log!(
+            root_completed,
+            "root task transitions to cancelled before runtime cleanup",
+            true,
+            root_completed
+        );
+        let _ = state.task_completed(root_task);
+        let scheduled_finalizers = state.drain_ready_async_finalizers();
+        crate::assert_with_log!(
+            scheduled_finalizers.len() == 1,
+            "root close schedules one async finalizer task",
+            1usize,
+            scheduled_finalizers.len()
+        );
+        let finalizer_task = scheduled_finalizers[0].0;
+        crate::assert_with_log!(
+            state.task(finalizer_task).is_some(),
+            "async finalizer task is installed during finalizer drain",
+            true,
+            state.task(finalizer_task).is_some()
+        );
+        let _fourth_attempt =
+            state.cancel_request(root, &CancelReason::user("finalizer close"), None);
+        let during_finalizer_drain = observe(
+            &state,
+            "during_finalizer_drain",
+            2,
+            &mut state_transition_sequence,
+            &mut quiescence_observations,
+            &mut first_quiescent_tick,
+        );
+        crate::assert_with_log!(
+            !during_finalizer_drain,
+            "finalizer drain stays non-quiescent",
+            false,
+            during_finalizer_drain
+        );
+
+        crate::assert_with_log!(
+            close_begin_count_for_root(&state) == 1,
+            "finalizer-drain re-entry preserves a single close-begin edge",
+            1usize,
+            close_begin_count_for_root(&state)
+        );
+        crate::assert_with_log!(
+            close_complete_count_for_root(&state) == 0,
+            "finalizer-drain re-entry does not close the region early",
+            0usize,
+            close_complete_count_for_root(&state)
+        );
+
+        let finalizer_waker = Waker::from(Arc::new(TestWaker(AtomicBool::new(false))));
+        let mut finalizer_poll_cx = Context::from_waker(&finalizer_waker);
+        let finalizer_outcome = {
+            let stored = state
+                .get_stored_future(finalizer_task)
+                .expect("async finalizer stored task");
+            match stored.poll(&mut finalizer_poll_cx) {
+                Poll::Ready(Outcome::Ok(())) => Outcome::Ok(()),
+                Poll::Ready(Outcome::Cancelled(reason)) => Outcome::Cancelled(reason),
+                Poll::Ready(Outcome::Panicked(payload)) => Outcome::Panicked(payload),
+                Poll::Ready(Outcome::Err(())) => {
+                    panic!("async finalizer task must not resolve with unit error")
+                }
+                Poll::Pending => panic!("async finalizer task must complete on first poll"),
+            }
+        };
+        let finalizer_completed = state.complete_task(finalizer_task, finalizer_outcome);
+        crate::assert_with_log!(
+            finalizer_completed,
+            "async finalizer task transitions to ok before runtime cleanup",
+            true,
+            finalizer_completed
+        );
+        let _ = state.task_completed(finalizer_task);
+        let outcome_before_post_close_reentry = format!("{:?}", state.region_close_outcome(root));
+        let after_close_complete = observe(
+            &state,
+            "after_close_complete",
+            3,
+            &mut state_transition_sequence,
+            &mut quiescence_observations,
+            &mut first_quiescent_tick,
+        );
+        crate::assert_with_log!(
+            after_close_complete,
+            "runtime becomes quiescent exactly when the close lifecycle completes",
+            true,
+            after_close_complete
+        );
+
+        let fifth_attempt = state.cancel_request(root, &CancelReason::user("post-close"), None);
+        crate::assert_with_log!(
+            fifth_attempt.is_empty(),
+            "post-close re-entry returns no scheduled work",
+            true,
+            fifth_attempt.len()
+        );
+        let after_post_close_reentry = observe(
+            &state,
+            "after_post_close_reentry",
+            4,
+            &mut state_transition_sequence,
+            &mut quiescence_observations,
+            &mut first_quiescent_tick,
+        );
+        crate::assert_with_log!(
+            after_post_close_reentry,
+            "post-close re-entry preserves quiescence",
+            true,
+            after_post_close_reentry
+        );
+
+        let close_begin_count = close_begin_count_for_root(&state);
+        let close_complete_count = close_complete_count_for_root(&state);
+        let finalizer_run_count = state
+            .finalizer_history()
+            .iter()
+            .filter(|event| matches!(event, FinalizerHistoryEvent::Ran { .. }))
+            .count();
+        let finalizer_close_count = state
+            .finalizer_history()
+            .iter()
+            .filter(|event| {
+                matches!(
+                    event,
+                    FinalizerHistoryEvent::RegionClosed { region, .. } if *region == root
+                )
+            })
+            .count();
+        let quiescence_transition_count = quiescence_observations
+            .iter()
+            .enumerate()
+            .filter(|(idx, is_quiescent)| {
+                **is_quiescent && (*idx == 0 || !quiescence_observations[idx.saturating_sub(1)])
+            })
+            .count();
+
+        crate::assert_with_log!(
+            close_begin_count == 1,
+            "root emits one close-begin trace across redundant requests",
+            1usize,
+            close_begin_count
+        );
+        crate::assert_with_log!(
+            close_complete_count == 1,
+            "root emits one close-complete trace across redundant requests",
+            1usize,
+            close_complete_count
+        );
+        crate::assert_with_log!(
+            finalizer_runs.load(Ordering::SeqCst) == 1,
+            "registered finalizer runs once",
+            1usize,
+            finalizer_runs.load(Ordering::SeqCst)
+        );
+        crate::assert_with_log!(
+            finalizer_run_count == 1,
+            "finalizer history records one run",
+            1usize,
+            finalizer_run_count
+        );
+        crate::assert_with_log!(
+            finalizer_close_count == 1,
+            "finalizer history records one close for the root region",
+            1usize,
+            finalizer_close_count
+        );
+        crate::assert_with_log!(
+            quiescence_transition_count == 1,
+            "quiescence flips from false to true exactly once",
+            1usize,
+            quiescence_transition_count
+        );
+        crate::assert_with_log!(
+            first_quiescent_tick == Some(3),
+            "first quiescent observation happens only after close completion",
+            Some(3usize),
+            first_quiescent_tick
+        );
+        crate::assert_with_log!(
+            state.region_was_closed(root),
+            "root region recorded as closed after redundant requests",
+            true,
+            state.region_was_closed(root)
+        );
+        crate::assert_with_log!(
+            outcome_before_post_close_reentry == format!("{:?}", state.region_close_outcome(root)),
+            "post-close re-entry preserves the terminal close outcome",
+            outcome_before_post_close_reentry,
+            format!("{:?}", state.region_close_outcome(root))
+        );
+        crate::assert_with_log!(
+            state.live_task_count() == 0,
+            "close re-entry does not leak tasks",
+            0usize,
+            state.live_task_count()
+        );
+        crate::assert_with_log!(
+            state.pending_obligation_count() == 0,
+            "close re-entry does not leak obligations",
+            0usize,
+            state.pending_obligation_count()
+        );
+        crate::test_complete!(
+            "redundant_region_close_requests_quiesce_once_without_double_finalize"
+        );
+    }
+
     // =========================================================================
     // Cancellation + Obligations Lifecycle Tests (bd-38kk)
     // =========================================================================
