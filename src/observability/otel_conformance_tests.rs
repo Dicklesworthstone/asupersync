@@ -36208,11 +36208,18 @@ mod otlp_122_tests {
 
         // These must remain boolean true/false, not become 1/0
         assert_eq!(encoded_true, true, "Encoded true must remain boolean true");
-        assert_eq!(encoded_false, false, "Encoded false must remain boolean false");
+        assert_eq!(
+            encoded_false, false,
+            "Encoded false must remain boolean false"
+        );
 
-        // Verify type consistency
-        assert_eq!(std::mem::discriminant(&encoded_true), std::mem::discriminant(&true));
-        assert_eq!(std::mem::discriminant(&encoded_false), std::mem::discriminant(&false));
+        // Verify the round-tripped values remain statically typed as bool.
+        let encoded_pair: (bool, bool) = (encoded_true, encoded_false);
+        assert_eq!(
+            encoded_pair,
+            (true, false),
+            "Encoded values must remain boolean typed"
+        );
 
         println!("OTLP-128: Boolean type safety verified");
     }
