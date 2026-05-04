@@ -2460,107 +2460,337 @@ mod tests {
 
     // ── Differential Conformance Tests vs tokio-util ────────────────────────────
 
-    /// Differential test: asupersync vs tokio-util on max_frame_length boundary.
-    ///
-    /// This test would ensure our LengthDelimitedCodec matches tokio-util's behavior
-    /// exactly when frames exceed the max_frame_length limit, testing both
-    /// boundary conditions and error message compatibility.
-    ///
-    /// DISABLED: Removed tokio_util dependency to maintain async runtime independence
+    /// Differential test: asupersync vs tokio-util across the primary
+    /// length-delimited decode boundary conditions required by the conformance
+    /// bead. Each scenario emits a stable one-line evidence record so the
+    /// remote `rch` proof can be reviewed without reconstructing local state.
     #[cfg(test)]
     #[test]
-    #[ignore = "differential tokio-util check is optional even though the dev dependency remains available"]
     fn conformance_differential_max_frame_length_vs_tokio_util() {
         use prost::bytes::BytesMut as TokioBytesMut;
         use tokio_util::codec::{Decoder as TokioDecoder, LengthDelimitedCodec as TokioCodec};
 
-        let test_cases = [
-            ("exact_boundary", 100, 100), // Exactly at max (should pass)
-            ("exceeds_by_one", 100, 101), // Exceeds by 1 (should fail)
-            ("large_excess", 100, 1000),  // Large excess (should fail)
-            ("zero_max", 0, 1),           // Edge case: zero max
+        const EXACT_RCH_COMMAND: &str = "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_asupersync_uy3h6s_ld cargo test -p asupersync --lib conformance_differential_max_frame_length_vs_tokio_util -- --nocapture";
+
+        #[derive(Clone)]
+        struct DifferentialCase {
+            scenario_id: &'static str,
+            corpus_label: &'static str,
+            encoded: BytesMut,
+            max_frame_length: usize,
+            declared_length: Option<usize>,
+            split_pattern: &'static str,
+            fragmented: bool,
+            expected_event_count: usize,
+        }
+
+        fn create_single_frame(payload_len: usize) -> BytesMut {
+            let mut encoded = BytesMut::new();
+            encoded.put_u32(payload_len as u32);
+            encoded.resize(encoded.len() + payload_len, 0xAB);
+            encoded
+        }
+
+        fn create_multiple_frames() -> BytesMut {
+            let mut encoded = BytesMut::new();
+            for size in [0_usize, 1, 6, 16] {
+                encoded.extend_from_slice(&u32::try_from(size).unwrap().to_be_bytes());
+                encoded.resize(encoded.len() + size, 0x41);
+            }
+            encoded
+        }
+
+        fn create_truncated_body_frame(declared_len: usize, partial_len: usize) -> BytesMut {
+            let mut encoded = BytesMut::new();
+            encoded.put_u32(declared_len as u32);
+            encoded.resize(encoded.len() + partial_len, 0x42);
+            encoded
+        }
+
+        fn decode_all_asupersync(
+            codec: &mut LengthDelimitedCodec,
+            encoded: BytesMut,
+            fragmented: bool,
+        ) -> Vec<Result<BytesMut, io::Error>> {
+            let mut events = Vec::new();
+            if !fragmented {
+                let mut src = encoded;
+                while !src.is_empty() {
+                    let initial_len = src.len();
+                    match codec.decode(&mut src) {
+                        Ok(Some(frame)) => events.push(Ok(frame)),
+                        Ok(None) => break,
+                        Err(err) => {
+                            events.push(Err(err));
+                            break;
+                        }
+                    }
+                    if src.len() == initial_len {
+                        break;
+                    }
+                }
+                return events;
+            }
+
+            let mut src = BytesMut::new();
+            for byte in encoded.as_ref().iter().copied() {
+                src.extend_from_slice(&[byte]);
+                loop {
+                    let initial_len = src.len();
+                    match codec.decode(&mut src) {
+                        Ok(Some(frame)) => events.push(Ok(frame)),
+                        Ok(None) => break,
+                        Err(err) => {
+                            events.push(Err(err));
+                            return events;
+                        }
+                    }
+                    if src.len() == initial_len {
+                        break;
+                    }
+                }
+            }
+            events
+        }
+
+        fn decode_all_tokio(
+            codec: &mut TokioCodec,
+            encoded: TokioBytesMut,
+            fragmented: bool,
+        ) -> Vec<Result<TokioBytesMut, io::Error>> {
+            let mut events = Vec::new();
+            if !fragmented {
+                let mut src = encoded;
+                while !src.is_empty() {
+                    let initial_len = src.len();
+                    match codec.decode(&mut src) {
+                        Ok(Some(frame)) => events.push(Ok(frame)),
+                        Ok(None) => break,
+                        Err(err) => {
+                            events.push(Err(err));
+                            break;
+                        }
+                    }
+                    if src.len() == initial_len {
+                        break;
+                    }
+                }
+                return events;
+            }
+
+            let mut src = TokioBytesMut::new();
+            for byte in encoded {
+                src.extend_from_slice(&[byte]);
+                loop {
+                    let initial_len = src.len();
+                    match codec.decode(&mut src) {
+                        Ok(Some(frame)) => events.push(Ok(frame)),
+                        Ok(None) => break,
+                        Err(err) => {
+                            events.push(Err(err));
+                            return events;
+                        }
+                    }
+                    if src.len() == initial_len {
+                        break;
+                    }
+                }
+            }
+            events
+        }
+
+        fn summarize_asupersync(events: &[Result<BytesMut, io::Error>]) -> String {
+            events
+                .iter()
+                .map(|event| match event {
+                    Ok(frame) => format!("ok:{}b", frame.len()),
+                    Err(err) => format!("err:{:?}", err.kind()),
+                })
+                .collect::<Vec<_>>()
+                .join("|")
+        }
+
+        fn summarize_tokio(events: &[Result<TokioBytesMut, io::Error>]) -> String {
+            events
+                .iter()
+                .map(|event| match event {
+                    Ok(frame) => format!("ok:{}b", frame.len()),
+                    Err(err) => format!("err:{:?}", err.kind()),
+                })
+                .collect::<Vec<_>>()
+                .join("|")
+        }
+
+        let cases = vec![
+            DifferentialCase {
+                scenario_id: "empty_frame",
+                corpus_label: "empty_frame",
+                encoded: create_single_frame(0),
+                max_frame_length: 16,
+                declared_length: Some(0),
+                split_pattern: "all-at-once",
+                fragmented: false,
+                expected_event_count: 1,
+            },
+            DifferentialCase {
+                scenario_id: "one_byte_frame",
+                corpus_label: "one_byte_frame",
+                encoded: create_single_frame(1),
+                max_frame_length: 16,
+                declared_length: Some(1),
+                split_pattern: "all-at-once",
+                fragmented: false,
+                expected_event_count: 1,
+            },
+            DifferentialCase {
+                scenario_id: "exact_max_frame",
+                corpus_label: "max_bounded_frame",
+                encoded: create_single_frame(16),
+                max_frame_length: 16,
+                declared_length: Some(16),
+                split_pattern: "all-at-once",
+                fragmented: false,
+                expected_event_count: 1,
+            },
+            DifferentialCase {
+                scenario_id: "multiple_frames",
+                corpus_label: "multi_frame_stream",
+                encoded: create_multiple_frames(),
+                max_frame_length: 32,
+                declared_length: Some(16),
+                split_pattern: "all-at-once",
+                fragmented: false,
+                expected_event_count: 4,
+            },
+            DifferentialCase {
+                scenario_id: "byte_by_byte_fragmentation",
+                corpus_label: "split_boundary",
+                encoded: create_multiple_frames(),
+                max_frame_length: 32,
+                declared_length: Some(16),
+                split_pattern: "byte-by-byte",
+                fragmented: true,
+                expected_event_count: 4,
+            },
+            DifferentialCase {
+                scenario_id: "truncated_header",
+                corpus_label: "truncated_header",
+                encoded: BytesMut::from(&b"\x00\x00"[..]),
+                max_frame_length: 16,
+                declared_length: None,
+                split_pattern: "all-at-once",
+                fragmented: false,
+                expected_event_count: 0,
+            },
+            DifferentialCase {
+                scenario_id: "truncated_body",
+                corpus_label: "truncated_body",
+                encoded: create_truncated_body_frame(5, 3),
+                max_frame_length: 16,
+                declared_length: Some(5),
+                split_pattern: "all-at-once",
+                fragmented: false,
+                expected_event_count: 0,
+            },
+            DifferentialCase {
+                scenario_id: "length_overflow",
+                corpus_label: "length_overflow",
+                encoded: create_single_frame(17),
+                max_frame_length: 16,
+                declared_length: Some(17),
+                split_pattern: "all-at-once",
+                fragmented: false,
+                expected_event_count: 1,
+            },
+            DifferentialCase {
+                scenario_id: "malformed_prefix_bytes",
+                corpus_label: "malformed_bytes",
+                encoded: BytesMut::from(&b"\xFF\xFF\x00"[..]),
+                max_frame_length: 16,
+                declared_length: None,
+                split_pattern: "all-at-once",
+                fragmented: false,
+                expected_event_count: 0,
+            },
         ];
 
-        for (case_name, max_len, frame_len) in test_cases {
-            // Build test frame data
-            let payload = vec![0xAB; frame_len];
-            let mut encoded = BytesMut::new();
-
-            // Encode with default settings (4-byte BE length prefix)
-            encoded.put_u32(frame_len as u32);
-            encoded.put_slice(&payload);
-
-            // Test our implementation
+        for case in cases {
             let mut our_codec = LengthDelimitedCodec::builder()
-                .max_frame_length(max_len)
+                .max_frame_length(case.max_frame_length)
                 .new_codec();
-            let mut our_buf = encoded.clone();
-            let our_result = our_codec.decode(&mut our_buf);
+            let mut tokio_codec = TokioCodec::builder()
+                .max_frame_length(case.max_frame_length)
+                .new_codec();
 
-            // Test tokio-util implementation
-            let mut tokio_codec = TokioCodec::builder().max_frame_length(max_len).new_codec();
-            let mut tokio_buf = TokioBytesMut::from(encoded.as_ref());
-            let tokio_result = tokio_codec.decode(&mut tokio_buf);
+            let our_events =
+                decode_all_asupersync(&mut our_codec, case.encoded.clone(), case.fragmented);
+            let tokio_events = decode_all_tokio(
+                &mut tokio_codec,
+                TokioBytesMut::from(case.encoded.as_ref()),
+                case.fragmented,
+            );
 
-            // Compare results: both should succeed or both should fail
-            match (&our_result, &tokio_result) {
-                (Ok(Some(our_frame)), Ok(Some(tokio_frame))) => {
-                    // Both succeeded - frames should be identical
-                    assert_eq!(
-                        our_frame.as_ref(),
-                        tokio_frame.as_ref(),
-                        "Case {case_name}: decoded frames differ\n\
-                         Our frame:    {:?}\n\
-                         Tokio frame:  {:?}",
-                        our_frame.as_ref(),
-                        tokio_frame.as_ref()
-                    );
-                }
-                (Ok(None), Ok(None)) => {
-                    // Both indicate more data needed - acceptable
-                }
-                (Err(our_err), Err(tokio_err)) => {
-                    // Both failed - error kinds should match
-                    assert_eq!(
-                        our_err.kind(),
-                        tokio_err.kind(),
-                        "Case {case_name}: error kinds differ\n\
-                         Our error:    {our_err:?}\n\
-                         Tokio error:  {tokio_err:?}"
-                    );
+            assert_eq!(
+                our_events.len(),
+                tokio_events.len(),
+                "Case {}: event count differs\nOur events: {:?}\nTokio events: {:?}",
+                case.scenario_id,
+                summarize_asupersync(&our_events),
+                summarize_tokio(&tokio_events)
+            );
+            assert_eq!(
+                our_events.len(),
+                case.expected_event_count,
+                "Case {}: unexpected event count for scenario contract",
+                case.scenario_id
+            );
 
-                    // Both should mention frame length or max length in error message
-                    let our_msg = our_err.to_string().to_lowercase();
-                    let tokio_msg = tokio_err.to_string().to_lowercase();
-                    assert!(
-                        (our_msg.contains("frame") && our_msg.contains("length"))
-                            || (our_msg.contains("max") && our_msg.contains("frame")),
-                        "Case {case_name}: our error message should mention frame/length: {our_err}"
-                    );
-                    assert!(
-                        (tokio_msg.contains("frame") && tokio_msg.contains("length"))
-                            || (tokio_msg.contains("max") && tokio_msg.contains("frame")),
-                        "Case {case_name}: tokio error message should mention frame/length: {tokio_err}"
-                    );
-                }
-                _ => {
-                    panic!(
-                        "Case {case_name}: result types differ\n\
-                         Our result:    {our_result:?}\n\
-                         Tokio result:  {tokio_result:?}"
-                    );
+            let mut error_kind_parity = true;
+            for (index, (our_event, tokio_event)) in
+                our_events.iter().zip(tokio_events.iter()).enumerate()
+            {
+                match (our_event, tokio_event) {
+                    (Ok(our_frame), Ok(tokio_frame)) => {
+                        assert_eq!(
+                            our_frame.as_ref(),
+                            tokio_frame.as_ref(),
+                            "Case {} frame {}: decoded bytes differ",
+                            case.scenario_id,
+                            index
+                        );
+                    }
+                    (Err(our_err), Err(tokio_err)) => {
+                        error_kind_parity = our_err.kind() == tokio_err.kind();
+                        assert!(
+                            error_kind_parity,
+                            "Case {} frame {}: error kinds differ\nOur error: {:?}\nTokio error: {:?}",
+                            case.scenario_id, index, our_err, tokio_err
+                        );
+                    }
+                    _ => {
+                        panic!(
+                            "Case {} frame {}: result types differ\nOur events: {:?}\nTokio events: {:?}",
+                            case.scenario_id,
+                            index,
+                            summarize_asupersync(&our_events),
+                            summarize_tokio(&tokio_events)
+                        );
+                    }
                 }
             }
 
-            // Test buffer consumption behavior - both should consume the same amount
-            assert_eq!(
-                our_buf.len(),
-                tokio_buf.len(),
-                "Case {case_name}: buffer consumption differs\n\
-                 Our remaining:    {} bytes\n\
-                 Tokio remaining:  {} bytes",
-                our_buf.len(),
-                tokio_buf.len()
+            eprintln!(
+                "LENGTH_DELIMITED_TOKIO_UTIL_DIFFERENTIAL scenario_id={} corpus_label={} frame_count={} declared_length={} split_pattern={} asupersync_outcome={} tokio_util_outcome={} error_kind_parity={} exact_rch_command=\"{}\" artifact_paths=none final_differential_verdict=pass",
+                case.scenario_id,
+                case.corpus_label,
+                our_events.len(),
+                case.declared_length
+                    .map_or_else(|| "none".to_string(), |len| len.to_string()),
+                case.split_pattern,
+                summarize_asupersync(&our_events),
+                summarize_tokio(&tokio_events),
+                error_kind_parity,
+                EXACT_RCH_COMMAND,
             );
         }
     }
