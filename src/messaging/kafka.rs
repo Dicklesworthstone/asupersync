@@ -850,6 +850,29 @@ impl Acks {
     }
 }
 
+/// Whether a producer configuration requires real broker-backed Kafka support.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum KafkaFeatureRequirement {
+    /// Kafka is optional for this configuration. Non-test builds without the
+    /// `kafka` feature still return `FeatureDisabled` from broker operations.
+    #[default]
+    Optional,
+    /// Kafka is mandatory for this configuration. Validation fails if the
+    /// crate was built without the `kafka` feature.
+    Required,
+}
+
+impl KafkaFeatureRequirement {
+    /// Stable operator-facing label for diagnostics and artifacts.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Optional => "optional",
+            Self::Required => "required",
+        }
+    }
+}
+
 fn bootstrap_server_host(endpoint: &str) -> &str {
     if let Some(rest) = endpoint.strip_prefix('[') {
         return rest.split_once(']').map_or(endpoint, |(host, _)| host);
@@ -1110,6 +1133,8 @@ pub struct ProducerConfig {
     pub max_message_size: usize,
     /// Transport security for Kafka broker connections.
     pub security: KafkaSecurityConfig,
+    /// Whether this config requires the real `kafka` cargo feature.
+    pub feature_requirement: KafkaFeatureRequirement,
     /// Internal test/debug-only opt-in for PLAINTEXT / unauthenticated remote brokers.
     ///
     /// The secure default is fail-closed for non-loopback plaintext bootstrap
@@ -1133,6 +1158,7 @@ impl Default for ProducerConfig {
             request_timeout: Duration::from_secs(30),
             max_message_size: 1_048_576, // 1MB
             security: KafkaSecurityConfig::default(),
+            feature_requirement: KafkaFeatureRequirement::default(),
             allow_insecure_transport_for_testing: false,
         }
     }
@@ -1204,6 +1230,27 @@ impl ProducerConfig {
         self
     }
 
+    /// Set whether this configuration requires real Kafka feature support.
+    #[must_use]
+    pub const fn feature_requirement(mut self, requirement: KafkaFeatureRequirement) -> Self {
+        self.feature_requirement = requirement;
+        self
+    }
+
+    /// Fail validation when the crate is built without the real `kafka` feature.
+    #[must_use]
+    pub const fn require_kafka_feature(mut self) -> Self {
+        self.feature_requirement = KafkaFeatureRequirement::Required;
+        self
+    }
+
+    /// Keep Kafka optional for this configuration.
+    #[must_use]
+    pub const fn optional_kafka_feature(mut self) -> Self {
+        self.feature_requirement = KafkaFeatureRequirement::Optional;
+        self
+    }
+
     /// Require TLS for Kafka broker transport.
     #[must_use]
     pub fn tls(self, tls: KafkaTlsConfig) -> Self {
@@ -1245,8 +1292,41 @@ impl ProducerConfig {
         self
     }
 
+    /// Operator-facing feature availability diagnostic.
+    #[must_use]
+    pub fn kafka_feature_diagnostic(&self) -> &'static str {
+        #[cfg(feature = "kafka")]
+        {
+            "Kafka cargo feature is enabled; real broker integration is available"
+        }
+        #[cfg(not(feature = "kafka"))]
+        {
+            match self.feature_requirement {
+                KafkaFeatureRequirement::Optional => {
+                    "Kafka cargo feature is optional for this config and is not enabled; \
+                     non-test broker operations return FeatureDisabled"
+                }
+                KafkaFeatureRequirement::Required => {
+                    "Kafka cargo feature is required by this config but is not enabled; \
+                     rebuild with --features kafka"
+                }
+            }
+        }
+    }
+
+    fn validate_feature_requirement(&self) -> Result<(), KafkaError> {
+        #[cfg(not(feature = "kafka"))]
+        {
+            if self.feature_requirement == KafkaFeatureRequirement::Required {
+                return Err(KafkaError::FeatureDisabled);
+            }
+        }
+        Ok(())
+    }
+
     /// Validate the configuration.
     pub fn validate(&self) -> Result<(), KafkaError> {
+        self.validate_feature_requirement()?;
         if self.bootstrap_servers.is_empty() {
             return Err(KafkaError::Config(
                 "bootstrap_servers cannot be empty".to_string(),
@@ -3564,6 +3644,119 @@ mod tests {
             "FeatureDisabled is a build-config error, not a capacity problem"
         );
         assert!(!err.is_timeout(), "FeatureDisabled is not a timeout");
+    }
+
+    #[cfg(not(feature = "kafka"))]
+    #[test]
+    fn kafka_feature_disabled_optional_config_validates_with_actionable_diagnostic() {
+        let config =
+            ProducerConfig::new(vec!["localhost:9092".to_string()]).optional_kafka_feature();
+
+        assert_eq!(
+            config.feature_requirement,
+            KafkaFeatureRequirement::Optional
+        );
+        assert!(
+            config.validate().is_ok(),
+            "optional disabled Kafka config should validate before explicit broker operations"
+        );
+        assert!(
+            KafkaProducer::new(config.clone()).is_ok(),
+            "crate-local tests may still construct the deterministic stub broker"
+        );
+
+        let diagnostic = config.kafka_feature_diagnostic();
+        assert!(diagnostic.contains("optional"), "got: {diagnostic}");
+        assert!(
+            diagnostic.contains("FeatureDisabled"),
+            "operator diagnostic must name the runtime error; got: {diagnostic}"
+        );
+    }
+
+    #[cfg(not(feature = "kafka"))]
+    #[test]
+    fn kafka_feature_disabled_required_config_fails_validation_before_client_construction() {
+        let config =
+            ProducerConfig::new(vec!["localhost:9092".to_string()]).require_kafka_feature();
+
+        assert_eq!(
+            config.feature_requirement,
+            KafkaFeatureRequirement::Required
+        );
+        match config.validate().unwrap_err() {
+            KafkaError::FeatureDisabled => {}
+            other => panic!(
+                "expected required disabled config to fail with FeatureDisabled, got {other:?}"
+            ),
+        }
+        match KafkaProducer::new(config.clone()).unwrap_err() {
+            KafkaError::FeatureDisabled => {}
+            other => panic!(
+                "expected producer construction to map required disabled config to FeatureDisabled, got {other:?}"
+            ),
+        }
+
+        let diagnostic = config.kafka_feature_diagnostic();
+        assert!(diagnostic.contains("required"), "got: {diagnostic}");
+        assert!(
+            diagnostic.contains("--features kafka"),
+            "operator diagnostic must include rebuild action; got: {diagnostic}"
+        );
+    }
+
+    #[cfg(feature = "kafka")]
+    #[test]
+    fn kafka_feature_enabled_required_config_validates() {
+        let config =
+            ProducerConfig::new(vec!["localhost:9092".to_string()]).require_kafka_feature();
+
+        assert_eq!(
+            config.feature_requirement,
+            KafkaFeatureRequirement::Required
+        );
+        assert!(
+            config.validate().is_ok(),
+            "required Kafka config should validate when kafka feature is enabled"
+        );
+
+        let diagnostic = config.kafka_feature_diagnostic();
+        assert!(diagnostic.contains("enabled"), "got: {diagnostic}");
+        assert!(
+            diagnostic.contains("real broker"),
+            "enabled diagnostic must name real broker support; got: {diagnostic}"
+        );
+    }
+
+    #[test]
+    fn kafka_producer_construction_preserves_config_error_mapping() {
+        let empty_bootstrap = ProducerConfig::new(Vec::new());
+
+        match KafkaProducer::new(empty_bootstrap).unwrap_err() {
+            KafkaError::Config(msg) => {
+                assert!(
+                    msg.contains("bootstrap_servers"),
+                    "config error should name the invalid field; got: {msg}"
+                );
+            }
+            other => panic!("expected invalid bootstrap config error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn kafka_feature_requirement_builder_round_trips_operator_mode() {
+        let required =
+            ProducerConfig::default().feature_requirement(KafkaFeatureRequirement::Required);
+        assert_eq!(
+            required.feature_requirement.as_str(),
+            KafkaFeatureRequirement::Required.as_str()
+        );
+
+        let optional = required.optional_kafka_feature();
+        assert_eq!(
+            optional.feature_requirement,
+            KafkaFeatureRequirement::Optional
+        );
+        assert_eq!(optional.feature_requirement.as_str(), "optional");
     }
 
     /// Audit test for Kafka producer batch.size configuration behavior.
