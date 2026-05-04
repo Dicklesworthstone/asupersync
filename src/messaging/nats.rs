@@ -849,7 +849,14 @@ pub(crate) enum NatsMessage {
 struct SubscriptionState {
     #[allow(dead_code)] // read via tracing format strings
     subject: String,
+    queue_group: Option<String>,
     sender: mpsc::Sender<Message>,
+}
+
+struct SubscriptionReplay {
+    sid: u64,
+    subject: String,
+    queue_group: Option<String>,
 }
 
 /// Shared state between client and subscriptions.
@@ -1168,12 +1175,53 @@ impl NatsClient {
 
         // Send CONNECT command
         self.send_connect(cx).await?;
+
+        let replayed_subscriptions = self.replay_subscriptions_after_reconnect(cx).await?;
         self.connected = true;
 
-        // TODO: Re-establish subscriptions that existed before disconnect
-        // For now, subscriptions will need to be manually re-created by the application
+        cx.trace(&format!(
+            "nats: replayed {replayed_subscriptions} subscription(s) after reconnect"
+        ));
 
         Ok(())
+    }
+
+    async fn replay_subscriptions_after_reconnect(&mut self, cx: &Cx) -> Result<usize, NatsError> {
+        let mut subscriptions = {
+            let subscriptions = self.state.subscriptions.lock();
+            subscriptions
+                .iter()
+                .map(|(&sid, state)| SubscriptionReplay {
+                    sid,
+                    subject: state.subject.clone(),
+                    queue_group: state.queue_group.clone(),
+                })
+                .collect::<Vec<_>>()
+        };
+
+        subscriptions.sort_by_key(|subscription| subscription.sid);
+        if subscriptions.is_empty() {
+            return Ok(0);
+        }
+
+        // A dropped or failed replay can leave the server with a partial SUB
+        // transcript, so keep the connection unusable until every SUB is flushed.
+        self.connected = false;
+        for subscription in &subscriptions {
+            cx.checkpoint().map_err(|_| NatsError::Cancelled)?;
+            let cmd = if let Some(queue_group) = &subscription.queue_group {
+                format!(
+                    "SUB {} {} {}\r\n",
+                    subscription.subject, queue_group, subscription.sid
+                )
+            } else {
+                format!("SUB {} {}\r\n", subscription.subject, subscription.sid)
+            };
+            self.stream.write_all(cmd.as_bytes()).await?;
+        }
+        self.stream.flush().await?;
+
+        Ok(subscriptions.len())
     }
 
     /// Wait for +OK response.
@@ -2007,6 +2055,7 @@ impl NatsClient {
                 sid,
                 SubscriptionState {
                     subject: subject.to_string(),
+                    queue_group: None,
                     sender: tx,
                 },
             );
@@ -2065,6 +2114,7 @@ impl NatsClient {
                 sid,
                 SubscriptionState {
                     subject: subject.to_string(),
+                    queue_group: Some(queue_group.to_string()),
                     sender: tx,
                 },
             );
@@ -2341,9 +2391,9 @@ mod tests {
     use serde_json::json;
     use socket2::SockRef;
     use std::io::{BufRead, BufReader, Read, Write};
-    use std::net::TcpListener;
+    use std::net::{SocketAddr, TcpListener};
     use std::sync::mpsc as std_mpsc;
-    use std::thread;
+    use std::thread::{self, JoinHandle};
 
     fn scrub_reply_subject(reply_to: Option<&str>) -> Option<&str> {
         let value = reply_to?;
@@ -2408,6 +2458,251 @@ mod tests {
             }
             Err(err) => panic!("read protocol line: {err}"),
         }
+    }
+
+    fn trim_protocol_line(line: String) -> String {
+        line.trim_end_matches(['\r', '\n']).to_string()
+    }
+
+    fn spawn_reconnect_replay_recorder(
+        expected_sub_count: usize,
+    ) -> (SocketAddr, JoinHandle<Vec<String>>) {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind reconnect test listener");
+        let addr = listener.local_addr().expect("listener addr");
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept reconnect client");
+            stream
+                .set_read_timeout(Some(Duration::from_millis(250)))
+                .expect("set read timeout");
+            stream
+                .write_all(
+                    b"INFO {\"server_id\":\"id\",\"server_name\":\"test\",\"version\":\"2.10.0\",\"proto\":1,\"max_payload\":1048576}\r\n",
+                )
+                .expect("write INFO");
+            stream.flush().expect("flush INFO");
+
+            let mut reader = BufReader::new(stream);
+            let mut lines = Vec::with_capacity(expected_sub_count + 1);
+            lines.push(trim_protocol_line(read_protocol_line(&mut reader)));
+            for _ in 0..expected_sub_count {
+                lines.push(trim_protocol_line(read_protocol_line(&mut reader)));
+            }
+            if let Some(extra) = read_optional_protocol_line(&mut reader) {
+                lines.push(format!("EXTRA:{}", trim_protocol_line(extra)));
+            }
+            lines
+        });
+        (addr, server)
+    }
+
+    fn insert_replay_subscription(
+        state: &Arc<SharedState>,
+        sid: u64,
+        subject: &str,
+        queue_group: Option<&str>,
+    ) {
+        let (tx, _rx) = mpsc::channel(8);
+        state.subscriptions.lock().insert(
+            sid,
+            SubscriptionState {
+                subject: subject.to_string(),
+                queue_group: queue_group.map(str::to_string),
+                sender: tx,
+            },
+        );
+    }
+
+    #[test]
+    fn reconnect_replay_zero_subscriptions_sends_no_sub_commands_jh9g1j() {
+        let (addr, server) = spawn_reconnect_replay_recorder(0);
+
+        run_test_with_cx(|cx| async move {
+            let stream = TcpStream::connect(format!("{addr}"))
+                .await
+                .expect("connect reconnect client");
+            let state = Arc::new(SharedState::new());
+            let mut client = NatsClient {
+                config: NatsConfig::default(),
+                stream,
+                read_buf: NatsReadBuffer::new(),
+                state: Arc::clone(&state),
+                next_sid: AtomicU64::new(1),
+                connected: false,
+            };
+
+            client
+                .complete_reconnect_handshake(&cx)
+                .await
+                .expect("zero-subscription reconnect must succeed");
+            assert!(client.connected, "client should be connected after replay");
+        });
+
+        let lines = server.join().expect("server join");
+        assert_eq!(lines.len(), 1, "zero replay must only send CONNECT");
+        assert!(
+            lines[0].starts_with("CONNECT "),
+            "unexpected CONNECT line: {:?}",
+            lines[0]
+        );
+        println!(
+            "NATS_RECONNECT_REPLAY scenario=zero subscriptions=0 replay_count=0 exact_rch_command='rch exec -- env CARGO_TARGET_DIR=${{TMPDIR:-/tmp}}/rch_target_asupersync_jh9g1j_nats cargo test -p asupersync --lib reconnect_replay --features test-internals -- --nocapture' verdict=pass"
+        );
+    }
+
+    #[test]
+    fn reconnect_replays_existing_subscriptions_sorted_with_queue_groups_jh9g1j() {
+        let (addr, server) = spawn_reconnect_replay_recorder(3);
+
+        run_test_with_cx(|cx| async move {
+            let stream = TcpStream::connect(format!("{addr}"))
+                .await
+                .expect("connect reconnect client");
+            let state = Arc::new(SharedState::new());
+            insert_replay_subscription(&state, 7, "metrics.cpu", None);
+            insert_replay_subscription(&state, 2, "orders.*", Some("workers"));
+            insert_replay_subscription(&state, 5, "events.>", None);
+
+            let mut client = NatsClient {
+                config: NatsConfig::default(),
+                stream,
+                read_buf: NatsReadBuffer::new(),
+                state,
+                next_sid: AtomicU64::new(8),
+                connected: false,
+            };
+
+            client
+                .complete_reconnect_handshake(&cx)
+                .await
+                .expect("subscription replay must succeed");
+            assert!(client.connected, "client should be connected after replay");
+        });
+
+        let lines = server.join().expect("server join");
+        assert!(
+            lines[0].starts_with("CONNECT "),
+            "unexpected CONNECT line: {:?}",
+            lines[0]
+        );
+        assert_eq!(
+            &lines[1..],
+            &[
+                "SUB orders.* workers 2".to_string(),
+                "SUB events.> 5".to_string(),
+                "SUB metrics.cpu 7".to_string(),
+            ],
+            "subscriptions must replay once in deterministic SID order"
+        );
+        println!(
+            "NATS_RECONNECT_REPLAY scenario=many_queue_wildcard subscription_ids=[2,5,7] queue_groups=1 replay_count=3 failure_point=none cancellation_state=active verdict=pass"
+        );
+    }
+
+    #[test]
+    fn repeated_reconnect_replays_each_subscription_once_per_connection_jh9g1j() {
+        let (first_addr, first_server) = spawn_reconnect_replay_recorder(2);
+        let (second_addr, second_server) = spawn_reconnect_replay_recorder(2);
+
+        run_test_with_cx(|cx| async move {
+            let state = Arc::new(SharedState::new());
+            insert_replay_subscription(&state, 11, "alpha", None);
+            insert_replay_subscription(&state, 12, "beta", Some("queue"));
+
+            let first_stream = TcpStream::connect(format!("{first_addr}"))
+                .await
+                .expect("connect first reconnect client");
+            let mut client = NatsClient {
+                config: NatsConfig::default(),
+                stream: first_stream,
+                read_buf: NatsReadBuffer::new(),
+                state: Arc::clone(&state),
+                next_sid: AtomicU64::new(13),
+                connected: false,
+            };
+
+            client
+                .complete_reconnect_handshake(&cx)
+                .await
+                .expect("first replay must succeed");
+
+            client.stream = TcpStream::connect(format!("{second_addr}"))
+                .await
+                .expect("connect second reconnect client");
+            client.read_buf = NatsReadBuffer::new();
+            client.connected = false;
+
+            client
+                .complete_reconnect_handshake(&cx)
+                .await
+                .expect("second replay must succeed");
+        });
+
+        for (label, server) in [("first", first_server), ("second", second_server)] {
+            let lines = server.join().expect("server join");
+            assert_eq!(
+                &lines[1..],
+                &["SUB alpha 11".to_string(), "SUB beta queue 12".to_string()],
+                "{label} reconnect must replay each active subscription exactly once"
+            );
+        }
+        println!(
+            "NATS_RECONNECT_REPLAY scenario=repeated subscription_ids=[11,12] replay_count_per_connection=2 duplicate_sub_commands=0 verdict=pass"
+        );
+    }
+
+    #[test]
+    fn reconnect_replay_failure_keeps_subscription_state_and_disconnects_jh9g1j() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind replay failure listener");
+        let addr = listener.local_addr().expect("listener addr");
+        let (closed_tx, closed_rx) = std_mpsc::channel();
+        let server = thread::spawn(move || {
+            let (stream, _) = listener.accept().expect("accept replay failure client");
+            SockRef::from(&stream)
+                .set_linger(Some(Duration::ZERO))
+                .expect("force reset on close");
+            drop(stream);
+            closed_tx.send(()).expect("closed ack");
+        });
+
+        run_test_with_cx(|cx| async move {
+            let stream = TcpStream::connect(format!("{addr}"))
+                .await
+                .expect("connect replay failure client");
+            closed_rx.recv().expect("server closed");
+
+            let state = Arc::new(SharedState::new());
+            insert_replay_subscription(&state, 42, "svc.echo", None);
+            let mut client = NatsClient {
+                config: NatsConfig::default(),
+                stream,
+                read_buf: NatsReadBuffer::new(),
+                state: Arc::clone(&state),
+                next_sid: AtomicU64::new(43),
+                connected: true,
+            };
+
+            let err = client
+                .replay_subscriptions_after_reconnect(&cx)
+                .await
+                .expect_err("replay write to reset peer must fail");
+            assert!(
+                matches!(err, NatsError::Io(_)),
+                "expected I/O replay failure, got {err:?}"
+            );
+            assert!(
+                !client.connected,
+                "failed replay must leave connection marked unusable"
+            );
+            assert!(
+                state.subscriptions.lock().contains_key(&42),
+                "local subscription must survive failed replay for next reconnect"
+            );
+        });
+
+        server.join().expect("server join");
+        println!(
+            "NATS_RECONNECT_REPLAY scenario=replay_failure subscription_ids=[42] replay_count=0 failure_point=write cancellation_state=active local_state_preserved=true verdict=pass"
+        );
     }
 
     #[test]
@@ -3157,6 +3452,7 @@ mod tests {
                 sid,
                 SubscriptionState {
                     subject: "svc.echo".to_string(),
+                    queue_group: None,
                     sender: tx,
                 },
             );
