@@ -49,18 +49,18 @@
           "wake_to_run_p99_ns": 666030
         },
         "adaptive": {
-          "selected_batch_size": 8,
+          "selected_batch_size": 4,
           "batch_mode_activated": true,
-          "shared_ready_touches": 1003,
+          "shared_ready_touches": 1015,
           "scale_up_events": 1,
           "cancel_floor_hits": 0,
           "cooldown_holds": 2,
           "batch_reason": "ready_contention_scale_up",
-          "wake_to_run_p99_ns": 607790
+          "wake_to_run_p99_ns": 641070
         },
         "comparison": {
-          "shared_ready_touches_delta": 21,
-          "wake_to_run_p99_improvement_ns": 58240,
+          "shared_ready_touches_delta": 9,
+          "wake_to_run_p99_improvement_ns": 24960,
           "winner_profile": "adaptive",
           "no_win_trigger": false
         }

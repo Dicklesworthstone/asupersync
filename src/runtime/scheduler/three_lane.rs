@@ -572,6 +572,19 @@ impl AdaptiveBatchSizingProfile {
             cooldown_steps: self.cooldown_steps,
         }
     }
+
+    #[inline]
+    fn contention_scale_up_batch_size(self, fixed_batch_size: usize) -> usize {
+        let fixed_batch_size = fixed_batch_size.max(1).min(self.max_batch_size);
+        if self.max_batch_size <= fixed_batch_size {
+            return fixed_batch_size;
+        }
+
+        let headroom = self.max_batch_size.saturating_sub(fixed_batch_size);
+        fixed_batch_size
+            .saturating_add((headroom / 2).max(1))
+            .clamp(self.min_batch_size, self.max_batch_size)
+    }
 }
 
 /// Snapshot of the last adaptive ready-batch decision.
@@ -3908,7 +3921,8 @@ impl ThreeLaneWorker {
                         && claim_ready
                         && profile.max_batch_size > fixed_batch_size
                     {
-                        selected_batch_size = profile.max_batch_size;
+                        selected_batch_size =
+                            profile.contention_scale_up_batch_size(fixed_batch_size);
                         self.adaptive_batch_state.active_batch_size = selected_batch_size;
                         self.adaptive_batch_state.cooldown_remaining = profile.cooldown_steps;
                         self.preemption_metrics.adaptive_batch_scale_up_events += 1;
@@ -7446,7 +7460,7 @@ mod tests {
             AdaptiveBatchDecisionReason::ReadyContentionScaleUp
         );
         assert_eq!(first_snapshot.fixed_batch_size, 1);
-        assert_eq!(first_snapshot.selected_batch_size, 8);
+        assert_eq!(first_snapshot.selected_batch_size, 4);
         assert!(
             first_snapshot.ready_depth >= 32,
             "contention replay should expose the backlog gate"
@@ -7470,10 +7484,10 @@ mod tests {
         assert_eq!(metrics.adaptive_batch_scale_up_events, 1);
         assert_eq!(metrics.adaptive_batch_cooldown_holds, 2);
         assert_eq!(metrics.adaptive_batch_cancel_floor_hits, 0);
-        assert_eq!(metrics.adaptive_batch_max_selected, 8);
+        assert_eq!(metrics.adaptive_batch_max_selected, 4);
         assert_eq!(metrics.global_ready_batch_drains, 3);
-        assert_eq!(metrics.global_ready_batch_tasks, 24);
-        assert_eq!(shared_ready_touches(total_dispatched, metrics), 1003);
+        assert_eq!(metrics.global_ready_batch_tasks, 12);
+        assert_eq!(shared_ready_touches(total_dispatched, metrics), 1015);
     }
 
     #[test]
