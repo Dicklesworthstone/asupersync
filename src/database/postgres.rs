@@ -2851,6 +2851,36 @@ const MAX_BACKEND_MESSAGE_LEN: i32 = 64 * 1024 * 1024;
 const MAX_NOTIFICATION_CHANNEL_NAME_BYTES: usize = 63;
 const MAX_NOTIFICATION_PAYLOAD_BYTES: usize = 8_000;
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct NotificationResponseFields {
+    process_id: i32,
+    channel: String,
+    payload: String,
+}
+
+/// Structured `NotificationResponse` fields exposed only for fuzz/test seams.
+#[cfg(feature = "test-internals")]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FuzzNotificationResponse {
+    /// Backend process ID that sent the notification.
+    pub process_id: i32,
+    /// Notification channel name.
+    pub channel: String,
+    /// Notification payload.
+    pub payload: String,
+}
+
+#[cfg(feature = "test-internals")]
+impl From<NotificationResponseFields> for FuzzNotificationResponse {
+    fn from(fields: NotificationResponseFields) -> Self {
+        Self {
+            process_id: fields.process_id,
+            channel: fields.channel,
+            payload: fields.payload,
+        }
+    }
+}
+
 fn backend_message_body_len(len_i32: i32) -> Result<usize, PgError> {
     // Practical PostgreSQL message limit. The protocol allows up to 2 GiB
     // but legitimate messages rarely exceed a few tens of MiB even for large
@@ -3132,12 +3162,25 @@ impl PgConnection {
         Ok(())
     }
 
-    fn handle_notification_response(&mut self, data: &[u8]) -> Result<(), PgError> {
+    fn parse_notification_response_fields(
+        data: &[u8],
+    ) -> Result<NotificationResponseFields, PgError> {
         let mut reader = MessageReader::new(data);
-        let _process_id = reader.read_i32()?;
-        let _channel = reader.read_cstring()?;
-        let _payload = reader.read_cstring()?;
+        let process_id = reader.read_i32()?;
+        let channel = reader.read_cstring()?.to_string();
+        validate_notification_channel_name(&channel)?;
+        let payload = reader.read_cstring()?.to_string();
+        validate_notification_payload(&payload)?;
         reader.ensure_consumed("NotificationResponse")?;
+        Ok(NotificationResponseFields {
+            process_id,
+            channel,
+            payload,
+        })
+    }
+
+    fn handle_notification_response(&mut self, data: &[u8]) -> Result<(), PgError> {
+        let _fields = Self::parse_notification_response_fields(data)?;
         Ok(())
     }
 
@@ -7107,9 +7150,8 @@ pub fn fuzz_build_unlisten_sql(channel: &str) -> Result<String, PgError> {
 /// Fuzz-target re-exporter for NotificationResponse parsing.
 #[cfg(feature = "test-internals")]
 #[doc(hidden)]
-pub fn fuzz_parse_notification_response(data: &[u8]) -> Result<(), PgError> {
-    let (mut conn, _peer) = fuzz_test_connection_with_peer();
-    conn.handle_notification_response(data)
+pub fn fuzz_parse_notification_response(data: &[u8]) -> Result<FuzzNotificationResponse, PgError> {
+    PgConnection::parse_notification_response_fields(data).map(Into::into)
 }
 
 /// Fuzz-target re-exporter for strict CommandComplete tag parsing.
@@ -8394,13 +8436,32 @@ mod tests {
     }
 
     fn notification_response_message(process_id: i32, channel: &str, payload: &str) -> Vec<u8> {
+        backend_message(
+            b'A',
+            &notification_response_body_from_parts(
+                process_id,
+                channel.as_bytes(),
+                payload.as_bytes(),
+            ),
+        )
+    }
+
+    fn notification_response_body(process_id: i32, channel: &str, payload: &str) -> Vec<u8> {
+        notification_response_body_from_parts(process_id, channel.as_bytes(), payload.as_bytes())
+    }
+
+    fn notification_response_body_from_parts(
+        process_id: i32,
+        channel: &[u8],
+        payload: &[u8],
+    ) -> Vec<u8> {
         let mut body = Vec::with_capacity(4 + channel.len() + payload.len() + 2);
         body.extend_from_slice(&process_id.to_be_bytes());
-        body.extend_from_slice(channel.as_bytes());
+        body.extend_from_slice(channel);
         body.push(0);
-        body.extend_from_slice(payload.as_bytes());
+        body.extend_from_slice(payload);
         body.push(0);
-        backend_message(b'A', &body)
+        body
     }
 
     #[test]
@@ -11584,6 +11645,260 @@ mod tests {
             }
             other => panic!("expected Protocol error, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn notification_response_production_parser_boundary_matrix_logs_evidence() {
+        const RCH_COMMAND: &str = "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_asupersync_rjvkoa_postgres cargo test -p asupersync --lib notification_response_production_parser_boundary_matrix_logs_evidence -- --nocapture";
+
+        enum Expected {
+            Ok {
+                process_id: i32,
+                channel: &'static str,
+                payload_len: usize,
+            },
+            ErrContains(&'static str),
+        }
+
+        struct Case {
+            label: &'static str,
+            parser_state: &'static str,
+            body: Vec<u8>,
+            channel_len: usize,
+            channel_fingerprint: u64,
+            payload_len: usize,
+            expected: Expected,
+        }
+
+        fn fingerprint(bytes: &[u8]) -> u64 {
+            let mut hash = 0xcbf2_9ce4_8422_2325u64;
+            for byte in bytes {
+                hash ^= u64::from(*byte);
+                hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+            }
+            hash
+        }
+
+        fn case(label: &'static str, channel: &[u8], payload: Vec<u8>, expected: Expected) -> Case {
+            Case {
+                label,
+                parser_state: "NotificationResponseBody",
+                body: notification_response_body_from_parts(42, channel, &payload),
+                channel_len: channel.len(),
+                channel_fingerprint: fingerprint(channel),
+                payload_len: payload.len(),
+                expected,
+            }
+        }
+
+        let exact_payload = "p".repeat(MAX_NOTIFICATION_PAYLOAD_BYTES);
+        let overlong_payload = "p".repeat(MAX_NOTIFICATION_PAYLOAD_BYTES + 1);
+        let overlong_channel = "c".repeat(MAX_NOTIFICATION_CHANNEL_NAME_BYTES + 1);
+        let mut embedded_nul_body = Vec::new();
+        embedded_nul_body.extend_from_slice(&42i32.to_be_bytes());
+        embedded_nul_body.extend_from_slice(b"jobs\0evil\0payload\0");
+
+        let cases = vec![
+            case(
+                "valid-unquoted",
+                b"jobs",
+                b"done".to_vec(),
+                Expected::Ok {
+                    process_id: 42,
+                    channel: "jobs",
+                    payload_len: 4,
+                },
+            ),
+            case(
+                "valid-quoted-identifier-chars",
+                b"jobs.queue\"blue",
+                Vec::new(),
+                Expected::Ok {
+                    process_id: 42,
+                    channel: "jobs.queue\"blue",
+                    payload_len: 0,
+                },
+            ),
+            case(
+                "payload-exact-limit",
+                b"jobs",
+                exact_payload.into_bytes(),
+                Expected::Ok {
+                    process_id: 42,
+                    channel: "jobs",
+                    payload_len: MAX_NOTIFICATION_PAYLOAD_BYTES,
+                },
+            ),
+            case(
+                "empty-channel",
+                b"",
+                b"payload".to_vec(),
+                Expected::ErrContains("cannot be empty"),
+            ),
+            case(
+                "overlong-channel",
+                overlong_channel.as_bytes(),
+                b"payload".to_vec(),
+                Expected::ErrContains("63-byte limit"),
+            ),
+            case(
+                "non-utf8-channel",
+                b"jobs\xff",
+                b"payload".to_vec(),
+                Expected::ErrContains("invalid UTF-8"),
+            ),
+            case(
+                "non-utf8-payload",
+                b"jobs",
+                b"payload\xff".to_vec(),
+                Expected::ErrContains("invalid UTF-8"),
+            ),
+            case(
+                "overlong-payload",
+                b"jobs",
+                overlong_payload.into_bytes(),
+                Expected::ErrContains("8000-byte limit"),
+            ),
+            Case {
+                label: "embedded-nul-channel",
+                parser_state: "NotificationResponseBody",
+                body: embedded_nul_body,
+                channel_len: 9,
+                channel_fingerprint: fingerprint(b"jobs\0evil"),
+                payload_len: 7,
+                expected: Expected::ErrContains("trailing byte"),
+            },
+            Case {
+                label: "missing-payload-terminator",
+                parser_state: "NotificationResponseBody",
+                body: {
+                    let mut body = Vec::new();
+                    body.extend_from_slice(&42i32.to_be_bytes());
+                    body.extend_from_slice(b"jobs\0payload");
+                    body
+                },
+                channel_len: 4,
+                channel_fingerprint: fingerprint(b"jobs"),
+                payload_len: 7,
+                expected: Expected::ErrContains("unterminated string"),
+            },
+        ];
+
+        for case in cases {
+            let result = PgConnection::parse_notification_response_fields(&case.body);
+            let error_kind = match &result {
+                Ok(_) => "ok".to_string(),
+                Err(PgError::Protocol(msg)) => format!("protocol:{msg}"),
+                Err(other) => format!("unexpected:{other:?}"),
+            };
+            eprintln!(
+                "POSTGRES_LISTEN_NOTIFY_PARSER corpus_label={} channel_len={} channel_fingerprint={:016x} payload_len={} parser_state={} production_seam=PgConnection::handle_notification_response error_kind={} rch_command=\"{}\" artifact_paths=[] final_verdict=production-not-mock",
+                case.label,
+                case.channel_len,
+                case.channel_fingerprint,
+                case.payload_len,
+                case.parser_state,
+                error_kind,
+                RCH_COMMAND
+            );
+
+            match (result, case.expected) {
+                (
+                    Ok(fields),
+                    Expected::Ok {
+                        process_id,
+                        channel,
+                        payload_len,
+                    },
+                ) => {
+                    assert_eq!(fields.process_id, process_id);
+                    assert_eq!(fields.channel, channel);
+                    assert_eq!(fields.payload.len(), payload_len);
+                }
+                (Err(PgError::Protocol(msg)), Expected::ErrContains(expected)) => {
+                    assert!(msg.contains(expected), "expected {expected:?}, got {msg:?}");
+                }
+                (other, expected) => panic!(
+                    "unexpected parser outcome for boundary case: outcome={other:?} expected={}",
+                    match expected {
+                        Expected::Ok { .. } => "ok",
+                        Expected::ErrContains(_) => "protocol error",
+                    }
+                ),
+            }
+        }
+    }
+
+    #[test]
+    fn notification_response_arbitrary_bytes_do_not_panic() {
+        let arbitrary_inputs = [
+            Vec::new(),
+            vec![0xff],
+            vec![0, 1, 2, 3],
+            vec![0, 0, 0, 42, b'j', b'o'],
+            vec![0, 0, 0, 42, b'j', b'o', b'b', b's', 0, 0, 0xff],
+        ];
+
+        for (index, body) in arbitrary_inputs.iter().enumerate() {
+            let parsed =
+                std::panic::catch_unwind(|| PgConnection::parse_notification_response_fields(body));
+            assert!(
+                parsed.is_ok(),
+                "production NotificationResponse parser panicked for arbitrary input {index}"
+            );
+        }
+    }
+
+    #[test]
+    fn notification_response_interleaves_with_async_backend_messages() {
+        let (mut conn, _peer) = make_test_connection_with_peer();
+        let parameter_status = {
+            let mut body = Vec::new();
+            body.extend_from_slice(b"application_name\0asupersync\0");
+            body
+        };
+        let notice = {
+            let mut body = Vec::new();
+            body.push(b'S');
+            body.extend_from_slice(b"NOTICE\0");
+            body.push(b'C');
+            body.extend_from_slice(b"00000\0");
+            body.push(b'M');
+            body.extend_from_slice(b"interleaved\0");
+            body.push(0);
+            body
+        };
+
+        assert!(
+            conn.handle_async_backend_message(b'S', &parameter_status)
+                .expect("ParameterStatus should parse")
+        );
+        assert!(
+            conn.handle_async_backend_message(
+                b'A',
+                &notification_response_body(7, "jobs", "ready"),
+            )
+            .expect("NotificationResponse should parse")
+        );
+        assert!(
+            conn.handle_async_backend_message(b'N', &notice)
+                .expect("NoticeResponse should parse")
+        );
+        assert!(
+            !conn
+                .handle_async_backend_message(b'C', b"SELECT 1\0")
+                .expect("CommandComplete is not an async side message")
+        );
+        assert_eq!(
+            conn.inner
+                .parameters
+                .get("application_name")
+                .map(String::as_str),
+            Some("asupersync")
+        );
+        eprintln!(
+            "POSTGRES_LISTEN_NOTIFY_PARSER corpus_label=async-interleaving channel_len=4 channel_fingerprint=41b90dde29446fdd payload_len=5 parser_state=handle_async_backend_message production_seam=PgConnection::handle_notification_response error_kind=ok rch_command=\"rch exec -- env CARGO_TARGET_DIR=${{TMPDIR:-/tmp}}/rch_target_asupersync_rjvkoa_postgres cargo test -p asupersync --lib notification_response_interleaves_with_async_backend_messages -- --nocapture\" artifact_paths=[] final_verdict=production-not-mock"
+        );
     }
 
     #[test]
@@ -15325,7 +15640,7 @@ mod tests {
             let minimal = {
                 let mut data = Vec::new();
                 data.extend_from_slice(&0i32.to_be_bytes()); // process_id = 0
-                data.extend_from_slice(b"\0"); // empty channel
+                data.extend_from_slice(b"events\0"); // channel
                 data.extend_from_slice(b"\0"); // empty payload
                 data
             };
@@ -15371,7 +15686,7 @@ mod tests {
 
             // AUDIT VERIFICATION: Protocol compliance ensures compatibility
             // - Handles all valid NotificationResponse message formats
-            // - Supports empty, large, and Unicode content
+            // - Supports empty payloads, large fields, and Unicode content
             // - Parser robustness prevents protocol errors during ordering
         }
 

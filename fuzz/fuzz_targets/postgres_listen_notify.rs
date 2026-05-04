@@ -14,11 +14,10 @@ use asupersync::database::postgres::{
     fuzz_build_listen_sql, fuzz_build_unlisten_sql, fuzz_parse_notification_response,
 };
 use libfuzzer_sys::fuzz_target;
-use std::collections::{BTreeMap, HashMap};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
 
-// Mock structures for PostgreSQL LISTEN/NOTIFY since not yet implemented in main codebase
+// Shadow-state types exercise operation invariants. Wire parsing delegates to
+// the production PostgreSQL NotificationResponse parser below.
 type ChannelName = String;
 type NotificationPayload = String;
 type ProcessId = u32;
@@ -34,22 +33,31 @@ struct ListenNotifyFuzzInput {
     pub config: ListenNotifyConfig,
 }
 
+#[derive(Arbitrary, Debug)]
+enum FuzzInput {
+    Operations(ListenNotifyFuzzInput),
+    Parser(RealParserInput),
+}
+
 /// Individual LISTEN/NOTIFY operations
 #[derive(Arbitrary, Debug, Clone)]
 enum ListenNotifyOperation {
     /// Start listening on a channel
-    Listen { channel: String },
+    Listen { channel: ChannelName },
     /// Stop listening on a channel
-    Unlisten { channel: String },
+    Unlisten { channel: ChannelName },
     /// Stop listening on all channels
     UnlistenAll,
     /// Send notification to a channel
-    Notify { channel: String, payload: String },
+    Notify {
+        channel: ChannelName,
+        payload: NotificationPayload,
+    },
     /// Simulate receiving notification from server
     ReceiveNotification {
-        channel: String,
-        payload: String,
-        sender_pid: u32,
+        channel: ChannelName,
+        payload: NotificationPayload,
+        sender_pid: ProcessId,
     },
     /// Test notification response parsing
     ParseNotificationResponse { raw_data: Vec<u8> },
@@ -85,9 +93,9 @@ enum ErrorType {
 /// Pending notification for queue testing
 #[derive(Arbitrary, Debug, Clone)]
 struct PendingNotification {
-    pub channel: String,
-    pub payload: String,
-    pub sender_pid: u32,
+    pub channel: ChannelName,
+    pub payload: NotificationPayload,
+    pub sender_pid: ProcessId,
     pub sequence: u32,
 }
 
@@ -474,102 +482,27 @@ fn test_receive_notification(
     Ok(())
 }
 
-/// Test notification response parsing (mock PostgreSQL wire protocol)
+/// Test notification response parsing through the production PostgreSQL parser.
 fn test_parse_notification_response(
     raw_data: &[u8],
     shadow: &ListenNotifyShadowModel,
 ) -> Result<(), String> {
-    // Mock PostgreSQL NotificationResponse format:
-    // Byte 'A' + length(4 bytes) + pid(4 bytes) + channel(null-terminated) + payload(null-terminated)
-
-    if raw_data.is_empty() {
-        shadow.record_error();
-        return Ok(());
-    }
-
-    // Should start with 'A' for NotificationResponse
-    if raw_data[0] != b'A' {
-        shadow.record_error();
-        return Ok(());
-    }
-
-    if raw_data.len() < 9 {
-        // Minimum: 'A' + length(4) + pid(4)
-        shadow.record_error();
-        return Ok(());
-    }
-
-    // Parse length field (bytes 1-4, big endian)
-    let length = u32::from_be_bytes([raw_data[1], raw_data[2], raw_data[3], raw_data[4]]) as usize;
-
-    // Verify length consistency
-    if length + 1 > raw_data.len() {
-        // +1 for the 'A' byte
-        shadow.record_error();
-        return Ok(());
-    }
-
-    // Parse PID (bytes 5-8, big endian)
-    let pid = u32::from_be_bytes([raw_data[5], raw_data[6], raw_data[7], raw_data[8]]);
-
-    if pid == 0 {
-        shadow.record_error();
-        return Ok(());
-    }
-
-    // Parse channel and payload (null-terminated strings)
-    let payload_start = 9;
-    if payload_start >= raw_data.len() {
-        shadow.record_error();
-        return Ok(());
-    }
-
-    // Find first null terminator (end of channel name)
-    let channel_end = match raw_data[payload_start..].iter().position(|&b| b == 0) {
-        Some(pos) => payload_start + pos,
-        None => {
-            shadow.record_error();
-            return Ok(());
+    match fuzz_parse_notification_response(raw_data) {
+        Ok(parsed) => {
+            let sender_pid = u32::try_from(parsed.process_id).unwrap_or(0);
+            if sender_pid == 0 {
+                shadow.record_error();
+                return Ok(());
+            }
+            shadow.add_notification(PendingNotification {
+                channel: parsed.channel,
+                payload: parsed.payload,
+                sender_pid,
+                sequence: shadow.notify_count.load(Ordering::SeqCst),
+            });
         }
-    };
-
-    let channel = match std::str::from_utf8(&raw_data[payload_start..channel_end]) {
-        Ok(s) => s,
-        Err(_) => {
-            shadow.record_error();
-            return Ok(());
-        }
-    };
-
-    // Find second null terminator (end of payload)
-    let payload_start = channel_end + 1;
-    if payload_start >= raw_data.len() {
-        shadow.record_error();
-        return Ok(());
+        Err(_) => shadow.record_error(),
     }
-
-    let payload_end = match raw_data[payload_start..].iter().position(|&b| b == 0) {
-        Some(pos) => payload_start + pos,
-        None => raw_data.len(), // Payload can extend to end if no null terminator
-    };
-
-    let payload = match std::str::from_utf8(&raw_data[payload_start..payload_end]) {
-        Ok(s) => s,
-        Err(_) => {
-            shadow.record_error();
-            return Ok(());
-        }
-    };
-
-    // Successfully parsed - create notification
-    let notification = PendingNotification {
-        channel: channel.to_string(),
-        payload: payload.to_string(),
-        sender_pid: pid,
-        sequence: shadow.notify_count.load(Ordering::SeqCst),
-    };
-
-    shadow.add_notification(notification);
 
     Ok(())
 }
@@ -708,22 +641,42 @@ fn test_notification_queuing(
 /// Verify shadow model internal consistency
 fn verify_shadow_model_consistency(shadow: &ListenNotifyShadowModel) -> Result<(), String> {
     // Verify queue size limits
-    let queue_size = shadow.notification_queue.lock().unwrap().len();
+    let queue = shadow.notification_queue.lock().unwrap();
+    let queue_size = queue.len();
     if queue_size > MAX_QUEUE_SIZE {
         return Err(format!(
             "Notification queue size {} exceeds limit {}",
             queue_size, MAX_QUEUE_SIZE
         ));
     }
+    for pair in queue.windows(2) {
+        if pair[0].sequence > pair[1].sequence {
+            return Err(format!(
+                "Notification sequence order regressed: {} > {}",
+                pair[0].sequence, pair[1].sequence
+            ));
+        }
+    }
+    drop(queue);
 
     // Verify channel count limits
-    let channel_count = shadow.listened_channels.lock().unwrap().len();
+    let channels: Vec<String> = shadow
+        .listened_channels
+        .lock()
+        .unwrap()
+        .iter()
+        .cloned()
+        .collect();
+    let channel_count = channels.len();
     if channel_count > 1000 {
         // Reasonable limit
         return Err(format!(
             "Listened channel count {} exceeds reasonable limit",
             channel_count
         ));
+    }
+    for channel in channels.iter().take(4) {
+        let _notifications = shadow.get_notifications_for_channel(channel);
     }
 
     // Verify counters are reasonable
@@ -780,6 +733,8 @@ fn contains_sql_injection(input: &str) -> bool {
 
 /// Main fuzzing entry point
 fn fuzz_listen_notify(mut input: ListenNotifyFuzzInput) -> Result<(), String> {
+    let _seed = input.seed;
+    let _sql_injection_enabled = input.config.test_sql_injection;
     normalize_fuzz_input(&mut input);
 
     // Skip degenerate cases
@@ -917,15 +872,24 @@ fn fuzz_real_notification_parser(input: RealParserInput) {
         &input.trailing_bytes,
     );
     let result = fuzz_parse_notification_response(&body);
+    let expected_parser_ok = should_succeed
+        && !channel.is_empty()
+        && channel.len() <= MAX_CHANNEL_NAME_LENGTH
+        && payload.len() <= MAX_PAYLOAD_SIZE;
     assert_eq!(
         result.is_ok(),
-        should_succeed,
+        expected_parser_ok,
         "mutation={:?} body_len={} channel={:?} payload={:?} result={result:?}",
         input.mutation,
         body.len(),
         channel,
         payload
     );
+    if let Ok(parsed) = result {
+        assert_eq!(parsed.process_id, input.process_id);
+        assert_eq!(parsed.channel, channel);
+        assert_eq!(parsed.payload, payload);
+    }
 }
 
 fuzz_target!(|data: &[u8]| {
@@ -934,10 +898,17 @@ fuzz_target!(|data: &[u8]| {
     }
 
     let mut unstructured = arbitrary::Unstructured::new(data);
-    let input = if let Ok(input) = RealParserInput::arbitrary(&mut unstructured) {
+    let input = if let Ok(input) = FuzzInput::arbitrary(&mut unstructured) {
         input
     } else {
         return;
     };
-    fuzz_real_notification_parser(input);
+    match input {
+        FuzzInput::Operations(input) => {
+            if let Err(err) = fuzz_listen_notify(input) {
+                panic!("LISTEN/NOTIFY shadow invariant violation: {err}");
+            }
+        }
+        FuzzInput::Parser(input) => fuzz_real_notification_parser(input),
+    }
 });
