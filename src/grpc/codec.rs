@@ -643,7 +643,9 @@ mod tests {
         clippy::future_not_send
     )]
     use super::*;
+    #[cfg(feature = "compression")]
     use crate::grpc::ProstCodec;
+    #[cfg(feature = "compression")]
     use prost::Message;
     use std::fmt::Write;
 
@@ -675,6 +677,7 @@ mod tests {
         out
     }
 
+    #[cfg(feature = "compression")]
     #[derive(Clone, PartialEq, prost::Message)]
     struct GzipParityMessage {
         #[prost(string, tag = "1")]
@@ -685,6 +688,7 @@ mod tests {
         counter: u64,
     }
 
+    #[cfg(feature = "compression")]
     fn gzip_parity_message_fingerprint(message: &GzipParityMessage) -> String {
         let mut hash = 14_695_981_039_346_656_037_u64;
         hash ^= message.name.len() as u64;
