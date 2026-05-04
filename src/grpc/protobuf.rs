@@ -193,6 +193,8 @@ mod tests {
         clippy::future_not_send
     )]
     use super::*;
+    use prost::Message;
+
     fn init_test(name: &str) {
         crate::test_utils::init_test_logging();
         crate::test_phase!(name);
@@ -628,6 +630,234 @@ mod tests {
         assert_eq!(decoded_inner, inner);
 
         crate::test_complete!("test_prost_codec_nested_length_prefix_consistency");
+    }
+
+    #[test]
+    fn conformance_prost_codec_roundtrip_boundary_matrix() {
+        init_test("conformance_prost_codec_roundtrip_boundary_matrix");
+
+        const EXACT_RCH_COMMAND: &str = "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_asupersync_91ulk2_prost cargo test -p asupersync --lib conformance_prost_codec_roundtrip_boundary_matrix -- --nocapture";
+
+        fn fingerprint(bytes: &[u8]) -> String {
+            let prefix = bytes
+                .iter()
+                .take(8)
+                .map(|byte| format!("{byte:02x}"))
+                .collect::<String>();
+            format!("len{}:{prefix}", bytes.len())
+        }
+
+        let log_case = |corpus_label: &str,
+                        declared_length: Option<usize>,
+                        actual_length: usize,
+                        message_type: &str,
+                        allocation_guard_decision: &str,
+                        decode_outcome: &str,
+                        error_kind: &str,
+                        roundtrip_fingerprint: &str| {
+            eprintln!(
+                "PROTOBUF_ENCODE_BOUNDARY corpus_label={} declared_length={} actual_length={} message_type={} allocation_guard_decision={} decode_outcome={} error_kind={} roundtrip_fingerprint={} exact_rch_command=\"{}\" artifact_paths=none final_no_realloc_panic_verdict=pass",
+                corpus_label,
+                declared_length.map_or_else(|| "none".to_string(), |len| len.to_string()),
+                actual_length,
+                message_type,
+                allocation_guard_decision,
+                decode_outcome,
+                error_kind,
+                roundtrip_fingerprint,
+                EXACT_RCH_COMMAND,
+            );
+        };
+
+        let empty = TestMessage::default();
+        let mut empty_codec: ProstCodec<TestMessage, TestMessage> = ProstCodec::with_max_size(0);
+        let empty_wire = empty_codec.encode(&empty).unwrap();
+        let empty_decoded = empty_codec.decode(&empty_wire).unwrap();
+        assert_eq!(empty_decoded, empty);
+        log_case(
+            "empty_roundtrip",
+            Some(empty.encoded_len()),
+            empty_wire.len(),
+            "TestMessage",
+            "exact-cap-accept",
+            "roundtrip-ok",
+            "ok",
+            &fingerprint(&empty_wire),
+        );
+
+        let small = TestMessage {
+            name: "hello".to_string(),
+            value: 42,
+        };
+        let small_cap = small.encoded_len();
+        let mut small_codec: ProstCodec<TestMessage, TestMessage> =
+            ProstCodec::with_max_size(small_cap);
+        let small_wire = small_codec.encode(&small).unwrap();
+        let small_decoded = small_codec.decode(&small_wire).unwrap();
+        assert_eq!(small_decoded, small);
+        log_case(
+            "small_roundtrip",
+            Some(small_cap),
+            small_wire.len(),
+            "TestMessage",
+            "exact-cap-accept",
+            "roundtrip-ok",
+            "ok",
+            &fingerprint(&small_wire),
+        );
+
+        let nested = NestedMessage {
+            inner: Some(TestMessage {
+                name: "inner".to_string(),
+                value: 7,
+            }),
+            items: vec!["a".to_string(), "bb".to_string(), "ccc".to_string()],
+        };
+        let nested_cap = nested.encoded_len();
+        let mut nested_codec: ProstCodec<NestedMessage, NestedMessage> =
+            ProstCodec::with_max_size(nested_cap);
+        let nested_wire = nested_codec.encode(&nested).unwrap();
+        let nested_decoded = nested_codec.decode(&nested_wire).unwrap();
+        assert_eq!(nested_decoded, nested);
+        log_case(
+            "nested_repeated_roundtrip",
+            Some(nested_cap),
+            nested_wire.len(),
+            "NestedMessage",
+            "exact-cap-accept",
+            "roundtrip-ok",
+            "ok",
+            &fingerprint(&nested_wire),
+        );
+
+        let max_bounded = TestMessage {
+            name: "max-bounded-message".repeat(8),
+            value: i32::MAX,
+        };
+        let max_bounded_cap = max_bounded.encoded_len();
+        let mut max_bounded_codec: ProstCodec<TestMessage, TestMessage> =
+            ProstCodec::with_max_size(max_bounded_cap);
+        let max_bounded_wire = max_bounded_codec.encode(&max_bounded).unwrap();
+        let max_bounded_decoded = max_bounded_codec.decode(&max_bounded_wire).unwrap();
+        assert_eq!(max_bounded_decoded, max_bounded);
+        log_case(
+            "max_bounded_roundtrip",
+            Some(max_bounded_cap),
+            max_bounded_wire.len(),
+            "TestMessage",
+            "exact-cap-accept",
+            "roundtrip-ok",
+            "ok",
+            &fingerprint(&max_bounded_wire),
+        );
+
+        let unknown_field = TestMessage {
+            name: "unknown-field".to_string(),
+            value: 99,
+        };
+        let mut unknown_codec: ProstCodec<TestMessage, TestMessage> = ProstCodec::new();
+        let mut unknown_wire = unknown_codec.encode(&unknown_field).unwrap().to_vec();
+        unknown_wire.extend_from_slice(&[0x98, 0x06, 0x7B]);
+        let unknown_decoded = unknown_codec.decode(&Bytes::from(unknown_wire)).unwrap();
+        assert_eq!(unknown_decoded, unknown_field);
+        let unknown_reencoded = unknown_codec.encode(&unknown_decoded).unwrap();
+        log_case(
+            "unknown_field_tolerant_roundtrip",
+            Some(unknown_reencoded.len()),
+            unknown_reencoded.len(),
+            "TestMessage",
+            "within-cap-accept",
+            "roundtrip-ok",
+            "ok",
+            &fingerprint(&unknown_reencoded),
+        );
+
+        let huge = TestMessage {
+            name: "x".repeat(4096),
+            value: 1,
+        };
+        let huge_declared = huge.encoded_len();
+        let huge_cap = huge_declared.saturating_sub(1);
+        let mut huge_codec: ProstCodec<TestMessage, TestMessage> =
+            ProstCodec::with_max_size(huge_cap);
+        let huge_err = huge_codec.encode(&huge).unwrap_err();
+        assert!(matches!(
+            huge_err,
+            ProtobufError::MessageTooLarge {
+                size,
+                limit
+            } if size == huge_declared && limit == huge_cap
+        ));
+        log_case(
+            "huge_message_rejected_before_allocation",
+            Some(huge_declared),
+            huge_declared,
+            "TestMessage",
+            "reject-before-alloc",
+            "encode-rejected",
+            "MessageTooLarge",
+            "none",
+        );
+
+        let malformed_length_prefix = vec![0x0A, 0xFF, 0xFF, 0xFF, 0xFF, 0x0F];
+        let (declared_len, len_len) =
+            decode_test_varint(&malformed_length_prefix[1..]).expect("declared length");
+        let actual_len = malformed_length_prefix.len().saturating_sub(1 + len_len);
+        let mut malformed_codec: ProstCodec<TestMessage, TestMessage> = ProstCodec::new();
+        let malformed_err = malformed_codec
+            .decode(&Bytes::from(malformed_length_prefix))
+            .unwrap_err();
+        assert!(matches!(malformed_err, ProtobufError::DecodeError(_)));
+        log_case(
+            "malformed_length_prefix",
+            Some(declared_len as usize),
+            actual_len,
+            "TestMessage",
+            "declared>remaining",
+            "decode-err",
+            "DecodeError",
+            "none",
+        );
+
+        let truncated_payload = vec![0x0A, 0x03, b'a', b'b'];
+        let mut truncated_codec: ProstCodec<TestMessage, TestMessage> = ProstCodec::new();
+        let truncated_err = truncated_codec
+            .decode(&Bytes::from(truncated_payload.clone()))
+            .unwrap_err();
+        assert!(matches!(truncated_err, ProtobufError::DecodeError(_)));
+        log_case(
+            "truncated_payload",
+            Some(3),
+            truncated_payload.len() - 2,
+            "TestMessage",
+            "declared>remaining",
+            "decode-err",
+            "DecodeError",
+            "none",
+        );
+
+        let arbitrary = vec![0xFF, 0x00, 0xFF];
+        let mut arbitrary_codec: ProstCodec<TestMessage, TestMessage> = ProstCodec::new();
+        let arbitrary_err = arbitrary_codec
+            .decode(&Bytes::from(arbitrary.clone()))
+            .unwrap_err();
+        assert!(matches!(arbitrary_err, ProtobufError::DecodeError(_)));
+        log_case(
+            "arbitrary_bytes_typed_err",
+            None,
+            arbitrary.len(),
+            "TestMessage",
+            "pass-through",
+            "decode-err",
+            "DecodeError",
+            "none",
+        );
+
+        // Unsupported compression flags are not relevant here:
+        // ProstCodec operates after gRPC framing has already validated
+        // the 1-byte compressed flag and stripped the length prefix.
+
+        crate::test_complete!("conformance_prost_codec_roundtrip_boundary_matrix");
     }
 
     #[test]
