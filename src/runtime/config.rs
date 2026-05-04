@@ -5276,6 +5276,42 @@ mod tests {
     }
 
     #[test]
+    fn runtime_capacity_hints_huge_expected_tasks_saturate_without_wrapping() {
+        init_test("runtime_capacity_hints_huge_expected_tasks_saturate_without_wrapping");
+
+        let huge = RuntimeCapacityHints::from_expected_concurrent_tasks(usize::MAX);
+
+        assert_eq!(
+            huge,
+            RuntimeCapacityHints::new(usize::MAX / 2, usize::MAX / 4, usize::MAX / 2),
+            "saturating arithmetic should preserve a conservative monotonic envelope for huge task hints"
+        );
+        assert!(
+            huge.task_capacity >= huge.obligation_capacity
+                && huge.obligation_capacity >= huge.region_capacity,
+            "huge hints should keep sibling table sizing monotonic after saturation"
+        );
+    }
+
+    #[test]
+    fn resolved_capacity_hints_without_explicit_override_preserve_baseline_defaults() {
+        init_test("resolved_capacity_hints_without_explicit_override_preserve_baseline_defaults");
+
+        let mut config = RuntimeConfig {
+            worker_threads: RuntimeConfig::DEFAULT_WORKER_THREADS,
+            capacity_hints: None,
+            ..RuntimeConfig::default()
+        };
+        config.normalize();
+
+        assert_eq!(
+            config.resolved_capacity_hints(),
+            RuntimeCapacityHints::default(),
+            "missing explicit capacity hints should stay equivalent to the historical default baseline"
+        );
+    }
+
+    #[test]
     fn arena_temperature_report_keeps_hot_metadata_out_of_cold_tier() {
         init_test("arena_temperature_report_keeps_hot_metadata_out_of_cold_tier");
 
