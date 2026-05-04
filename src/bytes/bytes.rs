@@ -912,6 +912,46 @@ mod tests {
                 "both extraction paths must match the original contiguous source slice",
             );
         }
+
+        #[test]
+        fn metamorphic_split_recombine_preserves_payload(
+            data in prop::collection::vec(any::<u8>(), 0..192),
+            first_split in 0usize..192,
+            middle_len in 0usize..192,
+        ) {
+            let bytes = Bytes::copy_from_slice(&data);
+            let witness = bytes.clone();
+            let len = bytes.len();
+            let first_split = first_split.min(len);
+            let middle_len = middle_len.min(len - first_split);
+
+            let mut middle = bytes.clone();
+            let prefix = middle.split_to(first_split);
+            let suffix = middle.split_off(middle_len);
+
+            prop_assert_eq!(prefix.len(), first_split);
+            prop_assert_eq!(middle.len(), middle_len);
+            prop_assert_eq!(suffix.len(), len - first_split - middle_len);
+
+            prop_assert_eq!(&prefix[..], &data[..first_split]);
+            prop_assert_eq!(
+                &middle[..],
+                &data[first_split..first_split + middle_len],
+            );
+            prop_assert_eq!(&suffix[..], &data[first_split + middle_len..]);
+            prop_assert_eq!(&witness[..], data.as_slice());
+
+            let mut recombined = Vec::with_capacity(len);
+            recombined.extend_from_slice(&prefix);
+            recombined.extend_from_slice(&middle);
+            recombined.extend_from_slice(&suffix);
+
+            prop_assert_eq!(
+                recombined.as_slice(),
+                data.as_slice(),
+                "split_to/split_off views must recombine into the original byte order",
+            );
+        }
     }
 
     #[test]
