@@ -1,0 +1,268 @@
+{
+  "contract_version": "tokio-migration-shadow-workload-v1",
+  "schema_version": "tokio-migration-shadow-workload-schema-v1",
+  "generated_for_bead": "asupersync-tokmap",
+  "purpose": "Map representative Tokio migration idioms to deterministic asupersync shadow-workload scenarios without adding Tokio to the core runtime crate.",
+  "proxy_evidence_policy": "reject",
+  "unsupported_idiom_policy": "fail_closed",
+  "determinism_policy": {
+    "seed_format": "hex_u64",
+    "scenario_order": "lexical_by_scenario_id",
+    "projection_hash_required": true
+  },
+  "workload_scale_limits": {
+    "small_mode_max_tasks": 2048,
+    "small_mode_max_channels": 128,
+    "small_mode_max_runtime_seconds": 30,
+    "real_host_template_min_cpu_cores": 64,
+    "real_host_template_min_memory_gib": 256
+  },
+  "required_scenario_classes": [
+    "mpsc-backpressure",
+    "select-timeout-race",
+    "broadcast-fanout",
+    "spawn-join-ownership",
+    "mutex-contention",
+    "blocking-work",
+    "graceful-shutdown"
+  ],
+  "required_report_fields": [
+    "scenario_id",
+    "contract_version",
+    "tokio_idiom",
+    "asupersync_rewrite",
+    "deterministic_seed",
+    "workload_scale",
+    "cancellation_injection_points",
+    "expected_asupersync_invariants",
+    "artifact_paths",
+    "projection_hash",
+    "operator_verdict"
+  ],
+  "scenarios": [
+    {
+      "scenario_id": "TM-SHADOW-001-MPSC-BACKPRESSURE",
+      "scenario_class": "mpsc-backpressure",
+      "tokio_idiom": "tokio_mpsc_reserve_send",
+      "tokio_source_surface": "tokio::sync::mpsc::Sender::reserve + send",
+      "asupersync_rewrite": "channel::mpsc::Sender::reserve(&Cx).await?.send(value)",
+      "asupersync_contract_surface": "src/channel/mpsc.rs",
+      "deterministic_seed": "0xA55A000000000001",
+      "workload_scale": {
+        "small_mode_tasks": 256,
+        "small_mode_channels": 16,
+        "real_host_template_tasks": 65536,
+        "real_host_template_channels": 1024
+      },
+      "cancellation_injection_points": [
+        "before_reserve_poll",
+        "after_reserve_ready_before_send",
+        "receiver_closed_under_backpressure"
+      ],
+      "expected_asupersync_invariants": [
+        "two_phase_send_no_loss",
+        "no_obligation_leak",
+        "region_close_quiescence"
+      ],
+      "evidence_policy": {
+        "reference_mode": "canonical_tokio_boundary",
+        "proxy_evidence_allowed": false,
+        "artifact_paths_required": true
+      },
+      "operator_note_template": "Compare send completion and cancellation accounting with secrets redacted.",
+      "report_field_overrides": []
+    },
+    {
+      "scenario_id": "TM-SHADOW-002-SELECT-TIMEOUT-RACE",
+      "scenario_class": "select-timeout-race",
+      "tokio_idiom": "tokio_select_timeout_race",
+      "tokio_source_surface": "tokio::select! with tokio::time::timeout",
+      "asupersync_rewrite": "Scope::race with loser drain and timeout(now, duration, future)",
+      "asupersync_contract_surface": "src/combinator/race.rs",
+      "deterministic_seed": "0xA55A000000000002",
+      "workload_scale": {
+        "small_mode_tasks": 512,
+        "small_mode_channels": 32,
+        "real_host_template_tasks": 131072,
+        "real_host_template_channels": 2048
+      },
+      "cancellation_injection_points": [
+        "timeout_wins_before_loser_poll",
+        "loser_ready_during_drain",
+        "winner_panics_after_timeout"
+      ],
+      "expected_asupersync_invariants": [
+        "losers_drained",
+        "cancel_request_drain_finalize",
+        "no_orphan_tasks"
+      ],
+      "evidence_policy": {
+        "reference_mode": "canonical_tokio_boundary",
+        "proxy_evidence_allowed": false,
+        "artifact_paths_required": true
+      },
+      "operator_note_template": "Surface intentional select semantics differences with secrets redacted.",
+      "report_field_overrides": []
+    },
+    {
+      "scenario_id": "TM-SHADOW-003-BROADCAST-FANOUT",
+      "scenario_class": "broadcast-fanout",
+      "tokio_idiom": "tokio_broadcast_watch_fanout",
+      "tokio_source_surface": "tokio::sync::{broadcast, watch}",
+      "asupersync_rewrite": "channel::broadcast and channel::watch with Cx-aware receive/change waits",
+      "asupersync_contract_surface": "src/channel/broadcast.rs",
+      "deterministic_seed": "0xA55A000000000003",
+      "workload_scale": {
+        "small_mode_tasks": 1024,
+        "small_mode_channels": 64,
+        "real_host_template_tasks": 262144,
+        "real_host_template_channels": 4096
+      },
+      "cancellation_injection_points": [
+        "lagging_receiver_cancelled",
+        "watch_changed_wait_cancelled",
+        "publisher_cancelled_before_commit"
+      ],
+      "expected_asupersync_invariants": [
+        "lag_reported_not_silent",
+        "watch_waiter_unregistered",
+        "no_waker_leak"
+      ],
+      "evidence_policy": {
+        "reference_mode": "canonical_tokio_boundary",
+        "proxy_evidence_allowed": false,
+        "artifact_paths_required": true
+      },
+      "operator_note_template": "Compare fanout lag and cancellation behavior with secrets redacted.",
+      "report_field_overrides": []
+    },
+    {
+      "scenario_id": "TM-SHADOW-004-SPAWN-JOIN-OWNERSHIP",
+      "scenario_class": "spawn-join-ownership",
+      "tokio_idiom": "tokio_spawn_join_handle",
+      "tokio_source_surface": "tokio::spawn + JoinHandle",
+      "asupersync_rewrite": "Scope::spawn with region-owned TaskHandle::join(&Cx)",
+      "asupersync_contract_surface": "src/cx/scope.rs",
+      "deterministic_seed": "0xA55A000000000004",
+      "workload_scale": {
+        "small_mode_tasks": 768,
+        "small_mode_channels": 8,
+        "real_host_template_tasks": 196608,
+        "real_host_template_channels": 256
+      },
+      "cancellation_injection_points": [
+        "parent_region_closes_while_child_running",
+        "join_wait_cancelled",
+        "child_panics_during_shutdown"
+      ],
+      "expected_asupersync_invariants": [
+        "no_orphan_tasks",
+        "region_close_quiescence",
+        "panic_outcome_reported"
+      ],
+      "evidence_policy": {
+        "reference_mode": "canonical_tokio_boundary",
+        "proxy_evidence_allowed": false,
+        "artifact_paths_required": true
+      },
+      "operator_note_template": "Explain ownership and shutdown deltas with secrets redacted.",
+      "report_field_overrides": []
+    },
+    {
+      "scenario_id": "TM-SHADOW-005-MUTEX-CONTENTION",
+      "scenario_class": "mutex-contention",
+      "tokio_idiom": "tokio_mutex_semaphore_contention",
+      "tokio_source_surface": "tokio::sync::{Mutex, Semaphore}",
+      "asupersync_rewrite": "sync::Mutex::lock(&Cx) and sync::Semaphore::acquire(&Cx, permits)",
+      "asupersync_contract_surface": "src/sync/mutex.rs",
+      "deterministic_seed": "0xA55A000000000005",
+      "workload_scale": {
+        "small_mode_tasks": 2048,
+        "small_mode_channels": 1,
+        "real_host_template_tasks": 524288,
+        "real_host_template_channels": 64
+      },
+      "cancellation_injection_points": [
+        "waiter_cancelled_at_head",
+        "permit_holder_cancelled",
+        "contention_spike_during_region_close"
+      ],
+      "expected_asupersync_invariants": [
+        "no_permit_leak",
+        "cancelled_waiter_unlinked",
+        "fairness_accounting_stable"
+      ],
+      "evidence_policy": {
+        "reference_mode": "canonical_tokio_boundary",
+        "proxy_evidence_allowed": false,
+        "artifact_paths_required": true
+      },
+      "operator_note_template": "Report contention deltas and cancellation accounting with secrets redacted.",
+      "report_field_overrides": []
+    },
+    {
+      "scenario_id": "TM-SHADOW-006-BLOCKING-WORK",
+      "scenario_class": "blocking-work",
+      "tokio_idiom": "tokio_spawn_blocking",
+      "tokio_source_surface": "tokio::task::spawn_blocking",
+      "asupersync_rewrite": "runtime blocking-pool admission with explicit capacity and Cx-visible shutdown",
+      "asupersync_contract_surface": "src/runtime/blocking_pool.rs",
+      "deterministic_seed": "0xA55A000000000006",
+      "workload_scale": {
+        "small_mode_tasks": 256,
+        "small_mode_channels": 4,
+        "real_host_template_tasks": 65536,
+        "real_host_template_channels": 128
+      },
+      "cancellation_injection_points": [
+        "queued_blocking_job_cancelled",
+        "runtime_shutdown_during_blocking_job",
+        "blocking_pool_capacity_exhausted"
+      ],
+      "expected_asupersync_invariants": [
+        "admission_accounting_stable",
+        "shutdown_waits_for_owned_work",
+        "no_capacity_counter_leak"
+      ],
+      "evidence_policy": {
+        "reference_mode": "canonical_tokio_boundary",
+        "proxy_evidence_allowed": false,
+        "artifact_paths_required": true
+      },
+      "operator_note_template": "Classify blocking-work migration risks with secrets redacted.",
+      "report_field_overrides": []
+    },
+    {
+      "scenario_id": "TM-SHADOW-007-GRACEFUL-SHUTDOWN",
+      "scenario_class": "graceful-shutdown",
+      "tokio_idiom": "tokio_signal_shutdown",
+      "tokio_source_surface": "tokio::signal + cooperative task shutdown",
+      "asupersync_rewrite": "capability-scoped signal handling plus region close to quiescence",
+      "asupersync_contract_surface": "src/signal/mod.rs",
+      "deterministic_seed": "0xA55A000000000007",
+      "workload_scale": {
+        "small_mode_tasks": 1536,
+        "small_mode_channels": 96,
+        "real_host_template_tasks": 393216,
+        "real_host_template_channels": 4096
+      },
+      "cancellation_injection_points": [
+        "shutdown_signal_before_accept_loop_poll",
+        "shutdown_signal_during_channel_flush",
+        "shutdown_budget_exhausted"
+      ],
+      "expected_asupersync_invariants": [
+        "region_close_quiescence",
+        "bounded_cleanup_budget_recorded",
+        "no_orphan_tasks"
+      ],
+      "evidence_policy": {
+        "reference_mode": "canonical_tokio_boundary",
+        "proxy_evidence_allowed": false,
+        "artifact_paths_required": true
+      },
+      "operator_note_template": "Show graceful shutdown readiness and fallback guidance with secrets redacted.",
+      "report_field_overrides": []
+    }
+  ]
+}
