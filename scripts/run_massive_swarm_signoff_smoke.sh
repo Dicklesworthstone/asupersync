@@ -59,6 +59,32 @@ report_schema_version() {
     jq -r '.runner_report_schema_version' "$CONTRACT_ARTIFACT"
 }
 
+required_source_skills_json() {
+    jq -c '.required_source_skills' "$CONTRACT_ARTIFACT"
+}
+
+required_source_skill_phases_json() {
+    jq -c '.required_source_skill_phases' "$CONTRACT_ARTIFACT"
+}
+
+required_objective_requirement_ids_json() {
+    jq -c '.required_objective_requirement_ids' "$CONTRACT_ARTIFACT"
+}
+
+skill_provenance_artifact_path() {
+    jq -r '.signoff_matrix[] | select(.control_id == "skill_provenance") | .artifact_path' "$CONTRACT_ARTIFACT"
+}
+
+skill_provenance_json() {
+    local artifact_path
+    artifact_path="$(skill_provenance_artifact_path)"
+    if [ -z "$artifact_path" ] || [ ! -f "${PROJECT_ROOT}/${artifact_path}" ]; then
+        echo "FATAL: skill provenance artifact missing at ${artifact_path}" >&2
+        exit 1
+    fi
+    jq -c '.' "${PROJECT_ROOT}/${artifact_path}"
+}
+
 list_scenarios() {
     jq -r '.smoke_scenarios[] | [.scenario_id, .description] | @tsv' "$CONTRACT_ARTIFACT" \
         | while IFS=$'\t' read -r scenario_id description; do
@@ -183,12 +209,46 @@ tracked_dirty_paths_json() {
     printf '%s' "$paths"
 }
 
+objective_coverage_json() {
+    local provenance_json
+    provenance_json="$(skill_provenance_json)"
+    jq -cn \
+        --argjson required_source_skills "$(required_source_skills_json)" \
+        --argjson required_source_skill_phases "$(required_source_skill_phases_json)" \
+        --argjson required_objective_requirement_ids "$(required_objective_requirement_ids_json)" \
+        --argjson source_skills "$(jq -c '.source_skills' <<<"$provenance_json")" \
+        --argjson declared_objective_requirement_ids "$(jq -c '[.objective_requirements[].id]' <<<"$provenance_json")" \
+        --argjson selected_bead_mappings "$(jq -c '.selected_bead_mappings' <<<"$provenance_json")" \
+        --argjson source_skill_phases "$(jq -c '[.selected_bead_mappings[].source_skill_phase] | unique' <<<"$provenance_json")" \
+        '{
+            required_source_skills: $required_source_skills,
+            actual_source_skills: $source_skills,
+            missing_required_source_skills: ($required_source_skills - $source_skills),
+            required_source_skill_phases: $required_source_skill_phases,
+            actual_source_skill_phases: $source_skill_phases,
+            missing_required_source_skill_phases: ($required_source_skill_phases - $source_skill_phases),
+            required_objective_requirement_ids: $required_objective_requirement_ids,
+            declared_objective_requirement_ids: $declared_objective_requirement_ids,
+            missing_required_objective_requirement_ids: ($required_objective_requirement_ids - $declared_objective_requirement_ids),
+            mapped_objective_requirement_ids: ([ $selected_bead_mappings[]?.objective_requirement_id ] | unique),
+            unmapped_objective_requirement_ids: ($required_objective_requirement_ids - ([ $selected_bead_mappings[]?.objective_requirement_id ] | unique)),
+            selected_bead_mapping_count: ($selected_bead_mappings | length),
+            selected_bead_mapping_bead_ids: ([ $selected_bead_mappings[]?.bead_id ] | unique)
+        }'
+}
+
 build_projection_json() {
     local scenario_json="$1"
     local child_statuses="$2"
+    local objective_coverage_json="$3"
     local host_template_mode child_artifact_count trusted_child_count fail_closed_child_count
     local open_tracker_blocker_count missing_artifact_path_count missing_runner_path_count
     local dirty_fail_closed_count tracked_dirty_blocker_count no_unexplained_artifacts signoff_verdict
+    local source_skill_count required_source_skill_count missing_required_source_skill_count
+    local source_skill_phase_count required_source_skill_phase_count missing_required_source_skill_phase_count
+    local objective_requirement_count required_objective_requirement_count
+    local covered_objective_requirement_count missing_required_objective_requirement_count
+    local unmapped_objective_requirement_count selected_bead_mapping_count objective_checklist_complete
     local tracked_dirty_paths_json_value
 
     host_template_mode="$(jq -r '.host_template_mode' <<<"$scenario_json")"
@@ -201,6 +261,26 @@ build_projection_json() {
     dirty_fail_closed_count="$(dirty_cluster_fail_closed_count)"
     tracked_dirty_paths_json_value="$(tracked_dirty_paths_json)"
     tracked_dirty_blocker_count="$(jq 'length' <<<"$tracked_dirty_paths_json_value")"
+    source_skill_count="$(jq '.actual_source_skills | length' <<<"$objective_coverage_json")"
+    required_source_skill_count="$(jq '.required_source_skills | length' <<<"$objective_coverage_json")"
+    missing_required_source_skill_count="$(jq '.missing_required_source_skills | length' <<<"$objective_coverage_json")"
+    source_skill_phase_count="$(jq '.actual_source_skill_phases | length' <<<"$objective_coverage_json")"
+    required_source_skill_phase_count="$(jq '.required_source_skill_phases | length' <<<"$objective_coverage_json")"
+    missing_required_source_skill_phase_count="$(jq '.missing_required_source_skill_phases | length' <<<"$objective_coverage_json")"
+    objective_requirement_count="$(jq '.declared_objective_requirement_ids | length' <<<"$objective_coverage_json")"
+    required_objective_requirement_count="$(jq '.required_objective_requirement_ids | length' <<<"$objective_coverage_json")"
+    covered_objective_requirement_count="$(jq '.mapped_objective_requirement_ids | length' <<<"$objective_coverage_json")"
+    missing_required_objective_requirement_count="$(jq '.missing_required_objective_requirement_ids | length' <<<"$objective_coverage_json")"
+    unmapped_objective_requirement_count="$(jq '.unmapped_objective_requirement_ids | length' <<<"$objective_coverage_json")"
+    selected_bead_mapping_count="$(jq '.selected_bead_mapping_count' <<<"$objective_coverage_json")"
+    objective_checklist_complete=false
+    if [ "$missing_required_source_skill_count" -eq 0 ] \
+        && [ "$missing_required_source_skill_phase_count" -eq 0 ] \
+        && [ "$missing_required_objective_requirement_count" -eq 0 ] \
+        && [ "$unmapped_objective_requirement_count" -eq 0 ] \
+        && [ "$selected_bead_mapping_count" -gt 0 ]; then
+        objective_checklist_complete=true
+    fi
     if [ "$dirty_fail_closed_count" -eq 0 ]; then
         no_unexplained_artifacts=true
     else
@@ -211,7 +291,8 @@ build_projection_json() {
         signoff_verdict="template_only"
     elif [ "$fail_closed_child_count" -gt 0 ] || [ "$open_tracker_blocker_count" -gt 0 ] \
         || [ "$missing_artifact_path_count" -gt 0 ] || [ "$missing_runner_path_count" -gt 0 ] \
-        || [ "$dirty_fail_closed_count" -gt 0 ] || [ "$tracked_dirty_blocker_count" -gt 0 ]; then
+        || [ "$dirty_fail_closed_count" -gt 0 ] || [ "$tracked_dirty_blocker_count" -gt 0 ] \
+        || [ "$objective_checklist_complete" != "true" ]; then
         signoff_verdict="fail_closed"
     else
         signoff_verdict="ready_for_signoff"
@@ -227,8 +308,21 @@ build_projection_json() {
         --argjson open_tracker_blocker_count "$open_tracker_blocker_count" \
         --argjson dirty_cluster_fail_closed_count "$dirty_fail_closed_count" \
         --argjson tracked_dirty_blocker_count "$tracked_dirty_blocker_count" \
+        --argjson source_skill_count "$source_skill_count" \
+        --argjson required_source_skill_count "$required_source_skill_count" \
+        --argjson missing_required_source_skill_count "$missing_required_source_skill_count" \
+        --argjson source_skill_phase_count "$source_skill_phase_count" \
+        --argjson required_source_skill_phase_count "$required_source_skill_phase_count" \
+        --argjson missing_required_source_skill_phase_count "$missing_required_source_skill_phase_count" \
+        --argjson objective_requirement_count "$objective_requirement_count" \
+        --argjson required_objective_requirement_count "$required_objective_requirement_count" \
+        --argjson covered_objective_requirement_count "$covered_objective_requirement_count" \
+        --argjson missing_required_objective_requirement_count "$missing_required_objective_requirement_count" \
+        --argjson unmapped_objective_requirement_count "$unmapped_objective_requirement_count" \
+        --argjson selected_bead_mapping_count "$selected_bead_mapping_count" \
         --argjson missing_artifact_path_count "$missing_artifact_path_count" \
         --argjson missing_runner_path_count "$missing_runner_path_count" \
+        --argjson objective_checklist_complete "$objective_checklist_complete" \
         --argjson no_unexplained_artifacts "$no_unexplained_artifacts" \
         '{
             signoff_verdict: $signoff_verdict,
@@ -239,8 +333,21 @@ build_projection_json() {
             open_tracker_blocker_count: $open_tracker_blocker_count,
             dirty_cluster_fail_closed_count: $dirty_cluster_fail_closed_count,
             tracked_dirty_blocker_count: $tracked_dirty_blocker_count,
+            source_skill_count: $source_skill_count,
+            required_source_skill_count: $required_source_skill_count,
+            missing_required_source_skill_count: $missing_required_source_skill_count,
+            source_skill_phase_count: $source_skill_phase_count,
+            required_source_skill_phase_count: $required_source_skill_phase_count,
+            missing_required_source_skill_phase_count: $missing_required_source_skill_phase_count,
+            objective_requirement_count: $objective_requirement_count,
+            required_objective_requirement_count: $required_objective_requirement_count,
+            covered_objective_requirement_count: $covered_objective_requirement_count,
+            missing_required_objective_requirement_count: $missing_required_objective_requirement_count,
+            unmapped_objective_requirement_count: $unmapped_objective_requirement_count,
+            selected_bead_mapping_count: $selected_bead_mapping_count,
             missing_artifact_path_count: $missing_artifact_path_count,
             missing_runner_path_count: $missing_runner_path_count,
+            objective_checklist_complete: $objective_checklist_complete,
             no_unexplained_artifacts: $no_unexplained_artifacts
         }')"
     projection_hash="$(printf '%s' "$projection_without_hash" | jq -Sc . | sha256sum | awk '{print $1}')"
@@ -266,9 +373,10 @@ run_scenario() {
     mkdir -p "$(dirname "$scenario_report_path")"
 
     local child_statuses projection_json expected_projection_json validation_passed status message script_exit_code
-    local host_template_mode started_ts ended_ts generated_artifact_paths tracked_dirty_paths
+    local host_template_mode started_ts ended_ts generated_artifact_paths tracked_dirty_paths objective_coverage
     child_statuses="$(build_child_status_json)"
-    projection_json="$(build_projection_json "$scenario_json" "$child_statuses")"
+    objective_coverage="$(objective_coverage_json)"
+    projection_json="$(build_projection_json "$scenario_json" "$child_statuses" "$objective_coverage")"
     expected_projection_json="$(jq -c '.expected_report_projection' <<<"$scenario_json")"
     host_template_mode="$(jq -r '.host_template_mode' <<<"$scenario_json")"
     tracked_dirty_paths="$(tracked_dirty_paths_json)"
@@ -317,6 +425,7 @@ run_scenario() {
         --argjson validation_passed "$validation_passed" \
         --argjson child_statuses "$child_statuses" \
         --argjson tracked_dirty_paths "$tracked_dirty_paths" \
+        --argjson objective_coverage "$objective_coverage" \
         --argjson report_projection "$projection_json" \
         --argjson generated_artifact_paths "$generated_artifact_paths" \
         '{
@@ -333,6 +442,7 @@ run_scenario() {
             validation_passed: $validation_passed,
             child_artifacts: $child_statuses,
             tracked_dirty_paths: $tracked_dirty_paths,
+            objective_coverage: $objective_coverage,
             generated_artifact_paths: $generated_artifact_paths,
             report_projection: $report_projection
         }')"
@@ -352,6 +462,7 @@ run_scenario() {
         --arg source_repo_hash "$(git -C "$PROJECT_ROOT" rev-parse --short=12 HEAD 2>/dev/null || printf unknown)" \
         --argjson validation_passed "$validation_passed" \
         --argjson tracked_dirty_paths "$tracked_dirty_paths" \
+        --argjson objective_coverage "$objective_coverage" \
         --argjson report_projection "$projection_json" \
         --argjson generated_artifact_paths "$generated_artifact_paths" \
         '{
@@ -367,6 +478,7 @@ run_scenario() {
             source_repo_hash: $source_repo_hash,
             validation_passed: $validation_passed,
             tracked_dirty_paths: $tracked_dirty_paths,
+            objective_coverage: $objective_coverage,
             report_projection: $report_projection,
             generated_artifact_paths: $generated_artifact_paths
         }' >"$bundle_manifest_path"
@@ -385,6 +497,7 @@ run_scenario() {
         --argjson validation_passed "$validation_passed" \
         --argjson script_exit_code "$script_exit_code" \
         --argjson tracked_dirty_paths "$tracked_dirty_paths" \
+        --argjson objective_coverage "$objective_coverage" \
         --argjson report_projection "$projection_json" \
         --argjson generated_artifact_paths "$generated_artifact_paths" \
         '{
@@ -401,6 +514,7 @@ run_scenario() {
             validation_passed: $validation_passed,
             script_exit_code: $script_exit_code,
             tracked_dirty_paths: $tracked_dirty_paths,
+            objective_coverage: $objective_coverage,
             report_projection: $report_projection,
             generated_artifact_paths: $generated_artifact_paths
         }' >"$run_report_path"
@@ -415,9 +529,26 @@ run_scenario() {
         printf 'open_tracker_blocker_count=%s\n' "$(jq -r '.open_tracker_blocker_count' <<<"$projection_json")"
         printf 'dirty_cluster_fail_closed_count=%s\n' "$(jq -r '.dirty_cluster_fail_closed_count' <<<"$projection_json")"
         printf 'tracked_dirty_blocker_count=%s\n' "$(jq -r '.tracked_dirty_blocker_count' <<<"$projection_json")"
+        printf 'source_skill_count=%s\n' "$(jq -r '.source_skill_count' <<<"$projection_json")"
+        printf 'required_source_skill_count=%s\n' "$(jq -r '.required_source_skill_count' <<<"$projection_json")"
+        printf 'missing_required_source_skill_count=%s\n' "$(jq -r '.missing_required_source_skill_count' <<<"$projection_json")"
+        printf 'source_skill_phase_count=%s\n' "$(jq -r '.source_skill_phase_count' <<<"$projection_json")"
+        printf 'required_source_skill_phase_count=%s\n' "$(jq -r '.required_source_skill_phase_count' <<<"$projection_json")"
+        printf 'missing_required_source_skill_phase_count=%s\n' "$(jq -r '.missing_required_source_skill_phase_count' <<<"$projection_json")"
+        printf 'objective_requirement_count=%s\n' "$(jq -r '.objective_requirement_count' <<<"$projection_json")"
+        printf 'required_objective_requirement_count=%s\n' "$(jq -r '.required_objective_requirement_count' <<<"$projection_json")"
+        printf 'covered_objective_requirement_count=%s\n' "$(jq -r '.covered_objective_requirement_count' <<<"$projection_json")"
+        printf 'missing_required_objective_requirement_count=%s\n' "$(jq -r '.missing_required_objective_requirement_count' <<<"$projection_json")"
+        printf 'unmapped_objective_requirement_count=%s\n' "$(jq -r '.unmapped_objective_requirement_count' <<<"$projection_json")"
+        printf 'selected_bead_mapping_count=%s\n' "$(jq -r '.selected_bead_mapping_count' <<<"$projection_json")"
         printf 'missing_artifact_path_count=%s\n' "$(jq -r '.missing_artifact_path_count' <<<"$projection_json")"
         printf 'missing_runner_path_count=%s\n' "$(jq -r '.missing_runner_path_count' <<<"$projection_json")"
+        printf 'objective_checklist_complete=%s\n' "$(jq -r '.objective_checklist_complete' <<<"$projection_json")"
         printf 'no_unexplained_artifacts=%s\n' "$(jq -r '.no_unexplained_artifacts' <<<"$projection_json")"
+        printf 'missing_required_source_skills=%s\n' "$(jq -r '.missing_required_source_skills | join("|")' <<<"$objective_coverage")"
+        printf 'missing_required_source_skill_phases=%s\n' "$(jq -r '.missing_required_source_skill_phases | join("|")' <<<"$objective_coverage")"
+        printf 'missing_required_objective_requirement_ids=%s\n' "$(jq -r '.missing_required_objective_requirement_ids | join("|")' <<<"$objective_coverage")"
+        printf 'unmapped_objective_requirement_ids=%s\n' "$(jq -r '.unmapped_objective_requirement_ids | join("|")' <<<"$objective_coverage")"
         printf 'tracked_dirty_paths=%s\n' "$(jq -r 'join("|")' <<<"$tracked_dirty_paths")"
         printf 'signoff_verdict=%s\n' "$(jq -r '.signoff_verdict' <<<"$projection_json")"
         printf 'generated_artifact_paths=%s\n' "$(jq -r 'join("|")' <<<"$generated_artifact_paths")"

@@ -86,6 +86,9 @@ fn validate_artifact(artifact: &Value) -> Result<(), String> {
         "runner_script",
         "runner_bundle_schema_version",
         "runner_report_schema_version",
+        "required_source_skills",
+        "required_source_skill_phases",
+        "required_objective_requirement_ids",
         "tracked_dirty_blocker_fixture_paths",
         "blocked_dependency_policy",
         "required_matrix_fields",
@@ -157,6 +160,19 @@ fn validate_artifact(artifact: &Value) -> Result<(), String> {
     }
 
     Ok(())
+}
+
+fn skill_provenance_artifact(artifact: &Value) -> Value {
+    let path = artifact["signoff_matrix"]
+        .as_array()
+        .expect("signoff_matrix must be array")
+        .iter()
+        .find(|entry| entry["control_id"].as_str() == Some("skill_provenance"))
+        .and_then(|entry| entry["artifact_path"].as_str())
+        .expect("skill provenance artifact path must exist");
+    let raw = std::fs::read_to_string(repo_root().join(path))
+        .expect("skill provenance artifact must load");
+    serde_json::from_str(&raw).expect("skill provenance artifact must parse")
 }
 
 fn child_statuses(artifact: &Value) -> Vec<Value> {
@@ -249,6 +265,200 @@ fn strip_projection_hash(mut projection: Value) -> Value {
     projection
 }
 
+fn string_array(value: &Value) -> Vec<String> {
+    value
+        .as_array()
+        .expect("value must be array")
+        .iter()
+        .map(|entry| {
+            entry
+                .as_str()
+                .expect("array entries must be strings")
+                .to_string()
+        })
+        .collect()
+}
+
+fn unique_mapping_strings<F>(mappings: &[Value], mut mapper: F) -> Vec<String>
+where
+    F: FnMut(&Value) -> Option<&str>,
+{
+    let mut seen = BTreeSet::new();
+    let mut ordered = Vec::new();
+    for value in mappings.iter().filter_map(&mut mapper) {
+        if seen.insert(value.to_string()) {
+            ordered.push(value.to_string());
+        }
+    }
+    ordered
+}
+
+fn difference_preserving(required: &[String], actual: &[String]) -> Vec<String> {
+    let actual_set: BTreeSet<&str> = actual.iter().map(String::as_str).collect();
+    required
+        .iter()
+        .filter(|value| !actual_set.contains(value.as_str()))
+        .cloned()
+        .collect()
+}
+
+fn objective_coverage_summary(artifact: &Value) -> Value {
+    let provenance = skill_provenance_artifact(artifact);
+    let mappings = provenance["selected_bead_mappings"]
+        .as_array()
+        .expect("selected_bead_mappings must be array");
+    let required_source_skills = string_array(&artifact["required_source_skills"]);
+    let required_source_skill_phases = string_array(&artifact["required_source_skill_phases"]);
+    let required_objective_requirement_ids =
+        string_array(&artifact["required_objective_requirement_ids"]);
+    let actual_source_skills = string_array(&provenance["source_skills"]);
+    let declared_objective_requirement_ids = provenance["objective_requirements"]
+        .as_array()
+        .expect("objective_requirements must be array")
+        .iter()
+        .map(|entry| {
+            entry["id"]
+                .as_str()
+                .expect("objective requirement id must be string")
+                .to_string()
+        })
+        .collect::<Vec<_>>();
+    let actual_source_skill_phases =
+        unique_mapping_strings(mappings, |entry| entry["source_skill_phase"].as_str());
+    let mapped_objective_requirement_ids =
+        unique_mapping_strings(mappings, |entry| entry["objective_requirement_id"].as_str());
+    let selected_bead_mapping_bead_ids =
+        unique_mapping_strings(mappings, |entry| entry["bead_id"].as_str());
+
+    let mut object = Map::new();
+    object.insert(
+        "required_source_skills".to_string(),
+        Value::Array(
+            required_source_skills
+                .iter()
+                .cloned()
+                .map(Value::String)
+                .collect(),
+        ),
+    );
+    object.insert(
+        "actual_source_skills".to_string(),
+        Value::Array(
+            actual_source_skills
+                .iter()
+                .cloned()
+                .map(Value::String)
+                .collect(),
+        ),
+    );
+    object.insert(
+        "missing_required_source_skills".to_string(),
+        Value::Array(
+            difference_preserving(&required_source_skills, &actual_source_skills)
+                .into_iter()
+                .map(Value::String)
+                .collect(),
+        ),
+    );
+    object.insert(
+        "required_source_skill_phases".to_string(),
+        Value::Array(
+            required_source_skill_phases
+                .iter()
+                .cloned()
+                .map(Value::String)
+                .collect(),
+        ),
+    );
+    object.insert(
+        "actual_source_skill_phases".to_string(),
+        Value::Array(
+            actual_source_skill_phases
+                .iter()
+                .cloned()
+                .map(Value::String)
+                .collect(),
+        ),
+    );
+    object.insert(
+        "missing_required_source_skill_phases".to_string(),
+        Value::Array(
+            difference_preserving(&required_source_skill_phases, &actual_source_skill_phases)
+                .into_iter()
+                .map(Value::String)
+                .collect(),
+        ),
+    );
+    object.insert(
+        "required_objective_requirement_ids".to_string(),
+        Value::Array(
+            required_objective_requirement_ids
+                .iter()
+                .cloned()
+                .map(Value::String)
+                .collect(),
+        ),
+    );
+    object.insert(
+        "declared_objective_requirement_ids".to_string(),
+        Value::Array(
+            declared_objective_requirement_ids
+                .iter()
+                .cloned()
+                .map(Value::String)
+                .collect(),
+        ),
+    );
+    object.insert(
+        "missing_required_objective_requirement_ids".to_string(),
+        Value::Array(
+            difference_preserving(
+                &required_objective_requirement_ids,
+                &declared_objective_requirement_ids,
+            )
+            .into_iter()
+            .map(Value::String)
+            .collect(),
+        ),
+    );
+    object.insert(
+        "mapped_objective_requirement_ids".to_string(),
+        Value::Array(
+            mapped_objective_requirement_ids
+                .iter()
+                .cloned()
+                .map(Value::String)
+                .collect(),
+        ),
+    );
+    object.insert(
+        "unmapped_objective_requirement_ids".to_string(),
+        Value::Array(
+            difference_preserving(
+                &required_objective_requirement_ids,
+                &mapped_objective_requirement_ids,
+            )
+            .into_iter()
+            .map(Value::String)
+            .collect(),
+        ),
+    );
+    object.insert(
+        "selected_bead_mapping_count".to_string(),
+        Value::from(mappings.len()),
+    );
+    object.insert(
+        "selected_bead_mapping_bead_ids".to_string(),
+        Value::Array(
+            selected_bead_mapping_bead_ids
+                .into_iter()
+                .map(Value::String)
+                .collect(),
+        ),
+    );
+    Value::Object(object)
+}
+
 fn build_projection(artifact: &Value, scenario_id: &str) -> Value {
     let scenario = artifact["smoke_scenarios"]
         .as_array()
@@ -280,10 +490,68 @@ fn build_projection(artifact: &Value, scenario_id: &str) -> Value {
         .count();
     let dirty_cluster_fail_closed_count = dirty_cluster_fail_closed_count(artifact);
     let tracked_dirty_blocker_count = tracked_dirty_paths().len();
+    let objective_coverage = objective_coverage_summary(artifact);
+    let source_skill_count = objective_coverage["actual_source_skills"]
+        .as_array()
+        .expect("actual_source_skills must be array")
+        .len();
+    let required_source_skill_count = objective_coverage["required_source_skills"]
+        .as_array()
+        .expect("required_source_skills must be array")
+        .len();
+    let missing_required_source_skill_count = objective_coverage["missing_required_source_skills"]
+        .as_array()
+        .expect("missing_required_source_skills must be array")
+        .len();
+    let source_skill_phase_count = objective_coverage["actual_source_skill_phases"]
+        .as_array()
+        .expect("actual_source_skill_phases must be array")
+        .len();
+    let required_source_skill_phase_count = objective_coverage["required_source_skill_phases"]
+        .as_array()
+        .expect("required_source_skill_phases must be array")
+        .len();
+    let missing_required_source_skill_phase_count =
+        objective_coverage["missing_required_source_skill_phases"]
+            .as_array()
+            .expect("missing_required_source_skill_phases must be array")
+            .len();
+    let objective_requirement_count = objective_coverage["declared_objective_requirement_ids"]
+        .as_array()
+        .expect("declared_objective_requirement_ids must be array")
+        .len();
+    let required_objective_requirement_count =
+        objective_coverage["required_objective_requirement_ids"]
+            .as_array()
+            .expect("required_objective_requirement_ids must be array")
+            .len();
+    let covered_objective_requirement_count =
+        objective_coverage["mapped_objective_requirement_ids"]
+            .as_array()
+            .expect("mapped_objective_requirement_ids must be array")
+            .len();
+    let missing_required_objective_requirement_count =
+        objective_coverage["missing_required_objective_requirement_ids"]
+            .as_array()
+            .expect("missing_required_objective_requirement_ids must be array")
+            .len();
+    let unmapped_objective_requirement_count =
+        objective_coverage["unmapped_objective_requirement_ids"]
+            .as_array()
+            .expect("unmapped_objective_requirement_ids must be array")
+            .len();
+    let selected_bead_mapping_count = objective_coverage["selected_bead_mapping_count"]
+        .as_u64()
+        .expect("selected_bead_mapping_count must be number");
     let host_template_mode = scenario["host_template_mode"]
         .as_bool()
         .expect("host_template_mode must be bool");
     let no_unexplained_artifacts = dirty_cluster_fail_closed_count == 0;
+    let objective_checklist_complete = missing_required_source_skill_count == 0
+        && missing_required_source_skill_phase_count == 0
+        && missing_required_objective_requirement_count == 0
+        && unmapped_objective_requirement_count == 0
+        && selected_bead_mapping_count > 0;
 
     let signoff_verdict = if host_template_mode {
         "template_only"
@@ -293,6 +561,7 @@ fn build_projection(artifact: &Value, scenario_id: &str) -> Value {
         || missing_runner_path_count > 0
         || dirty_cluster_fail_closed_count > 0
         || tracked_dirty_blocker_count > 0
+        || !objective_checklist_complete
     {
         "fail_closed"
     } else {
@@ -333,12 +602,64 @@ fn build_projection(artifact: &Value, scenario_id: &str) -> Value {
         Value::from(tracked_dirty_blocker_count),
     );
     object.insert(
+        "source_skill_count".to_string(),
+        Value::from(source_skill_count),
+    );
+    object.insert(
+        "required_source_skill_count".to_string(),
+        Value::from(required_source_skill_count),
+    );
+    object.insert(
+        "missing_required_source_skill_count".to_string(),
+        Value::from(missing_required_source_skill_count),
+    );
+    object.insert(
+        "source_skill_phase_count".to_string(),
+        Value::from(source_skill_phase_count),
+    );
+    object.insert(
+        "required_source_skill_phase_count".to_string(),
+        Value::from(required_source_skill_phase_count),
+    );
+    object.insert(
+        "missing_required_source_skill_phase_count".to_string(),
+        Value::from(missing_required_source_skill_phase_count),
+    );
+    object.insert(
+        "objective_requirement_count".to_string(),
+        Value::from(objective_requirement_count),
+    );
+    object.insert(
+        "required_objective_requirement_count".to_string(),
+        Value::from(required_objective_requirement_count),
+    );
+    object.insert(
+        "covered_objective_requirement_count".to_string(),
+        Value::from(covered_objective_requirement_count),
+    );
+    object.insert(
+        "missing_required_objective_requirement_count".to_string(),
+        Value::from(missing_required_objective_requirement_count),
+    );
+    object.insert(
+        "unmapped_objective_requirement_count".to_string(),
+        Value::from(unmapped_objective_requirement_count),
+    );
+    object.insert(
+        "selected_bead_mapping_count".to_string(),
+        Value::from(selected_bead_mapping_count),
+    );
+    object.insert(
         "missing_artifact_path_count".to_string(),
         Value::from(missing_artifact_path_count),
     );
     object.insert(
         "missing_runner_path_count".to_string(),
         Value::from(missing_runner_path_count),
+    );
+    object.insert(
+        "objective_checklist_complete".to_string(),
+        Value::Bool(objective_checklist_complete),
     );
     object.insert(
         "no_unexplained_artifacts".to_string(),
@@ -385,6 +706,32 @@ fn missing_matrix_field_is_rejected() {
         validate_artifact(&artifact)
             .expect_err("missing config_gate should fail")
             .contains("config_gate")
+    );
+}
+
+#[test]
+fn objective_provenance_covers_required_skills_and_requirements() {
+    let artifact = load_artifact();
+    let coverage = objective_coverage_summary(&artifact);
+    assert_eq!(
+        coverage["missing_required_source_skills"],
+        Value::Array(Vec::new()),
+        "required source skills must all be present"
+    );
+    assert_eq!(
+        coverage["missing_required_source_skill_phases"],
+        Value::Array(Vec::new()),
+        "required source skill phases must all be present"
+    );
+    assert_eq!(
+        coverage["missing_required_objective_requirement_ids"],
+        Value::Array(Vec::new()),
+        "required objective requirements must all be declared"
+    );
+    assert_eq!(
+        coverage["unmapped_objective_requirement_ids"],
+        Value::Array(Vec::new()),
+        "required objective requirements must all be mapped to selected beads"
     );
 }
 
