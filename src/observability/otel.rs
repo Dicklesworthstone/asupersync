@@ -49,12 +49,14 @@
 //! // RuntimeBuilder::new().metrics(metrics).build();
 //! ```
 
+use crate::observability::entry::LogEntry;
+use crate::observability::level::LogLevel;
 use crate::observability::metrics::{MetricsProvider, OutcomeKind};
 use crate::types::{CancelKind, RegionId, TaskId};
 use opentelemetry::KeyValue;
 use opentelemetry::metrics::{Counter, Histogram, Meter, ObservableGauge};
 use parking_lot::{Mutex, RwLock};
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::io::Write;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
