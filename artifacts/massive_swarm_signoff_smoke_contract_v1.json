@@ -25,7 +25,8 @@
     "REQ-OPERATOR-EVIDENCE"
   ],
   "tracked_dirty_blocker_fixture_paths": [
-    "src/grpc/protobuf.rs",
+    ".beads/issues.jsonl",
+    "src/http/compress.rs",
     "src/observability/otlp_add_attributes_missing_api_audit_test.rs"
   ],
   "blocked_dependency_policy": {
@@ -118,7 +119,7 @@
     {
       "control_id": "host_profile_planner",
       "tracker_bead_id": "asupersync-c1qfr9",
-      "tracker_status": "closed",
+      "tracker_status": "open",
       "artifact_path": "artifacts/host_profile_planner_smoke_contract_v1.json",
       "contract_version": "host-profile-planner-smoke-contract-v1",
       "runner_path": "scripts/run_host_profile_planner_smoke.sh",
@@ -212,24 +213,28 @@
       "contract_version": "trace-storage-profile-smoke-contract-v1",
       "runner_path": "scripts/run_trace_storage_profile_smoke.sh",
       "scenario_ids": [
-        "AA-TRACE-STORAGE-LARGE-MEMORY-256G"
+        "AA-TRACE-STORAGE-LARGE-MEMORY-256G",
+        "AA-TRACE-STORAGE-REAL-HOST-TEMPLATE"
       ],
       "config_gate": "large-memory trace retention must stay explicit, dry-runable, and separable from default trace budgets",
       "fallback_mode": "fall back to the default trace storage profile whenever large-memory retention is unjustified, unsupported, or outside operator budget",
       "unit_proof_ref": "tests/trace_storage_profile.rs",
-      "e2e_proof_ref": "scripts/run_trace_storage_profile_smoke.sh --scenario AA-TRACE-STORAGE-LARGE-MEMORY-256G --execute",
+      "e2e_proof_ref": "scripts/run_trace_storage_profile_smoke.sh --scenario AA-TRACE-STORAGE-REAL-HOST-TEMPLATE --execute",
       "operator_fields": [
         "budget_total_mib_delta",
         "hot_ring_turnover_reduction_ratio",
         "large_retained_cancellation_traces",
         "large_retained_distributed_traces",
-        "cold_write_amplification_reduction_ratio"
+        "cold_write_amplification_reduction_ratio",
+        "retention_policy_confidence",
+        "host_memory_requirement_satisfied",
+        "operator_verdict"
       ],
       "rollback_surface": "default_trace_storage_profile",
       "proof_status": "fail_closed",
-      "blocker_reason": "trace storage profile proof exists on main but the tracker bead remains open, so signoff must not treat large-memory retention as operator-closed",
+      "blocker_reason": "trace storage profile proofs now cover both the large-memory scenario and the template-only real-host path, but the tracker bead remains open, so signoff must not treat large-memory retention as operator-closed",
       "report_glob": "target/trace-storage-profile-smoke/run_*/AA-TRACE-STORAGE-*/run_report.json",
-      "reproduction_command": "scripts/run_trace_storage_profile_smoke.sh --scenario AA-TRACE-STORAGE-LARGE-MEMORY-256G --execute"
+      "reproduction_command": "scripts/run_trace_storage_profile_smoke.sh --scenario AA-TRACE-STORAGE-REAL-HOST-TEMPLATE --execute"
     },
     {
       "control_id": "capacity_envelope_planner",
@@ -392,9 +397,9 @@
         "child_artifact_count": 11,
       "trusted_child_count": 4,
       "fail_closed_child_count": 7,
-      "open_tracker_blocker_count": 5,
+      "open_tracker_blocker_count": 6,
       "dirty_cluster_fail_closed_count": 1,
-      "tracked_dirty_blocker_count": 2,
+      "tracked_dirty_blocker_count": 3,
       "source_skill_count": 4,
       "required_source_skill_count": 4,
       "missing_required_source_skill_count": 0,
@@ -411,7 +416,7 @@
       "missing_runner_path_count": 0,
       "objective_checklist_complete": true,
       "no_unexplained_artifacts": false,
-      "projection_hash": "c86c3a294da1566c62d6c456a53ff8bad3dc7159dae897868d742f737df2c122"
+      "projection_hash": "1663ef92225d855582dc2a8d75374937745ad4411b88183a51420d417d38dfe7"
     },
     "required_log_fields": [
       "scenario_id",
@@ -459,9 +464,9 @@
         "child_artifact_count": 11,
       "trusted_child_count": 4,
       "fail_closed_child_count": 7,
-      "open_tracker_blocker_count": 5,
+      "open_tracker_blocker_count": 6,
       "dirty_cluster_fail_closed_count": 1,
-      "tracked_dirty_blocker_count": 2,
+      "tracked_dirty_blocker_count": 3,
       "source_skill_count": 4,
       "required_source_skill_count": 4,
       "missing_required_source_skill_count": 0,
@@ -478,7 +483,7 @@
       "missing_runner_path_count": 0,
       "objective_checklist_complete": true,
       "no_unexplained_artifacts": false,
-      "projection_hash": "4868d01f9653fccbe5d402471b1552edfaf9106a9c4a3747c8969df5e8f7cbfb"
+      "projection_hash": "aafb0a755358969305e78e5add6b04057c1679baf241b00a9466819274770016"
     },
     "required_log_fields": [
       "scenario_id",

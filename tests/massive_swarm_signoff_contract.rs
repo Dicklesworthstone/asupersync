@@ -861,6 +861,95 @@ fn adaptive_batch_signoff_row_tracks_p999_no_win_evidence() {
 }
 
 #[test]
+fn host_profile_signoff_row_stays_fail_closed_while_tracker_bead_is_open() {
+    let artifact = load_artifact();
+    let host_profile_row = artifact["signoff_matrix"]
+        .as_array()
+        .expect("signoff_matrix must be array")
+        .iter()
+        .find(|entry| entry["control_id"].as_str() == Some("host_profile_planner"))
+        .expect("host profile planner row must exist");
+
+    let scenarios: BTreeSet<&str> = host_profile_row["scenario_ids"]
+        .as_array()
+        .expect("scenario_ids must be an array")
+        .iter()
+        .filter_map(Value::as_str)
+        .collect();
+    assert!(scenarios.contains("AA-HOST-PROFILE-PLANNER-EVIDENCE-RETENTION-64C-256G"));
+
+    let operator_fields: BTreeSet<&str> = host_profile_row["operator_fields"]
+        .as_array()
+        .expect("operator_fields must be an array")
+        .iter()
+        .filter_map(Value::as_str)
+        .collect();
+    assert!(operator_fields.contains("final_arena_temperature_policy"));
+    assert_eq!(host_profile_row["tracker_status"].as_str(), Some("open"));
+    assert_eq!(
+        host_profile_row["proof_status"].as_str(),
+        Some("fail_closed")
+    );
+    assert!(
+        host_profile_row["blocker_reason"]
+            .as_str()
+            .is_some_and(|reason| reason.contains("tracker bead remains open"))
+    );
+}
+
+#[test]
+fn trace_storage_signoff_row_tracks_template_only_real_host_path() {
+    let artifact = load_artifact();
+    let trace_storage_row = artifact["signoff_matrix"]
+        .as_array()
+        .expect("signoff_matrix must be array")
+        .iter()
+        .find(|entry| entry["control_id"].as_str() == Some("trace_storage_profile"))
+        .expect("trace storage profile row must exist");
+
+    let scenarios: BTreeSet<&str> = trace_storage_row["scenario_ids"]
+        .as_array()
+        .expect("scenario_ids must be an array")
+        .iter()
+        .filter_map(Value::as_str)
+        .collect();
+    assert!(scenarios.contains("AA-TRACE-STORAGE-LARGE-MEMORY-256G"));
+    assert!(scenarios.contains("AA-TRACE-STORAGE-REAL-HOST-TEMPLATE"));
+
+    let operator_fields: BTreeSet<&str> = trace_storage_row["operator_fields"]
+        .as_array()
+        .expect("operator_fields must be an array")
+        .iter()
+        .filter_map(Value::as_str)
+        .collect();
+    assert!(operator_fields.contains("retention_policy_confidence"));
+    assert!(operator_fields.contains("host_memory_requirement_satisfied"));
+    assert!(operator_fields.contains("operator_verdict"));
+    assert_eq!(
+        trace_storage_row["e2e_proof_ref"].as_str(),
+        Some(
+            "scripts/run_trace_storage_profile_smoke.sh --scenario AA-TRACE-STORAGE-REAL-HOST-TEMPLATE --execute"
+        )
+    );
+    assert_eq!(
+        trace_storage_row["reproduction_command"].as_str(),
+        Some(
+            "scripts/run_trace_storage_profile_smoke.sh --scenario AA-TRACE-STORAGE-REAL-HOST-TEMPLATE --execute"
+        )
+    );
+    assert_eq!(trace_storage_row["tracker_status"].as_str(), Some("open"));
+    assert_eq!(
+        trace_storage_row["proof_status"].as_str(),
+        Some("fail_closed")
+    );
+    assert!(
+        trace_storage_row["blocker_reason"]
+            .as_str()
+            .is_some_and(|reason| reason.contains("template-only real-host path"))
+    );
+}
+
+#[test]
 fn objective_provenance_covers_required_skills_and_requirements() {
     let artifact = load_artifact();
     let coverage = objective_coverage_summary(&artifact);
