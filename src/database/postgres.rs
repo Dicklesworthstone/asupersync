@@ -7252,6 +7252,34 @@ pub struct FuzzCopyInSequence {
     pub end: FuzzCopyInEnd,
 }
 
+#[cfg(feature = "test-internals")]
+fn fuzz_push_copy_in_frame(
+    msg_type: u8,
+    body: &[u8],
+    copy_data_chunks: &mut Vec<Vec<u8>>,
+) -> Result<Option<FuzzCopyInEnd>, PgError> {
+    match msg_type {
+        value if value == FrontendMessage::CopyData as u8 => {
+            copy_data_chunks.push(body.to_vec());
+            Ok(None)
+        }
+        value if value == FrontendMessage::CopyDone as u8 => {
+            MessageReader::new(body).ensure_consumed("CopyDone")?;
+            Ok(Some(FuzzCopyInEnd::Done))
+        }
+        value if value == FrontendMessage::CopyFail as u8 => {
+            let mut reader = MessageReader::new(body);
+            let message = reader.read_cstring()?.to_string();
+            reader.ensure_consumed("CopyFail")?;
+            Ok(Some(FuzzCopyInEnd::Fail(message)))
+        }
+        other => Err(PgError::Protocol(format!(
+            "unexpected COPY IN frontend message: {}",
+            other as char
+        ))),
+    }
+}
+
 /// Fuzz-target summary for a frontend StartupMessage.
 #[cfg(feature = "test-internals")]
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -7333,27 +7361,8 @@ pub fn fuzz_parse_copy_in_sequence(stream: &[u8]) -> Result<FuzzCopyInSequence, 
         let body = &stream[body_start..body_end];
         cursor = body_end;
 
-        let end = match msg_type {
-            value if value == FrontendMessage::CopyData as u8 => {
-                copy_data_chunks.push(body.to_vec());
-                continue;
-            }
-            value if value == FrontendMessage::CopyDone as u8 => {
-                MessageReader::new(body).ensure_consumed("CopyDone")?;
-                FuzzCopyInEnd::Done
-            }
-            value if value == FrontendMessage::CopyFail as u8 => {
-                let mut reader = MessageReader::new(body);
-                let message = reader.read_cstring()?.to_string();
-                reader.ensure_consumed("CopyFail")?;
-                FuzzCopyInEnd::Fail(message)
-            }
-            other => {
-                return Err(PgError::Protocol(format!(
-                    "unexpected COPY IN frontend message: {}",
-                    other as char
-                )));
-            }
+        let Some(end) = fuzz_push_copy_in_frame(msg_type, body, &mut copy_data_chunks)? else {
+            continue;
         };
 
         if cursor != stream.len() {
@@ -7368,6 +7377,79 @@ pub fn fuzz_parse_copy_in_sequence(stream: &[u8]) -> Result<FuzzCopyInSequence, 
             end,
         });
     }
+}
+
+/// Fuzz-target re-exporter for segmented frontend COPY IN stream decoding.
+#[cfg(feature = "test-internals")]
+#[doc(hidden)]
+pub fn fuzz_parse_copy_in_segments(segments: &[&[u8]]) -> Result<FuzzCopyInSequence, PgError> {
+    let mut pending = Vec::new();
+    let mut copy_data_chunks = Vec::new();
+    let mut terminal = None;
+
+    for segment in segments {
+        if terminal.is_some() {
+            if segment.is_empty() {
+                continue;
+            }
+            return Err(PgError::Protocol(format!(
+                "COPY IN stream has {} trailing byte(s) after terminal message",
+                segment.len()
+            )));
+        }
+
+        pending.extend_from_slice(segment);
+
+        loop {
+            if pending.is_empty() || pending.len() < 5 {
+                break;
+            }
+
+            let msg_type = pending[0];
+            let len_i32 = i32::from_be_bytes([pending[1], pending[2], pending[3], pending[4]]);
+            let body_len = backend_message_body_len(len_i32)?;
+            let body_end = 5usize
+                .checked_add(body_len)
+                .ok_or_else(|| PgError::Protocol("message length overflow".to_string()))?;
+
+            if pending.len() < body_end {
+                break;
+            }
+
+            let body = &pending[5..body_end];
+            if let Some(end) = fuzz_push_copy_in_frame(msg_type, body, &mut copy_data_chunks)? {
+                terminal = Some(end);
+            }
+            pending.drain(..body_end);
+
+            if terminal.is_some() {
+                if !pending.is_empty() {
+                    return Err(PgError::Protocol(format!(
+                        "COPY IN stream has {} trailing byte(s) after terminal message",
+                        pending.len()
+                    )));
+                }
+                break;
+            }
+        }
+    }
+
+    if let Some(end) = terminal {
+        return Ok(FuzzCopyInSequence {
+            copy_data_chunks,
+            end,
+        });
+    }
+
+    if pending.is_empty() {
+        return Err(PgError::Protocol(
+            "COPY IN stream ended before CopyDone or CopyFail".to_string(),
+        ));
+    }
+
+    Err(PgError::Protocol(
+        "unexpected end of COPY IN message".to_string(),
+    ))
 }
 
 /// Fuzz-target re-exporter for frontend Parse message decoding.
@@ -12017,6 +12099,215 @@ mod tests {
             buf.push(0);
 
             buf
+        }
+
+        #[cfg(feature = "test-internals")]
+        const COPY_IN_MAX_BOUNDED_TEST_PAYLOAD: usize = 1024;
+
+        #[cfg(feature = "test-internals")]
+        fn split_copy_stream_at<'a>(stream: &'a [u8], offsets: &[usize]) -> Vec<&'a [u8]> {
+            let mut segments = Vec::new();
+            let mut start = 0usize;
+
+            for &offset in offsets {
+                let end = offset.min(stream.len());
+                if end >= start {
+                    segments.push(&stream[start..end]);
+                    start = end;
+                }
+            }
+
+            segments.push(&stream[start..]);
+            segments
+        }
+
+        #[cfg(feature = "test-internals")]
+        fn assert_copy_in_segment_equivalence(stream: &[u8], segments: &[&[u8]]) {
+            let unsplit = fuzz_parse_copy_in_sequence(stream).expect("unsplit COPY IN stream");
+            let split = fuzz_parse_copy_in_segments(segments).expect("segmented COPY IN stream");
+            assert_eq!(split, unsplit);
+        }
+
+        #[test]
+        #[cfg(feature = "test-internals")]
+        fn copy_in_segment_parser_accepts_empty_copy_data() {
+            let mut stream = build_copy_data_message(&[]);
+            stream.extend_from_slice(&build_copy_done_message());
+
+            let parsed = fuzz_parse_copy_in_segments(&[stream.as_slice()])
+                .expect("empty CopyData should decode");
+            assert_eq!(parsed.copy_data_chunks, vec![Vec::<u8>::new()]);
+            assert_eq!(parsed.end, FuzzCopyInEnd::Done);
+            assert_copy_in_segment_equivalence(&stream, &[stream.as_slice()]);
+        }
+
+        #[test]
+        #[cfg(feature = "test-internals")]
+        fn copy_in_segment_parser_accepts_one_byte_payload() {
+            let mut stream = build_copy_data_message(b"x");
+            stream.extend_from_slice(&build_copy_done_message());
+            let segments = split_copy_stream_at(&stream, &[1, 5, 6]);
+
+            let parsed = fuzz_parse_copy_in_segments(&segments).expect("one-byte CopyData");
+            assert_eq!(parsed.copy_data_chunks, vec![b"x".to_vec()]);
+            assert_eq!(parsed.end, FuzzCopyInEnd::Done);
+            assert_copy_in_segment_equivalence(&stream, &segments);
+        }
+
+        #[test]
+        #[cfg(feature = "test-internals")]
+        fn copy_in_segment_parser_accepts_max_bounded_payload() {
+            let payload = vec![b'z'; COPY_IN_MAX_BOUNDED_TEST_PAYLOAD];
+            let mut stream = build_copy_data_message(&payload);
+            stream.extend_from_slice(&build_copy_done_message());
+            let mid_payload = 5 + COPY_IN_MAX_BOUNDED_TEST_PAYLOAD / 2;
+            let segments = split_copy_stream_at(&stream, &[1, 5, mid_payload]);
+
+            let parsed = fuzz_parse_copy_in_segments(&segments).expect("bounded CopyData");
+            assert_eq!(parsed.copy_data_chunks, vec![payload]);
+            assert_eq!(parsed.end, FuzzCopyInEnd::Done);
+            assert_copy_in_segment_equivalence(&stream, &segments);
+        }
+
+        #[test]
+        #[cfg(feature = "test-internals")]
+        fn copy_in_segment_parser_accepts_split_every_byte() {
+            let mut stream = build_copy_data_message(b"row-1\n");
+            stream.extend_from_slice(&build_copy_data_message(b"row-2\n"));
+            stream.extend_from_slice(&build_copy_done_message());
+            let segments = stream.chunks(1).collect::<Vec<_>>();
+
+            let parsed = fuzz_parse_copy_in_segments(&segments).expect("byte-split COPY IN");
+            assert_eq!(
+                parsed.copy_data_chunks,
+                vec![b"row-1\n".to_vec(), b"row-2\n".to_vec()]
+            );
+            assert_eq!(parsed.end, FuzzCopyInEnd::Done);
+            assert_copy_in_segment_equivalence(&stream, &segments);
+        }
+
+        #[test]
+        #[cfg(feature = "test-internals")]
+        fn copy_in_segment_parser_accepts_frame_header_boundaries() {
+            let first = build_copy_data_message(b"alpha");
+            let second = build_copy_data_message(b"beta");
+            let done = build_copy_done_message();
+            let mut stream = Vec::new();
+            stream.extend_from_slice(&first);
+            stream.extend_from_slice(&second);
+            stream.extend_from_slice(&done);
+
+            let first_end = first.len();
+            let second_start = first_end;
+            let second_end = first_end + second.len();
+            let segments = split_copy_stream_at(
+                &stream,
+                &[
+                    1,
+                    5,
+                    first_end,
+                    second_start + 1,
+                    second_start + 5,
+                    second_end,
+                    second_end + 1,
+                    second_end + 5,
+                ],
+            );
+
+            let parsed = fuzz_parse_copy_in_segments(&segments).expect("header-boundary split");
+            assert_eq!(
+                parsed.copy_data_chunks,
+                vec![b"alpha".to_vec(), b"beta".to_vec()]
+            );
+            assert_eq!(parsed.end, FuzzCopyInEnd::Done);
+            assert_copy_in_segment_equivalence(&stream, &segments);
+        }
+
+        #[test]
+        #[cfg(feature = "test-internals")]
+        fn copy_in_segment_parser_accepts_copy_done_after_data() {
+            let mut stream = build_copy_data_message(b"complete row\n");
+            stream.extend_from_slice(&build_copy_done_message());
+            let segments = split_copy_stream_at(&stream, &[3, 5, stream.len() - 1]);
+
+            let parsed = fuzz_parse_copy_in_segments(&segments).expect("CopyDone after data");
+            assert_eq!(parsed.copy_data_chunks, vec![b"complete row\n".to_vec()]);
+            assert_eq!(parsed.end, FuzzCopyInEnd::Done);
+            assert_copy_in_segment_equivalence(&stream, &segments);
+        }
+
+        #[test]
+        #[cfg(feature = "test-internals")]
+        fn copy_in_segment_parser_accepts_copy_fail_after_partial_data() {
+            let data = build_copy_data_message(b"partial-row-without-newline");
+            let fail = build_copy_fail_message("client aborted copy");
+            let mut stream = Vec::new();
+            stream.extend_from_slice(&data);
+            stream.extend_from_slice(&fail);
+            let segments = split_copy_stream_at(&stream, &[2, data.len() - 1, data.len() + 1]);
+
+            let parsed = fuzz_parse_copy_in_segments(&segments).expect("CopyFail after data");
+            assert_eq!(
+                parsed.copy_data_chunks,
+                vec![b"partial-row-without-newline".to_vec()]
+            );
+            assert_eq!(
+                parsed.end,
+                FuzzCopyInEnd::Fail("client aborted copy".to_string())
+            );
+            assert_copy_in_segment_equivalence(&stream, &segments);
+        }
+
+        #[test]
+        #[cfg(feature = "test-internals")]
+        fn copy_in_segment_parser_rejects_malformed_length_too_small() {
+            let stream = [b'd', 0, 0, 0, 3];
+            let segments = split_copy_stream_at(&stream, &[2]);
+
+            match fuzz_parse_copy_in_segments(&segments).unwrap_err() {
+                PgError::Protocol(msg) => {
+                    assert!(msg.contains("invalid message length: 3"), "got: {msg}");
+                }
+                other => panic!("expected Protocol error, got {other:?}"),
+            }
+        }
+
+        #[test]
+        #[cfg(feature = "test-internals")]
+        fn copy_in_segment_parser_rejects_malformed_length_too_large() {
+            let stream = [b'd', 4, 0, 0, 1];
+            let segments = split_copy_stream_at(&stream, &[1, 5]);
+
+            match fuzz_parse_copy_in_segments(&segments).unwrap_err() {
+                PgError::Protocol(msg) => {
+                    assert!(
+                        msg.contains("invalid message length: 67108865"),
+                        "got: {msg}"
+                    );
+                }
+                other => panic!("expected Protocol error, got {other:?}"),
+            }
+        }
+
+        #[test]
+        #[cfg(feature = "test-internals")]
+        fn copy_in_segment_parser_preserves_arbitrary_segmentation_equivalence() {
+            let first = build_copy_data_message(b"one");
+            let second = build_copy_data_message(b"two-two");
+            let fail = build_copy_fail_message("stop");
+            let mut stream = Vec::new();
+            stream.extend_from_slice(&first);
+            stream.extend_from_slice(&second);
+            stream.extend_from_slice(&fail);
+
+            let mut segments = split_copy_stream_at(
+                &stream,
+                &[0, 2, 5, 8, first.len(), first.len() + 4, stream.len() - 2],
+            );
+            segments.insert(1, &stream[0..0]);
+            segments.push(&stream[stream.len()..stream.len()]);
+
+            assert_copy_in_segment_equivalence(&stream, &segments);
         }
 
         #[test]
