@@ -1,5 +1,3 @@
-#![allow(warnings)]
-#![allow(clippy::all)]
 //! Contract tests for Tokio adapter boundary architecture (2oh2u.7.2).
 //!
 //! Validates enforceable adapter invariants, outcome contracts, structured
