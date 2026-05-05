@@ -1536,6 +1536,596 @@ pub fn emit_tail_latency_compact_event(
     }))
 }
 
+/// Latency-budget certificate schema version.
+pub const TAIL_LATENCY_BUDGET_CERTIFICATE_SCHEMA_VERSION: &str =
+    "runtime-latency-budget-certificate-v1";
+
+/// Operator-facing verdict for a latency-budget certificate.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TailLatencyBudgetVerdict {
+    /// Evidence is valid and the candidate stays within the requested budget.
+    Pass,
+    /// Evidence is valid, but the conservative fallback is safer.
+    NoWin,
+    /// Evidence is incomplete, stale, contradictory, or proxy-only.
+    FailClosed,
+}
+
+impl TailLatencyBudgetVerdict {
+    /// Stable string representation used by artifacts and smoke reports.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Pass => "pass",
+            Self::NoWin => "no_win",
+            Self::FailClosed => "fail_closed",
+        }
+    }
+}
+
+/// Quantile evidence required before a latency-budget certificate can pass.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TailLatencyBudgetQuantiles {
+    /// Median latency for the scenario.
+    pub p50_latency_ns: u64,
+    /// p95 latency for the scenario.
+    pub p95_latency_ns: u64,
+    /// p99 latency for the scenario.
+    pub p99_latency_ns: u64,
+    /// p999 latency for the scenario.
+    pub p999_latency_ns: u64,
+}
+
+impl TailLatencyBudgetQuantiles {
+    /// Build quantile evidence.
+    #[must_use]
+    pub const fn new(
+        p50_latency_ns: u64,
+        p95_latency_ns: u64,
+        p99_latency_ns: u64,
+        p999_latency_ns: u64,
+    ) -> Self {
+        Self {
+            p50_latency_ns,
+            p95_latency_ns,
+            p99_latency_ns,
+            p999_latency_ns,
+        }
+    }
+
+    fn ordered(self) -> bool {
+        self.p50_latency_ns <= self.p95_latency_ns
+            && self.p95_latency_ns <= self.p99_latency_ns
+            && self.p99_latency_ns <= self.p999_latency_ns
+    }
+}
+
+/// Conservative uncertainty interval around the reported tail quantile.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TailLatencyBudgetUncertainty {
+    /// Lower uncertainty bound in nanoseconds.
+    pub lower_bound_ns: u64,
+    /// Upper uncertainty bound in nanoseconds.
+    pub upper_bound_ns: u64,
+}
+
+impl TailLatencyBudgetUncertainty {
+    /// Build uncertainty evidence.
+    #[must_use]
+    pub const fn new(lower_bound_ns: u64, upper_bound_ns: u64) -> Self {
+        Self {
+            lower_bound_ns,
+            upper_bound_ns,
+        }
+    }
+
+    fn valid(self) -> bool {
+        self.lower_bound_ns <= self.upper_bound_ns
+    }
+}
+
+/// Verification gates for one latency-budget certificate.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TailLatencyBudgetGate {
+    /// Maximum certified p999 latency after uncertainty is applied.
+    pub budget_p999_latency_ns: u64,
+    /// Minimum number of samples needed before the quantiles are meaningful.
+    pub min_sample_count: u64,
+    /// Maximum total unknown residual accepted across compact tail events.
+    pub max_unknown_residual_ns: u64,
+    /// Maximum unknown residual as basis points of total observed latency.
+    pub max_unknown_residual_basis_points: u64,
+    /// Latest evidence epoch covered by calibration.
+    pub calibration_valid_until_epoch: u64,
+    /// Candidate p999 may regress by this many nanoseconds before fallback wins.
+    pub allowed_p999_regression_ns: u64,
+}
+
+impl TailLatencyBudgetGate {
+    /// Build a latency-budget gate.
+    #[must_use]
+    pub const fn new(
+        budget_p999_latency_ns: u64,
+        min_sample_count: u64,
+        max_unknown_residual_ns: u64,
+        max_unknown_residual_basis_points: u64,
+        calibration_valid_until_epoch: u64,
+        allowed_p999_regression_ns: u64,
+    ) -> Self {
+        Self {
+            budget_p999_latency_ns,
+            min_sample_count,
+            max_unknown_residual_ns,
+            max_unknown_residual_basis_points,
+            calibration_valid_until_epoch,
+            allowed_p999_regression_ns,
+        }
+    }
+}
+
+/// Evidence consumed by the latency-budget certificate verifier.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TailLatencyBudgetEvidence {
+    /// Stable certificate identifier.
+    pub certificate_id: String,
+    /// Scenario or workload identifier.
+    pub scenario_id: String,
+    /// Candidate profile or controller id.
+    pub candidate_id: String,
+    /// Conservative fallback profile id.
+    pub fallback_profile: String,
+    /// Deterministic replay command for the evidence packet.
+    pub replay_command: String,
+    /// Number of samples behind the quantiles.
+    pub sample_count: u64,
+    /// Epoch of the evidence packet.
+    pub evidence_epoch: u64,
+    /// Optional quantile evidence. Absence is treated as mean-only evidence.
+    pub quantiles: Option<TailLatencyBudgetQuantiles>,
+    /// Optional uncertainty interval around the tail quantile.
+    pub uncertainty: Option<TailLatencyBudgetUncertainty>,
+    /// Baseline p999 latency for asymmetric regression checks.
+    pub baseline_p999_latency_ns: u64,
+    /// Candidate p999 latency for asymmetric regression checks.
+    pub candidate_p999_latency_ns: u64,
+    /// Verification gates.
+    pub gate: TailLatencyBudgetGate,
+    /// Compact tail rows backing the term breakdown.
+    pub tail_events: Vec<TailLatencyCompactEvent>,
+}
+
+impl TailLatencyBudgetEvidence {
+    /// Build evidence with conservative empty optional fields.
+    #[must_use]
+    pub fn new(
+        certificate_id: impl Into<String>,
+        scenario_id: impl Into<String>,
+        candidate_id: impl Into<String>,
+        fallback_profile: impl Into<String>,
+        replay_command: impl Into<String>,
+        gate: TailLatencyBudgetGate,
+    ) -> Self {
+        Self {
+            certificate_id: certificate_id.into(),
+            scenario_id: scenario_id.into(),
+            candidate_id: candidate_id.into(),
+            fallback_profile: fallback_profile.into(),
+            replay_command: replay_command.into(),
+            sample_count: 0,
+            evidence_epoch: 0,
+            quantiles: None,
+            uncertainty: None,
+            baseline_p999_latency_ns: 0,
+            candidate_p999_latency_ns: 0,
+            gate,
+            tail_events: Vec::new(),
+        }
+    }
+
+    /// Attach quantile evidence.
+    #[must_use]
+    pub fn with_quantiles(mut self, quantiles: TailLatencyBudgetQuantiles) -> Self {
+        self.quantiles = Some(quantiles);
+        self
+    }
+
+    /// Attach uncertainty bounds.
+    #[must_use]
+    pub fn with_uncertainty(mut self, uncertainty: TailLatencyBudgetUncertainty) -> Self {
+        self.uncertainty = Some(uncertainty);
+        self
+    }
+
+    /// Attach sample count and evidence epoch.
+    #[must_use]
+    pub fn with_sample_window(mut self, sample_count: u64, evidence_epoch: u64) -> Self {
+        self.sample_count = sample_count;
+        self.evidence_epoch = evidence_epoch;
+        self
+    }
+
+    /// Attach baseline and candidate p999 values for asymmetric regression checks.
+    #[must_use]
+    pub fn with_regression_window(
+        mut self,
+        baseline_p999_latency_ns: u64,
+        candidate_p999_latency_ns: u64,
+    ) -> Self {
+        self.baseline_p999_latency_ns = baseline_p999_latency_ns;
+        self.candidate_p999_latency_ns = candidate_p999_latency_ns;
+        self
+    }
+
+    /// Attach compact tail events.
+    #[must_use]
+    pub fn with_tail_events(mut self, tail_events: Vec<TailLatencyCompactEvent>) -> Self {
+        self.tail_events = tail_events;
+        self
+    }
+}
+
+/// Per-term evidence row carried by a latency-budget certificate.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TailLatencyBudgetTermEvidence {
+    /// Canonical term id.
+    pub term_id: String,
+    /// Stable structured field key used for the term's compact evidence.
+    pub field_key: String,
+    /// Direct, proxy, or unknown bucket evidence class.
+    pub measurement_class: String,
+    /// Aggregated attribution state for the term.
+    pub attribution_state: String,
+    /// Sum of observed compact field values across all events.
+    pub observed_value: u64,
+    /// Sum of direct-duration nanoseconds for terms with direct measurements.
+    pub direct_duration_ns: u64,
+}
+
+/// Verifier output for one latency-budget certificate.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TailLatencyBudgetCertificate {
+    /// Certificate schema version.
+    pub schema_version: String,
+    /// Stable certificate identifier.
+    pub certificate_id: String,
+    /// Deterministic FNV-1a hash over the certificate projection.
+    pub certificate_hash: String,
+    /// Scenario or workload identifier.
+    pub scenario_id: String,
+    /// Candidate profile or controller id.
+    pub candidate_id: String,
+    /// Conservative fallback profile id.
+    pub fallback_profile: String,
+    /// Taxonomy version backing compact tail events.
+    pub taxonomy_version: String,
+    /// Operator-facing verdict.
+    pub verdict: TailLatencyBudgetVerdict,
+    /// Stable reason codes explaining fail-closed or no-win outcomes.
+    pub reason_codes: Vec<String>,
+    /// First fallback or fail-closed reason, if any.
+    pub fallback_reason: Option<String>,
+    /// Number of samples behind the quantiles.
+    pub sample_count: u64,
+    /// Certified p50 latency.
+    pub p50_latency_ns: Option<u64>,
+    /// Certified p95 latency.
+    pub p95_latency_ns: Option<u64>,
+    /// Certified p99 latency.
+    pub p99_latency_ns: Option<u64>,
+    /// Certified p999 latency.
+    pub p999_latency_ns: Option<u64>,
+    /// Lower uncertainty bound.
+    pub uncertainty_lower_bound_ns: Option<u64>,
+    /// Upper uncertainty bound.
+    pub uncertainty_upper_bound_ns: Option<u64>,
+    /// Budget gate applied to p999 plus uncertainty.
+    pub budget_p999_latency_ns: u64,
+    /// Total unknown residual across compact tail events.
+    pub unknown_residual_ns: u64,
+    /// Unknown residual as basis points of total compact-event latency.
+    pub unknown_residual_basis_points: u64,
+    /// Per-term evidence breakdown in canonical term order.
+    pub term_breakdown: Vec<TailLatencyBudgetTermEvidence>,
+    /// Deterministic replay command for the evidence packet.
+    pub replay_command: String,
+}
+
+fn tail_field_unsigned(event: &TailLatencyCompactEvent, key: &str) -> Option<u64> {
+    match event.fields.get(key) {
+        Some(TailLatencyFieldValue::Unsigned(value)) => Some(*value),
+        _ => None,
+    }
+}
+
+fn tail_term_field_key(term_id: &str) -> &'static str {
+    match term_id {
+        "queueing" => "tail.queueing.ready_queue_depth",
+        "service" => "tail.service.poll_count",
+        "io_or_network" => "tail.io_or_network.events_received",
+        "retries" => "tail.retries.total_delay_ns",
+        "synchronization" => "tail.synchronization.lock_wait_ns",
+        "allocator_or_cache" => "tail.allocator_or_cache.live_allocations",
+        "unknown" => "tail.unknown.unmeasured_ns",
+        _ => "tail.unknown.unmeasured_ns",
+    }
+}
+
+fn tail_term_measurement_class(term_id: &str) -> &'static str {
+    match term_id {
+        "retries" | "synchronization" => "direct_duration",
+        "unknown" => "unknown_bucket",
+        _ => "proxy_signal",
+    }
+}
+
+fn unique_push_reason(reasons: &mut Vec<String>, reason: impl Into<String>) {
+    let reason = reason.into();
+    if !reasons.contains(&reason) {
+        reasons.push(reason);
+    }
+}
+
+fn stable_fnv1a64_hex(bytes: &[u8]) -> String {
+    const OFFSET: u64 = 0xcbf29ce484222325;
+    const PRIME: u64 = 0x100000001b3;
+
+    let mut hash = OFFSET;
+    for byte in bytes {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(PRIME);
+    }
+    format!("fnv1a64:{hash:016x}")
+}
+
+fn tail_latency_budget_certificate_hash(certificate: &TailLatencyBudgetCertificate) -> String {
+    let mut projection = String::new();
+    projection.push_str(&certificate.schema_version);
+    projection.push('|');
+    projection.push_str(&certificate.certificate_id);
+    projection.push('|');
+    projection.push_str(&certificate.scenario_id);
+    projection.push('|');
+    projection.push_str(&certificate.candidate_id);
+    projection.push('|');
+    projection.push_str(certificate.verdict.as_str());
+    projection.push('|');
+    projection.push_str(&certificate.sample_count.to_string());
+    projection.push('|');
+    projection.push_str(&certificate.unknown_residual_ns.to_string());
+    projection.push('|');
+    projection.push_str(&certificate.unknown_residual_basis_points.to_string());
+    for reason in &certificate.reason_codes {
+        projection.push('|');
+        projection.push_str(reason);
+    }
+    for term in &certificate.term_breakdown {
+        projection.push('|');
+        projection.push_str(&term.term_id);
+        projection.push('=');
+        projection.push_str(&term.measurement_class);
+        projection.push(':');
+        projection.push_str(&term.attribution_state);
+        projection.push(':');
+        projection.push_str(&term.observed_value.to_string());
+        projection.push(':');
+        projection.push_str(&term.direct_duration_ns.to_string());
+    }
+    stable_fnv1a64_hex(projection.as_bytes())
+}
+
+/// Verify one latency-budget certificate from compact tail evidence.
+///
+/// Invalid evidence returns a `fail_closed` certificate instead of a pass. Valid
+/// evidence that misses the requested budget returns `no_win`, preserving the
+/// conservative fallback profile.
+#[must_use]
+pub fn verify_tail_latency_budget_certificate(
+    evidence: TailLatencyBudgetEvidence,
+) -> TailLatencyBudgetCertificate {
+    let contract = tail_latency_taxonomy_contract();
+    let mut fail_reasons = Vec::new();
+    let mut no_win_reasons = Vec::new();
+    let mut direct_duration_seen = false;
+    let mut unknown_residual_ns = 0_u64;
+    let mut total_latency_ns = 0_u64;
+
+    if evidence.certificate_id.trim().is_empty() {
+        unique_push_reason(&mut fail_reasons, "empty_certificate_id");
+    }
+    if evidence.scenario_id.trim().is_empty() {
+        unique_push_reason(&mut fail_reasons, "empty_scenario_id");
+    }
+    if evidence.candidate_id.trim().is_empty() {
+        unique_push_reason(&mut fail_reasons, "empty_candidate_id");
+    }
+    if evidence.fallback_profile.trim().is_empty() {
+        unique_push_reason(&mut fail_reasons, "empty_fallback_profile");
+    }
+    if evidence.replay_command.trim().is_empty() {
+        unique_push_reason(&mut fail_reasons, "missing_replay_command");
+    }
+    if evidence.tail_events.is_empty() {
+        unique_push_reason(&mut fail_reasons, "missing_tail_events");
+    }
+    if evidence.sample_count < evidence.gate.min_sample_count {
+        unique_push_reason(&mut fail_reasons, "insufficient_sample_count");
+    }
+    if evidence.evidence_epoch > evidence.gate.calibration_valid_until_epoch {
+        unique_push_reason(&mut fail_reasons, "stale_calibration");
+    }
+
+    let quantiles = evidence.quantiles;
+    if let Some(quantiles) = quantiles {
+        if !quantiles.ordered() {
+            unique_push_reason(&mut fail_reasons, "unordered_quantiles");
+        }
+    } else {
+        unique_push_reason(&mut fail_reasons, "missing_quantiles_mean_only_evidence");
+    }
+
+    let uncertainty = evidence.uncertainty;
+    if let Some(uncertainty) = uncertainty {
+        if !uncertainty.valid() {
+            unique_push_reason(&mut fail_reasons, "invalid_uncertainty_bounds");
+        }
+    } else {
+        unique_push_reason(&mut fail_reasons, "missing_uncertainty_bounds");
+    }
+
+    let term_ids: Vec<&str> = contract
+        .terms
+        .iter()
+        .map(|term| term.term_id.as_str())
+        .collect();
+    let required_keys: Vec<&str> = contract
+        .required_log_fields
+        .iter()
+        .map(|field| field.key.as_str())
+        .collect();
+    let mut term_breakdown = Vec::with_capacity(term_ids.len());
+
+    for event in &evidence.tail_events {
+        if event.schema_version != TAIL_LATENCY_COMPACT_EVENT_SCHEMA_VERSION {
+            unique_push_reason(&mut fail_reasons, "wrong_tail_event_schema");
+        }
+        if event.taxonomy_version != TAIL_LATENCY_TAXONOMY_CONTRACT_VERSION {
+            unique_push_reason(&mut fail_reasons, "wrong_tail_taxonomy_version");
+        }
+        for key in &required_keys {
+            if !event.fields.contains_key(*key) {
+                unique_push_reason(&mut fail_reasons, format!("missing_required_field:{key}"));
+            }
+        }
+        for term_id in &term_ids {
+            if !event.attribution_states.contains_key(*term_id) {
+                unique_push_reason(&mut fail_reasons, format!("missing_term:{term_id}"));
+            }
+        }
+
+        let event_total = tail_field_unsigned(event, "tail.total_latency_ns").unwrap_or(0);
+        total_latency_ns = total_latency_ns.saturating_add(event_total);
+        let unknown_field = tail_field_unsigned(event, "tail.unknown.unmeasured_ns");
+        if unknown_field != Some(event.unknown_unmeasured_ns) {
+            unique_push_reason(&mut fail_reasons, "hidden_unknown_bucket");
+        }
+        if !event.missing_producers.is_empty() && event.unknown_unmeasured_ns == 0 {
+            unique_push_reason(&mut fail_reasons, "hidden_unknown_bucket");
+        }
+        unknown_residual_ns = unknown_residual_ns.saturating_add(event.unknown_unmeasured_ns);
+
+        let retries_direct = tail_field_unsigned(event, "tail.retries.total_delay_ns").unwrap_or(0);
+        let sync_direct =
+            tail_field_unsigned(event, "tail.synchronization.lock_wait_ns").unwrap_or(0);
+        direct_duration_seen |= retries_direct > 0 || sync_direct > 0;
+    }
+
+    if !evidence.tail_events.is_empty() && !direct_duration_seen {
+        unique_push_reason(&mut fail_reasons, "proxy_only_green_row");
+    }
+
+    for term_id in &term_ids {
+        let field_key = tail_term_field_key(term_id);
+        let measurement_class = tail_term_measurement_class(term_id);
+        let mut observed_value = 0_u64;
+        let mut direct_duration_ns = 0_u64;
+        let mut state = "absent";
+        let mut missing = false;
+        for event in &evidence.tail_events {
+            observed_value =
+                observed_value.saturating_add(tail_field_unsigned(event, field_key).unwrap_or(0));
+            if measurement_class == "direct_duration" {
+                direct_duration_ns = direct_duration_ns
+                    .saturating_add(tail_field_unsigned(event, field_key).unwrap_or(0));
+            }
+            match event.attribution_states.get(*term_id).map(String::as_str) {
+                Some("missing_producer") => missing = true,
+                Some(current) if state == "absent" => state = current,
+                Some(current) if state != current => state = "mixed",
+                _ => {}
+            }
+        }
+        if missing {
+            state = "missing_producer";
+        }
+        term_breakdown.push(TailLatencyBudgetTermEvidence {
+            term_id: (*term_id).to_string(),
+            field_key: field_key.to_string(),
+            measurement_class: measurement_class.to_string(),
+            attribution_state: state.to_string(),
+            observed_value,
+            direct_duration_ns,
+        });
+    }
+
+    let unknown_residual_basis_points = if total_latency_ns == 0 {
+        0
+    } else {
+        unknown_residual_ns
+            .saturating_mul(10_000)
+            .saturating_div(total_latency_ns)
+    };
+
+    if unknown_residual_ns > evidence.gate.max_unknown_residual_ns {
+        unique_push_reason(&mut no_win_reasons, "unknown_residual_above_limit");
+    }
+    if unknown_residual_basis_points > evidence.gate.max_unknown_residual_basis_points {
+        unique_push_reason(&mut no_win_reasons, "unknown_fraction_above_limit");
+    }
+    if let (Some(quantiles), Some(uncertainty)) = (quantiles, uncertainty) {
+        let conservative_p999 = quantiles
+            .p999_latency_ns
+            .saturating_add(uncertainty.upper_bound_ns);
+        if conservative_p999 > evidence.gate.budget_p999_latency_ns {
+            unique_push_reason(&mut no_win_reasons, "p999_budget_exceeded");
+        }
+        let allowed_candidate_p999 = evidence
+            .baseline_p999_latency_ns
+            .saturating_add(evidence.gate.allowed_p999_regression_ns);
+        if evidence.candidate_p999_latency_ns > allowed_candidate_p999 {
+            unique_push_reason(&mut no_win_reasons, "asymmetric_regression_gate");
+        }
+    }
+
+    let (verdict, reason_codes) = if fail_reasons.is_empty() {
+        if no_win_reasons.is_empty() {
+            (TailLatencyBudgetVerdict::Pass, Vec::new())
+        } else {
+            (TailLatencyBudgetVerdict::NoWin, no_win_reasons)
+        }
+    } else {
+        (TailLatencyBudgetVerdict::FailClosed, fail_reasons)
+    };
+    let fallback_reason = reason_codes.first().cloned();
+
+    let mut certificate = TailLatencyBudgetCertificate {
+        schema_version: TAIL_LATENCY_BUDGET_CERTIFICATE_SCHEMA_VERSION.to_string(),
+        certificate_id: evidence.certificate_id.trim().to_string(),
+        certificate_hash: String::new(),
+        scenario_id: evidence.scenario_id.trim().to_string(),
+        candidate_id: evidence.candidate_id.trim().to_string(),
+        fallback_profile: evidence.fallback_profile.trim().to_string(),
+        taxonomy_version: TAIL_LATENCY_TAXONOMY_CONTRACT_VERSION.to_string(),
+        verdict,
+        reason_codes,
+        fallback_reason,
+        sample_count: evidence.sample_count,
+        p50_latency_ns: quantiles.map(|value| value.p50_latency_ns),
+        p95_latency_ns: quantiles.map(|value| value.p95_latency_ns),
+        p99_latency_ns: quantiles.map(|value| value.p99_latency_ns),
+        p999_latency_ns: quantiles.map(|value| value.p999_latency_ns),
+        uncertainty_lower_bound_ns: uncertainty.map(|value| value.lower_bound_ns),
+        uncertainty_upper_bound_ns: uncertainty.map(|value| value.upper_bound_ns),
+        budget_p999_latency_ns: evidence.gate.budget_p999_latency_ns,
+        unknown_residual_ns,
+        unknown_residual_basis_points,
+        term_breakdown,
+        replay_command: evidence.replay_command,
+    };
+    certificate.certificate_hash = tail_latency_budget_certificate_hash(&certificate);
+    certificate
+}
+
 fn tail_latency_log_field(
     key: &str,
     unit: &str,
@@ -4589,6 +5179,177 @@ mod tests {
             extended_event.overhead_estimate_bytes <= 2_048,
             "extended overhead estimate should remain bounded: {} bytes",
             extended_event.overhead_estimate_bytes
+        );
+    }
+
+    fn latency_budget_gate() -> TailLatencyBudgetGate {
+        TailLatencyBudgetGate::new(20_000, 64, 20_000, 9_000, 10, 500)
+    }
+
+    fn latency_budget_event() -> TailLatencyCompactEvent {
+        emit_tail_latency_compact_event(
+            TailLatencyEmitterConfig::enabled_core(),
+            "LATENCY-BUDGET-PASS",
+            "event-0001",
+            TailLatencyCompactSample::new(18_000)
+                .with_ready_queue_depth(18)
+                .with_poll_count(7)
+                .with_events_received(4)
+                .with_retries_total_delay_ns(2_000)
+                .with_synchronization_lock_wait_ns(1_000)
+                .with_allocator_live_allocations(22),
+        )
+        .expect("latency budget event should emit")
+        .expect("enabled event should be present")
+    }
+
+    fn latency_budget_evidence() -> TailLatencyBudgetEvidence {
+        TailLatencyBudgetEvidence::new(
+            "latency-budget-cert-pass",
+            "LATENCY-BUDGET-PASS",
+            "candidate-balanced",
+            "conservative-baseline",
+            "bash scripts/run_latency_budget_certificate_smoke.sh --execute --scenario LATENCY-BUDGET-PASS",
+            latency_budget_gate(),
+        )
+        .with_sample_window(256, 7)
+        .with_quantiles(TailLatencyBudgetQuantiles::new(9_000, 13_000, 16_000, 17_000))
+        .with_uncertainty(TailLatencyBudgetUncertainty::new(250, 750))
+        .with_regression_window(17_500, 17_000)
+        .with_tail_events(vec![latency_budget_event()])
+    }
+
+    #[test]
+    fn latency_budget_certificate_accepts_direct_tail_evidence() {
+        let certificate = verify_tail_latency_budget_certificate(latency_budget_evidence());
+
+        assert_eq!(certificate.verdict, TailLatencyBudgetVerdict::Pass);
+        assert!(certificate.reason_codes.is_empty());
+        assert_eq!(
+            certificate.schema_version,
+            TAIL_LATENCY_BUDGET_CERTIFICATE_SCHEMA_VERSION
+        );
+        assert_eq!(
+            certificate.taxonomy_version,
+            TAIL_LATENCY_TAXONOMY_CONTRACT_VERSION
+        );
+        assert!(certificate.certificate_hash.starts_with("fnv1a64:"));
+        assert!(
+            certificate
+                .term_breakdown
+                .iter()
+                .any(|term| term.term_id == "retries"
+                    && term.measurement_class == "direct_duration"
+                    && term.direct_duration_ns == 2_000)
+        );
+        assert!(
+            certificate
+                .term_breakdown
+                .iter()
+                .any(|term| term.term_id == "unknown"
+                    && term.measurement_class == "unknown_bucket"
+                    && term.observed_value == certificate.unknown_residual_ns)
+        );
+    }
+
+    #[test]
+    fn latency_budget_certificate_rejects_missing_terms_and_hidden_unknown() {
+        let mut event = latency_budget_event();
+        event.attribution_states.remove("service");
+        event.fields.remove("tail.unknown.unmeasured_ns");
+
+        let certificate = verify_tail_latency_budget_certificate(
+            latency_budget_evidence().with_tail_events(vec![event]),
+        );
+
+        assert_eq!(certificate.verdict, TailLatencyBudgetVerdict::FailClosed);
+        assert!(
+            certificate
+                .reason_codes
+                .contains(&"missing_term:service".to_string())
+        );
+        assert!(
+            certificate
+                .reason_codes
+                .contains(&"missing_required_field:tail.unknown.unmeasured_ns".to_string())
+        );
+        assert!(
+            certificate
+                .reason_codes
+                .contains(&"hidden_unknown_bucket".to_string())
+        );
+    }
+
+    #[test]
+    fn latency_budget_certificate_rejects_stale_mean_only_and_proxy_only_evidence() {
+        let proxy_only = emit_tail_latency_compact_event(
+            TailLatencyEmitterConfig::enabled_core(),
+            "LATENCY-BUDGET-PROXY-ONLY",
+            "event-proxy",
+            TailLatencyCompactSample::new(1_000)
+                .with_ready_queue_depth(1)
+                .with_poll_count(1)
+                .with_events_received(1)
+                .with_allocator_live_allocations(1),
+        )
+        .expect("proxy-only event should emit")
+        .expect("enabled event should be present");
+
+        let certificate = verify_tail_latency_budget_certificate(
+            TailLatencyBudgetEvidence::new(
+                "latency-budget-cert-stale",
+                "LATENCY-BUDGET-PROXY-ONLY",
+                "candidate-proxy-only",
+                "conservative-baseline",
+                "bash scripts/run_latency_budget_certificate_smoke.sh --execute --scenario LATENCY-BUDGET-PROXY-ONLY",
+                latency_budget_gate(),
+            )
+            .with_sample_window(16, 11)
+            .with_uncertainty(TailLatencyBudgetUncertainty::new(0, 10))
+            .with_regression_window(1_000, 900)
+            .with_tail_events(vec![proxy_only]),
+        );
+
+        assert_eq!(certificate.verdict, TailLatencyBudgetVerdict::FailClosed);
+        for reason in [
+            "insufficient_sample_count",
+            "stale_calibration",
+            "missing_quantiles_mean_only_evidence",
+            "proxy_only_green_row",
+        ] {
+            assert!(
+                certificate.reason_codes.contains(&reason.to_string()),
+                "missing reason {reason}: {:?}",
+                certificate.reason_codes
+            );
+        }
+    }
+
+    #[test]
+    fn latency_budget_certificate_returns_no_win_for_budget_or_regression_miss() {
+        let certificate = verify_tail_latency_budget_certificate(
+            latency_budget_evidence()
+                .with_quantiles(TailLatencyBudgetQuantiles::new(
+                    9_000, 18_000, 20_000, 22_000,
+                ))
+                .with_uncertainty(TailLatencyBudgetUncertainty::new(500, 1_000))
+                .with_regression_window(17_500, 21_000),
+        );
+
+        assert_eq!(certificate.verdict, TailLatencyBudgetVerdict::NoWin);
+        assert!(
+            certificate
+                .reason_codes
+                .contains(&"p999_budget_exceeded".to_string())
+        );
+        assert!(
+            certificate
+                .reason_codes
+                .contains(&"asymmetric_regression_gate".to_string())
+        );
+        assert_eq!(
+            certificate.fallback_reason.as_deref(),
+            Some("p999_budget_exceeded")
         );
     }
 

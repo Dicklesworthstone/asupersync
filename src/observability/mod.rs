@@ -179,11 +179,15 @@ pub use debt_runtime_integration::{DebtHealthReport, DebtRuntimeIntegration};
 pub use diagnostics::{
     BlockReason, CancelReasonInfo, CancellationExplanation, CancellationStep, DeadlockCycle,
     DeadlockSeverity, Diagnostics, DirectionalDeadlockReport, ObligationLeak, Reason,
-    RegionOpenExplanation, TAIL_LATENCY_COMPACT_EVENT_SCHEMA_VERSION,
-    TAIL_LATENCY_TAXONOMY_CONTRACT_VERSION, TailLatencyCompactEvent, TailLatencyCompactSample,
+    RegionOpenExplanation, TAIL_LATENCY_BUDGET_CERTIFICATE_SCHEMA_VERSION,
+    TAIL_LATENCY_COMPACT_EVENT_SCHEMA_VERSION, TAIL_LATENCY_TAXONOMY_CONTRACT_VERSION,
+    TailLatencyBudgetCertificate, TailLatencyBudgetEvidence, TailLatencyBudgetGate,
+    TailLatencyBudgetQuantiles, TailLatencyBudgetTermEvidence, TailLatencyBudgetUncertainty,
+    TailLatencyBudgetVerdict, TailLatencyCompactEvent, TailLatencyCompactSample,
     TailLatencyEmitError, TailLatencyEmitterConfig, TailLatencyFieldValue, TailLatencyLogFieldSpec,
     TailLatencySignalSpec, TailLatencyTaxonomyContract, TailLatencyTermSpec,
     TaskBlockedExplanation, emit_tail_latency_compact_event, tail_latency_taxonomy_contract,
+    verify_tail_latency_budget_certificate,
 };
 pub use entry::LogEntry;
 pub use level::LogLevel;
