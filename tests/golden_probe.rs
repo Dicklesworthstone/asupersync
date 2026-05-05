@@ -1,5 +1,3 @@
-#![allow(warnings)]
-#![allow(clippy::all)]
 //! Temporary probe to capture golden vector values for conformance suite.
 //! Run: cargo test --test golden_probe -- --nocapture
 
