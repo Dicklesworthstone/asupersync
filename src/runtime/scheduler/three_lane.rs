@@ -899,7 +899,7 @@ where
     None
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, serde::Serialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, serde::Serialize)]
 #[serde(rename_all = "snake_case")]
 // Precise causes are populated as wait-site registration paths are wired up;
 // current production snapshots fall back to Unknown.
@@ -909,13 +909,8 @@ enum WaitCause {
     Channel,
     Notify,
     Join,
+    #[default]
     Unknown,
-}
-
-impl Default for WaitCause {
-    fn default() -> Self {
-        Self::Unknown
-    }
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, serde::Serialize)]
@@ -1831,9 +1826,9 @@ impl ThreeLaneScheduler {
     pub fn set_scheduler_evidence_window(&mut self, sample_window: usize) {
         let collector = (sample_window > 0)
             .then(|| Arc::new(Mutex::new(SchedulerEvidenceCollector::new(sample_window))));
-        self.scheduler_evidence = collector.clone();
+        self.scheduler_evidence.clone_from(&collector);
         for worker in &mut self.workers {
-            worker.scheduler_evidence = collector.clone();
+            worker.scheduler_evidence.clone_from(&collector);
         }
     }
 
