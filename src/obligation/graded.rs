@@ -638,6 +638,47 @@ impl fmt::Display for TypedObligationKindError {
 
 impl std::error::Error for TypedObligationKindError {}
 
+/// Contract row describing the typed obligation bridge evidence surface.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TypedObligationBridgeContract {
+    /// Bead that introduced the bridge contract.
+    pub bead_id: &'static str,
+    /// Protocol family strengthened by the typed bridge.
+    pub protocol_family: &'static str,
+    /// Typed API entrypoint that materializes a static obligation token.
+    pub typed_entrypoint: &'static str,
+    /// Dynamic fallback path that remains authoritative during migration.
+    pub dynamic_fallback: &'static str,
+    /// Compile-fail proof surface for invalid typestate transitions.
+    pub compile_fail_surface: &'static str,
+    /// Focused reproduction command for the contract evidence.
+    pub replay_command: &'static str,
+    /// Stable invariant checklist covered by the focused tests.
+    pub invariants: &'static [&'static str],
+}
+
+const TYPED_OBLIGATION_BRIDGE_INVARIANTS: &[&str] = &[
+    "matching dynamic kind creates a typed token",
+    "mismatched dynamic kind does not arm a token",
+    "scope accounting increments only after kind proof succeeds",
+    "abort cleanup balances a scoped lease token",
+    "committed proof has no abort transition",
+];
+
+/// Returns the contract row for the dynamic-to-typed obligation bridge.
+#[must_use]
+pub const fn typed_obligation_bridge_contract() -> TypedObligationBridgeContract {
+    TypedObligationBridgeContract {
+        bead_id: "asupersync-d87ytw.13",
+        protocol_family: "send-permit/ack/lease graded obligations",
+        typed_entrypoint: "asupersync::obligation::graded::ObligationToken::try_reserve_kind",
+        dynamic_fallback: "asupersync::record::ObligationKind",
+        compile_fail_surface: "src/obligation/graded.rs::ObligationToken commit-then-abort doctest",
+        replay_command: "rch exec -- env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-C debuginfo=0' CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_asupersync_graded_bridge cargo test -p asupersync --lib dynamic_kind_bridge --features test-internals -- --nocapture",
+        invariants: TYPED_OBLIGATION_BRIDGE_INVARIANTS,
+    }
+}
+
 /// Marker type for [`ObligationKind::SendPermit`].
 #[derive(Debug)]
 pub enum SendPermit {}
@@ -1534,6 +1575,66 @@ mod tests {
             proof.total_reserved()
         );
         crate::test_complete!("scoped_dynamic_kind_bridge_mismatch_does_not_increment_scope");
+    }
+
+    #[test]
+    fn typed_obligation_bridge_contract_logs_required_evidence_fields() {
+        init_test("typed_obligation_bridge_contract_logs_required_evidence_fields");
+        let contract = typed_obligation_bridge_contract();
+
+        crate::assert_with_log!(
+            contract.bead_id == "asupersync-d87ytw.13",
+            "bead id",
+            "asupersync-d87ytw.13",
+            contract.bead_id
+        );
+        crate::assert_with_log!(
+            contract.protocol_family.contains("send-permit")
+                && contract.protocol_family.contains("lease"),
+            "protocol family",
+            "send-permit/ack/lease graded obligations",
+            contract.protocol_family
+        );
+        crate::assert_with_log!(
+            contract
+                .typed_entrypoint
+                .ends_with("ObligationToken::try_reserve_kind"),
+            "typed entrypoint",
+            "ObligationToken::try_reserve_kind",
+            contract.typed_entrypoint
+        );
+        crate::assert_with_log!(
+            contract.dynamic_fallback == "asupersync::record::ObligationKind",
+            "dynamic fallback",
+            "asupersync::record::ObligationKind",
+            contract.dynamic_fallback
+        );
+        crate::assert_with_log!(
+            contract.compile_fail_surface.contains("commit-then-abort"),
+            "compile-fail surface",
+            "commit-then-abort",
+            contract.compile_fail_surface
+        );
+        crate::assert_with_log!(
+            contract.replay_command.contains("rch exec --")
+                && contract
+                    .replay_command
+                    .contains("--lib dynamic_kind_bridge"),
+            "replay command",
+            "rch exec -- cargo test --lib dynamic_kind_bridge",
+            contract.replay_command
+        );
+        crate::assert_with_log!(
+            contract
+                .invariants
+                .contains(&"mismatched dynamic kind does not arm a token"),
+            "migration fallback invariant",
+            true,
+            contract
+                .invariants
+                .contains(&"mismatched dynamic kind does not arm a token")
+        );
+        crate::test_complete!("typed_obligation_bridge_contract_logs_required_evidence_fields");
     }
 
     #[test]
