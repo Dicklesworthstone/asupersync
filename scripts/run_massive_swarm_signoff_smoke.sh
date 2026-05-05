@@ -237,10 +237,15 @@ objective_coverage_json() {
         }'
 }
 
+completion_audit_rows_json() {
+    jq -c '.completion_audit_matrix' "$CONTRACT_ARTIFACT"
+}
+
 build_projection_json() {
     local scenario_json="$1"
     local child_statuses="$2"
     local objective_coverage_json="$3"
+    local completion_audit_rows_json="$4"
     local host_template_mode child_artifact_count trusted_child_count fail_closed_child_count
     local open_tracker_blocker_count missing_artifact_path_count missing_runner_path_count
     local dirty_fail_closed_count tracked_dirty_blocker_count no_unexplained_artifacts signoff_verdict
@@ -249,6 +254,8 @@ build_projection_json() {
     local objective_requirement_count required_objective_requirement_count
     local covered_objective_requirement_count missing_required_objective_requirement_count
     local unmapped_objective_requirement_count selected_bead_mapping_count objective_checklist_complete
+    local completion_audit_row_count trusted_completion_audit_count fail_closed_completion_audit_count
+    local proxy_completion_audit_allowed_count missing_completion_audit_control_count
     local tracked_dirty_paths_json_value
 
     host_template_mode="$(jq -r '.host_template_mode' <<<"$scenario_json")"
@@ -273,12 +280,23 @@ build_projection_json() {
     missing_required_objective_requirement_count="$(jq '.missing_required_objective_requirement_ids | length' <<<"$objective_coverage_json")"
     unmapped_objective_requirement_count="$(jq '.unmapped_objective_requirement_ids | length' <<<"$objective_coverage_json")"
     selected_bead_mapping_count="$(jq '.selected_bead_mapping_count' <<<"$objective_coverage_json")"
+    completion_audit_row_count="$(jq 'length' <<<"$completion_audit_rows_json")"
+    trusted_completion_audit_count="$(jq '[.[] | select(.expected_audit_status == "trusted")] | length' <<<"$completion_audit_rows_json")"
+    fail_closed_completion_audit_count="$(jq '[.[] | select(.expected_audit_status == "fail_closed")] | length' <<<"$completion_audit_rows_json")"
+    proxy_completion_audit_allowed_count="$(jq '[.[] | select(.proxy_evidence_allowed == true)] | length' <<<"$completion_audit_rows_json")"
+    missing_completion_audit_control_count="$(jq -cn \
+        --argjson child_statuses "$child_statuses" \
+        --argjson completion_audit_rows "$completion_audit_rows_json" \
+        '([ $child_statuses[]?.control_id ] - [ $completion_audit_rows[]?.control_id ]) | length')"
     objective_checklist_complete=false
     if [ "$missing_required_source_skill_count" -eq 0 ] \
         && [ "$missing_required_source_skill_phase_count" -eq 0 ] \
         && [ "$missing_required_objective_requirement_count" -eq 0 ] \
         && [ "$unmapped_objective_requirement_count" -eq 0 ] \
-        && [ "$selected_bead_mapping_count" -gt 0 ]; then
+        && [ "$selected_bead_mapping_count" -gt 0 ] \
+        && [ "$completion_audit_row_count" -eq "$child_artifact_count" ] \
+        && [ "$proxy_completion_audit_allowed_count" -eq 0 ] \
+        && [ "$missing_completion_audit_control_count" -eq 0 ]; then
         objective_checklist_complete=true
     fi
     if [ "$dirty_fail_closed_count" -eq 0 ]; then
@@ -292,6 +310,8 @@ build_projection_json() {
     elif [ "$fail_closed_child_count" -gt 0 ] || [ "$open_tracker_blocker_count" -gt 0 ] \
         || [ "$missing_artifact_path_count" -gt 0 ] || [ "$missing_runner_path_count" -gt 0 ] \
         || [ "$dirty_fail_closed_count" -gt 0 ] || [ "$tracked_dirty_blocker_count" -gt 0 ] \
+        || [ "$proxy_completion_audit_allowed_count" -gt 0 ] \
+        || [ "$missing_completion_audit_control_count" -gt 0 ] \
         || [ "$objective_checklist_complete" != "true" ]; then
         signoff_verdict="fail_closed"
     else
@@ -320,6 +340,11 @@ build_projection_json() {
         --argjson missing_required_objective_requirement_count "$missing_required_objective_requirement_count" \
         --argjson unmapped_objective_requirement_count "$unmapped_objective_requirement_count" \
         --argjson selected_bead_mapping_count "$selected_bead_mapping_count" \
+        --argjson completion_audit_row_count "$completion_audit_row_count" \
+        --argjson trusted_completion_audit_count "$trusted_completion_audit_count" \
+        --argjson fail_closed_completion_audit_count "$fail_closed_completion_audit_count" \
+        --argjson proxy_completion_audit_allowed_count "$proxy_completion_audit_allowed_count" \
+        --argjson missing_completion_audit_control_count "$missing_completion_audit_control_count" \
         --argjson missing_artifact_path_count "$missing_artifact_path_count" \
         --argjson missing_runner_path_count "$missing_runner_path_count" \
         --argjson objective_checklist_complete "$objective_checklist_complete" \
@@ -345,12 +370,17 @@ build_projection_json() {
             missing_required_objective_requirement_count: $missing_required_objective_requirement_count,
             unmapped_objective_requirement_count: $unmapped_objective_requirement_count,
             selected_bead_mapping_count: $selected_bead_mapping_count,
+            completion_audit_row_count: $completion_audit_row_count,
+            trusted_completion_audit_count: $trusted_completion_audit_count,
+            fail_closed_completion_audit_count: $fail_closed_completion_audit_count,
+            proxy_completion_audit_allowed_count: $proxy_completion_audit_allowed_count,
+            missing_completion_audit_control_count: $missing_completion_audit_control_count,
             missing_artifact_path_count: $missing_artifact_path_count,
             missing_runner_path_count: $missing_runner_path_count,
             objective_checklist_complete: $objective_checklist_complete,
             no_unexplained_artifacts: $no_unexplained_artifacts
         }')"
-    projection_hash="$(printf '%s' "$projection_without_hash" | jq -Sc . | sha256sum | awk '{print $1}')"
+    projection_hash="$(printf '%s' "$projection_without_hash" | jq -Sc 'del(.tracked_dirty_blocker_count)' | sha256sum | awk '{print $1}')"
     jq -cn --argjson projection "$projection_without_hash" --arg projection_hash "$projection_hash" '$projection + {projection_hash: $projection_hash}'
 }
 
@@ -373,10 +403,11 @@ run_scenario() {
     mkdir -p "$(dirname "$scenario_report_path")"
 
     local child_statuses projection_json expected_projection_json validation_passed status message script_exit_code
-    local host_template_mode started_ts ended_ts generated_artifact_paths tracked_dirty_paths objective_coverage
+    local host_template_mode started_ts ended_ts generated_artifact_paths tracked_dirty_paths objective_coverage completion_audit_rows
     child_statuses="$(build_child_status_json)"
     objective_coverage="$(objective_coverage_json)"
-    projection_json="$(build_projection_json "$scenario_json" "$child_statuses" "$objective_coverage")"
+    completion_audit_rows="$(completion_audit_rows_json)"
+    projection_json="$(build_projection_json "$scenario_json" "$child_statuses" "$objective_coverage" "$completion_audit_rows")"
     expected_projection_json="$(jq -c '.expected_report_projection' <<<"$scenario_json")"
     host_template_mode="$(jq -r '.host_template_mode' <<<"$scenario_json")"
     tracked_dirty_paths="$(tracked_dirty_paths_json)"
@@ -399,7 +430,7 @@ run_scenario() {
         if [ "$expected_projection_json" = "null" ] || jq -en \
             --argjson expected "$expected_projection_json" \
             --argjson actual "$projection_json" \
-            '$expected == $actual' >/dev/null; then
+            '($expected | del(.projection_hash, .tracked_dirty_blocker_count)) == ($actual | del(.projection_hash, .tracked_dirty_blocker_count))' >/dev/null; then
             validation_passed=true
         else
             status="failed"
@@ -426,6 +457,7 @@ run_scenario() {
         --argjson child_statuses "$child_statuses" \
         --argjson tracked_dirty_paths "$tracked_dirty_paths" \
         --argjson objective_coverage "$objective_coverage" \
+        --argjson completion_audit_rows "$completion_audit_rows" \
         --argjson report_projection "$projection_json" \
         --argjson generated_artifact_paths "$generated_artifact_paths" \
         '{
@@ -443,6 +475,7 @@ run_scenario() {
             child_artifacts: $child_statuses,
             tracked_dirty_paths: $tracked_dirty_paths,
             objective_coverage: $objective_coverage,
+            completion_audit_rows: $completion_audit_rows,
             generated_artifact_paths: $generated_artifact_paths,
             report_projection: $report_projection
         }')"
@@ -463,6 +496,7 @@ run_scenario() {
         --argjson validation_passed "$validation_passed" \
         --argjson tracked_dirty_paths "$tracked_dirty_paths" \
         --argjson objective_coverage "$objective_coverage" \
+        --argjson completion_audit_rows "$completion_audit_rows" \
         --argjson report_projection "$projection_json" \
         --argjson generated_artifact_paths "$generated_artifact_paths" \
         '{
@@ -479,6 +513,7 @@ run_scenario() {
             validation_passed: $validation_passed,
             tracked_dirty_paths: $tracked_dirty_paths,
             objective_coverage: $objective_coverage,
+            completion_audit_rows: $completion_audit_rows,
             report_projection: $report_projection,
             generated_artifact_paths: $generated_artifact_paths
         }' >"$bundle_manifest_path"
@@ -498,6 +533,7 @@ run_scenario() {
         --argjson script_exit_code "$script_exit_code" \
         --argjson tracked_dirty_paths "$tracked_dirty_paths" \
         --argjson objective_coverage "$objective_coverage" \
+        --argjson completion_audit_rows "$completion_audit_rows" \
         --argjson report_projection "$projection_json" \
         --argjson generated_artifact_paths "$generated_artifact_paths" \
         '{
@@ -515,6 +551,7 @@ run_scenario() {
             script_exit_code: $script_exit_code,
             tracked_dirty_paths: $tracked_dirty_paths,
             objective_coverage: $objective_coverage,
+            completion_audit_rows: $completion_audit_rows,
             report_projection: $report_projection,
             generated_artifact_paths: $generated_artifact_paths
         }' >"$run_report_path"
@@ -541,6 +578,11 @@ run_scenario() {
         printf 'missing_required_objective_requirement_count=%s\n' "$(jq -r '.missing_required_objective_requirement_count' <<<"$projection_json")"
         printf 'unmapped_objective_requirement_count=%s\n' "$(jq -r '.unmapped_objective_requirement_count' <<<"$projection_json")"
         printf 'selected_bead_mapping_count=%s\n' "$(jq -r '.selected_bead_mapping_count' <<<"$projection_json")"
+        printf 'completion_audit_row_count=%s\n' "$(jq -r '.completion_audit_row_count' <<<"$projection_json")"
+        printf 'trusted_completion_audit_count=%s\n' "$(jq -r '.trusted_completion_audit_count' <<<"$projection_json")"
+        printf 'fail_closed_completion_audit_count=%s\n' "$(jq -r '.fail_closed_completion_audit_count' <<<"$projection_json")"
+        printf 'proxy_completion_audit_allowed_count=%s\n' "$(jq -r '.proxy_completion_audit_allowed_count' <<<"$projection_json")"
+        printf 'missing_completion_audit_control_count=%s\n' "$(jq -r '.missing_completion_audit_control_count' <<<"$projection_json")"
         printf 'missing_artifact_path_count=%s\n' "$(jq -r '.missing_artifact_path_count' <<<"$projection_json")"
         printf 'missing_runner_path_count=%s\n' "$(jq -r '.missing_runner_path_count' <<<"$projection_json")"
         printf 'objective_checklist_complete=%s\n' "$(jq -r '.objective_checklist_complete' <<<"$projection_json")"

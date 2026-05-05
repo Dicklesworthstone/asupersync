@@ -912,7 +912,7 @@
       "missing_runner_path_count": 0,
       "objective_checklist_complete": true,
       "no_unexplained_artifacts": false,
-        "projection_hash": "0b064a96e88b2e30b8cb1ecd37f3e6f2afa021e5dd2bc6a630d7a4e8e117a8f5"
+        "projection_hash": "8145ee1a81fb40f134d37a7243b464763838e145423f422a7cf4ca25a6624d4b"
     },
     "required_log_fields": [
       "scenario_id",
@@ -989,7 +989,7 @@
       "missing_runner_path_count": 0,
       "objective_checklist_complete": true,
       "no_unexplained_artifacts": false,
-        "projection_hash": "62d2f3aa0f493a3763c32941f16ea0911b2f350f1aeb2d4748ec2a7e89b00159"
+        "projection_hash": "f92335943b445fddb3846ab9b731ac54fad53d6d267c1724a08b48a3703e8200"
     },
     "required_log_fields": [
       "scenario_id",

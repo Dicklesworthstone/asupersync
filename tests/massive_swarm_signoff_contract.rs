@@ -3,7 +3,7 @@
 #![allow(missing_docs)]
 
 use serde_json::{Map, Value};
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -78,6 +78,141 @@ fn validate_matrix_entry(entry: &Value, required_fields: &[String]) -> Result<()
     Ok(())
 }
 
+fn validate_completion_audit_matrix(
+    artifact: &Value,
+    required_fields: &[String],
+) -> Result<(), String> {
+    let required_requirement_ids: BTreeSet<String> =
+        string_array(&artifact["required_objective_requirement_ids"])
+            .into_iter()
+            .collect();
+    let required_source_skill_phases: BTreeSet<String> =
+        string_array(&artifact["required_source_skill_phases"])
+            .into_iter()
+            .collect();
+    let minimum_evidence_refs: BTreeSet<&str> = [
+        "artifact_path",
+        "contract_version",
+        "unit_proof_ref",
+        "e2e_proof_ref",
+        "reproduction_command",
+        "report_glob",
+        "fallback_mode",
+        "operator_fields",
+        "tracker_status",
+        "proof_status",
+        "blocker_reason",
+    ]
+    .into_iter()
+    .collect();
+
+    let signoff_matrix = artifact["signoff_matrix"]
+        .as_array()
+        .ok_or_else(|| "signoff_matrix must be array".to_string())?;
+    let mut signoff_by_control = BTreeMap::new();
+    for entry in signoff_matrix {
+        let control_id = entry["control_id"]
+            .as_str()
+            .ok_or_else(|| "signoff control_id must be string".to_string())?;
+        signoff_by_control.insert(control_id, entry);
+    }
+
+    let audit_matrix = artifact["completion_audit_matrix"]
+        .as_array()
+        .ok_or_else(|| "completion_audit_matrix must be array".to_string())?;
+    let mut audit_ids = BTreeSet::new();
+    let mut audited_controls = BTreeSet::new();
+    for row in audit_matrix {
+        for field in required_fields {
+            let value = row
+                .get(field)
+                .ok_or_else(|| format!("missing completion audit field {field}"))?;
+            let missing = value.is_null()
+                || value.as_str().is_some_and(str::is_empty)
+                || value.as_array().is_some_and(Vec::is_empty);
+            if missing {
+                return Err(format!("empty completion audit field {field}"));
+            }
+        }
+
+        let audit_id = row["audit_id"]
+            .as_str()
+            .ok_or_else(|| "completion audit audit_id must be string".to_string())?;
+        if !audit_ids.insert(audit_id.to_string()) {
+            return Err(format!("duplicate completion audit id {audit_id}"));
+        }
+        let control_id = row["control_id"]
+            .as_str()
+            .ok_or_else(|| "completion audit control_id must be string".to_string())?;
+        let signoff_row = signoff_by_control
+            .get(control_id)
+            .ok_or_else(|| format!("completion audit references unknown control {control_id}"))?;
+        audited_controls.insert(control_id.to_string());
+
+        if row["proxy_evidence_allowed"].as_bool() != Some(false) {
+            return Err(format!(
+                "completion audit {audit_id} must reject proxy evidence"
+            ));
+        }
+        if row["expected_audit_status"].as_str() != signoff_row["proof_status"].as_str() {
+            return Err(format!(
+                "completion audit {audit_id} status must match signoff proof_status"
+            ));
+        }
+
+        let prompt_ids: BTreeSet<String> = string_array(&row["prompt_requirement_ids"])
+            .into_iter()
+            .collect();
+        if !prompt_ids.is_subset(&required_requirement_ids) {
+            return Err(format!(
+                "completion audit {audit_id} references unknown prompt requirement"
+            ));
+        }
+        let source_phases: BTreeSet<String> = string_array(&row["source_skill_phases"])
+            .into_iter()
+            .collect();
+        if !source_phases.is_subset(&required_source_skill_phases) {
+            return Err(format!(
+                "completion audit {audit_id} references unknown source skill phase"
+            ));
+        }
+
+        let refs: BTreeSet<String> = string_array(&row["required_evidence_refs"])
+            .into_iter()
+            .collect();
+        for required_ref in &minimum_evidence_refs {
+            if !refs.contains(*required_ref) {
+                return Err(format!(
+                    "completion audit {audit_id} missing required evidence ref {required_ref}"
+                ));
+            }
+        }
+        for evidence_ref in refs {
+            let value = signoff_row
+                .get(&evidence_ref)
+                .ok_or_else(|| format!("signoff row {control_id} missing {evidence_ref}"))?;
+            let missing = value.is_null()
+                || (evidence_ref != "blocker_reason" && value.as_str().is_some_and(str::is_empty))
+                || value.as_array().is_some_and(Vec::is_empty);
+            if missing {
+                return Err(format!(
+                    "signoff row {control_id} has empty evidence ref {evidence_ref}"
+                ));
+            }
+        }
+    }
+
+    let signoff_controls: BTreeSet<String> = signoff_by_control
+        .keys()
+        .map(|key| key.to_string())
+        .collect();
+    if audited_controls != signoff_controls {
+        return Err("completion audit matrix must cover every signoff control".to_string());
+    }
+
+    Ok(())
+}
+
 fn validate_artifact(artifact: &Value) -> Result<(), String> {
     let top_level_required = [
         "contract_version",
@@ -92,7 +227,9 @@ fn validate_artifact(artifact: &Value) -> Result<(), String> {
         "tracked_dirty_blocker_fixture_paths",
         "blocked_dependency_policy",
         "required_matrix_fields",
+        "required_completion_audit_fields",
         "signoff_matrix",
+        "completion_audit_matrix",
         "smoke_scenarios",
     ];
     for field in top_level_required {
@@ -112,6 +249,17 @@ fn validate_artifact(artifact: &Value) -> Result<(), String> {
                 .ok_or_else(|| "required_matrix_fields entries must be strings".to_string())
         })
         .collect::<Result<_, _>>()?;
+    let required_completion_audit_fields: Vec<String> =
+        artifact["required_completion_audit_fields"]
+            .as_array()
+            .ok_or_else(|| "required_completion_audit_fields must be array".to_string())?
+            .iter()
+            .map(|value| {
+                value.as_str().map(ToOwned::to_owned).ok_or_else(|| {
+                    "required_completion_audit_fields entries must be strings".to_string()
+                })
+            })
+            .collect::<Result<_, _>>()?;
 
     let matrix = artifact["signoff_matrix"]
         .as_array()
@@ -130,6 +278,7 @@ fn validate_artifact(artifact: &Value) -> Result<(), String> {
             return Err(format!("duplicate control_id {control_id}"));
         }
     }
+    validate_completion_audit_matrix(artifact, &required_completion_audit_fields)?;
 
     let blocked_policy = &artifact["blocked_dependency_policy"];
     if blocked_policy["fail_closed_conditions"]
@@ -550,6 +699,36 @@ fn build_projection(artifact: &Value, scenario_id: &str) -> Value {
     let selected_bead_mapping_count = objective_coverage["selected_bead_mapping_count"]
         .as_u64()
         .expect("selected_bead_mapping_count must be number");
+    let completion_audit_rows = artifact["completion_audit_matrix"]
+        .as_array()
+        .expect("completion_audit_matrix must be array");
+    let completion_audit_row_count = completion_audit_rows.len();
+    let trusted_completion_audit_count = completion_audit_rows
+        .iter()
+        .filter(|row| row["expected_audit_status"].as_str() == Some("trusted"))
+        .count();
+    let fail_closed_completion_audit_count = completion_audit_rows
+        .iter()
+        .filter(|row| row["expected_audit_status"].as_str() == Some("fail_closed"))
+        .count();
+    let proxy_completion_audit_allowed_count = completion_audit_rows
+        .iter()
+        .filter(|row| row["proxy_evidence_allowed"].as_bool() == Some(true))
+        .count();
+    let signoff_controls: BTreeSet<String> = artifact["signoff_matrix"]
+        .as_array()
+        .expect("signoff_matrix must be array")
+        .iter()
+        .filter_map(|entry| entry["control_id"].as_str())
+        .map(ToOwned::to_owned)
+        .collect();
+    let audited_controls: BTreeSet<String> = completion_audit_rows
+        .iter()
+        .filter_map(|entry| entry["control_id"].as_str())
+        .map(ToOwned::to_owned)
+        .collect();
+    let missing_completion_audit_control_count =
+        signoff_controls.difference(&audited_controls).count();
     let host_template_mode = scenario["host_template_mode"]
         .as_bool()
         .expect("host_template_mode must be bool");
@@ -558,7 +737,10 @@ fn build_projection(artifact: &Value, scenario_id: &str) -> Value {
         && missing_required_source_skill_phase_count == 0
         && missing_required_objective_requirement_count == 0
         && unmapped_objective_requirement_count == 0
-        && selected_bead_mapping_count > 0;
+        && selected_bead_mapping_count > 0
+        && completion_audit_row_count == child_artifact_count
+        && proxy_completion_audit_allowed_count == 0
+        && missing_completion_audit_control_count == 0;
 
     let signoff_verdict = if host_template_mode {
         "template_only"
@@ -568,6 +750,8 @@ fn build_projection(artifact: &Value, scenario_id: &str) -> Value {
         || missing_runner_path_count > 0
         || dirty_cluster_fail_closed_count > 0
         || tracked_dirty_blocker_count > 0
+        || proxy_completion_audit_allowed_count > 0
+        || missing_completion_audit_control_count > 0
         || !objective_checklist_complete
     {
         "fail_closed"
@@ -655,6 +839,26 @@ fn build_projection(artifact: &Value, scenario_id: &str) -> Value {
     object.insert(
         "selected_bead_mapping_count".to_string(),
         Value::from(selected_bead_mapping_count),
+    );
+    object.insert(
+        "completion_audit_row_count".to_string(),
+        Value::from(completion_audit_row_count),
+    );
+    object.insert(
+        "trusted_completion_audit_count".to_string(),
+        Value::from(trusted_completion_audit_count),
+    );
+    object.insert(
+        "fail_closed_completion_audit_count".to_string(),
+        Value::from(fail_closed_completion_audit_count),
+    );
+    object.insert(
+        "proxy_completion_audit_allowed_count".to_string(),
+        Value::from(proxy_completion_audit_allowed_count),
+    );
+    object.insert(
+        "missing_completion_audit_control_count".to_string(),
+        Value::from(missing_completion_audit_control_count),
     );
     object.insert(
         "missing_artifact_path_count".to_string(),
@@ -759,6 +963,13 @@ fn fail_closed_entry_with_missing_paths_is_accepted() {
         "runner_path".to_string(),
         Value::String("scripts/run-does-not-exist.sh".to_string()),
     );
+    artifact["completion_audit_matrix"][0]
+        .as_object_mut()
+        .expect("audit row object")
+        .insert(
+            "expected_audit_status".to_string(),
+            Value::String("fail_closed".to_string()),
+        );
     validate_artifact(&artifact)
         .expect("fail_closed rows may point at missing committed artifact/runner paths");
 }
@@ -1071,6 +1282,25 @@ fn objective_provenance_covers_required_skills_and_requirements() {
         coverage["unmapped_objective_requirement_ids"],
         Value::Array(Vec::new()),
         "required objective requirements must all be mapped to selected beads"
+    );
+}
+
+#[test]
+fn completion_audit_matrix_covers_every_signoff_control_without_proxy_evidence() {
+    let artifact = load_artifact();
+    let required_fields = string_array(&artifact["required_completion_audit_fields"]);
+    validate_completion_audit_matrix(&artifact, &required_fields)
+        .expect("completion audit matrix must map every signoff control to live evidence rows");
+
+    let proxy_allowed_count = artifact["completion_audit_matrix"]
+        .as_array()
+        .expect("completion_audit_matrix must be array")
+        .iter()
+        .filter(|row| row["proxy_evidence_allowed"].as_bool() == Some(true))
+        .count();
+    assert_eq!(
+        proxy_allowed_count, 0,
+        "final completion audit must not permit proxy-only evidence"
     );
 }
 
