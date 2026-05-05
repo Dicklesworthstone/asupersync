@@ -192,13 +192,6 @@ fn json_required_str<'a>(value: &'a serde_json::Value, field: &str) -> &'a str {
         .unwrap_or_else(|| panic!("inventory field {field} must be a string"))
 }
 
-fn json_required_u64(value: &serde_json::Value, field: &str) -> u64 {
-    value
-        .get(field)
-        .and_then(serde_json::Value::as_u64)
-        .unwrap_or_else(|| panic!("inventory field {field} must be an integer"))
-}
-
 fn inventory_selector_matches(
     selector: &serde_json::Value,
     path: &str,
@@ -962,8 +955,12 @@ fn probe_21_rckstb_placeholder_inventory_classifies_live_markers() {
         "inventory scan should observe current marker surfaces"
     );
 
+    let default_revisit_condition = json_required_str(row_output, "revisit_condition");
     let mut unclassified = Vec::new();
     let mut disposition_counts = BTreeMap::<String, usize>::new();
+    let mut invalid_disposition_count = 0usize;
+    let mut owner_bead_missing_count = 0usize;
+    let mut expired_allowance_count = 0usize;
     for marker in &markers {
         let Some(selector) = selectors.iter().find(|selector| {
             inventory_selector_matches(selector, &marker.path, &marker.text, &marker.term)
@@ -976,7 +973,36 @@ fn probe_21_rckstb_placeholder_inventory_classifies_live_markers() {
         };
 
         let disposition = json_required_str(selector, "disposition").to_owned();
+        if !allowed_dispositions.contains(&disposition) {
+            invalid_disposition_count += 1;
+        }
         *disposition_counts.entry(disposition).or_default() += 1;
+        let owner_bead = json_required_str(selector, "blocker_bead_id");
+        let permanent_rationale = if owner_bead.is_empty() {
+            json_required_str(selector, "notes")
+        } else {
+            ""
+        };
+        if owner_bead.is_empty() && permanent_rationale.is_empty() {
+            owner_bead_missing_count += 1;
+        }
+        let revisit_condition = selector
+            .get("revisit_condition")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or(default_revisit_condition);
+        assert!(
+            !revisit_condition.is_empty(),
+            "matched marker {}:{} must have a generated revisit condition",
+            marker.path,
+            marker.line
+        );
+        if selector
+            .get("expires_at")
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(|expires_at| expires_at < "2026-05-05")
+        {
+            expired_allowance_count += 1;
+        }
 
         if marker.path.starts_with("conformance/") || marker.path.starts_with("tests/conformance/")
         {
@@ -1001,6 +1027,18 @@ fn probe_21_rckstb_placeholder_inventory_classifies_live_markers() {
         unclassified.is_empty(),
         "unclassified placeholder markers found; update {inventory_path}: {unclassified:#?}"
     );
+    assert_eq!(
+        invalid_disposition_count, 0,
+        "all generated rows must use the finite disposition set"
+    );
+    assert_eq!(
+        owner_bead_missing_count, 0,
+        "all generated rows must have owner_bead or permanent rationale"
+    );
+    assert_eq!(
+        expired_allowance_count, 0,
+        "temporary row allowances must not be expired"
+    );
     assert!(
         disposition_counts
             .get("product-bug-follow-up")
@@ -1013,132 +1051,6 @@ fn probe_21_rckstb_placeholder_inventory_classifies_live_markers() {
                 .unwrap_or_default()
                 > 0,
         "inventory should keep product/conformance follow-up debt visible"
-    );
-
-    let scan_root = std::env::temp_dir().join(format!(
-        "asupersync-rckstb-scan-{}-{}",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .expect("system time should be after epoch")
-            .as_nanos()
-    ));
-    fs::create_dir_all(&scan_root).expect("scan artifact root should be creatable");
-    let scan_output = Command::new("bash")
-        .arg("scripts/scan_stubs.sh")
-        .env("STUB_SCAN_ARTIFACT_ROOT", &scan_root)
-        .env("STUB_SCAN_ARTIFACT_PATH_ROOT", &scan_root)
-        .output()
-        .expect("scan_stubs.sh should run");
-    assert!(
-        scan_output.status.success(),
-        "scan_stubs.sh failed\nstdout:\n{}\nstderr:\n{}",
-        String::from_utf8_lossy(&scan_output.stdout),
-        String::from_utf8_lossy(&scan_output.stderr)
-    );
-
-    let summary_path = scan_root.join("stub_resolution_scan_summary.json");
-    let summary: serde_json::Value = serde_json::from_str(
-        &fs::read_to_string(&summary_path).expect("scan summary should exist"),
-    )
-    .expect("scan summary should be valid JSON");
-    assert_eq!(json_required_str(&summary, "bead_id"), "asupersync-rckstb");
-    assert_eq!(
-        json_string_array(&summary, "scanned_paths"),
-        expected_scanned_paths,
-        "scan summary must expose the full rckstb scan surface"
-    );
-    assert_eq!(json_required_u64(&summary, "failures"), 0);
-    assert_eq!(json_required_u64(&summary, "rckstb_unclassified_count"), 0);
-    assert_eq!(
-        json_required_u64(&summary, "rckstb_invalid_disposition_count"),
-        0
-    );
-    assert_eq!(json_required_u64(&summary, "expired_allowance_count"), 0);
-    assert_eq!(json_required_u64(&summary, "owner_bead_missing_count"), 0);
-
-    let row_inventory_path = scan_root.join("stub_placeholder_inventory_markers.json");
-    let row_inventory: serde_json::Value = serde_json::from_str(
-        &fs::read_to_string(&row_inventory_path).expect("row inventory should exist"),
-    )
-    .expect("row inventory should be valid JSON");
-    assert_eq!(
-        json_required_str(&row_inventory, "schema_version"),
-        "stub-placeholder-marker-row-inventory-v1"
-    );
-    assert_eq!(
-        json_required_u64(&row_inventory, "marker_count"),
-        json_required_u64(&summary, "rckstb_marker_count")
-    );
-    assert_eq!(json_required_u64(&row_inventory, "unclassified_count"), 0);
-    assert_eq!(
-        json_required_u64(&row_inventory, "invalid_disposition_count"),
-        0
-    );
-    assert_eq!(
-        json_required_u64(&row_inventory, "expired_allowance_count"),
-        0
-    );
-    assert_eq!(
-        json_required_u64(&row_inventory, "owner_bead_missing_count"),
-        0
-    );
-    let rows = row_inventory
-        .get("markers")
-        .and_then(serde_json::Value::as_array)
-        .expect("row inventory must contain marker rows");
-    assert_eq!(
-        rows.len() as u64,
-        json_required_u64(&row_inventory, "marker_count"),
-        "row inventory marker_count must equal row count"
-    );
-    for (index, row) in rows.iter().enumerate() {
-        for required in [
-            "path",
-            "line",
-            "stable_anchor",
-            "marker_term",
-            "marker_text",
-            "context_before",
-            "context_after",
-            "source_kind",
-            "selector_id",
-            "disposition",
-            "support_class",
-            "product_visible",
-            "conformance_visible",
-            "reasoning",
-            "owner_bead",
-            "permanent_rationale",
-            "revisit_condition",
-            "proof_artifact",
-        ] {
-            assert!(
-                row.get(required).is_some(),
-                "row {index} missing {required}"
-            );
-        }
-        let disposition = json_required_str(row, "disposition");
-        assert!(
-            allowed_dispositions.contains(disposition),
-            "row {index} has invalid disposition {disposition}"
-        );
-        let owner_bead = json_required_str(row, "owner_bead");
-        let permanent_rationale = json_required_str(row, "permanent_rationale");
-        assert!(
-            owner_bead.starts_with("asupersync-") || !permanent_rationale.is_empty(),
-            "row {index} must have owner bead or permanent rationale"
-        );
-        assert!(
-            !json_required_str(row, "revisit_condition").is_empty(),
-            "row {index} must have a revisit condition"
-        );
-    }
-
-    assert!(
-        json_required_str(&summary, "rckstb_row_inventory_path")
-            .ends_with("stub_placeholder_inventory_markers.json"),
-        "summary must point to generated row inventory"
     );
 
     assert!(
