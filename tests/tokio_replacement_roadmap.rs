@@ -1,5 +1,3 @@
-#![allow(warnings)]
-#![allow(clippy::all)]
 //! Contract tests for dependency-aware Tokio replacement roadmap (2oh2u.1.3.3).
 
 #![allow(missing_docs)]
