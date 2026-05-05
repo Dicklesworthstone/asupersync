@@ -1,0 +1,200 @@
+{
+  "schema_version": "massive-swarm-capacity-envelope-evidence-v1",
+  "bead_id": "asupersync-j1dwk6",
+  "capability_id": "massive_swarm_capacity_envelope",
+  "created_date": "2026-05-05",
+  "runner_script": "scripts/run_massive_swarm_capacity_envelope.sh",
+  "contract_test": "tests/massive_swarm_capacity_envelope_contract.rs",
+  "support_class": "artifact-contract-backed",
+  "metric_policy": {
+    "latency_fields": "p50_us, p95_us, p99_us, and p999_us are capacity-envelope certificate or reduced-scale smoke budgets unless the runner reports metric_source=live_large_host.",
+    "rss_fields": "max_rss_bytes is an upper-bound envelope budget for the profile, not a sampled process RSS unless the runner reports metric_source=live_large_host.",
+    "trace_fields": "trace_bytes is the retained trace budget for the workload profile.",
+    "large_host_truthfulness": "The runner must never emit verdict=pass for profile=large-host unless the executing host has at least 64 CPUs and at least 256 binary GiB of memory."
+  },
+  "required_log_fields": [
+    "bead_id",
+    "scenario_id",
+    "host_cpu_count",
+    "host_memory_gib",
+    "profile",
+    "seed",
+    "task_count",
+    "region_count",
+    "obligation_count",
+    "worker_count",
+    "numa_policy",
+    "p50_us",
+    "p95_us",
+    "p99_us",
+    "p999_us",
+    "max_rss_bytes",
+    "trace_bytes",
+    "cancellation_drain_us",
+    "fallback_reason",
+    "no_win_reason",
+    "unsupported_reason",
+    "artifact_path",
+    "verdict",
+    "first_failure"
+  ],
+  "host_shape_requirement": {
+    "large_host_min_cpu_count": 64,
+    "large_host_min_memory_gib": 256,
+    "memory_unit": "binary_gib_from_memtotal_bytes",
+    "cpu_source": "os_cpu_count_or_nproc",
+    "unsupported_skip_policy": "If either host_cpu_count < 64 or host_memory_gib < 256, profile=large-host must emit verdict=skip, a nonempty unsupported_reason, and first_failure=host_shape_unsupported."
+  },
+  "source_evidence_paths": [
+    "artifacts/capacity_envelope_planner_smoke_contract_v1.json",
+    "artifacts/massive_swarm_signoff_smoke_contract_v1.json",
+    "artifacts/adaptive_batch_sizing_smoke_contract_v1.json",
+    "artifacts/trace_storage_profile_smoke_contract_v1.json",
+    "artifacts/runtime_latency_budget_certificate_v1.json",
+    "scripts/run_capacity_envelope_planner_smoke.sh",
+    "scripts/run_massive_swarm_signoff_smoke.sh",
+    "src/runtime/config.rs",
+    "src/observability/diagnostics.rs"
+  ],
+  "existing_capacity_scenario_refs": [
+    {
+      "scenario_id": "AA-CAPACITY-ENVELOPE-LOCALITY-CERT-64C-256G",
+      "role": "64c_256g_certificate",
+      "expected_selected_profile": "locality_first_64c_256g",
+      "safe_worker_max": 64,
+      "safe_agent_max": 512,
+      "sample_count": 96,
+      "source_artifact": "artifacts/capacity_envelope_planner_smoke_contract_v1.json"
+    },
+    {
+      "scenario_id": "AA-CAPACITY-ENVELOPE-NO-WIN-64C-256G",
+      "role": "no_win_conservative_fallback",
+      "expected_selected_profile": "conservative_baseline",
+      "refused_agent_min": 640,
+      "no_win_reason": "capacity_envelope_no_win_refuses_640_agents_and_pins_conservative_baseline",
+      "source_artifact": "artifacts/capacity_envelope_planner_smoke_contract_v1.json"
+    },
+    {
+      "scenario_id": "AA-CAPACITY-ENVELOPE-STALE-EVIDENCE-FALLBACK",
+      "role": "stale_evidence_fallback",
+      "expected_selected_profile": "conservative_baseline",
+      "fallback_reason": "stale_evidence_prefers_conservative_baseline",
+      "source_artifact": "artifacts/capacity_envelope_planner_smoke_contract_v1.json"
+    },
+    {
+      "scenario_id": "AA-CAPACITY-ENVELOPE-UNDER-SAMPLED-EVIDENCE",
+      "role": "under_sampled_fallback",
+      "expected_selected_profile": "conservative_baseline",
+      "fallback_reason": "under_sampled_evidence_prefers_conservative_baseline",
+      "source_artifact": "artifacts/capacity_envelope_planner_smoke_contract_v1.json"
+    },
+    {
+      "scenario_id": "AA-CAPACITY-ENVELOPE-CALIBRATION-DRIFT-FALLBACK",
+      "role": "calibration_drift_fallback",
+      "expected_selected_profile": "conservative_baseline",
+      "fallback_reason": "calibration_drift_prefers_conservative_baseline",
+      "source_artifact": "artifacts/capacity_envelope_planner_smoke_contract_v1.json"
+    }
+  ],
+  "profile_matrix": [
+    {
+      "profile": "fast",
+      "scenario_id": "AA-MASSIVE-SWARM-CAPACITY-FAST-REDUCED-CI",
+      "description": "Reduced-scale CI smoke profile that keeps the logging, profile selection, and invariant contract cheap enough for focused validation.",
+      "seed": 401001,
+      "task_count": 4096,
+      "region_count": 256,
+      "obligation_count": 4096,
+      "worker_count": 4,
+      "numa_policy": "single_cohort_ci",
+      "p50_us": 45,
+      "p95_us": 170,
+      "p99_us": 420,
+      "p999_us": 760,
+      "max_rss_bytes": 268435456,
+      "trace_bytes": 8388608,
+      "cancellation_drain_us": 1500,
+      "fallback_reason": "",
+      "no_win_reason": "",
+      "requires_large_host": false,
+      "metric_source": "reduced_scale_contract_budget",
+      "source_scenario_refs": [
+        "AA-CAPACITY-ENVELOPE-LOCALITY-CERT-64C-256G"
+      ],
+      "expected_supported_verdict": "pass"
+    },
+    {
+      "profile": "standard",
+      "scenario_id": "AA-MASSIVE-SWARM-CAPACITY-STANDARD-ARTIFACT-CHAIN",
+      "description": "Operator-standard profile that exercises the existing capacity, adaptive-batch, trace-storage, and latency-budget artifacts without requiring a 64c/256GiB worker.",
+      "seed": 401002,
+      "task_count": 32768,
+      "region_count": 2048,
+      "obligation_count": 32768,
+      "worker_count": 16,
+      "numa_policy": "balanced_cohort_conservative",
+      "p50_us": 120,
+      "p95_us": 430,
+      "p99_us": 950,
+      "p999_us": 1400,
+      "max_rss_bytes": 4294967296,
+      "trace_bytes": 134217728,
+      "cancellation_drain_us": 4500,
+      "fallback_reason": "capacity_chain_prefers_conservative_baseline_on_stale_under_sampled_or_drifted_evidence",
+      "no_win_reason": "adaptive_batch_no_win_keeps_fixed_profile_when_p999_regresses",
+      "requires_large_host": false,
+      "metric_source": "artifact_chain_contract_budget",
+      "source_scenario_refs": [
+        "AA-CAPACITY-ENVELOPE-STALE-EVIDENCE-FALLBACK",
+        "AA-CAPACITY-ENVELOPE-UNDER-SAMPLED-EVIDENCE",
+        "AA-CAPACITY-ENVELOPE-CALIBRATION-DRIFT-FALLBACK",
+        "AA-ADAPTIVE-BATCH-SIZING-NO-WIN-64P"
+      ],
+      "expected_supported_verdict": "pass"
+    },
+    {
+      "profile": "large-host",
+      "scenario_id": "AA-MASSIVE-SWARM-CAPACITY-LARGE-HOST-64C-256G",
+      "description": "Platform-scoped 64 CPU / 256 binary GiB profile backed by the capacity planner's 64c/256g artifact chain and guarded by live host-shape checks.",
+      "seed": 401064,
+      "task_count": 196608,
+      "region_count": 8192,
+      "obligation_count": 196608,
+      "worker_count": 64,
+      "numa_policy": "locality_first_64c_256g",
+      "p50_us": 220,
+      "p95_us": 640,
+      "p99_us": 900,
+      "p999_us": 1664,
+      "max_rss_bytes": 140187732541,
+      "trace_bytes": 2147483648,
+      "cancellation_drain_us": 1300,
+      "fallback_reason": "conservative_baseline_when_certificate_is_stale_mismatched_under_sampled_or_drifted",
+      "no_win_reason": "capacity_envelope_no_win_refuses_640_agents_and_pins_conservative_baseline",
+      "requires_large_host": true,
+      "metric_source": "capacity_planner_64c_256g_artifact_budget_plus_adaptive_p999_tail",
+      "source_scenario_refs": [
+        "AA-CAPACITY-ENVELOPE-LOCALITY-CERT-64C-256G",
+        "AA-CAPACITY-ENVELOPE-NO-WIN-64C-256G",
+        "AA-ADAPTIVE-BATCH-SIZING-NO-WIN-64P",
+        "AA-TRACE-STORAGE-LARGE-MEMORY-256G"
+      ],
+      "expected_supported_verdict": "pass",
+      "unsupported_reason_when_unavailable": "host does not satisfy 64 CPU / 256 binary GiB large-host requirement"
+    }
+  ],
+  "validation": {
+    "unit_proof_command": "rch exec -- env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-C debuginfo=0' CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_massive_swarm_capacity cargo test -p asupersync --test massive_swarm_capacity_envelope_contract --features test-internals -- --nocapture",
+    "e2e_proof_command": "bash scripts/run_massive_swarm_capacity_envelope.sh --output-root target/massive-swarm-capacity-envelope --profile all",
+    "clippy_proof_command": "rch exec -- env CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 RUSTFLAGS='-C debuginfo=0' CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_massive_swarm_capacity_clippy cargo clippy -p asupersync --test massive_swarm_capacity_envelope_contract --features test-internals -- -D warnings",
+    "heavy_benchmark_policy": "Heavy benchmarks remain opt-in; this contract proves the profile, evidence chain, log shape, and fail-closed host gate without making normal validation allocate a massive swarm."
+  },
+  "operator_notes": {
+    "recommended_default": "standard",
+    "fast_profile_use": "CI and quick bisect validation",
+    "standard_profile_use": "ordinary operator smoke proof and support-matrix evidence refresh",
+    "large_host_profile_use": "only on workers with at least 64 CPUs and 256 binary GiB memory",
+    "fallback_policy": "When evidence is stale, under-sampled, drifted, host-mismatched, or p999 regresses, keep the conservative baseline and log fallback_reason or no_win_reason."
+  },
+  "redaction_verdict": "not_applicable"
+}
