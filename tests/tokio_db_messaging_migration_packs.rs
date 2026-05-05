@@ -1,5 +1,3 @@
-#![allow(warnings)]
-#![allow(clippy::all)]
 //! T6.11 — Migration Packs for Database and Messaging Ecosystems
 //!
 //! Bead: `asupersync-2oh2u.6.11`
