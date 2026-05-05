@@ -71,6 +71,7 @@ fn main() {
 
     // Generate coverage matrix
     let coverage = CoverageMatrix::from_results(&executions);
+    let quality_gate_failure = evidence_quality_gate_failure(&executions);
 
     // Output results based on mode
     if ci_mode {
@@ -103,6 +104,12 @@ fn main() {
     } else {
         // Standard test execution output
         print_test_results(&executions, &coverage, verbose);
+    }
+
+    if let Some(message) = quality_gate_failure {
+        eprintln!();
+        eprintln!("Evidence quality gate failed: {message}");
+        process::exit(1);
     }
 
     // Check conformance threshold and exit appropriately
@@ -321,6 +328,24 @@ fn register_all_tests(runner: &mut ConformanceRunner) {
     rfc6330_tests::register_all_tests(runner);
 }
 
+fn evidence_quality_gate_failure(executions: &[TestExecution]) -> Option<String> {
+    if executions.is_empty() {
+        return Some(
+            "zero RFC6330 tests selected; refusing to report empty conformance".to_string(),
+        );
+    }
+
+    let summary = EvidenceSummary::from_executions(executions);
+    if summary.live_checked == 0 && summary.fixture_only == executions.len() {
+        return Some(
+            "all selected RFC6330 evidence is fixture_only; no production seam was checked"
+                .to_string(),
+        );
+    }
+
+    None
+}
+
 /// Print test execution results in human-readable format
 fn print_test_results(executions: &[TestExecution], coverage: &CoverageMatrix, verbose: bool) {
     let mut passed = 0;
@@ -404,6 +429,11 @@ fn print_test_results(executions: &[TestExecution], coverage: &CoverageMatrix, v
     println!("  Unsupported:   {}", evidence_summary.unsupported);
     println!("  Expected fail: {}", evidence_summary.expected_fail);
     println!("  Failed:        {}", evidence_summary.failed);
+    if let Some(message) = evidence_quality_gate_failure(executions) {
+        println!("Evidence Quality Gate: FAIL - {message}");
+    } else {
+        println!("Evidence Quality Gate: PASS");
+    }
     println!();
     println!(
         "Conformance Score: {:.1}% ({})",
@@ -432,6 +462,11 @@ fn generate_detailed_report(coverage: &CoverageMatrix, executions: &[TestExecuti
         coverage.overall_score() * 100.0,
         coverage.overall_status()
     );
+    if let Some(message) = evidence_quality_gate_failure(executions) {
+        println!("**Evidence Quality Gate:** FAIL - {message}");
+    } else {
+        println!("**Evidence Quality Gate:** PASS");
+    }
     println!(
         "**MUST Clause Coverage:** {}/{} ({:.1}%)",
         coverage.overall.must_passing,

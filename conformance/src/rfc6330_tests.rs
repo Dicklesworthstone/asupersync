@@ -299,15 +299,17 @@ impl ConformanceTest for RepairTupleGenerationTest {
 
     fn run(&self, ctx: &ConformanceContext) -> ConformanceResult {
         if !ctx.enable_differential {
-            return ConformanceResult::Skipped {
-                reason: "Differential testing disabled - no reference implementation available"
-                    .to_string(),
+            return ConformanceResult::Blocked {
+                reason: "Repair tuple generation needs a live oracle or reference fixture path; differential fixtures are disabled".to_string(),
+                blocker_id: "asupersync-kokw3m".to_string(),
             };
         }
 
-        // TODO: Implement differential testing for repair tuple generation
-        ConformanceResult::Skipped {
-            reason: "Repair tuple generation differential testing not yet implemented".to_string(),
+        ConformanceResult::Blocked {
+            reason:
+                "Repair tuple generation differential testing is not wired to a live oracle yet"
+                    .to_string(),
+            blocker_id: "asupersync-kokw3m".to_string(),
         }
     }
 
@@ -363,28 +365,10 @@ impl ConformanceTest for KParameterDerivationTest {
     }
 
     fn run(&self, _ctx: &ConformanceContext) -> ConformanceResult {
-        // TODO: Implement K derivation validation
-        ConformanceResult::Skipped {
-            reason: "K parameter derivation validation not yet implemented".to_string(),
+        ConformanceResult::Blocked {
+            reason: "K parameter derivation validation is not wired to a live SourceBlockEncoder assertion yet".to_string(),
+            blocker_id: "asupersync-kokw3m".to_string(),
         }
-
-        // When implemented:
-        // let test_cases = [
-        //     (1024, 64, 16),     // 1KB object, 64-byte symbols, expect K=16
-        //     (4096, 256, 16),    // 4KB object, 256-byte symbols, expect K=16
-        //     (65536, 1024, 64),  // 64KB object, 1024-byte symbols, expect K=64
-        // ];
-        //
-        // for (object_size, symbol_size, expected_k) in test_cases {
-        //     let actual_k = derive_k(object_size, symbol_size);
-        //     if actual_k != expected_k {
-        //         return ConformanceResult::Fail {
-        //             reason: format!("K derivation incorrect for {object_size}B object with {symbol_size}B symbols"),
-        //             details: Some(format!("expected K={expected_k}, got K={actual_k}")),
-        //         };
-        //     }
-        // }
-        // ConformanceResult::Pass
     }
 
     fn tags(&self) -> Vec<&str> {
@@ -511,6 +495,9 @@ pub fn get_all_example_tests() -> Vec<Box<dyn ConformanceTest>> {
         // P0 Tests - RFC 6330 parameters and algorithms
         Box::new(SystematicIndexTest),
         Box::new(SystematicTupleGenerationTest),
+        Box::new(RepairTupleGenerationTest),
+        // P1 Tests - explicitly tracked gaps that must not masquerade as live conformance
+        Box::new(KParameterDerivationTest),
     ]
 }
 
@@ -522,6 +509,8 @@ pub fn register_all_tests(runner: &mut ConformanceRunner) {
     runner.register_test(LookupTableV3Test);
     runner.register_test(SystematicIndexTest);
     runner.register_test(SystematicTupleGenerationTest);
+    runner.register_test(RepairTupleGenerationTest);
+    runner.register_test(KParameterDerivationTest);
 }
 
 /// Get P0 priority tests only (critical requirements)
@@ -533,6 +522,7 @@ pub fn get_p0_tests() -> Vec<Box<dyn ConformanceTest>> {
         Box::new(LookupTableV3Test),
         Box::new(SystematicIndexTest),
         Box::new(SystematicTupleGenerationTest),
+        Box::new(RepairTupleGenerationTest),
     ]
 }
 
@@ -561,7 +551,7 @@ mod tests {
     #[test]
     fn rfc6330_registry_exposes_real_tests() {
         let registry = get_all_example_tests();
-        assert_eq!(registry.len(), 6);
+        assert_eq!(registry.len(), 8);
         assert!(registry.iter().all(|test| !test.rfc_clause().is_empty()));
         assert!(registry.iter().all(|test| !test.description().is_empty()));
     }
@@ -576,32 +566,55 @@ mod tests {
 
         assert_eq!(runner.test_count(), registry.len());
         assert_eq!(runner.test_names(), registry_names);
-        assert_eq!(runner.test_count_by_level(RequirementLevel::Must), 6);
+        assert_eq!(runner.test_count_by_level(RequirementLevel::Must), 8);
     }
 
     #[test]
     fn rfc6330_registry_filters_select_expected_subsets() {
         assert_eq!(get_section_tests("5.5").len(), 4);
         assert_eq!(get_section_tests("5.1").len(), 1);
-        assert_eq!(get_section_tests("5.3").len(), 1);
-        assert_eq!(get_level_tests(RequirementLevel::Must).len(), 6);
+        assert_eq!(get_section_tests("5.3").len(), 2);
+        assert_eq!(get_section_tests("4.1").len(), 1);
+        assert_eq!(get_level_tests(RequirementLevel::Must).len(), 8);
         assert!(get_level_tests(RequirementLevel::Should).is_empty());
-        assert_eq!(get_p0_tests().len(), 6);
+        assert_eq!(get_p0_tests().len(), 7);
     }
 
     #[test]
-    fn rfc6330_registered_tests_pass_against_runtime() {
+    fn rfc6330_registered_live_tests_pass_and_degraded_gaps_are_blocked() {
         let ctx = ConformanceContext::default();
+        let mut live_checked = 0;
+        let mut blocked = 0;
 
         for test in get_all_example_tests() {
             let result = test.run(&ctx);
-            assert_eq!(
-                result,
-                ConformanceResult::Pass,
-                "{} returned {}",
-                test.name(),
-                result.description()
-            );
+            match test.rfc_clause() {
+                "RFC6330-5.3.2" | "RFC6330-4.1.2" => {
+                    assert!(
+                        matches!(result, ConformanceResult::Blocked { .. }),
+                        "{} must be explicit blocked evidence, got {}",
+                        test.name(),
+                        result.description()
+                    );
+                    assert_eq!(test.blocker_id(), Some("asupersync-kokw3m"));
+                    assert!(test.production_seam_path().is_some());
+                    blocked += 1;
+                }
+                _ => {
+                    assert_eq!(
+                        result,
+                        ConformanceResult::Pass,
+                        "{} returned {}",
+                        test.name(),
+                        result.description()
+                    );
+                    assert!(test.production_seam_path().is_some());
+                    live_checked += 1;
+                }
+            }
         }
+
+        assert_eq!(live_checked, 6);
+        assert_eq!(blocked, 2);
     }
 }

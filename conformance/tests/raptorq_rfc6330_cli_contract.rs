@@ -37,20 +37,27 @@ fn counts(executions: &[TestExecution]) -> (usize, usize, usize) {
 #[test]
 fn run_all_ci_mode_reports_real_registered_tests() {
     let records = executions(&["--run-all", "--ci-mode"]);
+    let summary = EvidenceSummary::from_executions(&records);
 
-    assert_eq!(records.len(), 6, "RFC6330 CLI must run the live registry");
-    assert_eq!(counts(&records), (6, 6, 0));
+    assert_eq!(records.len(), 8, "RFC6330 CLI must run the full registry");
+    assert_eq!(counts(&records), (8, 6, 2));
+    assert_eq!(summary.live_checked, 6);
+    assert_eq!(summary.blocked, 2);
+    assert_eq!(summary.fixture_only, 0);
+    assert_eq!(summary.failed, 0);
     assert!(
         records
             .iter()
-            .all(|line| line.evidence.evidence_kind == EvidenceKind::LiveChecked),
-        "registered RFC6330 tests must be live implementation checks, not fixture-only claims"
+            .filter(|line| line.evidence.evidence_kind == EvidenceKind::LiveChecked)
+            .all(|line| line.evidence.production_seam_path.is_some()),
+        "every live RFC6330 record must name the production seam it exercised"
     );
     assert!(
         records
             .iter()
-            .all(|line| line.evidence.production_seam_path.is_some()),
-        "every live RFC6330 record must name the production seam it exercised"
+            .filter(|line| line.evidence.evidence_kind == EvidenceKind::Blocked)
+            .all(|line| line.evidence.blocker_id.as_deref() == Some("asupersync-kokw3m")),
+        "degraded RFC6330 records must carry the follow-up blocker"
     );
     assert!(
         records
@@ -61,6 +68,11 @@ fn run_all_ci_mode_reports_real_registered_tests() {
         records
             .iter()
             .any(|line| line.rfc_clause == "RFC6330-5.3.1")
+    );
+    assert!(
+        records
+            .iter()
+            .any(|line| line.rfc_clause == "RFC6330-5.3.2")
     );
 }
 
@@ -87,6 +99,17 @@ fn ci_jsonl_carries_evidence_quality_contract_fields() {
         line["command"],
         "raptorq_rfc6330_conformance --section 5.3 --ci-mode"
     );
+
+    let blocked_line: Value = serde_json::from_str(
+        jsonl
+            .lines()
+            .find(|line| line.contains("\"clause_id\":\"RFC6330-5.3.2\""))
+            .expect("section 5.3 JSONL should include blocked repair tuple gap"),
+    )
+    .expect("blocked JSONL row should parse");
+    assert_eq!(blocked_line["evidence_kind"], "blocked");
+    assert_eq!(blocked_line["test_status"], "blocked");
+    assert_eq!(blocked_line["blocker_id"], "asupersync-kokw3m");
 }
 
 #[test]
@@ -111,6 +134,14 @@ fn evidence_summary_counts_each_quality_state_separately() {
             ConformanceResult::Blocked {
                 reason: "fixture server unavailable".to_string(),
                 blocker_id: "asupersync-test-blocker".to_string(),
+            },
+        ),
+        synthetic_execution(
+            "skipped",
+            EvidenceKind::Blocked,
+            TestStatus::Skip,
+            ConformanceResult::Skipped {
+                reason: "dependency scenario intentionally skipped".to_string(),
             },
         ),
         synthetic_execution(
@@ -145,12 +176,12 @@ fn evidence_summary_counts_each_quality_state_separately() {
     let summary = EvidenceSummary::from_executions(&records);
     assert_eq!(summary.live_checked, 1);
     assert_eq!(summary.fixture_only, 1);
-    assert_eq!(summary.blocked, 1);
+    assert_eq!(summary.blocked, 2);
     assert_eq!(summary.unsupported, 1);
     assert_eq!(summary.expected_fail, 1);
     assert_eq!(summary.failed, 1);
     assert_eq!(summary.passed, 2);
-    assert_eq!(summary.skipped, 0);
+    assert_eq!(summary.skipped, 1);
 
     let jsonl = generate_jsonl_logs_with_command(&records, "raptorq_rfc6330_conformance --ci-mode");
     for expected_kind in [
@@ -169,26 +200,55 @@ fn evidence_summary_counts_each_quality_state_separately() {
 }
 
 #[test]
+fn evidence_quality_gate_rejects_zero_test_output() {
+    let failure = evidence_quality_gate_failure(&[]).expect("zero tests must fail quality gate");
+
+    assert!(failure.contains("zero RFC6330 tests"));
+}
+
+#[test]
+fn evidence_quality_gate_rejects_fixture_only_only_output() {
+    let records = vec![synthetic_execution(
+        "fixture-only-only",
+        EvidenceKind::FixtureOnly,
+        TestStatus::Pass,
+        ConformanceResult::Pass,
+    )];
+
+    let failure =
+        evidence_quality_gate_failure(&records).expect("fixture-only-only output must fail gate");
+
+    assert!(failure.contains("fixture_only"));
+}
+
+#[test]
+fn evidence_quality_gate_allows_live_with_blocked_followups() {
+    let records = executions(&["--run-all", "--ci-mode"]);
+
+    assert!(evidence_quality_gate_failure(&records).is_none());
+}
+
+#[test]
 fn cli_filters_select_registered_tests() {
     let cases: &[(&[&str], (usize, usize, usize), &str)] = &[
         (
             &["--section", "5.3", "--ci-mode"],
-            (1, 1, 0),
+            (2, 1, 1),
             "RFC6330-5.3.1",
         ),
         (
             &["--level", "must", "--ci-mode"],
-            (6, 6, 0),
+            (8, 6, 2),
             "RFC6330-5.1.1",
         ),
         (
             &["--category", "unit", "--ci-mode"],
-            (5, 5, 0),
+            (6, 5, 1),
             "RFC6330-5.5.1-V3",
         ),
         (
             &["--category", "differential", "--ci-mode"],
-            (1, 1, 0),
+            (2, 1, 1),
             "RFC6330-5.3.1",
         ),
     ];
@@ -210,7 +270,7 @@ fn cli_filters_select_registered_tests() {
 fn generate_report_selects_registered_test_executions() {
     let records = executions(&["--generate-report"]);
 
-    assert_eq!(counts(&records), (6, 6, 0));
+    assert_eq!(counts(&records), (8, 6, 2));
     assert!(
         records
             .iter()
@@ -220,6 +280,11 @@ fn generate_report_selects_registered_test_executions() {
         records
             .iter()
             .any(|line| line.rfc_clause == "RFC6330-5.3.1")
+    );
+    assert!(
+        records
+            .iter()
+            .any(|line| line.rfc_clause == "RFC6330-4.1.2")
     );
 }
 

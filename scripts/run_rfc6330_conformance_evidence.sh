@@ -110,16 +110,16 @@ scenario_filter_label() {
 scenario_expected_behavior() {
     case "$1" in
         RFC6330-PROOF-RUN-ALL-LIVE)
-            printf '%s\n' "The RFC6330 CLI runs all registered tests, emits nonzero CI JSONL rows, and reports live_checked evidence."
+            printf '%s\n' "The RFC6330 CLI runs all registered tests, emits nonzero CI JSONL rows, reports live_checked evidence, and surfaces blocked RFC6330 gaps explicitly."
             ;;
         RFC6330-PROOF-SECTION-5-3-LIVE)
-            printf '%s\n' "The RFC6330 section filter executes the live 5.3 tuple-generation seam and preserves production seam metadata."
+            printf '%s\n' "The RFC6330 section filter executes the live 5.3 tuple-generation seam and preserves blocked repair-tuple gap metadata."
             ;;
         RFC6330-PROOF-LEVEL-MUST-LIVE)
-            printf '%s\n' "The RFC6330 requirement-level filter executes all MUST rows without fixture-only promotion."
+            printf '%s\n' "The RFC6330 requirement-level filter executes all MUST rows without fixture-only promotion and keeps incomplete MUST rows blocked."
             ;;
         RFC6330-PROOF-CATEGORY-DIFFERENTIAL-LIVE)
-            printf '%s\n' "The RFC6330 category filter executes the differential tuple test through live production code."
+            printf '%s\n' "The RFC6330 category filter executes the differential tuple test through live production code and exposes blocked differential follow-up rows."
             ;;
         RFC6330-PROOF-GENERATE-REPORT)
             printf '%s\n' "The human report contains evidence-quality counts and the registered test execution matrix."
@@ -198,7 +198,8 @@ first_failure_line_from() {
 validate_ci_output() {
     local stdout_path="$1"
     local scenario_id="$2"
-    local summary_json total failing live_checked record_count missing_seam
+    local summary_json total failing live_checked blocked unsupported expected_fail failed_quality
+    local record_count missing_seam missing_blocker
 
     summary_json="$(grep -E '^\{"summary":' "$stdout_path" | tail -n1 || true)"
     if [[ -z "$summary_json" ]]; then
@@ -207,10 +208,15 @@ validate_ci_output() {
     fi
 
     total="$(jq -r '.summary.total // empty' <<<"$summary_json")"
-    failing="$(jq -r '.summary.failing // empty' <<<"$summary_json")"
-    live_checked="$(jq -r '.summary.evidence_quality.live_checked // empty' <<<"$summary_json")"
+    failing="$(jq -r '.summary.failing // 0' <<<"$summary_json")"
+    live_checked="$(jq -r '.summary.evidence_quality.live_checked // 0' <<<"$summary_json")"
+    blocked="$(jq -r '.summary.evidence_quality.blocked // 0' <<<"$summary_json")"
+    unsupported="$(jq -r '.summary.evidence_quality.unsupported // 0' <<<"$summary_json")"
+    expected_fail="$(jq -r '.summary.evidence_quality.expected_fail // 0' <<<"$summary_json")"
+    failed_quality="$(jq -r '.summary.evidence_quality.failed // 0' <<<"$summary_json")"
     record_count="$(jq -Rr 'fromjson? | objects | select(has("summary") | not) | .rfc_clause // empty' "$stdout_path" | wc -l | tr -d ' ')"
     missing_seam="$(jq -Rr 'fromjson? | objects | select(has("summary") | not) | select((.evidence_kind == "live_checked") and ((.production_seam_path // "") == "")) | .rfc_clause // empty' "$stdout_path" | head -n1)"
+    missing_blocker="$(jq -Rr 'fromjson? | objects | select(has("summary") | not) | select((.evidence_kind == "blocked" or .evidence_kind == "unsupported" or .evidence_kind == "expected_fail") and ((.blocker_id // "") == "")) | .rfc_clause // empty' "$stdout_path" | head -n1)"
 
     if [[ -z "$total" || "$total" -le 0 ]]; then
         printf '%s emitted zero tests' "$scenario_id"
@@ -228,12 +234,17 @@ validate_ci_output() {
         printf '%s live row missing production seam: %s' "$scenario_id" "$missing_seam"
         return 1
     fi
-    if [[ -n "$failing" && "$failing" -gt 0 ]]; then
-        printf '%s reported failing=%s' "$scenario_id" "$failing"
+    if [[ -n "$missing_blocker" ]]; then
+        printf '%s degraded row missing blocker: %s' "$scenario_id" "$missing_blocker"
+        return 1
+    fi
+    if [[ "$failed_quality" -gt 0 ]]; then
+        printf '%s reported live failed evidence=%s' "$scenario_id" "$failed_quality"
         return 1
     fi
 
-    printf 'CLI summary total=%s failing=%s live_checked=%s records=%s' "$total" "$failing" "$live_checked" "$record_count"
+    printf 'CLI summary total=%s failing=%s live_checked=%s blocked=%s unsupported=%s expected_fail=%s records=%s' \
+        "$total" "$failing" "$live_checked" "$blocked" "$unsupported" "$expected_fail" "$record_count"
 }
 
 validate_report_output() {
