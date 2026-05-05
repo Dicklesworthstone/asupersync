@@ -2270,6 +2270,352 @@ impl OverloadBrownoutLedger {
     }
 }
 
+/// Stable version identifier for unified admission and brownout policy ledgers.
+pub const UNIFIED_ADMISSION_BROWNOUT_LEDGER_SCHEMA_VERSION: &str =
+    "asupersync.unified-admission-brownout.v1";
+
+/// Top-level phase emitted by the unified overload policy.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum UnifiedAdmissionBrownoutPhase {
+    Normal,
+    Observe,
+    Defer,
+    Degrade,
+    ShedOptional,
+    Refuse,
+    Recovery,
+}
+
+/// Work-admission action selected after all overload controllers are composed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum UnifiedAdmissionAction {
+    Admit,
+    Defer,
+    Refuse,
+}
+
+/// Optional-surface action selected by the unified policy.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum UnifiedBrownoutAction {
+    KeepFullSurfaces,
+    Observe,
+    DegradeOptional,
+    ShedOptional,
+    RestoreOptional,
+}
+
+/// Explicit reason codes for the unified admission/brownout verdict.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum UnifiedAdmissionBrownoutReason {
+    Disabled,
+    LowConfidenceFallback,
+    TailRiskShedPrecedence,
+    TailRiskDeferPrecedence,
+    CohortSteeringDefer,
+    CohortFairnessEscape,
+    BrownoutShedPrecedence,
+    BrownoutDegradePrecedence,
+    BrownoutObservePrecedence,
+    RestorationHysteresisSatisfied,
+    CriticalSurfacePreserved,
+    TelemetryMinimumPreserved,
+    ConservativeBaseline,
+}
+
+/// Operator-tunable guardrails for the unified admission and brownout contract.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UnifiedAdmissionBrownoutProfile {
+    pub enabled: bool,
+    pub min_confidence_percent: u8,
+    pub defer_admit_basis_points: u16,
+    pub preserved_telemetry_floor_units: u16,
+    pub critical_surface_floor_units: u64,
+}
+
+impl Default for UnifiedAdmissionBrownoutProfile {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            min_confidence_percent: 60,
+            defer_admit_basis_points: 8_000,
+            preserved_telemetry_floor_units: 4,
+            critical_surface_floor_units: 1,
+        }
+    }
+}
+
+/// Inputs for composing admission, cohort steering, and brownout ledgers.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UnifiedAdmissionBrownoutEvidence {
+    pub offered_work_units: u64,
+    pub critical_surface_units: u64,
+    pub tail_risk: TailRiskAdmissionLedger,
+    pub cohort_steering: CohortAdmissionSteeringLedger,
+    pub brownout: OverloadBrownoutLedger,
+}
+
+/// Deterministic operator-facing policy ledger that composes all overload controls.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UnifiedAdmissionBrownoutLedger {
+    pub schema_version: String,
+    pub phase: UnifiedAdmissionBrownoutPhase,
+    pub admission_action: UnifiedAdmissionAction,
+    pub brownout_action: UnifiedBrownoutAction,
+    pub fallback_used: bool,
+    pub confidence_percent: u8,
+    pub reason_codes: Vec<UnifiedAdmissionBrownoutReason>,
+    pub admitted_units: u64,
+    pub deferred_units: u64,
+    pub refused_units: u64,
+    pub preserved_telemetry_units: u16,
+    pub preserved_critical_surface_units: u64,
+    pub requested_degraded_surfaces: Vec<BrownoutOptionalSurface>,
+    pub restored_surfaces: Vec<BrownoutOptionalSurface>,
+    pub preserved_surfaces: Vec<BrownoutProtectedSurface>,
+    pub no_win_decision: bool,
+    pub fallback_reason: Option<String>,
+    pub profile: UnifiedAdmissionBrownoutProfile,
+    pub explanation: Vec<String>,
+}
+
+impl UnifiedAdmissionBrownoutLedger {
+    /// Compose the first-party overload controllers into one deterministic policy verdict.
+    #[must_use]
+    pub fn evaluate(
+        evidence: &UnifiedAdmissionBrownoutEvidence,
+        profile: &UnifiedAdmissionBrownoutProfile,
+    ) -> Self {
+        let preserved_critical_surface_units = evidence
+            .critical_surface_units
+            .max(profile.critical_surface_floor_units);
+        let preserved_telemetry_units = profile.preserved_telemetry_floor_units;
+        let mut reason_codes = vec![
+            UnifiedAdmissionBrownoutReason::CriticalSurfacePreserved,
+            UnifiedAdmissionBrownoutReason::TelemetryMinimumPreserved,
+        ];
+        let mut explanation = vec![
+            "critical scheduling, cancellation drain, region quiescence, obligation cleanup, and minimum telemetry stay preserved before optional shedding is considered"
+                .to_string(),
+        ];
+        let input_fallback_used = evidence.tail_risk.fallback_used
+            || evidence.cohort_steering.fallback_used
+            || evidence.brownout.fallback_used;
+        let confidence_percent = evidence
+            .tail_risk
+            .confidence_percent
+            .min(evidence.cohort_steering.confidence_percent)
+            .min(100);
+
+        if !profile.enabled {
+            reason_codes.push(UnifiedAdmissionBrownoutReason::Disabled);
+            reason_codes.push(UnifiedAdmissionBrownoutReason::ConservativeBaseline);
+            explanation.push(
+                "unified policy is disabled, so the conservative fully-admitted baseline stayed pinned"
+                    .to_string(),
+            );
+            return Self::finish(
+                profile,
+                UnifiedAdmissionBrownoutPhase::Normal,
+                UnifiedAdmissionAction::Admit,
+                UnifiedBrownoutAction::KeepFullSurfaces,
+                true,
+                confidence_percent,
+                reason_codes,
+                evidence.offered_work_units,
+                preserved_telemetry_units,
+                preserved_critical_surface_units,
+                Vec::new(),
+                Vec::new(),
+                evidence.brownout.preserved_surfaces.clone(),
+                false,
+                None,
+                explanation,
+            );
+        }
+
+        let low_confidence = confidence_percent < profile.min_confidence_percent;
+        if low_confidence {
+            reason_codes.push(UnifiedAdmissionBrownoutReason::LowConfidenceFallback);
+            explanation.push(format!(
+                "minimum controller confidence {}% stayed below the unified policy floor {}%",
+                confidence_percent, profile.min_confidence_percent
+            ));
+        }
+
+        let fairness_escape = evidence
+            .cohort_steering
+            .reason_codes
+            .contains(&CohortAdmissionSteeringReason::FairnessEscapeHatch);
+        if fairness_escape {
+            reason_codes.push(UnifiedAdmissionBrownoutReason::CohortFairnessEscape);
+            explanation.push(
+                "cohort steering recorded a fairness escape hatch, so tail-admitted work keeps an admission path"
+                    .to_string(),
+            );
+        }
+
+        let mut admission_action = match evidence.tail_risk.decision {
+            TailRiskAdmissionDecision::Shed => {
+                reason_codes.push(UnifiedAdmissionBrownoutReason::TailRiskShedPrecedence);
+                explanation
+                    .push("tail-risk shed takes precedence over cohort placement".to_string());
+                UnifiedAdmissionAction::Refuse
+            }
+            TailRiskAdmissionDecision::Defer => {
+                reason_codes.push(UnifiedAdmissionBrownoutReason::TailRiskDeferPrecedence);
+                explanation
+                    .push("tail-risk defer takes precedence over cohort placement".to_string());
+                UnifiedAdmissionAction::Defer
+            }
+            TailRiskAdmissionDecision::Admit => match evidence.cohort_steering.decision {
+                CohortAdmissionSteeringDecision::Defer if !fairness_escape => {
+                    reason_codes.push(UnifiedAdmissionBrownoutReason::CohortSteeringDefer);
+                    explanation.push(
+                        "cohort steering deferred after tail-risk admission because no safe placement was available"
+                            .to_string(),
+                    );
+                    UnifiedAdmissionAction::Defer
+                }
+                CohortAdmissionSteeringDecision::AdmitLocal
+                | CohortAdmissionSteeringDecision::RedirectRemote
+                | CohortAdmissionSteeringDecision::Defer => UnifiedAdmissionAction::Admit,
+            },
+        };
+
+        if low_confidence && admission_action == UnifiedAdmissionAction::Admit {
+            admission_action = UnifiedAdmissionAction::Defer;
+        }
+
+        let brownout_action = match evidence.brownout.phase {
+            OverloadBrownoutPhase::Normal if evidence.brownout.restored_surfaces.is_empty() => {
+                UnifiedBrownoutAction::KeepFullSurfaces
+            }
+            OverloadBrownoutPhase::Normal | OverloadBrownoutPhase::Recovery => {
+                reason_codes.push(UnifiedAdmissionBrownoutReason::RestorationHysteresisSatisfied);
+                explanation.push("brownout recovery restored optional surfaces".to_string());
+                UnifiedBrownoutAction::RestoreOptional
+            }
+            OverloadBrownoutPhase::Observe => {
+                reason_codes.push(UnifiedAdmissionBrownoutReason::BrownoutObservePrecedence);
+                UnifiedBrownoutAction::Observe
+            }
+            OverloadBrownoutPhase::Degrade => {
+                reason_codes.push(UnifiedAdmissionBrownoutReason::BrownoutDegradePrecedence);
+                UnifiedBrownoutAction::DegradeOptional
+            }
+            OverloadBrownoutPhase::ShedOptional => {
+                reason_codes.push(UnifiedAdmissionBrownoutReason::BrownoutShedPrecedence);
+                UnifiedBrownoutAction::ShedOptional
+            }
+        };
+
+        let phase = match (admission_action, brownout_action) {
+            (UnifiedAdmissionAction::Refuse, _) => UnifiedAdmissionBrownoutPhase::Refuse,
+            (_, UnifiedBrownoutAction::ShedOptional) => UnifiedAdmissionBrownoutPhase::ShedOptional,
+            (UnifiedAdmissionAction::Defer, _) => UnifiedAdmissionBrownoutPhase::Defer,
+            (_, UnifiedBrownoutAction::DegradeOptional) => UnifiedAdmissionBrownoutPhase::Degrade,
+            (_, UnifiedBrownoutAction::RestoreOptional) => UnifiedAdmissionBrownoutPhase::Recovery,
+            (_, UnifiedBrownoutAction::Observe) => UnifiedAdmissionBrownoutPhase::Observe,
+            (UnifiedAdmissionAction::Admit, UnifiedBrownoutAction::KeepFullSurfaces) => {
+                UnifiedAdmissionBrownoutPhase::Normal
+            }
+        };
+
+        let no_win_decision = low_confidence
+            || (input_fallback_used && admission_action != UnifiedAdmissionAction::Admit);
+        let fallback_reason = no_win_decision.then(|| {
+            if low_confidence {
+                "low_confidence_fallback".to_string()
+            } else {
+                "controller_fallback_used".to_string()
+            }
+        });
+
+        Self::finish(
+            profile,
+            phase,
+            admission_action,
+            brownout_action,
+            input_fallback_used || low_confidence,
+            confidence_percent,
+            reason_codes,
+            evidence.offered_work_units,
+            preserved_telemetry_units,
+            preserved_critical_surface_units,
+            evidence.brownout.requested_degraded_surfaces.clone(),
+            evidence.brownout.restored_surfaces.clone(),
+            evidence.brownout.preserved_surfaces.clone(),
+            no_win_decision,
+            fallback_reason,
+            explanation,
+        )
+    }
+
+    fn finish(
+        profile: &UnifiedAdmissionBrownoutProfile,
+        phase: UnifiedAdmissionBrownoutPhase,
+        admission_action: UnifiedAdmissionAction,
+        brownout_action: UnifiedBrownoutAction,
+        fallback_used: bool,
+        confidence_percent: u8,
+        reason_codes: Vec<UnifiedAdmissionBrownoutReason>,
+        offered_work_units: u64,
+        preserved_telemetry_units: u16,
+        preserved_critical_surface_units: u64,
+        requested_degraded_surfaces: Vec<BrownoutOptionalSurface>,
+        restored_surfaces: Vec<BrownoutOptionalSurface>,
+        preserved_surfaces: Vec<BrownoutProtectedSurface>,
+        no_win_decision: bool,
+        fallback_reason: Option<String>,
+        explanation: Vec<String>,
+    ) -> Self {
+        let (admitted_units, deferred_units, refused_units) =
+            unified_admission_counts(offered_work_units, admission_action, profile);
+        Self {
+            schema_version: UNIFIED_ADMISSION_BROWNOUT_LEDGER_SCHEMA_VERSION.to_string(),
+            phase,
+            admission_action,
+            brownout_action,
+            fallback_used,
+            confidence_percent,
+            reason_codes,
+            admitted_units,
+            deferred_units,
+            refused_units,
+            preserved_telemetry_units,
+            preserved_critical_surface_units,
+            requested_degraded_surfaces,
+            restored_surfaces,
+            preserved_surfaces,
+            no_win_decision,
+            fallback_reason,
+            profile: profile.clone(),
+            explanation,
+        }
+    }
+}
+
+fn unified_admission_counts(
+    offered_work_units: u64,
+    admission_action: UnifiedAdmissionAction,
+    profile: &UnifiedAdmissionBrownoutProfile,
+) -> (u64, u64, u64) {
+    match admission_action {
+        UnifiedAdmissionAction::Admit => (offered_work_units, 0, 0),
+        UnifiedAdmissionAction::Defer => {
+            let admitted = offered_work_units
+                .saturating_mul(u64::from(profile.defer_admit_basis_points.min(10_000)))
+                / 10_000;
+            (admitted, offered_work_units.saturating_sub(admitted), 0)
+        }
+        UnifiedAdmissionAction::Refuse => (0, 0, offered_work_units),
+    }
+}
+
 fn cycle_overhead_percentage(elapsed: Duration, interval: Duration) -> f64 {
     let interval_nanos = interval.as_nanos();
     if interval_nanos == 0 {
