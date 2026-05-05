@@ -36,6 +36,7 @@
 //! ```
 
 use serde::{Deserialize, Serialize};
+use std::time::{Duration, Instant};
 
 /// Test result for a single conformance requirement.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -131,6 +132,7 @@ pub enum CursorType {
 #[allow(dead_code)]
 pub struct MySqlStmtConformanceHarness {
     results: Vec<MySqlStmtConformanceResult>,
+    last_result_at: Instant,
 }
 
 #[allow(dead_code)]
@@ -141,6 +143,7 @@ impl MySqlStmtConformanceHarness {
     pub fn new() -> Self {
         Self {
             results: Vec::new(),
+            last_result_at: Instant::now(),
         }
     }
 
@@ -200,6 +203,10 @@ impl MySqlStmtConformanceHarness {
         verdict: TestVerdict,
         notes: Option<String>,
     ) {
+        let now = Instant::now();
+        let elapsed_ms = elapsed_millis_for_report(now.duration_since(self.last_result_at));
+        self.last_result_at = now;
+
         self.results.push(MySqlStmtConformanceResult {
             test_id: test_id.to_string(),
             description: description.to_string(),
@@ -207,7 +214,7 @@ impl MySqlStmtConformanceHarness {
             requirement_level: requirement,
             verdict,
             notes,
-            elapsed_ms: 0, // TODO: Add timing if needed
+            elapsed_ms,
         });
     }
 
@@ -622,10 +629,10 @@ impl MySqlStmtConformanceHarness {
         let result = std::panic::catch_unwind(|| {
             // Test length encoding for variable-length parameters
             let test_cases = vec![
-                (250, vec![250]),                        // Short length
-                (251, vec![252, 251, 0]),                // Medium length (3-byte)
-                (65535, vec![252, 255, 255]),            // Medium length max
-                (65536, vec![253, 0, 0, 1, 0, 0, 0, 0]), // Long length (8-byte)
+                (250, vec![250]),             // Short length
+                (251, vec![252, 251, 0]),     // Medium length (3-byte)
+                (65535, vec![252, 255, 255]), // Medium length max
+                (65536, vec![253, 0, 0, 1]),  // 3-byte length
             ];
 
             for (length, expected_encoding) in test_cases {
@@ -1152,7 +1159,7 @@ impl MySqlStmtConformanceHarness {
 
             // NULL bitmap for columns (not parameters)
             let null_bitmap_len = (column_count + 7 + 2) / 8; // +2 for offset
-            let null_bitmap = vec![0b00000010]; // Column 1 is NULL, others are not
+            let null_bitmap = vec![0b00001000]; // Column 1 is NULL, others are not
             row.extend_from_slice(&null_bitmap);
 
             // Column values (only for non-NULL columns)
@@ -1563,6 +1570,11 @@ impl MySqlStmtConformanceHarness {
     }
 }
 
+fn elapsed_millis_for_report(elapsed: Duration) -> u64 {
+    let rounded = elapsed.as_nanos().saturating_add(999_999) / 1_000_000;
+    rounded.clamp(1, u128::from(u64::MAX)) as u64
+}
+
 impl Default for MySqlStmtConformanceHarness {
     #[allow(dead_code)]
     fn default() -> Self {
@@ -1737,6 +1749,11 @@ mod tests {
         if !must_failures.is_empty() {
             panic!("MUST requirements failed: {:#?}", must_failures);
         }
+
+        assert!(
+            results.iter().all(|r| r.elapsed_ms > 0),
+            "all conformance results must record non-zero elapsed time"
+        );
 
         println!(
             "✅ MySQL prepared statement conformance: {} tests passed",

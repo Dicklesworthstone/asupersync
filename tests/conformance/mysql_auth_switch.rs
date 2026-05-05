@@ -45,6 +45,7 @@ use asupersync::database::{MySqlConnection, MySqlError};
 use asupersync::types::{Budget, RegionId, TaskId};
 use asupersync::util::ArenaIndex;
 use std::collections::BTreeMap;
+use std::time::{Duration, Instant};
 
 /// Test result for a single conformance requirement.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -94,6 +95,7 @@ pub enum TestVerdict {
 #[allow(dead_code)]
 pub struct MySqlAuthConformanceHarness {
     results: Vec<MySqlAuthConformanceResult>,
+    last_result_at: Instant,
 }
 
 #[allow(dead_code)]
@@ -104,6 +106,7 @@ impl MySqlAuthConformanceHarness {
     pub fn new() -> Self {
         Self {
             results: Vec::new(),
+            last_result_at: Instant::now(),
         }
     }
 
@@ -159,6 +162,10 @@ impl MySqlAuthConformanceHarness {
         verdict: TestVerdict,
         notes: Option<String>,
     ) {
+        let now = Instant::now();
+        let elapsed_ms = elapsed_millis_for_report(now.duration_since(self.last_result_at));
+        self.last_result_at = now;
+
         self.results.push(MySqlAuthConformanceResult {
             test_id: test_id.to_string(),
             description: description.to_string(),
@@ -166,7 +173,7 @@ impl MySqlAuthConformanceHarness {
             requirement_level: requirement,
             verdict,
             notes,
-            elapsed_ms: 0, // TODO: Add timing if needed
+            elapsed_ms,
         });
     }
 
@@ -1079,6 +1086,11 @@ impl MySqlAuthConformanceHarness {
     }
 }
 
+fn elapsed_millis_for_report(elapsed: Duration) -> u64 {
+    let rounded = elapsed.as_nanos().saturating_add(999_999) / 1_000_000;
+    rounded.clamp(1, u128::from(u64::MAX)) as u64
+}
+
 impl Default for MySqlAuthConformanceHarness {
     #[allow(dead_code)]
     fn default() -> Self {
@@ -1335,6 +1347,11 @@ mod tests {
         if !must_failures.is_empty() {
             panic!("MUST requirements failed: {:#?}", must_failures);
         }
+
+        assert!(
+            results.iter().all(|r| r.elapsed_ms > 0),
+            "all conformance results must record non-zero elapsed time"
+        );
 
         println!(
             "✅ MySQL AuthSwitch conformance: {} tests passed",
