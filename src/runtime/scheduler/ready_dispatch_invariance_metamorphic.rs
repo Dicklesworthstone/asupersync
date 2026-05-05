@@ -1,4 +1,3 @@
-#![allow(clippy::all)]
 //! Metamorphic Testing: Ready Dispatch Invariance Under Enqueue-Order Shuffles
 //!
 //! This module implements metamorphic relations for testing that the three-lane
