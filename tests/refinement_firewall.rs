@@ -1,5 +1,3 @@
-#![allow(warnings)]
-#![allow(clippy::all)]
 //! Integration tests for trace refinement firewall checks.
 
 use asupersync::record::ObligationKind;
