@@ -325,6 +325,22 @@ franken_kernel/false/
 # Beads bad-import backups
 **/.beads/*.bad_*
 
+# Beads backup / repair / recovery artifacts that don't fit the
+# `*.bak_` / `.bv.lock` / `.migration-hint-ts` shapes already
+# covered above. These are produced locally by `bd`'s migration,
+# 3-way merge, repair, and crash-recovery tooling and are pure
+# per-machine state — the canonical source of truth is the
+# committed `.beads/issues.jsonl`. None of these belong in git.
+**/.beads/*.bak-*
+**/.beads/*.pre_fix_*
+**/.beads/*.regenerated.jsonl
+**/.beads/*.clean
+**/.beads/*.mixed-*
+**/.beads/recovery/
+**/.beads/repair-backups/
+**/.beads/.write.lock
+**/.beads/daemon-error
+
 # Remote compilation helper workspaces
 .rch-target-*/
 
