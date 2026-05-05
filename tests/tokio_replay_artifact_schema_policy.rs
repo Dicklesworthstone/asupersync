@@ -1,5 +1,3 @@
-#![allow(warnings)]
-#![allow(clippy::all)]
 //! Contract tests for replay artifact schema + trace policy spec (2oh2u.10.6).
 //!
 //! Enforces normative schema/rules, promotion+rollback criteria, ownership
