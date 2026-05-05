@@ -174,6 +174,7 @@ STATUS="passed"
 VALIDATION_PASSED=false
 MESSAGE="runner completed"
 ACTUAL_REPORT_PROJECTION_JSON="null"
+ACTUAL_CAPACITY_MERGER_SUMMARY_JSON="null"
 
 if [ "$MODE" = "dry-run" ]; then
     printf 'DRY_RUN scenario=%s\n' "$SCENARIO" >"$RUN_LOG_PATH"
@@ -240,6 +241,7 @@ else
             MESSAGE="capacity envelope report JSON markers missing from run.log"
         else
             ACTUAL_REPORT_PROJECTION_JSON="$(jq -c '.report_projection' "$SCENARIO_REPORT_PATH")"
+            ACTUAL_CAPACITY_MERGER_SUMMARY_JSON="$(jq -c '.capacity_merger.summary // null' "$SCENARIO_REPORT_PATH")"
             if [ "$EXPECTED_REPORT_PROJECTION_JSON" = "null" ] || jq -en \
                 --argjson expected "$EXPECTED_REPORT_PROJECTION_JSON" \
                 --argjson actual "$ACTUAL_REPORT_PROJECTION_JSON" \
@@ -297,6 +299,7 @@ jq -n \
     --argjson script_exit_code "$SCRIPT_EXIT_CODE" \
     --argjson expected_report_projection "$EXPECTED_REPORT_PROJECTION_JSON" \
     --argjson actual_report_projection "$ACTUAL_REPORT_PROJECTION_JSON" \
+    --argjson capacity_merger_summary "$ACTUAL_CAPACITY_MERGER_SUMMARY_JSON" \
     '{
         schema_version: $schema_version,
         scenario_id: $scenario_id,
@@ -310,7 +313,8 @@ jq -n \
         report_artifact_path: $report_path,
         run_log_path: $run_log_path,
         expected_report_projection: $expected_report_projection,
-        actual_report_projection: $actual_report_projection
+        actual_report_projection: $actual_report_projection,
+        capacity_merger_summary: $capacity_merger_summary
     }' >"$RUN_REPORT_PATH"
 
 printf 'Scenario: %s\n' "$SCENARIO"

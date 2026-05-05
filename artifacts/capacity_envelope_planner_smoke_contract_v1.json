@@ -83,6 +83,89 @@
         "brownout_risk_basis_points": 550,
         "retention_budget_gib": 2
       },
+      "capacity_merger": {
+        "scenario_group_id": "AA-CAPACITY-MERGER-64C-256G",
+        "workload_seed": 640256,
+        "child_evidence": [
+          {
+            "kind": "numa_locality",
+            "child_certificate_id": "numa-arena-locality:AA-NUMA-ARENA-LOCALITY-WIN-64C-256G",
+            "artifact_id": "artifacts/numa_arena_locality_smoke_contract_v1.json",
+            "contract_version": "numa-arena-locality-smoke-contract-v1",
+            "digest_sha256": "6f5b47d09c58ef4dd1514dfb32f0c61d8d9a5a7341d4d42d0f6b85bf39b17301",
+            "calibration_status": "current",
+            "host_fingerprint": {
+              "hostname": "lab-64c-256g-a",
+              "arch": "x86_64",
+              "cpu_cores": 64,
+              "memory_gib": 256
+            },
+            "scenario_group_id": "AA-CAPACITY-MERGER-64C-256G",
+            "workload_seed": 640256,
+            "remote_touch_ratio_bps": 2171,
+            "remote_touch_delta_bps": -4559,
+            "no_win_trigger": false
+          },
+          {
+            "kind": "arena_capacity",
+            "child_certificate_id": "runtime-capacity-hints:AA-RUNTIME-CAPACITY-HINTS-64C-256G",
+            "artifact_id": "artifacts/runtime_capacity_hints_smoke_contract_v1.json",
+            "contract_version": "runtime-capacity-hints-smoke-contract-v1",
+            "digest_sha256": "a9f835f971c9d1b61464faec5f60558f65258f9f3290f10a8648609a15d285b0",
+            "calibration_status": "current",
+            "host_fingerprint": {
+              "hostname": "lab-64c-256g-a",
+              "arch": "x86_64",
+              "cpu_cores": 64,
+              "memory_gib": 256
+            },
+            "scenario_group_id": "AA-CAPACITY-MERGER-64C-256G",
+            "workload_seed": 640256,
+            "task_arena_capacity": 32768,
+            "region_arena_capacity": 8192,
+            "obligation_arena_capacity": 16384,
+            "no_win_trigger": false
+          },
+          {
+            "kind": "hot_cold_tiers",
+            "child_certificate_id": "hot-cold-arena:AA-HOT-COLD-ARENA-TIERED-RETENTION-64C-256G",
+            "artifact_id": "artifacts/hot_cold_arena_tiers_smoke_contract_v1.json",
+            "contract_version": "hot-cold-arena-tiers-smoke-contract-v1",
+            "digest_sha256": "cc38167a98aa01491cd47e2abd052268aab0da75e39515e628299a8d04f1488e",
+            "calibration_status": "current",
+            "host_fingerprint": {
+              "hostname": "lab-64c-256g-a",
+              "arch": "x86_64",
+              "cpu_cores": 64,
+              "memory_gib": 256
+            },
+            "scenario_group_id": "AA-CAPACITY-MERGER-64C-256G",
+            "workload_seed": 640256,
+            "selected_policy": "tiered_cold_evidence",
+            "locality_profile_present": true,
+            "no_win_trigger": false
+          },
+          {
+            "kind": "task_record_pool",
+            "child_certificate_id": "task-record-pool:AA-TASK-RECORD-POOL-EXPECTED-TASKS-4096",
+            "artifact_id": "artifacts/task_record_pool_smoke_contract_v1.json",
+            "contract_version": "task-record-pool-smoke-contract-v1",
+            "digest_sha256": "136cce67bb4b324745b31ee8f358f23f923c4fc4e76ef684a432a93f40d64d9c",
+            "calibration_status": "current",
+            "host_fingerprint": {
+              "hostname": "lab-64c-256g-a",
+              "arch": "x86_64",
+              "cpu_cores": 64,
+              "memory_gib": 256
+            },
+            "scenario_group_id": "AA-CAPACITY-MERGER-64C-256G",
+            "workload_seed": 640256,
+            "reuse_percent": 100,
+            "reset_proof_present": true,
+            "no_win_trigger": false
+          }
+        ]
+      },
       "budget": {
         "target_p99_ns": 1300000,
         "target_cancel_debt_units": 130,

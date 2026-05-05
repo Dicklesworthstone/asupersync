@@ -12,7 +12,7 @@ use asupersync::runtime::config::{
 };
 use serde::Deserialize;
 use serde_json::{Value, json};
-use std::collections::hash_map::DefaultHasher;
+use std::collections::{BTreeSet, hash_map::DefaultHasher};
 use std::fs;
 use std::hash::{Hash, Hasher};
 use std::path::Path;
@@ -45,6 +45,8 @@ struct CapacityEnvelopeScenario {
     environment_note: Option<String>,
     validation_command: Option<String>,
     expected_report_projection: Option<Value>,
+    #[serde(default)]
+    capacity_merger: Option<Value>,
 }
 
 #[derive(Debug, Clone, Copy, Deserialize)]
@@ -528,6 +530,241 @@ fn report_projection(report: &Value) -> Value {
     object
 }
 
+fn child_str<'a>(child: &'a Value, key: &str) -> &'a str {
+    child[key]
+        .as_str()
+        .unwrap_or_else(|| panic!("capacity merger child missing string field {key}"))
+}
+
+fn child_u64(child: &Value, key: &str) -> u64 {
+    child[key]
+        .as_u64()
+        .unwrap_or_else(|| panic!("capacity merger child missing numeric field {key}"))
+}
+
+fn merged_digest_for(value: &Value) -> String {
+    format!("merge:{:016x}", projection_hash(value))
+}
+
+fn capacity_merger_report(
+    scenario: &CapacityEnvelopeScenario,
+    certificate: &CapacityEnvelopeCertificate,
+) -> Value {
+    let Some(merger) = scenario.capacity_merger.as_ref() else {
+        return json!({
+            "summary": {
+                "status": "absent",
+                "child_count": 0,
+                "child_certificate_ids": [],
+                "merged_digest": Value::Null,
+                "host_class": Value::Null,
+                "scenario_group_id": Value::Null,
+                "workload_seed": Value::Null,
+                "fallback_reason": "no capacity merger evidence supplied",
+                "refusal_reasons": [],
+            },
+            "child_evidence": [],
+        });
+    };
+
+    let children = merger["child_evidence"]
+        .as_array()
+        .expect("capacity merger child_evidence array");
+    let scenario_group_id = merger["scenario_group_id"]
+        .as_str()
+        .expect("capacity merger scenario_group_id");
+    let workload_seed = merger["workload_seed"]
+        .as_u64()
+        .expect("capacity merger workload_seed");
+    let mut refusal_reasons = Vec::new();
+    let mut no_win_reasons = Vec::new();
+    let mut child_certificate_ids = Vec::new();
+    let mut artifact_ids = Vec::new();
+    let mut child_kinds = BTreeSet::new();
+    let mut child_host_classes = BTreeSet::new();
+    let mut scenario_ids = BTreeSet::new();
+    let mut workload_seeds = BTreeSet::new();
+    let mut locality_remote_touch_ratio_bps = 0;
+    let mut locality_remote_touch_delta_bps = 0_i64;
+    let mut task_arena_capacity = 0;
+    let mut region_arena_capacity = 0;
+    let mut obligation_arena_capacity = 0;
+    let mut hot_cold_policy = "missing".to_string();
+    let mut task_record_pool_reuse_percent = 0;
+    let mut task_record_pool_reset_proof_present = false;
+
+    for child in children {
+        let kind = child_str(child, "kind");
+        let child_id = child_str(child, "child_certificate_id");
+        let artifact_id = child_str(child, "artifact_id");
+        let digest = child_str(child, "digest_sha256");
+        let calibration_status = child_str(child, "calibration_status");
+        let host = &child["host_fingerprint"];
+        let child_cpu = host["cpu_cores"]
+            .as_u64()
+            .unwrap_or_else(|| panic!("{child_id} missing host cpu_cores"));
+        let child_memory = host["memory_gib"]
+            .as_u64()
+            .unwrap_or_else(|| panic!("{child_id} missing host memory_gib"));
+        let child_cpu_cores =
+            usize::try_from(child_cpu).expect("capacity merger child cpu_cores fits usize");
+        let child_memory_gib =
+            usize::try_from(child_memory).expect("capacity merger child memory_gib fits usize");
+        let child_arch = host["arch"]
+            .as_str()
+            .unwrap_or_else(|| panic!("{child_id} missing host arch"));
+        let child_scenario = child_str(child, "scenario_group_id");
+        let child_seed = child_u64(child, "workload_seed");
+
+        child_kinds.insert(kind.to_string());
+        child_certificate_ids.push(child_id.to_string());
+        artifact_ids.push(artifact_id.to_string());
+        child_host_classes.insert(format!("{child_cpu}c_{child_memory}g"));
+        scenario_ids.insert(child_scenario.to_string());
+        workload_seeds.insert(child_seed);
+
+        if !Path::new(artifact_id)
+            .extension()
+            .is_some_and(|extension| extension.eq_ignore_ascii_case("json"))
+        {
+            refusal_reasons.push(format!("{child_id} artifact_id must end with .json"));
+        }
+        if digest.len() != 64 || !digest.chars().all(|c| c.is_ascii_hexdigit()) {
+            refusal_reasons.push(format!(
+                "{child_id} digest_sha256 must be a 64-character hex digest"
+            ));
+        }
+        if calibration_status != "current" {
+            refusal_reasons.push(format!(
+                "{child_id} calibration_status {calibration_status} is not current"
+            ));
+        }
+        if child_cpu_cores != scenario.host_resources.cpu_cores
+            || child_memory_gib != scenario.host_resources.memory_gib
+            || child_arch != scenario.host_fingerprint.arch
+        {
+            refusal_reasons.push(format!(
+                "{child_id} host fingerprint did not match the capacity request"
+            ));
+        }
+        if child_scenario != scenario_group_id {
+            refusal_reasons.push(format!(
+                "{child_id} scenario_group_id did not match the merger"
+            ));
+        }
+        if child_seed != workload_seed {
+            refusal_reasons.push(format!("{child_id} workload_seed did not match the merger"));
+        }
+        if child["no_win_trigger"].as_bool().unwrap_or(false) {
+            no_win_reasons.push(format!("{child_id} reported no-win"));
+        }
+
+        match kind {
+            "numa_locality" => {
+                locality_remote_touch_ratio_bps = child_u64(child, "remote_touch_ratio_bps");
+                locality_remote_touch_delta_bps = child["remote_touch_delta_bps"]
+                    .as_i64()
+                    .expect("numa locality remote_touch_delta_bps");
+                if locality_remote_touch_delta_bps >= 0 {
+                    no_win_reasons.push(format!("{child_id} did not reduce remote-touch pressure"));
+                }
+            }
+            "arena_capacity" => {
+                task_arena_capacity = child_u64(child, "task_arena_capacity");
+                region_arena_capacity = child_u64(child, "region_arena_capacity");
+                obligation_arena_capacity = child_u64(child, "obligation_arena_capacity");
+                if task_arena_capacity == 0
+                    || region_arena_capacity == 0
+                    || obligation_arena_capacity == 0
+                {
+                    refusal_reasons.push(format!("{child_id} arena capacities must be positive"));
+                }
+            }
+            "hot_cold_tiers" => {
+                hot_cold_policy = child_str(child, "selected_policy").to_string();
+                if !child["locality_profile_present"].as_bool().unwrap_or(false) {
+                    refusal_reasons.push(format!("{child_id} missing locality profile"));
+                }
+            }
+            "task_record_pool" => {
+                task_record_pool_reuse_percent = child_u64(child, "reuse_percent");
+                task_record_pool_reset_proof_present =
+                    child["reset_proof_present"].as_bool().unwrap_or(false);
+                if !task_record_pool_reset_proof_present {
+                    refusal_reasons.push(format!("{child_id} missing pooling reset proof"));
+                }
+            }
+            other => refusal_reasons.push(format!("{child_id} unsupported child kind {other}")),
+        }
+    }
+
+    for required in [
+        "numa_locality",
+        "arena_capacity",
+        "hot_cold_tiers",
+        "task_record_pool",
+    ] {
+        if !child_kinds.contains(required) {
+            refusal_reasons.push(format!("missing required child evidence {required}"));
+        }
+    }
+    if certificate.used_safe_fallback() {
+        no_win_reasons
+            .push("capacity envelope already selected the conservative fallback".to_string());
+    }
+
+    let status = if !refusal_reasons.is_empty() {
+        "refused"
+    } else if !no_win_reasons.is_empty() {
+        "no_win"
+    } else {
+        "used"
+    };
+    let fallback_reason = if !refusal_reasons.is_empty() {
+        refusal_reasons[0].clone()
+    } else if !no_win_reasons.is_empty() {
+        no_win_reasons[0].clone()
+    } else {
+        String::new()
+    };
+    let digest_basis = json!({
+        "scenario_group_id": scenario_group_id,
+        "workload_seed": workload_seed,
+        "child_certificate_ids": child_certificate_ids,
+        "artifact_ids": artifact_ids,
+        "host_classes": child_host_classes,
+        "scenario_ids": scenario_ids,
+        "workload_seeds": workload_seeds,
+        "selected_profile": certificate.selected_profile.as_str(),
+        "safe_envelope": range_json(certificate.safe_envelope),
+    });
+
+    json!({
+        "summary": {
+            "status": status,
+            "child_count": children.len(),
+            "child_certificate_ids": digest_basis["child_certificate_ids"],
+            "artifact_ids": digest_basis["artifact_ids"],
+            "merged_digest": merged_digest_for(&digest_basis),
+            "host_class": format!("{}c_{}g", scenario.host_resources.cpu_cores, scenario.host_resources.memory_gib),
+            "scenario_group_id": scenario_group_id,
+            "workload_seed": workload_seed,
+            "locality_remote_touch_ratio_bps": locality_remote_touch_ratio_bps,
+            "locality_remote_touch_delta_bps": locality_remote_touch_delta_bps,
+            "task_arena_capacity": task_arena_capacity,
+            "region_arena_capacity": region_arena_capacity,
+            "obligation_arena_capacity": obligation_arena_capacity,
+            "hot_cold_policy": hot_cold_policy,
+            "task_record_pool_reuse_percent": task_record_pool_reuse_percent,
+            "task_record_pool_reset_proof_present": task_record_pool_reset_proof_present,
+            "fallback_reason": fallback_reason,
+            "refusal_reasons": refusal_reasons,
+            "no_win_reasons": no_win_reasons,
+        },
+        "child_evidence": children,
+    })
+}
+
 fn certificate_report_json(
     contract_version: &str,
     scenario: &CapacityEnvelopeScenario,
@@ -535,6 +772,7 @@ fn certificate_report_json(
 ) -> Value {
     let safe_envelope = range_json(certificate.safe_envelope);
     let refused_envelope = range_json(Some(certificate.refused_envelope));
+    let capacity_merger = capacity_merger_report(scenario, certificate);
     let mut report = json!({
         "schema_version": "asupersync.capacity-envelope-certificate.v1",
         "contract_version": contract_version,
@@ -599,6 +837,7 @@ fn certificate_report_json(
             "agent_ceiling": certificate.coordination_workload_status.agent_ceiling,
             "refusal_reasons": certificate.coordination_workload_status.refusal_reasons.clone(),
         },
+        "capacity_merger": capacity_merger,
         "sanitized_environment_note": certificate.sanitized_environment_note,
         "sanitized_validation_command": certificate.sanitized_validation_command,
         "validation_verdict": {
@@ -609,7 +848,8 @@ fn certificate_report_json(
                 "capacity certificates refuse under-sampled or drifted evidence before extrapolation",
                 "safe envelopes stay dry-run only and never mutate runtime state",
                 "manual SLO overrides take precedence over the default certificate budget",
-                "operator notes and validation commands are secret-scrubbed before reporting"
+                "operator notes and validation commands are secret-scrubbed before reporting",
+                "NUMA locality, arena capacity, hot/cold tier, and TaskRecord pooling child evidence must align before the merged certificate is used"
             ],
             "no_win": certificate.safe_envelope.is_none(),
             "safe_fallback_profile": certificate.fallback_profile.as_str(),
@@ -982,6 +1222,114 @@ fn capacity_envelope_certificate_emits_expected_locality_bundle() {
     assert_eq!(envelope.worker_max, 64);
     assert_eq!(envelope.agent_max, 512);
     assert_eq!(certificate.refused_envelope.agent_min, 512);
+}
+
+#[test]
+fn capacity_merger_accepts_aligned_child_evidence() {
+    let contract = default_contract();
+    let scenario = &contract.smoke_scenarios[0];
+    let request = build_request(scenario);
+    let report = certificate_report_json(&contract.contract_version, scenario, &request.plan());
+    let summary = &report["capacity_merger"]["summary"];
+
+    assert_eq!(summary["status"], "used");
+    assert_eq!(summary["child_count"], 4);
+    assert_eq!(summary["host_class"], "64c_256g");
+    assert_eq!(
+        summary["child_certificate_ids"],
+        json!([
+            "numa-arena-locality:AA-NUMA-ARENA-LOCALITY-WIN-64C-256G",
+            "runtime-capacity-hints:AA-RUNTIME-CAPACITY-HINTS-64C-256G",
+            "hot-cold-arena:AA-HOT-COLD-ARENA-TIERED-RETENTION-64C-256G",
+            "task-record-pool:AA-TASK-RECORD-POOL-EXPECTED-TASKS-4096",
+        ])
+    );
+    assert!(
+        summary["merged_digest"]
+            .as_str()
+            .expect("merged digest")
+            .starts_with("merge:")
+    );
+    assert_eq!(summary["locality_remote_touch_ratio_bps"], 2171);
+    assert_eq!(summary["locality_remote_touch_delta_bps"], -4559);
+    assert_eq!(summary["task_arena_capacity"], 32768);
+    assert_eq!(summary["hot_cold_policy"], "tiered_cold_evidence");
+    assert_eq!(summary["task_record_pool_reuse_percent"], 100);
+    assert_eq!(summary["fallback_reason"], "");
+}
+
+#[test]
+fn capacity_merger_rejects_host_mismatch_stale_and_missing_pool_reset() {
+    let contract = default_contract();
+    let mut scenario = contract.smoke_scenarios[0].clone();
+    let merger = scenario
+        .capacity_merger
+        .as_mut()
+        .expect("capacity merger fixture");
+    let children = merger["child_evidence"]
+        .as_array_mut()
+        .expect("child evidence array");
+    children[0]["host_fingerprint"]["cpu_cores"] = json!(32);
+    children[1]["calibration_status"] = json!("stale");
+    children[3]["reset_proof_present"] = json!(false);
+
+    let request = build_request(&scenario);
+    let report = certificate_report_json(&contract.contract_version, &scenario, &request.plan());
+    let summary = &report["capacity_merger"]["summary"];
+    let reasons = summary["refusal_reasons"]
+        .as_array()
+        .expect("refusal reasons");
+
+    assert_eq!(summary["status"], "refused");
+    assert!(
+        reasons.iter().any(|reason| reason
+            .as_str()
+            .unwrap_or_default()
+            .contains("host fingerprint")),
+        "{reasons:?}"
+    );
+    assert!(
+        reasons.iter().any(|reason| reason
+            .as_str()
+            .unwrap_or_default()
+            .contains("calibration_status stale")),
+        "{reasons:?}"
+    );
+    assert!(
+        reasons.iter().any(|reason| reason
+            .as_str()
+            .unwrap_or_default()
+            .contains("missing pooling reset proof")),
+        "{reasons:?}"
+    );
+}
+
+#[test]
+fn capacity_merger_preserves_no_win_fallback_when_simpler_baseline_is_safer() {
+    let contract = default_contract();
+    let mut scenario = contract.smoke_scenarios[0].clone();
+    let merger = scenario
+        .capacity_merger
+        .as_mut()
+        .expect("capacity merger fixture");
+    let children = merger["child_evidence"]
+        .as_array_mut()
+        .expect("child evidence array");
+    children[0]["remote_touch_delta_bps"] = json!(0);
+    children[0]["no_win_trigger"] = json!(true);
+
+    let request = build_request(&scenario);
+    let report = certificate_report_json(&contract.contract_version, &scenario, &request.plan());
+    let summary = &report["capacity_merger"]["summary"];
+
+    assert_eq!(summary["status"], "no_win");
+    assert!(
+        summary["fallback_reason"]
+            .as_str()
+            .expect("fallback reason")
+            .contains("reported no-win")
+    );
+    assert_eq!(summary["refusal_reasons"], json!([]));
 }
 
 #[test]
