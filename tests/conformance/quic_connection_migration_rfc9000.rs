@@ -11,18 +11,17 @@
 //! - NAT rebinding detection via source address change (§9.3)
 //! - Concurrent path migration from both endpoints (§9.2)
 
-use crate::cx::Cx;
-use crate::net::quic_native::{
-    NativeQuicConnection, NativeQuicConnectionConfig, NativeQuicConnectionError,
-    PacketNumberSpace, StreamRole,
+use asupersync::cx::Cx;
+use asupersync::net::quic_native::{
+    NativeQuicConnection, NativeQuicConnectionConfig, NativeQuicConnectionError, PacketNumberSpace,
+    StreamRole,
 };
-use crate::types::Budget;
-use crate::util::ArenaIndex;
-use crate::{RegionId, TaskId};
+use asupersync::types::{Budget, RegionId, TaskId};
+use asupersync::util::ArenaIndex;
 use std::time::Instant;
 
 /// Test categories for QUIC connection migration conformance.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 #[allow(dead_code)]
 pub enum TestCategory {
@@ -279,9 +278,8 @@ impl QuicConnectionMigrationConformanceHarness {
                 if msg == "path migration requires established state" => {}
             Ok(_) => {
                 result.verdict = TestVerdict::Fail;
-                result.error_message = Some(
-                    "Migration succeeded before the connection was established".to_string(),
-                );
+                result.error_message =
+                    Some("Migration succeeded before the connection was established".to_string());
             }
             Err(err) => {
                 result.verdict = TestVerdict::Fail;
@@ -306,9 +304,8 @@ impl QuicConnectionMigrationConformanceHarness {
 
         let mut result = QuicConnectionMigrationConformanceResult {
             test_id: "quic_path_migration_blocked_when_disabled".to_string(),
-            description:
-                "disable_active_migration transport policy blocks active path migration"
-                    .to_string(),
+            description: "disable_active_migration transport policy blocks active path migration"
+                .to_string(),
             category: TestCategory::ConnectionMigrationSecurity,
             requirement_level: RequirementLevel::Must,
             verdict: TestVerdict::Pass,
@@ -375,7 +372,9 @@ impl QuicConnectionMigrationConformanceHarness {
 
     #[allow(dead_code)]
 
-    fn test_path_migration_same_path_is_idempotent(&self) -> QuicConnectionMigrationConformanceResult {
+    fn test_path_migration_same_path_is_idempotent(
+        &self,
+    ) -> QuicConnectionMigrationConformanceResult {
         let start_time = Instant::now();
         let cx = test_cx();
         let mut conn = established_conn();
@@ -578,22 +577,17 @@ impl QuicConnectionMigrationConformanceHarness {
         };
 
         let cx = test_cx();
-        let mut conn = NativeQuicConnection::new(NativeQuicConnectionConfig {
-            role: StreamRole::Server,
-            ..NativeQuicConnectionConfig::default()
-        });
-        conn.begin_handshake(&cx).expect("begin");
-        conn.on_datagram_received(&cx, 400).expect("credit datagram");
+        let mut conn = server_handshaking_conn();
 
         if let Err(err) =
-            conn.on_packet_sent(&cx, PacketNumberSpace::Handshake, 1_200, true, true, 1)
+            conn.on_packet_sent(&cx, PacketNumberSpace::Handshake, 3_600, true, true, 1)
         {
             result.verdict = TestVerdict::Fail;
             result.error_message = Some(format!("Exactly 3x received bytes was rejected: {err}"));
         } else {
             match conn.on_packet_sent(&cx, PacketNumberSpace::Handshake, 1, true, true, 2) {
                 Err(NativeQuicConnectionError::AmplificationLimited { limit, .. })
-                    if limit == 1_200 => {}
+                    if limit == 3_600 => {}
                 Ok(_) => {
                     result.verdict = TestVerdict::Fail;
                     result.error_message =
@@ -874,7 +868,9 @@ mod tests {
 
         assert!(!results.is_empty());
         assert!(
-            results.iter().all(|result| result.verdict != TestVerdict::Fail),
+            results
+                .iter()
+                .all(|result| result.verdict != TestVerdict::Fail),
             "{results:#?}"
         );
         assert!(
