@@ -651,7 +651,7 @@ pub struct MySqlRowStream<'a> {
     deprecate_eof: bool,
 }
 
-impl<'a> MySqlRowStream<'a> {
+impl MySqlRowStream<'_> {
     /// Get the next row from the stream.
     ///
     /// Returns `Ok(Some(row))` for the next row, `Ok(None)` when the stream
@@ -782,19 +782,19 @@ impl MySqlConnection {
         match first_packet[0] {
             0xFF => {
                 // Error packet
-                return Outcome::Err(Self::parse_error(&first_packet));
+                Outcome::Err(Self::parse_error(&first_packet))
             }
             0x00 => {
                 // OK packet (no result set)
                 self.inner.closed = false;
-                return Outcome::Ok(MySqlRowStream {
+                Outcome::Ok(MySqlRowStream {
                     connection: self,
                     columns: None,
                     column_indices: None,
                     finished: true,
                     pending_row_count: 0,
                     deprecate_eof,
-                });
+                })
             }
             _ => {
                 // Result set header - parse column count and metadata
@@ -832,14 +832,14 @@ impl MySqlConnection {
 
                 // Mark connection as usable for successful result set
                 self.inner.closed = false;
-                return Outcome::Ok(MySqlRowStream {
+                Outcome::Ok(MySqlRowStream {
                     connection: self,
                     columns: Some(columns),
                     column_indices: Some(indices),
                     finished: false,
                     pending_row_count: 0,
                     deprecate_eof,
-                });
+                })
             }
         }
     }
