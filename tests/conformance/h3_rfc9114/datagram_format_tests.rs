@@ -1,5 +1,3 @@
-#![allow(warnings)]
-#![allow(clippy::all)]
 //! HTTP/3 RFC 9297 DATAGRAM frame format validation conformance tests.
 //!
 //! Tests compliance with RFC 9297 H3 DATAGRAM frame format requirements:
@@ -483,5 +481,44 @@ fn calculate_varint_length(value: u64) -> usize {
         4
     } else {
         8
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn datagram_format_results_match_native_support() {
+        let results = run_datagram_format_tests();
+        assert_eq!(results.len(), 5);
+
+        let expected_failure_ids: Vec<_> = results
+            .iter()
+            .filter(|result| result.verdict == TestVerdict::ExpectedFailure)
+            .map(|result| result.test_id.as_str())
+            .collect();
+        assert_eq!(expected_failure_ids, vec!["RFC9297-3-DATAGRAM-NEGOTIATION"]);
+
+        for result in results {
+            if result.test_id == "RFC9297-3-DATAGRAM-NEGOTIATION" {
+                assert_eq!(result.verdict, TestVerdict::ExpectedFailure);
+                assert!(
+                    result.notes.as_deref().is_some_and(|notes| notes.contains(
+                        "H3ConnectionState does not expose peer-negotiated DATAGRAM gating yet"
+                    )),
+                    "expected negotiation support note, got {:?}",
+                    result.notes
+                );
+            } else {
+                assert_eq!(
+                    result.verdict,
+                    TestVerdict::Pass,
+                    "{} failed: {:?}",
+                    result.test_id,
+                    result.notes
+                );
+            }
+        }
     }
 }
