@@ -1,4 +1,3 @@
-#![allow(warnings)]
 //! Metamorphic Testing for Obligation Ledger Commit/Abort Idempotence
 //!
 //! Tests the invariants and safety properties of the obligation ledger's
@@ -19,31 +18,20 @@
 use proptest::prelude::*;
 use std::panic;
 
-use asupersync::lab::config::LabConfig;
-use asupersync::lab::runtime::LabRuntime;
 use asupersync::obligation::ledger::{ObligationLedger, ObligationToken};
 use asupersync::record::{ObligationAbortReason, ObligationKind, ObligationState};
 use asupersync::types::{ObligationId, RegionId, TaskId, Time};
 
 /// Test harness for obligation ledger metamorphic testing
 struct LedgerTestHarness {
-    lab_runtime: LabRuntime,
     ledger: ObligationLedger,
 }
 
 impl LedgerTestHarness {
     fn new() -> Self {
-        let config = LabConfig::default()
-            .worker_count(1)
-            .trace_capacity(512)
-            .max_steps(1000);
-        let lab_runtime = LabRuntime::new(config);
         let ledger = ObligationLedger::new();
 
-        Self {
-            lab_runtime,
-            ledger,
-        }
+        Self { ledger }
     }
 
     fn create_test_task(&self) -> TaskId {
@@ -71,54 +59,6 @@ impl LedgerTestHarness {
                 self.acquire_obligation(ObligationKind::Lease, time)
             })
             .collect()
-    }
-}
-
-/// Statistics for analyzing ledger behavior
-#[derive(Debug, Clone)]
-struct LedgerOperationStats {
-    initial_stats: asupersync::obligation::ledger::LedgerStats,
-    final_stats: asupersync::obligation::ledger::LedgerStats,
-    operations_attempted: usize,
-    operations_succeeded: usize,
-    operations_panicked: usize,
-    unique_obligations: usize,
-}
-
-impl LedgerOperationStats {
-    fn new(
-        initial_stats: asupersync::obligation::ledger::LedgerStats,
-        final_stats: asupersync::obligation::ledger::LedgerStats,
-        operations_attempted: usize,
-        operations_succeeded: usize,
-        operations_panicked: usize,
-        unique_obligations: usize,
-    ) -> Self {
-        Self {
-            initial_stats,
-            final_stats,
-            operations_attempted,
-            operations_succeeded,
-            operations_panicked,
-            unique_obligations,
-        }
-    }
-
-    fn stats_increment_correctly(&self) -> bool {
-        let expected_resolved = self.operations_succeeded;
-        let actual_resolved = (self.final_stats.total_committed + self.final_stats.total_aborted)
-            - (self.initial_stats.total_committed + self.initial_stats.total_aborted);
-        expected_resolved == actual_resolved as usize
-    }
-
-    fn no_double_counting(&self) -> bool {
-        // Each unique obligation should contribute exactly once to final counts
-        let total_final_operations =
-            self.final_stats.total_committed + self.final_stats.total_aborted;
-        let total_initial_operations =
-            self.initial_stats.total_committed + self.initial_stats.total_aborted;
-
-        (total_final_operations - total_initial_operations) == self.unique_obligations as u64
     }
 }
 
@@ -185,7 +125,6 @@ fn mr_double_operation_rejection() {
         let token1 = harness.acquire_obligation(ObligationKind::Lease, Time::ZERO);
         let token2 = harness.acquire_obligation(ObligationKind::Lease, Time::from_nanos(10));
         let id1 = token1.id();
-        let id2 = token2.id();
 
         // First operation - should succeed
         let first_result: Result<(), ()> = match first_operation {
