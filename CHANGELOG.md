@@ -14,7 +14,276 @@ Asupersync is a spec-first, cancel-correct, capability-secure async runtime for 
 
 ## [Unreleased]
 
-_No entries — `0.3.1` freezes the current tip._
+> 3,657 commits since v0.3.1 (2026-04-22 → 2026-05-05) | [compare](https://github.com/Dicklesworthstone/asupersync/compare/v0.3.1...main)
+
+### Release theme
+
+A two-week, multi-agent push focused on three things at once: closing
+the **Reality-Check Wave 2 / swarm-v2** program (autonomic live control
+loop, signed profile bundles, and a 64-core / 256GiB capacity envelope
+proof), driving the **mock-code-finder** sweep into every subsystem
+(replacing placeholder/mock implementations and broad clippy
+suppressions with real semantics and contract artifacts), and a heavy
+**runtime/protocol perf and correctness pass** across MPSC, mutex,
+HPACK, transport router, scheduler hot paths, HTTP/3 QPACK, and
+RaptorQ. Test surface grew with 90+ structure-aware fuzz targets and
+a wave of differential / golden / metamorphic suites. Dozens of new
+smoke-artifact lanes landed under hidden roots
+(`.<name>-smoke-artifacts/`) and dedicated `scripts/run_*_smoke.sh`
+runners; the matching `*_contract` integration tests pin them to
+deterministic invariants.
+
+### Reality-Check Wave 2 — swarm-v2 autonomic control loop
+
+The headline workstream. Closed as `asupersync-d87ytw` (`[swarm-v2]
+Autonomic live control loop and proof certificates`) on 2026-05-05
+together with all 15 sub-beads `d87ytw.1`..`d87ytw.15` and the
+`reality-check-wave2` siblings (`6qju7t`, `j1dwk6`, `ta56mp`,
+`4a3ghz`).
+
+- **Massive-swarm responsiveness program** ([`f660601c8`](https://github.com/Dicklesworthstone/asupersync/commit/f660601c8), [`b832d7fff`](https://github.com/Dicklesworthstone/asupersync/commit/b832d7fff), `br-asupersync-ul9jhr`)
+- **64-core / 256GiB massive-swarm capacity envelope proof** with proof-carrying capacity certificates ([`a44863be5`](https://github.com/Dicklesworthstone/asupersync/commit/a44863be5), [`7e56ccdd5`](https://github.com/Dicklesworthstone/asupersync/commit/7e56ccdd5), [`1e0a3abb8`](https://github.com/Dicklesworthstone/asupersync/commit/1e0a3abb8), `br-asupersync-j1dwk6`, `tdgqjy`)
+- **Compositional latency-budget certificates** and **mean-field swarm capacity planner** (`asupersync-d87ytw.2`, `d87ytw.3`)
+- **Signed profile bundles** with manifests, shadow-run gates, rollback receipts, and true cryptographic signatures ([`66d6d2c1d`](https://github.com/Dicklesworthstone/asupersync/commit/66d6d2c1d), [`f6768f4b2`](https://github.com/Dicklesworthstone/asupersync/commit/f6768f4b2), [`9da861091`](https://github.com/Dicklesworthstone/asupersync/commit/9da861091), `br-asupersync-4buhgd`, `gk0cg3`, `spbsig`, `d87ytw.4`, `d87ytw.7`)
+- **Explainable host profile planner** and dry-run runtime config bundles with arena-temperature policy ([`d5fc7b639`](https://github.com/Dicklesworthstone/asupersync/commit/d5fc7b639), [`bc671cd74`](https://github.com/Dicklesworthstone/asupersync/commit/bc671cd74), [`a81c62a8b`](https://github.com/Dicklesworthstone/asupersync/commit/a81c62a8b), `br-asupersync-c1qfr9`)
+- **Adaptive batch sizing** for cancel and inject burst handling (`br-asupersync-crtx9h`)
+- **Hot-cold arena tiers** and optional large-page cold evidence slabs ([`90d8eda39`](https://github.com/Dicklesworthstone/asupersync/commit/90d8eda39), [`360842bdd`](https://github.com/Dicklesworthstone/asupersync/commit/360842bdd), [`c896ea729`](https://github.com/Dicklesworthstone/asupersync/commit/c896ea729), `br-asupersync-hhlhjv`)
+- **NUMA-local arena shard placement** and remote-touch accounting with deterministic locality planner ([`dd7dfdc79`](https://github.com/Dicklesworthstone/asupersync/commit/dd7dfdc79), `br-asupersync-nxd9xm`)
+- **NUMA-aware worker cohorts** + local-first stealing (`br-asupersync-3ld2ri`)
+- **Cohort-aware admission steering** and remote-spill budget (`br-asupersync-j1980r`)
+- **Tail-risk-aware admission control** for overload periods (`br-asupersync-g0aumf`)
+- **Overload brownout mode** for optional runtime surfaces, with OTLP trace shedding folded into the brownout-aware observability policy ([`717395913`](https://github.com/Dicklesworthstone/asupersync/commit/717395913), [`75afc4dac`](https://github.com/Dicklesworthstone/asupersync/commit/75afc4dac), [`bc2252817`](https://github.com/Dicklesworthstone/asupersync/commit/bc2252817), `br-asupersync-m1k0pz`, `xnqgmd`, `d87ytw.8`)
+- **Read-biased snapshot substrate** for governor and observability hot paths (`br-asupersync-l0q0rs`)
+- **Bounded-load distributed routing** for hot-node avoidance (`br-asupersync-lgj5tz`)
+- **Contention-adaptive combiner path** for injection hot spots (`br-asupersync-g0kwgh`)
+- **Self-tuning trace storage profiles** for 256GiB-class hosts (`br-asupersync-yaj7g6`, `d87ytw.9`)
+- **Wake-to-run telemetry** + offline autotuner feedback loop and scheduler evidence artifact schema (`br-asupersync-99if94`, `1l8m9y`)
+- **Controller interference matrix** + timescale-separation proof harness; **controller interference digital twin** (`br-asupersync-b4guhs`, `d87ytw.6`)
+- **Controller snapshot ledger** for adaptive swarm policies; **controller provenance dashboard** ([`8ac2cc60a`](https://github.com/Dicklesworthstone/asupersync/commit/8ac2cc60a), `br-asupersync-ccgxc3`, `d87ytw.14`)
+- **Live tail-causal attribution emitters**, **wait-cause remediation reports**, **session-typed hot-path obligation proofs**, **NUMA-and-capacity certificate merger**, **rch proof-queue workload feedback** (`asupersync-d87ytw.5`/`.10`/`.11`/`.12`/`.13`)
+- **Final control-loop signoff audit** ([`a829a677f`](https://github.com/Dicklesworthstone/asupersync/commit/a829a677f), `asupersync-d87ytw.15`)
+- **Real agent-swarm workload bridge and replay pack** (parent + sub-beads `qn8i0p` and `qn8i0p.1..8`): coordination workload artifact schema, redacted Agent-Mail/Beads/rch collector, runtime workload corpus expansion, lab replay/minimization hooks, capacity/profile planner ingest, privacy/redaction/trust boundary proofs, one-command smoke runner, final signoff
+- **Restart-budget metamorphic oracle** alignment for the supervision storm-monitor regression ([`896e5fcbe`](https://github.com/Dicklesworthstone/asupersync/commit/896e5fcbe), [`95f93ee33`](https://github.com/Dicklesworthstone/asupersync/commit/95f93ee33), `br-asupersync-ta56mp`, `4a3ghz`)
+- **Unified capability evidence registry** + proof manifest ([`68b1127cc`](https://github.com/Dicklesworthstone/asupersync/commit/68b1127cc), `br-asupersync-6qju7t`)
+
+The program also added **22+ smoke-artifact lanes** with paired
+`scripts/run_*_smoke.sh` runners and `tests/*_contract.rs`
+integration tests pinning each lane to deterministic invariants:
+adaptive-batch-sizing, blocking-pool-affinity, capacity-envelope-planner,
+cohort-admission-steering, compile-frontier-movement,
+decision-plane-validation, governor-state-snapshot,
+host-profile-planner, hot-cold-arena-tiers,
+jetstream-publish-backpressure, massive-swarm-signoff,
+numa-arena-locality, otlp-audit-inventory, otlp-brownout-shedding,
+overload-brownout, read-biased-region-snapshot,
+resource-monitor-platform-gap, runtime-capacity-hints,
+signed-profile-bundle, tail-risk-admission, task-record-pool,
+trace-storage-profile. Smoke-artifact roots are gitignored by
+contract ([`4874ddca9`](https://github.com/Dicklesworthstone/asupersync/commit/4874ddca9), `br-asupersync-9o35bs`).
+
+### Mock-Code-Finder sweep
+
+178 commits prefixed `[mock-code-finder][...]` and 70+ matching closed
+beads. The campaign systematically removed broad clippy `#[allow(...)]`
+suppressions and replaced placeholder/mock implementations with real
+behavior across the repo. Top-touched subsystems: WASM (33 commits),
+HTTP/2 (14), HTTP/3 (8), tokio compat, sync, scheduler, combinator,
+otel/diagnostics/oracle, pool, lab-live, contract, websocket, trace,
+time, recovery, raptorq, quic, notify, lab, kernel, kafka, doctor,
+codec, channel, cancel, broadcast, frankenlab, refinement,
+leak-checker, gen-server, gf256, golden, type, region, mutex, h1,
+hpack, redis, fabric, rate-limit, fs/process/signal,
+runtime/control-seam, rwlock, snapshot, semantic-risk.
+
+Real production gaps closed under that banner included:
+
+- **Kafka silent message loss when the `kafka` feature was off** —
+  `KafkaProducer::send` was writing to a stub broker on production
+  builds without `kafka` (which is not a default feature). Closed as
+  CRITICAL.
+- **HTTP/2 GOAWAY / PRIORITY / PING / PUSH_PROMISE / DATA END_STREAM
+  conformance simulations** replaced with real state-machine and
+  SETTINGS-driven assertions; **ENABLE_PUSH** wired to real
+  `PUSH_PROMISE` behavior.
+- **OTEL placeholders** replaced with real snapshots: histogram /
+  metric aggregator extraction, resource / log severity / trace+span
+  ID / batching simulations, W3C baggage HTTP extraction and
+  injection, tail-based sampling scope, span-semantics success rate.
+- **PostgreSQL real `COPY FROM` client API** + protocol state machine
+  ([`fabea56fc`](https://github.com/Dicklesworthstone/asupersync/commit/fabea56fc) and related).
+- **HTTP/1.1 RFC 9112 request-target validation** suite — six tests
+  that previously passed vacuously when codec validation was missing.
+- **RaptorQ differential** scaffolding that compared against
+  hardcoded `Ok(vec![0x42; 1024])` mocks, plus the Gaussian
+  elimination test placeholder, replaced with real round-trip and
+  spec-derived assertions.
+- **Storm-monitor** default-alignment regression fixed ([`95f93ee33`](https://github.com/Dicklesworthstone/asupersync/commit/95f93ee33)).
+- **HTTP/3 conformance harness re-enabled** with 29 sub-suites and
+  `static-mut` state replaced with `OnceLock<Mutex>` ([`73d7f63ce`](https://github.com/Dicklesworthstone/asupersync/commit/73d7f63ce)).
+- **Hardcoded H3 mock implementations** replaced with real
+  functionality ([`1bbfc2168`](https://github.com/Dicklesworthstone/asupersync/commit/1bbfc2168), `br-asupersync-bs9nbz`).
+
+### Concurrency correctness
+
+Real production bugs uncovered while landing the swarm-v2 program:
+
+- **`src/channel/mpsc.rs`** — `try_send` was returning `Full` whenever
+  *any* waiter was queued, even with available capacity (`bd
+  asupersync-m02s6r`). Reverted to a true capacity check.
+- **`src/channel/mpsc.rs`** — `SendPermit::send` was dropping the
+  failure mode silently on disconnect; rewrote to surface via
+  `Outcome` ([`b75a998f5`](https://github.com/Dicklesworthstone/asupersync/commit/b75a998f5), `br-asupersync-l7t66t`).
+- **`src/channel/watch.rs`** — `send_modify` deadlocked because the
+  user closure ran under the write lock; closure now executes outside
+  the lock window ([`3a6ad1ea8`](https://github.com/Dicklesworthstone/asupersync/commit/3a6ad1ea8), `br-asupersync-0x7fdb`).
+- **`src/runtime/io_driver.rs`** — `on_event` callbacks could deadlock
+  against the driver's own state lock; ordering fixed ([`99043ae8e`](https://github.com/Dicklesworthstone/asupersync/commit/99043ae8e)).
+- **`src/lab/runtime.rs`** — lock-ordering inversion repaired by
+  hoisting `cx_inner.read()` out of the `scheduler.lock()` scope
+  ([`dc69ed4e8`](https://github.com/Dicklesworthstone/asupersync/commit/dc69ed4e8), `br-asupersync-iwqn3q`).
+- **`src/runtime/scheduler/three_lane.rs`** — the steal path was
+  evicting tasks whose arena records had been concurrently removed;
+  changed to preserve, then steal, then update accounting ([`df763583c`](https://github.com/Dicklesworthstone/asupersync/commit/df763583c), [`dc7123c78`](https://github.com/Dicklesworthstone/asupersync/commit/dc7123c78), `br-asupersync-uguhr2`).
+- **`src/runtime/state.rs`** — region close not waking *all* waiters;
+  fixed to broadcast ([`f257fd1c4`](https://github.com/Dicklesworthstone/asupersync/commit/f257fd1c4), `asupersync-novvgd`).
+- **`src/record/region.rs`** — `IN_REGION_WITH_CALL` panic safety via
+  `ReentryGuard` RAII ([`813131f08`](https://github.com/Dicklesworthstone/asupersync/commit/813131f08), `asupersync-b3998e`); `heap_with` /
+  `rref_with` reentrant deadlock prevention ([`c5d08813b`](https://github.com/Dicklesworthstone/asupersync/commit/c5d08813b), `asupersync-xtxr28`).
+- **`src/runtime/state.rs`** — region epoch advance on obligation
+  reservation; obligation pending-counter underflow promoted from
+  `debug_assert + saturating_sub` to release-mode panic ([`e3071bc80`](https://github.com/Dicklesworthstone/asupersync/commit/e3071bc80), [`25803feec`](https://github.com/Dicklesworthstone/asupersync/commit/25803feec)).
+- **`src/sync/notify.rs`** — `notify_one` waking same waker repeatedly
+  via baton drift; corrected baton passing across drop and `notified`
+  paths.
+- **`src/runtime/scheduler/three_lane.rs`** — `seen_io_tokens` bound
+  added so the per-worker scratch set cannot grow without bound across
+  long-lived workers ([`3d6bb2104`](https://github.com/Dicklesworthstone/asupersync/commit/3d6bb2104), `br-asupersync-414j0b`).
+
+### HTTP / protocol correctness
+
+- **HTTP/3 QPACK**: enforce max field-section-size ([`2830f0fa4`](https://github.com/Dicklesworthstone/asupersync/commit/2830f0fa4), `asupersync-ifn7kw`); decoded-header count cap for DoS protection ([`fe8dcdc16`](https://github.com/Dicklesworthstone/asupersync/commit/fe8dcdc16), `asupersync-9bvfe5`); dynamic-table base-relative indexing fixed ([`5159c0758`](https://github.com/Dicklesworthstone/asupersync/commit/5159c0758), [`5c77c9340`](https://github.com/Dicklesworthstone/asupersync/commit/5c77c9340), [`e565f9252`](https://github.com/Dicklesworthstone/asupersync/commit/e565f9252)); QPACK documented as static-only and the runtime status reconciled across README tables ([`4ead428b5`](https://github.com/Dicklesworthstone/asupersync/commit/4ead428b5), [`15da98895`](https://github.com/Dicklesworthstone/asupersync/commit/15da98895)).
+- **HTTP/3 frame**: varint encoding fixed ([`b61b51396`](https://github.com/Dicklesworthstone/asupersync/commit/b61b51396), [`4a1ebb6aa`](https://github.com/Dicklesworthstone/asupersync/commit/4a1ebb6aa), `br-asupersync-e48gp6`); 29-sub-suite RFC 9114 conformance harness re-enabled ([`73d7f63ce`](https://github.com/Dicklesworthstone/asupersync/commit/73d7f63ce)); `H3UniStreamType::decode` widened to `pub` ([`5fafb3fff`](https://github.com/Dicklesworthstone/asupersync/commit/5fafb3fff)).
+- **HTTP/1.1 codec**: forbidden trailers per RFC 9110 §6.5.1 rejected ([`4c3a2cdca`](https://github.com/Dicklesworthstone/asupersync/commit/4c3a2cdca), `br-asupersync-135g0e`); leading-sign in Content-Length and chunk-size rejected ([`52eac7c26`](https://github.com/Dicklesworthstone/asupersync/commit/52eac7c26)); bare-CR scan bound to head region ([`322a1df11`](https://github.com/Dicklesworthstone/asupersync/commit/322a1df11), `br-asupersync-2ovm8z`).
+- **HTTP/2 stream**: `StreamStore::ensure_slot` gap capped to prevent memory-DoS ([`db46975e5`](https://github.com/Dicklesworthstone/asupersync/commit/db46975e5), `br-asupersync-jq82r4`); HTTP/2 SETTINGS frame differential test vs `h2` reference ([`4c0048590`](https://github.com/Dicklesworthstone/asupersync/commit/4c0048590)); H2 stream conformance coverage tightened ([`6d13b2151`](https://github.com/Dicklesworthstone/asupersync/commit/6d13b2151), `br-asupersync-h8pga6`).
+- **HPACK**: O(1) `DynamicTable` find via side-index ([`46b2d1646`](https://github.com/Dicklesworthstone/asupersync/commit/46b2d1646), `br-asupersync-4pshog`); `Arc<str>` dynamic-table entries plus 4-bit-stride Huffman state table ([`8e3353e44`](https://github.com/Dicklesworthstone/asupersync/commit/8e3353e44)); UTF-8-validate-on-borrow + wasted-clone cleanup ([`e32fd747a`](https://github.com/Dicklesworthstone/asupersync/commit/e32fd747a)); HPACK golden vectors landed ([`c0c07ae6a`](https://github.com/Dicklesworthstone/asupersync/commit/c0c07ae6a)).
+- **WebSocket**: receive `Cx` threaded through read-refill polling so cancellation interrupts before transport bytes are consumed ([`192e41654`](https://github.com/Dicklesworthstone/asupersync/commit/192e41654)); frame encoder close-payload validation ([`f553cfcc9`](https://github.com/Dicklesworthstone/asupersync/commit/f553cfcc9), `asupersync-xc1r82`); wire-byte golden snapshot ([`696b2caa3`](https://github.com/Dicklesworthstone/asupersync/commit/696b2caa3)); trailing-bytes mock-code suppressions removed ([`636f94e13`](https://github.com/Dicklesworthstone/asupersync/commit/636f94e13)).
+- **gRPC**: trailer timeout harness repaired ([`adc594f26`](https://github.com/Dicklesworthstone/asupersync/commit/adc594f26)); transport timeouts mapped to `DEADLINE_EXCEEDED` ([`b5729089a`](https://github.com/Dicklesworthstone/asupersync/commit/b5729089a), `br-asupersync-p8rju5`); conformance modules revived for grpc_deadline / grpc_health / grpc_status ([`6704791c4`](https://github.com/Dicklesworthstone/asupersync/commit/6704791c4), [`54970da04`](https://github.com/Dicklesworthstone/asupersync/commit/54970da04), `br-asupersync-pfvsch`); initial-window backpressure differential vs grpc-go ([`809e09080`](https://github.com/Dicklesworthstone/asupersync/commit/809e09080)).
+- **TLS**: `--features tls -D warnings` cleared ([`a78f535a0`](https://github.com/Dicklesworthstone/asupersync/commit/a78f535a0), `br-asupersync-s0nwli`); ClientHello harness hardened ([`6a8f21a01`](https://github.com/Dicklesworthstone/asupersync/commit/6a8f21a01), `br-asupersync-cuyzmt`); record_conformance post-handshake plaintext-injection cases inverted with `u16::try_from` and tautological asserts replaced ([`9c061e13f`](https://github.com/Dicklesworthstone/asupersync/commit/9c061e13f), [`f222ed94f`](https://github.com/Dicklesworthstone/asupersync/commit/f222ed94f), [`5da6a1632`](https://github.com/Dicklesworthstone/asupersync/commit/5da6a1632)); cryptographic boundary test module ([`aced1f44e`](https://github.com/Dicklesworthstone/asupersync/commit/aced1f44e), `br-asupersync-9fjvs3`); cert-pinning fuzzer ([`2c87c7d1b`](https://github.com/Dicklesworthstone/asupersync/commit/2c87c7d1b), `br-asupersync-t374gm`).
+- **DNS**: reject CNAME / MX / SRV RDATA with trailing bytes after the embedded DNS name ([`981b595be`](https://github.com/Dicklesworthstone/asupersync/commit/981b595be)); golden encoder include_bytes paths corrected ([`78eaad0ce`](https://github.com/Dicklesworthstone/asupersync/commit/78eaad0ce), `br-asupersync-knpltd`).
+- **Web layer**: compression honors `identity;q=0`; ETags content-derived; error rewrites strip stale headers; health JSON includes top-level detail; nextjs bootstrap invalidates runtime scope on failure ([`676707e1e`](https://github.com/Dicklesworthstone/asupersync/commit/676707e1e)).
+- **QUIC**: native QUIC RFC 9000 conformance test suite ([`f1d99ac9d`](https://github.com/Dicklesworthstone/asupersync/commit/f1d99ac9d), `br-asupersync-3mgtqf`); H3 varint frame fuzzer ([`98976fdd1`](https://github.com/Dicklesworthstone/asupersync/commit/98976fdd1), `br-asupersync-0eas0f`); tls_conformance_harness `arb_crypto_sequence` repair ([`3b4c99784`](https://github.com/Dicklesworthstone/asupersync/commit/3b4c99784), `br-asupersync-0pfh9h`).
+
+### Database and messaging
+
+- **MySQL** wire-protocol conformance test suite ([`c2f02422e`](https://github.com/Dicklesworthstone/asupersync/commit/c2f02422e), `asupersync-jysouz`); MariaDB OK_Packet status flags differential ([`c421dfd86`](https://github.com/Dicklesworthstone/asupersync/commit/c421dfd86)); `ResultSet` structure-aware fuzzer ([`b6f10c40a`](https://github.com/Dicklesworthstone/asupersync/commit/b6f10c40a)); MySQL row-stream clippy frontier cleared and explicit `AuthSwitch` coverage timed ([`234fc871a`](https://github.com/Dicklesworthstone/asupersync/commit/234fc871a), [`1cbc303e7`](https://github.com/Dicklesworthstone/asupersync/commit/1cbc303e7), `br-asupersync-m84ex4`, `f9o478`).
+- **PostgreSQL** wire parser seam hardening ([`5e9532a44`](https://github.com/Dicklesworthstone/asupersync/commit/5e9532a44)); `CopyData` / `CopyDone` wire format differential conformance ([`eb3d2a164`](https://github.com/Dicklesworthstone/asupersync/commit/eb3d2a164)); real `COPY FROM` client API + extended-query / logical-replication coverage.
+- **Database pool** real-server URL safety gates ([`6a7499ff0`](https://github.com/Dicklesworthstone/asupersync/commit/6a7499ff0)); E2E pool-reconnection integration test ([`cc5cdd286`](https://github.com/Dicklesworthstone/asupersync/commit/cc5cdd286), `asupersync-na35bj`).
+- **Kafka**: real-broker test harness fix ([`31287df27`](https://github.com/Dicklesworthstone/asupersync/commit/31287df27), `br-asupersync-ygotyp`); committed offsets retained across resubscribe ([`f97d2eaa0`](https://github.com/Dicklesworthstone/asupersync/commit/f97d2eaa0)); compile-blocker rebalance test API repaired ([`c12c415a1`](https://github.com/Dicklesworthstone/asupersync/commit/c12c415a1), `br-asupersync-b0irdm`); `ProduceResponse` parser fuzzer ([`3af44c682`](https://github.com/Dicklesworthstone/asupersync/commit/3af44c682)); record-batch integration repaired ([`fabea56fc`](https://github.com/Dicklesworthstone/asupersync/commit/fabea56fc)).
+- **Redis**: RESP3 Push frames accepted in `RedisPubSub::parse_event` ([`8228cf70f`](https://github.com/Dicklesworthstone/asupersync/commit/8228cf70f)); RESP3 SUBSCRIBE pattern routing differential vs `redis-rs` ([`0256200bc`](https://github.com/Dicklesworthstone/asupersync/commit/0256200bc)); RESP3 buffering and `RESP3 pubsub` decoder structure-aware fuzzer ([`25c72e989`](https://github.com/Dicklesworthstone/asupersync/commit/25c72e989), [`e7a705c01`](https://github.com/Dicklesworthstone/asupersync/commit/e7a705c01)).
+- **JetStream**: `ConsumerInfo`, `StreamInfo`, `PullSubscribeOpts`, API-response, error-response, and publish-backpressure structure-aware fuzzers ([`db038ab3f`](https://github.com/Dicklesworthstone/asupersync/commit/db038ab3f), [`5ae936ea4`](https://github.com/Dicklesworthstone/asupersync/commit/5ae936ea4), [`cabb82adc`](https://github.com/Dicklesworthstone/asupersync/commit/cabb82adc), [`7cfa88d8b`](https://github.com/Dicklesworthstone/asupersync/commit/7cfa88d8b)).
+- **SQLite**: `PRAGMA` serialization structure-aware fuzzer ([`85975767d`](https://github.com/Dicklesworthstone/asupersync/commit/85975767d)).
+
+### RaptorQ erasure coding
+
+- **RFC 6330 LtTuple expansion** inlined into `repair_symbol_into` ([`e4e7e7e0a`](https://github.com/Dicklesworthstone/asupersync/commit/e4e7e7e0a)); FEC-Payload-ID emission benchmark ([`43adfe0b8`](https://github.com/Dicklesworthstone/asupersync/commit/43adfe0b8)).
+- **Decode rejects overflowed repair ESIs** instead of panicking in `decode_block` ([`br-asupersync-fm6ys2`](https://github.com/Dicklesworthstone/asupersync/commit/7ba972514), regression test included).
+- **GF(256) SIMD vs scalar-reference equivalence fuzzer** ([`4982c3c93`](https://github.com/Dicklesworthstone/asupersync/commit/4982c3c93), `br-asupersync-uc6d7d`).
+- **Canonical encode / decode round-trip golden snapshot** ([`894629272`](https://github.com/Dicklesworthstone/asupersync/commit/894629272), `br-asupersync-c12bcb`); RFC 6330 §6 high-loss recovery differential test ([`4aa26704c`](https://github.com/Dicklesworthstone/asupersync/commit/4aa26704c)); RFC 6330 §6 encode-decode round-trip differential ([`7a8c67d35`](https://github.com/Dicklesworthstone/asupersync/commit/7a8c67d35)).
+- **Decoder progressive-symbol-arrival cancel-storm fuzzer** ([`1dbb986e4`](https://github.com/Dicklesworthstone/asupersync/commit/1dbb986e4)); decoder symbol-corruption fuzzer ([`324bfe08d`](https://github.com/Dicklesworthstone/asupersync/commit/324bfe08d)); `N_max` boundary fuzzer ([`cff637262`](https://github.com/Dicklesworthstone/asupersync/commit/cff637262)); decoding pipeline `feed()` structure-aware target ([`a6567e0a5`](https://github.com/Dicklesworthstone/asupersync/commit/a6567e0a5)); multi-block coverage ([`8d3d2157a`](https://github.com/Dicklesworthstone/asupersync/commit/8d3d2157a), `br-asupersync-lc0anl`).
+
+### Runtime performance
+
+A continuous-improvement pass; many fixes are bead-traced. Highlights:
+
+- **MPSC O(N) → O(1) slab-based lookups** ([`0ae255739`](https://github.com/Dicklesworthstone/asupersync/commit/0ae255739)); MPSC `try_send` single-lock fast path ([`cdb033b3c`](https://github.com/Dicklesworthstone/asupersync/commit/cdb033b3c), `br-lej99f`); MPSC waiter scans removed.
+- **Mutex** O(1) waiter cleanup via slab-backed intrusive linked list ([`f49630a8e`](https://github.com/Dicklesworthstone/asupersync/commit/f49630a8e), `br-asupersync-wlf0xh`, `vgw2yw`).
+- **Semaphore** waiter scans removed ([`321132d36`](https://github.com/Dicklesworthstone/asupersync/commit/321132d36), `br-asupersync-8qlc7a`); static description on hot path ([`31b85ecb9`](https://github.com/Dicklesworthstone/asupersync/commit/31b85ecb9)).
+- **Three-lane scheduler** `next_task` hot dispatch lock acquisitions optimized; `self.local.lock()` coalesced in next_task hot path ([`f2f2484a5`](https://github.com/Dicklesworthstone/asupersync/commit/f2f2484a5), [`82c0f8a1d`](https://github.com/Dicklesworthstone/asupersync/commit/82c0f8a1d), `br-asupersync-fvixmw`).
+- **Local queue** O(1) dedup `HashSet` + lock-free `cached_len` atomic ([`4a14e7844`](https://github.com/Dicklesworthstone/asupersync/commit/4a14e7844), `br-asupersync-5oll2p`, `pvbwxm`).
+- **TaskRecord object pool** eliminating ~35% allocation hot-spots ([`579894f8e`](https://github.com/Dicklesworthstone/asupersync/commit/579894f8e)).
+- **Transport router** hot-path alloc removal + `DispatchResult` inline capacity ([`c26ee7fb5`](https://github.com/Dicklesworthstone/asupersync/commit/c26ee7fb5), `br-asupersync-klff8q`, `dv32fs`); hash-based `select_n` with consistent hashing ([`71f868f0a`](https://github.com/Dicklesworthstone/asupersync/commit/71f868f0a)).
+- **OTLP trace exporter** lock-free `ArrayQueue` ([`3e6a436da`](https://github.com/Dicklesworthstone/asupersync/commit/3e6a436da), [`e2cc810c3`](https://github.com/Dicklesworthstone/asupersync/commit/e2cc810c3)).
+- **Distributed assignment** O(K²) `Vec::contains` → O(K log K) `BTreeSet` ([`9a5dfd056`](https://github.com/Dicklesworthstone/asupersync/commit/9a5dfd056), `br-asupersync-45xcbm`).
+- **Lyapunov governor** O(1) snapshot via incremental obligation counters ([`adadea72a`](https://github.com/Dicklesworthstone/asupersync/commit/adadea72a), [`f844f5555`](https://github.com/Dicklesworthstone/asupersync/commit/f844f5555), `br-asupersync-xxcss5`).
+- **`Cx`** fast-cancel atomic check before write-lock in `checkpoint` ([`2f62175c0`](https://github.com/Dicklesworthstone/asupersync/commit/2f62175c0), `br-is2xg0`); hot-path `Cx::current().is_some*()` migrated to zero-Arc-clone helpers ([`b18f6d3b8`](https://github.com/Dicklesworthstone/asupersync/commit/b18f6d3b8), `br-asupersync-xqt7dj`); `cx/registry` `format!` removed from hot reservation path ([`570d755ec`](https://github.com/Dicklesworthstone/asupersync/commit/570d755ec)).
+- **`time::wheel`** redundant `current_time()` call eliminated in `register` path ([`505b91af3`](https://github.com/Dicklesworthstone/asupersync/commit/505b91af3), [`33e34c78c`](https://github.com/Dicklesworthstone/asupersync/commit/33e34c78c), `br-asupersync-ifq7c5`).
+- **`runtime/state`** `live_task_count` delegated to `TaskTable`'s O(1) phase-counts sum ([`0ba45c264`](https://github.com/Dicklesworthstone/asupersync/commit/0ba45c264), `br-afv6z4`).
+- **`scheduler/worker`** `seen_io_tokens` bounded + cache-waker amortization ([`3d6bb2104`](https://github.com/Dicklesworthstone/asupersync/commit/3d6bb2104), `br-asupersync-414j0b`, `jkb17z`).
+- **`observability/cancellation_debt_monitor`** parking_lot + bounded pending map ([`ecbb95c85`](https://github.com/Dicklesworthstone/asupersync/commit/ecbb95c85), `br-asupersync-37sffr`, `i40ap4`).
+- **`panic_isolation`** `PANIC_COUNTER` `fetch_add` SeqCst → Relaxed ([`88850ba3e`](https://github.com/Dicklesworthstone/asupersync/commit/88850ba3e), `br-asupersync-h0pfb4`).
+- **Hot-path Vec storage** migrated to `SmallVec` inline buffers across runtime ([`8fc1e0d38`](https://github.com/Dicklesworthstone/asupersync/commit/8fc1e0d38)).
+- **Arena pre-sizing** optimization ([`9c5183f42`](https://github.com/Dicklesworthstone/asupersync/commit/9c5183f42), `br-asupersync-y4lcl9`).
+- **gRPC codec** zero-copy identity frame + sized-Vec gzip ([`d3841aa5c`](https://github.com/Dicklesworthstone/asupersync/commit/d3841aa5c)); H1 zero-copy body via `BytesMut::into_vec` ([`482935ac4`](https://github.com/Dicklesworthstone/asupersync/commit/482935ac4)); H2 stream `StreamStore` flat-Vec replaces `DetHashMap` on hot path ([`eb26cfa67`](https://github.com/Dicklesworthstone/asupersync/commit/eb26cfa67)).
+
+### Test infrastructure expansion
+
+- **165 `feat:` commits, 90+ structure-aware fuzz targets** added across H1, H2, H3, RaptorQ, JetStream, Kafka, Redis, MySQL, SQLite, codecs, intrusive heap, macaroon attenuation, finalizer stack, and task-cancel witness serialization.
+- **Differential conformance suites**: HTTP/2 SETTINGS frame vs `h2`; `LengthDelimitedCodec`; gRPC initial-window backpressure vs `grpc-go`; PostgreSQL `CopyData` / `CopyDone`; RESP3 SUBSCRIBE pattern vs `redis-rs`; MySQL vs MariaDB OK_Packet; Bytes shared-slice semantics ([`32b3c56fc`](https://github.com/Dicklesworthstone/asupersync/commit/32b3c56fc), `br-asupersync-6uckg1`); RFC 6330 §6 RaptorQ.
+- **Golden snapshot suites**: Plan IR rewrites ([`0a37eb422`](https://github.com/Dicklesworthstone/asupersync/commit/0a37eb422), `br-asupersync-8tajyi`); Plan DAG rewrite-rule ([`0e6066426`](https://github.com/Dicklesworthstone/asupersync/commit/0e6066426)); HPACK ([`c0c07ae6a`](https://github.com/Dicklesworthstone/asupersync/commit/c0c07ae6a), `br-asupersync-l432ti`); WebSocket wire-byte ([`696b2caa3`](https://github.com/Dicklesworthstone/asupersync/commit/696b2caa3), `br-asupersync-z95cah`); trace canonicalizer Foata normal form ([`14fa0df4b`](https://github.com/Dicklesworthstone/asupersync/commit/14fa0df4b)); trace event serialization ([`a5258618c`](https://github.com/Dicklesworthstone/asupersync/commit/a5258618c), `br-asupersync-la3t6w`); h1 request-line + h2 control-frame goldens ([`504ae1fe6`](https://github.com/Dicklesworthstone/asupersync/commit/504ae1fe6)); Plan DAG / analysis / certificate insta baselines ([`e66cf1c97`](https://github.com/Dicklesworthstone/asupersync/commit/e66cf1c97)); obligation ledger goldens ([`e56cdfe69`](https://github.com/Dicklesworthstone/asupersync/commit/e56cdfe69), `asupersync-a2tueg`); symbol_cancel protocol lifecycle golden ([`f00395737`](https://github.com/Dicklesworthstone/asupersync/commit/f00395737)).
+- **Metamorphic suites**: `OnceCell` init-then-get equivalence ([`4eb5b01b3`](https://github.com/Dicklesworthstone/asupersync/commit/4eb5b01b3)); three-lane scheduler priority-promotion idempotence ([`e9875ffce`](https://github.com/Dicklesworthstone/asupersync/commit/e9875ffce)); semaphore fairness and cancel-release invariants ([`249093cbe`](https://github.com/Dicklesworthstone/asupersync/commit/249093cbe), `br-asupersync-668nd3`); MPSC FIFO ([`99e3eead4`](https://github.com/Dicklesworthstone/asupersync/commit/99e3eead4)); broadcast MR3 dropped-receiver recovery range pinned to actual sent values ([`9a83b6d44`](https://github.com/Dicklesworthstone/asupersync/commit/9a83b6d44), `br-asupersync-w7g55u`).
+- **Cryptographic boundary tests** module ([`aced1f44e`](https://github.com/Dicklesworthstone/asupersync/commit/aced1f44e), `br-asupersync-9fjvs3`).
+- **Bytes** shared-slice conformance suite ([`32b3c56fc`](https://github.com/Dicklesworthstone/asupersync/commit/32b3c56fc), `br-asupersync-6uckg1`).
+- **HPACK RFC 7541 edge-case + adversarial decoder fuzz targets** ([`5571df6c1`](https://github.com/Dicklesworthstone/asupersync/commit/5571df6c1)).
+
+### Refactoring and code quality
+
+A 2026-04-25 sweep centralized constructor and default behavior across
+the runtime, transport, codec, lab, observability, plan, RaptorQ, and
+HTTP subsystems via `derive Default` / shared constructor helpers /
+test-setup helper reuse. Representative commits: scheduler default
+delegations ([`8e5e98783`](https://github.com/Dicklesworthstone/asupersync/commit/8e5e98783), [`ac5dba397`](https://github.com/Dicklesworthstone/asupersync/commit/ac5dba397), [`326685465`](https://github.com/Dicklesworthstone/asupersync/commit/326685465), [`1ecafa20d`](https://github.com/Dicklesworthstone/asupersync/commit/1ecafa20d)), HPACK default
+constructors ([`c23a26b5a`](https://github.com/Dicklesworthstone/asupersync/commit/c23a26b5a)), gRPC web frame default ([`6facb4e79`](https://github.com/Dicklesworthstone/asupersync/commit/6facb4e79)), TLS empty
+constructors ([`43baf627a`](https://github.com/Dicklesworthstone/asupersync/commit/43baf627a)), CRDT counter constructors ([`0d852e83b`](https://github.com/Dicklesworthstone/asupersync/commit/0d852e83b)),
+Lamport clock default ([`b5a0b9e82`](https://github.com/Dicklesworthstone/asupersync/commit/b5a0b9e82)), Conformal calibration defaults
+([`366ab1ab1`](https://github.com/Dicklesworthstone/asupersync/commit/366ab1ab1)).
+
+### Observability
+
+- **Cancellation visualizer** namespaced DOT node IDs per trace, escaped labels, overflow-safe duration averages, real throughput accumulator ([`711c97178`](https://github.com/Dicklesworthstone/asupersync/commit/711c97178)).
+- **Cancellation analyzer** bottleneck threshold compares fractions instead of percentage points; preserves zero-throughput samples; insufficient-data on empty input ([`edd1f81cc`](https://github.com/Dicklesworthstone/asupersync/commit/edd1f81cc)).
+- **`panic_isolation`** runtime lifecycle instrumentation in `CapturingMetrics` ([`bb3afb75f`](https://github.com/Dicklesworthstone/asupersync/commit/bb3afb75f)).
+- **OTEL** placeholder histograms / metric aggregator extraction / W3C baggage HTTP extraction / tail-based sampling scope all replaced with real implementations under the mock-code-finder banner.
+
+### Documentation and repository hygiene
+
+A 2026-05-05 cleanup sweep:
+
+- Root `.md` planning / analysis / fuzz-companion / per-subsystem audit files relocated under `docs/{plans,analysis,fuzz,audits}/` ([`56b3de9aa`](https://github.com/Dicklesworthstone/asupersync/commit/56b3de9aa), [`33b6c7ac6`](https://github.com/Dicklesworthstone/asupersync/commit/33b6c7ac6), [`79d5f5139`](https://github.com/Dicklesworthstone/asupersync/commit/79d5f5139), [`800c8a2a9`](https://github.com/Dicklesworthstone/asupersync/commit/800c8a2a9), [`e82f1ee76`](https://github.com/Dicklesworthstone/asupersync/commit/e82f1ee76)).
+- Raw modes-of-reasoning per-mode swarm outputs removed ([`a5f3d5692`](https://github.com/Dicklesworthstone/asupersync/commit/a5f3d5692)); tracked ephemeral scan / fix-script / test-binary detritus removed ([`e04a0e708`](https://github.com/Dicklesworthstone/asupersync/commit/e04a0e708)).
+- `.gitignore` expanded for root scratch and smoke-artifact accumulation ([`d31e2515a`](https://github.com/Dicklesworthstone/asupersync/commit/d31e2515a), [`4874ddca9`](https://github.com/Dicklesworthstone/asupersync/commit/4874ddca9)).
+- Phase 6 reality check added ([`0f192ae63`](https://github.com/Dicklesworthstone/asupersync/commit/0f192ae63), `br-asupersync-ao9m8l`); HTTP/3 implementation status aligned across all README tables ([`15da98895`](https://github.com/Dicklesworthstone/asupersync/commit/15da98895), [`9a577aa7a`](https://github.com/Dicklesworthstone/asupersync/commit/9a577aa7a)).
+
+### Audit campaign
+
+The fresh-eyes / bug-audit campaign continued. Apr-24 / Apr-25 batches
+recorded multiple SOUND verdicts, including the cryptographic boundary
+test module ([`6d6009c17`](https://github.com/Dicklesworthstone/asupersync/commit/6d6009c17)), lab-network and lab-meta runners
+([`3549ad058`](https://github.com/Dicklesworthstone/asupersync/commit/3549ad058)), and the smallvec optimization pass ([`6a28e1a48`](https://github.com/Dicklesworthstone/asupersync/commit/6a28e1a48), `br-asupersync-ms7qud`). The audit index ledger now exceeds 1450 records.
+
+### Beads / workstream evidence
+
+1,726 beads closed since v0.3.1. Beyond the swarm-v2 program above:
+
+- **`asupersync-d87ytw` (parent epic)** + sub-beads `.1`–`.15` — autonomic live control loop and proof certificates (closed 2026-05-05).
+- **`asupersync-qn8i0p` (parent)** + sub-beads `.1`–`.8` — real coordination-workload bridge and replay pack.
+- **`asupersync-6qju7t`** — unified capability evidence registry and proof manifest.
+- **`asupersync-j1dwk6`** — 64-core / 256GiB massive-swarm capacity envelope proof.
+- **`asupersync-ul9jhr`** — massive-swarm responsiveness program.
+- **`asupersync-wqsael`** — final massive-swarm signoff matrix and operator evidence audit.
+- Workstream-specific cleanups: `m84ex4` (mysql clippy), `mmddg3` (runtime config clippy), `pfweja` (three_lane clippy), `vdhei0` (blocking_pool clippy), `xmp8am` (low-risk clippy frontier), `ikol9e` (W3C trace-context generalization), `jm7y3y` (`OnceCell` future_not_send policy), `9o35bs` (smoke-artifact gitignore contract), `5005zl` (E2E conformance helper compile bead).
+
+### Verification
+
+- `cargo check --workspace --all-targets` continues to pass.
+- The lib-test frontier work (`br-asupersync-0b0fxk`, `d367a0`,
+  `dhrd5p`, `ejzzih`, `hxk1pe`, `i1vce6`, `nuday6`, `oim3yn`, `wfbfg3`,
+  `zb9g03`) repaired the residual cross-surface compile drift that
+  blocked scheduler / observability / shared-main proof paths under
+  `--features test-internals -D warnings`.
+- The 22+ `tests/*_smoke_contract.rs` contract tests pin
+  reality-check Wave 2 invariants; their generated artifacts live
+  under hidden `.<name>-smoke-artifacts/` roots and are gitignored by
+  contract.
 
 ---
 
