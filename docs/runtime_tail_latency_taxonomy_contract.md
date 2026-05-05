@@ -127,6 +127,44 @@ The contract requires the following sampling discipline:
 2. Extended fields may be replay-only or forensic-only, but must retain the stable keys defined by this contract.
 3. When a term is only represented by proxies, preserve the proxy fields and keep the residual duration in the unknown bucket.
 
+## Compact Tail Causal Emitters
+
+Bead `asupersync-d87ytw.5` adds the first runtime-facing compact emitter for this taxonomy:
+
+- `TailLatencyEmitterConfig`
+- `TailLatencyCompactSample`
+- `TailLatencyCompactEvent`
+- `emit_tail_latency_compact_event`
+
+The emitter is disabled by default. Enabled core emission produces a deterministic event row with:
+
+- `scenario_id`
+- `event_id`
+- `taxonomy_version`
+- `fields`
+- `attribution_states`
+- `missing_producers`
+- `unknown_unmeasured_ns`
+- `overhead_estimate_bytes`
+
+The compact core mirrors the required log field table exactly. It includes `tail.contract_version`, `tail.total_latency_ns`, ready queue depth, poll count, I/O events received, retry delay, lock wait, live allocations, and the unknown residual bucket.
+
+Missing producers fail closed without dropping the row. The numeric field remains present with value `0`, the key is listed in `missing_producers`, the term attribution state becomes `missing_producer`, and the residual stays visible in `tail.unknown.unmeasured_ns`. Proxy fields never reduce the unknown bucket; only measured direct durations do. If measured direct durations exceed `tail.total_latency_ns`, emission returns an error instead of saturating silently.
+
+Extended allocator byte pressure is gated with `TailLatencyEmitterConfig::with_extended_allocator_bytes_live()`. It is replay/forensics-only until a later bead proves a live low-overhead producer.
+
+## Compact Emitter Smoke Runner
+
+The deterministic runner is `scripts/run_tail_causal_attribution_emitters_smoke.sh`.
+
+It exercises:
+
+1. A complete compact row with all producers present.
+2. A missing-producer row that preserves residual unknown latency.
+3. The default disabled path, which emits no row.
+
+Every execute-mode run logs scenario id, event id, taxonomy version, compact fields, residual unknown, overhead estimate, artifact path, and replay command in a JSON report. The runner routes the Rust proof through `rch` and writes a report artifact under the selected output root.
+
 ## Validation
 
 The invariant suite for this contract lives in `tests/runtime_tail_latency_taxonomy_contract.rs`.
@@ -134,7 +172,13 @@ The invariant suite for this contract lives in `tests/runtime_tail_latency_taxon
 Focused reproduction:
 
 ```bash
-rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=/tmp/rch-greenmountain-aa0114 cargo test --features cli --test runtime_tail_latency_taxonomy_contract -- --nocapture
+rch exec -- env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-C debuginfo=0' CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_tail_latency_taxonomy cargo test -p asupersync --test runtime_tail_latency_taxonomy_contract --features test-internals -- --nocapture
+```
+
+Smoke reproduction:
+
+```bash
+bash scripts/run_tail_causal_attribution_emitters_smoke.sh --execute --output-root target/tail-causal-attribution-smoke
 ```
 
 The validation checks:
@@ -143,12 +187,14 @@ The validation checks:
 2. The artifact stays aligned to the code-backed contract.
 3. Producer file paths continue to exist.
 4. Term and required-field inventories stay stable across edits.
+5. Compact emitter rows preserve schema keys, unknown residuals, disabled-mode behavior, deterministic serialization, and low-overhead feature gating.
 
 ## Cross-References
 
 - `src/observability/diagnostics.rs`
 - `artifacts/runtime_tail_latency_taxonomy_v1.json`
 - `tests/runtime_tail_latency_taxonomy_contract.rs`
+- `scripts/run_tail_causal_attribution_emitters_smoke.sh`
 - `src/runtime/scheduler/decision_contract.rs`
 - `src/obligation/lyapunov.rs`
 - `src/observability/resource_accounting.rs`

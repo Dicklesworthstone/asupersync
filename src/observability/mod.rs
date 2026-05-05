@@ -179,9 +179,11 @@ pub use debt_runtime_integration::{DebtHealthReport, DebtRuntimeIntegration};
 pub use diagnostics::{
     BlockReason, CancelReasonInfo, CancellationExplanation, CancellationStep, DeadlockCycle,
     DeadlockSeverity, Diagnostics, DirectionalDeadlockReport, ObligationLeak, Reason,
-    RegionOpenExplanation, TAIL_LATENCY_TAXONOMY_CONTRACT_VERSION, TailLatencyLogFieldSpec,
+    RegionOpenExplanation, TAIL_LATENCY_COMPACT_EVENT_SCHEMA_VERSION,
+    TAIL_LATENCY_TAXONOMY_CONTRACT_VERSION, TailLatencyCompactEvent, TailLatencyCompactSample,
+    TailLatencyEmitError, TailLatencyEmitterConfig, TailLatencyFieldValue, TailLatencyLogFieldSpec,
     TailLatencySignalSpec, TailLatencyTaxonomyContract, TailLatencyTermSpec,
-    TaskBlockedExplanation, tail_latency_taxonomy_contract,
+    TaskBlockedExplanation, emit_tail_latency_compact_event, tail_latency_taxonomy_contract,
 };
 pub use entry::LogEntry;
 pub use level::LogLevel;

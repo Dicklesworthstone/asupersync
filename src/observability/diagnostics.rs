@@ -1164,6 +1164,378 @@ pub struct TailLatencyTaxonomyContract {
     pub compatibility_notes: Vec<String>,
 }
 
+/// Compact tail-causal event schema emitted by the always-on attribution path.
+pub const TAIL_LATENCY_COMPACT_EVENT_SCHEMA_VERSION: &str =
+    "runtime-tail-causal-attribution-event-v1";
+
+/// Value carried by one stable tail-latency structured-log field.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum TailLatencyFieldValue {
+    /// Text value, used for schema identifiers and state labels.
+    Text(String),
+    /// Unsigned integer value, used for nanoseconds, counts, and bytes.
+    Unsigned(u64),
+}
+
+/// Configuration for compact tail-causal attribution emission.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct TailLatencyEmitterConfig {
+    /// Whether the emitter should produce events.
+    pub enabled: bool,
+    /// Whether replay/forensics-only byte pressure should be included.
+    pub include_extended_allocator_bytes_live: bool,
+}
+
+impl TailLatencyEmitterConfig {
+    /// Return a config that enables the compact always-on core only.
+    #[must_use]
+    pub const fn enabled_core() -> Self {
+        Self {
+            enabled: true,
+            include_extended_allocator_bytes_live: false,
+        }
+    }
+
+    /// Enable replay/forensics-only allocator byte pressure in addition to the
+    /// compact core.
+    #[must_use]
+    pub const fn with_extended_allocator_bytes_live(mut self) -> Self {
+        self.include_extended_allocator_bytes_live = true;
+        self
+    }
+}
+
+/// Explicit input sample for one compact tail-causal attribution event.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct TailLatencyCompactSample {
+    /// End-to-end latency under analysis.
+    pub total_latency_ns: u64,
+    /// Ready queue backlog proxy.
+    pub ready_queue_depth: Option<u64>,
+    /// Task poll demand proxy.
+    pub poll_count: Option<u64>,
+    /// Reactor/network event pressure proxy.
+    pub events_received: Option<u64>,
+    /// Direct retry/backoff delay, when measured.
+    pub retries_total_delay_ns: Option<u64>,
+    /// Direct lock wait delay, when measured.
+    pub synchronization_lock_wait_ns: Option<u64>,
+    /// Live allocator/cache pressure proxy.
+    pub allocator_live_allocations: Option<u64>,
+    /// Replay/forensics-only live byte pressure proxy.
+    pub allocator_bytes_live: Option<u64>,
+}
+
+impl TailLatencyCompactSample {
+    /// Create an empty sample for the supplied total latency.
+    #[must_use]
+    pub const fn new(total_latency_ns: u64) -> Self {
+        Self {
+            total_latency_ns,
+            ready_queue_depth: None,
+            poll_count: None,
+            events_received: None,
+            retries_total_delay_ns: None,
+            synchronization_lock_wait_ns: None,
+            allocator_live_allocations: None,
+            allocator_bytes_live: None,
+        }
+    }
+
+    /// Attach the compact core queueing proxy.
+    #[must_use]
+    pub const fn with_ready_queue_depth(mut self, value: u64) -> Self {
+        self.ready_queue_depth = Some(value);
+        self
+    }
+
+    /// Attach the compact core service proxy.
+    #[must_use]
+    pub const fn with_poll_count(mut self, value: u64) -> Self {
+        self.poll_count = Some(value);
+        self
+    }
+
+    /// Attach the compact core I/O or network proxy.
+    #[must_use]
+    pub const fn with_events_received(mut self, value: u64) -> Self {
+        self.events_received = Some(value);
+        self
+    }
+
+    /// Attach measured retry/backoff delay.
+    #[must_use]
+    pub const fn with_retries_total_delay_ns(mut self, value: u64) -> Self {
+        self.retries_total_delay_ns = Some(value);
+        self
+    }
+
+    /// Attach measured synchronization lock wait.
+    #[must_use]
+    pub const fn with_synchronization_lock_wait_ns(mut self, value: u64) -> Self {
+        self.synchronization_lock_wait_ns = Some(value);
+        self
+    }
+
+    /// Attach the compact core allocator/cache proxy.
+    #[must_use]
+    pub const fn with_allocator_live_allocations(mut self, value: u64) -> Self {
+        self.allocator_live_allocations = Some(value);
+        self
+    }
+
+    /// Attach replay/forensics-only allocator byte pressure.
+    #[must_use]
+    pub const fn with_allocator_bytes_live(mut self, value: u64) -> Self {
+        self.allocator_bytes_live = Some(value);
+        self
+    }
+}
+
+/// Compact, deterministic event row suitable for certificates and smoke logs.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TailLatencyCompactEvent {
+    /// Event schema version.
+    pub schema_version: String,
+    /// Scenario or workload identifier supplied by the caller.
+    pub scenario_id: String,
+    /// Event identifier supplied by the caller.
+    pub event_id: String,
+    /// Taxonomy version backing the field set.
+    pub taxonomy_version: String,
+    /// Stable structured fields in lexical order.
+    pub fields: BTreeMap<String, TailLatencyFieldValue>,
+    /// Per-term attribution states in lexical order.
+    pub attribution_states: BTreeMap<String, String>,
+    /// Required producers that were unavailable for this event.
+    pub missing_producers: Vec<String>,
+    /// Explicit residual that remains unattributed by measured durations.
+    pub unknown_unmeasured_ns: u64,
+    /// Conservative deterministic overhead estimate for this compact event.
+    pub overhead_estimate_bytes: usize,
+}
+
+/// Failure while building a compact tail-causal event.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TailLatencyEmitError {
+    /// Scenario id was empty.
+    EmptyScenarioId,
+    /// Event id was empty.
+    EmptyEventId,
+    /// Direct measured durations exceed the observed total latency.
+    DirectDurationExceedsTotal {
+        /// Observed total latency.
+        total_latency_ns: u64,
+        /// Sum of direct measured terms.
+        direct_duration_ns: u64,
+    },
+}
+
+impl fmt::Display for TailLatencyEmitError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::EmptyScenarioId => f.write_str("tail-latency scenario id must not be empty"),
+            Self::EmptyEventId => f.write_str("tail-latency event id must not be empty"),
+            Self::DirectDurationExceedsTotal {
+                total_latency_ns,
+                direct_duration_ns,
+            } => write!(
+                f,
+                "tail-latency direct durations ({direct_duration_ns}ns) exceed total latency ({total_latency_ns}ns)"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for TailLatencyEmitError {}
+
+fn push_tail_missing(
+    missing: &mut Vec<String>,
+    attribution_states: &mut BTreeMap<String, String>,
+    term: &str,
+    producer_key: &str,
+) {
+    missing.push(producer_key.to_string());
+    attribution_states.insert(term.to_string(), "missing_producer".to_string());
+}
+
+fn tail_field_from_optional(
+    fields: &mut BTreeMap<String, TailLatencyFieldValue>,
+    missing: &mut Vec<String>,
+    attribution_states: &mut BTreeMap<String, String>,
+    key: &str,
+    term: &str,
+    state_when_present: &str,
+    value: Option<u64>,
+) {
+    match value {
+        Some(value) => {
+            fields.insert(key.to_string(), TailLatencyFieldValue::Unsigned(value));
+            attribution_states.insert(term.to_string(), state_when_present.to_string());
+        }
+        None => {
+            fields.insert(key.to_string(), TailLatencyFieldValue::Unsigned(0));
+            push_tail_missing(missing, attribution_states, term, key);
+        }
+    }
+}
+
+fn tail_compact_event_overhead_estimate_bytes(
+    field_count: usize,
+    state_count: usize,
+    missing_count: usize,
+) -> usize {
+    std::mem::size_of::<TailLatencyCompactSample>()
+        + std::mem::size_of::<TailLatencyCompactEvent>()
+        + (field_count * 96)
+        + (state_count * 64)
+        + (missing_count * 48)
+}
+
+/// Emit one compact tail-causal attribution event.
+///
+/// The emitter is disabled by default. When enabled, every required compact
+/// field is present in the output. Missing producers are represented by a zero
+/// placeholder plus a `missing_producers` entry and a nonzero unknown residual
+/// whenever measured direct terms do not cover the observed total.
+pub fn emit_tail_latency_compact_event(
+    config: TailLatencyEmitterConfig,
+    scenario_id: &str,
+    event_id: &str,
+    sample: TailLatencyCompactSample,
+) -> Result<Option<TailLatencyCompactEvent>, TailLatencyEmitError> {
+    if !config.enabled {
+        return Ok(None);
+    }
+    if scenario_id.trim().is_empty() {
+        return Err(TailLatencyEmitError::EmptyScenarioId);
+    }
+    if event_id.trim().is_empty() {
+        return Err(TailLatencyEmitError::EmptyEventId);
+    }
+
+    let direct_duration_ns = sample
+        .retries_total_delay_ns
+        .unwrap_or(0)
+        .saturating_add(sample.synchronization_lock_wait_ns.unwrap_or(0));
+    if direct_duration_ns > sample.total_latency_ns {
+        return Err(TailLatencyEmitError::DirectDurationExceedsTotal {
+            total_latency_ns: sample.total_latency_ns,
+            direct_duration_ns,
+        });
+    }
+    let unknown_unmeasured_ns = sample.total_latency_ns - direct_duration_ns;
+
+    let mut fields = BTreeMap::new();
+    let mut attribution_states = BTreeMap::new();
+    let mut missing_producers = Vec::new();
+
+    fields.insert(
+        "tail.contract_version".to_string(),
+        TailLatencyFieldValue::Text(TAIL_LATENCY_TAXONOMY_CONTRACT_VERSION.to_string()),
+    );
+    fields.insert(
+        "tail.total_latency_ns".to_string(),
+        TailLatencyFieldValue::Unsigned(sample.total_latency_ns),
+    );
+    tail_field_from_optional(
+        &mut fields,
+        &mut missing_producers,
+        &mut attribution_states,
+        "tail.queueing.ready_queue_depth",
+        "queueing",
+        "proxy_signal",
+        sample.ready_queue_depth,
+    );
+    tail_field_from_optional(
+        &mut fields,
+        &mut missing_producers,
+        &mut attribution_states,
+        "tail.service.poll_count",
+        "service",
+        "proxy_signal",
+        sample.poll_count,
+    );
+    tail_field_from_optional(
+        &mut fields,
+        &mut missing_producers,
+        &mut attribution_states,
+        "tail.io_or_network.events_received",
+        "io_or_network",
+        "proxy_signal",
+        sample.events_received,
+    );
+    tail_field_from_optional(
+        &mut fields,
+        &mut missing_producers,
+        &mut attribution_states,
+        "tail.retries.total_delay_ns",
+        "retries",
+        "direct_duration",
+        sample.retries_total_delay_ns,
+    );
+    tail_field_from_optional(
+        &mut fields,
+        &mut missing_producers,
+        &mut attribution_states,
+        "tail.synchronization.lock_wait_ns",
+        "synchronization",
+        "direct_duration",
+        sample.synchronization_lock_wait_ns,
+    );
+    tail_field_from_optional(
+        &mut fields,
+        &mut missing_producers,
+        &mut attribution_states,
+        "tail.allocator_or_cache.live_allocations",
+        "allocator_or_cache",
+        "proxy_signal",
+        sample.allocator_live_allocations,
+    );
+    fields.insert(
+        "tail.unknown.unmeasured_ns".to_string(),
+        TailLatencyFieldValue::Unsigned(unknown_unmeasured_ns),
+    );
+    attribution_states.insert(
+        "unknown".to_string(),
+        if unknown_unmeasured_ns == 0 {
+            "fully_attributed".to_string()
+        } else {
+            "residual".to_string()
+        },
+    );
+
+    if config.include_extended_allocator_bytes_live {
+        if let Some(bytes_live) = sample.allocator_bytes_live {
+            fields.insert(
+                "tail.allocator_or_cache.bytes_live".to_string(),
+                TailLatencyFieldValue::Unsigned(bytes_live),
+            );
+        }
+    }
+
+    missing_producers.sort();
+    missing_producers.dedup();
+    let overhead_estimate_bytes = tail_compact_event_overhead_estimate_bytes(
+        fields.len(),
+        attribution_states.len(),
+        missing_producers.len(),
+    );
+
+    Ok(Some(TailLatencyCompactEvent {
+        schema_version: TAIL_LATENCY_COMPACT_EVENT_SCHEMA_VERSION.to_string(),
+        scenario_id: scenario_id.trim().to_string(),
+        event_id: event_id.trim().to_string(),
+        taxonomy_version: TAIL_LATENCY_TAXONOMY_CONTRACT_VERSION.to_string(),
+        fields,
+        attribution_states,
+        missing_producers,
+        unknown_unmeasured_ns,
+        overhead_estimate_bytes,
+    }))
+}
+
 fn tail_latency_log_field(
     key: &str,
     unit: &str,
@@ -4031,6 +4403,193 @@ mod tests {
                 signal.producer_file
             );
         }
+    }
+
+    fn complete_tail_latency_sample() -> TailLatencyCompactSample {
+        TailLatencyCompactSample::new(12_000)
+            .with_ready_queue_depth(17)
+            .with_poll_count(5)
+            .with_events_received(9)
+            .with_retries_total_delay_ns(1_500)
+            .with_synchronization_lock_wait_ns(2_500)
+            .with_allocator_live_allocations(33)
+            .with_allocator_bytes_live(8_192)
+    }
+
+    #[test]
+    fn compact_tail_emitter_required_schema_keys_stay_stable() {
+        let event = emit_tail_latency_compact_event(
+            TailLatencyEmitterConfig::enabled_core(),
+            "scheduler-overload-smoke",
+            "event-0001",
+            complete_tail_latency_sample(),
+        )
+        .expect("emit should succeed")
+        .expect("enabled emitter should produce an event");
+
+        let contract = tail_latency_taxonomy_contract();
+        let required_keys: std::collections::BTreeSet<&str> = contract
+            .required_log_fields
+            .iter()
+            .map(|field| field.key.as_str())
+            .collect();
+        let actual_keys: std::collections::BTreeSet<&str> =
+            event.fields.keys().map(String::as_str).collect();
+        assert_eq!(actual_keys, required_keys);
+        assert_eq!(
+            event.schema_version,
+            TAIL_LATENCY_COMPACT_EVENT_SCHEMA_VERSION
+        );
+        assert_eq!(
+            event.taxonomy_version,
+            TAIL_LATENCY_TAXONOMY_CONTRACT_VERSION
+        );
+        assert_eq!(event.unknown_unmeasured_ns, 8_000);
+    }
+
+    #[test]
+    fn compact_tail_emitter_missing_producers_fall_back_to_unknown() {
+        let sample = TailLatencyCompactSample::new(9_000)
+            .with_ready_queue_depth(3)
+            .with_retries_total_delay_ns(1_000)
+            .with_allocator_live_allocations(7);
+        let event = emit_tail_latency_compact_event(
+            TailLatencyEmitterConfig::enabled_core(),
+            "partial-producer-smoke",
+            "event-missing",
+            sample,
+        )
+        .expect("missing producers should not abort emission")
+        .expect("enabled emitter should produce an event");
+
+        assert_eq!(event.unknown_unmeasured_ns, 8_000);
+        assert_eq!(
+            event.fields.get("tail.service.poll_count"),
+            Some(&TailLatencyFieldValue::Unsigned(0))
+        );
+        assert_eq!(
+            event.fields.get("tail.io_or_network.events_received"),
+            Some(&TailLatencyFieldValue::Unsigned(0))
+        );
+        assert!(
+            event
+                .missing_producers
+                .contains(&"tail.service.poll_count".to_string())
+        );
+        assert!(
+            event
+                .missing_producers
+                .contains(&"tail.io_or_network.events_received".to_string())
+        );
+        assert_eq!(
+            event.attribution_states.get("service").map(String::as_str),
+            Some("missing_producer")
+        );
+        assert_eq!(
+            event.attribution_states.get("unknown").map(String::as_str),
+            Some("residual")
+        );
+    }
+
+    #[test]
+    fn compact_tail_emitter_serialization_is_deterministic() {
+        let config = TailLatencyEmitterConfig::enabled_core().with_extended_allocator_bytes_live();
+        let sample = complete_tail_latency_sample();
+        let first = emit_tail_latency_compact_event(
+            config,
+            "deterministic-smoke",
+            "event-stable",
+            sample.clone(),
+        )
+        .expect("first emission")
+        .expect("first event");
+        let second =
+            emit_tail_latency_compact_event(config, "deterministic-smoke", "event-stable", sample)
+                .expect("second emission")
+                .expect("second event");
+
+        let first_json = serde_json::to_vec(&first).expect("serialize first");
+        let second_json = serde_json::to_vec(&second).expect("serialize second");
+        assert_eq!(first_json, second_json);
+        assert!(
+            first
+                .fields
+                .contains_key("tail.allocator_or_cache.bytes_live"),
+            "extended allocator byte pressure should be explicitly gated"
+        );
+    }
+
+    #[test]
+    fn compact_tail_emitter_disabled_mode_is_semantics_neutral() {
+        let event = emit_tail_latency_compact_event(
+            TailLatencyEmitterConfig::default(),
+            "",
+            "",
+            TailLatencyCompactSample::new(1).with_retries_total_delay_ns(2),
+        )
+        .expect("disabled emitter should skip validation");
+        assert_eq!(event, None);
+    }
+
+    #[test]
+    fn compact_tail_emitter_rejects_impossible_direct_duration() {
+        let error = emit_tail_latency_compact_event(
+            TailLatencyEmitterConfig::enabled_core(),
+            "bad-direct-duration",
+            "event-overflow",
+            TailLatencyCompactSample::new(1_000)
+                .with_retries_total_delay_ns(750)
+                .with_synchronization_lock_wait_ns(500),
+        )
+        .expect_err("direct durations over total latency must fail closed");
+        assert_eq!(
+            error,
+            TailLatencyEmitError::DirectDurationExceedsTotal {
+                total_latency_ns: 1_000,
+                direct_duration_ns: 1_250,
+            }
+        );
+    }
+
+    #[test]
+    fn compact_tail_emitter_extended_fields_are_gated_and_bounded() {
+        let core_event = emit_tail_latency_compact_event(
+            TailLatencyEmitterConfig::enabled_core(),
+            "core-only",
+            "event-core",
+            complete_tail_latency_sample(),
+        )
+        .expect("core event should emit")
+        .expect("core event");
+        let extended_event = emit_tail_latency_compact_event(
+            TailLatencyEmitterConfig::enabled_core().with_extended_allocator_bytes_live(),
+            "extended",
+            "event-extended",
+            complete_tail_latency_sample(),
+        )
+        .expect("extended event should emit")
+        .expect("extended event");
+
+        assert!(
+            !core_event
+                .fields
+                .contains_key("tail.allocator_or_cache.bytes_live")
+        );
+        assert!(
+            extended_event
+                .fields
+                .contains_key("tail.allocator_or_cache.bytes_live")
+        );
+        assert!(
+            core_event.overhead_estimate_bytes <= 2_048,
+            "compact core overhead estimate should remain bounded: {} bytes",
+            core_event.overhead_estimate_bytes
+        );
+        assert!(
+            extended_event.overhead_estimate_bytes <= 2_048,
+            "extended overhead estimate should remain bounded: {} bytes",
+            extended_event.overhead_estimate_bytes
+        );
     }
 
     #[test]

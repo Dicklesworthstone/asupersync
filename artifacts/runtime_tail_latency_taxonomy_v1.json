@@ -1,0 +1,458 @@
+{
+  "contract_version": "runtime-tail-latency-taxonomy-v1",
+  "equation": "tail_latency_ns = queueing_ns + service_ns + io_or_network_ns + retries_ns + synchronization_ns + allocator_or_cache_ns + unknown_ns",
+  "total_latency_key": "tail.total_latency_ns",
+  "unknown_bucket_key": "tail.unknown.unmeasured_ns",
+  "required_log_fields": [
+    {
+      "key": "tail.contract_version",
+      "unit": "schema_id",
+      "required": true,
+      "meaning": "Versioned tail-latency taxonomy contract identifier."
+    },
+    {
+      "key": "tail.total_latency_ns",
+      "unit": "ns",
+      "required": true,
+      "meaning": "Observed end-to-end tail latency for the operation under analysis."
+    },
+    {
+      "key": "tail.queueing.ready_queue_depth",
+      "unit": "count",
+      "required": true,
+      "meaning": "Always-on queueing proxy based on runnable backlog."
+    },
+    {
+      "key": "tail.service.poll_count",
+      "unit": "count",
+      "required": true,
+      "meaning": "Service-side work proxy based on task poll demand."
+    },
+    {
+      "key": "tail.io_or_network.events_received",
+      "unit": "count",
+      "required": true,
+      "meaning": "I/O or network pressure proxy based on reactor event volume."
+    },
+    {
+      "key": "tail.retries.total_delay_ns",
+      "unit": "ns",
+      "required": true,
+      "meaning": "Direct retry/backoff delay accumulated by retry combinators."
+    },
+    {
+      "key": "tail.synchronization.lock_wait_ns",
+      "unit": "ns",
+      "required": true,
+      "meaning": "Direct synchronization delay from contention-instrumented locks."
+    },
+    {
+      "key": "tail.allocator_or_cache.live_allocations",
+      "unit": "count",
+      "required": true,
+      "meaning": "Allocator/cache pressure proxy based on live region-heap allocations."
+    },
+    {
+      "key": "tail.unknown.unmeasured_ns",
+      "unit": "ns",
+      "required": true,
+      "meaning": "Residual latency that remains unattributed after measured terms and proxies are recorded."
+    }
+  ],
+  "terms": [
+    {
+      "term_id": "queueing",
+      "description": "Backlog before useful work begins, spanning ready queues, waiters, and drain queues.",
+      "direct_duration_key": "tail.queueing.ns",
+      "attribution_state_key": "tail.queueing.attribution_state",
+      "signals": [
+        {
+          "signal_id": "queueing.ready_queue_depth",
+          "structured_log_key": "tail.queueing.ready_queue_depth",
+          "unit": "count",
+          "producer_kind": "snapshot_field",
+          "producer_symbol": "asupersync::obligation::lyapunov::StateSnapshot::ready_queue_depth",
+          "producer_file": "src/obligation/lyapunov.rs",
+          "measurement_class": "proxy_signal",
+          "core": true,
+          "notes": "Canonical scheduler backlog proxy used by the three-lane decision contract."
+        },
+        {
+          "signal_id": "queueing.draining_regions",
+          "structured_log_key": "tail.queueing.draining_regions",
+          "unit": "count",
+          "producer_kind": "snapshot_field",
+          "producer_symbol": "asupersync::obligation::lyapunov::StateSnapshot::draining_regions",
+          "producer_file": "src/obligation/lyapunov.rs",
+          "measurement_class": "proxy_signal",
+          "core": true,
+          "notes": "Captures cancellation/finalizer drain backlog that elongates queueing tails."
+        },
+        {
+          "signal_id": "queueing.bulkhead_queue_depth",
+          "structured_log_key": "tail.queueing.bulkhead_queue_depth",
+          "unit": "count",
+          "producer_kind": "stats_struct",
+          "producer_symbol": "asupersync::combinator::bulkhead::BulkheadMetrics::queue_depth",
+          "producer_file": "src/combinator/bulkhead.rs",
+          "measurement_class": "proxy_signal",
+          "core": false,
+          "notes": "Extended queueing proxy for admission-controlled bulkhead lanes."
+        },
+        {
+          "signal_id": "queueing.pool_waiters",
+          "structured_log_key": "tail.queueing.pool_waiters",
+          "unit": "count",
+          "producer_kind": "stats_struct",
+          "producer_symbol": "asupersync::sync::pool::PoolStats::waiters",
+          "producer_file": "src/sync/pool.rs",
+          "measurement_class": "proxy_signal",
+          "core": false,
+          "notes": "Extended backlog proxy for pool acquisition queues."
+        }
+      ]
+    },
+    {
+      "term_id": "service",
+      "description": "CPU work once the task is scheduled, including poll consumption and budget burn.",
+      "direct_duration_key": "tail.service.ns",
+      "attribution_state_key": "tail.service.attribution_state",
+      "signals": [
+        {
+          "signal_id": "service.poll_count",
+          "structured_log_key": "tail.service.poll_count",
+          "unit": "count",
+          "producer_kind": "snapshot_field",
+          "producer_symbol": "asupersync::runtime::state::TaskSnapshot::poll_count",
+          "producer_file": "src/runtime/state.rs",
+          "measurement_class": "proxy_signal",
+          "core": true,
+          "notes": "Canonical always-on service proxy derived from task budget consumption."
+        },
+        {
+          "signal_id": "service.poll_quota_consumed",
+          "structured_log_key": "tail.service.poll_quota_consumed",
+          "unit": "quota_units",
+          "producer_kind": "stats_struct",
+          "producer_symbol": "asupersync::observability::resource_accounting::ResourceAccountingSnapshot::poll_quota_consumed",
+          "producer_file": "src/observability/resource_accounting.rs",
+          "measurement_class": "proxy_signal",
+          "core": true,
+          "notes": "Aggregated service-pressure counter for runtime/test emitters."
+        },
+        {
+          "signal_id": "service.cost_quota_consumed",
+          "structured_log_key": "tail.service.cost_quota_consumed",
+          "unit": "cost_units",
+          "producer_kind": "stats_struct",
+          "producer_symbol": "asupersync::observability::resource_accounting::ResourceAccountingSnapshot::cost_quota_consumed",
+          "producer_file": "src/observability/resource_accounting.rs",
+          "measurement_class": "proxy_signal",
+          "core": false,
+          "notes": "Extended service-pressure counter for cost-aware workloads."
+        }
+      ]
+    },
+    {
+      "term_id": "io_or_network",
+      "description": "Latency spent waiting on or draining reactor/network activity.",
+      "direct_duration_key": "tail.io_or_network.ns",
+      "attribution_state_key": "tail.io_or_network.attribution_state",
+      "signals": [
+        {
+          "signal_id": "io_or_network.events_received",
+          "structured_log_key": "tail.io_or_network.events_received",
+          "unit": "count",
+          "producer_kind": "stats_struct",
+          "producer_symbol": "asupersync::runtime::io_driver::IoStats::events_received",
+          "producer_file": "src/runtime/io_driver.rs",
+          "measurement_class": "proxy_signal",
+          "core": true,
+          "notes": "Canonical always-on I/O/network pressure proxy from the reactor driver."
+        },
+        {
+          "signal_id": "io_or_network.polls",
+          "structured_log_key": "tail.io_or_network.polls",
+          "unit": "count",
+          "producer_kind": "stats_struct",
+          "producer_symbol": "asupersync::runtime::io_driver::IoStats::polls",
+          "producer_file": "src/runtime/io_driver.rs",
+          "measurement_class": "proxy_signal",
+          "core": false,
+          "notes": "Extended reactor activity proxy for sustained polling pressure."
+        },
+        {
+          "signal_id": "io_or_network.wakers_dispatched",
+          "structured_log_key": "tail.io_or_network.wakers_dispatched",
+          "unit": "count",
+          "producer_kind": "stats_struct",
+          "producer_symbol": "asupersync::runtime::io_driver::IoStats::wakers_dispatched",
+          "producer_file": "src/runtime/io_driver.rs",
+          "measurement_class": "proxy_signal",
+          "core": false,
+          "notes": "Extended proxy for wake fan-out caused by readiness events."
+        }
+      ]
+    },
+    {
+      "term_id": "retries",
+      "description": "Backoff and reattempt inflation introduced by retry/rate-limit/circuit-breaker control loops.",
+      "direct_duration_key": "tail.retries.ns",
+      "attribution_state_key": "tail.retries.attribution_state",
+      "signals": [
+        {
+          "signal_id": "retries.total_delay_ns",
+          "structured_log_key": "tail.retries.total_delay_ns",
+          "unit": "ns",
+          "producer_kind": "state_field",
+          "producer_symbol": "asupersync::combinator::retry::RetryState::total_delay",
+          "producer_file": "src/combinator/retry.rs",
+          "measurement_class": "direct_duration",
+          "core": true,
+          "notes": "Direct retry-delay contribution from the retry combinator."
+        },
+        {
+          "signal_id": "retries.rate_limit_total_wait_ns",
+          "structured_log_key": "tail.retries.rate_limit_total_wait_ns",
+          "unit": "ns",
+          "producer_kind": "stats_struct",
+          "producer_symbol": "asupersync::combinator::rate_limit::RateLimitMetrics::total_wait_time",
+          "producer_file": "src/combinator/rate_limit.rs",
+          "measurement_class": "direct_duration",
+          "core": false,
+          "notes": "Extended direct delay when token-bucket admission defers work."
+        },
+        {
+          "signal_id": "retries.circuit_rejected_total",
+          "structured_log_key": "tail.retries.circuit_rejected_total",
+          "unit": "count",
+          "producer_kind": "stats_struct",
+          "producer_symbol": "asupersync::combinator::circuit_breaker::CircuitBreakerMetrics::total_rejected",
+          "producer_file": "src/combinator/circuit_breaker.rs",
+          "measurement_class": "proxy_signal",
+          "core": false,
+          "notes": "Extended retry/control-loop pressure proxy when open circuits reject work."
+        }
+      ]
+    },
+    {
+      "term_id": "synchronization",
+      "description": "Coordination delay from locks, pools, obligations, and cancellation-aware rendezvous.",
+      "direct_duration_key": "tail.synchronization.ns",
+      "attribution_state_key": "tail.synchronization.attribution_state",
+      "signals": [
+        {
+          "signal_id": "synchronization.lock_wait_ns",
+          "structured_log_key": "tail.synchronization.lock_wait_ns",
+          "unit": "ns",
+          "producer_kind": "stats_struct",
+          "producer_symbol": "asupersync::sync::contended_mutex::LockMetricsSnapshot::wait_ns",
+          "producer_file": "src/sync/contended_mutex.rs",
+          "measurement_class": "direct_duration",
+          "core": true,
+          "notes": "Canonical direct synchronization delay from contention-instrumented locks."
+        },
+        {
+          "signal_id": "synchronization.lock_hold_ns",
+          "structured_log_key": "tail.synchronization.lock_hold_ns",
+          "unit": "ns",
+          "producer_kind": "stats_struct",
+          "producer_symbol": "asupersync::sync::contended_mutex::LockMetricsSnapshot::hold_ns",
+          "producer_file": "src/sync/contended_mutex.rs",
+          "measurement_class": "proxy_signal",
+          "core": false,
+          "notes": "Extended proxy for convoying and long critical sections."
+        },
+        {
+          "signal_id": "synchronization.pool_total_wait_ns",
+          "structured_log_key": "tail.synchronization.pool_total_wait_ns",
+          "unit": "ns",
+          "producer_kind": "stats_struct",
+          "producer_symbol": "asupersync::sync::pool::PoolStats::total_wait_time",
+          "producer_file": "src/sync/pool.rs",
+          "measurement_class": "direct_duration",
+          "core": false,
+          "notes": "Extended direct delay from resource-pool acquisition waits."
+        },
+        {
+          "signal_id": "synchronization.obligations_pending",
+          "structured_log_key": "tail.synchronization.obligations_pending",
+          "unit": "count",
+          "producer_kind": "stats_struct",
+          "producer_symbol": "asupersync::observability::resource_accounting::ResourceAccountingSnapshot::obligations_pending",
+          "producer_file": "src/observability/resource_accounting.rs",
+          "measurement_class": "proxy_signal",
+          "core": true,
+          "notes": "Captures obligation/cancellation backlog that can extend synchronization tails."
+        }
+      ]
+    },
+    {
+      "term_id": "allocator_or_cache",
+      "description": "Allocator and cache-locality pressure observable from region-heap churn and memory high-water marks.",
+      "direct_duration_key": "tail.allocator_or_cache.ns",
+      "attribution_state_key": "tail.allocator_or_cache.attribution_state",
+      "signals": [
+        {
+          "signal_id": "allocator_or_cache.live_allocations",
+          "structured_log_key": "tail.allocator_or_cache.live_allocations",
+          "unit": "count",
+          "producer_kind": "stats_struct",
+          "producer_symbol": "asupersync::runtime::region_heap::HeapStats::live",
+          "producer_file": "src/runtime/region_heap.rs",
+          "measurement_class": "proxy_signal",
+          "core": true,
+          "notes": "Canonical allocator-pressure proxy from live region-heap allocations."
+        },
+        {
+          "signal_id": "allocator_or_cache.bytes_live",
+          "structured_log_key": "tail.allocator_or_cache.bytes_live",
+          "unit": "bytes",
+          "producer_kind": "stats_struct",
+          "producer_symbol": "asupersync::runtime::region_heap::HeapStats::bytes_live",
+          "producer_file": "src/runtime/region_heap.rs",
+          "measurement_class": "proxy_signal",
+          "core": false,
+          "notes": "Extended allocator-pressure proxy for live retained bytes."
+        },
+        {
+          "signal_id": "allocator_or_cache.heap_bytes_peak",
+          "structured_log_key": "tail.allocator_or_cache.heap_bytes_peak",
+          "unit": "bytes",
+          "producer_kind": "stats_struct",
+          "producer_symbol": "asupersync::observability::resource_accounting::ResourceAccountingSnapshot::heap_bytes_peak",
+          "producer_file": "src/observability/resource_accounting.rs",
+          "measurement_class": "proxy_signal",
+          "core": false,
+          "notes": "Extended region-level memory high-water mark for cache/allocator analysis."
+        }
+      ]
+    },
+    {
+      "term_id": "unknown",
+      "description": "Residual latency that remains unattributed after measured terms and proxies are accounted for.",
+      "direct_duration_key": "tail.unknown.unmeasured_ns",
+      "attribution_state_key": "tail.unknown.attribution_state",
+      "signals": [
+        {
+          "signal_id": "unknown.unmeasured_ns",
+          "structured_log_key": "tail.unknown.unmeasured_ns",
+          "unit": "ns",
+          "producer_kind": "contract_field",
+          "producer_symbol": "asupersync::observability::diagnostics::tail_latency_taxonomy_contract",
+          "producer_file": "src/observability/diagnostics.rs",
+          "measurement_class": "unknown_bucket",
+          "core": true,
+          "notes": "Must be emitted whenever any term lacks direct attribution so latency does not disappear from evidence bundles."
+        }
+      ]
+    }
+  ],
+  "sampling_policy": [
+    "Always emit the required core fields for any tail-latency event, even when extended observability sampling is disabled.",
+    "Extended fields may be sampled or emitted only in replay/forensics modes, but they must retain the stable keys defined here.",
+    "If a direct-duration field is unavailable for a term, preserve proxy signals and roll the residual duration into tail.unknown.unmeasured_ns."
+  ],
+  "compatibility_notes": [
+    "Structured-log keys are append-only within a contract version; removals or unit changes require a new contract version.",
+    "Proxy signals are not interchangeable with direct-duration fields; emitters must preserve both semantics explicitly.",
+    "Unknown contribution is mandatory whenever attribution is incomplete so downstream controllers never treat missing data as zero."
+  ],
+  "compact_tail_emitter": {
+    "event_schema_version": "runtime-tail-causal-attribution-event-v1",
+    "smoke_report_schema_version": "tail-causal-attribution-smoke-report-v1",
+    "bead_id": "asupersync-d87ytw.5",
+    "source_symbols": [
+      "asupersync::observability::diagnostics::TailLatencyEmitterConfig",
+      "asupersync::observability::diagnostics::TailLatencyCompactSample",
+      "asupersync::observability::diagnostics::TailLatencyCompactEvent",
+      "asupersync::observability::diagnostics::emit_tail_latency_compact_event"
+    ],
+    "source_files": [
+      "src/observability/diagnostics.rs",
+      "src/observability/mod.rs",
+      "tests/runtime_tail_latency_taxonomy_contract.rs",
+      "scripts/run_tail_causal_attribution_emitters_smoke.sh"
+    ],
+    "disabled_by_default": true,
+    "required_event_fields": [
+      "schema_version",
+      "scenario_id",
+      "event_id",
+      "taxonomy_version",
+      "fields",
+      "attribution_states",
+      "missing_producers",
+      "unknown_unmeasured_ns",
+      "overhead_estimate_bytes"
+    ],
+    "compact_core_keys": [
+      "tail.contract_version",
+      "tail.total_latency_ns",
+      "tail.queueing.ready_queue_depth",
+      "tail.service.poll_count",
+      "tail.io_or_network.events_received",
+      "tail.retries.total_delay_ns",
+      "tail.synchronization.lock_wait_ns",
+      "tail.allocator_or_cache.live_allocations",
+      "tail.unknown.unmeasured_ns"
+    ],
+    "extended_replay_only_keys": [
+      "tail.allocator_or_cache.bytes_live"
+    ],
+    "missing_producer_policy": [
+      "Required compact numeric fields remain present with value 0 when a producer is unavailable.",
+      "The missing producer key is listed in missing_producers and the term attribution state is missing_producer.",
+      "Measured direct durations are the only terms subtracted from tail.unknown.unmeasured_ns; proxy fields never hide residual latency."
+    ],
+    "fail_closed_rules": [
+      "Empty scenario_id is rejected when the emitter is enabled.",
+      "Empty event_id is rejected when the emitter is enabled.",
+      "Direct measured durations greater than tail.total_latency_ns are rejected instead of saturating silently."
+    ],
+    "smoke_runner": "scripts/run_tail_causal_attribution_emitters_smoke.sh",
+    "smoke_scenarios": [
+      {
+        "scenario_id": "TAIL-CAUSAL-COMPLETE-CORE",
+        "event_id": "tail-event-0001",
+        "expected_verdict": "pass",
+        "description": "All compact producers are present; extended allocator bytes are gated on for replay evidence.",
+        "required_log_fields": [
+          "scenario_id",
+          "event_id",
+          "taxonomy_version",
+          "compact_fields",
+          "residual_unknown_ns",
+          "overhead_estimate_bytes",
+          "artifact_path",
+          "replay_command"
+        ]
+      },
+      {
+        "scenario_id": "TAIL-CAUSAL-MISSING-PRODUCER",
+        "event_id": "tail-event-0002",
+        "expected_verdict": "fallback_unknown",
+        "description": "Missing service, I/O, and synchronization producers remain explicit and leave residual unknown latency visible.",
+        "required_log_fields": [
+          "missing_producers",
+          "residual_unknown_ns",
+          "compact_fields",
+          "replay_command"
+        ]
+      },
+      {
+        "scenario_id": "TAIL-CAUSAL-DISABLED",
+        "event_id": "tail-event-0003",
+        "expected_verdict": "disabled_noop",
+        "description": "Default disabled configuration produces no runtime row and preserves disabled-mode equivalence.",
+        "required_log_fields": [
+          "scenario_id",
+          "event_id",
+          "taxonomy_version",
+          "overhead_estimate_bytes",
+          "replay_command"
+        ]
+      }
+    ]
+  }
+}

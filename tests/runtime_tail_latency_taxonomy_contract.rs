@@ -1,18 +1,19 @@
-#![allow(warnings)]
-#![allow(clippy::all)]
 //! Runtime tail-latency taxonomy contract invariants (AA-01.1).
 
 #![allow(missing_docs)]
 
 use asupersync::observability::{
-    TAIL_LATENCY_TAXONOMY_CONTRACT_VERSION, tail_latency_taxonomy_contract,
+    TAIL_LATENCY_COMPACT_EVENT_SCHEMA_VERSION, TAIL_LATENCY_TAXONOMY_CONTRACT_VERSION,
+    TailLatencyCompactSample, TailLatencyEmitterConfig, emit_tail_latency_compact_event,
+    tail_latency_taxonomy_contract,
 };
-use serde_json::Value;
+use serde_json::{Value, json};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 const DOC_PATH: &str = "docs/runtime_tail_latency_taxonomy_contract.md";
 const ARTIFACT_PATH: &str = "artifacts/runtime_tail_latency_taxonomy_v1.json";
+const RUNNER_PATH: &str = "scripts/run_tail_causal_attribution_emitters_smoke.sh";
 
 fn repo_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -27,6 +28,11 @@ fn load_artifact() -> Value {
     let raw = std::fs::read_to_string(repo_root().join(ARTIFACT_PATH))
         .expect("failed to load runtime tail latency taxonomy artifact");
     serde_json::from_str(&raw).expect("failed to parse taxonomy artifact")
+}
+
+fn load_runner() -> String {
+    std::fs::read_to_string(repo_root().join(RUNNER_PATH))
+        .expect("failed to load compact tail causal attribution runner")
 }
 
 fn artifact_required_fields(value: &Value) -> BTreeMap<String, (String, bool)> {
@@ -147,6 +153,7 @@ fn doc_references_artifact_test_and_source() {
         "artifacts/runtime_tail_latency_taxonomy_v1.json",
         "tests/runtime_tail_latency_taxonomy_contract.rs",
         "src/observability/diagnostics.rs",
+        "scripts/run_tail_causal_attribution_emitters_smoke.sh",
     ];
     for reference in refs {
         assert!(doc.contains(reference), "doc must reference {reference}");
@@ -158,7 +165,7 @@ fn doc_reproduction_command_uses_rch() {
     let doc = load_doc();
     assert!(
         doc.contains(
-            "rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=/tmp/rch-greenmountain-aa0114 cargo test --features cli --test runtime_tail_latency_taxonomy_contract -- --nocapture"
+            "rch exec -- env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-C debuginfo=0' CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_tail_latency_taxonomy cargo test -p asupersync --test runtime_tail_latency_taxonomy_contract --features test-internals -- --nocapture"
         ),
         "doc must route heavy validation through rch"
     );
@@ -275,4 +282,213 @@ fn contract_covers_all_required_terms() {
         ]),
         "contract must cover the canonical decomposition terms"
     );
+}
+
+#[test]
+fn artifact_declares_compact_tail_emitter_contract() {
+    let artifact = load_artifact();
+    let emitter = &artifact["compact_tail_emitter"];
+
+    assert_eq!(
+        emitter["event_schema_version"].as_str(),
+        Some(TAIL_LATENCY_COMPACT_EVENT_SCHEMA_VERSION)
+    );
+    assert_eq!(emitter["bead_id"].as_str(), Some("asupersync-d87ytw.5"));
+    assert_eq!(emitter["disabled_by_default"].as_bool(), Some(true));
+    assert_eq!(emitter["smoke_runner"].as_str(), Some(RUNNER_PATH));
+
+    let required_event_fields: BTreeSet<&str> = emitter["required_event_fields"]
+        .as_array()
+        .expect("required_event_fields must be array")
+        .iter()
+        .map(|field| {
+            field
+                .as_str()
+                .expect("required_event_fields entries must be strings")
+        })
+        .collect();
+    for required in [
+        "scenario_id",
+        "event_id",
+        "taxonomy_version",
+        "fields",
+        "unknown_unmeasured_ns",
+        "overhead_estimate_bytes",
+        "missing_producers",
+    ] {
+        assert!(
+            required_event_fields.contains(required),
+            "compact emitter contract must require {required}"
+        );
+    }
+
+    assert!(
+        emitter["smoke_scenarios"]
+            .as_array()
+            .expect("smoke_scenarios must be array")
+            .len()
+            >= 3,
+        "compact emitter contract must include complete, missing-producer, and disabled scenarios"
+    );
+}
+
+#[test]
+fn runner_script_exists_and_routes_execute_through_rch() {
+    let runner = load_runner();
+    assert!(Path::new(RUNNER_PATH).exists(), "runner must exist");
+    assert!(runner.contains("--list"), "runner must support --list");
+    assert!(
+        runner.contains("--dry-run"),
+        "runner must support --dry-run"
+    );
+    assert!(
+        runner.contains("--execute"),
+        "runner must support --execute"
+    );
+    assert!(
+        runner.contains("rch exec -- env CARGO_INCREMENTAL=0"),
+        "runner execute mode must route cargo through rch"
+    );
+    assert!(
+        runner.contains("ASUPERSYNC_TAIL_CAUSAL_ATTRIBUTION_REPORT_PATH"),
+        "runner must pass the report path to the Rust smoke test"
+    );
+    assert!(
+        runner.contains("COMMAND_EXIT_CODE=$?"),
+        "runner must preserve the real rch wrapper exit code in run_report.json"
+    );
+    assert!(
+        !runner.contains("if ! bash -lc \"$COMMAND\""),
+        "runner must not lose the command status through shell boolean negation"
+    );
+}
+
+fn smoke_sample_complete() -> TailLatencyCompactSample {
+    TailLatencyCompactSample::new(18_000)
+        .with_ready_queue_depth(64)
+        .with_poll_count(11)
+        .with_events_received(7)
+        .with_retries_total_delay_ns(2_000)
+        .with_synchronization_lock_wait_ns(3_000)
+        .with_allocator_live_allocations(128)
+        .with_allocator_bytes_live(32_768)
+}
+
+#[test]
+fn compact_tail_causal_attribution_smoke_emits_report() {
+    let report_path = std::env::var("ASUPERSYNC_TAIL_CAUSAL_ATTRIBUTION_REPORT_PATH")
+        .unwrap_or_else(|_| "target/tail-causal-attribution-smoke/report.json".to_string());
+    let replay_command =
+        format!("bash {RUNNER_PATH} --execute --output-root target/tail-causal-attribution-smoke");
+
+    let complete_event = emit_tail_latency_compact_event(
+        TailLatencyEmitterConfig::enabled_core().with_extended_allocator_bytes_live(),
+        "TAIL-CAUSAL-COMPLETE-CORE",
+        "tail-event-0001",
+        smoke_sample_complete(),
+    )
+    .expect("complete event should emit")
+    .expect("complete event should be present");
+
+    let missing_producer_event = emit_tail_latency_compact_event(
+        TailLatencyEmitterConfig::enabled_core(),
+        "TAIL-CAUSAL-MISSING-PRODUCER",
+        "tail-event-0002",
+        TailLatencyCompactSample::new(10_000)
+            .with_ready_queue_depth(4)
+            .with_retries_total_delay_ns(1_000)
+            .with_allocator_live_allocations(12),
+    )
+    .expect("missing-producer event should emit")
+    .expect("missing-producer event should be present");
+
+    let disabled_event = emit_tail_latency_compact_event(
+        TailLatencyEmitterConfig::default(),
+        "TAIL-CAUSAL-DISABLED",
+        "tail-event-0003",
+        smoke_sample_complete(),
+    )
+    .expect("disabled emitter should not fail validation");
+
+    assert_eq!(
+        complete_event.taxonomy_version,
+        TAIL_LATENCY_TAXONOMY_CONTRACT_VERSION
+    );
+    assert_eq!(complete_event.unknown_unmeasured_ns, 13_000);
+    assert!(complete_event.missing_producers.is_empty());
+    assert!(
+        missing_producer_event.unknown_unmeasured_ns > 0,
+        "missing producers must leave a visible unknown residual"
+    );
+    assert!(
+        missing_producer_event
+            .missing_producers
+            .iter()
+            .any(|producer| producer == "tail.service.poll_count")
+    );
+    assert!(
+        disabled_event.is_none(),
+        "disabled mode must not emit a row"
+    );
+
+    let report = json!({
+        "schema_version": "tail-causal-attribution-smoke-report-v1",
+        "bead_id": "asupersync-d87ytw.5",
+        "status": "passed",
+        "artifact_path": report_path,
+        "replay_command": replay_command,
+        "rows": [
+            {
+                "scenario_id": complete_event.scenario_id,
+                "event_id": complete_event.event_id,
+                "taxonomy_version": complete_event.taxonomy_version,
+                "compact_fields": complete_event.fields,
+                "residual_unknown_ns": complete_event.unknown_unmeasured_ns,
+                "overhead_estimate_bytes": complete_event.overhead_estimate_bytes,
+                "missing_producers": complete_event.missing_producers,
+                "verdict": "pass"
+            },
+            {
+                "scenario_id": missing_producer_event.scenario_id,
+                "event_id": missing_producer_event.event_id,
+                "taxonomy_version": missing_producer_event.taxonomy_version,
+                "compact_fields": missing_producer_event.fields,
+                "residual_unknown_ns": missing_producer_event.unknown_unmeasured_ns,
+                "overhead_estimate_bytes": missing_producer_event.overhead_estimate_bytes,
+                "missing_producers": missing_producer_event.missing_producers,
+                "verdict": "fallback_unknown"
+            },
+            {
+                "scenario_id": "TAIL-CAUSAL-DISABLED",
+                "event_id": "tail-event-0003",
+                "taxonomy_version": TAIL_LATENCY_TAXONOMY_CONTRACT_VERSION,
+                "compact_fields": {},
+                "residual_unknown_ns": null,
+                "overhead_estimate_bytes": 0,
+                "missing_producers": [],
+                "verdict": "disabled_noop"
+            }
+        ]
+    });
+
+    println!("TAIL_CAUSAL_ATTRIBUTION_REPORT_JSON_BEGIN");
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&report).expect("serialize report")
+    );
+    println!("TAIL_CAUSAL_ATTRIBUTION_REPORT_JSON_END");
+
+    let report_path = PathBuf::from(
+        report["artifact_path"]
+            .as_str()
+            .expect("report path should be string"),
+    );
+    if let Some(parent) = report_path.parent() {
+        std::fs::create_dir_all(parent).expect("create report directory");
+    }
+    std::fs::write(
+        &report_path,
+        serde_json::to_vec_pretty(&report).expect("serialize report file"),
+    )
+    .expect("write report file");
 }
