@@ -25,8 +25,8 @@
   "local_host_snapshot": {
     "git_head_at_inventory": "77a6a85e08de",
     "expected_cluster_count": 9,
-    "expected_file_count": 44,
-    "expected_total_bytes": 203047,
+    "expected_file_count": 49,
+    "expected_total_bytes": 235413,
     "inventory_command": "find <cluster> -maxdepth 3 -type f | sort; sha256sum over stable file lists",
     "no_deletion_confirmation": true
   },
@@ -164,10 +164,10 @@
       "reproduction_command": "scripts/run_trace_storage_profile_smoke.sh --execute --output-root .trace-storage-profile-smoke-artifacts",
       "retention_decision": "ignore_generated_root_keep_inventory",
       "signoff_status": "trusted_when_runner_contract_and_owner_closeout_are_present",
-      "expected_file_count": 1,
-      "expected_total_bytes": 3727,
-      "stable_file_list_sha256": "469c323a4817d3034b6184d0d831dc095ea964836831832cc226f833f017100d",
-      "checksum_manifest_sha256": "392cb662a6885a8608a4c11cc5a94f78430ad4ab5eba4e7e76a167af8d724279",
+      "expected_file_count": 6,
+      "expected_total_bytes": 36093,
+      "stable_file_list_sha256": "2cd67bc5ff1779b930b4be22fc5e215fde89da5d2132a7586a7d2d1135700127",
+      "checksum_manifest_sha256": "7d83dfa221a7f9cdbc05c4a7669978b207a638f2ce8d3993505913c3fc4c9263",
       "no_deletion_confirmation": true
     },
     {
@@ -218,9 +218,9 @@
       "require_current_host_clusters": true,
       "expected_counts": {
         "cluster_count": 9,
-        "file_count": 44,
-        "total_bytes": 203047,
-        "fail_closed_cluster_count": 1,
+        "file_count": 49,
+        "total_bytes": 235413,
+        "fail_closed_cluster_count": 0,
         "no_deletion_confirmation_count": 9
       },
       "required_log_fields": [
