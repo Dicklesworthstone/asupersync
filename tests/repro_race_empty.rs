@@ -1,17 +1,14 @@
-#![allow(clippy::all)]
 //! Tests for empty race inputs.
 //!
 //! Empty races should remain pending unless the surrounding context is already
 //! cancelled. That preserves `race([])` as the never future while still allowing
 //! cancellation to unblock callers.
 
-mod common;
-
 use asupersync::cx::Cx;
 use asupersync::runtime::{JoinError, RuntimeBuilder};
+use asupersync::test_utils::{init_test_logging, run_test};
 use asupersync::time::timeout;
 use asupersync::types::{CancelKind, Time};
-use common::*;
 use std::future::Future;
 use std::pin::Pin;
 use std::time::Duration;
@@ -19,7 +16,7 @@ use std::time::Duration;
 #[test]
 fn test_race_empty_is_never() {
     init_test_logging();
-    test_phase!("test_race_empty_is_never");
+    asupersync::test_phase!("test_race_empty_is_never");
 
     run_test(|| async {
         let cx: Cx = Cx::for_testing();
@@ -37,13 +34,13 @@ fn test_race_empty_is_never() {
         );
     });
 
-    test_complete!("test_race_empty_is_never");
+    asupersync::test_complete!("test_race_empty_is_never");
 }
 
 #[test]
 fn test_race_identity_law_violation() {
     init_test_logging();
-    test_phase!("test_race_identity_law_violation");
+    asupersync::test_phase!("test_race_identity_law_violation");
 
     run_test(|| async {
         let cx: Cx = Cx::for_testing();
@@ -72,7 +69,7 @@ fn test_race_identity_law_violation() {
         );
     });
 
-    test_complete!("test_race_identity_law_violation");
+    asupersync::test_complete!("test_race_identity_law_violation");
 }
 
 #[test]
