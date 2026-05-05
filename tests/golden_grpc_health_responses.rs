@@ -1,4 +1,3 @@
-#![allow(warnings)]
 //! Comprehensive golden snapshot tests for gRPC health service responses
 //!
 //! Tests all response formats and edge cases for the gRPC Health Checking Protocol
@@ -13,12 +12,10 @@
 #![cfg(test)]
 
 use asupersync::grpc::health::{
-    HealthCheckRequest, HealthCheckResponse, HealthReporter, HealthService, HealthServiceBuilder,
-    ServingStatus,
+    HealthCheckRequest, HealthReporter, HealthService, HealthServiceBuilder, ServingStatus,
 };
 use insta::assert_json_snapshot;
 use serde_json::{Value, json};
-use std::collections::HashMap;
 
 /// Helper to create consistent response snapshots
 fn health_response_snapshot(service: &HealthService, query: &str, description: &str) -> Value {

@@ -1,0 +1,66 @@
+---
+source: tests/golden_grpc_health_responses.rs
+expression: snapshot
+---
+{
+  "edge_case_names": [
+    {
+      "description": "Space character service name",
+      "error_message": "gRPC status PERMISSION_DENIED: health check access denied",
+      "query_service": " ",
+      "result": "error"
+    },
+    {
+      "description": "Tab character service name",
+      "error_message": "gRPC status PERMISSION_DENIED: health check access denied",
+      "query_service": "\t",
+      "result": "error"
+    },
+    {
+      "description": "Service name with spaces",
+      "error_message": "gRPC status PERMISSION_DENIED: health check access denied",
+      "query_service": "service with spaces",
+      "result": "error"
+    }
+  ],
+  "existing_service": {
+    "description": "Known service",
+    "is_healthy": true,
+    "query_service": "existing.service",
+    "result": "success",
+    "status_code": 1,
+    "status_text": "SERVING"
+  },
+  "unknown_queries": [
+    {
+      "description": "Unregistered service",
+      "error_message": "gRPC status PERMISSION_DENIED: health check access denied",
+      "query_service": "nonexistent.service",
+      "result": "error"
+    },
+    {
+      "description": "Another missing service",
+      "error_message": "gRPC status PERMISSION_DENIED: health check access denied",
+      "query_service": "another.missing",
+      "result": "error"
+    },
+    {
+      "description": "Service with dot notation",
+      "error_message": "gRPC status PERMISSION_DENIED: health check access denied",
+      "query_service": "service.with.dots",
+      "result": "error"
+    },
+    {
+      "description": "Uppercase service name",
+      "error_message": "gRPC status PERMISSION_DENIED: health check access denied",
+      "query_service": "UPPERCASE_SERVICE",
+      "result": "error"
+    },
+    {
+      "description": "Service with slashes",
+      "error_message": "gRPC status PERMISSION_DENIED: health check access denied",
+      "query_service": "service/with/slashes",
+      "result": "error"
+    }
+  ]
+}

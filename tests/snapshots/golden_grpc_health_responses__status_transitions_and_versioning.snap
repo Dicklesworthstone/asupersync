@@ -1,0 +1,110 @@
+---
+source: tests/golden_grpc_health_responses.rs
+expression: snapshot
+---
+{
+  "final_version": 5,
+  "initial_version": 0,
+  "status_transitions": [
+    {
+      "description": "Initial unknown state",
+      "response": {
+        "description": "Initial unknown state",
+        "is_healthy": false,
+        "query_service": "transition.test",
+        "result": "success",
+        "status_code": 0,
+        "status_text": "UNKNOWN"
+      },
+      "status_code": 0,
+      "status_set": "UNKNOWN",
+      "version_after": 1,
+      "version_before": 0,
+      "version_changed": true
+    },
+    {
+      "description": "Service becomes healthy",
+      "response": {
+        "description": "Service becomes healthy",
+        "is_healthy": true,
+        "query_service": "transition.test",
+        "result": "success",
+        "status_code": 1,
+        "status_text": "SERVING"
+      },
+      "status_code": 1,
+      "status_set": "SERVING",
+      "version_after": 2,
+      "version_before": 1,
+      "version_changed": true
+    },
+    {
+      "description": "Service goes unhealthy",
+      "response": {
+        "description": "Service goes unhealthy",
+        "is_healthy": false,
+        "query_service": "transition.test",
+        "result": "success",
+        "status_code": 2,
+        "status_text": "NOT_SERVING"
+      },
+      "status_code": 2,
+      "status_set": "NOT_SERVING",
+      "version_after": 3,
+      "version_before": 2,
+      "version_changed": true
+    },
+    {
+      "description": "Service in transient state",
+      "response": {
+        "description": "Service in transient state",
+        "is_healthy": false,
+        "query_service": "transition.test",
+        "result": "success",
+        "status_code": 3,
+        "status_text": "SERVICE_UNKNOWN"
+      },
+      "status_code": 3,
+      "status_set": "SERVICE_UNKNOWN",
+      "version_after": 4,
+      "version_before": 3,
+      "version_changed": true
+    },
+    {
+      "description": "Service recovers to healthy",
+      "response": {
+        "description": "Service recovers to healthy",
+        "is_healthy": true,
+        "query_service": "transition.test",
+        "result": "success",
+        "status_code": 1,
+        "status_text": "SERVING"
+      },
+      "status_code": 1,
+      "status_set": "SERVING",
+      "version_after": 5,
+      "version_before": 4,
+      "version_changed": true
+    },
+    {
+      "description": "Redundant set to same status",
+      "response": {
+        "description": "Redundant set to same status",
+        "is_healthy": true,
+        "query_service": "transition.test",
+        "result": "success",
+        "status_code": 1,
+        "status_text": "SERVING"
+      },
+      "status_code": 1,
+      "status_set": "SERVING",
+      "version_after": 5,
+      "version_before": 5,
+      "version_changed": false
+    }
+  ],
+  "version_behavior": {
+    "expected_redundant_sets": "Should not increment version for same status",
+    "note": "Version should only increment on actual status changes"
+  }
+}

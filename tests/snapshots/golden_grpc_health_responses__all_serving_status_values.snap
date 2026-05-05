@@ -1,0 +1,60 @@
+---
+source: tests/golden_grpc_health_responses.rs
+expression: snapshot
+---
+{
+  "metadata": {
+    "healthy_services": [
+      "serving_service"
+    ],
+    "total_statuses": 4,
+    "unhealthy_services": [
+      "unknown_service",
+      "not_serving_service",
+      "transient_service"
+    ]
+  },
+  "server_health": {
+    "description": "Overall server health",
+    "is_healthy": true,
+    "query_service": "",
+    "result": "success",
+    "status_code": 1,
+    "status_text": "SERVING"
+  },
+  "service_version": 5,
+  "status_variations": [
+    {
+      "description": "Service with Unknown status",
+      "is_healthy": false,
+      "query_service": "unknown_service",
+      "result": "success",
+      "status_code": 0,
+      "status_text": "UNKNOWN"
+    },
+    {
+      "description": "Service with Serving status",
+      "is_healthy": true,
+      "query_service": "serving_service",
+      "result": "success",
+      "status_code": 1,
+      "status_text": "SERVING"
+    },
+    {
+      "description": "Service with NotServing status",
+      "is_healthy": false,
+      "query_service": "not_serving_service",
+      "result": "success",
+      "status_code": 2,
+      "status_text": "NOT_SERVING"
+    },
+    {
+      "description": "Service with ServiceUnknown status",
+      "is_healthy": false,
+      "query_service": "transient_service",
+      "result": "success",
+      "status_code": 3,
+      "status_text": "SERVICE_UNKNOWN"
+    }
+  ]
+}
