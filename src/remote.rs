@@ -853,12 +853,22 @@ impl RemoteHandle {
             let reason = cx
                 .cancel_reason()
                 .unwrap_or_else(|| CancelReason::user("remote handle close"));
+            cx.trace(trace_events::CANCEL_SENT);
             self.request_cancel(reason);
         }
 
         match self.receiver.recv_uninterruptible().await {
-            Ok(result) => self.finish_result(result),
-            Err(oneshot::RecvError::Closed) => Err(self.finish_closed()),
+            Ok(result) => {
+                cx.trace(trace_events::RESULT_DELIVERED);
+                self.finish_result(result)
+            }
+            Err(oneshot::RecvError::Closed) => {
+                let err = self.finish_closed();
+                if err == RemoteError::LeaseExpired {
+                    cx.trace(trace_events::LEASE_EXPIRED);
+                }
+                Err(err)
+            }
             Err(oneshot::RecvError::Cancelled) => {
                 unreachable!("RecvUninterruptibleFuture cannot return Cancelled")
             }
@@ -883,8 +893,17 @@ impl RemoteHandle {
         }
 
         match self.receiver.recv(cx).await {
-            Ok(result) => self.finish_result(result),
-            Err(oneshot::RecvError::Closed) => Err(self.finish_closed()),
+            Ok(result) => {
+                cx.trace(trace_events::RESULT_DELIVERED);
+                self.finish_result(result)
+            }
+            Err(oneshot::RecvError::Closed) => {
+                let err = self.finish_closed();
+                if err == RemoteError::LeaseExpired {
+                    cx.trace(trace_events::LEASE_EXPIRED);
+                }
+                Err(err)
+            }
             Err(oneshot::RecvError::Cancelled) => {
                 let reason = cx
                     .cancel_reason()
@@ -939,6 +958,7 @@ impl RemoteHandle {
         let reason = cx
             .cancel_reason()
             .unwrap_or_else(|| CancelReason::user("remote handle abort"));
+        cx.trace(trace_events::CANCEL_SENT);
         self.request_cancel(reason);
     }
 }
@@ -1030,6 +1050,7 @@ pub fn spawn_remote(
             origin_region: region,
             origin_task: cx.task_id(),
         };
+        cx.trace(trace_events::SPAWN_REQUEST_CREATED);
 
         let sender_time = cx.logical_tick();
         let envelope = MessageEnvelope::new(
@@ -1041,6 +1062,7 @@ pub fn spawn_remote(
             runtime.unregister_task(remote_task_id);
             return Err(err);
         }
+        cx.trace(trace_events::SPAWN_REQUEST_SENT);
         RemoteTaskState::Pending
     } else {
         let fallback_error = cap.phase0_simulation().failure.to_remote_error(&node);
@@ -2846,6 +2868,54 @@ mod tests {
         fn sent_messages(&self) -> Vec<(NodeId, MessageEnvelope<RemoteMessage>)> {
             self.sent.lock().clone()
         }
+
+        fn pending_count(&self) -> usize {
+            self.pending.lock().len()
+        }
+
+        fn state_count(&self) -> usize {
+            self.states.lock().len()
+        }
+    }
+
+    fn last_remote_message(runtime: &LifecycleRuntime) -> RemoteMessage {
+        runtime
+            .sent_messages()
+            .last()
+            .expect("expected a sent remote message")
+            .1
+            .payload
+            .clone()
+    }
+
+    fn last_spawn_request(runtime: &LifecycleRuntime) -> SpawnRequest {
+        match last_remote_message(runtime) {
+            RemoteMessage::SpawnRequest(request) => request,
+            other => panic!("expected SpawnRequest, got {other:?}"),
+        }
+    }
+
+    fn last_cancel_request(runtime: &LifecycleRuntime) -> CancelRequest {
+        match last_remote_message(runtime) {
+            RemoteMessage::CancelRequest(request) => request,
+            other => panic!("expected CancelRequest, got {other:?}"),
+        }
+    }
+
+    fn assert_runtime_drained(runtime: &LifecycleRuntime) {
+        assert_eq!(runtime.pending_count(), 0, "pending remote result senders");
+        assert_eq!(runtime.state_count(), 0, "tracked remote lifecycle states");
+    }
+
+    fn trace_messages(trace: &crate::trace::TraceBufferHandle) -> Vec<String> {
+        trace
+            .snapshot()
+            .into_iter()
+            .filter_map(|event| match event.data {
+                crate::trace::TraceData::Message(message) => Some(message),
+                _ => None,
+            })
+            .collect()
     }
 
     impl RemoteRuntime for LifecycleRuntime {
@@ -4068,6 +4138,334 @@ mod tests {
         .unwrap();
 
         assert_eq!(handle.lease(), Duration::from_secs(120));
+    }
+
+    #[test]
+    fn remote_virtual_lifecycle_proof_exercises_runtime_transport_and_protocol() {
+        let trace = crate::trace::TraceBufferHandle::new(96);
+        let runtime = Arc::new(LifecycleRuntime::default());
+        let cap = RemoteCap::new()
+            .with_local_node(NodeId::new("origin-a"))
+            .with_runtime(runtime.clone());
+        let cx: Cx = Cx::for_testing_with_remote(cap);
+        cx.set_trace_buffer(trace.clone());
+
+        let mut success = spawn_remote(
+            &cx,
+            NodeId::new("worker-1"),
+            ComputationName::new("encode_block"),
+            RemoteInput::new(vec![1, 2, 3]),
+        )
+        .expect("spawn_remote should enqueue a virtual transport request");
+        let success_req = last_spawn_request(runtime.as_ref());
+        let success_id = success.remote_task_id();
+        let success_ack = test_ack_accepted(success_id);
+        let origin = OriginSession::<OriginInit>::new(success_id)
+            .send_spawn(&success_req)
+            .expect("origin sends spawn");
+        let remote = RemoteSession::<RemoteInit>::new(success_id)
+            .recv_spawn(&success_req)
+            .expect("remote receives spawn");
+        let origin = match origin
+            .recv_spawn_ack(&success_ack)
+            .expect("origin receives accepted ack")
+        {
+            OriginAckOutcome::Accepted(session) => session,
+            OriginAckOutcome::Rejected(_) => panic!("accepted ack must not reject"),
+        };
+        let remote = remote
+            .send_ack_accepted(&success_ack)
+            .expect("remote sends accepted ack");
+        runtime.mark_state(success_id, RemoteTaskState::Running);
+
+        let mut lease = Lease::new(
+            test_obligation_id(),
+            cx.region_id(),
+            cx.task_id(),
+            success_req.lease,
+            Time::ZERO,
+        );
+        assert!(lease.is_active(Time::ZERO));
+
+        let renewal = LeaseRenewal {
+            remote_task_id: success_id,
+            new_lease: Duration::from_secs(15),
+            current_state: RemoteTaskState::Running,
+            node: NodeId::new("worker-1"),
+        };
+        let origin = origin
+            .recv_lease_renewal(&renewal)
+            .expect("origin accepts lease renewal");
+        let remote = remote
+            .send_lease_renewal(&renewal)
+            .expect("remote sends lease renewal");
+        lease
+            .renew(renewal.new_lease, Time::from_secs(10))
+            .expect("lease renewal extends liveness obligation");
+        assert_eq!(lease.renewal_count(), 1);
+
+        let success_result = ResultDelivery {
+            remote_task_id: success_id,
+            outcome: RemoteOutcome::Success(vec![9, 9, 9]),
+            execution_time: Duration::from_millis(7),
+        };
+        let _remote_done = remote
+            .send_result(&success_result)
+            .expect("remote sends terminal result");
+        let _origin_done = origin
+            .recv_result(&success_result)
+            .expect("origin receives terminal result");
+        lease
+            .release(Time::from_secs(11))
+            .expect("terminal result releases lease");
+        assert!(lease.is_released());
+        runtime.deliver(&cx, success_id, Ok(success_result.outcome.clone()));
+
+        let outcome = futures_lite::future::block_on(success.join(&cx))
+            .expect("success result reaches origin handle");
+        assert!(matches!(outcome, RemoteOutcome::Success(bytes) if bytes == vec![9, 9, 9]));
+        assert_runtime_drained(runtime.as_ref());
+
+        let mut cancelled_before_ack = spawn_remote(
+            &cx,
+            NodeId::new("worker-1"),
+            ComputationName::new("pre_ack_cancel"),
+            RemoteInput::new(vec![4]),
+        )
+        .expect("spawn before-ack cancel scenario");
+        let cancel_before_req = last_spawn_request(runtime.as_ref());
+        let cancel_before_id = cancelled_before_ack.remote_task_id();
+        cancelled_before_ack.abort(&cx);
+        let cancel_before = last_cancel_request(runtime.as_ref());
+        let origin = OriginSession::<OriginInit>::new(cancel_before_id)
+            .send_spawn(&cancel_before_req)
+            .expect("origin sends spawn")
+            .send_cancel(&cancel_before)
+            .expect("origin sends cancel before ack");
+        let remote = RemoteSession::<RemoteInit>::new(cancel_before_id)
+            .recv_spawn(&cancel_before_req)
+            .expect("remote receives spawn")
+            .recv_cancel(&cancel_before)
+            .expect("remote receives cancel before ack");
+        let ack = test_ack_accepted(cancel_before_id);
+        let origin = match origin
+            .recv_spawn_ack(&ack)
+            .expect("late ack after cancel is handled")
+        {
+            OriginCancelAckOutcome::Accepted(session) => session,
+            OriginCancelAckOutcome::Rejected(_) => panic!("accepted late ack must not reject"),
+        };
+        let remote = remote
+            .send_ack_accepted(&ack)
+            .expect("remote accepts while cancel is pending");
+        let result = ResultDelivery {
+            remote_task_id: cancel_before_id,
+            outcome: RemoteOutcome::Cancelled(CancelReason::user("cancelled before ack")),
+            execution_time: Duration::from_millis(1),
+        };
+        let _remote_done = remote.send_result(&result).expect("remote drains cancel");
+        let _origin_done = origin.recv_result(&result).expect("origin drains cancel");
+        runtime.deliver(&cx, cancel_before_id, Ok(result.outcome.clone()));
+        let outcome = futures_lite::future::block_on(cancelled_before_ack.join(&cx))
+            .expect("cancelled result reaches origin handle");
+        assert!(
+            matches!(outcome, RemoteOutcome::Cancelled(reason) if reason == CancelReason::user("cancelled before ack"))
+        );
+        assert_runtime_drained(runtime.as_ref());
+
+        let mut cancelled_running = spawn_remote(
+            &cx,
+            NodeId::new("worker-1"),
+            ComputationName::new("running_cancel"),
+            RemoteInput::new(vec![5]),
+        )
+        .expect("spawn running-cancel scenario");
+        let running_req = last_spawn_request(runtime.as_ref());
+        let running_id = cancelled_running.remote_task_id();
+        let ack = test_ack_accepted(running_id);
+        let origin = OriginSession::<OriginInit>::new(running_id)
+            .send_spawn(&running_req)
+            .expect("origin sends spawn");
+        let remote = RemoteSession::<RemoteInit>::new(running_id)
+            .recv_spawn(&running_req)
+            .expect("remote receives spawn");
+        let origin = match origin.recv_spawn_ack(&ack).expect("accepted ack") {
+            OriginAckOutcome::Accepted(session) => session,
+            OriginAckOutcome::Rejected(_) => panic!("accepted ack must not reject"),
+        };
+        let remote = remote.send_ack_accepted(&ack).expect("remote accepts");
+        runtime.mark_state(running_id, RemoteTaskState::Running);
+        let renewal = LeaseRenewal {
+            remote_task_id: running_id,
+            new_lease: Duration::from_secs(10),
+            current_state: RemoteTaskState::Running,
+            node: NodeId::new("worker-1"),
+        };
+        let origin = origin
+            .recv_lease_renewal(&renewal)
+            .expect("origin accepts running renewal");
+        let remote = remote
+            .send_lease_renewal(&renewal)
+            .expect("remote sends running renewal");
+        cancelled_running.abort(&cx);
+        let cancel = last_cancel_request(runtime.as_ref());
+        let origin = origin.send_cancel(&cancel).expect("origin sends cancel");
+        let remote = remote.recv_cancel(&cancel).expect("remote receives cancel");
+        let origin = origin
+            .recv_lease_renewal(&renewal)
+            .expect("origin accepts renewal while draining cancel");
+        let remote = remote
+            .send_lease_renewal(&renewal)
+            .expect("remote renews while draining cancel");
+        let result = ResultDelivery {
+            remote_task_id: running_id,
+            outcome: RemoteOutcome::Cancelled(CancelReason::user("cancelled while running")),
+            execution_time: Duration::from_millis(3),
+        };
+        let _remote_done = remote
+            .send_result(&result)
+            .expect("remote sends cancel result");
+        let _origin_done = origin
+            .recv_result(&result)
+            .expect("origin receives cancel result");
+        runtime.deliver(&cx, running_id, Ok(result.outcome.clone()));
+        let outcome = futures_lite::future::block_on(cancelled_running.join(&cx))
+            .expect("running cancel reaches origin handle");
+        assert!(
+            matches!(outcome, RemoteOutcome::Cancelled(reason) if reason == CancelReason::user("cancelled while running"))
+        );
+        assert_runtime_drained(runtime.as_ref());
+
+        let mut expired = spawn_remote(
+            &cx,
+            NodeId::new("worker-1"),
+            ComputationName::new("lease_expiry"),
+            RemoteInput::new(vec![6]),
+        )
+        .expect("spawn lease-expiry scenario");
+        let expired_req = last_spawn_request(runtime.as_ref());
+        let expired_id = expired.remote_task_id();
+        let ack = test_ack_accepted(expired_id);
+        let origin = OriginSession::<OriginInit>::new(expired_id)
+            .send_spawn(&expired_req)
+            .expect("origin sends spawn");
+        let origin = match origin.recv_spawn_ack(&ack).expect("accepted ack") {
+            OriginAckOutcome::Accepted(session) => session,
+            OriginAckOutcome::Rejected(_) => panic!("accepted ack must not reject"),
+        };
+        let expired_cancel = CancelRequest {
+            remote_task_id: expired_id,
+            reason: CancelReason::deadline(),
+            origin_node: NodeId::new("origin-a"),
+        };
+        let origin = origin
+            .lease_expired()
+            .send_cancel(&expired_cancel)
+            .expect("lease expiry can request remote cleanup");
+        let late_result = ResultDelivery {
+            remote_task_id: expired_id,
+            outcome: RemoteOutcome::Success(vec![1]),
+            execution_time: Duration::from_millis(9),
+        };
+        let _origin_done = origin
+            .recv_result(&late_result)
+            .expect("late terminal result remains correlated");
+        runtime.mark_state(expired_id, RemoteTaskState::LeaseExpired);
+        runtime.close_sender_preserving_state(expired_id);
+        let err = futures_lite::future::block_on(expired.join(&cx))
+            .expect_err("closed lease-expired runtime state surfaces lease error");
+        assert_eq!(err, RemoteError::LeaseExpired);
+        assert_runtime_drained(runtime.as_ref());
+
+        let mut store = IdempotencyStore::new(Duration::from_secs(300));
+        let success_fingerprint = IdempotencyRequestFingerprint::from_spawn_request(&success_req);
+        assert!(matches!(
+            store.check(
+                &success_req.idempotency_key,
+                &success_fingerprint,
+                Time::ZERO
+            ),
+            DedupDecision::New
+        ));
+        assert!(store.record(
+            success_req.idempotency_key,
+            success_id,
+            success_fingerprint.clone(),
+            Time::ZERO,
+        ));
+        assert!(store.complete(
+            &success_req.idempotency_key,
+            RemoteOutcome::Success(vec![9, 9, 9])
+        ));
+        match store.check(
+            &success_req.idempotency_key,
+            &success_fingerprint,
+            Time::from_secs(1),
+        ) {
+            DedupDecision::Duplicate(record) => {
+                assert_eq!(record.remote_task_id, success_id);
+                assert!(
+                    matches!(record.outcome, Some(RemoteOutcome::Success(bytes)) if bytes == vec![9, 9, 9])
+                );
+            }
+            other => panic!("expected duplicate decision, got {other:?}"),
+        }
+        let conflict_fingerprint = IdempotencyRequestFingerprint::new(
+            success_req.computation.clone(),
+            RemoteInput::new(vec![0xff]),
+        );
+        assert!(matches!(
+            store.check(
+                &success_req.idempotency_key,
+                &conflict_fingerprint,
+                Time::from_secs(1),
+            ),
+            DedupDecision::Conflict
+        ));
+
+        let failing = Arc::new(FailingSendRuntime::default());
+        let failing_cx: Cx =
+            Cx::for_testing_with_remote(RemoteCap::new().with_runtime(failing.clone()));
+        let err = spawn_remote(
+            &failing_cx,
+            NodeId::new("worker-1"),
+            ComputationName::new("transport_failure"),
+            RemoteInput::empty(),
+        )
+        .expect_err("send failure should fail spawn");
+        assert!(
+            matches!(err, RemoteError::TransportError(message) if message.contains("simulated send failure"))
+        );
+        let registered = failing.registered.lock().clone();
+        assert_eq!(registered.len(), 1);
+        assert_eq!(failing.unregistered.lock().clone(), registered);
+
+        let fallback_cx: Cx = Cx::for_testing_with_remote(fast_phase0_cap());
+        let mut fallback = spawn_remote(
+            &fallback_cx,
+            NodeId::new("missing-worker"),
+            ComputationName::new("fallback"),
+            RemoteInput::empty(),
+        )
+        .expect("phase-0 fallback creates a terminal handle");
+        let err = fallback
+            .try_join()
+            .expect_err("phase-0 fallback surfaces configured error");
+        assert!(matches!(err, RemoteError::NodeUnreachable(node) if node == "missing-worker"));
+
+        let messages = trace_messages(&trace);
+        for expected in [
+            trace_events::SPAWN_REQUEST_CREATED,
+            trace_events::SPAWN_REQUEST_SENT,
+            trace_events::CANCEL_SENT,
+            trace_events::RESULT_DELIVERED,
+            trace_events::LEASE_EXPIRED,
+        ] {
+            assert!(
+                messages.iter().any(|message| message == expected),
+                "missing trace event {expected}; messages={messages:?}"
+            );
+        }
     }
 
     // -----------------------------------------------------------------------
