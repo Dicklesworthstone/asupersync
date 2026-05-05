@@ -11,8 +11,8 @@
 //! - ERROR: 17-20
 //! - FATAL: 21-24
 
-use asupersync::observability::otel::OtelMetrics;
-use std::collections::{BTreeMap, BTreeSet};
+use asupersync::observability::{LogLevel, log_level_to_otlp_severity};
+use std::collections::BTreeSet;
 
 /// OTLP severity levels as defined in the specification.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -35,20 +35,10 @@ const OTLP_SEVERITY_RANGES: &[(OtlpSeverityLevel, (i32, i32))] = &[
     (OtlpSeverityLevel::Fatal, (21, 24)),
 ];
 
-/// Common Rust log levels for mapping tests.
-#[derive(Debug, Clone, Copy, PartialEq)]
-enum RustLogLevel {
-    Trace,
-    Debug,
-    Info,
-    Warn,
-    Error,
-}
-
 /// Test case for severity level mapping.
 struct SeverityMappingTestCase {
     name: &'static str,
-    input_levels: Vec<RustLogLevel>,
+    input_levels: Vec<LogLevel>,
     description: &'static str,
 }
 
@@ -60,33 +50,33 @@ fn main() {
         SeverityMappingTestCase {
             name: "all_rust_log_levels",
             input_levels: vec![
-                RustLogLevel::Trace,
-                RustLogLevel::Debug,
-                RustLogLevel::Info,
-                RustLogLevel::Warn,
-                RustLogLevel::Error,
+                LogLevel::Trace,
+                LogLevel::Debug,
+                LogLevel::Info,
+                LogLevel::Warn,
+                LogLevel::Error,
             ],
             description: "All standard Rust log levels should map to valid OTLP severities",
         },
         SeverityMappingTestCase {
             name: "duplicate_levels",
             input_levels: vec![
-                RustLogLevel::Info,
-                RustLogLevel::Info,
-                RustLogLevel::Error,
-                RustLogLevel::Error,
-                RustLogLevel::Warn,
+                LogLevel::Info,
+                LogLevel::Info,
+                LogLevel::Error,
+                LogLevel::Error,
+                LogLevel::Warn,
             ],
             description: "Duplicate log levels should produce consistent mappings",
         },
         SeverityMappingTestCase {
             name: "error_heavy_sequence",
             input_levels: vec![
-                RustLogLevel::Error,
-                RustLogLevel::Warn,
-                RustLogLevel::Error,
-                RustLogLevel::Info,
-                RustLogLevel::Error,
+                LogLevel::Error,
+                LogLevel::Warn,
+                LogLevel::Error,
+                LogLevel::Info,
+                LogLevel::Error,
             ],
             description: "Error-heavy logging patterns should map correctly",
         },
@@ -115,7 +105,15 @@ fn main() {
         println!("    ✅ severity_mapping_completeness");
     }
 
-    // Test 3: Test individual mapping cases
+    // Test 3: Verify unsupported FATAL range is explicit for the shipped LogLevel enum.
+    println!("  Testing explicit unsupported FATAL range");
+    if let Err(error) = test_fatal_range_explicitly_unsupported() {
+        failed_tests.push(("fatal_range_unsupported".to_string(), error));
+    } else {
+        println!("    ✅ fatal_range_unsupported");
+    }
+
+    // Test 4: Test individual mapping cases
     for test_case in &test_cases {
         println!("  Testing {}: {}", test_case.name, test_case.description);
 
@@ -126,7 +124,7 @@ fn main() {
         }
     }
 
-    // Test 4: Boundary value testing
+    // Test 5: Boundary value testing
     println!("  Testing severity boundary values");
     if let Err(error) = test_severity_boundary_values() {
         failed_tests.push(("severity_boundary_values".to_string(), error));
@@ -134,7 +132,7 @@ fn main() {
         println!("    ✅ severity_boundary_values");
     }
 
-    // Test 5: Round-trip consistency
+    // Test 6: Round-trip consistency
     println!("  Testing round-trip mapping consistency");
     if let Err(error) = test_round_trip_mapping_consistency() {
         failed_tests.push(("round_trip_consistency".to_string(), error));
@@ -160,8 +158,11 @@ fn main() {
 fn test_otlp_specification_coverage() -> Result<(), String> {
     let supported_severities = get_our_supported_severities();
 
-    // Verify we have mappings for all OTLP levels
     for (level, (min_num, max_num)) in OTLP_SEVERITY_RANGES {
+        if *level == OtlpSeverityLevel::Fatal {
+            continue;
+        }
+
         let has_mapping_in_range = supported_severities
             .iter()
             .any(|&severity_num| severity_num >= *min_num && severity_num <= *max_num);
@@ -190,11 +191,11 @@ fn test_otlp_specification_coverage() -> Result<(), String> {
 /// Test that there are no gaps in our severity level mapping.
 fn test_severity_mapping_completeness() -> Result<(), String> {
     let rust_levels = vec![
-        RustLogLevel::Trace,
-        RustLogLevel::Debug,
-        RustLogLevel::Info,
-        RustLogLevel::Warn,
-        RustLogLevel::Error,
+        LogLevel::Trace,
+        LogLevel::Debug,
+        LogLevel::Info,
+        LogLevel::Warn,
+        LogLevel::Error,
     ];
 
     let mut mapped_severities = BTreeSet::new();
@@ -229,6 +230,29 @@ fn test_severity_mapping_completeness() -> Result<(), String> {
     Ok(())
 }
 
+/// Test that the OTLP FATAL range is not silently claimed by Asupersync LogLevel.
+fn test_fatal_range_explicitly_unsupported() -> Result<(), String> {
+    let supported_severities = get_our_supported_severities();
+    let fatal_mappings: Vec<_> = supported_severities
+        .iter()
+        .copied()
+        .filter(|severity| (21..=24).contains(severity))
+        .collect();
+
+    if !fatal_mappings.is_empty() {
+        return Err(format!(
+            "Asupersync LogLevel has no Fatal variant but mapped severities into FATAL range: {:?}",
+            fatal_mappings
+        ));
+    }
+
+    if map_otlp_severity_to_description(21) != "FATAL" {
+        return Err("Raw OTLP FATAL severity numbers must still describe as FATAL".to_string());
+    }
+
+    Ok(())
+}
+
 /// Test severity level mapping for specific test cases.
 fn test_severity_level_mapping(test_case: &SeverityMappingTestCase) -> Result<(), String> {
     let mut severity_numbers = Vec::new();
@@ -246,11 +270,11 @@ fn test_severity_level_mapping(test_case: &SeverityMappingTestCase) -> Result<()
 
         // Verify severity number maps to correct OTLP level category
         let expected_range = match level {
-            RustLogLevel::Trace => (1, 4),
-            RustLogLevel::Debug => (5, 8),
-            RustLogLevel::Info => (9, 12),
-            RustLogLevel::Warn => (13, 16),
-            RustLogLevel::Error => (17, 20),
+            LogLevel::Trace => (1, 4),
+            LogLevel::Debug => (5, 8),
+            LogLevel::Info => (9, 12),
+            LogLevel::Warn => (13, 16),
+            LogLevel::Error => (17, 20),
         };
 
         if severity_num < expected_range.0 || severity_num > expected_range.1 {
@@ -310,11 +334,11 @@ fn test_severity_boundary_values() -> Result<(), String> {
 /// Test round-trip consistency of severity mappings.
 fn test_round_trip_mapping_consistency() -> Result<(), String> {
     let rust_levels = vec![
-        RustLogLevel::Trace,
-        RustLogLevel::Debug,
-        RustLogLevel::Info,
-        RustLogLevel::Warn,
-        RustLogLevel::Error,
+        LogLevel::Trace,
+        LogLevel::Debug,
+        LogLevel::Info,
+        LogLevel::Warn,
+        LogLevel::Error,
     ];
 
     for level in rust_levels {
@@ -323,11 +347,11 @@ fn test_round_trip_mapping_consistency() -> Result<(), String> {
 
         // Verify the description is reasonable for the level
         let expected_keywords = match level {
-            RustLogLevel::Trace => vec!["trace", "verbose"],
-            RustLogLevel::Debug => vec!["debug"],
-            RustLogLevel::Info => vec!["info", "information"],
-            RustLogLevel::Warn => vec!["warn", "warning"],
-            RustLogLevel::Error => vec!["error"],
+            LogLevel::Trace => vec!["trace", "verbose"],
+            LogLevel::Debug => vec!["debug"],
+            LogLevel::Info => vec!["info", "information"],
+            LogLevel::Warn => vec!["warn", "warning"],
+            LogLevel::Error => vec!["error"],
         };
 
         let description_lower = description.to_lowercase();
@@ -346,34 +370,26 @@ fn test_round_trip_mapping_consistency() -> Result<(), String> {
     Ok(())
 }
 
-/// Get the severity numbers that our implementation supports.
-/// TODO: Replace with actual asupersync implementation query.
+/// Get the severity numbers exposed by the production Asupersync mapping.
 fn get_our_supported_severities() -> Vec<i32> {
-    // Placeholder implementation - should query actual asupersync severity mappings
-    vec![
-        2,  // TRACE level (in range 1-4)
-        6,  // DEBUG level (in range 5-8)
-        10, // INFO level (in range 9-12)
-        14, // WARN level (in range 13-16)
-        18, // ERROR level (in range 17-20)
-            // Note: FATAL level (21-24) might be mapped separately or not at all
+    [
+        LogLevel::Trace,
+        LogLevel::Debug,
+        LogLevel::Info,
+        LogLevel::Warn,
+        LogLevel::Error,
     ]
+    .into_iter()
+    .map(|level| log_level_to_otlp_severity(level).0)
+    .collect()
 }
 
-/// Map Rust log level to OTLP severity number.
-/// TODO: Replace with actual asupersync implementation.
-fn map_rust_level_to_otlp_severity(level: RustLogLevel) -> i32 {
-    match level {
-        RustLogLevel::Trace => 2,  // OTLP TRACE range: 1-4
-        RustLogLevel::Debug => 6,  // OTLP DEBUG range: 5-8
-        RustLogLevel::Info => 10,  // OTLP INFO range: 9-12
-        RustLogLevel::Warn => 14,  // OTLP WARN range: 13-16
-        RustLogLevel::Error => 18, // OTLP ERROR range: 17-20
-    }
+/// Map Asupersync log level to OTLP severity number through the production seam.
+fn map_rust_level_to_otlp_severity(level: LogLevel) -> i32 {
+    log_level_to_otlp_severity(level).0
 }
 
-/// Map OTLP severity number back to human-readable description.
-/// TODO: Replace with actual asupersync implementation.
+/// Map raw OTLP severity number ranges back to human-readable descriptions.
 fn map_otlp_severity_to_description(severity_num: i32) -> String {
     match severity_num {
         1..=4 => "TRACE".to_string(),

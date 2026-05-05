@@ -4,17 +4,45 @@
 //! OTEL_RESOURCE_ATTRIBUTES environment variable produces identical
 //! Resource objects compared to the opentelemetry-sdk reference implementation.
 
-use asupersync::observability::otel::OtelMetrics;
+use asupersync::observability::otel::OtlpResourceBuilder;
 use opentelemetry_sdk::Resource;
 use std::collections::BTreeMap;
 use std::env;
-use std::time::Duration;
 
 /// Test cases for Resource detection conformance.
 struct ResourceDetectionTestCase {
     name: &'static str,
-    otel_resource_attributes: &'static str,
+    otel_resource_attributes: String,
     description: &'static str,
+}
+
+struct ResourceEnvGuard {
+    previous: Option<String>,
+}
+
+impl ResourceEnvGuard {
+    fn set(value: &str) -> Self {
+        let previous = env::var("OTEL_RESOURCE_ATTRIBUTES").ok();
+        unsafe {
+            if value.is_empty() {
+                env::remove_var("OTEL_RESOURCE_ATTRIBUTES");
+            } else {
+                env::set_var("OTEL_RESOURCE_ATTRIBUTES", value);
+            }
+        }
+        Self { previous }
+    }
+}
+
+impl Drop for ResourceEnvGuard {
+    fn drop(&mut self) {
+        unsafe {
+            match &self.previous {
+                Some(previous) => env::set_var("OTEL_RESOURCE_ATTRIBUTES", previous),
+                None => env::remove_var("OTEL_RESOURCE_ATTRIBUTES"),
+            }
+        }
+    }
 }
 
 fn main() {
@@ -24,62 +52,62 @@ fn main() {
     let test_cases = vec![
         ResourceDetectionTestCase {
             name: "empty_attributes",
-            otel_resource_attributes: "",
+            otel_resource_attributes: "".to_string(),
             description: "Empty OTEL_RESOURCE_ATTRIBUTES should produce default resource",
         },
         ResourceDetectionTestCase {
             name: "single_attribute",
-            otel_resource_attributes: "service.name=my-service",
+            otel_resource_attributes: "service.name=my-service".to_string(),
             description: "Single service name attribute",
         },
         ResourceDetectionTestCase {
             name: "multiple_attributes",
-            otel_resource_attributes: "service.name=my-service,service.version=1.0.0,deployment.environment=production",
+            otel_resource_attributes: "service.name=my-service,service.version=1.0.0,deployment.environment=production".to_string(),
             description: "Multiple comma-separated attributes",
         },
         ResourceDetectionTestCase {
             name: "quoted_values",
-            otel_resource_attributes: "service.name=\"my service\",description=\"A test service\"",
+            otel_resource_attributes: "service.name=\"my service\",description=\"A test service\"".to_string(),
             description: "Quoted values with spaces",
         },
         ResourceDetectionTestCase {
             name: "escaped_characters",
-            otel_resource_attributes: "service.name=test\\,service,description=A\\=test",
+            otel_resource_attributes: "service.name=test\\,service,description=A\\=test".to_string(),
             description: "Escaped commas and equals signs",
         },
         ResourceDetectionTestCase {
             name: "semantic_conventions",
-            otel_resource_attributes: "service.name=auth-service,service.version=2.1.0,service.namespace=production,service.instance.id=auth-01,deployment.environment=prod,telemetry.sdk.name=asupersync,telemetry.sdk.language=rust,telemetry.sdk.version=0.3.1",
+            otel_resource_attributes: "service.name=auth-service,service.version=2.1.0,service.namespace=production,service.instance.id=auth-01,deployment.environment=prod,telemetry.sdk.name=asupersync,telemetry.sdk.language=rust,telemetry.sdk.version=0.3.1".to_string(),
             description: "Standard semantic convention attributes",
         },
         ResourceDetectionTestCase {
             name: "custom_attributes",
-            otel_resource_attributes: "custom.team=platform,custom.region=us-west-2,custom.cluster=k8s-prod",
+            otel_resource_attributes: "custom.team=platform,custom.region=us-west-2,custom.cluster=k8s-prod".to_string(),
             description: "Custom application-specific attributes",
         },
         ResourceDetectionTestCase {
             name: "mixed_types",
-            otel_resource_attributes: "service.name=api,port=8080,enabled=true,ratio=0.95",
+            otel_resource_attributes: "service.name=api,port=8080,enabled=true,ratio=0.95".to_string(),
             description: "Mixed attribute types (string, int, bool, float)",
         },
         ResourceDetectionTestCase {
             name: "unicode_values",
-            otel_resource_attributes: "service.name=测试服务,description=\"Service with 中文 characters\"",
+            otel_resource_attributes: "service.name=测试服务,description=\"Service with 中文 characters\"".to_string(),
             description: "Unicode characters in attribute values",
         },
         ResourceDetectionTestCase {
             name: "special_characters",
-            otel_resource_attributes: "service.name=my-service_v1,path=/api/v1/users,query=?filter=active&sort=name",
+            otel_resource_attributes: "service.name=my-service_v1,path=/api/v1/users,query=?filter=active&sort=name".to_string(),
             description: "Special characters in attribute values",
         },
         ResourceDetectionTestCase {
             name: "whitespace_handling",
-            otel_resource_attributes: " service.name = my-service , service.version = 1.0 ",
+            otel_resource_attributes: " service.name = my-service , service.version = 1.0 ".to_string(),
             description: "Whitespace around keys and values",
         },
         ResourceDetectionTestCase {
             name: "duplicate_keys",
-            otel_resource_attributes: "service.name=first,service.name=second,version=1.0",
+            otel_resource_attributes: "service.name=first,service.name=second,version=1.0".to_string(),
             description: "Duplicate keys - last value should win",
         },
     ];
@@ -135,36 +163,23 @@ struct ResourceData {
 
 /// Test our Resource detection implementation.
 fn test_our_resource_detection(test_case: &ResourceDetectionTestCase) -> ResourceData {
-    // Set the environment variable
-    env::set_var(
-        "OTEL_RESOURCE_ATTRIBUTES",
-        test_case.otel_resource_attributes,
-    );
-
-    // TODO: Call our Resource detection implementation
-    // This should be replaced with actual asupersync Resource detection code
-    // For now, we'll create a placeholder that parses the env var manually
-
-    let attributes = parse_resource_attributes(test_case.otel_resource_attributes);
-
-    // Clean up environment variable
-    if test_case.otel_resource_attributes.is_empty() {
-        env::remove_var("OTEL_RESOURCE_ATTRIBUTES");
-    }
+    let _guard = ResourceEnvGuard::set(&test_case.otel_resource_attributes);
+    let attributes = OtlpResourceBuilder::new()
+        .with_env_resource_attributes()
+        .environment_attributes()
+        .iter()
+        .map(|(key, value)| (key.clone(), value.clone()))
+        .collect();
 
     ResourceData {
         attributes,
-        schema_url: None, // Our implementation may not set schema URL
+        schema_url: None,
     }
 }
 
 /// Test the reference opentelemetry-sdk Resource detection.
 fn test_reference_resource_detection(test_case: &ResourceDetectionTestCase) -> ResourceData {
-    // Set the environment variable
-    env::set_var(
-        "OTEL_RESOURCE_ATTRIBUTES",
-        test_case.otel_resource_attributes,
-    );
+    let _guard = ResourceEnvGuard::set(&test_case.otel_resource_attributes);
 
     // Use opentelemetry-sdk Resource detection - use the ResourceBuilder approach
     let resource = Resource::builder_empty()
@@ -172,11 +187,6 @@ fn test_reference_resource_detection(test_case: &ResourceDetectionTestCase) -> R
             opentelemetry_sdk::resource::EnvResourceDetector::new(),
         ))
         .build();
-
-    // Clean up environment variable
-    if test_case.otel_resource_attributes.is_empty() {
-        env::remove_var("OTEL_RESOURCE_ATTRIBUTES");
-    }
 
     // Convert to our test representation
     let mut attributes = BTreeMap::new();
@@ -190,54 +200,11 @@ fn test_reference_resource_detection(test_case: &ResourceDetectionTestCase) -> R
     }
 }
 
-/// Parse OTEL_RESOURCE_ATTRIBUTES string manually (placeholder implementation).
-/// This should be replaced with the actual asupersync implementation.
-fn parse_resource_attributes(attributes_str: &str) -> BTreeMap<String, String> {
-    let mut attributes = BTreeMap::new();
-
-    if attributes_str.trim().is_empty() {
-        return attributes;
-    }
-
-    // Simple parsing - this should match the complexity of actual implementation
-    let parts: Vec<&str> = attributes_str.split(',').collect();
-
-    for part in parts {
-        let part = part.trim();
-        if part.is_empty() {
-            continue;
-        }
-
-        // Find the first unescaped = sign
-        if let Some(eq_pos) = part.find('=') {
-            let key = part[..eq_pos].trim().to_string();
-            let value = part[eq_pos + 1..].trim();
-
-            // Handle quoted values
-            let value = if value.starts_with('"') && value.ends_with('"') && value.len() > 1 {
-                &value[1..value.len() - 1]
-            } else {
-                value
-            };
-
-            // Handle escaped characters (simplified)
-            let value = value
-                .replace("\\,", ",")
-                .replace("\\=", "=")
-                .replace("\\\"", "\"");
-
-            attributes.insert(key, value);
-        }
-    }
-
-    attributes
-}
-
 /// Compare Resource objects between our implementation and reference.
 fn compare_resources(
     our_resource: &ResourceData,
     reference_resource: &ResourceData,
-    test_case: &ResourceDetectionTestCase,
+    _test_case: &ResourceDetectionTestCase,
 ) -> Result<(), String> {
     // Compare attributes - this is the core requirement
     if our_resource.attributes != reference_resource.attributes {
@@ -291,6 +258,12 @@ fn compare_resources(
 
 /// Test edge cases for Resource detection.
 fn test_resource_detection_edge_cases(failed_tests: &mut Vec<(String, String)>) {
+    let extremely_long_value = format!("key={}", "x".repeat(1000));
+    let many_attributes = (0..50)
+        .map(|i| format!("key{}=value{}", i, i))
+        .collect::<Vec<_>>()
+        .join(",");
+
     let edge_cases = vec![
         (
             "malformed_no_equals",
@@ -307,15 +280,12 @@ fn test_resource_detection_edge_cases(failed_tests: &mut Vec<(String, String)>) 
         ),
         (
             "extremely_long_value",
-            &format!("key={}", "x".repeat(1000)),
+            extremely_long_value.as_str(),
             "Very long attribute value",
         ),
         (
             "many_attributes",
-            &(0..50)
-                .map(|i| format!("key{}=value{}", i, i))
-                .collect::<Vec<_>>()
-                .join(","),
+            many_attributes.as_str(),
             "Many attributes",
         ),
     ];
@@ -323,7 +293,7 @@ fn test_resource_detection_edge_cases(failed_tests: &mut Vec<(String, String)>) 
     for (case_name, attributes_str, description) in edge_cases {
         let test_case = ResourceDetectionTestCase {
             name: case_name,
-            otel_resource_attributes: attributes_str,
+            otel_resource_attributes: attributes_str.to_string(),
             description,
         };
 

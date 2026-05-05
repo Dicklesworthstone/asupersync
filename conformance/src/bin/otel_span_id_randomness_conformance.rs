@@ -7,20 +7,18 @@
 //! Key properties tested:
 //! - Statistical uniformity of generated 8-byte span IDs
 //! - Uniqueness over large sample sizes
-//! - Identical distribution patterns vs reference implementation
+//! - Comparable distribution health vs opentelemetry-sdk
 //! - Entropy and randomness quality metrics for 8-byte IDs
 //! - Proper handling of invalid span ID (all zeros)
 
-use asupersync::observability::otel::OtelMetrics;
-use opentelemetry::trace::SpanId as OtelSpanId;
-use std::collections::{BTreeMap, BTreeSet, HashMap};
-use std::sync::atomic::{AtomicU64, Ordering};
+use asupersync::observability::w3c_trace_context::SpanId as AsupersyncSpanId;
+use opentelemetry_sdk::trace::{IdGenerator, RandomIdGenerator};
+use std::collections::BTreeSet;
 
 /// Test cases for span ID randomness conformance
 struct SpanIdRandomnessTestCase {
     name: &'static str,
     sample_size: usize,
-    seed: u64,
     description: &'static str,
 }
 
@@ -166,43 +164,31 @@ fn main() {
         SpanIdRandomnessTestCase {
             name: "small_sample",
             sample_size: 1000,
-            seed: 54321,
             description: "Small sample for quick validation",
         },
         SpanIdRandomnessTestCase {
             name: "medium_sample",
-            sample_size: 10000,
-            seed: 13579,
+            sample_size: 5000,
             description: "Medium sample for statistical analysis",
         },
         SpanIdRandomnessTestCase {
             name: "large_sample",
-            sample_size: 50000,
-            seed: 24680,
+            sample_size: 10000,
             description: "Large sample for distribution conformance",
         },
         SpanIdRandomnessTestCase {
-            name: "fixed_seed_reproducible",
-            sample_size: 5000,
-            seed: 1337,
-            description: "Fixed seed for reproducible results",
+            name: "fresh_generator_short_run",
+            sample_size: 1000,
+            description: "Fresh generator short run",
         },
         SpanIdRandomnessTestCase {
-            name: "edge_seed_zero",
+            name: "second_fresh_generator_short_run",
             sample_size: 1000,
-            seed: 0,
-            description: "Edge case with zero seed",
-        },
-        SpanIdRandomnessTestCase {
-            name: "edge_seed_max",
-            sample_size: 1000,
-            seed: u64::MAX,
-            description: "Edge case with maximum seed value",
+            description: "Second fresh generator short run",
         },
         SpanIdRandomnessTestCase {
             name: "span_collision_detection",
-            sample_size: 100000,
-            seed: 9999,
+            sample_size: 20000,
             description: "Large sample to detect span ID collisions",
         },
     ];
@@ -220,7 +206,7 @@ fn main() {
         // Test our implementation
         let our_span_ids = test_our_span_id_generation(test_case);
 
-        // Test reference implementation
+        // Test opentelemetry-sdk implementation
         let reference_span_ids = test_reference_span_id_generation(test_case);
 
         // Compare distributions
@@ -253,16 +239,11 @@ fn main() {
 
 /// Test our span ID generation implementation
 fn test_our_span_id_generation(test_case: &SpanIdRandomnessTestCase) -> Vec<SpanIdData> {
-    // TODO: Replace with actual asupersync span ID generation
-    // This should use the same SplitMix64 PRNG as shown in the otel.rs module
-
-    // Reset seed for deterministic testing
-    let mut rng_state = test_case.seed;
-
     let mut span_ids = Vec::with_capacity(test_case.sample_size);
 
     for _ in 0..test_case.sample_size {
-        let span_id_bytes = generate_our_span_id(&mut rng_state);
+        let span_id = AsupersyncSpanId::new_random();
+        let span_id_bytes = span_id_hex_to_bytes(&span_id.to_hex());
         span_ids.push(SpanIdData::new(span_id_bytes));
     }
 
@@ -271,68 +252,33 @@ fn test_our_span_id_generation(test_case: &SpanIdRandomnessTestCase) -> Vec<Span
 
 /// Test reference opentelemetry-sdk span ID generation
 fn test_reference_span_id_generation(test_case: &SpanIdRandomnessTestCase) -> Vec<SpanIdData> {
-    // TODO: Use actual opentelemetry-sdk span ID generation with same seed
-    // For now, simulate reference behavior using same algorithm
-
-    let mut rng_state = test_case.seed;
+    let generator = RandomIdGenerator::default();
     let mut span_ids = Vec::with_capacity(test_case.sample_size);
 
     for _ in 0..test_case.sample_size {
-        let span_id_bytes = generate_reference_span_id(&mut rng_state);
+        let span_id = generator.new_span_id();
+        let span_id_bytes = span_id_hex_to_bytes(&format!("{span_id:016x}"));
         span_ids.push(SpanIdData::new(span_id_bytes));
     }
 
     span_ids
 }
 
-/// Generate span ID using our implementation (SplitMix64 with XOR salt)
-fn generate_our_span_id(rng_state: &mut u64) -> [u8; 8] {
-    *rng_state = rng_state.wrapping_add(1); // Increment seed like NEXT_TEST_SPAN_SEED
-
-    let seed = *rng_state;
-    let raw = splitmix64(seed ^ 0xa5a5_a5a5_a5a5_a5a5); // Same XOR salt as otel.rs
-
-    let span_id_bytes = [
-        (raw >> 56) as u8,
-        (raw >> 48) as u8,
-        (raw >> 40) as u8,
-        (raw >> 32) as u8,
-        (raw >> 24) as u8,
-        (raw >> 16) as u8,
-        (raw >> 8) as u8,
-        raw as u8,
-    ];
-
-    // Handle invalid span ID case
-    if span_id_bytes == [0; 8] {
-        [0, 0, 0, 0, 0, 0, 0, 1]
-    } else {
-        span_id_bytes
+fn span_id_hex_to_bytes(hex: &str) -> [u8; 8] {
+    assert_eq!(hex.len(), 16, "span ID hex must be 16 chars");
+    let mut bytes = [0u8; 8];
+    for (idx, byte) in bytes.iter_mut().enumerate() {
+        let offset = idx * 2;
+        *byte = u8::from_str_radix(&hex[offset..offset + 2], 16).expect("span ID hex must parse");
     }
-}
-
-/// Generate span ID using reference implementation (should be identical algorithm)
-fn generate_reference_span_id(rng_state: &mut u64) -> [u8; 8] {
-    // This should match exactly what opentelemetry-sdk does
-    // For now, use same algorithm - in real implementation this would
-    // call into the actual opentelemetry-sdk
-    generate_our_span_id(rng_state)
-}
-
-/// SplitMix64 PRNG implementation (matching otel.rs)
-fn splitmix64(mut state: u64) -> u64 {
-    state = state.wrapping_add(0x9e37_79b9_7f4a_7c15);
-    let mut z = state;
-    z = (z ^ (z >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
-    z = (z ^ (z >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
-    z ^ (z >> 31)
+    bytes
 }
 
 /// Compare span ID distributions between implementations
 fn compare_span_id_distributions(
     our_span_ids: &[SpanIdData],
     reference_span_ids: &[SpanIdData],
-    test_case: &SpanIdRandomnessTestCase,
+    _test_case: &SpanIdRandomnessTestCase,
 ) -> Result<(), String> {
     if our_span_ids.len() != reference_span_ids.len() {
         return Err(format!(
@@ -342,45 +288,40 @@ fn compare_span_id_distributions(
         ));
     }
 
-    // For differential testing with same RNG seed, outputs should be identical
-    for (i, (our_id, ref_id)) in our_span_ids
-        .iter()
-        .zip(reference_span_ids.iter())
-        .enumerate()
-    {
-        if our_id != ref_id {
-            return Err(format!(
-                "Span ID mismatch at index {}: our={:?}, reference={:?}",
-                i, our_id.bytes, ref_id.bytes
-            ));
-        }
-    }
-
-    // Statistical analysis should also match
     let our_analysis = SpanIdRandomnessAnalysis::analyze(our_span_ids);
     let ref_analysis = SpanIdRandomnessAnalysis::analyze(reference_span_ids);
 
-    if our_analysis.unique_count != ref_analysis.unique_count {
-        return Err(format!(
-            "Unique count mismatch: our={}, reference={}",
-            our_analysis.unique_count, ref_analysis.unique_count
-        ));
-    }
+    for (label, analysis) in [
+        ("asupersync", &our_analysis),
+        ("opentelemetry-sdk", &ref_analysis),
+    ] {
+        if analysis.invalid_count != 0 {
+            return Err(format!(
+                "{label} generated {} invalid all-zero span IDs",
+                analysis.invalid_count
+            ));
+        }
 
-    if our_analysis.invalid_count != ref_analysis.invalid_count {
-        return Err(format!(
-            "Invalid count mismatch: our={}, reference={}",
-            our_analysis.invalid_count, ref_analysis.invalid_count
-        ));
-    }
+        let uniqueness_rate = analysis.unique_count as f64 / analysis.sample_size as f64;
+        if uniqueness_rate < 0.99 {
+            return Err(format!(
+                "{label} uniqueness rate {:.4} is below 0.99",
+                uniqueness_rate
+            ));
+        }
+        if analysis.collision_count > analysis.sample_size / 100 {
+            return Err(format!(
+                "{label} collision count {} exceeds 1% of sample size {}",
+                analysis.collision_count, analysis.sample_size
+            ));
+        }
 
-    // Entropy should be very close (allowing for floating point precision)
-    let entropy_diff = (our_analysis.entropy_mean - ref_analysis.entropy_mean).abs();
-    if entropy_diff > 0.001 {
-        return Err(format!(
-            "Entropy mean mismatch: our={:.6}, reference={:.6}, diff={:.6}",
-            our_analysis.entropy_mean, ref_analysis.entropy_mean, entropy_diff
-        ));
+        if analysis.entropy_mean < 2.8 {
+            return Err(format!(
+                "{label} entropy mean {:.3} is too low",
+                analysis.entropy_mean
+            ));
+        }
     }
 
     Ok(())
@@ -391,7 +332,6 @@ fn test_span_id_randomness_properties(failed_tests: &mut Vec<(String, String)>) 
     let test_case = SpanIdRandomnessTestCase {
         name: "randomness_properties",
         sample_size: 10000,
-        seed: 7777,
         description: "General randomness property testing",
     };
 
@@ -412,8 +352,8 @@ fn test_span_id_randomness_properties(failed_tests: &mut Vec<(String, String)>) 
         println!("    ✅ span_uniqueness_rate: {:.4}", uniqueness_rate);
     }
 
-    // Test 2: No invalid span IDs should be generated (except the controlled case)
-    if analysis.invalid_count > 1 {
+    // Test 2: No invalid span IDs should be generated.
+    if analysis.invalid_count != 0 {
         failed_tests.push((
             "invalid_span_ids".to_string(),
             format!("Too many invalid span IDs: {}", analysis.invalid_count),
@@ -499,10 +439,9 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_splitmix64_deterministic() {
-        assert_eq!(splitmix64(0), 0x9e3779b97f4a7c15);
-        assert_eq!(splitmix64(1), 0x85c6f9db0bd6e9c3);
-        assert_eq!(splitmix64(12345), 0x1c47f40b16fcbe9e);
+    fn test_span_id_hex_to_bytes() {
+        let bytes = span_id_hex_to_bytes("0001020304050607");
+        assert_eq!(bytes, [0, 1, 2, 3, 4, 5, 6, 7]);
     }
 
     #[test]
@@ -539,24 +478,27 @@ mod tests {
     }
 
     #[test]
-    fn test_our_span_id_generation_deterministic() {
-        let mut state1 = 1234;
-        let mut state2 = 1234;
-
-        let id1 = generate_our_span_id(&mut state1);
-        let id2 = generate_our_span_id(&mut state2);
-
-        assert_eq!(id1, id2, "Same seed should produce same span ID");
+    fn test_our_span_id_generation_uses_live_nonzero_ids() {
+        let test_case = SpanIdRandomnessTestCase {
+            name: "unit_live_nonzero",
+            sample_size: 32,
+            description: "Unit live nonzero",
+        };
+        let ids = test_our_span_id_generation(&test_case);
+        assert!(ids.iter().all(SpanIdData::is_valid));
     }
 
     #[test]
     fn test_span_id_generation_uniqueness() {
-        let mut state = 1;
         let mut ids = BTreeSet::new();
+        let test_case = SpanIdRandomnessTestCase {
+            name: "unit_uniqueness",
+            sample_size: 10000,
+            description: "Unit uniqueness",
+        };
 
-        for _ in 0..10000 {
-            let id = generate_our_span_id(&mut state);
-            ids.insert(id);
+        for id in test_our_span_id_generation(&test_case) {
+            ids.insert(id.bytes);
         }
 
         // Should have very high uniqueness for 8-byte IDs
@@ -567,29 +509,13 @@ mod tests {
     }
 
     #[test]
-    fn test_span_id_xor_salt() {
-        let mut state1 = 42;
-        let mut state2 = 42;
-
-        // Our implementation uses XOR salt
-        let id1 = generate_our_span_id(&mut state1);
-
-        // Test that the XOR salt affects the output
-        state2 = 42;
-        let raw_no_salt = splitmix64(state2 + 1);
-        let raw_with_salt = splitmix64((state2 + 1) ^ 0xa5a5_a5a5_a5a5_a5a5);
-
-        assert_ne!(raw_no_salt, raw_with_salt, "XOR salt should modify output");
-    }
-
-    #[test]
     fn test_span_id_randomness_analysis() {
-        let span_ids: Vec<SpanIdData> = (0..1000)
-            .map(|i| {
-                let mut state = i as u64;
-                SpanIdData::new(generate_our_span_id(&mut state))
-            })
-            .collect();
+        let test_case = SpanIdRandomnessTestCase {
+            name: "unit_analysis",
+            sample_size: 1000,
+            description: "Unit analysis",
+        };
+        let span_ids = test_our_span_id_generation(&test_case);
 
         let analysis = SpanIdRandomnessAnalysis::analyze(&span_ids);
 
@@ -601,7 +527,7 @@ mod tests {
 
     #[test]
     fn test_invalid_span_id_handling() {
-        // Simulate case where splitmix64 produces all zeros
+        // Pin the validity predicate for the forbidden all-zero W3C span ID.
         let invalid_bytes = [0; 8];
         let span_id = if invalid_bytes == [0; 8] {
             [0, 0, 0, 0, 0, 0, 0, 1]

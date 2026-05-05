@@ -1,8 +1,8 @@
 //! OpenTelemetry Metric Exporter Batching Conformance Test (Tick #149)
 //!
-//! This conformance test verifies that our metric exporter batching produces
-//! identical OTLP/Metrics ResourceMetrics batches compared to opentelemetry-sdk
-//! when given the same metric stream.
+//! This conformance test verifies that the live Asupersync OTLP metric request
+//! builder produces deterministic ResourceMetrics batches from the same metric
+//! stream.
 //!
 //! Key OTLP specification requirements tested:
 //! - ResourceMetrics structure and organization
@@ -11,21 +11,10 @@
 //! - Resource attributes and schema URL compliance
 //! - Temporal aggregation and data point formatting
 
-use asupersync::observability::otel::OtelMetrics;
-#[cfg(all(
-    any(test, feature = "fuzz"),
-    feature = "metrics",
-    feature = "tracing-integration"
-))]
-use asupersync::observability::otel::otlp_request_builder;
-use asupersync::observability::metrics::{Metrics, MetricsSnapshot, MetricLabels};
-use opentelemetry::global;
-use opentelemetry::metrics::{MeterProvider};
-use opentelemetry_sdk::metrics::{SdkMeterProvider, data};
+use asupersync::observability::otel::{MetricLabels, MetricsSnapshot, otlp_request_builder};
 use opentelemetry_proto::tonic::collector::metrics::v1::ExportMetricsServiceRequest;
-use opentelemetry_proto::tonic::metrics::v1::{ResourceMetrics, ScopeMetrics, Metric};
-use std::collections::{BTreeMap, HashMap};
-use std::sync::{Arc, Mutex};
+use opentelemetry_proto::tonic::metrics::v1::{Metric, ResourceMetrics, ScopeMetrics, metric};
+use std::collections::BTreeMap;
 
 /// Test cases for metric exporter batching conformance
 struct MetricBatchingTestCase {
@@ -103,7 +92,7 @@ enum DataValue {
 
 fn main() {
     println!("🔍 OpenTelemetry Metric Exporter Batching Conformance Test");
-    println!("Verifying same metric stream → identical OTLP ResourceMetrics batch");
+    println!("Verifying same metric stream → live OTLP ResourceMetrics batch invariants");
 
     let test_cases = vec![
         MetricBatchingTestCase {
@@ -201,8 +190,14 @@ fn main() {
                 name: "special.metric-name_with/chars".to_string(),
                 metric_type: MetricType::Counter,
                 labels: vec![
-                    ("label.with.dots".to_string(), "value-with-dashes".to_string()),
-                    ("label/with/slashes".to_string(), "value_with_underscores".to_string()),
+                    (
+                        "label.with.dots".to_string(),
+                        "value-with-dashes".to_string(),
+                    ),
+                    (
+                        "label/with/slashes".to_string(),
+                        "value_with_underscores".to_string(),
+                    ),
                 ],
                 values: vec![1.0],
             }],
@@ -225,11 +220,7 @@ fn main() {
         // Test our implementation
         let our_batch_data = test_our_metric_batching(test_case);
 
-        // Test reference implementation
-        let reference_batch_data = test_reference_metric_batching(test_case);
-
-        // Compare results
-        if let Err(error) = compare_metric_batches(&our_batch_data, &reference_batch_data, test_case) {
+        if let Err(error) = validate_live_metric_batch(&our_batch_data, test_case) {
             failed_tests.push((test_case.name.to_string(), error));
         } else {
             println!("    ✅ {}", test_case.name);
@@ -244,7 +235,7 @@ fn main() {
     println!("\n📊 Metric Exporter Batching Conformance Test Results");
     if failed_tests.is_empty() {
         println!("✅ ALL TESTS PASSED - Metric batching is conformant");
-        println!("🎯 OTLP ResourceMetrics batches match opentelemetry-sdk exactly");
+        println!("🎯 OTLP ResourceMetrics batches satisfy live builder invariants");
     } else {
         println!("❌ {} TESTS FAILED:", failed_tests.len());
         for (test_name, error) in &failed_tests {
@@ -258,44 +249,13 @@ fn main() {
 fn test_our_metric_batching(test_case: &MetricBatchingTestCase) -> MetricBatchData {
     // Create metrics snapshot from test data
     let snapshot = create_metrics_snapshot(&test_case.metrics_data);
-
-    #[cfg(all(
-        any(test, feature = "fuzz"),
-        feature = "metrics",
-        feature = "tracing-integration"
-    ))]
-    {
-        // Use our OTLP request builder
-        let request = otlp_request_builder::metrics_request_from_snapshot(
-            &snapshot,
-            &test_case.service_name,
-            test_case.batch_sequence,
-            "asupersync.observability.otel",
-        );
-
-        // Convert to our test representation
-        convert_otlp_request_to_batch_data(request)
-    }
-
-    #[cfg(not(all(
-        any(test, feature = "fuzz"),
-        feature = "metrics",
-        feature = "tracing-integration"
-    )))]
-    {
-        // Fallback implementation for when OTLP builder is not available
-        create_mock_batch_data(test_case)
-    }
-}
-
-/// Test reference opentelemetry-sdk metric batching
-fn test_reference_metric_batching(test_case: &MetricBatchingTestCase) -> MetricBatchData {
-    // TODO: Replace with actual opentelemetry-sdk metric batching
-    // This would involve setting up a real SdkMeterProvider with an in-memory exporter
-    // and capturing the exported ResourceMetrics
-
-    // For now, simulate reference behavior using same algorithm
-    test_our_metric_batching(test_case)
+    let request = otlp_request_builder::metrics_request_from_snapshot(
+        &snapshot,
+        &test_case.service_name,
+        test_case.batch_sequence,
+        "asupersync.observability.otel",
+    );
+    convert_otlp_request_to_batch_data(request)
 }
 
 /// Create a metrics snapshot from test metric data
@@ -313,7 +273,7 @@ fn create_metrics_snapshot(metrics_data: &[MetricData]) -> MetricsSnapshot {
                 counters.push((metric.name.clone(), labels, value));
             }
             MetricType::Gauge => {
-                let value = metric.values.first().copied().unwrap_or(0.0);
+                let value = metric.values.first().copied().unwrap_or(0.0) as i64;
                 gauges.push((metric.name.clone(), labels, value));
             }
             MetricType::Histogram(_boundaries) => {
@@ -333,7 +293,8 @@ fn create_metrics_snapshot(metrics_data: &[MetricData]) -> MetricsSnapshot {
 
 /// Convert OTLP request to our test representation
 fn convert_otlp_request_to_batch_data(request: ExportMetricsServiceRequest) -> MetricBatchData {
-    let resource_metrics = request.resource_metrics
+    let resource_metrics = request
+        .resource_metrics
         .into_iter()
         .map(|rm| convert_resource_metrics(rm))
         .collect();
@@ -357,18 +318,15 @@ fn convert_resource_metrics(rm: ResourceMetrics) -> ResourceMetricsData {
                     }
                 }
                 "batch.sequence" => {
-                    if let Some(value) = attr.value.and_then(|v| v.value) {
-                        if let opentelemetry_proto::tonic::common::v1::any_value::Value::IntValue(i) = value {
-                            batch_sequence = Some(i as u64);
-                        }
-                    }
+                    batch_sequence = parse_batch_sequence(attr.value);
                 }
                 _ => {}
             }
         }
     }
 
-    let scope_metrics = rm.scope_metrics
+    let scope_metrics = rm
+        .scope_metrics
         .into_iter()
         .map(|sm| convert_scope_metrics(sm))
         .collect();
@@ -387,10 +345,7 @@ fn convert_scope_metrics(sm: ScopeMetrics) -> ScopeMetricsData {
         ("unknown".to_string(), "".to_string())
     };
 
-    let metrics = sm.metrics
-        .into_iter()
-        .map(|m| convert_metric(m))
-        .collect();
+    let metrics = sm.metrics.into_iter().map(|m| convert_metric(m)).collect();
 
     ScopeMetricsData {
         scope_name,
@@ -401,25 +356,31 @@ fn convert_scope_metrics(sm: ScopeMetrics) -> ScopeMetricsData {
 }
 
 fn convert_metric(m: Metric) -> MetricInfo {
-    let data_type = if m.sum.is_some() {
-        "Sum".to_string()
-    } else if m.gauge.is_some() {
-        "Gauge".to_string()
-    } else if m.histogram.is_some() {
-        "Histogram".to_string()
-    } else {
-        "Unknown".to_string()
-    };
-
-    // Extract data points based on metric type
-    let data_points = if let Some(sum) = m.sum {
-        sum.data_points.into_iter().map(convert_number_data_point).collect()
-    } else if let Some(gauge) = m.gauge {
-        gauge.data_points.into_iter().map(convert_number_data_point).collect()
-    } else if let Some(histogram) = m.histogram {
-        histogram.data_points.into_iter().map(convert_histogram_data_point).collect()
-    } else {
-        vec![]
+    let (data_type, data_points) = match m.data {
+        Some(metric::Data::Sum(sum)) => (
+            "Sum".to_string(),
+            sum.data_points
+                .into_iter()
+                .map(|dp| convert_number_data_point(dp, NumberPointKind::Counter))
+                .collect(),
+        ),
+        Some(metric::Data::Gauge(gauge)) => (
+            "Gauge".to_string(),
+            gauge
+                .data_points
+                .into_iter()
+                .map(|dp| convert_number_data_point(dp, NumberPointKind::Gauge))
+                .collect(),
+        ),
+        Some(metric::Data::Histogram(histogram)) => (
+            "Histogram".to_string(),
+            histogram
+                .data_points
+                .into_iter()
+                .map(convert_histogram_data_point)
+                .collect(),
+        ),
+        _ => ("Unknown".to_string(), Vec::new()),
     };
 
     MetricInfo {
@@ -431,24 +392,46 @@ fn convert_metric(m: Metric) -> MetricInfo {
     }
 }
 
+#[derive(Debug, Clone, Copy)]
+enum NumberPointKind {
+    Counter,
+    Gauge,
+}
+
 fn convert_number_data_point(
     dp: opentelemetry_proto::tonic::metrics::v1::NumberDataPoint,
+    kind: NumberPointKind,
 ) -> DataPoint {
-    let attributes = dp.attributes.into_iter()
+    let attributes = dp
+        .attributes
+        .into_iter()
         .map(|attr| (attr.key, extract_string_value(attr.value)))
         .collect();
 
     let value = if let Some(value) = dp.value {
-        match value {
-            opentelemetry_proto::tonic::metrics::v1::number_data_point::Value::AsDouble(d) => {
-                DataValue::Gauge(d)
-            }
-            opentelemetry_proto::tonic::metrics::v1::number_data_point::Value::AsInt(i) => {
-                DataValue::Counter(i as u64)
-            }
+        match (kind, value) {
+            (
+                NumberPointKind::Gauge,
+                opentelemetry_proto::tonic::metrics::v1::number_data_point::Value::AsDouble(d),
+            ) => DataValue::Gauge(d),
+            (
+                NumberPointKind::Gauge,
+                opentelemetry_proto::tonic::metrics::v1::number_data_point::Value::AsInt(i),
+            ) => DataValue::Gauge(i as f64),
+            (
+                NumberPointKind::Counter,
+                opentelemetry_proto::tonic::metrics::v1::number_data_point::Value::AsDouble(d),
+            ) => DataValue::Counter(d as u64),
+            (
+                NumberPointKind::Counter,
+                opentelemetry_proto::tonic::metrics::v1::number_data_point::Value::AsInt(i),
+            ) => DataValue::Counter(i as u64),
         }
     } else {
-        DataValue::Counter(0)
+        match kind {
+            NumberPointKind::Counter => DataValue::Counter(0),
+            NumberPointKind::Gauge => DataValue::Gauge(0.0),
+        }
     };
 
     DataPoint {
@@ -461,13 +444,15 @@ fn convert_number_data_point(
 fn convert_histogram_data_point(
     dp: opentelemetry_proto::tonic::metrics::v1::HistogramDataPoint,
 ) -> DataPoint {
-    let attributes = dp.attributes.into_iter()
+    let attributes = dp
+        .attributes
+        .into_iter()
         .map(|attr| (attr.key, extract_string_value(attr.value)))
         .collect();
 
     let value = DataValue::Histogram {
         count: dp.count,
-        sum: dp.sum,
+        sum: dp.sum.unwrap_or_default(),
         bucket_counts: dp.bucket_counts,
         explicit_bounds: dp.explicit_bounds,
     };
@@ -479,16 +464,20 @@ fn convert_histogram_data_point(
     }
 }
 
-fn extract_string_value(
-    value: Option<opentelemetry_proto::tonic::common::v1::AnyValue>,
-) -> String {
+fn extract_string_value(value: Option<opentelemetry_proto::tonic::common::v1::AnyValue>) -> String {
     if let Some(any_value) = value {
         if let Some(value) = any_value.value {
             match value {
                 opentelemetry_proto::tonic::common::v1::any_value::Value::StringValue(s) => s,
-                opentelemetry_proto::tonic::common::v1::any_value::Value::IntValue(i) => i.to_string(),
-                opentelemetry_proto::tonic::common::v1::any_value::Value::DoubleValue(d) => d.to_string(),
-                opentelemetry_proto::tonic::common::v1::any_value::Value::BoolValue(b) => b.to_string(),
+                opentelemetry_proto::tonic::common::v1::any_value::Value::IntValue(i) => {
+                    i.to_string()
+                }
+                opentelemetry_proto::tonic::common::v1::any_value::Value::DoubleValue(d) => {
+                    d.to_string()
+                }
+                opentelemetry_proto::tonic::common::v1::any_value::Value::BoolValue(b) => {
+                    b.to_string()
+                }
                 _ => "unknown".to_string(),
             }
         } else {
@@ -499,133 +488,105 @@ fn extract_string_value(
     }
 }
 
-/// Create mock batch data for when OTLP builder is not available
-fn create_mock_batch_data(test_case: &MetricBatchingTestCase) -> MetricBatchData {
-    // Create a mock batch that simulates the expected structure
-    MetricBatchData {
-        resource_metrics: vec![ResourceMetricsData {
-            service_name: test_case.service_name.clone(),
-            batch_sequence: Some(test_case.batch_sequence),
-            scope_metrics: vec![ScopeMetricsData {
-                scope_name: "asupersync.observability.otel".to_string(),
-                scope_version: env!("CARGO_PKG_VERSION").to_string(),
-                schema_url: "https://opentelemetry.io/schemas/1.37.0".to_string(),
-                metrics: test_case.metrics_data.iter().map(|md| MetricInfo {
-                    name: md.name.clone(),
-                    description: format!("Metric: {}", md.name),
-                    unit: "1".to_string(),
-                    data_type: match md.metric_type {
-                        MetricType::Counter => "Sum".to_string(),
-                        MetricType::Gauge => "Gauge".to_string(),
-                        MetricType::Histogram(_) => "Histogram".to_string(),
-                    },
-                    data_points: vec![DataPoint {
-                        attributes: md.labels.iter().cloned().collect(),
-                        value: match &md.metric_type {
-                            MetricType::Counter => DataValue::Counter(md.values.first().copied().unwrap_or(0.0) as u64),
-                            MetricType::Gauge => DataValue::Gauge(md.values.first().copied().unwrap_or(0.0)),
-                            MetricType::Histogram(bounds) => DataValue::Histogram {
-                                count: md.values.len() as u64,
-                                sum: md.values.iter().sum(),
-                                bucket_counts: vec![0; bounds.len() + 1],
-                                explicit_bounds: bounds.clone(),
-                            },
-                        },
-                        timestamp: 1234567890000000000, // Mock timestamp
-                    }],
-                }).collect(),
-            }],
-        }],
+fn parse_batch_sequence(
+    value: Option<opentelemetry_proto::tonic::common::v1::AnyValue>,
+) -> Option<u64> {
+    match value.and_then(|any_value| any_value.value)? {
+        opentelemetry_proto::tonic::common::v1::any_value::Value::StringValue(value) => {
+            value.parse().ok()
+        }
+        opentelemetry_proto::tonic::common::v1::any_value::Value::IntValue(value) => {
+            u64::try_from(value).ok()
+        }
+        _ => None,
     }
 }
 
-/// Compare metric batches between implementations
-fn compare_metric_batches(
-    our_batch: &MetricBatchData,
-    reference_batch: &MetricBatchData,
+/// Validate the live metric batch emitted by Asupersync's OTLP request builder.
+fn validate_live_metric_batch(
+    batch: &MetricBatchData,
     test_case: &MetricBatchingTestCase,
 ) -> Result<(), String> {
-    if our_batch.resource_metrics.len() != reference_batch.resource_metrics.len() {
+    if batch.resource_metrics.len() != 1 {
         return Err(format!(
-            "ResourceMetrics count mismatch: our={}, reference={}",
-            our_batch.resource_metrics.len(),
-            reference_batch.resource_metrics.len()
+            "ResourceMetrics count mismatch: expected=1, actual={}",
+            batch.resource_metrics.len()
         ));
     }
 
-    for (i, (our_rm, ref_rm)) in our_batch.resource_metrics.iter()
-        .zip(reference_batch.resource_metrics.iter())
-        .enumerate()
-    {
-        // Check service name
-        if our_rm.service_name != ref_rm.service_name {
+    let resource_metrics = &batch.resource_metrics[0];
+    if resource_metrics.service_name != test_case.service_name {
+        return Err(format!(
+            "service name mismatch: expected={}, actual={}",
+            test_case.service_name, resource_metrics.service_name
+        ));
+    }
+    if resource_metrics.batch_sequence != Some(test_case.batch_sequence) {
+        return Err(format!(
+            "batch sequence mismatch: expected={}, actual={:?}",
+            test_case.batch_sequence, resource_metrics.batch_sequence
+        ));
+    }
+    if resource_metrics.scope_metrics.len() != 1 {
+        return Err(format!(
+            "ScopeMetrics count mismatch: expected=1, actual={}",
+            resource_metrics.scope_metrics.len()
+        ));
+    }
+
+    let scope_metrics = &resource_metrics.scope_metrics[0];
+    if scope_metrics.scope_name != "asupersync.observability.otel" {
+        return Err(format!(
+            "unexpected scope name: {}",
+            scope_metrics.scope_name
+        ));
+    }
+    if scope_metrics.schema_url.is_empty() {
+        return Err("schema URL must be present".to_string());
+    }
+    if scope_metrics.scope_version.is_empty() {
+        return Err("scope version must be present".to_string());
+    }
+    if scope_metrics.metrics.len() != test_case.metrics_data.len() {
+        return Err(format!(
+            "metric count mismatch: expected={}, actual={}",
+            test_case.metrics_data.len(),
+            scope_metrics.metrics.len()
+        ));
+    }
+
+    for expected in &test_case.metrics_data {
+        let Some(actual) = scope_metrics
+            .metrics
+            .iter()
+            .find(|metric| metric.name == expected.name)
+        else {
+            return Err(format!("missing metric {}", expected.name));
+        };
+
+        let expected_type = match &expected.metric_type {
+            MetricType::Counter => "Sum",
+            MetricType::Gauge => "Gauge",
+            MetricType::Histogram(_) => "Histogram",
+        };
+        if actual.data_type != expected_type {
             return Err(format!(
-                "ResourceMetrics {} service name mismatch: our={}, reference={}",
-                i, our_rm.service_name, ref_rm.service_name
+                "metric {} data type mismatch: expected={}, actual={}",
+                expected.name, expected_type, actual.data_type
             ));
         }
-
-        // Check batch sequence
-        if our_rm.batch_sequence != ref_rm.batch_sequence {
+        if actual.description.len() > 4096 || actual.unit.len() > 128 {
             return Err(format!(
-                "ResourceMetrics {} batch sequence mismatch: our={:?}, reference={:?}",
-                i, our_rm.batch_sequence, ref_rm.batch_sequence
+                "metric {} metadata fields exceed bounded validation limits",
+                expected.name
             ));
         }
-
-        // Check scope metrics
-        if our_rm.scope_metrics.len() != ref_rm.scope_metrics.len() {
+        if actual.data_points.len() != 1 {
             return Err(format!(
-                "ResourceMetrics {} scope metrics count mismatch: our={}, reference={}",
-                i, our_rm.scope_metrics.len(), ref_rm.scope_metrics.len()
+                "metric {} should have one data point, actual={}",
+                expected.name,
+                actual.data_points.len()
             ));
-        }
-
-        for (j, (our_sm, ref_sm)) in our_rm.scope_metrics.iter()
-            .zip(ref_rm.scope_metrics.iter())
-            .enumerate()
-        {
-            if our_sm.scope_name != ref_sm.scope_name {
-                return Err(format!(
-                    "ScopeMetrics {}.{} name mismatch: our={}, reference={}",
-                    i, j, our_sm.scope_name, ref_sm.scope_name
-                ));
-            }
-
-            if our_sm.schema_url != ref_sm.schema_url {
-                return Err(format!(
-                    "ScopeMetrics {}.{} schema URL mismatch: our={}, reference={}",
-                    i, j, our_sm.schema_url, ref_sm.schema_url
-                ));
-            }
-
-            // Check metrics count
-            if our_sm.metrics.len() != ref_sm.metrics.len() {
-                return Err(format!(
-                    "ScopeMetrics {}.{} metrics count mismatch: our={}, reference={}",
-                    i, j, our_sm.metrics.len(), ref_sm.metrics.len()
-                ));
-            }
-
-            // Check individual metrics
-            for (k, (our_metric, ref_metric)) in our_sm.metrics.iter()
-                .zip(ref_sm.metrics.iter())
-                .enumerate()
-            {
-                if our_metric.name != ref_metric.name {
-                    return Err(format!(
-                        "Metric {}.{}.{} name mismatch: our={}, reference={}",
-                        i, j, k, our_metric.name, ref_metric.name
-                    ));
-                }
-
-                if our_metric.data_type != ref_metric.data_type {
-                    return Err(format!(
-                        "Metric {}.{}.{} data type mismatch: our={}, reference={}",
-                        i, j, k, our_metric.data_type, ref_metric.data_type
-                    ));
-                }
-            }
         }
     }
 
@@ -660,7 +621,9 @@ fn test_metric_batching_edge_cases(failed_tests: &mut Vec<(String, String)>) {
             vec![MetricData {
                 name: "multi_label_metric".to_string(),
                 metric_type: MetricType::Counter,
-                labels: (0..100).map(|i| (format!("label_{}", i), format!("value_{}", i))).collect(),
+                labels: (0..100)
+                    .map(|i| (format!("label_{}", i), format!("value_{}", i)))
+                    .collect(),
                 values: vec![1.0],
             }],
             "Metric with many labels",
@@ -676,31 +639,20 @@ fn test_metric_batching_edge_cases(failed_tests: &mut Vec<(String, String)>) {
             description,
         };
 
-        // Test both implementations
         let our_result = std::panic::catch_unwind(|| test_our_metric_batching(&test_case));
-        let ref_result = std::panic::catch_unwind(|| test_reference_metric_batching(&test_case));
 
-        match (our_result, ref_result) {
-            (Ok(our_batch), Ok(ref_batch)) => {
-                if let Err(error) = compare_metric_batches(&our_batch, &ref_batch, &test_case) {
+        match our_result {
+            Ok(our_batch) => {
+                if let Err(error) = validate_live_metric_batch(&our_batch, &test_case) {
                     failed_tests.push((format!("edge_case_{}", case_name), error));
                 } else {
                     println!("    ✅ edge_case_{}", case_name);
                 }
             }
-            (Err(_), Err(_)) => {
-                println!("    ✅ edge_case_{} (both panicked consistently)", case_name);
-            }
-            (Ok(_), Err(_)) => {
+            Err(_) => {
                 failed_tests.push((
                     format!("edge_case_{}", case_name),
-                    "Our implementation succeeded but reference panicked".to_string(),
-                ));
-            }
-            (Err(_), Ok(_)) => {
-                failed_tests.push((
-                    format!("edge_case_{}", case_name),
-                    "Our implementation panicked but reference succeeded".to_string(),
+                    "live Asupersync metric batching panicked".to_string(),
                 ));
             }
         }
@@ -713,14 +665,12 @@ mod tests {
 
     #[test]
     fn test_metrics_snapshot_creation() {
-        let metrics_data = vec![
-            MetricData {
-                name: "test_counter".to_string(),
-                metric_type: MetricType::Counter,
-                labels: vec![("label1".to_string(), "value1".to_string())],
-                values: vec![10.0],
-            },
-        ];
+        let metrics_data = vec![MetricData {
+            name: "test_counter".to_string(),
+            metric_type: MetricType::Counter,
+            labels: vec![("label1".to_string(), "value1".to_string())],
+            values: vec![10.0],
+        }];
 
         let snapshot = create_metrics_snapshot(&metrics_data);
         assert_eq!(snapshot.counters.len(), 1);
@@ -730,14 +680,12 @@ mod tests {
 
     #[test]
     fn test_histogram_values() {
-        let metrics_data = vec![
-            MetricData {
-                name: "test_histogram".to_string(),
-                metric_type: MetricType::Histogram(vec![1.0, 5.0, 10.0]),
-                labels: vec![],
-                values: vec![0.5, 2.0, 7.5, 15.0],
-            },
-        ];
+        let metrics_data = vec![MetricData {
+            name: "test_histogram".to_string(),
+            metric_type: MetricType::Histogram(vec![1.0, 5.0, 10.0]),
+            labels: vec![],
+            values: vec![0.5, 2.0, 7.5, 15.0],
+        }];
 
         let snapshot = create_metrics_snapshot(&metrics_data);
         assert_eq!(snapshot.histograms.len(), 1);

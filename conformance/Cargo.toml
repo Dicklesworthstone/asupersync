@@ -155,6 +155,10 @@ name = "otel_logs_severity_range_conformance"
 path = "src/bin/otel_logs_severity_range_conformance.rs"
 
 [[bin]]
+name = "otel_metric_exporter_batching_conformance"
+path = "src/bin/otel_metric_exporter_batching_conformance.rs"
+
+[[bin]]
 name = "h1_expect_continue_conformance"
 path = "src/bin/h1_expect_continue_conformance.rs"
 [dependencies]

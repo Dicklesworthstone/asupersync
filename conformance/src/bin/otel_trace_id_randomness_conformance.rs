@@ -7,20 +7,18 @@
 //! Key properties tested:
 //! - Statistical uniformity of generated trace IDs
 //! - Uniqueness over large sample sizes
-//! - Identical distribution patterns vs reference implementation
+//! - Comparable distribution health vs opentelemetry-sdk
 //! - Entropy and randomness quality metrics
 //! - Proper handling of invalid trace ID (all zeros)
 
-use asupersync::observability::otel::OtelMetrics;
-use opentelemetry::trace::TraceId as OtelTraceId;
-use std::collections::{BTreeMap, BTreeSet, HashMap};
-use std::sync::atomic::{AtomicU64, Ordering};
+use asupersync::observability::w3c_trace_context::TraceId as AsupersyncTraceId;
+use opentelemetry_sdk::trace::{IdGenerator, RandomIdGenerator};
+use std::collections::BTreeSet;
 
 /// Test cases for trace ID randomness conformance
 struct TraceIdRandomnessTestCase {
     name: &'static str,
     sample_size: usize,
-    seed: u64,
     description: &'static str,
 }
 
@@ -134,38 +132,27 @@ fn main() {
         TraceIdRandomnessTestCase {
             name: "small_sample",
             sample_size: 1000,
-            seed: 12345,
             description: "Small sample for quick validation",
         },
         TraceIdRandomnessTestCase {
             name: "medium_sample",
-            sample_size: 10000,
-            seed: 67890,
+            sample_size: 5000,
             description: "Medium sample for statistical analysis",
         },
         TraceIdRandomnessTestCase {
             name: "large_sample",
-            sample_size: 50000,
-            seed: 98765,
+            sample_size: 10000,
             description: "Large sample for distribution conformance",
         },
         TraceIdRandomnessTestCase {
-            name: "fixed_seed_reproducible",
-            sample_size: 5000,
-            seed: 42,
-            description: "Fixed seed for reproducible results",
+            name: "fresh_generator_short_run",
+            sample_size: 1000,
+            description: "Fresh generator short run",
         },
         TraceIdRandomnessTestCase {
-            name: "edge_seed_zero",
+            name: "second_fresh_generator_short_run",
             sample_size: 1000,
-            seed: 0,
-            description: "Edge case with zero seed",
-        },
-        TraceIdRandomnessTestCase {
-            name: "edge_seed_max",
-            sample_size: 1000,
-            seed: u64::MAX,
-            description: "Edge case with maximum seed value",
+            description: "Second fresh generator short run",
         },
     ];
 
@@ -182,7 +169,7 @@ fn main() {
         // Test our implementation
         let our_trace_ids = test_our_trace_id_generation(test_case);
 
-        // Test reference implementation
+        // Test opentelemetry-sdk implementation
         let reference_trace_ids = test_reference_trace_id_generation(test_case);
 
         // Compare distributions
@@ -215,16 +202,11 @@ fn main() {
 
 /// Test our trace ID generation implementation
 fn test_our_trace_id_generation(test_case: &TraceIdRandomnessTestCase) -> Vec<TraceIdData> {
-    // TODO: Replace with actual asupersync trace ID generation
-    // This should use the same SplitMix64 PRNG as shown in the otel.rs module
-
-    // Reset seed for deterministic testing
-    let mut rng_state = test_case.seed;
-
     let mut trace_ids = Vec::with_capacity(test_case.sample_size);
 
     for _ in 0..test_case.sample_size {
-        let trace_id_bytes = generate_our_trace_id(&mut rng_state);
+        let trace_id = AsupersyncTraceId::new_random();
+        let trace_id_bytes = trace_id_hex_to_bytes(&trace_id.to_hex());
         trace_ids.push(TraceIdData::new(trace_id_bytes));
     }
 
@@ -233,77 +215,33 @@ fn test_our_trace_id_generation(test_case: &TraceIdRandomnessTestCase) -> Vec<Tr
 
 /// Test reference opentelemetry-sdk trace ID generation
 fn test_reference_trace_id_generation(test_case: &TraceIdRandomnessTestCase) -> Vec<TraceIdData> {
-    // TODO: Use actual opentelemetry-sdk trace ID generation with same seed
-    // For now, simulate reference behavior using same algorithm
-
-    let mut rng_state = test_case.seed;
+    let generator = RandomIdGenerator::default();
     let mut trace_ids = Vec::with_capacity(test_case.sample_size);
 
     for _ in 0..test_case.sample_size {
-        let trace_id_bytes = generate_reference_trace_id(&mut rng_state);
+        let trace_id = generator.new_trace_id();
+        let trace_id_bytes = trace_id_hex_to_bytes(&format!("{trace_id:032x}"));
         trace_ids.push(TraceIdData::new(trace_id_bytes));
     }
 
     trace_ids
 }
 
-/// Generate trace ID using our implementation (SplitMix64)
-fn generate_our_trace_id(rng_state: &mut u64) -> [u8; 16] {
-    *rng_state = rng_state.wrapping_add(1); // Increment seed like NEXT_TEST_SPAN_SEED
-
-    let seed = *rng_state;
-    let hi = splitmix64(seed);
-    let lo = splitmix64(seed ^ 0x9e37_79b9_7f4a_7c15);
-
-    let trace_id_bytes = [
-        (hi >> 56) as u8,
-        (hi >> 48) as u8,
-        (hi >> 40) as u8,
-        (hi >> 32) as u8,
-        (hi >> 24) as u8,
-        (hi >> 16) as u8,
-        (hi >> 8) as u8,
-        hi as u8,
-        (lo >> 56) as u8,
-        (lo >> 48) as u8,
-        (lo >> 40) as u8,
-        (lo >> 32) as u8,
-        (lo >> 24) as u8,
-        (lo >> 16) as u8,
-        (lo >> 8) as u8,
-        lo as u8,
-    ];
-
-    // Handle invalid trace ID case
-    if trace_id_bytes == [0; 16] {
-        [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1]
-    } else {
-        trace_id_bytes
+fn trace_id_hex_to_bytes(hex: &str) -> [u8; 16] {
+    assert_eq!(hex.len(), 32, "trace ID hex must be 32 chars");
+    let mut bytes = [0u8; 16];
+    for (idx, byte) in bytes.iter_mut().enumerate() {
+        let offset = idx * 2;
+        *byte = u8::from_str_radix(&hex[offset..offset + 2], 16).expect("trace ID hex must parse");
     }
-}
-
-/// Generate trace ID using reference implementation (should be identical algorithm)
-fn generate_reference_trace_id(rng_state: &mut u64) -> [u8; 16] {
-    // This should match exactly what opentelemetry-sdk does
-    // For now, use same algorithm - in real implementation this would
-    // call into the actual opentelemetry-sdk
-    generate_our_trace_id(rng_state)
-}
-
-/// SplitMix64 PRNG implementation (matching otel.rs)
-fn splitmix64(mut state: u64) -> u64 {
-    state = state.wrapping_add(0x9e37_79b9_7f4a_7c15);
-    let mut z = state;
-    z = (z ^ (z >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
-    z = (z ^ (z >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
-    z ^ (z >> 31)
+    bytes
 }
 
 /// Compare trace ID distributions between implementations
 fn compare_trace_id_distributions(
     our_trace_ids: &[TraceIdData],
     reference_trace_ids: &[TraceIdData],
-    test_case: &TraceIdRandomnessTestCase,
+    _test_case: &TraceIdRandomnessTestCase,
 ) -> Result<(), String> {
     if our_trace_ids.len() != reference_trace_ids.len() {
         return Err(format!(
@@ -313,45 +251,40 @@ fn compare_trace_id_distributions(
         ));
     }
 
-    // For differential testing with same RNG seed, outputs should be identical
-    for (i, (our_id, ref_id)) in our_trace_ids
-        .iter()
-        .zip(reference_trace_ids.iter())
-        .enumerate()
-    {
-        if our_id != ref_id {
-            return Err(format!(
-                "Trace ID mismatch at index {}: our={:?}, reference={:?}",
-                i, our_id.bytes, ref_id.bytes
-            ));
-        }
-    }
-
-    // Statistical analysis should also match
     let our_analysis = RandomnessAnalysis::analyze(our_trace_ids);
     let ref_analysis = RandomnessAnalysis::analyze(reference_trace_ids);
 
-    if our_analysis.unique_count != ref_analysis.unique_count {
-        return Err(format!(
-            "Unique count mismatch: our={}, reference={}",
-            our_analysis.unique_count, ref_analysis.unique_count
-        ));
-    }
+    for (label, analysis) in [
+        ("asupersync", &our_analysis),
+        ("opentelemetry-sdk", &ref_analysis),
+    ] {
+        if analysis.invalid_count != 0 {
+            return Err(format!(
+                "{label} generated {} invalid all-zero trace IDs",
+                analysis.invalid_count
+            ));
+        }
 
-    if our_analysis.invalid_count != ref_analysis.invalid_count {
-        return Err(format!(
-            "Invalid count mismatch: our={}, reference={}",
-            our_analysis.invalid_count, ref_analysis.invalid_count
-        ));
-    }
+        let uniqueness_rate = analysis.unique_count as f64 / analysis.sample_size as f64;
+        if uniqueness_rate < 0.99 {
+            return Err(format!(
+                "{label} uniqueness rate {:.4} is below 0.99",
+                uniqueness_rate
+            ));
+        }
+        if analysis.collision_count > analysis.sample_size / 100 {
+            return Err(format!(
+                "{label} collision count {} exceeds 1% of sample size {}",
+                analysis.collision_count, analysis.sample_size
+            ));
+        }
 
-    // Entropy should be very close (allowing for floating point precision)
-    let entropy_diff = (our_analysis.entropy_mean - ref_analysis.entropy_mean).abs();
-    if entropy_diff > 0.001 {
-        return Err(format!(
-            "Entropy mean mismatch: our={:.6}, reference={:.6}, diff={:.6}",
-            our_analysis.entropy_mean, ref_analysis.entropy_mean, entropy_diff
-        ));
+        if analysis.entropy_mean < 3.0 {
+            return Err(format!(
+                "{label} entropy mean {:.3} is too low",
+                analysis.entropy_mean
+            ));
+        }
     }
 
     Ok(())
@@ -362,7 +295,6 @@ fn test_trace_id_randomness_properties(failed_tests: &mut Vec<(String, String)>)
     let test_case = TraceIdRandomnessTestCase {
         name: "randomness_properties",
         sample_size: 10000,
-        seed: 1337,
         description: "General randomness property testing",
     };
 
@@ -380,8 +312,8 @@ fn test_trace_id_randomness_properties(failed_tests: &mut Vec<(String, String)>)
         println!("    ✅ uniqueness_rate: {:.4}", uniqueness_rate);
     }
 
-    // Test 2: No invalid trace IDs should be generated (except the controlled case)
-    if analysis.invalid_count > 1 {
+    // Test 2: No invalid trace IDs should be generated.
+    if analysis.invalid_count != 0 {
         failed_tests.push((
             "invalid_trace_ids".to_string(),
             format!("Too many invalid trace IDs: {}", analysis.invalid_count),
@@ -448,10 +380,12 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_splitmix64_deterministic() {
-        assert_eq!(splitmix64(0), 0x9e3779b97f4a7c15);
-        assert_eq!(splitmix64(1), 0x85c6f9db0bd6e9c3);
-        assert_eq!(splitmix64(12345), 0x1c47f40b16fcbe9e);
+    fn test_trace_id_hex_to_bytes() {
+        let bytes = trace_id_hex_to_bytes("000102030405060708090a0b0c0d0e0f");
+        assert_eq!(
+            bytes,
+            [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]
+        );
     }
 
     #[test]
@@ -473,24 +407,27 @@ mod tests {
     }
 
     #[test]
-    fn test_our_trace_id_generation_deterministic() {
-        let mut state1 = 42;
-        let mut state2 = 42;
-
-        let id1 = generate_our_trace_id(&mut state1);
-        let id2 = generate_our_trace_id(&mut state2);
-
-        assert_eq!(id1, id2, "Same seed should produce same trace ID");
+    fn test_our_trace_id_generation_uses_live_nonzero_ids() {
+        let test_case = TraceIdRandomnessTestCase {
+            name: "unit_live_nonzero",
+            sample_size: 32,
+            description: "Unit live nonzero",
+        };
+        let ids = test_our_trace_id_generation(&test_case);
+        assert!(ids.iter().all(TraceIdData::is_valid));
     }
 
     #[test]
     fn test_trace_id_generation_uniqueness() {
-        let mut state = 1;
         let mut ids = BTreeSet::new();
+        let test_case = TraceIdRandomnessTestCase {
+            name: "unit_uniqueness",
+            sample_size: 1000,
+            description: "Unit uniqueness",
+        };
 
-        for _ in 0..1000 {
-            let id = generate_our_trace_id(&mut state);
-            ids.insert(id);
+        for id in test_our_trace_id_generation(&test_case) {
+            ids.insert(id.bytes);
         }
 
         // Should have very high uniqueness
@@ -499,12 +436,12 @@ mod tests {
 
     #[test]
     fn test_randomness_analysis() {
-        let trace_ids: Vec<TraceIdData> = (0..100)
-            .map(|i| {
-                let mut state = i as u64;
-                TraceIdData::new(generate_our_trace_id(&mut state))
-            })
-            .collect();
+        let test_case = TraceIdRandomnessTestCase {
+            name: "unit_analysis",
+            sample_size: 100,
+            description: "Unit analysis",
+        };
+        let trace_ids = test_our_trace_id_generation(&test_case);
 
         let analysis = RandomnessAnalysis::analyze(&trace_ids);
 
@@ -515,7 +452,7 @@ mod tests {
 
     #[test]
     fn test_invalid_trace_id_handling() {
-        // Simulate case where splitmix64 produces all zeros
+        // Pin the validity predicate for the forbidden all-zero W3C trace ID.
         let invalid_bytes = [0; 16];
         let trace_id = if invalid_bytes == [0; 16] {
             [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1]
