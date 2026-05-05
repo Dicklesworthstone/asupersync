@@ -4,8 +4,13 @@
 //! END_STREAM handling against the h2 reference implementation to ensure
 //! identical stream state transitions per RFC 7540.
 
-use asupersync::bytes::Bytes;
-use asupersync::http::h2::{Connection, Settings, frame::DataFrame};
+use asupersync::bytes::{Bytes, BytesMut};
+use asupersync::http::h2::{
+    Connection, Header, HpackEncoder, Settings,
+    connection::ReceivedFrame,
+    error::ErrorCode,
+    frame::{DataFrame, Frame, HeadersFrame, SettingsFrame},
+};
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
@@ -223,11 +228,35 @@ impl DataEndStreamConformanceTester {
         // Test asupersync implementation
         let asupersync_result = self.test_asupersync_data_end_stream(case).await;
 
-        // Test h2 reference implementation
+        // Test h2 reference implementation. If the external reference is not
+        // wired, keep this as a live conformance check against the RFC-backed
+        // expected state instead of reporting a fake comparison.
         let h2_result = self.test_h2_data_end_stream(case).await;
 
         // Compare results
         let (verdict, error, differences) = match (&asupersync_result, &h2_result) {
+            (Ok(asupersync_state), Err(h2_err)) if h2_err == H2_REFERENCE_UNIMPLEMENTED => {
+                let differences = self
+                    .compare_connection_states(asupersync_state, &case.expected_connection_state);
+                if differences.is_empty() {
+                    (DataEndStreamTestVerdict::Pass, None, differences)
+                } else {
+                    (
+                        DataEndStreamTestVerdict::Fail,
+                        Some(format!(
+                            "Live asupersync DATA END_STREAM state differed from expected RFC behavior while {h2_err}"
+                        )),
+                        differences,
+                    )
+                }
+            }
+            (Err(asupersync_err), Err(h2_err)) if h2_err == H2_REFERENCE_UNIMPLEMENTED => (
+                DataEndStreamTestVerdict::Fail,
+                Some(format!(
+                    "Live asupersync DATA END_STREAM processing failed while {h2_err}: {asupersync_err}"
+                )),
+                vec![format!("asupersync_error: {asupersync_err}")],
+            ),
             (Ok(asupersync_state), Ok(h2_state)) => {
                 let differences = self.compare_connection_states(asupersync_state, h2_state);
                 if differences.is_empty() {
@@ -285,8 +314,8 @@ impl DataEndStreamConformanceTester {
             case_id: case.id.clone(),
             verdict,
             error,
-            asupersync_state: asupersync_result.ok(),
-            h2_state: h2_result.ok(),
+            asupersync_state: asupersync_result.as_ref().ok().cloned(),
+            h2_state: h2_result.as_ref().ok().cloned(),
             differences,
         }
     }
@@ -299,10 +328,11 @@ impl DataEndStreamConformanceTester {
         let settings = Settings::default();
         let mut connection = Connection::server(settings);
         let mut error_messages = Vec::new();
+        accept_peer_settings(&mut connection)?;
 
         // Initialize streams
         for &stream_id in &case.initial_streams {
-            if let Err(e) = simulate_stream_initialization(&mut connection, stream_id) {
+            if let Err(e) = initialize_remote_stream(&mut connection, stream_id) {
                 return Err(format!("Failed to initialize stream {}: {}", stream_id, e));
             }
         }
@@ -310,7 +340,7 @@ impl DataEndStreamConformanceTester {
         // Apply DATA sequence
         for serializable_frame in &case.data_sequence {
             let data_frame: DataFrame = serializable_frame.clone().into();
-            match simulate_data_frame_processing(&mut connection, &data_frame) {
+            match process_live_data_frame(&mut connection, &data_frame) {
                 Ok(_) => {}
                 Err(e) => {
                     error_messages.push(format!(
@@ -322,8 +352,11 @@ impl DataEndStreamConformanceTester {
         }
 
         // Extract connection state
-        let connection_state =
-            extract_asupersync_data_end_stream_state(&connection, error_messages);
+        let connection_state = extract_asupersync_data_end_stream_state(
+            &connection,
+            &case.initial_streams,
+            error_messages,
+        );
         Ok(connection_state)
     }
 
@@ -480,48 +513,94 @@ impl Default for DataEndStreamConformanceTester {
     }
 }
 
-/// Helper function to simulate stream initialization in asupersync connection.
-fn simulate_stream_initialization(
-    _connection: &mut Connection,
-    _stream_id: u32,
-) -> Result<(), String> {
-    // This would need to be implemented based on how Connection manages streams
-    // For now, return Ok to allow compilation
-    // In real implementation, this would:
-    // 1. Send HEADERS frame to establish the stream
-    // 2. Ensure the stream is in Open state
-    Ok(())
+fn accept_peer_settings(connection: &mut Connection) -> Result<(), String> {
+    let received = connection
+        .process_frame(Frame::Settings(SettingsFrame::new(vec![])))
+        .map_err(|err| err.to_string())?;
+    if received.is_some() {
+        return Err("SETTINGS handshake produced an application frame".to_string());
+    }
+
+    match connection.next_frame() {
+        Some(Frame::Settings(settings)) if settings.ack => Ok(()),
+        other => Err(format!(
+            "SETTINGS handshake should queue exactly one ACK, got {other:?}"
+        )),
+    }
 }
 
-/// Helper function to simulate DATA frame processing in asupersync connection.
-fn simulate_data_frame_processing(
-    _connection: &mut Connection,
-    _data_frame: &DataFrame,
+fn request_header_block(stream_id: u32) -> Bytes {
+    let headers = [
+        Header::new(":method", "GET"),
+        Header::new(":scheme", "https"),
+        Header::new(":authority", "example.test"),
+        Header::new(":path", format!("/stream/{stream_id}")),
+    ];
+    let mut encoder = HpackEncoder::new();
+    let mut block = BytesMut::new();
+    encoder.encode(&headers, &mut block);
+    block.freeze()
+}
+
+/// Open a peer-initiated stream through the production HEADERS path.
+fn initialize_remote_stream(connection: &mut Connection, stream_id: u32) -> Result<(), String> {
+    let headers = HeadersFrame::new(stream_id, request_header_block(stream_id), false, true);
+    match connection
+        .process_frame(Frame::Headers(headers))
+        .map_err(|err| err.to_string())?
+    {
+        Some(ReceivedFrame::Headers {
+            stream_id: received_stream_id,
+            end_stream,
+            ..
+        }) if received_stream_id == stream_id && !end_stream => Ok(()),
+        other => Err(format!(
+            "HEADERS stream initialization produced unexpected frame: {other:?}"
+        )),
+    }
+}
+
+/// Process a DATA frame through the production connection state machine.
+fn process_live_data_frame(
+    connection: &mut Connection,
+    data_frame: &DataFrame,
 ) -> Result<(), String> {
-    // This would need to be implemented based on how Connection processes frames
-    // For now, return Ok to allow compilation
-    // In real implementation, this would:
-    // 1. Create a Frame::Data from the DataFrame
-    // 2. Call connection.process_frame() or equivalent
-    // 3. Return any errors that occur (e.g., StreamClosed)
-    Ok(())
+    match connection.process_frame(Frame::Data(data_frame.clone())) {
+        Ok(Some(ReceivedFrame::Data {
+            stream_id,
+            end_stream,
+            ..
+        })) if stream_id == data_frame.stream_id && end_stream == data_frame.end_stream => Ok(()),
+        Ok(None) => Ok(()),
+        Ok(other) => Err(format!("unexpected DATA result frame: {other:?}")),
+        Err(err) => Err(format!("{:?}", err.code)),
+    }
 }
 
 /// Extract DATA END_STREAM-related connection state from asupersync connection.
 fn extract_asupersync_data_end_stream_state(
-    _connection: &Connection,
+    connection: &Connection,
+    stream_ids: &[u32],
     error_messages: Vec<String>,
 ) -> DataEndStreamConnectionState {
-    // This would need to be implemented to extract actual connection and stream states
-    // For now, return a placeholder to allow compilation
-    // In real implementation, this would:
-    // 1. Access the connection's state field
-    // 2. Iterate over all streams and extract their states
-    // 3. Check can_recv() and can_send() for each stream
-    // 4. Include any error conditions
+    let stream_states = stream_ids
+        .iter()
+        .filter_map(|&stream_id| {
+            let stream = connection.stream(stream_id)?;
+            let state = stream.state();
+            Some(StreamEndStreamState {
+                stream_id,
+                state: format!("{state:?}"),
+                can_recv: state.can_recv(),
+                can_send: state.can_send(),
+                error_code: stream.error_code().map(|code| format!("{code:?}")),
+            })
+        })
+        .collect();
+
     DataEndStreamConnectionState {
-        connection_state: "Open".to_string(),
-        stream_states: Vec::new(),
+        connection_state: format!("{:?}", connection.state()),
+        stream_states,
         has_errors: !error_messages.is_empty(),
         error_messages,
     }
@@ -761,13 +840,96 @@ mod tests {
     use super::*;
 
     #[tokio::test]
-    async fn test_unimplemented_h2_reference_skips_instead_of_faking_pass() {
+    async fn h2_reference_unavailable_still_runs_live_data_assertions() {
         let tester = DataEndStreamConformanceTester::new();
-        let result = tester.run_single_test(&tester.test_cases[0]).await;
+        let report = tester.run_all_tests().await;
 
-        assert_eq!(result.verdict, DataEndStreamTestVerdict::Skipped);
-        assert_eq!(result.error.as_deref(), Some(H2_REFERENCE_UNIMPLEMENTED));
-        assert!(result.differences.is_empty());
-        assert!(result.h2_state.is_none());
+        assert_eq!(report.total_cases, 7);
+        assert_eq!(report.summary.passed, 7);
+        assert_eq!(report.summary.failed, 0);
+        assert_eq!(report.summary.skipped, 0);
+        assert!(
+            report
+                .results
+                .iter()
+                .all(|result| result.h2_state.is_none()),
+            "h2 reference is intentionally not wired for this harness"
+        );
+        assert!(
+            report
+                .results
+                .iter()
+                .all(|result| result.asupersync_state.is_some()),
+            "every case must exercise the live asupersync connection"
+        );
+    }
+
+    #[test]
+    fn data_end_stream_moves_stream_half_closed_remote() {
+        let mut connection = Connection::server(Settings::default());
+        accept_peer_settings(&mut connection).expect("SETTINGS handshake");
+        initialize_remote_stream(&mut connection, 1).expect("open stream");
+
+        let data = DataFrame::new(1, Bytes::from_static(b"done"), true);
+        process_live_data_frame(&mut connection, &data).expect("DATA should process");
+
+        let stream = connection.stream(1).expect("stream exists");
+        assert_eq!(format!("{:?}", stream.state()), "HalfClosedRemote");
+        assert!(!stream.state().can_recv());
+        assert!(stream.state().can_send());
+    }
+
+    #[test]
+    fn data_after_end_stream_reports_stream_closed() {
+        let mut connection = Connection::server(Settings::default());
+        accept_peer_settings(&mut connection).expect("SETTINGS handshake");
+        initialize_remote_stream(&mut connection, 1).expect("open stream");
+
+        let first = DataFrame::new(1, Bytes::from_static(b"done"), true);
+        process_live_data_frame(&mut connection, &first).expect("first DATA should process");
+
+        let second = DataFrame::new(1, Bytes::from_static(b"again"), false);
+        let error = process_live_data_frame(&mut connection, &second)
+            .expect_err("DATA after END_STREAM must fail");
+        assert_eq!(error, "StreamClosed");
+    }
+
+    #[test]
+    fn data_frame_updates_connection_and_stream_receive_windows() {
+        let mut connection = Connection::server(Settings::default());
+        accept_peer_settings(&mut connection).expect("SETTINGS handshake");
+        initialize_remote_stream(&mut connection, 1).expect("open stream");
+
+        let connection_window_before = connection.recv_window();
+        let stream_window_before = connection.stream(1).unwrap().recv_window();
+        let data = DataFrame::new(1, Bytes::from_static(b"windowed"), false);
+        process_live_data_frame(&mut connection, &data).expect("DATA should process");
+
+        assert_eq!(connection.recv_window(), connection_window_before - 8);
+        assert_eq!(
+            connection.stream(1).unwrap().recv_window(),
+            stream_window_before - 8
+        );
+        assert_eq!(
+            format!("{:?}", connection.stream(1).unwrap().state()),
+            "Open"
+        );
+    }
+
+    #[test]
+    fn headers_after_data_end_stream_reports_stream_closed() {
+        let mut connection = Connection::server(Settings::default());
+        accept_peer_settings(&mut connection).expect("SETTINGS handshake");
+        initialize_remote_stream(&mut connection, 1).expect("open stream");
+
+        let data = DataFrame::new(1, Bytes::from_static(b"done"), true);
+        process_live_data_frame(&mut connection, &data).expect("DATA should close remote side");
+
+        let trailers = HeadersFrame::new(1, Bytes::new(), true, true);
+        let error = connection
+            .process_frame(Frame::Headers(trailers))
+            .expect_err("HEADERS after END_STREAM must fail");
+        assert_eq!(error.code, ErrorCode::StreamClosed);
+        assert_eq!(error.stream_id, Some(1));
     }
 }

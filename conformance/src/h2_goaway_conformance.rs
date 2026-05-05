@@ -5,7 +5,12 @@
 //! connection state transitions per RFC 7540.
 
 use asupersync::bytes::Bytes;
-use asupersync::http::h2::{Connection, Settings, error::ErrorCode, frame::GoAwayFrame};
+use asupersync::http::h2::{
+    Connection, Header, Settings,
+    connection::ReceivedFrame,
+    error::ErrorCode,
+    frame::{Frame, GoAwayFrame, SettingsFrame},
+};
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
@@ -228,11 +233,35 @@ impl GoAwayConformanceTester {
         // Test asupersync implementation
         let asupersync_result = self.test_asupersync_goaway(case).await;
 
-        // Test h2 reference implementation
+        // Test h2 reference implementation. If the external reference is not
+        // wired, keep this as a live conformance check against the RFC-backed
+        // expected state instead of reporting a fake comparison.
         let h2_result = self.test_h2_goaway(case).await;
 
         // Compare results
         let (verdict, error, differences) = match (&asupersync_result, &h2_result) {
+            (Ok(asupersync_state), Err(h2_err)) if h2_err == H2_REFERENCE_UNIMPLEMENTED => {
+                let differences = self
+                    .compare_connection_states(asupersync_state, &case.expected_connection_state);
+                if differences.is_empty() {
+                    (GoAwayTestVerdict::Pass, None, differences)
+                } else {
+                    (
+                        GoAwayTestVerdict::Fail,
+                        Some(format!(
+                            "Live asupersync GOAWAY state differed from expected RFC behavior while {h2_err}"
+                        )),
+                        differences,
+                    )
+                }
+            }
+            (Err(asupersync_err), Err(h2_err)) if h2_err == H2_REFERENCE_UNIMPLEMENTED => (
+                GoAwayTestVerdict::Fail,
+                Some(format!(
+                    "Live asupersync GOAWAY processing failed while {h2_err}: {asupersync_err}"
+                )),
+                vec![format!("asupersync_error: {asupersync_err}")],
+            ),
             (Ok(asupersync_state), Ok(h2_state)) => {
                 let differences = self.compare_connection_states(asupersync_state, h2_state);
                 if differences.is_empty() {
@@ -288,8 +317,8 @@ impl GoAwayConformanceTester {
             case_id: case.id.clone(),
             verdict,
             error,
-            asupersync_state: asupersync_result.ok(),
-            h2_state: h2_result.ok(),
+            asupersync_state: asupersync_result.as_ref().ok().cloned(),
+            h2_state: h2_result.as_ref().ok().cloned(),
             differences,
         }
     }
@@ -300,25 +329,32 @@ impl GoAwayConformanceTester {
         case: &GoAwayConformanceCase,
     ) -> Result<GoAwayConnectionState, String> {
         let settings = Settings::default();
-        let mut connection = Connection::server(settings);
+        let mut connection = Connection::client(settings);
+        accept_peer_settings(&mut connection)?;
 
         // Simulate existing streams
         for &stream_id in &case.existing_streams {
-            if let Err(e) = simulate_stream_creation(&mut connection, stream_id) {
+            if let Err(e) = create_local_stream(&mut connection, stream_id) {
                 return Err(format!("Failed to create stream {}: {}", stream_id, e));
             }
         }
 
         // Apply GOAWAY sequence
+        let mut last_received_goaway = None;
         for serializable_frame in &case.goaway_sequence {
             let goaway_frame: GoAwayFrame = serializable_frame.clone().into();
-            if let Err(e) = simulate_goaway_frame_processing(&mut connection, &goaway_frame) {
-                return Err(format!("Failed to process GOAWAY frame: {}", e));
+            match process_live_goaway_frame(&mut connection, &goaway_frame) {
+                Ok(last_stream_id) => last_received_goaway = Some(last_stream_id),
+                Err(e) => return Err(format!("Failed to process GOAWAY frame: {}", e)),
             }
         }
 
         // Extract connection state
-        let connection_state = extract_asupersync_goaway_state(&connection);
+        let connection_state = extract_asupersync_goaway_state(
+            &connection,
+            &case.existing_streams,
+            last_received_goaway,
+        );
         Ok(connection_state)
     }
 
@@ -453,47 +489,84 @@ impl Default for GoAwayConformanceTester {
     }
 }
 
-/// Helper function to simulate stream creation in asupersync connection.
-fn simulate_stream_creation(_connection: &mut Connection, _stream_id: u32) -> Result<(), String> {
-    // This would need to be implemented based on how Connection manages streams
-    // For now, return Ok to allow compilation
-    // In real implementation, this would:
-    // 1. Create a stream with the given ID
-    // 2. Add it to the connection's stream store
-    Ok(())
+fn accept_peer_settings(connection: &mut Connection) -> Result<(), String> {
+    let received = connection
+        .process_frame(Frame::Settings(SettingsFrame::new(vec![])))
+        .map_err(|err| err.to_string())?;
+    if received.is_some() {
+        return Err("SETTINGS handshake produced an application frame".to_string());
+    }
+
+    match connection.next_frame() {
+        Some(Frame::Settings(settings)) if settings.ack => Ok(()),
+        other => Err(format!(
+            "SETTINGS handshake should queue exactly one ACK, got {other:?}"
+        )),
+    }
 }
 
-/// Helper function to simulate GOAWAY frame processing in asupersync connection.
-fn simulate_goaway_frame_processing(
-    _connection: &mut Connection,
-    _goaway_frame: &GoAwayFrame,
-) -> Result<(), String> {
-    // This would need to be implemented based on how Connection processes frames
-    // For now, return Ok to allow compilation
-    // In real implementation, this would:
-    // 1. Create a Frame::GoAway from the GoAwayFrame
-    // 2. Call connection.process_frame() or equivalent
-    Ok(())
+fn create_local_stream(connection: &mut Connection, expected_stream_id: u32) -> Result<(), String> {
+    let headers = vec![
+        Header::new(":method", "GET"),
+        Header::new(":scheme", "https"),
+        Header::new(":authority", "example.test"),
+        Header::new(":path", format!("/stream/{expected_stream_id}")),
+    ];
+    let stream_id = connection
+        .open_stream(headers, false)
+        .map_err(|err| err.to_string())?;
+    if stream_id != expected_stream_id {
+        return Err(format!(
+            "expected stream {expected_stream_id}, opened stream {stream_id}"
+        ));
+    }
+
+    match connection.next_frame() {
+        Some(Frame::Headers(headers)) if headers.stream_id == expected_stream_id => Ok(()),
+        other => Err(format!(
+            "expected queued HEADERS for stream {expected_stream_id}, got {other:?}"
+        )),
+    }
+}
+
+/// Process a GOAWAY frame through the production connection state machine.
+fn process_live_goaway_frame(
+    connection: &mut Connection,
+    goaway_frame: &GoAwayFrame,
+) -> Result<u32, String> {
+    match connection
+        .process_frame(Frame::GoAway(goaway_frame.clone()))
+        .map_err(|err| err.to_string())?
+    {
+        Some(ReceivedFrame::GoAway { last_stream_id, .. }) => Ok(last_stream_id),
+        other => Err(format!("GOAWAY produced unexpected frame: {other:?}")),
+    }
 }
 
 /// Extract GOAWAY-related connection state from asupersync connection.
-fn extract_asupersync_goaway_state(_connection: &Connection) -> GoAwayConnectionState {
-    // This would need to be implemented to extract actual connection state
-    // For now, return a placeholder to allow compilation
-    // In real implementation, this would:
-    // 1. Access the connection's goaway_received field
-    // 2. Access the connection's goaway_sent field
-    // 3. Access the connection's state field
-    // 4. Access the received_goaway_last_stream_id field
-    // 5. Access the sent_goaway_last_stream_id field
-    // 6. Determine which streams were reset due to GOAWAY
+fn extract_asupersync_goaway_state(
+    connection: &Connection,
+    existing_streams: &[u32],
+    received_goaway_last_stream_id: Option<u32>,
+) -> GoAwayConnectionState {
+    let reset_streams = existing_streams
+        .iter()
+        .copied()
+        .filter(|stream_id| {
+            connection
+                .stream(*stream_id)
+                .and_then(|stream| stream.error_code())
+                .is_some()
+        })
+        .collect();
+
     GoAwayConnectionState {
-        goaway_received: true,
+        goaway_received: connection.goaway_received(),
         goaway_sent: false,
-        connection_state: "Closing".to_string(),
-        received_goaway_last_stream_id: Some(0),
+        connection_state: format!("{:?}", connection.state()),
+        received_goaway_last_stream_id,
         sent_goaway_last_stream_id: None,
-        reset_streams: Vec::new(),
+        reset_streams,
     }
 }
 
@@ -663,13 +736,89 @@ mod tests {
     use super::*;
 
     #[tokio::test]
-    async fn test_unimplemented_h2_reference_skips_instead_of_faking_pass() {
+    async fn h2_reference_unavailable_still_runs_live_goaway_assertions() {
         let tester = GoAwayConformanceTester::new();
-        let result = tester.run_single_test(&tester.test_cases[0]).await;
+        let report = tester.run_all_tests().await;
 
-        assert_eq!(result.verdict, GoAwayTestVerdict::Skipped);
-        assert_eq!(result.error.as_deref(), Some(H2_REFERENCE_UNIMPLEMENTED));
-        assert!(result.differences.is_empty());
-        assert!(result.h2_state.is_none());
+        assert_eq!(report.total_cases, 7);
+        assert_eq!(report.summary.passed, 7);
+        assert_eq!(report.summary.failed, 0);
+        assert_eq!(report.summary.skipped, 0);
+        assert!(
+            report
+                .results
+                .iter()
+                .all(|result| result.h2_state.is_none()),
+            "h2 reference is intentionally not wired for this harness"
+        );
+        assert!(
+            report
+                .results
+                .iter()
+                .all(|result| result.asupersync_state.is_some()),
+            "every case must exercise the live asupersync connection"
+        );
+    }
+
+    #[test]
+    fn received_goaway_resets_local_streams_above_last_stream_id() {
+        let mut connection = Connection::client(Settings::default());
+        accept_peer_settings(&mut connection).expect("SETTINGS handshake");
+        create_local_stream(&mut connection, 1).expect("stream 1");
+        create_local_stream(&mut connection, 3).expect("stream 3");
+
+        let goaway = GoAwayFrame::new(1, ErrorCode::NoError);
+        let last_stream_id =
+            process_live_goaway_frame(&mut connection, &goaway).expect("GOAWAY should process");
+        assert_eq!(last_stream_id, 1);
+        assert!(connection.stream(1).unwrap().error_code().is_none());
+        assert_eq!(
+            connection.stream(3).unwrap().error_code(),
+            Some(ErrorCode::RefusedStream)
+        );
+    }
+
+    #[test]
+    fn local_goaway_queues_frame_with_debug_data_and_closes_connection() {
+        let mut connection = Connection::server(Settings::default());
+        accept_peer_settings(&mut connection).expect("SETTINGS handshake");
+        connection.goaway(
+            ErrorCode::EnhanceYourCalm,
+            Bytes::from_static(b"too many requests"),
+        );
+
+        let frame = connection
+            .next_frame()
+            .expect("local GOAWAY should be queued");
+        match frame {
+            Frame::GoAway(goaway) => {
+                assert_eq!(goaway.last_stream_id, 0);
+                assert_eq!(goaway.error_code, ErrorCode::EnhanceYourCalm);
+                assert_eq!(goaway.debug_data, Bytes::from_static(b"too many requests"));
+            }
+            other => panic!("expected GOAWAY frame, got {other:?}"),
+        }
+        assert_eq!(format!("{:?}", connection.state()), "Closing");
+    }
+
+    #[test]
+    fn open_stream_after_received_goaway_is_refused() {
+        let mut connection = Connection::client(Settings::default());
+        accept_peer_settings(&mut connection).expect("SETTINGS handshake");
+        create_local_stream(&mut connection, 1).expect("stream 1");
+
+        let goaway = GoAwayFrame::new(1, ErrorCode::NoError);
+        process_live_goaway_frame(&mut connection, &goaway).expect("GOAWAY should process");
+
+        let headers = vec![
+            Header::new(":method", "GET"),
+            Header::new(":scheme", "https"),
+            Header::new(":authority", "example.test"),
+            Header::new(":path", "/after-goaway"),
+        ];
+        let error = connection
+            .open_stream(headers, false)
+            .expect_err("new local streams after GOAWAY must be refused");
+        assert_eq!(error.code, ErrorCode::ProtocolError);
     }
 }
