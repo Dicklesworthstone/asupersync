@@ -124,7 +124,7 @@ pub mod tls_sni;
 // follow-up work; the goal of this commit is to stop these tests from
 // silently failing-open by surfacing them in mod.rs as known-broken
 // rather than invisibly-skipped.
-// pub mod actor_mailbox_protocol;   // tests/conformance internal — broken imports against current API
+pub mod actor_mailbox_protocol; // repaired by br-asupersync-8m6dfx actor mailbox sub-slice
 // pub mod broadcast_lag;            // asupersync::cx::test_cx + asupersync::time::{Duration} renamed/removed
 pub mod dns_cache; // repaired by br-asupersync-2qssae DNS cache sub-slice
 // grpc_deadline and grpc_health were repaired by br-asupersync-pfvsch and are
@@ -136,7 +136,7 @@ pub mod dns_cache; // repaired by br-asupersync-2qssae DNS cache sub-slice
 // pub mod quic_initial;             // bit-rot vs current quic API
 // pub mod task_inspector_wire;      // crate::observability + crate::types not in scope here
 // pub mod tls_alpn;                 // asupersync::tls module path changed
-// pub mod trace_event;              // bit-rot vs current trace API
+pub mod trace_event; // repaired by br-asupersync-8m6dfx trace event sub-slice
 pub mod udp_socket; // repaired by br-asupersync-2qssae UDP sub-slice
 pub mod unix_listener; // repaired by br-asupersync-2qssae Unix listener sub-slice
 // pub mod web_session_cookies;      // bit-rot — depends on `tokio` (forbidden) and asupersync::io::Cursor moved

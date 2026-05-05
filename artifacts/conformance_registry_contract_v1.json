@@ -3,11 +3,12 @@
   "bead_id": "asupersync-rckcnf",
   "source_registry": "tests/conformance/mod.rs",
   "readme_anchor": "README.md#conformance-suite",
-  "active_module_count": 72,
-  "dormant_module_count": 20,
+  "active_module_count": 74,
+  "dormant_module_count": 18,
   "count_policy": "Counts are machine-checked against tests/conformance/mod.rs. README prose must point here instead of hardcoding active or dormant counts.",
   "active_modules": [
     "aggregator_flush",
+    "actor_mailbox_protocol",
     "codec_framing_properties",
     "codec_round_trip",
     "cx_capability_semantics",
@@ -52,6 +53,7 @@
     "quic_retry_rfc9000",
     "race_loser_drain_metamorphic",
     "tls_0rtt_replay_rfc8446",
+    "trace_event",
     "trace_replay_idempotency_metamorphic",
     "broadcast",
     "consistent_hash_ring",
@@ -163,14 +165,6 @@
       "retention_reason": "File deletion is forbidden; retained for SQLite conformance repair."
     },
     {
-      "module": "actor_mailbox_protocol",
-      "line": 117,
-      "disposition": "intentionally_deferred_inline_followup",
-      "inline_followup": "tests/conformance/mod.rs audit-recovered orphan list",
-      "reason": "Broken imports against current conformance internals are noted inline.",
-      "retention_reason": "File deletion is forbidden; retained for targeted refactor."
-    },
-    {
       "module": "broadcast_lag",
       "line": 118,
       "disposition": "superseded_by_named_live_suite",
@@ -248,14 +242,6 @@
       ],
       "reason": "ALPN and TLS handshake coverage are live under current module paths.",
       "retention_reason": "File deletion is forbidden; retained for comparison."
-    },
-    {
-      "module": "trace_event",
-      "line": 129,
-      "disposition": "intentionally_deferred_inline_followup",
-      "inline_followup": "tests/conformance/mod.rs audit-recovered orphan list",
-      "reason": "The module is bit-rotted against the current trace API.",
-      "retention_reason": "File deletion is forbidden; retained for trace conformance repair."
     },
     {
       "module": "web_session_cookies",
