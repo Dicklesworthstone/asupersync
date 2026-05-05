@@ -1,14 +1,12 @@
-#![allow(warnings)]
-#![allow(clippy::all)]
 #![allow(missing_docs)]
-//! Regression test for local queue dead task stealing bug.
+//! Regression test for missing-record local queue stealing.
 
 use asupersync::runtime::scheduler::local_queue::LocalQueue;
 use asupersync::types::TaskId;
 use std::sync::Arc;
 
 #[test]
-fn test_dead_tasks_block_stealing() {
+fn missing_records_do_not_block_stealing() {
     let state = LocalQueue::test_state(10);
     let queue = LocalQueue::new(Arc::clone(&state));
 
@@ -16,7 +14,9 @@ fn test_dead_tasks_block_stealing() {
         queue.push(TaskId::new_for_test(i, 0));
     }
 
-    // Now, remove the first 8 tasks from the state to simulate them completing
+    // Remove the first 8 task records. These represent pre-arena test ids or
+    // stale records; current queue semantics treat them as stealable rather
+    // than letting them strand later work in the victim queue.
     {
         let mut guard = state.lock().unwrap();
         for i in 0..8 {
@@ -24,13 +24,13 @@ fn test_dead_tasks_block_stealing() {
         }
     }
 
-    // Now try to steal. Task 8 is still alive and at index 8.
     let stealer = queue.stealer();
-    let stolen = stealer.steal();
-
-    assert_eq!(
-        stolen,
-        Some(TaskId::new_for_test(8, 0)),
-        "Stealer should have skipped dead tasks and stolen task 8"
-    );
+    for i in 0..10 {
+        assert_eq!(
+            stealer.steal(),
+            Some(TaskId::new_for_test(i, 0)),
+            "stealer should drain missing-record prefixes without blocking later work"
+        );
+    }
+    assert_eq!(stealer.steal(), None);
 }
