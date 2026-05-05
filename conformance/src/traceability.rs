@@ -622,8 +622,7 @@ fn collect_rs_files(path: &Path, out: &mut Vec<PathBuf>) -> Result<(), Traceabil
     if path
         .extension()
         .and_then(|ext| ext.to_str())
-        .map(|ext| ext == "rs")
-        .unwrap_or(false)
+        .is_some_and(|ext| ext == "rs")
     {
         out.push(path.to_path_buf());
     }
@@ -671,7 +670,7 @@ fn scan_file_for_conformance(path: &Path) -> Result<TraceabilityScan, Traceabili
             && !pending.is_empty()
         {
             let line_number = (index + 1) as u32;
-            for args in pending.drain(..) {
+            for args in std::mem::take(&mut pending) {
                 entries.push(TraceabilityEntry::new(
                     args.spec,
                     args.requirement,

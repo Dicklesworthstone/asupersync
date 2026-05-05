@@ -164,6 +164,7 @@ pub mod codec;
 pub mod combinator;
 pub mod config;
 pub mod conformance;
+pub use conformance::traceability;
 pub mod console;
 pub mod cx;
 pub mod decoding;

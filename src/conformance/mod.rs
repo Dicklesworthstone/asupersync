@@ -25,6 +25,15 @@
 //! });
 //! ```
 
+#[path = "../../conformance/src/traceability.rs"]
+pub mod traceability;
+
+pub use traceability::{
+    CiReport, CoverageStats, ScanWarning, SpecRequirement, TraceabilityEntry, TraceabilityMatrix,
+    TraceabilityMatrixBuilder, TraceabilityScan, TraceabilityScanError, requirements_from_entries,
+    scan_conformance_attributes,
+};
+
 use crate::channel::oneshot;
 use crate::cx::Cx;
 use crate::types::{Budget, CancelReason, Outcome, RegionId, TaskId};

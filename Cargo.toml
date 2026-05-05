@@ -28,6 +28,7 @@ include = [
     "README.md",
     "LICENSE",
     "assets/dashboard.html",
+    "conformance/src/traceability.rs",
     "src/**",
     "!**/*.out",
 ]
