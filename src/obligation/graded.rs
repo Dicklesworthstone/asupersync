@@ -614,6 +614,30 @@ pub trait TokenKind: sealed::Sealed {
     fn obligation_kind() -> ObligationKind;
 }
 
+/// Error returned when dynamic obligation metadata does not match a typed token.
+///
+/// This is the migration bridge from existing runtime/ledger surfaces that
+/// still carry [`ObligationKind`] dynamically into the stronger typestate API.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TypedObligationKindError {
+    /// Static obligation kind required by the requested token type.
+    pub expected: ObligationKind,
+    /// Dynamic obligation kind supplied by the caller.
+    pub actual: ObligationKind,
+}
+
+impl fmt::Display for TypedObligationKindError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "typed obligation kind mismatch: expected {}, got {}",
+            self.expected, self.actual
+        )
+    }
+}
+
+impl std::error::Error for TypedObligationKindError {}
+
 /// Marker type for [`ObligationKind::SendPermit`].
 #[derive(Debug)]
 pub enum SendPermit {}
@@ -673,6 +697,17 @@ impl TokenKind for SemaphorePermitKind {
 ///
 /// Dropping without consuming panics ("drop bomb"), approximating a linear
 /// type in Rust's affine type system.
+///
+/// Invalid transitions stay unrepresentable: after a token is committed, the
+/// resulting proof has no `abort` transition.
+///
+/// ```compile_fail
+/// use asupersync::obligation::graded::{ObligationToken, SendPermitToken};
+///
+/// let token: SendPermitToken = ObligationToken::reserve("send");
+/// let committed = token.commit();
+/// let _late_abort = committed.abort();
+/// ```
 #[must_use = "obligation tokens must be consumed via commit() or abort()"]
 pub struct ObligationToken<K: TokenKind> {
     description: String,
@@ -689,6 +724,30 @@ impl<K: TokenKind> ObligationToken<K> {
             description: description.into(),
             armed: true,
             _kind: PhantomData,
+        }
+    }
+
+    /// Reserve a typed token from dynamic obligation metadata.
+    ///
+    /// This preserves the existing dynamic [`ObligationKind`] source of truth
+    /// while refusing to manufacture a static token for the wrong protocol
+    /// family. On mismatch no token is created, so no drop bomb is armed.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`TypedObligationKindError`] when `kind` differs from `K`.
+    pub fn try_reserve_kind(
+        kind: ObligationKind,
+        description: impl Into<String>,
+    ) -> Result<Self, TypedObligationKindError> {
+        let expected = K::obligation_kind();
+        if kind == expected {
+            Ok(Self::reserve(description))
+        } else {
+            Err(TypedObligationKindError {
+                expected,
+                actual: kind,
+            })
         }
     }
 
@@ -837,6 +896,25 @@ impl GradedScope {
     ) -> ObligationToken<K> {
         self.on_reserve();
         ObligationToken::reserve(description)
+    }
+
+    /// Reserve a typed token from dynamic obligation metadata and record it.
+    ///
+    /// Scope accounting is updated only after the dynamic kind matches the
+    /// requested static token kind. A mismatch therefore cannot create a
+    /// synthetic outstanding obligation in the graded scope.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`TypedObligationKindError`] when `kind` differs from `K`.
+    pub fn try_reserve_token_kind<K: TokenKind>(
+        &mut self,
+        kind: ObligationKind,
+        description: impl Into<String>,
+    ) -> Result<ObligationToken<K>, TypedObligationKindError> {
+        let token = ObligationToken::try_reserve_kind(kind, description)?;
+        self.on_reserve();
+        Ok(token)
     }
 
     /// Commit a typed obligation token, recording the resolution in this scope.
@@ -1329,6 +1407,133 @@ mod tests {
             kind
         );
         crate::test_complete!("token_abort_returns_proof");
+    }
+
+    #[test]
+    fn token_dynamic_kind_bridge_accepts_matching_hot_path_kind() {
+        init_test("token_dynamic_kind_bridge_accepts_matching_hot_path_kind");
+        let token: SendPermitToken =
+            ObligationToken::try_reserve_kind(ObligationKind::SendPermit, "hot-path send")
+                .expect("send permit dynamic kind should map to SendPermitToken");
+
+        let proof = token.commit();
+        crate::assert_with_log!(
+            proof.kind() == ObligationKind::SendPermit,
+            "typed proof kind",
+            ObligationKind::SendPermit,
+            proof.kind()
+        );
+        let resolved = proof.into_resolved_proof();
+        crate::assert_with_log!(
+            resolved.resolution() == Resolution::Commit,
+            "resolved proof",
+            Resolution::Commit,
+            resolved.resolution()
+        );
+        crate::test_complete!("token_dynamic_kind_bridge_accepts_matching_hot_path_kind");
+    }
+
+    #[test]
+    fn token_dynamic_kind_bridge_rejects_mismatched_protocol_family() {
+        init_test("token_dynamic_kind_bridge_rejects_mismatched_protocol_family");
+        let err = SendPermitToken::try_reserve_kind(ObligationKind::Ack, "wrong dynamic family")
+            .expect_err("Ack must not manufacture a SendPermitToken");
+
+        crate::assert_with_log!(
+            err.expected == ObligationKind::SendPermit,
+            "expected typed kind",
+            ObligationKind::SendPermit,
+            err.expected
+        );
+        crate::assert_with_log!(
+            err.actual == ObligationKind::Ack,
+            "actual dynamic kind",
+            ObligationKind::Ack,
+            err.actual
+        );
+        crate::assert_with_log!(
+            format!("{err}").contains("expected send_permit, got ack"),
+            "diagnostic",
+            true,
+            format!("{err}").contains("expected send_permit, got ack")
+        );
+        crate::test_complete!("token_dynamic_kind_bridge_rejects_mismatched_protocol_family");
+    }
+
+    #[test]
+    fn scoped_dynamic_kind_bridge_tracks_abort_cleanup_parity() {
+        init_test("scoped_dynamic_kind_bridge_tracks_abort_cleanup_parity");
+        let mut scope = GradedScope::open("lease-hot-path");
+        let token: LeaseToken = scope
+            .try_reserve_token_kind(ObligationKind::Lease, "lease cancellation cleanup")
+            .expect("Lease dynamic kind should map to LeaseToken");
+        crate::assert_with_log!(scope.outstanding() == 1, "reserved", 1, scope.outstanding());
+
+        let proof = scope.resolve_abort(token);
+        crate::assert_with_log!(
+            proof.kind() == ObligationKind::Lease,
+            "abort proof kind",
+            ObligationKind::Lease,
+            proof.kind()
+        );
+        let resolved = proof.into_resolved_proof();
+        crate::assert_with_log!(
+            resolved.resolution() == Resolution::Abort,
+            "abort bridges to resolved proof",
+            Resolution::Abort,
+            resolved.resolution()
+        );
+
+        let scope_proof = scope.close().expect("abort must leave scope balanced");
+        crate::assert_with_log!(
+            scope_proof.total_reserved() == 1,
+            "scope reserved count",
+            1,
+            scope_proof.total_reserved()
+        );
+        crate::assert_with_log!(
+            scope_proof.total_resolved() == 1,
+            "scope resolved count",
+            1,
+            scope_proof.total_resolved()
+        );
+        crate::test_complete!("scoped_dynamic_kind_bridge_tracks_abort_cleanup_parity");
+    }
+
+    #[test]
+    fn scoped_dynamic_kind_bridge_mismatch_does_not_increment_scope() {
+        init_test("scoped_dynamic_kind_bridge_mismatch_does_not_increment_scope");
+        let mut scope = GradedScope::open("mismatch");
+        let err = scope
+            .try_reserve_token_kind::<AckKind>(ObligationKind::SendPermit, "wrong ack family")
+            .expect_err("SendPermit must not reserve AckToken scope state");
+
+        crate::assert_with_log!(
+            err.expected == ObligationKind::Ack,
+            "expected typed kind",
+            ObligationKind::Ack,
+            err.expected
+        );
+        crate::assert_with_log!(
+            err.actual == ObligationKind::SendPermit,
+            "actual dynamic kind",
+            ObligationKind::SendPermit,
+            err.actual
+        );
+        crate::assert_with_log!(
+            scope.outstanding() == 0,
+            "mismatch leaves scope empty",
+            0,
+            scope.outstanding()
+        );
+        let proof = scope.close().expect("mismatch must not leak scope state");
+        crate::assert_with_log!(
+            proof.total_reserved() == 0,
+            "no reservation recorded",
+            0,
+            proof.total_reserved()
+        );
+        crate::test_complete!("scoped_dynamic_kind_bridge_mismatch_does_not_increment_scope");
     }
 
     #[test]
