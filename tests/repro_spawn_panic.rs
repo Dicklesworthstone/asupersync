@@ -1,5 +1,3 @@
-#![allow(warnings)]
-#![allow(clippy::all)]
 #![allow(missing_docs)]
 #![cfg(feature = "test-internals")]
 //! Repro for spawn factory panic handling.
