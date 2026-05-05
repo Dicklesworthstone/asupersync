@@ -21,7 +21,7 @@ pub mod tls_handshake;
 // in; tracked separately as h1-conformance-bitrot follow-up.
 //
 //   pub mod h1_body_framing;
-//   pub mod h1_chunked;
+pub mod h1_chunked;
 //   pub mod h1_content_encoding;
 //   pub mod h1_expect_continue;
 //   pub mod h1_keepalive;
@@ -140,13 +140,13 @@ pub mod tls_sni;
 // pub mod unix_listener;            // crate::net + crate::io + assert_with_log! macro missing
 // pub mod web_session_cookies;      // bit-rot — depends on `tokio` (forbidden) and asupersync::io::Cursor moved
 //
-// h1_* siblings (h1_body_framing, h1_chunked, h1_content_encoding,
+// h1_* siblings (h1_body_framing, h1_content_encoding,
 // h1_expect_continue, h1_keepalive, h1_methods, h1_request_chunked) and
 // h2_stream_state_machine_rfc7540, hpack_metamorphic,
 // sqlite_prepared_statements is already individually
 // commented out earlier in this file with bit-rot rationale; deliberately
 // not re-declared here.
-// The h1_* siblings (h1_body_framing, h1_chunked, h1_content_encoding,
+// The h1_* siblings (h1_body_framing, h1_content_encoding,
 // h1_expect_continue, h1_keepalive, h1_methods, h1_request_chunked) and
 // h2_stream_state_machine_rfc7540, hpack_metamorphic,
 // sqlite_prepared_statements are already individually
