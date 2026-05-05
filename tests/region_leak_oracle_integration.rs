@@ -1,5 +1,3 @@
-#![allow(warnings)]
-#![allow(clippy::all)]
 //! Integration tests for the Region Leak Detection Oracle
 //!
 //! These tests verify that the oracle correctly detects various forms of
