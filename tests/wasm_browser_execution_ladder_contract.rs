@@ -1,5 +1,3 @@
-#![allow(warnings)]
-#![allow(clippy::all)]
 //! Browser Edition execution-ladder contract checks.
 //!
 //! Focused follow-up: stale lane-health state must not mask a current hard
