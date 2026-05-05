@@ -75,7 +75,7 @@ pub mod tls_0rtt_replay_rfc8446;
 pub mod trace_replay_idempotency_metamorphic;
 // TODO: SQLite conformance tests - module has unresolved dependencies
 // pub mod sqlite_prepared_statements;
-// pub mod websocket_rfc6455;
+//
 pub mod broadcast;
 pub mod consistent_hash_ring;
 pub mod grpc_max_message_size;
@@ -91,6 +91,11 @@ pub mod tcp_accept;
 pub mod timeout_deadline_harness;
 pub mod timeout_deadline_reference;
 pub mod websocket_extension_negotiation_rfc6455;
+// The legacy sibling file `websocket_rfc6455.rs` is preserved on disk, but the
+// live suite is the directory module below. Use an explicit path to avoid Rust's
+// file-vs-directory module ambiguity while keeping RULE 1 intact.
+#[path = "websocket_rfc6455/mod.rs"]
+pub mod websocket_rfc6455;
 
 // ─── br-asupersync-dgdwsm: orphaned conformance modules wired in ───────────
 // Audit-recovered: these .rs files existed in tests/conformance/ but were
@@ -138,13 +143,13 @@ pub mod tls_sni;
 // h1_* siblings (h1_body_framing, h1_chunked, h1_content_encoding,
 // h1_expect_continue, h1_keepalive, h1_methods, h1_request_chunked) and
 // h2_stream_state_machine_rfc7540, hpack_metamorphic,
-// sqlite_prepared_statements, websocket_rfc6455 are already individually
+// sqlite_prepared_statements is already individually
 // commented out earlier in this file with bit-rot rationale; deliberately
 // not re-declared here.
 // The h1_* siblings (h1_body_framing, h1_chunked, h1_content_encoding,
 // h1_expect_continue, h1_keepalive, h1_methods, h1_request_chunked) and
 // h2_stream_state_machine_rfc7540, hpack_metamorphic,
-// sqlite_prepared_statements, websocket_rfc6455 are already individually
+// sqlite_prepared_statements are already individually
 // commented out earlier in this file with bit-rot rationale; deliberately
 // not re-declared here.
 
@@ -154,6 +159,7 @@ pub use aggregator_flush::AggregatorFlushConformanceHarness;
 pub use cancel_dag_determinism::{
     CancelDagDeterminismHarness, CancelDagDeterminismResult, TestCategory as CancelDagTestCategory,
 };
+pub use grpc_trailer_forwarding_rfc9113::GrpcTrailerConformanceHarness;
 pub use h1_rfc9112::{H1ConformanceHarness, RequirementLevel, TestVerdict};
 #[cfg(feature = "tls")]
 pub use h2_alpn_negotiation_rfc7540::{
@@ -175,6 +181,11 @@ pub use obligation_lifecycle_metamorphic::{
 pub use postgres_copy::PostgresCopyConformanceHarness;
 #[cfg(feature = "postgres")]
 pub use postgres_extended_query::PostgresExtendedQueryConformanceHarness;
+#[cfg(feature = "quic")]
+pub use quic_connection_migration_rfc9000::{
+    QuicConnectionMigrationConformanceHarness, QuicConnectionMigrationConformanceResult,
+    TestCategory as QuicConnectionMigrationTestCategory,
+};
 pub use quic_retry_rfc9000::QuicRetryConformanceHarness;
 #[cfg(feature = "deterministic-mode")]
 pub use race_loser_drain_metamorphic::{
@@ -190,14 +201,8 @@ pub use trace_replay_idempotency_metamorphic::{
     TestCategory as TraceReplayTestCategory, TraceReplayIdempotencyMetamorphicHarness,
     TraceReplayIdempotencyMetamorphicResult,
 };
-// pub use websocket_rfc6455::{WsConformanceHarness, WsConformanceResult};
-pub use grpc_trailer_forwarding_rfc9113::GrpcTrailerConformanceHarness;
-#[cfg(feature = "quic")]
-pub use quic_connection_migration_rfc9000::{
-    QuicConnectionMigrationConformanceHarness, QuicConnectionMigrationConformanceResult,
-    TestCategory as QuicConnectionMigrationTestCategory,
-};
 pub use websocket_extension_negotiation_rfc6455::WsExtensionConformanceHarness;
+pub use websocket_rfc6455::{WsConformanceHarness, WsConformanceResult};
 
 // Unified test categories for all conformance suites
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]

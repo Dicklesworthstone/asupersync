@@ -146,7 +146,11 @@ Override via `RuntimeBuilder::obligation_leak_response(...)` or
 - gRPC: `src/grpc/` (framing, client/server, interceptors)
   - Tests: `tests/grpc_verification.rs`
 - WebSocket: `src/net/websocket/` (handshake, frames, client/server)
-  - Tests: `tests/e2e_websocket.rs`
+  - Conformance tests: `tests/conformance/mod.rs` wires
+    `websocket_extension_negotiation_rfc6455` and the directory-backed
+    `websocket_rfc6455` suite for framing, masking, control-frame, close,
+    error-handling, extension, and fragmentation coverage.
+  - Runtime/e2e tests: `tests/e2e_websocket.rs` and `tests/e2e/websocket/`
 - HTTP/3: `src/http/h3_native.rs` (native frame/settings/control-stream and
   QPACK field-section primitives)
   - Default support is default static-only QPACK.

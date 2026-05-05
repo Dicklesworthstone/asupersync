@@ -7,7 +7,7 @@
 use super::*;
 use asupersync::bytes::BytesMut;
 use asupersync::codec::{Decoder, Encoder};
-use asupersync::net::websocket::{Frame, FrameCodec, Opcode, apply_mask};
+use asupersync::net::websocket::{Frame, FrameCodec, Opcode, WsError, apply_mask};
 
 /// Run all frame format conformance tests.
 #[allow(dead_code)]
@@ -33,7 +33,7 @@ fn test_frame_header_format() -> WsConformanceResult {
         // Frame header structure validation
         // Minimum frame: 2 bytes (FIN + opcode + length + no payload)
 
-        let mut codec = FrameCodec::new();
+        let mut codec = FrameCodec::client();
 
         // Test minimal frame structure
         let mut buf = BytesMut::new();
@@ -110,7 +110,7 @@ fn test_opcode_validation() -> WsConformanceResult {
                 ));
             }
 
-            let mut codec = FrameCodec::new();
+            let mut codec = FrameCodec::client();
             let mut buf = BytesMut::from(&[0x80 | *opcode_byte, 0x00][..]);
             match codec.decode(&mut buf) {
                 Err(WsError::InvalidOpcode(actual)) if actual == *opcode_byte => {}
@@ -148,7 +148,7 @@ fn test_reserved_bits() -> WsConformanceResult {
         ];
 
         for (first_byte, label) in test_cases {
-            let mut codec = FrameCodec::new();
+            let mut codec = FrameCodec::client();
             let mut buf = BytesMut::from(&[first_byte, 0x00][..]);
             match codec.decode(&mut buf) {
                 Err(WsError::ReservedBitsSet) => {}
@@ -200,19 +200,20 @@ fn test_payload_length_encoding() -> WsConformanceResult {
                 rsv3: false,
                 opcode: Opcode::Binary,
                 masked: false,
-                mask: None,
+                mask_key: None,
                 payload: payload.into(),
             };
 
             // Encode and decode to verify length encoding
-            let mut codec = FrameCodec::new();
+            let mut encoder = FrameCodec::server();
+            let mut decoder = FrameCodec::client();
             let mut buf = BytesMut::new();
 
-            codec
+            encoder
                 .encode(frame.clone(), &mut buf)
                 .map_err(|e| format!("Failed to encode {}: {}", description, e))?;
 
-            let decoded = codec
+            let decoded = decoder
                 .decode(&mut buf)
                 .map_err(|e| format!("Failed to decode {}: {}", description, e))?
                 .ok_or_else(|| format!("Expected frame for {}", description))?;
@@ -257,7 +258,7 @@ fn test_masking_key_format() -> WsConformanceResult {
             rsv3: false,
             opcode: Opcode::Text,
             masked: true,
-            mask: Some(mask),
+            mask_key: Some(mask),
             payload: payload.to_vec().into(),
         };
 
@@ -274,21 +275,21 @@ fn test_masking_key_format() -> WsConformanceResult {
             rsv3: false,
             opcode: Opcode::Text,
             masked: false,
-            mask: None,
+            mask_key: None,
             payload: payload.to_vec().into(),
         };
 
         // Verify unmasked frame has no mask
-        if unmasked_frame.mask.is_some() {
+        if unmasked_frame.mask_key.is_some() {
             return Err("Unmasked frame must not have masking key".to_string());
         }
 
         // Test mask application
         let mut masked_payload = payload.to_vec();
-        apply_mask(&mut masked_payload, &mask);
+        apply_mask(&mut masked_payload, mask);
 
         // Applying mask twice should restore original
-        apply_mask(&mut masked_payload, &mask);
+        apply_mask(&mut masked_payload, mask);
         if masked_payload != payload {
             return Err("Double masking should restore original payload".to_string());
         }
@@ -320,7 +321,7 @@ fn test_control_frame_constraints() -> WsConformanceResult {
                 rsv3: false,
                 opcode: *opcode,
                 masked: false,
-                mask: None,
+                mask_key: None,
                 payload: vec![0u8; 50].into(), // Valid size
             };
 
@@ -333,7 +334,7 @@ fn test_control_frame_constraints() -> WsConformanceResult {
             }
 
             let fragmented_first_byte = (*opcode as u8) & 0x0F;
-            let mut fragmented_codec = FrameCodec::new();
+            let mut fragmented_codec = FrameCodec::client();
             let mut fragmented = BytesMut::from(&[fragmented_first_byte, 0x00][..]);
             match fragmented_codec.decode(&mut fragmented) {
                 Err(WsError::FragmentedControlFrame) => {}
@@ -345,7 +346,7 @@ fn test_control_frame_constraints() -> WsConformanceResult {
                 }
             }
 
-            let mut oversized_codec = FrameCodec::new();
+            let mut oversized_codec = FrameCodec::client();
             let mut oversized = BytesMut::new();
             oversized.extend_from_slice(&[0x80 | (*opcode as u8), 0x7E, 0x00, 0x7E]);
             match oversized_codec.decode(&mut oversized) {
@@ -394,7 +395,7 @@ fn test_data_frame_validation() -> WsConformanceResult {
                     rsv3: false,
                     opcode: *opcode,
                     masked: false,
-                    mask: None,
+                    mask_key: None,
                     payload: payload.into(),
                 };
 
@@ -415,7 +416,7 @@ fn test_data_frame_validation() -> WsConformanceResult {
                     rsv3: false,
                     opcode: *opcode,
                     masked: false,
-                    mask: None,
+                    mask_key: None,
                     payload: vec![0u8; 100].into(),
                 };
 
@@ -466,7 +467,7 @@ fn test_frame_size_limits() -> WsConformanceResult {
                 rsv3: false,
                 opcode: Opcode::Binary,
                 masked: false,
-                mask: None,
+                mask_key: None,
                 payload: vec![0u8; *size].into(),
             };
 

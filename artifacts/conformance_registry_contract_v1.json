@@ -3,8 +3,8 @@
   "bead_id": "asupersync-rckcnf",
   "source_registry": "tests/conformance/mod.rs",
   "readme_anchor": "README.md#conformance-suite",
-  "active_module_count": 64,
-  "dormant_module_count": 28,
+  "active_module_count": 65,
+  "dormant_module_count": 27,
   "count_policy": "Counts are machine-checked against tests/conformance/mod.rs. README prose must point here instead of hardcoding active or dormant counts.",
   "active_modules": [
     "aggregator_flush",
@@ -63,6 +63,7 @@
     "timeout_deadline_harness",
     "timeout_deadline_reference",
     "websocket_extension_negotiation_rfc6455",
+    "websocket_rfc6455",
     "hpack_rfc7541_appendix_c",
     "macaroon_attenuation_vectors",
     "raptorq_proof_correctness",
@@ -169,14 +170,6 @@
       "inline_followup": "tests/conformance/mod.rs unresolved SQLite dependencies",
       "reason": "The module has unresolved dependencies noted inline before it can be rewired.",
       "retention_reason": "File deletion is forbidden; retained for SQLite conformance repair."
-    },
-    {
-      "module": "websocket_rfc6455",
-      "line": 74,
-      "disposition": "intentionally_deferred_with_owner_bead",
-      "owner_bead": "asupersync-rckwsf",
-      "reason": "Broader RFC6455 framing/control/close/masking coverage is tracked by the dedicated WebSocket reality-check bead.",
-      "retention_reason": "File deletion is forbidden; retained until the broader suite is rewired."
     },
     {
       "module": "actor_mailbox_protocol",

@@ -217,6 +217,30 @@ mod tests {
             categories.contains(&TestCategory::ControlFrames),
             "Should test control frames"
         );
+        assert!(
+            categories.contains(&TestCategory::ConnectionClose),
+            "Should test close handling"
+        );
+        assert!(
+            categories.contains(&TestCategory::Masking),
+            "Should test masking"
+        );
+        assert!(
+            categories.contains(&TestCategory::Fragmentation),
+            "Should test fragmentation"
+        );
+        assert!(
+            categories.contains(&TestCategory::Extensions),
+            "Should test extension interactions"
+        );
+        assert!(
+            categories.contains(&TestCategory::ErrorHandling),
+            "Should test protocol error handling"
+        );
+        assert!(
+            categories.contains(&TestCategory::DataFrames),
+            "Should test data frames"
+        );
     }
 
     #[test]

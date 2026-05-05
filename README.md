@@ -436,7 +436,7 @@ It maps common Tokio ecosystem crates to the corresponding Asupersync modules.
 | TCP/UDP/Unix sockets | `tokio::net` | `src/net/tcp/`, `src/net/udp.rs`, `src/net/unix/` | Built-in | Active | Mixed | Medium |
 | DNS resolution | `trust-dns`, `hickory`, custom stacks | `src/net/dns/` | Built-in | Active | Mixed | Medium |
 | TLS | `tokio-rustls`, `native-tls` | `src/tls/` (`tls`, `tls-native-roots`, `tls-webpki-roots`) | Feature-gated | Active | Mixed | Medium |
-| WebSocket | `tokio-tungstenite` | `src/net/websocket/` | Built-in | Active (live RFC6455 coverage still partial) | Mixed | Medium |
+| WebSocket | `tokio-tungstenite` | `src/net/websocket/` | Built-in | Active (broad RFC6455 conformance registry wired; runtime e2e coverage remains lane-specific) | Mixed | Medium |
 | HTTP stack (HTTP/1.1 + HTTP/2) | `hyper`, `h2`, `http-body`, `hyper-util` | `src/http/h1/`, `src/http/h2/`, `src/http/body.rs`, `src/http/pool.rs` | Built-in | Active | Mixed | Medium |
 | QUIC + HTTP/3 (default static-only QPACK; opt-in dynamic QPACK field-section context) | `quinn`, `h3`, `h3-quinn` | `src/net/quic_core/`, `src/net/quic_native/`, `src/http/h3_native.rs` (native core feature surfaces exposed via `quic`/`http3`; historical wrapper sources in `src/net/quic/` and `src/http/h3/` remain parked outside the core feature graph; support matrix: `artifacts/http3_qpack_support_matrix_v1.json`) | Feature-gated | Active | Mixed | Medium |
 | Web framework | `axum`, `warp`, `tower-http` | `src/web/`, `src/service/`, `src/server/` | In progress | Active | Mixed | Medium |
@@ -719,11 +719,13 @@ Both layers integrate with connection pooling (`src/http/pool.rs`) and optional 
 
 `src/net/websocket/` ships handshake, binary/text frames, ping/pong, and close
 frames with status codes. The split reader/writer model allows concurrent send
-and receive within the same region. Current `tests/conformance` wiring only
-keeps the extension-negotiation suite live; the broader RFC 6455 framing,
-masking, control-frame, close, and fragmentation suites are still present on
-disk but not compiled in the active registry until the dormant
-`websocket_rfc6455` lane is re-wired.
+and receive within the same region. Current `tests/conformance` wiring keeps
+both the extension-negotiation suite and the broader directory-backed RFC 6455
+suite live, covering framing, masking, control-frame, close, error-handling, and
+fragmentation harnesses against the production WebSocket parser and handshake
+surfaces. Runtime cancellation and integration behavior remain covered by the
+focused `tests/e2e_websocket.rs` and `tests/e2e/websocket/` lanes rather than by
+the byte-level RFC harness alone.
 
 ### TLS
 
@@ -991,9 +993,9 @@ Important limitation: the repository also preserves many conformance files on
 disk that are **not** part of the live registry today. `tests/conformance/mod.rs`
 leaves explicit commented-out `pub mod` entries as known bit-rot,
 superseded-suite, or unresolved-dependency follow-ups, including older `h1_*`
-siblings, `sqlite_prepared_statements`, the full `websocket_rfc6455` suite,
-`grpc_deadline`, `grpc_health`, `grpc_status`, `h3_settings`, `quic_initial`,
-and `task_inspector_wire`. The contract artifact records each dormant suite's
+siblings, `sqlite_prepared_statements`, `grpc_deadline`, `grpc_health`,
+`grpc_status`, `h3_settings`, `quic_initial`, and `task_inspector_wire`.
+The contract artifact records each dormant suite's
 current disposition, owner bead or supersession path, and retention reason.
 Those files remain in-tree for repair work, but they do not compile or run
 until they are re-wired in `tests/conformance/mod.rs`.
@@ -1493,7 +1495,7 @@ and known limitations.
 | Parallel scheduler + work-stealing | ✅ Implemented (three-lane scheduler) |
 | I/O reactor (Linux epoll + optional io_uring primary path; BSD/Windows reactors have narrower interest support) | ✅ Implemented |
 | TCP, HTTP/1.1, HTTP/2, TLS | ✅ Implemented |
-| WebSocket | ⚠️ Runtime surface shipped, but live RFC6455 conformance coverage is partial (extension negotiation is wired; broader framing/control/close/masking suites remain dormant) |
+| WebSocket | ⚠️ Runtime surface shipped; live RFC6455 conformance coverage now wires extension negotiation plus broader framing/control/close/masking/fragmentation harnesses, with runtime e2e coverage still lane-specific |
 | HTTP/3 (default static-only QPACK; opt-in dynamic QPACK field-section context) | ⚠️ Partial implementation: dynamic QPACK field-section/table and Huffman strings are supported, but there is no full QPACK encoder/decoder instruction-stream parity or blocked-stream scheduler claim |
 | Database clients (SQLite, PostgreSQL, MySQL) | ✅ Implemented |
 | Actor supervision (GenServer, links, monitors) | ✅ Implemented |
