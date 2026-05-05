@@ -1,0 +1,5 @@
+---
+source: tests/raptorq_encoder_stats_golden.rs
+expression: encoder.stats().to_string()
+---
+EncodingStats(K=8, S=7, H=10, L=27, sym=128B, repairs=0, bytes=1024sys+0rep, avg_deg=0.0, overhead=3.38)

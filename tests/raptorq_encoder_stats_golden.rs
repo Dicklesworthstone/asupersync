@@ -1,4 +1,3 @@
-#![allow(warnings)]
 //! Golden snapshot test for RaptorQ EncoderStats display output.
 
 use asupersync::raptorq::systematic::SystematicEncoder;
