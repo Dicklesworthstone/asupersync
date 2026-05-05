@@ -1508,13 +1508,18 @@ transport from protocol, so callers must attach a `RemoteRuntime` /
 `RemoteTransport` implementation or use the deterministic no-runtime fallback.
 All remote operations require `RemoteCap` from `Cx` (no closure shipping).
 
-The shipped proof tier is protocol/state-machine plus virtual transport
-harness. `remote_virtual_lifecycle_proof_exercises_runtime_transport_and_protocol`
-drives `spawn_remote` through the injected `RemoteRuntime` boundary and covers
-accepted spawn/result delivery, cancellation before ack, cancellation while
-running, lease renewal, lease expiry, idempotent duplicate handling, transport
-send-failure cleanup, deterministic fallback, and trace emission. Production
-network execution is still an adapter responsibility, not a core-runtime claim.
+The shipped proof tier is protocol/state-machine plus two transport proofs.
+`remote_virtual_lifecycle_proof_exercises_runtime_transport_and_protocol` keeps
+the deterministic lab baseline. `tests/remote_transport_lifecycle_contract.rs`
+adds a production-transport-backed loopback proof through
+`asupersync::net::TcpListener` / `TcpStream` and the injected `RemoteRuntime` /
+`RemoteTransport` boundaries. It covers accepted spawn/result delivery,
+cancellation before ack, cancellation while running, lease renewal, lease
+expiry, idempotent duplicate handling, send-failure cleanup, receive EOF,
+delayed ack, malformed envelope cleanup, deterministic fallback, capability
+denial, required structured logs, and trace emission. Deployment discovery,
+TLS/authentication, WAN retry policy, and a frozen production wire format remain
+adapter-specific responsibilities, not blanket core-runtime claims.
 
 ---
 

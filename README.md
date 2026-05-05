@@ -782,10 +782,11 @@ Asupersync's distributed runtime surface is designed around the same
 invariants as local execution: explicit ownership, explicit cancellation, and
 deterministic state transitions. Today the core crate ships the remote
 protocol/state-machine surface plus capability, lease, idempotency, and saga
-contracts. The shipped proof tier is virtual/lab-backed: the core remote
-lifecycle is exercised through the injected `RemoteRuntime` boundary, while
-production network execution remains adapter responsibility rather than a
-blanket core-runtime claim.
+contracts. The shipped proof tier now includes both the deterministic
+virtual/lab baseline and a production-transport-backed loopback proof through
+`asupersync::net::TcpListener` / `TcpStream`. Broader deployment concerns such
+as discovery, TLS/authentication, WAN retry policy, and a frozen production wire
+format remain adapter-specific rather than blanket core-runtime claims.
 
 | Primitive | Location | Runtime Behavior |
 |-----------|----------|------------------|
@@ -798,9 +799,11 @@ blanket core-runtime claim.
 
 The transport surface is deliberately separated from protocol state machines,
 so message semantics can be tested independently of network backend details.
-When a production network backend is attached, it must preserve the same
-spawn/result/cancel/lease/idempotency contract that the virtual lifecycle proof
-pins today.
+`tests/remote_transport_lifecycle_contract.rs` proves that a TCP-backed
+`RemoteRuntime` adapter preserves spawn/result, cancellation before ack,
+cancellation while running, lease renewal, lease expiry, idempotency replay,
+send failure, receive EOF, malformed envelope cleanup, delayed ack ordering,
+capability denial, and deterministic no-runtime fallback behavior.
 
 ---
 
@@ -1505,7 +1508,7 @@ and known limitations.
 | Database clients (SQLite, PostgreSQL, MySQL) | ✅ Implemented |
 | Actor supervision (GenServer, links, monitors) | ✅ Implemented |
 | DPOR schedule exploration | ✅ Implemented |
-| Distributed runtime (remote tasks, sagas, leases, recovery) | Protocol/state-machine, lease, idempotency, and saga surfaces implemented; virtual/lab remote lifecycle proof shipped; production network backend execution remains adapter responsibility |
+| Distributed runtime (remote tasks, sagas, leases, recovery) | Protocol/state-machine, lease, idempotency, and saga surfaces implemented; virtual/lab baseline plus production TCP loopback RemoteRuntime lifecycle proof shipped; deployment discovery, TLS/authentication, WAN retry policy, and stable production wire format remain adapter-scoped |
 | RaptorQ fountain coding for snapshot distribution | ✅ Implemented |
 | Formal methods (TLA+ export + Lean checked core-invariant coverage) | ⚠️ Partial implementation (Lean-checked core invariants cover the six non-negotiable runtime invariants; broader adapter/protocol/runtime refinement proof remains tiered and lane-specific) |
 | Browser Edition (WASM, JS/TS consumers) | ✅ Implemented for browser main-thread and dedicated-worker consumers (single-threaded, event-loop-driven) |

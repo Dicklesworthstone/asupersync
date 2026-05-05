@@ -1,0 +1,161 @@
+{
+  "schema_version": "remote-transport-lifecycle-evidence-v1",
+  "bead_id": "asupersync-5d9s85",
+  "capability_id": "remote_transport_lifecycle",
+  "created_date": "2026-05-05",
+  "runner_script": "scripts/run_remote_transport_lifecycle_evidence.sh",
+  "contract_test": "tests/remote_transport_lifecycle_contract.rs",
+  "support_class": "production-transport-backed-loopback-proof",
+  "transport_boundary": {
+    "transport_kind": "asupersync_tcp_loopback",
+    "origin_node": "origin-prod-loopback",
+    "remote_node": "remote-prod-loopback",
+    "network_surface": "asupersync::net::TcpListener/TcpStream on 127.0.0.1",
+    "runtime_boundary": "test-local RemoteRuntime adapter using production asupersync TCP surfaces and src/remote.rs protocol messages",
+    "excluded_claims": [
+      "transparent closure migration",
+      "arbitrary WAN deployment",
+      "Tokio-backed network execution",
+      "ambient global executor"
+    ],
+    "no_tokio_policy": "The proof uses asupersync::net plus futures-lite test blocking only; it does not introduce tokio, hyper, tonic, async-std, smol, or a core runtime executor dependency."
+  },
+  "required_log_fields": [
+    "bead_id",
+    "scenario_id",
+    "origin_node",
+    "remote_node",
+    "transport_kind",
+    "remote_task_id",
+    "lease_id",
+    "idempotency_key",
+    "command",
+    "trace_event_count",
+    "obligation_count_before",
+    "obligation_count_after",
+    "expected_state",
+    "actual_state",
+    "verdict",
+    "first_failure"
+  ],
+  "source_evidence_paths": [
+    "src/remote.rs",
+    "README.md",
+    "docs/integration.md",
+    "tests/remote_transport_lifecycle_contract.rs",
+    "scripts/run_remote_transport_lifecycle_evidence.sh",
+    "artifacts/wave2/remote_transport_lifecycle_evidence.json"
+  ],
+  "scenario_matrix": [
+    {
+      "scenario_id": "wire_codec_protocol_fields",
+      "surface": "wire_codec",
+      "expected_state": "Completed",
+      "required_observable": "serde round-trip preserves remote_task_id, idempotency_key, and command tag"
+    },
+    {
+      "scenario_id": "remote_transport_trait_ack_result_logical_time",
+      "surface": "RemoteTransport",
+      "expected_state": "Completed",
+      "required_observable": "RemoteTransport send/try_recv crosses TCP loopback and preserves Lamport metadata"
+    },
+    {
+      "scenario_id": "spawn_ack_result_delivery",
+      "surface": "RemoteRuntime",
+      "expected_state": "Completed",
+      "required_observable": "spawn_remote delivers accepted spawn result over TCP loopback"
+    },
+    {
+      "scenario_id": "cancel_while_running_drains_result",
+      "surface": "RemoteHandle::close",
+      "expected_state": "Cancelled",
+      "required_observable": "close sends CancelRequest and drains terminal cancelled result"
+    },
+    {
+      "scenario_id": "cancel_before_ack_drains_result",
+      "surface": "RemoteHandle::close",
+      "expected_state": "Cancelled",
+      "required_observable": "pending handle sends cancel before ack and drains terminal result"
+    },
+    {
+      "scenario_id": "spawn_rejected_cleans_origin_state",
+      "surface": "RemoteRuntime",
+      "expected_state": "Failed",
+      "required_observable": "rejected spawn returns SpawnRejected and clears pending origin state"
+    },
+    {
+      "scenario_id": "lease_renewal_then_result",
+      "surface": "lease_renewal",
+      "expected_state": "Completed",
+      "required_observable": "lease renewal reply is observed before terminal result"
+    },
+    {
+      "scenario_id": "lost_renewal_lease_expiry_cleanup",
+      "surface": "lease_expiry",
+      "expected_state": "LeaseExpired",
+      "required_observable": "lost renewal maps to LeaseExpired and clears runtime state"
+    },
+    {
+      "scenario_id": "send_failure_unregisters_pending_task",
+      "surface": "failure_injection",
+      "expected_state": "Failed",
+      "required_observable": "connect/send failure unregisters pending task"
+    },
+    {
+      "scenario_id": "receive_eof_unregisters_pending_task",
+      "surface": "failure_injection",
+      "expected_state": "Failed",
+      "required_observable": "EOF before reply unregisters pending task"
+    },
+    {
+      "scenario_id": "malformed_envelope_unregisters_pending_task",
+      "surface": "failure_injection",
+      "expected_state": "Failed",
+      "required_observable": "malformed reply returns SerializationError and unregisters pending task"
+    },
+    {
+      "scenario_id": "delayed_ack_preserves_result_delivery",
+      "surface": "failure_injection",
+      "expected_state": "Completed",
+      "required_observable": "delayed ack still preserves ordered result delivery"
+    },
+    {
+      "scenario_id": "duplicate_idempotency_replay_cached_result",
+      "surface": "idempotency",
+      "expected_state": "Completed",
+      "required_observable": "duplicate idempotency key returns cached result without a second execution"
+    },
+    {
+      "scenario_id": "capability_denied_without_remote_cap",
+      "surface": "capability",
+      "expected_state": "Failed",
+      "required_observable": "Cx without RemoteCap fails closed with NoCapability"
+    },
+    {
+      "scenario_id": "phase0_fallback_without_runtime_is_explicit",
+      "surface": "fallback",
+      "expected_state": "Failed",
+      "required_observable": "RemoteCap without runtime uses explicit deterministic fallback"
+    }
+  ],
+  "validation_commands": [
+    "rustfmt --edition 2024 --check tests/remote_transport_lifecycle_contract.rs",
+    "bash -n scripts/run_remote_transport_lifecycle_evidence.sh",
+    "bash scripts/run_remote_transport_lifecycle_evidence.sh --run-id wave2-remote-transport --timeout-sec 180",
+    "rch exec -- env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-C debuginfo=0' CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_wave2_remote_transport_lifecycle cargo test -p asupersync --test remote_transport_lifecycle_contract --features test-internals -- --nocapture",
+    "rch exec -- env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-C debuginfo=0' CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_wave2_remote_transport_clippy cargo clippy -p asupersync --test remote_transport_lifecycle_contract --features test-internals -- -D warnings",
+    "bash scripts/run_wave2_capability_evidence_registry.sh --output-root target/wave2-capability-evidence-registry"
+  ],
+  "acceptance_gates": [
+    "all required log fields are emitted for every scenario",
+    "pending and tracked runtime state counts return to zero after terminal outcomes or spawn failures",
+    "failure injection covers send failure, receive EOF, delayed ack, malformed envelope, and lost renewal",
+    "duplicate idempotency replay does not execute the remote computation twice",
+    "capability denial and no-runtime fallback remain explicit"
+  ],
+  "redaction_verdict": "not_applicable",
+  "residual_risks": [
+    "The production-backed proof is loopback-scoped; remote deployment discovery, TLS, authentication, and WAN retry policy remain adapter-specific surfaces.",
+    "The proof maps src/remote.rs protocol messages through a test-local JSON frame format; a future stable production wire format still needs its own compatibility contract."
+  ]
+}
