@@ -115,12 +115,14 @@ import json
 import os
 import re
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 
 CONTRACT_VERSION = "agent-swarm-coordination-collector-contract-v1"
 BUNDLE_VERSION = "agent-swarm-coordination-workload-bundle-v1"
 EVENT_VERSION = "agent-swarm-coordination-event-v1"
 DEFAULT_GENERATED_AT = "2026-05-05T05:00:00Z"
+STALE_SOURCE_MAX_SECONDS = 24 * 60 * 60
 ADAPTERS = [
     "agent_mail",
     "beads",
@@ -145,6 +147,21 @@ def h(text, size=12):
 
 def canonical(value):
     return json.dumps(value, sort_keys=True, separators=(",", ":"))
+
+
+def parse_instant(value):
+    text = str(value or "")
+    if not text:
+        return None
+    if text.endswith("Z"):
+        text = text[:-1] + "+00:00"
+    try:
+        parsed = datetime.fromisoformat(text)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
 
 
 def pseudonym(prefix, value):
@@ -235,6 +252,34 @@ def event(
     return ev
 
 
+def refresh_source_hash(ev):
+    source_basis = {
+        key: ev[key]
+        for key in [
+            "source_kind",
+            "source_agent",
+            "source_thread_or_bead",
+            "event_ts",
+            "event_kind",
+            "correlation_id",
+            "command_class",
+            "workload_family",
+            "queue_depth_or_lock_state",
+            "file_frontier",
+            "artifact_refs",
+            "redaction_verdict",
+            "refusal_reason",
+        ]
+    }
+    ev["source_hash"] = f"sha256:{hashlib.sha256(canonical(source_basis).encode()).hexdigest()}"
+
+
+def mark_refused(ev, reason):
+    ev["redaction_verdict"] = "refused"
+    ev["refusal_reason"] = reason
+    refresh_source_hash(ev)
+
+
 def refused(kind, path, reason, detail):
     return event(
         source_kind=kind if kind in ADAPTERS else "unknown",
@@ -248,6 +293,14 @@ def refused(kind, path, reason, detail):
         redaction_verdict="refused",
         refusal_reason=reason,
     )
+
+
+def stale_source_event(ev, generated_at):
+    event_time = parse_instant(ev.get("event_ts"))
+    generated_time = parse_instant(generated_at)
+    if event_time is None or generated_time is None:
+        return False
+    return (generated_time - event_time).total_seconds() > STALE_SOURCE_MAX_SECONDS
 
 
 def load_json(path):
@@ -606,6 +659,14 @@ def collect_from_kind(kind, raw, data, path):
 
 
 def materialize(events, output_root, run_id, generated_at, hard_fail):
+    stale_count = 0
+    for ev in events:
+        if ev["redaction_verdict"] != "refused" and stale_source_event(ev, generated_at):
+            mark_refused(ev, "stale_source")
+            stale_count += 1
+    if stale_count:
+        hard_fail = True
+
     pre_sorted = sorted(
         events,
         key=lambda ev: (
@@ -684,6 +745,7 @@ def materialize(events, output_root, run_id, generated_at, hard_fail):
         "accepted_event_count": len(deduped) - refused_count,
         "refused_event_count": refused_count,
         "duplicate_event_count": duplicates,
+        "stale_source_event_count": stale_count,
         "adapter_count": len(ADAPTERS),
         "privacy_verdict": verdict,
         "first_failure_line": first_failure,

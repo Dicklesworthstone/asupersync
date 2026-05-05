@@ -61,8 +61,9 @@ contract sort key.
 The collector keeps message bodies out of bundle content by default. Agent
 names, local paths, worker metadata, and artifact paths are pseudonymized or
 hashed. Inputs that contain token-like material, malformed JSON, unknown source
-kinds, or missing required identifiers fail closed with a refused event and a
-nonzero exit code.
+kinds, missing required identifiers, or source events older than the
+deterministic freshness window fail closed with a refused event and a nonzero
+exit code.
 
 The redaction behavior is constrained by:
 
@@ -88,7 +89,8 @@ The validation checks:
    artifacts.
 4. Fixture events satisfy the workload contract required fields and ordering.
 5. Duplicate message events are suppressed and counted.
-6. Malformed JSON, unsupported sources, and unredacted secrets fail closed.
+6. Malformed JSON, unsupported sources, stale source events, and unredacted
+   secrets fail closed.
 7. Git dirty-frontier inputs retain only path hashes and counts.
 8. Repeated fixture runs produce identical bundle hashes.
 

@@ -179,6 +179,7 @@ fn artifact_lists_required_modes_adapters_outputs_and_fail_closed_cases() {
         BTreeSet::from([
             "malformed_json",
             "missing_required_identifier",
+            "stale_source",
             "unknown_source_kind",
             "unredacted_secret",
         ])
@@ -408,6 +409,60 @@ fn unredacted_secret_source_fails_closed_and_does_not_leak_token() {
     .expect("read bundle");
     assert!(!output_text.contains("REDACTION_FIXTURE_TOKEN_12345"));
     assert!(output_text.contains("unredacted_secret"));
+}
+
+#[test]
+fn stale_source_input_fails_closed_with_refused_event() {
+    let root = temp_root("stale");
+    let source = root.join("mail.json");
+    fs::write(
+        &source,
+        r#"[{"id":7,"from":"BlueMountain","thread_id":"asupersync-d87ytw.1","created_ts":"2026-05-03T05:00:00Z","subject":"old source","body_md":"metadata-only body"}]"#,
+    )
+    .expect("write stale source");
+    let out = run_script_owned(&[
+        "--execute".into(),
+        "--source".into(),
+        format!("agent_mail:{}", source.to_string_lossy()),
+        "--output-root".into(),
+        root.to_string_lossy().into_owned(),
+        "--run-id".into(),
+        "stale-source".into(),
+        "--generated-at".into(),
+        "2026-05-05T05:00:00Z".into(),
+    ]);
+    assert!(!out.status.success(), "stale source must fail closed");
+
+    let report: Value = serde_json::from_str(
+        &fs::read_to_string(
+            root.join("stale-source")
+                .join("coordination-collector-report.json"),
+        )
+        .expect("read stale report"),
+    )
+    .expect("parse stale report");
+    assert_eq!(report["privacy_verdict"], "fail_closed");
+    assert_eq!(report["stale_source_event_count"].as_u64(), Some(1));
+    assert!(
+        report["first_failure_line"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("stale_source")
+    );
+
+    let bundle: Value = serde_json::from_str(
+        &fs::read_to_string(
+            root.join("stale-source")
+                .join("coordination-workload-bundle.json"),
+        )
+        .expect("read stale bundle"),
+    )
+    .expect("parse stale bundle");
+    let event = &bundle["events"][0];
+    assert_eq!(event["redaction_verdict"], "refused");
+    assert_eq!(event["refusal_reason"], "stale_source");
+    let bundle_text = serde_json::to_string(&bundle).expect("serialize stale bundle");
+    assert!(!bundle_text.contains("metadata-only body"));
 }
 
 #[test]

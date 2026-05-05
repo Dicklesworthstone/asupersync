@@ -128,6 +128,11 @@
       "exit_code": 3
     },
     {
+      "case": "stale_source",
+      "refusal_reason": "stale_source",
+      "exit_code": 3
+    },
+    {
       "case": "unredacted_secret",
       "refusal_reason": "unredacted_secret",
       "exit_code": 3
@@ -138,7 +143,8 @@
     "No raw absolute local path is retained; dirty-frontier paths are represented by hashes and counts.",
     "No raw rch worker name is retained; worker pool is recorded as redacted metadata.",
     "No source is read unless named by --source or supplied by --fixture.",
-    "Malformed or secret-bearing source input writes a refused event and exits nonzero."
+    "Malformed or secret-bearing source input writes a refused event and exits nonzero.",
+    "Events older than the deterministic freshness window write refused stale_source rows and exit nonzero."
   ],
   "validation_commands": [
     "bash -n scripts/run_agent_swarm_coordination_collector.sh",
