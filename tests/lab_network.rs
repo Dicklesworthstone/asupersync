@@ -1,5 +1,3 @@
-#![allow(warnings)]
-#![allow(clippy::all)]
 //! Deterministic network simulation integration tests.
 
 use asupersync::bytes::Bytes;
