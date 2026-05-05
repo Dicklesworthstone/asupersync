@@ -1,5 +1,3 @@
-#![allow(warnings)]
-#![allow(clippy::all)]
 //! HTTP/1.1 protocol conformance — gaps not covered by sibling h1_* files.
 //!
 //! Most surfaces in the user-listed RFC 7230/7231 set are already covered:
