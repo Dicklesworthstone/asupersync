@@ -1,14 +1,9 @@
-use asupersync::observability::otel::OtelMetrics;
+use asupersync::observability::metrics::{HistogramSnapshot, Metrics};
 use clap::{Arg, Command};
-use opentelemetry::metrics::{Histogram, Meter};
-use opentelemetry_sdk::Resource;
-use opentelemetry_sdk::metrics::{ManualReader, PeriodicReader, SdkMeterProvider};
-use std::collections::HashMap;
-use std::sync::Arc;
 
 /// Metric aggregator conformance testing.
-/// Compares our histogram implementation against opentelemetry-sdk reference
-/// for identical bucket boundaries and counts given the same data points.
+/// Records through the live asupersync histogram implementation and compares
+/// exported snapshots against a deterministic OTLP-style bucket model.
 fn main() {
     env_logger::init();
 
@@ -19,7 +14,7 @@ fn main() {
                 .long("test")
                 .value_name("NAME")
                 .help(
-                    "Run specific test case (basic, custom-buckets, large-dataset, extreme-values)",
+                    "Run specific test case (basic, custom-buckets, large-dataset, extreme-values, export, cardinality)",
                 )
                 .action(clap::ArgAction::Set),
         )
@@ -35,12 +30,14 @@ fn main() {
     let verbose = matches.get_flag("verbose");
     let test_name = matches.get_one::<String>("test");
 
-    let test_cases = vec![
+    let test_cases: Vec<(&str, fn(bool) -> TestResult)> = vec![
         ("basic", test_basic_histogram),
         ("custom-buckets", test_custom_buckets),
         ("large-dataset", test_large_dataset),
         ("extreme-values", test_extreme_values),
         ("comprehensive", test_comprehensive_scenario),
+        ("export", test_prometheus_export),
+        ("cardinality", test_cardinality_cap),
     ];
 
     let mut total_tests = 0;
@@ -77,51 +74,71 @@ fn main() {
     }
 }
 
-type TestResult = Result<(), Box<dyn std::error::Error>>;
+type TestResult = Result<(), String>;
 
 // =============================================================================
 // Histogram Data Comparison
 // =============================================================================
 
-#[derive(Debug, Clone, PartialEq)]
-struct HistogramSnapshot {
-    buckets: Vec<(f64, u64)>, // (upper_bound, count)
-    count: u64,
-    sum: f64,
-    min: Option<f64>,
-    max: Option<f64>,
+fn live_histogram_snapshot(
+    name: &str,
+    boundaries: Vec<f64>,
+    observations: &[f64],
+) -> HistogramSnapshot {
+    let mut metrics = Metrics::new();
+    let histogram = metrics.histogram(name, boundaries);
+    for &observation in observations {
+        histogram.observe(observation);
+    }
+    histogram.snapshot()
 }
 
-/// Extracts histogram data from OpenTelemetry SDK metrics
-fn extract_otel_histogram(
-    meter: &Meter,
+fn reference_histogram_snapshot(
     name: &str,
-) -> Result<HistogramSnapshot, Box<dyn std::error::Error>> {
-    // Note: This is a simplified extraction since we can't easily access internal state
-    // In a real conformance test, you'd use the metrics exporter interface
-    Ok(HistogramSnapshot {
-        buckets: vec![],
-        count: 0,
-        sum: 0.0,
-        min: None,
-        max: None,
-    })
+    mut boundaries: Vec<f64>,
+    observations: &[f64],
+) -> HistogramSnapshot {
+    boundaries.sort_by(|left, right| left.partial_cmp(right).unwrap_or(std::cmp::Ordering::Equal));
+    let mut bucket_counts = vec![0; boundaries.len() + 1];
+    let mut sum = 0.0;
+
+    for &observation in observations {
+        let bucket_index = boundaries
+            .iter()
+            .position(|&boundary| observation <= boundary)
+            .unwrap_or(boundaries.len());
+        bucket_counts[bucket_index] += 1;
+        sum += observation;
+    }
+
+    HistogramSnapshot {
+        name: name.to_string(),
+        bucket_boundaries: boundaries,
+        bucket_counts,
+        count: u64::try_from(observations.len())
+            .expect("histogram conformance observation count fits u64"),
+        sum,
+    }
 }
 
-/// Extracts histogram data from our OtelMetrics implementation
-fn extract_asupersync_histogram(
-    metrics: &OtelMetrics,
+fn verify_histogram_case(
     name: &str,
-) -> Result<HistogramSnapshot, Box<dyn std::error::Error>> {
-    // Note: This would need to access internal state of our metrics implementation
-    // For now, return empty snapshot as placeholder
-    Ok(HistogramSnapshot {
-        buckets: vec![],
-        count: 0,
-        sum: 0.0,
-        min: None,
-        max: None,
-    })
+    boundaries: Vec<f64>,
+    observations: &[f64],
+    verbose: bool,
+) -> TestResult {
+    let live = live_histogram_snapshot(name, boundaries.clone(), observations);
+    let reference = reference_histogram_snapshot(name, boundaries, observations);
+    compare_histograms(&live, &reference, 1e-9)?;
+
+    if verbose {
+        println!("  Histogram: {}", live.name);
+        println!("  Boundaries: {:?}", live.bucket_boundaries);
+        println!("  Bucket counts: {:?}", live.bucket_counts);
+        println!("  Count: {}, sum: {:.6}", live.count, live.sum);
+    }
+
+    Ok(())
 }
 
 /// Compares two histogram snapshots for conformance
@@ -130,18 +147,26 @@ fn compare_histograms(
     reference: &HistogramSnapshot,
     tolerance: f64,
 ) -> Result<(), String> {
-    // Compare bucket boundaries
-    if our.buckets.len() != reference.buckets.len() {
+    if our.name != reference.name {
         return Err(format!(
-            "Bucket count mismatch: our {} vs ref {}",
-            our.buckets.len(),
-            reference.buckets.len()
+            "Histogram name mismatch: our {} vs ref {}",
+            our.name, reference.name
         ));
     }
 
-    // Compare bucket upper bounds
-    for (i, ((our_bound, our_count), (ref_bound, ref_count))) in
-        our.buckets.iter().zip(reference.buckets.iter()).enumerate()
+    if our.bucket_boundaries.len() != reference.bucket_boundaries.len() {
+        return Err(format!(
+            "Bucket boundary count mismatch: our {} vs ref {}",
+            our.bucket_boundaries.len(),
+            reference.bucket_boundaries.len()
+        ));
+    }
+
+    for (i, (our_bound, ref_bound)) in our
+        .bucket_boundaries
+        .iter()
+        .zip(reference.bucket_boundaries.iter())
+        .enumerate()
     {
         let bound_diff = (our_bound - ref_bound).abs();
         if bound_diff > tolerance {
@@ -150,7 +175,22 @@ fn compare_histograms(
                 i, our_bound, ref_bound, bound_diff
             ));
         }
+    }
 
+    if our.bucket_counts.len() != reference.bucket_counts.len() {
+        return Err(format!(
+            "Bucket count length mismatch: our {} vs ref {}",
+            our.bucket_counts.len(),
+            reference.bucket_counts.len()
+        ));
+    }
+
+    for (i, (our_count, ref_count)) in our
+        .bucket_counts
+        .iter()
+        .zip(reference.bucket_counts.iter())
+        .enumerate()
+    {
         if our_count != ref_count {
             return Err(format!(
                 "Bucket {} count mismatch: our {} vs ref {}",
@@ -189,30 +229,8 @@ fn test_basic_histogram(verbose: bool) -> TestResult {
     }
 
     let test_data = vec![1.0, 2.5, 4.0, 7.5, 15.0, 30.0, 60.0, 120.0];
-
-    // Create OpenTelemetry SDK histogram
-    let exporter = opentelemetry_sdk::metrics::ManualReader::builder().build();
-    let provider = SdkMeterProvider::builder()
-        .with_reader(exporter)
-        .with_resource(Resource::default())
-        .build();
-    let meter = provider.meter("test");
-
-    let otel_histogram = meter.f64_histogram("test_metric").init();
-
-    // Record data points
-    for value in &test_data {
-        otel_histogram.record(*value, &[]);
-    }
-
-    // Create our histogram (placeholder - would need actual implementation)
-    // let our_metrics = OtelMetrics::new(meter.clone());
-    // For now, we'll simulate the comparison
-
-    // In a real test, we'd:
-    // 1. Record the same data points to our histogram
-    // 2. Export metrics from both implementations
-    // 3. Compare bucket boundaries and counts
+    let boundaries = vec![1.0, 5.0, 10.0, 30.0, 60.0, 120.0];
+    verify_histogram_case("test_metric", boundaries, &test_data, verbose)?;
 
     if verbose {
         println!(
@@ -220,7 +238,6 @@ fn test_basic_histogram(verbose: bool) -> TestResult {
             test_data.len(),
             test_data
         );
-        println!("  Bucket comparison: [simulated] ✓");
     }
 
     Ok(())
@@ -234,22 +251,16 @@ fn test_custom_buckets(verbose: bool) -> TestResult {
 
     let custom_boundaries = vec![0.1, 0.5, 1.0, 2.0, 5.0, 10.0, 20.0, 50.0, 100.0];
     let test_data = vec![0.05, 0.3, 0.7, 1.5, 3.0, 7.0, 15.0, 35.0, 75.0, 150.0];
-
-    // Both implementations should use the same custom boundaries
-    // and produce identical bucket counts for the same data
+    verify_histogram_case(
+        "custom_bucket_metric",
+        custom_boundaries.clone(),
+        &test_data,
+        verbose,
+    )?;
 
     if verbose {
         println!("  Custom boundaries: {:?}", custom_boundaries);
         println!("  Test data: {:?}", test_data);
-
-        // Simulate bucket assignment
-        for value in &test_data {
-            let bucket_index = custom_boundaries
-                .iter()
-                .position(|&boundary| *value <= boundary)
-                .unwrap_or(custom_boundaries.len());
-            println!("  Value {} -> bucket {}", value, bucket_index);
-        }
     }
 
     Ok(())
@@ -268,9 +279,8 @@ fn test_large_dataset(verbose: bool) -> TestResult {
         let value = (i as f64 / 100.0) % 50.0; // 0-50 range with cycling
         test_data.push(value);
     }
-
-    // Both implementations should handle large datasets identically
-    // and produce the same bucket distributions
+    let boundaries = vec![0.5, 1.0, 2.5, 5.0, 10.0, 25.0, 50.0];
+    verify_histogram_case("large_dataset_metric", boundaries, &test_data, verbose)?;
 
     if verbose {
         println!("  Dataset size: {} points", test_data.len());
@@ -290,16 +300,9 @@ fn test_extreme_values(verbose: bool) -> TestResult {
         println!("  Testing extreme values");
     }
 
-    let extreme_values = vec![
-        f64::MIN_POSITIVE,
-        1e-10,
-        1e10,
-        f64::MAX / 2.0,
-        // Note: We avoid f64::INFINITY and f64::NAN as they may not be handled consistently
-    ];
-
-    // Both implementations should handle extreme values identically
-    // This tests the robustness of the bucketing algorithm
+    let extreme_values = vec![f64::MIN_POSITIVE, 1e-10, 1e10, f64::MAX / 2.0];
+    let boundaries = vec![1e-12, 1e-6, 1.0, 1e6, 1e12, f64::MAX / 4.0];
+    verify_histogram_case("extreme_value_metric", boundaries, &extreme_values, verbose)?;
 
     if verbose {
         println!("  Extreme values: {:?}", extreme_values);
@@ -317,7 +320,6 @@ fn test_comprehensive_scenario(verbose: bool) -> TestResult {
         println!("  Testing comprehensive metric aggregation scenario");
     }
 
-    // Simulate a real application scenario with multiple histograms
     let scenarios = vec![
         (
             "request_duration",
@@ -336,16 +338,97 @@ fn test_comprehensive_scenario(verbose: bool) -> TestResult {
         ),
     ];
 
-    for (name, _boundaries, data) in scenarios {
+    for (name, boundaries, data) in scenarios {
+        verify_histogram_case(name, boundaries, &data, verbose)?;
         if verbose {
             println!("  Scenario: {} with {} data points", name, data.len());
         }
-
-        // In a real test, we would:
-        // 1. Create histograms with the specified boundaries
-        // 2. Record the test data
-        // 3. Export and compare the results
     }
+
+    Ok(())
+}
+
+/// Test cumulative export behavior against the same live histogram snapshot.
+fn test_prometheus_export(verbose: bool) -> TestResult {
+    if verbose {
+        println!("  Testing cumulative Prometheus export");
+    }
+
+    let mut metrics = Metrics::new();
+    let histogram = metrics.histogram("export_metric", vec![1.0, 5.0]);
+    for observation in [0.5, 1.0, 2.0, 7.0] {
+        histogram.observe(observation);
+    }
+
+    let snapshot = histogram.snapshot();
+    let reference =
+        reference_histogram_snapshot("export_metric", vec![1.0, 5.0], &[0.5, 1.0, 2.0, 7.0]);
+    compare_histograms(&snapshot, &reference, 1e-9)?;
+
+    let exported = metrics.export_prometheus();
+    for expected in [
+        "# TYPE export_metric histogram",
+        "export_metric_bucket{le=\"1\"} 2",
+        "export_metric_bucket{le=\"5\"} 3",
+        "export_metric_bucket{le=\"+Inf\"} 4",
+        "export_metric_sum 10.5",
+        "export_metric_count 4",
+    ] {
+        if !exported.contains(expected) {
+            return Err(format!(
+                "Missing expected export line {expected:?} in {exported:?}"
+            ));
+        }
+    }
+
+    Ok(())
+}
+
+/// Test histogram cardinality pressure routes new instruments to the overflow bucket.
+fn test_cardinality_cap(verbose: bool) -> TestResult {
+    if verbose {
+        println!("  Testing histogram cardinality cap behavior");
+    }
+
+    let mut metrics = Metrics::with_cardinality_cap(1);
+    let first = metrics.histogram("cardinality_first", vec![1.0]);
+    let overflow = metrics.histogram("cardinality_second", vec![1.0]);
+
+    first.observe(0.5);
+    overflow.observe(2.0);
+
+    let (_, _, histogram_rejections, _) = metrics.overflow_rejections();
+    if histogram_rejections != 1 {
+        return Err(format!(
+            "Histogram cardinality rejection mismatch: got {histogram_rejections}, expected 1"
+        ));
+    }
+
+    let first_snapshot = first.snapshot();
+    if first_snapshot.name != "cardinality_first" {
+        return Err(format!(
+            "First histogram name changed unexpectedly: {}",
+            first_snapshot.name
+        ));
+    }
+    compare_histograms(
+        &first_snapshot,
+        &reference_histogram_snapshot("cardinality_first", vec![1.0], &[0.5]),
+        1e-9,
+    )?;
+
+    let overflow_snapshot = overflow.snapshot();
+    if overflow_snapshot.name != "asupersync_metric_cardinality_overflow" {
+        return Err(format!(
+            "Overflow histogram name mismatch: {}",
+            overflow_snapshot.name
+        ));
+    }
+    compare_histograms(
+        &overflow_snapshot,
+        &reference_histogram_snapshot("asupersync_metric_cardinality_overflow", vec![1.0], &[2.0]),
+        1e-9,
+    )?;
 
     Ok(())
 }
@@ -357,19 +440,19 @@ mod tests {
     #[test]
     fn test_histogram_comparison() {
         let hist1 = HistogramSnapshot {
-            buckets: vec![(1.0, 5), (5.0, 10), (10.0, 15)],
+            name: "latency".to_string(),
+            bucket_boundaries: vec![1.0, 5.0, 10.0],
+            bucket_counts: vec![5, 10, 15, 0],
             count: 30,
             sum: 180.0,
-            min: Some(0.1),
-            max: Some(9.5),
         };
 
         let hist2 = HistogramSnapshot {
-            buckets: vec![(1.0, 5), (5.0, 10), (10.0, 15)],
+            name: "latency".to_string(),
+            bucket_boundaries: vec![1.0, 5.0, 10.0],
+            bucket_counts: vec![5, 10, 15, 0],
             count: 30,
             sum: 180.0,
-            min: Some(0.1),
-            max: Some(9.5),
         };
 
         assert!(compare_histograms(&hist1, &hist2, 1e-6).is_ok());
@@ -378,19 +461,19 @@ mod tests {
     #[test]
     fn test_histogram_mismatch() {
         let hist1 = HistogramSnapshot {
-            buckets: vec![(1.0, 5), (5.0, 10)],
+            name: "latency".to_string(),
+            bucket_boundaries: vec![1.0, 5.0],
+            bucket_counts: vec![5, 10, 0],
             count: 15,
             sum: 90.0,
-            min: Some(0.1),
-            max: Some(4.5),
         };
 
         let hist2 = HistogramSnapshot {
-            buckets: vec![(1.0, 5), (5.0, 12)], // Different count
+            name: "latency".to_string(),
+            bucket_boundaries: vec![1.0, 5.0],
+            bucket_counts: vec![5, 12, 0],
             count: 17,
             sum: 95.0,
-            min: Some(0.1),
-            max: Some(4.5),
         };
 
         assert!(compare_histograms(&hist1, &hist2, 1e-6).is_err());

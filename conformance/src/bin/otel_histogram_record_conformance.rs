@@ -1,8 +1,9 @@
 //! OpenTelemetry Histogram Record Conformance Test (Tick #146)
 //!
 //! This conformance test verifies that our Histogram.record() implementation
-//! produces identical bucket counts, sum, and count values compared to
-//! opentelemetry-sdk when given the same sequence of observations.
+//! produces expected bucket counts, sum, and count values from the live
+//! asupersync metrics implementation when given the same sequence of
+//! observations.
 //!
 //! Key OTLP specification requirements tested:
 //! - Bucket boundaries and value assignment
@@ -12,12 +13,7 @@
 //! - Edge case handling (infinity, zero, negative values)
 
 use asupersync::observability::metrics::{Histogram, Metrics};
-use opentelemetry::metrics::{Histogram as OtelHistogram, MeterProvider};
-use opentelemetry_sdk::Resource;
-use opentelemetry_sdk::metrics::{PeriodicReader, SdkMeterProvider, data};
-use std::collections::{BTreeMap, HashMap};
-use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::sync::Arc;
 
 /// Test cases for histogram recording conformance
 struct HistogramRecordTestCase {
@@ -47,31 +43,9 @@ impl HistogramData {
     }
 }
 
-/// Mock exporter for capturing histogram data from opentelemetry-sdk
-#[derive(Debug, Default)]
-struct MockHistogramExporter {
-    captured_data: Arc<Mutex<Vec<HistogramData>>>,
-}
-
-impl MockHistogramExporter {
-    fn new() -> Self {
-        Self {
-            captured_data: Arc::new(Mutex::new(Vec::new())),
-        }
-    }
-
-    fn get_captured_data(&self) -> Vec<HistogramData> {
-        self.captured_data.lock().unwrap().clone()
-    }
-
-    fn clear(&self) {
-        self.captured_data.lock().unwrap().clear();
-    }
-}
-
 fn main() {
     println!("🔍 OpenTelemetry Histogram Record Conformance Test");
-    println!("Verifying same observations → identical bucket counts + sum + count");
+    println!("Verifying live asupersync observations → bucket counts + sum + count");
 
     let test_cases = vec![
         HistogramRecordTestCase {
@@ -149,7 +123,7 @@ fn main() {
         // Test our implementation
         let our_histogram_data = test_our_histogram_recording(test_case);
 
-        // Test reference implementation
+        // Test the deterministic reference bucket model
         let reference_histogram_data = test_reference_histogram_recording(test_case);
 
         // Compare results
@@ -170,7 +144,7 @@ fn main() {
     println!("\n📊 Histogram Record Conformance Test Results");
     if failed_tests.is_empty() {
         println!("✅ ALL TESTS PASSED - Histogram recording is conformant");
-        println!("🎯 Bucket counts, sum, and count match opentelemetry-sdk exactly");
+        println!("🎯 Bucket counts, sum, and count match the reference bucket model");
     } else {
         println!("❌ {} TESTS FAILED:", failed_tests.len());
         for (test_name, error) in &failed_tests {
@@ -190,85 +164,57 @@ fn test_our_histogram_recording(test_case: &HistogramRecordTestCase) -> Histogra
         histogram.observe(observation);
     }
 
-    // Extract histogram data
+    // Extract histogram data from the live asupersync snapshot seam.
+    let snapshot = histogram.snapshot();
     let bucket_counts = extract_our_bucket_counts(&histogram);
     let sum = extract_our_sum(&histogram);
     let count = extract_our_count(&histogram);
 
-    HistogramData::new(
-        bucket_counts,
-        sum,
-        count,
-        test_case.bucket_boundaries.clone(),
-    )
+    HistogramData::new(bucket_counts, sum, count, snapshot.bucket_boundaries)
 }
 
-/// Test reference opentelemetry-sdk histogram recording
+/// Test deterministic OTLP-style histogram bucket assignment.
 fn test_reference_histogram_recording(test_case: &HistogramRecordTestCase) -> HistogramData {
-    // TODO: Replace with actual opentelemetry-sdk histogram implementation
-    // For now, simulate the reference behavior using our algorithm
-
-    // Create a manual histogram that follows OTLP specification exactly
+    let mut sorted_boundaries = test_case.bucket_boundaries.clone();
+    sorted_boundaries.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
     let mut bucket_counts = vec![0u64; test_case.bucket_boundaries.len() + 1];
     let mut sum = 0.0;
     let mut count = 0u64;
 
     for &observation in &test_case.observations {
-        // Find bucket index using OTLP specification logic
-        let bucket_index = test_case
-            .bucket_boundaries
+        let bucket_index = sorted_boundaries
             .iter()
             .position(|&boundary| observation <= boundary)
-            .unwrap_or(test_case.bucket_boundaries.len());
+            .unwrap_or(sorted_boundaries.len());
 
         bucket_counts[bucket_index] += 1;
         sum += observation;
         count += 1;
     }
 
-    HistogramData::new(
-        bucket_counts,
-        sum,
-        count,
-        test_case.bucket_boundaries.clone(),
-    )
+    HistogramData::new(bucket_counts, sum, count, sorted_boundaries)
 }
 
 /// Extract bucket counts from our histogram implementation
 fn extract_our_bucket_counts(histogram: &Arc<Histogram>) -> Vec<u64> {
-    // TODO: Replace with actual method to extract bucket counts from asupersync Histogram
-    // This requires accessing the internal counts field
-
-    // For now, simulate extraction - in real implementation this would be:
-    // histogram.get_bucket_counts() or similar
-    vec![0; 6] // Placeholder
+    histogram.snapshot().bucket_counts
 }
 
 /// Extract sum from our histogram implementation
 fn extract_our_sum(histogram: &Arc<Histogram>) -> f64 {
-    // TODO: Replace with actual method to extract sum from asupersync Histogram
-    // This requires accessing the internal sum field and converting from bits
-
-    // For now, simulate extraction - in real implementation this would be:
-    // f64::from_bits(histogram.sum.load(Ordering::Relaxed))
-    0.0 // Placeholder
+    histogram.snapshot().sum
 }
 
 /// Extract count from our histogram implementation
 fn extract_our_count(histogram: &Arc<Histogram>) -> u64 {
-    // TODO: Replace with actual method to extract count from asupersync Histogram
-    // This requires accessing the internal count field
-
-    // For now, simulate extraction - in real implementation this would be:
-    // histogram.count.load(Ordering::Relaxed)
-    0 // Placeholder
+    histogram.snapshot().count
 }
 
 /// Compare histogram data between implementations
 fn compare_histogram_data(
     our_data: &HistogramData,
     reference_data: &HistogramData,
-    test_case: &HistogramRecordTestCase,
+    _test_case: &HistogramRecordTestCase,
 ) -> Result<(), String> {
     // Check bucket counts
     if our_data.bucket_counts.len() != reference_data.bucket_counts.len() {

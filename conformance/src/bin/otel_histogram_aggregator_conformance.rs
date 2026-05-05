@@ -1,92 +1,68 @@
-//! OpenTelemetry Histogram Aggregator Conformance Test (Tick #128)
+//! OpenTelemetry Histogram Aggregator Conformance Test (br-asupersync-j5f)
 //!
-//! This conformance test verifies that our Histogram aggregator produces
-//! identical bucket distributions compared to the opentelemetry-sdk reference
-//! implementation, specifically focusing on exponential bucket boundaries.
+//! This conformance test records through the live asupersync histogram API and
+//! compares the exported snapshot with a deterministic explicit-boundary
+//! reference model. The production histogram surface currently exposes count,
+//! sum, explicit bucket boundaries, and per-bucket counts; min/max and
+//! attribute-scoped data points are not claimed here.
 
-use asupersync::observability::otel::{MetricsSnapshot, OtelMetrics};
-use opentelemetry::metrics::{Histogram, Meter};
-use opentelemetry_sdk::Resource;
-use opentelemetry_sdk::metrics::{
-    ManualReader, SdkMeterProvider, Temporality,
-    data::{Histogram as SdkHistogram, MetricKind, ResourceMetrics},
-};
-use std::collections::BTreeMap;
+use asupersync::observability::metrics::{HistogramSnapshot, Metrics};
 
 /// Test cases for Histogram aggregator conformance.
 struct HistogramAggregatorTestCase {
     name: &'static str,
     histogram_name: &'static str,
-    observations: Vec<(Vec<(&'static str, &'static str)>, Vec<f64>)>, // (labels, values)
-    bucket_boundaries: Option<Vec<f64>>, // None for default exponential buckets
+    observations: Vec<f64>,
+    bucket_boundaries: Vec<f64>,
     description: &'static str,
 }
 
 fn main() {
     println!("🔍 OpenTelemetry Histogram Aggregator Conformance Test");
-    println!("Verifying exponential bucket boundaries produce identical distributions");
+    println!("Verifying live asupersync histogram snapshots");
 
     let test_cases = vec![
         HistogramAggregatorTestCase {
-            name: "exponential_buckets_default",
+            name: "default_explicit_buckets",
             histogram_name: "request_duration",
-            observations: vec![
-                (
-                    vec![("method", "GET"), ("status", "200")],
-                    vec![0.1, 0.2, 0.5, 1.0, 2.5],
-                ),
-                (
-                    vec![("method", "POST"), ("status", "201")],
-                    vec![0.05, 0.15, 0.8, 1.5],
-                ),
-            ],
-            bucket_boundaries: None, // Use default exponential boundaries
-            description: "Default exponential bucket boundaries with mixed observations",
+            observations: vec![0.05, 0.1, 0.15, 0.2, 0.5, 0.8, 1.0, 1.5, 2.5],
+            bucket_boundaries: default_explicit_boundaries(),
+            description: "Default explicit bucket boundaries with mixed observations",
         },
         HistogramAggregatorTestCase {
-            name: "exponential_buckets_custom",
+            name: "custom_explicit_buckets",
             histogram_name: "response_size_bytes",
-            observations: vec![
-                (
-                    vec![("endpoint", "/api/users")],
-                    vec![100.0, 1000.0, 10000.0, 100000.0],
-                ),
-                (vec![("endpoint", "/api/orders")], vec![50.0, 500.0, 5000.0]),
-            ],
-            bucket_boundaries: Some(vec![10.0, 100.0, 1000.0, 10000.0, 100000.0, 1000000.0]),
-            description: "Custom exponential bucket boundaries for response sizes",
+            observations: vec![50.0, 100.0, 500.0, 1000.0, 5000.0, 10000.0, 100000.0],
+            bucket_boundaries: vec![10.0, 100.0, 1000.0, 10000.0, 100000.0, 1000000.0],
+            description: "Custom explicit bucket boundaries for response sizes",
         },
         HistogramAggregatorTestCase {
-            name: "exponential_edge_values",
+            name: "boundary_edge_values",
             histogram_name: "latency_ms",
             observations: vec![
-                (
-                    vec![("service", "auth")],
-                    vec![0.001, 999.999, 1000.0, 1000.001],
-                ),
-                (
-                    vec![("service", "db")],
-                    vec![0.0, f64::EPSILON, f64::MAX / 1e10],
-                ),
+                0.0,
+                f64::EPSILON,
+                0.001,
+                999.999,
+                1000.0,
+                1000.001,
+                f64::MAX / 1e10,
             ],
-            bucket_boundaries: Some(vec![0.001, 0.01, 0.1, 1.0, 10.0, 100.0, 1000.0, 10000.0]),
+            bucket_boundaries: vec![0.001, 0.01, 0.1, 1.0, 10.0, 100.0, 1000.0, 10000.0],
             description: "Edge values near bucket boundaries",
         },
         HistogramAggregatorTestCase {
             name: "single_bucket_multiple_values",
             histogram_name: "cpu_usage",
-            observations: vec![
-                (vec![("host", "server-1")], vec![0.1, 0.15, 0.2, 0.25, 0.3]),
-                (vec![("host", "server-2")], vec![0.12, 0.18, 0.22]),
-            ],
-            bucket_boundaries: Some(vec![0.5, 1.0]), // All values fall in first bucket
+            observations: vec![0.1, 0.12, 0.15, 0.18, 0.2, 0.22, 0.25, 0.3],
+            bucket_boundaries: vec![0.5, 1.0],
             description: "Multiple values falling in same bucket",
         },
         HistogramAggregatorTestCase {
-            name: "exponential_wide_range",
+            name: "wide_range_explicit_buckets",
             histogram_name: "file_size",
-            observations: vec![(vec![("type", "log")], vec![1e-6, 1e-3, 1.0, 1e3, 1e6, 1e9])],
-            bucket_boundaries: Some(vec![1e-9, 1e-6, 1e-3, 1.0, 1e3, 1e6, 1e9, 1e12]),
+            observations: vec![1e-6, 1e-3, 1.0, 1e3, 1e6, 1e9],
+            bucket_boundaries: vec![1e-9, 1e-6, 1e-3, 1.0, 1e3, 1e6, 1e9, 1e12],
             description: "Wide range exponential values across many orders of magnitude",
         },
     ];
@@ -101,13 +77,9 @@ fn main() {
     for test_case in &test_cases {
         println!("  Testing {}: {}", test_case.name, test_case.description);
 
-        // Test our implementation
         let our_histogram_data = test_our_histogram_aggregator(test_case);
-
-        // Test reference implementation
         let reference_histogram_data = test_reference_histogram_aggregator(test_case);
 
-        // Compare results
         if let Err(error) =
             compare_histogram_data(&our_histogram_data, &reference_histogram_data, test_case)
         {
@@ -125,7 +97,7 @@ fn main() {
     println!("\n📊 Histogram Aggregator Conformance Test Results");
     if failed_tests.is_empty() {
         println!("✅ ALL TESTS PASSED - Histogram aggregator is conformant");
-        println!("🎯 Exponential bucket distributions match opentelemetry-sdk exactly");
+        println!("🎯 Live snapshot bucket distributions match the explicit-boundary model");
     } else {
         println!("❌ {} TESTS FAILED:", failed_tests.len());
         for (test_name, error) in &failed_tests {
@@ -138,7 +110,7 @@ fn main() {
 /// Our test representation of Histogram data.
 #[derive(Debug, Clone, PartialEq)]
 struct HistogramDataPoint {
-    labels: Vec<(String, String)>,
+    name: String,
     bucket_counts: Vec<u64>,
     bucket_boundaries: Vec<f64>,
     count: u64,
@@ -148,220 +120,107 @@ struct HistogramDataPoint {
 }
 
 /// Test our Histogram aggregator implementation.
-fn test_our_histogram_aggregator(
-    test_case: &HistogramAggregatorTestCase,
-) -> Vec<HistogramDataPoint> {
-    // Create OtelMetrics instance
-    let meter = create_test_meter("asupersync_test");
-    let mut otel_metrics = OtelMetrics::new(meter.clone());
+fn test_our_histogram_aggregator(test_case: &HistogramAggregatorTestCase) -> HistogramDataPoint {
+    let mut metrics = Metrics::new();
+    let histogram = metrics.histogram(
+        test_case.histogram_name,
+        test_case.bucket_boundaries.clone(),
+    );
 
-    // Create histogram with custom boundaries if specified
-    let histogram = if let Some(boundaries) = &test_case.bucket_boundaries {
-        meter
-            .f64_histogram(test_case.histogram_name)
-            .with_boundaries(boundaries.clone())
-            .build()
-    } else {
-        meter.f64_histogram(test_case.histogram_name).build()
-    };
-
-    // Record observations
-    for (labels, values) in &test_case.observations {
-        let kvs: Vec<_> = labels
-            .iter()
-            .map(|(k, v)| opentelemetry::KeyValue::new(*k, *v))
-            .collect();
-
-        for &value in values {
-            histogram.record(value, &kvs);
-        }
+    for &value in &test_case.observations {
+        histogram.observe(value);
     }
 
-    // Get metrics snapshot
-    let snapshot = otel_metrics.snapshot();
-
-    // Convert to our test format
-    extract_histogram_data_from_snapshot(&snapshot, test_case.histogram_name)
+    histogram_data_from_snapshot(histogram.snapshot())
 }
 
-/// Test reference opentelemetry-sdk Histogram aggregator.
+/// Test the deterministic explicit-boundary reference model.
 fn test_reference_histogram_aggregator(
     test_case: &HistogramAggregatorTestCase,
-) -> Vec<HistogramDataPoint> {
-    // Create SDK meter provider with manual reader
-    let reader = ManualReader::builder()
-        .with_temporality(Temporality::Cumulative)
-        .build();
+) -> HistogramDataPoint {
+    let mut boundaries = test_case.bucket_boundaries.clone();
+    boundaries.sort_by(|left, right| left.partial_cmp(right).unwrap_or(std::cmp::Ordering::Equal));
+    let mut bucket_counts = vec![0; boundaries.len() + 1];
+    let mut sum = 0.0;
 
-    let provider = SdkMeterProvider::builder()
-        .with_reader(reader.clone())
-        .with_resource(Resource::new(vec![opentelemetry::KeyValue::new(
-            "service.name",
-            "test",
-        )]))
-        .build();
-
-    let meter = provider.meter("test");
-
-    // Create histogram with custom boundaries if specified
-    let histogram = if let Some(boundaries) = &test_case.bucket_boundaries {
-        meter
-            .f64_histogram(test_case.histogram_name)
-            .with_boundaries(boundaries.clone())
-            .build()
-    } else {
-        meter.f64_histogram(test_case.histogram_name).build()
-    };
-
-    // Record observations
-    for (labels, values) in &test_case.observations {
-        let kvs: Vec<_> = labels
+    for &value in &test_case.observations {
+        let bucket_index = boundaries
             .iter()
-            .map(|(k, v)| opentelemetry::KeyValue::new(*k, *v))
-            .collect();
-
-        for &value in values {
-            histogram.record(value, &kvs);
-        }
+            .position(|&boundary| value <= boundary)
+            .unwrap_or(boundaries.len());
+        bucket_counts[bucket_index] += 1;
+        sum += value;
     }
 
-    // Collect metrics
-    let mut resource_metrics = Vec::new();
-    reader
-        .collect(&mut resource_metrics)
-        .expect("collect metrics");
-
-    // Extract Histogram data
-    extract_histogram_data_from_sdk(&resource_metrics, test_case.histogram_name)
+    HistogramDataPoint {
+        name: test_case.histogram_name.to_string(),
+        bucket_counts,
+        bucket_boundaries: boundaries,
+        count: observation_count(test_case.observations.len()),
+        sum,
+        min: None,
+        max: None,
+    }
 }
 
-/// Extract Histogram data points from our metrics snapshot.
-fn extract_histogram_data_from_snapshot(
-    snapshot: &MetricsSnapshot,
-    histogram_name: &str,
-) -> Vec<HistogramDataPoint> {
-    let mut data_points = Vec::new();
-
-    for (name, labels, count, sum) in &snapshot.histograms {
-        if name == histogram_name {
-            let sorted_labels: Vec<_> =
-                labels.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
-
-            // For our implementation, we need to extract bucket boundaries and counts
-            // This is a simplified version for conformance testing
-            let bucket_boundaries = get_default_exponential_boundaries();
-            let bucket_counts = simulate_bucket_counts(*sum, *count, &bucket_boundaries);
-
-            data_points.push(HistogramDataPoint {
-                labels: sorted_labels,
-                bucket_counts,
-                bucket_boundaries,
-                count: *count,
-                sum: *sum,
-                min: None, // Simplified for testing
-                max: None, // Simplified for testing
-            });
-        }
+fn histogram_data_from_snapshot(snapshot: HistogramSnapshot) -> HistogramDataPoint {
+    HistogramDataPoint {
+        name: snapshot.name,
+        bucket_counts: snapshot.bucket_counts,
+        bucket_boundaries: snapshot.bucket_boundaries,
+        count: snapshot.count,
+        sum: snapshot.sum,
+        min: None,
+        max: None,
     }
-
-    // Sort for deterministic comparison
-    data_points.sort_by(|a, b| a.labels.cmp(&b.labels));
-    data_points
-}
-
-/// Extract Histogram data points from opentelemetry-sdk ResourceMetrics.
-fn extract_histogram_data_from_sdk(
-    resource_metrics: &[ResourceMetrics],
-    histogram_name: &str,
-) -> Vec<HistogramDataPoint> {
-    let mut data_points = Vec::new();
-
-    for resource_metric in resource_metrics {
-        for scope_metric in &resource_metric.scope_metrics {
-            for metric in &scope_metric.metrics {
-                if metric.name == histogram_name {
-                    if let MetricKind::Histogram(histogram_data) = &metric.data {
-                        for data_point in &histogram_data.data_points {
-                            let labels: Vec<_> = data_point
-                                .attributes
-                                .iter()
-                                .map(|kv| (kv.key.to_string(), kv.value.to_string()))
-                                .collect();
-
-                            data_points.push(HistogramDataPoint {
-                                labels,
-                                bucket_counts: data_point.bucket_counts.clone(),
-                                bucket_boundaries: data_point.bounds.clone(),
-                                count: data_point.count,
-                                sum: data_point.sum,
-                                min: data_point.min,
-                                max: data_point.max,
-                            });
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    // Sort for deterministic comparison
-    data_points.sort_by(|a, b| a.labels.cmp(&b.labels));
-    data_points
 }
 
 /// Compare Histogram data from our implementation vs reference.
 fn compare_histogram_data(
-    our_data: &[HistogramDataPoint],
-    reference_data: &[HistogramDataPoint],
+    our_point: &HistogramDataPoint,
+    ref_point: &HistogramDataPoint,
     test_case: &HistogramAggregatorTestCase,
 ) -> Result<(), String> {
-    if our_data.len() != reference_data.len() {
+    if our_point.name != ref_point.name {
         return Err(format!(
-            "Data point count mismatch: our={}, reference={}",
-            our_data.len(),
-            reference_data.len()
+            "Histogram name mismatch for {}: our={}, reference={}",
+            test_case.name, our_point.name, ref_point.name
         ));
     }
 
-    for (i, (our_point, ref_point)) in our_data.iter().zip(reference_data.iter()).enumerate() {
-        // Check labels
-        if our_point.labels != ref_point.labels {
-            return Err(format!(
-                "Labels mismatch at index {}: our={:?}, reference={:?}",
-                i, our_point.labels, ref_point.labels
-            ));
-        }
+    if !bucket_boundaries_equal(&our_point.bucket_boundaries, &ref_point.bucket_boundaries) {
+        return Err(format!(
+            "Bucket boundaries mismatch for {}: our={:?}, reference={:?}",
+            test_case.name, our_point.bucket_boundaries, ref_point.bucket_boundaries
+        ));
+    }
 
-        // Check bucket boundaries (most important for exponential buckets)
-        if !bucket_boundaries_equal(&our_point.bucket_boundaries, &ref_point.bucket_boundaries) {
-            return Err(format!(
-                "Bucket boundaries mismatch at index {}: our={:?}, reference={:?}",
-                i, our_point.bucket_boundaries, ref_point.bucket_boundaries
-            ));
-        }
+    if our_point.bucket_counts != ref_point.bucket_counts {
+        return Err(format!(
+            "Bucket counts mismatch for {}: our={:?}, reference={:?}",
+            test_case.name, our_point.bucket_counts, ref_point.bucket_counts
+        ));
+    }
 
-        // Check bucket counts (core requirement)
-        if our_point.bucket_counts != ref_point.bucket_counts {
-            return Err(format!(
-                "Bucket counts mismatch at index {}: our={:?}, reference={:?}",
-                i, our_point.bucket_counts, ref_point.bucket_counts
-            ));
-        }
+    if our_point.count != ref_point.count {
+        return Err(format!(
+            "Total count mismatch for {}: our={}, reference={}",
+            test_case.name, our_point.count, ref_point.count
+        ));
+    }
 
-        // Check total count and sum
-        if our_point.count != ref_point.count {
-            return Err(format!(
-                "Total count mismatch at index {}: our={}, reference={}",
-                i, our_point.count, ref_point.count
-            ));
-        }
+    if !values_equal(our_point.sum, ref_point.sum, 1e-10) {
+        return Err(format!(
+            "Sum mismatch for {}: our={}, reference={}",
+            test_case.name, our_point.sum, ref_point.sum
+        ));
+    }
 
-        if !values_equal(our_point.sum, ref_point.sum, 1e-10) {
-            return Err(format!(
-                "Sum mismatch at index {}: our={}, reference={}",
-                i, our_point.sum, ref_point.sum
-            ));
-        }
+    if our_point.min != ref_point.min || our_point.max != ref_point.max {
+        return Err(format!(
+            "Min/max support mismatch for {}: our=({:?}, {:?}), reference=({:?}, {:?})",
+            test_case.name, our_point.min, our_point.max, ref_point.min, ref_point.max
+        ));
     }
 
     Ok(())
@@ -393,47 +252,16 @@ fn values_equal(a: f64, b: f64, tolerance: f64) -> bool {
     (a - b).abs() <= tolerance
 }
 
-/// Get default exponential bucket boundaries for testing.
-fn get_default_exponential_boundaries() -> Vec<f64> {
-    // OpenTelemetry default exponential histogram boundaries
+/// OpenTelemetry-style default explicit histogram bucket boundaries.
+fn default_explicit_boundaries() -> Vec<f64> {
     vec![
-        0.005,
-        0.01,
-        0.025,
-        0.05,
-        0.075,
-        0.1,
-        0.25,
-        0.5,
-        0.75,
-        1.0,
-        2.5,
-        5.0,
-        7.5,
-        10.0,
-        f64::INFINITY,
+        0.0, 5.0, 10.0, 25.0, 50.0, 75.0, 100.0, 250.0, 500.0, 750.0, 1000.0, 2500.0, 5000.0,
+        7500.0, 10000.0,
     ]
 }
 
-/// Simulate bucket counts for our implementation (simplified for testing).
-fn simulate_bucket_counts(sum: f64, count: u64, boundaries: &[f64]) -> Vec<u64> {
-    // This is a simplified simulation for conformance testing
-    // In reality, this would come from the actual histogram implementation
-    let mut bucket_counts = vec![0u64; boundaries.len()];
-
-    if count > 0 {
-        let avg_value = sum / (count as f64);
-
-        // Find which bucket the average value falls into
-        for (i, &boundary) in boundaries.iter().enumerate() {
-            if avg_value <= boundary || boundary.is_infinite() {
-                bucket_counts[i] = count;
-                break;
-            }
-        }
-    }
-
-    bucket_counts
+fn observation_count(len: usize) -> u64 {
+    u64::try_from(len).expect("histogram conformance observation count fits u64")
 }
 
 /// Test edge cases for Histogram aggregator.
@@ -443,7 +271,7 @@ fn test_histogram_aggregator_edge_cases(failed_tests: &mut Vec<(String, String)>
         name: "empty_histogram",
         histogram_name: "empty_test",
         observations: vec![],
-        bucket_boundaries: None,
+        bucket_boundaries: default_explicit_boundaries(),
         description: "Empty histogram with no observations",
     };
 
@@ -460,8 +288,8 @@ fn test_histogram_aggregator_edge_cases(failed_tests: &mut Vec<(String, String)>
     let zero_case = HistogramAggregatorTestCase {
         name: "zero_values",
         histogram_name: "zero_test",
-        observations: vec![(vec![("type", "zero")], vec![0.0, 0.0, 0.0])],
-        bucket_boundaries: Some(vec![0.1, 1.0, 10.0]),
+        observations: vec![0.0, 0.0, 0.0],
+        bucket_boundaries: vec![0.1, 1.0, 10.0],
         description: "Multiple zero value observations",
     };
 
@@ -473,10 +301,4 @@ fn test_histogram_aggregator_edge_cases(failed_tests: &mut Vec<(String, String)>
     } else {
         println!("    ✅ zero_values");
     }
-}
-
-/// Create a test meter.
-fn create_test_meter(name: &str) -> Meter {
-    use opentelemetry::global;
-    global::meter(name)
 }
