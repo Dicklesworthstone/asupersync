@@ -1,5 +1,3 @@
-#![allow(warnings)]
-#![allow(clippy::all)]
 //! WASM cfg/profile compile invariants (3qv04.8.2.1).
 
 #![allow(missing_docs)]
