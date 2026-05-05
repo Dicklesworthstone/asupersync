@@ -1,5 +1,3 @@
-#![allow(warnings)]
-#![allow(clippy::all)]
 //! Contract tests for exported-handle ownership, outcome, and cancellation
 //! invariants (asupersync-3qv04.8.2.2).
 //!
