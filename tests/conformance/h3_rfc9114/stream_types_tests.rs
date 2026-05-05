@@ -7,20 +7,15 @@
 //! - Proper rejection of non-first or wrong-type stream indicators
 
 use super::*;
+use asupersync::http::h3_native::{
+    H3ConnectionState, H3Frame, H3NativeError, H3Settings, H3UniStreamType,
+};
+use asupersync::net::quic_core::{decode_varint, encode_varint};
 
-/// Stream type identifiers from RFC 9114 Section 6.2.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[repr(u64)]
-pub enum H3StreamType {
-    /// Control stream (0x00).
-    Control = 0x00,
-    /// Push stream (0x01).
-    Push = 0x01,
-    /// QPACK encoder stream (0x02).
-    QpackEncoder = 0x02,
-    /// QPACK decoder stream (0x03).
-    QpackDecoder = 0x03,
-}
+const STREAM_TYPE_CONTROL: u64 = 0x00;
+const STREAM_TYPE_PUSH: u64 = 0x01;
+const STREAM_TYPE_QPACK_ENCODER: u64 = 0x02;
+const STREAM_TYPE_QPACK_DECODER: u64 = 0x03;
 
 /// Run all stream type validation conformance tests.
 #[allow(dead_code)]
@@ -40,293 +35,300 @@ pub fn run_stream_type_tests() -> Vec<H3ConformanceResult> {
 #[allow(dead_code)]
 fn test_stream_type_first_varint() -> H3ConformanceResult {
     let (result, elapsed_ms) = timed_test(|| -> Result<(), String> {
-        // Test valid stream type declarations (type as first varint)
-        let valid_stream_types = vec![
-            (H3StreamType::Control, "control stream"),
-            (H3StreamType::Push, "push stream"),
-            (H3StreamType::QpackEncoder, "QPACK encoder stream"),
-            (H3StreamType::QpackDecoder, "QPACK decoder stream"),
+        let valid_stream_types = [
+            (
+                STREAM_TYPE_CONTROL,
+                H3UniStreamType::Control,
+                "control stream",
+            ),
+            (STREAM_TYPE_PUSH, H3UniStreamType::Push, "push stream"),
+            (
+                STREAM_TYPE_QPACK_ENCODER,
+                H3UniStreamType::QpackEncoder,
+                "QPACK encoder stream",
+            ),
+            (
+                STREAM_TYPE_QPACK_DECODER,
+                H3UniStreamType::QpackDecoder,
+                "QPACK decoder stream",
+            ),
         ];
 
-        for (stream_type, description) in valid_stream_types {
-            let stream_data = create_stream_with_type_first(stream_type);
-
-            if !validate_stream_type_declaration(&stream_data) {
+        for (raw_type, expected_kind, description) in valid_stream_types {
+            let stream_data = encode_stream_type_prefix(raw_type)?;
+            let (actual_kind, consumed) = decode_first_stream_type(&stream_data)?;
+            if actual_kind != expected_kind {
                 return Err(format!(
-                    "Valid {} type declaration was rejected",
-                    description
+                    "{description}: decoded kind mismatch, expected {expected_kind:?}, got {actual_kind:?}"
                 ));
             }
-
-            if get_stream_type_from_data(&stream_data) != Some(stream_type) {
+            if consumed != stream_data.len() {
                 return Err(format!(
-                    "Stream type not correctly parsed for {}",
-                    description
+                    "{description}: stream type varint consumed {consumed} bytes from {} byte input",
+                    stream_data.len()
                 ));
             }
         }
 
-        // Test invalid: data before stream type
-        let invalid_cases = vec![
-            (b"\x01\x02\x00".to_vec(), "data before stream type"),
-            (b"HTTP/3\x00".to_vec(), "text before stream type"),
+        let prefixed_data = {
+            let mut data = encode_stream_type_prefix(STREAM_TYPE_CONTROL)?;
+            data.extend_from_slice(b"payload-after-type");
+            data
+        };
+        let (kind, consumed) = decode_first_stream_type(&prefixed_data)?;
+        if kind != H3UniStreamType::Control {
+            return Err(format!("control prefix decoded as {kind:?}"));
+        }
+        if consumed != 1 {
+            return Err(format!(
+                "first stream-type varint should consume exactly one byte, got {consumed}"
+            ));
+        }
+
+        let truncated_varints: [(&[u8], &str); 2] = [
+            (&[0x40], "truncated two-byte stream type varint"),
             (
-                b"\xff\xff\xff\xff\x00".to_vec(),
-                "large data before stream type",
+                &[0x80, 0x00, 0x00],
+                "truncated four-byte stream type varint",
             ),
         ];
 
-        for (invalid_data, description) in invalid_cases {
-            if validate_stream_type_declaration(&invalid_data) {
-                return Err(format!("Invalid case '{}' was accepted", description));
-            }
+        for (data, description) in truncated_varints {
+            expect_varint_decode_error(data, description)?;
         }
 
         Ok(())
     });
 
-    H3ConformanceResult {
-        test_id: "RFC9114-6.2-STREAM-TYPE-FIRST".to_string(),
-        description: "Stream type must be first varint on unidirectional streams".to_string(),
-        category: TestCategory::StreamTypes,
-        requirement_level: RequirementLevel::Must,
-        verdict: if result.is_ok() {
-            TestVerdict::Pass
-        } else {
-            TestVerdict::Fail
-        },
+    conformance_result(
+        "RFC9114-6.2-STREAM-TYPE-FIRST",
+        "Stream type must be first varint on unidirectional streams",
+        RequirementLevel::Must,
+        result,
         elapsed_ms,
-        notes: result.err(),
-    }
+    )
 }
 
-/// RFC 9114 Section 6.2: Invalid stream types must be rejected.
+/// RFC 9114 Section 6.2: Unknown stream types are ignored.
 #[allow(dead_code)]
 fn test_invalid_stream_type_rejection() -> H3ConformanceResult {
     let (result, elapsed_ms) = timed_test(|| -> Result<(), String> {
-        // Test rejection of invalid stream types
-        let invalid_types = vec![
+        let unknown_types = [
             (0x04, "undefined stream type 0x04"),
             (0x05, "undefined stream type 0x05"),
             (0xFF, "undefined stream type 0xFF"),
             (0x1000, "large undefined stream type"),
-            (0xFFFFFFFF, "maximum undefined stream type"),
+            (0xFFFF_FFFF, "maximum undefined stream type"),
         ];
 
-        for (invalid_type, description) in invalid_types {
-            let stream_data = create_stream_with_raw_type(invalid_type);
-
-            if validate_stream_type_declaration(&stream_data) {
-                return Err(format!("Invalid stream type {} was accepted", description));
-            }
-
-            // Should result in H3_STREAM_CREATION_ERROR
-            let error_code = get_last_h3_error();
-            if !matches!(error_code, Some(H3ErrorCode::StreamCreationError)) {
+        let mut connection = H3ConnectionState::new_client();
+        let mut stream_id = 3;
+        for (raw_type, description) in unknown_types {
+            let kind =
+                register_remote_uni_stream(&mut connection, stream_id, raw_type, description)?;
+            if kind != H3UniStreamType::Unknown(raw_type) {
                 return Err(format!(
-                    "Invalid stream type {} should cause H3_STREAM_CREATION_ERROR, got {:?}",
-                    description, error_code
+                    "{description}: expected Unknown({raw_type}), got {kind:?}"
                 ));
             }
+            connection
+                .on_uni_stream_frame(stream_id, &H3Frame::Data(vec![1, 2, 3]))
+                .map_err(|err| {
+                    format!("{description}: unknown stream data should be ignored: {err}")
+                })?;
+            stream_id += 4;
         }
 
         Ok(())
     });
 
-    H3ConformanceResult {
-        test_id: "RFC9114-6.2-INVALID-TYPE-REJECT".to_string(),
-        description: "Invalid stream types must be rejected".to_string(),
-        category: TestCategory::StreamTypes,
-        requirement_level: RequirementLevel::Must,
-        verdict: if result.is_ok() {
-            TestVerdict::Pass
-        } else {
-            TestVerdict::Fail
-        },
+    conformance_result(
+        "RFC9114-6.2-UNKNOWN-TYPE-IGNORE",
+        "Unknown stream types must be accepted and ignored",
+        RequirementLevel::Must,
+        result,
         elapsed_ms,
-        notes: result.err(),
-    }
+    )
 }
 
 /// RFC 9114 Section 6.2: Duplicate stream types must be rejected.
 #[allow(dead_code)]
 fn test_duplicate_stream_type_rejection() -> H3ConformanceResult {
     let (result, elapsed_ms) = timed_test(|| -> Result<(), String> {
-        // Each stream type should only be allowed once per connection
+        let mut connection = H3ConnectionState::new_client();
+        register_remote_uni_stream(
+            &mut connection,
+            3,
+            STREAM_TYPE_CONTROL,
+            "first control stream",
+        )?;
+        register_remote_uni_stream(
+            &mut connection,
+            7,
+            STREAM_TYPE_QPACK_ENCODER,
+            "first QPACK encoder stream",
+        )?;
+        register_remote_uni_stream(
+            &mut connection,
+            11,
+            STREAM_TYPE_QPACK_DECODER,
+            "first QPACK decoder stream",
+        )?;
 
-        // First, create valid streams of each type
-        let stream_types = vec![
-            H3StreamType::Control,
-            H3StreamType::QpackEncoder,
-            H3StreamType::QpackDecoder,
-            // Note: Push streams can have multiple instances
-        ];
+        expect_control_protocol(
+            connection.on_remote_uni_stream_type(15, STREAM_TYPE_CONTROL),
+            "duplicate remote control stream",
+            "duplicate control stream",
+        )?;
+        expect_stream_protocol(
+            connection.on_remote_uni_stream_type(19, STREAM_TYPE_QPACK_ENCODER),
+            "duplicate remote qpack encoder stream",
+            "duplicate QPACK encoder stream",
+        )?;
+        expect_stream_protocol(
+            connection.on_remote_uni_stream_type(23, STREAM_TYPE_QPACK_DECODER),
+            "duplicate remote qpack decoder stream",
+            "duplicate QPACK decoder stream",
+        )?;
 
-        for stream_type in &stream_types {
-            let first_stream = create_stream_with_type_first(*stream_type);
-
-            if !validate_stream_type_declaration(&first_stream) {
-                return Err(format!("First {:?} stream was rejected", stream_type));
-            }
-        }
-
-        // Now try to create duplicates - these should be rejected
-        let duplicate_types = vec![
-            (H3StreamType::Control, "duplicate control stream"),
-            (H3StreamType::QpackEncoder, "duplicate QPACK encoder stream"),
-            (H3StreamType::QpackDecoder, "duplicate QPACK decoder stream"),
-        ];
-
-        for (stream_type, description) in duplicate_types {
-            let duplicate_stream = create_stream_with_type_first(stream_type);
-
-            if validate_stream_type_declaration(&duplicate_stream) {
-                return Err(format!(
-                    "{} was accepted when it should be rejected",
-                    description
-                ));
-            }
-
-            // Should result in H3_STREAM_CREATION_ERROR
-            let error_code = get_last_h3_error();
-            if !matches!(error_code, Some(H3ErrorCode::StreamCreationError)) {
-                return Err(format!(
-                    "{} should cause H3_STREAM_CREATION_ERROR, got {:?}",
-                    description, error_code
-                ));
-            }
-        }
+        register_remote_uni_stream(&mut connection, 27, STREAM_TYPE_PUSH, "first push stream")?;
+        register_remote_uni_stream(&mut connection, 31, STREAM_TYPE_PUSH, "second push stream")?;
 
         Ok(())
     });
 
-    H3ConformanceResult {
-        test_id: "RFC9114-6.2-DUPLICATE-REJECT".to_string(),
-        description: "Duplicate stream types must be rejected".to_string(),
-        category: TestCategory::StreamTypes,
-        requirement_level: RequirementLevel::Must,
-        verdict: if result.is_ok() {
-            TestVerdict::Pass
-        } else {
-            TestVerdict::Fail
-        },
+    conformance_result(
+        "RFC9114-6.2-DUPLICATE-REJECT",
+        "Duplicate control and QPACK stream types must be rejected",
+        RequirementLevel::Must,
+        result,
         elapsed_ms,
-        notes: result.err(),
-    }
+    )
 }
 
 /// RFC 9114 Section 6.2: Stream type ordering and creation rules.
 #[allow(dead_code)]
 fn test_stream_type_ordering() -> H3ConformanceResult {
     let (result, elapsed_ms) = timed_test(|| -> Result<(), String> {
-        // Control stream should be created first among unidirectional streams
-        let creation_order = vec![
-            (H3StreamType::Control, "control stream must be first"),
-            (H3StreamType::QpackEncoder, "QPACK encoder after control"),
-            (H3StreamType::QpackDecoder, "QPACK decoder after control"),
-        ];
+        let mut connection = H3ConnectionState::new_client();
 
-        for (i, (stream_type, description)) in creation_order.iter().enumerate() {
-            let stream_data = create_stream_with_type_first(*stream_type);
+        expect_stream_protocol(
+            connection.on_remote_uni_stream_type(0, STREAM_TYPE_CONTROL),
+            "unidirectional stream type requires unidirectional stream id",
+            "bidirectional stream cannot carry stream type",
+        )?;
+        expect_stream_protocol(
+            connection.on_uni_stream_frame(3, &H3Frame::Settings(H3Settings::default())),
+            "unknown unidirectional stream",
+            "frame before stream type registration",
+        )?;
 
-            if i == 0 {
-                // First stream (control) should always be accepted
-                if !validate_stream_type_declaration(&stream_data) {
-                    return Err(format!("Control stream creation failed: {}", description));
-                }
-            } else {
-                // Subsequent streams should be accepted after control stream
-                if !validate_stream_type_declaration(&stream_data) {
-                    return Err(format!(
-                        "Stream creation failed after control stream: {}",
-                        description
-                    ));
-                }
-            }
-        }
+        register_remote_uni_stream(&mut connection, 3, STREAM_TYPE_CONTROL, "control stream")?;
+        connection
+            .on_uni_stream_frame(3, &H3Frame::Settings(H3Settings::default()))
+            .map_err(|err| format!("control stream SETTINGS should be accepted: {err}"))?;
 
-        // Test wrong order: QPACK streams before control stream
-        reset_connection_state();
+        register_remote_uni_stream(
+            &mut connection,
+            7,
+            STREAM_TYPE_QPACK_ENCODER,
+            "QPACK encoder stream",
+        )?;
+        expect_stream_protocol(
+            connection.on_uni_stream_frame(7, &H3Frame::Data(vec![1])),
+            "qpack streams carry instructions, not h3 frames",
+            "QPACK encoder stream cannot carry H3 DATA frames",
+        )?;
 
-        let qpack_first = create_stream_with_type_first(H3StreamType::QpackEncoder);
-        if validate_stream_type_declaration(&qpack_first) {
-            return Err("QPACK encoder stream was accepted before control stream".to_string());
-        }
+        register_remote_uni_stream(&mut connection, 11, STREAM_TYPE_PUSH, "push stream")?;
+        expect_stream_protocol(
+            connection.on_uni_stream_frame(11, &H3Frame::Headers(vec![0x80])),
+            "push stream missing push id",
+            "push stream frame before push header",
+        )?;
+        connection
+            .on_push_stream_header(11, 7)
+            .map_err(|err| format!("push stream header should be accepted: {err}"))?;
+        connection
+            .on_uni_stream_frame(11, &H3Frame::Headers(vec![0x80]))
+            .map_err(|err| format!("push response HEADERS should be accepted: {err}"))?;
+        connection
+            .on_uni_stream_frame(11, &H3Frame::Data(vec![1, 2]))
+            .map_err(|err| format!("push response DATA should be accepted: {err}"))?;
 
         Ok(())
     });
 
-    H3ConformanceResult {
-        test_id: "RFC9114-6.2-STREAM-ORDERING".to_string(),
-        description: "Stream type creation ordering validation".to_string(),
-        category: TestCategory::StreamTypes,
-        requirement_level: RequirementLevel::Must,
-        verdict: if result.is_ok() {
-            TestVerdict::Pass
-        } else {
-            TestVerdict::Fail
-        },
+    conformance_result(
+        "RFC9114-6.2-STREAM-ORDERING",
+        "Stream type registration and frame routing validation",
+        RequirementLevel::Must,
+        result,
         elapsed_ms,
-        notes: result.err(),
-    }
+    )
 }
 
 /// RFC 9114 Section 6.2: Reserved stream types handling.
 #[allow(dead_code)]
 fn test_reserved_stream_types() -> H3ConformanceResult {
     let (result, elapsed_ms) = timed_test(|| -> Result<(), String> {
-        // Reserved stream types should follow GREASE principles
-        // Implementation should ignore unknown stream types gracefully
-
-        let reserved_types = vec![
+        let reserved_types = [
             (0x04, "first reserved type"),
             (0x08, "reserved type 0x08"),
             (0x0F, "reserved type 0x0F"),
             (0x21, "GREASE reserved type"),
         ];
 
+        let mut connection = H3ConnectionState::new_client();
+        let mut stream_id = 3;
         for (reserved_type, description) in reserved_types {
-            let stream_data = create_stream_with_raw_type(reserved_type);
-
-            // Implementation behavior for reserved types varies:
-            // - MAY ignore the stream gracefully
-            // - MAY reject with H3_STREAM_CREATION_ERROR
-            // Both are conformant behavior
-
-            let validation_result = validate_stream_type_declaration(&stream_data);
-            let error_code = get_last_h3_error();
-
-            // Either acceptance (ignore) or specific error is fine
-            match error_code {
-                None if validation_result => {
-                    // Stream was ignored gracefully - conformant
-                }
-                Some(H3ErrorCode::StreamCreationError) if !validation_result => {
-                    // Stream was rejected properly - conformant
-                }
-                Some(other_error) => {
-                    return Err(format!(
-                        "Reserved stream type {} caused unexpected error: {:?}",
-                        description, other_error
-                    ));
-                }
-                _ => {
-                    return Err(format!(
-                        "Reserved stream type {} had inconsistent validation result",
-                        description
-                    ));
-                }
+            let encoded = encode_stream_type_prefix(reserved_type)?;
+            let (decoded, consumed) = decode_first_stream_type(&encoded)?;
+            if decoded != H3UniStreamType::Unknown(reserved_type) {
+                return Err(format!(
+                    "{description}: reserved type decoded as {decoded:?}"
+                ));
             }
+            if consumed != encoded.len() {
+                return Err(format!(
+                    "{description}: stream-type varint consumed {consumed} bytes from {} byte input",
+                    encoded.len()
+                ));
+            }
+
+            register_remote_uni_stream(&mut connection, stream_id, reserved_type, description)?;
+            connection
+                .on_uni_stream_frame(stream_id, &H3Frame::Data(vec![0xAA]))
+                .map_err(|err| {
+                    format!("{description}: reserved stream payload should be ignored: {err}")
+                })?;
+            stream_id += 4;
         }
 
         Ok(())
     });
 
+    conformance_result(
+        "RFC9114-6.2-RESERVED-TYPES",
+        "Reserved stream types handling validation",
+        RequirementLevel::Should,
+        result,
+        elapsed_ms,
+    )
+}
+
+fn conformance_result(
+    test_id: &str,
+    description: &str,
+    requirement_level: RequirementLevel,
+    result: Result<(), String>,
+    elapsed_ms: u64,
+) -> H3ConformanceResult {
     H3ConformanceResult {
-        test_id: "RFC9114-6.2-RESERVED-TYPES".to_string(),
-        description: "Reserved stream types handling validation".to_string(),
+        test_id: test_id.to_string(),
+        description: description.to_string(),
         category: TestCategory::StreamTypes,
-        requirement_level: RequirementLevel::Should,
+        requirement_level,
         verdict: if result.is_ok() {
             TestVerdict::Pass
         } else {
@@ -337,100 +339,71 @@ fn test_reserved_stream_types() -> H3ConformanceResult {
     }
 }
 
-// Helper functions for stream type testing
-// In real implementation, these would integrate with actual HTTP/3 stack
-
-#[derive(Debug, PartialEq)]
-enum H3ErrorCode {
-    StreamCreationError,
-    ProtocolError,
-    FrameUnexpected,
-}
-
-fn create_stream_with_type_first(stream_type: H3StreamType) -> Vec<u8> {
-    // Create stream data with type as first varint
+fn encode_stream_type_prefix(stream_type: u64) -> Result<Vec<u8>, String> {
     let mut data = Vec::new();
-    encode_varint(&mut data, stream_type as u64);
-    data
+    encode_varint(stream_type, &mut data)
+        .map_err(|err| format!("stream type {stream_type:#x} encode failed: {err}"))?;
+    Ok(data)
 }
 
-fn create_stream_with_raw_type(stream_type: u64) -> Vec<u8> {
-    let mut data = Vec::new();
-    encode_varint(&mut data, stream_type);
-    data
+fn decode_first_stream_type(stream_data: &[u8]) -> Result<(H3UniStreamType, usize), String> {
+    let (raw_type, consumed) = decode_varint(stream_data)
+        .map_err(|err| format!("stream type varint decode failed: {err}"))?;
+    Ok((H3UniStreamType::decode(raw_type), consumed))
 }
 
-fn encode_varint(data: &mut Vec<u8>, value: u64) -> usize {
-    // Simplified varint encoding for testing
-    if value < 64 {
-        data.push(value as u8);
-        1
-    } else if value < 16384 {
-        data.push(0x40 | ((value >> 8) as u8));
-        data.push(value as u8);
-        2
-    } else if value < 1073741824 {
-        data.push(0x80 | ((value >> 24) as u8));
-        data.push((value >> 16) as u8);
-        data.push((value >> 8) as u8);
-        data.push(value as u8);
-        4
-    } else {
-        data.push(0xC0 | ((value >> 56) as u8));
-        for i in (0..7).rev() {
-            data.push((value >> (i * 8)) as u8);
-        }
-        8
+fn expect_varint_decode_error(data: &[u8], context: &str) -> Result<(), String> {
+    match decode_varint(data) {
+        Err(_) => Ok(()),
+        Ok((value, consumed)) => Err(format!(
+            "{context}: expected decode failure, got value {value:#x} consuming {consumed} bytes"
+        )),
     }
 }
 
-fn validate_stream_type_declaration(stream_data: &[u8]) -> bool {
-    // Mock validation - in real implementation, integrates with HTTP/3 parser
-    if stream_data.is_empty() {
-        return false;
-    }
+fn register_remote_uni_stream(
+    connection: &mut H3ConnectionState,
+    stream_id: u64,
+    stream_type: u64,
+    context: &str,
+) -> Result<H3UniStreamType, String> {
+    connection
+        .on_remote_uni_stream_type(stream_id, stream_type)
+        .map_err(|err| {
+            format!(
+                "{context}: stream {stream_id} type {stream_type:#x} registration failed: {err}"
+            )
+        })
+}
 
-    // First byte should be a valid varint start
-    let first_byte = stream_data[0];
-
-    // Extract stream type from varint
-    match get_stream_type_from_data(stream_data) {
-        Some(H3StreamType::Control)
-        | Some(H3StreamType::Push)
-        | Some(H3StreamType::QpackEncoder)
-        | Some(H3StreamType::QpackDecoder) => true,
-        _ => false,
+fn expect_stream_protocol<T>(
+    result: Result<T, H3NativeError>,
+    expected: &'static str,
+    context: &str,
+) -> Result<(), String> {
+    match result {
+        Err(H3NativeError::StreamProtocol(msg)) if msg == expected => Ok(()),
+        Err(err) => Err(format!(
+            "{context}: expected stream protocol error {expected:?}, got {err:?}"
+        )),
+        Ok(_) => Err(format!(
+            "{context}: expected stream protocol error {expected:?}, got acceptance"
+        )),
     }
 }
 
-fn get_stream_type_from_data(stream_data: &[u8]) -> Option<H3StreamType> {
-    if stream_data.is_empty() {
-        return None;
+fn expect_control_protocol<T>(
+    result: Result<T, H3NativeError>,
+    expected: &'static str,
+    context: &str,
+) -> Result<(), String> {
+    match result {
+        Err(H3NativeError::ControlProtocol(msg)) if msg == expected => Ok(()),
+        Err(err) => Err(format!(
+            "{context}: expected control protocol error {expected:?}, got {err:?}"
+        )),
+        Ok(_) => Err(format!(
+            "{context}: expected control protocol error {expected:?}, got acceptance"
+        )),
     }
-
-    // Simplified varint decoding
-    let value = match stream_data[0] & 0xC0 {
-        0x00 => stream_data[0] as u64,
-        0x40 if stream_data.len() >= 2 => {
-            ((stream_data[0] as u64 & 0x3F) << 8) | (stream_data[1] as u64)
-        }
-        _ => return None,
-    };
-
-    match value {
-        0x00 => Some(H3StreamType::Control),
-        0x01 => Some(H3StreamType::Push),
-        0x02 => Some(H3StreamType::QpackEncoder),
-        0x03 => Some(H3StreamType::QpackDecoder),
-        _ => None,
-    }
-}
-
-fn get_last_h3_error() -> Option<H3ErrorCode> {
-    // Mock error tracking - would return actual connection error
-    Some(H3ErrorCode::StreamCreationError)
-}
-
-fn reset_connection_state() {
-    // Mock connection state reset
 }
