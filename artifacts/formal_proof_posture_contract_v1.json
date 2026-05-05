@@ -1,0 +1,146 @@
+{
+  "contract_version": "formal-proof-posture-contract-v1",
+  "bead_id": "asupersync-rckfrm",
+  "created_date": "2026-05-04",
+  "status": "checked_core_invariant_posture",
+  "canonical_inventory": {
+    "path": "formal/lean/coverage/invariant_status_inventory.json",
+    "inventory_id": "lean.invariant_status.v1",
+    "expected_summary": {
+      "fully_proven": 6,
+      "partially_proven": 0,
+      "unproven": 0
+    },
+    "required_invariant_ids": [
+      "inv.structured_concurrency.single_owner",
+      "inv.region_close.quiescence",
+      "inv.cancel.protocol",
+      "inv.race.losers_drained",
+      "inv.obligation.no_leaks",
+      "inv.authority.no_ambient"
+    ]
+  },
+  "toolchain_verification": {
+    "command": "rch exec -- bash -lc 'cd formal/lean && lake build'",
+    "result": "passed",
+    "observed_signal": "Build completed successfully (3 jobs).",
+    "warning_policy": "Lean lint warnings are tracked as cleanup debt, not proof failures."
+  },
+  "proof_tiers": [
+    {
+      "tier": "semantics_source",
+      "status": "specification_source",
+      "paths": [
+        "asupersync_v4_formal_semantics.md"
+      ],
+      "claim_scope": "Small-step rules and invariant definitions are sourced here."
+    },
+    {
+      "tier": "tla_model_checking",
+      "status": "bounded_model_checking_and_trace_export",
+      "paths": [
+        "src/trace/tla_export.rs",
+        "formal/"
+      ],
+      "claim_scope": "Bounded TLC and exported trace surfaces support model-checking workflows."
+    },
+    {
+      "tier": "lean_checked_core_invariants",
+      "status": "fully_proven_for_six_non_negotiable_invariants",
+      "paths": [
+        "formal/lean/Asupersync.lean",
+        "formal/lean/coverage/invariant_status_inventory.json",
+        "formal/lean/coverage/invariant_theorem_test_link_map.json"
+      ],
+      "claim_scope": "Lean checks theorem families for the six core runtime invariants."
+    },
+    {
+      "tier": "runtime_refinement",
+      "status": "refinement_map_and_lab_oracle_backed",
+      "paths": [
+        "formal/lean/coverage/runtime_state_refinement_map.json",
+        "tests/refinement_conformance.rs",
+        "tests/lean_invariant_theorem_test_link_map.rs"
+      ],
+      "claim_scope": "Executable tests bind selected runtime traces and operations back to formal rows."
+    },
+    {
+      "tier": "adapter_protocol_surfaces",
+      "status": "lane_specific_or_coverage_planned",
+      "paths": [
+        "README.md",
+        "docs/integration.md",
+        "formal/lean/coverage/gap_risk_sequencing_plan.json"
+      ],
+      "claim_scope": "No blanket proof is claimed for every adapter, protocol, backend, or distributed transport lane."
+    }
+  ],
+  "scope_limits": {
+    "full_runtime_proof_claimed": false,
+    "adapter_protocol_proof_claimed": false,
+    "core_invariants_fully_proven": true,
+    "runtime_behavior_requires_refinement_evidence": true
+  },
+  "marker_inventory": [
+    {
+      "marker": "sorry",
+      "classification": "absent_from_formal_lean_asupersync",
+      "count": 0,
+      "path": "formal/lean/Asupersync.lean"
+    },
+    {
+      "marker": "admit",
+      "classification": "absent_from_formal_lean_asupersync",
+      "count": 0,
+      "path": "formal/lean/Asupersync.lean"
+    },
+    {
+      "marker": "axiom",
+      "classification": "absent_from_formal_lean_asupersync",
+      "count": 0,
+      "path": "formal/lean/Asupersync.lean"
+    },
+    {
+      "marker": "opaque IsReady",
+      "classification": "explicit_model_boundary",
+      "count": 1,
+      "path": "formal/lean/Asupersync.lean",
+      "explanation": "Readiness remains an abstract semantic predicate; runtime conformance and refinement rows carry the executable mapping."
+    },
+    {
+      "marker": "assumption catalog",
+      "classification": "tracked_runtime_refinement_guardrail",
+      "count": 4,
+      "path": "formal/lean/coverage/invariant_theorem_test_link_map.json",
+      "required_assumption_classes": [
+        "budget_constraints",
+        "cancellation_protocol",
+        "region_lifecycle",
+        "obligation_resolution"
+      ]
+    },
+    {
+      "marker": "historical skeleton/scaffold wording",
+      "classification": "doc_bound_explanation",
+      "count": 1,
+      "path": "formal/lean/Asupersync.lean",
+      "explanation": "The theorem file header still records the original incremental intent; repository-facing docs now bind current status to checked inventory, lake build, and this contract."
+    }
+  ],
+  "doc_contract": {
+    "readme_path": "README.md",
+    "formal_readme_path": "formal/README.md",
+    "required_phrases": [
+      "Lean-checked core invariants",
+      "not a blanket mechanized proof",
+      "artifacts/formal_proof_posture_contract_v1.json",
+      "tests/formal_proof_posture_contract.rs"
+    ],
+    "forbidden_stale_phrases": [
+      "Lean mechanization remains scaffold/in progress",
+      "Lean scaffold lives in",
+      "intentionally minimal at first",
+      "Labels + step relation placeholders"
+    ]
+  }
+}

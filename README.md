@@ -301,9 +301,11 @@ Concurrency bugs become reproducible test failures.
 
 Asupersync deliberately uses mathematically rigorous machinery where it buys real correctness, determinism, and debuggability. The intent is to make concurrency properties *structural*, so both humans and coding agents can trust the system under cancellation, failures, and schedule perturbations.
 
-### Formal Semantics (and a Lean Skeleton) for the Runtime Kernel
+### Formal Semantics and Lean-Checked Core Invariants
 
-The runtime design is backed by a small-step operational semantics (`asupersync_v4_formal_semantics.md`) with an accompanying Lean mechanization scaffold (`formal/lean/Asupersync.lean`).
+The runtime design is backed by a small-step operational semantics (`asupersync_v4_formal_semantics.md`) and a Lean project (`formal/lean/Asupersync.lean`) that checks the six non-negotiable runtime invariants recorded in `formal/lean/coverage/invariant_status_inventory.json`: structured concurrency single-owner, region-close quiescence, cancellation protocol, race loser drain, obligation no leaks, and no ambient authority.
+
+The proof posture is exact: these are Lean-checked core invariants with theorem and executable-test linkage. This is not a blanket mechanized proof of every adapter, protocol implementation, platform backend, or distributed runtime transport path. Broader runtime-facing claims stay tiered through TLA+/TLC exports, lab/refinement oracles, and lane-specific coverage artifacts. The canonical proof command is `rch exec -- bash -lc 'cd formal/lean && lake build'`; see [`artifacts/formal_proof_posture_contract_v1.json`](./artifacts/formal_proof_posture_contract_v1.json), [`tests/formal_proof_posture_contract.rs`](./tests/formal_proof_posture_contract.rs), and [`formal/README.md`](./formal/README.md).
 
 One example: the cancellation/cleanup **budget** composes as a semiring-like object (componentwise `min`, with priority as `max`), which makes "who constrains whom?" algebraic instead of ad-hoc:
 
@@ -1498,7 +1500,7 @@ and known limitations.
 | DPOR schedule exploration | ✅ Implemented |
 | Distributed runtime (remote tasks, sagas, leases, recovery) | Protocol/state-machine, lease, idempotency, and saga surfaces implemented; transport-backed remote lifecycle still in progress |
 | RaptorQ fountain coding for snapshot distribution | ✅ Implemented |
-| Formal methods (TLA+ export + Lean coverage planning artifacts) | ⚠️ Partial implementation (coverage artifacts exist; Lean mechanization remains scaffold/in progress) |
+| Formal methods (TLA+ export + Lean checked core-invariant coverage) | ⚠️ Partial implementation (Lean-checked core invariants cover the six non-negotiable runtime invariants; broader adapter/protocol/runtime refinement proof remains tiered and lane-specific) |
 | Browser Edition (WASM, JS/TS consumers) | ✅ Implemented for browser main-thread and dedicated-worker consumers (single-threaded, event-loop-driven) |
 | Service worker / shared worker direct runtime | Deferred; not yet shipped |
 | Rust-to-WASM compilation path | Preview public lane exists via `RuntimeBuilder::browser()`, but current Rust support is still narrower than the shipped JS/TS packages and remains anchored by fixture/evidence validation |
@@ -1529,7 +1531,7 @@ and known limitations.
 | **Phase 2** | I/O integration (Linux epoll, optional io_uring, TCP, HTTP/1.1-2, TLS, HTTP/3 static-only; BSD/Windows reactors currently expose narrower interest support) | ⚠️ Partial |
 | **Phase 3** | Actors + supervision (GenServer, links, monitors) | ✅ Complete |
 | **Phase 4** | Distributed structured concurrency | ✅ Complete |
-| **Phase 5** | DPOR + formal tooling | ⚠️ Partial (DPOR landed; TLA+ export and Lean coverage artifacts exist, but mechanization is still in progress) |
+| **Phase 5** | DPOR + formal tooling | ⚠️ Partial (DPOR landed; TLA+ export and Lean-checked core invariants exist; broader adapter/protocol/runtime refinement proof remains active and lane-specific) |
 | **Phase 6** | Hardening, policy gates, and adapter surface expansion | ✅ Continuous (see [Policy Gates](#phase-6-policy-gates)) |
 
 ---

@@ -5,10 +5,36 @@ The source of truth for the rules is:
 
 - `asupersync_v4_formal_semantics.md`
 
-The Lean scaffold lives in `formal/lean/` and is intentionally minimal at first:
-- Core domains and state skeletons
-- Labels + step relation placeholders
-- A place to incrementally encode the rules from the semantics document
+## Current proof posture (asupersync-rckfrm)
+
+The Lean project under `formal/lean/` is build-checked, not merely a planning
+stub. The canonical proof command for this repository is:
+
+```bash
+rch exec -- bash -lc 'cd formal/lean && lake build'
+```
+
+The current machine-readable inventory
+`formal/lean/coverage/invariant_status_inventory.json` reports all six
+Asupersync non-negotiable invariants as `fully_proven`:
+
+- `inv.structured_concurrency.single_owner`
+- `inv.region_close.quiescence`
+- `inv.cancel.protocol`
+- `inv.race.losers_drained`
+- `inv.obligation.no_leaks`
+- `inv.authority.no_ambient`
+
+That is the Lean-checked core invariants posture. It is not a blanket mechanized proof
+of every adapter, protocol implementation, platform backend, or distributed runtime transport path. Runtime-facing confidence remains
+tiered: the semantics document is the rule source, TLA+/TLC and exported traces
+cover bounded model checking surfaces, Lean checks the core invariant theorem
+families, and Rust lab/refinement/conformance tests bind those claims back to
+executable runtime behavior.
+
+The posture contract is recorded in
+`artifacts/formal_proof_posture_contract_v1.json` and enforced by
+`tests/formal_proof_posture_contract.rs`.
 
 Lean coverage planning artifacts live in `formal/lean/coverage/`:
 - `README.md`: ontology, statuses, blocker codes, evidence fields, validation rules
@@ -27,15 +53,21 @@ Lean coverage planning artifacts live in `formal/lean/coverage/`:
 ## Lean (preferred)
 
 The Lean project is self-contained under `formal/lean/` and does not affect the Rust
-crate or Cargo builds. Enter that directory to build:
+crate or Cargo builds. Use `rch` for repository validation:
 
 ```bash
-cd formal/lean
-lake build
+rch exec -- bash -lc 'cd formal/lean && lake build'
 ```
 
-## Next steps (bd-330st)
+Local interactive proof work may still enter the directory and run `lake build`,
+but closeout evidence for shared-main beads should record the `rch exec` form.
 
-- Encode the full domain/state definitions from §1 of the semantics
-- Add the small-step rules as inductive constructors
-- Prove well-formedness preservation and progress for the operational rules
+## Remaining work
+
+- Keep `runtime_state_refinement_map.json` synchronized when Rust scheduler,
+  region, cancellation, race, obligation, or authority behavior changes.
+- Extend proof/refinement coverage beyond the six core invariants to broader
+  adapter and protocol lanes only when each lane has a checked artifact and an
+  executable runtime mapping.
+- Treat assumption IDs in `invariant_theorem_test_link_map.json` as live
+  guardrails that need conformance evidence before claims are broadened.
