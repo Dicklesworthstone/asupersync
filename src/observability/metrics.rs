@@ -106,6 +106,21 @@ pub struct Histogram {
     count: AtomicU64,
 }
 
+/// Point-in-time view of a [`Histogram`].
+#[derive(Debug, Clone, PartialEq)]
+pub struct HistogramSnapshot {
+    /// Histogram metric name.
+    pub name: String,
+    /// Sorted explicit bucket upper bounds. The implicit final bucket is `+Inf`.
+    pub bucket_boundaries: Vec<f64>,
+    /// Per-bucket observation counts, including the final `+Inf` bucket.
+    pub bucket_counts: Vec<u64>,
+    /// Total number of observations.
+    pub count: u64,
+    /// Sum of all observed values.
+    pub sum: f64,
+}
+
 impl Histogram {
     pub(crate) fn new(name: impl Into<String>, buckets: Vec<f64>) -> Self {
         let mut buckets = buckets;
@@ -168,6 +183,22 @@ impl Histogram {
     /// Returns the histogram name.
     pub fn name(&self) -> &str {
         &self.name
+    }
+
+    /// Returns a point-in-time snapshot for conformance and export checks.
+    #[must_use]
+    pub fn snapshot(&self) -> HistogramSnapshot {
+        HistogramSnapshot {
+            name: self.name.clone(),
+            bucket_boundaries: self.buckets.clone(),
+            bucket_counts: self
+                .counts
+                .iter()
+                .map(|atomic| atomic.load(Ordering::Relaxed))
+                .collect(),
+            count: self.count(),
+            sum: self.sum(),
+        }
     }
 
     #[cfg(all(test, feature = "metrics"))]
@@ -1168,6 +1199,24 @@ mod tests {
         h.observe(3.0); // should go in the <=5.0 bucket
         h.observe(100.0); // should go in the +Inf bucket
         assert_eq!(h.count(), 3);
+    }
+
+    #[test]
+    #[allow(clippy::float_cmp)]
+    fn histogram_snapshot_exposes_live_bucket_state() {
+        let h = Histogram::new("request_latency", vec![5.0, 1.0, 10.0]);
+        h.observe(0.5);
+        h.observe(3.0);
+        h.observe(10.0);
+        h.observe(100.0);
+
+        let snapshot = h.snapshot();
+
+        assert_eq!(snapshot.name, "request_latency");
+        assert_eq!(snapshot.bucket_boundaries, vec![1.0, 5.0, 10.0]);
+        assert_eq!(snapshot.bucket_counts, vec![1, 1, 1, 1]);
+        assert_eq!(snapshot.count, 4);
+        assert_eq!(snapshot.sum, 113.5);
     }
 
     #[test]
