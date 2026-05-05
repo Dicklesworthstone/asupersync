@@ -186,7 +186,11 @@ pub use diagnostics::{
     TailLatencyBudgetVerdict, TailLatencyCompactEvent, TailLatencyCompactSample,
     TailLatencyEmitError, TailLatencyEmitterConfig, TailLatencyFieldValue, TailLatencyLogFieldSpec,
     TailLatencySignalSpec, TailLatencyTaxonomyContract, TailLatencyTermSpec,
-    TaskBlockedExplanation, emit_tail_latency_compact_event, tail_latency_taxonomy_contract,
+    TaskBlockedExplanation, WAIT_CAUSE_REMEDIATION_REPORT_SCHEMA_VERSION, WaitCauseCategory,
+    WaitCauseObligationEvidence, WaitCauseRemediationEvidence, WaitCauseRemediationFinding,
+    WaitCauseRemediationReport, WaitCauseRemediationVerdict, WaitCauseSeverity,
+    WaitCauseTaskEvidence, WaitCauseTaskWaitKind, build_wait_cause_remediation_report,
+    emit_tail_latency_compact_event, tail_latency_taxonomy_contract,
     verify_tail_latency_budget_certificate,
 };
 pub use entry::LogEntry;

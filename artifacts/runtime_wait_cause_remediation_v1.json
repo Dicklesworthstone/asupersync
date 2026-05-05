@@ -1,0 +1,109 @@
+{
+  "contract_version": "runtime-wait-cause-remediation-report-v1",
+  "runner_report_schema_version": "wait-cause-remediation-runner-report-v1",
+  "smoke_report_schema_version": "wait-cause-remediation-smoke-report-v1",
+  "tail_taxonomy_contract_version": "runtime-tail-latency-taxonomy-v1",
+  "bead_id": "asupersync-d87ytw.12",
+  "title": "Wait-cause remediation reports",
+  "source_files": [
+    "src/observability/diagnostics.rs",
+    "src/observability/mod.rs"
+  ],
+  "doc_path": "docs/runtime_wait_cause_remediation_contract.md",
+  "test_path": "tests/runtime_wait_cause_remediation_contract.rs",
+  "runner_script": "scripts/run_wait_cause_remediation_smoke.sh",
+  "required_report_fields": [
+    "report_id",
+    "report_hash",
+    "scenario_id",
+    "wait_cause_graph_hash",
+    "tail_taxonomy_version",
+    "verdict",
+    "refusal_reason",
+    "finding_count",
+    "safe_actions",
+    "forbidden_action_disclaimer",
+    "replay_command",
+    "evidence_refs",
+    "findings"
+  ],
+  "required_finding_fields": [
+    "finding_id",
+    "rank",
+    "category",
+    "severity",
+    "confidence_basis_points",
+    "reason_code",
+    "summary",
+    "blocked_resource",
+    "owner_task_id",
+    "owner_region_id",
+    "evidence_refs",
+    "safe_actions",
+    "forbidden_actions",
+    "replay_command"
+  ],
+  "verdicts": [
+    "actionable",
+    "investigate",
+    "refused"
+  ],
+  "finding_categories": [
+    "deadlock_cycle",
+    "futurelock",
+    "obligation_leak",
+    "unknown_wait"
+  ],
+  "severity_order": [
+    "critical",
+    "high",
+    "warning",
+    "info"
+  ],
+  "required_safe_action_themes": [
+    "capture_wait_graph_artifact",
+    "replay_before_widening",
+    "inspect_awaited_producer",
+    "resolve_obligation_through_protocol",
+    "collect_fresh_diagnostics_snapshot"
+  ],
+  "forbidden_action_themes": [
+    "do_not_delete_files_or_artifacts",
+    "do_not_reset_git_state",
+    "do_not_kill_unknown_tasks_or_processes"
+  ],
+  "fail_closed_reasons": [
+    "empty_report_id",
+    "empty_scenario_id",
+    "missing_replay_command",
+    "wrong_tail_taxonomy_version",
+    "no_wait_cause_evidence"
+  ],
+  "smoke_scenarios": [
+    {
+      "scenario_id": "WAIT-CAUSE-ACTIONABLE",
+      "report_id": "wait-cause-report-actionable",
+      "expected_verdict": "actionable",
+      "expected_categories": [
+        "deadlock_cycle",
+        "futurelock",
+        "obligation_leak"
+      ]
+    },
+    {
+      "scenario_id": "WAIT-CAUSE-INVESTIGATE",
+      "report_id": "wait-cause-report-investigate",
+      "expected_verdict": "investigate",
+      "expected_categories": [
+        "unknown_wait"
+      ]
+    },
+    {
+      "scenario_id": "WAIT-CAUSE-REFUSED",
+      "report_id": "wait-cause-report-refused",
+      "expected_verdict": "refused",
+      "expected_categories": [],
+      "expected_refusal_reason": "missing_replay_command"
+    }
+  ]
+}

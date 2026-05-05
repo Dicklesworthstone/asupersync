@@ -2126,6 +2126,813 @@ pub fn verify_tail_latency_budget_certificate(
     certificate
 }
 
+/// Wait-cause remediation report schema version.
+pub const WAIT_CAUSE_REMEDIATION_REPORT_SCHEMA_VERSION: &str =
+    "runtime-wait-cause-remediation-report-v1";
+
+/// Operator-facing report verdict for wait-cause remediation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WaitCauseRemediationVerdict {
+    /// The report has ranked findings and safe next actions.
+    Actionable,
+    /// The report is valid, but only low-confidence unknown waits were found.
+    Investigate,
+    /// The evidence packet was incomplete, stale, or off-contract.
+    Refused,
+}
+
+impl WaitCauseRemediationVerdict {
+    /// Stable string representation used by artifacts and smoke reports.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Actionable => "actionable",
+            Self::Investigate => "investigate",
+            Self::Refused => "refused",
+        }
+    }
+}
+
+/// Canonical wait-cause classes surfaced to operators.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WaitCauseCategory {
+    /// A directed wait-for cycle was found.
+    DeadlockCycle,
+    /// A task is stuck awaiting a future without a pending wake.
+    Futurelock,
+    /// A reserved obligation is still held.
+    ObligationLeak,
+    /// The system can identify a wait, but not a stronger root cause.
+    UnknownWait,
+}
+
+impl WaitCauseCategory {
+    /// Stable string representation used by artifacts and smoke reports.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::DeadlockCycle => "deadlock_cycle",
+            Self::Futurelock => "futurelock",
+            Self::ObligationLeak => "obligation_leak",
+            Self::UnknownWait => "unknown_wait",
+        }
+    }
+}
+
+/// Severity of one wait-cause remediation finding.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WaitCauseSeverity {
+    /// Trapped cycle or high-confidence leak that can stop quiescence.
+    Critical,
+    /// Strong evidence of a blocked runtime path.
+    High,
+    /// Weak or ambiguous evidence that still needs investigation.
+    Warning,
+    /// Informational row.
+    Info,
+}
+
+impl WaitCauseSeverity {
+    /// Stable string representation used by artifacts and smoke reports.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Critical => "critical",
+            Self::High => "high",
+            Self::Warning => "warning",
+            Self::Info => "info",
+        }
+    }
+
+    const fn sort_rank(self) -> u8 {
+        match self {
+            Self::Critical => 4,
+            Self::High => 3,
+            Self::Warning => 2,
+            Self::Info => 1,
+        }
+    }
+}
+
+/// Task wait kind consumed by the remediation report builder.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WaitCauseTaskWaitKind {
+    /// The task is awaiting a future or external producer.
+    AwaitingFuture,
+    /// The task has a pending wake and should be scheduled.
+    AwaitingSchedule,
+    /// The task is blocked, but the await point is unknown.
+    Unknown,
+}
+
+impl WaitCauseTaskWaitKind {
+    /// Stable string representation used in graph hashes.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::AwaitingFuture => "awaiting_future",
+            Self::AwaitingSchedule => "awaiting_schedule",
+            Self::Unknown => "unknown",
+        }
+    }
+}
+
+/// Evidence for one task-level wait row.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WaitCauseTaskEvidence {
+    /// Blocked task.
+    pub task_id: TaskId,
+    /// Owning region if known.
+    pub region_id: Option<RegionId>,
+    /// Wait classification.
+    pub wait_kind: WaitCauseTaskWaitKind,
+    /// Resource or producer the task appears to be waiting on.
+    pub blocked_resource: String,
+    /// Observed wait age in nanoseconds.
+    pub wait_age_ns: u64,
+    /// Whether a wake is already pending for this task.
+    pub wake_pending: bool,
+    /// Sanitized detail strings used only for evidence hashing and summaries.
+    pub details: Vec<String>,
+}
+
+impl WaitCauseTaskEvidence {
+    /// Build task wait evidence.
+    #[must_use]
+    pub fn new(
+        task_id: TaskId,
+        region_id: Option<RegionId>,
+        wait_kind: WaitCauseTaskWaitKind,
+        blocked_resource: impl Into<String>,
+    ) -> Self {
+        Self {
+            task_id,
+            region_id,
+            wait_kind,
+            blocked_resource: blocked_resource.into(),
+            wait_age_ns: 0,
+            wake_pending: false,
+            details: Vec::new(),
+        }
+    }
+
+    /// Build task evidence from an existing task-blocked explanation.
+    #[must_use]
+    pub fn from_task_blocked(
+        explanation: &TaskBlockedExplanation,
+        region_id: Option<RegionId>,
+        wait_age_ns: u64,
+        wake_pending: bool,
+    ) -> Self {
+        let wait_kind = match &explanation.block_reason {
+            BlockReason::AwaitingFuture { .. } => WaitCauseTaskWaitKind::AwaitingFuture,
+            BlockReason::AwaitingSchedule => WaitCauseTaskWaitKind::AwaitingSchedule,
+            _ => WaitCauseTaskWaitKind::Unknown,
+        };
+        let blocked_resource = sanitize_remediation_text(&explanation.block_reason.to_string());
+        Self {
+            task_id: explanation.task_id,
+            region_id,
+            wait_kind,
+            blocked_resource,
+            wait_age_ns,
+            wake_pending,
+            details: explanation
+                .details
+                .iter()
+                .map(|detail| sanitize_remediation_text(detail))
+                .collect(),
+        }
+    }
+
+    /// Attach observed wait age.
+    #[must_use]
+    pub const fn with_wait_age_ns(mut self, wait_age_ns: u64) -> Self {
+        self.wait_age_ns = wait_age_ns;
+        self
+    }
+
+    /// Mark whether a wake is pending.
+    #[must_use]
+    pub const fn with_wake_pending(mut self, wake_pending: bool) -> Self {
+        self.wake_pending = wake_pending;
+        self
+    }
+
+    /// Attach deterministic detail strings.
+    #[must_use]
+    pub fn with_details(mut self, details: Vec<String>) -> Self {
+        self.details = details
+            .into_iter()
+            .map(|detail| sanitize_remediation_text(&detail))
+            .collect();
+        self
+    }
+}
+
+/// Evidence for one obligation held across a wait-cause snapshot.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WaitCauseObligationEvidence {
+    /// Obligation id.
+    pub obligation_id: ObligationId,
+    /// Stable obligation kind string.
+    pub obligation_type: String,
+    /// Task currently holding the obligation.
+    pub holder_task: Option<TaskId>,
+    /// Region that owns the obligation.
+    pub region_id: RegionId,
+    /// Observed age in nanoseconds.
+    pub age_ns: u64,
+}
+
+impl WaitCauseObligationEvidence {
+    /// Build obligation wait evidence.
+    #[must_use]
+    pub fn new(
+        obligation_id: ObligationId,
+        obligation_type: impl Into<String>,
+        holder_task: Option<TaskId>,
+        region_id: RegionId,
+        age_ns: u64,
+    ) -> Self {
+        Self {
+            obligation_id,
+            obligation_type: sanitize_remediation_text(&obligation_type.into()),
+            holder_task,
+            region_id,
+            age_ns,
+        }
+    }
+
+    /// Build obligation evidence from an existing leak snapshot.
+    #[must_use]
+    pub fn from_obligation_leak(leak: &ObligationLeak) -> Self {
+        let nanos = u64::try_from(leak.age.as_nanos()).unwrap_or(u64::MAX);
+        Self::new(
+            leak.obligation_id,
+            leak.obligation_type.clone(),
+            leak.holder_task,
+            leak.region_id,
+            nanos,
+        )
+    }
+}
+
+/// Input packet consumed by the wait-cause remediation report builder.
+#[derive(Debug, Clone)]
+pub struct WaitCauseRemediationEvidence {
+    /// Stable report id.
+    pub report_id: String,
+    /// Scenario or workload id.
+    pub scenario_id: String,
+    /// Deterministic replay command for this snapshot.
+    pub replay_command: String,
+    /// Tail taxonomy contract version linked to this report.
+    pub tail_taxonomy_version: String,
+    /// Optional directional deadlock report from runtime diagnostics.
+    pub deadlock_report: Option<DirectionalDeadlockReport>,
+    /// Task-level wait evidence rows.
+    pub task_waits: Vec<WaitCauseTaskEvidence>,
+    /// Obligation-level wait evidence rows.
+    pub obligation_leaks: Vec<WaitCauseObligationEvidence>,
+    /// Artifact, certificate, or source references used to produce the report.
+    pub evidence_refs: Vec<String>,
+}
+
+impl WaitCauseRemediationEvidence {
+    /// Build a remediation evidence packet with the current tail taxonomy.
+    #[must_use]
+    pub fn new(
+        report_id: impl Into<String>,
+        scenario_id: impl Into<String>,
+        replay_command: impl Into<String>,
+    ) -> Self {
+        Self {
+            report_id: report_id.into(),
+            scenario_id: scenario_id.into(),
+            replay_command: replay_command.into(),
+            tail_taxonomy_version: TAIL_LATENCY_TAXONOMY_CONTRACT_VERSION.to_string(),
+            deadlock_report: None,
+            task_waits: Vec::new(),
+            obligation_leaks: Vec::new(),
+            evidence_refs: Vec::new(),
+        }
+    }
+
+    /// Override the tail taxonomy version. Non-current values fail closed.
+    #[must_use]
+    pub fn with_tail_taxonomy_version(mut self, version: impl Into<String>) -> Self {
+        self.tail_taxonomy_version = version.into();
+        self
+    }
+
+    /// Attach a directional deadlock report.
+    #[must_use]
+    pub fn with_deadlock_report(mut self, report: DirectionalDeadlockReport) -> Self {
+        self.deadlock_report = Some(report);
+        self
+    }
+
+    /// Attach task wait evidence rows.
+    #[must_use]
+    pub fn with_task_waits(mut self, waits: Vec<WaitCauseTaskEvidence>) -> Self {
+        self.task_waits = waits;
+        self
+    }
+
+    /// Attach obligation leak evidence rows.
+    #[must_use]
+    pub fn with_obligation_leaks(mut self, leaks: Vec<WaitCauseObligationEvidence>) -> Self {
+        self.obligation_leaks = leaks;
+        self
+    }
+
+    /// Attach deterministic evidence references.
+    #[must_use]
+    pub fn with_evidence_refs(mut self, refs: Vec<String>) -> Self {
+        self.evidence_refs = refs
+            .into_iter()
+            .map(|reference| sanitize_cancel_message(&reference))
+            .collect();
+        self
+    }
+}
+
+/// One ranked root-cause finding in a wait-cause remediation report.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WaitCauseRemediationFinding {
+    /// Deterministic finding id assigned after ranking.
+    pub finding_id: String,
+    /// One-based rank in the report.
+    pub rank: usize,
+    /// Wait-cause category.
+    pub category: WaitCauseCategory,
+    /// Finding severity.
+    pub severity: WaitCauseSeverity,
+    /// Confidence in basis points.
+    pub confidence_basis_points: u16,
+    /// Stable reason code.
+    pub reason_code: String,
+    /// Operator-safe summary.
+    pub summary: String,
+    /// Blocked resource or wait-graph component.
+    pub blocked_resource: String,
+    /// Owning task id if known.
+    pub owner_task_id: Option<String>,
+    /// Owning region id if known.
+    pub owner_region_id: Option<String>,
+    /// Evidence references backing this finding.
+    pub evidence_refs: Vec<String>,
+    /// Safe next actions. These must be non-destructive.
+    pub safe_actions: Vec<String>,
+    /// Explicitly forbidden destructive or ambiguous actions.
+    pub forbidden_actions: Vec<String>,
+    /// Replay command for the finding.
+    pub replay_command: String,
+}
+
+/// Deterministic operator report for wait-cause remediation.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WaitCauseRemediationReport {
+    /// Report schema version.
+    pub schema_version: String,
+    /// Stable report id.
+    pub report_id: String,
+    /// Deterministic hash over the report projection.
+    pub report_hash: String,
+    /// Scenario or workload id.
+    pub scenario_id: String,
+    /// Deterministic hash over the wait-cause evidence graph.
+    pub wait_cause_graph_hash: String,
+    /// Linked tail taxonomy contract version.
+    pub tail_taxonomy_version: String,
+    /// Overall report verdict.
+    pub verdict: WaitCauseRemediationVerdict,
+    /// Refusal reason for off-contract evidence.
+    pub refusal_reason: Option<String>,
+    /// Ranked findings.
+    pub findings: Vec<WaitCauseRemediationFinding>,
+    /// Flattened, deduplicated safe action list.
+    pub safe_actions: Vec<String>,
+    /// Explicit destructive-action disclaimer.
+    pub forbidden_action_disclaimer: String,
+    /// Deterministic replay command.
+    pub replay_command: String,
+    /// Evidence references used by the report.
+    pub evidence_refs: Vec<String>,
+}
+
+fn sanitize_remediation_text(input: &str) -> String {
+    let sanitized = sanitize_cancel_message(input);
+    let mut tokens = Vec::new();
+    for token in sanitized.split_whitespace() {
+        if token.contains('/') || token.contains('\\') {
+            tokens.push("[redacted-path]".to_string());
+        } else if token.contains('@') {
+            tokens.push("[redacted-identity]".to_string());
+        } else {
+            tokens.push(token.to_string());
+        }
+    }
+    if tokens.is_empty() {
+        String::new()
+    } else {
+        tokens.join(" ")
+    }
+}
+
+fn remediation_forbidden_actions() -> Vec<String> {
+    vec![
+        "Do not delete files, artifacts, or trace evidence while diagnosing the wait.".to_string(),
+        "Do not reset git state or discard unrelated work to clear a stall.".to_string(),
+        "Do not kill unknown tasks or processes until ownership and replay evidence are recorded."
+            .to_string(),
+    ]
+}
+
+fn deadlock_safe_actions(trapped: bool) -> Vec<String> {
+    let mut actions = vec![
+        "Capture the wait-graph artifact before changing runtime state.".to_string(),
+        "Replay and minimize the cycle before widening the investigation.".to_string(),
+    ];
+    if trapped {
+        actions.push(
+            "Cancel the smallest non-critical owning region only after drain ownership is known."
+                .to_string(),
+        );
+    } else {
+        actions.push("Inspect the egress edge before forcing cancellation.".to_string());
+    }
+    actions
+}
+
+fn futurelock_safe_actions() -> Vec<String> {
+    vec![
+        "Inspect the awaited producer and wake path for the blocked task.".to_string(),
+        "Use the replay command before adding timeouts or policy changes.".to_string(),
+        "Cancel the owning region only if the task is non-critical and drain evidence is recorded."
+            .to_string(),
+    ]
+}
+
+fn obligation_safe_actions() -> Vec<String> {
+    vec![
+        "Resolve the named obligation through its owning protocol commit or abort path."
+            .to_string(),
+        "Inspect the holder task before closing the region.".to_string(),
+        "Verify drain and finalize paths clear the obligation in replay.".to_string(),
+    ]
+}
+
+fn unknown_wait_safe_actions() -> Vec<String> {
+    vec![
+        "Collect a fresh diagnostics snapshot with task, region, and obligation rows.".to_string(),
+        "Preserve replay artifacts before attempting remediation.".to_string(),
+        "Escalate to focused instrumentation instead of guessing at destructive cleanup."
+            .to_string(),
+    ]
+}
+
+fn wait_cause_graph_hash(evidence: &WaitCauseRemediationEvidence) -> String {
+    let mut projection = String::new();
+    projection.push_str(&evidence.report_id);
+    projection.push('|');
+    projection.push_str(&evidence.scenario_id);
+    projection.push('|');
+    projection.push_str(&evidence.tail_taxonomy_version);
+    if let Some(report) = &evidence.deadlock_report {
+        projection.push_str("|deadlock:");
+        projection.push_str(report.severity.as_str());
+        projection.push(':');
+        projection.push_str(&format!("{:.6}", report.risk_score));
+        for cycle in &report.cycles {
+            projection.push('|');
+            projection.push_str(if cycle.trapped { "trapped" } else { "egress" });
+            projection.push(':');
+            projection.push_str(&cycle.ingress_edges.to_string());
+            projection.push(':');
+            projection.push_str(&cycle.egress_edges.to_string());
+            for task in &cycle.tasks {
+                projection.push(':');
+                projection.push_str(&format!("{task:?}"));
+            }
+        }
+    }
+    for wait in &evidence.task_waits {
+        projection.push_str("|task:");
+        projection.push_str(&format!("{:?}", wait.task_id));
+        projection.push(':');
+        projection.push_str(wait.wait_kind.as_str());
+        projection.push(':');
+        projection.push_str(&wait.wait_age_ns.to_string());
+        projection.push(':');
+        projection.push_str(if wait.wake_pending { "wake" } else { "no_wake" });
+        projection.push(':');
+        projection.push_str(&sanitize_remediation_text(&wait.blocked_resource));
+    }
+    for leak in &evidence.obligation_leaks {
+        projection.push_str("|obligation:");
+        projection.push_str(&format!("{:?}", leak.obligation_id));
+        projection.push(':');
+        projection.push_str(&sanitize_remediation_text(&leak.obligation_type));
+        projection.push(':');
+        projection.push_str(&format!("{:?}", leak.region_id));
+        projection.push(':');
+        projection.push_str(&leak.age_ns.to_string());
+    }
+    stable_fnv1a64_hex(projection.as_bytes())
+}
+
+impl DeadlockSeverity {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::None => "none",
+            Self::Elevated => "elevated",
+            Self::Critical => "critical",
+        }
+    }
+}
+
+fn push_deadlock_findings(
+    findings: &mut Vec<WaitCauseRemediationFinding>,
+    report: &DirectionalDeadlockReport,
+    evidence: &WaitCauseRemediationEvidence,
+) {
+    for cycle in &report.cycles {
+        let severity = if cycle.trapped {
+            WaitCauseSeverity::Critical
+        } else {
+            WaitCauseSeverity::High
+        };
+        let confidence_basis_points = if cycle.trapped { 9_600 } else { 8_100 };
+        let reason_code = if cycle.trapped {
+            "trapped_wait_cycle"
+        } else {
+            "cyclic_wait_with_egress"
+        };
+        let blocked_resource = sanitize_remediation_text(&format!(
+            "wait_graph_cycle:{}:{}",
+            if cycle.trapped { "trapped" } else { "egress" },
+            cycle
+                .tasks
+                .iter()
+                .map(|task| format!("{task:?}"))
+                .collect::<Vec<_>>()
+                .join("->")
+        ));
+        findings.push(WaitCauseRemediationFinding {
+            finding_id: String::new(),
+            rank: 0,
+            category: WaitCauseCategory::DeadlockCycle,
+            severity,
+            confidence_basis_points,
+            reason_code: reason_code.to_string(),
+            summary: format!(
+                "{} wait-for cycle across {} task(s)",
+                if cycle.trapped {
+                    "trapped"
+                } else {
+                    "egress-capable"
+                },
+                cycle.tasks.len()
+            ),
+            blocked_resource,
+            owner_task_id: cycle.tasks.first().map(|task| format!("{task:?}")),
+            owner_region_id: None,
+            evidence_refs: evidence.evidence_refs.clone(),
+            safe_actions: deadlock_safe_actions(cycle.trapped),
+            forbidden_actions: remediation_forbidden_actions(),
+            replay_command: evidence.replay_command.clone(),
+        });
+    }
+}
+
+fn push_task_wait_findings(
+    findings: &mut Vec<WaitCauseRemediationFinding>,
+    evidence: &WaitCauseRemediationEvidence,
+) {
+    for wait in &evidence.task_waits {
+        let (category, severity, confidence_basis_points, reason_code, safe_actions) =
+            match (wait.wait_kind, wait.wake_pending) {
+                (WaitCauseTaskWaitKind::AwaitingFuture, false) => (
+                    WaitCauseCategory::Futurelock,
+                    WaitCauseSeverity::High,
+                    8_200,
+                    "future_wait_without_pending_wake",
+                    futurelock_safe_actions(),
+                ),
+                (WaitCauseTaskWaitKind::AwaitingFuture, true) => (
+                    WaitCauseCategory::UnknownWait,
+                    WaitCauseSeverity::Warning,
+                    5_200,
+                    "future_wait_has_pending_wake",
+                    unknown_wait_safe_actions(),
+                ),
+                (WaitCauseTaskWaitKind::AwaitingSchedule, _) => (
+                    WaitCauseCategory::UnknownWait,
+                    WaitCauseSeverity::Info,
+                    4_200,
+                    "awaiting_scheduler_turn",
+                    unknown_wait_safe_actions(),
+                ),
+                (WaitCauseTaskWaitKind::Unknown, _) => (
+                    WaitCauseCategory::UnknownWait,
+                    WaitCauseSeverity::Warning,
+                    4_800,
+                    "unknown_wait_cause",
+                    unknown_wait_safe_actions(),
+                ),
+            };
+
+        let blocked_resource = sanitize_remediation_text(&wait.blocked_resource);
+        findings.push(WaitCauseRemediationFinding {
+            finding_id: String::new(),
+            rank: 0,
+            category,
+            severity,
+            confidence_basis_points,
+            reason_code: reason_code.to_string(),
+            summary: format!(
+                "task {:?} wait classified as {} for {}ns",
+                wait.task_id,
+                category.as_str(),
+                wait.wait_age_ns
+            ),
+            blocked_resource: if blocked_resource.is_empty() {
+                "unknown_resource".to_string()
+            } else {
+                blocked_resource
+            },
+            owner_task_id: Some(format!("{:?}", wait.task_id)),
+            owner_region_id: wait.region_id.map(|region| format!("{region:?}")),
+            evidence_refs: evidence.evidence_refs.clone(),
+            safe_actions,
+            forbidden_actions: remediation_forbidden_actions(),
+            replay_command: evidence.replay_command.clone(),
+        });
+    }
+}
+
+fn push_obligation_findings(
+    findings: &mut Vec<WaitCauseRemediationFinding>,
+    evidence: &WaitCauseRemediationEvidence,
+) {
+    for leak in &evidence.obligation_leaks {
+        let obligation_type = sanitize_remediation_text(&leak.obligation_type);
+        findings.push(WaitCauseRemediationFinding {
+            finding_id: String::new(),
+            rank: 0,
+            category: WaitCauseCategory::ObligationLeak,
+            severity: WaitCauseSeverity::Critical,
+            confidence_basis_points: 9_000,
+            reason_code: "reserved_obligation_still_held".to_string(),
+            summary: format!(
+                "obligation {:?} ({}) held for {}ns",
+                leak.obligation_id, obligation_type, leak.age_ns
+            ),
+            blocked_resource: format!("obligation:{:?}", leak.obligation_id),
+            owner_task_id: leak.holder_task.map(|task| format!("{task:?}")),
+            owner_region_id: Some(format!("{:?}", leak.region_id)),
+            evidence_refs: evidence.evidence_refs.clone(),
+            safe_actions: obligation_safe_actions(),
+            forbidden_actions: remediation_forbidden_actions(),
+            replay_command: evidence.replay_command.clone(),
+        });
+    }
+}
+
+fn rank_wait_cause_findings(findings: &mut [WaitCauseRemediationFinding]) {
+    findings.sort_by(|a, b| {
+        b.severity
+            .sort_rank()
+            .cmp(&a.severity.sort_rank())
+            .then_with(|| b.confidence_basis_points.cmp(&a.confidence_basis_points))
+            .then_with(|| a.category.cmp(&b.category))
+            .then_with(|| a.blocked_resource.cmp(&b.blocked_resource))
+            .then_with(|| a.owner_task_id.cmp(&b.owner_task_id))
+    });
+    for (idx, finding) in findings.iter_mut().enumerate() {
+        finding.rank = idx + 1;
+        finding.finding_id = format!("wait-cause-remediation-{:04}", idx + 1);
+    }
+}
+
+fn wait_cause_report_hash(report: &WaitCauseRemediationReport) -> String {
+    let mut projection = String::new();
+    projection.push_str(&report.schema_version);
+    projection.push('|');
+    projection.push_str(&report.report_id);
+    projection.push('|');
+    projection.push_str(&report.scenario_id);
+    projection.push('|');
+    projection.push_str(report.verdict.as_str());
+    projection.push('|');
+    projection.push_str(&report.wait_cause_graph_hash);
+    if let Some(reason) = &report.refusal_reason {
+        projection.push('|');
+        projection.push_str(reason);
+    }
+    for finding in &report.findings {
+        projection.push('|');
+        projection.push_str(&finding.finding_id);
+        projection.push(':');
+        projection.push_str(finding.category.as_str());
+        projection.push(':');
+        projection.push_str(finding.severity.as_str());
+        projection.push(':');
+        projection.push_str(&finding.confidence_basis_points.to_string());
+        projection.push(':');
+        projection.push_str(&finding.reason_code);
+    }
+    stable_fnv1a64_hex(projection.as_bytes())
+}
+
+fn flattened_safe_actions(findings: &[WaitCauseRemediationFinding]) -> Vec<String> {
+    let mut actions = Vec::new();
+    for finding in findings {
+        for action in &finding.safe_actions {
+            if !actions.contains(action) {
+                actions.push(action.clone());
+            }
+        }
+    }
+    actions
+}
+
+/// Build one deterministic wait-cause remediation report.
+///
+/// Off-contract evidence returns a refused report instead of actionable advice.
+/// Action rows are deliberately non-destructive and include explicit forbidden
+/// action disclaimers for operator use.
+#[must_use]
+pub fn build_wait_cause_remediation_report(
+    evidence: WaitCauseRemediationEvidence,
+) -> WaitCauseRemediationReport {
+    let mut refusal_reasons = Vec::new();
+    if evidence.report_id.trim().is_empty() {
+        unique_push_reason(&mut refusal_reasons, "empty_report_id");
+    }
+    if evidence.scenario_id.trim().is_empty() {
+        unique_push_reason(&mut refusal_reasons, "empty_scenario_id");
+    }
+    if evidence.replay_command.trim().is_empty() {
+        unique_push_reason(&mut refusal_reasons, "missing_replay_command");
+    }
+    if evidence.tail_taxonomy_version != TAIL_LATENCY_TAXONOMY_CONTRACT_VERSION {
+        unique_push_reason(&mut refusal_reasons, "wrong_tail_taxonomy_version");
+    }
+
+    let graph_hash = wait_cause_graph_hash(&evidence);
+    let mut findings = Vec::new();
+    if let Some(report) = &evidence.deadlock_report {
+        push_deadlock_findings(&mut findings, report, &evidence);
+    }
+    push_task_wait_findings(&mut findings, &evidence);
+    push_obligation_findings(&mut findings, &evidence);
+    rank_wait_cause_findings(&mut findings);
+
+    if findings.is_empty() {
+        unique_push_reason(&mut refusal_reasons, "no_wait_cause_evidence");
+    }
+
+    let verdict = if refusal_reasons.is_empty() {
+        if findings
+            .iter()
+            .all(|finding| finding.category == WaitCauseCategory::UnknownWait)
+        {
+            WaitCauseRemediationVerdict::Investigate
+        } else {
+            WaitCauseRemediationVerdict::Actionable
+        }
+    } else {
+        findings.clear();
+        WaitCauseRemediationVerdict::Refused
+    };
+
+    let mut report = WaitCauseRemediationReport {
+        schema_version: WAIT_CAUSE_REMEDIATION_REPORT_SCHEMA_VERSION.to_string(),
+        report_id: evidence.report_id.trim().to_string(),
+        report_hash: String::new(),
+        scenario_id: evidence.scenario_id.trim().to_string(),
+        wait_cause_graph_hash: graph_hash,
+        tail_taxonomy_version: evidence.tail_taxonomy_version,
+        verdict,
+        refusal_reason: refusal_reasons.first().cloned(),
+        safe_actions: flattened_safe_actions(&findings),
+        findings,
+        forbidden_action_disclaimer:
+            "All remediation actions must preserve evidence and avoid destructive cleanup unless explicitly authorized."
+                .to_string(),
+        replay_command: evidence.replay_command,
+        evidence_refs: evidence.evidence_refs,
+    };
+    report.report_hash = wait_cause_report_hash(&report);
+    report
+}
+
 fn tail_latency_log_field(
     key: &str,
     unit: &str,
@@ -5350,6 +6157,172 @@ mod tests {
         assert_eq!(
             certificate.fallback_reason.as_deref(),
             Some("p999_budget_exceeded")
+        );
+    }
+
+    fn wait_task(index: u32) -> TaskId {
+        TaskId::new_for_test(index, 0)
+    }
+
+    fn wait_region(index: u32) -> RegionId {
+        RegionId::new_for_test(index, 0)
+    }
+
+    fn wait_obligation(index: u32) -> ObligationId {
+        ObligationId::new_for_test(index, 0)
+    }
+
+    fn trapped_deadlock_report() -> DirectionalDeadlockReport {
+        DirectionalDeadlockReport {
+            severity: DeadlockSeverity::Critical,
+            risk_score: 1.0,
+            cycles: vec![DeadlockCycle {
+                tasks: vec![wait_task(1), wait_task(2)],
+                ingress_edges: 0,
+                egress_edges: 0,
+                trapped: true,
+            }],
+        }
+    }
+
+    fn base_wait_cause_evidence() -> WaitCauseRemediationEvidence {
+        WaitCauseRemediationEvidence::new(
+            "wait-cause-report-pass",
+            "WAIT-CAUSE-PASS",
+            "bash scripts/run_wait_cause_remediation_smoke.sh --execute --scenario WAIT-CAUSE-PASS",
+        )
+        .with_evidence_refs(vec![
+            "artifacts/runtime_latency_budget_certificate_v1.json".to_string(),
+            "artifacts/runtime_tail_latency_taxonomy_v1.json".to_string(),
+        ])
+    }
+
+    #[test]
+    fn wait_cause_report_ranks_deadlock_before_futurelock_and_unknown_wait() {
+        let report = build_wait_cause_remediation_report(
+            base_wait_cause_evidence()
+                .with_deadlock_report(trapped_deadlock_report())
+                .with_task_waits(vec![
+                    WaitCauseTaskEvidence::new(
+                        wait_task(9),
+                        Some(wait_region(3)),
+                        WaitCauseTaskWaitKind::Unknown,
+                        "opaque await point",
+                    )
+                    .with_wait_age_ns(5_000),
+                    WaitCauseTaskEvidence::new(
+                        wait_task(7),
+                        Some(wait_region(2)),
+                        WaitCauseTaskWaitKind::AwaitingFuture,
+                        "channel receive producer",
+                    )
+                    .with_wait_age_ns(9_000),
+                ]),
+        );
+
+        assert_eq!(report.verdict, WaitCauseRemediationVerdict::Actionable);
+        assert_eq!(report.findings.len(), 3);
+        assert_eq!(
+            report.findings[0].category,
+            WaitCauseCategory::DeadlockCycle
+        );
+        assert_eq!(report.findings[0].severity, WaitCauseSeverity::Critical);
+        assert_eq!(report.findings[1].category, WaitCauseCategory::Futurelock);
+        assert_eq!(report.findings[2].category, WaitCauseCategory::UnknownWait);
+        assert_eq!(report.findings[0].rank, 1);
+        assert_eq!(report.findings[1].rank, 2);
+        assert!(report.report_hash.starts_with("fnv1a64:"));
+        assert!(report.wait_cause_graph_hash.starts_with("fnv1a64:"));
+    }
+
+    #[test]
+    fn wait_cause_report_surfaces_obligation_metadata_and_safe_actions() {
+        let report =
+            build_wait_cause_remediation_report(base_wait_cause_evidence().with_obligation_leaks(
+                vec![WaitCauseObligationEvidence::new(
+                    wait_obligation(11),
+                    "SendPermit",
+                    Some(wait_task(4)),
+                    wait_region(5),
+                    42_000,
+                )],
+            ));
+
+        assert_eq!(report.verdict, WaitCauseRemediationVerdict::Actionable);
+        assert_eq!(report.findings.len(), 1);
+        let finding = &report.findings[0];
+        assert_eq!(finding.category, WaitCauseCategory::ObligationLeak);
+        assert_eq!(finding.reason_code, "reserved_obligation_still_held");
+        assert_eq!(finding.owner_task_id, Some(format!("{:?}", wait_task(4))));
+        assert_eq!(
+            finding.owner_region_id,
+            Some(format!("{:?}", wait_region(5)))
+        );
+        assert!(
+            finding
+                .safe_actions
+                .iter()
+                .any(|action| action.contains("commit or abort"))
+        );
+        assert!(
+            finding
+                .forbidden_actions
+                .iter()
+                .any(|action| action.contains("Do not delete files"))
+        );
+    }
+
+    #[test]
+    fn wait_cause_report_refuses_missing_replay_and_wrong_taxonomy() {
+        let report = build_wait_cause_remediation_report(
+            WaitCauseRemediationEvidence::new("bad-report", "BAD", "")
+                .with_tail_taxonomy_version("runtime-tail-latency-taxonomy-v0")
+                .with_task_waits(vec![WaitCauseTaskEvidence::new(
+                    wait_task(1),
+                    None,
+                    WaitCauseTaskWaitKind::AwaitingFuture,
+                    "producer",
+                )]),
+        );
+
+        assert_eq!(report.verdict, WaitCauseRemediationVerdict::Refused);
+        assert_eq!(report.findings.len(), 0);
+        assert_eq!(
+            report.refusal_reason.as_deref(),
+            Some("missing_replay_command")
+        );
+    }
+
+    #[test]
+    fn wait_cause_report_investigates_unknown_wait_and_redacts_operator_text() {
+        let report =
+            build_wait_cause_remediation_report(base_wait_cause_evidence().with_task_waits(vec![
+                WaitCauseTaskEvidence::new(
+                    wait_task(3),
+                    Some(wait_region(1)),
+                    WaitCauseTaskWaitKind::Unknown,
+                    "socket /tmp/secret\nhost=internal.example.com\tuser=a@example.com",
+                )
+                .with_wait_age_ns(1_000)
+                .with_wake_pending(true)
+                .with_details(vec!["raw\ncontrol\tchars".to_string()]),
+            ]));
+
+        assert_eq!(report.verdict, WaitCauseRemediationVerdict::Investigate);
+        assert_eq!(report.findings.len(), 1);
+        let finding = &report.findings[0];
+        assert_eq!(finding.category, WaitCauseCategory::UnknownWait);
+        assert!(!finding.blocked_resource.contains('\n'));
+        assert!(!finding.blocked_resource.contains('\t'));
+        assert!(!finding.blocked_resource.contains("/tmp/secret"));
+        assert!(!finding.blocked_resource.contains("a@example.com"));
+        assert!(finding.blocked_resource.contains("[redacted-path]"));
+        assert!(finding.blocked_resource.contains("[redacted-identity]"));
+        assert!(
+            report
+                .safe_actions
+                .iter()
+                .any(|action| action.contains("fresh diagnostics snapshot"))
         );
     }
 
