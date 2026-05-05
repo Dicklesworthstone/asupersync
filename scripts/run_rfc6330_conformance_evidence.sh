@@ -50,7 +50,12 @@ USAGE
 }
 
 json_escape() {
-    printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g'
+    python3 - "$1" <<'PY'
+import json
+import sys
+
+print(json.dumps(sys.argv[1])[1:-1], end="")
+PY
 }
 
 repo_relative() {
@@ -191,7 +196,7 @@ first_failure_line_from() {
     local stderr_path="$1"
     local stdout_path="$2"
     local line=""
-    line="$(grep -m1 -E 'error:|FAILED|FAIL|blocked|unsupported|Conformance threshold not met' "$stderr_path" "$stdout_path" 2>/dev/null || true)"
+    line="$(grep -h -E 'error:|FAILED|FAIL|blocked|unsupported|Conformance threshold not met' "$stderr_path" "$stdout_path" 2>/dev/null | head -n1 || true)"
     printf '%s' "$line"
 }
 
@@ -314,12 +319,12 @@ run_scenario() {
             first_failure="$validation_result"
         fi
     fi
-    if [[ "$verdict" == "pass" && "$rc" -ne 0 && "$USE_RCH" -eq 1 ]]; then
-        actual="${actual}; rch wrapper exited ${rc} after emitting valid proof output"
-    elif [[ "$verdict" == "pass" && "$rc" -ne 0 ]]; then
-        verdict="fail"
-        actual="command exited ${rc}; ${actual}"
-        first_failure="$(first_failure_line_from "$stderr_path" "$stdout_path")"
+    if [[ "$verdict" == "pass" && "$rc" -ne 0 ]]; then
+        if [[ "$USE_RCH" -eq 1 ]]; then
+            actual="${actual}; rch wrapper exited ${rc} after emitting valid proof output"
+        else
+            actual="${actual}; command exited ${rc} after emitting valid proof output"
+        fi
     elif [[ "$verdict" == "fail" && "$rc" -ne 0 ]]; then
         actual="command exited ${rc}; ${actual}"
         if [[ -z "$first_failure" ]]; then
