@@ -1,0 +1,81 @@
+{
+  "contract_version": "mock-code-finder-aggregate-contract-v1",
+  "schema_version": "mock-code-finder-aggregate-report-v1",
+  "bead_id": "asupersync-oelvq2",
+  "depends_on": [
+    "asupersync-uw9zg9",
+    "asupersync-hxi1ga",
+    "asupersync-kokw3m",
+    "asupersync-zftrj9",
+    "asupersync-qlvtin",
+    "asupersync-a5d34a",
+    "asupersync-a45"
+  ],
+  "shared_record_schema": "mock-code-finder-evidence-jsonl-schema-v1",
+  "runner": "scripts/run_mock_code_finder_evidence.py",
+  "default_child_runners": [
+    {
+      "child_bead_id": "asupersync-uw9zg9",
+      "subsystem": "observability-otel-w3c",
+      "script": "scripts/run_observability_evidence.sh"
+    },
+    {
+      "child_bead_id": "asupersync-hxi1ga",
+      "subsystem": "http2-conformance",
+      "script": "scripts/run_h2_conformance_evidence.sh"
+    },
+    {
+      "child_bead_id": "asupersync-kokw3m",
+      "subsystem": "raptorq-rfc6330",
+      "script": "scripts/run_rfc6330_conformance_evidence.sh"
+    },
+    {
+      "child_bead_id": "asupersync-zftrj9",
+      "subsystem": "database-postgres-copy-from",
+      "script": "scripts/run_postgres_copy_from_evidence.sh"
+    },
+    {
+      "child_bead_id": "asupersync-a5d34a",
+      "subsystem": "runtime-sync",
+      "script": "scripts/run_runtime_sync_invariant_evidence.sh"
+    },
+    {
+      "child_bead_id": "asupersync-a45",
+      "subsystem": "mock-code-finder-policy",
+      "script": "scripts/run_no_mock_policy_evidence.sh"
+    }
+  ],
+  "required_modes": [
+    "local",
+    "rch",
+    "ci",
+    "list",
+    "dry-run",
+    "self-test"
+  ],
+  "required_aggregate_fields": [
+    "run_id",
+    "git_sha_or_tree_state",
+    "started_at",
+    "finished_at",
+    "invoked_by_bead",
+    "child_bead_id",
+    "subsystem",
+    "command",
+    "scenario_count",
+    "verdict_counts",
+    "evidence_quality_counts",
+    "first_failure_line",
+    "artifact_paths",
+    "policy_scan_counts",
+    "final_verdict"
+  ],
+  "failure_rules": [
+    "Malformed child JSONL fails the aggregate.",
+    "Zero child JSONL artifacts or zero scenario records fail the aggregate.",
+    "Missing evidence_quality fails the aggregate.",
+    "Blocked or unsupported records must include blocker or context details.",
+    "Nonzero child exit fails the aggregate.",
+    "Child artifacts and logs remain under that child bead's aggregate artifact root."
+  ]
+}
