@@ -244,6 +244,7 @@ build_rckstb_inventory_summary() {
               marker_count: 0,
               selector_count: 0,
               disposition_counts: {},
+              row_inventory_path: "",
               unclassified_count: 1,
               verdict: "fail",
               first_failure: $first_failure
@@ -251,7 +252,7 @@ build_rckstb_inventory_summary() {
         return 0
     fi
 
-    python3 - "$PROJECT_ROOT" "$RCKSTB_INVENTORY_FILE" <<'PY'
+    python3 - "$PROJECT_ROOT" "$RCKSTB_INVENTORY_FILE" "$ARTIFACT_ROOT" "$ARTIFACT_PATH_ROOT" <<'PY'
 import json
 import pathlib
 import sys
@@ -259,6 +260,8 @@ from collections import Counter
 
 project_root = pathlib.Path(sys.argv[1])
 inventory_path = pathlib.Path(sys.argv[2])
+artifact_root = pathlib.Path(sys.argv[3])
+artifact_path_root = sys.argv[4].rstrip("/")
 artifact_path = "artifacts/stub_placeholder_inventory_v1.json"
 
 try:
@@ -271,6 +274,7 @@ except Exception as exc:  # noqa: BLE001 - shell summary must stay diagnostic.
         "marker_count": 0,
         "selector_count": 0,
         "disposition_counts": {},
+        "row_inventory_path": "",
         "unclassified_count": 1,
         "verdict": "fail",
         "first_failure": f"failed to read inventory: {exc}",
@@ -280,6 +284,10 @@ except Exception as exc:  # noqa: BLE001 - shell summary must stay diagnostic.
 terms = [str(term) for term in inventory.get("marker_terms", [])]
 extensions = {str(ext) for ext in inventory.get("file_extensions", [])}
 selectors = list(inventory.get("selectors", []))
+row_output = inventory.get("row_inventory_output", {}) or {}
+row_inventory_name = str(row_output.get("default_path", "stub_placeholder_inventory_markers.json"))
+row_inventory_path = artifact_root / row_inventory_name
+row_inventory_path_field = f"{artifact_path_root}/{row_inventory_name}" if artifact_path_root else row_inventory_name
 
 
 def selector_matches(selector: dict, rel_path: str, text: str, term: str) -> bool:
@@ -320,10 +328,14 @@ for root_name in inventory.get("scanned_paths", []):
                         "line": line_no,
                         "term": term,
                         "text": line.strip(),
+                        "context_before": lines[line_no - 2].strip() if line_no >= 2 else "",
+                        "context_after": lines[line_no].strip() if line_no < len(lines) else "",
+                        "source_kind": path.suffix.removeprefix("."),
                     })
 
 unclassified = []
 disposition_counts: Counter[str] = Counter()
+rows = []
 for marker in markers:
     matched = next(
         (
@@ -335,17 +347,73 @@ for marker in markers:
     )
     if matched is None:
         unclassified.append(marker)
+        rows.append({
+            "path": marker["path"],
+            "line": marker["line"],
+            "stable_anchor": f"{marker['path']}:{marker['line']}:{marker['term']}",
+            "marker_term": marker["term"],
+            "marker_text": marker["text"],
+            "context_before": marker["context_before"],
+            "context_after": marker["context_after"],
+            "source_kind": marker["source_kind"],
+            "selector_id": "",
+            "disposition": "unclassified",
+            "support_class": "unclassified",
+            "product_visible": marker["path"].startswith("src/"),
+            "conformance_visible": marker["path"].startswith("conformance/") or marker["path"].startswith("tests/conformance/"),
+            "reasoning": "",
+            "owner_bead": "",
+            "permanent_rationale": "",
+            "revisit_condition": "Classify this marker before closing asupersync-rckstb.",
+            "proof_artifact": row_inventory_path_field,
+        })
     else:
-        disposition_counts[str(matched.get("disposition", "unknown"))] += 1
+        disposition = str(matched.get("disposition", "unknown"))
+        disposition_counts[disposition] += 1
+        owner_bead = str(matched.get("blocker_bead_id", "")) or str(inventory.get("bead_id", "asupersync-rckstb"))
+        reasoning = str(matched.get("notes", ""))
+        rows.append({
+            "path": marker["path"],
+            "line": marker["line"],
+            "stable_anchor": f"{marker['path']}:{marker['line']}:{marker['term']}",
+            "marker_term": marker["term"],
+            "marker_text": marker["text"],
+            "context_before": marker["context_before"],
+            "context_after": marker["context_after"],
+            "source_kind": marker["source_kind"],
+            "selector_id": str(matched.get("id", "")),
+            "disposition": disposition,
+            "support_class": str(matched.get("support_class", "")),
+            "product_visible": marker["path"].startswith("src/"),
+            "conformance_visible": marker["path"].startswith("conformance/") or marker["path"].startswith("tests/conformance/"),
+            "reasoning": reasoning,
+            "owner_bead": owner_bead,
+            "permanent_rationale": reasoning if not str(matched.get("blocker_bead_id", "")) else "",
+            "revisit_condition": str(matched.get("revisit_condition", row_output.get("revisit_condition", ""))),
+            "proof_artifact": row_inventory_path_field,
+        })
 
 first_failure = ""
 if unclassified:
     marker = unclassified[0]
     first_failure = f"{marker['path']}:{marker['line']}:{marker['term']}: {marker['text']}"
 
+row_inventory = {
+    "schema_version": str(row_output.get("schema_version", "stub-placeholder-marker-row-inventory-v1")),
+    "bead_id": str(inventory.get("bead_id", "asupersync-rckstb")),
+    "source_artifact": artifact_path,
+    "scanned_paths": inventory.get("scanned_paths", []),
+    "marker_count": len(markers),
+    "unclassified_count": len(unclassified),
+    "disposition_counts": dict(sorted(disposition_counts.items())),
+    "markers": rows,
+}
+row_inventory_path.write_text(json.dumps(row_inventory, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
 print(json.dumps({
     "schema_version": "stub-placeholder-inventory-summary-v1",
     "artifact_path": artifact_path,
+    "row_inventory_path": row_inventory_path_field,
     "scanned_paths": inventory.get("scanned_paths", []),
     "marker_count": len(markers),
     "selector_count": len(selectors),
@@ -367,7 +435,9 @@ check_rckstb_placeholder_inventory_is_classified() {
     first_failure="$(jq -r '.first_failure // ""' <<<"$RCKSTB_INVENTORY_SUMMARY_JSON")"
 
     if [[ "$unclassified_count" == "0" ]]; then
-        report_pass "ZR-SCAN-RCKSTB-INVENTORY" "rckstb placeholder inventory classifies live markers" "marker_count=${marker_count}; unclassified_count=0; artifact=artifacts/stub_placeholder_inventory_v1.json"
+        local row_inventory_path
+        row_inventory_path="$(jq -r '.row_inventory_path // ""' <<<"$RCKSTB_INVENTORY_SUMMARY_JSON")"
+        report_pass "ZR-SCAN-RCKSTB-INVENTORY" "rckstb placeholder inventory classifies live markers" "marker_count=${marker_count}; unclassified_count=0; artifact=artifacts/stub_placeholder_inventory_v1.json; row_inventory=${row_inventory_path}"
     else
         report_fail "ZR-SCAN-RCKSTB-INVENTORY" "rckstb placeholder inventory has unclassified markers" "unclassified_count=${unclassified_count}; first_failure=${first_failure}"
     fi
@@ -738,6 +808,7 @@ jq -nc \
       rckstb_disposition_counts: $rckstb_inventory.disposition_counts,
       rckstb_unclassified_count: $rckstb_inventory.unclassified_count,
       rckstb_inventory_artifact_path: $rckstb_inventory.artifact_path,
+      rckstb_row_inventory_path: $rckstb_inventory.row_inventory_path,
       rckstb_inventory_verdict: $rckstb_inventory.verdict,
       rckstb_inventory_first_failure: $rckstb_inventory.first_failure,
       rckstb_placeholder_inventory: $rckstb_inventory

@@ -815,6 +815,41 @@ fn probe_21_rckstb_placeholder_inventory_classifies_live_markers() {
         .and_then(serde_json::Value::as_array)
         .expect("selectors must be an array");
     assert!(!selectors.is_empty(), "inventory must define selectors");
+    let row_output = inventory
+        .get("row_inventory_output")
+        .expect("inventory must declare generated row_inventory_output");
+    assert_eq!(
+        json_required_str(row_output, "schema_version"),
+        "stub-placeholder-marker-row-inventory-v1"
+    );
+    let row_fields = json_string_array(row_output, "row_fields")
+        .into_iter()
+        .collect::<BTreeSet<_>>();
+    for required in [
+        "path",
+        "line",
+        "stable_anchor",
+        "marker_term",
+        "marker_text",
+        "context_before",
+        "context_after",
+        "source_kind",
+        "selector_id",
+        "disposition",
+        "support_class",
+        "product_visible",
+        "conformance_visible",
+        "reasoning",
+        "owner_bead",
+        "permanent_rationale",
+        "revisit_condition",
+        "proof_artifact",
+    ] {
+        assert!(
+            row_fields.contains(required),
+            "row inventory must declare field {required}"
+        );
+    }
 
     let mut selector_ids = BTreeSet::new();
     for selector in selectors {
@@ -912,7 +947,7 @@ fn probe_21_rckstb_placeholder_inventory_classifies_live_markers() {
     );
     assert!(
         disposition_counts
-            .get("follow_up_bead")
+            .get("follow-up-bead")
             .copied()
             .unwrap_or_default()
             > 0,
