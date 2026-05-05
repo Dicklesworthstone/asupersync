@@ -1,5 +1,3 @@
-#![allow(warnings)]
-#![allow(clippy::all)]
 //! Flow control conformance tests.
 //!
 //! Tests flow control requirements from RFC 7540 Section 6.9.
@@ -20,7 +18,6 @@ pub fn run_flow_control_tests() -> Vec<H2ConformanceResult> {
 }
 
 #[allow(dead_code)]
-
 fn test_window_update_frame() -> H2ConformanceResult {
     let (result, elapsed) = timed_test(|| -> Result<(), String> {
         // WINDOW_UPDATE frame validation
@@ -31,10 +28,14 @@ fn test_window_update_frame() -> H2ConformanceResult {
             return Err("WINDOW_UPDATE payload must be 4 bytes".to_string());
         }
 
+        if max_increment != 0x7FFFFFFF {
+            return Err("WINDOW_UPDATE maximum increment must be 2^31-1".to_string());
+        }
+
         // Zero increment should cause PROTOCOL_ERROR
         let zero_increment = 0u32;
-        if zero_increment == 0 {
-            // Should be rejected
+        if zero_increment != 0 {
+            return Err("WINDOW_UPDATE zero-increment fixture must be zero".to_string());
         }
 
         Ok(())
@@ -51,7 +52,6 @@ fn test_window_update_frame() -> H2ConformanceResult {
 }
 
 #[allow(dead_code)]
-
 fn test_initial_window_size() -> H2ConformanceResult {
     let (result, elapsed) = timed_test(|| -> Result<(), String> {
         let default_window_size = 65535u32;
@@ -72,7 +72,6 @@ fn test_initial_window_size() -> H2ConformanceResult {
 }
 
 #[allow(dead_code)]
-
 fn test_flow_control_limits() -> H2ConformanceResult {
     let (result, elapsed) = timed_test(|| -> Result<(), String> {
         let max_window_size = 0x7FFFFFFFu32;
@@ -93,7 +92,6 @@ fn test_flow_control_limits() -> H2ConformanceResult {
 }
 
 #[allow(dead_code)]
-
 fn test_connection_flow_control() -> H2ConformanceResult {
     let (result, elapsed) = timed_test(|| -> Result<(), String> {
         // Connection-level flow control (stream 0)
