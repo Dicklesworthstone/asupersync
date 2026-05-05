@@ -3,7 +3,7 @@
   "bead_id": "asupersync-rckcnf",
   "source_registry": "tests/conformance/mod.rs",
   "readme_anchor": "README.md#conformance-suite",
-  "active_module_count": 63,
+  "active_module_count": 64,
   "dormant_module_count": 28,
   "count_policy": "Counts are machine-checked against tests/conformance/mod.rs. README prose must point here instead of hardcoding active or dormant counts.",
   "active_modules": [
@@ -21,6 +21,7 @@
     "h2_alpn_negotiation_rfc7540",
     "h2_connect",
     "h2_continuation_ordering",
+    "h2_live_adapter",
     "h2_must_reject_vectors",
     "h2_priority",
     "h2_rst_stream_ping_rfc9113",

@@ -63,8 +63,11 @@ pub mod obligation_invariants;
 pub mod obligation_lifecycle_metamorphic;
 pub mod phase_encoding_stable;
 pub mod plan_latency;
+#[cfg(feature = "postgres")]
 pub mod postgres_copy;
+#[cfg(feature = "postgres")]
 pub mod postgres_extended_query;
+#[cfg(feature = "postgres")]
 pub mod postgres_logical_replication;
 pub mod quic_retry_rfc9000;
 pub mod race_loser_drain_metamorphic;
@@ -168,7 +171,9 @@ pub use obligation_lifecycle_metamorphic::{
     ObligationLifecycleMetamorphicHarness, ObligationLifecycleMetamorphicResult,
     TestCategory as ObligationLifecycleTestCategory,
 };
+#[cfg(feature = "postgres")]
 pub use postgres_copy::PostgresCopyConformanceHarness;
+#[cfg(feature = "postgres")]
 pub use postgres_extended_query::PostgresExtendedQueryConformanceHarness;
 pub use quic_retry_rfc9000::QuicRetryConformanceHarness;
 #[cfg(feature = "deterministic-mode")]
@@ -911,84 +916,91 @@ pub fn run_all_conformance_tests() -> Vec<ConformanceTestResult> {
         .collect();
     results.extend(hpack_results);
 
-    // PostgreSQL extended-query conformance
-    let pg_extended_harness = PostgresExtendedQueryConformanceHarness::new();
-    let pg_extended_results: Vec<ConformanceTestResult> = pg_extended_harness
-        .run_all_tests()
-        .into_iter()
-        .map(|r| ConformanceTestResult {
-            test_id: r.test_id,
-            description: r.description,
-            category: match r.category {
-                postgres_extended_query::TestCategory::PipelineSequencing => {
-                    TestCategory::ProtocolOrdering
-                }
-                postgres_extended_query::TestCategory::StatementLifecycle => {
-                    TestCategory::StateMachine
-                }
-                postgres_extended_query::TestCategory::ErrorRecovery => TestCategory::ErrorHandling,
-                postgres_extended_query::TestCategory::RowDescriptionMetadata => {
-                    TestCategory::MessageEncoding
-                }
-                postgres_extended_query::TestCategory::ProtocolDistinction => {
-                    TestCategory::ProtocolOrdering
-                }
-                postgres_extended_query::TestCategory::TransactionStatus => {
-                    TestCategory::ConnectionHandling
-                }
-            },
-            requirement_level: match r.requirement_level {
-                postgres_extended_query::RequirementLevel::Must => RequirementLevel::Must,
-                postgres_extended_query::RequirementLevel::Should => RequirementLevel::Should,
-                postgres_extended_query::RequirementLevel::May => RequirementLevel::May,
-            },
-            verdict: match r.verdict {
-                postgres_extended_query::TestVerdict::Pass => TestVerdict::Pass,
-                postgres_extended_query::TestVerdict::Fail => TestVerdict::Fail,
-                postgres_extended_query::TestVerdict::Skipped => TestVerdict::Skipped,
-                postgres_extended_query::TestVerdict::ExpectedFailure => {
-                    TestVerdict::ExpectedFailure
-                }
-            },
-            error_message: r.error_message,
-            execution_time_ms: r.execution_time_ms,
-        })
-        .collect();
-    results.extend(pg_extended_results);
+    #[cfg(feature = "postgres")]
+    {
+        // PostgreSQL extended-query conformance
+        let pg_extended_harness = PostgresExtendedQueryConformanceHarness::new();
+        let pg_extended_results: Vec<ConformanceTestResult> = pg_extended_harness
+            .run_all_tests()
+            .into_iter()
+            .map(|r| ConformanceTestResult {
+                test_id: r.test_id,
+                description: r.description,
+                category: match r.category {
+                    postgres_extended_query::TestCategory::PipelineSequencing => {
+                        TestCategory::ProtocolOrdering
+                    }
+                    postgres_extended_query::TestCategory::StatementLifecycle => {
+                        TestCategory::StateMachine
+                    }
+                    postgres_extended_query::TestCategory::ErrorRecovery => {
+                        TestCategory::ErrorHandling
+                    }
+                    postgres_extended_query::TestCategory::RowDescriptionMetadata => {
+                        TestCategory::MessageEncoding
+                    }
+                    postgres_extended_query::TestCategory::ProtocolDistinction => {
+                        TestCategory::ProtocolOrdering
+                    }
+                    postgres_extended_query::TestCategory::TransactionStatus => {
+                        TestCategory::ConnectionHandling
+                    }
+                },
+                requirement_level: match r.requirement_level {
+                    postgres_extended_query::RequirementLevel::Must => RequirementLevel::Must,
+                    postgres_extended_query::RequirementLevel::Should => RequirementLevel::Should,
+                    postgres_extended_query::RequirementLevel::May => RequirementLevel::May,
+                },
+                verdict: match r.verdict {
+                    postgres_extended_query::TestVerdict::Pass => TestVerdict::Pass,
+                    postgres_extended_query::TestVerdict::Fail => TestVerdict::Fail,
+                    postgres_extended_query::TestVerdict::Skipped => TestVerdict::Skipped,
+                    postgres_extended_query::TestVerdict::ExpectedFailure => {
+                        TestVerdict::ExpectedFailure
+                    }
+                },
+                error_message: r.error_message,
+                execution_time_ms: r.execution_time_ms,
+            })
+            .collect();
+        results.extend(pg_extended_results);
 
-    // PostgreSQL COPY protocol conformance
-    let pg_copy_harness = PostgresCopyConformanceHarness::new();
-    let pg_copy_results: Vec<ConformanceTestResult> = pg_copy_harness
-        .run_all_tests()
-        .into_iter()
-        .map(|r| ConformanceTestResult {
-            test_id: r.test_id,
-            description: r.description,
-            category: match r.category {
-                postgres_copy::TestCategory::FormatSpecification => TestCategory::MessageEncoding,
-                postgres_copy::TestCategory::MessageBoundaries => TestCategory::Framing,
-                postgres_copy::TestCategory::CopyTermination => TestCategory::ProtocolOrdering,
-                postgres_copy::TestCategory::ErrorHandling => TestCategory::ErrorHandling,
-                postgres_copy::TestCategory::CopyOutSequence => TestCategory::ProtocolOrdering,
-                postgres_copy::TestCategory::FormatCompliance => TestCategory::MessageEncoding,
-                postgres_copy::TestCategory::ProtocolOrdering => TestCategory::ProtocolOrdering,
-            },
-            requirement_level: match r.requirement_level {
-                postgres_copy::RequirementLevel::Must => RequirementLevel::Must,
-                postgres_copy::RequirementLevel::Should => RequirementLevel::Should,
-                postgres_copy::RequirementLevel::May => RequirementLevel::May,
-            },
-            verdict: match r.verdict {
-                postgres_copy::TestVerdict::Pass => TestVerdict::Pass,
-                postgres_copy::TestVerdict::Fail => TestVerdict::Fail,
-                postgres_copy::TestVerdict::Skipped => TestVerdict::Skipped,
-                postgres_copy::TestVerdict::ExpectedFailure => TestVerdict::ExpectedFailure,
-            },
-            error_message: r.error_message,
-            execution_time_ms: r.execution_time_ms,
-        })
-        .collect();
-    results.extend(pg_copy_results);
+        // PostgreSQL COPY protocol conformance
+        let pg_copy_harness = PostgresCopyConformanceHarness::new();
+        let pg_copy_results: Vec<ConformanceTestResult> = pg_copy_harness
+            .run_all_tests()
+            .into_iter()
+            .map(|r| ConformanceTestResult {
+                test_id: r.test_id,
+                description: r.description,
+                category: match r.category {
+                    postgres_copy::TestCategory::FormatSpecification => {
+                        TestCategory::MessageEncoding
+                    }
+                    postgres_copy::TestCategory::MessageBoundaries => TestCategory::Framing,
+                    postgres_copy::TestCategory::CopyTermination => TestCategory::ProtocolOrdering,
+                    postgres_copy::TestCategory::ErrorHandling => TestCategory::ErrorHandling,
+                    postgres_copy::TestCategory::CopyOutSequence => TestCategory::ProtocolOrdering,
+                    postgres_copy::TestCategory::FormatCompliance => TestCategory::MessageEncoding,
+                    postgres_copy::TestCategory::ProtocolOrdering => TestCategory::ProtocolOrdering,
+                },
+                requirement_level: match r.requirement_level {
+                    postgres_copy::RequirementLevel::Must => RequirementLevel::Must,
+                    postgres_copy::RequirementLevel::Should => RequirementLevel::Should,
+                    postgres_copy::RequirementLevel::May => RequirementLevel::May,
+                },
+                verdict: match r.verdict {
+                    postgres_copy::TestVerdict::Pass => TestVerdict::Pass,
+                    postgres_copy::TestVerdict::Fail => TestVerdict::Fail,
+                    postgres_copy::TestVerdict::Skipped => TestVerdict::Skipped,
+                    postgres_copy::TestVerdict::ExpectedFailure => TestVerdict::ExpectedFailure,
+                },
+                error_message: r.error_message,
+                execution_time_ms: r.execution_time_ms,
+            })
+            .collect();
+        results.extend(pg_copy_results);
+    }
 
     // TODO: Add other conformance suites when implemented:
     /*
@@ -1345,6 +1357,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "postgres")]
     #[test]
     #[allow(dead_code)]
     fn test_postgres_extended_query_conformance_integration() {
@@ -1393,6 +1406,7 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "postgres")]
     #[test]
     #[allow(dead_code)]
     fn test_postgres_copy_conformance_integration() {
@@ -1438,6 +1452,7 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "postgres")]
     #[test]
     #[allow(dead_code)]
     fn test_postgres_conformance_registry_integration() {
