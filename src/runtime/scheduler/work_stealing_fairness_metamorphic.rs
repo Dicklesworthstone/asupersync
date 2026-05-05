@@ -1,4 +1,3 @@
-#![allow(clippy::all)]
 //! Metamorphic property tests for work-stealing fairness (br-asupersync-umttcl).
 //!
 //! These tests verify three invariants of the work-stealing scheduler under
