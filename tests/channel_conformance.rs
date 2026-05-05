@@ -532,9 +532,9 @@ fn run_conformance_tests() {
     test_phase!("run_conformance_tests");
     let runtime = AsupersyncRuntime::new();
     let summary = run_conformance_suite(&runtime, "asupersync", RunConfig::new());
-    write_conformance_artifacts("channel_conformance", &summary);
-
     let report = render_console_summary(&summary);
+    write_conformance_artifacts("channel_conformance", &summary, &report);
+
     tracing::info!(summary = %report, "conformance summary");
     assert!(
         summary.failed == 0,

@@ -286,7 +286,11 @@ fn topology_artifacts_dir() -> Option<PathBuf> {
     None
 }
 
-pub fn write_conformance_artifacts(suite_name: &str, summary: &conformance::runner::SuiteResult) {
+pub fn write_conformance_artifacts<T: serde::Serialize>(
+    suite_name: &str,
+    summary: &T,
+    summary_text: &str,
+) {
     let Some(dir) = conformance_artifacts_dir() else {
         return;
     };
@@ -297,7 +301,15 @@ pub fn write_conformance_artifacts(suite_name: &str, summary: &conformance::runn
     }
 
     let json_path = dir.join(format!("{suite_name}.json"));
-    if let Err(err) = conformance::write_json_report(summary, &json_path) {
+    let json = match serde_json::to_string_pretty(summary) {
+        Ok(json) => json,
+        Err(err) => {
+            tracing::warn!(error = %err, "failed to serialize conformance report");
+            return;
+        }
+    };
+
+    if let Err(err) = std::fs::write(&json_path, json) {
         tracing::warn!(
             error = %err,
             path = %json_path.display(),
@@ -306,7 +318,6 @@ pub fn write_conformance_artifacts(suite_name: &str, summary: &conformance::runn
     }
 
     let txt_path = dir.join(format!("{suite_name}.txt"));
-    let summary_text = conformance::render_console_summary(summary);
     if let Err(err) = std::fs::write(&txt_path, summary_text) {
         tracing::warn!(
             error = %err,
