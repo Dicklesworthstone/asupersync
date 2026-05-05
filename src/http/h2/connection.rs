@@ -1945,6 +1945,28 @@ mod tests {
             .expect("test instant overflow")
     }
 
+    fn encode_test_headers(headers: &[(&str, &str)]) -> Bytes {
+        let mut encoder = hpack::Encoder::new();
+        let mut encoded = BytesMut::new();
+        encoder.encode(
+            &headers
+                .iter()
+                .map(|(name, value)| Header::new(*name, *value))
+                .collect::<Vec<_>>(),
+            &mut encoded,
+        );
+        encoded.freeze()
+    }
+
+    fn test_request_headers(path: &str) -> Bytes {
+        encode_test_headers(&[
+            (":method", "GET"),
+            (":scheme", "https"),
+            (":path", path),
+            (":authority", "example.com"),
+        ])
+    }
+
     #[test]
     fn data_frame_triggers_connection_window_update_on_low_watermark() {
         let mut conn = Connection::server(Settings::default());
@@ -3481,7 +3503,12 @@ mod tests {
         conn.state = ConnectionState::Open;
 
         // Process stream 1 so the outbound GOAWAY advertises last_stream_id = 1.
-        let headers = Frame::Headers(HeadersFrame::new(1, Bytes::new(), false, true));
+        let headers = Frame::Headers(HeadersFrame::new(
+            1,
+            test_request_headers("/one"),
+            false,
+            true,
+        ));
         conn.process_frame(headers).unwrap();
         conn.goaway(ErrorCode::NoError, Bytes::new());
 
@@ -3493,7 +3520,12 @@ mod tests {
 
         // A higher-numbered HEADERS after GOAWAY is refused, but still creates
         // the stream entry so later frames can target it.
-        let refused = Frame::Headers(HeadersFrame::new(3, Bytes::new(), false, true));
+        let refused = Frame::Headers(HeadersFrame::new(
+            3,
+            test_request_headers("/refused"),
+            false,
+            true,
+        ));
         assert!(conn.process_frame(refused).unwrap().is_none());
 
         // Later bookkeeping on stream 3 can still bump the mutable tracker.
@@ -3503,7 +3535,12 @@ mod tests {
         assert_eq!(conn.sent_goaway_last_stream_id, Some(1));
 
         // The refusal boundary must remain frozen at the value we advertised.
-        let refused_again = Frame::Headers(HeadersFrame::new(5, Bytes::new(), false, true));
+        let refused_again = Frame::Headers(HeadersFrame::new(
+            5,
+            test_request_headers("/still-refused"),
+            false,
+            true,
+        ));
         assert!(
             conn.process_frame(refused_again).unwrap().is_none(),
             "streams above the advertised GOAWAY boundary must stay refused"
@@ -3974,11 +4011,21 @@ mod tests {
         conn.state = ConnectionState::Open;
 
         // Process HEADERS on stream 1
-        let headers = Frame::Headers(HeadersFrame::new(1, Bytes::new(), false, true));
+        let headers = Frame::Headers(HeadersFrame::new(
+            1,
+            test_request_headers("/one"),
+            false,
+            true,
+        ));
         conn.process_frame(headers).unwrap();
 
         // Process HEADERS on stream 3
-        let headers = Frame::Headers(HeadersFrame::new(3, Bytes::new(), false, true));
+        let headers = Frame::Headers(HeadersFrame::new(
+            3,
+            test_request_headers("/three"),
+            false,
+            true,
+        ));
         conn.process_frame(headers).unwrap();
 
         // Send GOAWAY — should reflect last_stream_id=3
@@ -4001,7 +4048,12 @@ mod tests {
         conn.state = ConnectionState::Open;
 
         // Open stream via HEADERS
-        let headers = Frame::Headers(HeadersFrame::new(1, Bytes::new(), false, true));
+        let headers = Frame::Headers(HeadersFrame::new(
+            1,
+            test_request_headers("/one"),
+            false,
+            true,
+        ));
         conn.process_frame(headers).unwrap();
 
         // Process DATA on stream 1
@@ -4009,7 +4061,12 @@ mod tests {
         conn.process_frame(data).unwrap();
 
         // Open stream 3 via HEADERS
-        let headers = Frame::Headers(HeadersFrame::new(3, Bytes::new(), true, true));
+        let headers = Frame::Headers(HeadersFrame::new(
+            3,
+            test_request_headers("/three"),
+            true,
+            true,
+        ));
         conn.process_frame(headers).unwrap();
 
         // GOAWAY should reflect stream 3 (highest seen)
@@ -4693,40 +4750,20 @@ mod tests {
         // RFC 9113 Section 6.8 conformance test - GOAWAY frame ordering and semantics
         // Tests the MUST/SHOULD clauses for connection termination
 
-        fn encode_headers(headers: Vec<Header>) -> Bytes {
-            let mut encoder = hpack::Encoder::new();
-            let mut encoded = BytesMut::new();
-            encoder.encode(&headers, &mut encoded);
-            encoded.freeze()
-        }
-
         let mut conn = Connection::server(Settings::default());
+        conn.process_frame(Frame::Settings(SettingsFrame::new(vec![])))
+            .expect("client SETTINGS first frame must be accepted");
+        let _ = conn.next_frame();
 
         // Test Requirement 1: GOAWAY should include last successfully processed stream ID
         // Open multiple streams to establish last_stream_id baseline
 
         // Process stream 1 (successfully)
-        let headers1 = HeadersFrame::new(
-            1,
-            encode_headers(vec![
-                Header::new(":method", "GET"),
-                Header::new(":path", "/"),
-            ]),
-            false,
-            true,
-        );
+        let headers1 = HeadersFrame::new(1, test_request_headers("/"), false, true);
         conn.process_frame(Frame::Headers(headers1)).unwrap();
 
         // Process stream 3 (successfully)
-        let headers3 = HeadersFrame::new(
-            3,
-            encode_headers(vec![
-                Header::new(":method", "POST"),
-                Header::new(":path", "/api"),
-            ]),
-            false,
-            true,
-        );
+        let headers3 = HeadersFrame::new(3, test_request_headers("/api"), false, true);
         conn.process_frame(Frame::Headers(headers3)).unwrap();
 
         // RFC 9113 §6.8: "the stream identifier of the last stream that it successfully received"
@@ -4753,6 +4790,10 @@ mod tests {
         // Test Requirement 3: Multiple GOAWAY frames (narrowing semantics)
         // Receive GOAWAY from peer with higher last_stream_id - should narrow down
         let mut conn2 = Connection::client(Settings::default());
+        conn2
+            .process_frame(Frame::Settings(SettingsFrame::new(vec![])))
+            .expect("server SETTINGS first frame must be accepted");
+        let _ = conn2.next_frame();
 
         // Receive first GOAWAY with last_stream_id = 5
         let goaway1 = Frame::GoAway(GoAwayFrame::new(5, ErrorCode::NoError));

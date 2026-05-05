@@ -96,19 +96,19 @@ scenario_command() {
             printf '%s cargo test -p asupersync --test conformance test_h2_conformance_integration --features test-internals -- --nocapture\n' "$(cargo_env_prefix)"
             ;;
         H2-GOAWAY-STATE-MACHINE-LIVE)
-            printf '%s cargo test -p asupersync --lib goaway --features test-internals -- --nocapture\n' "$(cargo_env_prefix)"
+            printf '%s cargo run -p asupersync-conformance --bin h2_goaway_conformance -- --format summary --timeout 30\n' "$(cargo_env_prefix)"
             ;;
         H2-PING-ACK-LIVE)
-            printf '%s cargo test -p asupersync --lib ping_ack --features test-internals -- --nocapture\n' "$(cargo_env_prefix)"
+            printf '%s cargo run -p asupersync-conformance --bin h2_ping_conformance -- --format summary --timeout 30\n' "$(cargo_env_prefix)"
             ;;
         H2-DATA-END-STREAM-LIVE)
-            printf '%s cargo test -p asupersync --lib end_stream --features test-internals -- --nocapture\n' "$(cargo_env_prefix)"
+            printf '%s cargo run -p asupersync-conformance --bin h2_data_end_stream_conformance -- --format summary --timeout 30\n' "$(cargo_env_prefix)"
             ;;
         H2-PRIORITY-STATE-LIVE)
-            printf '%s cargo test -p asupersync --lib priority --features test-internals -- --nocapture\n' "$(cargo_env_prefix)"
+            printf '%s cargo run -p asupersync-conformance --bin h2_priority_conformance -- --format summary --timeout 30\n' "$(cargo_env_prefix)"
             ;;
         H2-ENABLE-PUSH-LIVE)
-            printf '%s cargo test -p asupersync --lib enable_push --features test-internals -- --nocapture\n' "$(cargo_env_prefix)"
+            printf '%s cargo run -p asupersync-conformance --bin h2_enable_push_conformance -- --format summary --timeout 30\n' "$(cargo_env_prefix)"
             ;;
         H2-SIMULATE-HELPER-SCAN-LIVE)
             printf 'bash scripts/run_h2_conformance_evidence.sh --internal-simulate-scan\n'
@@ -123,11 +123,11 @@ scenario_command() {
 scenario_test_filter() {
     case "$1" in
         H2-LIVE-ADAPTER-INTEGRATION-LIVE) printf 'test_h2_conformance_integration\n' ;;
-        H2-GOAWAY-STATE-MACHINE-LIVE) printf 'goaway\n' ;;
-        H2-PING-ACK-LIVE) printf 'ping_ack\n' ;;
-        H2-DATA-END-STREAM-LIVE) printf 'end_stream\n' ;;
-        H2-PRIORITY-STATE-LIVE) printf 'priority\n' ;;
-        H2-ENABLE-PUSH-LIVE) printf 'enable_push\n' ;;
+        H2-GOAWAY-STATE-MACHINE-LIVE) printf 'h2_goaway_conformance\n' ;;
+        H2-PING-ACK-LIVE) printf 'h2_ping_conformance\n' ;;
+        H2-DATA-END-STREAM-LIVE) printf 'h2_data_end_stream_conformance\n' ;;
+        H2-PRIORITY-STATE-LIVE) printf 'h2_priority_conformance\n' ;;
+        H2-ENABLE-PUSH-LIVE) printf 'h2_enable_push_conformance\n' ;;
         H2-SIMULATE-HELPER-SCAN-LIVE) printf 'h2 simulate helper scan\n' ;;
         *) return 1 ;;
     esac
@@ -166,19 +166,19 @@ scenario_source_files() {
             printf '["tests/conformance/mod.rs","tests/conformance/h2_live_adapter.rs","tests/conformance/h2_rfc7540/mod.rs"]\n'
             ;;
         H2-GOAWAY-STATE-MACHINE-LIVE)
-            printf '["src/http/h2/connection.rs","src/http/h2/frame.rs","tests/conformance/h2_rfc7540/connection_tests.rs"]\n'
+            printf '["src/http/h2/connection.rs","src/http/h2/frame.rs","conformance/src/h2_goaway_conformance.rs","conformance/src/bin/h2_goaway_conformance.rs","tests/conformance/h2_rfc7540/connection_tests.rs"]\n'
             ;;
         H2-PING-ACK-LIVE)
-            printf '["src/http/h2/connection.rs","src/http/h2/frame.rs","conformance/src/h2_ping_conformance.rs"]\n'
+            printf '["src/http/h2/connection.rs","src/http/h2/frame.rs","conformance/src/h2_ping_conformance.rs","conformance/src/bin/h2_ping_conformance.rs"]\n'
             ;;
         H2-DATA-END-STREAM-LIVE)
-            printf '["src/http/h2/connection.rs","src/http/h2/stream.rs","tests/conformance/h2_rfc7540/stream_tests.rs"]\n'
+            printf '["src/http/h2/connection.rs","src/http/h2/stream.rs","conformance/src/h2_data_end_stream_conformance.rs","conformance/src/bin/h2_data_end_stream_conformance.rs"]\n'
             ;;
         H2-PRIORITY-STATE-LIVE)
-            printf '["src/http/h2/frame.rs","src/http/h2/stream.rs","tests/conformance/h2_priority.rs","tests/conformance/h2_rfc7540/priority_tests.rs"]\n'
+            printf '["src/http/h2/frame.rs","src/http/h2/stream.rs","conformance/src/h2_priority_conformance.rs","conformance/src/bin/h2_priority_conformance.rs","tests/conformance/h2_priority.rs","tests/conformance/h2_rfc7540/priority_tests.rs"]\n'
             ;;
         H2-ENABLE-PUSH-LIVE)
-            printf '["src/http/h2/settings.rs","src/http/h2/connection.rs","conformance/src/h2_enable_push_conformance.rs"]\n'
+            printf '["src/http/h2/settings.rs","src/http/h2/connection.rs","conformance/src/h2_enable_push_conformance.rs","conformance/src/bin/h2_enable_push_conformance.rs"]\n'
             ;;
         H2-SIMULATE-HELPER-SCAN-LIVE)
             printf '["tests/conformance/h2_live_adapter.rs","tests/conformance/h2_rfc7540/connection_tests.rs","tests/conformance/h2_rfc7540/stream_tests.rs","tests/conformance/h2_rfc7540/priority_tests.rs","conformance/src/h2_ping_conformance.rs","conformance/src/h2_goaway_conformance.rs","conformance/src/h2_data_end_stream_conformance.rs","conformance/src/h2_priority_conformance.rs","conformance/src/h2_enable_push_conformance.rs"]\n'
@@ -190,11 +190,11 @@ scenario_source_files() {
 scenario_input_artifact() {
     case "$1" in
         H2-LIVE-ADAPTER-INTEGRATION-LIVE) printf 'tests/conformance/mod.rs:test_h2_conformance_integration\n' ;;
-        H2-GOAWAY-STATE-MACHINE-LIVE) printf 'src/http/h2/connection.rs:goaway\n' ;;
-        H2-PING-ACK-LIVE) printf 'src/http/h2/connection.rs:ping_ack\n' ;;
-        H2-DATA-END-STREAM-LIVE) printf 'src/http/h2/connection.rs:end_stream\n' ;;
-        H2-PRIORITY-STATE-LIVE) printf 'src/http/h2/frame.rs:PriorityFrame\n' ;;
-        H2-ENABLE-PUSH-LIVE) printf 'src/http/h2/settings.rs:SETTINGS_ENABLE_PUSH\n' ;;
+        H2-GOAWAY-STATE-MACHINE-LIVE) printf 'conformance/src/bin/h2_goaway_conformance.rs\n' ;;
+        H2-PING-ACK-LIVE) printf 'conformance/src/bin/h2_ping_conformance.rs\n' ;;
+        H2-DATA-END-STREAM-LIVE) printf 'conformance/src/bin/h2_data_end_stream_conformance.rs\n' ;;
+        H2-PRIORITY-STATE-LIVE) printf 'conformance/src/bin/h2_priority_conformance.rs\n' ;;
+        H2-ENABLE-PUSH-LIVE) printf 'conformance/src/bin/h2_enable_push_conformance.rs\n' ;;
         H2-SIMULATE-HELPER-SCAN-LIVE) printf 'targeted HTTP/2 conformance source scan\n' ;;
         *) return 1 ;;
     esac
@@ -242,7 +242,7 @@ run_simulate_scan() {
         "conformance/src/h2_enable_push_conformance.rs"
     )
     local forbidden=""
-    forbidden="$(rg -n 'simulate_(ping|goaway|data|priority|enable_push|stream_creation)|hard-coded success|fake pass' "${scan_files[@]}" || true)"
+    forbidden="$(rg -n 'simulate_[[:alnum:]_]+|hard-coded success|fake pass' "${scan_files[@]}" || true)"
     if [[ -n "$forbidden" ]]; then
         printf 'h2 simulate helper scan failed:\n%s\n' "$forbidden"
         return 1
@@ -255,6 +255,21 @@ validate_cargo_output() {
     local combined_path="$1"
     local scenario_id="$2"
     local test_count
+    local case_count
+
+    if grep -Fq "ALL TESTS PASSED" "$combined_path"; then
+        case_count="$(grep -Eo 'Passed: *[0-9]+' "$combined_path" | tail -n1 | awk '{print $2}' || true)"
+        if [[ -z "$case_count" || "$case_count" -le 0 ]]; then
+            printf '%s conformance runner did not report any passed cases' "$scenario_id"
+            return 1
+        fi
+        if grep -Eiq 'TESTS FAILED|panicked at|error\[|Tests timed out|not found' "$combined_path"; then
+            printf '%s conformance runner output contains failure markers despite pass summary' "$scenario_id"
+            return 1
+        fi
+        printf 'conformance runner summary ok; passed_cases=%s' "$case_count"
+        return 0
+    fi
 
     if ! grep -Fq "test result: ok" "$combined_path"; then
         printf '%s did not emit a successful cargo test summary' "$scenario_id"
@@ -305,40 +320,40 @@ run_rch_command_capture() {
             timeout "$RCH_WRAPPER_TIMEOUT" "$RCH_BIN" exec -- \
                 env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS="-C debuginfo=0" \
                 CARGO_TARGET_DIR="$target_dir" \
-                cargo test -p asupersync --lib goaway \
-                --features test-internals -- --nocapture \
+                cargo run -p asupersync-conformance --bin h2_goaway_conformance -- \
+                --format summary --timeout 30 \
                 > "$stdout_path" 2> "$stderr_path"
             ;;
         H2-PING-ACK-LIVE)
             timeout "$RCH_WRAPPER_TIMEOUT" "$RCH_BIN" exec -- \
                 env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS="-C debuginfo=0" \
                 CARGO_TARGET_DIR="$target_dir" \
-                cargo test -p asupersync --lib ping_ack \
-                --features test-internals -- --nocapture \
+                cargo run -p asupersync-conformance --bin h2_ping_conformance -- \
+                --format summary --timeout 30 \
                 > "$stdout_path" 2> "$stderr_path"
             ;;
         H2-DATA-END-STREAM-LIVE)
             timeout "$RCH_WRAPPER_TIMEOUT" "$RCH_BIN" exec -- \
                 env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS="-C debuginfo=0" \
                 CARGO_TARGET_DIR="$target_dir" \
-                cargo test -p asupersync --lib end_stream \
-                --features test-internals -- --nocapture \
+                cargo run -p asupersync-conformance --bin h2_data_end_stream_conformance -- \
+                --format summary --timeout 30 \
                 > "$stdout_path" 2> "$stderr_path"
             ;;
         H2-PRIORITY-STATE-LIVE)
             timeout "$RCH_WRAPPER_TIMEOUT" "$RCH_BIN" exec -- \
                 env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS="-C debuginfo=0" \
                 CARGO_TARGET_DIR="$target_dir" \
-                cargo test -p asupersync --lib priority \
-                --features test-internals -- --nocapture \
+                cargo run -p asupersync-conformance --bin h2_priority_conformance -- \
+                --format summary --timeout 30 \
                 > "$stdout_path" 2> "$stderr_path"
             ;;
         H2-ENABLE-PUSH-LIVE)
             timeout "$RCH_WRAPPER_TIMEOUT" "$RCH_BIN" exec -- \
                 env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS="-C debuginfo=0" \
                 CARGO_TARGET_DIR="$target_dir" \
-                cargo test -p asupersync --lib enable_push \
-                --features test-internals -- --nocapture \
+                cargo run -p asupersync-conformance --bin h2_enable_push_conformance -- \
+                --format summary --timeout 30 \
                 > "$stdout_path" 2> "$stderr_path"
             ;;
         *)
@@ -375,36 +390,36 @@ run_command_capture() {
         H2-GOAWAY-STATE-MACHINE-LIVE)
             env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS="-C debuginfo=0" \
                 CARGO_TARGET_DIR="${TMPDIR:-/tmp}/rch_target_asupersync_hxi1ga_h2" \
-                cargo test -p asupersync --lib goaway \
-                --features test-internals -- --nocapture \
+                cargo run -p asupersync-conformance --bin h2_goaway_conformance -- \
+                --format summary --timeout 30 \
                 > "$stdout_path" 2> "$stderr_path"
             ;;
         H2-PING-ACK-LIVE)
             env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS="-C debuginfo=0" \
                 CARGO_TARGET_DIR="${TMPDIR:-/tmp}/rch_target_asupersync_hxi1ga_h2" \
-                cargo test -p asupersync --lib ping_ack \
-                --features test-internals -- --nocapture \
+                cargo run -p asupersync-conformance --bin h2_ping_conformance -- \
+                --format summary --timeout 30 \
                 > "$stdout_path" 2> "$stderr_path"
             ;;
         H2-DATA-END-STREAM-LIVE)
             env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS="-C debuginfo=0" \
                 CARGO_TARGET_DIR="${TMPDIR:-/tmp}/rch_target_asupersync_hxi1ga_h2" \
-                cargo test -p asupersync --lib end_stream \
-                --features test-internals -- --nocapture \
+                cargo run -p asupersync-conformance --bin h2_data_end_stream_conformance -- \
+                --format summary --timeout 30 \
                 > "$stdout_path" 2> "$stderr_path"
             ;;
         H2-PRIORITY-STATE-LIVE)
             env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS="-C debuginfo=0" \
                 CARGO_TARGET_DIR="${TMPDIR:-/tmp}/rch_target_asupersync_hxi1ga_h2" \
-                cargo test -p asupersync --lib priority \
-                --features test-internals -- --nocapture \
+                cargo run -p asupersync-conformance --bin h2_priority_conformance -- \
+                --format summary --timeout 30 \
                 > "$stdout_path" 2> "$stderr_path"
             ;;
         H2-ENABLE-PUSH-LIVE)
             env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS="-C debuginfo=0" \
                 CARGO_TARGET_DIR="${TMPDIR:-/tmp}/rch_target_asupersync_hxi1ga_h2" \
-                cargo test -p asupersync --lib enable_push \
-                --features test-internals -- --nocapture \
+                cargo run -p asupersync-conformance --bin h2_enable_push_conformance -- \
+                --format summary --timeout 30 \
                 > "$stdout_path" 2> "$stderr_path"
             ;;
         *)
@@ -546,10 +561,37 @@ run_self_test() {
     local root="$ARTIFACT_ROOT/self-test"
     local fixture_jsonl="$root/h2-conformance-self-test.jsonl"
     local summary_json="$root/h2-conformance-self-test.summary.json"
+    local cargo_output="$root/h2-cargo-summary.fixture"
+    local runner_output="$root/h2-runner-summary.fixture"
+    local failing_output="$root/h2-failing-summary.fixture"
     mkdir -p "$root"
     write_self_test_fixture_jsonl "$fixture_jsonl"
     python3 "$VALIDATOR" --contract "$CONTRACT" --self-test >/dev/null
     python3 "$VALIDATOR" --contract "$CONTRACT" --jsonl "$fixture_jsonl" --summary-output "$summary_json"
+    cat > "$cargo_output" <<'EOF'
+running 2 tests
+test h2_fixture_one ... ok
+test h2_fixture_two ... ok
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+EOF
+    validate_cargo_output "$cargo_output" "h2-self-test-cargo-summary" >/dev/null
+    cat > "$runner_output" <<'EOF'
+HTTP/2 CONFORMANCE RESULTS
+ALL TESTS PASSED
+Passed: 3
+Failed: 0
+EOF
+    validate_cargo_output "$runner_output" "h2-self-test-runner-summary" >/dev/null
+    cat > "$failing_output" <<'EOF'
+HTTP/2 CONFORMANCE RESULTS
+1 TESTS FAILED
+Passed: 2
+Failed: 1
+EOF
+    if validate_cargo_output "$failing_output" "h2-self-test-failing-summary" >/dev/null; then
+        echo "self-test failure fixture unexpectedly validated" >&2
+        exit 1
+    fi
     echo "HTTP/2 conformance evidence runner self-test: pass"
     echo "Evidence JSONL: $(repo_relative "$fixture_jsonl")"
     echo "Summary: $(repo_relative "$summary_json")"

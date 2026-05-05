@@ -242,3 +242,59 @@ fn runtime_sync_evidence_runner_lists_and_self_tests() {
     assert!(stdout.contains("runtime-sync-self-test.jsonl"));
     assert!(stdout.contains("runtime-sync-self-test.summary.json"));
 }
+
+#[test]
+fn h2_conformance_evidence_runner_lists_and_self_tests() {
+    let list_output = Command::new("bash")
+        .arg("scripts/run_h2_conformance_evidence.sh")
+        .arg("--list")
+        .current_dir(repo_path(""))
+        .output()
+        .expect("list HTTP/2 conformance evidence runner scenarios");
+
+    assert!(
+        list_output.status.success(),
+        "runner --list failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&list_output.stdout),
+        String::from_utf8_lossy(&list_output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&list_output.stdout);
+    for scenario in [
+        "H2-LIVE-ADAPTER-INTEGRATION-LIVE",
+        "H2-GOAWAY-STATE-MACHINE-LIVE",
+        "H2-PING-ACK-LIVE",
+        "H2-DATA-END-STREAM-LIVE",
+        "H2-PRIORITY-STATE-LIVE",
+        "H2-ENABLE-PUSH-LIVE",
+        "H2-SIMULATE-HELPER-SCAN-LIVE",
+    ] {
+        assert!(
+            stdout.contains(scenario),
+            "runner --list should include {scenario}"
+        );
+    }
+    assert!(stdout.contains("aggregate_runner_bead=asupersync-oelvq2"));
+    assert!(stdout.contains("aggregate_child_bead=asupersync-hxi1ga"));
+
+    let artifact_root = repo_path("target/mock-code-finder/asupersync-hxi1ga-contract-test")
+        .join(std::process::id().to_string());
+    let self_test_output = Command::new("bash")
+        .arg("scripts/run_h2_conformance_evidence.sh")
+        .arg("--self-test")
+        .arg("--artifact-root")
+        .arg(&artifact_root)
+        .current_dir(repo_path(""))
+        .output()
+        .expect("run HTTP/2 conformance evidence runner self-test");
+
+    assert!(
+        self_test_output.status.success(),
+        "runner --self-test failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&self_test_output.stdout),
+        String::from_utf8_lossy(&self_test_output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&self_test_output.stdout);
+    assert!(stdout.contains("HTTP/2 conformance evidence runner self-test: pass"));
+    assert!(stdout.contains("h2-conformance-self-test.jsonl"));
+    assert!(stdout.contains("h2-conformance-self-test.summary.json"));
+}
