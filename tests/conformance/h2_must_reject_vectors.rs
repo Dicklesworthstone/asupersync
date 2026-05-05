@@ -1,5 +1,3 @@
-#![allow(warnings)]
-#![allow(clippy::all)]
 //! HTTP/2 RFC 9113 must-reject conformance vectors.
 //!
 //! This file covers the specific h2spec-style scenarios where the
@@ -24,10 +22,10 @@
 
 use asupersync::bytes::Bytes;
 use asupersync::http::h2::connection::Connection;
-use asupersync::http::h2::error::{ErrorCode, H2Error};
+use asupersync::http::h2::error::ErrorCode;
 use asupersync::http::h2::frame::{
-    DataFrame, Frame, GoAwayFrame, HeadersFrame, PushPromiseFrame, RstStreamFrame, Setting,
-    SettingsFrame, WindowUpdateFrame,
+    DataFrame, Frame, GoAwayFrame, HeadersFrame, PushPromiseFrame, RstStreamFrame, SettingsFrame,
+    WindowUpdateFrame,
 };
 use asupersync::http::h2::settings::Settings;
 
