@@ -1,5 +1,3 @@
-#![allow(warnings)]
-#![allow(clippy::all)]
 //! HTTP/1.1 Chunked Request Body Transfer-Encoding RFC 9112 Conformance Tests
 //!
 //! This module provides comprehensive conformance testing for HTTP/1.1 chunked
@@ -26,55 +24,14 @@
 //! - **MR4**: Chunk extensions in requests are accepted and properly formatted
 //! - **MR5**: Trailer fields are correctly encoded after final chunk
 
-use proptest::prelude::*;
-use std::time::{Duration, Instant};
-
-use asupersync::bytes::{Buf, BytesMut};
+use asupersync::bytes::BytesMut;
 use asupersync::codec::Encoder;
 use asupersync::http::h1::client::Http1ClientCodec;
 use asupersync::http::h1::codec::HttpError;
 use asupersync::http::h1::types::{Method, Request, Version};
-
-/// Test result for chunked request conformance verification.
-#[derive(Debug, Clone, PartialEq, Eq)]
-#[allow(dead_code)]
-pub struct ChunkedRequestTestResult {
-    pub test_id: String,
-    pub description: String,
-    pub passed: bool,
-    pub error_message: Option<String>,
-    pub wire_format_valid: bool,
-}
-
-#[allow(dead_code)]
-
-impl ChunkedRequestTestResult {
-    #[allow(dead_code)]
-    fn pass(test_id: &str, description: &str, wire_valid: bool) -> Self {
-        Self {
-            test_id: test_id.to_string(),
-            description: description.to_string(),
-            passed: true,
-            error_message: None,
-            wire_format_valid: wire_valid,
-        }
-    }
-
-    #[allow(dead_code)]
-
-    fn fail(test_id: &str, description: &str, error: &str) -> Self {
-        Self {
-            test_id: test_id.to_string(),
-            description: description.to_string(),
-            passed: false,
-            error_message: Some(error.to_string()),
-            wire_format_valid: false,
-        }
-    }
-}
+use proptest::prelude::*;
 
 /// Helper to encode HTTP/1.1 chunked request and verify wire format.
-#[allow(dead_code)]
 fn encode_chunked_request(req: Request) -> Result<Vec<u8>, HttpError> {
     let mut codec = Http1ClientCodec::new();
     let mut buf = BytesMut::new();
@@ -84,7 +41,6 @@ fn encode_chunked_request(req: Request) -> Result<Vec<u8>, HttpError> {
 }
 
 /// Verify that encoded data contains proper chunked encoding structure.
-#[allow(dead_code)]
 fn verify_chunked_wire_format(data: &[u8], expected_body: &[u8]) -> bool {
     let data_str = String::from_utf8_lossy(data);
 
@@ -121,11 +77,10 @@ fn verify_chunked_wire_format(data: &[u8], expected_body: &[u8]) -> bool {
 /// Metamorphic relation: A valid HTTP/1.1 request with Transfer-Encoding: chunked
 /// must be successfully encoded and produce valid wire format.
 #[test]
-#[allow(dead_code)]
 fn test_mr1_chunked_request_allowed() {
     let test_body = b"Hello, world!";
 
-    let mut req = Request::builder(Method::Post, "/test")
+    let req = Request::builder(Method::Post, "/test")
         .version(Version::Http11)
         .header("Transfer-Encoding", "chunked")
         .header("Host", "example.com")
@@ -159,7 +114,6 @@ fn test_mr1_chunked_request_allowed() {
 /// Metamorphic relation: All chunked requests must end with "0\r\n\r\n"
 /// regardless of body content.
 #[test]
-#[allow(dead_code)]
 fn test_mr2_zero_length_final_chunk() {
     let test_cases = vec![
         ("Empty body", Vec::new()),
@@ -175,8 +129,8 @@ fn test_mr2_zero_length_final_chunk() {
             .body(body.clone())
             .build();
 
-        let encoded =
-            encode_chunked_request(req).expect(&format!("Should encode request with {}", desc));
+        let encoded = encode_chunked_request(req)
+            .unwrap_or_else(|err| panic!("Should encode request with {desc}: {err:?}"));
 
         // Must end with zero-length chunk and final CRLF
         assert!(
@@ -205,7 +159,6 @@ fn test_mr2_zero_length_final_chunk() {
 /// Metamorphic relation: HTTP/1.0 requests with Transfer-Encoding header
 /// must be rejected since chunked encoding is only valid in HTTP/1.1+.
 #[test]
-#[allow(dead_code)]
 fn test_mr3_chunked_http10_rejected() {
     let req = Request::builder(Method::Post, "/test")
         .version(Version::Http10)
@@ -234,7 +187,6 @@ fn test_mr3_chunked_http10_rejected() {
 /// Metamorphic relation: The client codec should accept and properly format
 /// chunk extensions when encoding chunked requests.
 #[test]
-#[allow(dead_code)]
 fn test_mr4_chunk_extensions_tolerated() {
     // Note: This tests that the implementation can handle chunk extensions
     // even though the simple implementation may not support them directly.
@@ -273,19 +225,16 @@ fn test_mr4_chunk_extensions_tolerated() {
 /// Metamorphic relation: Chunked requests with trailer fields should be
 /// properly encoded with trailers appearing after the final chunk.
 #[test]
-#[allow(dead_code)]
 fn test_mr5_trailer_content_type_allowed() {
     let test_body = b"request body";
 
-    let mut req = Request::builder(Method::Post, "/test")
+    let req = Request::builder(Method::Post, "/test")
         .version(Version::Http11)
         .header("Transfer-Encoding", "chunked")
         .header("Host", "example.com")
         .body(test_body.to_vec())
-        .trailers(vec![
-            ("Content-Type".to_string(), "application/json".to_string()),
-            ("X-Custom-Trailer".to_string(), "trailer-value".to_string()),
-        ])
+        .trailer("Content-Type", "application/json")
+        .trailer("X-Custom-Trailer", "trailer-value")
         .build();
 
     let encoded = encode_chunked_request(req).expect("Should encode request with trailers");
@@ -337,13 +286,12 @@ proptest! {
             .body(body.clone());
 
         if has_trailers {
-            req_builder = req_builder.trailers(vec![
-                ("X-Test-Trailer".to_string(), "test-value".to_string()),
-            ]);
+            req_builder = req_builder.trailer("X-Test-Trailer", "test-value");
         }
 
         let req = req_builder.build();
-        let encoded = encode_chunked_request(req)?;
+        let encoded = encode_chunked_request(req)
+            .map_err(|err| TestCaseError::fail(format!("chunked encode failed: {err:?}")))?;
 
         // Invariant 1: Must contain Transfer-Encoding header
         let encoded_str = String::from_utf8_lossy(&encoded);
@@ -370,7 +318,6 @@ proptest! {
 
 /// Integration test combining all metamorphic relations
 #[test]
-#[allow(dead_code)]
 fn test_integration_all_mrs() {
     let test_cases = vec![
         // MR1 + MR2: Basic chunked request
@@ -401,10 +348,8 @@ fn test_integration_all_mrs() {
                 .version(Version::Http11)
                 .header("Transfer-Encoding", "chunked")
                 .body(b"file content here".to_vec())
-                .trailers(vec![
-                    ("Content-MD5".to_string(), "abc123".to_string()),
-                    ("X-Upload-Status".to_string(), "complete".to_string()),
-                ])
+                .trailer("Content-MD5", "abc123")
+                .trailer("X-Upload-Status", "complete")
                 .build(),
             true, // should succeed
         ),
@@ -414,7 +359,8 @@ fn test_integration_all_mrs() {
         let result = encode_chunked_request(req.clone());
 
         if should_succeed {
-            let encoded = result.expect(&format!("Test '{}' should succeed", test_name));
+            let encoded =
+                result.unwrap_or_else(|err| panic!("Test '{test_name}' should succeed: {err:?}"));
 
             // Verify all MRs are satisfied
             assert!(
@@ -422,57 +368,8 @@ fn test_integration_all_mrs() {
                 "Test '{}' should produce valid wire format",
                 test_name
             );
-
-            println!("✓ Integration test '{}' passed", test_name);
         } else {
-            assert!(result.is_err(), "Test '{}' should fail", test_name);
-
-            println!("✓ Integration test '{}' correctly failed", test_name);
-        }
-    }
-}
-
-#[cfg(test)]
-mod benchmarks {
-    use super::*;
-    use std::time::{Duration, Instant};
-
-    #[test]
-    #[allow(dead_code)]
-    fn benchmark_chunked_encoding_performance() {
-        let body_sizes = vec![0, 64, 1024, 8192, 65536];
-
-        for size in body_sizes {
-            let body = vec![b'A'; size];
-            let req = Request::builder(Method::Post, "/benchmark")
-                .version(Version::Http11)
-                .header("Transfer-Encoding", "chunked")
-                .body(body)
-                .build();
-
-            let start = Instant::now();
-            let iterations = 1000;
-
-            for _ in 0..iterations {
-                let _encoded =
-                    encode_chunked_request(req.clone()).expect("Benchmark encoding should succeed");
-            }
-
-            let duration = start.elapsed();
-            let per_op = duration / iterations;
-
-            println!(
-                "Chunked encoding {} bytes: {:.2}µs per operation",
-                size,
-                per_op.as_micros()
-            );
-
-            // Performance requirement: should encode within reasonable time
-            assert!(
-                per_op < Duration::from_millis(1),
-                "Encoding {} bytes should complete within 1ms",
-                size
-            );
+            assert!(result.is_err(), "Test '{test_name}' should fail");
         }
     }
 }

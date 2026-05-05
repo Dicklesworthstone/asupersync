@@ -26,12 +26,12 @@ pub mod h1_chunked;
 //   pub mod h1_expect_continue;
 //   pub mod h1_keepalive;
 //   pub mod h1_methods;
-//   pub mod h1_request_chunked;
 //
 // h1_protocol.rs is the new RFC 7230 obs-fold + TE/CL precedence suite
 // (no bit-rot — built against current Http1Codec API).
 pub mod h1_ows_normalization;
 pub mod h1_protocol;
+pub mod h1_request_chunked;
 pub mod h1_request_target;
 pub mod h1_rfc9112;
 pub mod h1_trailer_restrictions;
@@ -141,13 +141,13 @@ pub mod tls_sni;
 // pub mod web_session_cookies;      // bit-rot — depends on `tokio` (forbidden) and asupersync::io::Cursor moved
 //
 // h1_* siblings (h1_body_framing, h1_content_encoding,
-// h1_expect_continue, h1_keepalive, h1_methods, h1_request_chunked) and
+// h1_expect_continue, h1_keepalive, h1_methods) and
 // h2_stream_state_machine_rfc7540, hpack_metamorphic,
 // sqlite_prepared_statements is already individually
 // commented out earlier in this file with bit-rot rationale; deliberately
 // not re-declared here.
 // The h1_* siblings (h1_body_framing, h1_content_encoding,
-// h1_expect_continue, h1_keepalive, h1_methods, h1_request_chunked) and
+// h1_expect_continue, h1_keepalive, h1_methods) and
 // h2_stream_state_machine_rfc7540, hpack_metamorphic,
 // sqlite_prepared_statements are already individually
 // commented out earlier in this file with bit-rot rationale; deliberately

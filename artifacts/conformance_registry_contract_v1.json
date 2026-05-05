@@ -3,8 +3,8 @@
   "bead_id": "asupersync-rckcnf",
   "source_registry": "tests/conformance/mod.rs",
   "readme_anchor": "README.md#conformance-suite",
-  "active_module_count": 66,
-  "dormant_module_count": 26,
+  "active_module_count": 67,
+  "dormant_module_count": 25,
   "count_policy": "Counts are machine-checked against tests/conformance/mod.rs. README prose must point here instead of hardcoding active or dormant counts.",
   "active_modules": [
     "aggregator_flush",
@@ -16,6 +16,7 @@
     "h1_ows_normalization",
     "h1_chunked",
     "h1_protocol",
+    "h1_request_chunked",
     "h1_request_target",
     "h1_rfc9112",
     "h1_trailer_restrictions",
@@ -120,14 +121,6 @@
     {
       "module": "h1_methods",
       "line": 28,
-      "disposition": "intentionally_deferred_inline_followup",
-      "inline_followup": "tests/conformance/mod.rs h1-conformance-bitrot",
-      "reason": "Older h1 sibling has API drift noted inline before it can be rewired.",
-      "retention_reason": "File deletion is forbidden; retained for targeted refactor."
-    },
-    {
-      "module": "h1_request_chunked",
-      "line": 29,
       "disposition": "intentionally_deferred_inline_followup",
       "inline_followup": "tests/conformance/mod.rs h1-conformance-bitrot",
       "reason": "Older h1 sibling has API drift noted inline before it can be rewired.",

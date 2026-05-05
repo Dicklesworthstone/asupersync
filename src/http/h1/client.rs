@@ -475,6 +475,9 @@ impl crate::codec::Encoder<Request> for Http1ClientCodec {
             None => false,
         };
 
+        if chunked && req.version == Version::Http10 {
+            return Err(HttpError::BadTransferEncoding);
+        }
         if chunked && cl.is_some() {
             return Err(HttpError::AmbiguousBodyLength);
         }
