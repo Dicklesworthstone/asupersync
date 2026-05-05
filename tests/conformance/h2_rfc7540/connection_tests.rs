@@ -1,5 +1,3 @@
-#![allow(warnings)]
-#![allow(clippy::all)]
 //! Connection management conformance tests.
 //!
 //! Tests connection lifecycle and management requirements from RFC 7540 Section 3.
