@@ -1,0 +1,150 @@
+{
+  "contract_version": "agent-swarm-coordination-collector-contract-v1",
+  "bead_id": "asupersync-qn8i0p.2",
+  "description": "Explicit-input collector contract for converting redacted Agent Mail, Beads, bv, rch, git dirty-frontier, and artifact exports into deterministic coordination workload bundles.",
+  "script": "scripts/run_agent_swarm_coordination_collector.sh",
+  "documentation": "docs/agent_swarm_coordination_collector.md",
+  "test": "tests/agent_swarm_coordination_collector_contract.rs",
+  "source_contracts": {
+    "workload": "artifacts/agent_swarm_coordination_workload_contract_v1.json",
+    "redaction": "artifacts/agent_swarm_coordination_redaction_contract_v1.json"
+  },
+  "modes": [
+    {
+      "mode": "list",
+      "reads_sources": false,
+      "writes_artifacts": false
+    },
+    {
+      "mode": "dry-run",
+      "reads_sources": false,
+      "writes_artifacts": false
+    },
+    {
+      "mode": "fixture",
+      "reads_sources": false,
+      "writes_artifacts": true
+    },
+    {
+      "mode": "execute",
+      "reads_sources": true,
+      "writes_artifacts": true
+    }
+  ],
+  "source_adapters": [
+    {
+      "kind": "agent_mail",
+      "explicit_input_only": true,
+      "events": [
+        "message_sent",
+        "message_acknowledged",
+        "reservation_conflict",
+        "reservation_granted"
+      ],
+      "redaction": "message bodies are never retained"
+    },
+    {
+      "kind": "beads",
+      "explicit_input_only": true,
+      "events": [
+        "bead_created",
+        "bead_status_changed",
+        "dependency_added"
+      ],
+      "redaction": "agent names are pseudonymized"
+    },
+    {
+      "kind": "bv",
+      "explicit_input_only": true,
+      "events": [
+        "robot_plan_snapshot"
+      ],
+      "redaction": "summary metadata only"
+    },
+    {
+      "kind": "rch",
+      "explicit_input_only": true,
+      "events": [
+        "rch_job_queued",
+        "rch_job_started",
+        "rch_job_completed"
+      ],
+      "redaction": "worker pool names are redacted"
+    },
+    {
+      "kind": "git_dirty_frontier",
+      "explicit_input_only": true,
+      "events": [
+        "dirty_frontier_observed"
+      ],
+      "redaction": "paths are hashed and counted"
+    },
+    {
+      "kind": "artifact_store",
+      "explicit_input_only": true,
+      "events": [
+        "artifact_published"
+      ],
+      "redaction": "artifact paths are hashed"
+    }
+  ],
+  "artifact_outputs": [
+    "coordination-workload-bundle.json",
+    "coordination-workload-events.jsonl",
+    "coordination-collector-report.json",
+    "coordination-collector.summary.txt"
+  ],
+  "determinism": {
+    "event_sort_key": [
+      "event_ts",
+      "stable_sequence",
+      "source_kind",
+      "source_thread_or_bead",
+      "event_kind",
+      "correlation_id"
+    ],
+    "duplicate_key": [
+      "source_hash",
+      "correlation_id",
+      "event_kind"
+    ],
+    "duplicate_action": "dedupe_then_sort",
+    "fixture_run_id": "coordination-collector-fixture"
+  },
+  "fail_closed_cases": [
+    {
+      "case": "malformed_json",
+      "refusal_reason": "unknown_schema_version",
+      "exit_code": 3
+    },
+    {
+      "case": "unknown_source_kind",
+      "refusal_reason": "unsupported_source_kind",
+      "exit_code": 3
+    },
+    {
+      "case": "missing_required_identifier",
+      "refusal_reason": "missing_required_field",
+      "exit_code": 3
+    },
+    {
+      "case": "unredacted_secret",
+      "refusal_reason": "unredacted_secret",
+      "exit_code": 3
+    }
+  ],
+  "privacy_invariants": [
+    "No message body is retained in emitted bundle content.",
+    "No raw absolute local path is retained; dirty-frontier paths are represented by hashes and counts.",
+    "No raw rch worker name is retained; worker pool is recorded as redacted metadata.",
+    "No source is read unless named by --source or supplied by --fixture.",
+    "Malformed or secret-bearing source input writes a refused event and exits nonzero."
+  ],
+  "validation_commands": [
+    "bash -n scripts/run_agent_swarm_coordination_collector.sh",
+    "bash scripts/run_agent_swarm_coordination_collector.sh --list",
+    "bash scripts/run_agent_swarm_coordination_collector.sh --dry-run --source beads:missing.json",
+    "bash scripts/run_agent_swarm_coordination_collector.sh --fixture --output-root target/agent-swarm-coordination-collector",
+    "rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_agent_swarm_coordination_collector cargo test -p asupersync --test agent_swarm_coordination_collector_contract -- --nocapture"
+  ]
+}
