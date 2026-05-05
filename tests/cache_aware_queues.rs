@@ -1,5 +1,3 @@
-#![allow(warnings)]
-#![allow(clippy::all)]
 #![allow(missing_docs)]
 #![allow(unsafe_code)]
 #![allow(clippy::too_many_lines)]
