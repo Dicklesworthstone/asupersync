@@ -5828,6 +5828,408 @@ pub struct SignedProfileBundleBundle {
     pub rollback_receipt: SignedProfileBundleRollbackReceipt,
 }
 
+/// Schema version for shadow promotion and rollback receipts.
+pub const SHADOW_PROMOTE_ROLLBACK_RECEIPT_SCHEMA_VERSION: &str =
+    "shadow-promote-rollback-receipt-v1";
+
+/// Final decision emitted by the shadow promotion gate.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ShadowPromoteRollbackDecision {
+    /// Candidate beat the conservative baseline and can be promoted.
+    Promote,
+    /// Candidate is structurally valid but should remain in shadow hold.
+    Hold,
+    /// Candidate failed bundle verification and must be rolled back or rejected.
+    Rollback,
+    /// Evidence is insufficient or controllers conflict, so no safe winner exists.
+    NoWin,
+}
+
+impl ShadowPromoteRollbackDecision {
+    /// Stable report string.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Promote => "promote",
+            Self::Hold => "hold",
+            Self::Rollback => "rollback",
+            Self::NoWin => "no_win",
+        }
+    }
+}
+
+impl fmt::Display for ShadowPromoteRollbackDecision {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// Request for a deterministic shadow promotion and rollback receipt.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ShadowPromoteRollbackReceiptRequest {
+    /// Stable scenario or rollout identifier.
+    pub scenario_id: String,
+    /// Candidate signed-profile bundle, including its verifier, shadow evaluation, and rollback receipt.
+    pub candidate_bundle: SignedProfileBundleBundle,
+    /// Digest of the conservative baseline config under the same evidence snapshot.
+    pub baseline_bundle_digest_sha256: String,
+    /// Digest of the candidate config being considered for promotion.
+    pub candidate_bundle_digest_sha256: String,
+    /// Evidence hash consumed by the conservative baseline comparison.
+    pub baseline_evidence_hash_sha256: String,
+    /// Evidence hash consumed by the candidate comparison.
+    pub candidate_evidence_hash_sha256: String,
+    /// Capacity certificate artifact or identifier.
+    pub capacity_certificate_id: String,
+    /// Latency certificate artifact or identifier.
+    pub latency_certificate_id: String,
+    /// Candidate p99 latency minus conservative-baseline p99 latency.
+    pub p99_delta_ns: i64,
+    /// Candidate p999 latency minus conservative-baseline p999 latency.
+    pub p999_delta_ns: i64,
+    /// Evidence age for this shadow decision.
+    pub evidence_age_hours: u64,
+    /// Maximum accepted evidence age for promotion.
+    pub max_evidence_age_hours: u64,
+    /// Evidence sample count behind the paired comparison.
+    pub sample_count: usize,
+    /// Minimum sample count required before promotion.
+    pub min_sample_count: usize,
+    /// Combined-controller interference verdict, when available.
+    pub controller_interference_verdict: Option<ControllerInterferenceTwinVerdict>,
+    /// Dirty or unexplained artifacts observed during signoff.
+    pub dirty_artifacts: Vec<String>,
+    /// Path where operator tooling writes the receipt.
+    pub receipt_path: String,
+    /// Command that replays this exact decision.
+    pub replay_command: String,
+}
+
+impl ShadowPromoteRollbackReceiptRequest {
+    /// Evaluate the candidate bundle against the conservative baseline and emit a receipt.
+    #[must_use]
+    pub fn evaluate(&self) -> ShadowPromoteRollbackReceipt {
+        let mut refusal_reasons = self.structural_refusal_reasons();
+        let shadow_run_decision = self
+            .candidate_bundle
+            .shadow_run_evaluation
+            .as_ref()
+            .map(|shadow| shadow.decision);
+        let regret_margin_basis_points = self
+            .candidate_bundle
+            .shadow_run_evaluation
+            .as_ref()
+            .map_or(0, |shadow| shadow.regret_margin_basis_points);
+        let mut shadow_hold_reasons = self
+            .candidate_bundle
+            .shadow_run_evaluation
+            .as_ref()
+            .map_or_else(Vec::new, |shadow| shadow.hold_reasons.clone());
+        dedup_preserving_order(&mut shadow_hold_reasons);
+
+        if !self.candidate_bundle.verification.accepted {
+            refusal_reasons.extend(
+                self.candidate_bundle
+                    .verification
+                    .refusal_reasons
+                    .iter()
+                    .map(|reason| format!("bundle verification rejected candidate: {reason}")),
+            );
+        }
+        if shadow_run_decision.is_none() {
+            refusal_reasons
+                .push("shadow_run_evaluation must be present before promotion".to_string());
+        }
+        if shadow_run_decision == Some(SignedProfileBundleShadowRunDecision::Hold) {
+            refusal_reasons.push("shadow-run gate held the candidate".to_string());
+        }
+        if self.p99_delta_ns > 0 {
+            refusal_reasons.push(format!(
+                "candidate p99 regressed by {}ns against the conservative baseline",
+                self.p99_delta_ns
+            ));
+        }
+        if self.p999_delta_ns > 0 {
+            refusal_reasons.push(format!(
+                "candidate p999 regressed by {}ns against the conservative baseline",
+                self.p999_delta_ns
+            ));
+        }
+        if self.evidence_age_hours > self.max_evidence_age_hours {
+            refusal_reasons.push(format!(
+                "evidence age {}h exceeded promotion budget {}h",
+                self.evidence_age_hours, self.max_evidence_age_hours
+            ));
+        }
+        if self.sample_count < self.min_sample_count {
+            refusal_reasons.push(format!(
+                "sample count {} was below promotion floor {}",
+                self.sample_count, self.min_sample_count
+            ));
+        }
+        if self.baseline_evidence_hash_sha256 != self.candidate_evidence_hash_sha256 {
+            refusal_reasons.push(
+                "candidate and baseline must use the same evidence snapshot hash".to_string(),
+            );
+        }
+        if self.controller_interference_verdict != Some(ControllerInterferenceTwinVerdict::Pass) {
+            let verdict = self
+                .controller_interference_verdict
+                .map_or("missing".to_string(), |verdict| {
+                    verdict.as_str().to_string()
+                });
+            refusal_reasons.push(format!(
+                "controller interference verdict {verdict} does not allow promotion"
+            ));
+        }
+        let dirty_artifacts = sorted_unique_strings(self.dirty_artifacts.clone());
+        if !dirty_artifacts.is_empty() {
+            refusal_reasons.push(format!(
+                "unexplained dirty artifacts blocked promotion: {}",
+                dirty_artifacts.join(",")
+            ));
+        }
+        dedup_preserving_order(&mut refusal_reasons);
+
+        let no_win_reason_present = refusal_reasons.iter().any(|reason| {
+            !(reason.contains("shadow-run gate held")
+                || reason.contains("candidate p99 regressed")
+                || reason.contains("candidate p999 regressed"))
+        });
+        let decision = if !self.candidate_bundle.verification.accepted {
+            ShadowPromoteRollbackDecision::Rollback
+        } else if no_win_reason_present {
+            ShadowPromoteRollbackDecision::NoWin
+        } else if shadow_run_decision == Some(SignedProfileBundleShadowRunDecision::Hold)
+            || self.p99_delta_ns > 0
+            || self.p999_delta_ns > 0
+        {
+            ShadowPromoteRollbackDecision::Hold
+        } else {
+            ShadowPromoteRollbackDecision::Promote
+        };
+        let accepted = decision == ShadowPromoteRollbackDecision::Promote;
+        let fallback_decision = match decision {
+            ShadowPromoteRollbackDecision::Promote => "promote_candidate_bundle",
+            ShadowPromoteRollbackDecision::Hold => "hold_conservative_baseline",
+            ShadowPromoteRollbackDecision::Rollback => "rollback_candidate_bundle",
+            ShadowPromoteRollbackDecision::NoWin => "no_win_preserve_conservative_baseline",
+        }
+        .to_string();
+
+        let mut receipt = ShadowPromoteRollbackReceipt {
+            schema_version: SHADOW_PROMOTE_ROLLBACK_RECEIPT_SCHEMA_VERSION.to_string(),
+            scenario_id: self.scenario_id.clone(),
+            decision,
+            accepted,
+            no_win: matches!(decision, ShadowPromoteRollbackDecision::NoWin),
+            fallback_decision,
+            baseline_bundle_digest_sha256: self.baseline_bundle_digest_sha256.clone(),
+            candidate_bundle_digest_sha256: self.candidate_bundle_digest_sha256.clone(),
+            candidate_manifest_digest_sha256: self
+                .candidate_bundle
+                .manifest
+                .manifest_digest_sha256
+                .clone(),
+            baseline_evidence_hash_sha256: self.baseline_evidence_hash_sha256.clone(),
+            candidate_evidence_hash_sha256: self.candidate_evidence_hash_sha256.clone(),
+            capacity_certificate_id: self.capacity_certificate_id.clone(),
+            latency_certificate_id: self.latency_certificate_id.clone(),
+            shadow_run_decision,
+            regret_margin_basis_points,
+            p99_delta_ns: self.p99_delta_ns,
+            p999_delta_ns: self.p999_delta_ns,
+            shadow_hold_reasons,
+            refusal_reasons,
+            rollback_receipt_digest_sha256: self
+                .candidate_bundle
+                .rollback_receipt
+                .receipt_digest_sha256
+                .clone(),
+            rollback_receipt_path: self.receipt_path.clone(),
+            dirty_artifacts,
+            replay_command: self.replay_command.clone(),
+            promotion_receipt_digest_sha256: String::new(),
+        };
+        receipt.promotion_receipt_digest_sha256 = receipt.compute_digest();
+        receipt
+    }
+
+    fn structural_refusal_reasons(&self) -> Vec<String> {
+        let mut refusal_reasons = Vec::new();
+        if let Err(reason) = validate_slug_like(&self.scenario_id, "scenario_id") {
+            refusal_reasons.push(reason);
+        }
+        for (label, digest) in [
+            (
+                "baseline_bundle_digest_sha256",
+                &self.baseline_bundle_digest_sha256,
+            ),
+            (
+                "candidate_bundle_digest_sha256",
+                &self.candidate_bundle_digest_sha256,
+            ),
+            (
+                "baseline_evidence_hash_sha256",
+                &self.baseline_evidence_hash_sha256,
+            ),
+            (
+                "candidate_evidence_hash_sha256",
+                &self.candidate_evidence_hash_sha256,
+            ),
+        ] {
+            if !is_hex_digest(digest) {
+                refusal_reasons.push(format!("{label} must be a 64-character hexadecimal digest"));
+            }
+        }
+        if self.candidate_bundle_digest_sha256 != self.candidate_bundle.manifest.final_bundle_digest
+        {
+            refusal_reasons.push(
+                "candidate_bundle_digest_sha256 must match the signed bundle final_bundle_digest"
+                    .to_string(),
+            );
+        }
+        if let Err(reason) =
+            validate_artifact_json_path(&self.capacity_certificate_id, "capacity_certificate_id")
+        {
+            refusal_reasons.push(reason);
+        }
+        if let Err(reason) =
+            validate_artifact_json_path(&self.latency_certificate_id, "latency_certificate_id")
+        {
+            refusal_reasons.push(reason);
+        }
+        if let Err(reason) = validate_artifact_json_path(&self.receipt_path, "receipt_path") {
+            refusal_reasons.push(reason);
+        }
+        if self.replay_command.trim().is_empty() {
+            refusal_reasons.push("replay_command must not be empty".to_string());
+        }
+        for artifact in &self.dirty_artifacts {
+            if let Err(reason) = validate_artifact_json_path(artifact, "dirty_artifacts") {
+                refusal_reasons.push(reason);
+            }
+        }
+        refusal_reasons
+    }
+}
+
+/// Deterministic receipt emitted before shadow promotion can recommend a candidate.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ShadowPromoteRollbackReceipt {
+    /// Receipt schema version.
+    pub schema_version: String,
+    /// Scenario or rollout identifier.
+    pub scenario_id: String,
+    /// Final promotion gate decision.
+    pub decision: ShadowPromoteRollbackDecision,
+    /// Whether the candidate can be promoted.
+    pub accepted: bool,
+    /// Whether the gate found no safe winner.
+    pub no_win: bool,
+    /// Deterministic fallback or promotion action.
+    pub fallback_decision: String,
+    /// Conservative-baseline config digest.
+    pub baseline_bundle_digest_sha256: String,
+    /// Candidate config digest.
+    pub candidate_bundle_digest_sha256: String,
+    /// Candidate signed manifest digest.
+    pub candidate_manifest_digest_sha256: String,
+    /// Conservative-baseline evidence snapshot digest.
+    pub baseline_evidence_hash_sha256: String,
+    /// Candidate evidence snapshot digest.
+    pub candidate_evidence_hash_sha256: String,
+    /// Capacity certificate artifact or identifier.
+    pub capacity_certificate_id: String,
+    /// Latency certificate artifact or identifier.
+    pub latency_certificate_id: String,
+    /// Underlying signed-bundle shadow decision.
+    pub shadow_run_decision: Option<SignedProfileBundleShadowRunDecision>,
+    /// Baseline loss minus candidate loss in basis points.
+    pub regret_margin_basis_points: i64,
+    /// Candidate p99 latency minus baseline p99 latency.
+    pub p99_delta_ns: i64,
+    /// Candidate p999 latency minus baseline p999 latency.
+    pub p999_delta_ns: i64,
+    /// Hold reasons from the signed-bundle shadow run.
+    pub shadow_hold_reasons: Vec<String>,
+    /// Reasons promotion was refused.
+    pub refusal_reasons: Vec<String>,
+    /// Digest of the rollback receipt chained to the candidate bundle.
+    pub rollback_receipt_digest_sha256: String,
+    /// Artifact path for the rollback receipt.
+    pub rollback_receipt_path: String,
+    /// Dirty or unexplained artifacts observed during signoff.
+    pub dirty_artifacts: Vec<String>,
+    /// Command that replays the receipt.
+    pub replay_command: String,
+    /// Digest over the promotion receipt contents.
+    pub promotion_receipt_digest_sha256: String,
+}
+
+impl ShadowPromoteRollbackReceipt {
+    fn compute_digest(&self) -> String {
+        stable_sha256_hex(&[
+            ("schema_version", self.schema_version.clone()),
+            ("scenario_id", self.scenario_id.clone()),
+            ("decision", self.decision.as_str().to_string()),
+            ("accepted", format_bool(self.accepted)),
+            ("no_win", format_bool(self.no_win)),
+            ("fallback_decision", self.fallback_decision.clone()),
+            (
+                "baseline_bundle_digest_sha256",
+                self.baseline_bundle_digest_sha256.clone(),
+            ),
+            (
+                "candidate_bundle_digest_sha256",
+                self.candidate_bundle_digest_sha256.clone(),
+            ),
+            (
+                "candidate_manifest_digest_sha256",
+                self.candidate_manifest_digest_sha256.clone(),
+            ),
+            (
+                "baseline_evidence_hash_sha256",
+                self.baseline_evidence_hash_sha256.clone(),
+            ),
+            (
+                "candidate_evidence_hash_sha256",
+                self.candidate_evidence_hash_sha256.clone(),
+            ),
+            (
+                "capacity_certificate_id",
+                self.capacity_certificate_id.clone(),
+            ),
+            (
+                "latency_certificate_id",
+                self.latency_certificate_id.clone(),
+            ),
+            (
+                "shadow_run_decision",
+                self.shadow_run_decision.map_or_else(
+                    || "none".to_string(),
+                    |decision| decision.as_str().to_string(),
+                ),
+            ),
+            (
+                "regret_margin_basis_points",
+                self.regret_margin_basis_points.to_string(),
+            ),
+            ("p99_delta_ns", self.p99_delta_ns.to_string()),
+            ("p999_delta_ns", self.p999_delta_ns.to_string()),
+            ("shadow_hold_reasons", self.shadow_hold_reasons.join("|")),
+            ("refusal_reasons", self.refusal_reasons.join("|")),
+            (
+                "rollback_receipt_digest_sha256",
+                self.rollback_receipt_digest_sha256.clone(),
+            ),
+            ("rollback_receipt_path", self.rollback_receipt_path.clone()),
+            ("dirty_artifacts", self.dirty_artifacts.join("|")),
+            ("replay_command", self.replay_command.clone()),
+        ])
+    }
+}
+
 /// Schema version for controller-interference digital-twin signoff reports.
 pub const CONTROLLER_INTERFERENCE_DIGITAL_TWIN_REPORT_SCHEMA_VERSION: &str =
     "controller-interference-digital-twin-report-v1";
@@ -6616,6 +7018,12 @@ fn dedup_controller_interference_findings(findings: &mut Vec<ControllerInterfere
         }
     }
     *findings = deduped;
+}
+
+fn sorted_unique_strings(mut values: Vec<String>) -> Vec<String> {
+    values.sort();
+    values.dedup();
+    values
 }
 
 const SIGNED_PROFILE_SHADOW_RUN_P99_WEIGHT: u64 = 4;
