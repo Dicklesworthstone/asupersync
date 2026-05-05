@@ -4103,6 +4103,621 @@ impl CapacityEnvelopeCertificate {
     }
 }
 
+/// Schema version for mean-field capacity planner reports.
+pub const MEAN_FIELD_CAPACITY_PLANNER_REPORT_SCHEMA_VERSION: &str =
+    "mean-field-capacity-planner-report-v1";
+
+const MEAN_FIELD_MIN_CONFIDENCE_PERCENT: u8 = HOST_PROFILE_MIN_EVIDENCE_CONFIDENCE_PERCENT;
+const MEAN_FIELD_MAX_EXTRAPOLATION_BPS: u32 = 20_000;
+
+/// Operator-facing verdict for a mean-field capacity plan.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MeanFieldCapacityPlannerVerdict {
+    /// Planner is disabled and retained the conservative baseline.
+    Disabled,
+    /// Planner produced a certificate-backed recommendation.
+    Recommended,
+    /// Inputs were valid, but conservative fallback was safer.
+    NoWin,
+    /// Inputs were invalid, unsupported, or outside the calibrated envelope.
+    FailClosed,
+}
+
+impl MeanFieldCapacityPlannerVerdict {
+    /// Stable operator-facing verdict string.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Disabled => "disabled",
+            Self::Recommended => "recommended",
+            Self::NoWin => "no_win",
+            Self::FailClosed => "fail_closed",
+        }
+    }
+}
+
+impl fmt::Display for MeanFieldCapacityPlannerVerdict {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// Workload mix used by the mean-field planner.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MeanFieldWorkloadMix {
+    /// Coordination/control-plane share in basis points.
+    pub coordination_basis_points: u16,
+    /// I/O or network share in basis points.
+    pub io_basis_points: u16,
+    /// CPU-bound service share in basis points.
+    pub cpu_basis_points: u16,
+    /// Evidence-retention and diagnostics share in basis points.
+    pub evidence_basis_points: u16,
+    /// Background/other share in basis points.
+    pub background_basis_points: u16,
+}
+
+impl MeanFieldWorkloadMix {
+    /// Build an explicit workload mix. Values must sum to 10_000 basis points.
+    #[must_use]
+    pub const fn new(
+        coordination_basis_points: u16,
+        io_basis_points: u16,
+        cpu_basis_points: u16,
+        evidence_basis_points: u16,
+        background_basis_points: u16,
+    ) -> Self {
+        Self {
+            coordination_basis_points,
+            io_basis_points,
+            cpu_basis_points,
+            evidence_basis_points,
+            background_basis_points,
+        }
+    }
+
+    /// Balanced default for mixed agent-swarm workloads.
+    #[must_use]
+    pub const fn balanced() -> Self {
+        Self::new(2_500, 2_500, 2_500, 1_500, 1_000)
+    }
+
+    /// Total share represented by the mix.
+    #[must_use]
+    pub const fn total_basis_points(self) -> u32 {
+        self.coordination_basis_points as u32
+            + self.io_basis_points as u32
+            + self.cpu_basis_points as u32
+            + self.evidence_basis_points as u32
+            + self.background_basis_points as u32
+    }
+
+    fn validate(self) -> Result<(), String> {
+        let total = self.total_basis_points();
+        if total != 10_000 {
+            return Err(format!(
+                "workload mix must sum to 10000 basis points, got {total}"
+            ));
+        }
+        Ok(())
+    }
+
+    fn pressure_basis_points(self) -> u32 {
+        10_000
+            + u32::from(self.coordination_basis_points) / 5
+            + u32::from(self.io_basis_points) / 10
+            + u32::from(self.evidence_basis_points) / 8
+            + u32::from(self.background_basis_points) / 20
+    }
+
+    fn dominant_class(self) -> &'static str {
+        let rows = [
+            ("coordination", self.coordination_basis_points),
+            ("io", self.io_basis_points),
+            ("cpu", self.cpu_basis_points),
+            ("evidence", self.evidence_basis_points),
+            ("background", self.background_basis_points),
+        ];
+        rows.into_iter()
+            .max_by_key(|(_, value)| *value)
+            .map_or("unknown", |(name, _)| name)
+    }
+
+    fn conflicts_with_objective(self, objective: HostProfilePlannerObjective) -> Option<String> {
+        match objective {
+            HostProfilePlannerObjective::EvidenceRetentionFirst
+                if self.coordination_basis_points >= 4_000 =>
+            {
+                Some(
+                    "conflicting_goals:evidence_retention_first_under_coordination_pressure"
+                        .to_string(),
+                )
+            }
+            HostProfilePlannerObjective::LocalityFirst if self.evidence_basis_points >= 5_000 => {
+                Some("conflicting_goals:locality_first_under_evidence_retention_load".to_string())
+            }
+            HostProfilePlannerObjective::TailProtectionFirst if self.cpu_basis_points >= 7_000 => {
+                Some("conflicting_goals:tail_protection_first_under_cpu_saturation".to_string())
+            }
+            _ => None,
+        }
+    }
+}
+
+/// Stable reference to a proof artifact consumed by the mean-field planner.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MeanFieldCapacityCertificateRef {
+    /// Certificate or artifact identifier.
+    pub artifact_id: String,
+    /// Certificate digest or digest-like reference.
+    pub digest: String,
+    /// Human-readable role for the proof.
+    pub role: String,
+}
+
+/// One controller setting emitted by the mean-field planner report.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MeanFieldControllerSetting {
+    /// Controller or runtime surface.
+    pub controller: String,
+    /// Deterministic setting value.
+    pub setting: String,
+    /// Evidence source behind this row.
+    pub source: String,
+}
+
+/// Request for a dry-run mean-field capacity plan.
+#[derive(Clone)]
+pub struct MeanFieldCapacityPlannerRequest {
+    /// Whether the planner is enabled.
+    pub enabled: bool,
+    /// Objective used to interpret controller tradeoffs.
+    pub objective: HostProfilePlannerObjective,
+    /// Target host resources.
+    pub host_resources: HostProfileHostResources,
+    /// Requested host fingerprint.
+    pub host_fingerprint: CapacityEnvelopeHostFingerprint,
+    /// Workload mix for the target swarm.
+    pub workload_mix: MeanFieldWorkloadMix,
+    /// Capacity certificate that bounds all recommendations.
+    pub capacity_certificate: CapacityEnvelopeCertificate,
+    /// Confidence in the child evidence set, in percent.
+    pub evidence_confidence_percent: u8,
+    /// Stable capacity certificate id or path.
+    pub capacity_certificate_id: String,
+    /// Digest for the capacity certificate projection.
+    pub capacity_certificate_hash: String,
+    /// Replay command for the evidence packet.
+    pub replay_command: String,
+}
+
+impl MeanFieldCapacityPlannerRequest {
+    /// Compute a dry-run capacity plan without mutating runtime state.
+    #[must_use]
+    pub fn plan(&self) -> MeanFieldCapacityPlan {
+        if !self.enabled {
+            return self.disabled_plan();
+        }
+
+        let mut fail_reasons = Vec::new();
+        let mut no_win_reasons = Vec::new();
+        if let Err(reason) = self.workload_mix.validate() {
+            fail_reasons.push(reason);
+        }
+        if self.capacity_certificate_id.trim().is_empty() {
+            fail_reasons.push("capacity_certificate_id must not be empty".to_string());
+        }
+        if let Err(reason) =
+            validate_hashish(&self.capacity_certificate_hash, "capacity_certificate_hash")
+        {
+            fail_reasons.push(reason);
+        }
+        if self.replay_command.trim().is_empty() {
+            fail_reasons.push("replay_command must not be empty".to_string());
+        }
+        if let Err(reason) = self
+            .host_fingerprint
+            .validate_for_resources(&self.host_resources, "request host fingerprint")
+        {
+            fail_reasons.push(reason);
+        }
+        if self.capacity_certificate.host_fingerprint.hostname != self.host_fingerprint.hostname
+            || self.capacity_certificate.host_fingerprint.arch != self.host_fingerprint.arch
+            || self.capacity_certificate.host_fingerprint.cpu_cores
+                != self.host_fingerprint.cpu_cores
+            || self.capacity_certificate.host_fingerprint.memory_gib
+                != self.host_fingerprint.memory_gib
+        {
+            fail_reasons
+                .push("capacity certificate host fingerprint did not match request".to_string());
+        }
+        if self.host_resources.cpu_cores
+            < self
+                .capacity_certificate
+                .selected_profile
+                .required_cpu_cores()
+        {
+            fail_reasons.push(format!(
+                "unsupported topology: {} requires {} CPU cores, host has {}",
+                self.capacity_certificate.selected_profile,
+                self.capacity_certificate
+                    .selected_profile
+                    .required_cpu_cores(),
+                self.host_resources.cpu_cores
+            ));
+        }
+        if self.host_resources.memory_gib
+            < self
+                .capacity_certificate
+                .selected_profile
+                .required_memory_gib()
+        {
+            fail_reasons.push(format!(
+                "unsupported memory envelope: {} requires {} GiB, host has {} GiB",
+                self.capacity_certificate.selected_profile,
+                self.capacity_certificate
+                    .selected_profile
+                    .required_memory_gib(),
+                self.host_resources.memory_gib
+            ));
+        }
+        if self.capacity_certificate.used_safe_fallback() {
+            no_win_reasons
+                .push("capacity certificate already selected conservative fallback".to_string());
+            no_win_reasons.extend(self.capacity_certificate.refusal_reasons.clone());
+        }
+        if self.capacity_certificate.evidence_snapshot.sample_count
+            < self.capacity_certificate.effective_budget.min_sample_count
+        {
+            fail_reasons.push(format!(
+                "capacity certificate sample_count {} below minimum {}",
+                self.capacity_certificate.evidence_snapshot.sample_count,
+                self.capacity_certificate.effective_budget.min_sample_count
+            ));
+        }
+        if self.evidence_confidence_percent < MEAN_FIELD_MIN_CONFIDENCE_PERCENT {
+            no_win_reasons.push(format!(
+                "evidence_confidence_percent {} below required {}",
+                self.evidence_confidence_percent, MEAN_FIELD_MIN_CONFIDENCE_PERCENT
+            ));
+        }
+        if let Some(reason) = self.workload_mix.conflicts_with_objective(self.objective) {
+            no_win_reasons.push(reason);
+        }
+
+        let safe_envelope = match self.capacity_certificate.safe_envelope {
+            Some(range) => range,
+            None => {
+                no_win_reasons
+                    .push("capacity certificate did not expose a safe envelope".to_string());
+                self.capacity_certificate.refused_envelope
+            }
+        };
+        let measured_agents = self
+            .capacity_certificate
+            .evidence_snapshot
+            .measured_agent_count
+            .max(1);
+        let extrapolation_bps = saturating_mul_div(
+            safe_envelope.agent_max as u128,
+            10_000,
+            measured_agents as u128,
+        ) as u32;
+        if extrapolation_bps > MEAN_FIELD_MAX_EXTRAPOLATION_BPS {
+            fail_reasons.push(format!(
+                "safe agent ceiling extrapolated {}bps beyond measured evidence; max supported {}bps",
+                extrapolation_bps, MEAN_FIELD_MAX_EXTRAPOLATION_BPS
+            ));
+        }
+
+        if !fail_reasons.is_empty() {
+            return self.fallback_plan(MeanFieldCapacityPlannerVerdict::FailClosed, fail_reasons);
+        }
+        if !no_win_reasons.is_empty() {
+            return self.fallback_plan(MeanFieldCapacityPlannerVerdict::NoWin, no_win_reasons);
+        }
+
+        let pressure_basis_points = self.workload_mix.pressure_basis_points();
+        let recommended_agent_ceiling = saturating_mul_div(
+            safe_envelope.agent_max as u128,
+            10_000,
+            pressure_basis_points as u128,
+        ) as usize;
+        let recommended_agent_ceiling = recommended_agent_ceiling
+            .max(safe_envelope.agent_min.max(1))
+            .min(safe_envelope.agent_max.max(1));
+        let recommended_worker_threads = safe_envelope
+            .worker_max
+            .min(self.host_resources.cpu_cores)
+            .max(1);
+        let recommended_global_queue_limit = safe_envelope
+            .max_queue_depth
+            .max(recommended_agent_ceiling.saturating_mul(2))
+            .min(self.capacity_certificate.effective_budget.max_queue_depth);
+        let recommended_capacity_hints = RuntimeCapacityHints::from_expected_concurrent_tasks(
+            recommended_agent_ceiling
+                .saturating_mul(32)
+                .min(recommended_global_queue_limit.max(1)),
+        );
+        let recommended_trace_storage_profile = if self.workload_mix.evidence_basis_points >= 2_500
+            && self.host_resources.memory_gib >= 256
+        {
+            TraceStorageProfile::LargeMemory256G
+        } else {
+            self.capacity_certificate.final_bundle.trace_storage_profile
+        };
+        let recommended_arena_temperature_policy =
+            if self.workload_mix.evidence_basis_points >= 2_500 {
+                ArenaTemperaturePolicy::TieredColdEvidence
+            } else {
+                self.capacity_certificate
+                    .final_bundle
+                    .arena_temperature_policy
+            };
+        let recommended_blocking_affinity_profile = self
+            .capacity_certificate
+            .final_bundle
+            .blocking
+            .affinity_profile;
+        let mut final_bundle = self.capacity_certificate.final_bundle.clone();
+        final_bundle.worker_threads = recommended_worker_threads;
+        final_bundle.global_queue_limit = recommended_global_queue_limit;
+        final_bundle.capacity_hints = Some(recommended_capacity_hints);
+        final_bundle.trace_storage_profile = recommended_trace_storage_profile;
+        final_bundle.arena_temperature_policy = recommended_arena_temperature_policy;
+        final_bundle.normalize();
+
+        MeanFieldCapacityPlan {
+            schema_version: MEAN_FIELD_CAPACITY_PLANNER_REPORT_SCHEMA_VERSION.to_string(),
+            verdict: MeanFieldCapacityPlannerVerdict::Recommended,
+            objective: self.objective,
+            selected_profile: self.capacity_certificate.selected_profile,
+            fallback_profile: self.capacity_certificate.fallback_profile,
+            host_fingerprint_class: host_fingerprint_class(&self.host_resources),
+            cpu_bucket: cpu_bucket(self.host_resources.cpu_cores).to_string(),
+            memory_bucket: memory_bucket(self.host_resources.memory_gib).to_string(),
+            workload_mix: self.workload_mix,
+            dominant_workload_class: self.workload_mix.dominant_class().to_string(),
+            recommended_agent_ceiling,
+            recommended_worker_threads,
+            recommended_global_queue_limit,
+            recommended_capacity_hints,
+            recommended_trace_storage_profile,
+            recommended_arena_temperature_policy,
+            recommended_blocking_affinity_profile,
+            recommended_bundle_digest: runtime_config_digest(&final_bundle),
+            confidence_percent: self.evidence_confidence_percent,
+            certificate_refs: self.certificate_refs(),
+            controller_settings: self.controller_settings(
+                recommended_worker_threads,
+                recommended_global_queue_limit,
+                recommended_capacity_hints,
+                recommended_trace_storage_profile,
+                recommended_arena_temperature_policy,
+            ),
+            refusal_reasons: Vec::new(),
+            no_win: false,
+            replay_command: self.replay_command.trim().to_string(),
+        }
+    }
+
+    fn disabled_plan(&self) -> MeanFieldCapacityPlan {
+        let baseline = RuntimeConfig::default();
+        MeanFieldCapacityPlan {
+            schema_version: MEAN_FIELD_CAPACITY_PLANNER_REPORT_SCHEMA_VERSION.to_string(),
+            verdict: MeanFieldCapacityPlannerVerdict::Disabled,
+            objective: self.objective,
+            selected_profile: HostProfileId::ConservativeBaseline,
+            fallback_profile: HostProfileId::ConservativeBaseline,
+            host_fingerprint_class: host_fingerprint_class(&self.host_resources),
+            cpu_bucket: cpu_bucket(self.host_resources.cpu_cores).to_string(),
+            memory_bucket: memory_bucket(self.host_resources.memory_gib).to_string(),
+            workload_mix: self.workload_mix,
+            dominant_workload_class: self.workload_mix.dominant_class().to_string(),
+            recommended_agent_ceiling: 0,
+            recommended_worker_threads: baseline.worker_threads,
+            recommended_global_queue_limit: baseline.global_queue_limit,
+            recommended_capacity_hints: baseline.resolved_capacity_hints(),
+            recommended_trace_storage_profile: baseline.trace_storage_profile,
+            recommended_arena_temperature_policy: baseline.arena_temperature_policy,
+            recommended_blocking_affinity_profile: baseline.blocking.affinity_profile,
+            recommended_bundle_digest: runtime_config_digest(&baseline),
+            confidence_percent: 0,
+            certificate_refs: Vec::new(),
+            controller_settings: Vec::new(),
+            refusal_reasons: vec![
+                "mean-field capacity planner disabled; conservative baseline retained".to_string(),
+            ],
+            no_win: false,
+            replay_command: self.replay_command.trim().to_string(),
+        }
+    }
+
+    fn fallback_plan(
+        &self,
+        verdict: MeanFieldCapacityPlannerVerdict,
+        refusal_reasons: Vec<String>,
+    ) -> MeanFieldCapacityPlan {
+        let baseline = RuntimeConfig::default();
+        MeanFieldCapacityPlan {
+            schema_version: MEAN_FIELD_CAPACITY_PLANNER_REPORT_SCHEMA_VERSION.to_string(),
+            verdict,
+            objective: self.objective,
+            selected_profile: HostProfileId::ConservativeBaseline,
+            fallback_profile: HostProfileId::ConservativeBaseline,
+            host_fingerprint_class: host_fingerprint_class(&self.host_resources),
+            cpu_bucket: cpu_bucket(self.host_resources.cpu_cores).to_string(),
+            memory_bucket: memory_bucket(self.host_resources.memory_gib).to_string(),
+            workload_mix: self.workload_mix,
+            dominant_workload_class: self.workload_mix.dominant_class().to_string(),
+            recommended_agent_ceiling: 0,
+            recommended_worker_threads: baseline.worker_threads,
+            recommended_global_queue_limit: baseline.global_queue_limit,
+            recommended_capacity_hints: baseline.resolved_capacity_hints(),
+            recommended_trace_storage_profile: baseline.trace_storage_profile,
+            recommended_arena_temperature_policy: baseline.arena_temperature_policy,
+            recommended_blocking_affinity_profile: baseline.blocking.affinity_profile,
+            recommended_bundle_digest: runtime_config_digest(&baseline),
+            confidence_percent: self.evidence_confidence_percent,
+            certificate_refs: self.certificate_refs(),
+            controller_settings: Vec::new(),
+            refusal_reasons,
+            no_win: verdict == MeanFieldCapacityPlannerVerdict::NoWin,
+            replay_command: self.replay_command.trim().to_string(),
+        }
+    }
+
+    fn certificate_refs(&self) -> Vec<MeanFieldCapacityCertificateRef> {
+        let mut refs = vec![MeanFieldCapacityCertificateRef {
+            artifact_id: self.capacity_certificate_id.trim().to_string(),
+            digest: self.capacity_certificate_hash.trim().to_string(),
+            role: "capacity_envelope_certificate".to_string(),
+        }];
+        refs.extend(
+            self.capacity_certificate
+                .evidence_artifact_ids
+                .iter()
+                .map(|id| MeanFieldCapacityCertificateRef {
+                    artifact_id: id.clone(),
+                    digest: stable_sha256_hex(&[("artifact_id", id.clone())]),
+                    role: "child_controller_evidence".to_string(),
+                }),
+        );
+        refs
+    }
+
+    fn controller_settings(
+        &self,
+        worker_threads: usize,
+        global_queue_limit: usize,
+        capacity_hints: RuntimeCapacityHints,
+        trace_storage_profile: TraceStorageProfile,
+        arena_temperature_policy: ArenaTemperaturePolicy,
+    ) -> Vec<MeanFieldControllerSetting> {
+        vec![
+            MeanFieldControllerSetting {
+                controller: "worker_topology".to_string(),
+                setting: format!("worker_threads={worker_threads}"),
+                source: "mean_field_safe_envelope".to_string(),
+            },
+            MeanFieldControllerSetting {
+                controller: "queue_admission".to_string(),
+                setting: format!("global_queue_limit={global_queue_limit}"),
+                source: "capacity_certificate_queue_budget".to_string(),
+            },
+            MeanFieldControllerSetting {
+                controller: "arena_capacity".to_string(),
+                setting: format!(
+                    "task={} region={} obligation={}",
+                    capacity_hints.task_capacity,
+                    capacity_hints.region_capacity,
+                    capacity_hints.obligation_capacity
+                ),
+                source: "mean_field_agent_ceiling".to_string(),
+            },
+            MeanFieldControllerSetting {
+                controller: "trace_retention".to_string(),
+                setting: trace_storage_profile.to_string(),
+                source: "workload_mix_evidence_share".to_string(),
+            },
+            MeanFieldControllerSetting {
+                controller: "arena_temperature".to_string(),
+                setting: arena_temperature_policy.to_string(),
+                source: "workload_mix_evidence_share".to_string(),
+            },
+        ]
+    }
+}
+
+/// Dry-run report produced by the mean-field planner.
+#[derive(Clone)]
+pub struct MeanFieldCapacityPlan {
+    /// Report schema version.
+    pub schema_version: String,
+    /// Planner verdict.
+    pub verdict: MeanFieldCapacityPlannerVerdict,
+    /// Objective that drove tradeoff handling.
+    pub objective: HostProfilePlannerObjective,
+    /// Recommended or fallback profile.
+    pub selected_profile: HostProfileId,
+    /// Conservative fallback profile.
+    pub fallback_profile: HostProfileId,
+    /// Host class label used by smoke reports.
+    pub host_fingerprint_class: String,
+    /// CPU bucket used by operator logs.
+    pub cpu_bucket: String,
+    /// Memory bucket used by operator logs.
+    pub memory_bucket: String,
+    /// Workload mix supplied to the planner.
+    pub workload_mix: MeanFieldWorkloadMix,
+    /// Dominant workload class.
+    pub dominant_workload_class: String,
+    /// Recommended safe agent ceiling.
+    pub recommended_agent_ceiling: usize,
+    /// Recommended worker count.
+    pub recommended_worker_threads: usize,
+    /// Recommended global queue limit.
+    pub recommended_global_queue_limit: usize,
+    /// Recommended arena capacity hints.
+    pub recommended_capacity_hints: RuntimeCapacityHints,
+    /// Recommended trace storage profile.
+    pub recommended_trace_storage_profile: TraceStorageProfile,
+    /// Recommended arena temperature policy.
+    pub recommended_arena_temperature_policy: ArenaTemperaturePolicy,
+    /// Recommended blocking affinity profile.
+    pub recommended_blocking_affinity_profile: BlockingPoolAffinityProfile,
+    /// Digest of the dry-run bundle projection.
+    pub recommended_bundle_digest: String,
+    /// Evidence confidence score used by the planner.
+    pub confidence_percent: u8,
+    /// Certificate references inspected by the planner.
+    pub certificate_refs: Vec<MeanFieldCapacityCertificateRef>,
+    /// Controller setting rows.
+    pub controller_settings: Vec<MeanFieldControllerSetting>,
+    /// Refusal or fallback reasons.
+    pub refusal_reasons: Vec<String>,
+    /// Whether the valid input produced a no-win fallback.
+    pub no_win: bool,
+    /// Replay command for the evidence packet.
+    pub replay_command: String,
+}
+
+impl MeanFieldCapacityPlan {
+    /// Whether this report contains a usable recommendation.
+    #[must_use]
+    pub const fn recommended(&self) -> bool {
+        matches!(self.verdict, MeanFieldCapacityPlannerVerdict::Recommended)
+    }
+}
+
+fn host_fingerprint_class(resources: &HostProfileHostResources) -> String {
+    format!(
+        "{}_{}",
+        cpu_bucket(resources.cpu_cores),
+        memory_bucket(resources.memory_gib)
+    )
+}
+
+const fn cpu_bucket(cpu_cores: usize) -> &'static str {
+    if cpu_cores >= 64 {
+        "cpu_64_plus"
+    } else if cpu_cores >= 32 {
+        "cpu_32_63"
+    } else {
+        "cpu_lt_32"
+    }
+}
+
+const fn memory_bucket(memory_gib: usize) -> &'static str {
+    if memory_gib >= 256 {
+        "mem_256_plus"
+    } else if memory_gib >= 128 {
+        "mem_128_255"
+    } else {
+        "mem_lt_128"
+    }
+}
+
 /// Integrity mode for operator-facing profile bundles.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SignedProfileBundleIntegrityMode {

@@ -1,0 +1,45 @@
+{
+  "contract_version": "mean-field-capacity-planner-smoke-contract-v1",
+  "runner_script": "scripts/run_mean_field_capacity_planner_smoke.sh",
+  "report_artifacts": [
+    "mean_field_capacity_planner_report.json",
+    "run_report.json"
+  ],
+  "smoke_scenarios": [
+    {
+      "scenario_id": "AA-MEAN-FIELD-CAPACITY-PLANNER-64C-256G",
+      "description": "Mean-field dry-run recommendation for a 64-core / 256 GiB host using capacity-envelope certificate evidence and a balanced agent-swarm workload mix.",
+      "expected_verdict": "recommended",
+      "required_report_fields": [
+        "schema_version",
+        "scenario_id",
+        "verdict",
+        "host_fingerprint_class",
+        "cpu_bucket",
+        "memory_bucket",
+        "workload_mix",
+        "recommended_profile",
+        "confidence_percent",
+        "certificate_refs",
+        "controller_settings",
+        "refusal_reasons",
+        "no_win",
+        "replay_command"
+      ],
+      "acceptance": {
+        "host_fingerprint_class": "cpu_64_plus_mem_256_plus",
+        "cpu_bucket": "cpu_64_plus",
+        "memory_bucket": "mem_256_plus",
+        "no_win": false,
+        "minimum_certificate_refs": 2,
+        "required_controller_rows": [
+          "worker_topology",
+          "queue_admission",
+          "arena_capacity",
+          "trace_retention",
+          "arena_temperature"
+        ]
+      }
+    }
+  ]
+}
