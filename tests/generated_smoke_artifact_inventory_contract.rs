@@ -7,7 +7,33 @@ use std::collections::BTreeSet;
 use std::path::PathBuf;
 
 const ARTIFACT_PATH: &str = "artifacts/generated_smoke_artifact_inventory_v1.json";
+const GITIGNORE_PATH: &str = ".gitignore";
 const RUNNER_PATH: &str = "scripts/run_generated_smoke_artifact_inventory_smoke.sh";
+const ROOT_SMOKE_OUTPUT_DIRS: &[&str] = &[
+    ".adaptive-batch-sizing-smoke-artifacts",
+    ".blocking-pool-affinity-smoke-artifacts",
+    ".capacity-envelope-planner-smoke-artifacts",
+    ".cohort-admission-steering-smoke-artifacts",
+    ".compile-frontier-movement-smoke-artifacts",
+    ".decision-plane-validation-smoke-artifacts",
+    ".governor-state-snapshot-smoke-artifacts",
+    ".host-profile-planner-smoke-artifacts",
+    ".hot-cold-arena-tiers-smoke-artifacts",
+    ".jetstream-publish-backpressure-smoke-artifacts",
+    ".massive-swarm-signoff-smoke-artifacts",
+    ".numa-arena-locality-smoke-artifacts",
+    ".otlp-audit-inventory-smoke-artifacts",
+    ".otlp-brownout-shedding-smoke-artifacts",
+    ".overload-brownout-smoke-artifacts",
+    ".read-biased-region-snapshot-smoke-artifacts",
+    ".resource-monitor-platform-gap-smoke-artifacts",
+    ".runtime-capacity-hints-smoke-artifacts",
+    ".signed-profile-bundle-smoke-artifacts",
+    ".tail-risk-admission-smoke-artifacts",
+    ".task-record-pool-smoke-artifacts",
+    ".trace-storage-profile-smoke-artifacts",
+    "topology-smoke-out",
+];
 
 fn repo_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -21,6 +47,19 @@ fn read_workspace_file(path: &str) -> String {
 fn load_artifact() -> Value {
     serde_json::from_str(&read_workspace_file(ARTIFACT_PATH))
         .expect("generated smoke artifact inventory must parse as JSON")
+}
+
+fn gitignore_patterns() -> BTreeSet<String> {
+    read_workspace_file(GITIGNORE_PATH)
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty() && !line.starts_with('#'))
+        .map(ToOwned::to_owned)
+        .collect()
+}
+
+fn ignored_root_pattern(root: &str) -> String {
+    format!("/{root}/")
 }
 
 fn validate_inventory(artifact: &Value) -> Result<(), String> {
@@ -217,6 +256,37 @@ fn artifact_and_runner_exist() {
 fn inventory_schema_and_counts_are_valid() {
     let artifact = load_artifact();
     validate_inventory(&artifact).expect("inventory contract should be complete");
+}
+
+#[test]
+fn root_smoke_output_dirs_are_gitignored() {
+    let patterns = gitignore_patterns();
+    for root in ROOT_SMOKE_OUTPUT_DIRS {
+        let pattern = ignored_root_pattern(root);
+        assert!(
+            patterns.contains(&pattern),
+            "root smoke artifact dir {root} must be ignored with {pattern}"
+        );
+    }
+
+    let artifact = load_artifact();
+    let clusters = artifact["clusters"]
+        .as_array()
+        .expect("clusters must be an array");
+    for cluster in clusters {
+        let output_root = cluster["output_root"]
+            .as_str()
+            .expect("output_root must be a string");
+        if output_root.starts_with("target/") {
+            continue;
+        }
+
+        let pattern = ignored_root_pattern(output_root);
+        assert!(
+            patterns.contains(&pattern),
+            "inventoried smoke output_root {output_root} must be ignored with {pattern}"
+        );
+    }
 }
 
 #[test]

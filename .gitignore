@@ -125,13 +125,27 @@ artifacts/*
 
 # Generated smoke-run output roots. These are retained local evidence, not
 # source artifacts; the committed inventory above records ownership/checksums.
+/.adaptive-batch-sizing-smoke-artifacts/
 /.blocking-pool-affinity-smoke-artifacts/
+/.capacity-envelope-planner-smoke-artifacts/
 /.cohort-admission-steering-smoke-artifacts/
+/.compile-frontier-movement-smoke-artifacts/
 /.decision-plane-validation-smoke-artifacts/
 /.governor-state-snapshot-smoke-artifacts/
+/.host-profile-planner-smoke-artifacts/
+/.hot-cold-arena-tiers-smoke-artifacts/
+/.jetstream-publish-backpressure-smoke-artifacts/
+/.massive-swarm-signoff-smoke-artifacts/
+/.numa-arena-locality-smoke-artifacts/
+/.otlp-audit-inventory-smoke-artifacts/
+/.otlp-brownout-shedding-smoke-artifacts/
 /.overload-brownout-smoke-artifacts/
 /.read-biased-region-snapshot-smoke-artifacts/
+/.resource-monitor-platform-gap-smoke-artifacts/
+/.runtime-capacity-hints-smoke-artifacts/
+/.signed-profile-bundle-smoke-artifacts/
 /.tail-risk-admission-smoke-artifacts/
+/.task-record-pool-smoke-artifacts/
 /.trace-storage-profile-smoke-artifacts/
 /topology-smoke-out/
 
