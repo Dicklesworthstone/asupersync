@@ -1,5 +1,3 @@
-#![allow(warnings)]
-#![allow(clippy::all)]
 //! Cost-capped topology-guided exploration contract invariants (AA-06.2).
 
 #![allow(missing_docs)]
