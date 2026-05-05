@@ -1,0 +1,198 @@
+{
+  "contract_version": "final-control-loop-signoff-contract-v1",
+  "schema_version": "final-control-loop-signoff-v1",
+  "runner_script": "scripts/run_final_control_loop_signoff_smoke.sh",
+  "parent_bead": "asupersync-d87ytw",
+  "parent_expected_status": "open",
+  "required_child_beads": [
+    "asupersync-d87ytw.1",
+    "asupersync-d87ytw.2",
+    "asupersync-d87ytw.3",
+    "asupersync-d87ytw.4",
+    "asupersync-d87ytw.5",
+    "asupersync-d87ytw.6",
+    "asupersync-d87ytw.7",
+    "asupersync-d87ytw.8",
+    "asupersync-d87ytw.9",
+    "asupersync-d87ytw.10",
+    "asupersync-d87ytw.11",
+    "asupersync-d87ytw.12",
+    "asupersync-d87ytw.13",
+    "asupersync-d87ytw.14"
+  ],
+  "required_certificate_artifacts": [
+    "artifacts/capacity_envelope_planner_smoke_contract_v1.json",
+    "artifacts/runtime_latency_budget_certificate_v1.json",
+    "artifacts/controller_provenance_dashboard_contract_v1.json"
+  ],
+  "smoke_scenarios": [
+    {
+      "scenario_id": "AA-FINAL-CONTROL-LOOP-SIGNOFF-64C-256G",
+      "expected_verdict": "no_win",
+      "expected_child_rows": 14,
+      "expected_dirty_blockers": null,
+      "expected_no_win_rows": [
+        "controller_provenance_dashboard"
+      ]
+    }
+  ],
+  "checklist_rows": [
+    {
+      "requirement_id": "redacted_coordination_ingestion",
+      "owner_bead": "asupersync-d87ytw.1",
+      "artifact_path": "artifacts/agent_swarm_coordination_redaction_contract_v1.json",
+      "command_class": "smoke_runner",
+      "proof_command": "bash scripts/run_coordination_workload_bridge_signoff.sh --dry-run",
+      "child_status": "closed",
+      "fallback_status": "pass",
+      "proxy_only": false
+    },
+    {
+      "requirement_id": "latency_budget_certificate",
+      "owner_bead": "asupersync-d87ytw.2",
+      "artifact_path": "artifacts/runtime_latency_budget_certificate_v1.json",
+      "command_class": "rch_cargo_test",
+      "proof_command": "timeout 900 rch exec -- cargo test -p asupersync --test runtime_capacity_hints_contract --features test-internals",
+      "child_status": "closed",
+      "fallback_status": "pass",
+      "proxy_only": false
+    },
+    {
+      "requirement_id": "mean_field_capacity_plan",
+      "owner_bead": "asupersync-d87ytw.3",
+      "artifact_path": "artifacts/mean_field_capacity_planner_smoke_contract_v1.json",
+      "command_class": "smoke_runner",
+      "proof_command": "bash scripts/run_mean_field_capacity_planner_smoke.sh --dry-run",
+      "child_status": "closed",
+      "fallback_status": "pass",
+      "proxy_only": false
+    },
+    {
+      "requirement_id": "signed_controller_bundle",
+      "owner_bead": "asupersync-d87ytw.4",
+      "artifact_path": "artifacts/signed_profile_bundle_smoke_contract_v1.json",
+      "command_class": "smoke_runner",
+      "proof_command": "bash scripts/run_signed_profile_bundle_smoke.sh --dry-run",
+      "child_status": "closed",
+      "fallback_status": "pass",
+      "proxy_only": false
+    },
+    {
+      "requirement_id": "tail_causal_attribution",
+      "owner_bead": "asupersync-d87ytw.5",
+      "artifact_path": "artifacts/runtime_tail_latency_taxonomy_v1.json",
+      "command_class": "replay_command",
+      "proof_command": "asupersync lab replay --artifact artifacts/runtime_tail_latency_taxonomy_v1.json",
+      "child_status": "closed",
+      "fallback_status": "pass",
+      "proxy_only": false
+    },
+    {
+      "requirement_id": "controller_interference_twin",
+      "owner_bead": "asupersync-d87ytw.6",
+      "artifact_path": "artifacts/controller_interference_digital_twin_smoke_contract_v1.json",
+      "command_class": "smoke_runner",
+      "proof_command": "bash scripts/run_controller_interference_digital_twin_smoke.sh --dry-run",
+      "child_status": "closed",
+      "fallback_status": "pass",
+      "proxy_only": false
+    },
+    {
+      "requirement_id": "shadow_promote_rollback_receipt",
+      "owner_bead": "asupersync-d87ytw.7",
+      "artifact_path": "artifacts/shadow_promote_rollback_receipts_smoke_contract_v1.json",
+      "command_class": "smoke_runner",
+      "proof_command": "bash scripts/run_shadow_promote_rollback_receipts_smoke.sh --dry-run",
+      "child_status": "closed",
+      "fallback_status": "pass",
+      "proxy_only": false
+    },
+    {
+      "requirement_id": "unified_admission_brownout_contract",
+      "owner_bead": "asupersync-d87ytw.8",
+      "artifact_path": "artifacts/unified_admission_brownout_smoke_contract_v1.json",
+      "command_class": "smoke_runner",
+      "proof_command": "bash scripts/run_controller_artifact_verifier_smoke.sh --dry-run",
+      "child_status": "closed",
+      "fallback_status": "pass",
+      "proxy_only": false
+    },
+    {
+      "requirement_id": "trace_storage_profile",
+      "owner_bead": "asupersync-d87ytw.9",
+      "artifact_path": "artifacts/trace_storage_profile_smoke_contract_v1.json",
+      "command_class": "smoke_runner",
+      "proof_command": "bash scripts/run_trace_storage_profile_smoke.sh --dry-run",
+      "child_status": "closed",
+      "fallback_status": "pass",
+      "proxy_only": false
+    },
+    {
+      "requirement_id": "numa_capacity_certificate_merger",
+      "owner_bead": "asupersync-d87ytw.10",
+      "artifact_path": "artifacts/numa_arena_locality_smoke_contract_v1.json",
+      "command_class": "smoke_runner",
+      "proof_command": "bash scripts/run_controller_artifact_verifier_smoke.sh --dry-run",
+      "child_status": "closed",
+      "fallback_status": "pass",
+      "proxy_only": false
+    },
+    {
+      "requirement_id": "rch_proof_queue_feedback",
+      "owner_bead": "asupersync-d87ytw.11",
+      "artifact_path": "artifacts/compile_frontier_movement_proof_v1.json",
+      "command_class": "smoke_runner",
+      "proof_command": "bash scripts/run_controller_artifact_verifier_smoke.sh --dry-run",
+      "child_status": "closed",
+      "fallback_status": "pass",
+      "proxy_only": false
+    },
+    {
+      "requirement_id": "wait_cause_remediation_report",
+      "owner_bead": "asupersync-d87ytw.12",
+      "artifact_path": "artifacts/runtime_wait_cause_remediation_v1.json",
+      "command_class": "replay_command",
+      "proof_command": "asupersync lab replay --artifact artifacts/runtime_wait_cause_remediation_v1.json",
+      "child_status": "closed",
+      "fallback_status": "pass",
+      "proxy_only": false
+    },
+    {
+      "requirement_id": "session_typed_obligation_proofs",
+      "owner_bead": "asupersync-d87ytw.13",
+      "artifact_path": "artifacts/formal_proof_posture_contract_v1.json",
+      "command_class": "rch_cargo_test",
+      "proof_command": "timeout 900 rch exec -- cargo test -p asupersync --test session_type_obligations --features test-internals",
+      "child_status": "closed",
+      "fallback_status": "pass",
+      "proxy_only": false
+    },
+    {
+      "requirement_id": "controller_provenance_dashboard",
+      "owner_bead": "asupersync-d87ytw.14",
+      "artifact_path": "artifacts/controller_provenance_dashboard_contract_v1.json",
+      "command_class": "smoke_runner",
+      "proof_command": "bash scripts/run_controller_provenance_dashboard_smoke.sh --execute --run-id final-signoff-prereq",
+      "child_status": "closed",
+      "fallback_status": "no_win",
+      "proxy_only": false
+    }
+  ],
+  "dirty_blocker_source": "The smoke runner injects live tracked peer-dirty paths from git status via ASUPERSYNC_FINAL_CONTROL_LOOP_SIGNOFF_DIRTY_PATHS. The static rows below are only fallback rows for direct test execution.",
+  "dirty_blockers": [
+    {
+      "blocker_id": "peer_dirty_metamorphic_sync_pool",
+      "path": "tests/metamorphic_sync_pool.rs",
+      "blocker_type": "peer_dirty_worktree",
+      "retention_policy": "block_parent_epic_close",
+      "fallback_reason": "Peer-owned dirty work remains visible in the shared worktree, so final parent epic closure must stay no-win until that owner commits or releases it."
+    },
+    {
+      "blocker_id": "peer_dirty_tokio_executable_conformance_contracts",
+      "path": "tests/tokio_executable_conformance_contracts.rs",
+      "blocker_type": "peer_dirty_worktree",
+      "retention_policy": "block_parent_epic_close",
+      "fallback_reason": "Peer-owned dirty work remains visible in the shared worktree, so final parent epic closure must stay no-win until that owner commits or releases it."
+    }
+  ]
+}
