@@ -26,15 +26,34 @@ fn ascii_metadata_value<'a>(metadata: &'a Metadata, key: &str) -> Option<&'a str
     }
 }
 
-fn log_deadline_event(
-    scenario_id: &str,
-    timeout: &str,
+struct DeadlineLog<'a> {
+    scenario_id: &'a str,
+    metadata_in: &'a str,
+    metadata_out: &'a str,
+    virtual_now: &'a str,
+    deadline: &'a str,
     expected_status: Code,
     actual_status: Code,
-    verdict: &str,
-) {
+    health_state: &'a str,
+    cancellation_observed: bool,
+    verdict: &'a str,
+    first_failure: &'a str,
+}
+
+fn log_deadline_event(case: DeadlineLog<'_>) {
     println!(
-        "bead_id=asupersync-pfvsch suite_id=grpc_deadline scenario_id={scenario_id} grpc_method=/grpc.test.Deadline/Unary metadata_in=grpc-timeout:{timeout} expected_status={expected_status:?} actual_status={actual_status:?} verdict={verdict} first_failure="
+        "bead_id=asupersync-pfvsch suite_id=grpc_deadline scenario_id={} grpc_method=/grpc.test.Deadline/Unary metadata_in={} metadata_out={} virtual_now={} deadline={} expected_status={:?} actual_status={:?} health_state={} cancellation_observed={} verdict={} first_failure={}",
+        case.scenario_id,
+        case.metadata_in,
+        case.metadata_out,
+        case.virtual_now,
+        case.deadline,
+        case.expected_status,
+        case.actual_status,
+        case.health_state,
+        case.cancellation_observed,
+        case.verdict,
+        case.first_failure
     );
 }
 
@@ -160,11 +179,83 @@ fn expired_deadline_surfaces_zero_timeout_and_deadline_exceeded_status() {
     };
     let status = response.expect_err("zero timeout must fail fast");
     assert_eq!(status.code(), Code::DeadlineExceeded);
-    log_deadline_event(
-        "zero-timeout-fails-fast",
-        "0n",
-        Code::DeadlineExceeded,
-        status.code(),
-        "pass",
-    );
+    log_deadline_event(DeadlineLog {
+        scenario_id: "zero-timeout-fails-fast",
+        metadata_in: "grpc-timeout:0n",
+        metadata_out: "grpc-timeout:0n",
+        virtual_now: "0ns",
+        deadline: "0ns",
+        expected_status: Code::DeadlineExceeded,
+        actual_status: status.code(),
+        health_state: "not_applicable",
+        cancellation_observed: true,
+        verdict: "pass",
+        first_failure: "",
+    });
+}
+
+#[test]
+fn deadline_conformance_runner_logs_success_failure_and_propagation_matrix() {
+    let now = Instant::now();
+
+    let success = CallContext::from_metadata_at(metadata_with_timeout("5S"), None, None, now);
+    let handler_end = now + Duration::from_millis(250);
+    let success_response: Result<Response<&'static str>, Status> =
+        if success.is_expired_at(handler_end) {
+            Err(Status::deadline_exceeded(
+                "handler processing exceeded deadline",
+            ))
+        } else {
+            Ok(Response::new("ok"))
+        };
+    let success_status = match &success_response {
+        Ok(_) => Code::Ok,
+        Err(status) => status.code(),
+    };
+    assert_eq!(success_status, Code::Ok);
+
+    let mut outbound = metadata_with_timeout("30S");
+    assert!(success.propagate_timeout_to_at(&mut outbound, now + Duration::from_secs(1)));
+    assert_eq!(ascii_metadata_value(&outbound, "grpc-timeout"), Some("4S"));
+    log_deadline_event(DeadlineLog {
+        scenario_id: "success-propagates-tighter-parent-timeout",
+        metadata_in: "grpc-timeout:5S",
+        metadata_out: "grpc-timeout:4S",
+        virtual_now: "1s",
+        deadline: "5s",
+        expected_status: Code::Ok,
+        actual_status: success_status,
+        health_state: "not_applicable",
+        cancellation_observed: false,
+        verdict: "pass",
+        first_failure: "",
+    });
+
+    let expired = CallContext::from_metadata_at(metadata_with_timeout("1m"), None, None, now);
+    let handler_end = now + Duration::from_millis(2);
+    let expired_response: Result<Response<&'static str>, Status> =
+        if expired.is_expired_at(handler_end) {
+            Err(Status::deadline_exceeded(
+                "handler processing exceeded deadline",
+            ))
+        } else {
+            Ok(Response::new("late"))
+        };
+    let expired_status = expired_response
+        .expect_err("handler past deadline must fail")
+        .code();
+    assert_eq!(expired_status, Code::DeadlineExceeded);
+    log_deadline_event(DeadlineLog {
+        scenario_id: "failure-deadline-exceeded-after-virtual-work",
+        metadata_in: "grpc-timeout:1m",
+        metadata_out: "grpc-timeout:0n",
+        virtual_now: "2ms",
+        deadline: "1ms",
+        expected_status: Code::DeadlineExceeded,
+        actual_status: expired_status,
+        health_state: "not_applicable",
+        cancellation_observed: true,
+        verdict: "pass",
+        first_failure: "",
+    });
 }

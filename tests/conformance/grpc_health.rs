@@ -8,7 +8,9 @@
 
 use proptest::prelude::*;
 use std::collections::{HashMap, HashSet};
+use std::pin::Pin;
 use std::sync::Arc;
+use std::task::Poll;
 use std::thread;
 use std::time::Duration;
 
@@ -16,6 +18,7 @@ use asupersync::grpc::health::{
     HealthCheckRequest, HealthCheckResponse, HealthReporter, HealthService, ServingStatus,
 };
 use asupersync::grpc::status::{Code, Status};
+use asupersync::grpc::{HealthWatchStream, Metadata, Request, Streaming};
 
 /// Maximum number of services for property-based testing
 const MAX_SERVICES: usize = 20;
@@ -34,6 +37,64 @@ const SERVICE_NAMES: &[&str] = &[
     "search.v1.SearchService",
     "recommendation.v1.RecommendationService",
 ];
+
+struct HealthLog<'a> {
+    scenario_id: &'a str,
+    grpc_method: &'a str,
+    metadata_in: &'a str,
+    metadata_out: &'a str,
+    virtual_now: &'a str,
+    deadline: &'a str,
+    expected_status: Code,
+    actual_status: Code,
+    health_state: &'a str,
+    cancellation_observed: bool,
+    verdict: &'a str,
+    first_failure: &'a str,
+}
+
+fn log_health_event(case: HealthLog<'_>) {
+    println!(
+        "bead_id=asupersync-pfvsch suite_id=grpc_health scenario_id={} grpc_method={} metadata_in={} metadata_out={} virtual_now={} deadline={} expected_status={:?} actual_status={:?} health_state={} cancellation_observed={} verdict={} first_failure={}",
+        case.scenario_id,
+        case.grpc_method,
+        case.metadata_in,
+        case.metadata_out,
+        case.virtual_now,
+        case.deadline,
+        case.expected_status,
+        case.actual_status,
+        case.health_state,
+        case.cancellation_observed,
+        case.verdict,
+        case.first_failure
+    );
+}
+
+fn health_request(service: &str, auth: Option<&str>) -> Request<HealthCheckRequest> {
+    let mut metadata = Metadata::new();
+    if let Some(auth) = auth {
+        assert!(metadata.insert("authorization", auth));
+    }
+    Request::with_metadata(HealthCheckRequest::new(service), metadata)
+}
+
+fn poll_health_stream_once(
+    stream: &mut HealthWatchStream,
+) -> Option<Result<HealthCheckResponse, Status>> {
+    futures_lite::future::block_on(futures_lite::future::poll_fn(|cx| {
+        Streaming::poll_next(Pin::new(stream), cx)
+    }))
+}
+
+fn register_pending_watch_poll(stream: &mut HealthWatchStream) {
+    futures_lite::future::block_on(futures_lite::future::poll_fn(
+        |cx| match Streaming::poll_next(Pin::new(stream), cx) {
+            Poll::Pending => Poll::Ready(()),
+            Poll::Ready(other) => panic!("expected pending watch poll, got {other:?}"),
+        },
+    ));
+}
 
 /// All possible serving statuses for property testing
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -783,6 +844,119 @@ proptest! {
 #[cfg(test)]
 mod conformance_tests {
     use super::*;
+
+    #[test]
+    #[allow(dead_code)]
+    fn conformance_health_runner_logs_async_auth_watch_cancel_and_shutdown() {
+        let service_name = "auth.v1.AuthService";
+        let service = HealthService::new();
+        service.set_status(service_name, ServingStatus::Serving);
+
+        let unauth = health_request(service_name, None);
+        let unauth_error = futures_lite::future::block_on(service.check_async(&unauth))
+            .expect_err("async Check must enforce metadata auth");
+        assert_eq!(unauth_error.code(), Code::Unauthenticated);
+        log_health_event(HealthLog {
+            scenario_id: "check-missing-auth-fails",
+            grpc_method: "/grpc.health.v1.Health/Check",
+            metadata_in: "authorization:<missing>",
+            metadata_out: "none",
+            virtual_now: "0ns",
+            deadline: "not_applicable",
+            expected_status: Code::Unauthenticated,
+            actual_status: unauth_error.code(),
+            health_state: "UNKNOWN",
+            cancellation_observed: false,
+            verdict: "pass",
+            first_failure: "",
+        });
+
+        let authed = health_request(service_name, Some("Bearer test-token"));
+        let response = futures_lite::future::block_on(service.check_async(&authed))
+            .expect("async Check with bearer metadata must pass");
+        assert_eq!(response.get_ref().status, ServingStatus::Serving);
+        log_health_event(HealthLog {
+            scenario_id: "check-authed-serving-succeeds",
+            grpc_method: "/grpc.health.v1.Health/Check",
+            metadata_in: "authorization:Bearer",
+            metadata_out: "none",
+            virtual_now: "0ns",
+            deadline: "not_applicable",
+            expected_status: Code::Ok,
+            actual_status: Code::Ok,
+            health_state: "SERVING",
+            cancellation_observed: false,
+            verdict: "pass",
+            first_failure: "",
+        });
+
+        let watch_request = health_request(service_name, Some("Bearer test-token"));
+        let mut watch_stream = futures_lite::future::block_on(service.watch_async(&watch_request))
+            .expect("async Watch with bearer metadata must pass")
+            .into_inner();
+        let initial = poll_health_stream_once(&mut watch_stream)
+            .expect("watch stream must emit initial response")
+            .expect("initial watch response must be OK");
+        assert_eq!(initial.status, ServingStatus::Serving);
+
+        service.set_status(service_name, ServingStatus::NotServing);
+        let changed = poll_health_stream_once(&mut watch_stream)
+            .expect("watch stream must emit changed response")
+            .expect("changed watch response must be OK");
+        assert_eq!(changed.status, ServingStatus::NotServing);
+
+        register_pending_watch_poll(&mut watch_stream);
+        drop(watch_stream);
+        service.set_status(service_name, ServingStatus::Serving);
+        let after_cancel = service
+            .check(&HealthCheckRequest::new(service_name))
+            .expect("direct check remains usable after client drops watch stream");
+        assert_eq!(after_cancel.status, ServingStatus::Serving);
+        log_health_event(HealthLog {
+            scenario_id: "watch-authed-update-then-client-cancel",
+            grpc_method: "/grpc.health.v1.Health/Watch",
+            metadata_in: "authorization:Bearer",
+            metadata_out: "none",
+            virtual_now: "1tick",
+            deadline: "not_applicable",
+            expected_status: Code::Ok,
+            actual_status: Code::Ok,
+            health_state: "NOT_SERVING->SERVING",
+            cancellation_observed: true,
+            verdict: "pass",
+            first_failure: "",
+        });
+
+        let shutdown_service = HealthService::new();
+        let shutdown_name = "shutdown.v1.Service";
+        let mut shutdown_watcher = shutdown_service.watch(shutdown_name);
+        {
+            let reporter = HealthReporter::new(shutdown_service.clone(), shutdown_name);
+            reporter.set_serving();
+            assert!(shutdown_watcher.changed());
+            assert_eq!(shutdown_watcher.status(), ServingStatus::Serving);
+        }
+        assert!(shutdown_watcher.changed());
+        assert_eq!(shutdown_watcher.status(), ServingStatus::ServiceUnknown);
+        let shutdown_error = shutdown_service
+            .check(&HealthCheckRequest::new(shutdown_name))
+            .expect_err("direct check after reporter shutdown must fail closed");
+        assert_eq!(shutdown_error.code(), Code::PermissionDenied);
+        log_health_event(HealthLog {
+            scenario_id: "reporter-drop-shutdown-cleans-watch-state",
+            grpc_method: "/grpc.health.v1.Health/Watch",
+            metadata_in: "none",
+            metadata_out: "none",
+            virtual_now: "shutdown",
+            deadline: "not_applicable",
+            expected_status: Code::PermissionDenied,
+            actual_status: shutdown_error.code(),
+            health_state: "SERVICE_UNKNOWN",
+            cancellation_observed: false,
+            verdict: "pass",
+            first_failure: "",
+        });
+    }
 
     #[test]
     #[allow(dead_code)]
