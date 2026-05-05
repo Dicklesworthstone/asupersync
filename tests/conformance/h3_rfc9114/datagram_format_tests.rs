@@ -8,6 +8,7 @@
 //! - Negotiation and capability detection
 
 use super::*;
+use asupersync::http::h3_native::{H3ConnectionConfig, H3Frame, H3RequestStreamState, H3Settings};
 
 /// H3 DATAGRAM frame structure and validation.
 #[derive(Debug, Clone)]
@@ -224,8 +225,7 @@ fn test_datagram_ordering_semantics() -> H3ConformanceResult {
             }
         }
 
-        // Verify frames can be processed out-of-order (simulate network reordering)
-        reset_datagram_context();
+        // Verify frames can be processed out-of-order.
 
         let reordered_indices = vec![0, 2, 1, 3]; // Process in different order
         for &i in &reordered_indices {
@@ -245,8 +245,6 @@ fn test_datagram_ordering_semantics() -> H3ConformanceResult {
             (3, b"flow3_msg1"),
             (2, b"flow2_msg2"),
         ];
-
-        reset_datagram_context();
 
         for (flow_id, payload) in flow_isolation_test {
             let frame = H3DatagramFrame {
@@ -285,73 +283,47 @@ fn test_datagram_ordering_semantics() -> H3ConformanceResult {
 #[allow(dead_code)]
 fn test_datagram_capability_negotiation() -> H3ConformanceResult {
     let (result, elapsed_ms) = timed_test(|| -> Result<(), String> {
-        // Test proper SETTINGS negotiation for H3_DATAGRAM capability
-
-        // Before negotiation, DATAGRAM frames should be rejected
-        reset_connection_state();
-
-        let test_frame = H3DatagramFrame {
-            flow_id: 0,
-            payload: b"test".to_vec(),
-        };
-        let encoded = encode_datagram_frame(&test_frame);
-
-        if process_datagram_frame(&encoded) {
-            return Err("DATAGRAM frame accepted before capability negotiation".to_string());
-        }
-
-        // Negotiate DATAGRAM capability via SETTINGS
+        // Production H3Settings parses the peer's SETTINGS_H3_DATAGRAM value.
         let settings_with_datagram = create_settings_with_datagram(true);
-        if !process_settings_frame(&settings_with_datagram) {
-            return Err("Failed to process SETTINGS frame with H3_DATAGRAM=1".to_string());
+        let decoded_with_datagram = decode_settings_payload(&settings_with_datagram)?;
+        if decoded_with_datagram.h3_datagram != Some(true) {
+            return Err("SETTINGS_H3_DATAGRAM=1 did not decode as enabled".to_string());
         }
-
-        // After negotiation, DATAGRAM frames should be accepted
-        if !process_datagram_frame(&encoded) {
-            return Err("DATAGRAM frame rejected after capability negotiation".to_string());
-        }
-
-        // Test peer doesn't support DATAGRAM
-        reset_connection_state();
 
         let settings_no_datagram = create_settings_with_datagram(false);
-        if !process_settings_frame(&settings_no_datagram) {
-            return Err("Failed to process SETTINGS frame with H3_DATAGRAM=0".to_string());
+        let decoded_no_datagram = decode_settings_payload(&settings_no_datagram)?;
+        if decoded_no_datagram.h3_datagram != Some(false) {
+            return Err("SETTINGS_H3_DATAGRAM=0 did not decode as disabled".to_string());
         }
-
-        // DATAGRAM frames should still be rejected
-        if process_datagram_frame(&encoded) {
-            return Err("DATAGRAM frame accepted when peer doesn't support it".to_string());
-        }
-
-        // Test missing DATAGRAM setting (default is not supported)
-        reset_connection_state();
 
         let settings_empty = create_empty_settings();
-        if !process_settings_frame(&settings_empty) {
-            return Err("Failed to process empty SETTINGS frame".to_string());
-        }
-
-        // DATAGRAM frames should be rejected (default is no support)
-        if process_datagram_frame(&encoded) {
-            return Err("DATAGRAM frame accepted without explicit support".to_string());
+        let decoded_empty = decode_settings_payload(&settings_empty)?;
+        if decoded_empty.h3_datagram.is_some() {
+            return Err("empty SETTINGS unexpectedly enabled H3_DATAGRAM".to_string());
         }
 
         Ok(())
     });
+
+    let (verdict, notes) = match result {
+        Ok(()) => (
+            TestVerdict::ExpectedFailure,
+            Some(
+                "H3Settings parses SETTINGS_H3_DATAGRAM, but H3ConnectionState does not expose peer-negotiated DATAGRAM gating yet"
+                    .to_string(),
+            ),
+        ),
+        Err(err) => (TestVerdict::Fail, Some(err)),
+    };
 
     H3ConformanceResult {
         test_id: "RFC9297-3-DATAGRAM-NEGOTIATION".to_string(),
         description: "DATAGRAM capability negotiation via SETTINGS".to_string(),
         category: TestCategory::Settings,
         requirement_level: RequirementLevel::Must,
-        verdict: if result.is_ok() {
-            TestVerdict::Pass
-        } else {
-            TestVerdict::Fail
-        },
+        verdict,
         elapsed_ms,
-        notes: result.err(),
+        notes,
     }
 }
 
@@ -367,12 +339,6 @@ fn test_datagram_error_handling() -> H3ConformanceResult {
         ];
 
         for (malformed_data, description) in malformed_frames {
-            reset_datagram_context();
-
-            // Enable DATAGRAM capability first
-            let settings = create_settings_with_datagram(true);
-            process_settings_frame(&settings);
-
             if validate_datagram_frame_format(&malformed_data) {
                 return Err(format!(
                     "Malformed DATAGRAM frame was accepted: {}",
@@ -388,33 +354,25 @@ fn test_datagram_error_handling() -> H3ConformanceResult {
             }
         }
 
-        // Test oversized DATAGRAM frames
-        let oversized_payload = vec![0; 100_000]; // Very large payload
+        // Test oversized DATAGRAM frames through the production frame-size gate.
+        let oversized_payload = vec![0; 16];
         let oversized_frame = H3DatagramFrame {
             flow_id: 0,
             payload: oversized_payload,
         };
         let encoded_oversized = encode_datagram_frame(&oversized_frame);
+        let tight_config = H3ConnectionConfig {
+            max_frame_payload_size: 4,
+            ..H3ConnectionConfig::default()
+        };
 
-        // Should handle gracefully (may accept or reject based on implementation limits)
-        let result = process_datagram_frame(&encoded_oversized);
-
-        // Either acceptance or specific error is fine
-        if !result {
-            let error = get_last_datagram_error();
-            match error {
-                Some(DatagramError::FrameTooLarge) | Some(DatagramError::ResourceExhausted) => {
-                    // Expected error types for oversized frames
-                }
-                Some(other_error) => {
-                    return Err(format!(
-                        "Unexpected error for oversized frame: {:?}",
-                        other_error
-                    ));
-                }
-                None => {
-                    return Err("Oversized frame rejected without error indication".to_string());
-                }
+        match H3Frame::decode(&encoded_oversized, &tight_config) {
+            Err(asupersync::http::h3_native::H3NativeError::FrameTooLarge { .. }) => {}
+            Ok(_) => return Err("Oversized DATAGRAM frame was accepted".to_string()),
+            Err(err) => {
+                return Err(format!(
+                    "Oversized DATAGRAM frame produced wrong error: {err}"
+                ));
             }
         }
 
@@ -437,15 +395,6 @@ fn test_datagram_error_handling() -> H3ConformanceResult {
 }
 
 // Helper functions and types for DATAGRAM testing
-// In real implementation, these would integrate with actual HTTP/3 stack
-
-#[derive(Debug, PartialEq)]
-enum DatagramError {
-    FrameTooLarge,
-    ResourceExhausted,
-    InvalidFormat,
-    CapabilityNotNegotiated,
-}
 
 impl TestCategory {
     const DatagramFormat: TestCategory = TestCategory::Settings; // Reuse existing category
@@ -453,89 +402,76 @@ impl TestCategory {
 
 fn encode_datagram_frame(frame: &H3DatagramFrame) -> Vec<u8> {
     let mut encoded = Vec::new();
-
-    // Encode flow ID as varint
-    encode_varint(&mut encoded, frame.flow_id);
-
-    // Append payload
-    encoded.extend_from_slice(&frame.payload);
-
+    H3Frame::Datagram {
+        quarter_stream_id: frame.flow_id,
+        payload: frame.payload.clone(),
+    }
+    .encode(&mut encoded)
+    .expect("H3 DATAGRAM frame should encode");
     encoded
 }
 
 fn decode_datagram_frame(data: &[u8]) -> Result<H3DatagramFrame, String> {
-    if data.is_empty() {
-        return Err("Empty DATAGRAM frame".to_string());
+    let (frame, consumed) = H3Frame::decode(data, &H3ConnectionConfig::default())
+        .map_err(|err| format!("DATAGRAM frame decode failed: {err}"))?;
+    if consumed != data.len() {
+        return Err(format!(
+            "DATAGRAM frame left trailing bytes: consumed {consumed} of {}",
+            data.len()
+        ));
     }
 
-    let (flow_id, varint_len) = decode_varint(data).ok_or("Invalid flow ID varint")?;
-
-    if varint_len > data.len() {
-        return Err("Truncated DATAGRAM frame".to_string());
-    }
-
-    let payload = data[varint_len..].to_vec();
-
-    Ok(H3DatagramFrame { flow_id, payload })
-}
-
-fn encode_varint(data: &mut Vec<u8>, value: u64) {
-    // Simplified varint encoding
-    if value < 64 {
-        data.push(value as u8);
-    } else if value < 16384 {
-        data.push(0x40 | ((value >> 8) as u8));
-        data.push(value as u8);
-    } else if value < 1073741824 {
-        data.push(0x80 | ((value >> 24) as u8));
-        data.push((value >> 16) as u8);
-        data.push((value >> 8) as u8);
-        data.push(value as u8);
-    } else {
-        data.push(0xC0 | ((value >> 56) as u8));
-        for i in (0..7).rev() {
-            data.push((value >> (i * 8)) as u8);
-        }
+    match frame {
+        H3Frame::Datagram {
+            quarter_stream_id,
+            payload,
+        } => Ok(H3DatagramFrame {
+            flow_id: quarter_stream_id,
+            payload,
+        }),
+        other => Err(format!("decoded non-DATAGRAM frame: {other:?}")),
     }
 }
 
-fn decode_varint(data: &[u8]) -> Option<(u64, usize)> {
-    if data.is_empty() {
-        return None;
-    }
+fn decode_settings_payload(data: &[u8]) -> Result<H3Settings, String> {
+    H3Settings::decode_payload(data).map_err(|err| format!("SETTINGS decode failed: {err}"))
+}
 
-    let first_byte = data[0];
-    match first_byte & 0xC0 {
-        0x00 => Some((first_byte as u64, 1)),
-        0x40 => {
-            if data.len() < 2 {
-                return None;
-            }
-            let value = ((first_byte as u64 & 0x3F) << 8) | (data[1] as u64);
-            Some((value, 2))
-        }
-        0x80 => {
-            if data.len() < 4 {
-                return None;
-            }
-            let mut value = (first_byte as u64 & 0x3F) << 24;
-            value |= (data[1] as u64) << 16;
-            value |= (data[2] as u64) << 8;
-            value |= data[3] as u64;
-            Some((value, 4))
-        }
-        0xC0 => {
-            if data.len() < 8 {
-                return None;
-            }
-            let mut value = (first_byte as u64 & 0x3F) << 56;
-            for i in 1..8 {
-                value |= (data[i] as u64) << (8 * (7 - i));
-            }
-            Some((value, 8))
-        }
-        _ => None,
+fn create_settings_with_datagram(enable: bool) -> Vec<u8> {
+    let mut settings = Vec::new();
+    H3Settings {
+        h3_datagram: Some(enable),
+        ..H3Settings::default()
     }
+    .encode_payload(&mut settings)
+    .expect("SETTINGS_H3_DATAGRAM should encode");
+    settings
+}
+
+fn create_empty_settings() -> Vec<u8> {
+    Vec::new()
+}
+
+fn process_datagram_frame(data: &[u8]) -> bool {
+    let (frame, consumed) = match H3Frame::decode(data, &H3ConnectionConfig::default()) {
+        Ok((frame @ H3Frame::Datagram { .. }, consumed)) if consumed == data.len() => {
+            (frame, consumed)
+        }
+        _ => return false,
+    };
+    let mut request_stream = H3RequestStreamState::new();
+    request_stream
+        .on_frame(&H3Frame::Headers(vec![0x80]))
+        .is_ok()
+        && request_stream.on_frame(&frame).is_ok()
+        && consumed == data.len()
+}
+
+fn validate_datagram_frame_format(data: &[u8]) -> bool {
+    matches!(
+        H3Frame::decode(data, &H3ConnectionConfig::default()),
+        Ok((H3Frame::Datagram { .. }, consumed)) if consumed == data.len()
+    )
 }
 
 fn calculate_varint_length(value: u64) -> usize {
@@ -548,53 +484,4 @@ fn calculate_varint_length(value: u64) -> usize {
     } else {
         8
     }
-}
-
-fn validate_datagram_frame_format(data: &[u8]) -> bool {
-    decode_datagram_frame(data).is_ok()
-}
-
-fn process_datagram_frame(_data: &[u8]) -> bool {
-    // Mock processing - would integrate with actual HTTP/3 implementation
-    true
-}
-
-fn process_settings_frame(_data: &[u8]) -> bool {
-    // Mock SETTINGS processing
-    true
-}
-
-fn create_settings_with_datagram(enable: bool) -> Vec<u8> {
-    let mut settings = Vec::new();
-
-    // SETTINGS frame type (0x04)
-    settings.push(0x04);
-
-    // Length (2 bytes for one setting)
-    settings.push(0x02);
-
-    // H3_DATAGRAM setting (0x33 = 51)
-    settings.push(0x33);
-
-    // Value (0 or 1)
-    settings.push(if enable { 1 } else { 0 });
-
-    settings
-}
-
-fn create_empty_settings() -> Vec<u8> {
-    vec![0x04, 0x00] // SETTINGS frame with zero length
-}
-
-fn reset_connection_state() {
-    // Mock connection reset
-}
-
-fn reset_datagram_context() {
-    // Mock datagram context reset
-}
-
-fn get_last_datagram_error() -> Option<DatagramError> {
-    // Mock error tracking
-    Some(DatagramError::FrameTooLarge)
 }
