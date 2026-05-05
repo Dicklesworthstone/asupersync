@@ -4124,6 +4124,97 @@ mod tests {
         crate::test_complete!("restart_history_tracking");
     }
 
+    #[test]
+    fn restart_tracker_default_backoff_preserves_third_attempt_delay() {
+        init_test("restart_tracker_default_backoff_preserves_third_attempt_delay");
+
+        let mut tracker =
+            RestartTracker::from_restart_config(RestartConfig::new(4, Duration::from_secs(60)));
+
+        tracker.record(0);
+        tracker.record(1_000_000_000);
+
+        assert_eq!(
+            tracker.evaluate(2_000_000_000),
+            RestartVerdict::Allowed {
+                attempt: 3,
+                delay: Some(Duration::from_millis(400)),
+            }
+        );
+
+        crate::test_complete!("restart_tracker_default_backoff_preserves_third_attempt_delay");
+    }
+
+    #[test]
+    fn restart_tracker_no_backoff_preserves_none_delay() {
+        init_test("restart_tracker_no_backoff_preserves_none_delay");
+
+        let config =
+            RestartConfig::new(4, Duration::from_secs(60)).with_backoff(BackoffStrategy::None);
+        let mut tracker = RestartTracker::from_restart_config(config);
+
+        tracker.record(0);
+        tracker.record(1_000_000_000);
+
+        assert_eq!(
+            tracker.evaluate(2_000_000_000),
+            RestartVerdict::Allowed {
+                attempt: 3,
+                delay: None,
+            }
+        );
+
+        crate::test_complete!("restart_tracker_no_backoff_preserves_none_delay");
+    }
+
+    #[test]
+    fn restart_tracker_fixed_backoff_preserves_configured_delay() {
+        init_test("restart_tracker_fixed_backoff_preserves_configured_delay");
+
+        let fixed_delay = Duration::from_millis(75);
+        let config = RestartConfig::new(4, Duration::from_secs(60))
+            .with_backoff(BackoffStrategy::Fixed(fixed_delay));
+        let mut tracker = RestartTracker::from_restart_config(config);
+
+        tracker.record(0);
+        tracker.record(1_000_000_000);
+
+        assert_eq!(
+            tracker.evaluate(2_000_000_000),
+            RestartVerdict::Allowed {
+                attempt: 3,
+                delay: Some(fixed_delay),
+            }
+        );
+
+        crate::test_complete!("restart_tracker_fixed_backoff_preserves_configured_delay");
+    }
+
+    #[test]
+    fn restart_tracker_denies_after_larger_budget_is_exhausted() {
+        init_test("restart_tracker_denies_after_larger_budget_is_exhausted");
+
+        let mut tracker =
+            RestartTracker::from_restart_config(RestartConfig::new(4, Duration::from_secs(60)));
+
+        for now in [0_u64, 1_000_000_000, 2_000_000_000, 3_000_000_000] {
+            assert!(tracker.evaluate(now).is_allowed());
+            tracker.record(now);
+        }
+
+        assert!(matches!(
+            tracker.evaluate(4_000_000_000),
+            RestartVerdict::Denied {
+                refusal: BudgetRefusal::WindowExhausted {
+                    max_restarts: 4,
+                    window,
+                },
+            } if window == Duration::from_secs(60)
+        ));
+
+        crate::test_complete!("restart_tracker_denies_after_larger_budget_is_exhausted");
+    }
+
     // ---- Tests for new RestartPolicy, EscalationPolicy, SupervisionConfig ----
 
     #[test]
