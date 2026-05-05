@@ -289,7 +289,7 @@ OPERATOR_NOTES_JSON="$(jq -c '.operator_notes' <<<"$SCENARIO_JSON")"
 EXPECTED_REPORT_PROJECTION_JSON="$(jq -c '.expected_report_projection' <<<"$SCENARIO_JSON")"
 HOST_FINGERPRINT_JSON="$(host_fingerprint_json)"
 
-COMMAND="rch exec -- env ASUPERSYNC_TRACE_STORAGE_CONTRACT_PATH=${ARTIFACT} ASUPERSYNC_TRACE_STORAGE_SCENARIO_ID=${SCENARIO} ASUPERSYNC_TRACE_STORAGE_REPORT_PATH=${COMPARISON_REPORT_PATH} cargo test -p asupersync --test trace_storage_profile trace_storage_profile_smoke_contract_emits_operator_cost_report -- --nocapture"
+COMMAND="rch exec -- env ASUPERSYNC_TRACE_STORAGE_CONTRACT_PATH=${ARTIFACT} ASUPERSYNC_TRACE_STORAGE_SCENARIO_ID=${SCENARIO} ASUPERSYNC_TRACE_STORAGE_REPORT_PATH=${COMPARISON_REPORT_PATH} CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-C debuginfo=0' CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_asupersync_trace_storage_profile_smoke cargo test -p asupersync --test trace_storage_profile trace_storage_profile_smoke_contract_emits_operator_cost_report -- --nocapture"
 
 STARTED_TS="$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
 COMMAND_EXIT_CODE=0

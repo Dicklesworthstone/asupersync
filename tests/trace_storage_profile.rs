@@ -30,6 +30,21 @@ struct ContractScenario {
     operator_verdict: String,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TraceStorageSelectionProfile {
+    Default,
+    LargeMemory256G,
+}
+
+impl TraceStorageSelectionProfile {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Default => "default",
+            Self::LargeMemory256G => "large_memory_256g",
+        }
+    }
+}
+
 fn default_trace_storage_workload() -> TraceStorageWorkload {
     TraceStorageWorkload {
         time_window_seconds: 24 * 60 * 60,
@@ -60,6 +75,14 @@ fn bytes_to_mib(bytes: usize) -> f64 {
 
 fn ratio(numerator: usize, denominator: usize) -> f64 {
     round4(numerator as f64 / denominator as f64)
+}
+
+fn value_usize(value: &serde_json::Value, path: &[&str]) -> usize {
+    let mut current = value;
+    for key in path {
+        current = &current[*key];
+    }
+    current.as_u64().expect("usize json value") as usize
 }
 
 fn basis_points(numerator: u64, denominator: usize) -> f64 {
@@ -204,10 +227,18 @@ fn comparison_projection(report: &serde_json::Value) -> serde_json::Value {
         .expect("hot_trace_events") as usize;
     let default_overflow_interference_bps = basis_points(default_turnovers, hot_trace_events);
     let large_overflow_interference_bps = basis_points(large_turnovers, hot_trace_events);
+    let decision = &report["self_tuning_decision"];
+    let selected = &report["selected_profile_report"];
+    let selected_retained = &selected["scenario_observations"]["retained_artifact_counts"];
+    let selected_dropped = &selected["scenario_observations"]["dropped_artifact_counts"];
 
     json!({
         "schema_version": "trace-storage-profile-smoke-projection-v1",
         "scenario_id": report["scenario_id"].clone(),
+        "selected_profile": decision["selected_profile"].clone(),
+        "memory_bucket": decision["memory_bucket"].clone(),
+        "workload_pressure_class": decision["workload_pressure_class"].clone(),
+        "fallback_reason": decision["fallback_reason"].clone(),
         "default_budget_total_mib": default_total_mib,
         "large_budget_total_mib": large_total_mib,
         "budget_total_mib_delta": round4(large_total_mib - default_total_mib),
@@ -229,8 +260,133 @@ fn comparison_projection(report: &serde_json::Value) -> serde_json::Value {
         "p999_non_regression_passed": large_overflow_interference_bps <= default_overflow_interference_bps,
         "retention_policy_confidence": report["retention_policy_confidence"]["score"].clone(),
         "host_memory_requirement_satisfied": report["host_memory_evidence"]["requirement_satisfied"].clone(),
+        "selected_retained_cancellation_traces": selected_retained["cancellation_traces"].clone(),
+        "selected_retained_distributed_traces": selected_retained["distributed_traces"].clone(),
+        "selected_dropped_cancellation_traces": selected_dropped["cancellation_traces"].clone(),
+        "selected_dropped_distributed_traces": selected_dropped["distributed_traces"].clone(),
+        "selected_budget_hot_bytes": selected["budget"]["estimated_hot_bytes"].clone(),
+        "selected_budget_cold_bytes": selected["budget"]["estimated_cold_bytes"].clone(),
+        "selected_retained_cold_bytes": selected["scenario_observations"]["retained_cold_bytes"].clone(),
+        "selected_budget_hot_mib": selected["budget"]["memory_usage_mib"]["hot"].clone(),
+        "selected_budget_cold_mib": selected["budget"]["memory_usage_mib"]["cold"].clone(),
+        "selected_retained_cold_mib": selected["scenario_observations"]["retained_cold_mib"].clone(),
         "pressure_handoff_triggered": report["pressure_handoff"]["triggered"].clone(),
         "operator_verdict": report["operator_verdict"].clone(),
+    })
+}
+
+fn total_dropped_cold_traces(profile_report: &serde_json::Value) -> usize {
+    value_usize(
+        profile_report,
+        &[
+            "scenario_observations",
+            "dropped_artifact_counts",
+            "cancellation_traces",
+        ],
+    )
+    .saturating_add(value_usize(
+        profile_report,
+        &[
+            "scenario_observations",
+            "dropped_artifact_counts",
+            "distributed_traces",
+        ],
+    ))
+}
+
+fn memory_bucket(host_memory_evidence: &serde_json::Value) -> &'static str {
+    let assumed_host_memory_gib = host_memory_evidence["assumed_host_memory_gib"]
+        .as_u64()
+        .unwrap_or(0);
+    let requirement_satisfied = host_memory_evidence["requirement_satisfied"]
+        .as_bool()
+        .unwrap_or(false);
+
+    if assumed_host_memory_gib >= 256 && requirement_satisfied {
+        "large_memory_256g"
+    } else if assumed_host_memory_gib >= 256 {
+        "unverified_large_memory"
+    } else {
+        "below_256g"
+    }
+}
+
+fn workload_pressure_class(
+    default_profile: &serde_json::Value,
+    workload: TraceStorageWorkload,
+) -> &'static str {
+    let dropped = total_dropped_cold_traces(default_profile);
+    let turnovers = value_usize(
+        default_profile,
+        &["scenario_observations", "hot_ring_turnovers"],
+    );
+
+    if dropped > workload.cancellation_traces / 2 || turnovers >= 128 {
+        "retention_pressure_high"
+    } else if dropped > 0 || turnovers >= 16 {
+        "retention_pressure_moderate"
+    } else {
+        "retention_pressure_low"
+    }
+}
+
+fn self_tuning_decision(
+    default_profile: &serde_json::Value,
+    large_memory_profile: &serde_json::Value,
+    workload: TraceStorageWorkload,
+    host_memory_evidence: &serde_json::Value,
+    default_overflow_interference_bps: f64,
+    large_overflow_interference_bps: f64,
+) -> serde_json::Value {
+    let confidence = host_memory_evidence["confidence"].as_f64().unwrap_or(0.0);
+    let bucket = memory_bucket(host_memory_evidence);
+    let pressure_class = workload_pressure_class(default_profile, workload);
+    let default_dropped = total_dropped_cold_traces(default_profile);
+    let large_dropped = total_dropped_cold_traces(large_memory_profile);
+    let p999_non_regression_passed =
+        large_overflow_interference_bps <= default_overflow_interference_bps;
+    let evidence_is_confident = confidence >= 0.8;
+    let large_retains_more = large_dropped < default_dropped;
+    let select_large = bucket == "large_memory_256g"
+        && evidence_is_confident
+        && p999_non_regression_passed
+        && large_retains_more;
+    let selected_profile = if select_large {
+        TraceStorageSelectionProfile::LargeMemory256G
+    } else {
+        TraceStorageSelectionProfile::Default
+    };
+    let fallback_reason = if select_large {
+        "none"
+    } else if bucket != "large_memory_256g" {
+        "insufficient_large_memory_evidence"
+    } else if !evidence_is_confident {
+        "low_confidence_retention_evidence"
+    } else if !p999_non_regression_passed {
+        "tail_proxy_regression"
+    } else {
+        "no_retention_win"
+    };
+
+    json!({
+        "selected_profile": selected_profile.as_str(),
+        "fallback_profile": TraceStorageSelectionProfile::Default.as_str(),
+        "fallback_reason": fallback_reason,
+        "memory_bucket": bucket,
+        "workload_pressure_class": pressure_class,
+        "confidence": confidence,
+        "tail_evidence": {
+            "metric": "overflow_interference_probability_basis_points",
+            "default_basis_points": default_overflow_interference_bps,
+            "large_basis_points": large_overflow_interference_bps,
+            "p999_non_regression_passed": p999_non_regression_passed,
+        },
+        "retention_evidence": {
+            "default_dropped_cold_traces": default_dropped,
+            "large_memory_dropped_cold_traces": large_dropped,
+            "large_retains_more_cold_traces": large_retains_more,
+        },
+        "deterministic_selection_passed": true,
     })
 }
 
@@ -253,6 +409,20 @@ fn trace_storage_report(
     let default_overflow_interference_bps =
         basis_points(default_turnovers, workload.hot_trace_events);
     let large_overflow_interference_bps = basis_points(large_turnovers, workload.hot_trace_events);
+    let decision = self_tuning_decision(
+        &default_profile,
+        &large_memory_profile,
+        workload,
+        host_memory_evidence,
+        default_overflow_interference_bps,
+        large_overflow_interference_bps,
+    );
+    let selected_profile_report =
+        if decision["selected_profile"].as_str() == Some("large_memory_256g") {
+            large_memory_profile.clone()
+        } else {
+            default_profile.clone()
+        };
     let report = json!({
         "schema_version": "asupersync.trace-storage-profile-comparison.v1",
         "scenario_id": scenario_id,
@@ -265,6 +435,8 @@ fn trace_storage_report(
         },
         "default_profile": default_profile,
         "large_memory_profile": large_memory_profile,
+        "selected_profile_report": selected_profile_report,
+        "self_tuning_decision": decision,
         "comparison": {
             "latency_proxy_basis": "hot_ring_turnovers and cold_write_amplification_factor",
             "hot_path_latency_summary": {
@@ -322,9 +494,13 @@ fn trace_storage_report(
             },
         },
         "pressure_handoff": {
-            "triggered": false,
+            "triggered": decision["fallback_reason"].as_str() != Some("none"),
             "safe_fallback_profile": operator_notes["fallback_profile"].clone(),
-            "reason": "deterministic comparison remained within the selected profile budgets; no backpressure or brownout handoff was required",
+            "reason": if decision["fallback_reason"].as_str() == Some("none") {
+                json!("self-tuning selector accepted the large-memory profile with confident host and tail evidence")
+            } else {
+                json!("self-tuning selector fell back to the default profile until large-memory evidence is sufficient")
+            },
         },
         "operator_verdict": operator_verdict,
         "operator_notes": operator_notes.clone(),
@@ -336,6 +512,7 @@ fn trace_storage_report(
                 "large-memory profile reduces hot ring turnovers under the fixed workload",
                 "large-memory profile lowers cold-to-hot write amplification under the fixed workload by widening the hot ring",
                 "large-memory profile preserves the p999 hot-path interference proxy under the fixed workload",
+                "self-tuning selector records selected profile, memory bucket, confidence, fallback reason, and retained/dropped trace counts",
             ]
         }
     });
@@ -583,6 +760,18 @@ fn trace_storage_profile_report_exposes_confidence_and_handoff_metadata() {
     assert_eq!(report["retention_policy_confidence"]["score"], json!(1.0));
     assert_eq!(report["pressure_handoff"]["triggered"], json!(false));
     assert_eq!(
+        report["self_tuning_decision"]["selected_profile"],
+        json!("large_memory_256g")
+    );
+    assert_eq!(
+        report["self_tuning_decision"]["memory_bucket"],
+        json!("large_memory_256g")
+    );
+    assert_eq!(
+        report["self_tuning_decision"]["fallback_reason"],
+        json!("none")
+    );
+    assert_eq!(
         report["pressure_handoff"]["safe_fallback_profile"],
         json!("default")
     );
@@ -624,6 +813,156 @@ fn trace_storage_profile_real_host_template_marks_large_memory_assumptions_optio
     );
     assert_eq!(report["retention_policy_confidence"]["score"], json!(0.5));
     assert_eq!(report["operator_verdict"], json!("template_only"));
+    assert_eq!(
+        report["self_tuning_decision"]["selected_profile"],
+        json!("default")
+    );
+    assert_eq!(
+        report["self_tuning_decision"]["memory_bucket"],
+        json!("unverified_large_memory")
+    );
+    assert_eq!(
+        report["self_tuning_decision"]["fallback_reason"],
+        json!("insufficient_large_memory_evidence")
+    );
+    assert_eq!(report["pressure_handoff"]["triggered"], json!(true));
+}
+
+#[test]
+fn trace_storage_profile_contract_scenarios_match_self_tuning_projections() {
+    let artifact_path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("artifacts/trace_storage_profile_smoke_contract_v1.json");
+    let artifact: serde_json::Value = serde_json::from_str(
+        &fs::read_to_string(&artifact_path).expect("read trace storage profile contract"),
+    )
+    .expect("parse trace storage profile contract");
+    let scenarios = artifact["smoke_scenarios"]
+        .as_array()
+        .expect("smoke_scenarios array");
+
+    assert!(
+        scenarios.iter().any(|scenario| {
+            scenario["scenario_id"].as_str() == Some("AA-TRACE-STORAGE-LOW-MEMORY-FALLBACK")
+        }),
+        "contract must include an explicit low-memory fallback scenario"
+    );
+
+    for scenario in scenarios {
+        let scenario = parse_contract_scenario(scenario);
+        let report = trace_storage_report(
+            &scenario.scenario_id,
+            &scenario.description,
+            scenario.workload,
+            &scenario.operator_notes,
+            &scenario.host_memory_evidence,
+            &scenario.operator_verdict,
+        );
+        assert_eq!(
+            report["report_projection"], scenario.expected_projection,
+            "scenario {} projection should match the frozen self-tuning contract",
+            scenario.scenario_id
+        );
+        assert!(
+            report["report_projection"]["selected_profile"].is_string(),
+            "scenario {} must log selected profile",
+            scenario.scenario_id
+        );
+        assert!(
+            report["report_projection"]["memory_bucket"].is_string(),
+            "scenario {} must log memory bucket",
+            scenario.scenario_id
+        );
+        assert!(
+            report["report_projection"]["fallback_reason"].is_string(),
+            "scenario {} must log fallback reason",
+            scenario.scenario_id
+        );
+    }
+}
+
+#[test]
+fn trace_storage_profile_self_tuning_falls_back_on_low_memory_hosts() {
+    let report = trace_storage_report(
+        "AA-TRACE-STORAGE-LOW-MEMORY-FALLBACK",
+        "Low-memory fallback scenario for deterministic self-tuning selection.",
+        default_trace_storage_workload(),
+        &json!({ "fallback_profile": "default" }),
+        &json!({
+            "source": "deterministic_low_memory_fixture",
+            "freshness_seconds": 0,
+            "confidence": 0.95,
+            "required_min_memory_gib": 256,
+            "assumed_host_memory_gib": 64,
+            "requirement_satisfied": false,
+        }),
+        "fallback_default",
+    );
+
+    assert_eq!(
+        report["self_tuning_decision"]["selected_profile"],
+        json!("default")
+    );
+    assert_eq!(
+        report["self_tuning_decision"]["memory_bucket"],
+        json!("below_256g")
+    );
+    assert_eq!(
+        report["self_tuning_decision"]["workload_pressure_class"],
+        json!("retention_pressure_high")
+    );
+    assert_eq!(
+        report["self_tuning_decision"]["fallback_reason"],
+        json!("insufficient_large_memory_evidence")
+    );
+    assert_eq!(report["pressure_handoff"]["triggered"], json!(true));
+    assert_eq!(
+        report["report_projection"]["selected_dropped_cancellation_traces"],
+        json!(110_000)
+    );
+    assert_eq!(
+        report["report_projection"]["selected_dropped_distributed_traces"],
+        json!(70_000)
+    );
+}
+
+#[test]
+fn trace_storage_profile_self_tuning_projection_logs_operator_fields() {
+    let report = trace_storage_report(
+        TRACE_STORAGE_SCENARIO_ID,
+        "Deterministic storage-profile comparison for a 24h evidence-retention workload.",
+        default_trace_storage_workload(),
+        &json!({ "fallback_profile": "default" }),
+        &deterministic_host_memory_evidence(),
+        "ready_for_rch",
+    );
+    let projection = &report["report_projection"];
+
+    assert_eq!(projection["selected_profile"], json!("large_memory_256g"));
+    assert_eq!(projection["memory_bucket"], json!("large_memory_256g"));
+    assert_eq!(
+        projection["workload_pressure_class"],
+        json!("retention_pressure_high")
+    );
+    assert_eq!(projection["fallback_reason"], json!("none"));
+    assert_eq!(
+        projection["selected_retained_cancellation_traces"],
+        json!(120_000)
+    );
+    assert_eq!(
+        projection["selected_retained_distributed_traces"],
+        json!(80_000)
+    );
+    assert_eq!(projection["selected_dropped_cancellation_traces"], json!(0));
+    assert_eq!(projection["selected_dropped_distributed_traces"], json!(0));
+    assert_eq!(projection["selected_budget_hot_bytes"], json!(67_108_864));
+    assert_eq!(projection["selected_budget_cold_bytes"], json!(716_800_000));
+    assert_eq!(
+        projection["selected_retained_cold_bytes"],
+        json!(368_640_000)
+    );
+    assert_eq!(projection["selected_budget_hot_mib"], json!(64.0));
+    assert_eq!(projection["selected_budget_cold_mib"], json!(683.5938));
+    assert_eq!(projection["selected_retained_cold_mib"], json!(351.5625));
 }
 
 #[test]
@@ -650,6 +989,10 @@ fn trace_storage_profile_smoke_contract_emits_operator_cost_report() {
                 expected_projection: json!({
                     "schema_version": "trace-storage-profile-smoke-projection-v1",
                     "scenario_id": TRACE_STORAGE_SCENARIO_ID,
+                    "selected_profile": "large_memory_256g",
+                    "memory_bucket": "large_memory_256g",
+                    "workload_pressure_class": "retention_pressure_high",
+                    "fallback_reason": "none",
                     "default_budget_total_mib": 35.1797,
                     "large_budget_total_mib": 747.5938,
                     "budget_total_mib_delta": 712.4141,
@@ -671,6 +1014,16 @@ fn trace_storage_profile_smoke_contract_emits_operator_cost_report() {
                     "p999_non_regression_passed": true,
                     "retention_policy_confidence": 1.0,
                     "host_memory_requirement_satisfied": true,
+                    "selected_retained_cancellation_traces": 120000,
+                    "selected_retained_distributed_traces": 80000,
+                    "selected_dropped_cancellation_traces": 0,
+                    "selected_dropped_distributed_traces": 0,
+                    "selected_budget_hot_bytes": 67108864,
+                    "selected_budget_cold_bytes": 716800000,
+                    "selected_retained_cold_bytes": 368640000,
+                    "selected_budget_hot_mib": 64.0,
+                    "selected_budget_cold_mib": 683.5938,
+                    "selected_retained_cold_mib": 351.5625,
                     "pressure_handoff_triggered": false,
                     "operator_verdict": "ready_for_rch"
                 }),

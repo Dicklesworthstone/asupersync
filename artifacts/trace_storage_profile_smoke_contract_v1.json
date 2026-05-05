@@ -113,6 +113,10 @@
       "expected_report_projection": {
         "schema_version": "trace-storage-profile-smoke-projection-v1",
         "scenario_id": "AA-TRACE-STORAGE-LARGE-MEMORY-256G",
+        "selected_profile": "large_memory_256g",
+        "memory_bucket": "large_memory_256g",
+        "workload_pressure_class": "retention_pressure_high",
+        "fallback_reason": "none",
         "default_budget_total_mib": 35.1797,
         "large_budget_total_mib": 747.5938,
         "budget_total_mib_delta": 712.4141,
@@ -134,6 +138,16 @@
         "p999_non_regression_passed": true,
         "retention_policy_confidence": 1.0,
         "host_memory_requirement_satisfied": true,
+        "selected_retained_cancellation_traces": 120000,
+        "selected_retained_distributed_traces": 80000,
+        "selected_dropped_cancellation_traces": 0,
+        "selected_dropped_distributed_traces": 0,
+        "selected_budget_hot_bytes": 67108864,
+        "selected_budget_cold_bytes": 716800000,
+        "selected_retained_cold_bytes": 368640000,
+        "selected_budget_hot_mib": 64.0,
+        "selected_budget_cold_mib": 683.5938,
+        "selected_retained_cold_mib": 351.5625,
         "pressure_handoff_triggered": false,
         "operator_verdict": "ready_for_rch"
       }
@@ -188,6 +202,10 @@
       "expected_report_projection": {
         "schema_version": "trace-storage-profile-smoke-projection-v1",
         "scenario_id": "AA-TRACE-STORAGE-REAL-HOST-TEMPLATE",
+        "selected_profile": "default",
+        "memory_bucket": "unverified_large_memory",
+        "workload_pressure_class": "retention_pressure_high",
+        "fallback_reason": "insufficient_large_memory_evidence",
         "default_budget_total_mib": 35.1797,
         "large_budget_total_mib": 747.5938,
         "budget_total_mib_delta": 712.4141,
@@ -209,8 +227,107 @@
         "p999_non_regression_passed": true,
         "retention_policy_confidence": 0.5,
         "host_memory_requirement_satisfied": false,
-        "pressure_handoff_triggered": false,
+        "selected_retained_cancellation_traces": 10000,
+        "selected_retained_distributed_traces": 10000,
+        "selected_dropped_cancellation_traces": 110000,
+        "selected_dropped_distributed_traces": 70000,
+        "selected_budget_hot_bytes": 1048576,
+        "selected_budget_cold_bytes": 35840000,
+        "selected_retained_cold_bytes": 35840000,
+        "selected_budget_hot_mib": 1.0,
+        "selected_budget_cold_mib": 34.1797,
+        "selected_retained_cold_mib": 34.1797,
+        "pressure_handoff_triggered": true,
         "operator_verdict": "template_only"
+      }
+    },
+    {
+      "scenario_id": "AA-TRACE-STORAGE-LOW-MEMORY-FALLBACK",
+      "description": "Low-memory replay that proves self-tuning keeps the default trace storage profile when 256GiB-class evidence is absent.",
+      "output_root": "target/trace-storage-profile-smoke",
+      "execution_policy": "execute_or_dry_run",
+      "host_requirements": {
+        "min_worker_threads": 1,
+        "min_memory_gib": 0,
+        "notes": [
+          "This fallback scenario intentionally supplies a 64GiB memory bucket so large-memory trace retention must not be selected.",
+          "It verifies the same deterministic workload and tail proxy while preserving rollback to the default profile."
+        ]
+      },
+      "template_env": {
+        "TRACE_STORAGE_PROFILE_SMOKE_OUTPUT_DIR": "Override the bundle/report output root.",
+        "TRACE_STORAGE_PROFILE_SMOKE_ARTIFACT_ROOT": "Override the retrieved comparison artifact root."
+      },
+      "workload_model": {
+        "time_window_seconds": 86400,
+        "hot_trace_events": 1048576,
+        "cancellation_traces": 120000,
+        "distributed_traces": 80000
+      },
+      "operator_notes": {
+        "recommended_for": [
+          "Smaller hosts that need deterministic trace-storage accounting without enabling large-memory retention",
+          "Rollback-safe controller bundles where memory evidence is below the 256GiB bucket"
+        ],
+        "avoid_when": [
+          "Treating default fallback as a large-memory win",
+          "Hiding dropped cold traces instead of accounting for them"
+        ],
+        "fallback_profile": "default"
+      },
+      "host_memory_evidence": {
+        "source": "deterministic_low_memory_fixture",
+        "freshness_seconds": 0,
+        "confidence": 0.95,
+        "required_min_memory_gib": 256,
+        "assumed_host_memory_gib": 64,
+        "requirement_satisfied": false
+      },
+      "operator_verdict": "fallback_default",
+      "capture_plan": [
+        "Run the trace_storage_profile integration seam with the low-memory scenario ID injected through the environment.",
+        "Persist the emitted comparison JSON and require the projection to select the default profile while accounting for retained and dropped cold traces."
+      ],
+      "expected_report_projection": {
+        "schema_version": "trace-storage-profile-smoke-projection-v1",
+        "scenario_id": "AA-TRACE-STORAGE-LOW-MEMORY-FALLBACK",
+        "selected_profile": "default",
+        "memory_bucket": "below_256g",
+        "workload_pressure_class": "retention_pressure_high",
+        "fallback_reason": "insufficient_large_memory_evidence",
+        "default_budget_total_mib": 35.1797,
+        "large_budget_total_mib": 747.5938,
+        "budget_total_mib_delta": 712.4141,
+        "budget_multiplier": 21.2507,
+        "default_hot_ring_turnovers": 256,
+        "large_hot_ring_turnovers": 4,
+        "hot_ring_turnover_reduction_ratio": 64.0,
+        "default_retained_cancellation_traces": 10000,
+        "large_retained_cancellation_traces": 120000,
+        "default_retained_distributed_traces": 10000,
+        "large_retained_distributed_traces": 80000,
+        "default_cold_write_amplification_factor": 34.1797,
+        "large_cold_write_amplification_factor": 5.4932,
+        "cold_write_amplification_reduction_ratio": 6.2222,
+        "default_cold_budget_utilization_ratio": 1.0,
+        "large_cold_budget_utilization_ratio": 0.5143,
+        "default_overflow_interference_bps": 2.4414,
+        "large_overflow_interference_bps": 0.0381,
+        "p999_non_regression_passed": true,
+        "retention_policy_confidence": 0.95,
+        "host_memory_requirement_satisfied": false,
+        "selected_retained_cancellation_traces": 10000,
+        "selected_retained_distributed_traces": 10000,
+        "selected_dropped_cancellation_traces": 110000,
+        "selected_dropped_distributed_traces": 70000,
+        "selected_budget_hot_bytes": 1048576,
+        "selected_budget_cold_bytes": 35840000,
+        "selected_retained_cold_bytes": 35840000,
+        "selected_budget_hot_mib": 1.0,
+        "selected_budget_cold_mib": 34.1797,
+        "selected_retained_cold_mib": 34.1797,
+        "pressure_handoff_triggered": true,
+        "operator_verdict": "fallback_default"
       }
     }
   ]
