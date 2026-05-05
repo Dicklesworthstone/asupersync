@@ -1,5 +1,3 @@
-#![allow(warnings)]
-#![allow(clippy::all)]
 //! Packaged WASM ABI compatibility matrix contract
 //! (`asupersync-3qv04.6.5`, `asupersync-v2ofj7.2`).
 //!
