@@ -1,5 +1,3 @@
-#![allow(warnings)]
-#![allow(clippy::all)]
 //! Reproduction test for rate-limit readiness wake behavior under fixed time.
 
 use asupersync::service::Service;
