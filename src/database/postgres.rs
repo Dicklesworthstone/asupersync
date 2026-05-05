@@ -1425,13 +1425,10 @@ enum FrontendMessage {
     /// Password message (authentication).
     Password = b'p',
     /// Copy data message.
-    #[allow(dead_code)]
     CopyData = b'd',
     /// Copy done message.
-    #[allow(dead_code)]
     CopyDone = b'c',
     /// Copy fail message.
-    #[allow(dead_code)]
     CopyFail = b'f',
 }
 
@@ -2829,6 +2826,77 @@ pub struct PgConnection {
     inner: PgConnectionInner,
 }
 
+/// Server metadata returned when a PostgreSQL `COPY ... FROM STDIN` command
+/// enters COPY IN mode.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PgCopyInResponse {
+    overall_format: Format,
+    column_formats: Vec<Format>,
+}
+
+impl PgCopyInResponse {
+    /// Overall COPY stream format requested by the backend.
+    #[must_use]
+    pub const fn overall_format(&self) -> Format {
+        self.overall_format
+    }
+
+    /// Per-column COPY formats requested by the backend.
+    #[must_use]
+    pub fn column_formats(&self) -> &[Format] {
+        &self.column_formats
+    }
+}
+
+/// Summary returned after a `COPY ... FROM STDIN` stream completes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PgCopyInComplete {
+    affected_rows: u64,
+    chunks_sent: u64,
+    bytes_sent: u64,
+    response: PgCopyInResponse,
+}
+
+impl PgCopyInComplete {
+    /// Row count parsed from the backend `COPY n` command tag.
+    #[must_use]
+    pub const fn affected_rows(&self) -> u64 {
+        self.affected_rows
+    }
+
+    /// Number of `CopyData` frames sent by the client.
+    #[must_use]
+    pub const fn chunks_sent(&self) -> u64 {
+        self.chunks_sent
+    }
+
+    /// Total payload bytes sent across `CopyData` frames.
+    #[must_use]
+    pub const fn bytes_sent(&self) -> u64 {
+        self.bytes_sent
+    }
+
+    /// COPY IN format metadata announced by the backend.
+    #[must_use]
+    pub const fn response(&self) -> &PgCopyInResponse {
+        &self.response
+    }
+}
+
+/// Active PostgreSQL `COPY ... FROM STDIN` stream.
+///
+/// The connection remains reserved until the stream is explicitly finished or
+/// failed. Dropping an unfinished stream closes the connection to prevent a
+/// later request from reusing a socket that is still in COPY mode.
+#[derive(Debug)]
+pub struct PgCopyIn<'a> {
+    connection: &'a mut PgConnection,
+    response: PgCopyInResponse,
+    chunks_sent: u64,
+    bytes_sent: u64,
+    finished: bool,
+}
+
 impl fmt::Debug for PgConnection {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("PgConnection")
@@ -2870,6 +2938,7 @@ const POSTGRES_PROTOCOL_VERSION_3_0: i32 = 196_608;
 const MAX_BACKEND_MESSAGE_LEN: i32 = 64 * 1024 * 1024;
 const MAX_NOTIFICATION_CHANNEL_NAME_BYTES: usize = 63;
 const MAX_NOTIFICATION_PAYLOAD_BYTES: usize = 8_000;
+const COPY_TERMINAL_MASKED_POLLS: u32 = 64;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct NotificationResponseFields {
@@ -4210,6 +4279,164 @@ impl PgConnection {
         }
 
         Outcome::Ok(affected_rows)
+    }
+
+    /// Start a PostgreSQL `COPY ... FROM STDIN` operation.
+    ///
+    /// The SQL must be a trusted COPY statement that causes the backend to
+    /// enter COPY IN mode. The returned [`PgCopyIn`] sends bounded `CopyData`
+    /// frames and must be completed with [`PgCopyIn::finish`] or aborted with
+    /// [`PgCopyIn::fail`].
+    pub async fn copy_in<'a>(&'a mut self, cx: &Cx, sql: &str) -> Outcome<PgCopyIn<'a>, PgError> {
+        if cx.checkpoint().is_err() {
+            return Outcome::Cancelled(cancelled_reason(cx));
+        }
+        if self.inner.closed {
+            return Outcome::Err(PgError::ConnectionClosed);
+        }
+
+        match self.flush_pending_deallocates_before_request(cx).await {
+            Outcome::Ok(()) => {}
+            Outcome::Err(err) => return Outcome::Err(err),
+            Outcome::Cancelled(reason) => return Outcome::Cancelled(reason),
+            Outcome::Panicked(payload) => return Outcome::Panicked(payload),
+        }
+
+        match self.ensure_no_orphaned_transaction(cx).await {
+            Outcome::Ok(()) => {}
+            Outcome::Err(err) => return Outcome::Err(err),
+            Outcome::Cancelled(reason) => return Outcome::Cancelled(reason),
+            Outcome::Panicked(payload) => return Outcome::Panicked(payload),
+        }
+
+        let mut buf = MessageBuffer::new();
+        buf.write_cstring(sql);
+        let msg = match buf.build_message(FrontendMessage::Query as u8) {
+            Ok(msg) => msg,
+            Err(err) => return Outcome::Err(err),
+        };
+
+        self.inner.closed = true;
+
+        if let Err(err) = self.write_all(cx, &msg).await {
+            return self.fail_in_flight(err);
+        }
+
+        let mut command_tag = None::<String>;
+        loop {
+            if cx.checkpoint().is_err() {
+                return self.cancel_in_flight(cx);
+            }
+
+            let (msg_type, data) = match self.read_message(cx).await {
+                Ok(msg) => msg,
+                Err(err) => return self.fail_in_flight(err),
+            };
+
+            match msg_type {
+                b'G' => {
+                    let (overall_format, column_formats) =
+                        match Self::parse_copy_response("CopyInResponse", &data) {
+                            Ok(parsed) => parsed,
+                            Err(err) => return self.fail_in_flight(err),
+                        };
+                    return Outcome::Ok(PgCopyIn {
+                        connection: self,
+                        response: PgCopyInResponse {
+                            overall_format,
+                            column_formats,
+                        },
+                        chunks_sent: 0,
+                        bytes_sent: 0,
+                        finished: false,
+                    });
+                }
+                b'C' => {
+                    command_tag = Self::parse_command_tag(&data).map(str::to_string);
+                }
+                b'I' => {}
+                b'Z' => {
+                    self.inner.closed = false;
+                    if let Err(err) = self.handle_ready_for_query(&data) {
+                        return self.fail_in_flight(err);
+                    }
+                    let suffix = command_tag
+                        .as_deref()
+                        .map_or(String::new(), |tag| format!("; command tag was {tag:?}"));
+                    return Outcome::Err(PgError::Protocol(format!(
+                        "COPY FROM statement did not enter COPY IN mode{suffix}"
+                    )));
+                }
+                b'E' => {
+                    return outcome_from_error(self.parse_error_and_drain(cx, &data).await);
+                }
+                _ => {
+                    match self.handle_async_backend_message(msg_type, &data) {
+                        Ok(true) => continue,
+                        Ok(false) => {}
+                        Err(err) => return self.fail_in_flight(err),
+                    }
+                    return self
+                        .fail_in_flight(unexpected_backend_message("COPY IN startup", msg_type));
+                }
+            }
+        }
+    }
+
+    /// Stream chunks into `COPY ... FROM STDIN` and finish with `CopyDone`.
+    ///
+    /// Each iterator item becomes one `CopyData` frame. If the iterator
+    /// yields an error, the client sends `CopyFail`, drains back to
+    /// `ReadyForQuery`, and returns the original source error. If cancellation
+    /// is observed between chunks, the client also attempts `CopyFail` before
+    /// returning cancellation.
+    pub async fn copy_from_chunks<I, B>(
+        &mut self,
+        cx: &Cx,
+        sql: &str,
+        chunks: I,
+    ) -> Outcome<PgCopyInComplete, PgError>
+    where
+        I: IntoIterator<Item = Result<B, PgError>>,
+        B: AsRef<[u8]>,
+    {
+        let mut copy = match self.copy_in(cx, sql).await {
+            Outcome::Ok(copy) => copy,
+            Outcome::Err(err) => return Outcome::Err(err),
+            Outcome::Cancelled(reason) => return Outcome::Cancelled(reason),
+            Outcome::Panicked(payload) => return Outcome::Panicked(payload),
+        };
+
+        for chunk in chunks {
+            if cx.checkpoint().is_err() {
+                let reason = cancelled_reason(cx);
+                let _ = copy.fail(cx, "COPY FROM cancelled before CopyDone").await;
+                return Outcome::Cancelled(reason);
+            }
+
+            let chunk = match chunk {
+                Ok(chunk) => chunk,
+                Err(err) => match copy.fail(cx, "COPY FROM source error").await {
+                    Outcome::Ok(()) => return Outcome::Err(err),
+                    Outcome::Err(abort_err) => {
+                        return Outcome::Err(PgError::Protocol(format!(
+                            "{err}; additionally failed to abort COPY FROM: {abort_err}"
+                        )));
+                    }
+                    Outcome::Cancelled(reason) => return Outcome::Cancelled(reason),
+                    Outcome::Panicked(payload) => return Outcome::Panicked(payload),
+                },
+            };
+
+            match copy.send_chunk(cx, chunk.as_ref()).await {
+                Outcome::Ok(()) => {}
+                Outcome::Err(err) => return Outcome::Err(err),
+                Outcome::Cancelled(reason) => return Outcome::Cancelled(reason),
+                Outcome::Panicked(payload) => return Outcome::Panicked(payload),
+            }
+        }
+
+        copy.finish(cx).await
     }
 
     /// Register a PostgreSQL LISTEN channel with identifier quoting and
@@ -6049,6 +6276,258 @@ impl PgConnection {
     }
 }
 
+impl PgCopyIn<'_> {
+    /// COPY IN format metadata announced by the backend.
+    #[must_use]
+    pub const fn response(&self) -> &PgCopyInResponse {
+        &self.response
+    }
+
+    /// Number of `CopyData` frames sent so far.
+    #[must_use]
+    pub const fn chunks_sent(&self) -> u64 {
+        self.chunks_sent
+    }
+
+    /// Total payload bytes sent so far.
+    #[must_use]
+    pub const fn bytes_sent(&self) -> u64 {
+        self.bytes_sent
+    }
+
+    /// Send one COPY data chunk as one bounded `CopyData` frame.
+    pub async fn send_chunk(&mut self, cx: &Cx, data: &[u8]) -> Outcome<(), PgError> {
+        if self.finished {
+            return Outcome::Err(PgError::Protocol(
+                "COPY IN stream is already finished".to_string(),
+            ));
+        }
+        if cx.checkpoint().is_err() {
+            return self
+                .abort_after_cancel(cx, "COPY FROM cancelled before CopyDone")
+                .await;
+        }
+
+        let msg = match build_copy_data_msg(data) {
+            Ok(msg) => msg,
+            Err(err) => return Outcome::Err(err),
+        };
+
+        match self.connection.write_all(cx, &msg).await {
+            Ok(()) => {
+                self.chunks_sent = self.chunks_sent.saturating_add(1);
+                self.bytes_sent = self.bytes_sent.saturating_add(data.len() as u64);
+                Outcome::Ok(())
+            }
+            Err(PgError::Cancelled(reason)) => {
+                self.connection.abort_in_flight_exchange();
+                self.finished = true;
+                Outcome::Cancelled(reason)
+            }
+            Err(err) => self.connection.fail_in_flight(err),
+        }
+    }
+
+    /// Finish COPY IN with `CopyDone` and read the backend completion tag.
+    pub async fn finish(mut self, cx: &Cx) -> Outcome<PgCopyInComplete, PgError> {
+        if self.finished {
+            return Outcome::Err(PgError::Protocol(
+                "COPY IN stream is already finished".to_string(),
+            ));
+        }
+
+        let msg = match build_copy_done_msg() {
+            Ok(msg) => msg,
+            Err(err) => return Outcome::Err(err),
+        };
+        let write_result = crate::combinator::commit_section(
+            cx,
+            COPY_TERMINAL_MASKED_POLLS,
+            self.connection.write_all(cx, &msg),
+        )
+        .await;
+
+        match write_result {
+            Ok(()) => self.read_copy_done_result(cx).await,
+            Err(PgError::Cancelled(reason)) => {
+                self.connection.abort_in_flight_exchange();
+                self.finished = true;
+                Outcome::Cancelled(reason)
+            }
+            Err(err) => self.connection.fail_in_flight(err),
+        }
+    }
+
+    /// Abort COPY IN with `CopyFail` and drain back to `ReadyForQuery`.
+    pub async fn fail(mut self, cx: &Cx, message: &str) -> Outcome<(), PgError> {
+        if self.finished {
+            return Outcome::Err(PgError::Protocol(
+                "COPY IN stream is already finished".to_string(),
+            ));
+        }
+        self.write_copy_fail_and_drain(cx, message).await
+    }
+
+    async fn abort_after_cancel(&mut self, cx: &Cx, message: &str) -> Outcome<(), PgError> {
+        let reason = cancelled_reason(cx);
+        match self.write_copy_fail_and_drain(cx, message).await {
+            Outcome::Ok(()) => Outcome::Cancelled(reason),
+            Outcome::Err(_) => {
+                self.connection.abort_in_flight_exchange();
+                self.finished = true;
+                Outcome::Cancelled(reason)
+            }
+            Outcome::Cancelled(_) | Outcome::Panicked(_) => {
+                self.connection.abort_in_flight_exchange();
+                self.finished = true;
+                Outcome::Cancelled(reason)
+            }
+        }
+    }
+
+    async fn write_copy_fail_and_drain(&mut self, cx: &Cx, message: &str) -> Outcome<(), PgError> {
+        let msg = match build_copy_fail_msg(message) {
+            Ok(msg) => msg,
+            Err(err) => {
+                self.connection.abort_in_flight_exchange();
+                self.finished = true;
+                return Outcome::Err(err);
+            }
+        };
+
+        crate::combinator::commit_section(cx, COPY_TERMINAL_MASKED_POLLS, async {
+            if let Err(err) = self.connection.write_all(cx, &msg).await {
+                return outcome_from_error(err);
+            }
+            self.drain_after_copy_fail(cx).await
+        })
+        .await
+    }
+
+    async fn drain_after_copy_fail(&mut self, cx: &Cx) -> Outcome<(), PgError> {
+        loop {
+            if cx.checkpoint().is_err() {
+                self.connection.abort_in_flight_exchange();
+                self.finished = true;
+                return Outcome::Cancelled(cancelled_reason(cx));
+            }
+
+            let (msg_type, data) = match self.connection.read_message(cx).await {
+                Ok(msg) => msg,
+                Err(err) => return self.connection.fail_in_flight(err),
+            };
+
+            match msg_type {
+                b'E' => {
+                    let err = self.connection.parse_error_and_drain(cx, &data).await;
+                    return match err {
+                        PgError::Server { .. } => {
+                            self.finished = true;
+                            Outcome::Ok(())
+                        }
+                        PgError::Cancelled(reason) => {
+                            self.finished = true;
+                            Outcome::Cancelled(reason)
+                        }
+                        other => {
+                            self.finished = true;
+                            Outcome::Err(other)
+                        }
+                    };
+                }
+                b'Z' => {
+                    self.connection.inner.closed = false;
+                    if let Err(err) = self.connection.handle_ready_for_query(&data) {
+                        return self.connection.fail_in_flight(err);
+                    }
+                    self.finished = true;
+                    return Outcome::Ok(());
+                }
+                _ => {
+                    match self
+                        .connection
+                        .handle_async_backend_message(msg_type, &data)
+                    {
+                        Ok(true) => continue,
+                        Ok(false) => {}
+                        Err(err) => return self.connection.fail_in_flight(err),
+                    }
+                    return self
+                        .connection
+                        .fail_in_flight(unexpected_backend_message("COPY IN abort", msg_type));
+                }
+            }
+        }
+    }
+
+    async fn read_copy_done_result(&mut self, cx: &Cx) -> Outcome<PgCopyInComplete, PgError> {
+        let mut affected_rows = 0u64;
+
+        loop {
+            if cx.checkpoint().is_err() {
+                return self.connection.cancel_in_flight(cx);
+            }
+
+            let (msg_type, data) = match self.connection.read_message(cx).await {
+                Ok(msg) => msg,
+                Err(err) => return self.connection.fail_in_flight(err),
+            };
+
+            match msg_type {
+                b'C' => {
+                    if let Some(tag) = PgConnection::parse_command_tag(&data)
+                        && let Some(rows) = PgConnection::affected_rows_from_command_tag(tag)
+                    {
+                        affected_rows = rows;
+                    }
+                }
+                b'Z' => {
+                    self.connection.inner.closed = false;
+                    if let Err(err) = self.connection.handle_ready_for_query(&data) {
+                        return self.connection.fail_in_flight(err);
+                    }
+                    self.finished = true;
+                    return Outcome::Ok(PgCopyInComplete {
+                        affected_rows,
+                        chunks_sent: self.chunks_sent,
+                        bytes_sent: self.bytes_sent,
+                        response: self.response.clone(),
+                    });
+                }
+                b'E' => {
+                    let err = self.connection.parse_error_and_drain(cx, &data).await;
+                    if !self.connection.inner.closed {
+                        self.finished = true;
+                    }
+                    return outcome_from_error(err);
+                }
+                _ => {
+                    match self
+                        .connection
+                        .handle_async_backend_message(msg_type, &data)
+                    {
+                        Ok(true) => continue,
+                        Ok(false) => {}
+                        Err(err) => return self.connection.fail_in_flight(err),
+                    }
+                    return self.connection.fail_in_flight(unexpected_backend_message(
+                        "COPY IN completion",
+                        msg_type,
+                    ));
+                }
+            }
+        }
+    }
+}
+
+impl Drop for PgCopyIn<'_> {
+    fn drop(&mut self) {
+        if !self.finished {
+            self.connection.abort_in_flight_exchange();
+        }
+    }
+}
+
 // ============================================================================
 // Typed Query Parameter Inference Audit Tests
 // ============================================================================
@@ -6630,6 +7109,32 @@ pub fn build_execute_msg(portal: &str, max_rows: i32) -> Result<Vec<u8>, PgError
 pub fn build_sync_msg() -> Result<Vec<u8>, PgError> {
     let mut buf = MessageBuffer::new();
     buf.build_message(FrontendMessage::Sync as u8)
+}
+
+/// Build a CopyData message for a COPY IN stream.
+fn build_copy_data_msg(data: &[u8]) -> Result<Vec<u8>, PgError> {
+    let mut buf = MessageBuffer::with_capacity(data.len());
+    buf.write_bytes(data);
+    buf.build_message(FrontendMessage::CopyData as u8)
+}
+
+/// Build a CopyDone message for a COPY IN stream.
+fn build_copy_done_msg() -> Result<Vec<u8>, PgError> {
+    let mut buf = MessageBuffer::new();
+    buf.build_message(FrontendMessage::CopyDone as u8)
+}
+
+/// Build a CopyFail message for a COPY IN stream.
+fn build_copy_fail_msg(message: &str) -> Result<Vec<u8>, PgError> {
+    if message.as_bytes().contains(&0) {
+        return Err(PgError::Protocol(
+            "CopyFail message contains embedded NUL byte".to_string(),
+        ));
+    }
+    let mut buf = MessageBuffer::with_capacity(message.len() + 1);
+    buf.write_bytes(message.as_bytes());
+    buf.write_byte(0);
+    buf.build_message(FrontendMessage::CopyFail as u8)
 }
 
 /// Build a Close message.
@@ -8433,6 +8938,42 @@ mod tests {
         msg
     }
 
+    fn copy_in_response_message(overall_format: Format, column_formats: &[Format]) -> Vec<u8> {
+        let mut body = Vec::with_capacity(3 + column_formats.len() * 2);
+        body.push(overall_format as u8);
+        body.extend_from_slice(
+            &i16::try_from(column_formats.len())
+                .expect("test column count fits")
+                .to_be_bytes(),
+        );
+        for format in column_formats {
+            body.extend_from_slice(&(*format as i16).to_be_bytes());
+        }
+        backend_message(b'G', &body)
+    }
+
+    fn command_complete_message(tag: &str) -> Vec<u8> {
+        let mut body = Vec::with_capacity(tag.len() + 1);
+        body.extend_from_slice(tag.as_bytes());
+        body.push(0);
+        backend_message(b'C', &body)
+    }
+
+    fn frontend_frame_len(data: &[u8], offset: usize) -> usize {
+        let len = i32::from_be_bytes([
+            data[offset + 1],
+            data[offset + 2],
+            data[offset + 3],
+            data[offset + 4],
+        ]);
+        1 + usize::try_from(len).expect("frontend length is non-negative")
+    }
+
+    fn frontend_body(data: &[u8], offset: usize) -> &[u8] {
+        let frame_len = frontend_frame_len(data, offset);
+        &data[offset + 5..offset + frame_len]
+    }
+
     fn ready_for_query(status: u8) -> Vec<u8> {
         backend_message(b'Z', &[status])
     }
@@ -8612,6 +9153,187 @@ mod tests {
         body.push(0);
         body.push(0);
         backend_message(b'E', &body)
+    }
+
+    #[test]
+    fn copy_from_chunks_streams_copy_data_and_done_without_buffering_rows() {
+        let (mut conn, mut peer) = make_test_connection_with_peer();
+        std::io::Write::write_all(
+            &mut peer,
+            &copy_in_response_message(Format::Text, &[Format::Text, Format::Text]),
+        )
+        .unwrap();
+        std::io::Write::write_all(&mut peer, &command_complete_message("COPY 2")).unwrap();
+        std::io::Write::write_all(&mut peer, &ready_for_query(b'I')).unwrap();
+
+        let cx = Cx::for_testing();
+        let chunks: Vec<Result<&[u8], PgError>> = vec![Ok(b"alice\t1\n"), Ok(b"bob\t2\n")];
+        let complete = match run(conn.copy_from_chunks(&cx, "COPY users FROM STDIN", chunks)) {
+            Outcome::Ok(complete) => complete,
+            other => panic!("expected COPY success, got {other:?}"),
+        };
+
+        assert_eq!(complete.affected_rows(), 2);
+        assert_eq!(complete.chunks_sent(), 2);
+        assert_eq!(complete.bytes_sent(), b"alice\t1\nbob\t2\n".len() as u64);
+        assert_eq!(complete.response().overall_format(), Format::Text);
+        assert_eq!(
+            complete.response().column_formats(),
+            &[Format::Text, Format::Text]
+        );
+        assert!(!conn.inner.closed);
+        assert_eq!(conn.inner.transaction_status, b'I');
+
+        let written =
+            read_until_contains(&mut peer, &[FrontendMessage::CopyDone as u8, 0, 0, 0, 4]);
+        assert_eq!(written[0], FrontendMessage::Query as u8);
+        assert_eq!(frontend_body(&written, 0), b"COPY users FROM STDIN\0");
+
+        let copy_offset = frontend_frame_len(&written, 0);
+        let parsed = fuzz_parse_copy_in_sequence(&written[copy_offset..]).unwrap();
+        assert_eq!(
+            parsed.copy_data_chunks,
+            vec![b"alice\t1\n".to_vec(), b"bob\t2\n".to_vec()]
+        );
+        assert_eq!(parsed.end, FuzzCopyInEnd::Done);
+    }
+
+    #[test]
+    fn copy_from_chunks_empty_input_sends_copy_done() {
+        let (mut conn, mut peer) = make_test_connection_with_peer();
+        std::io::Write::write_all(
+            &mut peer,
+            &copy_in_response_message(Format::Text, &[Format::Text]),
+        )
+        .unwrap();
+        std::io::Write::write_all(&mut peer, &command_complete_message("COPY 0")).unwrap();
+        std::io::Write::write_all(&mut peer, &ready_for_query(b'I')).unwrap();
+
+        let cx = Cx::for_testing();
+        let chunks: Vec<Result<&[u8], PgError>> = Vec::new();
+        let complete = match run(conn.copy_from_chunks(&cx, "COPY empty FROM STDIN", chunks)) {
+            Outcome::Ok(complete) => complete,
+            other => panic!("expected empty COPY success, got {other:?}"),
+        };
+
+        assert_eq!(complete.affected_rows(), 0);
+        assert_eq!(complete.chunks_sent(), 0);
+        assert_eq!(complete.bytes_sent(), 0);
+        assert!(!conn.inner.closed);
+
+        let written =
+            read_until_contains(&mut peer, &[FrontendMessage::CopyDone as u8, 0, 0, 0, 4]);
+        let copy_offset = frontend_frame_len(&written, 0);
+        let parsed = fuzz_parse_copy_in_sequence(&written[copy_offset..]).unwrap();
+        assert_eq!(parsed.copy_data_chunks, Vec::<Vec<u8>>::new());
+        assert_eq!(parsed.end, FuzzCopyInEnd::Done);
+    }
+
+    #[test]
+    fn copy_from_chunks_source_error_sends_copy_fail_and_resynchronizes() {
+        let (mut conn, mut peer) = make_test_connection_with_peer();
+        std::io::Write::write_all(
+            &mut peer,
+            &copy_in_response_message(Format::Text, &[Format::Text]),
+        )
+        .unwrap();
+        std::io::Write::write_all(
+            &mut peer,
+            &error_response_message("57014", "COPY FROM source error"),
+        )
+        .unwrap();
+        std::io::Write::write_all(&mut peer, &ready_for_query(b'I')).unwrap();
+
+        let cx = Cx::for_testing();
+        let chunks: Vec<Result<&[u8], PgError>> = vec![
+            Ok(b"partial row\n"),
+            Err(PgError::Protocol("source stopped".to_string())),
+        ];
+        match run(conn.copy_from_chunks(&cx, "COPY source_error FROM STDIN", chunks)) {
+            Outcome::Err(PgError::Protocol(msg)) => {
+                assert_eq!(msg, "source stopped");
+            }
+            other => panic!("expected source error, got {other:?}"),
+        }
+
+        assert!(!conn.inner.closed);
+        let written = read_until_contains(&mut peer, &[FrontendMessage::CopyFail as u8]);
+        let copy_offset = frontend_frame_len(&written, 0);
+        let parsed = fuzz_parse_copy_in_sequence(&written[copy_offset..]).unwrap();
+        assert_eq!(parsed.copy_data_chunks, vec![b"partial row\n".to_vec()]);
+        assert_eq!(
+            parsed.end,
+            FuzzCopyInEnd::Fail("COPY FROM source error".to_string())
+        );
+    }
+
+    #[test]
+    fn copy_in_send_chunk_cancel_before_copy_done_sends_copy_fail() {
+        let (mut conn, mut peer) = make_test_connection_with_peer();
+        std::io::Write::write_all(
+            &mut peer,
+            &copy_in_response_message(Format::Text, &[Format::Text]),
+        )
+        .unwrap();
+        std::io::Write::write_all(
+            &mut peer,
+            &error_response_message("57014", "COPY FROM cancelled before CopyDone"),
+        )
+        .unwrap();
+        std::io::Write::write_all(&mut peer, &ready_for_query(b'I')).unwrap();
+
+        let cx = Cx::for_testing();
+        let mut copy = match run(conn.copy_in(&cx, "COPY cancellable FROM STDIN")) {
+            Outcome::Ok(copy) => copy,
+            other => panic!("expected COPY IN stream, got {other:?}"),
+        };
+        cx.cancel_fast(CancelKind::User);
+        assert_user_cancelled(run(copy.send_chunk(&cx, b"late row\n")));
+        drop(copy);
+
+        assert!(!conn.inner.closed);
+        let written = read_until_contains(&mut peer, &[FrontendMessage::CopyFail as u8]);
+        let copy_offset = frontend_frame_len(&written, 0);
+        let parsed = fuzz_parse_copy_in_sequence(&written[copy_offset..]).unwrap();
+        assert_eq!(parsed.copy_data_chunks, Vec::<Vec<u8>>::new());
+        assert_eq!(
+            parsed.end,
+            FuzzCopyInEnd::Fail("COPY FROM cancelled before CopyDone".to_string())
+        );
+    }
+
+    #[test]
+    fn copy_from_chunks_backend_error_after_copy_done_preserves_server_error() {
+        let (mut conn, mut peer) = make_test_connection_with_peer();
+        std::io::Write::write_all(
+            &mut peer,
+            &copy_in_response_message(Format::Text, &[Format::Text]),
+        )
+        .unwrap();
+        std::io::Write::write_all(
+            &mut peer,
+            &error_response_message("22P02", "invalid input syntax for integer"),
+        )
+        .unwrap();
+        std::io::Write::write_all(&mut peer, &ready_for_query(b'I')).unwrap();
+
+        let cx = Cx::for_testing();
+        let chunks: Vec<Result<&[u8], PgError>> = vec![Ok(b"not-an-int\n")];
+        match run(conn.copy_from_chunks(&cx, "COPY malformed FROM STDIN", chunks)) {
+            Outcome::Err(PgError::Server { code, message, .. }) => {
+                assert_eq!(code, "22P02");
+                assert_eq!(message, "invalid input syntax for integer");
+            }
+            other => panic!("expected backend COPY error, got {other:?}"),
+        }
+
+        assert!(!conn.inner.closed);
+        let written =
+            read_until_contains(&mut peer, &[FrontendMessage::CopyDone as u8, 0, 0, 0, 4]);
+        let copy_offset = frontend_frame_len(&written, 0);
+        let parsed = fuzz_parse_copy_in_sequence(&written[copy_offset..]).unwrap();
+        assert_eq!(parsed.copy_data_chunks, vec![b"not-an-int\n".to_vec()]);
+        assert_eq!(parsed.end, FuzzCopyInEnd::Done);
     }
 
     #[test]
