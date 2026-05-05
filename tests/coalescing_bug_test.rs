@@ -1,5 +1,3 @@
-#![allow(warnings)]
-#![allow(clippy::all)]
 #![allow(missing_docs)]
 use asupersync::time::{CoalescingConfig, TimerWheel, TimerWheelConfig};
 use asupersync::types::Time;
