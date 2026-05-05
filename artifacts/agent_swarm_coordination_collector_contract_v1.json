@@ -94,6 +94,16 @@
     "coordination-collector-report.json",
     "coordination-collector.summary.txt"
   ],
+  "e2e_log_fields": [
+    "source_kind",
+    "pseudonymized_agent",
+    "correlation_id",
+    "workload_family",
+    "refusal_reason",
+    "source_hash",
+    "output_bundle_path",
+    "replay_command"
+  ],
   "determinism": {
     "event_sort_key": [
       "event_ts",

@@ -761,6 +761,10 @@ def materialize(events, output_root, run_id, generated_at, hard_fail):
     jsonl_path = out_dir / "coordination-workload-events.jsonl"
     report_path = out_dir / "coordination-collector-report.json"
     summary_path = out_dir / "coordination-collector.summary.txt"
+    replay_command = (
+        "RCH_BIN=rch bash ./scripts/run_runtime_workload_corpus.sh "
+        f"--synthesize-coordination-pack --coordination-bundle {bundle_path}"
+    )
     bundle_path.write_text(json.dumps(bundle, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     jsonl_path.write_text("".join(json.dumps(ev, sort_keys=True) + "\n" for ev in deduped), encoding="utf-8")
     report["artifact_paths"] = {
@@ -769,11 +773,26 @@ def materialize(events, output_root, run_id, generated_at, hard_fail):
         "report": str(report_path),
         "summary": str(summary_path),
     }
+    report["replay_command"] = replay_command
+    report["e2e_log_rows"] = [
+        {
+            "source_kind": ev["source_kind"],
+            "pseudonymized_agent": ev["source_agent"],
+            "correlation_id": ev["correlation_id"],
+            "workload_family": ev["workload_family"],
+            "refusal_reason": ev["refusal_reason"],
+            "source_hash": ev["source_hash"],
+            "output_bundle_path": str(bundle_path),
+            "replay_command": replay_command,
+        }
+        for ev in deduped
+    ]
     report_path.write_text(json.dumps(report, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     summary = (
         f"collector_result run_id={run_id} verdict={verdict} "
         f"accepted={report['accepted_event_count']} refused={refused_count} "
-        f"duplicates={duplicates} bundle={bundle_path}\n"
+        f"duplicates={duplicates} bundle={bundle_path} "
+        f"replay_command={replay_command}\n"
     )
     summary_path.write_text(summary, encoding="utf-8")
     print(summary, end="")

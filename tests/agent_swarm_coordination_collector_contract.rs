@@ -168,6 +168,23 @@ fn artifact_lists_required_modes_adapters_outputs_and_fail_closed_cases() {
         ])
     );
 
+    let e2e_fields: BTreeSet<_> = string_array(&artifact, "e2e_log_fields")
+        .into_iter()
+        .collect();
+    assert_eq!(
+        e2e_fields,
+        BTreeSet::from([
+            "correlation_id",
+            "output_bundle_path",
+            "pseudonymized_agent",
+            "refusal_reason",
+            "replay_command",
+            "source_hash",
+            "source_kind",
+            "workload_family",
+        ])
+    );
+
     let fail_closed: BTreeSet<_> = artifact["fail_closed_cases"]
         .as_array()
         .expect("fail cases")
@@ -329,6 +346,74 @@ fn fixture_deduplicates_messages_and_covers_required_workload_families() {
         report.get("privacy_verdict").and_then(Value::as_str),
         Some("pass")
     );
+}
+
+#[test]
+fn report_e2e_rows_cover_required_smoke_log_fields() {
+    let root = temp_root("fixture-e2e-log");
+    let out = run_script_owned(&[
+        "--fixture".into(),
+        "--output-root".into(),
+        root.to_string_lossy().into_owned(),
+    ]);
+    assert!(
+        out.status.success(),
+        "fixture stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let bundle = fixture_bundle(&root);
+    let report = fixture_report(&root);
+    let bundle_path = report["artifact_paths"]["bundle"]
+        .as_str()
+        .expect("bundle path");
+    let replay_command = report["replay_command"].as_str().expect("replay command");
+    assert!(
+        replay_command.contains("scripts/run_runtime_workload_corpus.sh"),
+        "replay command should point at workload corpus runner: {replay_command}"
+    );
+    assert!(
+        replay_command.contains("--synthesize-coordination-pack"),
+        "replay command should synthesize coordination pack: {replay_command}"
+    );
+    assert!(
+        replay_command.contains("--coordination-bundle"),
+        "replay command should pass collector bundle: {replay_command}"
+    );
+    assert!(
+        replay_command.contains(bundle_path),
+        "replay command should include output bundle path"
+    );
+
+    let rows = report["e2e_log_rows"].as_array().expect("e2e rows");
+    let events = bundle["events"].as_array().expect("bundle events");
+    assert_eq!(
+        rows.len(),
+        events.len(),
+        "every emitted event needs one E2E log row"
+    );
+
+    for (row, event) in rows.iter().zip(events) {
+        for field in [
+            "source_kind",
+            "pseudonymized_agent",
+            "correlation_id",
+            "workload_family",
+            "refusal_reason",
+            "source_hash",
+            "output_bundle_path",
+            "replay_command",
+        ] {
+            assert!(row.get(field).is_some(), "row missing {field}: {row}");
+        }
+        assert_eq!(row["source_kind"], event["source_kind"]);
+        assert_eq!(row["pseudonymized_agent"], event["source_agent"]);
+        assert_eq!(row["correlation_id"], event["correlation_id"]);
+        assert_eq!(row["workload_family"], event["workload_family"]);
+        assert_eq!(row["refusal_reason"], event["refusal_reason"]);
+        assert_eq!(row["source_hash"], event["source_hash"]);
+        assert_eq!(row["output_bundle_path"], bundle_path);
+        assert_eq!(row["replay_command"], replay_command);
+    }
 }
 
 #[test]

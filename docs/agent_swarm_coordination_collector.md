@@ -56,6 +56,11 @@ The bundle uses schema version
 `source_hash`, `correlation_id`, and `event_kind`, then sorted by the workload
 contract sort key.
 
+The machine report includes deterministic `e2e_log_rows` for every normalized
+event. Each row records the source kind, pseudonymized agent, correlation id,
+workload family, refusal reason, source hash, output bundle path, and replay
+command needed to feed the bundle into `scripts/run_runtime_workload_corpus.sh`.
+
 ## Redaction
 
 The collector keeps message bodies out of bundle content by default. Agent
@@ -92,7 +97,9 @@ The validation checks:
 6. Malformed JSON, unsupported sources, stale source events, and unredacted
    secrets fail closed.
 7. Git dirty-frontier inputs retain only path hashes and counts.
-8. Repeated fixture runs produce identical bundle hashes.
+8. Report `e2e_log_rows` expose the required smoke-log fields and replay
+   command for every emitted event.
+9. Repeated fixture runs produce identical bundle hashes.
 
 ## Cross-References
 
