@@ -1,0 +1,263 @@
+{
+  "contract_version": "coordination-workload-bridge-smoke-contract-v1",
+  "bead_id": "asupersync-qn8i0p.7",
+  "description": "Operator-facing one-command smoke contract for the redacted agent-swarm coordination workload bridge.",
+  "runner_script": "scripts/run_coordination_workload_bridge_smoke.sh",
+  "runbook_doc": "docs/coordination_workload_bridge_smoke_runbook.md",
+  "runner_report_schema_version": "coordination-workload-bridge-smoke-report-v1",
+  "runner_row_schema_version": "coordination-workload-bridge-smoke-row-v1",
+  "modes": [
+    {
+      "mode": "list",
+      "reads_live_state": false,
+      "writes_artifacts": false,
+      "description": "Lists smoke rows, output artifacts, and supported command modes."
+    },
+    {
+      "mode": "dry-run",
+      "reads_live_state": false,
+      "writes_artifacts": true,
+      "description": "Emits a planned report and row JSONL without running child smoke scripts."
+    },
+    {
+      "mode": "execute",
+      "reads_live_state": false,
+      "writes_artifacts": true,
+      "description": "Runs checked fixture ingestion, refusal probes, local replay handoff checks, and planner dry-run handoffs."
+    },
+    {
+      "mode": "fixture",
+      "reads_live_state": false,
+      "writes_artifacts": true,
+      "description": "Forces checked synthetic fixtures and refuses unsupported live-input execution."
+    },
+    {
+      "mode": "output-root",
+      "reads_live_state": false,
+      "writes_artifacts": true,
+      "description": "Pins all generated artifacts under the operator-provided root."
+    }
+  ],
+  "artifact_outputs": [
+    "coordination-workload-bridge-smoke-manifest.json",
+    "coordination-workload-bridge-smoke.jsonl",
+    "coordination-workload-bridge-smoke-report.json",
+    "coordination-workload-bridge-smoke.summary.txt",
+    "collector/*/coordination-workload-bundle.json",
+    "workload/coordination-expansion/*/coordination-workload-expansion-pack.json",
+    "replay-hook-handoff.json",
+    "logs/*.log"
+  ],
+  "source_contracts": {
+    "collector": "artifacts/agent_swarm_coordination_collector_contract_v1.json",
+    "redaction": "artifacts/agent_swarm_coordination_redaction_contract_v1.json",
+    "workload": "artifacts/agent_swarm_coordination_workload_contract_v1.json",
+    "runtime_corpus": "artifacts/runtime_workload_corpus_v1.json",
+    "signoff": "artifacts/massive_swarm_signoff_smoke_contract_v1.json"
+  },
+  "required_prerequisites": [
+    "jq",
+    "python3",
+    "sha256sum",
+    "scripts/run_agent_swarm_coordination_collector.sh",
+    "scripts/run_runtime_workload_corpus.sh",
+    "scripts/run_capacity_envelope_planner_smoke.sh",
+    "scripts/run_host_profile_planner_smoke.sh",
+    "scripts/run_signed_profile_bundle_smoke.sh",
+    "artifacts/agent_swarm_coordination_collector_contract_v1.json",
+    "artifacts/agent_swarm_coordination_redaction_contract_v1.json",
+    "artifacts/agent_swarm_coordination_workload_contract_v1.json",
+    "artifacts/runtime_workload_corpus_v1.json",
+    "artifacts/massive_swarm_signoff_smoke_contract_v1.json"
+  ],
+  "fail_closed_conditions": [
+    "missing prerequisite tool, script, contract, or operator-provided extra path",
+    "execute mode without --fixture because live Agent Mail, Beads, bv, rch, and git reads are unsupported",
+    "malformed explicit source JSON",
+    "unredacted secret or token-like content in an input source",
+    "dirty frontier containing unsupported absolute or home-directory paths",
+    "coordination bundle schema mismatch",
+    "coordination workload pack missing required scenario families",
+    "planner handoff row missing used, refused, or absent pack states"
+  ],
+  "privacy_policy": {
+    "live_agent_mail_allowed": false,
+    "live_beads_allowed": false,
+    "live_bv_allowed": false,
+    "live_rch_allowed": false,
+    "live_git_allowed": false,
+    "raw_message_body_retained": false,
+    "raw_home_paths_retained": false,
+    "raw_worker_names_retained": false
+  },
+  "smoke_rows": [
+    {
+      "row_id": "missing_prerequisite_guard",
+      "phase": "admission",
+      "consumer": "operator",
+      "expected_status": "passed",
+      "command": "bash scripts/run_coordination_workload_bridge_smoke.sh --execute --fixture --extra-required-path <path>",
+      "stable_fingerprint_basis": [
+        "required tool list",
+        "required script list",
+        "required contract list"
+      ],
+      "fail_closed_if": [
+        "missing tool",
+        "missing script",
+        "missing contract",
+        "missing extra-required-path"
+      ]
+    },
+    {
+      "row_id": "collector_fixture_accepts_redacted_inputs",
+      "phase": "collector",
+      "consumer": "collector",
+      "expected_status": "passed",
+      "command": "bash scripts/run_agent_swarm_coordination_collector.sh --fixture --source agent_mail:<latency-fixture> --output-root <root> --run-id coordination-bridge-collector-fixture",
+      "stable_fingerprint_basis": [
+        "source_bundle_hash",
+        "covered_scenario_families",
+        "accepted_event_count",
+        "refused_event_count",
+        "duplicate_event_count"
+      ],
+      "fail_closed_if": [
+        "privacy_verdict is not pass",
+        "accepted bridge fixture does not cover all seven scenario families"
+      ]
+    },
+    {
+      "row_id": "workload_expansion_accepts_collector_bundle",
+      "phase": "workload-corpus",
+      "consumer": "synthesis",
+      "expected_status": "passed",
+      "command": "bash scripts/run_runtime_workload_corpus.sh --synthesize-coordination-pack --coordination-bundle <collector-bundle> --output-root <root>",
+      "stable_fingerprint_basis": [
+        "source_bundle_hash",
+        "accepted_workload_count",
+        "covered_scenario_families"
+      ],
+      "fail_closed_if": [
+        "accepted workload count is not seven",
+        "required scenario family is missing"
+      ]
+    },
+    {
+      "row_id": "workload_expansion_refuses_missing_dimensions",
+      "phase": "workload-corpus",
+      "consumer": "synthesis",
+      "expected_status": "fail_closed",
+      "command": "bash scripts/run_runtime_workload_corpus.sh --synthesize-coordination-pack --coordination-fixture-id refused-missing-scenario-dimensions --output-root <root>",
+      "stable_fingerprint_basis": [
+        "missing_scenario_families",
+        "first_failure_line"
+      ],
+      "fail_closed_if": [
+        "missing_scenario_dimensions"
+      ]
+    },
+    {
+      "row_id": "collector_refuses_malformed_source_schema",
+      "phase": "collector-refusal",
+      "consumer": "redaction",
+      "expected_status": "fail_closed",
+      "command": "bash scripts/run_agent_swarm_coordination_collector.sh --execute --source agent_mail:<malformed-json>",
+      "stable_fingerprint_basis": [
+        "unknown_schema_version",
+        "privacy_verdict"
+      ],
+      "fail_closed_if": [
+        "malformed JSON source"
+      ]
+    },
+    {
+      "row_id": "collector_refuses_unredacted_secret",
+      "phase": "collector-refusal",
+      "consumer": "redaction",
+      "expected_status": "fail_closed",
+      "command": "bash scripts/run_agent_swarm_coordination_collector.sh --execute --source agent_mail:<secret-bearing-json>",
+      "stable_fingerprint_basis": [
+        "unredacted_secret",
+        "privacy_verdict"
+      ],
+      "fail_closed_if": [
+        "token-like content appears in raw source"
+      ]
+    },
+    {
+      "row_id": "dirty_frontier_unsupported_paths_fail_closed",
+      "phase": "admission",
+      "consumer": "collector",
+      "expected_status": "fail_closed",
+      "command": "bash scripts/run_agent_swarm_coordination_collector.sh --execute --source git_dirty_frontier:<unsupported-path-json>",
+      "stable_fingerprint_basis": [
+        "unsupported_dirty_paths_count",
+        "path_hash_count"
+      ],
+      "fail_closed_if": [
+        "absolute path",
+        "home-directory path"
+      ]
+    },
+    {
+      "row_id": "schema_mismatch_guard_fails_closed",
+      "phase": "admission",
+      "consumer": "synthesis",
+      "expected_status": "fail_closed",
+      "command": "local schema guard before workload-corpus synthesis",
+      "stable_fingerprint_basis": [
+        "observed_schema_version",
+        "expected_schema_version"
+      ],
+      "fail_closed_if": [
+        "bundle schema is not agent-swarm-coordination-workload-bundle-v1"
+      ]
+    },
+    {
+      "row_id": "replay_hook_handoff_validates_minimization_inputs",
+      "phase": "lab-replay",
+      "consumer": "replay",
+      "expected_status": "passed",
+      "command": "validate expansion pack compatibility with synthesize_coordination_pressure_replay and minimize_coordination_pressure_replay",
+      "stable_fingerprint_basis": [
+        "covered_scenario_families",
+        "expected replay event totals",
+        "expected minimized first failure"
+      ],
+      "fail_closed_if": [
+        "required replay scenario family missing",
+        "refused bundle present in accepted replay pack"
+      ]
+    },
+    {
+      "row_id": "capacity_profile_planner_handoff_records_used_refused_absent",
+      "phase": "planner-handoff",
+      "consumer": "capacity-profile",
+      "expected_status": "passed",
+      "command": "run capacity, host-profile, and signed-profile smoke scripts in dry-run mode plus inspect the signoff handoff row",
+      "stable_fingerprint_basis": [
+        "coordination_workload_planner_handoff signoff row",
+        "used scenario id",
+        "refused scenario id",
+        "absent scenario id"
+      ],
+      "fail_closed_if": [
+        "planner dry-run fails",
+        "signoff row lacks used/refused/absent pack states"
+      ]
+    }
+  ],
+  "validation": {
+    "local_shell": [
+      "bash -n scripts/run_coordination_workload_bridge_smoke.sh",
+      "jq empty artifacts/coordination_workload_bridge_smoke_contract_v1.json",
+      "bash scripts/run_coordination_workload_bridge_smoke.sh --list",
+      "bash scripts/run_coordination_workload_bridge_smoke.sh --dry-run --fixture --output-root target/coordination-workload-bridge-smoke-dry-run",
+      "bash scripts/run_coordination_workload_bridge_smoke.sh --execute --fixture --output-root target/coordination-workload-bridge-smoke --generated-at 2026-05-05T05:00:00Z"
+    ],
+    "rch_cargo": [
+      "rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_coordination_workload_bridge_smoke cargo test -p asupersync --test coordination_workload_bridge_smoke_contract --features test-internals -- --nocapture"
+    ]
+  }
+}
