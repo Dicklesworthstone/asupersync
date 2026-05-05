@@ -86,6 +86,10 @@ pub enum ConformanceResult {
         reason: String,
         discrepancy_id: String, // Reference to DISCREPANCIES.md entry
     },
+    /// Blocked - requirement could not run because an external dependency is missing
+    Blocked { reason: String, blocker_id: String },
+    /// Unsupported - requirement is explicitly outside the current implementation scope
+    Unsupported { reason: String, blocker_id: String },
 }
 
 impl ConformanceResult {
@@ -114,6 +118,132 @@ impl ConformanceResult {
             } => {
                 format!("XFAIL: {reason} (see {discrepancy_id})")
             }
+            ConformanceResult::Blocked { reason, blocker_id } => {
+                format!("BLOCKED: {reason} (see {blocker_id})")
+            }
+            ConformanceResult::Unsupported { reason, blocker_id } => {
+                format!("UNSUPPORTED: {reason} (see {blocker_id})")
+            }
+        }
+    }
+}
+
+/// Quality class for the evidence backing a conformance requirement.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EvidenceKind {
+    /// Production code was exercised and compared with spec-derived expectations.
+    LiveChecked,
+    /// The record is backed only by fixtures or static reference data.
+    FixtureOnly,
+    /// Execution was blocked by a named missing dependency or environment.
+    Blocked,
+    /// The implementation explicitly does not support this requirement yet.
+    Unsupported,
+    /// A known divergence was checked and recorded as expected.
+    ExpectedFail,
+    /// The live check ran and failed.
+    Failed,
+}
+
+impl fmt::Display for EvidenceKind {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            EvidenceKind::LiveChecked => write!(f, "live_checked"),
+            EvidenceKind::FixtureOnly => write!(f, "fixture_only"),
+            EvidenceKind::Blocked => write!(f, "blocked"),
+            EvidenceKind::Unsupported => write!(f, "unsupported"),
+            EvidenceKind::ExpectedFail => write!(f, "expected_fail"),
+            EvidenceKind::Failed => write!(f, "failed"),
+        }
+    }
+}
+
+/// Stable status name for the test result independent of evidence quality.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TestStatus {
+    Pass,
+    Fail,
+    Skip,
+    ExpectedFail,
+    Blocked,
+    Unsupported,
+}
+
+impl fmt::Display for TestStatus {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            TestStatus::Pass => write!(f, "pass"),
+            TestStatus::Fail => write!(f, "fail"),
+            TestStatus::Skip => write!(f, "skip"),
+            TestStatus::ExpectedFail => write!(f, "expected_fail"),
+            TestStatus::Blocked => write!(f, "blocked"),
+            TestStatus::Unsupported => write!(f, "unsupported"),
+        }
+    }
+}
+
+impl From<&ConformanceResult> for TestStatus {
+    fn from(result: &ConformanceResult) -> Self {
+        match result {
+            ConformanceResult::Pass => Self::Pass,
+            ConformanceResult::Fail { .. } => Self::Fail,
+            ConformanceResult::Skipped { .. } => Self::Skip,
+            ConformanceResult::ExpectedFailure { .. } => Self::ExpectedFail,
+            ConformanceResult::Blocked { .. } => Self::Blocked,
+            ConformanceResult::Unsupported { .. } => Self::Unsupported,
+        }
+    }
+}
+
+/// Source metadata used by CI JSONL and human reports to avoid overstating coverage.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EvidenceMetadata {
+    pub evidence_kind: EvidenceKind,
+    pub test_status: TestStatus,
+    pub blocker_id: Option<String>,
+    pub fixture_reference: Option<String>,
+    pub production_seam_path: Option<String>,
+}
+
+impl EvidenceMetadata {
+    fn from_test_and_result(test: &dyn ConformanceTest, result: &ConformanceResult) -> Self {
+        let test_status = TestStatus::from(result);
+        let blocker_id = match result {
+            ConformanceResult::Blocked { blocker_id, .. }
+            | ConformanceResult::Unsupported { blocker_id, .. } => Some(blocker_id.clone()),
+            ConformanceResult::ExpectedFailure { discrepancy_id, .. } => {
+                Some(discrepancy_id.clone())
+            }
+            _ => test.blocker_id().map(str::to_string),
+        };
+
+        let production_seam_path = test.production_seam_path().map(str::to_string);
+        let fixture_reference = test.fixture_reference().map(str::to_string);
+        let evidence_kind = match result {
+            ConformanceResult::Pass => {
+                if production_seam_path.is_some() {
+                    EvidenceKind::LiveChecked
+                } else if fixture_reference.is_some() {
+                    EvidenceKind::FixtureOnly
+                } else {
+                    EvidenceKind::Unsupported
+                }
+            }
+            ConformanceResult::Fail { .. } => EvidenceKind::Failed,
+            ConformanceResult::Skipped { .. } => EvidenceKind::Blocked,
+            ConformanceResult::ExpectedFailure { .. } => EvidenceKind::ExpectedFail,
+            ConformanceResult::Blocked { .. } => EvidenceKind::Blocked,
+            ConformanceResult::Unsupported { .. } => EvidenceKind::Unsupported,
+        };
+
+        Self {
+            evidence_kind,
+            test_status,
+            blocker_id,
+            fixture_reference,
+            production_seam_path,
         }
     }
 }
@@ -218,6 +348,21 @@ pub trait ConformanceTest: Send + Sync {
     fn tags(&self) -> Vec<&str> {
         Vec::new()
     }
+
+    /// Production code seam exercised by this test, if any.
+    fn production_seam_path(&self) -> Option<&str> {
+        None
+    }
+
+    /// Fixture or reference data used to derive expected values, if any.
+    fn fixture_reference(&self) -> Option<&str> {
+        None
+    }
+
+    /// Blocker or follow-up ID for intentionally degraded evidence, if any.
+    fn blocker_id(&self) -> Option<&str> {
+        None
+    }
 }
 
 // ============================================================================
@@ -241,6 +386,8 @@ pub struct TestExecution {
     pub description: String,
     /// Test result
     pub result: ConformanceResult,
+    /// Evidence metadata for CI/reporting quality gates
+    pub evidence: EvidenceMetadata,
     /// Execution duration
     pub duration: Duration,
     /// Execution timestamp
@@ -333,6 +480,8 @@ impl ConformanceRunner {
                     eprintln!("  Duration: {duration:?}");
                 }
 
+                let evidence = EvidenceMetadata::from_test_and_result(test.as_ref(), &test_result);
+
                 executions.push(TestExecution {
                     test_name: test.name(),
                     rfc_clause: test.rfc_clause().to_string(),
@@ -341,6 +490,7 @@ impl ConformanceRunner {
                     category: test.category(),
                     description: test.description().to_string(),
                     result: test_result,
+                    evidence,
                     duration,
                     timestamp,
                 });
@@ -489,6 +639,48 @@ pub struct OverallCoverage {
     pub conformance_score: f64,
     /// Overall conformance status
     pub conformance_status: ConformanceStatus,
+}
+
+/// Counts by evidence quality and test status for CI summaries.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EvidenceSummary {
+    pub live_checked: usize,
+    pub fixture_only: usize,
+    pub blocked: usize,
+    pub unsupported: usize,
+    pub expected_fail: usize,
+    pub failed: usize,
+    pub passed: usize,
+    pub skipped: usize,
+}
+
+impl EvidenceSummary {
+    /// Build counts from execution evidence metadata.
+    pub fn from_executions(executions: &[TestExecution]) -> Self {
+        let mut summary = Self::default();
+
+        for execution in executions {
+            match execution.evidence.evidence_kind {
+                EvidenceKind::LiveChecked => summary.live_checked += 1,
+                EvidenceKind::FixtureOnly => summary.fixture_only += 1,
+                EvidenceKind::Blocked => summary.blocked += 1,
+                EvidenceKind::Unsupported => summary.unsupported += 1,
+                EvidenceKind::ExpectedFail => summary.expected_fail += 1,
+                EvidenceKind::Failed => summary.failed += 1,
+            }
+
+            match execution.evidence.test_status {
+                TestStatus::Pass => summary.passed += 1,
+                TestStatus::Skip => summary.skipped += 1,
+                TestStatus::ExpectedFail
+                | TestStatus::Fail
+                | TestStatus::Blocked
+                | TestStatus::Unsupported => {}
+            }
+        }
+
+        summary
+    }
 }
 
 impl CoverageMatrix {
@@ -674,12 +866,23 @@ fn load_rfc_section_metadata() -> Vec<(String, String)> {
 #[derive(Debug, Serialize)]
 pub struct ConformanceLogEntry {
     pub timestamp: String,
+    pub clause_id: String,
     pub rfc_clause: String,
     pub section: String,
+    pub requirement_level: RequirementLevel,
     pub level: RequirementLevel,
+    pub evidence_kind: EvidenceKind,
+    pub test_status: TestStatus,
     pub status: String,
+    pub command: String,
     pub duration_ms: u64,
     pub description: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub blocker_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fixture_reference: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub production_seam_path: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub failure_reason: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -688,6 +891,11 @@ pub struct ConformanceLogEntry {
 
 /// Generate JSON-line logs for CI consumption
 pub fn generate_jsonl_logs(executions: &[TestExecution]) -> String {
+    generate_jsonl_logs_with_command(executions, "raptorq_rfc6330_conformance")
+}
+
+/// Generate JSON-line logs for CI consumption with the command that produced them.
+pub fn generate_jsonl_logs_with_command(executions: &[TestExecution], command: &str) -> String {
     let mut logs = String::new();
 
     for execution in executions {
@@ -698,21 +906,33 @@ pub fn generate_jsonl_logs(executions: &[TestExecution]) -> String {
                 .unwrap_or_default()
                 .as_secs()
                 .to_string(),
+            clause_id: execution.rfc_clause.clone(),
             rfc_clause: execution.rfc_clause.clone(),
             section: execution.section.clone(),
+            requirement_level: execution.level,
             level: execution.level,
+            evidence_kind: execution.evidence.evidence_kind,
+            test_status: execution.evidence.test_status,
             status: match &execution.result {
                 ConformanceResult::Pass => "PASS".to_string(),
                 ConformanceResult::Fail { .. } => "FAIL".to_string(),
                 ConformanceResult::Skipped { .. } => "SKIP".to_string(),
                 ConformanceResult::ExpectedFailure { .. } => "XFAIL".to_string(),
+                ConformanceResult::Blocked { .. } => "BLOCKED".to_string(),
+                ConformanceResult::Unsupported { .. } => "UNSUPPORTED".to_string(),
             },
+            command: command.to_string(),
             duration_ms: execution.duration.as_millis() as u64,
             description: execution.description.clone(),
+            blocker_id: execution.evidence.blocker_id.clone(),
+            fixture_reference: execution.evidence.fixture_reference.clone(),
+            production_seam_path: execution.evidence.production_seam_path.clone(),
             failure_reason: match &execution.result {
                 ConformanceResult::Fail { reason, .. } => Some(reason.clone()),
                 ConformanceResult::Skipped { reason } => Some(reason.clone()),
                 ConformanceResult::ExpectedFailure { reason, .. } => Some(reason.clone()),
+                ConformanceResult::Blocked { reason, .. } => Some(reason.clone()),
+                ConformanceResult::Unsupported { reason, .. } => Some(reason.clone()),
                 _ => None,
             },
             discrepancy_id: match &execution.result {

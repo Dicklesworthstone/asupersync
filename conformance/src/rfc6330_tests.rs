@@ -48,6 +48,14 @@ impl ConformanceTest for LookupTableV0Test {
     fn tags(&self) -> Vec<&str> {
         vec!["p0", "lookup-tables", "critical"]
     }
+
+    fn production_seam_path(&self) -> Option<&str> {
+        Some("src/raptorq/rfc6330.rs::V0")
+    }
+
+    fn fixture_reference(&self) -> Option<&str> {
+        Some("RFC6330_V0_TABLE")
+    }
 }
 
 /// Test RFC 6330 Section 5.5.1 - Lookup table V1 validation
@@ -80,6 +88,14 @@ impl ConformanceTest for LookupTableV1Test {
 
     fn tags(&self) -> Vec<&str> {
         vec!["p0", "lookup-tables", "critical"]
+    }
+
+    fn production_seam_path(&self) -> Option<&str> {
+        Some("src/raptorq/rfc6330.rs::V1")
+    }
+
+    fn fixture_reference(&self) -> Option<&str> {
+        Some("RFC6330_V1_TABLE")
     }
 }
 
@@ -146,6 +162,14 @@ impl ConformanceTest for SystematicIndexTest {
 
     fn tags(&self) -> Vec<&str> {
         vec!["p0", "parameters", "systematic-index", "critical"]
+    }
+
+    fn production_seam_path(&self) -> Option<&str> {
+        Some("src/raptorq/systematic.rs::SystematicParams::try_for_source_block")
+    }
+
+    fn fixture_reference(&self) -> Option<&str> {
+        Some("RFC6330_SYSTEMATIC_INDEX_TABLE")
     }
 }
 
@@ -239,6 +263,14 @@ impl ConformanceTest for SystematicTupleGenerationTest {
     fn tags(&self) -> Vec<&str> {
         vec!["p0", "tuple-generation", "differential", "critical"]
     }
+
+    fn production_seam_path(&self) -> Option<&str> {
+        Some("src/raptorq/rfc6330.rs::try_tuple")
+    }
+
+    fn fixture_reference(&self) -> Option<&str> {
+        Some("RFC6330_TUPLE_TEST_VECTORS")
+    }
 }
 
 /// Test RFC 6330 Section 5.3.2 - Repair tuple generation
@@ -291,6 +323,14 @@ impl ConformanceTest for RepairTupleGenerationTest {
             "repair-symbols",
             "critical",
         ]
+    }
+
+    fn production_seam_path(&self) -> Option<&str> {
+        Some("src/raptorq/decoder.rs::InactivationDecoder::repair_equation_rfc6330")
+    }
+
+    fn blocker_id(&self) -> Option<&str> {
+        Some("asupersync-kokw3m")
     }
 }
 
@@ -350,6 +390,14 @@ impl ConformanceTest for KParameterDerivationTest {
     fn tags(&self) -> Vec<&str> {
         vec!["p1", "parameters", "k-derivation"]
     }
+
+    fn production_seam_path(&self) -> Option<&str> {
+        Some("src/raptorq/encoder.rs::SourceBlockEncoder")
+    }
+
+    fn blocker_id(&self) -> Option<&str> {
+        Some("asupersync-kokw3m")
+    }
 }
 
 /// Test RFC 6330 Section 5.5.1 - Lookup table V2 validation
@@ -383,6 +431,14 @@ impl ConformanceTest for LookupTableV2Test {
     fn tags(&self) -> Vec<&str> {
         vec!["p0", "lookup-tables", "critical"]
     }
+
+    fn production_seam_path(&self) -> Option<&str> {
+        Some("src/raptorq/rfc6330.rs::V2")
+    }
+
+    fn fixture_reference(&self) -> Option<&str> {
+        Some("RFC6330_V2_TABLE")
+    }
 }
 
 /// Test RFC 6330 Section 5.5.1 - Lookup table V3 validation
@@ -415,6 +471,14 @@ impl ConformanceTest for LookupTableV3Test {
 
     fn tags(&self) -> Vec<&str> {
         vec!["p0", "lookup-tables", "critical"]
+    }
+
+    fn production_seam_path(&self) -> Option<&str> {
+        Some("src/raptorq/rfc6330.rs::V3")
+    }
+
+    fn fixture_reference(&self) -> Option<&str> {
+        Some("RFC6330_V3_TABLE")
     }
 }
 

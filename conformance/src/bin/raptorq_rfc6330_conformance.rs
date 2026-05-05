@@ -30,7 +30,8 @@ use std::time::Duration;
 // Import conformance types
 use asupersync_conformance::raptorq_rfc6330::{
     ConformanceContext, ConformanceResult, ConformanceRunner, ConformanceStatus, CoverageMatrix,
-    RequirementLevel, TestCategory, TestExecution, generate_jsonl_logs,
+    EvidenceSummary, RequirementLevel, TestCategory, TestExecution,
+    generate_jsonl_logs_with_command,
 };
 use asupersync_conformance::rfc6330_tests;
 
@@ -74,17 +75,27 @@ fn main() {
     // Output results based on mode
     if ci_mode {
         // CI mode: JSON-line output
-        let jsonl_logs = generate_jsonl_logs(&executions);
+        let command = command_for_matches(&matches);
+        let jsonl_logs = generate_jsonl_logs_with_command(&executions, &command);
         print!("{jsonl_logs}");
 
         // Summary line for CI parsing
+        let evidence_summary = EvidenceSummary::from_executions(&executions);
         println!(
-            "{{\"summary\":{{\"score\":{:.3},\"status\":\"{}\",\"total\":{},\"passing\":{},\"failing\":{}}}}}",
+            "{{\"summary\":{{\"score\":{:.3},\"status\":\"{}\",\"total\":{},\"passing\":{},\"failing\":{},\"evidence_quality\":{{\"live_checked\":{},\"fixture_only\":{},\"blocked\":{},\"unsupported\":{},\"expected_fail\":{},\"failed\":{}}},\"test_status\":{{\"passed\":{},\"skipped\":{}}}}}}}",
             coverage.overall_score(),
             coverage.overall_status(),
             coverage.overall.total_requirements,
             coverage.overall.passing_requirements,
             coverage.overall.failed_requirements,
+            evidence_summary.live_checked,
+            evidence_summary.fixture_only,
+            evidence_summary.blocked,
+            evidence_summary.unsupported,
+            evidence_summary.expected_fail,
+            evidence_summary.failed,
+            evidence_summary.passed,
+            evidence_summary.skipped,
         );
     } else if matches.get_flag("generate-report") {
         // Generate detailed conformance report
@@ -114,6 +125,34 @@ fn main() {
             threshold * 100.0
         );
     }
+}
+
+fn command_for_matches(matches: &ArgMatches) -> String {
+    let mut parts = vec!["raptorq_rfc6330_conformance".to_string()];
+
+    if matches.get_flag("run-all") {
+        parts.push("--run-all".to_string());
+    }
+    if let Some(section) = matches.get_one::<String>("section") {
+        parts.push("--section".to_string());
+        parts.push(section.clone());
+    }
+    if let Some(level) = matches.get_one::<String>("level") {
+        parts.push("--level".to_string());
+        parts.push(level.clone());
+    }
+    if let Some(category) = matches.get_one::<String>("category") {
+        parts.push("--category".to_string());
+        parts.push(category.clone());
+    }
+    if matches.get_flag("generate-report") {
+        parts.push("--generate-report".to_string());
+    }
+    if matches.get_flag("ci-mode") {
+        parts.push("--ci-mode".to_string());
+    }
+
+    parts.join(" ")
 }
 
 fn cli_command() -> Command {
@@ -310,19 +349,42 @@ fn print_test_results(executions: &[TestExecution], coverage: &CoverageMatrix, v
                 xfail += 1;
                 "XFAIL"
             }
+            ConformanceResult::Blocked { .. } => {
+                skipped += 1;
+                "BLOCKED"
+            }
+            ConformanceResult::Unsupported { .. } => {
+                skipped += 1;
+                "UNSUPPORTED"
+            }
         };
 
-        if verbose || matches!(execution.result, ConformanceResult::Fail { .. }) {
+        if verbose
+            || matches!(
+                execution.result,
+                ConformanceResult::Fail { .. }
+                    | ConformanceResult::Blocked { .. }
+                    | ConformanceResult::Unsupported { .. }
+            )
+        {
             println!(
                 "[{status:>5}] {}: {}",
                 execution.rfc_clause, execution.description,
             );
 
-            if let ConformanceResult::Fail { reason, details } = &execution.result {
-                println!("        Reason: {reason}");
-                if let Some(details) = details {
-                    println!("        Details: {details}");
+            match &execution.result {
+                ConformanceResult::Fail { reason, details } => {
+                    println!("        Reason: {reason}");
+                    if let Some(details) = details {
+                        println!("        Details: {details}");
+                    }
                 }
+                ConformanceResult::Blocked { reason, blocker_id }
+                | ConformanceResult::Unsupported { reason, blocker_id } => {
+                    println!("        Reason: {reason}");
+                    println!("        Blocker: {blocker_id}");
+                }
+                _ => {}
             }
         }
     }
@@ -334,6 +396,14 @@ fn print_test_results(executions: &[TestExecution], coverage: &CoverageMatrix, v
     println!("  Failed:  {failed}");
     println!("  Skipped: {skipped}");
     println!("  XFail:   {xfail}");
+    let evidence_summary = EvidenceSummary::from_executions(executions);
+    println!("Evidence Quality:");
+    println!("  Live checked:  {}", evidence_summary.live_checked);
+    println!("  Fixture only:  {}", evidence_summary.fixture_only);
+    println!("  Blocked:       {}", evidence_summary.blocked);
+    println!("  Unsupported:   {}", evidence_summary.unsupported);
+    println!("  Expected fail: {}", evidence_summary.expected_fail);
+    println!("  Failed:        {}", evidence_summary.failed);
     println!();
     println!(
         "Conformance Score: {:.1}% ({})",
@@ -412,43 +482,83 @@ fn generate_detailed_report(coverage: &CoverageMatrix, executions: &[TestExecuti
 
     println!();
 
+    let evidence_summary = EvidenceSummary::from_executions(executions);
+    println!("## Evidence Quality");
+    println!();
+    println!("| Live checked | Fixture only | Blocked | Unsupported | Expected fail | Failed |");
+    println!("|--------------|--------------|---------|-------------|---------------|--------|");
+    println!(
+        "| {} | {} | {} | {} | {} | {} |",
+        evidence_summary.live_checked,
+        evidence_summary.fixture_only,
+        evidence_summary.blocked,
+        evidence_summary.unsupported,
+        evidence_summary.expected_fail,
+        evidence_summary.failed
+    );
+    println!();
+
     // Failed tests
     let failed_tests: Vec<_> = executions
         .iter()
-        .filter(|e| matches!(e.result, ConformanceResult::Fail { .. }))
+        .filter(|e| {
+            matches!(
+                e.result,
+                ConformanceResult::Fail { .. }
+                    | ConformanceResult::Blocked { .. }
+                    | ConformanceResult::Unsupported { .. }
+            )
+        })
         .collect();
 
     if !failed_tests.is_empty() {
-        println!("## Failed Tests");
+        println!("## Non-Passing Tests");
         println!();
         for test in failed_tests {
-            if let ConformanceResult::Fail { reason, details } = &test.result {
-                println!("### {}", test.rfc_clause);
-                println!("- **Section:** {}", test.section);
-                println!("- **Level:** {}", test.level);
-                println!("- **Description:** {}", test.description);
-                println!("- **Failure Reason:** {reason}");
-                if let Some(details) = details {
-                    println!("- **Details:** {details}");
+            println!("### {}", test.rfc_clause);
+            println!("- **Section:** {}", test.section);
+            println!("- **Level:** {}", test.level);
+            println!("- **Evidence kind:** {}", test.evidence.evidence_kind);
+            println!("- **Test status:** {}", test.evidence.test_status);
+            println!("- **Description:** {}", test.description);
+            match &test.result {
+                ConformanceResult::Fail { reason, details } => {
+                    println!("- **Failure Reason:** {reason}");
+                    if let Some(details) = details {
+                        println!("- **Details:** {details}");
+                    }
                 }
-                println!();
+                ConformanceResult::Blocked { reason, blocker_id }
+                | ConformanceResult::Unsupported { reason, blocker_id } => {
+                    println!("- **Reason:** {reason}");
+                    println!("- **Blocker:** {blocker_id}");
+                }
+                _ => {}
             }
+            println!();
         }
     }
 
     println!("## Registered Test Executions");
     println!();
-    println!("| RFC Clause | Section | Level | Category | Status | Description |");
-    println!("|------------|---------|-------|----------|--------|-------------|");
+    println!(
+        "| RFC Clause | Section | Level | Category | Status | Evidence | Production Seam | Fixture | Description |"
+    );
+    println!(
+        "|------------|---------|-------|----------|--------|----------|-----------------|---------|-------------|"
+    );
 
     for test in executions {
         println!(
-            "| {} | {} | {} | {:?} | {} | {} |",
+            "| {} | {} | {} | {:?} | {} | {} | {} | {} | {} |",
             test.rfc_clause,
             test.section,
             test.level,
             test.category,
             test.result.description(),
+            test.evidence.evidence_kind,
+            test.evidence.production_seam_path.as_deref().unwrap_or(""),
+            test.evidence.fixture_reference.as_deref().unwrap_or(""),
             test.description.replace('|', "\\|")
         );
     }
