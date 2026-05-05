@@ -1,5 +1,3 @@
-#![allow(warnings)]
-#![allow(clippy::all)]
 //! Contract tests for T6.11 migration packs (asupersync-2oh2u.6.11).
 //!
 //! Validates documentation completeness, before/after pattern coverage,
