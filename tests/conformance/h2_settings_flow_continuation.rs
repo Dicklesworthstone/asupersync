@@ -1,14 +1,9 @@
-#![allow(warnings)]
-#![allow(clippy::all)]
 //! HTTP/2 SETTINGS, Flow Control, and CONTINUATION Frame Conformance Tests (RFC 9113)
 
-use asupersync::bytes::{BufMut, Bytes, BytesMut};
+use asupersync::bytes::Bytes;
 use asupersync::http::h2::{
-    error::{ErrorCode, H2Error},
-    frame::{
-        ContinuationFrame, Frame, FrameHeader, FrameType, SettingsFrame, WindowUpdateFrame,
-        parse_frame,
-    },
+    error::ErrorCode,
+    frame::{ContinuationFrame, FrameHeader, FrameType, SettingsFrame, WindowUpdateFrame},
 };
 use serde::{Deserialize, Serialize};
 use std::time::{Duration, Instant};
