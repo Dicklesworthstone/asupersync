@@ -1,0 +1,510 @@
+{
+  "schema_version": "reality-check-gap-closure-signoff-v1",
+  "bead_id": "asupersync-rcksgn",
+  "created_date": "2026-05-05",
+  "program_status": "signoff_in_progress_until_this_artifact_and_tracker_close_land",
+  "source_reality_check": "2026-05-04 README/live-code release-readiness reality check",
+  "implementation_commit": "",
+  "tracker_close_commit": "",
+  "required_gap_ids": [
+    "conformance-registry",
+    "websocket-rfc6455",
+    "http3-qpack",
+    "remote-lifecycle",
+    "browser-boundary",
+    "formal-proof-posture",
+    "tokio-feature-boundary",
+    "stub-placeholder-inventory",
+    "phase6-main-only-gates",
+    "docs-reconciliation"
+  ],
+  "support_classes": [
+    "machine-checked-registry",
+    "runtime-shipped-lane-specific-e2e",
+    "production-live-opt-in-boundary",
+    "virtual-lab-proof-adapter-responsibility",
+    "direct-runtime-supported-with-guarded-and-deferred-browser-lanes",
+    "checked-core-invariants-lane-specific-refinement",
+    "tokio-free-default-and-metrics-fuzz-quarantined",
+    "row-inventoried-zero-unclassified-placeholders",
+    "local-main-gates-plus-pr-release-workflow",
+    "docs-truth-contract-passed"
+  ],
+  "dependency_status": {
+    "dependencies_closed_before_signoff": true,
+    "dependencies": [
+      {
+        "bead_id": "asupersync-rckdoc",
+        "status": "closed",
+        "close_commit": "35b9760dee091204dd9724fe2fe6bb5ec2654bdc"
+      }
+    ],
+    "jsonl_reality_check_state": {
+      "source": ".beads/issues.jsonl fallback parse after br list degraded",
+      "total_reality_check_items": 16,
+      "closed_count": 14,
+      "open_items": [
+        {
+          "bead_id": "asupersync-rcksgn",
+          "status": "in_progress",
+          "assignee": "CopperMeadow",
+          "dependency": "asupersync-rckdoc"
+        },
+        {
+          "bead_id": "asupersync-rckepc",
+          "status": "open",
+          "dependency": "asupersync-rcksgn"
+        }
+      ],
+      "signoff_closure_rule": "During signoff execution the only permitted open reality-check rows are asupersync-rcksgn itself and the umbrella epic asupersync-rckepc."
+    }
+  },
+  "control_plane_diagnostics": {
+    "br_dep_cycles_json": {
+      "command": "timeout 30s br dep cycles --json",
+      "status": "timed_out",
+      "exit_code": 124,
+      "stdout": "",
+      "stderr": "",
+      "fallback_used": ".beads/issues.jsonl parse plus bv --robot-plan --label reality-check"
+    },
+    "br_list_json": {
+      "command": "timeout 30s br list --json",
+      "status": "failed_external_lock",
+      "exit_code": 7,
+      "error": "Configuration error: Timed out after 30000ms waiting for write lock at /data/projects/asupersync/.beads/.write.lock. Another br process may be holding .write.lock; retry after it exits or investigate a stuck process.",
+      "fallback_used": ".beads/issues.jsonl parse"
+    },
+    "beads_write_lock": {
+      "path": ".beads/.write.lock",
+      "observed": "zero-byte lock file present, mtime 2026-05-04 16:06"
+    },
+    "bv_robot_plan_reality_check": {
+      "command": "bv --robot-plan --label reality-check",
+      "status": "passed",
+      "open_count": 2,
+      "closed_count": 14,
+      "single_actionable": "asupersync-rcksgn",
+      "unblocks": [
+        "asupersync-rckepc"
+      ],
+      "data_hash": "304919e9608bbbd3"
+    }
+  },
+  "fresh_signoff_commands": [
+    {
+      "command_id": "no-tokio-default-normal-graph-rerun",
+      "command": "rch exec -- cargo tree -e normal -p asupersync -i tokio",
+      "status": "passed",
+      "observed_signal": "warning: nothing to print.",
+      "required_by": "asupersync-rcksgn acceptance"
+    },
+    {
+      "command_id": "docs-evidence-e2e-rerun",
+      "command": "REALITY_CHECK_DOCS_ARTIFACT_PATH=/tmp/asupersync-rckdoc-docs-evidence-2/docs-evidence-report.json bash scripts/run_reality_check_docs_evidence.sh",
+      "status": "passed",
+      "observed_signal": "docs_checked=4 source_artifacts_checked=7 support_classes_seen=17 deferred_links_checked=5 closed_bead_evidence_checked=9 drift_count=0 verdict=passed",
+      "required_by": "docs reconciliation row"
+    },
+    {
+      "command_id": "docs-contract-rust-test-rerun",
+      "command": "rch exec -- env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-C debuginfo=0' CARGO_TARGET_DIR=/tmp/rch_target_asupersync_rckdoc_docs2 cargo test -p asupersync --test reality_check_docs_contract --features test-internals -- --nocapture",
+      "status": "passed",
+      "observed_signal": "remote exit=0; 6 passed / 0 failed; local wrapper killed only after remote success during .rch-target retrieval",
+      "required_by": "docs reconciliation row"
+    }
+  ],
+  "gap_rows": [
+    {
+      "gap_id": "conformance-registry",
+      "gap": "Conformance registry count and dormant-suite governance were brittle and prose-count driven.",
+      "closing_bead": "asupersync-rckcnf",
+      "commit": "287844e662c646edfc5b3f1e650a767fe9b95190",
+      "touched_files": [
+        "README.md",
+        "artifacts/conformance_registry_contract_v1.json",
+        "tests/conformance_registry_contract.rs"
+      ],
+      "artifact_paths": [
+        "artifacts/conformance_registry_contract_v1.json",
+        "tests/conformance_registry_contract.rs",
+        "tests/conformance/mod.rs"
+      ],
+      "support_class_after": "machine-checked-registry",
+      "closure_status": "fully_closed",
+      "evidence_quality": "fully_proof_backed",
+      "tracker_close_mode": "live_commit_and_artifact_verified",
+      "stale_closed_tracker_repair": false,
+      "proof_commands": [
+        {
+          "command": "rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=/tmp/rch_target_asupersync_rckcnf_contract cargo test -p asupersync --test conformance_registry_contract --features test-internals -- --nocapture",
+          "status": "passed",
+          "observed_signal": "contract test validates active/dormant module lists against tests/conformance/mod.rs"
+        }
+      ],
+      "residual_risks": [
+        "Individual protocol modules can still be feature-gated or platform-gated; the registry contract now makes that distinction explicit."
+      ]
+    },
+    {
+      "gap_id": "websocket-rfc6455",
+      "gap": "WebSocket conformance wording outpaced the live RFC6455 registry wiring.",
+      "closing_bead": "asupersync-rckwsf",
+      "commit": "7c64dfcf51f2e0ba50403ee20b7e8106ef814ccb",
+      "touched_files": [
+        "README.md",
+        "artifacts/conformance_registry_contract_v1.json",
+        "docs/integration.md",
+        "tests/conformance/mod.rs",
+        "tests/conformance/websocket_rfc6455/framing_tests.rs",
+        "tests/conformance/websocket_rfc6455/mod.rs"
+      ],
+      "artifact_paths": [
+        "artifacts/conformance_registry_contract_v1.json",
+        "tests/conformance/websocket_rfc6455.rs",
+        "tests/conformance/websocket_rfc6455/mod.rs",
+        "tests/e2e_websocket.rs"
+      ],
+      "support_class_after": "runtime-shipped-lane-specific-e2e",
+      "closure_status": "fully_closed",
+      "evidence_quality": "fully_proof_backed",
+      "tracker_close_mode": "live_commit_and_artifact_verified",
+      "stale_closed_tracker_repair": false,
+      "proof_commands": [
+        {
+          "command": "rch exec -- cargo test -p asupersync --test conformance websocket_rfc6455 --features test-internals -- --nocapture",
+          "status": "passed",
+          "observed_signal": "RFC6455 registry live for framing/control/close/masking/fragmentation harnesses"
+        }
+      ],
+      "residual_risks": [
+        "Runtime e2e remains lane-specific and is intentionally documented as separate from byte-level RFC harness coverage."
+      ]
+    },
+    {
+      "gap_id": "http3-qpack",
+      "gap": "HTTP/3/QPACK docs needed a truthful support boundary instead of implying full QPACK parity.",
+      "closing_bead": "asupersync-rckh3q",
+      "commit": "95dd13605543c6aa4a2d0726de8c17cde6ced405",
+      "touched_files": [
+        "README.md",
+        "artifacts/http3_qpack_support_matrix_v1.json",
+        "docs/integration.md",
+        "tests/http3_qpack_support_matrix_contract.rs"
+      ],
+      "artifact_paths": [
+        "artifacts/http3_qpack_support_matrix_v1.json",
+        "tests/http3_qpack_support_matrix_contract.rs",
+        "src/http/h3_native.rs"
+      ],
+      "support_class_after": "production-live-opt-in-boundary",
+      "closure_status": "fully_closed",
+      "evidence_quality": "fully_proof_backed",
+      "tracker_close_mode": "live_commit_and_artifact_verified",
+      "stale_closed_tracker_repair": false,
+      "proof_commands": [
+        {
+          "command": "rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=/tmp/rch_target_asupersync_rckh3q_contract cargo test -p asupersync --test http3_qpack_support_matrix_contract --features test-internals,http3 -- --nocapture",
+          "status": "passed",
+          "observed_signal": "matrix contract validates static-only default, opt-in dynamic field sections, and no full instruction-stream parity claim"
+        },
+        {
+          "command": "rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=/tmp/rch_target_asupersync_rckh3q_h3 cargo check -p asupersync --lib --features http3,test-internals",
+          "status": "passed",
+          "observed_signal": "http3 feature graph checked"
+        }
+      ],
+      "residual_risks": [
+        "Full QPACK encoder/decoder instruction-stream parity and blocked-stream scheduler remain explicitly not advertised."
+      ]
+    },
+    {
+      "gap_id": "remote-lifecycle",
+      "gap": "Remote lifecycle docs needed either production transport proof or a narrower support claim.",
+      "closing_bead": "asupersync-rckrmt",
+      "commit": "aa2e38691367aaf5ac5bc38ff8fa1a20d84a48e7",
+      "touched_files": [
+        "src/remote.rs",
+        "docs/integration.md"
+      ],
+      "artifact_paths": [
+        "src/remote.rs",
+        "docs/integration.md",
+        "README.md",
+        "docs/stub_disposition_matrix.md"
+      ],
+      "support_class_after": "virtual-lab-proof-adapter-responsibility",
+      "closure_status": "fully_closed",
+      "evidence_quality": "fully_proof_backed",
+      "tracker_close_mode": "stale_open_reconciled_from_landed_commit",
+      "stale_closed_tracker_repair": true,
+      "proof_commands": [
+        {
+          "command": "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_asupersync_rckrmt cargo test -p asupersync --lib remote_virtual_lifecycle_proof_exercises_runtime_transport_and_protocol --features test-internals -- --nocapture",
+          "status": "passed",
+          "observed_signal": "virtual RemoteRuntime proof covers accepted spawn/result, cancel before ack, running cancel with lease renewal, lease expiry, duplicate/idempotency, send-failure cleanup, fallback, bookkeeping drain, and trace emission"
+        }
+      ],
+      "residual_risks": [
+        "Production network execution remains adapter responsibility; docs must not advertise blanket network backend parity."
+      ]
+    },
+    {
+      "gap_id": "browser-boundary",
+      "gap": "Browser service/shared-worker, messaging, and WebTransport lanes needed precise support classes.",
+      "closing_bead": "asupersync-rckwas",
+      "commit": "e09becd7e8513ea159ed1227a519b0361bb458dc",
+      "touched_files": [
+        "docs/WASM.md",
+        "artifacts/wasm_browser_support_boundary_contract_v1.json",
+        "tests/wasm_browser_support_boundary_contract.rs"
+      ],
+      "artifact_paths": [
+        "artifacts/wasm_browser_support_boundary_contract_v1.json",
+        "tests/wasm_browser_support_boundary_contract.rs",
+        "docs/WASM.md",
+        "docs/integration.md"
+      ],
+      "support_class_after": "direct-runtime-supported-with-guarded-and-deferred-browser-lanes",
+      "closure_status": "fully_closed",
+      "evidence_quality": "fully_proof_backed",
+      "tracker_close_mode": "stale_open_reconciled_from_landed_commit",
+      "stale_closed_tracker_repair": true,
+      "proof_commands": [
+        {
+          "command": "rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_asupersync_rckwas_contract cargo test -p asupersync --test wasm_browser_support_boundary_contract --features test-internals -- --nocapture",
+          "status": "passed",
+          "observed_signal": "support-boundary contract validates main-thread/dedicated-worker direct runtime, service/shared-worker fail-closed direct runtime, guarded helpers, messaging substrate-only, and WebTransport fallback"
+        }
+      ],
+      "residual_risks": [
+        "Service/shared-worker direct runtime and public messaging SDK APIs remain intentionally unshipped until future promotion contracts land."
+      ]
+    },
+    {
+      "gap_id": "formal-proof-posture",
+      "gap": "Formal-methods prose needed to distinguish checked Lean core invariants from blanket runtime proof.",
+      "closing_bead": "asupersync-rckfrm",
+      "commit": "c04f2566e25533eb6b845b7e7b13e6a67a827f44",
+      "touched_files": [
+        "README.md",
+        "formal/README.md",
+        "artifacts/formal_proof_posture_contract_v1.json",
+        "tests/formal_proof_posture_contract.rs"
+      ],
+      "artifact_paths": [
+        "artifacts/formal_proof_posture_contract_v1.json",
+        "tests/formal_proof_posture_contract.rs",
+        "formal/README.md",
+        "formal/lean/coverage/invariant_status_inventory.json"
+      ],
+      "support_class_after": "checked-core-invariants-lane-specific-refinement",
+      "closure_status": "fully_closed",
+      "evidence_quality": "fully_proof_backed",
+      "tracker_close_mode": "stale_open_reconciled_from_landed_commit",
+      "stale_closed_tracker_repair": true,
+      "proof_commands": [
+        {
+          "command": "rch exec -- bash -lc 'cd formal/lean && lake build'",
+          "status": "passed",
+          "observed_signal": "Lean build completed successfully with existing lint warnings only"
+        },
+        {
+          "command": "rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=/tmp/rch_target_asupersync_rckfrm_contract cargo test -p asupersync --test formal_proof_posture_contract --features test-internals -- --nocapture",
+          "status": "passed",
+          "observed_signal": "formal proof posture contract verifies six fully proven core invariants and no blanket adapter/protocol proof claim"
+        }
+      ],
+      "residual_risks": [
+        "Adapter/protocol/runtime refinement proof remains lane-specific and is not claimed as full mechanized proof."
+      ]
+    },
+    {
+      "gap_id": "tokio-feature-boundary",
+      "gap": "Optional metrics/fuzz Tokio dependency boundary needed to be exact.",
+      "closing_bead": "asupersync-rcktok",
+      "commit": "9d75d7ccafa885deaeb4d29ffbc794975769e9b4",
+      "touched_files": [
+        "Cargo.toml",
+        "README.md",
+        "AGENTS.md",
+        "artifacts/no_tokio_feature_boundary_contract_v1.json",
+        "tests/no_tokio_feature_boundary_contract.rs"
+      ],
+      "artifact_paths": [
+        "artifacts/no_tokio_feature_boundary_contract_v1.json",
+        "tests/no_tokio_feature_boundary_contract.rs",
+        "Cargo.toml",
+        "README.md",
+        "AGENTS.md"
+      ],
+      "support_class_after": "tokio-free-default-and-metrics-fuzz-quarantined",
+      "closure_status": "fully_closed",
+      "evidence_quality": "fully_proof_backed",
+      "tracker_close_mode": "stale_open_reconciled_from_landed_commit",
+      "stale_closed_tracker_repair": true,
+      "proof_commands": [
+        {
+          "command": "rch exec -- cargo tree -e normal -p asupersync -i tokio",
+          "status": "passed",
+          "observed_signal": "warning: nothing to print."
+        },
+        {
+          "command": "rch exec -- cargo tree -e normal -p asupersync --features metrics -i tokio",
+          "status": "passed",
+          "observed_signal": "warning: nothing to print."
+        },
+        {
+          "command": "rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_asupersync_rcktok_contract cargo test -p asupersync --test no_tokio_feature_boundary_contract --features test-internals -- --nocapture",
+          "status": "passed",
+          "observed_signal": "contract test validates default/metrics Tokio-free and fuzz quarantine"
+        }
+      ],
+      "residual_risks": [
+        "The fuzz feature intentionally carries the OTLP tonic helper path and remains outside the production no-Tokio guarantee."
+      ]
+    },
+    {
+      "gap_id": "stub-placeholder-inventory",
+      "gap": "Placeholder/stub markers needed row-level disposition and no production-live fake evidence.",
+      "closing_bead": "asupersync-rckstb",
+      "commit": "ae09cf21dfbc7589e1708c01de3ef988e70584b2",
+      "touched_files": [
+        "artifacts/stub_placeholder_inventory_v1.json",
+        "docs/stub_disposition_matrix.md",
+        "scripts/scan_stubs.sh",
+        "tests/stub_resolution_audit.rs"
+      ],
+      "artifact_paths": [
+        "artifacts/stub_placeholder_inventory_v1.json",
+        "docs/stub_disposition_matrix.md",
+        "scripts/scan_stubs.sh",
+        "tests/stub_resolution_audit.rs"
+      ],
+      "support_class_after": "row-inventoried-zero-unclassified-placeholders",
+      "closure_status": "fully_closed",
+      "evidence_quality": "fully_proof_backed",
+      "tracker_close_mode": "live_commit_and_artifact_verified",
+      "stale_closed_tracker_repair": false,
+      "proof_commands": [
+        {
+          "command": "bash scripts/scan_stubs.sh",
+          "status": "passed",
+          "observed_signal": "marker_count=950, unclassified_count=0, invalid_disposition_count=0, expired_allowance_count=0, owner_bead_missing_count=0"
+        },
+        {
+          "command": "rch exec -- env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-C debuginfo=0' CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_asupersync_rckstb_final3 cargo test -p asupersync --test stub_resolution_audit --features test-internals -- --nocapture",
+          "status": "passed",
+          "observed_signal": "remote exit=0; 21 passed / 0 failed"
+        }
+      ],
+      "residual_risks": [
+        "Product-bug and conformance-bug follow-up selectors remain tracked by owner beads and must not be counted as production-live pass evidence."
+      ]
+    },
+    {
+      "gap_id": "phase6-main-only-gates",
+      "gap": "Phase 6 gate language needed to match the main-only direct-commit workflow.",
+      "closing_bead": "asupersync-rckg8s",
+      "commit": "eefed339afb7db05530e4865299d159fc3257fdd",
+      "touched_files": [
+        "README.md",
+        "artifacts/phase6_methodology_gate_enforcement_contract_v1.json",
+        "tests/phase6_methodology_gate_contract.rs"
+      ],
+      "artifact_paths": [
+        "artifacts/phase6_methodology_gate_enforcement_contract_v1.json",
+        "tests/phase6_methodology_gate_contract.rs",
+        ".github/workflows/methodology-gates.yml",
+        "README.md"
+      ],
+      "support_class_after": "local-main-gates-plus-pr-release-workflow",
+      "closure_status": "fully_closed",
+      "evidence_quality": "fully_proof_backed",
+      "tracker_close_mode": "stale_open_reconciled_from_landed_commit",
+      "stale_closed_tracker_repair": true,
+      "proof_commands": [
+        {
+          "command": "rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=/tmp/rch_target_asupersync_rckg8s_contract cargo test -p asupersync --test phase6_methodology_gate_contract --features test-internals -- --nocapture",
+          "status": "passed",
+          "observed_signal": "contract validates PR-only GitHub workflow plus local rch direct-main gate commands"
+        }
+      ],
+      "residual_risks": [
+        "Push-on-main GitHub enforcement is explicitly not enabled; direct-main protection is local rch preflight plus committed artifacts."
+      ]
+    },
+    {
+      "gap_id": "docs-reconciliation",
+      "gap": "README, support matrices, FAQ, limitations, and stale remote/browser/support wording needed final truth reconciliation.",
+      "closing_bead": "asupersync-rckdoc",
+      "commit": "b1adcb30c85857506ddaa7fce67fcc1a8144f6b4",
+      "tracker_commit": "35b9760dee091204dd9724fe2fe6bb5ec2654bdc",
+      "touched_files": [
+        "README.md",
+        "docs/WASM.md",
+        "docs/stub_disposition_matrix.md",
+        "artifacts/reality_check_docs_contract_v1.json",
+        "scripts/run_reality_check_docs_evidence.sh",
+        "tests/reality_check_docs_contract.rs"
+      ],
+      "artifact_paths": [
+        "artifacts/reality_check_docs_contract_v1.json",
+        "scripts/run_reality_check_docs_evidence.sh",
+        "tests/reality_check_docs_contract.rs",
+        "README.md",
+        "docs/integration.md",
+        "docs/WASM.md",
+        "docs/stub_disposition_matrix.md"
+      ],
+      "support_class_after": "docs-truth-contract-passed",
+      "closure_status": "fully_closed",
+      "evidence_quality": "fully_proof_backed",
+      "tracker_close_mode": "live_commit_and_artifact_verified",
+      "stale_closed_tracker_repair": false,
+      "proof_commands": [
+        {
+          "command": "REALITY_CHECK_DOCS_ARTIFACT_PATH=/tmp/asupersync-rckdoc-docs-evidence-2/docs-evidence-report.json bash scripts/run_reality_check_docs_evidence.sh",
+          "status": "passed",
+          "observed_signal": "docs_checked=4 source_artifacts_checked=7 support_classes_seen=17 deferred_links_checked=5 closed_bead_evidence_checked=9 drift_count=0 verdict=passed"
+        },
+        {
+          "command": "rch exec -- env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-C debuginfo=0' CARGO_TARGET_DIR=/tmp/rch_target_asupersync_rckdoc_docs2 cargo test -p asupersync --test reality_check_docs_contract --features test-internals -- --nocapture",
+          "status": "passed",
+          "observed_signal": "remote exit=0; 6 passed / 0 failed"
+        }
+      ],
+      "residual_risks": [
+        "Docs intentionally do not link the final signoff artifact as public evidence until this signoff bead lands and is closed."
+      ]
+    }
+  ],
+  "signoff_invariants": {
+    "every_required_gap_has_row": true,
+    "every_dependency_closed": true,
+    "no_row_marked_fully_closed_without_passing_proof": true,
+    "no_row_marked_fully_closed_without_durable_artifact": true,
+    "no_unresolved_gap_hidden_in_prose": true,
+    "stale_closed_bead_count": 5,
+    "failed_or_blocked_required_proof_commands": [],
+    "control_plane_degraded_commands": [
+      "timeout 30s br dep cycles --json",
+      "timeout 30s br list --json"
+    ]
+  },
+  "e2e_logging_contract": {
+    "script": "scripts/run_reality_check_gap_closure_signoff.sh",
+    "default_artifact_path": "target/reality-check-signoff/asupersync-rcksgn/signoff-report.json",
+    "required_top_level_fields": [
+      "bead_id",
+      "graph_status",
+      "dependency_status",
+      "proof_command_count",
+      "failed_or_blocked_commands",
+      "stale_closed_bead_count",
+      "artifact_path",
+      "verdict",
+      "first_failure"
+    ]
+  }
+}
