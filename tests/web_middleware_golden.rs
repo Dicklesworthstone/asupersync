@@ -1,4 +1,3 @@
-#![allow(warnings)]
 //! Golden snapshot for the web middleware request/response chain.
 
 use asupersync::combinator::rate_limit::{RateLimitPolicy, WaitStrategy};
@@ -12,7 +11,6 @@ use asupersync::web::middleware::{
 use asupersync::web::response::{Response, StatusCode};
 use insta::assert_json_snapshot;
 use serde::Serialize;
-use serde_json::json;
 use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::sync::atomic::AtomicU64;
@@ -24,15 +22,24 @@ fn fixed_time() -> Time {
 
 struct EchoChainHandler;
 
+#[derive(Serialize)]
+struct EchoPayload<'a> {
+    method: &'a str,
+    path: &'a str,
+    authorization: Option<&'a str>,
+    request_id: Option<&'a str>,
+    trace_id: Option<&'a str>,
+}
+
 impl Handler for EchoChainHandler {
     fn call(&self, req: Request) -> Response {
-        let payload = json!({
-            "method": req.method,
-            "path": req.path,
-            "authorization": req.header("authorization"),
-            "request_id": req.extensions.get("request_id"),
-            "trace_id": req.extensions.get("trace_id"),
-        });
+        let payload = EchoPayload {
+            method: &req.method,
+            path: &req.path,
+            authorization: req.header("authorization"),
+            request_id: req.extensions.get("request_id"),
+            trace_id: req.extensions.get("trace_id"),
+        };
         let body = serde_json::to_vec_pretty(&payload).expect("echo payload should serialize");
         Response::new(StatusCode::OK, body).header("x-handler", "echo")
     }
