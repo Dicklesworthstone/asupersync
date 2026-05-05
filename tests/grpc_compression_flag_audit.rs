@@ -8,8 +8,11 @@
 //! header is "identity", the implementation must REJECT with protocol error,
 //! not attempt decompression (which causes data corruption).
 
-use asupersync::bytes::{BufMut, Bytes, BytesMut};
-use asupersync::grpc::codec::{FramedCodec, GrpcCodec, GrpcMessage, IdentityCodec};
+#[cfg(feature = "compression")]
+use asupersync::bytes::Bytes;
+use asupersync::bytes::{BufMut, BytesMut};
+use asupersync::codec::Decoder;
+use asupersync::grpc::codec::{FramedCodec, GrpcCodec, IdentityCodec};
 use asupersync::grpc::status::GrpcError;
 
 #[test]
@@ -39,6 +42,9 @@ fn grpc_compression_flag_identity_mismatch_audit() {
             println!("   Decoded data: {:?}", String::from_utf8_lossy(&decoded));
             println!("   This should have been rejected as a protocol error!");
             panic!("PROTOCOL VIOLATION: compressed-flag=1 with identity encoding must be rejected");
+        }
+        Ok(None) => {
+            panic!("complete malformed frame should not decode as incomplete");
         }
         Err(GrpcError::Protocol(_)) => {
             println!(
@@ -74,6 +80,9 @@ fn grpc_compression_flag_consistency_audit() {
         Ok(Some(decoded)) => {
             println!("✅ CORRECT: Uncompressed frame accepted with identity encoding");
             assert_eq!(&decoded[..], b"hello, world!");
+        }
+        Ok(None) => {
+            panic!("complete identity frame should not decode as incomplete");
         }
         Err(e) => {
             panic!("Valid uncompressed frame should not be rejected: {:?}", e);
@@ -136,8 +145,7 @@ fn grpc_compression_flag_protocol_violation_patterns_audit() {
     );
     println!("✅ CORRECT: Invalid compression flag value rejected");
 
-    // Pattern 3: Compression flag vs actual data encoding mismatch detection
-    // This is the core vulnerability - when flag says compressed but data isn't
+    // Pattern 3: Compression flag vs grpc-encoding mismatch detection.
     let mut mismatch_codec = FramedCodec::new(IdentityCodec).with_identity_frame_codec();
 
     // Create what appears to be a compressed frame but contains uncompressed data
@@ -147,19 +155,14 @@ fn grpc_compression_flag_protocol_violation_patterns_audit() {
     // Put clearly uncompressed text data
     mismatch_buf.extend_from_slice(b"this is not compressed");
 
-    let mismatch_result = mismatch_codec.decode_message(&mut mismatch_buf);
+    let mismatch_result =
+        mismatch_codec.decode_message_with_encoding(&mut mismatch_buf, Some("identity"));
 
-    // The identity "decompressor" will pass through the data unchanged
-    // This reveals the vulnerability - the flag is ignored if identity decompressor is used
-    match mismatch_result {
-        Ok(Some(_)) => {
-            println!("❌ VULNERABILITY: Identity decompressor ignores compression flag");
-            println!("   This allows compressed-flag=1 with uncompressed data to pass through");
-        }
-        Err(_) => {
-            println!("✅ SECURE: Compression flag mismatch detected and rejected");
-        }
-    }
+    assert!(
+        matches!(mismatch_result, Err(GrpcError::Protocol(_))),
+        "compressed-flag=1 with grpc-encoding=identity must be rejected as protocol error"
+    );
+    println!("✅ SECURE: Compression flag mismatch detected and rejected");
 }
 
 #[test]
@@ -206,8 +209,8 @@ fn grpc_compression_flag_encoding_consistency_audit() {
             case.compressed_flag
         );
 
-        // Currently, our codec doesn't validate grpc-encoding header consistency
-        // This test documents the expected behavior once the fix is implemented
+        // The production decode_message_with_encoding path validates
+        // grpc-encoding header consistency before decompression.
 
         // Create a frame with the specified compression flag
         let mut buf = BytesMut::new();
@@ -254,9 +257,8 @@ fn grpc_compression_flag_encoding_consistency_audit() {
         }
     }
 
-    println!("\n🔍 CURRENT STATUS: Header validation not implemented");
-    println!("⚠️  RISK: Protocol violations may be silently accepted");
-    println!("🛡️  FIX REQUIRED: Add grpc-encoding header consistency validation");
+    println!("\nCURRENT STATUS: Header validation implemented");
+    println!("Protocol violations are rejected through decode_message_with_encoding");
 }
 
 #[test]

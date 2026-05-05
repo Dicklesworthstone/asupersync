@@ -1,0 +1,83 @@
+{
+  "contract_version": "mock-code-finder-stale-audit-normalization-v1",
+  "bead_id": "asupersync-dq4",
+  "schema_version": "mock-code-finder-evidence-jsonl-schema-v1",
+  "purpose": "Normalize stale audit modules whose production gaps have landed, without hiding still-real gaps or deleting retained audit files.",
+  "script": "scripts/run_stale_audit_normalization_evidence.sh",
+  "default_output_jsonl": "target/mock-code-finder/asupersync-dq4/stale-audit-normalization.jsonl",
+  "default_summary_json": "target/mock-code-finder/asupersync-dq4/stale-audit-normalization.summary.json",
+  "required_scenarios": [
+    {
+      "scenario_id": "grpc-deadline-max-request-cap",
+      "module": "tests/grpc_server_deadline_propagation_audit.rs",
+      "outcome": "production-backed executable assertion",
+      "cargo_features": ["test-internals"],
+      "proof_commands": [
+        "rch exec -- env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-C debuginfo=0' CARGO_TARGET_DIR=/tmp/rch_target_asupersync_dq4_integration cargo test -p asupersync --test grpc_server_deadline_propagation_audit --test grpc_compression_flag_audit --test kafka_offset_commit_retry_audit --features test-internals -- --nocapture",
+        "rch exec -- env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-C debuginfo=0' CARGO_TARGET_DIR=/tmp/rch_target_asupersync_dq4_contract cargo test -p asupersync --test mock_code_finder_stale_audit_normalization --features test-internals -- --nocapture"
+      ],
+      "source_truth": "CallContext::from_metadata_at_with_max_deadline clamps peer grpc-timeout values when ServerConfig::max_request_deadline is configured."
+    },
+    {
+      "scenario_id": "grpc-compression-header-consistency",
+      "module": "tests/grpc_compression_flag_audit.rs",
+      "outcome": "production-backed executable assertion",
+      "cargo_features": ["test-internals"],
+      "proof_commands": [
+        "rch exec -- env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-C debuginfo=0' CARGO_TARGET_DIR=/tmp/rch_target_asupersync_dq4_integration cargo test -p asupersync --test grpc_server_deadline_propagation_audit --test grpc_compression_flag_audit --test kafka_offset_commit_retry_audit --features test-internals -- --nocapture",
+        "rch exec -- env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-C debuginfo=0' CARGO_TARGET_DIR=/tmp/rch_target_asupersync_dq4_contract cargo test -p asupersync --test mock_code_finder_stale_audit_normalization --features test-internals -- --nocapture"
+      ],
+      "source_truth": "FramedCodec::decode_message_with_encoding rejects compressed-flag/grpc-encoding mismatches as protocol errors."
+    },
+    {
+      "scenario_id": "kafka-offset-commit-retry-budget",
+      "module": "tests/kafka_offset_commit_retry_audit.rs",
+      "outcome": "production-backed executable assertion",
+      "cargo_features": ["test-internals"],
+      "proof_commands": [
+        "rch exec -- env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-C debuginfo=0' CARGO_TARGET_DIR=/tmp/rch_target_asupersync_dq4_integration cargo test -p asupersync --test grpc_server_deadline_propagation_audit --test grpc_compression_flag_audit --test kafka_offset_commit_retry_audit --features test-internals -- --nocapture",
+        "rch exec -- env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-C debuginfo=0' CARGO_TARGET_DIR=/tmp/rch_target_asupersync_dq4_contract cargo test -p asupersync --test mock_code_finder_stale_audit_normalization --features test-internals -- --nocapture"
+      ],
+      "source_truth": "ConsumerConfig exposes retries and commit_offsets routes real Kafka commits through retry_consumer_operation."
+    },
+    {
+      "scenario_id": "otlp-head-based-sampling",
+      "module": "src/observability/head_based_sampling_audit_test.rs",
+      "outcome": "production-backed executable assertion",
+      "cargo_features": ["test-internals"],
+      "proof_commands": [
+        "rch exec -- env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-C debuginfo=0' CARGO_TARGET_DIR=/tmp/rch_target_asupersync_dq4_head_sampling cargo test -p asupersync --lib head_based_sampling_audit_test --features test-internals -- --nocapture",
+        "rch exec -- env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-C debuginfo=0' CARGO_TARGET_DIR=/tmp/rch_target_asupersync_dq4_contract cargo test -p asupersync --test mock_code_finder_stale_audit_normalization --features test-internals -- --nocapture"
+      ],
+      "source_truth": "LoadSheddingTraceExporter filters unsampled spans before queueing/export."
+    },
+    {
+      "scenario_id": "otel-span-obligation-leak-detection",
+      "module": "src/observability/span_lifecycle_obligation_leak_audit_test.rs",
+      "outcome": "production-backed executable assertion",
+      "cargo_features": ["test-internals", "metrics"],
+      "proof_commands": [
+        "rch exec -- env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-C debuginfo=0' CARGO_TARGET_DIR=/tmp/rch_target_asupersync_dq4_span_leak cargo test -p asupersync --lib span_lifecycle_obligation_leak_audit_test --features test-internals,metrics -- --nocapture",
+        "rch exec -- env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-C debuginfo=0' CARGO_TARGET_DIR=/tmp/rch_target_asupersync_dq4_contract cargo test -p asupersync --test mock_code_finder_stale_audit_normalization --features test-internals -- --nocapture"
+      ],
+      "source_truth": "SpanStorage::detect_obligation_leaks reports aged unended pending spans when metrics support is enabled."
+    },
+    {
+      "scenario_id": "otlp-add-attributes-production-seam",
+      "module": "src/observability/otlp_add_attributes_missing_api_audit_test.rs",
+      "outcome": "production-backed executable assertion",
+      "cargo_features": ["test-internals", "metrics", "tracing-integration"],
+      "proof_commands": [
+        "rch exec -- env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-C debuginfo=0' CARGO_TARGET_DIR=/tmp/rch_target_asupersync_dq4_add_attributes cargo test -p asupersync --lib otlp_add_attributes_missing_api_audit_test --features test-internals,metrics,tracing-integration -- --nocapture",
+        "rch exec -- env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-C debuginfo=0' CARGO_TARGET_DIR=/tmp/rch_target_asupersync_dq4_contract cargo test -p asupersync --test mock_code_finder_stale_audit_normalization --features test-internals -- --nocapture"
+      ],
+      "source_truth": "TestSpan::add_attributes has executable coverage for deduplication, capacity, typed values, unsupported values, and redacted logging."
+    }
+  ],
+  "guardrails": [
+    "No audit file may be deleted as part of this normalization.",
+    "A module with a still-real gap must name a blocker bead instead of being silently downgraded.",
+    "Production-live pass records must use evidence_quality=live under the shared mock-code-finder schema.",
+    "Generated artifacts must be deterministic and must not include secret values."
+  ]
+}

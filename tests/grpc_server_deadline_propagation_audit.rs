@@ -1,43 +1,15 @@
 //! Audit + regression test for `src/grpc/server.rs::CallContext`
 //! request-deadline propagation (tick #138).
 //!
-//! Audit findings:
+//! Current source-truth summary:
 //!
-//!   (a) **Peer grpc-timeout is parsed and used verbatim — P1 GAP.**
-//!       `CallContext::from_metadata_at` (server.rs:1151) reads the
-//!       peer-supplied `grpc-timeout` metadata header, parses it
-//!       via `parse_grpc_timeout`, and uses the resulting Duration
-//!       as the call's deadline:
-//!
-//!         let timeout = match metadata.get("grpc-timeout") {
-//!             Some(Ascii(s)) => parse_grpc_timeout(s),
-//!             ...
-//!         };
-//!         let deadline = timeout.and_then(|t| now.checked_add(t));
-//!
-//!       The only bound on the peer's value is the parser's
-//!       8-digit cap — `parse_grpc_timeout` accepts up to
-//!       99_999_999 of the named unit. For unit `H` (hours), that's
-//!       99_999_999 hours = ≈11,400 YEARS. A peer can therefore
-//!       set `grpc-timeout: 99999999H` and the deadline ends up
-//!       effectively unbounded.
-//!
-//!       **No server-side maximum cap is applied.** The server's
-//!       `ServerConfig::default_timeout` is ONLY used as a
-//!       fallback when the peer DOES NOT send the header
-//!       (server.rs:1161). It is NOT used as a CAP.
-//!
-//!       Concrete impact: a hostile peer can pin server resources
-//!       on a long-running call indefinitely just by setting a
-//!       large grpc-timeout. The graceful-shutdown story
-//!       (`stream_idle_timeout`) only fires on quiet streams, not
-//!       on actively-progressing ones.
-//!
-//!       The fix is a `ServerConfig::max_request_deadline:
-//!       Option<Duration>` that, when set, caps every
-//!       peer-supplied timeout via
-//!       `min(peer_timeout, max_request_deadline)`. Filed as P1
-//!       follow-up.
+//!   (a) **Peer grpc-timeout has an opt-in server cap — FIXED LIVE SEAM.**
+//!       `CallContext::from_metadata_at_with_max_deadline` clamps
+//!       peer-supplied `grpc-timeout` values to
+//!       `ServerConfig::max_request_deadline` when operators configure one.
+//!       The legacy `from_metadata_at` constructor still passes `cap=None`
+//!       for compatibility, so this audit now pins both behaviors explicitly
+//!       instead of claiming there is no production cap.
 //!
 //!   (b) **No client-controlled extension via repeated headers —
 //!       VERIFIED CLEAN.** `Metadata::get` returns the most
@@ -66,9 +38,7 @@
 //!       mean "reject the call with InvalidArgument", which it
 //!       does NOT.
 //!
-//! Regression tests below pin (b) and (c), and PIN the gap (a) so
-//! a future fix that adds `max_request_deadline` and clamps the
-//! deadline forces an intentional re-baseline.
+//! Regression tests below pin (a), (b), and (c) as live behavior.
 
 use asupersync::grpc::server::CallContext;
 use asupersync::grpc::streaming::Metadata;
@@ -85,18 +55,13 @@ fn meta_with_timeout(value: &str) -> Metadata {
 }
 
 #[test]
-fn peer_grpc_timeout_is_currently_unbounded_audit_pin() {
-    // Pinned current behavior (P1 audit finding): a peer sending
-    // grpc-timeout=99999999H gets a deadline effectively at
-    // now + 99_999_999 hours ≈ now + 11,400 years. No server-side
-    // maximum cap is applied today. This test will trip when a
-    // future commit adds ServerConfig::max_request_deadline and
-    // clamps the deadline — which is the desired fix.
+fn peer_grpc_timeout_is_clamped_when_max_request_deadline_is_configured() {
     let metadata = meta_with_timeout("99999999H");
     let n = now();
-    let ctx = CallContext::from_metadata_at(
+    let ctx = CallContext::from_metadata_at_with_max_deadline(
         metadata,
-        Some(Duration::from_secs(60)), // server's default_timeout
+        Some(Duration::from_secs(60)),
+        Some(Duration::from_secs(10)),
         None,
         n,
     );
@@ -104,14 +69,25 @@ fn peer_grpc_timeout_is_currently_unbounded_audit_pin() {
     let remaining = deadline
         .checked_duration_since(n)
         .expect("deadline must be in the future");
-    // Pinned: remaining is enormous, NOT clamped to default_timeout.
-    let one_year = Duration::from_secs(365 * 24 * 3600);
     assert!(
-        remaining > one_year,
-        "P1 audit pin: peer-supplied 99999999H is currently NOT clamped to \
-         the server's default_timeout. remaining={remaining:?} should be \
-         clamped to ~60s; if this assertion fires it's GOOD news (the cap \
-         was added) and this test must be re-baselined to assert the cap.",
+        remaining <= Duration::from_secs(10),
+        "configured max_request_deadline must clamp peer timeout; got {remaining:?}",
+    );
+}
+
+#[test]
+fn legacy_constructor_keeps_no_cap_semantics_explicit() {
+    let metadata = meta_with_timeout("99999999H");
+    let n = now();
+    let ctx = CallContext::from_metadata_at(metadata, Some(Duration::from_secs(60)), None, n);
+    let remaining = ctx
+        .deadline()
+        .and_then(|deadline| deadline.checked_duration_since(n))
+        .expect("deadline must be set");
+
+    assert!(
+        remaining > Duration::from_secs(365 * 24 * 3600),
+        "from_metadata_at intentionally passes max_request_deadline=None; got {remaining:?}",
     );
 }
 

@@ -173,13 +173,10 @@ fn audit_head_based_sampling_compliance() {
     println!("   ✓ Sampled spans (traceflags=1) exported to OTLP endpoint");
 }
 
-/// **AUDIT TEST**: Current implementation defect demonstration.
-///
-/// **EXPECTATION**: This test will FAIL with current implementation,
-/// demonstrating that head-based sampling is not implemented.
+/// **AUDIT TEST**: Current implementation drops unsampled spans.
 #[test]
-fn audit_current_implementation_exports_unsampled_spans() {
-    println!("🚨 AUDIT: Demonstrating current head-based sampling defect");
+fn audit_current_implementation_drops_unsampled_spans() {
+    println!("AUDIT: Verifying current head-based sampling implementation");
 
     let mock_exporter = MockOtlpHttpExporter::new(Duration::from_millis(1));
     let exporter = LoadSheddingTraceExporter::new(
@@ -202,7 +199,6 @@ fn audit_current_implementation_exports_unsampled_spans() {
         created_at: std::time::Instant::now(),
     };
 
-    // Current implementation: exporter processes unsampled spans
     exporter
         .export(&unsampled_batch)
         .expect("export should succeed");
@@ -210,17 +206,12 @@ fn audit_current_implementation_exports_unsampled_spans() {
 
     let exported_batches = mock_exporter.exported_batches();
 
-    // DEFECT DEMONSTRATION: Current implementation exports unsampled spans
-    if !exported_batches.is_empty() {
-        println!(
-            "🚨 DEFECT CONFIRMED: Current implementation exported {} unsampled batches",
-            exported_batches.len()
-        );
-        println!("💡 REQUIREMENT: Head-based sampling must drop unsampled spans");
-        println!("📋 SOLUTION NEEDED: Check traceflags before export");
-    } else {
-        println!("✅ Unexpectedly compliant - implementation may already be fixed");
-    }
+    assert!(
+        exported_batches.is_empty(),
+        "unsampled spans must be dropped before OTLP export; exported {} batches",
+        exported_batches.len()
+    );
+    println!("Head-based sampling implementation drops unsampled spans");
 }
 
 /// **AUDIT TEST**: Mixed sampling scenario.

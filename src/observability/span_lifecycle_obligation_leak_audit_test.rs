@@ -12,12 +12,17 @@
 //! the structured concurrency guarantee.
 
 #![cfg(test)]
+#![cfg(feature = "metrics")]
 
 use crate::Time;
 use crate::observability::otel_structured_concurrency::{
     EntityId, OtelStructuredConcurrencyConfig, SpanStorage, SpanType,
 };
 use std::time::Duration;
+
+fn leak_audit_config() -> OtelStructuredConcurrencyConfig {
+    OtelStructuredConcurrencyConfig::default().with_global_sample_rate(1.0)
+}
 
 /// **AUDIT TEST**: Verify unended spans are detected as obligation leaks.
 ///
@@ -28,7 +33,7 @@ use std::time::Duration;
 fn audit_unended_spans_create_obligation_leaks() {
     println!("🔍 AUDIT: Span lifecycle obligation leak detection");
 
-    let config = OtelStructuredConcurrencyConfig::default();
+    let config = leak_audit_config();
     let storage = SpanStorage::new(config);
 
     // Create spans but forget to end them (simulating programmer error)
@@ -79,7 +84,7 @@ fn audit_unended_spans_create_obligation_leaks() {
     );
 
     // CRITICAL AUDIT CHECK: These spans should be detectable as obligation leaks
-    let leaked_spans = storage.detect_obligation_leaks(Duration::from_secs(30));
+    let leaked_spans = storage.detect_obligation_leaks(Duration::ZERO);
 
     assert_eq!(
         leaked_spans.len(),
@@ -111,7 +116,7 @@ fn audit_unended_spans_create_obligation_leaks() {
 fn audit_properly_ended_spans_do_not_leak() {
     println!("🔍 AUDIT: Properly ended spans do not create obligation leaks");
 
-    let config = OtelStructuredConcurrencyConfig::default();
+    let config = leak_audit_config();
     let storage = SpanStorage::new(config);
 
     // Create and properly end spans
@@ -155,7 +160,7 @@ fn audit_properly_ended_spans_do_not_leak() {
     println!("📊 Spans properly ended");
 
     // Check for leaks - should be none
-    let leaked_spans = storage.detect_obligation_leaks(Duration::from_secs(30));
+    let leaked_spans = storage.detect_obligation_leaks(Duration::ZERO);
 
     assert_eq!(
         leaked_spans.len(),
@@ -167,15 +172,12 @@ fn audit_properly_ended_spans_do_not_leak() {
     println!("✅ NO OBLIGATION LEAKS: Properly ended spans do not leak");
 }
 
-/// **AUDIT TEST**: Current implementation defect demonstration.
-///
-/// **EXPECTATION**: This test will FAIL with current implementation,
-/// demonstrating that obligation leak detection is not implemented.
+/// **AUDIT TEST**: Current implementation detects unended spans.
 #[test]
-fn audit_current_implementation_missing_leak_detection() {
-    println!("🚨 AUDIT: Demonstrating current obligation leak detection defect");
+fn audit_current_implementation_detects_leaked_span() {
+    println!("AUDIT: Verifying current obligation leak detection implementation");
 
-    let config = OtelStructuredConcurrencyConfig::default();
+    let config = leak_audit_config();
     let storage = SpanStorage::new(config);
 
     // Create span without ending it
@@ -191,11 +193,11 @@ fn audit_current_implementation_missing_leak_detection() {
         None,
     ));
 
-    // Current implementation: leak detection method doesn't exist
-    // This will fail to compile, demonstrating the missing functionality
-
-    // Simulate what the leak detection should find
-    println!("🚨 DEFECT CONFIRMED: Obligation leak detection not implemented");
-    println!("💡 REQUIREMENT: Implement detect_obligation_leaks() method");
-    println!("📋 SOLUTION NEEDED: Track span creation time and detect aged unended spans");
+    let leaked_spans = storage.detect_obligation_leaks(Duration::ZERO);
+    assert_eq!(
+        leaked_spans.len(),
+        1,
+        "one unended span should be reported as an obligation leak"
+    );
+    assert_eq!(leaked_spans[0].span_name, "leaked_span");
 }
