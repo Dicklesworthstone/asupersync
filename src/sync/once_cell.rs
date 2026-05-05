@@ -442,6 +442,7 @@ impl<T> OnceCell<T> {
     /// Returns `Err(OnceCellError::Cancelled)` if the supplied `Cx` is
     /// cancelled before initialization completes.
     #[inline]
+    #[allow(clippy::future_not_send)]
     pub async fn wait(&self, cx: &crate::cx::Cx) -> Result<(), OnceCellError> {
         // Fast path: already initialized
         if self.is_initialized() {
