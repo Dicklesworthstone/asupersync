@@ -1,5 +1,3 @@
-#![allow(warnings)]
-#![allow(clippy::all)]
 //! Contract tests for deterministic lab-model expansion baseline (2oh2u.10.1).
 //!
 //! Validates model-domain coverage, scenario taxonomy, schedule-control
