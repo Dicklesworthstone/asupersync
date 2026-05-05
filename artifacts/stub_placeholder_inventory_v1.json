@@ -4,11 +4,23 @@
   "scanned_paths": [
     "src",
     "tests",
-    "conformance"
+    "conformance",
+    "examples",
+    "README.md",
+    "docs/integration.md",
+    "docs/WASM.md",
+    "docs/stub_closure_policy.md",
+    "docs/stub_disposition_matrix.md",
+    "scripts/scan_stubs.sh",
+    "scripts/verify_stub_resolution.sh",
+    "artifacts/stub_placeholder_inventory_v1.json",
+    "artifacts/mock_code_finder_verification_contract_v1.json"
   ],
   "file_extensions": [
     "rs",
-    "md"
+    "md",
+    "sh",
+    "json"
   ],
   "marker_terms": [
     "TODO",
@@ -22,11 +34,12 @@
   ],
   "allowed_dispositions": [
     "documented-deferred-surface",
-    "follow-up-bead",
     "implemented-now",
+    "intentional-reference-implementation",
     "legitimate-test-harness",
     "obsolete-retained-no-delete",
-    "product-bug",
+    "product-bug-follow-up",
+    "conformance-bug-follow-up",
     "unsupported-fail-closed"
   ],
   "allowed_support_classes": [
@@ -41,8 +54,8 @@
   ],
   "classification_policy": {
     "unclassified_count": 0,
-    "conformance_placeholder_evidence": "Placeholder-only conformance rows must classify as documented-deferred-surface, unsupported-fail-closed, obsolete-retained-no-delete, follow-up-bead, or legitimate-test-harness; they must never be counted as production_live pass evidence.",
-    "product_placeholder_evidence": "Production-facing markers must either be terminology/internal bookkeeping, explicit unsupported behavior with a stable reason, or linked to a concrete follow-up bead."
+    "conformance_placeholder_evidence": "Placeholder-only conformance rows must classify as documented-deferred-surface, unsupported-fail-closed, obsolete-retained-no-delete, conformance-bug-follow-up, intentional-reference-implementation, or legitimate-test-harness; they must never be counted as production_live pass evidence.",
+    "product_placeholder_evidence": "Production-facing markers must either be terminology/internal bookkeeping, explicit unsupported behavior with a stable reason, or linked to a concrete product-bug-follow-up bead."
   },
   "row_inventory_output": {
     "schema_version": "stub-placeholder-marker-row-inventory-v1",
@@ -158,7 +171,7 @@
         "stub",
         "not implemented"
       ],
-      "disposition": "follow-up-bead",
+      "disposition": "product-bug-follow-up",
       "support_class": "blocked_follow_up",
       "blocker_bead_id": "asupersync-yex",
       "notes": "Postgres TLS cfg-off stubs are explicit feature boundaries; reconnect NOT_IMPLEMENTED audit prose remains tracked as follow-up gap debt."
@@ -187,7 +200,7 @@
         "not implemented",
         "Status::unimplemented"
       ],
-      "disposition": "follow-up-bead",
+      "disposition": "product-bug-follow-up",
       "support_class": "blocked_follow_up",
       "blocker_bead_id": "asupersync-yex",
       "notes": "gRPC retained comments are either removed-stub guardrails, status test vectors, or deadline-audit follow-up debt; none is counted as a live conformance pass."
@@ -289,7 +302,7 @@
       "terms": [
         "placeholder"
       ],
-      "disposition": "follow-up-bead",
+      "disposition": "product-bug-follow-up",
       "support_class": "blocked_follow_up",
       "blocker_bead_id": "asupersync-yex",
       "notes": "The subject-fabric data capsule marker is product-adjacent and remains tracked under mock-code-finder gap closure."
@@ -377,7 +390,7 @@
         "simulate",
         "actual implementation"
       ],
-      "disposition": "follow-up-bead",
+      "disposition": "conformance-bug-follow-up",
       "support_class": "blocked_follow_up",
       "blocker_bead_id": "asupersync-j5f",
       "notes": "OpenTelemetry conformance simulations are not live conformance passes; histogram/metric snapshots are tracked by j5f and the broader yn7/uw9zg9 lane."
@@ -410,7 +423,7 @@
         "placeholder",
         "not yet implemented"
       ],
-      "disposition": "documented-deferred-surface",
+      "disposition": "intentional-reference-implementation",
       "support_class": "fixture_reference",
       "blocker_bead_id": "asupersync-kokw3m",
       "notes": "RFC6330 fixture maintenance placeholders are fixture/reference workflow debt and are no longer counted as live production evidence."
@@ -440,7 +453,7 @@
         "not yet implemented",
         "actual implementation"
       ],
-      "disposition": "documented-deferred-surface",
+      "disposition": "intentional-reference-implementation",
       "support_class": "fixture_reference",
       "blocker_bead_id": "asupersync-rckstb",
       "notes": "Root conformance-test markers are treated as fixture/test-harness metadata unless a narrower bead promotes that lane to production_live evidence."
@@ -480,10 +493,76 @@
         "not yet implemented",
         "not implemented"
       ],
-      "disposition": "follow-up-bead",
+      "disposition": "conformance-bug-follow-up",
       "support_class": "blocked_follow_up",
       "blocker_bead_id": "asupersync-yex",
       "notes": "Fallback classification for retained conformance-crate markers not covered by a narrower selector; these are blocked follow-up surfaces, not pass evidence."
+    },
+    {
+      "id": "docs-support-matrix-placeholder-claims",
+      "paths": [
+        "README.md",
+        "docs/integration.md",
+        "docs/WASM.md",
+        "docs/stub_closure_policy.md",
+        "docs/stub_disposition_matrix.md"
+      ],
+      "terms": [
+        "TODO",
+        "FIXME",
+        "todo!(",
+        "unimplemented!(",
+        "placeholder",
+        "stub",
+        "not yet implemented",
+        "not implemented"
+      ],
+      "disposition": "documented-deferred-surface",
+      "support_class": "documented_runtime_semantics",
+      "blocker_bead_id": "asupersync-rckdoc",
+      "notes": "Public docs and support matrices may name placeholder/stub surfaces only as explicit support posture or historical closure evidence; rckdoc owns final public-claim reconciliation."
+    },
+    {
+      "id": "scripts-stub-resolution-proof-tooling",
+      "paths": [
+        "scripts/scan_stubs.sh",
+        "scripts/verify_stub_resolution.sh"
+      ],
+      "terms": [
+        "TODO",
+        "FIXME",
+        "todo!(",
+        "unimplemented!(",
+        "placeholder",
+        "stub",
+        "not yet implemented",
+        "not implemented"
+      ],
+      "disposition": "intentional-reference-implementation",
+      "support_class": "internal_bookkeeping",
+      "blocker_bead_id": "",
+      "notes": "Stub-resolution script markers are names of the verification surface itself and the deterministic evidence schema, not product or conformance placeholders."
+    },
+    {
+      "id": "artifacts-stub-placeholder-contracts",
+      "paths": [
+        "artifacts/stub_placeholder_inventory_v1.json",
+        "artifacts/mock_code_finder_verification_contract_v1.json"
+      ],
+      "terms": [
+        "TODO",
+        "FIXME",
+        "todo!(",
+        "unimplemented!(",
+        "placeholder",
+        "stub",
+        "not yet implemented",
+        "not implemented"
+      ],
+      "disposition": "intentional-reference-implementation",
+      "support_class": "not_conformance_evidence",
+      "blocker_bead_id": "",
+      "notes": "Contract artifacts mention placeholder/stub strings to define scanner policy and negative fixtures; those rows are evidence metadata, not support claims."
     }
   ]
 }

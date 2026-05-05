@@ -12,16 +12,15 @@ SUMMARY_PATH_FIELD="${ARTIFACT_PATH_ROOT}/stub_resolution_scan_summary.json"
 ALLOWLIST_FILE="${PROJECT_ROOT}/.stub-allowlist.txt"
 TMP_EVENTS="$(mktemp)"
 TMP_SUMMARY="$(mktemp)"
-# Z1 owns the scan ratchet / allowlist policy surface. Z0b owns the heavier
-# rch-backed verification runner that consumes this scan as one stage.
-BEAD_ID="asupersync-v2ofj7.10.1"
+# rckstb owns the reality-check row inventory for the live marker surface.
+BEAD_ID="asupersync-rckstb"
 TRACK_ID="Z"
 PROFILE_FAMILY="stub-resolution-scan"
 COMMAND_STRING="bash ${SCRIPT_DIR}/$(basename "$0")"
 CONFIG_SNAPSHOT_REF="docs/stub_closure_policy.md::Scan Rules; TESTING.md::Shared Validation Contract (asupersync-ay6qvw)"
 STARTED_TS="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 RCKSTB_INVENTORY_FILE="${PROJECT_ROOT}/artifacts/stub_placeholder_inventory_v1.json"
-RCKSTB_INVENTORY_SUMMARY_JSON='{"schema_version":"stub-placeholder-inventory-summary-v1","artifact_path":"artifacts/stub_placeholder_inventory_v1.json","scanned_paths":[],"marker_count":0,"disposition_counts":{},"unclassified_count":0,"verdict":"blocked","first_failure":"inventory summary not run"}'
+RCKSTB_INVENTORY_SUMMARY_JSON='{"schema_version":"stub-placeholder-inventory-summary-v1","artifact_path":"artifacts/stub_placeholder_inventory_v1.json","scanned_paths":[],"marker_count":0,"disposition_counts":{},"unclassified_count":0,"expired_allowance_count":0,"owner_bead_missing_count":0,"verdict":"blocked","first_failure":"inventory summary not run"}'
 
 mkdir -p "$ARTIFACT_ROOT"
 : >"$TMP_EVENTS"
@@ -275,6 +274,8 @@ except Exception as exc:  # noqa: BLE001 - shell summary must stay diagnostic.
         "selector_count": 0,
         "disposition_counts": {},
         "row_inventory_path": "",
+        "expired_allowance_count": 0,
+        "owner_bead_missing_count": 0,
         "unclassified_count": 1,
         "verdict": "fail",
         "first_failure": f"failed to read inventory: {exc}",
@@ -284,10 +285,12 @@ except Exception as exc:  # noqa: BLE001 - shell summary must stay diagnostic.
 terms = [str(term) for term in inventory.get("marker_terms", [])]
 extensions = {str(ext) for ext in inventory.get("file_extensions", [])}
 selectors = list(inventory.get("selectors", []))
+allowed_dispositions = {str(item) for item in inventory.get("allowed_dispositions", [])}
 row_output = inventory.get("row_inventory_output", {}) or {}
 row_inventory_name = str(row_output.get("default_path", "stub_placeholder_inventory_markers.json"))
 row_inventory_path = artifact_root / row_inventory_name
 row_inventory_path_field = f"{artifact_path_root}/{row_inventory_name}" if artifact_path_root else row_inventory_name
+default_revisit_condition = str(row_output.get("revisit_condition", ""))
 
 
 def selector_matches(selector: dict, rel_path: str, text: str, term: str) -> bool:
@@ -311,7 +314,11 @@ for root_name in inventory.get("scanned_paths", []):
     root = project_root / str(root_name)
     if not root.exists():
         continue
-    for path in sorted(root.rglob("*")):
+    if root.is_file():
+        candidates = [root]
+    else:
+        candidates = sorted(root.rglob("*"))
+    for path in candidates:
         if not path.is_file() or path.suffix.removeprefix(".") not in extensions:
             continue
         rel_path = path.relative_to(project_root).as_posix()
@@ -334,8 +341,12 @@ for root_name in inventory.get("scanned_paths", []):
                     })
 
 unclassified = []
+invalid_dispositions = []
+expired_allowance_count = 0
+owner_bead_missing_count = 0
 disposition_counts: Counter[str] = Counter()
 rows = []
+today = None
 for marker in markers:
     matched = next(
         (
@@ -369,9 +380,31 @@ for marker in markers:
         })
     else:
         disposition = str(matched.get("disposition", "unknown"))
+        if disposition not in allowed_dispositions:
+            invalid_dispositions.append({
+                "path": marker["path"],
+                "line": marker["line"],
+                "term": marker["term"],
+                "disposition": disposition,
+            })
         disposition_counts[disposition] += 1
         owner_bead = str(matched.get("blocker_bead_id", "")) or str(inventory.get("bead_id", "asupersync-rckstb"))
         reasoning = str(matched.get("notes", ""))
+        permanent_rationale = reasoning if not str(matched.get("blocker_bead_id", "")) else ""
+        revisit_condition = str(matched.get("revisit_condition", default_revisit_condition))
+        expires_at = str(matched.get("expires_at", ""))
+        if expires_at:
+            import datetime
+
+            if today is None:
+                today = datetime.date.today()
+            try:
+                if datetime.date.fromisoformat(expires_at) < today:
+                    expired_allowance_count += 1
+            except ValueError:
+                expired_allowance_count += 1
+        if not owner_bead and not permanent_rationale:
+            owner_bead_missing_count += 1
         rows.append({
             "path": marker["path"],
             "line": marker["line"],
@@ -388,8 +421,9 @@ for marker in markers:
             "conformance_visible": marker["path"].startswith("conformance/") or marker["path"].startswith("tests/conformance/"),
             "reasoning": reasoning,
             "owner_bead": owner_bead,
-            "permanent_rationale": reasoning if not str(matched.get("blocker_bead_id", "")) else "",
-            "revisit_condition": str(matched.get("revisit_condition", row_output.get("revisit_condition", ""))),
+            "permanent_rationale": permanent_rationale,
+            "revisit_condition": revisit_condition,
+            "expires_at": expires_at,
             "proof_artifact": row_inventory_path_field,
         })
 
@@ -397,6 +431,13 @@ first_failure = ""
 if unclassified:
     marker = unclassified[0]
     first_failure = f"{marker['path']}:{marker['line']}:{marker['term']}: {marker['text']}"
+elif invalid_dispositions:
+    marker = invalid_dispositions[0]
+    first_failure = f"{marker['path']}:{marker['line']}:{marker['term']}: unsupported disposition {marker['disposition']}"
+elif owner_bead_missing_count:
+    first_failure = "row inventory contains marker rows without owner_bead or permanent_rationale"
+elif expired_allowance_count:
+    first_failure = "row inventory contains expired temporary allowances"
 
 row_inventory = {
     "schema_version": str(row_output.get("schema_version", "stub-placeholder-marker-row-inventory-v1")),
@@ -405,6 +446,9 @@ row_inventory = {
     "scanned_paths": inventory.get("scanned_paths", []),
     "marker_count": len(markers),
     "unclassified_count": len(unclassified),
+    "invalid_disposition_count": len(invalid_dispositions),
+    "expired_allowance_count": expired_allowance_count,
+    "owner_bead_missing_count": owner_bead_missing_count,
     "disposition_counts": dict(sorted(disposition_counts.items())),
     "markers": rows,
 }
@@ -419,7 +463,10 @@ print(json.dumps({
     "selector_count": len(selectors),
     "disposition_counts": dict(sorted(disposition_counts.items())),
     "unclassified_count": len(unclassified),
-    "verdict": "pass" if not unclassified else "fail",
+    "invalid_disposition_count": len(invalid_dispositions),
+    "expired_allowance_count": expired_allowance_count,
+    "owner_bead_missing_count": owner_bead_missing_count,
+    "verdict": "pass" if not unclassified and not invalid_dispositions and expired_allowance_count == 0 and owner_bead_missing_count == 0 else "fail",
     "first_failure": first_failure,
 }, sort_keys=True))
 PY
@@ -429,17 +476,23 @@ check_rckstb_placeholder_inventory_is_classified() {
     RCKSTB_INVENTORY_SUMMARY_JSON="$(build_rckstb_inventory_summary)"
     local marker_count
     local unclassified_count
+    local invalid_disposition_count
+    local expired_allowance_count
+    local owner_bead_missing_count
     local first_failure
     marker_count="$(jq -r '.marker_count // 0' <<<"$RCKSTB_INVENTORY_SUMMARY_JSON")"
     unclassified_count="$(jq -r '.unclassified_count // 0' <<<"$RCKSTB_INVENTORY_SUMMARY_JSON")"
+    invalid_disposition_count="$(jq -r '.invalid_disposition_count // 0' <<<"$RCKSTB_INVENTORY_SUMMARY_JSON")"
+    expired_allowance_count="$(jq -r '.expired_allowance_count // 0' <<<"$RCKSTB_INVENTORY_SUMMARY_JSON")"
+    owner_bead_missing_count="$(jq -r '.owner_bead_missing_count // 0' <<<"$RCKSTB_INVENTORY_SUMMARY_JSON")"
     first_failure="$(jq -r '.first_failure // ""' <<<"$RCKSTB_INVENTORY_SUMMARY_JSON")"
 
-    if [[ "$unclassified_count" == "0" ]]; then
+    if [[ "$unclassified_count" == "0" && "$invalid_disposition_count" == "0" && "$expired_allowance_count" == "0" && "$owner_bead_missing_count" == "0" ]]; then
         local row_inventory_path
         row_inventory_path="$(jq -r '.row_inventory_path // ""' <<<"$RCKSTB_INVENTORY_SUMMARY_JSON")"
-        report_pass "ZR-SCAN-RCKSTB-INVENTORY" "rckstb placeholder inventory classifies live markers" "marker_count=${marker_count}; unclassified_count=0; artifact=artifacts/stub_placeholder_inventory_v1.json; row_inventory=${row_inventory_path}"
+        report_pass "ZR-SCAN-RCKSTB-INVENTORY" "rckstb placeholder inventory classifies live markers" "marker_count=${marker_count}; unclassified_count=0; invalid_disposition_count=0; expired_allowance_count=0; owner_bead_missing_count=0; artifact=artifacts/stub_placeholder_inventory_v1.json; row_inventory=${row_inventory_path}"
     else
-        report_fail "ZR-SCAN-RCKSTB-INVENTORY" "rckstb placeholder inventory has unclassified markers" "unclassified_count=${unclassified_count}; first_failure=${first_failure}"
+        report_fail "ZR-SCAN-RCKSTB-INVENTORY" "rckstb placeholder inventory has invalid rows" "unclassified_count=${unclassified_count}; invalid_disposition_count=${invalid_disposition_count}; expired_allowance_count=${expired_allowance_count}; owner_bead_missing_count=${owner_bead_missing_count}; first_failure=${first_failure}"
     fi
 }
 
@@ -805,8 +858,14 @@ jq -nc \
       events_path: $events_path,
       rckstb_scanned_paths: $rckstb_inventory.scanned_paths,
       rckstb_marker_count: $rckstb_inventory.marker_count,
+      scanned_paths: $rckstb_inventory.scanned_paths,
       rckstb_disposition_counts: $rckstb_inventory.disposition_counts,
       rckstb_unclassified_count: $rckstb_inventory.unclassified_count,
+      expired_allowance_count: $rckstb_inventory.expired_allowance_count,
+      owner_bead_missing_count: $rckstb_inventory.owner_bead_missing_count,
+      rckstb_expired_allowance_count: $rckstb_inventory.expired_allowance_count,
+      rckstb_owner_bead_missing_count: $rckstb_inventory.owner_bead_missing_count,
+      rckstb_invalid_disposition_count: $rckstb_inventory.invalid_disposition_count,
       rckstb_inventory_artifact_path: $rckstb_inventory.artifact_path,
       rckstb_row_inventory_path: $rckstb_inventory.row_inventory_path,
       rckstb_inventory_verdict: $rckstb_inventory.verdict,
