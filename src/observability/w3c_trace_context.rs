@@ -28,6 +28,7 @@
 
 use std::collections::{BTreeMap, HashMap};
 use std::fmt;
+use std::hash::BuildHasher;
 use std::str::FromStr;
 
 /// Maximum length for trace context values to prevent amplification attacks.
@@ -514,8 +515,8 @@ impl FromStr for W3CTraceContext {
 ///
 /// Baggage is independent of trace context; callers can receive baggage even
 /// when no `traceparent` header exists.
-pub fn extract_propagation_from_http(
-    headers: &HashMap<String, String>,
+pub fn extract_propagation_from_http<S: BuildHasher>(
+    headers: &HashMap<String, String, S>,
 ) -> Result<W3CPropagationContext, TraceContextError> {
     let baggage = extract_baggage_from_http(headers)?;
     let trace_context = match headers.get("traceparent") {
@@ -540,8 +541,8 @@ pub fn extract_propagation_from_http(
 }
 
 /// Extracts W3C baggage from HTTP headers.
-pub fn extract_baggage_from_http(
-    headers: &HashMap<String, String>,
+pub fn extract_baggage_from_http<S: BuildHasher>(
+    headers: &HashMap<String, String, S>,
 ) -> Result<W3CBaggage, TraceContextError> {
     headers.get("baggage").map_or_else(
         || Ok(W3CBaggage::new()),
@@ -553,8 +554,8 @@ pub fn extract_baggage_from_http(
 ///
 /// Returns `None` if no trace context headers present (not an error).
 /// Returns `Err` only on malformed context that should be logged.
-pub fn extract_from_http(
-    headers: &HashMap<String, String>,
+pub fn extract_from_http<S: BuildHasher>(
+    headers: &HashMap<String, String, S>,
 ) -> Result<Option<W3CTraceContext>, TraceContextError> {
     extract_propagation_from_http(headers).map(|propagation| propagation.trace_context)
 }
@@ -562,7 +563,7 @@ pub fn extract_from_http(
 /// Injects W3C baggage into HTTP headers.
 pub fn inject_baggage_to_http(
     baggage: &W3CBaggage,
-    headers: &mut HashMap<String, String>,
+    headers: &mut HashMap<String, String, impl BuildHasher>,
 ) -> Result<(), TraceContextError> {
     if !baggage.is_empty() {
         headers.insert("baggage".to_string(), baggage.to_header()?);
@@ -573,7 +574,7 @@ pub fn inject_baggage_to_http(
 /// Injects W3C trace context and baggage into HTTP headers.
 pub fn inject_to_http(
     context: &W3CTraceContext,
-    headers: &mut HashMap<String, String>,
+    headers: &mut HashMap<String, String, impl BuildHasher>,
 ) -> Result<(), TraceContextError> {
     headers.insert("traceparent".to_string(), context.to_traceparent());
 
@@ -585,7 +586,10 @@ pub fn inject_to_http(
 }
 
 /// Injects W3C trace context into gRPC metadata.
-pub fn inject_to_grpc(context: &W3CTraceContext, metadata: &mut HashMap<String, String>) {
+pub fn inject_to_grpc(
+    context: &W3CTraceContext,
+    metadata: &mut HashMap<String, String, impl BuildHasher>,
+) {
     metadata.insert("traceparent".to_string(), context.to_traceparent());
 
     if let Some(ref tracestate) = context.tracestate {
@@ -725,6 +729,43 @@ mod tests {
         let mut grpc_metadata = HashMap::new();
         inject_to_grpc(&context, &mut grpc_metadata);
         assert_eq!(grpc_metadata.get("baggage"), http_headers.get("baggage"));
+    }
+
+    #[test]
+    fn propagation_helpers_accept_alternate_hashers() {
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::BuildHasherDefault;
+
+        type HeaderMap = HashMap<String, String, BuildHasherDefault<DefaultHasher>>;
+
+        let mut headers = HeaderMap::with_hasher(BuildHasherDefault::default());
+        headers.insert(
+            "traceparent".to_string(),
+            "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01".to_string(),
+        );
+        headers.insert("baggage".to_string(), "tenant=gamma".to_string());
+
+        let propagation =
+            extract_propagation_from_http(&headers).expect("alternate-hasher extraction failed");
+        let context = propagation
+            .trace_context
+            .expect("trace context should be present");
+        assert_eq!(context.baggage.get("tenant"), Some("gamma"));
+
+        let mut outbound = HeaderMap::with_hasher(BuildHasherDefault::default());
+        inject_to_http(&context, &mut outbound).expect("alternate-hasher HTTP injection failed");
+        assert!(outbound.contains_key("traceparent"));
+        assert_eq!(
+            outbound.get("baggage").map(String::as_str),
+            Some("tenant=gamma")
+        );
+
+        let mut grpc_metadata = HeaderMap::with_hasher(BuildHasherDefault::default());
+        inject_to_grpc(&context, &mut grpc_metadata);
+        assert_eq!(
+            grpc_metadata.get("traceparent"),
+            outbound.get("traceparent")
+        );
     }
 
     #[test]
