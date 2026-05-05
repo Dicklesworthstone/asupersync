@@ -1,5 +1,3 @@
-#![allow(warnings)]
-#![allow(clippy::all)]
 //! Progressive-disclosure contract checks for the FABRIC messaging surface.
 //!
 //! These tests intentionally read the checked-in source files instead of
