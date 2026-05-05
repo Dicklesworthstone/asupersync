@@ -1,5 +1,3 @@
-#![allow(warnings)]
-#![allow(clippy::all)]
 //! Exhaustive framing properties for `src/codec/*` — gap-fill alongside
 //! `codec_round_trip.rs` (single-config round-trip / amplification) and the
 //! existing `codec_framing/` subdir (CodecConformanceResult harness, not
@@ -315,7 +313,7 @@ fn ld_byte_by_byte_streaming_converges() {
 // ─── 6. Decoder recovery after error ───────────────────────────────────────
 
 #[test]
-fn ld_decoder_recovers_after_oversize_error_when_buffer_is_reset() {
+fn ld_decoder_recovers_after_oversize_error_when_body_is_drained() {
     let mut codec = ld_be(4, 64);
     // Inject oversize frame → expect typed error.
     let mut buf = BytesMut::new();
@@ -323,10 +321,15 @@ fn ld_decoder_recovers_after_oversize_error_when_buffer_is_reset() {
     let r = codec.decode(&mut buf);
     assert!(r.is_err(), "oversize frame must yield Err, got {r:?}");
 
-    // Reset the buffer (simulate caller draining the bad frame from upstream)
-    // and feed a valid frame. The codec MUST still parse it cleanly — its
-    // internal `state` must be `Head`, not stuck in `Data(...)`.
-    buf.clear();
+    assert!(buf.is_empty(), "oversize header must be consumed");
+    assert!(
+        codec.decode(&mut buf).unwrap().is_none(),
+        "empty follow-up must wait for the advertised oversize body"
+    );
+
+    // Drain the advertised body, then feed a valid frame. The codec MUST
+    // resume cleanly instead of re-emitting the oversize error.
+    buf.resize(1024, 0);
     let mut encoder_codec = ld_be(4, 64);
     encoder_codec
         .encode(BytesMut::from(&b"recovered"[..]), &mut buf)
