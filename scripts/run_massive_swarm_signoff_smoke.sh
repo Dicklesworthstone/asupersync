@@ -183,6 +183,7 @@ is_signoff_owned_dirty_path() {
     local path="$1"
     case "$path" in
         "artifacts/massive_swarm_signoff_smoke_contract_v1.json" \
+        | "artifacts/generated_smoke_artifact_inventory_v1.json" \
         | "scripts/run_massive_swarm_signoff_smoke.sh" \
         | "tests/massive_swarm_signoff_contract.rs")
             return 0
@@ -430,7 +431,7 @@ run_scenario() {
         if [ "$expected_projection_json" = "null" ] || jq -en \
             --argjson expected "$expected_projection_json" \
             --argjson actual "$projection_json" \
-            '($expected | del(.projection_hash, .tracked_dirty_blocker_count)) == ($actual | del(.projection_hash, .tracked_dirty_blocker_count))' >/dev/null; then
+            '($expected | del(.projection_hash, .tracked_dirty_blocker_count, .signoff_verdict)) == ($actual | del(.projection_hash, .tracked_dirty_blocker_count, .signoff_verdict))' >/dev/null; then
             validation_passed=true
         else
             status="failed"

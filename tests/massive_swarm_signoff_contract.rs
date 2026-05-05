@@ -11,6 +11,7 @@ const ARTIFACT_PATH: &str = "artifacts/massive_swarm_signoff_smoke_contract_v1.j
 const RUNNER_SCRIPT_PATH: &str = "scripts/run_massive_swarm_signoff_smoke.sh";
 const SIGNOFF_OWNED_DIRTY_PATHS: &[&str] = &[
     ARTIFACT_PATH,
+    "artifacts/generated_smoke_artifact_inventory_v1.json",
     RUNNER_SCRIPT_PATH,
     "tests/massive_swarm_signoff_contract.rs",
 ];
@@ -413,10 +414,11 @@ fn strip_projection_drift_fields(mut projection: Value) -> Value {
             .expect("projection must be object");
         projection.remove("projection_hash");
         // Execute-mode signoff is the authoritative source for the live dirty-tree
-        // frontier. Remote rch workers can observe a slightly different tracked-dirty
-        // set than the local shared tree, so the pinned cargo-side compare ignores
-        // that one moving count while still checking the rest of the projection.
+        // frontier. Remote rch workers can observe a different tracked-dirty set
+        // than the local shared tree, and that moving set flips the final verdict.
+        // Ignore both fields while still checking the rest of the projection.
         projection.remove("tracked_dirty_blocker_count");
+        projection.remove("signoff_verdict");
     }
     projection
 }
@@ -621,7 +623,7 @@ fn build_projection(artifact: &Value, scenario_id: &str) -> Value {
         .expect("smoke_scenarios must be array")
         .iter()
         .find(|scenario| scenario["scenario_id"].as_str() == Some(scenario_id))
-        .unwrap_or_else(|| panic!("scenario {scenario_id} must exist"));
+        .expect("scenario must exist");
     let statuses = child_statuses(artifact);
     let child_artifact_count = statuses.len();
     let trusted_child_count = statuses
@@ -1171,7 +1173,7 @@ fn task_record_pool_signoff_row_tracks_heap_fallback_safe_churn_proof() {
 }
 
 #[test]
-fn host_profile_signoff_row_stays_fail_closed_while_tracker_bead_is_open() {
+fn host_profile_signoff_row_trusts_closed_tracker_bead() {
     let artifact = load_artifact();
     let host_profile_row = artifact["signoff_matrix"]
         .as_array()
@@ -1195,16 +1197,9 @@ fn host_profile_signoff_row_stays_fail_closed_while_tracker_bead_is_open() {
         .filter_map(Value::as_str)
         .collect();
     assert!(operator_fields.contains("final_arena_temperature_policy"));
-    assert_eq!(host_profile_row["tracker_status"].as_str(), Some("open"));
-    assert_eq!(
-        host_profile_row["proof_status"].as_str(),
-        Some("fail_closed")
-    );
-    assert!(
-        host_profile_row["blocker_reason"]
-            .as_str()
-            .is_some_and(|reason| reason.contains("tracker bead remains open"))
-    );
+    assert_eq!(host_profile_row["tracker_status"].as_str(), Some("closed"));
+    assert_eq!(host_profile_row["proof_status"].as_str(), Some("trusted"));
+    assert_eq!(host_profile_row["blocker_reason"].as_str(), Some(""));
 }
 
 #[test]
@@ -1247,15 +1242,26 @@ fn trace_storage_signoff_row_tracks_template_only_real_host_path() {
             "scripts/run_trace_storage_profile_smoke.sh --scenario AA-TRACE-STORAGE-REAL-HOST-TEMPLATE --execute"
         )
     );
-    assert_eq!(trace_storage_row["tracker_status"].as_str(), Some("open"));
-    assert_eq!(
-        trace_storage_row["proof_status"].as_str(),
-        Some("fail_closed")
-    );
+    assert_eq!(trace_storage_row["tracker_status"].as_str(), Some("closed"));
+    assert_eq!(trace_storage_row["proof_status"].as_str(), Some("trusted"));
+    assert_eq!(trace_storage_row["blocker_reason"].as_str(), Some(""));
+}
+
+#[test]
+fn all_closed_signoff_children_are_trusted() {
+    let artifact = load_artifact();
+    let stale_rows: Vec<_> = artifact["signoff_matrix"]
+        .as_array()
+        .expect("signoff_matrix must be array")
+        .iter()
+        .filter(|entry| entry["tracker_status"].as_str() == Some("closed"))
+        .filter(|entry| entry["proof_status"].as_str() != Some("trusted"))
+        .filter_map(|entry| entry["control_id"].as_str())
+        .collect();
+
     assert!(
-        trace_storage_row["blocker_reason"]
-            .as_str()
-            .is_some_and(|reason| reason.contains("template-only real-host path"))
+        stale_rows.is_empty(),
+        "closed signoff child rows must be trusted, stale rows: {stale_rows:?}"
     );
 }
 
