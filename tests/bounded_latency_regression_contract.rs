@@ -1,5 +1,3 @@
-#![allow(warnings)]
-#![allow(clippy::all)]
 //! Bounded latency regression contract invariants (AA-04.3).
 
 #![allow(missing_docs, clippy::cast_precision_loss)]
