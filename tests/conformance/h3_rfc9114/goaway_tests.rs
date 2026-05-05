@@ -8,22 +8,9 @@
 //! - Connection closure and cleanup behavior
 
 use super::*;
-
-/// GOAWAY frame structure.
-#[derive(Debug, Clone)]
-pub struct GoawayFrame {
-    /// Last stream ID that will be processed.
-    pub last_stream_id: u64,
-}
-
-/// Connection shutdown types.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum ShutdownType {
-    /// Graceful shutdown - allow in-flight streams to complete.
-    Graceful,
-    /// Immediate shutdown - close all streams immediately.
-    Immediate,
-}
+use asupersync::http::h3_native::{
+    H3ConnectionConfig, H3ConnectionState, H3Frame, H3NativeError, H3Settings,
+};
 
 /// Run all GOAWAY semantics conformance tests.
 #[allow(dead_code)]
@@ -43,306 +30,194 @@ pub fn run_goaway_tests() -> Vec<H3ConformanceResult> {
 #[allow(dead_code)]
 fn test_goaway_last_stream_id_validity() -> H3ConformanceResult {
     let (result, elapsed_ms) = timed_test(|| -> Result<(), String> {
-        // Test valid last-stream-ID values
-        setup_test_streams(&[1, 5, 9, 13]); // Client-initiated streams
-
-        let valid_goaway_cases = vec![
-            (13u64, "include all streams"),
-            (9u64, "include streams 1, 5, 9"),
-            (5u64, "include streams 1, 5"),
-            (1u64, "include only stream 1"),
-            (0u64, "include no streams"),
+        let valid_goaway_cases = [
+            (12u64, "allow streams below 12"),
+            (8u64, "allow streams below 8"),
+            (4u64, "allow streams below 4"),
+            (0u64, "reject all request streams"),
         ];
 
         for (last_stream_id, description) in valid_goaway_cases {
-            reset_connection_state();
-            setup_test_streams(&[1, 5, 9, 13]);
+            let mut connection = client_connection_with_settings()?;
+            process_wire_goaway(&mut connection, last_stream_id, description)?;
 
-            let goaway = GoawayFrame { last_stream_id };
-            let encoded_goaway = encode_goaway_frame(&goaway);
-
-            if !validate_goaway_frame(&encoded_goaway) {
-                return Err(format!("Valid GOAWAY frame rejected: {}", description));
-            }
-
-            if !process_goaway_frame(&encoded_goaway) {
-                return Err(format!(
-                    "Failed to process valid GOAWAY frame: {}",
-                    description
-                ));
-            }
-
-            // Verify stream processing based on last_stream_id
-            let stream_states = get_stream_states();
-            for stream_id in &[1, 5, 9, 13] {
-                let should_be_processed = *stream_id <= last_stream_id;
-                let is_processed = stream_states
-                    .get(stream_id)
-                    .map_or(false, |state| *state == StreamState::WillProcess);
-
-                if should_be_processed != is_processed {
-                    return Err(format!(
-                        "Stream {} processing mismatch for {}: expected {}, got {}",
-                        stream_id, description, should_be_processed, is_processed
-                    ));
+            for stream_id in [0, 4, 8, 12] {
+                if stream_id < last_stream_id {
+                    expect_request_stream_allowed(&mut connection, stream_id, description)?;
+                } else {
+                    expect_request_stream_rejected_after_goaway(
+                        &mut connection,
+                        stream_id,
+                        description,
+                    )?;
                 }
             }
         }
 
-        // Test invalid last-stream-ID values
-        setup_test_streams(&[1, 5]);
-
-        let invalid_cases = vec![
-            (2u64, "even stream ID (server-initiated not allowed)"),
-            (4u64, "another even stream ID"),
+        let invalid_cases = [
+            (1u64, "server-initiated bidirectional stream ID"),
+            (2u64, "client-initiated unidirectional stream ID"),
+            (3u64, "server-initiated unidirectional stream ID"),
+            (5u64, "server-initiated bidirectional stream ID above 4"),
         ];
 
         for (invalid_stream_id, description) in invalid_cases {
-            reset_connection_state();
-            setup_test_streams(&[1, 5]);
-
-            let invalid_goaway = GoawayFrame {
-                last_stream_id: invalid_stream_id,
-            };
-            let encoded = encode_goaway_frame(&invalid_goaway);
-
-            if process_goaway_frame(&encoded) {
-                // Some implementations may accept this as "no stream with that ID"
-                // Both acceptance and rejection can be conformant
-                continue;
-            }
-
-            let error_code = get_last_connection_error();
-            if !matches!(error_code, Some(ConnectionError::ProtocolError)) {
-                return Err(format!(
-                    "Invalid stream ID should cause protocol error: {}",
-                    description
-                ));
-            }
+            let mut connection = client_connection_with_settings()?;
+            let frame = decode_exact_frame(&encode_goaway_frame(invalid_stream_id)?)?;
+            expect_control_protocol(
+                connection.on_control_frame(&frame),
+                "GOAWAY id must be a client-initiated bidirectional stream id",
+                description,
+            )?;
         }
 
         Ok(())
     });
 
-    H3ConformanceResult {
-        test_id: "RFC9114-8.1-GOAWAY-STREAM-ID".to_string(),
-        description: "GOAWAY last-stream-ID validity validation".to_string(),
-        category: TestCategory::ConnectionManagement,
-        requirement_level: RequirementLevel::Must,
-        verdict: if result.is_ok() {
-            TestVerdict::Pass
-        } else {
-            TestVerdict::Fail
-        },
+    conformance_result(
+        "RFC9114-8.1-GOAWAY-STREAM-ID",
+        "GOAWAY last-stream-ID validity validation",
+        result,
         elapsed_ms,
-        notes: result.err(),
-    }
+        None,
+    )
 }
 
 /// RFC 9114 Section 8.1: GOAWAY graceful shutdown.
 #[allow(dead_code)]
 fn test_goaway_graceful_shutdown() -> H3ConformanceResult {
     let (result, elapsed_ms) = timed_test(|| -> Result<(), String> {
-        // Setup connection with active streams
-        reset_connection_state();
-        setup_test_streams(&[1, 5, 9]);
-        start_stream_processing(&[1, 5, 9]);
+        let mut connection = client_connection_with_settings()?;
 
-        // Send GOAWAY with last_stream_id = 5 (graceful shutdown)
-        let goaway = GoawayFrame { last_stream_id: 5 };
-        let encoded_goaway = encode_goaway_frame(&goaway);
+        expect_request_stream_allowed(&mut connection, 0, "pre-GOAWAY in-flight stream 0")?;
+        expect_request_stream_allowed(&mut connection, 4, "pre-GOAWAY in-flight stream 4")?;
 
-        if !process_goaway_frame(&encoded_goaway) {
-            return Err("Failed to process GOAWAY for graceful shutdown".to_string());
+        process_wire_goaway(&mut connection, 8, "graceful cutoff at stream 8")?;
+
+        connection
+            .on_request_stream_frame(4, &H3Frame::Data(b"in-flight body".to_vec()))
+            .map_err(|err| {
+                format!("in-flight stream below GOAWAY cutoff should continue: {err}")
+            })?;
+
+        connection
+            .finish_request_stream(0)
+            .map_err(|err| format!("in-flight stream 0 should finish after GOAWAY: {err}"))?;
+        connection
+            .finish_request_stream(4)
+            .map_err(|err| format!("in-flight stream 4 should finish after GOAWAY: {err}"))?;
+
+        if connection.active_request_stream_count() != 0 {
+            return Err(format!(
+                "finished streams should be removed from live state, got {} active",
+                connection.active_request_stream_count()
+            ));
         }
 
-        // Verify connection state after GOAWAY
-        let connection_state = get_connection_state();
-        if !matches!(connection_state, ConnectionState::Closing) {
-            return Err("Connection should be in closing state after GOAWAY".to_string());
-        }
-
-        // Streams <= last_stream_id should continue processing
-        let stream_states = get_stream_states();
-
-        if stream_states.get(&1) != Some(&StreamState::Processing) {
-            return Err("Stream 1 should continue processing after GOAWAY".to_string());
-        }
-
-        if stream_states.get(&5) != Some(&StreamState::Processing) {
-            return Err("Stream 5 should continue processing after GOAWAY".to_string());
-        }
-
-        // Streams > last_stream_id should be rejected
-        if stream_states.get(&9) != Some(&StreamState::Rejected) {
-            return Err("Stream 9 should be rejected after GOAWAY".to_string());
-        }
-
-        // New streams should be rejected
-        if create_new_stream(17) {
-            return Err("New streams should be rejected after GOAWAY".to_string());
-        }
-
-        // Complete in-flight streams
-        complete_stream(1);
-        complete_stream(5);
-
-        // Connection should close after all in-flight streams complete
-        wait_for_connection_closure();
-
-        let final_state = get_connection_state();
-        if !matches!(final_state, ConnectionState::Closed) {
-            return Err("Connection should be closed after all streams complete".to_string());
-        }
+        expect_request_stream_rejected_after_goaway(
+            &mut connection,
+            8,
+            "new stream at GOAWAY cutoff",
+        )?;
+        expect_request_stream_rejected_after_goaway(
+            &mut connection,
+            12,
+            "new stream above GOAWAY cutoff",
+        )?;
 
         Ok(())
     });
 
-    H3ConformanceResult {
-        test_id: "RFC9114-8.1-GOAWAY-GRACEFUL".to_string(),
-        description: "GOAWAY graceful shutdown semantics".to_string(),
-        category: TestCategory::ConnectionManagement,
-        requirement_level: RequirementLevel::Must,
-        verdict: if result.is_ok() {
-            TestVerdict::Pass
-        } else {
-            TestVerdict::Fail
-        },
+    conformance_result(
+        "RFC9114-8.1-GOAWAY-GRACEFUL",
+        "GOAWAY graceful shutdown stream cutoff and in-flight completion",
+        result,
         elapsed_ms,
-        notes: result.err(),
-    }
+        Some(
+            "Verified native stream cutoff and in-flight completion; transport-driven connection close timing is outside H3ConnectionState.",
+        ),
+    )
 }
 
 /// RFC 9114 Section 8.1: GOAWAY immediate shutdown.
 #[allow(dead_code)]
 fn test_goaway_immediate_shutdown() -> H3ConformanceResult {
     let (result, elapsed_ms) = timed_test(|| -> Result<(), String> {
-        // Setup connection with active streams
-        reset_connection_state();
-        setup_test_streams(&[1, 5, 9]);
-        start_stream_processing(&[1, 5, 9]);
+        let mut connection = client_connection_with_settings()?;
+        process_wire_goaway(&mut connection, 0, "immediate cutoff at stream 0")?;
 
-        // Send GOAWAY with last_stream_id = 0 (immediate shutdown)
-        let goaway = GoawayFrame { last_stream_id: 0 };
-        let encoded_goaway = encode_goaway_frame(&goaway);
-
-        if !process_goaway_frame(&encoded_goaway) {
-            return Err("Failed to process GOAWAY for immediate shutdown".to_string());
-        }
-
-        // All streams should be terminated immediately
-        let stream_states = get_stream_states();
-
-        for stream_id in &[1, 5, 9] {
-            let stream_state = stream_states.get(stream_id);
-            if !matches!(stream_state, Some(StreamState::Terminated)) {
-                return Err(format!(
-                    "Stream {} should be terminated immediately, got {:?}",
-                    stream_id, stream_state
-                ));
-            }
-        }
-
-        // Connection should close immediately
-        let connection_state = get_connection_state();
-        if !matches!(
-            connection_state,
-            ConnectionState::Closed | ConnectionState::Closing
-        ) {
-            return Err("Connection should close immediately with last_stream_id=0".to_string());
-        }
-
-        // No new streams should be accepted
-        if create_new_stream(13) {
-            return Err("No new streams should be accepted after immediate shutdown".to_string());
+        for stream_id in [0, 4, 8, 12] {
+            expect_request_stream_rejected_after_goaway(
+                &mut connection,
+                stream_id,
+                "GOAWAY(0) immediate cutoff",
+            )?;
         }
 
         Ok(())
     });
 
-    H3ConformanceResult {
-        test_id: "RFC9114-8.1-GOAWAY-IMMEDIATE".to_string(),
-        description: "GOAWAY immediate shutdown semantics".to_string(),
-        category: TestCategory::ConnectionManagement,
-        requirement_level: RequirementLevel::Must,
-        verdict: if result.is_ok() {
-            TestVerdict::Pass
-        } else {
-            TestVerdict::Fail
-        },
+    conformance_result(
+        "RFC9114-8.1-GOAWAY-IMMEDIATE",
+        "GOAWAY(0) rejects all request streams through native state",
+        result,
         elapsed_ms,
-        notes: result.err(),
-    }
+        Some(
+            "GOAWAY(0) stream admission is verified; closing the QUIC connection is a transport lifecycle outside this mapping state.",
+        ),
+    )
 }
 
 /// RFC 9114 Section 8.1: GOAWAY bidirectional behavior.
 #[allow(dead_code)]
 fn test_goaway_bidirectional_behavior() -> H3ConformanceResult {
     let (result, elapsed_ms) = timed_test(|| -> Result<(), String> {
-        // Test client sending GOAWAY
-        reset_connection_state();
-        setup_test_streams(&[1, 5]); // Client streams
+        let mut client = client_connection_with_settings()?;
+        process_wire_goaway(&mut client, 8, "server-to-client GOAWAY")?;
+        expect_request_stream_allowed(&mut client, 4, "client stream below server GOAWAY")?;
+        expect_request_stream_rejected_after_goaway(
+            &mut client,
+            8,
+            "client stream at server GOAWAY",
+        )?;
 
-        let client_goaway = GoawayFrame { last_stream_id: 1 };
-        let encoded = encode_goaway_frame(&client_goaway);
-
-        if !process_goaway_frame(&encoded) {
-            return Err("Failed to process client GOAWAY".to_string());
+        let mut server = H3ConnectionState::new_server();
+        receive_peer_settings(&mut server)?;
+        process_wire_goaway(&mut server, 7, "client-to-server push-id GOAWAY")?;
+        if server.goaway_id() != Some(7) {
+            return Err(format!(
+                "server role should record client GOAWAY push ID 7, got {:?}",
+                server.goaway_id()
+            ));
         }
-
-        // Verify client GOAWAY doesn't affect server-initiated streams
-        // (this test assumes we can differentiate client vs server behavior)
-
-        // Test server sending GOAWAY
-        reset_connection_state();
-        setup_test_streams(&[1, 5]); // Client streams
-
-        let server_goaway = GoawayFrame { last_stream_id: 5 };
-        let encoded_server = encode_goaway_frame(&server_goaway);
-
-        if !process_goaway_frame(&encoded_server) {
-            return Err("Failed to process server GOAWAY".to_string());
-        }
-
-        // Test both endpoints sending GOAWAY
-        reset_connection_state();
-        setup_test_streams(&[1, 5, 9]);
-
-        // Client sends GOAWAY first
-        let client_goaway2 = GoawayFrame { last_stream_id: 5 };
-        if !process_goaway_frame(&encode_goaway_frame(&client_goaway2)) {
-            return Err("Failed to process first GOAWAY in bidirectional test".to_string());
-        }
-
-        // Server sends GOAWAY second
-        let server_goaway2 = GoawayFrame { last_stream_id: 1 };
-        if !process_goaway_frame(&encode_goaway_frame(&server_goaway2)) {
-            return Err("Failed to process second GOAWAY in bidirectional test".to_string());
-        }
-
-        // Connection should close when both sides have sent GOAWAY
-        wait_for_connection_closure();
-
-        let final_state = get_connection_state();
-        if !matches!(final_state, ConnectionState::Closed) {
-            return Err("Connection should close after bidirectional GOAWAY".to_string());
-        }
+        expect_request_stream_allowed(
+            &mut server,
+            8,
+            "server role should not apply push-id GOAWAY to request stream IDs",
+        )?;
 
         Ok(())
     });
 
+    let (verdict, notes) = match result {
+        Ok(()) => (
+            TestVerdict::ExpectedFailure,
+            Some(
+                "Native state verifies per-endpoint received GOAWAY behavior; combined two-endpoint graceful-close lifecycle is not represented without transport integration."
+                    .to_string(),
+            ),
+        ),
+        Err(err) => (TestVerdict::Fail, Some(err)),
+    };
+
     H3ConformanceResult {
         test_id: "RFC9114-8.1-GOAWAY-BIDIRECTIONAL".to_string(),
         description: "GOAWAY bidirectional behavior validation".to_string(),
-        category: TestCategory::ConnectionManagement,
+        category: TestCategory::ControlStream,
         requirement_level: RequirementLevel::Must,
-        verdict: if result.is_ok() {
-            TestVerdict::Pass
-        } else {
-            TestVerdict::Fail
-        },
+        verdict,
         elapsed_ms,
-        notes: result.err(),
+        notes,
     }
 }
 
@@ -350,77 +225,70 @@ fn test_goaway_bidirectional_behavior() -> H3ConformanceResult {
 #[allow(dead_code)]
 fn test_goaway_error_handling() -> H3ConformanceResult {
     let (result, elapsed_ms) = timed_test(|| -> Result<(), String> {
-        // Test malformed GOAWAY frames
-        let malformed_frames = vec![
-            (vec![], "empty GOAWAY frame"),
-            (vec![0x07], "GOAWAY frame without stream ID"),
-            (vec![0x07, 0x02, 0xFF], "truncated stream ID varint"),
+        let malformed_frames: [(&[u8], &str); 3] = [
+            (&[], "empty GOAWAY frame"),
+            (&[0x07], "GOAWAY frame without length"),
+            (&[0x07, 0x02, 0xFF], "truncated GOAWAY stream ID varint"),
         ];
 
         for (malformed_data, description) in malformed_frames {
-            reset_connection_state();
-
-            if validate_goaway_frame(&malformed_data) {
-                return Err(format!("Malformed GOAWAY frame accepted: {}", description));
-            }
-
-            if process_goaway_frame(&malformed_data) {
-                return Err(format!(
-                    "Processing succeeded for malformed GOAWAY: {}",
-                    description
-                ));
-            }
+            expect_decode_error(malformed_data, description)?;
         }
 
-        // Test multiple GOAWAY frames
-        reset_connection_state();
-        setup_test_streams(&[1, 5, 9]);
-
-        let first_goaway = GoawayFrame { last_stream_id: 9 };
-        if !process_goaway_frame(&encode_goaway_frame(&first_goaway)) {
-            return Err("Failed to process first GOAWAY".to_string());
+        let mut connection = client_connection_with_settings()?;
+        process_wire_goaway(&mut connection, 12, "first GOAWAY")?;
+        process_wire_goaway(&mut connection, 8, "smaller second GOAWAY")?;
+        if connection.goaway_id() != Some(8) {
+            return Err(format!(
+                "smaller GOAWAY ID should replace prior value, got {:?}",
+                connection.goaway_id()
+            ));
         }
+        expect_request_stream_allowed(&mut connection, 4, "stream below smaller GOAWAY")?;
+        expect_request_stream_rejected_after_goaway(
+            &mut connection,
+            8,
+            "stream at smaller GOAWAY",
+        )?;
 
-        // Second GOAWAY with smaller last_stream_id
-        let second_goaway = GoawayFrame { last_stream_id: 5 };
-        if !process_goaway_frame(&encode_goaway_frame(&second_goaway)) {
-            return Err("Failed to process second GOAWAY".to_string());
-        }
+        expect_control_protocol(
+            connection.on_control_frame(&H3Frame::Goaway(12)),
+            "GOAWAY id must not increase",
+            "increasing GOAWAY ID",
+        )?;
 
-        // Verify the smaller last_stream_id takes effect
-        let stream_states = get_stream_states();
-        if stream_states.get(&9) != Some(&StreamState::Rejected) {
-            return Err(
-                "Stream 9 should be rejected after second GOAWAY with smaller ID".to_string(),
-            );
-        }
-
-        // Test GOAWAY with future stream ID
-        reset_connection_state();
-        setup_test_streams(&[1, 5]);
-
-        let future_goaway = GoawayFrame { last_stream_id: 13 }; // Stream doesn't exist yet
-        if !process_goaway_frame(&encode_goaway_frame(&future_goaway)) {
-            return Err("Failed to process GOAWAY with future stream ID".to_string());
-        }
-
-        // Creating stream 9 should still be allowed
-        if !create_new_stream(9) {
-            return Err("Stream 9 should be allowed with future GOAWAY ID".to_string());
-        }
-
-        // Creating stream 17 should be rejected
-        if create_new_stream(17) {
-            return Err("Stream 17 should be rejected with future GOAWAY ID".to_string());
-        }
+        let mut future_cutoff = client_connection_with_settings()?;
+        process_wire_goaway(&mut future_cutoff, 16, "future GOAWAY stream ID")?;
+        expect_request_stream_allowed(&mut future_cutoff, 12, "new stream below future GOAWAY ID")?;
+        expect_request_stream_rejected_after_goaway(
+            &mut future_cutoff,
+            16,
+            "new stream at future GOAWAY ID",
+        )?;
 
         Ok(())
     });
 
+    conformance_result(
+        "RFC9114-8-GOAWAY-ERROR-HANDLING",
+        "GOAWAY error handling and edge cases",
+        result,
+        elapsed_ms,
+        None,
+    )
+}
+
+fn conformance_result(
+    test_id: &str,
+    description: &str,
+    result: Result<(), String>,
+    elapsed_ms: u64,
+    pass_notes: Option<&str>,
+) -> H3ConformanceResult {
     H3ConformanceResult {
-        test_id: "RFC9114-8-GOAWAY-ERROR-HANDLING".to_string(),
-        description: "GOAWAY error handling and edge cases".to_string(),
-        category: TestCategory::ConnectionManagement,
+        test_id: test_id.to_string(),
+        description: description.to_string(),
+        category: TestCategory::ControlStream,
         requirement_level: RequirementLevel::Must,
         verdict: if result.is_ok() {
             TestVerdict::Pass
@@ -428,151 +296,110 @@ fn test_goaway_error_handling() -> H3ConformanceResult {
             TestVerdict::Fail
         },
         elapsed_ms,
-        notes: result.err(),
+        notes: match result {
+            Ok(()) => pass_notes.map(str::to_string),
+            Err(err) => Some(err),
+        },
     }
 }
 
-// Helper functions and types for GOAWAY testing
-// In real implementation, these would integrate with actual HTTP/3 stack
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-enum StreamState {
-    WillProcess,
-    Processing,
-    Rejected,
-    Terminated,
-    Completed,
+fn client_connection_with_settings() -> Result<H3ConnectionState, String> {
+    let mut connection = H3ConnectionState::new_client();
+    receive_peer_settings(&mut connection)?;
+    Ok(connection)
 }
 
-#[derive(Debug, PartialEq)]
-enum ConnectionState {
-    Open,
-    Closing,
-    Closed,
+fn receive_peer_settings(connection: &mut H3ConnectionState) -> Result<(), String> {
+    connection
+        .on_control_frame(&H3Frame::Settings(H3Settings::default()))
+        .map_err(|err| format!("initial peer SETTINGS rejected: {err}"))
 }
 
-#[derive(Debug, PartialEq)]
-enum ConnectionError {
-    ProtocolError,
-    FrameError,
-}
-
-impl TestCategory {
-    const ConnectionManagement: TestCategory = TestCategory::ControlStream; // Reuse existing category
-}
-
-fn encode_goaway_frame(goaway: &GoawayFrame) -> Vec<u8> {
-    let mut frame = Vec::new();
-
-    // Frame type: GOAWAY (0x07)
-    frame.push(0x07);
-
-    // Calculate payload length (varint for stream ID)
-    let stream_id_bytes = encode_varint_bytes(goaway.last_stream_id);
-    frame.push(stream_id_bytes.len() as u8);
-
-    // Stream ID varint
-    frame.extend_from_slice(&stream_id_bytes);
-
-    frame
-}
-
-fn encode_varint_bytes(value: u64) -> Vec<u8> {
-    let mut bytes = Vec::new();
-
-    if value < 64 {
-        bytes.push(value as u8);
-    } else if value < 16384 {
-        bytes.push(0x40 | ((value >> 8) as u8));
-        bytes.push(value as u8);
-    } else if value < 1073741824 {
-        bytes.push(0x80 | ((value >> 24) as u8));
-        bytes.push((value >> 16) as u8);
-        bytes.push((value >> 8) as u8);
-        bytes.push(value as u8);
-    } else {
-        bytes.push(0xC0 | ((value >> 56) as u8));
-        for i in (0..7).rev() {
-            bytes.push((value >> (i * 8)) as u8);
-        }
+fn process_wire_goaway(
+    connection: &mut H3ConnectionState,
+    goaway_id: u64,
+    context: &str,
+) -> Result<(), String> {
+    let encoded = encode_goaway_frame(goaway_id)?;
+    let frame = decode_exact_frame(&encoded)?;
+    connection
+        .on_control_frame(&frame)
+        .map_err(|err| format!("GOAWAY {goaway_id} rejected for {context}: {err}"))?;
+    if connection.goaway_id() != Some(goaway_id) {
+        return Err(format!(
+            "GOAWAY {goaway_id} should be recorded for {context}, got {:?}",
+            connection.goaway_id()
+        ));
     }
-
-    bytes
+    Ok(())
 }
 
-fn validate_goaway_frame(data: &[u8]) -> bool {
-    // Basic GOAWAY frame validation
-    if data.len() < 2 {
-        return false;
+fn encode_goaway_frame(goaway_id: u64) -> Result<Vec<u8>, String> {
+    let mut encoded = Vec::new();
+    H3Frame::Goaway(goaway_id)
+        .encode(&mut encoded)
+        .map_err(|err| format!("GOAWAY {goaway_id} encode failed: {err}"))?;
+    Ok(encoded)
+}
+
+fn decode_exact_frame(encoded: &[u8]) -> Result<H3Frame, String> {
+    let (frame, consumed) = H3Frame::decode(encoded, &H3ConnectionConfig::default())
+        .map_err(|err| format!("H3 frame decode failed: {err}"))?;
+    if consumed != encoded.len() {
+        return Err(format!(
+            "H3 frame decode consumed {consumed} bytes from {} byte input",
+            encoded.len()
+        ));
     }
-
-    if data[0] != 0x07 {
-        return false; // Not a GOAWAY frame
-    }
-
-    let length = data[1] as usize;
-    data.len() >= 2 + length
+    Ok(frame)
 }
 
-fn process_goaway_frame(_data: &[u8]) -> bool {
-    // Mock GOAWAY processing
-    true
-}
-
-fn setup_test_streams(stream_ids: &[u64]) {
-    // Mock stream setup
-    for &stream_id in stream_ids {
-        register_stream(stream_id);
+fn expect_decode_error(data: &[u8], context: &str) -> Result<(), String> {
+    match H3Frame::decode(data, &H3ConnectionConfig::default()) {
+        Err(H3NativeError::InvalidFrame(_)) | Err(H3NativeError::UnexpectedEof) => Ok(()),
+        Err(err) => Err(format!(
+            "{context}: expected malformed GOAWAY decode error, got {err:?}"
+        )),
+        Ok((frame, _)) => Err(format!(
+            "{context}: malformed GOAWAY bytes decoded as {frame:?}"
+        )),
     }
 }
 
-fn start_stream_processing(stream_ids: &[u64]) {
-    // Mock stream processing start
-    for &stream_id in stream_ids {
-        set_stream_state(stream_id, StreamState::Processing);
+fn expect_request_stream_allowed(
+    connection: &mut H3ConnectionState,
+    stream_id: u64,
+    context: &str,
+) -> Result<(), String> {
+    connection
+        .on_request_stream_frame(stream_id, &H3Frame::Headers(vec![0x80]))
+        .map_err(|err| format!("stream {stream_id} should be allowed for {context}: {err}"))
+}
+
+fn expect_request_stream_rejected_after_goaway(
+    connection: &mut H3ConnectionState,
+    stream_id: u64,
+    context: &str,
+) -> Result<(), String> {
+    expect_control_protocol(
+        connection.on_request_stream_frame(stream_id, &H3Frame::Headers(vec![0x80])),
+        "request stream id rejected after GOAWAY",
+        &format!("stream {stream_id} for {context}"),
+    )
+}
+
+fn expect_control_protocol(
+    result: Result<(), H3NativeError>,
+    expected: &'static str,
+    context: &str,
+) -> Result<(), String> {
+    match result {
+        Err(H3NativeError::ControlProtocol(msg)) if msg == expected => Ok(()),
+        Err(err) => Err(format!(
+            "{context}: expected control protocol error {expected:?}, got {err:?}"
+        )),
+        Ok(()) => Err(format!(
+            "{context}: expected control protocol error {expected:?}, got acceptance"
+        )),
     }
-}
-
-fn complete_stream(stream_id: u64) {
-    set_stream_state(stream_id, StreamState::Completed);
-}
-
-fn create_new_stream(_stream_id: u64) -> bool {
-    // Mock stream creation - returns false if rejected
-    false
-}
-
-fn wait_for_connection_closure() {
-    // Mock waiting for connection closure
-}
-
-fn get_stream_states() -> std::collections::HashMap<u64, StreamState> {
-    // Mock stream state tracking
-    let mut states = std::collections::HashMap::new();
-    states.insert(1, StreamState::Processing);
-    states.insert(5, StreamState::Processing);
-    states.insert(9, StreamState::Rejected);
-    states
-}
-
-pub fn get_connection_state() -> ConnectionState {
-    // Mock connection state
-    ConnectionState::Closing
-}
-
-fn get_last_connection_error() -> Option<ConnectionError> {
-    // Mock error tracking
-    Some(ConnectionError::ProtocolError)
-}
-
-fn register_stream(_stream_id: u64) {
-    // Mock stream registration
-}
-
-fn set_stream_state(_stream_id: u64, _state: StreamState) {
-    // Mock stream state management
-}
-
-fn reset_connection_state() {
-    // Mock connection reset
 }
