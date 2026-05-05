@@ -58,13 +58,12 @@ impl RealPgConfig {
         } else if node_env == "production" {
             Some("BLOCKED: NODE_ENV=production".into())
         } else if looks_prod {
-            Some(format!(
-                "BLOCKED: POSTGRES_URL looks like production: {url}"
-            ))
+            Some("BLOCKED: POSTGRES_URL looks like production (redacted)".into())
         } else if !host_looks_local && !allow_remote {
-            Some(format!(
-                "BLOCKED: non-localhost POSTGRES_URL without ALLOW_NON_LOCALHOST_POSTGRES=true: {url}"
-            ))
+            Some(
+                "BLOCKED: non-localhost POSTGRES_URL without ALLOW_NON_LOCALHOST_POSTGRES=true (redacted)"
+                    .into(),
+            )
         } else {
             None
         };
@@ -391,6 +390,155 @@ fn pg_real_unique_violation_sqlstate_classification() {
             conn.execute_unchecked(&cx, "ROLLBACK").await,
             &log,
             "ROLLBACK",
+        );
+
+        log.end("pass");
+    });
+}
+
+/// COPY FROM: drive the public streaming API against a real backend when the
+/// real-server harness is explicitly enabled. The fallback proof script records
+/// a blocked real-server record when this environment is absent.
+#[test]
+fn pg_real_copy_from_chunks_streams_and_recovers() {
+    let cfg = RealPgConfig::from_env();
+    if skip_if_disabled(&cfg, "pg_real_copy_from_chunks_streams_and_recovers") {
+        return;
+    }
+    let log = PgTestLogger::new(
+        "postgres_real",
+        "pg_real_copy_from_chunks_streams_and_recovers",
+    );
+
+    run_test_with_cx(|cx| async move {
+        log.phase("connect");
+        let mut conn = unwrap_pg(PgConnection::connect(&cx, &cfg.url).await, &log, "connect");
+
+        log.phase("create_temp_table");
+        let _ = unwrap_pg(
+            conn.execute_unchecked(
+                &cx,
+                "CREATE TEMPORARY TABLE asupersync_zftrj9_copy \
+                 (id int4 NOT NULL, name text NOT NULL) ON COMMIT PRESERVE ROWS",
+            )
+            .await,
+            &log,
+            "create_temp_table",
+        );
+
+        log.phase("copy_success");
+        let success_chunks: Vec<Result<&[u8], PgError>> =
+            vec![Ok(&b"1\talice\n"[..]), Ok(&b"2\tbob\n"[..])];
+        let complete = unwrap_pg(
+            conn.copy_from_chunks(
+                &cx,
+                "COPY asupersync_zftrj9_copy (id, name) FROM STDIN",
+                success_chunks,
+            )
+            .await,
+            &log,
+            "copy_success",
+        );
+        log.assert_match(
+            "copy_success_affected_rows",
+            "2",
+            &complete.affected_rows().to_string(),
+        );
+        assert_eq!(complete.affected_rows(), 2);
+        assert_eq!(complete.chunks_sent(), 2);
+        assert_eq!(complete.bytes_sent(), b"1\talice\n2\tbob\n".len() as u64);
+
+        log.phase("query_after_success");
+        let rows = unwrap_pg(
+            conn.query_unchecked(
+                &cx,
+                "SELECT count(*)::int8 AS n, max(id)::int4 AS max_id \
+                 FROM asupersync_zftrj9_copy",
+            )
+            .await,
+            &log,
+            "query_after_success",
+        );
+        let count = rows[0].get_i64("n").expect("get count");
+        let max_id = rows[0].get_i32("max_id").expect("get max_id");
+        log.assert_match("row_count_after_success", "2", &count.to_string());
+        log.assert_match("max_id_after_success", "2", &max_id.to_string());
+        assert_eq!(count, 2);
+        assert_eq!(max_id, 2);
+
+        log.phase("copy_source_abort");
+        let abort_chunks: Vec<Result<&[u8], PgError>> = vec![
+            Ok(&b"3\tpartial\n"[..]),
+            Err(PgError::Protocol(
+                "source stopped before CopyDone".to_string(),
+            )),
+        ];
+        let abort = conn
+            .copy_from_chunks(
+                &cx,
+                "COPY asupersync_zftrj9_copy (id, name) FROM STDIN",
+                abort_chunks,
+            )
+            .await;
+        match abort {
+            Outcome::Err(PgError::Protocol(message)) => {
+                log.assert_match(
+                    "copy_abort_error",
+                    "source stopped before CopyDone",
+                    &message,
+                );
+                assert_eq!(message, "source stopped before CopyDone");
+            }
+            other => panic!("expected source abort protocol error, got {other:?}"),
+        }
+
+        log.phase("query_after_abort");
+        let rows = unwrap_pg(
+            conn.query_unchecked(
+                &cx,
+                "SELECT count(*)::int8 AS n FROM asupersync_zftrj9_copy",
+            )
+            .await,
+            &log,
+            "query_after_abort",
+        );
+        let count = rows[0].get_i64("n").expect("get count after abort");
+        log.assert_match("row_count_after_abort", "2", &count.to_string());
+        assert_eq!(count, 2, "CopyFail should roll back the partial COPY row");
+
+        log.phase("copy_malformed_backend_error");
+        let malformed_chunks: Vec<Result<&[u8], PgError>> = vec![Ok(&b"4\n"[..])];
+        let malformed = conn
+            .copy_from_chunks(
+                &cx,
+                "COPY asupersync_zftrj9_copy (id, name) FROM STDIN",
+                malformed_chunks,
+            )
+            .await;
+        match malformed {
+            Outcome::Err(err) => {
+                let code = err.error_code().unwrap_or("");
+                log.assert_match("copy_malformed_sqlstate", "22P04", code);
+                assert_eq!(code, "22P04", "expected bad COPY row SQLSTATE");
+            }
+            other => panic!("expected malformed COPY row server error, got {other:?}"),
+        }
+
+        log.phase("query_after_failure");
+        let rows = unwrap_pg(
+            conn.query_unchecked(
+                &cx,
+                "SELECT count(*)::int8 AS n FROM asupersync_zftrj9_copy",
+            )
+            .await,
+            &log,
+            "query_after_failure",
+        );
+        let count = rows[0].get_i64("n").expect("get count after failure");
+        log.assert_match("row_count_after_failure", "2", &count.to_string());
+        assert_eq!(
+            count, 2,
+            "backend COPY error should not commit partial rows"
         );
 
         log.end("pass");
