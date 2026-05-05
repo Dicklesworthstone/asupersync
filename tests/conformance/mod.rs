@@ -38,6 +38,7 @@ pub mod h1_trailer_restrictions;
 pub mod h2_alpn_negotiation_rfc7540;
 pub mod h2_connect;
 pub mod h2_continuation_ordering;
+pub mod h2_live_adapter;
 pub mod h2_must_reject_vectors;
 pub mod h2_priority;
 pub mod h2_rst_stream_ping_rfc9113;
