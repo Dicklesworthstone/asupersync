@@ -160,6 +160,9 @@ The shipped JS/TS diagnostics expose this matrix directly:
 - `packages/next/src/index.ts` preserves the browser diagnostics for client
   boundaries and adds `supportClass: "bridge_only"` plus explicit bridge-only
   reasons for Next `server` and `edge` targets.
+- Bead `asupersync-rckwas` pins the cross-surface support boundary in
+  `artifacts/wasm_browser_support_boundary_contract_v1.json`, enforced by
+  `tests/wasm_browser_support_boundary_contract.rs`.
 
 ### Execution Ladder Contract
 

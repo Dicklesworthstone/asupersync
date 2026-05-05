@@ -1,0 +1,138 @@
+{
+  "contract_version": "wasm-browser-support-boundary-contract-v1",
+  "bead_id": "asupersync-rckwas",
+  "created_date": "2026-05-05",
+  "status": "browser_worker_and_messaging_lanes_truthfully_bounded",
+  "canonical_docs": [
+    "docs/WASM.md",
+    "docs/integration.md",
+    "docs/wasm_service_worker_broker_contract.md",
+    "docs/wasm_shared_worker_tenancy_lifecycle_contract.md",
+    "docs/wasm_troubleshooting_compendium.md"
+  ],
+  "canonical_tests": [
+    "tests/wasm_browser_support_boundary_contract.rs",
+    "tests/wasm_browser_feasibility_matrix.rs",
+    "tests/wasm_js_exports_coverage_contract.rs",
+    "tests/wasm_service_worker_broker_contract.rs",
+    "tests/wasm_shared_worker_tenancy_lifecycle_contract.rs"
+  ],
+  "runtime_contexts": [
+    {
+      "context": "browser_main_thread",
+      "public_label": "direct_runtime_supported",
+      "direct_runtime_supported": true,
+      "package_reason": "supported",
+      "runtime_reason_code": "supported",
+      "required_markers": [
+        "browser_main_thread",
+        "direct_runtime_supported"
+      ]
+    },
+    {
+      "context": "dedicated_worker",
+      "public_label": "direct_runtime_supported",
+      "direct_runtime_supported": true,
+      "package_reason": "supported",
+      "runtime_reason_code": "supported",
+      "required_markers": [
+        "DedicatedWorkerGlobalScope",
+        "dedicated_worker",
+        "WorkerGlobalScope"
+      ]
+    },
+    {
+      "context": "service_worker",
+      "public_label": "direct_runtime_feasible_but_not_shipped",
+      "direct_runtime_supported": false,
+      "package_reason": "service_worker_not_yet_shipped",
+      "runtime_reason_code": "service_worker_direct_runtime_not_shipped",
+      "bounded_helper_support": "guarded_package_level_broker",
+      "required_markers": [
+        "detectBrowserServiceWorkerBrokerSupport(",
+        "BrowserServiceWorkerBrokerStore",
+        "reason: \"service_worker_not_yet_shipped\"",
+        "BrowserExecutionReasonCode::ServiceWorkerDirectRuntimeNotShipped",
+        "lane.browser.service_worker.broker"
+      ]
+    },
+    {
+      "context": "shared_worker",
+      "public_label": "direct_runtime_feasible_but_not_shipped",
+      "direct_runtime_supported": false,
+      "package_reason": "shared_worker_not_yet_shipped",
+      "runtime_reason_code": "shared_worker_direct_runtime_not_shipped",
+      "bounded_helper_support": "guarded_package_level_coordinator",
+      "required_markers": [
+        "detectBrowserSharedWorkerCoordinatorSupport(",
+        "createBrowserSharedWorkerCoordinatorSelection(",
+        "BrowserSharedWorkerCoordinatorClient",
+        "BrowserExecutionReasonCode::SharedWorkerDirectRuntimeNotShipped",
+        "lane.browser.shared_worker.coordinator"
+      ]
+    }
+  ],
+  "capability_surfaces": [
+    {
+      "surface": "service_worker_bounded_broker",
+      "public_label": "guarded_package_level_support",
+      "must_not_widen_direct_runtime": true,
+      "docs": [
+        "docs/wasm_service_worker_broker_contract.md",
+        "tests/fixtures/service-worker-broker-consumer/",
+        "scripts/validate_service_worker_broker_consumer.sh"
+      ]
+    },
+    {
+      "surface": "shared_worker_bounded_coordinator",
+      "public_label": "guarded_package_level_support",
+      "must_not_widen_direct_runtime": true,
+      "docs": [
+        "docs/wasm_shared_worker_tenancy_lifecycle_contract.md",
+        "tests/fixtures/shared-worker-consumer/",
+        "scripts/validate_shared_worker_consumer.sh"
+      ]
+    },
+    {
+      "surface": "browser_native_messaging",
+      "public_label": "substrate_only_not_public_browser_sdk",
+      "must_not_export_public_browser_api": true,
+      "allowed_internal_markers": [
+        "MessagePort",
+        "BroadcastChannel",
+        "register_message_port",
+        "register_broadcast_channel"
+      ],
+      "forbidden_public_export_markers": [
+        "export class BrowserMessageChannel",
+        "export class BrowserMessagePort",
+        "export class BrowserBroadcastChannel",
+        "export function createBrowserMessageChannel",
+        "export function createBrowserBroadcastChannel"
+      ]
+    },
+    {
+      "surface": "webtransport_datagrams",
+      "public_label": "guarded_direct_runtime_support",
+      "fallback_required": true,
+      "required_markers": [
+        "detectWebTransportSupport",
+        "openWebTransport(",
+        "WebTransportHandle",
+        "Use WebSocket or fetch when WebTransport support is unavailable."
+      ]
+    }
+  ],
+  "scope_limits": {
+    "service_worker_direct_runtime_shipped": false,
+    "shared_worker_direct_runtime_shipped": false,
+    "message_channel_public_browser_sdk_shipped": false,
+    "broadcast_channel_public_browser_sdk_shipped": false,
+    "webtransport_implies_raw_socket_parity": false
+  },
+  "validation_commands": [
+    "python3 -m json.tool artifacts/wasm_browser_support_boundary_contract_v1.json",
+    "rch exec -- rustfmt --edition 2024 --check tests/wasm_browser_support_boundary_contract.rs",
+    "rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_asupersync_rckwas_contract cargo test -p asupersync --test wasm_browser_support_boundary_contract --features test-internals -- --nocapture"
+  ]
+}
