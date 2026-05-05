@@ -1,5 +1,3 @@
-#![allow(warnings)]
-#![allow(clippy::all)]
 //! Broadcast channel conformance tests.
 //!
 //! Tests the subscribe/lag/drop semantics of the broadcast channel implementation
@@ -165,7 +163,8 @@ impl BroadcastState {
 fn test_mr1_subscribe_returns_only_values_sent_after_subscribe() {
     proptest!(|(messages_before in message_sequence_strategy(), messages_after in message_sequence_strategy())| {
         let cx = test_cx();
-        let (sender, _receiver) = broadcast::channel::<TestMessage>(10);
+        let capacity = messages_after.len().max(1);
+        let (sender, _receiver) = broadcast::channel::<TestMessage>(capacity);
 
         // Send messages before subscribe
         for msg in &messages_before {
@@ -492,7 +491,9 @@ fn test_broadcast_edge_cases() {
         sender.send(&cx, msg1).unwrap();
         sender.send(&cx, msg2.clone()).unwrap();
 
-        // Should only receive the second message
+        assert!(matches!(receiver.try_recv(), Err(TryRecvError::Lagged(1))));
+        // After the lag notification advances the cursor, the retained message
+        // is readable.
         assert_eq!(receiver.try_recv().unwrap(), msg2);
         assert!(matches!(receiver.try_recv(), Err(TryRecvError::Empty)));
     }
@@ -528,7 +529,12 @@ fn test_broadcast_stress() {
         sender.send(&cx, msg).unwrap();
     }
 
-    // Receive all messages
+    assert!(matches!(
+        receiver.try_recv(),
+        Err(TryRecvError::Lagged(9000))
+    ));
+
+    // Receive all retained messages after acknowledging the lag.
     let mut received_count = 0;
     while receiver.try_recv().is_ok() {
         received_count += 1;
