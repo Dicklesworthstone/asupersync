@@ -59,6 +59,17 @@
     "report_glob",
     "reproduction_command"
   ],
+  "required_completion_audit_fields": [
+    "audit_id",
+    "control_id",
+    "prompt_requirement_ids",
+    "source_skill_phases",
+    "required_evidence_refs",
+    "live_evidence_policy",
+    "fail_closed_if",
+    "proxy_evidence_allowed",
+    "expected_audit_status"
+  ],
   "signoff_matrix": [
     {
       "control_id": "skill_provenance",
@@ -457,6 +468,415 @@
       "reproduction_command": "rch exec -- cargo test -p asupersync --lib audit_notify_send_sync_bounds --features test-internals -- --nocapture"
     }
   ],
+  "completion_audit_matrix": [
+    {
+      "audit_id": "completion-audit-skill-provenance",
+      "control_id": "skill_provenance",
+      "prompt_requirement_ids": [
+        "REQ-OPERATOR-EVIDENCE"
+      ],
+      "source_skill_phases": [
+        "idea-wizard.phase-6"
+      ],
+      "required_evidence_refs": [
+        "artifact_path",
+        "contract_version",
+        "unit_proof_ref",
+        "e2e_proof_ref",
+        "reproduction_command",
+        "report_glob",
+        "fallback_mode",
+        "operator_fields",
+        "tracker_status",
+        "proof_status",
+        "blocker_reason"
+      ],
+      "live_evidence_policy": "inspect committed skill provenance artifact and selected_bead_mappings; source skill presence alone is not signoff evidence",
+      "fail_closed_if": [
+        "selected bead mappings are absent or unmapped",
+        "required source skill phase is missing",
+        "only proxy green status is available"
+      ],
+      "proxy_evidence_allowed": false,
+      "expected_audit_status": "trusted"
+    },
+    {
+      "audit_id": "completion-audit-generated-smoke-inventory",
+      "control_id": "generated_smoke_inventory",
+      "prompt_requirement_ids": [
+        "REQ-OPERATOR-EVIDENCE"
+      ],
+      "source_skill_phases": [
+        "idea-wizard.phase-6"
+      ],
+      "required_evidence_refs": [
+        "artifact_path",
+        "contract_version",
+        "unit_proof_ref",
+        "e2e_proof_ref",
+        "reproduction_command",
+        "report_glob",
+        "fallback_mode",
+        "operator_fields",
+        "tracker_status",
+        "proof_status",
+        "blocker_reason"
+      ],
+      "live_evidence_policy": "inspect generated artifact clusters and retained-root owner decisions before allowing final signoff",
+      "fail_closed_if": [
+        "any retained generated cluster lacks an owner bead",
+        "any retained generated cluster lacks a reproduction command",
+        "any cluster remains fail_closed"
+      ],
+      "proxy_evidence_allowed": false,
+      "expected_audit_status": "fail_closed"
+    },
+    {
+      "audit_id": "completion-audit-host-profile-planner",
+      "control_id": "host_profile_planner",
+      "prompt_requirement_ids": [
+        "REQ-OPERATOR-EVIDENCE"
+      ],
+      "source_skill_phases": [
+        "idea-wizard.phase-5"
+      ],
+      "required_evidence_refs": [
+        "artifact_path",
+        "contract_version",
+        "unit_proof_ref",
+        "e2e_proof_ref",
+        "reproduction_command",
+        "report_glob",
+        "fallback_mode",
+        "operator_fields",
+        "tracker_status",
+        "proof_status",
+        "blocker_reason"
+      ],
+      "live_evidence_policy": "inspect planner proof fields, refusal matrix, and conservative baseline fallback rather than accepting dry-run intent",
+      "fail_closed_if": [
+        "tracker bead remains open",
+        "profile proof references are absent",
+        "fallback profile is not conservative_baseline"
+      ],
+      "proxy_evidence_allowed": false,
+      "expected_audit_status": "fail_closed"
+    },
+    {
+      "audit_id": "completion-audit-adaptive-batch-sizing",
+      "control_id": "adaptive_batch_sizing",
+      "prompt_requirement_ids": [
+        "REQ-MASSIVE-SWARM-RESPONSIVENESS",
+        "REQ-ADVANCED-MATH-CONTROL"
+      ],
+      "source_skill_phases": [
+        "idea-wizard.next-10"
+      ],
+      "required_evidence_refs": [
+        "artifact_path",
+        "contract_version",
+        "unit_proof_ref",
+        "e2e_proof_ref",
+        "reproduction_command",
+        "report_glob",
+        "fallback_mode",
+        "operator_fields",
+        "tracker_status",
+        "proof_status",
+        "blocker_reason"
+      ],
+      "live_evidence_policy": "inspect p99 and p999 comparator fields plus no-win fallback evidence for the adaptive controller",
+      "fail_closed_if": [
+        "p999 regresses while p99 improves",
+        "no-win fallback is absent",
+        "anti-oscillation proof is missing"
+      ],
+      "proxy_evidence_allowed": false,
+      "expected_audit_status": "trusted"
+    },
+    {
+      "audit_id": "completion-audit-hot-cold-arena-tiers",
+      "control_id": "hot_cold_arena_tiers",
+      "prompt_requirement_ids": [
+        "REQ-RESOURCE-UTILIZATION-64C-256G"
+      ],
+      "source_skill_phases": [
+        "idea-wizard.phase-5"
+      ],
+      "required_evidence_refs": [
+        "artifact_path",
+        "contract_version",
+        "unit_proof_ref",
+        "e2e_proof_ref",
+        "reproduction_command",
+        "report_glob",
+        "fallback_mode",
+        "operator_fields",
+        "tracker_status",
+        "proof_status",
+        "blocker_reason"
+      ],
+      "live_evidence_policy": "inspect hot-path isolation, large-page fallback, and cold-retention storm evidence before enabling tiered arenas",
+      "fail_closed_if": [
+        "tracker bead remains open",
+        "large-page fallback proof is absent",
+        "cold-retention storm evidence is missing"
+      ],
+      "proxy_evidence_allowed": false,
+      "expected_audit_status": "fail_closed"
+    },
+    {
+      "audit_id": "completion-audit-trace-storage-profile",
+      "control_id": "trace_storage_profile",
+      "prompt_requirement_ids": [
+        "REQ-RESOURCE-UTILIZATION-64C-256G"
+      ],
+      "source_skill_phases": [
+        "idea-wizard.next-10"
+      ],
+      "required_evidence_refs": [
+        "artifact_path",
+        "contract_version",
+        "unit_proof_ref",
+        "e2e_proof_ref",
+        "reproduction_command",
+        "report_glob",
+        "fallback_mode",
+        "operator_fields",
+        "tracker_status",
+        "proof_status",
+        "blocker_reason"
+      ],
+      "live_evidence_policy": "inspect large-memory trace retention confidence and real-host template evidence before accepting trace storage signoff",
+      "fail_closed_if": [
+        "tracker bead remains open",
+        "real-host path is template-only",
+        "p999 non-regression evidence is absent"
+      ],
+      "proxy_evidence_allowed": false,
+      "expected_audit_status": "fail_closed"
+    },
+    {
+      "audit_id": "completion-audit-runtime-capacity-hints",
+      "control_id": "runtime_capacity_hints",
+      "prompt_requirement_ids": [
+        "REQ-RESOURCE-UTILIZATION-64C-256G"
+      ],
+      "source_skill_phases": [
+        "extreme-software-optimization"
+      ],
+      "required_evidence_refs": [
+        "artifact_path",
+        "contract_version",
+        "unit_proof_ref",
+        "e2e_proof_ref",
+        "reproduction_command",
+        "report_glob",
+        "fallback_mode",
+        "operator_fields",
+        "tracker_status",
+        "proof_status",
+        "blocker_reason"
+      ],
+      "live_evidence_policy": "inspect burst and zero-hint fallback profiles plus allocator-growth reduction evidence",
+      "fail_closed_if": [
+        "capacity hints are zeroed or unsafe",
+        "allocator-growth win is absent",
+        "fallback normalization is missing"
+      ],
+      "proxy_evidence_allowed": false,
+      "expected_audit_status": "trusted"
+    },
+    {
+      "audit_id": "completion-audit-capacity-envelope-planner",
+      "control_id": "capacity_envelope_planner",
+      "prompt_requirement_ids": [
+        "REQ-RESOURCE-UTILIZATION-64C-256G",
+        "REQ-ADVANCED-MATH-CONTROL"
+      ],
+      "source_skill_phases": [
+        "extreme-software-optimization",
+        "idea-wizard.phase-6"
+      ],
+      "required_evidence_refs": [
+        "artifact_path",
+        "contract_version",
+        "unit_proof_ref",
+        "e2e_proof_ref",
+        "reproduction_command",
+        "report_glob",
+        "fallback_mode",
+        "operator_fields",
+        "tracker_status",
+        "proof_status",
+        "blocker_reason"
+      ],
+      "live_evidence_policy": "inspect capacity certificate assumptions, tail decomposition, uncertainty, and refusal evidence before trusting envelope claims",
+      "fail_closed_if": [
+        "tracker bead remains open",
+        "capacity certificate is stale or host-mismatched",
+        "tail decomposition or refusal evidence is absent"
+      ],
+      "proxy_evidence_allowed": false,
+      "expected_audit_status": "fail_closed"
+    },
+    {
+      "audit_id": "completion-audit-task-record-pool",
+      "control_id": "task_record_pool",
+      "prompt_requirement_ids": [
+        "REQ-RESOURCE-UTILIZATION-64C-256G"
+      ],
+      "source_skill_phases": [
+        "extreme-software-optimization"
+      ],
+      "required_evidence_refs": [
+        "artifact_path",
+        "contract_version",
+        "unit_proof_ref",
+        "e2e_proof_ref",
+        "reproduction_command",
+        "report_glob",
+        "fallback_mode",
+        "operator_fields",
+        "tracker_status",
+        "proof_status",
+        "blocker_reason"
+      ],
+      "live_evidence_policy": "inspect saturation, disabled heap fallback, stale-field checksum, and spawn-latency evidence",
+      "fail_closed_if": [
+        "heap fallback is not safe",
+        "stale-field invariant checksum is absent",
+        "pool loses the spawn-latency win"
+      ],
+      "proxy_evidence_allowed": false,
+      "expected_audit_status": "trusted"
+    },
+    {
+      "audit_id": "completion-audit-signed-profile-bundle",
+      "control_id": "signed_profile_bundle",
+      "prompt_requirement_ids": [
+        "REQ-OPERATOR-EVIDENCE"
+      ],
+      "source_skill_phases": [
+        "idea-wizard.phase-6"
+      ],
+      "required_evidence_refs": [
+        "artifact_path",
+        "contract_version",
+        "unit_proof_ref",
+        "e2e_proof_ref",
+        "reproduction_command",
+        "report_glob",
+        "fallback_mode",
+        "operator_fields",
+        "tracker_status",
+        "proof_status",
+        "blocker_reason"
+      ],
+      "live_evidence_policy": "inspect profile bundle integrity mode, child evidence hashes, rollback receipt, and digest-only limitation",
+      "fail_closed_if": [
+        "tracker bead remains open",
+        "signature mode is required but only digest evidence exists",
+        "rollback receipt is absent"
+      ],
+      "proxy_evidence_allowed": false,
+      "expected_audit_status": "fail_closed"
+    },
+    {
+      "audit_id": "completion-audit-signed-profile-shadow-run",
+      "control_id": "signed_profile_shadow_run",
+      "prompt_requirement_ids": [
+        "REQ-OPERATOR-EVIDENCE"
+      ],
+      "source_skill_phases": [
+        "idea-wizard.phase-6"
+      ],
+      "required_evidence_refs": [
+        "artifact_path",
+        "contract_version",
+        "unit_proof_ref",
+        "e2e_proof_ref",
+        "reproduction_command",
+        "report_glob",
+        "fallback_mode",
+        "operator_fields",
+        "tracker_status",
+        "proof_status",
+        "blocker_reason"
+      ],
+      "live_evidence_policy": "inspect candidate-versus-baseline loss, regret margin, hold reasons, and rollback receipt before promotion",
+      "fail_closed_if": [
+        "tracker bead remains open",
+        "candidate and baseline use different evidence snapshots",
+        "hold/no-win explanation is absent"
+      ],
+      "proxy_evidence_allowed": false,
+      "expected_audit_status": "fail_closed"
+    },
+    {
+      "audit_id": "completion-audit-jetstream-publish-backpressure",
+      "control_id": "jetstream_publish_backpressure",
+      "prompt_requirement_ids": [
+        "REQ-MASSIVE-SWARM-RESPONSIVENESS",
+        "REQ-OPERATOR-EVIDENCE"
+      ],
+      "source_skill_phases": [
+        "idea-wizard.next-10"
+      ],
+      "required_evidence_refs": [
+        "artifact_path",
+        "contract_version",
+        "unit_proof_ref",
+        "e2e_proof_ref",
+        "reproduction_command",
+        "report_glob",
+        "fallback_mode",
+        "operator_fields",
+        "tracker_status",
+        "proof_status",
+        "blocker_reason"
+      ],
+      "live_evidence_policy": "inspect bounded in-flight pressure, zero-wait tail evidence, and refusal-only fallback before accepting publish-path capacity claims",
+      "fail_closed_if": [
+        "bounded waiter policy is absent",
+        "tail evidence is missing",
+        "nonzero-wait fairness proof is missing"
+      ],
+      "proxy_evidence_allowed": false,
+      "expected_audit_status": "trusted"
+    },
+    {
+      "audit_id": "completion-audit-compile-frontier-movement",
+      "control_id": "compile_frontier_movement",
+      "prompt_requirement_ids": [
+        "REQ-OPERATOR-EVIDENCE"
+      ],
+      "source_skill_phases": [
+        "idea-wizard.phase-6"
+      ],
+      "required_evidence_refs": [
+        "artifact_path",
+        "contract_version",
+        "unit_proof_ref",
+        "e2e_proof_ref",
+        "reproduction_command",
+        "report_glob",
+        "fallback_mode",
+        "operator_fields",
+        "tracker_status",
+        "proof_status",
+        "blocker_reason"
+      ],
+      "live_evidence_policy": "inspect the first-failure movement artifact and rch-backed notify proof instead of treating compile cleanup as implicit",
+      "fail_closed_if": [
+        "frontier movement artifact is missing",
+        "rch proof command is absent",
+        "failure is hidden behind cfg gates"
+      ],
+      "proxy_evidence_allowed": false,
+      "expected_audit_status": "trusted"
+    }
+  ],
   "smoke_scenarios": [
     {
       "scenario_id": "AA-MASSIVE-SWARM-SIGNOFF-OPERATOR-CHAIN-SMALL-MODE",
@@ -483,6 +903,11 @@
       "missing_required_objective_requirement_count": 0,
       "unmapped_objective_requirement_count": 0,
       "selected_bead_mapping_count": 17,
+      "completion_audit_row_count": 13,
+      "trusted_completion_audit_count": 6,
+      "fail_closed_completion_audit_count": 7,
+      "proxy_completion_audit_allowed_count": 0,
+      "missing_completion_audit_control_count": 0,
       "missing_artifact_path_count": 0,
       "missing_runner_path_count": 0,
       "objective_checklist_complete": true,
@@ -511,6 +936,11 @@
       "missing_required_objective_requirement_count",
       "unmapped_objective_requirement_count",
       "selected_bead_mapping_count",
+      "completion_audit_row_count",
+      "trusted_completion_audit_count",
+      "fail_closed_completion_audit_count",
+      "proxy_completion_audit_allowed_count",
+      "missing_completion_audit_control_count",
       "missing_artifact_path_count",
       "missing_runner_path_count",
       "objective_checklist_complete",
@@ -550,6 +980,11 @@
       "missing_required_objective_requirement_count": 0,
       "unmapped_objective_requirement_count": 0,
       "selected_bead_mapping_count": 17,
+      "completion_audit_row_count": 13,
+      "trusted_completion_audit_count": 6,
+      "fail_closed_completion_audit_count": 7,
+      "proxy_completion_audit_allowed_count": 0,
+      "missing_completion_audit_control_count": 0,
       "missing_artifact_path_count": 0,
       "missing_runner_path_count": 0,
       "objective_checklist_complete": true,
@@ -578,6 +1013,11 @@
       "missing_required_objective_requirement_count",
       "unmapped_objective_requirement_count",
       "selected_bead_mapping_count",
+      "completion_audit_row_count",
+      "trusted_completion_audit_count",
+      "fail_closed_completion_audit_count",
+      "proxy_completion_audit_allowed_count",
+      "missing_completion_audit_control_count",
       "missing_artifact_path_count",
       "missing_runner_path_count",
       "objective_checklist_complete",
