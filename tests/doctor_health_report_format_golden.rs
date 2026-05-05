@@ -1,4 +1,3 @@
-#![allow(warnings)]
 #![cfg(feature = "cli")]
 //! Golden snapshot for doctor health report text formatting.
 
