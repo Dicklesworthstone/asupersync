@@ -1,5 +1,3 @@
-#![allow(warnings)]
-#![allow(clippy::all)]
 //! WASM Pilot Feedback Triage Loop Contract Checks (WASM-16).
 //!
 //! Bead: asupersync-umelq.17.3
