@@ -1,5 +1,3 @@
-#![allow(warnings)]
-#![allow(clippy::all)]
 //! Distributed snapshot application integration tests.
 
 use asupersync::distributed::bridge::RegionBridge;
