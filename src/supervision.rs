@@ -8829,9 +8829,33 @@ mod tests {
             tracker.is_intensity_storm(900_000_000),
             "intensity threshold should trip once three restarts land inside one second"
         );
+
+        let snapshot = tracker
+            .storm_snapshot()
+            .expect("storm detection should install the default e-process monitor");
+        assert!(
+            snapshot.e_value > 1.0,
+            "default e-process monitor should accumulate evidence above the configured threshold"
+        );
+        assert_eq!(
+            snapshot.alert_state,
+            crate::obligation::eprocess::AlertState::Watching,
+            "three above-threshold samples should watch before the anytime-valid alert boundary"
+        );
+
+        for now in [
+            1_000_000_000,
+            1_100_000_000,
+            1_200_000_000,
+            1_300_000_000,
+            1_400_000_000,
+        ] {
+            tracker.record(now);
+        }
+
         assert!(
             tracker.is_storm(),
-            "default e-process monitor should align with the configured threshold"
+            "sustained above-threshold restarts should eventually trip the e-process alert"
         );
 
         crate::test_complete!("restart_tracker_aligns_default_storm_monitor_with_threshold");
