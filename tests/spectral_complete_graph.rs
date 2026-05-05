@@ -1,5 +1,3 @@
-#![allow(warnings)]
-#![allow(clippy::all)]
 //! Spectral decomposition test for complete graphs.
 use asupersync::observability::spectral_health::{
     DependencyLaplacian, SpectralThresholds, compute_spectral_decomposition,
