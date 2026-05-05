@@ -1,5 +1,3 @@
-#![allow(warnings)]
-#![allow(clippy::all)]
 //! GF(256) Kernel Bit-Exactness Validation Tests
 //!
 //! Comprehensive validation suite proving that SIMD-optimized GF(256) kernels
@@ -14,8 +12,10 @@
 #[cfg(test)]
 mod tests {
     use asupersync::raptorq::gf256::{
-        Gf256, Gf256Kernel, active_kernel, gf256_addmul_slice, gf256_mul_slice, gf256_mul_slices2,
+        Gf256, gf256_addmul_slice, gf256_mul_slice, gf256_mul_slices2,
     };
+    #[cfg(feature = "simd-intrinsics")]
+    use asupersync::raptorq::gf256::{Gf256Kernel, active_kernel};
     use std::time::Instant;
 
     #[cfg(all(
@@ -39,6 +39,7 @@ mod tests {
         false
     }
 
+    #[cfg(feature = "simd-intrinsics")]
     fn next_pinned_u8(state: &mut u64) -> u8 {
         *state = state
             .wrapping_mul(6_364_136_223_846_793_005)
