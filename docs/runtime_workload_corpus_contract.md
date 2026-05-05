@@ -70,6 +70,13 @@ The coordination pack covers:
 | `stale_in_progress_reclaim` | `ASWARM-WL-STALE-001` | stale work requeue, tracker priority rebalance, operator recovery loop | pseudonymized assignee, updated-at bucket, dependency count |
 | `coordination_latency_burst` | `ASWARM-WL-LATENCY-001` | ack-required message burst, coordination round-trip tail, operator latency amplification | message id, thread id, ack-required flag |
 
+For `concurrent_rch_proofs`, synthesis also emits an `rch_pressure_summary`
+inside the expansion pack, scheduler evidence input, and synthesis report. The
+summary keeps only deterministic pressure classes: queue-depth bucket, maximum
+queue depth, proof fanout count, artifact-retrieval-tail bucket, timeout or
+refusal reasons, and command-class hashes. It never carries raw worker names,
+hostnames, command text, or artifact paths.
+
 ## Reproducibility Bundle Format
 
 Every runner-emitted bundle manifest must include:
@@ -145,7 +152,8 @@ The validation checks:
 4. Every underlying entry command stays `rch`-routed and references a real script or test file.
 5. Core-set and expansion-pack IDs remain internally consistent.
 6. Coordination expansion-pack synthesis keeps all `ASWARM-WL-*` workloads outside the core denominator.
-7. Accepted and refused coordination fixtures emit deterministic hashes, stable replay commands, valid artifact globs, and explicit `missing_scenario_dimensions` refusal reports.
+7. Accepted coordination fixtures carry the rch proof-queue pressure summary through expansion packs, scheduler evidence inputs, and reports.
+8. Accepted and refused coordination fixtures emit deterministic hashes, stable replay commands, valid artifact globs, and explicit `missing_scenario_dimensions` refusal reports.
 
 ## Cross-References
 

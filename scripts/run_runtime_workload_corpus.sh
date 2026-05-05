@@ -151,6 +151,50 @@ synthesize_coordination_pack() {
             required - accepted_families;
         def events_for($family):
             [accepted_events[] | select(.workload_family == $family)];
+        def as_number($value):
+            (($value // 0) | tonumber? // 0);
+        def max_queue_depth($events):
+            ([$events[] | as_number(.queue_depth_or_lock_state.queue_depth)] | max // 0);
+        def queue_depth_bucket($depth):
+            if $depth >= 16 then "q16_plus"
+            elif $depth >= 8 then "q08_15"
+            elif $depth >= 4 then "q04_07"
+            elif $depth >= 1 then "q01_03"
+            else "q00"
+            end;
+        def stable_command_hash($text):
+            "cmdclass:" + (
+              ($text | tostring | explode)
+              | reduce .[] as $codepoint (0; ((. * 131 + $codepoint) % 1000000007))
+              | tostring
+            );
+        def rch_pressure_summary($events):
+            max_queue_depth($events) as $max_depth
+            | {
+                queue_depth_bucket: queue_depth_bucket($max_depth),
+                max_queue_depth: $max_depth,
+                proof_fanout_count: ($events | length),
+                artifact_retrieval_tail_bucket:
+                  (if (([$events[] | (.artifact_refs // []) | length] | add // 0) > 0)
+                   then "artifact_refs_observed"
+                   else "artifact_tail_unknown"
+                   end),
+                timeout_or_refusal_reasons:
+                  ([$events[]
+                    | (.queue_depth_or_lock_state.timeout_or_refusal_reason // .refusal_reason // "")
+                    | select(. != "")]
+                   | unique),
+                command_class_hashes:
+                  ([$events[]
+                    | stable_command_hash((.command_class // "unknown") + "|" + (.event_kind // "unknown"))]
+                   | unique)
+              };
+        def pressure_summary($mapping; $events):
+            if $mapping.family == "concurrent_rch_proofs" then
+              {rch: rch_pressure_summary($events)}
+            else
+              {}
+            end;
 
         {
           schema_version: "runtime-workload-coordination-expansion-pack-v1",
@@ -183,7 +227,8 @@ synthesize_coordination_pack() {
                 replay_command: $mapping.replay_command,
                 entry_command: $mapping.entry_command,
                 expected_artifact_globs: $mapping.expected_artifact_globs,
-                scheduler_evidence_input_id: $mapping.scheduler_evidence_input_id
+                scheduler_evidence_input_id: $mapping.scheduler_evidence_input_id,
+                pressure_summary: pressure_summary($mapping; $family_events)
               }
           ],
           refused_bundles:
@@ -217,7 +262,8 @@ synthesize_coordination_pack() {
                 provenance_only_context: .provenance_only_context,
                 source_event_count: .source_event_count,
                 source_hashes: .source_hashes,
-                source_bundle_hash: .source_bundle_hash
+                source_bundle_hash: .source_bundle_hash,
+                pressure_summary: .pressure_summary
               }
           ]
         }
@@ -240,6 +286,10 @@ synthesize_coordination_pack() {
             accepted_workload_count: ($pack[0].workloads | length),
             refused_bundle_count: ($pack[0].refused_bundles | length),
             missing_scenario_families: $pack[0].missing_scenario_families,
+            rch_pressure_summary:
+              ([$pack[0].workloads[]
+                | select(.scenario_family == "concurrent_rch_proofs")
+                | .pressure_summary.rch][0] // {}),
             first_failure_line:
               (if $missing_count == 0 then ""
                else "missing_scenario_dimensions: " + ($pack[0].missing_scenario_families | join(","))
@@ -256,14 +306,18 @@ synthesize_coordination_pack() {
 
     {
         echo "coordination_workload_synthesis run_id=${run_id} pack=agent-swarm-coordination-pressure"
-        echo "family	source_events	semantic_pressure	provenance_only_context"
+        echo "family	source_events	semantic_pressure	provenance_only_context	rch_queue_depth_bucket"
         jq -r '
             .workloads[]
             | [
                 .scenario_family,
                 (.source_event_kinds | join(",")),
                 (.semantic_pressure | join(",")),
-                (.provenance_only_context | join(","))
+                (.provenance_only_context | join(",")),
+                (if .scenario_family == "concurrent_rch_proofs"
+                 then (.pressure_summary.rch.queue_depth_bucket // "q00")
+                 else ""
+                 end)
               ]
             | @tsv
         ' "$pack_path"

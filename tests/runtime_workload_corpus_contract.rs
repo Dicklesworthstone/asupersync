@@ -304,6 +304,23 @@ fn coordination_expansion_pack_preserves_core_denominator_and_maps_all_families(
         Some("agent-swarm-coordination-pressure")
     );
     assert_eq!(coordination["baseline_denominator"].as_bool(), Some(false));
+    let rch_summary_fields: BTreeSet<String> = coordination["rch_pressure_summary_fields"]
+        .as_array()
+        .expect("rch_pressure_summary_fields")
+        .iter()
+        .map(|field| field.as_str().expect("rch summary field").to_string())
+        .collect();
+    assert_eq!(
+        rch_summary_fields,
+        BTreeSet::from([
+            "artifact_retrieval_tail_bucket".to_string(),
+            "command_class_hashes".to_string(),
+            "max_queue_depth".to_string(),
+            "proof_fanout_count".to_string(),
+            "queue_depth_bucket".to_string(),
+            "timeout_or_refusal_reasons".to_string(),
+        ])
+    );
 
     let required: BTreeSet<String> = coordination["required_scenario_families"]
         .as_array()
@@ -616,6 +633,54 @@ fn coordination_fixture_synthesis_emits_deterministic_scheduler_inputs() {
     assert_eq!(evidence["evidence_inputs"].as_array().unwrap().len(), 7);
     assert!(summary.contains("tracker_lock_contention"));
     assert!(summary.contains("coordination_latency_burst"));
+    assert!(summary.contains("q04_07"));
+
+    let rch_workload = pack["workloads"]
+        .as_array()
+        .expect("workloads")
+        .iter()
+        .find(|workload| workload["scenario_family"] == "concurrent_rch_proofs")
+        .expect("rch workload");
+    let rch_summary = &rch_workload["pressure_summary"]["rch"];
+    assert_eq!(rch_summary["queue_depth_bucket"], "q04_07");
+    assert_eq!(rch_summary["max_queue_depth"].as_u64(), Some(5));
+    assert_eq!(rch_summary["proof_fanout_count"].as_u64(), Some(1));
+    assert_eq!(
+        rch_summary["artifact_retrieval_tail_bucket"],
+        "artifact_tail_unknown"
+    );
+    assert_eq!(
+        rch_summary["timeout_or_refusal_reasons"]
+            .as_array()
+            .expect("timeout/refusal reasons")
+            .len(),
+        0
+    );
+    let command_hashes = rch_summary["command_class_hashes"]
+        .as_array()
+        .expect("command hashes");
+    assert_eq!(command_hashes.len(), 1);
+    assert!(
+        command_hashes[0]
+            .as_str()
+            .expect("command hash")
+            .starts_with("cmdclass:")
+    );
+
+    let evidence_rch = evidence["evidence_inputs"]
+        .as_array()
+        .expect("evidence inputs")
+        .iter()
+        .find(|input| input["scenario_family"] == "concurrent_rch_proofs")
+        .expect("rch evidence input");
+    assert_eq!(
+        evidence_rch["pressure_summary"]["rch"]["queue_depth_bucket"],
+        "q04_07"
+    );
+    assert_eq!(
+        report["rch_pressure_summary"]["queue_depth_bucket"],
+        "q04_07"
+    );
 
     for workload in pack["workloads"].as_array().expect("workloads") {
         assert!(

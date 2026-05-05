@@ -71,6 +71,14 @@
     "source_contract": "artifacts/agent_swarm_coordination_workload_contract_v1.json",
     "source_schema_version": "agent-swarm-coordination-workload-bundle-v1",
     "runner_mode": "scripts/run_runtime_workload_corpus.sh --synthesize-coordination-pack",
+    "rch_pressure_summary_fields": [
+      "queue_depth_bucket",
+      "max_queue_depth",
+      "proof_fanout_count",
+      "artifact_retrieval_tail_bucket",
+      "timeout_or_refusal_reasons",
+      "command_class_hashes"
+    ],
     "baseline_denominator": false,
     "required_scenario_families": [
       "tracker_lock_contention",
