@@ -1,5 +1,3 @@
-#![allow(warnings)]
-#![allow(clippy::all)]
 //! HTTP/3 RFC 9298 Extended CONNECT conformance tests.
 //!
 //! Tests compliance with RFC 9298 Extended CONNECT requirements:
@@ -8,7 +6,9 @@
 //! - Capsule format validation
 
 use super::*;
+use asupersync::http::h3_native::{H3NativeError, H3PseudoHeaders, H3RequestHead};
 use asupersync::net::quic_core::{decode_varint, encode_varint};
+use std::collections::{HashMap, HashSet};
 
 /// Extended CONNECT protocol types from RFC 9298.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -231,7 +231,6 @@ fn test_connect_ip_negotiation() -> H3ConformanceResult {
         // Test IPv4 and IPv6 targets
         let ip_targets = vec![
             ("192.0.2.1", "IPv4 target"),
-            ("2001:db8::1", "IPv6 target"),
             ("[2001:db8::1]", "IPv6 target with brackets"),
         ];
 
@@ -258,6 +257,7 @@ fn test_connect_ip_negotiation() -> H3ConformanceResult {
         let invalid_targets = vec![
             ("example.com", "hostname instead of IP"),
             ("256.1.1.1", "invalid IPv4"),
+            ("2001:db8::1", "IPv6 authority without brackets"),
             ("gggg::1", "invalid IPv6"),
             ("", "empty target"),
         ];
@@ -361,7 +361,7 @@ fn test_extended_connect_error_handling() -> H3ConformanceResult {
             create_extended_connect_headers("unsupported-protocol", "example.com", 8080);
 
         if validate_extended_connect_headers(&unsupported_protocol) {
-            let response = process_connect_request(&unsupported_protocol);
+            let response = connect_response_for_protocol(&unsupported_protocol);
             if get_response_status(&response) != 501 {
                 return Err("Unsupported protocol should result in 501 Not Implemented".to_string());
             }
@@ -381,25 +381,21 @@ fn test_extended_connect_error_handling() -> H3ConformanceResult {
         ];
 
         for (malformed_headers, description) in malformed_cases {
-            if validate_extended_connect_headers(&malformed_headers) {
-                return Err(format!("Malformed headers accepted: {}", description));
-            }
-
-            let error_code = get_last_protocol_error();
-            if !matches!(error_code, Some(ProtocolError::MalformedHeaders)) {
+            let err = match validate_extended_connect_headers_result(&malformed_headers) {
+                Ok(_) => return Err(format!("Malformed headers accepted: {}", description)),
+                Err(err) => err,
+            };
+            if !matches!(err, H3NativeError::InvalidRequestPseudoHeader(_)) {
                 return Err(format!(
-                    "Expected MalformedHeaders error for {}, got {:?}",
-                    description, error_code
+                    "Expected invalid request pseudo-header error for {}, got {:?}",
+                    description, err
                 ));
             }
         }
 
-        // Test connection state after errors
-        let error_response = process_connect_request(&unsupported_protocol);
-        let connection_state = get_connection_state();
-
-        if !matches!(connection_state, ConnectionState::Open) {
-            return Err("Connection should remain open after Extended CONNECT error".to_string());
+        let valid_after_error = create_extended_connect_headers("connect-udp", "example.com", 8080);
+        if !validate_extended_connect_headers(&valid_after_error) {
+            return Err("Valid Extended CONNECT request rejected after error cases".to_string());
         }
 
         Ok(())
@@ -420,8 +416,7 @@ fn test_extended_connect_error_handling() -> H3ConformanceResult {
     }
 }
 
-// Helper functions and types for Extended CONNECT testing
-// In real implementation, these would integrate with actual HTTP/3 stack
+// Helper functions and types for Extended CONNECT testing.
 
 #[derive(Debug, Clone)]
 pub struct HttpHeader {
@@ -442,19 +437,6 @@ pub struct Capsule {
     pub capsule_type: CapsuleType,
     pub length: u64,
     pub payload: Vec<u8>,
-}
-
-#[derive(Debug, PartialEq)]
-enum ProtocolError {
-    MalformedHeaders,
-    UnsupportedProtocol,
-    InvalidTarget,
-}
-
-#[derive(Debug, PartialEq)]
-enum ConnectionState {
-    Open,
-    Closed,
 }
 
 impl TestCategory {
@@ -610,31 +592,54 @@ fn create_drain_webtransport_session_capsule(session_id: u32) -> Vec<u8> {
 }
 
 fn validate_extended_connect_headers(headers: &[HttpHeader]) -> bool {
-    let header_map = headers_to_map(headers);
+    validate_extended_connect_headers_result(headers).is_ok()
+}
 
-    // Must have :method CONNECT
-    if header_map.get(":method") != Some(&"CONNECT".to_string()) {
-        return false;
-    }
+fn validate_extended_connect_headers_result(
+    headers: &[HttpHeader],
+) -> Result<H3RequestHead, H3NativeError> {
+    let mut pseudo = H3PseudoHeaders::default();
+    let mut regular_headers = Vec::new();
+    let mut seen_pseudo = HashSet::new();
 
-    // Must have :protocol
-    if !header_map.contains_key(":protocol") {
-        return false;
-    }
+    for header in headers {
+        if header.name.starts_with(':') && !seen_pseudo.insert(header.name.as_str()) {
+            return Err(H3NativeError::InvalidRequestPseudoHeader(
+                "duplicate pseudo header",
+            ));
+        }
 
-    // Must have :authority
-    if !header_map.contains_key(":authority") {
-        return false;
-    }
-
-    // Protocol must be lowercase
-    if let Some(protocol) = header_map.get(":protocol") {
-        if protocol != &protocol.to_lowercase() {
-            return false;
+        match header.name.as_str() {
+            ":method" => pseudo.method = Some(header.value.clone()),
+            ":scheme" => pseudo.scheme = Some(header.value.clone()),
+            ":authority" => pseudo.authority = Some(header.value.clone()),
+            ":path" => pseudo.path = Some(header.value.clone()),
+            ":protocol" => {
+                if !is_valid_protocol_token(&header.value) {
+                    return Err(H3NativeError::InvalidRequestPseudoHeader(
+                        "invalid extended CONNECT :protocol token",
+                    ));
+                }
+                pseudo.protocol = Some(header.value.clone());
+            }
+            ":status" => pseudo.status = header.value.parse().ok(),
+            name if name.starts_with(':') => {
+                return Err(H3NativeError::InvalidRequestPseudoHeader(
+                    "unknown pseudo header",
+                ));
+            }
+            _ => regular_headers.push((header.name.clone(), header.value.clone())),
         }
     }
 
-    true
+    H3RequestHead::new_with_settings(pseudo, regular_headers, true)
+}
+
+fn is_valid_protocol_token(protocol: &str) -> bool {
+    !protocol.is_empty()
+        && protocol.bytes().all(|byte| {
+            byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'-' | b'.' | b'_')
+        })
 }
 
 fn validate_connect_response(headers: &[HttpHeader]) -> bool {
@@ -675,7 +680,7 @@ fn parse_capsule(data: &[u8]) -> Result<Capsule, String> {
     })
 }
 
-fn headers_to_map(headers: &[HttpHeader]) -> std::collections::HashMap<String, String> {
+fn headers_to_map(headers: &[HttpHeader]) -> HashMap<String, String> {
     headers
         .iter()
         .map(|h| (h.name.clone(), h.value.clone()))
@@ -720,9 +725,14 @@ fn is_valid_ip_address(target: &str) -> bool {
     false
 }
 
-fn process_connect_request(_headers: &[HttpHeader]) -> Vec<HttpHeader> {
-    // Mock request processing
-    create_connect_response(501, "Not Implemented")
+fn connect_response_for_protocol(headers: &[HttpHeader]) -> Vec<HttpHeader> {
+    match extract_protocol_from_headers(headers) {
+        Ok(ExtendedConnectProtocol::ConnectUdp)
+        | Ok(ExtendedConnectProtocol::ConnectIp)
+        | Ok(ExtendedConnectProtocol::WebTransport) => create_connect_response(200, "Connected"),
+        Ok(ExtendedConnectProtocol::Custom(_)) => create_connect_response(501, "Not Implemented"),
+        Err(_) => create_connect_response(400, "Bad Request"),
+    }
 }
 
 fn get_response_status(response: &[HttpHeader]) -> u16 {
@@ -733,10 +743,23 @@ fn get_response_status(response: &[HttpHeader]) -> u16 {
         .unwrap_or(500)
 }
 
-fn get_last_protocol_error() -> Option<ProtocolError> {
-    Some(ProtocolError::MalformedHeaders)
-}
+#[cfg(test)]
+mod tests {
+    use super::*;
 
-pub fn get_connection_state() -> ConnectionState {
-    ConnectionState::Open
+    #[test]
+    fn extended_connect_results_pass() {
+        let results = run_extended_connect_tests();
+        assert_eq!(results.len(), 5);
+
+        for result in results {
+            assert_eq!(
+                result.verdict,
+                TestVerdict::Pass,
+                "{} failed: {:?}",
+                result.test_id,
+                result.notes
+            );
+        }
+    }
 }
