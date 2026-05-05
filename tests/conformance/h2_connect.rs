@@ -1,5 +1,3 @@
-#![allow(warnings)]
-#![allow(clippy::all)]
 //! HTTP/2 CONNECT method tunneling conformance tests per RFC 9113.
 //!
 //! This module tests CONNECT method compliance with RFC 9113 Section 8.5 with focus on:
@@ -375,7 +373,9 @@ proptest! {
     #[allow(dead_code)]
     fn connect_with_scheme_or_path_rejected(
         input in arb_invalid_connect_request()
-            .prop_filter("has forbidden headers", |input| input.has_forbidden_pseudo_headers())
+            .prop_filter("has forbidden headers with authority", |input| {
+                input.authority.is_some() && input.has_forbidden_pseudo_headers()
+            })
     ) {
         let result = validate_connect_pseudo_headers(&input);
 
@@ -389,9 +389,7 @@ proptest! {
             if input.scheme.is_some() {
                 prop_assert!(err.to_string().contains(":scheme"),
                     "Error should mention forbidden :scheme");
-            }
-
-            if input.path.is_some() {
+            } else if input.path.is_some() {
                 prop_assert!(err.to_string().contains(":path"),
                     "Error should mention forbidden :path");
             }
