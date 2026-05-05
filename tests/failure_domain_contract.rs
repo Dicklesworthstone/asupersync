@@ -1,5 +1,3 @@
-#![allow(warnings)]
-#![allow(clippy::all)]
 //! Failure domain compiler contract invariants (AA-09.2).
 
 #![allow(missing_docs)]
