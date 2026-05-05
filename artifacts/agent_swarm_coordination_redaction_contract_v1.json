@@ -1,0 +1,382 @@
+{
+  "contract_version": "agent-swarm-coordination-redaction-contract-v1",
+  "schema_version": "agent-swarm-coordination-redaction-report-v1",
+  "bead_id": "asupersync-qn8i0p.6",
+  "source_workload_contract": "agent-swarm-coordination-workload-contract-v1",
+  "source_workload_artifact": "artifacts/agent_swarm_coordination_workload_contract_v1.json",
+  "description": "Privacy, redaction, and trust-boundary contract for agent-swarm coordination evidence bundles.",
+  "accepted_secret_placeholder": "<redacted>",
+  "pseudonymization": {
+    "scope_fields": [
+      "contract_version",
+      "project_scoped_salt_id",
+      "redaction_class",
+      "normalized_input"
+    ],
+    "fixture_algorithm": "stable-pseudonym-fixture-v1",
+    "output_prefixes": {
+      "agent_identity": "agent:",
+      "absolute_local_path": "path:",
+      "email_identifier": "email:",
+      "hostname": "host:",
+      "worker_metadata": "worker:"
+    }
+  },
+  "trust_levels": [
+    {
+      "trust_level": "fixture_checked",
+      "accepted_for_replay": true,
+      "requires_redaction_report": true,
+      "notes": "Checked synthetic fixtures and checked sample artifacts."
+    },
+    {
+      "trust_level": "explicit_export",
+      "accepted_for_replay": true,
+      "requires_redaction_report": true,
+      "notes": "Explicit exported JSON/stdout selected by the operator."
+    },
+    {
+      "trust_level": "live_command_output",
+      "accepted_for_replay": true,
+      "requires_redaction_report": true,
+      "notes": "Accepted only after raw env values, hostnames, worker names, and message bodies are removed."
+    },
+    {
+      "trust_level": "metadata_only",
+      "accepted_for_replay": true,
+      "requires_redaction_report": true,
+      "notes": "Only counts, kinds, hashes, and stable pseudonyms are retained."
+    },
+    {
+      "trust_level": "unknown",
+      "accepted_for_replay": false,
+      "requires_redaction_report": true,
+      "notes": "Unknown inputs can only produce refused events."
+    }
+  ],
+  "redaction_classes": [
+    {
+      "class": "secret_like",
+      "default_action": "refuse",
+      "retained_shape": "none",
+      "refusal_reason": "unredacted_secret"
+    },
+    {
+      "class": "bearer_token",
+      "default_action": "redact",
+      "retained_shape": "token_kind",
+      "refusal_reason": "unredacted_secret"
+    },
+    {
+      "class": "github_token",
+      "default_action": "redact",
+      "retained_shape": "token_kind",
+      "refusal_reason": "unredacted_secret"
+    },
+    {
+      "class": "api_key",
+      "default_action": "redact",
+      "retained_shape": "key_kind",
+      "refusal_reason": "unredacted_secret"
+    },
+    {
+      "class": "ssh_path",
+      "default_action": "refuse",
+      "retained_shape": "none",
+      "refusal_reason": "raw_local_path"
+    },
+    {
+      "class": "absolute_local_path",
+      "default_action": "pseudonymize",
+      "retained_shape": "path_pseudonym",
+      "refusal_reason": "raw_local_path"
+    },
+    {
+      "class": "email_identifier",
+      "default_action": "pseudonymize",
+      "retained_shape": "email_pseudonym",
+      "refusal_reason": "raw_identifier"
+    },
+    {
+      "class": "agent_identity",
+      "default_action": "pseudonymize",
+      "retained_shape": "agent_pseudonym",
+      "refusal_reason": "raw_identifier"
+    },
+    {
+      "class": "hostname",
+      "default_action": "pseudonymize",
+      "retained_shape": "host_pseudonym",
+      "refusal_reason": "raw_host_metadata"
+    },
+    {
+      "class": "command_env_var",
+      "default_action": "metadata_only",
+      "retained_shape": "env_key_only",
+      "refusal_reason": "raw_env_value"
+    },
+    {
+      "class": "attachment_reference",
+      "default_action": "metadata_only",
+      "retained_shape": "attachment_kind_and_hash",
+      "refusal_reason": "raw_attachment_content"
+    },
+    {
+      "class": "message_body",
+      "default_action": "refuse",
+      "retained_shape": "none",
+      "refusal_reason": "raw_message_body"
+    },
+    {
+      "class": "git_remote_url",
+      "default_action": "redact",
+      "retained_shape": "remote_kind",
+      "refusal_reason": "raw_remote_url"
+    },
+    {
+      "class": "worker_metadata",
+      "default_action": "pseudonymize",
+      "retained_shape": "worker_pseudonym",
+      "refusal_reason": "raw_worker_metadata"
+    },
+    {
+      "class": "malformed_redaction_metadata",
+      "default_action": "refuse",
+      "retained_shape": "none",
+      "refusal_reason": "malformed_redaction_metadata"
+    }
+  ],
+  "refusal_reasons": [
+    "malformed_redaction_metadata",
+    "raw_attachment_content",
+    "raw_env_value",
+    "raw_host_metadata",
+    "raw_identifier",
+    "raw_local_path",
+    "raw_message_body",
+    "raw_remote_url",
+    "raw_worker_metadata",
+    "unredacted_secret",
+    "unknown_source"
+  ],
+  "detector_fixtures": [
+    {
+      "fixture_id": "secret-like-password",
+      "class": "secret_like",
+      "synthetic_input": "password=REDACTION_FIXTURE_VALUE",
+      "expected_action": "refuse",
+      "expected_output": "",
+      "refusal_reason": "unredacted_secret"
+    },
+    {
+      "fixture_id": "bearer-token-header",
+      "class": "bearer_token",
+      "synthetic_input": "Authorization: Bearer REDACTION_FIXTURE_BEARER_TOKEN",
+      "expected_action": "redact",
+      "expected_output": "Authorization: Bearer <redacted>",
+      "refusal_reason": ""
+    },
+    {
+      "fixture_id": "github-token-sentinel",
+      "class": "github_token",
+      "synthetic_input": "ghp_REDACTION_FIXTURE_GITHUB_TOKEN",
+      "expected_action": "redact",
+      "expected_output": "<redacted>",
+      "refusal_reason": ""
+    },
+    {
+      "fixture_id": "api-key-assignment",
+      "class": "api_key",
+      "synthetic_input": "api_key=REDACTION_FIXTURE_API_KEY",
+      "expected_action": "redact",
+      "expected_output": "api_key=<redacted>",
+      "refusal_reason": ""
+    },
+    {
+      "fixture_id": "ssh-private-key-path",
+      "class": "ssh_path",
+      "synthetic_input": "/home/example/.ssh/id_rsa",
+      "expected_action": "refuse",
+      "expected_output": "",
+      "refusal_reason": "raw_local_path"
+    },
+    {
+      "fixture_id": "absolute-project-path",
+      "class": "absolute_local_path",
+      "synthetic_input": "/data/projects/asupersync/src/http/h2/connection.rs",
+      "expected_action": "pseudonymize",
+      "expected_output": "path:coord-42f5",
+      "refusal_reason": ""
+    },
+    {
+      "fixture_id": "email-like-identifier",
+      "class": "email_identifier",
+      "synthetic_input": "agent@example.invalid",
+      "expected_action": "pseudonymize",
+      "expected_output": "email:coord-8c11",
+      "refusal_reason": ""
+    },
+    {
+      "fixture_id": "agent-name-first",
+      "class": "agent_identity",
+      "synthetic_input": "BlueMountain",
+      "expected_action": "pseudonymize",
+      "expected_output": "agent:coord-274a",
+      "refusal_reason": ""
+    },
+    {
+      "fixture_id": "agent-name-repeat",
+      "class": "agent_identity",
+      "synthetic_input": "BlueMountain",
+      "expected_action": "pseudonymize",
+      "expected_output": "agent:coord-274a",
+      "refusal_reason": ""
+    },
+    {
+      "fixture_id": "host-name",
+      "class": "hostname",
+      "synthetic_input": "vmi-redaction-fixture-host",
+      "expected_action": "pseudonymize",
+      "expected_output": "host:coord-3a20",
+      "refusal_reason": ""
+    },
+    {
+      "fixture_id": "command-env-var",
+      "class": "command_env_var",
+      "synthetic_input": "DATABASE_URL=postgres://fixture:secret@example.invalid/db",
+      "expected_action": "metadata_only",
+      "expected_output": "DATABASE_URL",
+      "refusal_reason": ""
+    },
+    {
+      "fixture_id": "attachment-reference",
+      "class": "attachment_reference",
+      "synthetic_input": "attachments/2026/05/raw-proof.log",
+      "expected_action": "metadata_only",
+      "expected_output": "attachment:text:sha256:fixture-attachment",
+      "refusal_reason": ""
+    },
+    {
+      "fixture_id": "message-body",
+      "class": "message_body",
+      "synthetic_input": "raw message body fixture with operator prose",
+      "expected_action": "refuse",
+      "expected_output": "",
+      "refusal_reason": "raw_message_body"
+    },
+    {
+      "fixture_id": "git-remote-url",
+      "class": "git_remote_url",
+      "synthetic_input": "https://token@github.example.invalid/owner/repo.git",
+      "expected_action": "redact",
+      "expected_output": "https://<redacted>@github.example.invalid/owner/repo.git",
+      "refusal_reason": ""
+    },
+    {
+      "fixture_id": "rch-worker-metadata",
+      "class": "worker_metadata",
+      "synthetic_input": "worker=vmi-redaction-fixture-host ip=192.0.2.10",
+      "expected_action": "pseudonymize",
+      "expected_output": "worker:coord-9e21",
+      "refusal_reason": ""
+    },
+    {
+      "fixture_id": "malformed-redaction-metadata",
+      "class": "malformed_redaction_metadata",
+      "synthetic_input": "{\"redaction_verdict\":\"redacted\",\"source_hash\":\"\"}",
+      "expected_action": "refuse",
+      "expected_output": "",
+      "refusal_reason": "malformed_redaction_metadata"
+    }
+  ],
+  "privacy_report_required_fields": [
+    "schema_version",
+    "run_id",
+    "source_bundle_hash",
+    "redacted_field_count",
+    "pseudonymized_field_count",
+    "metadata_only_field_count",
+    "refused_event_count",
+    "retained_field_summary",
+    "source_hashes",
+    "refusal_reasons",
+    "privacy_verdict"
+  ],
+  "sample_privacy_reports": [
+    {
+      "sample_id": "fixture-redaction-pass",
+      "schema_version": "agent-swarm-coordination-redaction-report-v1",
+      "run_id": "redaction-fixture-pass-001",
+      "source_bundle_hash": "sha256:redaction-fixture-pass-001",
+      "redacted_field_count": 4,
+      "pseudonymized_field_count": 6,
+      "metadata_only_field_count": 2,
+      "refused_event_count": 0,
+      "retained_field_summary": [
+        "token_kind",
+        "agent_pseudonym",
+        "path_pseudonym",
+        "env_key_only",
+        "attachment_kind_and_hash"
+      ],
+      "source_hashes": [
+        "sha256:fixture-source-001",
+        "sha256:fixture-source-002"
+      ],
+      "refusal_reasons": [],
+      "privacy_verdict": "pass"
+    },
+    {
+      "sample_id": "fixture-redaction-refused",
+      "schema_version": "agent-swarm-coordination-redaction-report-v1",
+      "run_id": "redaction-fixture-refused-001",
+      "source_bundle_hash": "sha256:redaction-fixture-refused-001",
+      "redacted_field_count": 0,
+      "pseudonymized_field_count": 0,
+      "metadata_only_field_count": 1,
+      "refused_event_count": 4,
+      "retained_field_summary": [
+        "refusal provenance"
+      ],
+      "source_hashes": [
+        "sha256:fixture-refused-001"
+      ],
+      "refusal_reasons": [
+        "malformed_redaction_metadata",
+        "raw_local_path",
+        "raw_message_body",
+        "unredacted_secret"
+      ],
+      "privacy_verdict": "fail_closed"
+    }
+  ],
+  "escape_hatches": {
+    "allow_raw_body_capture": {
+      "enabled_by_default": false,
+      "requires_explicit_operator_flag": true,
+      "requires_test_fixture": true,
+      "refusal_when_absent": "raw_message_body"
+    },
+    "allow_live_attachment_ingestion": {
+      "enabled_by_default": false,
+      "requires_explicit_operator_flag": true,
+      "requires_test_fixture": true,
+      "refusal_when_absent": "raw_attachment_content"
+    },
+    "allow_raw_worker_metadata": {
+      "enabled_by_default": false,
+      "requires_explicit_operator_flag": true,
+      "requires_test_fixture": true,
+      "refusal_when_absent": "raw_worker_metadata"
+    }
+  },
+  "acceptance_rules": [
+    "Detector fixtures are synthetic and must not contain live credentials.",
+    "Every redaction class has exactly one default action and refusal reason.",
+    "Unknown trust levels can only fail closed.",
+    "Repeated normalized inputs in the same class produce identical pseudonyms.",
+    "The same normalized input in different classes must not share a pseudonym namespace.",
+    "Privacy reports must include counts, retained-field summaries, source hashes, refusal reasons, and final privacy verdicts.",
+    "Escape hatches are disabled by default and require explicit operator flags plus tests."
+  ]
+}
