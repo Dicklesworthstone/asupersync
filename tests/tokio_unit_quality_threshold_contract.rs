@@ -1,5 +1,3 @@
-#![allow(warnings)]
-#![allow(clippy::all)]
 //! Contract tests for cross-track unit-test quality thresholds (2oh2u.10.11).
 //!
 //! These tests enforce presence of required gate IDs, prerequisite bead bindings,
