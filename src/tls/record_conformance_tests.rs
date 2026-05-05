@@ -1,4 +1,3 @@
-#![allow(clippy::all)]
 //! TLS 1.3 record-layer conformance tests.
 //!
 //! Golden tests for TLS 1.3 record framing conformance per RFC 8446 §5.
@@ -721,7 +720,8 @@ mod tests {
             // This test validates the record-layer aspects rather than full 0-RTT flow.
 
             // Test early data records after handshake (should be rejected)
-            // In a real 0-RTT scenario, these would come before ServerHello
+            // Full 0-RTT flows place these before ServerHello; this harness
+            // isolates the record-layer boundary.
             let early_data_content = b"Early data payload";
             let mut early_payload = early_data_content.to_vec();
             early_payload.push(CONTENT_TYPE_APPLICATION_DATA);
