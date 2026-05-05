@@ -1,5 +1,3 @@
-#![allow(warnings)]
-#![allow(clippy::all)]
 #![allow(missing_docs)]
 //! Scheduler backoff tests.
 
@@ -7,32 +5,39 @@ use asupersync::runtime::RuntimeState;
 use asupersync::runtime::scheduler::WorkStealingScheduler;
 use asupersync::sync::ContendedMutex;
 use std::sync::Arc;
-use std::time::Duration;
+use std::sync::mpsc;
+use std::time::{Duration, Instant};
 
 #[test]
-fn test_scheduler_shutdown_with_backoff() {
-    // This test verifies that the worker loop with backoff eventually parks and
-    // can be properly shut down.
-
+fn scheduler_shutdown_with_backoff_exits_idle_worker() {
     let state = Arc::new(ContendedMutex::new("runtime_state", RuntimeState::new()));
     let mut scheduler = WorkStealingScheduler::new(1, &state);
 
-    // Take workers to run in a thread
     let workers = scheduler.take_workers();
     assert_eq!(workers.len(), 1);
-    let mut worker = workers.into_iter().next().unwrap();
+    let mut worker = workers
+        .into_iter()
+        .next()
+        .expect("single-worker scheduler should produce one worker");
 
-    // Spawn worker thread
+    let (tx, rx) = mpsc::channel();
     let handle = std::thread::spawn(move || {
+        let started = Instant::now();
         worker.run_loop();
+        tx.send(started.elapsed())
+            .expect("worker shutdown timing send should succeed");
     });
 
-    // Sleep to allow worker to enter backoff and park
     std::thread::sleep(Duration::from_millis(50));
-
-    // Signal shutdown
     scheduler.shutdown();
 
-    // Join thread - if backoff/park logic is broken, this might hang
+    let elapsed = rx
+        .recv_timeout(Duration::from_secs(2))
+        .expect("idle worker should observe scheduler shutdown");
     handle.join().expect("worker thread join");
+
+    assert!(
+        elapsed < Duration::from_secs(1),
+        "idle worker should exit promptly after shutdown, elapsed={elapsed:?}"
+    );
 }
