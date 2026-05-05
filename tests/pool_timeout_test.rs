@@ -1,5 +1,3 @@
-#![allow(warnings)]
-#![allow(clippy::all)]
 #![allow(missing_docs)]
 #![cfg(feature = "test-internals")]
 //! Regression coverage for create-time acquire timeouts in `GenericPool`.
@@ -12,11 +10,9 @@ use parking_lot::Mutex;
 use std::sync::Arc;
 use std::time::Duration;
 
-mod common;
-
 #[test]
 fn pool_creation_respects_acquire_timeout() {
-    common::init_test_logging();
+    asupersync::test_utils::init_test_logging();
 
     let mut runtime = LabRuntime::new(LabConfig::new(0x5157_9001).max_steps(10_000));
     let root = runtime.state.create_root_region(Budget::INFINITE);
