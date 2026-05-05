@@ -1,5 +1,3 @@
-#![allow(warnings)]
-#![allow(clippy::all)]
 //! Contract tests for [T8.8] Capability-Security and Authority-Flow Audit
 //!
 //! Validates that the capability-security audit document and JSON artifact
