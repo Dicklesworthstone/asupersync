@@ -1,11 +1,16 @@
-#![allow(warnings)]
-#![allow(clippy::all)]
 //! Integration test for Kafka RecordBatch v2 conformance.
+
+#[path = "conformance/kafka_record_batch_v2/format.rs"]
+mod format;
+#[path = "conformance/kafka_record_batch_v2/harness.rs"]
+mod harness;
+#[path = "conformance/kafka_record_batch_v2/test_vectors.rs"]
+mod test_vectors;
 
 #[test]
 fn kafka_record_batch_v2_conformance_integration() {
     // Import the conformance test harness
-    use conformance::KafkaConformanceHarness;
+    use harness::{KafkaConformanceHarness, TestVerdict};
 
     let harness = KafkaConformanceHarness::new();
 
@@ -20,13 +25,20 @@ fn kafka_record_batch_v2_conformance_integration() {
         println!(
             "Test {}: {} - {}",
             result.test_id,
-            if result.passed { "PASS" } else { "FAIL" },
-            result.error_message.as_deref().unwrap_or("No error")
+            if result.verdict == TestVerdict::Pass {
+                "PASS"
+            } else {
+                "FAIL"
+            },
+            result.details.as_deref().unwrap_or("No error")
         );
     }
 
     // Ensure we don't have any unexpected failures
-    let failed_count = results.iter().filter(|r| !r.passed).count();
+    let failed_count = results
+        .iter()
+        .filter(|r| r.verdict != TestVerdict::Pass)
+        .count();
 
     assert_eq!(
         failed_count, 0,
