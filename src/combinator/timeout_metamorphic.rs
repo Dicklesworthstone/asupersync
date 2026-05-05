@@ -1,4 +1,3 @@
-#![allow(clippy::all)]
 //! Metamorphic Testing: timeout nesting under cancellation
 //!
 //! This module implements comprehensive metamorphic relations for timeout
@@ -24,8 +23,8 @@
 use crate::cx::Cx;
 use crate::lab::{LabConfig, LabRuntime};
 use crate::time::{TimerDriverHandle, VirtualClock, timeout};
-use crate::types::{Budget, CancelReason, RegionId, TaskId, Time};
-use futures::future;
+use crate::types::{Budget, CancelKind, CancelReason, RegionId, TaskId, Time};
+use futures_lite::future;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -134,6 +133,8 @@ struct TestOperation {
     global_state: Arc<GlobalTimeoutState>,
     /// Start time for duration tracking.
     start_time: parking_lot::Mutex<Option<Time>>,
+    /// Optional elapsed-time threshold for an externally requested cancellation.
+    external_cancel_after_ms: Option<u64>,
 }
 
 impl TestOperation {
@@ -146,7 +147,13 @@ impl TestOperation {
             cancel_reason: parking_lot::Mutex::new(None),
             global_state,
             start_time: parking_lot::Mutex::new(None),
+            external_cancel_after_ms: None,
         }
+    }
+
+    fn with_external_cancel_after(mut self, delay_ms: u64) -> Self {
+        self.external_cancel_after_ms = Some(delay_ms);
+        self
     }
 
     /// Mark this operation as cancelled with the given reason.
@@ -160,11 +167,16 @@ impl TestOperation {
 
     /// Check if this operation should complete now.
     fn should_complete(&self, now: Time) -> bool {
+        self.elapsed_ms_since_start(now)
+            .is_some_and(|elapsed_ms| elapsed_ms >= self.duration_ms)
+    }
+
+    fn elapsed_ms_since_start(&self, now: Time) -> Option<u64> {
         if let Some(start_time) = *self.start_time.lock() {
             let elapsed_ms = (now.as_nanos().saturating_sub(start_time.as_nanos())) / 1_000_000;
-            elapsed_ms >= self.duration_ms
+            Some(elapsed_ms)
         } else {
-            false
+            None
         }
     }
 }
@@ -172,7 +184,7 @@ impl TestOperation {
 impl Future for TestOperation {
     type Output = Result<i32, &'static str>;
 
-    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+    fn poll(self: Pin<&mut Self>, task_cx: &mut Context<'_>) -> Poll<Self::Output> {
         let this = self.get_mut();
 
         // Initialize start time on first poll
@@ -183,7 +195,28 @@ impl Future for TestOperation {
             }
         }
 
-        // Check for cancellation
+        if let Some(current_cx) = Cx::current() {
+            if let Some(cancel_after_ms) = this.external_cancel_after_ms {
+                let should_cancel = this
+                    .elapsed_ms_since_start(current_cx.now())
+                    .is_some_and(|elapsed_ms| elapsed_ms >= cancel_after_ms);
+                if should_cancel && !this.cancelled.load(Ordering::SeqCst) {
+                    current_cx.cancel_with(
+                        CancelKind::User,
+                        Some("timeout precedence test cancellation"),
+                    );
+                }
+            }
+
+            if current_cx.is_cancel_requested() && !this.cancelled.load(Ordering::SeqCst) {
+                let reason = current_cx
+                    .cancel_reason()
+                    .unwrap_or_else(|| CancelReason::user("external cancellation"));
+                this.cancel(reason);
+            }
+        }
+
+        // Check for cancellation.
         if this.cancelled.load(Ordering::SeqCst) {
             let _reason = this
                 .cancel_reason
@@ -207,8 +240,8 @@ impl Future for TestOperation {
             }
         }
 
-        // Wake up after a short delay to simulate polling progress
-        cx.waker().wake_by_ref();
+        // Wake again so the step driver can advance virtual time.
+        task_cx.waker().wake_by_ref();
         Poll::Pending
     }
 }
@@ -528,16 +561,12 @@ mod metamorphic_cancel_timeout_precedence {
             );
 
             let summary = run_timeout_test(&config, |global_state| async move {
-                let operation = TestOperation::new(1, operation_ms, Arc::clone(&global_state));
+                let operation = TestOperation::new(1, operation_ms, Arc::clone(&global_state))
+                    .with_external_cancel_after(cancel_delay_ms);
 
                 if let Some(cx) = Cx::current() {
                     let now = cx.now();
 
-                    // This test models precedence at the outcome level. It does
-                    // not inject a real external cancellation signal yet, so the
-                    // authoritative behavior here is simply the observed timeout
-                    // result for the configured operation.
-                    let _cancel_delay_ms = cancel_delay_ms;
                     match timeout(now, Duration::from_millis(timeout_ms), operation).await {
                         Ok(Ok(_)) => {
                             global_state
@@ -555,23 +584,18 @@ mod metamorphic_cancel_timeout_precedence {
                                 .fetch_add(1, Ordering::SeqCst);
                         }
                     }
-
-                    // In this test, we're verifying the precedence conceptually
-                    // The actual implementation would require integration with the
-                    // cancellation system to inject proper CancelReason values
                 }
             });
 
-            // Verify that when we inject cancellation before timeout,
-            // the operation doesn't time out in most cases
             if cancel_delay_ms < timeout_ms {
-                // We expect cancellation to take precedence, though the exact
-                // implementation depends on the cancellation mechanism
-                let total_outcomes = summary.operation_completed
-                    + summary.operation_cancelled
-                    + summary.timeouts_detected
-                    + summary.external_cancels_detected;
-                assert!(total_outcomes > 0, "Case {}: Some outcome should occur", i);
+                assert_eq!(
+                    summary.external_cancels_detected, 1,
+                    "Case {i}: external cancellation should win before timeout"
+                );
+                assert_eq!(
+                    summary.timeouts_detected, 0,
+                    "Case {i}: pre-timeout cancellation must not surface as timeout"
+                );
             }
         }
     }
@@ -601,10 +625,11 @@ mod metamorphic_no_double_cancel {
                 let timeout3 = timeout(now, Duration::from_millis(80), operations.next().unwrap());
 
                 // Run them concurrently and collect results
-                let results = future::join3(timeout1, timeout2, timeout3).await;
+                let ((result1, result2), result3) =
+                    future::zip(future::zip(timeout1, timeout2), timeout3).await;
 
                 // Count outcomes
-                let outcomes = [&results.0, &results.1, &results.2];
+                let outcomes = [&result1, &result2, &result3];
                 for outcome in outcomes {
                     match outcome {
                         Ok(Ok(_)) => global_state
@@ -871,24 +896,5 @@ mod metamorphic_integration {
             !summary.double_cancel_detected,
             "No double-cancellation should occur in comprehensive test"
         );
-    }
-}
-
-// Need to add futures dependency for join macros
-mod futures {
-    pub mod future {
-        pub async fn join3<A, B, C>(a: A, b: B, c: C) -> (A::Output, B::Output, C::Output)
-        where
-            A: std::future::Future,
-            B: std::future::Future,
-            C: std::future::Future,
-        {
-            // Simple implementation without external futures crate
-            // In practice, this would use a proper join implementation
-            let a_result = a.await;
-            let b_result = b.await;
-            let c_result = c.await;
-            (a_result, b_result, c_result)
-        }
     }
 }
