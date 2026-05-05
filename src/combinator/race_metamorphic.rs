@@ -1,5 +1,4 @@
 #![allow(clippy::cast_possible_wrap)]
-#![allow(clippy::all)]
 //! Metamorphic Testing: Scope.race loser-drain correctness
 //!
 //! This module implements metamorphic relations (MRs) to verify that Scope::race
@@ -55,7 +54,7 @@ struct TestFuture {
     id: u32,
     /// Value to return when completing successfully
     value: i32,
-    /// Number of polls before completing (simulates work)
+    /// Number of remaining polls before completion.
     polls_to_complete: AtomicU32,
     /// Whether this future should panic during execution
     should_panic: bool,
@@ -276,23 +275,6 @@ fn create_test_context(region_id: u32, task_id: u32) -> Cx {
         TaskId::from_arena(ArenaIndex::new(task_id, 0)),
         Budget::INFINITE,
     )
-}
-
-/// Simple block-on implementation for testing
-fn block_on<F: Future>(f: F) -> F::Output {
-    let waker = Waker::from(Arc::new(TestWaker));
-    let mut cx = Context::from_waker(&waker);
-    let mut pinned = Box::pin(f);
-    loop {
-        match pinned.as_mut().poll(&mut cx) {
-            Poll::Ready(v) => return v,
-            Poll::Pending => {
-                // In a real implementation, we'd use LabRuntime here
-                // For now, yield to simulate scheduling
-                std::thread::yield_now();
-            }
-        }
-    }
 }
 
 #[derive(Debug)]
