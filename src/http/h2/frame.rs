@@ -1866,6 +1866,26 @@ mod tests {
     }
 
     #[test]
+    fn test_ping_rejects_every_non_eight_byte_payload_size() {
+        for payload_len in [0usize, 1, 7, 9, 16] {
+            let header = FrameHeader {
+                length: u32::try_from(payload_len).expect("test payload length fits u32"),
+                frame_type: FrameType::Ping as u8,
+                flags: 0,
+                stream_id: 0,
+            };
+            let payload = Bytes::from(vec![0; payload_len]);
+
+            let err = PingFrame::parse(&header, &payload).unwrap_err();
+            assert_eq!(
+                err.code,
+                ErrorCode::FrameSizeError,
+                "PING payload length {payload_len} must be rejected before connection handling"
+            );
+        }
+    }
+
+    #[test]
     fn test_goaway_non_zero_stream_id_rejected() {
         let header = FrameHeader {
             length: 8,

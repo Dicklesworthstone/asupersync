@@ -2207,6 +2207,7 @@ mod tests {
     #[test]
     fn test_connection_process_ping() {
         let mut conn = Connection::client(Settings::client());
+        conn.state = ConnectionState::Open;
 
         let ping = PingFrame::new([1, 2, 3, 4, 5, 6, 7, 8]);
         conn.process_frame(Frame::Ping(ping)).unwrap();
@@ -3619,6 +3620,70 @@ mod tests {
 
         // No response should be queued
         assert!(!conn.has_pending_frames());
+    }
+
+    #[test]
+    fn ping_ack_is_queued_after_existing_pending_frame() {
+        let mut conn = Connection::server(Settings::default());
+        conn.state = ConnectionState::Open;
+
+        conn.send_connection_window_update(1024)
+            .expect("queue pre-existing connection WINDOW_UPDATE");
+        conn.process_frame(Frame::Ping(PingFrame::new(*b"abcdefgh")))
+            .expect("non-ACK PING should be processed by the connection state machine");
+
+        match conn
+            .next_frame()
+            .expect("pre-existing pending frame should be emitted first")
+        {
+            Frame::WindowUpdate(frame) => {
+                assert_eq!(frame.stream_id, 0);
+                assert_eq!(frame.increment, 1024);
+            }
+            other => panic!("expected WINDOW_UPDATE before PING ACK, got {other:?}"),
+        }
+
+        match conn
+            .next_frame()
+            .expect("non-ACK PING should queue exactly one ACK response")
+        {
+            Frame::Ping(frame) => {
+                assert!(frame.ack);
+                assert_eq!(frame.opaque_data, *b"abcdefgh");
+            }
+            other => panic!("expected PING ACK after pre-existing frame, got {other:?}"),
+        }
+
+        assert!(!conn.has_pending_frames());
+        assert_eq!(conn.state, ConnectionState::Open);
+    }
+
+    #[test]
+    fn ping_ack_frame_preserves_existing_pending_queue_without_echo() {
+        let mut conn = Connection::server(Settings::default());
+        conn.state = ConnectionState::Open;
+
+        conn.send_connection_window_update(2048)
+            .expect("queue pre-existing connection WINDOW_UPDATE");
+        conn.process_frame(Frame::Ping(PingFrame::ack(*b"ack-data")))
+            .expect("ACK PING should be accepted without generating a response");
+
+        match conn
+            .next_frame()
+            .expect("pre-existing pending frame should remain queued")
+        {
+            Frame::WindowUpdate(frame) => {
+                assert_eq!(frame.stream_id, 0);
+                assert_eq!(frame.increment, 2048);
+            }
+            other => panic!("expected original WINDOW_UPDATE, got {other:?}"),
+        }
+
+        assert!(
+            conn.next_frame().is_none(),
+            "ACK PING must not append a second PING ACK"
+        );
+        assert_eq!(conn.state, ConnectionState::Open);
     }
 
     // =========================================================================
