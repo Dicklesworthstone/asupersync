@@ -1,4 +1,3 @@
-#![allow(clippy::all)]
 //! Metamorphic Testing: bracket resource lifecycle under cancellation
 //!
 //! This module implements metamorphic relations for the `bracket` combinator,
@@ -11,8 +10,6 @@
 //! 2. **Acquire Failure Elision**: If `acquire` fails or is cancelled before completion, `use` and `release` MUST NOT run.
 //! 3. **Cancellation Equivalence**: `bracket` under external cancellation must leave the resource in the same state as a `bracket` where the `use` future self-cancels.
 //! 4. **Panic Isolation**: A panic in `use` must still trigger `release` before propagating.
-
-#![allow(dead_code)]
 
 use crate::combinator::bracket;
 use crate::cx::Cx;
@@ -151,7 +148,7 @@ fn metamorphic_bracket_lifecycle_guarantees() {
     let lab_config = LabConfig::new(42);
     let _lab = LabRuntime::new(lab_config);
 
-    // Test different poll counts to simulate varying completion times
+    // Test different poll counts to cover varying completion times
     let scenarios = [(1, 1, 1), (5, 5, 5), (1, 10, 1), (10, 1, 10)];
 
     for &(acq_polls, use_polls, rel_polls) in &scenarios {
