@@ -126,7 +126,7 @@ pub mod tls_sni;
 // rather than invisibly-skipped.
 // pub mod actor_mailbox_protocol;   // tests/conformance internal — broken imports against current API
 // pub mod broadcast_lag;            // asupersync::cx::test_cx + asupersync::time::{Duration} renamed/removed
-// pub mod dns_cache;                // bit-rot vs current dns API
+pub mod dns_cache; // repaired by br-asupersync-2qssae DNS cache sub-slice
 // grpc_deadline and grpc_health were repaired by br-asupersync-pfvsch and are
 // wired as live modules above.
 // pub mod grpc_status;              // bit-rot vs current grpc::status API

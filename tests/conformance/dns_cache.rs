@@ -1,5 +1,3 @@
-#![allow(warnings)]
-#![allow(clippy::all)]
 //! DNS Cache RFC 2308 Conformance Tests
 //!
 //! Validates RFC 2308 negative caching compliance and TTL management:
@@ -34,14 +32,11 @@
 //! When cache reaches maximum capacity, oldest entries (by insertion time)
 //! are evicted first to make room for new entries, following LRU semantics.
 
-use asupersync::net::dns::cache::{CacheConfig, CacheStats, DnsCache};
-use asupersync::net::dns::lookup::LookupIp;
-use asupersync::net::dns::DnsError;
+use asupersync::net::dns::{CacheConfig, CacheStats, DnsCache, DnsError, LookupIp};
 use asupersync::types::Time;
-use std::collections::HashMap;
-use std::net::{IpAddr, Ipv4Addr};
-use std::time::Duration;
 use std::cell::Cell;
+use std::net::IpAddr;
+use std::time::Duration;
 
 // =============================================================================
 // Test Infrastructure
@@ -80,10 +75,7 @@ fn test_cache(config: CacheConfig) -> DnsCache {
 /// Create a sample IP lookup result.
 #[allow(dead_code)]
 fn sample_lookup(addresses: &[&str], ttl_secs: u64) -> LookupIp {
-    let addrs: Vec<IpAddr> = addresses
-        .iter()
-        .map(|addr| addr.parse().unwrap())
-        .collect();
+    let addrs: Vec<IpAddr> = addresses.iter().map(|addr| addr.parse().unwrap()).collect();
     LookupIp::new(addrs, Duration::from_secs(ttl_secs))
 }
 
@@ -207,23 +199,35 @@ fn mr1_positive_ttl_decremented_on_access() {
     cache.put_ip("example.com", &lookup);
 
     // Verify entry is cached initially
-    assert!(cache.get_ip("example.com").is_some(), "Entry should be cached initially");
+    assert!(
+        cache.get_ip("example.com").is_some(),
+        "Entry should be cached initially"
+    );
 
     // Advance time by 15 seconds (half TTL)
     advance_time(Duration::from_secs(15));
 
     // Entry should still be valid
-    assert!(cache.get_ip("example.com").is_some(), "Entry should still be valid after 15s");
+    assert!(
+        cache.get_ip("example.com").is_some(),
+        "Entry should still be valid after 15s"
+    );
 
     // Advance time by another 20 seconds (35 seconds total, exceeds 30s TTL)
     advance_time(Duration::from_secs(20));
 
     // Entry should now be expired and removed
-    assert!(cache.get_ip("example.com").is_none(), "Entry should be expired after 35s");
+    assert!(
+        cache.get_ip("example.com").is_none(),
+        "Entry should be expired after 35s"
+    );
 
     // Stats should show an eviction
     let stats = cache.stats();
-    assert!(stats.evictions > 0, "Should have recorded eviction of expired entry");
+    assert!(
+        stats.evictions > 0,
+        "Should have recorded eviction of expired entry"
+    );
 }
 
 /// **MR2: Expired Entries Removed on Lookup**
@@ -245,8 +249,8 @@ fn mr2_expired_entries_removed_on_lookup() {
     let cache = test_cache(config);
 
     // Cache multiple entries with different TTLs
-    let short_lookup = sample_lookup(&["192.0.2.1"], 10);  // 10s TTL
-    let long_lookup = sample_lookup(&["192.0.2.2"], 60);   // 60s TTL
+    let short_lookup = sample_lookup(&["192.0.2.1"], 10); // 10s TTL
+    let long_lookup = sample_lookup(&["192.0.2.2"], 60); // 60s TTL
 
     cache.put_ip("short.example", &short_lookup);
     cache.put_ip("long.example", &long_lookup);
@@ -259,15 +263,27 @@ fn mr2_expired_entries_removed_on_lookup() {
     advance_time(Duration::from_secs(15));
 
     // Access the long entry (should trigger cleanup of expired short entry)
-    assert!(cache.get_ip("long.example").is_some(), "Long entry should still be valid");
+    assert!(
+        cache.get_ip("long.example").is_some(),
+        "Long entry should still be valid"
+    );
 
     // Short entry should be automatically removed during the lookup
-    assert!(cache.get_ip("short.example").is_none(), "Short entry should be auto-removed");
+    assert!(
+        cache.get_ip("short.example").is_none(),
+        "Short entry should be auto-removed"
+    );
 
     // Verify cache size reflects the removal
     let stats = cache.stats();
-    assert_eq!(stats.size, 1, "Cache should contain only 1 entry after auto-removal");
-    assert!(stats.evictions > 0, "Should have recorded automatic eviction");
+    assert_eq!(
+        stats.size, 1,
+        "Cache should contain only 1 entry after auto-removal"
+    );
+    assert!(
+        stats.evictions > 0,
+        "Should have recorded automatic eviction"
+    );
 }
 
 /// **MR3: Negative TTL Per MIN(SOA.MINIMUM, TTL)**
@@ -287,17 +303,21 @@ fn mr3_negative_ttl_per_soa_minimum() {
 
     // Test Case 1: SOA TTL < SOA MINIMUM → use SOA TTL
     let soa1 = SoaRecord {
-        ttl: Duration::from_secs(120),      // 2 minutes
-        minimum: Duration::from_secs(300),  // 5 minutes
+        ttl: Duration::from_secs(120),     // 2 minutes
+        minimum: Duration::from_secs(300), // 5 minutes
     };
 
-    let cache1 = ExtendedDnsCache::new(base_config.clone()).put_negative_with_soa("case1.example", &soa1);
+    let cache1 =
+        ExtendedDnsCache::new(base_config.clone()).put_negative_with_soa("case1.example", &soa1);
 
     // Should be cached initially
-    assert!(matches!(
-        cache1.get_ip_result("case1.example"),
-        Some(Err(DnsError::NoRecords(_)))
-    ), "Should have negative cache entry");
+    assert!(
+        matches!(
+            cache1.get_ip_result("case1.example"),
+            Some(Err(DnsError::NoRecords(_)))
+        ),
+        "Should have negative cache entry"
+    );
 
     // Advance by SOA TTL (120s) - should expire
     advance_time(Duration::from_secs(120));
@@ -311,11 +331,12 @@ fn mr3_negative_ttl_per_soa_minimum() {
     set_test_time(0); // Reset time
 
     let soa2 = SoaRecord {
-        ttl: Duration::from_secs(600),      // 10 minutes
-        minimum: Duration::from_secs(180),  // 3 minutes
+        ttl: Duration::from_secs(600),     // 10 minutes
+        minimum: Duration::from_secs(180), // 3 minutes
     };
 
-    let cache2 = ExtendedDnsCache::new(base_config.clone()).put_negative_with_soa("case2.example", &soa2);
+    let cache2 =
+        ExtendedDnsCache::new(base_config.clone()).put_negative_with_soa("case2.example", &soa2);
 
     // Should be cached initially
     assert!(matches!(
@@ -369,18 +390,20 @@ fn mr4_soa_record_drives_negative_cache_duration() {
 
     // SOA with much shorter MINIMUM (30 seconds)
     let short_soa = SoaRecord {
-        ttl: Duration::from_secs(1800),     // 30 minutes
-        minimum: Duration::from_secs(30),   // 30 seconds (controls negative caching)
+        ttl: Duration::from_secs(1800),   // 30 minutes
+        minimum: Duration::from_secs(30), // 30 seconds (controls negative caching)
     };
 
     // SOA with longer MINIMUM (10 minutes)
     let long_soa = SoaRecord {
-        ttl: Duration::from_secs(3600),     // 1 hour
-        minimum: Duration::from_secs(600),  // 10 minutes (controls negative caching)
+        ttl: Duration::from_secs(3600),    // 1 hour
+        minimum: Duration::from_secs(600), // 10 minutes (controls negative caching)
     };
 
-    let short_cache = ExtendedDnsCache::new(base_config.clone()).put_negative_with_soa("short.example", &short_soa);
-    let long_cache = ExtendedDnsCache::new(base_config).put_negative_with_soa("long.example", &long_soa);
+    let short_cache = ExtendedDnsCache::new(base_config.clone())
+        .put_negative_with_soa("short.example", &short_soa);
+    let long_cache =
+        ExtendedDnsCache::new(base_config).put_negative_with_soa("long.example", &long_soa);
 
     // Both should be cached initially
     assert!(short_cache.get_ip_result("short.example").is_some());
@@ -413,8 +436,14 @@ fn mr4_soa_record_drives_negative_cache_duration() {
     // Verify the caches correctly honored SOA MINIMUM over default negative_ttl
     let short_stats = short_cache.stats();
     let long_stats = long_cache.stats();
-    assert!(short_stats.evictions >= 1, "Short cache should have evicted SOA-controlled entry");
-    assert!(long_stats.evictions >= 1, "Long cache should have evicted SOA-controlled entry");
+    assert!(
+        short_stats.evictions >= 1,
+        "Short cache should have evicted SOA-controlled entry"
+    );
+    assert!(
+        long_stats.evictions >= 1,
+        "Long cache should have evicted SOA-controlled entry"
+    );
 }
 
 /// **MR5: Cache Capacity LRU-Evicts Oldest**
@@ -455,9 +484,18 @@ fn mr5_cache_capacity_lru_evicts_oldest() {
     cache.put_ip("host3.example", &lookup3);
 
     // All three should be present
-    assert!(cache.get_ip("host1.example").is_some(), "host1 should be cached");
-    assert!(cache.get_ip("host2.example").is_some(), "host2 should be cached");
-    assert!(cache.get_ip("host3.example").is_some(), "host3 should be cached");
+    assert!(
+        cache.get_ip("host1.example").is_some(),
+        "host1 should be cached"
+    );
+    assert!(
+        cache.get_ip("host2.example").is_some(),
+        "host2 should be cached"
+    );
+    assert!(
+        cache.get_ip("host3.example").is_some(),
+        "host3 should be cached"
+    );
 
     let stats_before = cache.stats();
     assert_eq!(stats_before.size, 3, "Cache should be at capacity");
@@ -467,28 +505,58 @@ fn mr5_cache_capacity_lru_evicts_oldest() {
     cache.put_ip("host4.example", &lookup4);
 
     // host1 (oldest) should be evicted, others should remain
-    assert!(cache.get_ip("host1.example").is_none(), "host1 (oldest) should be evicted");
-    assert!(cache.get_ip("host2.example").is_some(), "host2 should remain");
-    assert!(cache.get_ip("host3.example").is_some(), "host3 should remain");
-    assert!(cache.get_ip("host4.example").is_some(), "host4 (new) should be cached");
+    assert!(
+        cache.get_ip("host1.example").is_none(),
+        "host1 (oldest) should be evicted"
+    );
+    assert!(
+        cache.get_ip("host2.example").is_some(),
+        "host2 should remain"
+    );
+    assert!(
+        cache.get_ip("host3.example").is_some(),
+        "host3 should remain"
+    );
+    assert!(
+        cache.get_ip("host4.example").is_some(),
+        "host4 (new) should be cached"
+    );
 
     let stats_after = cache.stats();
     assert_eq!(stats_after.size, 3, "Cache should still be at capacity");
-    assert!(stats_after.evictions > stats_before.evictions, "Should have recorded LRU eviction");
+    assert!(
+        stats_after.evictions > stats_before.evictions,
+        "Should have recorded LRU eviction"
+    );
 
     // Insert fifth entry - should evict host2 (now oldest)
     set_test_time(5000);
     let lookup5 = sample_lookup(&["192.0.2.5"], 3600);
     cache.put_ip("host5.example", &lookup5);
 
-    assert!(cache.get_ip("host2.example").is_none(), "host2 (now oldest) should be evicted");
-    assert!(cache.get_ip("host3.example").is_some(), "host3 should remain");
-    assert!(cache.get_ip("host4.example").is_some(), "host4 should remain");
-    assert!(cache.get_ip("host5.example").is_some(), "host5 (new) should be cached");
+    assert!(
+        cache.get_ip("host2.example").is_none(),
+        "host2 (now oldest) should be evicted"
+    );
+    assert!(
+        cache.get_ip("host3.example").is_some(),
+        "host3 should remain"
+    );
+    assert!(
+        cache.get_ip("host4.example").is_some(),
+        "host4 should remain"
+    );
+    assert!(
+        cache.get_ip("host5.example").is_some(),
+        "host5 (new) should be cached"
+    );
 
     let final_stats = cache.stats();
     assert_eq!(final_stats.size, 3, "Cache should maintain capacity");
-    assert_eq!(final_stats.evictions, 2, "Should have 2 LRU evictions total");
+    assert_eq!(
+        final_stats.evictions, 2,
+        "Should have 2 LRU evictions total"
+    );
 }
 
 // =============================================================================
@@ -510,19 +578,19 @@ fn comprehensive_rfc_2308_integration() {
         negative_ttl: Duration::from_secs(300),
     };
 
-    let cache = test_cache(config);
+    let cache = test_cache(config.clone());
     let extended_cache = ExtendedDnsCache::new(config);
 
     // Test 1: Positive caching with TTL expiration
     let lookup_short = sample_lookup(&["192.0.2.10"], 60); // 1 minute TTL
-    let lookup_long = sample_lookup(&["192.0.2.20"], 300);  // 5 minute TTL
+    let lookup_long = sample_lookup(&["192.0.2.20"], 300); // 5 minute TTL
 
     cache.put_ip("short.test", &lookup_short);
     cache.put_ip("long.test", &lookup_long);
 
     // Test 2: Negative caching with SOA control
     let soa = SoaRecord {
-        ttl: Duration::from_secs(1800),  // 30 minutes
+        ttl: Duration::from_secs(1800),    // 30 minutes
         minimum: Duration::from_secs(120), // 2 minutes (controls negative caching)
     };
 
@@ -537,16 +605,31 @@ fn comprehensive_rfc_2308_integration() {
     // Advance 90 seconds (short expired, long valid, negative valid)
     advance_time(Duration::from_secs(90));
 
-    assert!(cache.get_ip("short.test").is_none(), "Short entry should expire");
-    assert!(cache.get_ip("long.test").is_some(), "Long entry should remain");
-    assert!(negative_cache.get_ip_result("negative.test").is_some(), "Negative should remain (SOA MINIMUM 120s)");
+    assert!(
+        cache.get_ip("short.test").is_none(),
+        "Short entry should expire"
+    );
+    assert!(
+        cache.get_ip("long.test").is_some(),
+        "Long entry should remain"
+    );
+    assert!(
+        negative_cache.get_ip_result("negative.test").is_some(),
+        "Negative should remain (SOA MINIMUM 120s)"
+    );
 
     // Test 4: SOA-driven negative expiration
     // Advance another 40 seconds (130s total - exceeds SOA MINIMUM of 120s)
     advance_time(Duration::from_secs(40));
 
-    assert!(negative_cache.get_ip_result("negative.test").is_none(), "Negative should expire after SOA MINIMUM");
-    assert!(cache.get_ip("long.test").is_some(), "Long entry should still be valid");
+    assert!(
+        negative_cache.get_ip_result("negative.test").is_none(),
+        "Negative should expire after SOA MINIMUM"
+    );
+    assert!(
+        cache.get_ip("long.test").is_some(),
+        "Long entry should still be valid"
+    );
 
     // Test 5: LRU eviction under capacity pressure
     // Fill cache to capacity with new entries
@@ -556,7 +639,10 @@ fn comprehensive_rfc_2308_integration() {
     }
 
     // Original long entry should be evicted due to LRU
-    assert!(cache.get_ip("long.test").is_none(), "Long entry should be LRU-evicted");
+    assert!(
+        cache.get_ip("long.test").is_none(),
+        "Long entry should be LRU-evicted"
+    );
 
     // Verify final state
     let stats = cache.stats();

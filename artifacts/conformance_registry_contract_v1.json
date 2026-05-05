@@ -3,8 +3,8 @@
   "bead_id": "asupersync-rckcnf",
   "source_registry": "tests/conformance/mod.rs",
   "readme_anchor": "README.md#conformance-suite",
-  "active_module_count": 69,
-  "dormant_module_count": 23,
+  "active_module_count": 70,
+  "dormant_module_count": 22,
   "count_policy": "Counts are machine-checked against tests/conformance/mod.rs. README prose must point here instead of hardcoding active or dormant counts.",
   "active_modules": [
     "aggregator_flush",
@@ -36,6 +36,7 @@
     "h3_rfc9114",
     "cancel_dag_determinism",
     "dns_message",
+    "dns_cache",
     "hpack_rfc7541",
     "kafka_offsets",
     "kafka_record_batch_v2",
@@ -176,14 +177,6 @@
       ],
       "reason": "Live broadcast conformance remains wired; the older lag file is bit-rotted against current Cx/time helpers.",
       "retention_reason": "File deletion is forbidden; retained for comparison."
-    },
-    {
-      "module": "dns_cache",
-      "line": 119,
-      "disposition": "intentionally_deferred_inline_followup",
-      "inline_followup": "tests/conformance/mod.rs audit-recovered orphan list",
-      "reason": "The module is bit-rotted against the current DNS API.",
-      "retention_reason": "File deletion is forbidden; retained for DNS cache repair."
     },
     {
       "module": "grpc_status",
