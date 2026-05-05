@@ -1,5 +1,3 @@
-#![allow(warnings)]
-#![allow(clippy::all)]
 //! Frame format conformance tests.
 //!
 //! Tests frame format requirements from RFC 7540 Section 4.
