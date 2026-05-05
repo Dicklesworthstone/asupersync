@@ -1,4 +1,3 @@
-#![allow(clippy::all)]
 //! Golden tests for transport stream half-close conformance.
 //!
 //! Validates TCP/TLS half-close semantics per RFC specifications:
@@ -37,19 +36,11 @@ impl HalfCloseGoldenTester {
         // Client shuts down write side
         client.shutdown(Shutdown::Write)?;
 
-        // Give some time for the FIN to propagate
-        std::thread::sleep(Duration::from_millis(10));
-
         // Server should observe EOF on read
-        let mut buf = [0u8; 64];
-        let server_eof = match server.read(&mut buf) {
-            Ok(0) => true,                                        // EOF indicates FIN received
-            Ok(_) => false,                                       // Still receiving data
-            Err(e) if e.kind() == ErrorKind::WouldBlock => false, // No data yet
-            Err(_) => false,                                      // Other error
-        };
+        let server_eof = Self::wait_for_eof(&mut server);
 
         // Client can still read (half-duplex)
+        let mut buf = [0u8; 64];
         let client_can_read = match client.read(&mut buf) {
             Ok(_) => true,
             Err(e) if e.kind() == ErrorKind::WouldBlock => true,
@@ -164,18 +155,22 @@ impl HalfCloseGoldenTester {
         // Test 1: shutdown(Both)
         client1.shutdown(Shutdown::Both)?;
         let mut buf = [0u8; 64];
-        let server1_eof = server1.read(&mut buf).is_ok_and(|n| n == 0);
+        let server1_eof = Self::wait_for_eof(&mut server1);
         let client1_write_err = client1.write(b"test").is_err();
-        let client1_read_err = client1.read(&mut buf).is_err();
+        let client1_cannot_read = match client1.read(&mut buf) {
+            Ok(0) => true,
+            Ok(_) => false,
+            Err(e) if e.kind() == ErrorKind::WouldBlock => false,
+            Err(_) => true,
+        };
 
         // Test 2: close() - drop the socket
         drop(client2);
-        // Allow some time for the connection to close
-        std::thread::sleep(Duration::from_millis(10));
-        let server2_eof = server2.read(&mut buf).is_ok_and(|n| n == 0);
+        let server2_eof = Self::wait_for_eof(&mut server2);
 
         // Both should behave identically
-        let behaviors_match = (server1_eof == server2_eof) && client1_write_err && client1_read_err;
+        let behaviors_match =
+            (server1_eof == server2_eof) && client1_write_err && client1_cannot_read;
 
         Ok(HalfCloseResult {
             operation: "shutdown_both".to_string(),
@@ -197,26 +192,14 @@ impl HalfCloseGoldenTester {
         // Peer (server) initiates write shutdown
         server.shutdown(Shutdown::Write)?;
 
-        // Give time for the FIN to propagate
-        std::thread::sleep(Duration::from_millis(10));
-
         // Client should observe EOF when trying to read
-        let mut buf = [0u8; 64];
-        let client_observes_eof = match client.read(&mut buf) {
-            Ok(0) => true,  // EOF observed
-            Ok(_) => false, // Still receiving data
-            Err(e) if e.kind() == ErrorKind::WouldBlock => {
-                // Data not available yet, try again briefly
-                std::thread::sleep(Duration::from_millis(1));
-                client.read(&mut buf).is_ok_and(|n| n == 0)
-            }
-            Err(_) => false, // Error
-        };
+        let client_observes_eof = Self::wait_for_eof(&mut client);
 
         // Client can still write back to peer
         let client_can_write = client.write(b"ack").is_ok();
 
         // Peer can still read client's response
+        let mut buf = [0u8; 64];
         let server_can_read = server.read(&mut buf).is_ok()
             || matches!(server.read(&mut buf), Err(ref e) if e.kind() == ErrorKind::WouldBlock);
 
@@ -263,6 +246,23 @@ impl HalfCloseGoldenTester {
         server.set_nonblocking(true)?;
 
         Ok((client, server))
+    }
+
+    fn wait_for_eof(stream: &mut TcpStream) -> bool {
+        let mut buf = [0u8; 64];
+
+        for _ in 0..32 {
+            match stream.read(&mut buf) {
+                Ok(0) => return true,
+                Ok(_) => return false,
+                Err(e) if e.kind() == ErrorKind::WouldBlock => {
+                    std::thread::sleep(Duration::from_millis(1));
+                }
+                Err(_) => return false,
+            }
+        }
+
+        false
     }
 }
 
