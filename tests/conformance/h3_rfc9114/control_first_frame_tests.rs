@@ -622,7 +622,7 @@ fn validate_control_stream_creation(stream_data: &[u8]) -> bool {
             return false;
         }
 
-        if simulate_control_stream_frame_processing(frame_data).is_err() {
+        if process_control_stream_frame(frame_data).is_err() {
             return false;
         }
 
@@ -669,7 +669,7 @@ fn reset_connection_state() {
     get_test_connection().lock().unwrap().reset();
 }
 
-fn simulate_control_stream_frame_processing(frame_data: &[u8]) -> Result<(), H3NativeError> {
+fn process_control_stream_frame(frame_data: &[u8]) -> Result<(), H3NativeError> {
     // Use real H3 frame parsing and control stream validation
     let config = H3ConnectionConfig::default();
 
@@ -706,4 +706,14 @@ fn parse_and_validate_h3_frame_accept_multibyte_varint_lengths() {
     assert_eq!(parsed[0].frame_type, H3FrameType::Headers);
     assert_eq!(parsed[0].length, payload.len() as u64);
     assert_eq!(parsed[0].payload, payload);
+}
+
+#[test]
+fn control_first_frame_source_has_no_legacy_simulation_helper_name() {
+    let source = include_str!("control_first_frame_tests.rs");
+    let forbidden = ["simulate", "_control_stream", "_frame_processing"].concat();
+    assert!(
+        !source.contains(&forbidden),
+        "control stream conformance should use the production-backed helper name"
+    );
 }
