@@ -1,5 +1,4 @@
 #![cfg(feature = "test-internals")]
-#![allow(clippy::all)]
 //! Golden artifacts for the trace subsystem.
 //!
 //! Freezes three classes of output that downstream tooling (replay
@@ -369,7 +368,7 @@ fn golden_trace_event_kind_variants_are_stable() {
     // local) — instead, assert that the six constructors each produce
     // a DISTINCT discriminant, and snapshot only the (constructor, seq)
     // pairs which are stable.
-    let kinds: Vec<TraceEventKind> = constructed.iter().map(|(_, ev)| ev.kind.clone()).collect();
+    let kinds: Vec<TraceEventKind> = constructed.iter().map(|(_, ev)| ev.kind).collect();
     // Distinctness check via Debug strings (since TraceEventKind may not
     // be Hash/Eq across all variants):
     let debug_strs: Vec<String> = kinds.iter().map(|k| format!("{k:?}")).collect();
