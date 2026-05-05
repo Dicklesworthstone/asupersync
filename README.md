@@ -404,7 +404,7 @@ Determinism is treated as a first-class algorithmic constraint across the codeba
 | **Bounded cleanup** | ✅ Budgeted | ❌ Best-effort | ❌ Best-effort |
 | **Deterministic testing** | ✅ Built-in | ❌ External tools | ❌ External tools |
 | **Obligation tracking** | ✅ Linear tokens | ❌ None | ❌ None |
-| **Ecosystem** | ✅ Tokio-scale built-in surface (runtime, net, HTTP/1.1+H2, TLS, WebSocket, gRPC, DB, distributed) | ⚠️ Medium | ⚠️ Small |
+| **Ecosystem** | ✅ Broad support-class-scoped built-in surface (runtime, net, HTTP/1.1+H2, TLS, WebSocket, gRPC, DB, distributed primitives; adapter lanes stay explicitly bounded) | ⚠️ Medium | ⚠️ Small |
 | **Maturity** | ✅ Feature-complete runtime surface, actively hardened | ✅ Production | ✅ Production |
 
 **When to use Asupersync:**
@@ -780,9 +780,12 @@ All three support prepared statements, transactions, and connection reuse. SQLit
 
 Asupersync's distributed runtime surface is designed around the same
 invariants as local execution: explicit ownership, explicit cancellation, and
-deterministic state transitions. Today the core crate ships the protocol,
-capability, lease, idempotency, and saga contracts for remote work, while the
-full transport-backed remote lifecycle is still being finalized under Track F.
+deterministic state transitions. Today the core crate ships the remote
+protocol/state-machine surface plus capability, lease, idempotency, and saga
+contracts. The shipped proof tier is virtual/lab-backed: the core remote
+lifecycle is exercised through the injected `RemoteRuntime` boundary, while
+production network execution remains adapter responsibility rather than a
+blanket core-runtime claim.
 
 | Primitive | Location | Runtime Behavior |
 |-----------|----------|------------------|
@@ -794,8 +797,10 @@ full transport-backed remote lifecycle is still being finalized under Track F.
 | Saga compensations | `src/remote.rs` | Forward steps and compensations are tracked as a structured rollback flow for distributed workflows |
 
 The transport surface is deliberately separated from protocol state machines,
-so message semantics can be tested independently of network backend details
-while the transport-backed spawn/result/cancel/close path continues to mature.
+so message semantics can be tested independently of network backend details.
+When a production network backend is attached, it must preserve the same
+spawn/result/cancel/lease/idempotency contract that the virtual lifecycle proof
+pins today.
 
 ---
 
@@ -1500,7 +1505,7 @@ and known limitations.
 | Database clients (SQLite, PostgreSQL, MySQL) | ✅ Implemented |
 | Actor supervision (GenServer, links, monitors) | ✅ Implemented |
 | DPOR schedule exploration | ✅ Implemented |
-| Distributed runtime (remote tasks, sagas, leases, recovery) | Protocol/state-machine, lease, idempotency, and saga surfaces implemented; transport-backed remote lifecycle still in progress |
+| Distributed runtime (remote tasks, sagas, leases, recovery) | Protocol/state-machine, lease, idempotency, and saga surfaces implemented; virtual/lab remote lifecycle proof shipped; production network backend execution remains adapter responsibility |
 | RaptorQ fountain coding for snapshot distribution | ✅ Implemented |
 | Formal methods (TLA+ export + Lean checked core-invariant coverage) | ⚠️ Partial implementation (Lean-checked core invariants cover the six non-negotiable runtime invariants; broader adapter/protocol/runtime refinement proof remains tiered and lane-specific) |
 | Browser Edition (WASM, JS/TS consumers) | ✅ Implemented for browser main-thread and dedicated-worker consumers (single-threaded, event-loop-driven) |
@@ -1532,7 +1537,7 @@ and known limitations.
 | **Phase 1** | Parallel scheduler + region heap | ✅ Complete |
 | **Phase 2** | I/O integration (Linux epoll, optional io_uring, TCP, HTTP/1.1-2, TLS, HTTP/3 native core with default static-only QPACK plus opt-in dynamic field-section context; BSD/Windows reactors currently expose narrower interest support) | ⚠️ Partial |
 | **Phase 3** | Actors + supervision (GenServer, links, monitors) | ✅ Complete |
-| **Phase 4** | Distributed structured concurrency | ✅ Complete |
+| **Phase 4** | Distributed structured concurrency | ✅ Core primitives complete; production remote network adapters remain support-class scoped |
 | **Phase 5** | DPOR + formal tooling | ⚠️ Partial (DPOR landed; TLA+ export and Lean-checked core invariants exist; broader adapter/protocol/runtime refinement proof remains active and lane-specific) |
 | **Phase 6** | Hardening, policy gates, and adapter surface expansion | ✅ Continuous (see [Policy Gates](#phase-6-policy-gates)) |
 

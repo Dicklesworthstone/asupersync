@@ -50,9 +50,9 @@
 
 ### Surface 6: remote.rs remote-execution contract
 - **File**: `src/remote.rs`
-- **State**: `src/remote.rs` now documents the transport-agnostic remote-execution contract: protocol payloads/envelopes, origin/remote state machines, `RemoteCap`, lease/idempotency/saga helpers, and deterministic fail-closed behavior when no runtime is attached. Real transport injection still happens through `RemoteRuntime`, and the fully transport-backed spawn/result/cancel/close lifecycle remains incomplete.
-- **Disposition**: **IMPLEMENT** → Track F (F1→F2→F3)
-- **Target**: Complete the transport-backed remote lifecycle and failure-injection coverage without regressing the now-honest protocol/capability surface.
+- **State**: **RESOLVED / BOUNDED** — `src/remote.rs` documents the transport-agnostic remote-execution contract: protocol payloads/envelopes, origin/remote state machines, `RemoteCap`, lease/idempotency/saga helpers, and deterministic fail-closed behavior when no runtime is attached. Bead `asupersync-rckrmt` added the virtual/lab lifecycle proof `remote_virtual_lifecycle_proof_exercises_runtime_transport_and_protocol`, which drives `spawn_remote` through the injected `RemoteRuntime` boundary and covers accepted spawn/result delivery, cancellation before ack, cancellation while running with lease renewal, lease expiry, duplicate/idempotency behavior, send-failure cleanup, fallback, and trace emission. Production network execution remains an adapter responsibility, not a core-runtime proof claim.
+- **Disposition**: **RESOLVED** (bounded support class: virtual/lab proof + adapter responsibility)
+- **Target**: Preserve the shipped protocol/capability proof and require future production network adapters to meet the same spawn/result/cancel/lease/idempotency contract before docs widen beyond the current support class.
 
 ### Surface 7: Session types — typestate without transport
 - **File**: `src/obligation/session_types.rs`

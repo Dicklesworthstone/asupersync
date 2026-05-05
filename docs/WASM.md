@@ -380,8 +380,8 @@ Follow-on beads should decide whether to ship, defer, or remove each one.
 
 | Surface | Rust evidence | Gap | Follow-on |
 |---|---|---|---|
-| WHATWG `ReadableStream`/`WritableStream` bridge | `src/io/browser_stream.rs` — maps WHATWG Streams to Asupersync `AsyncRead`/`AsyncWrite` with cancel semantics | No public JS/TS API; substrate-only | Future bead |
-| Storage policy/capability layer | `src/io/cap.rs` — `StorageConsistencyPolicy`, `StorageIoCap`, `StorageBackend` enum, policy validation for namespace/size/consistency | Complete but only used internally by host backends | Part of `asupersync-3ak5y` |
+| WHATWG `ReadableStream`/`WritableStream` bridge | `src/io/browser_stream.rs` — maps WHATWG Streams to Asupersync `AsyncRead`/`AsyncWrite` with cancel semantics | No public JS/TS API; substrate-only | Explicitly deferred; do not market as a Browser Edition API until a future bead creates and links a promotion contract |
+| Storage policy/capability layer | `src/io/cap.rs` — `StorageConsistencyPolicy`, `StorageIoCap`, `StorageBackend` enum, policy validation for namespace/size/consistency | Complete but only used internally by host backends | Tracked by `asupersync-3ak5y` |
 
 ### Live contradictions (2026-03-15, bead asupersync-1tte9)
 

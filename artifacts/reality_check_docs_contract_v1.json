@@ -1,0 +1,446 @@
+{
+  "contract_version": "reality-check-docs-contract-v1",
+  "bead_id": "asupersync-rckdoc",
+  "created_date": "2026-05-05",
+  "status": "docs_reconciled_to_live_support_artifacts",
+  "docs_checked": [
+    "README.md",
+    "docs/integration.md",
+    "docs/WASM.md",
+    "docs/stub_disposition_matrix.md"
+  ],
+  "source_artifacts_checked": [
+    "artifacts/conformance_registry_contract_v1.json",
+    "artifacts/http3_qpack_support_matrix_v1.json",
+    "artifacts/wasm_browser_support_boundary_contract_v1.json",
+    "artifacts/formal_proof_posture_contract_v1.json",
+    "artifacts/no_tokio_feature_boundary_contract_v1.json",
+    "artifacts/phase6_methodology_gate_enforcement_contract_v1.json",
+    "artifacts/stub_placeholder_inventory_v1.json"
+  ],
+  "support_classes_seen": [
+    "machine-checked-registry",
+    "production-live",
+    "production-live-opt-in",
+    "fail-closed-boundary",
+    "not-advertised-deferred",
+    "virtual-lab-proof",
+    "direct-runtime-supported",
+    "guarded-direct-runtime-support",
+    "direct-runtime-feasible-not-yet-shipped",
+    "bridge-only",
+    "impossible-unsupported",
+    "checked-core-invariants",
+    "tokio-free-normal-graph",
+    "tokio-carrying-quarantined",
+    "local-enforced-main-gates",
+    "documented-deferred-surface",
+    "unsupported-fail-closed"
+  ],
+  "support_class_contract": [
+    {
+      "support_class": "direct-runtime-supported",
+      "meaning": "Shipped Browser Edition direct runtime in package-guarded browser main-thread and dedicated-worker hosts.",
+      "docs_required": [
+        {
+          "path": "docs/integration.md",
+          "markers": [
+            "Direct-runtime supported",
+            "browser main thread",
+            "dedicated worker"
+          ]
+        },
+        {
+          "path": "docs/WASM.md",
+          "markers": [
+            "Direct-runtime supported",
+            "browser main thread",
+            "Dedicated Web Worker"
+          ]
+        }
+      ]
+    },
+    {
+      "support_class": "guarded-direct-runtime-support",
+      "meaning": "Shipped only when explicit host or deployment prerequisites hold, with documented fallback.",
+      "docs_required": [
+        {
+          "path": "docs/integration.md",
+          "markers": [
+            "Guarded direct-runtime support",
+            "WebTransport"
+          ]
+        },
+        {
+          "path": "docs/WASM.md",
+          "markers": [
+            "Guarded direct-runtime support",
+            "WebTransport"
+          ]
+        }
+      ]
+    },
+    {
+      "support_class": "direct-runtime-feasible-not-yet-shipped",
+      "meaning": "Real substrate exists but public Browser Edition direct-runtime support is fail-closed until promotion.",
+      "docs_required": [
+        {
+          "path": "docs/integration.md",
+          "markers": [
+            "Direct-runtime feasible but not yet shipped",
+            "service/shared worker direct runtime"
+          ]
+        },
+        {
+          "path": "docs/WASM.md",
+          "markers": [
+            "Direct-runtime feasible but not yet shipped",
+            "service_worker_direct_runtime_not_shipped"
+          ]
+        }
+      ]
+    },
+    {
+      "support_class": "bridge-only",
+      "meaning": "Direct runtime execution is not allowed at that boundary; use serialization or adapters.",
+      "docs_required": [
+        {
+          "path": "docs/integration.md",
+          "markers": [
+            "Bridge-only",
+            "Next server components"
+          ]
+        },
+        {
+          "path": "docs/WASM.md",
+          "markers": [
+            "bridge-only",
+            "Node / SSR / edge"
+          ]
+        }
+      ]
+    },
+    {
+      "support_class": "impossible-unsupported",
+      "meaning": "The platform contract rules out direct runtime support.",
+      "docs_required": [
+        {
+          "path": "docs/integration.md",
+          "markers": [
+            "Impossible / unsupported",
+            "raw TCP/UDP"
+          ]
+        },
+        {
+          "path": "docs/WASM.md",
+          "markers": [
+            "Impossible for direct browser runtime",
+            "Raw TCP/UDP"
+          ]
+        }
+      ]
+    }
+  ],
+  "doc_marker_contract": [
+    {
+      "path": "README.md",
+      "required": [
+        "Broad support-class-scoped built-in surface",
+        "counts into prose",
+        "artifacts/conformance_registry_contract_v1.json",
+        "default static-only QPACK",
+        "opt-in dynamic QPACK field-section",
+        "no full QPACK encoder/decoder instruction-stream parity",
+        "virtual/lab remote lifecycle proof shipped",
+        "production network backend execution remains adapter responsibility",
+        "Lean-checked core invariants cover the six non-negotiable runtime invariants",
+        "The optional `metrics` feature also has no normal-edge dependency on tokio",
+        "The `fuzz` feature is intentionally outside this guarantee",
+        "Push-on-main GitHub enforcement is not currently enabled",
+        "docs/integration.md",
+        "docs/WASM.md"
+      ],
+      "forbidden": [
+        "61 live",
+        "61 active",
+        "63 live",
+        "63 active",
+        "transport-backed remote lifecycle still in progress",
+        "full transport-backed remote lifecycle is still being finalized under Track F",
+        "metrics feature pulls tokio",
+        "Phase 6 methodology gates are enforced only at PR review time"
+      ]
+    },
+    {
+      "path": "docs/integration.md",
+      "required": [
+        "Browser Support-Class Quick Reference",
+        "Direct-runtime supported",
+        "Guarded direct-runtime support",
+        "Direct-runtime feasible but not yet shipped",
+        "Bridge-only",
+        "Impossible / unsupported",
+        "artifacts/http3_qpack_support_matrix_v1.json",
+        "virtual transport",
+        "adapter responsibility"
+      ],
+      "forbidden": [
+        "transport-backed remote lifecycle still in progress"
+      ]
+    },
+    {
+      "path": "docs/WASM.md",
+      "required": [
+        "Direct-runtime supported",
+        "Guarded direct-runtime support",
+        "Direct-runtime feasible but not yet shipped",
+        "bridge-only",
+        "Impossible for direct browser runtime",
+        "Explicitly deferred; do not market as a Browser Edition API until a future bead creates and links a promotion contract",
+        "Tracked by `asupersync-3ak5y`"
+      ],
+      "forbidden": [
+        "| WHATWG `ReadableStream`/`WritableStream` bridge | `src/io/browser_stream.rs` — maps WHATWG Streams to Asupersync `AsyncRead`/`AsyncWrite` with cancel semantics | No public JS/TS API; substrate-only | Future bead |"
+      ]
+    },
+    {
+      "path": "docs/stub_disposition_matrix.md",
+      "required": [
+        "Surface 6: remote.rs remote-execution contract",
+        "RESOLVED / BOUNDED",
+        "remote_virtual_lifecycle_proof_exercises_runtime_transport_and_protocol",
+        "Production network execution remains an adapter responsibility"
+      ],
+      "forbidden": [
+        "the fully transport-backed spawn/result/cancel/close lifecycle remains incomplete",
+        "IMPLEMENT** → Track F"
+      ]
+    }
+  ],
+  "deferred_links_checked": [
+    {
+      "surface_id": "qpack-instruction-stream-parity",
+      "support_class": "not-advertised-deferred",
+      "artifact": "artifacts/http3_qpack_support_matrix_v1.json",
+      "owner_bead": "",
+      "intentional_explanation": "The matrix explicitly refuses to advertise full QPACK instruction-stream parity or blocked-stream scheduling.",
+      "doc_markers": [
+        {
+          "path": "README.md",
+          "marker": "no full QPACK encoder/decoder instruction-stream parity"
+        },
+        {
+          "path": "docs/integration.md",
+          "marker": "there is no full QPACK encoder/decoder instruction-stream parity"
+        }
+      ]
+    },
+    {
+      "surface_id": "service-shared-worker-direct-runtime",
+      "support_class": "direct-runtime-feasible-not-yet-shipped",
+      "artifact": "artifacts/wasm_browser_support_boundary_contract_v1.json",
+      "owner_bead": "",
+      "intentional_explanation": "Direct runtime remains fail-closed; bounded broker/coordinator helpers are separate guarded package-level surfaces.",
+      "doc_markers": [
+        {
+          "path": "README.md",
+          "marker": "Service worker / shared worker direct runtime"
+        },
+        {
+          "path": "docs/integration.md",
+          "marker": "service/shared worker direct runtime"
+        },
+        {
+          "path": "docs/WASM.md",
+          "marker": "Service-worker or shared-worker direct runtime"
+        }
+      ]
+    },
+    {
+      "surface_id": "browser-native-messaging-public-sdk",
+      "support_class": "direct-runtime-feasible-not-yet-shipped",
+      "artifact": "artifacts/wasm_browser_support_boundary_contract_v1.json",
+      "owner_bead": "",
+      "intentional_explanation": "The Rust/browser substrate exists, but the public Browser Edition packages intentionally do not export MessageChannel/BroadcastChannel APIs yet.",
+      "doc_markers": [
+        {
+          "path": "docs/WASM.md",
+          "marker": "Browser-native messaging surfaces (`MessageChannel`, `MessagePort`, `BroadcastChannel`) | Direct-runtime feasible but not yet shipped as public Browser Edition APIs"
+        }
+      ]
+    },
+    {
+      "surface_id": "browser-stream-public-sdk",
+      "support_class": "documented-deferred-surface",
+      "artifact": "docs/WASM.md",
+      "owner_bead": "",
+      "intentional_explanation": "WHATWG stream bridge is real Rust substrate with no public JS/TS API; docs now forbid marketing it until a future bead creates a promotion contract.",
+      "doc_markers": [
+        {
+          "path": "docs/WASM.md",
+          "marker": "Explicitly deferred; do not market as a Browser Edition API until a future bead creates and links a promotion contract"
+        }
+      ]
+    },
+    {
+      "surface_id": "postgres-grpc-placeholder-followups",
+      "support_class": "blocked-follow-up",
+      "artifact": "artifacts/stub_placeholder_inventory_v1.json",
+      "owner_bead": "asupersync-yex",
+      "intentional_explanation": "The placeholder inventory keeps product-visible follow-ups linked to a concrete bead instead of counting them as shipped behavior.",
+      "doc_markers": [
+        {
+          "path": "docs/stub_disposition_matrix.md",
+          "marker": "product-bug-follow-up"
+        }
+      ]
+    }
+  ],
+  "closed_bead_evidence_checked": [
+    {
+      "bead_id": "asupersync-rckcnf",
+      "commit": "287844e662c646edfc5b3f1e650a767fe9b95190",
+      "support_posture": "machine-checked live/dormant conformance registry; README must not hardcode counts",
+      "evidence_files": [
+        "artifacts/conformance_registry_contract_v1.json",
+        "tests/conformance_registry_contract.rs",
+        "tests/conformance/mod.rs"
+      ],
+      "validation_commands": [
+        "rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=/tmp/rch_target_asupersync_rckcnf_contract cargo test -p asupersync --test conformance_registry_contract --features test-internals -- --nocapture"
+      ]
+    },
+    {
+      "bead_id": "asupersync-rckwsf",
+      "commit": "7c64dfcf51f2e0ba50403ee20b7e8106ef814ccb",
+      "support_posture": "WebSocket runtime shipped; RFC6455 registry is live for byte/protocol harnesses; runtime e2e remains lane-specific",
+      "evidence_files": [
+        "tests/conformance/mod.rs",
+        "tests/conformance/websocket_rfc6455.rs",
+        "tests/conformance/websocket_rfc6455/mod.rs",
+        "tests/e2e_websocket.rs"
+      ],
+      "validation_commands": [
+        "rch exec -- cargo test -p asupersync --test conformance websocket_rfc6455 --features test-internals -- --nocapture"
+      ]
+    },
+    {
+      "bead_id": "asupersync-rckh3q",
+      "commit": "95dd13605543c6aa4a2d0726de8c17cde6ced405",
+      "support_posture": "HTTP/3 native core with default static-only QPACK, opt-in dynamic field-section support, and explicit no-full-instruction-stream parity boundary",
+      "evidence_files": [
+        "artifacts/http3_qpack_support_matrix_v1.json",
+        "tests/http3_qpack_support_matrix_contract.rs",
+        "src/http/h3_native.rs"
+      ],
+      "validation_commands": [
+        "rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=/tmp/rch_target_asupersync_rckh3q_contract cargo test -p asupersync --test http3_qpack_support_matrix_contract --features test-internals,http3 -- --nocapture",
+        "rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=/tmp/rch_target_asupersync_rckh3q_h3 cargo check -p asupersync --lib --features http3,test-internals"
+      ]
+    },
+    {
+      "bead_id": "asupersync-rckrmt",
+      "commit": "aa2e38691367aaf5ac5bc38ff8fa1a20d84a48e7",
+      "support_posture": "remote protocol/state-machine plus virtual transport lifecycle proof; production network execution remains adapter responsibility",
+      "evidence_files": [
+        "src/remote.rs",
+        "docs/integration.md"
+      ],
+      "validation_commands": [
+        "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_asupersync_rckrmt cargo test -p asupersync --lib remote_virtual_lifecycle_proof_exercises_runtime_transport_and_protocol --features test-internals -- --nocapture"
+      ]
+    },
+    {
+      "bead_id": "asupersync-rckwas",
+      "commit": "e09becd7e8513ea159ed1227a519b0361bb458dc",
+      "support_posture": "Browser main-thread and dedicated-worker direct runtime shipped; service/shared-worker direct runtime fail-closed; bounded broker/coordinator and WebTransport are guarded",
+      "evidence_files": [
+        "artifacts/wasm_browser_support_boundary_contract_v1.json",
+        "tests/wasm_browser_support_boundary_contract.rs",
+        "docs/WASM.md",
+        "docs/integration.md"
+      ],
+      "validation_commands": [
+        "rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_asupersync_rckwas_contract cargo test -p asupersync --test wasm_browser_support_boundary_contract --features test-internals -- --nocapture"
+      ]
+    },
+    {
+      "bead_id": "asupersync-rcktok",
+      "commit": "9d75d7ccafa885deaeb4d29ffbc794975769e9b4",
+      "support_posture": "default and metrics normal graphs are Tokio-free; fuzz carries the quarantined OTLP tonic helper path",
+      "evidence_files": [
+        "artifacts/no_tokio_feature_boundary_contract_v1.json",
+        "tests/no_tokio_feature_boundary_contract.rs",
+        "Cargo.toml",
+        "README.md",
+        "AGENTS.md"
+      ],
+      "validation_commands": [
+        "rch exec -- cargo tree -e normal -p asupersync -i tokio",
+        "rch exec -- cargo tree -e normal -p asupersync --features metrics -i tokio",
+        "rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_asupersync_rcktok_contract cargo test -p asupersync --test no_tokio_feature_boundary_contract --features test-internals -- --nocapture"
+      ]
+    },
+    {
+      "bead_id": "asupersync-rckstb",
+      "commit": "ae09cf21dfbc7589e1708c01de3ef988e70584b2",
+      "support_posture": "placeholder/stub markers are row-inventoried and classified; unclassified and expired allowance counts are zero",
+      "evidence_files": [
+        "artifacts/stub_placeholder_inventory_v1.json",
+        "docs/stub_disposition_matrix.md",
+        "scripts/scan_stubs.sh",
+        "tests/stub_resolution_audit.rs"
+      ],
+      "validation_commands": [
+        "bash scripts/scan_stubs.sh",
+        "rch exec -- env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-C debuginfo=0' CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_asupersync_rckstb_final3 cargo test -p asupersync --test stub_resolution_audit --features test-internals -- --nocapture"
+      ]
+    },
+    {
+      "bead_id": "asupersync-rckg8s",
+      "commit": "eefed339afb7db05530e4865299d159fc3257fdd",
+      "support_posture": "Phase 6 gates are PR-only in GitHub Actions plus locally enforced rch preflight for direct-main agent commits",
+      "evidence_files": [
+        "artifacts/phase6_methodology_gate_enforcement_contract_v1.json",
+        "tests/phase6_methodology_gate_contract.rs",
+        ".github/workflows/methodology-gates.yml",
+        "README.md"
+      ],
+      "validation_commands": [
+        "rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=/tmp/rch_target_asupersync_rckg8s_contract cargo test -p asupersync --test phase6_methodology_gate_contract --features test-internals -- --nocapture"
+      ]
+    },
+    {
+      "bead_id": "asupersync-rckfrm",
+      "commit": "c04f2566e25533eb6b845b7e7b13e6a67a827f44",
+      "support_posture": "Lean-checked proof posture covers six core invariants; no blanket adapter/protocol mechanized proof is claimed",
+      "evidence_files": [
+        "artifacts/formal_proof_posture_contract_v1.json",
+        "tests/formal_proof_posture_contract.rs",
+        "formal/README.md",
+        "formal/lean/coverage/invariant_status_inventory.json"
+      ],
+      "validation_commands": [
+        "rch exec -- bash -lc 'cd formal/lean && lake build'",
+        "rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=/tmp/rch_target_asupersync_rckfrm_contract cargo test -p asupersync --test formal_proof_posture_contract --features test-internals -- --nocapture"
+      ]
+    }
+  ],
+  "e2e_logging_contract": {
+    "script": "scripts/run_reality_check_docs_evidence.sh",
+    "default_artifact_path": "target/reality-check-docs/asupersync-rckdoc/docs-evidence-report.json",
+    "required_top_level_fields": [
+      "bead_id",
+      "docs_checked",
+      "source_artifacts_checked",
+      "support_classes_seen",
+      "deferred_links_checked",
+      "closed_bead_evidence_checked",
+      "drift_count",
+      "artifact_path",
+      "verdict",
+      "first_failure"
+    ],
+    "failure_policy": "Any missing required marker, forbidden stale phrase, missing source artifact, malformed deferred row, missing evidence file, or missing commit when git metadata is available produces verdict=failed and a nonzero exit."
+  }
+}
