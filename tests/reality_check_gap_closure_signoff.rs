@@ -143,19 +143,16 @@ fn dependency_and_graph_diagnostics_record_br_degradation_and_jsonl_fallback() {
     );
     assert_eq!(
         jsonl.get("closed_count").and_then(JsonValue::as_u64),
-        Some(14)
+        Some(16)
     );
     let open_items = array(jsonl, "open_items");
     let open_ids = open_items
         .iter()
         .map(|item| nonempty_string(item, "bead_id").to_string())
         .collect::<BTreeSet<_>>();
-    assert_eq!(
-        open_ids,
-        BTreeSet::from([
-            "asupersync-rckepc".to_string(),
-            "asupersync-rcksgn".to_string(),
-        ])
+    assert!(
+        open_ids.is_empty(),
+        "final signoff must leave no open reality-check items"
     );
 
     let diagnostics = signoff
@@ -182,6 +179,18 @@ fn dependency_and_graph_diagnostics_record_br_degradation_and_jsonl_fallback() {
     assert_eq!(
         diagnostics["bv_robot_plan_reality_check"]["single_actionable"].as_str(),
         Some("asupersync-rcksgn")
+    );
+    assert_eq!(
+        diagnostics["bv_robot_plan_reality_check_after_close"]["open_count"].as_u64(),
+        Some(0)
+    );
+    assert_eq!(
+        diagnostics["bv_robot_plan_reality_check_after_close"]["closed_count"].as_u64(),
+        Some(16)
+    );
+    assert_eq!(
+        diagnostics["bv_robot_plan_reality_check_after_close"]["total_actionable"].as_u64(),
+        Some(0)
     );
 
     log_contract_event(

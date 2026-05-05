@@ -79,12 +79,13 @@ dependency_status = signoff.get("dependency_status", {})
 jsonl_state = dependency_status.get("jsonl_reality_check_state", {})
 open_items = jsonl_state.get("open_items", [])
 open_ids = {item.get("bead_id") for item in open_items}
-expected_open = {"asupersync-rcksgn", "asupersync-rckepc"}
+expected_open = set()
 require(
     dependency_status.get("dependencies_closed_before_signoff") is True,
     "dependency_status:not_all_dependencies_closed",
 )
 require(open_ids == expected_open, f"unexpected_open_reality_check_items:{sorted(open_ids)}")
+require(jsonl_state.get("closed_count") == 16, "final_reality_check_closed_count_mismatch")
 record(
     "dependency-status",
     dependency_status="passed"
@@ -99,10 +100,14 @@ record(
 diagnostics = signoff.get("control_plane_diagnostics", {})
 br_cycles = diagnostics.get("br_dep_cycles_json", {})
 br_list = diagnostics.get("br_list_json", {})
+final_bv = diagnostics.get("bv_robot_plan_reality_check_after_close", {})
 require(br_cycles.get("status") == "timed_out", "br_dep_cycles_degradation_not_recorded")
 require(br_cycles.get("exit_code") == 124, "br_dep_cycles_exit_code_not_recorded")
 require(br_list.get("status") == "failed_external_lock", "br_list_degradation_not_recorded")
 require(".beads/.write.lock" in br_list.get("error", ""), "br_list_lock_error_not_recorded")
+require(final_bv.get("open_count") == 0, "final_bv_open_count_not_zero")
+require(final_bv.get("closed_count") == 16, "final_bv_closed_count_mismatch")
+require(final_bv.get("total_actionable") == 0, "final_bv_actionable_not_zero")
 record(
     "graph-status",
     graph_status="fallback_passed",
@@ -111,6 +116,8 @@ record(
     bv_single_actionable=diagnostics.get("bv_robot_plan_reality_check", {}).get(
         "single_actionable", ""
     ),
+    final_open_count=final_bv.get("open_count", ""),
+    final_actionable=final_bv.get("total_actionable", ""),
     verdict="pass",
     first_failure="",
 )

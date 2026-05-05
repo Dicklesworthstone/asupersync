@@ -2,10 +2,10 @@
   "schema_version": "reality-check-gap-closure-signoff-v1",
   "bead_id": "asupersync-rcksgn",
   "created_date": "2026-05-05",
-  "program_status": "signoff_in_progress_until_this_artifact_and_tracker_close_land",
+  "program_status": "closed_after_artifact_and_tracker_close_landed",
   "source_reality_check": "2026-05-04 README/live-code release-readiness reality check",
-  "implementation_commit": "",
-  "tracker_close_commit": "",
+  "implementation_commit": "3d5782d2a83a5af6da0f2bdac208a6d88ef30f91",
+  "tracker_close_commit": "c2c4032488c158d933f740e241d75df35194d513",
   "required_gap_ids": [
     "conformance-registry",
     "websocket-rfc6455",
@@ -40,23 +40,11 @@
       }
     ],
     "jsonl_reality_check_state": {
-      "source": ".beads/issues.jsonl fallback parse after br list degraded",
+      "source": ".beads/issues.jsonl final parse after asupersync-rcksgn and asupersync-rckepc tracker closes",
       "total_reality_check_items": 16,
-      "closed_count": 14,
-      "open_items": [
-        {
-          "bead_id": "asupersync-rcksgn",
-          "status": "in_progress",
-          "assignee": "CopperMeadow",
-          "dependency": "asupersync-rckdoc"
-        },
-        {
-          "bead_id": "asupersync-rckepc",
-          "status": "open",
-          "dependency": "asupersync-rcksgn"
-        }
-      ],
-      "signoff_closure_rule": "During signoff execution the only permitted open reality-check rows are asupersync-rcksgn itself and the umbrella epic asupersync-rckepc."
+      "closed_count": 16,
+      "open_items": [],
+      "signoff_closure_rule": "After final tracker close, no open reality-check rows remain. During signoff execution before close, the only permitted open reality-check rows were asupersync-rcksgn itself and the umbrella epic asupersync-rckepc."
     }
   },
   "control_plane_diagnostics": {
@@ -89,6 +77,14 @@
         "asupersync-rckepc"
       ],
       "data_hash": "304919e9608bbbd3"
+    },
+    "bv_robot_plan_reality_check_after_close": {
+      "command": "bv --robot-plan --label reality-check",
+      "status": "passed",
+      "open_count": 0,
+      "closed_count": 16,
+      "total_actionable": 0,
+      "data_hash": "bf63fd2ac4dc051c"
     }
   },
   "fresh_signoff_commands": [
