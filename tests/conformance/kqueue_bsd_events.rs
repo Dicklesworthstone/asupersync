@@ -1,5 +1,3 @@
-#![allow(warnings)]
-#![allow(clippy::all)]
 //! BSD kqueue event semantics conformance tests.
 //!
 //! This module provides conformance testing for BSD-specific kqueue behaviors
@@ -12,18 +10,12 @@ mod bsd_tests {
     // while keeping them conditionally compiled for BSD platforms only.
 }
 
-/// Placeholder test for non-BSD platforms
+/// Non-BSD platform marker.
 /// This ensures the module compiles on all platforms but only runs the actual
 /// kqueue tests on BSD systems where kqueue is available.
 #[cfg(not(any(target_os = "macos", target_os = "freebsd")))]
 #[test]
-#[allow(dead_code)]
-fn kqueue_conformance_requires_bsd_platform() {
-    // This test serves as documentation that kqueue conformance tests
-    // are only available on macOS and FreeBSD platforms.
-    println!("kqueue conformance tests require macOS or FreeBSD");
-    assert!(true, "Placeholder test for non-BSD platforms");
-}
+fn kqueue_conformance_is_bsd_only() {}
 
 #[cfg(any(target_os = "macos", target_os = "freebsd"))]
 mod bsd_standalone {

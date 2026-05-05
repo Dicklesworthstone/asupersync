@@ -83,7 +83,6 @@ pub mod grpc_message_framing;
 pub mod grpc_status_mapping;
 pub mod grpc_trailer_forwarding_rfc9113;
 pub mod grpc_web_frame_format;
-#[cfg(any(target_os = "macos", target_os = "freebsd"))]
 pub mod kqueue_bsd_events;
 #[cfg(feature = "quic")]
 pub mod quic_connection_migration_rfc9000;
