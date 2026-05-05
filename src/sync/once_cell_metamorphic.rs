@@ -1,4 +1,3 @@
-#![allow(clippy::all)]
 //! Metamorphic Testing: OnceCell initialization invariants
 //!
 //! This module implements comprehensive metamorphic relations for the OnceCell
@@ -102,7 +101,7 @@ impl GlobalOnceCellState {
         }
     }
 
-    /// Record a simulated cancellation event in cancellation-focused tests.
+    /// Record a cancellation event in cancellation-focused tests.
     pub fn record_cancellation(&self) {
         self.cancellations.fetch_add(1, Ordering::SeqCst);
     }
@@ -145,14 +144,14 @@ impl From<&GlobalOnceCellState> for OnceCellTestSummary {
     }
 }
 
-/// Test operation that can simulate initialization with optional cancellation.
+/// Test operation that exercises initialization with optional cancellation.
 #[derive(Clone)]
 struct TestInitializer {
     /// Unique identifier for this initializer.
     id: u32,
     /// Value to initialize with.
     value: u32,
-    /// Whether this initializer should simulate slow initialization.
+    /// Whether this initializer should require extra polls before completing.
     slow_init: bool,
     /// Global state for tracking.
     global_state: Arc<GlobalOnceCellState>,
@@ -173,7 +172,7 @@ impl Future for TestInitializer {
     type Output = u32;
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        // Simulate slow initialization by requiring multiple polls
+        // Slow-path initialization requires multiple polls before completion.
         if self.slow_init {
             let op_count = self
                 .global_state
