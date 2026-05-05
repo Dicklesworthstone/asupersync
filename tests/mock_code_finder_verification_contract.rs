@@ -155,3 +155,46 @@ fn mock_code_finder_validator_self_test_passes() {
         String::from_utf8_lossy(&output.stderr)
     );
 }
+
+#[test]
+fn rfc6330_evidence_runner_lists_and_self_tests() {
+    let list_output = Command::new("bash")
+        .arg("scripts/run_rfc6330_conformance_evidence.sh")
+        .arg("--list")
+        .current_dir(repo_path(""))
+        .output()
+        .expect("list RFC6330 evidence runner scenarios");
+
+    assert!(
+        list_output.status.success(),
+        "runner --list failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&list_output.stdout),
+        String::from_utf8_lossy(&list_output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&list_output.stdout);
+    assert!(stdout.contains("RFC6330-PROOF-RUN-ALL-LIVE"));
+    assert!(stdout.contains("RFC6330-PROOF-SECTION-5-3-LIVE"));
+    assert!(stdout.contains("aggregate_runner_bead=asupersync-oelvq2"));
+
+    let artifact_root = repo_path("target/mock-code-finder/asupersync-kokw3m-contract-test")
+        .join(std::process::id().to_string());
+    let self_test_output = Command::new("bash")
+        .arg("scripts/run_rfc6330_conformance_evidence.sh")
+        .arg("--self-test")
+        .arg("--artifact-root")
+        .arg(&artifact_root)
+        .current_dir(repo_path(""))
+        .output()
+        .expect("run RFC6330 evidence runner self-test");
+
+    assert!(
+        self_test_output.status.success(),
+        "runner --self-test failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&self_test_output.stdout),
+        String::from_utf8_lossy(&self_test_output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&self_test_output.stdout);
+    assert!(stdout.contains("RFC6330 evidence runner self-test: pass"));
+    assert!(stdout.contains("rfc6330-self-test.jsonl"));
+    assert!(stdout.contains("rfc6330-self-test.summary.json"));
+}
