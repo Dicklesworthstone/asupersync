@@ -133,6 +133,96 @@ pub struct OtlpBrownoutPolicySnapshot {
     pub queue_dropped_spans: u64,
 }
 
+/// Contract version for the OTLP tail-based sampling support boundary.
+pub const OTLP_TAIL_SAMPLING_SCOPE_CONTRACT_VERSION: &str = "otlp-tail-sampling-scope-contract-v1";
+
+/// Evidence owner bead for the current tail-based sampling support boundary.
+pub const OTLP_TAIL_SAMPLING_SCOPE_BEAD_ID: &str = "asupersync-7s6";
+
+/// Downstream proof bead that consumes this support boundary.
+pub const OTLP_TAIL_SAMPLING_E2E_BEAD_ID: &str = "asupersync-uw9zg9";
+
+/// Current production support class for OTLP tail-based sampling.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OtlpTailSamplingSupportClass {
+    /// The runtime does not currently implement deferred, trace-completion-based
+    /// sampling; downstream proof must record this as unsupported, not as a pass.
+    ExplicitlyUnsupported,
+}
+
+impl OtlpTailSamplingSupportClass {
+    /// Mock-code-finder `support_class` value for this support boundary.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::ExplicitlyUnsupported => "explicitly_unsupported",
+        }
+    }
+}
+
+/// Production support-scope snapshot for OTLP tail-based sampling.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OtlpTailSamplingScope {
+    /// Version of this support-boundary contract.
+    pub contract_version: &'static str,
+    /// Bead that owns the truthfulness decision.
+    pub bead_id: &'static str,
+    /// Downstream E2E/proof bead that must consume this boundary.
+    pub feeds_bead_id: &'static str,
+    /// Mock-code-finder support class.
+    pub support_class: OtlpTailSamplingSupportClass,
+    /// Mock-code-finder evidence quality for this boundary.
+    pub evidence_quality: &'static str,
+    /// Mock-code-finder verdict expected for proof records until support lands.
+    pub verdict: &'static str,
+    /// Whether a production tail-based sampler is available.
+    pub production_supported: bool,
+    /// Production surfaces that are currently missing.
+    pub missing_surfaces: &'static [&'static str],
+    /// Required semantics for a future supported implementation.
+    pub desired_semantics: &'static [&'static str],
+}
+
+impl OtlpTailSamplingScope {
+    /// Mock-code-finder `support_class` field value.
+    #[must_use]
+    pub const fn support_class_str(&self) -> &'static str {
+        self.support_class.as_str()
+    }
+}
+
+/// Return the current production support stance for OTLP tail-based sampling.
+///
+/// This deliberately lives beside the trace exporter so audits and proof
+/// scripts can query production truth instead of using an idealized local mock
+/// sampler. The existing exporter supports head-based filtering via W3C
+/// `trace_flags`; deferred tail decisions remain unsupported until a real
+/// buffering/completion policy is implemented.
+#[must_use]
+pub const fn otlp_tail_based_sampling_scope() -> OtlpTailSamplingScope {
+    OtlpTailSamplingScope {
+        contract_version: OTLP_TAIL_SAMPLING_SCOPE_CONTRACT_VERSION,
+        bead_id: OTLP_TAIL_SAMPLING_SCOPE_BEAD_ID,
+        feeds_bead_id: OTLP_TAIL_SAMPLING_E2E_BEAD_ID,
+        support_class: OtlpTailSamplingSupportClass::ExplicitlyUnsupported,
+        evidence_quality: "unsupported",
+        verdict: "unsupported",
+        production_supported: false,
+        missing_surfaces: &[
+            "trace-completion detector",
+            "bounded span buffer for deferred decisions",
+            "late sampling policy API",
+            "flush/shutdown behavior for undecided traces",
+        ],
+        desired_semantics: &[
+            "policy match after trace completion",
+            "consistent decision across every span in a trace",
+            "bounded memory and trace-expiry behavior",
+            "no trace leaks on cancellation, flush, or shutdown",
+        ],
+    }
+}
+
 /// Bounded export queue with oldest-drop load shedding.
 ///
 /// **PERFORMANCE**: Uses lock-free ArrayQueue to eliminate mutex contention
@@ -459,7 +549,7 @@ impl LoadSheddingTraceExporter {
     /// Returns the number of batches successfully processed.
     pub fn process_queue(&self) -> Result<usize, ExportError> {
         let mut processed = 0;
-        let mut total_spans_processed = 0;
+        let mut _total_spans_processed = 0;
 
         while let Some(batch) = self.export_queue.dequeue() {
             // Track aging of batches (warn if spans are getting stale)
@@ -477,7 +567,7 @@ impl LoadSheddingTraceExporter {
             // Export the batch
             self.inner.export(&batch)?;
             processed += 1;
-            total_spans_processed += batch.spans.len();
+            _total_spans_processed += batch.spans.len();
 
             // Apply batch timeout to prevent blocking export thread too long
             if batch.created_at.elapsed() > self.batch_timeout {
@@ -491,7 +581,7 @@ impl LoadSheddingTraceExporter {
                 target: "asupersync::observability::otlp_trace",
                 "Processed {} span batches ({} spans)",
                 processed,
-                total_spans_processed
+                _total_spans_processed
             );
         }
 

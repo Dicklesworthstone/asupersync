@@ -204,7 +204,11 @@ pub use otel::{
 pub use otel_structured_concurrency::{
     EntityId, OtelStructuredConcurrencyConfig, SpanStorage, SpanType,
 };
-pub use otlp_trace_exporter::{LoadSheddingTraceExporter, OtlpSpan, SpanBatch, TraceExporter};
+pub use otlp_trace_exporter::{
+    LoadSheddingTraceExporter, OTLP_TAIL_SAMPLING_E2E_BEAD_ID, OTLP_TAIL_SAMPLING_SCOPE_BEAD_ID,
+    OTLP_TAIL_SAMPLING_SCOPE_CONTRACT_VERSION, OtlpSpan, OtlpTailSamplingScope,
+    OtlpTailSamplingSupportClass, SpanBatch, TraceExporter, otlp_tail_based_sampling_scope,
+};
 pub use performance_budget_monitor::{
     BudgetAlert, BudgetDirection, BudgetEvaluation, BudgetSample, BudgetSeverity,
     PerformanceBudget, PerformanceBudgetMonitor, PerformanceBudgetSnapshot,
