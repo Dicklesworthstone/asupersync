@@ -16,9 +16,6 @@
 //! `KAFKA_BROKER_BOOTSTRAP` in the environment and the kafka feature
 //! flag — the tests will then hit that broker (a future follow-up).
 
-#![allow(warnings)]
-#![allow(clippy::all)]
-
 #[cfg(feature = "kafka")]
 mod compression_roundtrip {
     use asupersync::messaging::{Compression, ProducerConfig};
@@ -93,12 +90,5 @@ mod compression_roundtrip {
 #[cfg(not(feature = "kafka"))]
 mod compression_roundtrip_disabled {
     #[test]
-    fn huvyi0_compression_tests_require_kafka_feature() {
-        // Smoke test for when the kafka feature is disabled; documents
-        // that the round-trip suite is gated.
-        eprintln!(
-            "tests/messaging_kafka_compression_roundtrip.rs: kafka feature disabled — \
-             enable with `cargo test --features kafka` to run the round-trip suite."
-        );
-    }
+    fn huvyi0_compression_tests_require_kafka_feature() {}
 }
