@@ -1,4 +1,3 @@
-#![allow(warnings)]
 //! Metamorphic Testing for RwLock Reader/Writer Ordering Invariants
 //!
 //! Tests the fairness and ordering properties of the cancel-aware RwLock
@@ -17,7 +16,6 @@
 #![cfg(test)]
 
 use std::future::Future;
-use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::task::{Context, Poll, Waker};
@@ -44,15 +42,6 @@ fn test_cx_with_slot(slot: u32) -> Cx {
         TaskId::from_arena(ArenaIndex::new(0, slot)),
         Budget::INFINITE,
     )
-}
-
-fn poll_once<T>(future: &mut (impl Future<Output = T> + Unpin)) -> Option<T> {
-    let waker = Waker::noop();
-    let mut cx = Context::from_waker(waker);
-    match Pin::new(future).poll(&mut cx) {
-        Poll::Ready(v) => Some(v),
-        Poll::Pending => None,
-    }
 }
 
 fn poll_until_ready<T>(future: impl Future<Output = T>) -> T {
@@ -123,7 +112,6 @@ fn mr_writer_preference_blocks_readers() {
 #[test]
 fn mr_mutual_exclusion() {
     init_test("mr_mutual_exclusion");
-    let cx = test_cx();
     let lock = Arc::new(RwLock::new(0_i32));
     let counter = Arc::new(AtomicUsize::new(0));
     let reader_active = Arc::new(AtomicBool::new(false));
@@ -203,7 +191,6 @@ fn mr_mutual_exclusion() {
 #[test]
 fn mr_reader_concurrency_when_no_writers() {
     init_test("mr_reader_concurrency_when_no_writers");
-    let cx = test_cx();
     let lock = Arc::new(RwLock::new(42_i32));
     let concurrent_readers = Arc::new(AtomicUsize::new(0));
     let max_concurrent = Arc::new(AtomicUsize::new(0));
