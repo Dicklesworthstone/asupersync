@@ -4,7 +4,7 @@
 //! and PUSH_PROMISE seams. It intentionally does not fake h2 reference
 //! behavior when no live h2 peer is wired into this crate.
 
-use asupersync::bytes::{BufMut, Bytes, BytesMut};
+use asupersync::bytes::{BufMut, BytesMut};
 use asupersync::http::h2::connection::{Connection, ReceivedFrame};
 use asupersync::http::h2::error::{ErrorCode, H2Error};
 use asupersync::http::h2::frame::{
