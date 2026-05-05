@@ -1,5 +1,3 @@
-#![allow(warnings)]
-#![allow(clippy::all)]
 //! HTTP/2 PRIORITY Frame Conformance Tests (RFC 9113 Section 6.3)
 //!
 //! This module provides comprehensive conformance testing for HTTP/2 PRIORITY frame
@@ -1298,28 +1296,16 @@ mod tests {
         assert!(category_counts.contains_key(&TestCategory::CircularDependency));
         assert!(category_counts.contains_key(&TestCategory::ConnectionStreamError));
 
-        println!("H2 PRIORITY Conformance Test Results:");
-        println!("Total tests: {}", results.len());
-        for (category, count) in category_counts {
-            println!("  {:?}: {} tests", category, count);
-        }
-
         // Check for any failures
         let failures: Vec<_> = results
             .iter()
             .filter(|r| r.verdict == TestVerdict::Fail)
             .collect();
 
-        if !failures.is_empty() {
-            println!("Failed tests:");
-            for failure in failures {
-                println!("  {} - {}", failure.test_id, failure.description);
-                if let Some(ref msg) = failure.error_message {
-                    println!("    Error: {}", msg);
-                }
-            }
-            panic!("Some conformance tests failed");
-        }
+        assert!(
+            failures.is_empty(),
+            "H2 PRIORITY conformance failures: {failures:#?}"
+        );
     }
 
     #[test]
