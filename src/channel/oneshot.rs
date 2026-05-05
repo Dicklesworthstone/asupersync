@@ -332,7 +332,6 @@ impl<T> Sender<T> {
     /// This provides async notification of receiver dropout without attempting
     /// to send a value. Useful for detecting receiver cancellation.
     #[inline]
-    #[must_use]
     pub fn poll_closed(&mut self, cx: &mut std::task::Context<'_>) -> std::task::Poll<()> {
         let mut inner = self.inner.lock();
 
@@ -784,7 +783,6 @@ impl<T> Receiver<T> {
     /// This provides async notification of channel closure without attempting
     /// to receive a value. Useful for detecting sender dropout.
     #[inline]
-    #[must_use]
     pub fn poll_closed(&mut self, cx: &mut std::task::Context<'_>) -> std::task::Poll<()> {
         let mut inner = self.inner.lock();
 

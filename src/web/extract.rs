@@ -421,7 +421,7 @@ where
 ///
 /// Per HTML form specification, duplicate keys should preserve all values
 /// as Vec<String> rather than rejecting or overwriting. This correctly
-/// handles forms like "a=1&a=2" → {"a": ["1", "2"]}.
+/// handles forms like `a=1&a=2` -> `{"a": ["1", "2"]}`.
 fn parse_urlencoded_multi(
     input: &str,
     _field_kind: &str,
@@ -434,7 +434,7 @@ fn parse_urlencoded_multi(
         };
         let key = percent_decode(key);
         let value = percent_decode(parts.next().unwrap_or(""));
-        parsed.entry(key).or_insert_with(Vec::new).push(value);
+        parsed.entry(key).or_default().push(value);
     }
     Ok(parsed)
 }

@@ -506,7 +506,7 @@ impl TlsConnectorBuilder {
     pub fn with_native_roots(self) -> Result<Self, TlsError> {
         #[cfg(not(feature = "tls"))]
         {
-            return Err(tls_feature_disabled("load native root certificates"));
+            Err(tls_feature_disabled("load native root certificates"))
         }
         #[cfg(feature = "tls")]
         Err(TlsError::Configuration(

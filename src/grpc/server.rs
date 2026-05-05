@@ -8,11 +8,11 @@ use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use crate::bytes::{BufMut, Bytes, BytesMut};
+use crate::bytes::Bytes;
 use crate::cx::{Cx, cap};
 
 use super::client::CompressionEncoding;
-use super::codec::{Codec, FramedCodec, IdentityCodec};
+use super::codec::{Codec, FramedCodec};
 use super::reflection::ReflectionService;
 use super::service::{NamedService, ServiceHandler};
 use super::status::{GrpcError, Status, TransportErrorKind};
@@ -1760,6 +1760,7 @@ mod tests {
         unused_must_use
     )]
     use super::*;
+    use crate::bytes::{BufMut, BytesMut};
     use crate::grpc::service::ServiceDescriptor;
 
     fn init_test(name: &str) {

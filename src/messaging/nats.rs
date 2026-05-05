@@ -1480,13 +1480,11 @@ impl NatsClient {
                         }
                         Err(e) => {
                             cx.trace(&format!("nats: handshake failed during reconnect: {}", e));
-                            continue;
                         }
                     }
                 }
                 Err(e) => {
                     cx.trace(&format!("nats: TCP reconnect failed: {}", e));
-                    continue;
                 }
             }
         }

@@ -264,14 +264,16 @@ impl<T> BoundedExportQueue<T> {
                         let dropped_item = self.queue.pop();
                         if let Some(dropped_item) = dropped_item {
                             self.dropped_count.fetch_add(1, Ordering::Relaxed);
-                            if self.queue.push(returned_item).is_err() {
-                                panic!("overflow replacement must succeed");
-                            }
+                            assert!(
+                                self.queue.push(returned_item).is_ok(),
+                                "overflow replacement must succeed"
+                            );
                             Some(dropped_item)
                         } else {
-                            if self.queue.push(returned_item).is_err() {
-                                panic!("push must succeed after transient full queue clears");
-                            }
+                            assert!(
+                                self.queue.push(returned_item).is_ok(),
+                                "push must succeed after transient full queue clears"
+                            );
                             None
                         }
                     }
@@ -290,6 +292,11 @@ impl<T> BoundedExportQueue<T> {
     /// Get current queue length.
     pub fn len(&self) -> usize {
         self.queue.len()
+    }
+
+    /// Return true when no batches are queued.
+    pub fn is_empty(&self) -> bool {
+        self.queue.is_empty()
     }
 
     /// Get queue capacity.
@@ -498,7 +505,7 @@ impl LoadSheddingTraceExporter {
                 state.action = Self::action_for_phase(ledger.phase);
                 state.shared_phase = ledger.phase;
                 state.fallback_used = ledger.fallback_used;
-                state.shared_reason_codes = ledger.reason_codes.clone();
+                state.shared_reason_codes.clone_from(&ledger.reason_codes);
             }
             None => {
                 state.action = OtlpBrownoutAction::ExportAll;
@@ -737,7 +744,6 @@ impl Drop for LoadSheddingTraceExporter {
                 match self.inner.export(&batch) {
                     Ok(()) => {
                         // Successfully exported, continue with next batch
-                        continue;
                     }
                     Err(_e) => {
                         #[cfg(feature = "tracing-integration")]
@@ -747,7 +753,6 @@ impl Drop for LoadSheddingTraceExporter {
                             _e
                         );
                         // Continue trying to export remaining batches even if one fails
-                        continue;
                     }
                 }
             } else {
