@@ -480,13 +480,44 @@ run_self_test() {
     local root="$ARTIFACT_ROOT/self-test"
     local fixture_jsonl="$root/observability-self-test.jsonl"
     local summary_json="$root/observability-self-test.summary.json"
+    local nonzero_root="$root/nonzero-child"
+    local nonzero_log="$root/nonzero-child.log"
+    local nonzero_summary="$nonzero_root/child/observability-evidence.summary.json"
+    local child_rc
     mkdir -p "$root"
     write_self_test_fixture_jsonl "$fixture_jsonl"
     python3 "$VALIDATOR" --contract "$CONTRACT" --self-test >/dev/null
     python3 "$VALIDATOR" --contract "$CONTRACT" --jsonl "$fixture_jsonl" --summary-output "$summary_json"
+
+    set +e
+    RCH_BIN=false RCH_WRAPPER_TIMEOUT=5s bash "$0" \
+        --execute \
+        --scenario OTEL-HISTOGRAM-AGGREGATOR-LIVE \
+        --artifact-root "$nonzero_root" \
+        --run-id child \
+        > "$nonzero_log" 2>&1
+    child_rc=$?
+    set -e
+    if [[ "$child_rc" -eq 0 ]]; then
+        echo "self-test expected child proof runner to exit nonzero when child validation cannot run" >&2
+        exit 1
+    fi
+    python3 - "$nonzero_summary" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+summary_path = Path(sys.argv[1])
+summary = json.loads(summary_path.read_text(encoding="utf-8"))
+records = next(iter(summary.values()))
+if records.get("records") != 1 or records.get("verdicts", {}).get("fail") != 1:
+    raise SystemExit(f"{summary_path}: expected exactly one fail record, got {records!r}")
+PY
+
     echo "observability evidence runner self-test: pass"
     echo "Evidence JSONL: $(repo_relative "$fixture_jsonl")"
     echo "Summary: $(repo_relative "$summary_json")"
+    echo "Nonzero child-run log: $(repo_relative "$nonzero_log")"
 }
 
 list_scenarios() {
