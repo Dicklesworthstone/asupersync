@@ -1,5 +1,3 @@
-#![allow(warnings)]
-#![allow(clippy::all)]
 //! Pool leak detection test — requires a database feature to compile.
 #![cfg(any(feature = "sqlite", feature = "postgres", feature = "mysql"))]
 
@@ -33,7 +31,7 @@ fn test_pool_leak() {
     let runtime = Runtime::with_config(RuntimeConfig::default()).unwrap();
     runtime.block_on(async {
         let pool = AsyncDbPool::new(LeakManager, DbPoolConfig::with_max_size(1));
-        let cx = Cx::current().expect("runtime task context");
+        let cx = Cx::for_testing();
 
         let fut = pool.get(&cx);
         // Let it run until the await point
