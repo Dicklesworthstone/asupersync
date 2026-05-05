@@ -1,5 +1,3 @@
-#![allow(warnings)]
-#![allow(clippy::all)]
 //! Close → Quiescence regression tests (bd-sbi6e).
 //!
 //! Exercises region close on nested regions with oracle evidence.
