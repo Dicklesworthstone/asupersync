@@ -1,4 +1,3 @@
-#![allow(clippy::all)]
 #![allow(missing_docs)]
 
 use asupersync::cx::Cx;
