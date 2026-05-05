@@ -40,13 +40,15 @@ use base64::{Engine as _, engine::general_purpose::STANDARD_NO_PAD};
 use nkeys::KeyPair;
 use sha2::{Digest, Sha256};
 use std::fmt;
+use std::path::Path;
 use std::str::FromStr;
 use std::sync::Arc;
 
 /// Configuration for the blocking pool.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum BlockingPoolAffinityProfile {
     /// Do not apply cohort-aware queue routing.
+    #[default]
     Disabled,
     /// Bias tasks toward same-cohort blocking workers before spilling globally.
     CohortBiased {
@@ -72,12 +74,6 @@ impl BlockingPoolAffinityProfile {
                 *spill_check_interval = 1;
             }
         }
-    }
-}
-
-impl Default for BlockingPoolAffinityProfile {
-    fn default() -> Self {
-        Self::Disabled
     }
 }
 
@@ -220,9 +216,10 @@ impl Default for RuntimeCapacityHints {
 }
 
 /// Storage-temperature policy for runtime metadata and retained evidence.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum ArenaTemperaturePolicy {
     /// Keep hot metadata and retained evidence on the unified allocator path.
+    #[default]
     Unified,
     /// Separate retained evidence into a colder tier while keeping runtime metadata hot.
     TieredColdEvidence,
@@ -239,12 +236,6 @@ impl ArenaTemperaturePolicy {
             Self::TieredColdEvidence => "tiered-cold-evidence",
             Self::TieredColdEvidenceLargePages => "tiered-cold-evidence-large-pages",
         }
-    }
-}
-
-impl Default for ArenaTemperaturePolicy {
-    fn default() -> Self {
-        Self::Unified
     }
 }
 
@@ -1081,9 +1072,10 @@ impl WorkerCohortMapping {
 }
 
 /// Policy surface for deterministic arena-locality planning.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum ArenaLocalityPolicy {
     /// Keep all runtime metadata on the conservative non-locality path.
+    #[default]
     Disabled,
     /// Prefer cohort-local placement for hot metadata when topology evidence is good enough.
     CohortPinned {
@@ -1174,12 +1166,6 @@ impl ArenaLocalityPolicy {
                 }
             }
         }
-    }
-}
-
-impl Default for ArenaLocalityPolicy {
-    fn default() -> Self {
-        Self::Disabled
     }
 }
 
@@ -1849,6 +1835,7 @@ impl HostProfilePlannerObjective {
         }
     }
 
+    /// Returns the deterministic profile preference order for this planner objective.
     #[must_use]
     pub const fn candidate_order(self) -> &'static [HostProfileId] {
         match self {
@@ -1905,6 +1892,7 @@ impl HostProfileId {
         }
     }
 
+    /// Minimum CPU cores required before this profile is eligible.
     #[must_use]
     pub const fn required_cpu_cores(self) -> usize {
         match self {
@@ -1915,6 +1903,7 @@ impl HostProfileId {
         }
     }
 
+    /// Minimum memory, in GiB, required before this profile is eligible.
     #[must_use]
     pub const fn required_memory_gib(self) -> usize {
         match self {
@@ -1925,6 +1914,7 @@ impl HostProfileId {
         }
     }
 
+    /// Proof surfaces that must be present and current for this profile.
     #[must_use]
     pub const fn required_evidence(self) -> &'static [HostProfileEvidenceKind] {
         match self {
@@ -1942,6 +1932,7 @@ impl HostProfileId {
         }
     }
 
+    /// Operator-facing reasons this profile may be selected.
     #[must_use]
     pub const fn rationale(self) -> &'static [&'static str] {
         match self {
@@ -1964,6 +1955,7 @@ impl HostProfileId {
         }
     }
 
+    /// Operator-facing reasons to refuse this profile even if it is available.
     #[must_use]
     pub const fn when_not_to_use(self) -> &'static [&'static str] {
         match self {
@@ -2012,6 +2004,7 @@ pub enum HostProfileEvidenceKind {
 }
 
 impl HostProfileEvidenceKind {
+    /// Stable operator-facing evidence kind identifier.
     #[must_use]
     pub const fn as_str(self) -> &'static str {
         match self {
@@ -2081,7 +2074,7 @@ impl HostProfileEvidenceArtifact {
         if self.artifact_id.is_empty() {
             return Err("artifact_id must not be empty".to_string());
         }
-        if !self.artifact_id.ends_with(".json") {
+        if !has_json_artifact_extension(&self.artifact_id) {
             return Err("artifact_id must end with .json".to_string());
         }
         if self.artifact_id.contains("..") {
@@ -2394,6 +2387,7 @@ pub struct HostProfileEvidenceSet {
 }
 
 impl HostProfileEvidenceSet {
+    /// Artifact identifiers that become inputs to host-profile planning receipts.
     #[must_use]
     pub fn input_artifact_ids(&self) -> Vec<String> {
         let mut ids = Vec::new();
@@ -2415,6 +2409,7 @@ impl HostProfileEvidenceSet {
         ids
     }
 
+    /// Looks up the proof artifact associated with one required evidence kind.
     #[must_use]
     pub fn for_kind(&self, kind: HostProfileEvidenceKind) -> Option<&HostProfileEvidenceArtifact> {
         match kind {
@@ -2467,6 +2462,7 @@ pub struct HostProfileManualOverrides {
 }
 
 impl HostProfileManualOverrides {
+    /// Stable field names for every manual override present in this request.
     #[must_use]
     pub fn applied_field_names(&self) -> Vec<&'static str> {
         let mut fields = Vec::new();
@@ -2509,6 +2505,7 @@ impl HostProfileManualOverrides {
         fields
     }
 
+    /// Applies only explicitly configured manual overrides to a runtime config.
     pub fn apply_to_config(&self, config: &mut RuntimeConfig) {
         if let Some(worker_threads) = self.worker_threads {
             config.worker_threads = worker_threads;
@@ -2872,6 +2869,7 @@ pub enum HostProfileConfigDiffSource {
 }
 
 impl HostProfileConfigDiffSource {
+    /// Stable operator-facing diff source identifier.
     #[must_use]
     pub const fn as_str(self) -> &'static str {
         match self {
@@ -3194,9 +3192,8 @@ fn controller_ledger_entries(
     .map(|kind| {
         let artifact = evidence.for_kind(kind);
         let proof_artifact_id = artifact.map(|item| item.artifact_id.clone());
-        let validation_passed = artifact
-            .map(|item| item.validation_passed && item.validate().is_ok())
-            .unwrap_or(false);
+        let validation_passed =
+            artifact.is_some_and(|item| item.validation_passed && item.validate().is_ok());
         HostProfileControllerLedgerEntry {
             controller: kind.as_str().to_string(),
             stance: controller_stance(profile, kind).to_string(),
@@ -3501,6 +3498,7 @@ pub enum CapacityEnvelopeBrownoutStage {
 }
 
 impl CapacityEnvelopeBrownoutStage {
+    /// Stable operator-facing brownout stage identifier.
     #[must_use]
     pub const fn as_str(self) -> &'static str {
         match self {
@@ -3528,6 +3526,7 @@ pub enum CapacityEnvelopeCalibrationStatus {
 }
 
 impl CapacityEnvelopeCalibrationStatus {
+    /// Stable operator-facing calibration status identifier.
     #[must_use]
     pub const fn as_str(self) -> &'static str {
         match self {
@@ -3644,7 +3643,7 @@ impl CapacityEnvelopeEvidenceSnapshot {
         if self.scenario_artifact_id.trim().is_empty() {
             return Err("scenario_artifact_id must not be empty".to_string());
         }
-        if !self.scenario_artifact_id.ends_with(".json") {
+        if !has_json_artifact_extension(&self.scenario_artifact_id) {
             return Err("scenario_artifact_id must end with .json".to_string());
         }
         if self.scenario_artifact_id.contains("..") {
@@ -3772,6 +3771,7 @@ pub struct CapacityEnvelopeBudgetOverrides {
 }
 
 impl CapacityEnvelopeBudget {
+    /// Returns this budget with every supplied optional override applied.
     #[must_use]
     pub const fn with_overrides(self, overrides: CapacityEnvelopeBudgetOverrides) -> Self {
         Self {
@@ -4728,6 +4728,7 @@ pub enum SignedProfileBundleIntegrityMode {
 }
 
 impl SignedProfileBundleIntegrityMode {
+    /// Stable operator-facing integrity mode identifier.
     #[must_use]
     pub const fn as_str(self) -> &'static str {
         match self {
@@ -4755,6 +4756,7 @@ pub enum SignedProfileBundleExecutionMode {
 }
 
 impl SignedProfileBundleExecutionMode {
+    /// Stable operator-facing execution mode identifier.
     #[must_use]
     pub const fn as_str(self) -> &'static str {
         match self {
@@ -5708,6 +5710,7 @@ pub enum SignedProfileBundleShadowRunDecision {
 }
 
 impl SignedProfileBundleShadowRunDecision {
+    /// Stable operator-facing shadow-run decision identifier.
     #[must_use]
     pub const fn as_str(self) -> &'static str {
         match self {
@@ -7143,8 +7146,10 @@ fn build_signed_profile_bundle_shadow_run_evaluation(
         baseline_certificate.effective_budget,
         max_agent_count,
     );
-    let regret_margin_basis_points =
-        baseline_loss_basis_points as i64 - candidate_loss_basis_points as i64;
+    let regret_margin_basis_points = signed_profile_bundle_shadow_run_regret_margin_basis_points(
+        baseline_loss_basis_points,
+        candidate_loss_basis_points,
+    );
     let dominant_reasons = signed_profile_bundle_shadow_run_dominant_reasons(
         &candidate_point,
         &baseline_point,
@@ -7278,6 +7283,26 @@ fn signed_profile_bundle_shadow_run_loss_basis_points(
 
 fn normalize_capacity_metric_basis_points(numerator: u128, denominator: u128) -> u64 {
     saturating_mul_div(numerator, 10_000, denominator.max(1)) as u64
+}
+
+fn signed_profile_bundle_shadow_run_regret_margin_basis_points(
+    baseline_loss_basis_points: u64,
+    candidate_loss_basis_points: u64,
+) -> i64 {
+    if baseline_loss_basis_points >= candidate_loss_basis_points {
+        loss_basis_points_delta_to_i64(
+            baseline_loss_basis_points.saturating_sub(candidate_loss_basis_points),
+        )
+    } else {
+        loss_basis_points_delta_to_i64(
+            candidate_loss_basis_points.saturating_sub(baseline_loss_basis_points),
+        )
+        .saturating_neg()
+    }
+}
+
+fn loss_basis_points_delta_to_i64(delta: u64) -> i64 {
+    i64::try_from(delta).unwrap_or(i64::MAX)
 }
 
 fn signed_profile_bundle_shadow_run_dominant_reasons(
@@ -7588,7 +7613,7 @@ fn validate_artifact_json_path(value: &str, label: &str) -> Result<(), String> {
     if value.trim().is_empty() {
         return Err(format!("{label} must not be empty"));
     }
-    if !value.ends_with(".json") {
+    if !has_json_artifact_extension(value) {
         return Err(format!("{label} must end with .json"));
     }
     if value.contains("..") {
@@ -7603,6 +7628,12 @@ fn validate_artifact_json_path(value: &str, label: &str) -> Result<(), String> {
         return Err(format!("{label} contains unsupported characters"));
     }
     Ok(())
+}
+
+fn has_json_artifact_extension(value: &str) -> bool {
+    Path::new(value)
+        .extension()
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("json"))
 }
 
 fn validate_hashish(value: &str, label: &str) -> Result<(), String> {
@@ -8055,6 +8086,105 @@ mod tests {
     fn init_test(name: &str) {
         crate::test_utils::init_test_logging();
         crate::test_phase!(name);
+    }
+
+    #[test]
+    fn derived_policy_defaults_preserve_existing_variants() {
+        init_test("derived_policy_defaults_preserve_existing_variants");
+        crate::assert_with_log!(
+            BlockingPoolAffinityProfile::default() == BlockingPoolAffinityProfile::Disabled,
+            "blocking affinity default",
+            BlockingPoolAffinityProfile::Disabled,
+            BlockingPoolAffinityProfile::default()
+        );
+        crate::assert_with_log!(
+            ArenaTemperaturePolicy::default() == ArenaTemperaturePolicy::Unified,
+            "arena temperature default",
+            ArenaTemperaturePolicy::Unified,
+            ArenaTemperaturePolicy::default()
+        );
+        crate::assert_with_log!(
+            ArenaLocalityPolicy::default() == ArenaLocalityPolicy::Disabled,
+            "arena locality default",
+            ArenaLocalityPolicy::Disabled,
+            ArenaLocalityPolicy::default()
+        );
+        crate::test_complete!("derived_policy_defaults_preserve_existing_variants");
+    }
+
+    #[test]
+    fn artifact_json_path_validation_accepts_case_insensitive_json_paths() {
+        init_test("artifact_json_path_validation_accepts_case_insensitive_json_paths");
+        for value in [
+            "evidence/controller.json",
+            "evidence/controller.JSON",
+            "evidence/controller.JsOn",
+        ] {
+            let result = validate_artifact_json_path(value, "artifact_id");
+            crate::assert_with_log!(
+                result.is_ok(),
+                "case-insensitive json artifact path",
+                "Ok",
+                format!("{value}: {result:?}")
+            );
+        }
+        crate::test_complete!("artifact_json_path_validation_accepts_case_insensitive_json_paths");
+    }
+
+    #[test]
+    fn artifact_json_path_validation_rejects_unsafe_or_non_json_paths() {
+        init_test("artifact_json_path_validation_rejects_unsafe_or_non_json_paths");
+        for value in [
+            "",
+            "evidence/controller.txt",
+            "../evidence/controller.json",
+            "evidence/controller space.json",
+        ] {
+            let result = validate_artifact_json_path(value, "artifact_id");
+            crate::assert_with_log!(
+                result.is_err(),
+                "unsafe or non-json artifact path rejected",
+                "Err",
+                format!("{value}: {result:?}")
+            );
+        }
+        crate::test_complete!("artifact_json_path_validation_rejects_unsafe_or_non_json_paths");
+    }
+
+    #[test]
+    fn shadow_run_regret_margin_saturates_without_wrapping() {
+        init_test("shadow_run_regret_margin_saturates_without_wrapping");
+        crate::assert_with_log!(
+            signed_profile_bundle_shadow_run_regret_margin_basis_points(150, 100) == 50,
+            "positive regret margin",
+            50,
+            signed_profile_bundle_shadow_run_regret_margin_basis_points(150, 100)
+        );
+        crate::assert_with_log!(
+            signed_profile_bundle_shadow_run_regret_margin_basis_points(100, 150) == -50,
+            "negative regret margin",
+            -50,
+            signed_profile_bundle_shadow_run_regret_margin_basis_points(100, 150)
+        );
+        crate::assert_with_log!(
+            signed_profile_bundle_shadow_run_regret_margin_basis_points(100, 100) == 0,
+            "zero regret margin",
+            0,
+            signed_profile_bundle_shadow_run_regret_margin_basis_points(100, 100)
+        );
+        crate::assert_with_log!(
+            signed_profile_bundle_shadow_run_regret_margin_basis_points(u64::MAX, 0) == i64::MAX,
+            "positive regret margin saturates",
+            i64::MAX,
+            signed_profile_bundle_shadow_run_regret_margin_basis_points(u64::MAX, 0)
+        );
+        crate::assert_with_log!(
+            signed_profile_bundle_shadow_run_regret_margin_basis_points(0, u64::MAX) == -i64::MAX,
+            "negative regret margin saturates",
+            -i64::MAX,
+            signed_profile_bundle_shadow_run_regret_margin_basis_points(0, u64::MAX)
+        );
+        crate::test_complete!("shadow_run_regret_margin_saturates_without_wrapping");
     }
 
     #[test]
