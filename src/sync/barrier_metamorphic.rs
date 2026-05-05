@@ -1,4 +1,3 @@
-#![allow(clippy::all)]
 //! Metamorphic testing for Barrier wait correctness under spurious wakeups.
 //!
 //! This module implements comprehensive metamorphic relations for the `Barrier`
