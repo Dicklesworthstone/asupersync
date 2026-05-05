@@ -1,5 +1,3 @@
-#![allow(warnings)]
-#![allow(clippy::all)]
 //! Track-I (`asupersync-t1nde`) Windows platform completeness contract tests.
 //!
 //! These tests are host-agnostic: they validate gated source contracts without
@@ -67,7 +65,6 @@ fn track_i_process_surface_contains_windows_output_path() {
 
     for token in [
         "#[cfg(windows)]",
-        "use std::os::windows::io::{AsRawHandle, RawHandle};",
         "fn wait_with_output_windows(mut self) -> Result<Output, ProcessError>",
     ] {
         assert!(
@@ -76,6 +73,12 @@ fn track_i_process_surface_contains_windows_output_path() {
         );
     }
 
+    assert!(
+        process_src.contains("use std::os::windows::io::{AsRawHandle, RawHandle};")
+            || (process_src.contains("use std::os::windows::{")
+                && process_src.contains("io::{AsRawHandle, RawHandle},")),
+        "process module must import Windows raw-handle traits for process I/O"
+    );
     assert!(
         process_src.contains("return self.wait_with_output_windows();"),
         "wait_with_output must route to windows-specific implementation on Windows"
