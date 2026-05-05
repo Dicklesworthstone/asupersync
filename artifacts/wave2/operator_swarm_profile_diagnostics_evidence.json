@@ -1,0 +1,255 @@
+{
+  "schema_version": "operator-swarm-profile-diagnostics-evidence-v1",
+  "bead_id": "asupersync-5dudcn",
+  "capability_id": "operator_swarm_profile_diagnostics",
+  "created_date": "2026-05-05",
+  "runner_script": "scripts/run_operator_swarm_profile_diagnostics.sh",
+  "contract_test": "tests/operator_swarm_profile_diagnostics_contract.rs",
+  "support_class": "artifact-contract-backed-pending-registry",
+  "decision_contract": {
+    "purpose": "Turn the capacity-envelope, host-profile, trace, scheduler, blocking, remote, and messaging evidence chain into deterministic operator recommendations with rollback and no-win reasons.",
+    "no_dashboard_policy": "The output is a machine-readable report and line log, not a decorative dashboard.",
+    "aggressive_profile_gate": "Any non-conservative recommendation must carry confidence_score >= 90, redaction_verdict=not_applicable or redacted, a nonempty rollback_trigger, and source evidence from the capacity envelope or host-profile planner.",
+    "fallback_policy": "Missing host facts, stale evidence, conflicting metrics, p999 regressions, missing broker/remote proof, or redaction failure must keep the conservative baseline and emit no_win_reason or first_failure.",
+    "redaction_policy": "Endpoint, token, secret, bearer, password, and raw URI values must be redacted before reports are considered passable."
+  },
+  "required_log_fields": [
+    "bead_id",
+    "scenario_id",
+    "host_profile",
+    "selected_profile",
+    "confidence_score",
+    "saturation_class",
+    "primary_bottleneck",
+    "recommended_action",
+    "rollback_trigger",
+    "no_win_reason",
+    "redaction_verdict",
+    "artifact_path",
+    "verdict",
+    "first_failure"
+  ],
+  "source_evidence_paths": [
+    "artifacts/wave2/massive_swarm_capacity_envelope_evidence.json",
+    "artifacts/host_profile_planner_smoke_contract_v1.json",
+    "artifacts/capacity_envelope_planner_smoke_contract_v1.json",
+    "artifacts/runtime_latency_budget_certificate_v1.json",
+    "artifacts/trace_storage_profile_smoke_contract_v1.json",
+    "artifacts/blocking_pool_affinity_smoke_contract_v1.json",
+    "artifacts/cohort_admission_steering_smoke_contract_v1.json",
+    "artifacts/jetstream_publish_backpressure_smoke_contract_v1.json",
+    "src/runtime/config.rs",
+    "src/runtime/resource_monitor.rs",
+    "src/observability/diagnostics.rs"
+  ],
+  "host_profile_source_refs": [
+    {
+      "scenario_id": "AA-HOST-PROFILE-PLANNER-LOCALITY-FIRST-64C-256G",
+      "selected_profile": "locality_first_64c_256g",
+      "confidence_score": 100,
+      "used_safe_fallback": false,
+      "source_artifact": "artifacts/host_profile_planner_smoke_contract_v1.json"
+    },
+    {
+      "scenario_id": "AA-HOST-PROFILE-PLANNER-MISSING-PROOF-FALLBACK",
+      "selected_profile": "conservative_baseline",
+      "confidence_score": 83,
+      "used_safe_fallback": true,
+      "source_artifact": "artifacts/host_profile_planner_smoke_contract_v1.json"
+    },
+    {
+      "scenario_id": "AA-HOST-PROFILE-PLANNER-EVIDENCE-RETENTION-64C-256G",
+      "selected_profile": "large_memory_evidence_retention_256g",
+      "confidence_score": 100,
+      "used_safe_fallback": false,
+      "source_artifact": "artifacts/host_profile_planner_smoke_contract_v1.json"
+    }
+  ],
+  "capacity_envelope_source_refs": [
+    "AA-MASSIVE-SWARM-CAPACITY-FAST-REDUCED-CI",
+    "AA-MASSIVE-SWARM-CAPACITY-STANDARD-ARTIFACT-CHAIN",
+    "AA-MASSIVE-SWARM-CAPACITY-LARGE-HOST-64C-256G"
+  ],
+  "required_saturation_classes": [
+    "queue_pressure",
+    "timer_backlog",
+    "cancellation_drain_backlog",
+    "obligation_growth",
+    "trace_storage_pressure",
+    "blocking_pool_spill",
+    "broker_backpressure",
+    "remote_backpressure"
+  ],
+  "recommendation_case_requirements": [
+    "clear_win",
+    "no_win",
+    "conflicting_metrics",
+    "missing_host_facts",
+    "stale_evidence",
+    "rollback_trigger"
+  ],
+  "diagnostic_rows": [
+    {
+      "scenario_id": "AA-OPERATOR-SWARM-DIAGNOSTICS-LOCALITY-WIN",
+      "host_profile": "large-host-64c-256g",
+      "selected_profile": "locality_first_64c_256g",
+      "confidence_score": 100,
+      "saturation_class": "queue_pressure",
+      "primary_bottleneck": "cross_cohort_ready_queue_pressure",
+      "recommended_action": "enable_locality_first_profile_and_monitor_p999_tail",
+      "rollback_trigger": "p999_regression_or_host_shape_mismatch",
+      "no_win_reason": "",
+      "redaction_verdict": "not_applicable",
+      "verdict": "pass",
+      "first_failure": "",
+      "case_tags": ["clear_win", "rollback_trigger"],
+      "source_refs": [
+        "AA-HOST-PROFILE-PLANNER-LOCALITY-FIRST-64C-256G",
+        "AA-MASSIVE-SWARM-CAPACITY-LARGE-HOST-64C-256G",
+        "artifacts/cohort_admission_steering_smoke_contract_v1.json"
+      ]
+    },
+    {
+      "scenario_id": "AA-OPERATOR-SWARM-DIAGNOSTICS-TIMER-BACKLOG",
+      "host_profile": "standard",
+      "selected_profile": "conservative_baseline",
+      "confidence_score": 88,
+      "saturation_class": "timer_backlog",
+      "primary_bottleneck": "timer_wheel_backlog_with_tail_budget_pressure",
+      "recommended_action": "hold_conservative_profile_and_reduce_timer_fanout_before_retry",
+      "rollback_trigger": "timer_backlog_p99_exceeds_budget",
+      "no_win_reason": "tail_budget_not_proven_for_timer_backlog",
+      "redaction_verdict": "not_applicable",
+      "verdict": "no_win",
+      "first_failure": "",
+      "case_tags": ["no_win"],
+      "source_refs": [
+        "artifacts/runtime_latency_budget_certificate_v1.json",
+        "AA-MASSIVE-SWARM-CAPACITY-STANDARD-ARTIFACT-CHAIN"
+      ]
+    },
+    {
+      "scenario_id": "AA-OPERATOR-SWARM-DIAGNOSTICS-CANCEL-DRAIN",
+      "host_profile": "standard",
+      "selected_profile": "conservative_baseline",
+      "confidence_score": 86,
+      "saturation_class": "cancellation_drain_backlog",
+      "primary_bottleneck": "cancel_drain_debt_above_standard_profile_budget",
+      "recommended_action": "keep_conservative_profile_and_lower_admission_until_drain_debt_clears",
+      "rollback_trigger": "cancellation_drain_us_exceeds_profile_budget",
+      "no_win_reason": "cancel_drain_backlog_conflicts_with_aggressive_profile",
+      "redaction_verdict": "not_applicable",
+      "verdict": "no_win",
+      "first_failure": "",
+      "case_tags": ["conflicting_metrics"],
+      "source_refs": [
+        "AA-MASSIVE-SWARM-CAPACITY-STANDARD-ARTIFACT-CHAIN",
+        "src/runtime/resource_monitor.rs"
+      ]
+    },
+    {
+      "scenario_id": "AA-OPERATOR-SWARM-DIAGNOSTICS-OBLIGATION-GROWTH",
+      "host_profile": "standard",
+      "selected_profile": "conservative_baseline",
+      "confidence_score": 84,
+      "saturation_class": "obligation_growth",
+      "primary_bottleneck": "obligation_count_growing_faster_than_region_quiescence",
+      "recommended_action": "keep_conservative_profile_and_apply_backpressure_to_obligation_creators",
+      "rollback_trigger": "obligation_growth_slope_remains_positive",
+      "no_win_reason": "obligation_growth_blocks_profile_promotion",
+      "redaction_verdict": "not_applicable",
+      "verdict": "no_win",
+      "first_failure": "",
+      "case_tags": ["conflicting_metrics"],
+      "source_refs": [
+        "AA-MASSIVE-SWARM-CAPACITY-STANDARD-ARTIFACT-CHAIN",
+        "src/runtime/config.rs"
+      ]
+    },
+    {
+      "scenario_id": "AA-OPERATOR-SWARM-DIAGNOSTICS-TRACE-STORAGE",
+      "host_profile": "large-memory-256g",
+      "selected_profile": "large_memory_evidence_retention_256g",
+      "confidence_score": 100,
+      "saturation_class": "trace_storage_pressure",
+      "primary_bottleneck": "trace_retention_pressure_under_distributed_postmortem_load",
+      "recommended_action": "select_large_memory_evidence_retention_profile_with_default_fallback",
+      "rollback_trigger": "trace_budget_or_p999_interference_regresses",
+      "no_win_reason": "",
+      "redaction_verdict": "redacted",
+      "verdict": "pass",
+      "first_failure": "",
+      "case_tags": ["clear_win", "rollback_trigger"],
+      "source_refs": [
+        "AA-HOST-PROFILE-PLANNER-EVIDENCE-RETENTION-64C-256G",
+        "artifacts/trace_storage_profile_smoke_contract_v1.json"
+      ],
+      "redaction_sample": "endpoint=https://broker.internal token=[REDACTED]"
+    },
+    {
+      "scenario_id": "AA-OPERATOR-SWARM-DIAGNOSTICS-BLOCKING-SPILL",
+      "host_profile": "large-host-64c-256g",
+      "selected_profile": "locality_first_64c_256g",
+      "confidence_score": 95,
+      "saturation_class": "blocking_pool_spill",
+      "primary_bottleneck": "blocking_helper_spill_crosses_cohort_boundary",
+      "recommended_action": "enable_cohort_biased_blocking_affinity_and_watch_spill_rate",
+      "rollback_trigger": "blocking_spill_rate_or_p999_regresses",
+      "no_win_reason": "",
+      "redaction_verdict": "not_applicable",
+      "verdict": "pass",
+      "first_failure": "",
+      "case_tags": ["clear_win", "rollback_trigger"],
+      "source_refs": [
+        "artifacts/blocking_pool_affinity_smoke_contract_v1.json",
+        "AA-HOST-PROFILE-PLANNER-LOCALITY-FIRST-64C-256G"
+      ]
+    },
+    {
+      "scenario_id": "AA-OPERATOR-SWARM-DIAGNOSTICS-BROKER-BACKPRESSURE",
+      "host_profile": "standard",
+      "selected_profile": "conservative_baseline",
+      "confidence_score": 78,
+      "saturation_class": "broker_backpressure",
+      "primary_bottleneck": "broker_publish_wait_tail_without_live_broker_proof",
+      "recommended_action": "keep_conservative_profile_until_real_broker_e2e_proof_exists",
+      "rollback_trigger": "broker_ack_tail_or_consumer_lag_regresses",
+      "no_win_reason": "real_broker_e2e_proof_missing",
+      "redaction_verdict": "redacted",
+      "verdict": "no_win",
+      "first_failure": "",
+      "case_tags": ["missing_host_facts", "no_win"],
+      "source_refs": [
+        "artifacts/jetstream_publish_backpressure_smoke_contract_v1.json",
+        "asupersync-tohua1"
+      ],
+      "redaction_sample": "connection_uri=[REDACTED] bearer=[REDACTED]"
+    },
+    {
+      "scenario_id": "AA-OPERATOR-SWARM-DIAGNOSTICS-REMOTE-BACKPRESSURE",
+      "host_profile": "standard",
+      "selected_profile": "conservative_baseline",
+      "confidence_score": 75,
+      "saturation_class": "remote_backpressure",
+      "primary_bottleneck": "remote_transport_lifecycle_not_production_backed",
+      "recommended_action": "keep_remote_work_on_virtual_lab_profile_until_transport_proof_lands",
+      "rollback_trigger": "remote_lease_expiry_or_send_failure_rate_regresses",
+      "no_win_reason": "production_remote_transport_proof_missing",
+      "redaction_verdict": "not_applicable",
+      "verdict": "no_win",
+      "first_failure": "",
+      "case_tags": ["stale_evidence", "no_win"],
+      "source_refs": [
+        "src/remote.rs",
+        "asupersync-5d9s85"
+      ]
+    }
+  ],
+  "validation": {
+    "unit_proof_command": "rch exec -- env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-C debuginfo=0' CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_operator_swarm_profile cargo test -p asupersync --test operator_swarm_profile_diagnostics_contract --features test-internals -- --nocapture",
+    "e2e_proof_command": "bash scripts/run_operator_swarm_profile_diagnostics.sh --output-root target/operator-swarm-profile-diagnostics --profile all",
+    "clippy_proof_command": "rch exec -- env CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 RUSTFLAGS='-C debuginfo=0' CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_operator_swarm_profile_clippy cargo clippy -p asupersync --test operator_swarm_profile_diagnostics_contract --features test-internals -- -D warnings",
+    "tracker_registry_note": "Tracker and wave2 registry promotion are intentionally deferred while .beads and artifacts/wave2_capability_evidence_registry_v1.json are reserved by another active lease."
+  },
+  "redaction_verdict": "redacted"
+}
