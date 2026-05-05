@@ -9,6 +9,30 @@
     "workload": "artifacts/agent_swarm_coordination_workload_contract_v1.json",
     "redaction": "artifacts/agent_swarm_coordination_redaction_contract_v1.json"
   },
+  "core_runtime_dependency_boundary": {
+    "core_runtime_manifest": "Cargo.toml",
+    "runtime_linkage": "none",
+    "live_state_access": "explicit_export_files_only",
+    "collector_surfaces": [
+      "scripts/run_agent_swarm_coordination_collector.sh",
+      "docs/agent_swarm_coordination_collector.md",
+      "tests/agent_swarm_coordination_collector_contract.rs",
+      "artifacts/agent_swarm_coordination_collector_contract_v1.json"
+    ],
+    "checked_dependency_sections": [
+      "[dependencies]",
+      "[target.*.dependencies]"
+    ],
+    "forbidden_core_runtime_dependency_keys": [
+      "mcp_agent_mail",
+      "agent-mail",
+      "beads",
+      "br",
+      "bv",
+      "rch"
+    ],
+    "acceptance": "The asupersync core runtime manifest must not declare Agent Mail, Beads, bv, or rch dependency keys or package names."
+  },
   "modes": [
     {
       "mode": "list",

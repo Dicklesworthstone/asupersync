@@ -13,6 +13,12 @@ call MCP Agent Mail, Beads, `bv`, `rch`, or git by itself. Operators and agents
 must pass checked fixture files or explicit exported command output with
 `--source KIND:PATH`.
 
+The collector contract pins this as a core-runtime dependency boundary: the
+runtime manifest must not declare `mcp_agent_mail`, `agent-mail`, `beads`, `br`,
+`bv`, or `rch` dependency keys or package names in production dependency
+sections. Live swarm state reaches the collector only through explicit export
+files, never through runtime crate linkage.
+
 ## Command
 
 ```bash
@@ -99,7 +105,9 @@ The validation checks:
 7. Git dirty-frontier inputs retain only path hashes and counts.
 8. Report `e2e_log_rows` expose the required smoke-log fields and replay
    command for every emitted event.
-9. Repeated fixture runs produce identical bundle hashes.
+9. The collector artifact and root runtime manifest preserve the no-core-
+   runtime-dependency boundary for Agent Mail, Beads, `bv`, and `rch`.
+10. Repeated fixture runs produce identical bundle hashes.
 
 ## Cross-References
 

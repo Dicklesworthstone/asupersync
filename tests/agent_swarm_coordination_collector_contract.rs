@@ -12,6 +12,8 @@ const SCRIPT_PATH: &str = "scripts/run_agent_swarm_coordination_collector.sh";
 const WORKLOAD_ARTIFACT_PATH: &str = "artifacts/agent_swarm_coordination_workload_contract_v1.json";
 const REDACTION_ARTIFACT_PATH: &str =
     "artifacts/agent_swarm_coordination_redaction_contract_v1.json";
+const FORBIDDEN_CORE_RUNTIME_DEPENDENCY_KEYS: &[&str] =
+    &["mcp_agent_mail", "agent-mail", "beads", "br", "bv", "rch"];
 
 fn repo_path(relative: &str) -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join(relative)
@@ -68,6 +70,46 @@ fn string_array<'a>(value: &'a Value, key: &str) -> Vec<&'a str> {
         .collect()
 }
 
+fn production_dependency_declarations(manifest: &str) -> Vec<String> {
+    let mut declarations = Vec::new();
+    let mut in_production_dependency_section = false;
+    for raw_line in manifest.lines() {
+        let line = raw_line.trim();
+        if line.starts_with('[') && line.ends_with(']') {
+            in_production_dependency_section = line == "[dependencies]"
+                || (line.starts_with("[target.") && line.ends_with(".dependencies]"));
+            continue;
+        }
+        if !in_production_dependency_section {
+            continue;
+        }
+        let code = line
+            .split_once('#')
+            .map_or(line, |(before_comment, _)| before_comment)
+            .trim();
+        if code.is_empty() || !code.contains('=') {
+            continue;
+        }
+        declarations.push(code.to_string());
+    }
+    declarations
+}
+
+fn dependency_key(declaration: &str) -> Option<&str> {
+    declaration
+        .split_once('=')
+        .map(|(key, _)| key.trim().trim_matches('"').trim_matches('\''))
+}
+
+fn declaration_uses_forbidden_dependency(declaration: &str, forbidden: &[&str]) -> bool {
+    let key = dependency_key(declaration);
+    forbidden.iter().any(|name| {
+        key == Some(*name)
+            || declaration.contains(&format!("package = \"{name}\""))
+            || declaration.contains(&format!("package = '{name}'"))
+    })
+}
+
 fn fixture_bundle(root: &Path) -> Value {
     let bundle_path = root
         .join("coordination-collector-fixture")
@@ -82,6 +124,80 @@ fn fixture_report(root: &Path) -> Value {
         .join("coordination-collector-report.json");
     let raw = fs::read_to_string(report_path).expect("read fixture report");
     serde_json::from_str(&raw).expect("parse fixture report")
+}
+
+#[test]
+fn artifact_pins_and_core_manifest_preserves_dependency_boundary() {
+    let doc = load_doc();
+    assert!(
+        doc.contains("core-runtime dependency boundary"),
+        "doc must name the core-runtime dependency boundary"
+    );
+    assert!(
+        doc.contains("Live swarm state reaches the collector only through explicit export")
+            && doc.contains("never through runtime crate linkage"),
+        "doc must keep live state outside runtime linkage"
+    );
+
+    let artifact = load_json(ARTIFACT_PATH);
+    let boundary = artifact
+        .get("core_runtime_dependency_boundary")
+        .expect("core runtime dependency boundary");
+    assert_eq!(
+        boundary
+            .get("core_runtime_manifest")
+            .and_then(Value::as_str),
+        Some("Cargo.toml")
+    );
+    assert_eq!(
+        boundary.get("runtime_linkage").and_then(Value::as_str),
+        Some("none")
+    );
+    assert_eq!(
+        boundary.get("live_state_access").and_then(Value::as_str),
+        Some("explicit_export_files_only")
+    );
+
+    let forbidden: BTreeSet<_> = string_array(boundary, "forbidden_core_runtime_dependency_keys")
+        .into_iter()
+        .collect();
+    assert_eq!(
+        forbidden,
+        FORBIDDEN_CORE_RUNTIME_DEPENDENCY_KEYS
+            .iter()
+            .copied()
+            .collect()
+    );
+
+    let surfaces: BTreeSet<_> = string_array(boundary, "collector_surfaces")
+        .into_iter()
+        .collect();
+    assert_eq!(
+        surfaces,
+        BTreeSet::from([
+            SCRIPT_PATH,
+            DOC_PATH,
+            "tests/agent_swarm_coordination_collector_contract.rs",
+            ARTIFACT_PATH,
+        ])
+    );
+
+    let manifest = fs::read_to_string(repo_path("Cargo.toml")).expect("read runtime manifest");
+    let declarations = production_dependency_declarations(&manifest);
+    let offenders: Vec<_> = declarations
+        .iter()
+        .filter(|declaration| {
+            declaration_uses_forbidden_dependency(
+                declaration,
+                FORBIDDEN_CORE_RUNTIME_DEPENDENCY_KEYS,
+            )
+        })
+        .collect();
+    assert!(
+        offenders.is_empty(),
+        "core runtime production dependency sections must not declare collector \
+         tooling dependencies: {offenders:#?}"
+    );
 }
 
 #[test]
