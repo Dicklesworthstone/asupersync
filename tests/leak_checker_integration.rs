@@ -1,5 +1,3 @@
-#![allow(warnings)]
-#![allow(clippy::all)]
 //! E2E integration tests for the static obligation leak checker.
 //!
 //! Tests the full integration path: BodyBuilder, ObligationAnalyzer,
