@@ -5828,6 +5828,796 @@ pub struct SignedProfileBundleBundle {
     pub rollback_receipt: SignedProfileBundleRollbackReceipt,
 }
 
+/// Schema version for controller-interference digital-twin signoff reports.
+pub const CONTROLLER_INTERFERENCE_DIGITAL_TWIN_REPORT_SCHEMA_VERSION: &str =
+    "controller-interference-digital-twin-report-v1";
+
+/// Final signoff verdict for a combined-controller digital-twin replay.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ControllerInterferenceTwinVerdict {
+    /// The combined bundle had a clean deterministic replay.
+    Pass,
+    /// The replay found controller conflict and held on a conservative fallback.
+    NoWin,
+    /// The replay inputs were stale, incomplete, or structurally rejected.
+    FailClosed,
+}
+
+impl ControllerInterferenceTwinVerdict {
+    /// Stable report string.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Pass => "pass",
+            Self::NoWin => "no_win",
+            Self::FailClosed => "fail_closed",
+        }
+    }
+}
+
+impl fmt::Display for ControllerInterferenceTwinVerdict {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// Interference class detected by the controller digital twin.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ControllerInterferenceFindingClass {
+    /// Controller states moved back and forth instead of converging.
+    Oscillation,
+    /// A lower-priority shed path starved evidence or telemetry preservation.
+    PriorityInversion,
+    /// Pressure moved from one protected dimension into another hidden one.
+    HiddenOverloadTransfer,
+    /// One controller held no-win while another still attempted promotion.
+    ConflictingNoWin,
+    /// A controller reused stale, low-confidence, or unlisted evidence.
+    StaleEvidenceReuse,
+    /// Required controller state, version, evidence, or replay metadata was missing.
+    MissingEvidence,
+    /// The signed bundle gate rejected the candidate before interference replay.
+    BundleRejected,
+}
+
+impl ControllerInterferenceFindingClass {
+    /// Stable report string.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Oscillation => "oscillation",
+            Self::PriorityInversion => "priority_inversion",
+            Self::HiddenOverloadTransfer => "hidden_overload_transfer",
+            Self::ConflictingNoWin => "conflicting_no_win",
+            Self::StaleEvidenceReuse => "stale_evidence_reuse",
+            Self::MissingEvidence => "missing_evidence",
+            Self::BundleRejected => "bundle_rejected",
+        }
+    }
+}
+
+impl fmt::Display for ControllerInterferenceFindingClass {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// Severity of a controller-interference finding.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ControllerInterferenceFindingSeverity {
+    /// Hold the combined policy and fall back conservatively.
+    NoWin,
+    /// Reject the combined policy before signoff.
+    FailClosed,
+}
+
+impl ControllerInterferenceFindingSeverity {
+    /// Stable report string.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::NoWin => "no_win",
+            Self::FailClosed => "fail_closed",
+        }
+    }
+}
+
+impl fmt::Display for ControllerInterferenceFindingSeverity {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// Thresholds used while replaying the combined-controller state vector.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ControllerInterferenceTwinBudget {
+    /// Maximum age accepted for child controller evidence.
+    pub max_evidence_age_hours: u64,
+    /// Minimum confidence accepted for child controller evidence.
+    pub min_confidence_percent: u8,
+    /// Minimum pressure delta treated as a meaningful controller movement.
+    pub max_allowed_delta_basis_points: u16,
+    /// Minimum telemetry preservation required during non-critical shedding.
+    pub min_preserved_telemetry_basis_points: u16,
+    /// Maximum hidden transfer from queue relief into memory or tail risk.
+    pub max_overload_transfer_basis_points: u16,
+    /// Agent-ceiling delta that turns a no-win hold into a conflict.
+    pub conflicting_no_win_agent_delta: usize,
+}
+
+impl Default for ControllerInterferenceTwinBudget {
+    fn default() -> Self {
+        Self {
+            max_evidence_age_hours: 24,
+            min_confidence_percent: 80,
+            max_allowed_delta_basis_points: 1_500,
+            min_preserved_telemetry_basis_points: 8_500,
+            max_overload_transfer_basis_points: 1_500,
+            conflicting_no_win_agent_delta: 64,
+        }
+    }
+}
+
+/// One deterministic state vector emitted by a child controller in replay order.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ControllerInterferenceStateVector {
+    /// Replay step index used for deterministic ordering.
+    pub step_index: u32,
+    /// Controller surface name.
+    pub controller: String,
+    /// Controller contract version.
+    pub contract_version: String,
+    /// Policy digest proposed by the controller at this step.
+    pub policy_hash: String,
+    /// Evidence digest consumed by the controller at this step.
+    pub evidence_hash: String,
+    /// Confidence score for the evidence consumed by this state.
+    pub confidence_percent: u8,
+    /// Age of the evidence consumed by this state.
+    pub evidence_age_hours: u64,
+    /// Queue pressure after this controller step.
+    pub queue_pressure_basis_points: u16,
+    /// Tail-risk pressure after this controller step.
+    pub tail_risk_basis_points: u16,
+    /// Memory pressure after this controller step.
+    pub memory_pressure_basis_points: u16,
+    /// Non-critical work shedding requested by this controller step.
+    pub shed_noncritical_basis_points: u16,
+    /// Telemetry/evidence preservation retained by this controller step.
+    pub preserved_telemetry_basis_points: u16,
+    /// Agent ceiling proposed by this controller step.
+    pub target_agent_ceiling: usize,
+    /// Host profile selected by this controller step.
+    pub selected_profile: HostProfileId,
+    /// Whether this controller emitted an explicit no-win decision.
+    pub no_win: bool,
+    /// Whether this controller step activated a conservative fallback.
+    pub fallback_active: bool,
+}
+
+impl ControllerInterferenceStateVector {
+    fn validate(&self) -> Vec<String> {
+        let mut reasons = Vec::new();
+        if let Err(reason) = validate_slug_like(&self.controller, "state_vector controller") {
+            reasons.push(reason);
+        }
+        if self.contract_version.trim().is_empty() {
+            reasons.push("state_vector contract_version must not be empty".to_string());
+        }
+        if let Err(reason) = validate_hashish(&self.policy_hash, "state_vector policy_hash") {
+            reasons.push(reason);
+        }
+        if !is_hex_digest(&self.evidence_hash) {
+            reasons.push(
+                "state_vector evidence_hash must be a 64-character hexadecimal digest".to_string(),
+            );
+        }
+        if self.confidence_percent > 100 {
+            reasons.push("state_vector confidence_percent must be <= 100".to_string());
+        }
+        for (label, value) in [
+            (
+                "queue_pressure_basis_points",
+                self.queue_pressure_basis_points,
+            ),
+            ("tail_risk_basis_points", self.tail_risk_basis_points),
+            (
+                "memory_pressure_basis_points",
+                self.memory_pressure_basis_points,
+            ),
+            (
+                "shed_noncritical_basis_points",
+                self.shed_noncritical_basis_points,
+            ),
+            (
+                "preserved_telemetry_basis_points",
+                self.preserved_telemetry_basis_points,
+            ),
+        ] {
+            if value > 10_000 {
+                reasons.push(format!("state_vector {label} must be <= 10000"));
+            }
+        }
+        if self.target_agent_ceiling == 0 {
+            reasons.push("state_vector target_agent_ceiling must be non-zero".to_string());
+        }
+        reasons
+    }
+
+    fn render(&self) -> String {
+        [
+            self.step_index.to_string(),
+            self.controller.clone(),
+            self.contract_version.clone(),
+            self.policy_hash.clone(),
+            self.evidence_hash.clone(),
+            self.confidence_percent.to_string(),
+            self.evidence_age_hours.to_string(),
+            self.queue_pressure_basis_points.to_string(),
+            self.tail_risk_basis_points.to_string(),
+            self.memory_pressure_basis_points.to_string(),
+            self.shed_noncritical_basis_points.to_string(),
+            self.preserved_telemetry_basis_points.to_string(),
+            self.target_agent_ceiling.to_string(),
+            self.selected_profile.as_str().to_string(),
+            format_bool(self.no_win),
+            format_bool(self.fallback_active),
+        ]
+        .join("|")
+    }
+}
+
+/// One deterministic finding emitted by the digital twin.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ControllerInterferenceFinding {
+    /// Interference class.
+    pub class: ControllerInterferenceFindingClass,
+    /// Finding severity.
+    pub severity: ControllerInterferenceFindingSeverity,
+    /// Controllers implicated by the finding.
+    pub controllers: Vec<String>,
+    /// Stable human-readable explanation.
+    pub reason: String,
+}
+
+impl ControllerInterferenceFinding {
+    fn no_win(
+        class: ControllerInterferenceFindingClass,
+        controllers: Vec<String>,
+        reason: String,
+    ) -> Self {
+        Self {
+            class,
+            severity: ControllerInterferenceFindingSeverity::NoWin,
+            controllers,
+            reason,
+        }
+    }
+
+    fn fail_closed(
+        class: ControllerInterferenceFindingClass,
+        controllers: Vec<String>,
+        reason: String,
+    ) -> Self {
+        Self {
+            class,
+            severity: ControllerInterferenceFindingSeverity::FailClosed,
+            controllers,
+            reason,
+        }
+    }
+
+    fn render(&self) -> String {
+        format!(
+            "{}|{}|{}|{}",
+            self.class,
+            self.severity,
+            self.controllers.join(","),
+            self.reason
+        )
+    }
+}
+
+/// Digital-twin request for combined controller signoff.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ControllerInterferenceDigitalTwinRequest {
+    /// Stable smoke or rollout scenario identifier.
+    pub scenario_id: String,
+    /// Claimed child controller versions for the combined policy.
+    pub controller_versions: Vec<SignedProfileBundleControllerVersion>,
+    /// Input child evidence hashes consumed by the combined policy.
+    pub input_evidence_hashes: Vec<SignedProfileBundleChildEvidenceHash>,
+    /// Replay-ordered child controller state vectors.
+    pub state_vectors: Vec<ControllerInterferenceStateVector>,
+    /// Digest of the signed profile bundle manifest under review.
+    pub bundle_manifest_digest_sha256: String,
+    /// Whether the signed profile bundle verification gate accepted the candidate.
+    pub bundle_verification_accepted: bool,
+    /// Refusal reasons from the signed profile bundle verification gate.
+    pub bundle_verification_refusal_reasons: Vec<String>,
+    /// Whether signed mode was required for this combined policy.
+    pub signed_mode_required: bool,
+    /// Optional shadow-run decision from the signed bundle layer.
+    pub shadow_run_decision: Option<SignedProfileBundleShadowRunDecision>,
+    /// Optional shadow-run hold reasons from the signed bundle layer.
+    pub shadow_run_hold_reasons: Vec<String>,
+    /// Detection thresholds for this replay.
+    pub budget: ControllerInterferenceTwinBudget,
+    /// Command that replays this exact digital-twin proof.
+    pub replay_command: String,
+}
+
+impl ControllerInterferenceDigitalTwinRequest {
+    /// Evaluate the combined-controller replay and return a deterministic signoff report.
+    #[must_use]
+    pub fn evaluate(&self) -> ControllerInterferenceDigitalTwinReport {
+        let mut controller_versions = self.controller_versions.clone();
+        controller_versions.sort_by(|left, right| {
+            left.controller
+                .cmp(&right.controller)
+                .then_with(|| left.contract_version.cmp(&right.contract_version))
+        });
+        let mut input_evidence_hashes = self.input_evidence_hashes.clone();
+        input_evidence_hashes.sort_by(|left, right| {
+            left.controller
+                .cmp(&right.controller)
+                .then_with(|| left.artifact_id.cmp(&right.artifact_id))
+                .then_with(|| left.digest_sha256.cmp(&right.digest_sha256))
+        });
+        let mut state_vectors = self.state_vectors.clone();
+        state_vectors.sort_by(|left, right| {
+            left.step_index
+                .cmp(&right.step_index)
+                .then_with(|| left.controller.cmp(&right.controller))
+                .then_with(|| left.contract_version.cmp(&right.contract_version))
+                .then_with(|| left.policy_hash.cmp(&right.policy_hash))
+                .then_with(|| left.evidence_hash.cmp(&right.evidence_hash))
+        });
+
+        let mut findings =
+            self.structural_findings(&controller_versions, &input_evidence_hashes, &state_vectors);
+        let structural_failure = findings
+            .iter()
+            .any(|finding| finding.severity == ControllerInterferenceFindingSeverity::FailClosed);
+
+        if !structural_failure {
+            findings.extend(self.interference_findings(&state_vectors));
+        }
+        findings.sort_by(|left, right| left.render().cmp(&right.render()));
+        dedup_controller_interference_findings(&mut findings);
+
+        let verdict = if findings
+            .iter()
+            .any(|finding| finding.severity == ControllerInterferenceFindingSeverity::FailClosed)
+        {
+            ControllerInterferenceTwinVerdict::FailClosed
+        } else if findings.is_empty() {
+            ControllerInterferenceTwinVerdict::Pass
+        } else {
+            ControllerInterferenceTwinVerdict::NoWin
+        };
+        let fallback_decision = match verdict {
+            ControllerInterferenceTwinVerdict::Pass => "accept_combined_policy_bundle",
+            ControllerInterferenceTwinVerdict::NoWin => "hold_conservative_baseline",
+            ControllerInterferenceTwinVerdict::FailClosed => "fail_closed_reject_bundle",
+        }
+        .to_string();
+        let state_vector_hash = controller_interference_state_vector_hash(&state_vectors);
+        ControllerInterferenceDigitalTwinReport {
+            schema_version: CONTROLLER_INTERFERENCE_DIGITAL_TWIN_REPORT_SCHEMA_VERSION.to_string(),
+            scenario_id: self.scenario_id.clone(),
+            verdict,
+            accepted: verdict == ControllerInterferenceTwinVerdict::Pass,
+            no_win: verdict != ControllerInterferenceTwinVerdict::Pass,
+            fallback_decision,
+            bundle_manifest_digest_sha256: self.bundle_manifest_digest_sha256.clone(),
+            signed_mode_required: self.signed_mode_required,
+            controller_versions,
+            input_evidence_hashes,
+            state_vectors,
+            state_vector_hash,
+            findings,
+            replay_command: self.replay_command.clone(),
+        }
+    }
+
+    fn structural_findings(
+        &self,
+        controller_versions: &[SignedProfileBundleControllerVersion],
+        input_evidence_hashes: &[SignedProfileBundleChildEvidenceHash],
+        state_vectors: &[ControllerInterferenceStateVector],
+    ) -> Vec<ControllerInterferenceFinding> {
+        let mut findings = Vec::new();
+        if let Err(reason) = validate_slug_like(&self.scenario_id, "scenario_id") {
+            findings.push(ControllerInterferenceFinding::fail_closed(
+                ControllerInterferenceFindingClass::MissingEvidence,
+                Vec::new(),
+                reason,
+            ));
+        }
+        if self.replay_command.trim().is_empty() {
+            findings.push(ControllerInterferenceFinding::fail_closed(
+                ControllerInterferenceFindingClass::MissingEvidence,
+                Vec::new(),
+                "replay_command must not be empty".to_string(),
+            ));
+        }
+        if !is_hex_digest(&self.bundle_manifest_digest_sha256) {
+            findings.push(ControllerInterferenceFinding::fail_closed(
+                ControllerInterferenceFindingClass::BundleRejected,
+                Vec::new(),
+                "bundle_manifest_digest_sha256 must be a 64-character hexadecimal digest"
+                    .to_string(),
+            ));
+        }
+        if !self.bundle_verification_accepted {
+            let reason = if self.bundle_verification_refusal_reasons.is_empty() {
+                "signed profile bundle verification rejected the candidate".to_string()
+            } else {
+                self.bundle_verification_refusal_reasons.join("; ")
+            };
+            findings.push(ControllerInterferenceFinding::fail_closed(
+                ControllerInterferenceFindingClass::BundleRejected,
+                Vec::new(),
+                reason,
+            ));
+        }
+        if controller_versions.is_empty() {
+            findings.push(ControllerInterferenceFinding::fail_closed(
+                ControllerInterferenceFindingClass::MissingEvidence,
+                Vec::new(),
+                "controller_versions must not be empty".to_string(),
+            ));
+        }
+        if input_evidence_hashes.is_empty() {
+            findings.push(ControllerInterferenceFinding::fail_closed(
+                ControllerInterferenceFindingClass::MissingEvidence,
+                Vec::new(),
+                "input_evidence_hashes must not be empty".to_string(),
+            ));
+        }
+        if state_vectors.is_empty() {
+            findings.push(ControllerInterferenceFinding::fail_closed(
+                ControllerInterferenceFindingClass::MissingEvidence,
+                Vec::new(),
+                "state_vectors must not be empty".to_string(),
+            ));
+        }
+        for (index, entry) in controller_versions.iter().enumerate() {
+            if let Err(reason) = entry.validate(&format!("controller_versions[{index}]")) {
+                findings.push(ControllerInterferenceFinding::fail_closed(
+                    ControllerInterferenceFindingClass::MissingEvidence,
+                    vec![entry.controller.clone()],
+                    reason,
+                ));
+            }
+        }
+        if let Some(reason) =
+            duplicate_controller_version(controller_versions, "controller_versions")
+        {
+            findings.push(ControllerInterferenceFinding::fail_closed(
+                ControllerInterferenceFindingClass::MissingEvidence,
+                Vec::new(),
+                reason,
+            ));
+        }
+        for entry in input_evidence_hashes {
+            if let Err(reason) = entry.validate() {
+                findings.push(ControllerInterferenceFinding::fail_closed(
+                    ControllerInterferenceFindingClass::MissingEvidence,
+                    vec![entry.controller.clone()],
+                    reason,
+                ));
+            }
+        }
+        if let Some(reason) = duplicate_child_evidence_controller(input_evidence_hashes) {
+            findings.push(ControllerInterferenceFinding::fail_closed(
+                ControllerInterferenceFindingClass::MissingEvidence,
+                Vec::new(),
+                reason.replace("child_evidence_hashes", "input_evidence_hashes"),
+            ));
+        }
+        for state in state_vectors {
+            for reason in state.validate() {
+                findings.push(ControllerInterferenceFinding::fail_closed(
+                    ControllerInterferenceFindingClass::MissingEvidence,
+                    vec![state.controller.clone()],
+                    reason,
+                ));
+            }
+            if state.evidence_age_hours > self.budget.max_evidence_age_hours {
+                findings.push(ControllerInterferenceFinding::fail_closed(
+                    ControllerInterferenceFindingClass::StaleEvidenceReuse,
+                    vec![state.controller.clone()],
+                    format!(
+                        "controller {} reused evidence aged {}h above budget {}h",
+                        state.controller,
+                        state.evidence_age_hours,
+                        self.budget.max_evidence_age_hours
+                    ),
+                ));
+            }
+            if state.confidence_percent < self.budget.min_confidence_percent {
+                findings.push(ControllerInterferenceFinding::fail_closed(
+                    ControllerInterferenceFindingClass::StaleEvidenceReuse,
+                    vec![state.controller.clone()],
+                    format!(
+                        "controller {} evidence confidence {}% was below budget {}%",
+                        state.controller,
+                        state.confidence_percent,
+                        self.budget.min_confidence_percent
+                    ),
+                ));
+            }
+            if !input_evidence_hashes.iter().any(|hash| {
+                let controller_matches = hash.controller == state.controller;
+                let evidence_matches = hash.digest_sha256 == state.evidence_hash;
+                controller_matches && evidence_matches
+            }) {
+                findings.push(ControllerInterferenceFinding::fail_closed(
+                    ControllerInterferenceFindingClass::StaleEvidenceReuse,
+                    vec![state.controller.clone()],
+                    format!(
+                        "controller {} state vector evidence hash was not listed in input_evidence_hashes",
+                        state.controller
+                    ),
+                ));
+            }
+        }
+        for entry in controller_versions {
+            if !state_vectors.iter().any(|state| {
+                state.controller == entry.controller
+                    && state.contract_version == entry.contract_version
+            }) {
+                findings.push(ControllerInterferenceFinding::fail_closed(
+                    ControllerInterferenceFindingClass::MissingEvidence,
+                    vec![entry.controller.clone()],
+                    format!(
+                        "state vector for controller {} version {} is missing",
+                        entry.controller, entry.contract_version
+                    ),
+                ));
+            }
+            if !input_evidence_hashes
+                .iter()
+                .any(|hash| hash.controller == entry.controller)
+            {
+                findings.push(ControllerInterferenceFinding::fail_closed(
+                    ControllerInterferenceFindingClass::MissingEvidence,
+                    vec![entry.controller.clone()],
+                    format!(
+                        "input evidence hash for controller {} is missing",
+                        entry.controller
+                    ),
+                ));
+            }
+        }
+        findings
+    }
+
+    fn interference_findings(
+        &self,
+        state_vectors: &[ControllerInterferenceStateVector],
+    ) -> Vec<ControllerInterferenceFinding> {
+        let mut findings = Vec::new();
+        if let Some(finding) = self.detect_oscillation(state_vectors) {
+            findings.push(finding);
+        }
+        findings.extend(self.detect_priority_inversion(state_vectors));
+        findings.extend(self.detect_hidden_overload_transfer(state_vectors));
+        if let Some(finding) = self.detect_conflicting_no_win(state_vectors) {
+            findings.push(finding);
+        }
+        if self.shadow_run_decision == Some(SignedProfileBundleShadowRunDecision::Hold)
+            && state_vectors
+                .iter()
+                .any(|state| !state.no_win && !state.fallback_active)
+        {
+            findings.push(ControllerInterferenceFinding::no_win(
+                ControllerInterferenceFindingClass::ConflictingNoWin,
+                state_vectors
+                    .iter()
+                    .filter(|state| !state.no_win && !state.fallback_active)
+                    .map(|state| state.controller.clone())
+                    .collect(),
+                format!(
+                    "shadow-run hold conflicted with promoting controller states: {}",
+                    self.shadow_run_hold_reasons.join("; ")
+                ),
+            ));
+        }
+        findings
+    }
+
+    fn detect_oscillation(
+        &self,
+        state_vectors: &[ControllerInterferenceStateVector],
+    ) -> Option<ControllerInterferenceFinding> {
+        let mut direction = 0_i8;
+        let mut direction_flips = 0_usize;
+        let mut fallback_toggles = 0_usize;
+        for pair in state_vectors.windows(2) {
+            let previous = &pair[0];
+            let current = &pair[1];
+            let queue_delta = i32::from(current.queue_pressure_basis_points)
+                - i32::from(previous.queue_pressure_basis_points);
+            if queue_delta.unsigned_abs() >= u32::from(self.budget.max_allowed_delta_basis_points) {
+                let next_direction = if queue_delta > 0 { 1 } else { -1 };
+                if direction != 0 && next_direction != direction {
+                    direction_flips += 1;
+                }
+                direction = next_direction;
+            }
+            if previous.fallback_active != current.fallback_active {
+                fallback_toggles += 1;
+            }
+        }
+        if direction_flips >= 2 || fallback_toggles >= 2 {
+            return Some(ControllerInterferenceFinding::no_win(
+                ControllerInterferenceFindingClass::Oscillation,
+                state_vectors
+                    .iter()
+                    .map(|state| state.controller.clone())
+                    .collect(),
+                format!(
+                    "controller replay did not converge: {direction_flips} queue direction flips and {fallback_toggles} fallback toggles"
+                ),
+            ));
+        }
+        None
+    }
+
+    fn detect_priority_inversion(
+        &self,
+        state_vectors: &[ControllerInterferenceStateVector],
+    ) -> Vec<ControllerInterferenceFinding> {
+        state_vectors
+            .iter()
+            .filter(|state| {
+                state.preserved_telemetry_basis_points
+                    < self.budget.min_preserved_telemetry_basis_points
+                    && state.shed_noncritical_basis_points
+                        >= self.budget.max_allowed_delta_basis_points
+            })
+            .map(|state| {
+                ControllerInterferenceFinding::no_win(
+                    ControllerInterferenceFindingClass::PriorityInversion,
+                    vec![state.controller.clone()],
+                    format!(
+                        "controller {} shed {}bps while preserving only {}bps telemetry",
+                        state.controller,
+                        state.shed_noncritical_basis_points,
+                        state.preserved_telemetry_basis_points
+                    ),
+                )
+            })
+            .collect()
+    }
+
+    fn detect_hidden_overload_transfer(
+        &self,
+        state_vectors: &[ControllerInterferenceStateVector],
+    ) -> Vec<ControllerInterferenceFinding> {
+        let mut findings = Vec::new();
+        for pair in state_vectors.windows(2) {
+            let previous = &pair[0];
+            let current = &pair[1];
+            let queue_drop = previous
+                .queue_pressure_basis_points
+                .saturating_sub(current.queue_pressure_basis_points);
+            let memory_rise = current
+                .memory_pressure_basis_points
+                .saturating_sub(previous.memory_pressure_basis_points);
+            let tail_rise = current
+                .tail_risk_basis_points
+                .saturating_sub(previous.tail_risk_basis_points);
+            if queue_drop >= self.budget.max_allowed_delta_basis_points
+                && (memory_rise >= self.budget.max_overload_transfer_basis_points
+                    || tail_rise >= self.budget.max_overload_transfer_basis_points)
+            {
+                findings.push(ControllerInterferenceFinding::no_win(
+                    ControllerInterferenceFindingClass::HiddenOverloadTransfer,
+                    vec![previous.controller.clone(), current.controller.clone()],
+                    format!(
+                        "queue relief of {queue_drop}bps transferred into memory +{memory_rise}bps and tail +{tail_rise}bps"
+                    ),
+                ));
+            }
+        }
+        findings
+    }
+
+    fn detect_conflicting_no_win(
+        &self,
+        state_vectors: &[ControllerInterferenceStateVector],
+    ) -> Option<ControllerInterferenceFinding> {
+        for hold in state_vectors.iter().filter(|state| state.no_win) {
+            for promote in state_vectors.iter().filter(|state| !state.no_win) {
+                let promoted_agent_ceiling = hold
+                    .target_agent_ceiling
+                    .saturating_add(self.budget.conflicting_no_win_agent_delta);
+                if promote.target_agent_ceiling > promoted_agent_ceiling
+                    || (!promote.fallback_active
+                        && promote.selected_profile != HostProfileId::ConservativeBaseline)
+                {
+                    return Some(ControllerInterferenceFinding::no_win(
+                        ControllerInterferenceFindingClass::ConflictingNoWin,
+                        vec![hold.controller.clone(), promote.controller.clone()],
+                        format!(
+                            "controller {} held no-win at ceiling {}, but controller {} proposed {} with profile {}",
+                            hold.controller,
+                            hold.target_agent_ceiling,
+                            promote.controller,
+                            promote.target_agent_ceiling,
+                            promote.selected_profile.as_str()
+                        ),
+                    ));
+                }
+            }
+        }
+        None
+    }
+}
+
+/// Deterministic signoff report emitted by controller-interference digital twins.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ControllerInterferenceDigitalTwinReport {
+    /// Report schema version.
+    pub schema_version: String,
+    /// Scenario identifier.
+    pub scenario_id: String,
+    /// Final replay verdict.
+    pub verdict: ControllerInterferenceTwinVerdict,
+    /// Whether the combined controller bundle passed signoff.
+    pub accepted: bool,
+    /// Whether the combined controller bundle was held or rejected.
+    pub no_win: bool,
+    /// Deterministic fallback or acceptance decision.
+    pub fallback_decision: String,
+    /// Digest of the signed profile bundle manifest under review.
+    pub bundle_manifest_digest_sha256: String,
+    /// Whether signed mode was required for this combined policy.
+    pub signed_mode_required: bool,
+    /// Sorted controller-version rows used by the replay.
+    pub controller_versions: Vec<SignedProfileBundleControllerVersion>,
+    /// Sorted child evidence hashes used by the replay.
+    pub input_evidence_hashes: Vec<SignedProfileBundleChildEvidenceHash>,
+    /// Replay-ordered controller state vectors.
+    pub state_vectors: Vec<ControllerInterferenceStateVector>,
+    /// Digest of the replay-ordered state vectors.
+    pub state_vector_hash: String,
+    /// Deterministically sorted findings.
+    pub findings: Vec<ControllerInterferenceFinding>,
+    /// Command that replays this exact report.
+    pub replay_command: String,
+}
+
+fn controller_interference_state_vector_hash(
+    state_vectors: &[ControllerInterferenceStateVector],
+) -> String {
+    stable_sha256_hex(&[(
+        "controller_interference_state_vectors",
+        state_vectors
+            .iter()
+            .map(ControllerInterferenceStateVector::render)
+            .collect::<Vec<_>>()
+            .join(";"),
+    )])
+}
+
+fn dedup_controller_interference_findings(findings: &mut Vec<ControllerInterferenceFinding>) {
+    let mut deduped = Vec::with_capacity(findings.len());
+    for finding in findings.drain(..) {
+        if !deduped
+            .iter()
+            .any(|existing: &ControllerInterferenceFinding| existing == &finding)
+        {
+            deduped.push(finding);
+        }
+    }
+    *findings = deduped;
+}
+
 const SIGNED_PROFILE_SHADOW_RUN_P99_WEIGHT: u64 = 4;
 const SIGNED_PROFILE_SHADOW_RUN_CANCEL_WEIGHT: u64 = 2;
 const SIGNED_PROFILE_SHADOW_RUN_QUEUE_WEIGHT: u64 = 1;
