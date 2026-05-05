@@ -308,6 +308,41 @@
       "reproduction_command": "scripts/run_capacity_envelope_planner_smoke.sh --scenario AA-CAPACITY-ENVELOPE-LOCALITY-CERT-64C-256G --execute"
     },
     {
+      "control_id": "coordination_workload_planner_handoff",
+      "tracker_bead_id": "asupersync-qn8i0p.5",
+      "tracker_status": "closed",
+      "artifact_path": "artifacts/runtime_workload_corpus_v1.json",
+      "contract_version": "runtime-workload-corpus-v1",
+      "runner_path": "scripts/run_runtime_workload_corpus.sh",
+      "scenario_ids": [
+        "AA-COORDINATION-WORKLOAD-PLANNER-HANDOFF-USED",
+        "AA-COORDINATION-WORKLOAD-PLANNER-HANDOFF-REFUSED",
+        "AA-COORDINATION-WORKLOAD-PLANNER-HANDOFF-ABSENT"
+      ],
+      "config_gate": "coordination workload packs are optional planner inputs that can only narrow capacity envelopes and must fail closed when stale, host-mismatched, under-sampled, untrusted, malformed, or redaction-failed",
+      "fallback_mode": "treat absent packs as explicit absent status, reject refused packs before profile/capacity planning, and keep conservative_baseline when accepted coordination pressure produces no safe envelope",
+      "unit_proof_ref": "tests/capacity_envelope_planner_contract.rs, tests/host_profile_planner_contract.rs, tests/signed_profile_bundle_contract.rs, tests/massive_swarm_signoff_contract.rs",
+      "e2e_proof_ref": "rch exec -- cargo test -p asupersync --test capacity_envelope_planner_contract capacity_envelope_coordination --features test-internals -- --nocapture",
+      "operator_fields": [
+        "coordination_pack_status_used",
+        "coordination_pack_status_refused",
+        "coordination_pack_status_absent",
+        "pack_hash",
+        "source_bundle_hash",
+        "planner_input_profile",
+        "safe_envelope_delta",
+        "refused_envelope_delta",
+        "profile_recommendation_delta",
+        "fallback_status",
+        "no_win_verdict"
+      ],
+      "rollback_surface": "dry_run_only",
+      "proof_status": "trusted",
+      "blocker_reason": "",
+      "report_glob": "target/workload-corpus/coordination-expansion/*/coordination-workload-expansion-pack.json",
+      "reproduction_command": "RCH_BIN=rch bash ./scripts/run_runtime_workload_corpus.sh --synthesize-coordination-pack --coordination-fixture-id accepted-all-families --output-root target/workload-corpus --generated-at 2026-05-05T05:00:00Z"
+    },
+    {
       "control_id": "task_record_pool",
       "tracker_bead_id": "asupersync-180d5m",
       "tracker_status": "closed",
@@ -717,6 +752,41 @@
       "expected_audit_status": "trusted"
     },
     {
+      "audit_id": "completion-audit-coordination-workload-planner-handoff",
+      "control_id": "coordination_workload_planner_handoff",
+      "prompt_requirement_ids": [
+        "REQ-MASSIVE-SWARM-RESPONSIVENESS",
+        "REQ-RESOURCE-UTILIZATION-64C-256G",
+        "REQ-OPERATOR-EVIDENCE"
+      ],
+      "source_skill_phases": [
+        "extreme-software-optimization",
+        "idea-wizard.phase-6"
+      ],
+      "required_evidence_refs": [
+        "artifact_path",
+        "contract_version",
+        "unit_proof_ref",
+        "e2e_proof_ref",
+        "reproduction_command",
+        "report_glob",
+        "fallback_mode",
+        "operator_fields",
+        "tracker_status",
+        "proof_status",
+        "blocker_reason"
+      ],
+      "live_evidence_policy": "inspect used/refused/absent coordination-pack rows, pack/source hashes, profile deltas, and safe/refused envelope deltas before letting coordination evidence affect planner recommendations",
+      "fail_closed_if": [
+        "coordination pressure widens a safe envelope",
+        "refused packs are not reported with exact refusal reasons",
+        "pack hash or source bundle hash is absent",
+        "signoff lacks an absent-pack row"
+      ],
+      "proxy_evidence_allowed": false,
+      "expected_audit_status": "trusted"
+    },
+    {
       "audit_id": "completion-audit-task-record-pool",
       "control_id": "task_record_pool",
       "prompt_requirement_ids": [
@@ -879,8 +949,8 @@
       "expected_report_projection": {
         "signoff_verdict": "ready_for_signoff",
         "host_template_mode": false,
-        "child_artifact_count": 13,
-        "trusted_child_count": 13,
+        "child_artifact_count": 14,
+        "trusted_child_count": 14,
         "fail_closed_child_count": 0,
         "open_tracker_blocker_count": 0,
         "dirty_cluster_fail_closed_count": 0,
@@ -897,8 +967,8 @@
         "missing_required_objective_requirement_count": 0,
         "unmapped_objective_requirement_count": 0,
         "selected_bead_mapping_count": 17,
-        "completion_audit_row_count": 13,
-        "trusted_completion_audit_count": 13,
+        "completion_audit_row_count": 14,
+        "trusted_completion_audit_count": 14,
         "fail_closed_completion_audit_count": 0,
         "proxy_completion_audit_allowed_count": 0,
         "missing_completion_audit_control_count": 0,
@@ -956,8 +1026,8 @@
       "expected_report_projection": {
         "signoff_verdict": "template_only",
         "host_template_mode": true,
-        "child_artifact_count": 13,
-        "trusted_child_count": 13,
+        "child_artifact_count": 14,
+        "trusted_child_count": 14,
         "fail_closed_child_count": 0,
         "open_tracker_blocker_count": 0,
         "dirty_cluster_fail_closed_count": 0,
@@ -974,8 +1044,8 @@
         "missing_required_objective_requirement_count": 0,
         "unmapped_objective_requirement_count": 0,
         "selected_bead_mapping_count": 17,
-        "completion_audit_row_count": 13,
-        "trusted_completion_audit_count": 13,
+        "completion_audit_row_count": 14,
+        "trusted_completion_audit_count": 14,
         "fail_closed_completion_audit_count": 0,
         "proxy_completion_audit_allowed_count": 0,
         "missing_completion_audit_control_count": 0,

@@ -3,11 +3,12 @@
 //! Contract-backed proofs for the explainable host-profile planner.
 
 use asupersync::runtime::config::{
-    ArenaTemperaturePolicy, BlockingPoolAffinityProfile, HostProfileConfigDiffSource,
-    HostProfileEvidenceArtifact, HostProfileEvidenceCalibrationStatus, HostProfileEvidenceSet,
-    HostProfileHostResources, HostProfileId, HostProfileManualOverrides,
-    HostProfilePlannerObjective, HostProfilePlannerRequest, RuntimeCapacityHints, RuntimeConfig,
-    TraceStorageProfile,
+    ArenaTemperaturePolicy, BlockingPoolAffinityProfile, CapacityEnvelopeHostFingerprint,
+    CoordinationWorkloadExpansionEvidence, CoordinationWorkloadRedactionStatus,
+    CoordinationWorkloadTrustStatus, HostProfileConfigDiffSource, HostProfileEvidenceArtifact,
+    HostProfileEvidenceCalibrationStatus, HostProfileEvidenceSet, HostProfileHostResources,
+    HostProfileId, HostProfileManualOverrides, HostProfilePlannerObjective,
+    HostProfilePlannerRequest, RuntimeCapacityHints, RuntimeConfig, TraceStorageProfile,
 };
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -118,6 +119,7 @@ impl From<HostProfileEvidenceSetFixture> for HostProfileEvidenceSet {
             adaptive_batch_sizing: value.adaptive_batch_sizing.map(Into::into),
             blocking_pool_affinity: value.blocking_pool_affinity.map(Into::into),
             trace_storage_profile: value.trace_storage_profile.map(Into::into),
+            coordination_workload_expansion: None,
         }
     }
 }
@@ -552,6 +554,29 @@ fn full_proof_fixture() -> HostProfileEvidenceSet {
     .into()
 }
 
+fn coordination_workload_evidence(
+    pressure_basis_points: u32,
+) -> CoordinationWorkloadExpansionEvidence {
+    CoordinationWorkloadExpansionEvidence {
+        artifact_id: "artifacts/runtime_workload_corpus_v1.json".to_string(),
+        contract_version: "runtime-workload-coordination-synthesis-v1".to_string(),
+        pack_hash: "sha256:coordination-profile-handoff-accepted".to_string(),
+        source_bundle_hash: "sha256:coordination-runtime-fixture-accepted-all-families".to_string(),
+        validation_passed: true,
+        redaction_status: CoordinationWorkloadRedactionStatus::Passed,
+        trust_status: CoordinationWorkloadTrustStatus::Trusted,
+        sample_count: 96,
+        artifact_age_hours: 6,
+        host_fingerprint: CapacityEnvelopeHostFingerprint {
+            hostname: "lab-64c-256g-a".to_string(),
+            arch: "x86_64".to_string(),
+            cpu_cores: 64,
+            memory_gib: 256,
+        },
+        pressure_basis_points,
+    }
+}
+
 fn sample_request(
     objective: HostProfilePlannerObjective,
     requested_profile: Option<HostProfileId>,
@@ -762,6 +787,55 @@ fn host_profile_stale_evidence_is_reported_separately_from_missing_proofs() {
             .iter()
             .any(|reason| reason.contains("calibration_status stale"))
     );
+}
+
+#[test]
+fn host_profile_coordination_pack_is_cited_in_recommendation_ledger() {
+    let mut request = sample_request(
+        HostProfilePlannerObjective::LocalityFirst,
+        Some(HostProfileId::LocalityFirst64C256G),
+    );
+    request.controller_evidence.coordination_workload_expansion =
+        Some(coordination_workload_evidence(12_000));
+
+    let plan = request.plan();
+    assert_eq!(plan.selected_profile, HostProfileId::LocalityFirst64C256G);
+    assert!(
+        plan.input_evidence_artifact_ids
+            .iter()
+            .any(|artifact| { artifact == "artifacts/runtime_workload_corpus_v1.json" })
+    );
+    let coordination_row = plan
+        .controller_ledger_state
+        .iter()
+        .find(|row| row.controller == "coordination_workload")
+        .expect("coordination workload ledger row");
+    assert_eq!(coordination_row.stance, "capacity_pressure_gate");
+    assert_eq!(
+        coordination_row.proof_artifact_id.as_deref(),
+        Some("artifacts/runtime_workload_corpus_v1.json")
+    );
+    assert!(coordination_row.validation_passed);
+    assert_eq!(plan.evidence_confidence_status, "high-confidence");
+}
+
+#[test]
+fn host_profile_redaction_failed_coordination_pack_falls_back() {
+    let mut request = sample_request(
+        HostProfilePlannerObjective::LocalityFirst,
+        Some(HostProfileId::LocalityFirst64C256G),
+    );
+    let mut pack = coordination_workload_evidence(12_000);
+    pack.redaction_status = CoordinationWorkloadRedactionStatus::Failed;
+    request.controller_evidence.coordination_workload_expansion = Some(pack);
+
+    let plan = request.plan();
+    assert_eq!(plan.selected_profile, HostProfileId::ConservativeBaseline);
+    assert!(plan.used_safe_fallback());
+    assert!(plan.refusal_reasons.iter().any(|reason| {
+        reason.contains("coordination_workload proof rejected")
+            && reason.contains("redaction_status")
+    }));
 }
 
 #[test]

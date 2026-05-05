@@ -2032,6 +2032,8 @@ impl fmt::Display for HostProfileEvidenceKind {
 }
 
 const HOST_PROFILE_MIN_EVIDENCE_CONFIDENCE_PERCENT: u8 = 80;
+const COORDINATION_WORKLOAD_DEFAULT_MAX_ARTIFACT_AGE_HOURS: u64 = 48;
+const COORDINATION_WORKLOAD_DEFAULT_MIN_SAMPLE_COUNT: usize = 32;
 
 /// Freshness posture for host-profile child proof evidence.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2114,6 +2116,264 @@ impl HostProfileEvidenceArtifact {
     }
 }
 
+/// Redaction posture for coordination-derived workload expansion packs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CoordinationWorkloadRedactionStatus {
+    /// The pack passed the collector's redaction gate.
+    Passed,
+    /// The pack still contains data that cannot be surfaced to planners.
+    Failed,
+}
+
+impl CoordinationWorkloadRedactionStatus {
+    /// Stable operator-facing status string.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Passed => "passed",
+            Self::Failed => "failed",
+        }
+    }
+}
+
+impl fmt::Display for CoordinationWorkloadRedactionStatus {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// Trust posture for coordination-derived workload expansion packs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CoordinationWorkloadTrustStatus {
+    /// The pack is allowed to narrow capacity envelopes.
+    Trusted,
+    /// The pack is present but cannot influence planner decisions.
+    Untrusted,
+}
+
+impl CoordinationWorkloadTrustStatus {
+    /// Stable operator-facing status string.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Trusted => "trusted",
+            Self::Untrusted => "untrusted",
+        }
+    }
+}
+
+impl fmt::Display for CoordinationWorkloadTrustStatus {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// Optional coordination-pressure evidence synthesized from Agent Mail, Beads,
+/// bv, rch, git-frontier, and proof-artifact workload packs.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CoordinationWorkloadExpansionEvidence {
+    /// Stable expansion-pack artifact path.
+    pub artifact_id: String,
+    /// Contract version used by the synthesis runner.
+    pub contract_version: String,
+    /// Digest or digest-like identifier for the emitted expansion pack.
+    pub pack_hash: String,
+    /// Digest or digest-like identifier for the redacted source bundle.
+    pub source_bundle_hash: String,
+    /// Whether the synthesis runner validated the pack.
+    pub validation_passed: bool,
+    /// Redaction outcome for coordination-originating records.
+    pub redaction_status: CoordinationWorkloadRedactionStatus,
+    /// Trust outcome for the pack's signer/source policy.
+    pub trust_status: CoordinationWorkloadTrustStatus,
+    /// Independent coordination samples that backed the pack.
+    pub sample_count: usize,
+    /// Age of the pack in hours.
+    pub artifact_age_hours: u64,
+    /// Host fingerprint represented by the pack.
+    pub host_fingerprint: CapacityEnvelopeHostFingerprint,
+    /// Coordination pressure multiplier in basis points. Values below 10000
+    /// would widen capacity and are rejected instead of clamped silently.
+    pub pressure_basis_points: u32,
+}
+
+impl CoordinationWorkloadExpansionEvidence {
+    fn validate_for_resources(
+        &self,
+        max_artifact_age_hours: u64,
+        min_sample_count: usize,
+        resources: &HostProfileHostResources,
+    ) -> Result<(), String> {
+        validate_artifact_json_path(&self.artifact_id, "coordination artifact_id")?;
+        validate_hashish(&self.pack_hash, "coordination pack_hash")?;
+        validate_hashish(&self.source_bundle_hash, "coordination source_bundle_hash")?;
+        if self.contract_version.trim().is_empty() {
+            return Err("coordination contract_version must not be empty".to_string());
+        }
+        if !self.validation_passed {
+            return Err("coordination validation_passed is false".to_string());
+        }
+        if self.redaction_status != CoordinationWorkloadRedactionStatus::Passed {
+            return Err(format!(
+                "coordination redaction_status {} requires refusal",
+                self.redaction_status
+            ));
+        }
+        if self.trust_status != CoordinationWorkloadTrustStatus::Trusted {
+            return Err(format!(
+                "coordination trust_status {} requires refusal",
+                self.trust_status
+            ));
+        }
+        if self.sample_count < min_sample_count.max(1) {
+            return Err(format!(
+                "coordination sample_count {} was below the minimum evidence budget {}",
+                self.sample_count, min_sample_count
+            ));
+        }
+        if self.artifact_age_hours > max_artifact_age_hours {
+            return Err(format!(
+                "coordination artifact_age_hours {} exceeded the freshness budget {}",
+                self.artifact_age_hours, max_artifact_age_hours
+            ));
+        }
+        self.host_fingerprint
+            .validate_for_resources(resources, "coordination host fingerprint")?;
+        if self.pressure_basis_points < 10_000 {
+            return Err(format!(
+                "coordination pressure_basis_points {} would widen capacity",
+                self.pressure_basis_points
+            ));
+        }
+        if self.pressure_basis_points > 100_000 {
+            return Err(format!(
+                "coordination pressure_basis_points {} exceeds the supported bound 100000",
+                self.pressure_basis_points
+            ));
+        }
+        Ok(())
+    }
+
+    fn validate_for_capacity(
+        &self,
+        max_artifact_age_hours: u64,
+        min_sample_count: usize,
+        resources: &HostProfileHostResources,
+        request_fingerprint: &CapacityEnvelopeHostFingerprint,
+    ) -> Result<(), String> {
+        self.validate_for_resources(max_artifact_age_hours, min_sample_count, resources)?;
+        request_fingerprint.validate_for_resources(resources, "request host fingerprint")?;
+        if self.host_fingerprint.hostname != request_fingerprint.hostname
+            || self.host_fingerprint.arch != request_fingerprint.arch
+        {
+            return Err(
+                "coordination host fingerprint did not match the requested host fingerprint"
+                    .to_string(),
+            );
+        }
+        Ok(())
+    }
+
+    #[must_use]
+    fn agent_ceiling(&self, measured_agent_count: usize) -> usize {
+        let measured_agent_count = measured_agent_count.max(1);
+        let pressure_basis_points = u128::from(self.pressure_basis_points.max(10_000));
+        let ceiling =
+            saturating_mul_div(measured_agent_count as u128, 10_000, pressure_basis_points)
+                as usize;
+        ceiling.max(1).min(measured_agent_count)
+    }
+}
+
+/// Whether coordination evidence was absent, applied, or refused.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CoordinationWorkloadExpansionVerdict {
+    /// No coordination pack was supplied.
+    Absent,
+    /// A valid coordination pack narrowed planner inputs.
+    Used,
+    /// A supplied coordination pack was rejected before planning.
+    Refused,
+}
+
+impl CoordinationWorkloadExpansionVerdict {
+    /// Stable operator-facing verdict string.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Absent => "absent",
+            Self::Used => "used",
+            Self::Refused => "refused",
+        }
+    }
+}
+
+impl fmt::Display for CoordinationWorkloadExpansionVerdict {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// Operator-facing status for the optional coordination workload pack.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CoordinationWorkloadExpansionStatus {
+    /// Final planner verdict for the coordination pack.
+    pub verdict: CoordinationWorkloadExpansionVerdict,
+    /// Expansion-pack artifact path, if present.
+    pub artifact_id: Option<String>,
+    /// Expansion-pack digest, if present.
+    pub pack_hash: Option<String>,
+    /// Source bundle digest, if present.
+    pub source_bundle_hash: Option<String>,
+    /// Pressure multiplier from the accepted pack.
+    pub pressure_basis_points: Option<u32>,
+    /// Maximum agent count allowed by the accepted pack.
+    pub agent_ceiling: Option<usize>,
+    /// Reasons a supplied pack was refused.
+    pub refusal_reasons: Vec<String>,
+}
+
+impl CoordinationWorkloadExpansionStatus {
+    #[must_use]
+    fn absent() -> Self {
+        Self {
+            verdict: CoordinationWorkloadExpansionVerdict::Absent,
+            artifact_id: None,
+            pack_hash: None,
+            source_bundle_hash: None,
+            pressure_basis_points: None,
+            agent_ceiling: None,
+            refusal_reasons: Vec::new(),
+        }
+    }
+
+    #[must_use]
+    fn used(evidence: &CoordinationWorkloadExpansionEvidence, agent_ceiling: usize) -> Self {
+        Self {
+            verdict: CoordinationWorkloadExpansionVerdict::Used,
+            artifact_id: Some(evidence.artifact_id.clone()),
+            pack_hash: Some(evidence.pack_hash.clone()),
+            source_bundle_hash: Some(evidence.source_bundle_hash.clone()),
+            pressure_basis_points: Some(evidence.pressure_basis_points),
+            agent_ceiling: Some(agent_ceiling),
+            refusal_reasons: Vec::new(),
+        }
+    }
+
+    #[must_use]
+    fn refused(evidence: &CoordinationWorkloadExpansionEvidence, reason: String) -> Self {
+        Self {
+            verdict: CoordinationWorkloadExpansionVerdict::Refused,
+            artifact_id: Some(evidence.artifact_id.clone()),
+            pack_hash: Some(evidence.pack_hash.clone()),
+            source_bundle_hash: Some(evidence.source_bundle_hash.clone()),
+            pressure_basis_points: Some(evidence.pressure_basis_points),
+            agent_ceiling: None,
+            refusal_reasons: vec![reason],
+        }
+    }
+}
+
 /// The controller-proof ledger fed into the host-profile planner.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct HostProfileEvidenceSet {
@@ -2129,6 +2389,8 @@ pub struct HostProfileEvidenceSet {
     pub blocking_pool_affinity: Option<HostProfileEvidenceArtifact>,
     /// Trace-storage profile smoke-contract proof.
     pub trace_storage_profile: Option<HostProfileEvidenceArtifact>,
+    /// Optional coordination-derived workload expansion proof.
+    pub coordination_workload_expansion: Option<CoordinationWorkloadExpansionEvidence>,
 }
 
 impl HostProfileEvidenceSet {
@@ -2146,6 +2408,9 @@ impl HostProfileEvidenceSet {
             if let Some(artifact) = self.for_kind(kind) {
                 ids.push(artifact.artifact_id.clone());
             }
+        }
+        if let Some(evidence) = &self.coordination_workload_expansion {
+            ids.push(evidence.artifact_id.clone());
         }
         ids
     }
@@ -2381,8 +2646,11 @@ impl HostProfilePlannerRequest {
         let report_profile = self
             .requested_profile
             .unwrap_or_else(|| self.objective.candidate_order()[0]);
-        let evidence_evaluation =
-            evaluate_host_profile_evidence(report_profile, &self.controller_evidence);
+        let evidence_evaluation = evaluate_host_profile_evidence(
+            report_profile,
+            &self.controller_evidence,
+            &self.host_resources,
+        );
         let conflict_matrix = build_host_profile_conflict_rows(
             self.objective,
             fallback_profile,
@@ -2411,6 +2679,7 @@ impl HostProfilePlannerRequest {
             controller_ledger_state: controller_ledger_entries(
                 fallback_profile,
                 &self.controller_evidence,
+                &self.host_resources,
             ),
             input_evidence_artifact_ids,
             manual_overrides_applied,
@@ -2446,8 +2715,11 @@ impl HostProfilePlannerRequest {
                 self.host_resources.memory_gib
             ));
         }
-        let evidence_evaluation =
-            evaluate_host_profile_evidence(profile, &self.controller_evidence);
+        let evidence_evaluation = evaluate_host_profile_evidence(
+            profile,
+            &self.controller_evidence,
+            &self.host_resources,
+        );
         refusal_reasons.extend(evidence_evaluation.refusal_reasons.iter().cloned());
         if !refusal_reasons.is_empty() {
             return Err(refusal_reasons);
@@ -2466,7 +2738,11 @@ impl HostProfilePlannerRequest {
                 .copied()
                 .map(str::to_string)
                 .collect(),
-            controller_ledger_state: controller_ledger_entries(profile, &self.controller_evidence),
+            controller_ledger_state: controller_ledger_entries(
+                profile,
+                &self.controller_evidence,
+                &self.host_resources,
+            ),
             evidence_evaluation,
         })
     }
@@ -2632,9 +2908,10 @@ struct HostProfileEvidenceEvaluation {
 fn evaluate_host_profile_evidence(
     profile: HostProfileId,
     evidence: &HostProfileEvidenceSet,
+    host_resources: &HostProfileHostResources,
 ) -> HostProfileEvidenceEvaluation {
     let required = profile.required_evidence();
-    if required.is_empty() {
+    if required.is_empty() && evidence.coordination_workload_expansion.is_none() {
         return HostProfileEvidenceEvaluation {
             score_percent: 100,
             confidence_status: "baseline-no-child-proof-required".to_string(),
@@ -2652,6 +2929,7 @@ fn evaluate_host_profile_evidence(
     let mut refusal_reasons = Vec::new();
     let mut saw_low_confidence = false;
     let mut saw_stale = false;
+    let mut evidence_count = required.len();
 
     for kind in required {
         match evidence.for_kind(*kind) {
@@ -2683,7 +2961,31 @@ fn evaluate_host_profile_evidence(
         }
     }
 
-    let score_percent = ((valid_count * 100) / required.len()) as u8;
+    if let Some(coordination) = &evidence.coordination_workload_expansion {
+        evidence_count += 1;
+        match coordination.validate_for_resources(
+            COORDINATION_WORKLOAD_DEFAULT_MAX_ARTIFACT_AGE_HOURS,
+            COORDINATION_WORKLOAD_DEFAULT_MIN_SAMPLE_COUNT,
+            host_resources,
+        ) {
+            Ok(()) => valid_count += 1,
+            Err(reason) => {
+                unresolved_child_proof_ids.push(format!(
+                    "coordination_workload:{}",
+                    coordination.artifact_id
+                ));
+                dominant_risk_contributors
+                    .push(format!("coordination_workload proof rejected: {reason}"));
+                refusal_reasons.push(format!("coordination_workload proof rejected: {reason}"));
+            }
+        }
+    }
+
+    let score_percent = if evidence_count == 0 {
+        100
+    } else {
+        ((valid_count * 100) / evidence_count) as u8
+    };
     let confidence_status = if unresolved_child_proof_ids.is_empty() {
         "high-confidence".to_string()
     } else if saw_stale {
@@ -2878,8 +3180,9 @@ fn large_host_worker_cohort_map() -> WorkerCohortMapping {
 fn controller_ledger_entries(
     profile: HostProfileId,
     evidence: &HostProfileEvidenceSet,
+    host_resources: &HostProfileHostResources,
 ) -> Vec<HostProfileControllerLedgerEntry> {
-    [
+    let mut entries = [
         HostProfileEvidenceKind::Brownout,
         HostProfileEvidenceKind::OtlpBrownout,
         HostProfileEvidenceKind::AdmissionSteering,
@@ -2901,7 +3204,32 @@ fn controller_ledger_entries(
             validation_passed,
         }
     })
-    .collect()
+    .collect::<Vec<_>>();
+    if let Some(coordination) = &evidence.coordination_workload_expansion {
+        let validation_passed = coordination
+            .validate_for_resources(
+                COORDINATION_WORKLOAD_DEFAULT_MAX_ARTIFACT_AGE_HOURS,
+                COORDINATION_WORKLOAD_DEFAULT_MIN_SAMPLE_COUNT,
+                host_resources,
+            )
+            .is_ok();
+        entries.push(HostProfileControllerLedgerEntry {
+            controller: "coordination_workload".to_string(),
+            stance: coordination_workload_stance(profile).to_string(),
+            proof_artifact_id: Some(coordination.artifact_id.clone()),
+            validation_passed,
+        });
+    }
+    entries
+}
+
+fn coordination_workload_stance(profile: HostProfileId) -> &'static str {
+    match profile {
+        HostProfileId::ConservativeBaseline => "absent_or_refused_conservative",
+        HostProfileId::LocalityFirst64C256G
+        | HostProfileId::TailProtectionFirst64C256G
+        | HostProfileId::LargeMemoryEvidenceRetention256G => "capacity_pressure_gate",
+    }
 }
 
 fn controller_stance(profile: HostProfileId, kind: HostProfileEvidenceKind) -> &'static str {
@@ -2922,15 +3250,16 @@ fn controller_stance(profile: HostProfileId, kind: HostProfileEvidenceKind) -> &
         (HostProfileId::ConservativeBaseline, HostProfileEvidenceKind::TraceStorageProfile) => {
             "default"
         }
-        (HostProfileId::LocalityFirst64C256G, HostProfileEvidenceKind::Brownout)
-        | (HostProfileId::TailProtectionFirst64C256G, HostProfileEvidenceKind::Brownout)
-        | (HostProfileId::LargeMemoryEvidenceRetention256G, HostProfileEvidenceKind::Brownout) => {
-            "optional_first"
-        }
-        (HostProfileId::LocalityFirst64C256G, HostProfileEvidenceKind::OtlpBrownout)
-        | (HostProfileId::TailProtectionFirst64C256G, HostProfileEvidenceKind::OtlpBrownout)
-        | (
-            HostProfileId::LargeMemoryEvidenceRetention256G,
+        (
+            HostProfileId::LocalityFirst64C256G
+            | HostProfileId::TailProtectionFirst64C256G
+            | HostProfileId::LargeMemoryEvidenceRetention256G,
+            HostProfileEvidenceKind::Brownout,
+        ) => "optional_first",
+        (
+            HostProfileId::LocalityFirst64C256G
+            | HostProfileId::TailProtectionFirst64C256G
+            | HostProfileId::LargeMemoryEvidenceRetention256G,
             HostProfileEvidenceKind::OtlpBrownout,
         ) => "priority_gate",
         (HostProfileId::LocalityFirst64C256G, HostProfileEvidenceKind::AdmissionSteering) => {
@@ -2943,27 +3272,20 @@ fn controller_stance(profile: HostProfileId, kind: HostProfileEvidenceKind) -> &
             HostProfileId::LargeMemoryEvidenceRetention256G,
             HostProfileEvidenceKind::AdmissionSteering,
         ) => "cohort_locality",
-        (HostProfileId::LocalityFirst64C256G, HostProfileEvidenceKind::AdaptiveBatchSizing)
-        | (
-            HostProfileId::TailProtectionFirst64C256G,
-            HostProfileEvidenceKind::AdaptiveBatchSizing,
-        )
-        | (
-            HostProfileId::LargeMemoryEvidenceRetention256G,
+        (
+            HostProfileId::LocalityFirst64C256G
+            | HostProfileId::TailProtectionFirst64C256G
+            | HostProfileId::LargeMemoryEvidenceRetention256G,
             HostProfileEvidenceKind::AdaptiveBatchSizing,
         ) => "builtin_adaptive",
-        (HostProfileId::LocalityFirst64C256G, HostProfileEvidenceKind::BlockingPoolAffinity)
-        | (
-            HostProfileId::TailProtectionFirst64C256G,
-            HostProfileEvidenceKind::BlockingPoolAffinity,
-        )
-        | (
-            HostProfileId::LargeMemoryEvidenceRetention256G,
+        (
+            HostProfileId::LocalityFirst64C256G
+            | HostProfileId::TailProtectionFirst64C256G
+            | HostProfileId::LargeMemoryEvidenceRetention256G,
             HostProfileEvidenceKind::BlockingPoolAffinity,
         ) => "cohort_biased",
-        (HostProfileId::LocalityFirst64C256G, HostProfileEvidenceKind::TraceStorageProfile)
-        | (
-            HostProfileId::LargeMemoryEvidenceRetention256G,
+        (
+            HostProfileId::LocalityFirst64C256G | HostProfileId::LargeMemoryEvidenceRetention256G,
             HostProfileEvidenceKind::TraceStorageProfile,
         ) => "large_memory_256g",
         (
@@ -3521,6 +3843,25 @@ impl CapacityEnvelopePlannerRequest {
     #[must_use]
     pub fn plan(&self) -> CapacityEnvelopeCertificate {
         let effective_budget = self.budget.with_overrides(self.budget_overrides);
+        let coordination_workload_status = match self
+            .controller_evidence
+            .coordination_workload_expansion
+            .as_ref()
+        {
+            Some(evidence) => match evidence.validate_for_capacity(
+                effective_budget.max_artifact_age_hours,
+                effective_budget.min_sample_count,
+                &self.host_resources,
+                &self.host_fingerprint,
+            ) {
+                Ok(()) => CoordinationWorkloadExpansionStatus::used(
+                    evidence,
+                    evidence.agent_ceiling(self.evidence_snapshot.measured_agent_count),
+                ),
+                Err(reason) => CoordinationWorkloadExpansionStatus::refused(evidence, reason),
+            },
+            None => CoordinationWorkloadExpansionStatus::absent(),
+        };
         let host_profile_plan = HostProfilePlannerRequest {
             objective: self.objective,
             requested_profile: self.requested_profile,
@@ -3555,6 +3896,14 @@ impl CapacityEnvelopePlannerRequest {
         if host_profile_plan.used_safe_fallback() {
             refusal_reasons.extend(host_profile_plan.refusal_reasons.clone());
         }
+        if coordination_workload_status.verdict == CoordinationWorkloadExpansionVerdict::Refused {
+            refusal_reasons.extend(
+                coordination_workload_status
+                    .refusal_reasons
+                    .iter()
+                    .map(|reason| format!("coordination workload expansion rejected: {reason}")),
+            );
+        }
 
         let profile = if refusal_reasons.is_empty() {
             host_profile_plan.selected_profile
@@ -3571,8 +3920,12 @@ impl CapacityEnvelopePlannerRequest {
         );
         let candidate_agent_counts =
             normalize_capacity_sweep(&self.candidate_agent_counts, usize::MAX);
-        let assumptions_ledger =
-            build_capacity_assumptions(profile, &self.evidence_snapshot, effective_budget);
+        let assumptions_ledger = build_capacity_assumptions(
+            profile,
+            &self.evidence_snapshot,
+            effective_budget,
+            &coordination_workload_status,
+        );
 
         let mut evaluations = Vec::new();
         if refusal_reasons.is_empty() {
@@ -3585,6 +3938,7 @@ impl CapacityEnvelopePlannerRequest {
                         effective_budget,
                         *worker_count,
                         *agent_count,
+                        coordination_workload_status.agent_ceiling,
                     ));
                 }
             }
@@ -3634,6 +3988,7 @@ impl CapacityEnvelopePlannerRequest {
             safe_envelope,
             refused_envelope,
             evaluations,
+            coordination_workload_status,
             sanitized_environment_note,
             sanitized_validation_command,
         }
@@ -3732,6 +4087,8 @@ pub struct CapacityEnvelopeCertificate {
     pub refused_envelope: CapacityEnvelopeRange,
     /// Point-by-point sweep evaluation.
     pub evaluations: Vec<CapacityEnvelopePointEvaluation>,
+    /// Coordination-workload expansion status used by the certificate.
+    pub coordination_workload_status: CoordinationWorkloadExpansionStatus,
     /// Secret-scrubbed environment note.
     pub sanitized_environment_note: Option<String>,
     /// Secret-scrubbed validation command summary.
@@ -4890,6 +5247,32 @@ fn build_signed_profile_bundle_child_evidence_hashes(
             });
         }
     }
+    if let Some(evidence) = &evidence.coordination_workload_expansion {
+        let digest_sha256 = stable_sha256_hex(&[
+            ("controller", "coordination_workload".to_string()),
+            ("artifact_id", evidence.artifact_id.clone()),
+            ("contract_version", evidence.contract_version.clone()),
+            ("pack_hash", evidence.pack_hash.clone()),
+            ("source_bundle_hash", evidence.source_bundle_hash.clone()),
+            ("validation_passed", format_bool(evidence.validation_passed)),
+            ("redaction_status", evidence.redaction_status.to_string()),
+            ("trust_status", evidence.trust_status.to_string()),
+            ("sample_count", evidence.sample_count.to_string()),
+            (
+                "artifact_age_hours",
+                evidence.artifact_age_hours.to_string(),
+            ),
+            (
+                "pressure_basis_points",
+                evidence.pressure_basis_points.to_string(),
+            ),
+        ]);
+        hashes.push(SignedProfileBundleChildEvidenceHash {
+            controller: "coordination_workload".to_string(),
+            artifact_id: evidence.artifact_id.clone(),
+            digest_sha256,
+        });
+    }
     hashes
 }
 
@@ -5409,6 +5792,16 @@ fn validate_artifact_json_path(value: &str, label: &str) -> Result<(), String> {
     Ok(())
 }
 
+fn validate_hashish(value: &str, label: &str) -> Result<(), String> {
+    if is_hex_digest(value) {
+        return Ok(());
+    }
+    let Some(suffix) = value.strip_prefix("sha256:") else {
+        return Err(format!("{label} must be a sha256 digest"));
+    };
+    validate_slug_like(suffix, label)
+}
+
 fn validate_slug_like(value: &str, label: &str) -> Result<(), String> {
     if value.trim().is_empty() {
         return Err(format!("{label} must not be empty"));
@@ -5505,8 +5898,9 @@ fn build_capacity_assumptions(
     profile: HostProfileId,
     evidence: &CapacityEnvelopeEvidenceSnapshot,
     budget: CapacityEnvelopeBudget,
+    coordination_status: &CoordinationWorkloadExpansionStatus,
 ) -> Vec<String> {
-    vec![
+    let mut assumptions = vec![
         format!(
             "capacity certificate stays dry-run only; no runtime config is mutated for {}",
             profile
@@ -5530,7 +5924,32 @@ fn build_capacity_assumptions(
             budget.max_memory_pressure_basis_points,
             budget.max_brownout_risk_basis_points
         ),
-    ]
+    ];
+    match coordination_status.verdict {
+        CoordinationWorkloadExpansionVerdict::Absent => assumptions.push(
+            "coordination workload expansion pack absent; baseline capacity evidence is not widened"
+                .to_string(),
+        ),
+        CoordinationWorkloadExpansionVerdict::Used => assumptions.push(format!(
+            "coordination workload expansion pack {} applied pressure={}bps agent_ceiling={} pack_hash={} source_bundle_hash={}",
+            coordination_status
+                .artifact_id
+                .as_deref()
+                .unwrap_or("unknown"),
+            coordination_status.pressure_basis_points.unwrap_or(0),
+            coordination_status.agent_ceiling.unwrap_or(0),
+            coordination_status.pack_hash.as_deref().unwrap_or("unknown"),
+            coordination_status
+                .source_bundle_hash
+                .as_deref()
+                .unwrap_or("unknown")
+        )),
+        CoordinationWorkloadExpansionVerdict::Refused => assumptions.push(format!(
+            "coordination workload expansion pack refused before capacity planning: {}",
+            coordination_status.refusal_reasons.join("; ")
+        )),
+    }
+    assumptions
 }
 
 fn evaluate_capacity_point(
@@ -5540,6 +5959,7 @@ fn evaluate_capacity_point(
     budget: CapacityEnvelopeBudget,
     worker_count: usize,
     agent_count: usize,
+    coordination_agent_ceiling: Option<usize>,
 ) -> CapacityEnvelopePointEvaluation {
     let measured_workers = evidence.measured_worker_count.max(1) as u128;
     let measured_agents = evidence.measured_agent_count.max(1) as u128;
@@ -5627,6 +6047,13 @@ fn evaluate_capacity_point(
         refusal_reasons.push(format!(
             "predicted brownout risk {}bps exceeded budget {}bps",
             predicted_brownout_risk_basis_points, budget.max_brownout_risk_basis_points
+        ));
+    }
+    if let Some(agent_ceiling) = coordination_agent_ceiling
+        && agent_count > agent_ceiling
+    {
+        refusal_reasons.push(format!(
+            "coordination workload pressure capped safe agents at {agent_ceiling}"
         ));
     }
 

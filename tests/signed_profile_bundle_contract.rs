@@ -3,10 +3,11 @@
 use asupersync::runtime::config::{
     ArenaTemperaturePolicy, BlockingPoolAffinityProfile, CapacityEnvelopeBrownoutStage,
     CapacityEnvelopeBudget, CapacityEnvelopeCalibrationStatus, CapacityEnvelopeEvidenceSnapshot,
-    CapacityEnvelopeHostFingerprint, HostProfileEvidenceArtifact,
-    HostProfileEvidenceCalibrationStatus, HostProfileEvidenceSet, HostProfileHostResources,
-    HostProfileId, HostProfileManualOverrides, HostProfilePlannerObjective,
-    HostProfilePlannerRequest, RuntimeCapacityHints,
+    CapacityEnvelopeHostFingerprint, CoordinationWorkloadExpansionEvidence,
+    CoordinationWorkloadRedactionStatus, CoordinationWorkloadTrustStatus,
+    HostProfileEvidenceArtifact, HostProfileEvidenceCalibrationStatus, HostProfileEvidenceSet,
+    HostProfileHostResources, HostProfileId, HostProfileManualOverrides,
+    HostProfilePlannerObjective, HostProfilePlannerRequest, RuntimeCapacityHints,
     SignedProfileBundleCapacityCertificateReference, SignedProfileBundleControllerVersion,
     SignedProfileBundleExecutionMode, SignedProfileBundleIntegrityMode,
     SignedProfileBundleManifestRequest, SignedProfileBundleSignaturePolicy,
@@ -238,6 +239,7 @@ impl From<HostProfileEvidenceSetFixture> for HostProfileEvidenceSet {
             adaptive_batch_sizing: value.adaptive_batch_sizing.map(Into::into),
             blocking_pool_affinity: value.blocking_pool_affinity.map(Into::into),
             trace_storage_profile: value.trace_storage_profile.map(Into::into),
+            coordination_workload_expansion: None,
         }
     }
 }
@@ -893,6 +895,29 @@ fn signed_request() -> SignedProfileBundleManifestRequest {
     request_for_scenario("AA-SIGNED-PROFILE-BUNDLE-NKEY-ACCEPT-64C-256G")
 }
 
+fn coordination_workload_evidence(
+    pressure_basis_points: u32,
+) -> CoordinationWorkloadExpansionEvidence {
+    CoordinationWorkloadExpansionEvidence {
+        artifact_id: "artifacts/runtime_workload_corpus_v1.json".to_string(),
+        contract_version: "runtime-workload-coordination-synthesis-v1".to_string(),
+        pack_hash: "sha256:coordination-bundle-handoff-accepted".to_string(),
+        source_bundle_hash: "sha256:coordination-runtime-fixture-accepted-all-families".to_string(),
+        validation_passed: true,
+        redaction_status: CoordinationWorkloadRedactionStatus::Passed,
+        trust_status: CoordinationWorkloadTrustStatus::Trusted,
+        sample_count: 96,
+        artifact_age_hours: 6,
+        host_fingerprint: CapacityEnvelopeHostFingerprint {
+            hostname: "lab-64c-256g-a".to_string(),
+            arch: "x86_64".to_string(),
+            cpu_cores: 64,
+            memory_gib: 256,
+        },
+        pressure_basis_points,
+    }
+}
+
 fn assert_signed_request_rejects(request: SignedProfileBundleManifestRequest, needle: &str) {
     let bundle = request.plan();
     assert!(
@@ -926,6 +951,47 @@ fn signed_profile_bundle_accepts_valid_digest_only_manifest() {
             .integrity_limitations
             .iter()
             .any(|line| line.contains("digest-only") || line.contains("no asymmetric signature"))
+    );
+}
+
+#[test]
+fn signed_profile_bundle_rolls_coordination_pack_into_child_hashes_and_receipt() {
+    let mut request = sample_request();
+    request.controller_evidence.coordination_workload_expansion =
+        Some(coordination_workload_evidence(12_000));
+    let coordination_version = SignedProfileBundleControllerVersion {
+        controller: "coordination_workload".to_string(),
+        contract_version: "runtime-workload-coordination-synthesis-v1".to_string(),
+    };
+    request
+        .controller_versions
+        .push(coordination_version.clone());
+    request
+        .supported_controller_versions
+        .push(coordination_version);
+    request
+        .proof_command_classes
+        .push("coordination_workload".to_string());
+
+    let bundle = request.plan();
+    assert!(bundle.verification.accepted);
+    let coordination_hash = bundle
+        .manifest
+        .child_evidence_hashes
+        .iter()
+        .find(|entry| entry.controller == "coordination_workload")
+        .expect("coordination child evidence hash");
+    assert_eq!(
+        coordination_hash.artifact_id,
+        "artifacts/runtime_workload_corpus_v1.json"
+    );
+    assert_eq!(coordination_hash.digest_sha256.len(), 64);
+    assert!(
+        bundle
+            .rollback_receipt
+            .artifact_paths
+            .iter()
+            .any(|path| { path == "artifacts/runtime_workload_corpus_v1.json" })
     );
 }
 

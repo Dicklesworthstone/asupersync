@@ -4,10 +4,11 @@ use asupersync::runtime::config::{
     ArenaTemperaturePolicy, BlockingPoolAffinityProfile, CapacityEnvelopeBrownoutStage,
     CapacityEnvelopeBudget, CapacityEnvelopeBudgetOverrides, CapacityEnvelopeCalibrationStatus,
     CapacityEnvelopeCertificate, CapacityEnvelopeEvidenceSnapshot, CapacityEnvelopeHostFingerprint,
-    CapacityEnvelopePlannerRequest, HostProfileEvidenceArtifact,
-    HostProfileEvidenceCalibrationStatus, HostProfileEvidenceSet, HostProfileHostResources,
-    HostProfileId, HostProfileManualOverrides, HostProfilePlannerObjective, RuntimeCapacityHints,
-    RuntimeConfig, TraceStorageProfile,
+    CapacityEnvelopePlannerRequest, CoordinationWorkloadExpansionEvidence,
+    CoordinationWorkloadRedactionStatus, CoordinationWorkloadTrustStatus,
+    HostProfileEvidenceArtifact, HostProfileEvidenceCalibrationStatus, HostProfileEvidenceSet,
+    HostProfileHostResources, HostProfileId, HostProfileManualOverrides,
+    HostProfilePlannerObjective, RuntimeCapacityHints, RuntimeConfig, TraceStorageProfile,
 };
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -180,6 +181,7 @@ impl From<HostProfileEvidenceSetFixture> for HostProfileEvidenceSet {
             adaptive_batch_sizing: value.adaptive_batch_sizing.map(Into::into),
             blocking_pool_affinity: value.blocking_pool_affinity.map(Into::into),
             trace_storage_profile: value.trace_storage_profile.map(Into::into),
+            coordination_workload_expansion: None,
         }
     }
 }
@@ -405,6 +407,29 @@ fn build_request(scenario: &CapacityEnvelopeScenario) -> CapacityEnvelopePlanner
     }
 }
 
+fn coordination_workload_evidence(
+    pressure_basis_points: u32,
+) -> CoordinationWorkloadExpansionEvidence {
+    CoordinationWorkloadExpansionEvidence {
+        artifact_id: "artifacts/runtime_workload_corpus_v1.json".to_string(),
+        contract_version: "runtime-workload-coordination-synthesis-v1".to_string(),
+        pack_hash: "sha256:coordination-planner-handoff-accepted".to_string(),
+        source_bundle_hash: "sha256:coordination-runtime-fixture-accepted-all-families".to_string(),
+        validation_passed: true,
+        redaction_status: CoordinationWorkloadRedactionStatus::Passed,
+        trust_status: CoordinationWorkloadTrustStatus::Trusted,
+        sample_count: 96,
+        artifact_age_hours: 6,
+        host_fingerprint: CapacityEnvelopeHostFingerprint {
+            hostname: "lab-64c-256g-a".to_string(),
+            arch: "x86_64".to_string(),
+            cpu_cores: 64,
+            memory_gib: 256,
+        },
+        pressure_basis_points,
+    }
+}
+
 fn summarize_config(config: &RuntimeConfig) -> Value {
     json!({
         "worker_threads": config.worker_threads,
@@ -565,6 +590,15 @@ fn certificate_report_json(
         "safe_envelope": safe_envelope,
         "refused_envelope": refused_envelope,
         "evaluations": certificate.evaluations.iter().map(point_json).collect::<Vec<_>>(),
+        "coordination_workload_status": {
+            "verdict": certificate.coordination_workload_status.verdict.as_str(),
+            "artifact_id": certificate.coordination_workload_status.artifact_id.clone(),
+            "pack_hash": certificate.coordination_workload_status.pack_hash.clone(),
+            "source_bundle_hash": certificate.coordination_workload_status.source_bundle_hash.clone(),
+            "pressure_basis_points": certificate.coordination_workload_status.pressure_basis_points,
+            "agent_ceiling": certificate.coordination_workload_status.agent_ceiling,
+            "refusal_reasons": certificate.coordination_workload_status.refusal_reasons.clone(),
+        },
         "sanitized_environment_note": certificate.sanitized_environment_note,
         "sanitized_validation_command": certificate.sanitized_validation_command,
         "validation_verdict": {
@@ -763,6 +797,135 @@ fn capacity_envelope_stricter_slo_shrinks_safe_envelope_monotonically() {
         strict.safe_envelope.expect("strict envelope").agent_max,
         384
     );
+}
+
+#[test]
+fn capacity_envelope_coordination_pack_narrows_capacity_monotonically() {
+    let contract = default_contract();
+    let mut baseline = build_request(&contract.smoke_scenarios[0]);
+    baseline.candidate_agent_counts = vec![128, 192, 256, 384, 512];
+    let baseline_certificate = baseline.plan();
+
+    let mut moderate = baseline.clone();
+    moderate.controller_evidence.coordination_workload_expansion =
+        Some(coordination_workload_evidence(12_000));
+    let moderate_certificate = moderate.plan();
+
+    let mut severe = baseline;
+    severe.controller_evidence.coordination_workload_expansion =
+        Some(coordination_workload_evidence(20_000));
+    let severe_certificate = severe.plan();
+
+    assert_eq!(
+        moderate_certificate
+            .coordination_workload_status
+            .verdict
+            .as_str(),
+        "used"
+    );
+    assert_eq!(
+        severe_certificate
+            .coordination_workload_status
+            .verdict
+            .as_str(),
+        "used"
+    );
+    assert!(
+        moderate_certificate
+            .assumptions_ledger
+            .iter()
+            .any(|line| line.contains("coordination workload expansion pack"))
+    );
+    let baseline_agent_max = baseline_certificate
+        .safe_envelope
+        .expect("baseline safe envelope")
+        .agent_max;
+    let moderate_agent_max = moderate_certificate
+        .safe_envelope
+        .expect("moderate safe envelope")
+        .agent_max;
+    let severe_agent_max = severe_certificate
+        .safe_envelope
+        .expect("severe safe envelope")
+        .agent_max;
+    assert!(
+        baseline_agent_max > moderate_agent_max,
+        "coordination pressure must only narrow, not widen, the safe envelope"
+    );
+    assert!(
+        moderate_agent_max >= severe_agent_max,
+        "worse coordination pressure must not increase the safe envelope"
+    );
+}
+
+#[test]
+fn capacity_envelope_coordination_rejects_stale_redaction_failed_and_under_sampled_packs() {
+    let contract = default_contract();
+    let mut request = build_request(&contract.smoke_scenarios[0]);
+
+    let mut stale = request.clone();
+    let mut stale_pack = coordination_workload_evidence(12_000);
+    stale_pack.artifact_age_hours = 72;
+    stale.controller_evidence.coordination_workload_expansion = Some(stale_pack);
+    let stale_certificate = stale.plan();
+    assert!(stale_certificate.used_safe_fallback());
+    assert!(stale_certificate.refusal_reasons.iter().any(|reason| {
+        reason.contains("coordination workload expansion rejected")
+            && reason.contains("artifact_age_hours")
+    }));
+
+    let mut redaction_failed = request.clone();
+    let mut redaction_failed_pack = coordination_workload_evidence(12_000);
+    redaction_failed_pack.redaction_status = CoordinationWorkloadRedactionStatus::Failed;
+    redaction_failed
+        .controller_evidence
+        .coordination_workload_expansion = Some(redaction_failed_pack);
+    let redaction_failed_certificate = redaction_failed.plan();
+    assert!(redaction_failed_certificate.used_safe_fallback());
+    assert!(
+        redaction_failed_certificate
+            .refusal_reasons
+            .iter()
+            .any(|reason| {
+                reason.contains("coordination workload expansion rejected")
+                    && reason.contains("redaction_status")
+            })
+    );
+
+    let mut under_sampled_pack = coordination_workload_evidence(12_000);
+    under_sampled_pack.sample_count = 8;
+    request.controller_evidence.coordination_workload_expansion = Some(under_sampled_pack);
+    let under_sampled_certificate = request.plan();
+    assert!(under_sampled_certificate.used_safe_fallback());
+    assert!(
+        under_sampled_certificate
+            .refusal_reasons
+            .iter()
+            .any(|reason| {
+                reason.contains("coordination workload expansion rejected")
+                    && reason.contains("sample_count")
+            })
+    );
+}
+
+#[test]
+fn capacity_envelope_coordination_host_mismatch_is_rejected() {
+    let contract = default_contract();
+    let mut request = build_request(&contract.smoke_scenarios[0]);
+    let mut pack = coordination_workload_evidence(12_000);
+    pack.host_fingerprint.hostname = "different-host".to_string();
+    request.controller_evidence.coordination_workload_expansion = Some(pack);
+
+    let certificate = request.plan();
+    assert!(certificate.used_safe_fallback());
+    assert_eq!(
+        certificate.coordination_workload_status.verdict.as_str(),
+        "refused"
+    );
+    assert!(certificate.refusal_reasons.iter().any(|reason| {
+        reason.contains("coordination workload expansion rejected")
+            && reason.contains("host fingerprint")
+    }));
 }
 
 #[test]

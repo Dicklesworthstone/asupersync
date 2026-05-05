@@ -999,6 +999,10 @@ fn signoff_matrix_covers_dependency_rows_called_out_by_wqsael() {
         "signoff matrix must cover 2b5y3w runtime capacity hints"
     );
     assert!(
+        control_ids.contains("coordination_workload_planner_handoff"),
+        "signoff matrix must cover qn8i0p.5 coordination workload planner handoff"
+    );
+    assert!(
         control_ids.contains("task_record_pool"),
         "signoff matrix must cover 180d5m task record pooling"
     );
@@ -1123,6 +1127,52 @@ fn runtime_capacity_hints_signoff_row_tracks_burst_and_fallback_profiles() {
     assert_eq!(hints_row["tracker_status"].as_str(), Some("closed"));
     assert_eq!(hints_row["proof_status"].as_str(), Some("trusted"));
     assert_eq!(hints_row["blocker_reason"].as_str(), Some(""));
+}
+
+#[test]
+fn coordination_workload_signoff_row_tracks_used_refused_and_absent_pack_states() {
+    let artifact = load_artifact();
+    let coordination_row = artifact["signoff_matrix"]
+        .as_array()
+        .expect("signoff_matrix must be an array")
+        .iter()
+        .find(|entry| entry["control_id"].as_str() == Some("coordination_workload_planner_handoff"))
+        .expect("coordination workload handoff row must exist");
+
+    let scenarios: BTreeSet<&str> = coordination_row["scenario_ids"]
+        .as_array()
+        .expect("scenario_ids must be an array")
+        .iter()
+        .filter_map(Value::as_str)
+        .collect();
+    assert!(scenarios.contains("AA-COORDINATION-WORKLOAD-PLANNER-HANDOFF-USED"));
+    assert!(scenarios.contains("AA-COORDINATION-WORKLOAD-PLANNER-HANDOFF-REFUSED"));
+    assert!(scenarios.contains("AA-COORDINATION-WORKLOAD-PLANNER-HANDOFF-ABSENT"));
+
+    let operator_fields: BTreeSet<&str> = coordination_row["operator_fields"]
+        .as_array()
+        .expect("operator_fields must be an array")
+        .iter()
+        .filter_map(Value::as_str)
+        .collect();
+    assert!(operator_fields.contains("coordination_pack_status_used"));
+    assert!(operator_fields.contains("coordination_pack_status_refused"));
+    assert!(operator_fields.contains("coordination_pack_status_absent"));
+    assert!(operator_fields.contains("pack_hash"));
+    assert!(operator_fields.contains("source_bundle_hash"));
+    assert!(operator_fields.contains("planner_input_profile"));
+    assert!(operator_fields.contains("safe_envelope_delta"));
+    assert!(operator_fields.contains("refused_envelope_delta"));
+    assert!(operator_fields.contains("profile_recommendation_delta"));
+    assert!(operator_fields.contains("fallback_status"));
+    assert_eq!(coordination_row["tracker_status"].as_str(), Some("closed"));
+    assert_eq!(coordination_row["proof_status"].as_str(), Some("trusted"));
+    assert_eq!(coordination_row["blocker_reason"].as_str(), Some(""));
+    assert!(
+        coordination_row["fallback_mode"]
+            .as_str()
+            .is_some_and(|mode| mode.contains("absent status") && mode.contains("refused packs"))
+    );
 }
 
 #[test]
