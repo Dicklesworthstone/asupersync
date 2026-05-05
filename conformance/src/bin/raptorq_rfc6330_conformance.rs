@@ -22,7 +22,7 @@
 //! cargo run --bin raptorq_rfc6330_conformance -- --run-all --ci-mode
 //! ```
 
-use clap::{Arg, ArgAction, Command};
+use clap::{Arg, ArgAction, ArgMatches, Command};
 use std::path::PathBuf;
 use std::process;
 use std::time::Duration;
@@ -37,7 +37,87 @@ use asupersync_conformance::rfc6330_tests;
 // All conformance types are now imported from the main module
 
 fn main() {
-    let matches = Command::new("raptorq_rfc6330_conformance")
+    let matches = cli_command().get_matches();
+    let context = conformance_context_from_matches(&matches);
+    let runner = registered_runner(context);
+
+    let ci_mode = matches.get_flag("ci-mode");
+    let verbose = matches.get_flag("verbose");
+
+    if verbose && !ci_mode {
+        println!("RFC 6330 RaptorQ Conformance Test Runner");
+        println!("Registered tests: {}", runner.test_count());
+        println!(
+            "MUST tests: {}",
+            runner.test_count_by_level(RequirementLevel::Must)
+        );
+        println!(
+            "SHOULD tests: {}",
+            runner.test_count_by_level(RequirementLevel::Should)
+        );
+        println!(
+            "MAY tests: {}",
+            runner.test_count_by_level(RequirementLevel::May)
+        );
+        println!();
+    }
+
+    let executions =
+        selected_executions(&runner, &matches, ci_mode, verbose).unwrap_or_else(|message| {
+            eprintln!("{message}");
+            process::exit(1);
+        });
+
+    // Generate coverage matrix
+    let coverage = CoverageMatrix::from_results(&executions);
+
+    // Output results based on mode
+    if ci_mode {
+        // CI mode: JSON-line output
+        let jsonl_logs = generate_jsonl_logs(&executions);
+        print!("{jsonl_logs}");
+
+        // Summary line for CI parsing
+        println!(
+            "{{\"summary\":{{\"score\":{:.3},\"status\":\"{}\",\"total\":{},\"passing\":{},\"failing\":{}}}}}",
+            coverage.overall_score(),
+            coverage.overall_status(),
+            coverage.overall.total_requirements,
+            coverage.overall.passing_requirements,
+            coverage.overall.failed_requirements,
+        );
+    } else if matches.get_flag("generate-report") {
+        // Generate detailed conformance report
+        generate_detailed_report(&coverage, &executions);
+    } else {
+        // Standard test execution output
+        print_test_results(&executions, &coverage, verbose);
+    }
+
+    // Check conformance threshold and exit appropriately
+    let threshold = matches.get_one::<f64>("threshold").copied().unwrap_or(0.95);
+    if coverage.overall_score() < threshold {
+        if !ci_mode {
+            eprintln!();
+            eprintln!(
+                "❌ Conformance threshold not met: {:.1}% < {:.1}%",
+                coverage.overall_score() * 100.0,
+                threshold * 100.0
+            );
+        }
+        process::exit(1);
+    } else if !ci_mode && verbose {
+        println!();
+        println!(
+            "✅ Conformance threshold met: {:.1}% >= {:.1}%",
+            coverage.overall_score() * 100.0,
+            threshold * 100.0
+        );
+    }
+}
+
+fn cli_command() -> Command {
+    Command::new("raptorq_rfc6330_conformance")
         .version("1.0.0")
         .author("asupersync contributors")
         .about("RFC 6330 RaptorQ Conformance Test Runner")
@@ -118,42 +198,30 @@ fn main() {
                 .value_parser(clap::value_parser!(f64))
                 .default_value("0.95"),
         )
-        .get_matches();
+}
 
-    // Build conformance context from CLI arguments
-    let context = ConformanceContext {
+fn conformance_context_from_matches(matches: &ArgMatches) -> ConformanceContext {
+    ConformanceContext {
         timeout: Duration::from_secs(matches.get_one::<u64>("timeout").copied().unwrap_or(30)),
-        enable_differential: matches.contains_id("fixtures"),
+        enable_differential: matches.get_one::<PathBuf>("fixtures").is_some(),
         fixtures_path: matches.get_one::<PathBuf>("fixtures").cloned(),
         random_seed: matches.get_one::<u64>("seed").copied().unwrap_or(42),
         verbose: matches.get_flag("verbose"),
-    };
+    }
+}
 
-    // Initialize conformance runner with all registered tests
+fn registered_runner(context: ConformanceContext) -> ConformanceRunner {
     let mut runner = ConformanceRunner::with_context(context);
     register_all_tests(&mut runner);
+    runner
+}
 
-    let ci_mode = matches.get_flag("ci-mode");
-    let verbose = matches.get_flag("verbose");
-
-    if verbose && !ci_mode {
-        println!("RFC 6330 RaptorQ Conformance Test Runner");
-        println!("Registered tests: {}", runner.test_count());
-        println!(
-            "MUST tests: {}",
-            runner.test_count_by_level(RequirementLevel::Must)
-        );
-        println!(
-            "SHOULD tests: {}",
-            runner.test_count_by_level(RequirementLevel::Should)
-        );
-        println!(
-            "MAY tests: {}",
-            runner.test_count_by_level(RequirementLevel::May)
-        );
-        println!();
-    }
-
+fn selected_executions(
+    runner: &ConformanceRunner,
+    matches: &ArgMatches,
+    ci_mode: bool,
+    verbose: bool,
+) -> Result<Vec<TestExecution>, String> {
     // Execute tests based on CLI arguments
     let executions = if matches.get_flag("run-all") {
         if !ci_mode && verbose {
@@ -171,8 +239,7 @@ fn main() {
             "should" => RequirementLevel::Should,
             "may" => RequirementLevel::May,
             _ => {
-                eprintln!("Error: Invalid requirement level: {level_str}");
-                process::exit(1);
+                return Err(format!("Error: Invalid requirement level: {level_str}"));
             }
         };
         if !ci_mode && verbose {
@@ -187,8 +254,7 @@ fn main() {
             "performance" => TestCategory::Performance,
             "differential" => TestCategory::Differential,
             _ => {
-                eprintln!("Error: Invalid test category: {category_str}");
-                process::exit(1);
+                return Err(format!("Error: Invalid test category: {category_str}"));
             }
         };
         if !ci_mode && verbose {
@@ -202,58 +268,13 @@ fn main() {
         }
         runner.run_all_tests()
     } else {
-        eprintln!(
+        return Err(
             "Error: Must specify --run-all, --section, --level, --category, or --generate-report"
+                .to_string(),
         );
-        process::exit(1);
     };
 
-    // Generate coverage matrix
-    let coverage = CoverageMatrix::from_results(&executions);
-
-    // Output results based on mode
-    if ci_mode {
-        // CI mode: JSON-line output
-        let jsonl_logs = generate_jsonl_logs(&executions);
-        print!("{jsonl_logs}");
-
-        // Summary line for CI parsing
-        println!(
-            "{{\"summary\":{{\"score\":{:.3},\"status\":\"{}\",\"total\":{},\"passing\":{},\"failing\":{}}}}}",
-            coverage.overall_score(),
-            coverage.overall_status(),
-            coverage.overall.total_requirements,
-            coverage.overall.passing_requirements,
-            coverage.overall.failed_requirements,
-        );
-    } else if matches.get_flag("generate-report") {
-        // Generate detailed conformance report
-        generate_detailed_report(&coverage, &executions);
-    } else {
-        // Standard test execution output
-        print_test_results(&executions, &coverage, verbose);
-    }
-
-    // Check conformance threshold and exit appropriately
-    let threshold = matches.get_one::<f64>("threshold").copied().unwrap_or(0.95);
-    if coverage.overall_score() < threshold {
-        if !ci_mode {
-            eprintln!();
-            eprintln!(
-                "❌ Conformance threshold not met: {:.1}% < {:.1}%",
-                coverage.overall_score() * 100.0,
-                threshold * 100.0
-            );
-        }
-        process::exit(1);
-    } else if !ci_mode && verbose {
-        println!();
-        println!(
-            "✅ Conformance threshold met: {:.1}% >= {:.1}%",
-            coverage.overall_score() * 100.0,
-            threshold * 100.0
-        );
-    }
+    Ok(executions)
 }
 
 /// Register all available RFC 6330 conformance tests
@@ -463,4 +484,9 @@ fn generate_detailed_report(coverage: &CoverageMatrix, executions: &[TestExecuti
             }
         }
     }
+}
+
+#[cfg(test)]
+mod cli_contract {
+    include!("../../tests/raptorq_rfc6330_cli_contract.rs");
 }

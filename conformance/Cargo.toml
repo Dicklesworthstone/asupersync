@@ -3,6 +3,10 @@ name = "asupersync-conformance"
 version = "0.3.1"
 edition = "2024"
 autobins = false
+# Keep target-specific CLI contract tests inside the binary targets that own
+# them. A package-level integration test currently forces every conformance bin
+# to compile, including unrelated experimental OTLP/trace bins.
+autotests = false
 description = "Conformance test suite for async runtime specifications"
 license-file = "../LICENSE"
 repository = "https://github.com/Dicklesworthstone/asupersync"
