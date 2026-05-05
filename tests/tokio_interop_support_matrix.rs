@@ -1,5 +1,3 @@
-#![allow(warnings)]
-#![allow(clippy::all)]
 #![allow(missing_docs)]
 #![allow(clippy::items_after_statements, clippy::let_unit_value)]
 
