@@ -21,8 +21,7 @@ fn parse_module_after_marker(line: &str, marker: &str) -> Option<String> {
     (!module.is_empty()).then(|| module.to_string())
 }
 
-fn live_registry_modules() -> (BTreeSet<String>, BTreeSet<String>) {
-    let registry = read_repo_file("tests/conformance/mod.rs");
+fn registry_modules_from_str(registry: &str) -> (BTreeSet<String>, BTreeSet<String>) {
     let mut active = BTreeSet::new();
     let mut dormant = BTreeSet::new();
 
@@ -35,6 +34,11 @@ fn live_registry_modules() -> (BTreeSet<String>, BTreeSet<String>) {
     }
 
     (active, dormant)
+}
+
+fn live_registry_modules() -> (BTreeSet<String>, BTreeSet<String>) {
+    let registry = read_repo_file("tests/conformance/mod.rs");
+    registry_modules_from_str(&registry)
 }
 
 fn contract() -> Value {
@@ -65,6 +69,51 @@ fn nonempty_string<'a>(value: &'a Value, key: &str) -> &'a str {
         .unwrap_or_else(|| panic!("{key} must be a string"));
     assert!(!item.trim().is_empty(), "{key} must be nonempty");
     item
+}
+
+fn log_contract_event(scenario_id: &str, fields: &[(&str, String)]) {
+    let mut parts = vec![
+        "bead_id=asupersync-rckcnf".to_string(),
+        format!("scenario_id={scenario_id}"),
+    ];
+    parts.extend(fields.iter().map(|(key, value)| format!("{key}={value}")));
+    println!("{}", parts.join(" "));
+}
+
+#[test]
+fn registry_parser_handles_active_dormant_blank_and_duplicate_rows() {
+    let fixture = r#"
+        pub mod active_one;
+        pub mod active_one;
+        // pub mod dormant_one;
+        //   pub mod dormant_two;
+        // not a module
+        pub mod active_two; // trailing note
+        pub(crate) mod private_module;
+        // pub crate::not_module;
+    "#;
+
+    let (active, dormant) = registry_modules_from_str(fixture);
+    assert_eq!(
+        active,
+        BTreeSet::from(["active_one".to_string(), "active_two".to_string()])
+    );
+    assert_eq!(
+        dormant,
+        BTreeSet::from(["dormant_one".to_string(), "dormant_two".to_string()])
+    );
+
+    log_contract_event(
+        "registry-parser-unit",
+        &[
+            ("registry_path", "fixture:inline".to_string()),
+            ("active_count", active.len().to_string()),
+            ("dormant_count", dormant.len().to_string()),
+            ("docs_checked", "none".to_string()),
+            ("verdict", "pass".to_string()),
+            ("first_failure", "".to_string()),
+        ],
+    );
 }
 
 #[test]
@@ -105,8 +154,8 @@ fn conformance_registry_contract_matches_live_mod_rs() {
     assert_eq!(contract_dormant, dormant);
 
     for record in dormant_records {
-        nonempty_string(record, "module");
-        nonempty_string(record, "disposition");
+        let module = nonempty_string(record, "module");
+        let disposition = nonempty_string(record, "disposition");
         nonempty_string(record, "reason");
         nonempty_string(record, "retention_reason");
         assert!(
@@ -133,7 +182,49 @@ fn conformance_registry_contract_matches_live_mod_rs() {
             has_owner_bead || has_supersession || has_inline_followup,
             "dormant module needs owner bead, supersession, or inline follow-up: {record:?}"
         );
+        log_contract_event(
+            "registry-dormant-disposition",
+            &[
+                ("registry_path", "tests/conformance/mod.rs".to_string()),
+                ("module", module.to_string()),
+                ("disposition", disposition.to_string()),
+                (
+                    "owner_bead",
+                    record
+                        .get("owner_bead")
+                        .and_then(Value::as_str)
+                        .unwrap_or("")
+                        .to_string(),
+                ),
+                (
+                    "superseded_by_count",
+                    record
+                        .get("superseded_by")
+                        .and_then(Value::as_array)
+                        .map_or(0, Vec::len)
+                        .to_string(),
+                ),
+                ("verdict", "pass".to_string()),
+                ("first_failure", "".to_string()),
+            ],
+        );
     }
+
+    log_contract_event(
+        "registry-contract-live",
+        &[
+            ("registry_path", "tests/conformance/mod.rs".to_string()),
+            ("active_count", active.len().to_string()),
+            ("dormant_count", dormant.len().to_string()),
+            (
+                "artifact_path",
+                "artifacts/conformance_registry_contract_v1.json".to_string(),
+            ),
+            ("docs_checked", "README.md".to_string()),
+            ("verdict", "pass".to_string()),
+            ("first_failure", "".to_string()),
+        ],
+    );
 }
 
 #[test]
@@ -154,5 +245,20 @@ fn readme_uses_checked_contract_instead_of_stale_counts() {
     assert!(
         !readme.contains("currently leaves 21 `pub mod` entries"),
         "README must not preserve the stale dormant-suite count"
+    );
+    log_contract_event(
+        "readme-doc-truth",
+        &[
+            ("registry_path", "tests/conformance/mod.rs".to_string()),
+            ("active_count", "checked-by-contract".to_string()),
+            ("dormant_count", "checked-by-contract".to_string()),
+            ("docs_checked", "README.md".to_string()),
+            (
+                "artifact_path",
+                "artifacts/conformance_registry_contract_v1.json".to_string(),
+            ),
+            ("verdict", "pass".to_string()),
+            ("first_failure", "".to_string()),
+        ],
     );
 }
