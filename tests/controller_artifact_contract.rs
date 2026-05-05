@@ -1,5 +1,3 @@
-#![allow(warnings)]
-#![allow(clippy::all)]
 //! Controller artifact contract invariants (AA-02.2).
 
 #![allow(missing_docs)]
