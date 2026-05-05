@@ -4,7 +4,15 @@
 //! handling against the h2 reference implementation to ensure identical
 //! RTT computation and response behavior per RFC 7540.
 
-use asupersync::http::h2::{Connection, Settings, frame::PingFrame};
+use asupersync::http::h2::{
+    Connection, Settings,
+    frame::{Frame, PingFrame, SettingsFrame},
+};
+#[cfg(test)]
+use asupersync::{
+    bytes::Bytes,
+    http::h2::frame::{FrameHeader, FrameType, parse_frame},
+};
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
@@ -216,11 +224,35 @@ impl PingConformanceTester {
         // Test asupersync implementation
         let asupersync_result = self.test_asupersync_ping(case).await;
 
-        // Test h2 reference implementation
+        // Test h2 reference implementation. If the external reference is not wired,
+        // keep this as a live conformance check against the RFC-backed expected
+        // state in the test case instead of reporting a fake comparison.
         let h2_result = self.test_h2_ping(case).await;
 
         // Compare results
         let (verdict, error, differences) = match (&asupersync_result, &h2_result) {
+            (Ok(asupersync_state), Err(h2_err)) if h2_err == H2_REFERENCE_UNIMPLEMENTED => {
+                let differences = self
+                    .compare_connection_states(asupersync_state, &case.expected_connection_state);
+                if differences.is_empty() {
+                    (PingTestVerdict::Pass, None, differences)
+                } else {
+                    (
+                        PingTestVerdict::Fail,
+                        Some(format!(
+                            "Live asupersync state differed from expected RFC behavior while {h2_err}"
+                        )),
+                        differences,
+                    )
+                }
+            }
+            (Err(asupersync_err), Err(h2_err)) if h2_err == H2_REFERENCE_UNIMPLEMENTED => (
+                PingTestVerdict::Fail,
+                Some(format!(
+                    "Live asupersync PING processing failed while {h2_err}: {asupersync_err}"
+                )),
+                vec![format!("asupersync_error: {asupersync_err}")],
+            ),
             (_, Err(h2_err)) if h2_err == H2_REFERENCE_UNIMPLEMENTED => (
                 PingTestVerdict::Skipped,
                 Some(H2_REFERENCE_UNIMPLEMENTED.to_string()),
@@ -278,8 +310,8 @@ impl PingConformanceTester {
             case_id: case.id.clone(),
             verdict,
             error,
-            asupersync_state: asupersync_result.ok(),
-            h2_state: h2_result.ok(),
+            asupersync_state: asupersync_result.as_ref().ok().cloned(),
+            h2_state: h2_result.as_ref().ok().cloned(),
             differences,
         }
     }
@@ -292,6 +324,8 @@ impl PingConformanceTester {
         let settings = Settings::default();
         let mut connection = Connection::server(settings);
         let mut ping_timings = Vec::new();
+        let mut outstanding_ping_timings: Vec<([u8; 8], usize)> = Vec::new();
+        accept_peer_settings(&mut connection)?;
 
         // Apply PING sequence with timing
         for serializable_frame in &case.ping_sequence {
@@ -305,25 +339,36 @@ impl PingConformanceTester {
                     rtt_ms: None,
                 };
                 ping_timings.push(timing);
+                outstanding_ping_timings.push((ping_frame.opaque_data, ping_timings.len() - 1));
             } else {
                 // This is a PING ACK - update timing
-                if let Some(last_timing) = ping_timings.last_mut() {
-                    last_timing.ack_received_at_ms = Some(serializable_frame.timestamp_ms);
-                    if let Some(sent_at) = Some(last_timing.sent_at_ms) {
-                        last_timing.rtt_ms =
-                            Some(serializable_frame.timestamp_ms.saturating_sub(sent_at));
-                    }
+                if let Some(position) =
+                    outstanding_ping_timings
+                        .iter()
+                        .position(|(opaque_data, index)| {
+                            *opaque_data == ping_frame.opaque_data
+                                && ping_timings[*index].ack_received_at_ms.is_none()
+                        })
+                {
+                    let (_, timing_index) = outstanding_ping_timings.remove(position);
+                    let timing = &mut ping_timings[timing_index];
+                    timing.ack_received_at_ms = Some(serializable_frame.timestamp_ms);
+                    timing.rtt_ms = Some(
+                        serializable_frame
+                            .timestamp_ms
+                            .saturating_sub(timing.sent_at_ms),
+                    );
                 }
             }
 
             // Process the PING frame
-            if let Err(e) = simulate_ping_frame_processing(&mut connection, &ping_frame) {
+            if let Err(e) = process_live_ping_frame(&mut connection, &ping_frame) {
                 return Err(format!("Failed to process PING frame: {}", e));
             }
         }
 
         // Extract connection state
-        let connection_state = extract_asupersync_ping_state(&connection, ping_timings);
+        let connection_state = extract_asupersync_ping_state(&mut connection, ping_timings)?;
         Ok(connection_state)
     }
 
@@ -466,38 +511,62 @@ impl Default for PingConformanceTester {
     }
 }
 
-/// Helper function to simulate PING frame processing in asupersync connection.
-fn simulate_ping_frame_processing(
-    _connection: &mut Connection,
-    _ping_frame: &PingFrame,
+fn accept_peer_settings(connection: &mut Connection) -> Result<(), String> {
+    let received = connection
+        .process_frame(Frame::Settings(SettingsFrame::new(vec![])))
+        .map_err(|err| err.to_string())?;
+    if received.is_some() {
+        return Err("SETTINGS handshake produced an application frame".to_string());
+    }
+
+    match connection.next_frame() {
+        Some(Frame::Settings(settings)) if settings.ack => Ok(()),
+        other => Err(format!(
+            "SETTINGS handshake should queue exactly one ACK, got {other:?}"
+        )),
+    }
+}
+
+/// Process a PING frame through the production connection state machine.
+fn process_live_ping_frame(
+    connection: &mut Connection,
+    ping_frame: &PingFrame,
 ) -> Result<(), String> {
-    // This would need to be implemented based on how Connection processes frames
-    // For now, return Ok to allow compilation
-    // In real implementation, this would:
-    // 1. Create a Frame::Ping from the PingFrame
-    // 2. Call connection.process_frame() or equivalent
-    // 3. Track any resulting PING ACKs in pending operations
+    let received = connection
+        .process_frame(Frame::Ping(ping_frame.clone()))
+        .map_err(|err| err.to_string())?;
+    if received.is_some() {
+        return Err(format!(
+            "PING produced unexpected application frame: {received:?}"
+        ));
+    }
     Ok(())
 }
 
 /// Extract PING-related connection state from asupersync connection.
 fn extract_asupersync_ping_state(
-    _connection: &Connection,
+    connection: &mut Connection,
     ping_timings: Vec<PingTiming>,
-) -> PingConnectionState {
-    // This would need to be implemented to extract actual connection state
-    // For now, return a placeholder to allow compilation
-    // In real implementation, this would:
-    // 1. Access the connection's state field
-    // 2. Count pending PING ACK operations
-    // 3. Extract any error conditions
-    // 4. Include the collected timing data
-    PingConnectionState {
-        connection_state: "Open".to_string(),
-        pending_ping_acks: 0,
+) -> Result<PingConnectionState, String> {
+    let mut pending_ping_acks = 0;
+    while connection.has_pending_frames() {
+        match connection.next_frame() {
+            Some(Frame::Ping(ping)) if ping.ack => pending_ping_acks += 1,
+            Some(frame) => {
+                return Err(format!(
+                    "unexpected pending frame after PING processing: {frame:?}"
+                ));
+            }
+            None => break,
+        }
+    }
+
+    Ok(PingConnectionState {
+        connection_state: format!("{:?}", connection.state()),
+        pending_ping_acks,
         ping_timings,
         has_errors: false,
-    }
+    })
 }
 
 /// Create predefined test cases for PING frame conformance.
@@ -522,7 +591,7 @@ fn create_ping_test_cases() -> Vec<PingConformanceCase> {
             ],
             expected_connection_state: PingConnectionState {
                 connection_state: "Open".to_string(),
-                pending_ping_acks: 0, // Should be processed
+                pending_ping_acks: 1,
                 ping_timings: vec![PingTiming {
                     sent_at_ms: 0,
                     ack_received_at_ms: Some(50),
@@ -551,7 +620,7 @@ fn create_ping_test_cases() -> Vec<PingConformanceCase> {
             ],
             expected_connection_state: PingConnectionState {
                 connection_state: "Open".to_string(),
-                pending_ping_acks: 0,
+                pending_ping_acks: 1,
                 ping_timings: vec![PingTiming {
                     sent_at_ms: 0,
                     ack_received_at_ms: Some(25),
@@ -580,7 +649,7 @@ fn create_ping_test_cases() -> Vec<PingConformanceCase> {
             ],
             expected_connection_state: PingConnectionState {
                 connection_state: "Open".to_string(),
-                pending_ping_acks: 0,
+                pending_ping_acks: 1,
                 ping_timings: vec![PingTiming {
                     sent_at_ms: 100,
                     ack_received_at_ms: Some(175),
@@ -621,7 +690,7 @@ fn create_ping_test_cases() -> Vec<PingConformanceCase> {
             ],
             expected_connection_state: PingConnectionState {
                 connection_state: "Open".to_string(),
-                pending_ping_acks: 0,
+                pending_ping_acks: 2,
                 ping_timings: vec![
                     PingTiming {
                         sent_at_ms: 0,
@@ -722,7 +791,7 @@ fn create_ping_test_cases() -> Vec<PingConformanceCase> {
             ],
             expected_connection_state: PingConnectionState {
                 connection_state: "Open".to_string(), // No spurious GOAWAY
-                pending_ping_acks: 0,
+                pending_ping_acks: 3,
                 ping_timings: vec![
                     PingTiming {
                         sent_at_ms: 0,
@@ -746,4 +815,91 @@ fn create_ping_test_cases() -> Vec<PingConformanceCase> {
                 .to_string(),
         },
     ]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn non_ack_ping_queues_one_ack_with_same_opaque_data() {
+        let mut connection = Connection::server(Settings::default());
+        accept_peer_settings(&mut connection).expect("SETTINGS handshake");
+
+        let ping = PingFrame::new(*b"pingpong");
+        process_live_ping_frame(&mut connection, &ping).expect("PING should process");
+
+        match connection.next_frame() {
+            Some(Frame::Ping(ack)) => {
+                assert!(ack.ack);
+                assert_eq!(ack.opaque_data, *b"pingpong");
+            }
+            other => panic!("expected PING ACK, got {other:?}"),
+        }
+        assert!(!connection.has_pending_frames());
+    }
+
+    #[test]
+    fn ping_ack_does_not_queue_another_ack() {
+        let mut connection = Connection::server(Settings::default());
+        accept_peer_settings(&mut connection).expect("SETTINGS handshake");
+
+        let ping_ack = PingFrame::ack(*b"ack-only");
+        process_live_ping_frame(&mut connection, &ping_ack).expect("PING ACK should process");
+
+        assert!(
+            !connection.has_pending_frames(),
+            "incoming PING ACK must not be ACKed again"
+        );
+    }
+
+    #[test]
+    fn invalid_ping_payload_length_is_rejected_by_parser() {
+        let short_header = FrameHeader {
+            length: 7,
+            frame_type: FrameType::Ping as u8,
+            flags: 0,
+            stream_id: 0,
+        };
+        assert!(
+            parse_frame(&short_header, Bytes::from_static(b"1234567")).is_err(),
+            "PING payloads shorter than 8 bytes must be rejected"
+        );
+
+        let long_header = FrameHeader {
+            length: 9,
+            frame_type: FrameType::Ping as u8,
+            flags: 0,
+            stream_id: 0,
+        };
+        assert!(
+            parse_frame(&long_header, Bytes::from_static(b"123456789")).is_err(),
+            "PING payloads longer than 8 bytes must be rejected"
+        );
+    }
+
+    #[tokio::test]
+    async fn h2_reference_unavailable_still_runs_live_ping_assertions() {
+        let tester = PingConformanceTester::new();
+        let report = tester.run_all_tests().await;
+
+        assert_eq!(report.total_cases, 7);
+        assert_eq!(report.summary.passed, 7);
+        assert_eq!(report.summary.failed, 0);
+        assert_eq!(report.summary.skipped, 0);
+        assert!(
+            report
+                .results
+                .iter()
+                .all(|result| result.h2_state.is_none()),
+            "h2 reference is intentionally not wired for this harness"
+        );
+        assert!(
+            report
+                .results
+                .iter()
+                .all(|result| result.asupersync_state.is_some()),
+            "every case must exercise the live asupersync connection"
+        );
+    }
 }
