@@ -33,6 +33,13 @@ class ClassifiedPath:
     hits: tuple[Hit, ...]
 
 
+REQUIRES_REPLACEMENT_ISSUE = {
+    "conformance_placeholder",
+    "production_stub",
+    "stale_audit_prose",
+}
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument(
@@ -56,6 +63,11 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Run an isolated negative fixture proving fake conformance fails the policy",
     )
+    parser.add_argument(
+        "--self-test-policy-fixtures",
+        action="store_true",
+        help="Run policy parser/classifier fixtures against isolated repos",
+    )
     return parser.parse_args()
 
 
@@ -76,6 +88,8 @@ def load_policy(policy_path: pathlib.Path) -> dict:
         raise ValueError("allowlist_paths must be a list")
     if not isinstance(data.get("allowlist_entries", []), list):
         raise ValueError("allowlist_entries must be a list")
+    if not isinstance(data.get("allowlist_groups", []), list):
+        raise ValueError("allowlist_groups must be a list")
     if not isinstance(data.get("waivers"), list):
         raise ValueError("waivers must be a list")
     if not isinstance(data.get("owner_routes"), list):
@@ -100,15 +114,69 @@ def require_metadata(entry: dict[str, Any], label: str) -> None:
         raise ValueError(
             f"{label} entry for {pattern} must include expires_at_utc or revisit_condition"
         )
+    category = entry.get("category")
+    if (
+        category in REQUIRES_REPLACEMENT_ISSUE
+        and not isinstance(entry.get("replacement_issue"), str)
+    ):
+        raise ValueError(
+            f"{label} entry for {pattern} category={category} must include replacement_issue"
+        )
+
+
+def require_group_metadata(group: dict[str, Any], label: str) -> None:
+    group_id = group.get("group_id")
+    if not isinstance(group_id, str) or not group_id:
+        raise ValueError(f"{label} entry must include non-empty group_id")
+    patterns = group.get("patterns")
+    if not isinstance(patterns, list) or not patterns:
+        raise ValueError(f"{label} entry {group_id} must include non-empty patterns")
+    for pattern in patterns:
+        if not isinstance(pattern, str) or not pattern:
+            raise ValueError(f"{label} entry {group_id} patterns must be non-empty strings")
+    for field in ("category", "owner", "reason"):
+        if not isinstance(group.get(field), str) or not group[field]:
+            raise ValueError(f"{label} entry {group_id} must include {field}")
+    if not (
+        isinstance(group.get("expires_at_utc"), str)
+        or isinstance(group.get("revisit_condition"), str)
+    ):
+        raise ValueError(
+            f"{label} entry {group_id} must include expires_at_utc or revisit_condition"
+        )
+    category = group.get("category")
+    if (
+        category in REQUIRES_REPLACEMENT_ISSUE
+        and not isinstance(group.get("replacement_issue"), str)
+    ):
+        raise ValueError(
+            f"{label} entry {group_id} category={category} must include replacement_issue"
+        )
 
 
 def validate_structured_allowlist(policy: dict) -> None:
+    seen: set[tuple[str, str, str]] = set()
     for entry in policy.get("allowlist_entries", []):
         require_metadata(entry, "allowlist_entries")
+        key = ("allowlist_entries", str(entry.get("category")), entry_pattern(entry))
+        if key in seen:
+            raise ValueError(f"duplicate allowlist entry for {key[1]} {key[2]}")
+        seen.add(key)
+    for group in policy.get("allowlist_groups", []):
+        require_group_metadata(group, "allowlist_groups")
+        for entry in expand_allowlist_group(group):
+            key = ("allowlist_entries", str(entry.get("category")), entry_pattern(entry))
+            if key in seen:
+                raise ValueError(f"duplicate allowlist entry for {key[1]} {key[2]}")
+            seen.add(key)
     for waiver in policy.get("waivers", []):
         require_metadata(waiver, "waivers")
         if not isinstance(waiver.get("status"), str):
             raise ValueError("waiver entries must include status")
+        key = ("waivers", str(waiver.get("category")), entry_pattern(waiver))
+        if key in seen:
+            raise ValueError(f"duplicate waiver entry for {key[1]} {key[2]}")
+        seen.add(key)
 
 
 def run_scan(
@@ -181,6 +249,27 @@ def entry_pattern(entry: dict[str, Any]) -> str:
     return str(entry.get("pattern", entry.get("path", "")))
 
 
+def expand_allowlist_group(group: dict[str, Any]) -> list[dict[str, Any]]:
+    expanded = []
+    for pattern in group.get("patterns", []):
+        entry = {
+            key: value
+            for key, value in group.items()
+            if key not in {"patterns"}
+        }
+        entry["pattern"] = pattern
+        entry["source_group_id"] = group["group_id"]
+        expanded.append(entry)
+    return expanded
+
+
+def allowlist_entries(policy: dict) -> list[dict[str, Any]]:
+    entries = list(policy.get("allowlist_entries", []))
+    for group in policy.get("allowlist_groups", []):
+        entries.extend(expand_allowlist_group(group))
+    return entries
+
+
 def entry_matches(entry: dict[str, Any], path: str, category: str) -> bool:
     pattern = entry_pattern(entry)
     entry_category = entry.get("category", "any")
@@ -202,7 +291,7 @@ def coverage_for_path(
     policy: dict,
     now_utc: dt.datetime,
 ) -> tuple[str, dict[str, Any] | None]:
-    for entry in policy.get("allowlist_entries", []):
+    for entry in allowlist_entries(policy):
         if entry_matches(entry, path, category):
             if entry_expired(entry, now_utc):
                 return ("expired_allowlist", entry)
@@ -264,6 +353,7 @@ def evaluate_policy(
     violations: list[dict[str, Any]] = []
     covered: list[dict[str, Any]] = []
     expired: list[dict[str, Any]] = []
+    remaining_allowlist_entries: list[dict[str, Any]] = []
 
     for classified in classified_paths:
         path_hits = list(classified.hits)
@@ -291,6 +381,20 @@ def evaluate_policy(
         if coverage in ("allowlist", "legacy_allowlist", "waiver"):
             category_counts[classified.category]["covered"] += 1
             covered.append(row)
+            if coverage in ("allowlist", "waiver") and entry is not None:
+                remaining_allowlist_entries.append(
+                    {
+                        "path": classified.path,
+                        "category": classified.category,
+                        "coverage": coverage,
+                        "owner": entry.get("owner", classified.owner),
+                        "reason": entry.get("reason", ""),
+                        "replacement_issue": entry.get("replacement_issue", ""),
+                        "expires_at_utc": entry.get("expires_at_utc", ""),
+                        "revisit_condition": entry.get("revisit_condition", ""),
+                        "source_group_id": entry.get("source_group_id", ""),
+                    }
+                )
         else:
             category_counts[classified.category]["violations"] += 1
             violations.append(row)
@@ -310,7 +414,8 @@ def evaluate_policy(
         "policy_counts": {
             "allowlist_paths": len(policy.get("allowlist_paths", [])),
             "allowlist_paths_legacy": len(policy.get("allowlist_paths", [])),
-            "allowlist_entries": len(policy.get("allowlist_entries", [])),
+            "allowlist_entries": len(allowlist_entries(policy)),
+            "allowlist_entry_groups": len(policy.get("allowlist_groups", [])),
             "waivers_total": len(policy.get("waivers", [])),
             "waivers_active": sum(
                 1 for waiver in policy.get("waivers", []) if waiver.get("status") == "active"
@@ -325,6 +430,18 @@ def evaluate_policy(
         },
         "violations": violations,
         "covered": covered,
+        "first_failure_line": (
+            f"{violations[0]['path']}:{violations[0]['first_line']}" if violations else ""
+        ),
+        "remaining_allowlist_entries": sorted(
+            remaining_allowlist_entries,
+            key=lambda row: (
+                row["category"],
+                row["coverage"],
+                row["source_group_id"],
+                row["path"],
+            ),
+        ),
         "status": "pass" if not violations else "fail",
     }
 
@@ -409,10 +526,145 @@ def run_negative_fixture_self_test() -> int:
     return 0
 
 
+def run_policy_fixture_self_tests(policy_path: pathlib.Path) -> int:
+    policy = load_policy(policy_path)
+    now = dt.datetime.now(dt.timezone.utc)
+
+    def create_scan_roots(tmp: pathlib.Path, fixture_policy: dict[str, Any]) -> None:
+        for root in fixture_policy.get("scan", {}).get("roots", []):
+            if isinstance(root, str):
+                (tmp / root).mkdir(parents=True, exist_ok=True)
+
+    def evaluate_fixture(path: str, source: str) -> dict[str, Any]:
+        with tempfile.TemporaryDirectory(prefix="asupersync-no-mock-policy-") as tmp_raw:
+            tmp = pathlib.Path(tmp_raw)
+            create_scan_roots(tmp, policy)
+            fixture = tmp / path
+            fixture.parent.mkdir(parents=True, exist_ok=True)
+            fixture.write_text(source, encoding="utf-8")
+            return evaluate_policy(policy, policy_path, now, cwd=tmp)
+
+    legitimate_test = evaluate_fixture(
+        "tests/policy_legitimate_test_double.rs",
+        "struct MockPeer; fn fake_payload() -> &'static str { \"stub fixture\" }\n",
+    )
+    if legitimate_test["status"] != "pass":
+        print("policy fixture failed: legitimate tests/** double was rejected")
+        return 1
+
+    fake_conformance = evaluate_fixture(
+        "tests/conformance/policy_negative_fake_helper.rs",
+        "pub fn fake_conformance_helper() { unimplemented!(\"mock placeholder\"); }\n",
+    )
+    if fake_conformance["status"] != "fail":
+        print("policy fixture failed: new fake conformance helper was not rejected")
+        return 1
+    if not any(
+        row["category"] == "conformance_placeholder"
+        and row["path"] == "tests/conformance/policy_negative_fake_helper.rs"
+        for row in fake_conformance["violations"]
+    ):
+        print("policy fixture failed: fake conformance helper had wrong category")
+        return 1
+
+    fake_production = evaluate_fixture(
+        "src/policy_negative_production_stub.rs",
+        "pub fn not_real() { todo!(\"placeholder mock behavior\"); }\n",
+    )
+    if fake_production["status"] != "fail":
+        print("policy fixture failed: new production placeholder was not rejected")
+        return 1
+    if not any(
+        row["category"] == "production_stub"
+        and row["path"] == "src/policy_negative_production_stub.rs"
+        for row in fake_production["violations"]
+    ):
+        print("policy fixture failed: production placeholder had wrong category")
+        return 1
+
+    invalid_missing_bead = dict(policy)
+    invalid_missing_bead["allowlist_entries"] = [
+        {
+            "pattern": "src/missing_bead.rs",
+            "category": "production_stub",
+            "owner": "runtime-core",
+            "reason": "fixture",
+            "revisit_condition": "fixture",
+        }
+    ]
+    invalid_missing_bead["allowlist_groups"] = []
+    invalid_missing_bead["waivers"] = []
+    try:
+        validate_structured_allowlist(invalid_missing_bead)
+    except ValueError:
+        pass
+    else:
+        print("policy fixture failed: production allowlist without replacement_issue passed")
+        return 1
+
+    invalid_duplicate = dict(policy)
+    invalid_duplicate["allowlist_entries"] = [
+        {
+            "pattern": "tests/duplicate.rs",
+            "category": "intentional_test_double",
+            "owner": "test-infra",
+            "reason": "fixture",
+            "revisit_condition": "fixture",
+        },
+        {
+            "pattern": "tests/duplicate.rs",
+            "category": "intentional_test_double",
+            "owner": "test-infra",
+            "reason": "fixture",
+            "revisit_condition": "fixture",
+        },
+    ]
+    invalid_duplicate["allowlist_groups"] = []
+    invalid_duplicate["waivers"] = []
+    try:
+        validate_structured_allowlist(invalid_duplicate)
+    except ValueError:
+        pass
+    else:
+        print("policy fixture failed: duplicate allowlist entries passed")
+        return 1
+
+    expired_policy = dict(policy)
+    expired_policy["allowlist_entries"] = [
+        {
+            "pattern": "src/expired_placeholder.rs",
+            "category": "production_stub",
+            "owner": "runtime-core",
+            "reason": "fixture",
+            "expires_at_utc": "2000-01-01T00:00:00Z",
+            "replacement_issue": "asupersync-a45",
+        }
+    ]
+    expired_policy["allowlist_groups"] = []
+    expired_policy["waivers"] = []
+    with tempfile.TemporaryDirectory(prefix="asupersync-no-mock-policy-") as tmp_raw:
+        tmp = pathlib.Path(tmp_raw)
+        create_scan_roots(tmp, expired_policy)
+        fixture = tmp / "src" / "expired_placeholder.rs"
+        fixture.parent.mkdir(parents=True, exist_ok=True)
+        fixture.write_text("pub fn expired() { todo!(\"mock placeholder\"); }\n", encoding="utf-8")
+        expired_report = evaluate_policy(expired_policy, policy_path, now, cwd=tmp)
+    if expired_report["status"] != "fail" or not any(
+        row["coverage"] == "expired_allowlist" for row in expired_report["violations"]
+    ):
+        print("policy fixture failed: expired allowlist did not fail as expired")
+        return 1
+
+    print("policy fixtures passed: classifier, allowlist metadata, duplicates, expiry, and negative gates")
+    return 0
+
+
 def main() -> int:
     args = parse_args()
     if args.self_test_negative_fixture:
         return run_negative_fixture_self_test()
+    if args.self_test_policy_fixtures:
+        return run_policy_fixture_self_tests(pathlib.Path(args.policy))
 
     policy_path = pathlib.Path(args.policy)
     policy = load_policy(policy_path)

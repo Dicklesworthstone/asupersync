@@ -26,6 +26,10 @@
       "category": "conformance_placeholder"
     },
     {
+      "pattern": "src/**/snapshots/**",
+      "category": "fixture_reference_implementation"
+    },
+    {
       "pattern": "src/**/*_audit_test.rs",
       "category": "stale_audit_prose"
     },
@@ -44,6 +48,14 @@
     {
       "pattern": "tests/artifacts/**",
       "category": "fixture_reference_implementation"
+    },
+    {
+      "pattern": "src/**/*_tests.rs",
+      "category": "intentional_test_double"
+    },
+    {
+      "pattern": "src/runtime/scheduler/lane_pressure_scaling_metamorphic.rs",
+      "category": "intentional_test_double"
     },
     {
       "pattern": "tests/**",
@@ -76,6 +88,14 @@
       "owner": "messaging-core"
     },
     {
+      "pattern": "src/observability/**",
+      "owner": "observability-core"
+    },
+    {
+      "pattern": "src/grpc/**",
+      "owner": "grpc-core"
+    },
+    {
       "pattern": "src/runtime/reactor/**",
       "owner": "runtime-reactor"
     },
@@ -86,6 +106,10 @@
     {
       "pattern": "src/web/**",
       "owner": "web-runtime"
+    },
+    {
+      "pattern": "tests/conformance/**",
+      "owner": "conformance"
     },
     {
       "pattern": "tests/**",
@@ -224,6 +248,225 @@
       "reason": "Recovery-security tests use mock labels for adversarial fixtures.",
       "revisit_condition": "Revisit when recovery fixtures are renamed away from mock terminology.",
       "replacement_issue": "asupersync-yex"
+    }
+  ],
+  "allowlist_groups": [
+    {
+      "group_id": "normal-test-double-policy-2026-05-05",
+      "patterns": [
+        "tests/**",
+        "src/**/*_tests.rs",
+        "src/runtime/scheduler/lane_pressure_scaling_metamorphic.rs"
+      ],
+      "category": "intentional_test_double",
+      "owner": "test-infra",
+      "reason": "Normal tests and source-local test modules may use mock/fake/stub vocabulary for deterministic fixtures, adversarial peers, and fixture payloads. Conformance suites are classified before this rule and are not covered by this group.",
+      "revisit_condition": "Re-audit during asupersync-u7y final ratchet signoff; new production or conformance paths must remain uncovered unless explicitly documented.",
+      "replacement_issue": "asupersync-a45"
+    },
+    {
+      "group_id": "fixture-reference-policy-2026-05-05",
+      "patterns": [
+        "tests/artifacts/**",
+        "src/**/snapshots/**"
+      ],
+      "category": "fixture_reference_implementation",
+      "owner": "test-infra",
+      "reason": "Golden snapshots and checked-in artifact baselines are reference fixtures; mock/fake/stub words in those files describe fixture inputs or expected text rather than incomplete runtime behavior.",
+      "revisit_condition": "Re-audit when fixture layout changes or when asupersync-oelvq2 aggregates final mock-code-finder evidence.",
+      "replacement_issue": "asupersync-oelvq2"
+    },
+    {
+      "group_id": "stale-audit-prose-policy-2026-05-05",
+      "patterns": [
+        "src/**/*_audit_test.rs",
+        "src/**/*_audit.rs"
+      ],
+      "category": "stale_audit_prose",
+      "owner": "test-infra",
+      "reason": "Audit modules are tracked as evidence surfaces after source-truth repairs. The policy must report them separately from production stubs so stale prose is reviewed during final signoff instead of mixed into runtime-code failures.",
+      "revisit_condition": "Re-audit all matching paths during asupersync-u7y final gap closure and keep the generated JSONL evidence attached through asupersync-oelvq2.",
+      "replacement_issue": "asupersync-u7y"
+    },
+    {
+      "group_id": "known-conformance-placeholder-paths-2026-05-05",
+      "patterns": [
+        "tests/conformance/cancel_dag_determinism.rs",
+        "tests/conformance/channel_cancel_correctness/mpsc/send_cancel_tests.rs",
+        "tests/conformance/channel_cancel_correctness/src/state_validation.rs",
+        "tests/conformance/grpc_connect/src/connect_compat.rs",
+        "tests/conformance/grpc_connect/src/lib.rs",
+        "tests/conformance/grpc_connect/src/service.rs",
+        "tests/conformance/grpc_connect/src/test_cases.rs",
+        "tests/conformance/grpc_status.rs",
+        "tests/conformance/grpc_trailer_forwarding_rfc9113.rs",
+        "tests/conformance/h1_body_framing.rs",
+        "tests/conformance/h1_keepalive.rs",
+        "tests/conformance/h2_priority.rs",
+        "tests/conformance/h2_rfc7540/h2c_upgrade_tests.rs",
+        "tests/conformance/h2_rfc7540/hpack_dynamic_table_update_tests.rs",
+        "tests/conformance/h2_rfc7540/huffman_padding_tests.rs",
+        "tests/conformance/hpack_rfc7541/differential_tests.rs",
+        "tests/conformance/http_h1_chunked_rfc9112.rs",
+        "tests/conformance/kafka_offsets.rs",
+        "tests/conformance/kafka_record_batch_v2/format.rs",
+        "tests/conformance/kqueue_bsd_events.rs",
+        "tests/conformance/messaging_broker_parity.rs",
+        "tests/conformance/mod.rs",
+        "tests/conformance/mysql_auth_switch.rs",
+        "tests/conformance/mysql_stmt_prepare_execute.rs",
+        "tests/conformance/quic_connection_migration_rfc9000.rs",
+        "tests/conformance/race_loser_drain_metamorphic.rs",
+        "tests/conformance/raptorq_differential/src/lib.rs",
+        "tests/conformance/raptorq_differential/src/provenance.rs",
+        "tests/conformance/raptorq_rfc6330/golden/src/lib.rs",
+        "tests/conformance/raptorq_rfc6330/reporting/src/coverage_matrix.rs",
+        "tests/conformance/raptorq_rfc6330/reporting/src/maintenance_workflows.rs",
+        "tests/conformance/raptorq_rfc6330/spec_derived/decoding_process/constraint_matrix_tests.rs",
+        "tests/conformance/raptorq_rfc6330/spec_derived/decoding_process/gaussian_elimination_tests.rs",
+        "tests/conformance/raptorq_rfc6330/spec_derived/decoding_process/reconstruction_tests.rs",
+        "tests/conformance/raptorq_rfc6330/spec_derived/encoding_process/esi_validation_tests.rs",
+        "tests/conformance/raptorq_rfc6330/spec_derived/encoding_process/repair_symbol_tests.rs",
+        "tests/conformance/raptorq_rfc6330/spec_derived/integration/edge_case_matrix.rs",
+        "tests/conformance/raptorq_rfc6330/spec_derived/integration/end_to_end_conformance.rs",
+        "tests/conformance/tls_0rtt_replay_rfc8446.rs",
+        "tests/conformance/web_session_cookies.rs",
+        "tests/conformance/websocket_extension_negotiation_rfc6455.rs",
+        "tests/conformance/websocket_rfc6455.rs"
+      ],
+      "category": "conformance_placeholder",
+      "owner": "conformance",
+      "reason": "These exact paths are the known conformance lexical hits after the source-truth repair beads closed. They remain visible as conformance-placeholder coverage rows, while any new conformance file or helper with mock/fake/stub/placeholder/todo/unimplemented text fails until explicitly documented.",
+      "revisit_condition": "Re-audit exact path list during asupersync-u7y final gap closure and split or remove entries whose conformance claim has been rewritten without placeholder language.",
+      "replacement_issue": "asupersync-u7y"
+    },
+    {
+      "group_id": "known-production-runtime-core-policy-hits-2026-05-05",
+      "patterns": [
+        "src/bin/asupersync.rs",
+        "src/cancel/symbol_cancel.rs",
+        "src/combinator/join.rs",
+        "src/combinator/race.rs",
+        "src/combinator/timeout.rs",
+        "src/cx/macaroon.rs",
+        "src/database/postgres.rs",
+        "src/database/sqlite.rs",
+        "src/gen_server.rs",
+        "src/lab/explorer.rs",
+        "src/lab/network/harness.rs",
+        "src/lab/oracle/cancel_signal_ordering.rs",
+        "src/lab/oracle/priority_inversion.rs",
+        "src/lab/oracle/region_leak.rs",
+        "src/lab/util/stack_trace.rs",
+        "src/net/dns/resolver.rs",
+        "src/obligation/choreography/pipeline.rs",
+        "src/obligation/saga.rs",
+        "src/record/obligation.rs",
+        "src/record/region.rs",
+        "src/runtime/epoch_tracking.rs",
+        "src/runtime/panic_isolation.rs",
+        "src/runtime/resource_monitor.rs",
+        "src/runtime/state.rs",
+        "src/runtime/task_table.rs",
+        "src/security/authenticated.rs",
+        "src/security/tag.rs",
+        "src/service/load_balance.rs",
+        "src/service/reconnect.rs",
+        "src/service/steer.rs",
+        "src/supervision.rs",
+        "src/trace/event_structure.rs",
+        "src/trace/file.rs",
+        "src/transport/mock.rs",
+        "src/types/typed_symbol.rs",
+        "src/types/wasm_abi.rs",
+        "src/util/arena.rs",
+        "src/util/stack_trace.rs"
+      ],
+      "category": "production_stub",
+      "owner": "runtime-core",
+      "reason": "These exact runtime-core production paths are known lexical hits whose behavior is either live, cfg/test-support bounded, or tracked by closed mock-code-finder repair beads. New production source paths remain uncovered and fail the gate.",
+      "revisit_condition": "Re-audit exact path list during asupersync-u7y final ratchet signoff and retire entries as wording or test-support boundaries are normalized.",
+      "replacement_issue": "asupersync-u7y"
+    },
+    {
+      "group_id": "known-production-grpc-policy-hits-2026-05-05",
+      "patterns": [
+        "src/grpc/mod.rs",
+        "src/grpc/status.rs",
+        "src/grpc/streaming.rs",
+        "src/grpc/web.rs"
+      ],
+      "category": "production_stub",
+      "owner": "grpc-core",
+      "reason": "These exact gRPC paths are known lexical hits after gRPC compression, status, and deadline source-truth repairs landed. Future gRPC production placeholders remain policy violations.",
+      "revisit_condition": "Re-audit after asupersync-oelvq2 aggregate proof and asupersync-u7y final gap closure.",
+      "replacement_issue": "asupersync-u7y"
+    },
+    {
+      "group_id": "known-production-messaging-policy-hits-2026-05-05",
+      "patterns": [
+        "src/messaging/fabric.rs",
+        "src/messaging/jetstream.rs",
+        "src/messaging/nats.rs",
+        "src/messaging/redis.rs"
+      ],
+      "category": "production_stub",
+      "owner": "messaging-core",
+      "reason": "These exact messaging paths are known lexical hits in live or tracked transport surfaces. Kafka phase-0 stubs stay under expiring waivers; new messaging paths remain uncovered.",
+      "revisit_condition": "Re-audit after asupersync-oelvq2 aggregate proof and retire entries as transport wording is normalized.",
+      "replacement_issue": "asupersync-u7y"
+    },
+    {
+      "group_id": "known-production-observability-policy-hits-2026-05-05",
+      "patterns": [
+        "src/observability/analyzer_plugin.rs",
+        "src/observability/cancellation_analyzer.rs",
+        "src/observability/diagnostics.rs",
+        "src/observability/metrics.rs",
+        "src/observability/mod.rs",
+        "src/observability/otel.rs",
+        "src/observability/otlp_trace_exporter.rs"
+      ],
+      "category": "production_stub",
+      "owner": "observability-core",
+      "reason": "These exact observability production paths are known lexical hits after the OTLP/metrics repair beads closed. Audit modules are separately categorized as stale audit prose.",
+      "revisit_condition": "Re-audit after observability evidence aggregation in asupersync-oelvq2 and final gap closure in asupersync-u7y.",
+      "replacement_issue": "asupersync-u7y"
+    },
+    {
+      "group_id": "known-production-reactor-policy-hits-2026-05-05",
+      "patterns": [
+        "src/runtime/reactor/browser.rs"
+      ],
+      "category": "production_stub",
+      "owner": "runtime-reactor",
+      "reason": "The browser reactor path contains known platform-boundary fallback terminology and remains separated from default native runtime behavior; macOS and Windows fallback exports remain expiring waivers.",
+      "expires_at_utc": "2026-06-30T00:00:00Z",
+      "replacement_issue": "asupersync-u7y"
+    },
+    {
+      "group_id": "known-production-tls-policy-hits-2026-05-05",
+      "patterns": [
+        "src/tls/connector.rs",
+        "src/tls/error.rs"
+      ],
+      "category": "production_stub",
+      "owner": "tls-core",
+      "reason": "These exact TLS paths are known lexical hits in live connector/error handling surfaces rather than hidden fake TLS behavior.",
+      "revisit_condition": "Re-audit during asupersync-u7y final ratchet signoff.",
+      "replacement_issue": "asupersync-u7y"
+    },
+    {
+      "group_id": "known-production-web-policy-hits-2026-05-05",
+      "patterns": [
+        "src/web/middleware.rs",
+        "src/web/response.rs"
+      ],
+      "category": "production_stub",
+      "owner": "web-runtime",
+      "reason": "These exact web-runtime paths are known lexical hits in live middleware/response code or documented test-support hooks. New web production placeholders remain uncovered.",
+      "revisit_condition": "Re-audit during asupersync-u7y final ratchet signoff.",
+      "replacement_issue": "asupersync-u7y"
     }
   ],
   "waivers": [

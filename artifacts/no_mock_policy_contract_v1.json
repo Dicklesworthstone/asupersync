@@ -1,0 +1,119 @@
+{
+  "contract_version": "no-mock-policy-contract-v1",
+  "schema_version": "mock-code-finder-evidence-jsonl-schema-v1",
+  "bead_id": "asupersync-a45",
+  "depends_on": [
+    "asupersync-qlvtin",
+    "asupersync-dq4"
+  ],
+  "aggregate_runner_bead": "asupersync-oelvq2",
+  "final_ratchet_bead": "asupersync-u7y",
+  "purpose": "Make the no-mock/no-placeholder policy high-signal: known intentional doubles, fixtures, audit prose, and linked gaps are documented, while new production placeholders and new conformance fake helpers fail immediately.",
+  "baseline_before_counts": {
+    "captured_from": "target/mock-code-finder/asupersync-a45/baseline-policy-report.json before this bead repaired policy coverage",
+    "scan_counts": {
+      "matching_paths": 310,
+      "matching_hits": 839,
+      "violating_paths": 294,
+      "expired_entries": 0,
+      "expired_waivers": 0
+    },
+    "category_counts": {
+      "conformance_placeholder": {
+        "paths": 42,
+        "hits": 122,
+        "covered": 0,
+        "violations": 42
+      },
+      "fixture_reference_implementation": {
+        "paths": 1,
+        "hits": 2,
+        "covered": 0,
+        "violations": 1
+      },
+      "intentional_test_double": {
+        "paths": 128,
+        "hits": 358,
+        "covered": 4,
+        "violations": 124
+      },
+      "production_stub": {
+        "paths": 75,
+        "hits": 235,
+        "covered": 12,
+        "violations": 63
+      },
+      "stale_audit_prose": {
+        "paths": 64,
+        "hits": 122,
+        "covered": 0,
+        "violations": 64
+      }
+    }
+  },
+  "required_after_invariants": {
+    "policy_status": "pass",
+    "violating_paths": 0,
+    "expired_entries": 0,
+    "expired_waivers": 0,
+    "first_failure_line": "",
+    "required_categories": [
+      "conformance_placeholder",
+      "fixture_reference_implementation",
+      "intentional_test_double",
+      "production_stub",
+      "stale_audit_prose"
+    ],
+    "metadata_required_for_allowlist_entries": [
+      "pattern_or_path",
+      "category",
+      "owner",
+      "reason",
+      "replacement_issue_for_production_conformance_or_stale_audit",
+      "expires_at_utc_or_revisit_condition"
+    ],
+    "forbidden_broad_allowlist_patterns": [
+      {
+        "category": "production_stub",
+        "pattern": "src/**"
+      },
+      {
+        "category": "conformance_placeholder",
+        "pattern": "tests/conformance/**"
+      },
+      {
+        "category": "conformance_placeholder",
+        "pattern": "conformance/**"
+      }
+    ]
+  },
+  "required_commands": [
+    "python3 scripts/check_no_mock_policy.py --report-json target/mock-code-finder/asupersync-a45/no-mock-policy-report.json --max-errors 20",
+    "python3 scripts/check_no_mock_policy.py --self-test-negative-fixture",
+    "python3 scripts/check_no_mock_policy.py --self-test-policy-fixtures",
+    "bash scripts/scan_stubs.sh",
+    "bash scripts/run_no_mock_policy_evidence.sh"
+  ],
+  "required_scenarios": [
+    {
+      "scenario_id": "NO-MOCK-POLICY-GATE-LIVE",
+      "support_class": "production_live",
+      "expected_behavior": "The current tree produces a categorized no-mock policy report with zero undocumented or expired paths."
+    },
+    {
+      "scenario_id": "NO-MOCK-NEGATIVE-CONFORMANCE-LIVE",
+      "support_class": "production_live",
+      "expected_behavior": "A newly introduced fake conformance helper is rejected as conformance_placeholder."
+    },
+    {
+      "scenario_id": "NO-MOCK-POLICY-FIXTURES-LIVE",
+      "support_class": "production_live",
+      "expected_behavior": "Parser/classifier fixtures cover legitimate test doubles, new production placeholders, duplicate allowlist rows, expired rows, and missing replacement_issue metadata."
+    },
+    {
+      "scenario_id": "NO-MOCK-STUB-SCAN-RATCHET-LIVE",
+      "support_class": "production_live",
+      "expected_behavior": "The existing scan_stubs.sh production ratchet remains green after the no-mock policy coverage repair."
+    }
+  ]
+}

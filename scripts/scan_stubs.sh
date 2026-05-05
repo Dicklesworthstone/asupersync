@@ -142,7 +142,7 @@ allowlist_symbol_matches_file() {
     if [[ "$symbol" == *"*"* ]]; then
         local symbol_regex
         symbol_regex="$(allowlist_symbol_regex "$symbol")"
-        rg -q --pcre2 "$symbol_regex" "$path"
+        rg -q "$symbol_regex" "$path"
         return
     fi
 
