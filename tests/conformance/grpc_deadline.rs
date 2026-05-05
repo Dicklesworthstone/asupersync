@@ -123,6 +123,65 @@ fn call_context_applies_explicit_default_and_invalid_timeout_contracts() {
 }
 
 #[test]
+fn call_context_clamps_peer_timeout_to_server_max_without_clamping_default() {
+    let now = Instant::now();
+    let capped = CallContext::from_metadata_at_with_max_deadline(
+        metadata_with_timeout("3600S"),
+        Some(Duration::from_secs(120)),
+        Some(Duration::from_secs(30)),
+        Some("127.0.0.1:50051".to_string()),
+        now,
+    );
+    assert_eq!(
+        capped.deadline(),
+        Some(now + Duration::from_secs(30)),
+        "peer grpc-timeout must be clamped to the server max_request_deadline cap"
+    );
+    assert_eq!(capped.remaining_at(now), Some(Duration::from_secs(30)));
+    assert_eq!(capped.timeout_header_value_at(now), Some("30S".to_string()));
+
+    let defaulted = CallContext::from_metadata_at_with_max_deadline(
+        Metadata::new(),
+        Some(Duration::from_secs(120)),
+        Some(Duration::from_secs(30)),
+        None,
+        now,
+    );
+    assert_eq!(
+        defaulted.deadline(),
+        Some(now + Duration::from_secs(120)),
+        "absent grpc-timeout uses the operator default and is not capped again"
+    );
+
+    let malformed = CallContext::from_metadata_at_with_max_deadline(
+        metadata_with_timeout("3600s"),
+        Some(Duration::from_secs(120)),
+        Some(Duration::from_secs(30)),
+        None,
+        now,
+    );
+    assert_eq!(
+        malformed.deadline(),
+        None,
+        "malformed present grpc-timeout must fail closed instead of using default or cap"
+    );
+
+    log_deadline_event(DeadlineLog {
+        scenario_id: "server-max-deadline-clamps-peer-timeout",
+        metadata_in: "grpc-timeout:3600S",
+        metadata_out: "grpc-timeout:30S",
+        virtual_now: "0ns",
+        deadline: "30s",
+        expected_status: Code::Ok,
+        actual_status: Code::Ok,
+        health_state: "not_applicable",
+        cancellation_observed: false,
+        verdict: "pass",
+        first_failure: "",
+    });
+}
+
+#[test]
 fn call_context_with_cx_preserves_deadline_metadata_and_capability_context() {
     let now = Instant::now();
     let call = CallContext::from_metadata_at(metadata_with_timeout("750m"), None, None, now);
