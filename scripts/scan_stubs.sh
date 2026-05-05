@@ -20,6 +20,8 @@ PROFILE_FAMILY="stub-resolution-scan"
 COMMAND_STRING="bash ${SCRIPT_DIR}/$(basename "$0")"
 CONFIG_SNAPSHOT_REF="docs/stub_closure_policy.md::Scan Rules; TESTING.md::Shared Validation Contract (asupersync-ay6qvw)"
 STARTED_TS="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+RCKSTB_INVENTORY_FILE="${PROJECT_ROOT}/artifacts/stub_placeholder_inventory_v1.json"
+RCKSTB_INVENTORY_SUMMARY_JSON='{"schema_version":"stub-placeholder-inventory-summary-v1","artifact_path":"artifacts/stub_placeholder_inventory_v1.json","scanned_paths":[],"marker_count":0,"disposition_counts":{},"unclassified_count":0,"verdict":"blocked","first_failure":"inventory summary not run"}'
 
 mkdir -p "$ARTIFACT_ROOT"
 : >"$TMP_EVENTS"
@@ -227,6 +229,147 @@ check_stub_allowlist_file_is_valid() {
         report_fail "ZR-SCAN-ALLOWLIST-SYMBOLS" "Stub allowlist references symbols that are no longer present" "$(printf '%s' "$missing_symbols" | sed '/^$/d')"
     else
         report_pass "ZR-SCAN-ALLOWLIST-SYMBOLS" "Stub allowlist symbols still match the referenced files" "allowlist remains anchored to live surfaces"
+    fi
+}
+
+build_rckstb_inventory_summary() {
+    if [[ ! -f "$RCKSTB_INVENTORY_FILE" ]]; then
+        jq -nc \
+            --arg artifact_path "artifacts/stub_placeholder_inventory_v1.json" \
+            --arg first_failure "inventory file is missing" \
+            '{
+              schema_version: "stub-placeholder-inventory-summary-v1",
+              artifact_path: $artifact_path,
+              scanned_paths: [],
+              marker_count: 0,
+              selector_count: 0,
+              disposition_counts: {},
+              unclassified_count: 1,
+              verdict: "fail",
+              first_failure: $first_failure
+            }'
+        return 0
+    fi
+
+    python3 - "$PROJECT_ROOT" "$RCKSTB_INVENTORY_FILE" <<'PY'
+import json
+import pathlib
+import sys
+from collections import Counter
+
+project_root = pathlib.Path(sys.argv[1])
+inventory_path = pathlib.Path(sys.argv[2])
+artifact_path = "artifacts/stub_placeholder_inventory_v1.json"
+
+try:
+    inventory = json.loads(inventory_path.read_text(encoding="utf-8"))
+except Exception as exc:  # noqa: BLE001 - shell summary must stay diagnostic.
+    print(json.dumps({
+        "schema_version": "stub-placeholder-inventory-summary-v1",
+        "artifact_path": artifact_path,
+        "scanned_paths": [],
+        "marker_count": 0,
+        "selector_count": 0,
+        "disposition_counts": {},
+        "unclassified_count": 1,
+        "verdict": "fail",
+        "first_failure": f"failed to read inventory: {exc}",
+    }, sort_keys=True))
+    raise SystemExit(0)
+
+terms = [str(term) for term in inventory.get("marker_terms", [])]
+extensions = {str(ext) for ext in inventory.get("file_extensions", [])}
+selectors = list(inventory.get("selectors", []))
+
+
+def selector_matches(selector: dict, rel_path: str, text: str, term: str) -> bool:
+    exact_paths = selector.get("paths", []) or []
+    prefixes = selector.get("path_prefixes", []) or []
+    path_matches = rel_path in exact_paths or any(rel_path.startswith(prefix) for prefix in prefixes)
+    if not path_matches:
+        return False
+
+    text_lower = text.lower()
+    term_lower = term.lower()
+    for selector_term in selector.get("terms", []) or []:
+        selector_term_lower = str(selector_term).lower()
+        if selector_term_lower in text_lower or selector_term_lower in term_lower:
+            return True
+    return False
+
+
+markers = []
+for root_name in inventory.get("scanned_paths", []):
+    root = project_root / str(root_name)
+    if not root.exists():
+        continue
+    for path in sorted(root.rglob("*")):
+        if not path.is_file() or path.suffix.removeprefix(".") not in extensions:
+            continue
+        rel_path = path.relative_to(project_root).as_posix()
+        try:
+            lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+        except OSError:
+            continue
+        for line_no, line in enumerate(lines, start=1):
+            line_lower = line.lower()
+            for term in terms:
+                if term.lower() in line_lower:
+                    markers.append({
+                        "path": rel_path,
+                        "line": line_no,
+                        "term": term,
+                        "text": line.strip(),
+                    })
+
+unclassified = []
+disposition_counts: Counter[str] = Counter()
+for marker in markers:
+    matched = next(
+        (
+            selector
+            for selector in selectors
+            if selector_matches(selector, marker["path"], marker["text"], marker["term"])
+        ),
+        None,
+    )
+    if matched is None:
+        unclassified.append(marker)
+    else:
+        disposition_counts[str(matched.get("disposition", "unknown"))] += 1
+
+first_failure = ""
+if unclassified:
+    marker = unclassified[0]
+    first_failure = f"{marker['path']}:{marker['line']}:{marker['term']}: {marker['text']}"
+
+print(json.dumps({
+    "schema_version": "stub-placeholder-inventory-summary-v1",
+    "artifact_path": artifact_path,
+    "scanned_paths": inventory.get("scanned_paths", []),
+    "marker_count": len(markers),
+    "selector_count": len(selectors),
+    "disposition_counts": dict(sorted(disposition_counts.items())),
+    "unclassified_count": len(unclassified),
+    "verdict": "pass" if not unclassified else "fail",
+    "first_failure": first_failure,
+}, sort_keys=True))
+PY
+}
+
+check_rckstb_placeholder_inventory_is_classified() {
+    RCKSTB_INVENTORY_SUMMARY_JSON="$(build_rckstb_inventory_summary)"
+    local marker_count
+    local unclassified_count
+    local first_failure
+    marker_count="$(jq -r '.marker_count // 0' <<<"$RCKSTB_INVENTORY_SUMMARY_JSON")"
+    unclassified_count="$(jq -r '.unclassified_count // 0' <<<"$RCKSTB_INVENTORY_SUMMARY_JSON")"
+    first_failure="$(jq -r '.first_failure // ""' <<<"$RCKSTB_INVENTORY_SUMMARY_JSON")"
+
+    if [[ "$unclassified_count" == "0" ]]; then
+        report_pass "ZR-SCAN-RCKSTB-INVENTORY" "rckstb placeholder inventory classifies live markers" "marker_count=${marker_count}; unclassified_count=0; artifact=artifacts/stub_placeholder_inventory_v1.json"
+    else
+        report_fail "ZR-SCAN-RCKSTB-INVENTORY" "rckstb placeholder inventory has unclassified markers" "unclassified_count=${unclassified_count}; first_failure=${first_failure}"
     fi
 }
 
@@ -517,6 +660,7 @@ check_no_unimplemented_in_examples_and_tests() {
 }
 
 check_stub_allowlist_file_is_valid
+check_rckstb_placeholder_inventory_is_classified
 check_no_stray_binaries_in_src
 check_no_crate_level_dead_code_allow
 check_no_todo_in_production
@@ -564,6 +708,7 @@ jq -nc \
     --arg checks_total "$CHECKS_TOTAL" \
     --arg failures "$FAILURES" \
     --arg exit_code "$EXIT_CODE" \
+    --argjson rckstb_inventory "$RCKSTB_INVENTORY_SUMMARY_JSON" \
     '{
       schema_version: $schema_version,
       bead_id: $bead_id,
@@ -587,7 +732,15 @@ jq -nc \
       failures: ($failures | tonumber),
       started_ts: $started_ts,
       ended_ts: $ended_ts,
-      events_path: $events_path
+      events_path: $events_path,
+      rckstb_scanned_paths: $rckstb_inventory.scanned_paths,
+      rckstb_marker_count: $rckstb_inventory.marker_count,
+      rckstb_disposition_counts: $rckstb_inventory.disposition_counts,
+      rckstb_unclassified_count: $rckstb_inventory.unclassified_count,
+      rckstb_inventory_artifact_path: $rckstb_inventory.artifact_path,
+      rckstb_inventory_verdict: $rckstb_inventory.verdict,
+      rckstb_inventory_first_failure: $rckstb_inventory.first_failure,
+      rckstb_placeholder_inventory: $rckstb_inventory
     }' >"$TMP_SUMMARY"
 
 mv "$TMP_EVENTS" "$EVENTS_FILE"

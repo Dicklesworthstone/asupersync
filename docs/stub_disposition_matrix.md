@@ -141,17 +141,25 @@ from detached source files.
 - **Disposition**: **RETIRE** → Track I (I3/v2ofj7.9.3)
 - **Target**: Move to `docs/design/` or archive.
 
+## Reality-Check Overlay (2026-05-05)
+
+### Surface 19: Live placeholder marker classification
+- **Files**: `artifacts/stub_placeholder_inventory_v1.json`, `tests/stub_resolution_audit.rs`, `scripts/scan_stubs.sh`
+- **State**: **DOCUMENTED** — bead `asupersync-rckstb` adds a machine-readable inventory for current `src/`, `tests/`, and `conformance/` TODO/FIXME/stub/placeholder/unimplemented markers. The inventory classifies product-facing and conformance-facing markers as terminology, internal bookkeeping, explicit unsupported/deferred behavior, fixture/reference evidence, obsolete retained scaffolding, legitimate test harnesses, or linked follow-up beads. The scan runner now emits the rckstb `scanned_paths`, `marker_count`, `disposition_counts`, `unclassified_count`, `artifact_path`, `verdict`, and `first_failure` fields in its summary.
+- **Disposition**: **DOCUMENT** → Track Z / `asupersync-rckstb`
+- **Target**: Keep `unclassified_count = 0`; placeholder-only conformance rows must never be counted as production-live pass evidence unless a later bead replaces the placeholder path with a real seam and updates this inventory.
+
 ## Disposition Summary
 
 | Disposition | Count | Surfaces |
 |-------------|-------|----------|
 | RESOLVED | 7 | #2, #3, #4, #11, #12, #14, #16 |
 | IMPLEMENT | 3 | #6, #7, #17 |
-| DOCUMENT | 3 | #5, #9, #10 |
+| DOCUMENT | 4 | #5, #9, #10, #19 |
 | CONVERGE | 1 | #1 |
 | QUARANTINE | 1 | #13 |
 | RETIRE | 3 | #8, #15, #18 |
-| **Total** | **18** | |
+| **Total** | **19** | |
 
 ## Track-to-Surface Mapping
 
@@ -166,5 +174,5 @@ from detached source files.
 | G | #7 | IMPLEMENT |
 | H | #8, #9, #10 | RETIRE, DOCUMENT, DOCUMENT |
 | I | #13, #17, #18 | QUARANTINE, IMPLEMENT, RETIRE |
-| Z | All | Verification of above |
+| Z | All, #19 | Verification of above plus live marker classification ratchet |
 | Hygiene | #14, #15, #16 | #14 RESOLVED, #15 RETIRE, #16 RESOLVED |

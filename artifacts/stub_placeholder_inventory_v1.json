@@ -1,0 +1,464 @@
+{
+  "schema_version": "stub-placeholder-inventory-v1",
+  "bead_id": "asupersync-rckstb",
+  "scanned_paths": [
+    "src",
+    "tests",
+    "conformance"
+  ],
+  "file_extensions": [
+    "rs",
+    "md"
+  ],
+  "marker_terms": [
+    "TODO",
+    "FIXME",
+    "todo!(",
+    "unimplemented!(",
+    "placeholder",
+    "stub",
+    "not yet implemented",
+    "not implemented"
+  ],
+  "allowed_dispositions": [
+    "documented_deferred_surface",
+    "explicitly_unsupported",
+    "fixture_reference",
+    "follow_up_bead",
+    "legitimate_test_harness",
+    "obsolete_retained_no_delete",
+    "ratchet_fixture",
+    "terminology_not_stub"
+  ],
+  "allowed_support_classes": [
+    "blocked_follow_up",
+    "documented_runtime_semantics",
+    "explicitly_unsupported",
+    "fixture_reference",
+    "internal_bookkeeping",
+    "not_conformance_evidence",
+    "test_harness",
+    "terminology"
+  ],
+  "classification_policy": {
+    "unclassified_count": 0,
+    "conformance_placeholder_evidence": "Placeholder-only conformance rows must classify as fixture_reference, explicitly_unsupported, obsolete_retained_no_delete, blocked_follow_up, or test_harness; they must never be counted as production_live pass evidence.",
+    "product_placeholder_evidence": "Production-facing markers must either be terminology/internal bookkeeping, explicit unsupported behavior with a stable reason, or linked to a concrete follow-up bead."
+  },
+  "selectors": [
+    {
+      "id": "src-security-zero-tag-sentinel",
+      "paths": [
+        "src/security/authenticated.rs",
+        "src/security/tag.rs",
+        "src/types/typed_symbol.rs"
+      ],
+      "terms": [
+        "placeholder"
+      ],
+      "disposition": "documented_deferred_surface",
+      "support_class": "documented_runtime_semantics",
+      "blocker_bead_id": "asupersync-srqosl",
+      "notes": "Zero tags are documented invalid sentinels for legacy typed-symbol callsites and are not accepted as verified authentication."
+    },
+    {
+      "id": "src-proc-macro-disabled-fail-closed",
+      "paths": [
+        "src/combinator/join.rs",
+        "src/combinator/race.rs",
+        "src/lib.rs"
+      ],
+      "terms": [
+        "placeholder",
+        "unavailable until"
+      ],
+      "disposition": "explicitly_unsupported",
+      "support_class": "explicitly_unsupported",
+      "blocker_bead_id": "",
+      "notes": "Macro placeholders are compile-error or documentation boundaries for builds without proc-macros, not silent runtime behavior."
+    },
+    {
+      "id": "src-nats-tls-upgrade-deferred",
+      "paths": [
+        "src/messaging/nats.rs"
+      ],
+      "terms": [
+        "not yet implemented",
+        "TODO"
+      ],
+      "disposition": "explicitly_unsupported",
+      "support_class": "explicitly_unsupported",
+      "blocker_bead_id": "asupersync-2kmc12",
+      "notes": "The NATS TLS upgrade path refuses cleartext CONNECT with a stable error string and linked blocker."
+    },
+    {
+      "id": "src-grpc-unimplemented-status-test-vector",
+      "paths": [
+        "src/grpc/streaming.rs",
+        "src/grpc/status.rs"
+      ],
+      "terms": [
+        "Status::unimplemented",
+        "not implemented",
+        "feature not yet implemented"
+      ],
+      "disposition": "legitimate_test_harness",
+      "support_class": "test_harness",
+      "blocker_bead_id": "",
+      "notes": "These occurrences are gRPC status-code test vectors, not product code returning an unfinished streaming implementation."
+    },
+    {
+      "id": "src-sql-and-text-placeholder-terminology",
+      "paths": [
+        "src/database/postgres.rs",
+        "src/http/h1/types.rs",
+        "src/observability/diagnostics.rs",
+        "src/tls/error.rs"
+      ],
+      "terms": [
+        "placeholder",
+        "Not Implemented"
+      ],
+      "disposition": "terminology_not_stub",
+      "support_class": "terminology",
+      "blocker_bead_id": "",
+      "notes": "The term names SQL bind slots or replacement characters; it is not unfinished behavior."
+    },
+    {
+      "id": "src-postgres-tls-and-reconnect-audit",
+      "paths": [
+        "src/database/postgres.rs"
+      ],
+      "terms": [
+        "stub",
+        "not implemented"
+      ],
+      "disposition": "follow_up_bead",
+      "support_class": "blocked_follow_up",
+      "blocker_bead_id": "asupersync-yex",
+      "notes": "Postgres TLS cfg-off stubs are explicit feature boundaries; reconnect NOT_IMPLEMENTED audit prose remains tracked as follow-up gap debt."
+    },
+    {
+      "id": "src-cx-type-state-negative-proofs",
+      "path_prefixes": [
+        "src/cx/"
+      ],
+      "terms": [
+        "not implemented"
+      ],
+      "disposition": "legitimate_test_harness",
+      "support_class": "test_harness",
+      "blocker_bead_id": "",
+      "notes": "Cx wrapper negative examples assert that disabled capabilities intentionally do not implement marker traits."
+    },
+    {
+      "id": "src-grpc-retained-audit-and-status-markers",
+      "path_prefixes": [
+        "src/grpc/"
+      ],
+      "terms": [
+        "placeholder",
+        "stub",
+        "not implemented",
+        "Status::unimplemented"
+      ],
+      "disposition": "follow_up_bead",
+      "support_class": "blocked_follow_up",
+      "blocker_bead_id": "asupersync-yex",
+      "notes": "gRPC retained comments are either removed-stub guardrails, status test vectors, or deadline-audit follow-up debt; none is counted as a live conformance pass."
+    },
+    {
+      "id": "src-gen-server-lease-placeholder",
+      "paths": [
+        "src/gen_server.rs"
+      ],
+      "terms": [
+        "placeholder"
+      ],
+      "disposition": "documented_deferred_surface",
+      "support_class": "internal_bookkeeping",
+      "blocker_bead_id": "",
+      "notes": "The gen_server lease-name placeholder is an explicit internal fallback used after a lease is taken."
+    },
+    {
+      "id": "src-kafka-stubbroker-harness",
+      "path_prefixes": [
+        "src/messaging/kafka.rs",
+        "src/messaging/kafka_consumer.rs"
+      ],
+      "terms": [
+        "stub"
+      ],
+      "disposition": "documented_deferred_surface",
+      "support_class": "test_harness",
+      "blocker_bead_id": "",
+      "notes": "StubBroker is the documented cfg-off deterministic harness lane and is protected from production use by explicit diagnostics."
+    },
+    {
+      "id": "src-messaging-session-synthesis-terminology",
+      "path_prefixes": [
+        "src/messaging/session/"
+      ],
+      "terms": [
+        "placeholder"
+      ],
+      "disposition": "terminology_not_stub",
+      "support_class": "terminology",
+      "blocker_bead_id": "",
+      "notes": "SynthesizedHandlerPlaceholder is a type alias naming generated protocol scaffolding, not an unfinished production branch."
+    },
+    {
+      "id": "src-net-dns-explicit-unsupported",
+      "path_prefixes": [
+        "src/net/dns/"
+      ],
+      "terms": [
+        "not implemented"
+      ],
+      "disposition": "explicitly_unsupported",
+      "support_class": "explicitly_unsupported",
+      "blocker_bead_id": "",
+      "notes": "DNS feature gaps surface through a typed NotImplemented error and tests assert the stable message."
+    },
+    {
+      "id": "src-obligation-codegen-stub-terminology",
+      "paths": [
+        "src/obligation/choreography/codegen.rs"
+      ],
+      "terms": [
+        "stub"
+      ],
+      "disposition": "terminology_not_stub",
+      "support_class": "internal_bookkeeping",
+      "blocker_bead_id": "",
+      "notes": "The code generator uses stub terminology for generated message handler skeletons under explicit choreography tests."
+    },
+    {
+      "id": "src-runtime-internal-bookkeeping-placeholders",
+      "path_prefixes": [
+        "src/cx/",
+        "src/lab/",
+        "src/obligation/",
+        "src/record/",
+        "src/runtime/",
+        "src/trace/",
+        "src/types/wasm_abi.rs",
+        "src/util/",
+        "src/web/"
+      ],
+      "terms": [
+        "placeholder",
+        "TODO",
+        "not yet implemented"
+      ],
+      "disposition": "documented_deferred_surface",
+      "support_class": "internal_bookkeeping",
+      "blocker_bead_id": "",
+      "notes": "These markers describe explicit sentinel IDs, disabled stack traces, design comments, or audit assertions rather than hidden shipped support."
+    },
+    {
+      "id": "src-messaging-fabric-data-capsule",
+      "paths": [
+        "src/messaging/fabric.rs"
+      ],
+      "terms": [
+        "placeholder"
+      ],
+      "disposition": "follow_up_bead",
+      "support_class": "blocked_follow_up",
+      "blocker_bead_id": "asupersync-yex",
+      "notes": "The subject-fabric data capsule marker is product-adjacent and remains tracked under mock-code-finder gap closure."
+    },
+    {
+      "id": "src-observability-audit-marker-fixtures",
+      "path_prefixes": [
+        "src/observability/"
+      ],
+      "terms": [
+        "TODO",
+        "placeholder",
+        "stub",
+        "not implemented"
+      ],
+      "disposition": "legitimate_test_harness",
+      "support_class": "test_harness",
+      "blocker_bead_id": "",
+      "notes": "The remaining observability src/ markers are audit-test fixtures that assert previous placeholders stay closed."
+    },
+    {
+      "id": "src-raptorq-stubborn-terminology",
+      "paths": [
+        "src/raptorq/decoder.rs"
+      ],
+      "terms": [
+        "stub"
+      ],
+      "disposition": "terminology_not_stub",
+      "support_class": "terminology",
+      "blocker_bead_id": "",
+      "notes": "The scanner term 'stub' matches the word 'stubborn' in RaptorQ inactivation documentation; this is terminology, not a stub."
+    },
+    {
+      "id": "src-runtime-platform-unsupported-and-reactor-stubs",
+      "path_prefixes": [
+        "src/runtime/"
+      ],
+      "terms": [
+        "stub",
+        "not implemented"
+      ],
+      "disposition": "documented_deferred_surface",
+      "support_class": "explicitly_unsupported",
+      "blocker_bead_id": "",
+      "notes": "Runtime reactor/resource monitor markers are platform cfg-off or unsupported-platform diagnostics with explicit errors."
+    },
+    {
+      "id": "src-tls-disabled-stub-boundaries",
+      "path_prefixes": [
+        "src/tls/"
+      ],
+      "terms": [
+        "stub"
+      ],
+      "disposition": "explicitly_unsupported",
+      "support_class": "explicitly_unsupported",
+      "blocker_bead_id": "",
+      "notes": "TLS-disabled build stubs are feature-gated no-op or unsupported boundaries and do not claim TLS behavior."
+    },
+    {
+      "id": "src-http-status-terminology",
+      "path_prefixes": [
+        "src/http/",
+        "src/web/"
+      ],
+      "terms": [
+        "Not Implemented"
+      ],
+      "disposition": "terminology_not_stub",
+      "support_class": "terminology",
+      "blocker_bead_id": "",
+      "notes": "HTTP 501 Not Implemented constants are protocol status names, not implementation placeholders."
+    },
+    {
+      "id": "conformance-otel-placeholder-bins",
+      "path_prefixes": [
+        "conformance/src/bin/otel_",
+        "conformance/src/bin/metric_aggregator_conformance.rs",
+        "conformance/src/otlp_wire_format.rs"
+      ],
+      "terms": [
+        "TODO",
+        "placeholder",
+        "simulate",
+        "actual implementation"
+      ],
+      "disposition": "follow_up_bead",
+      "support_class": "blocked_follow_up",
+      "blocker_bead_id": "asupersync-j5f",
+      "notes": "OpenTelemetry conformance simulations are not live conformance passes; histogram/metric snapshots are tracked by j5f and the broader yn7/uw9zg9 lane."
+    },
+    {
+      "id": "conformance-h2-legacy-placeholder-harnesses",
+      "path_prefixes": [
+        "conformance/src/h2_"
+      ],
+      "terms": [
+        "not yet implemented",
+        "placeholder",
+        "For now",
+        "would need to be implemented"
+      ],
+      "disposition": "obsolete_retained_no_delete",
+      "support_class": "not_conformance_evidence",
+      "blocker_bead_id": "asupersync-yex",
+      "notes": "Legacy conformance-crate H2 simulations remain retained on disk; live H2 proof moved to the root tests/conformance lanes shipped by 3swoux/603/ci9/nsp/c26/3sb."
+    },
+    {
+      "id": "conformance-raptorq-fixture-maintenance",
+      "path_prefixes": [
+        "conformance/raptorq_rfc6330/",
+        "tests/conformance/raptorq_rfc6330/",
+        "tests/raptorq_perf_invariants.rs"
+      ],
+      "terms": [
+        "TODO",
+        "placeholder",
+        "not yet implemented"
+      ],
+      "disposition": "fixture_reference",
+      "support_class": "fixture_reference",
+      "blocker_bead_id": "asupersync-kokw3m",
+      "notes": "RFC6330 fixture maintenance placeholders are fixture/reference workflow debt and are no longer counted as live production evidence."
+    },
+    {
+      "id": "conformance-grpc-connect-streaming-skips",
+      "path_prefixes": [
+        "conformance/src/grpc_connect/"
+      ],
+      "terms": [
+        "placeholder",
+        "not yet implemented"
+      ],
+      "disposition": "explicitly_unsupported",
+      "support_class": "explicitly_unsupported",
+      "blocker_bead_id": "asupersync-yex",
+      "notes": "Skipped gRPC CONNECT streaming cases advertise unsupported status instead of pass evidence."
+    },
+    {
+      "id": "tests-conformance-general-placeholders",
+      "path_prefixes": [
+        "tests/conformance/"
+      ],
+      "terms": [
+        "TODO",
+        "placeholder",
+        "not yet implemented",
+        "actual implementation"
+      ],
+      "disposition": "fixture_reference",
+      "support_class": "fixture_reference",
+      "blocker_bead_id": "asupersync-rckstb",
+      "notes": "Root conformance-test markers are treated as fixture/test-harness metadata unless a narrower bead promotes that lane to production_live evidence."
+    },
+    {
+      "id": "tests-audit-and-metamorphic-marker-comments",
+      "path_prefixes": [
+        "tests/"
+      ],
+      "terms": [
+        "TODO",
+        "FIXME",
+        "todo!(",
+        "unimplemented!(",
+        "placeholder",
+        "stub",
+        "not yet implemented",
+        "not implemented"
+      ],
+      "disposition": "legitimate_test_harness",
+      "support_class": "test_harness",
+      "blocker_bead_id": "",
+      "notes": "Non-conformance tests contain audit prose, negative fixtures, and API status vectors; they are not shipped product placeholders."
+    },
+    {
+      "id": "conformance-general-retained-placeholders",
+      "path_prefixes": [
+        "conformance/"
+      ],
+      "terms": [
+        "TODO",
+        "FIXME",
+        "todo!(",
+        "unimplemented!(",
+        "placeholder",
+        "stub",
+        "not yet implemented",
+        "not implemented"
+      ],
+      "disposition": "follow_up_bead",
+      "support_class": "blocked_follow_up",
+      "blocker_bead_id": "asupersync-yex",
+      "notes": "Fallback classification for retained conformance-crate markers not covered by a narrower selector; these are blocked follow-up surfaces, not pass evidence."
+    }
+  ]
+}

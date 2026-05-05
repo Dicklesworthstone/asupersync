@@ -8,7 +8,7 @@
 //!
 //! Probe naming: `probe_NN_description` where NN maps to the disposition matrix surface.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::Path;
 use std::process::Command;
@@ -161,6 +161,133 @@ fn incomplete_marker_report_json(hits: &[IncompleteMarker]) -> String {
         "markers": markers,
     })
     .to_string()
+}
+
+#[derive(Debug, Clone, Eq, PartialEq, Ord, PartialOrd)]
+struct PlaceholderInventoryMarker {
+    path: String,
+    line: usize,
+    term: String,
+    text: String,
+}
+
+fn json_string_array(value: &serde_json::Value, field: &str) -> Vec<String> {
+    value
+        .get(field)
+        .and_then(serde_json::Value::as_array)
+        .unwrap_or_else(|| panic!("inventory field {field} must be an array"))
+        .iter()
+        .map(|item| {
+            item.as_str()
+                .unwrap_or_else(|| panic!("inventory field {field} contains a non-string"))
+                .to_owned()
+        })
+        .collect()
+}
+
+fn json_required_str<'a>(value: &'a serde_json::Value, field: &str) -> &'a str {
+    value
+        .get(field)
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_else(|| panic!("inventory field {field} must be a string"))
+}
+
+fn inventory_selector_matches(
+    selector: &serde_json::Value,
+    path: &str,
+    text: &str,
+    term: &str,
+) -> bool {
+    let paths = selector
+        .get("paths")
+        .and_then(serde_json::Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(serde_json::Value::as_str)
+        .collect::<Vec<_>>();
+    let prefixes = selector
+        .get("path_prefixes")
+        .and_then(serde_json::Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(serde_json::Value::as_str)
+        .collect::<Vec<_>>();
+    let path_matches = paths.iter().any(|exact| path == *exact)
+        || prefixes.iter().any(|prefix| path.starts_with(prefix));
+    if !path_matches {
+        return false;
+    }
+
+    let text_lower = text.to_ascii_lowercase();
+    let term_lower = term.to_ascii_lowercase();
+    json_string_array(selector, "terms")
+        .iter()
+        .any(|selector_term| {
+            let selector_term_lower = selector_term.to_ascii_lowercase();
+            term_lower.contains(&selector_term_lower) || text_lower.contains(&selector_term_lower)
+        })
+}
+
+fn walk_marker_inventory_files(root: &Path, extensions: &[String]) -> Vec<std::path::PathBuf> {
+    fn inner(dir: &Path, extensions: &[String], files: &mut Vec<std::path::PathBuf>) {
+        let Ok(entries) = fs::read_dir(dir) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                inner(&path, extensions, files);
+            } else if path
+                .extension()
+                .and_then(|ext| ext.to_str())
+                .is_some_and(|ext| extensions.iter().any(|allowed| allowed == ext))
+            {
+                files.push(path);
+            }
+        }
+    }
+
+    let mut files = Vec::new();
+    inner(root, extensions, &mut files);
+    files
+}
+
+fn live_placeholder_inventory_markers(
+    inventory: &serde_json::Value,
+) -> Vec<PlaceholderInventoryMarker> {
+    let roots = json_string_array(inventory, "scanned_paths");
+    let extensions = json_string_array(inventory, "file_extensions");
+    let terms = json_string_array(inventory, "marker_terms");
+    let mut markers = Vec::new();
+
+    for root in roots {
+        for file in walk_marker_inventory_files(Path::new(&root), &extensions) {
+            let path = file.to_string_lossy().replace('\\', "/");
+            let Ok(source) = fs::read_to_string(&file) else {
+                continue;
+            };
+
+            for (line_index, line) in source.lines().enumerate() {
+                let line_lower = line.to_ascii_lowercase();
+                for term in &terms {
+                    if line_lower.contains(&term.to_ascii_lowercase()) {
+                        markers.push(PlaceholderInventoryMarker {
+                            path: path.clone(),
+                            line: line_index + 1,
+                            term: term.clone(),
+                            text: line.trim().to_owned(),
+                        });
+                    }
+                }
+            }
+        }
+    }
+
+    markers
+        .into_iter()
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect()
 }
 
 // ── Probe 01: No stray binaries in src/ (Surface #14) ──────────────────
@@ -653,5 +780,154 @@ fn probe_20_live_production_incomplete_markers_are_tracked() {
     eprintln!(
         "[PASS] Live production incomplete markers are tracked: {}",
         tracked.join(", ")
+    );
+}
+
+// ── Probe 21: rckstb placeholder inventory classifies live markers ─────
+
+#[test]
+fn probe_21_rckstb_placeholder_inventory_classifies_live_markers() {
+    let inventory_path = "artifacts/stub_placeholder_inventory_v1.json";
+    let inventory: serde_json::Value =
+        serde_json::from_str(&read_source(inventory_path)).expect("inventory must be valid JSON");
+
+    assert_eq!(
+        json_required_str(&inventory, "schema_version"),
+        "stub-placeholder-inventory-v1"
+    );
+    assert_eq!(
+        json_required_str(&inventory, "bead_id"),
+        "asupersync-rckstb"
+    );
+    assert_eq!(
+        json_string_array(&inventory, "scanned_paths"),
+        vec!["src", "tests", "conformance"]
+    );
+
+    let allowed_dispositions = json_string_array(&inventory, "allowed_dispositions")
+        .into_iter()
+        .collect::<BTreeSet<_>>();
+    let allowed_support_classes = json_string_array(&inventory, "allowed_support_classes")
+        .into_iter()
+        .collect::<BTreeSet<_>>();
+    let selectors = inventory
+        .get("selectors")
+        .and_then(serde_json::Value::as_array)
+        .expect("selectors must be an array");
+    assert!(!selectors.is_empty(), "inventory must define selectors");
+
+    let mut selector_ids = BTreeSet::new();
+    for selector in selectors {
+        let id = json_required_str(selector, "id");
+        assert!(
+            selector_ids.insert(id.to_owned()),
+            "duplicate selector id {id}"
+        );
+
+        let has_exact_paths = selector
+            .get("paths")
+            .and_then(serde_json::Value::as_array)
+            .is_some_and(|paths| !paths.is_empty());
+        let has_prefixes = selector
+            .get("path_prefixes")
+            .and_then(serde_json::Value::as_array)
+            .is_some_and(|paths| !paths.is_empty());
+        assert!(
+            has_exact_paths || has_prefixes,
+            "selector {id} must name paths or path_prefixes"
+        );
+        assert!(
+            !json_string_array(selector, "terms").is_empty(),
+            "selector {id} must name marker terms"
+        );
+
+        let disposition = json_required_str(selector, "disposition");
+        assert!(
+            allowed_dispositions.contains(disposition),
+            "selector {id} has unsupported disposition {disposition}"
+        );
+        let support_class = json_required_str(selector, "support_class");
+        assert!(
+            allowed_support_classes.contains(support_class),
+            "selector {id} has unsupported support class {support_class}"
+        );
+
+        if support_class == "blocked_follow_up" {
+            let blocker = json_required_str(selector, "blocker_bead_id");
+            assert!(
+                blocker.starts_with("asupersync-"),
+                "blocked selector {id} must link a concrete follow-up bead"
+            );
+        }
+        assert!(
+            !json_required_str(selector, "notes").is_empty(),
+            "selector {id} must explain the disposition"
+        );
+    }
+
+    let markers = live_placeholder_inventory_markers(&inventory);
+    assert!(
+        !markers.is_empty(),
+        "inventory scan should observe current marker surfaces"
+    );
+
+    let mut unclassified = Vec::new();
+    let mut disposition_counts = BTreeMap::<String, usize>::new();
+    for marker in &markers {
+        let Some(selector) = selectors.iter().find(|selector| {
+            inventory_selector_matches(selector, &marker.path, &marker.text, &marker.term)
+        }) else {
+            unclassified.push(format!(
+                "{}:{}:{}: {}",
+                marker.path, marker.line, marker.term, marker.text
+            ));
+            continue;
+        };
+
+        let disposition = json_required_str(selector, "disposition").to_owned();
+        *disposition_counts.entry(disposition).or_default() += 1;
+
+        if marker.path.starts_with("conformance/") || marker.path.starts_with("tests/conformance/")
+        {
+            let support_class = json_required_str(selector, "support_class");
+            assert!(
+                matches!(
+                    support_class,
+                    "blocked_follow_up"
+                        | "explicitly_unsupported"
+                        | "fixture_reference"
+                        | "not_conformance_evidence"
+                        | "test_harness"
+                ),
+                "conformance marker {}:{} classified as unsupported support class {support_class}",
+                marker.path,
+                marker.line
+            );
+        }
+    }
+
+    assert!(
+        unclassified.is_empty(),
+        "unclassified placeholder markers found; update {inventory_path}: {unclassified:#?}"
+    );
+    assert!(
+        disposition_counts
+            .get("follow_up_bead")
+            .copied()
+            .unwrap_or_default()
+            > 0,
+        "inventory should keep product/conformance follow-up debt visible"
+    );
+
+    let nats = read_source("src/messaging/nats.rs");
+    assert!(
+        nats.contains("br-asupersync-2kmc12") && nats.contains("refusing to send CONNECT in"),
+        "NATS deferred TLS marker must remain a stable fail-closed diagnostic"
+    );
+
+    eprintln!(
+        "[PASS] rckstb placeholder inventory classified {} markers with counts {:?}",
+        markers.len(),
+        disposition_counts
     );
 }
